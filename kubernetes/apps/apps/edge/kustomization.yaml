@@ -1,11 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# Edge / internet exposure. Cloudflare half is LIVE (tunnel creds provided 2026-06-14).
-# Tailscale (tailscale.yaml + tailscale-oauth.sops.yaml) is held out until the OAuth client
-# is provided — add it back here then. See docs/runbooks/internet-exposure.md.
+# Edge / internet exposure (both halves live 2026-06-14): Cloudflare Tunnel (public, SSO-gated)
+# + Tailscale operator/subnet-router (private mesh). See docs/runbooks/internet-exposure.md.
 resources:
   - namespace.yaml
   - cloudflared-creds.sops.yaml
   - cloudflared.yaml
-  # - tailscale.yaml            # pending Tailscale OAuth client
-  # - tailscale-oauth.sops.yaml # pending Tailscale OAuth client
+  - tailscale-oauth.sops.yaml
+  - tailscale.yaml
