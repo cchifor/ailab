@@ -51,6 +51,10 @@ spec:
           env:
             - { name: STORE_MODEL_IN_DB, value: "False" }
             - { name: LITELLM_LOG, value: "INFO" }
+            # Auth for the (soon public) api.chifor.me. Internal callers (Open WebUI) send this too.
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: { name: litellm-secret, key: master-key }
           volumeMounts:
             - { name: config, mountPath: /etc/litellm, readOnly: true }
           readinessProbe:

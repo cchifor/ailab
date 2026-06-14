@@ -38,7 +38,9 @@ spec:
           env:
             # Point at the LiteLLM router; key is ignored (LiteLLM runs open internally).
             - { name: OPENAI_API_BASE_URL, value: "http://litellm.ai.svc.cluster.local:4000/v1" }
-            - { name: OPENAI_API_KEY, value: "sk-noauth" }
+            - name: OPENAI_API_KEY # the LiteLLM master key (LiteLLM now requires it)
+              valueFrom:
+                secretKeyRef: { name: litellm-secret, key: master-key }
             - { name: ENABLE_OLLAMA_API, value: "False" } # we only use the OpenAI endpoint
             - { name: WEBUI_NAME, value: "ailab AI" }
           volumeMounts:

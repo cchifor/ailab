@@ -4,6 +4,7 @@ kind: Kustomization
 # as an in-cluster OpenAI-compatible service + Prometheus scrape targets.
 resources:
   - namespace.yaml
+  - litellm-secret.sops.yaml
   - llm-service.yaml
   - monitoring.yaml
   - litellm.yaml

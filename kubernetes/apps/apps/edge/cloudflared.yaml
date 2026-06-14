@@ -11,7 +11,7 @@ metadata:
   namespace: edge
 data:
   config.yaml: |
-    tunnel: REPLACE_WITH_TUNNEL_ID
+    tunnel: f93d9a6a-5172-43d3-8bef-13460ea7607b
     credentials-file: /etc/cloudflared/creds/credentials.json
     metrics: 0.0.0.0:2000
     no-autoupdate: true

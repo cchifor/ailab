@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: cloudflared-creds
+    namespace: edge
+type: Opaque
+stringData:
+    credentials.json: ENC[AES256_GCM,data:m6Oe+hNmTnuQARp6MhaTbkd0RQdISWPu7Ag9PfTvOiu74wl22x+FOhf1CMa8X9JDN7ApT5mgNLZb0/1C9fGbnyEORHFHZL2uNdAj1dWX+LNN2yRYwSqK2wTtyfETvh3yqeMCRbnABXAkTI0VVvNY9FV/Mz5YiSOABYoPb2KrhgZsbpM7Uo6exf+frPflH0RbHzkv3iOlTiFeUlQwIMccITYtX0OJXtxUVLZCjG4h4w==,iv:l0Twk30msrMsKR51i2Kd1fVF3FE1QK1+RKX6lqNoadE=,tag:1GGvWd8Ys6G18MSD8gs69A==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBCOVhweXNDZU51Mmxla0F4
+            dHowNWE2dEVPK2kyNStrWGlBSytSMkhHVGswCnpTOGFhVjZKVDZRUWxNUXNZSFg0
+            cURJZWxJVEdKWUZSOTZtd2NoNi9STU0KLS0tIG1IM3ptWlNJWmF1V1pFMU5GMUgw
+            MDl1cmdBaEFYMXhNNTdaR3g5RWIzUUkKmQtUcXoFBdM6B0NbI0Rw6mUKCrfcpoRA
+            f2NIcYGsnycfIrygOB6OAIE0cntrXFP9kpAymhbxRSHD/rbXlFag8g==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-06-14T17:05:58Z"
+    mac: ENC[AES256_GCM,data:ET1GBI2pYSF/EsKgu21dmM4+GHL2tVMcSancQJI2S+rfe6iZDJZXPCnM40B1OOdIz7x+TMsXuy32nP2bl57Od+kyxKtOy5NhR5nkZeedBU7H3mHga1RIk9Ey/9xpdi0x4V3W0R9sGttmu9cc20hPaBVv7KBCPC3ZnAGqOdzrISo=,iv:uxrc7Gg9f5o8Oq7ZWtbrjL1YTkHMctbr108SgqbCU6E=,tag:uUvfTiIiqfm6OMA18QHSLQ==,type:str]
+    version: 3.13.1
