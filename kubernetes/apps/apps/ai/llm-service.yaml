@@ -1,0 +1,35 @@
+# Publishes the off-cluster ai-llm LXCs (llama.cpp on each Strix Halo iGPU) into the
+# cluster as a load-balanced ClusterIP service. Cilium balances across the three LXC
+# backends, so workloads call http://llm.ai.svc.cluster.local:8080/v1/... (OpenAI API).
+#
+# The Service has NO selector, so Kubernetes does not manage its Endpoints — the manual
+# Endpoints below is authoritative (mirrored to an EndpointSlice for Cilium/CoreDNS).
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: llm
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llm # MUST equal the Service name
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: llm
+subsets:
+  - addresses:
+      - { ip: 192.168.0.51, hostname: ai-llm-1 }
+      - { ip: 192.168.0.52, hostname: ai-llm-2 }
+      - { ip: 192.168.0.53, hostname: ai-llm-3 }
+    ports:
+      - { name: http, port: 8080, protocol: TCP }

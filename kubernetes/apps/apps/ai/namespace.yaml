@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai
+  labels:
+    app.kubernetes.io/part-of: ai-llm
+    # No pods run here yet (the LLM server is the off-cluster ai-llm LXC, surfaced via
+    # the Endpoints below). PodSecurity stays at the cluster default until a UI/gateway lands.

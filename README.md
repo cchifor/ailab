@@ -74,7 +74,8 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 | K8s cluster (Talos + Cilium + Flux) | ✅ done — 3-node HA, GitOps live (`docs/k8s-architecture.md`) |
 | K8s storage (NFS RWX CSI, default) | ✅ done — `nfs-csi` via Flux; iSCSI RWO deferred (`docs/k8s-followups.md`) |
 | K8s observability | ✅ metrics (Prometheus/Grafana/node-exporter); 🔧 logs (Loki+Alloy up, label tuning pending) |
-| K8s: AI LXC / ingress+exposure | pending (AI needs node/model; ingress needs Cloudflare+Tailscale) |
+| K8s: AI LLM appliance | ✅ done — 3× privileged GPU LXC, llama.cpp Vulkan (Qwen3-30B-A3B ~87–97 tok/s), `llm.ai.svc:8080`, GPU+inference metrics in Prometheus (`docs/runbooks/ai-host-setup.md`, ADR 0008) |
+| K8s: ingress + internet exposure | pending (needs Cloudflare + Tailscale accounts) |
 
 **Proven live (2026-06-14):** Linux↔QNAP Thunderbolt T2E works; both TB ports + 10GbE up;
 all nodes reach the NFS service IP `10.55.0.254`; OpenTofu-managed `qnap-nfs` mounted cluster-wide.

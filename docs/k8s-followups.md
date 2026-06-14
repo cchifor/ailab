@@ -29,7 +29,18 @@ stalls (incl. AI images).
 kube-prometheus-stack (they bind locally / kube-proxy is off under Cilium). To get control-plane
 metrics, expose them via Talos machine-config (bind addresses) and re-enable the serviceMonitors.
 
-## 5. Fast storage path for k8s PVCs (optional)
+## 5. AI heavyweight models + router (sub-phase 3 follow-on)
+The daily driver (Qwen3-30B-A3B) is live on all 3 `ai-llm` LXCs. Remaining:
+- **Download + validate heavyweights**: `scripts/fetch-models.sh gpt-oss` / `qwen3.5` / `all`
+  (~63 GB / ~76.5 GB, shared NFS), then run on-demand per `docs/runbooks/ai-host-setup.md`. Confirm they
+  fit the 64 GiB VRAM heap + GTT spill; only then consider downsizing a node's CP VM (32→24 GiB) or
+  reducing the BIOS carve. Expected ~49 / ~20 tok/s.
+- **Optional model router** (e.g. LiteLLM / a small gateway) if we want one endpoint to address multiple
+  models across nodes, plus an Open WebUI in the `ai` namespace.
+- **Grafana dashboard** for `amdgpu_*` + `llamacpp:*` (panels: iGPU busy %, VRAM/GTT used, decode tok/s,
+  KV usage, queue depth).
+
+## 6. Fast storage path for k8s PVCs (optional)
 k8s CSI currently uses the QNAP over the mgmt LAN (2.5 GbE) because the Talos VMs aren't on the
 Thunderbolt fabric. To use TB for PVCs, bridge each host's storage link into a Proxmox bridge and
 give each VM a NIC on `10.55.0.0/24`. VM *disks* already use TB (host NFS mount).

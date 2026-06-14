@@ -77,6 +77,12 @@ variable "control_planes" {
     memory    = number # MiB
     disk_gb   = number
   }))
+  # memory 32768 (32 GiB). The planned 32->24 GiB downsize (to free RAM for the ai-llm GPU
+  # LXC) proved unnecessary: with the Vulkan backend the model lives in the iGPU VRAM heap,
+  # so the LXC uses ~0.5 GiB system RAM and coexists with a 32 GiB CP VM (~33 GiB free).
+  # Downsize to 24576 only if heavyweight (120B/122B) GTT spill needs the headroom — see
+  # docs/runbooks/ai-host-setup.md. Talos has no memory hotplug; a change reboots the VM
+  # (roll one node at a time, 3-CP HA tolerates one down).
   default = {
     cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", cores = 8, memory = 32768, disk_gb = 40 }
     cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", cores = 8, memory = 32768, disk_gb = 40 }

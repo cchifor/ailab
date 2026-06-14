@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (gitignored). Uses root@pam PASSWORD auth (not the tofu API
+# token): Proxmox restricts LXC device passthrough + bind mounts to root@pam. The password
+# is the node root password (same as .env NODE_ROOT_PASSWORD).
+pve_endpoint     = "https://192.168.0.2:8006/"
+pve_username     = "root@pam"
+pve_password     = "your-node-root-password"
+pve_insecure     = true
+pve_ssh_username = "root"
+pve_ssh_key_path = "~/.ssh/id_ed25519"
+
+# Override only if needed, e.g.:
+# lxc_memory_mib = 98304   # after reducing the BIOS VRAM carve, for the 120B/122B models

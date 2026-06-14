@@ -1,0 +1,71 @@
+# Scrapes the off-cluster ai-llm LXCs into the existing kube-prometheus-stack:
+#   - llama-server  /metrics on :8080 (inference throughput, KV usage, queue depth)
+#   - node_exporter        on :9100 (host/CT metrics + amdgpu iGPU sysfs textfile:
+#     amdgpu_gpu_busy_percent / _gtt_used_bytes / _vram_used_bytes / temp / power)
+# ServiceMonitors carry `release: kube-prometheus-stack` so the operator selects them.
+---
+# Scrape-only headless service fronting the three LXC node_exporters.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-llm-node
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: ai-llm-node
+spec:
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: 9100
+      protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: ai-llm-node
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: ai-llm-node
+subsets:
+  - addresses:
+      - { ip: 192.168.0.51 }
+      - { ip: 192.168.0.52 }
+      - { ip: 192.168.0.53 }
+    ports:
+      - { name: metrics, port: 9100, protocol: TCP }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ai-llm-llamacpp
+  namespace: ai
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [ai]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ai-llm-node
+  namespace: ai
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [ai]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-llm-node
+  endpoints:
+    - port: metrics
+      interval: 15s
