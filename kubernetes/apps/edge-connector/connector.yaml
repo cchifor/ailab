@@ -1,0 +1,14 @@
+# Tailscale subnet router: advertises the LAN + storage fabric into the tailnet so your
+# Tailscale devices reach the nodes, LXCs, Talos VMs, k8s VIP, and QNAP privately.
+# Applied by the `edge-connector` Flux Kustomization (dependsOn apps) so the Connector CRD
+# (installed by the tailscale-operator HelmRelease in apps) exists first.
+apiVersion: tailscale.com/v1alpha1
+kind: Connector
+metadata:
+  name: ailab-subnet
+spec:
+  hostname: ailab-subnet
+  subnetRouter:
+    advertiseRoutes:
+      - "192.168.0.0/24" # nodes .2-.4, k8s VIP .40, Talos VMs .41-.43, ai-llm LXCs .51-.53
+      - "10.55.0.0/24"   # Thunderbolt/10GbE storage fabric + QNAP service IP

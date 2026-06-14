@@ -34,15 +34,6 @@ spec:
       mode: "true" # reach the k8s API over Tailscale
     operatorConfig:
       hostname: ailab-operator
----
-# Subnet router: advertises the LAN + storage fabric into the tailnet.
-apiVersion: tailscale.com/v1alpha1
-kind: Connector
-metadata:
-  name: ailab-subnet
-spec:
-  hostname: ailab-subnet
-  subnetRouter:
-    advertiseRoutes:
-      - "192.168.0.0/24" # nodes .2-.4, k8s VIP .40, Talos VMs .41-.43, ai-llm LXCs .51-.53
-      - "10.55.0.0/24"   # Thunderbolt/10GbE storage fabric + QNAP service IP
+# The subnet-router Connector lives in ../../edge-connector/ (its own Flux Kustomization that
+# dependsOn `apps`) because its CRD (connectors.tailscale.com) is installed by THIS HelmRelease —
+# a same-apply Connector fails the apps dry-run. dependsOn ensures the CRD exists first.

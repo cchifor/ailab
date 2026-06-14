@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Tailscale Connector — separated from the operator so it applies AFTER the operator's CRD
+# is installed (via the edge-connector Flux Kustomization's dependsOn: apps).
+resources:
+  - connector.yaml
