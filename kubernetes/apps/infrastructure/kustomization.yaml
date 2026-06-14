@@ -1,5 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# Infrastructure layer (sync wave before apps): CNI day-2, CSI, cert-manager, ingress,
-# cloudflared, tailscale, observability. Populated per sub-phase.
-resources: []
+# Infrastructure layer (sync wave before apps): CSI, cert-manager, ingress, cloudflared,
+# tailscale, observability. Populated per sub-phase.
+resources:
+  - sources
+  - storage
