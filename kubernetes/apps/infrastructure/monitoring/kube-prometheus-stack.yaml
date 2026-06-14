@@ -63,6 +63,7 @@ spec:
             volumeMounts:
               - name: prometheus-kube-prometheus-stack-prometheus-db
                 mountPath: /prometheus
+                subPath: prometheus-db # operator mounts the data here via this subPath; chmod THIS dir
         resources:
           requests: { cpu: 200m, memory: 1Gi }
           limits: { memory: 2Gi }
