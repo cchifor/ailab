@@ -49,8 +49,16 @@ echo "== persist Thunderbolt-bridge service IP ${SVC_IP} via cron reconciler =="
 python scripts/qnap-ssh.py <<PYEOF
 cat > /tmp/tb-storage-ip.sh <<'SH'
 #!/bin/sh
-# ailab: ensure the Thunderbolt-bridge NFS service IP is present (idempotent).
+# ailab QNAP storage reconciler (cron, every minute).
+# 1) ensure the Thunderbolt-bridge NFS service IP is present (idempotent)
 /usr/bin/ip addr show dev tbtbr0 2>/dev/null | grep -q "${SVC_IP}/24" || /usr/bin/ip addr add ${SVC_IP}/24 dev tbtbr0 2>/dev/null
+# 2) once per boot, after the share is mounted, re-export NFS: a QNAP boot-race drops the
+#    per-subnet rw rule from the kernel export table -> TB-subnet clients would be read-only.
+FLAG=/tmp/.ailab-nfs-reexported
+if [ ! -f "\$FLAG" ] && [ -d /share/${SHARE} ] && [ "\$(cut -d. -f1 /proc/uptime 2>/dev/null)" -gt 90 ] 2>/dev/null; then
+  /etc/init.d/nfs restart >/dev/null 2>&1
+  touch "\$FLAG"
+fi
 SH
 echo {{QNAP_PW}} | sudo -S -p "" cp /tmp/tb-storage-ip.sh /etc/config/tb-storage-ip.sh
 echo {{QNAP_PW}} | sudo -S -p "" chmod 755 /etc/config/tb-storage-ip.sh
