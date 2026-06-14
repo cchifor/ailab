@@ -2,3 +2,7 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: monitoring
+  labels:
+    # node-exporter and Alloy need hostPath volumes (node metrics + /var/log pod logs),
+    # which the default "baseline" PodSecurity policy forbids.
+    pod-security.kubernetes.io/enforce: privileged
