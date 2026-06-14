@@ -57,10 +57,5 @@ resource "talos_cluster_kubeconfig" "this" {
   depends_on = [talos_machine_bootstrap.this]
 }
 
-data "talos_cluster_health" "this" {
-  client_configuration = talos_machine_secrets.this.client_configuration
-  control_plane_nodes  = [for _, v in var.control_planes : v.ip]
-  endpoints            = [for _, v in var.control_planes : v.ip]
-
-  depends_on = [talos_cluster_kubeconfig.this]
-}
+# Note: talos_cluster_health is intentionally omitted here — nodes stay NotReady until Cilium
+# (CNI) is installed, which would make a health-wait block. Verify health after Cilium.

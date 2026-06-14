@@ -25,7 +25,7 @@ resource "proxmox_virtual_environment_vm" "cp" {
 
   disk {
     datastore_id = var.vm_datastore
-    import_from  = proxmox_download_file.talos[each.value.host_node].id
+    import_from  = "${var.image_datastore}:import/talos-${var.talos_version}-nocloud-amd64.raw"
     interface    = "scsi0"
     size         = each.value.disk_gb
     file_format  = "raw"

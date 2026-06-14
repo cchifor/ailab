@@ -11,6 +11,15 @@ resource "local_sensitive_file" "talosconfig" {
   file_permission = "0600"
 }
 
+output "schematic_id" {
+  description = "Talos Image Factory schematic ID (keep scripts/stage-talos-image.sh in sync)"
+  value       = talos_image_factory_schematic.this.id
+}
+
+output "talos_disk_image_url" {
+  value = data.talos_image_factory_urls.this.urls.disk_image
+}
+
 output "cluster_vip" {
   value = var.cluster_vip
 }

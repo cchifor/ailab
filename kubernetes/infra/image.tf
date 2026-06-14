@@ -17,15 +17,7 @@ data "talos_image_factory_urls" "this" {
   architecture  = "amd64"
 }
 
-# Download the decompressed Talos nocloud raw image to each host's image datastore.
-resource "proxmox_download_file" "talos" {
-  for_each = toset(distinct([for _, v in var.control_planes : v.host_node]))
-
-  content_type            = "iso"
-  datastore_id            = var.image_datastore
-  node_name               = each.key
-  file_name               = "talos-${var.talos_version}-nocloud-amd64.img"
-  url                     = data.talos_image_factory_urls.this.urls.disk_image
-  decompression_algorithm = "gz"
-  overwrite               = false
-}
+# NOTE: bpg's download_file cannot decompress xz (the format the Talos factory serves), so the
+# nocloud image is staged on each node by scripts/stage-talos-image.sh (download + `xz -d`) into
+# local:iso/talos-<ver>-nocloud-amd64.img. The VM disk imports from that file (see vms.tf).
+# `schematic_id` + `talos_disk_image_url` outputs let you keep that script in sync with this config.
