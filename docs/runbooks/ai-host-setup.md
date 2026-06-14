@@ -93,7 +93,7 @@ MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
   --env INSTANCE=vision --env PORT=8082 \
   --env MODEL=/models/qwen3-vl-8b/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf \
   --env MODEL_ALIAS=qwen3-vl-8b --env MMPROJ=/models/qwen3-vl-8b/mmproj-F16.gguf \
-  --env CTX=16384 --env PARALLEL=1
+  --env CTX=16384 --env PARALLEL=1 --env "EXTRA_ARGS=--image-min-tokens 1024"
 ```
 - **Use GPU mmproj offload (the default — do NOT pass `--no-mmproj-offload`).** GPU offload is both
   correct and fast for Qwen3-VL-8B (~0.5 s image-encode, ~2 s end-to-end). `--no-mmproj-offload`
@@ -101,7 +101,9 @@ MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
   image description take **>1 minute** — only reach for it if you ever observe garbled descriptions.
 - In Open WebUI select `qwen3-vl-8b` for images; enable its Vision capability if the upload button
   is hidden (Admin → Models → qwen3-vl-8b → Capabilities → Vision).
-- For dense OCR/grounding the model wants ≥1024 image tokens (`--image-min-tokens 1024`).
+- `--image-min-tokens 1024` (set above via EXTRA_ARGS) gives the model enough visual tokens for
+  dense OCR/grounding — costs ~1.7 s prompt vs ~0.5 s without, ~3 s end-to-end (worth it).
+  (`lxc-exec.py` shell-quotes env values, so multi-word EXTRA_ARGS passes through intact.)
 
 ## Verify
 ```bash

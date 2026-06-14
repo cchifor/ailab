@@ -12,6 +12,7 @@ kubernetes/infra/ai-lxc/ to /root/ in the CT (via the host's `pct push`), then r
 """
 import os
 import pathlib
+import shlex
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -107,8 +108,14 @@ def main() -> int:
     if no_run:
         c.close(); return 0
 
-    envstr = (" ".join(envs) + " ") if envs else ""
-    cmd = f"pct exec {vmid} -- bash -lc '{envstr}bash /root/provision.sh'"
+    # Shell-quote each env VALUE so multi-word values (e.g. EXTRA_ARGS="--image-min-tokens 1024")
+    # survive; shlex.quote the whole inner command for the outer remote shell (handles nesting).
+    assignments = []
+    for e in envs:
+        k, sep, v = e.partition("=")
+        assignments.append(f"{k}={shlex.quote(v)}" if sep else shlex.quote(k))
+    inner = " ".join(assignments + ["bash /root/provision.sh"])
+    cmd = f"pct exec {vmid} -- bash -lc {shlex.quote(inner)}"
     print(f"-> running provision.sh in CT {vmid} ...\n")
     rc = run(c, cmd)
     c.close()
