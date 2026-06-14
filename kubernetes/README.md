@@ -1,37 +1,32 @@
-# Kubernetes & apps — DEFERRED (scaffold only)
+# Kubernetes & AI (Phase 3+)
 
-This tree is intentionally empty for now. It is built **after** the storage + network
-foundation is up and validated (Objectives 1 & 2). The design below is recorded so the repo
-structure is ready; nothing here is applied yet.
+Architecture **decided** 2026-06-14 (full design: `docs/k8s-architecture.md`; rationale: ADRs
+0005/0006/0007). Built incrementally on top of the storage/network foundation.
 
-## Planned design (from research; finalize when this phase starts)
+## Decided stack
+- **Cluster:** Talos Linux as Proxmox VMs (OpenTofu: `bpg/proxmox` + `siderolabs/talos`). 3 stacked
+  control planes (HA, schedulable). Proxmox is kept on all nodes.
+- **CNI:** Cilium (kube-proxy-free, KubePrism, Hubble).
+- **GitOps:** Flux (+ SOPS+age). Bootstrapped as the last tofu step; owns everything in-cluster.
+- **Storage:** QNAP iSCSI CSI (default RWO, snapshots) + `csi-driver-nfs` on `pve-nfs` (RWX).
+- **AI:** privileged Proxmox **LXC** running llama.cpp (Vulkan) / Ollama on the host iGPU (ROCm),
+  exposed to k8s via an `ExternalName` service. (iGPU-in-VM ruled out; bare-metal Talos deferred.)
+- **Observability:** kube-prometheus-stack + Loki + Grafana Alloy; GPU metrics via `node_exporter` sysfs.
+- **Ingress/exposure:** Traefik + cert-manager (Cloudflare DNS-01 `*.chifor.me`); Cloudflare Tunnel +
+  Access (public); Tailscale operator (admin). `ingress-nginx` is EOL — not used.
 
-### Cluster
-- **Talos Linux** VMs on Proxmox, provisioned by OpenTofu (`bpg/proxmox` for VMs +
-  `siderolabs/talos` for machine config / bootstrap). Immutable, API-driven, fits full-rebuild.
-- 3 control-plane-capable nodes. Worker layout TBD.
-
-### GPU / AI node (the key fork — see ADR 0005)
-- Strix Halo iGPU (gfx1151, ROCm preview) is reliable via **privileged LXC** (`/dev/dri`+`/dev/kfd`)
-  or **bare-metal Talos** with `siderolabs/amdgpu` + AMD GPU Operator — **not** VM PCIe passthrough
-  (AMD reset bug). Keep this node's provisioning in a separate module from generic workers.
-- Inference on the iGPU (llama.cpp `GGML_HIP_NO_VMM=ON`, `HSA_OVERRIDE_GFX_VERSION=11.5.1`).
-  NPU unusable on Linux today.
-
-### Storage (CSI)
-- Official **`qnap-dev/QNAP-CSI-PlugIn`** (Helm): **iSCSI** RWO default StorageClass + **SMB** RWX.
-  (No NFS in that driver.) Reuses the same storage fabric brought up in Phase 2.
-- democratic-csi / terricain-csi are dead ends for QNAP.
-
-### Platform
-- **GitOps**: Argo CD or Flux (TBD) — fixes the `apps/` layout.
-- **Observability**: kube-prometheus-stack + Loki + Grafana, plus the AMD GPU metrics exporter.
-- **Ingress/exposure**: ingress-nginx/Traefik + cert-manager, fronted by **Cloudflare Tunnel**
-  (no open ports) using `chifor.me`; Tailscale for admin-only access.
-
-## Layout (when built)
+## Layout
 ```
 kubernetes/
-├─ infra/   # OpenTofu: Talos image factory, VM provisioning, cluster bootstrap, GPU node module
-└─ apps/    # GitOps root (app-of-apps / clusters/<name>): csi, monitoring, ingress, tunnel, apps
+├─ infra/   # OpenTofu: Talos image (qemu-guest-agent, iscsi-tools, util-linux-tools), VMs,
+│           #          machine-config, Cilium + Flux bootstrap
+└─ apps/    # Flux GitOps root (Kustomize + HelmRelease), SOPS-encrypted secrets
+            #   clusters/ai/ sync waves: cilium -> csi -> monitoring -> ingress -> apps
 ```
+
+## Build order
+1. Cluster (Talos VMs + Cilium + Flux)  2. Storage CSI (iSCSI+NFS)  3. AI LXC appliance
+4. Observability  5. Ingress + internet exposure
+
+See `docs/k8s-architecture.md` for topology, sizing, the storage-networking decision, and the manual
+prerequisites (Cloudflare/Tailscale accounts, SOPS age key, BIOS VRAM, QNAP iSCSI LUN).
