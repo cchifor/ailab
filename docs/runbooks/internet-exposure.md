@@ -47,8 +47,10 @@ Prereq: **`chifor.me` is a zone on your Cloudflare account** (its nameservers po
      "tag:k8s":          ["tag:k8s-operator"],
    },
    // optional: auto-approve the subnet routes so you don't click-approve each one
+   // NOTE: use tag:k8s (the tag the operator gives the subnet-router DEVICE), NOT tag:k8s-operator
+   // (that's the operator's own tag). autoApprovers matches the advertising device's tag.
    "autoApprovers": {
-     "routes": { "192.168.0.0/24": ["tag:k8s-operator"], "10.55.0.0/24": ["tag:k8s-operator"] },
+     "routes": { "192.168.0.0/24": ["tag:k8s"], "10.55.0.0/24": ["tag:k8s"] },
    },
    ```
 2. **OAuth client** (Settings → OAuth clients): create one with the **Devices → Write** scope AND the
