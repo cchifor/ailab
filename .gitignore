@@ -29,6 +29,11 @@ ansible/collections/
 docs/_generated/*
 !docs/_generated/.gitkeep
 
+# ---- generated cluster credentials / outputs ----
+kubernetes/infra/_out/
+kubeconfig
+talosconfig
+
 # ---- misc ----
 __pycache__/
 *.pyc

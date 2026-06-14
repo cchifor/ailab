@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (gitignored). Reuse the same Proxmox token as ../../tofu.
+pve_endpoint     = "https://192.168.0.2:8006/"
+pve_api_token    = "tofu@pve!tofu=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+pve_insecure     = true
+pve_ssh_username = "root"
+pve_ssh_key_path = "~/.ssh/id_ed25519"
+
+# talos_version, kubernetes_version, cluster_vip, control_planes{} all have defaults in variables.tf.
+# Override here if needed, e.g.:
+# talos_version      = "v1.11.2"
+# kubernetes_version = "v1.31.4"

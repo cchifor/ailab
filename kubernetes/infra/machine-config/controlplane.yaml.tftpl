@@ -1,0 +1,23 @@
+machine:
+  install:
+    disk: /dev/sda
+  network:
+    nameservers: ${nameservers}
+    interfaces:
+      - deviceSelector:
+          driver: virtio_net
+        dhcp: false
+        addresses:
+          - ${node_ip}/${prefix}
+        routes:
+          - network: 0.0.0.0/0
+            gateway: ${gateway}
+        vip:
+          ip: ${vip}
+cluster:
+  allowSchedulingOnControlPlanes: true
+  network:
+    cni:
+      name: none
+  proxy:
+    disabled: true
