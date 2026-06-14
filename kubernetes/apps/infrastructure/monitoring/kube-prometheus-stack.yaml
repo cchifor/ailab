@@ -38,9 +38,18 @@ spec:
         storage: {} # ephemeral
     prometheus:
       prometheusSpec:
-        retention: 7d
-        retentionSize: "8GB"
-        # Ephemeral (emptyDir) until block storage (iSCSI) is added -- NFS is unsafe for the TSDB.
+        retention: 15d
+        retentionSize: "8GB" # size cap (whichever hits first); ~80% of the 10Gi PVC
+        # Durable TSDB on node-local NVMe (local-path SC) — survives pod restarts. NFS is unsafe
+        # for the TSDB (mmap/file-locks); network block (QNAP iSCSI) is the documented alternative.
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: local-path
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 10Gi
         resources:
           requests: { cpu: 200m, memory: 1Gi }
           limits: { memory: 2Gi }

@@ -7,12 +7,23 @@ The Alloy `discovery.relabel` rules now surface the full label set on Loki strea
 `/loki/api/v1/labels`: `namespace`, `pod`, `container`, `node`, `app` (+ `instance`, `filename`).
 The earlier "only service_name/source" note was stale.
 
-## 2. QNAP iSCSI CSI (RWO + ZFS snapshots)
-Deferred in favor of NFS RWX (the working default). To add: enable QNAP iSCSI, Trident-based
-`qnap-dev/QNAP-CSI-PlugIn` (Helm `./Helm/trident`, ns `trident`) via a Flux `GitRepository` source,
-a SOPS-encrypted QNAP creds secret, a `TridentBackendConfig` (storageDriverName `qnap-nas`,
-networkInterfaces `["Adapter1"]`, CHAP), and a `csi.trident.qnap.io` StorageClass (make it default).
-Talos `iscsi-tools` extension is already baked into the image.
+## 2. Durable block storage — local-path now; QNAP iSCSI optional (RWO + ZFS snapshots)
+**Done:** `local-path-provisioner` (StorageClass `local-path`, node-local NVMe under Talos `/var`)
+provides durable RWO block storage; Prometheus TSDB now uses it (was ephemeral emptyDir). NFS stays
+the RWX default. Good enough for single-replica stateful workloads (node-pinned).
+
+**Optional upgrade — QNAP iSCSI (network block, uses the QNAP's large ZFS pool, migratable, snapshots).**
+Researched + validated for QuTS hero h5.2.9 (2026-06-14). Use the official Trident-based
+`qnap-dev/QNAP-CSI-PlugIn` v1.6.0 (driver `csi.trident.qnap.io`, `storageDriverName: qnap-nas`) —
+**not** democratic-csi (no QNAP/qcli driver; QuTS hero uses proprietary SCST, not LIO/targetcli).
+Steps: (a) **MANUAL, on the NAS GUI**: enable the iSCSI service (the driver can't; the qcli is
+undocumented) + confirm a ZFS pool with free space + a QNAP API user with iSCSI-admin rights;
+(b) vendor the repo's `./Helm/trident` chart + `./VolumeSnapshot/` CRDs into Flux (no public Helm repo);
+(c) `TridentBackendConfig` — **apiVersion `trident.qnap.io/v1`** (NOT trident.netapp.io), `qnap-nas`,
+`storageAddress: 192.168.1.225` (mgmt — used for BOTH the HTTP API and the iSCSI portal; the VMs are
+NOT on the 10.55 TB fabric so 10.55.0.254 is unreachable), `userCHAP: true` (NOT useCHAP), CHAP secret
+12–16 chars; (d) StorageClass `csi.trident.qnap.io`. **Pin Talos at v1.11.2** — v1.11.3 has an iSCSI
+regression (talos #12119). Talos `iscsi-tools` extension already baked in.
 
 ## 3. Docker Hub rate-limiting (recurring)
 Anonymous pulls from `docker.io` hit HTTP 429 several times (kiwigrid sidecar, curl test image,
