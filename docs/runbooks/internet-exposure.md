@@ -39,13 +39,23 @@ Prereq: **`chifor.me` is a zone on your Cloudflare account** (its nameservers po
 (`~/.cloudflared/<TUNNEL_ID>.json`). The JSON is a secret → it goes into a SOPS-encrypted secret.
 
 ### B. Tailscale (private admin mesh)
-1. In the Tailscale admin console → Settings → **OAuth clients** → generate a client with scopes
-   `devices:write` (+ the `tag:k8s-operator` and `tag:k8s` ACL tags). Define those tags in your Tailscale
-   ACL policy if not present.
-2. (Optional) Pre-authorize the subnet routes `192.168.0.0/24` and `10.55.0.0/24` in the admin console,
-   or approve them after the subnet router connects.
-
-**Hand over:** the OAuth **client ID** and **client secret**.
+1. **Define the operator's tags in the ACL FIRST** (admin console → Access Controls). Without this the
+   operator crashes: `requested tags [tag:k8s-operator] are invalid or not permitted (400)`. Add:
+   ```jsonc
+   "tagOwners": {
+     "tag:k8s-operator": [],
+     "tag:k8s":          ["tag:k8s-operator"],
+   },
+   // optional: auto-approve the subnet routes so you don't click-approve each one
+   "autoApprovers": {
+     "routes": { "192.168.0.0/24": ["tag:k8s-operator"], "10.55.0.0/24": ["tag:k8s-operator"] },
+   },
+   ```
+2. **OAuth client** (Settings → OAuth clients): create one with the **Devices → Write** scope AND the
+   **`tag:k8s-operator`** tag attached (tags are set at creation — if your existing client lacks it,
+   make a new one). Hand over the **client ID** + **client secret**.
+3. After the operator connects, approve the advertised subnet routes on the `ailab-subnet` machine in the
+   admin console (skipped if you added the `autoApprovers` above).
 
 ---
 
