@@ -14,6 +14,13 @@ machine:
             gateway: ${gateway}
         vip:
           ip: ${vip}
+  registries:
+    mirrors:
+      # Pull docker.io through Google's anonymous pull-through cache to dodge Docker Hub
+      # rate limits (HTTP 429). No credentials needed. (followup #3)
+      docker.io:
+        endpoints:
+          - https://mirror.gcr.io
 cluster:
   allowSchedulingOnControlPlanes: true
   network:
@@ -21,3 +28,12 @@ cluster:
       name: none
   proxy:
     disabled: true
+  # Expose controller-manager + scheduler metrics on the pod network (they bind 127.0.0.1 by
+  # default) so kube-prometheus-stack can scrape them. Stateless static pods → safe restart.
+  # (followup #4; etcd metrics deferred — needs a careful per-node etcd restart.)
+  controllerManager:
+    extraArgs:
+      bind-address: 0.0.0.0
+  scheduler:
+    extraArgs:
+      bind-address: 0.0.0.0

@@ -2,13 +2,10 @@
 
 Tracked items deferred during the build (cluster + GitOps + storage + observability are working).
 
-## 1. Loki/Alloy log-label enrichment
-Loki + Alloy are deployed and Alloy is actively tailing every pod's `/var/log/pods/.../0.log`
-on all nodes (file-based `loki.source.file` + `stage.cri`). Metrics are unaffected. But the
-`namespace`/`pod`/`container` labels from `discovery.relabel` aren't yet surfacing as Loki stream
-labels (only `service_name`/`source` appear). Needs a short pass on the Alloy pipeline
-(`local.file_match` → `loki.source.file` label propagation, or promote via `stage.static_labels`/
-`stage.label`). Logs flow; they're just under-labeled for filtering.
+## 1. Loki/Alloy log-label enrichment — ✅ RESOLVED (2026-06-14)
+The Alloy `discovery.relabel` rules now surface the full label set on Loki streams — verified via
+`/loki/api/v1/labels`: `namespace`, `pod`, `container`, `node`, `app` (+ `instance`, `filename`).
+The earlier "only service_name/source" note was stale.
 
 ## 2. QNAP iSCSI CSI (RWO + ZFS snapshots)
 Deferred in favor of NFS RWX (the working default). To add: enable QNAP iSCSI, Trident-based
