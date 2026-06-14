@@ -16,6 +16,10 @@ spec:
         namespace: flux-system
   values:
     deploymentMode: SingleBinary
+    # Drop the rules config-reloader sidecar (not needed for log storage; avoids a Docker Hub pull).
+    sidecar:
+      rules:
+        enabled: false
     loki:
       auth_enabled: false
       commonConfig:
