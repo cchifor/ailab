@@ -83,6 +83,26 @@ Both leave the LXC cgroup near the 16 GiB cap and system RAM near `free`=0 (GTT 
 at a heavyweight — it advertises `qwen3-30b-a3b`; hit a heavyweight directly on the node IP, or add a
 model router (see `docs/k8s-followups.md`). Steady state: all 3 nodes on the daily driver.
 
+## Vision / image input (Qwen3-VL-8B)
+Text models are text-only; image input needs a vision model + its `mmproj` projector (else
+"image input is not supported - provide the mmproj"). A dedicated **Qwen3-VL-8B** runs as a 3rd
+instance on node1 `:8082` (`scripts/fetch-models.sh vision` → `/models/qwen3-vl-8b/`), surfaced as
+`qwen3-vl-8b` in LiteLLM with `model_info.supports_vision: true`. Provision command:
+```bash
+MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
+  --env INSTANCE=vision --env PORT=8082 \
+  --env MODEL=/models/qwen3-vl-8b/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf \
+  --env MODEL_ALIAS=qwen3-vl-8b --env MMPROJ=/models/qwen3-vl-8b/mmproj-F16.gguf \
+  --env CTX=16384 --env PARALLEL=1
+```
+- **Use GPU mmproj offload (the default — do NOT pass `--no-mmproj-offload`).** GPU offload is both
+  correct and fast for Qwen3-VL-8B (~0.5 s image-encode, ~2 s end-to-end). `--no-mmproj-offload`
+  (CPU encoder, a defensive workaround for a Vulkan vision bug that does NOT affect this model) made
+  image description take **>1 minute** — only reach for it if you ever observe garbled descriptions.
+- In Open WebUI select `qwen3-vl-8b` for images; enable its Vision capability if the upload button
+  is hidden (Admin → Models → qwen3-vl-8b → Capabilities → Vision).
+- For dense OCR/grounding the model wants ≥1024 image tokens (`--image-min-tokens 1024`).
+
 ## Verify
 ```bash
 curl http://192.168.0.51:8080/health                      # {"status":"ok"}
