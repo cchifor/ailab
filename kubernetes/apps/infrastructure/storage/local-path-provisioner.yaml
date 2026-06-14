@@ -106,7 +106,9 @@ data:
   setup: |
     #!/bin/sh
     set -eu
-    mkdir -m 0777 -p "$VOL_DIR"
+    mkdir -p "$VOL_DIR"
+    chmod 0777 "$VOL_DIR"   # explicit: `mkdir -m 0777` is masked by the helper umask -> 0755,
+                            # which a non-root pod (Prometheus uid 1000) can't write to.
   teardown: |
     #!/bin/sh
     set -eu
