@@ -1,0 +1,21 @@
+# This repo's code runs on Linux (Proxmox nodes, WSL). Force LF in the working tree
+# regardless of platform/autocrlf, so shell scripts and Ansible templates never get CRLF.
+* text=auto eol=lf
+
+*.sh        text eol=lf
+*.j2        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.tf        text eol=lf
+*.cfg       text eol=lf
+*.md        text eol=lf
+*.conf      text eol=lf
+*.sources   text eol=lf
+justfile    text eol=lf
+.gitignore  text eol=lf
+.editorconfig text eol=lf
+
+# Binaries (none yet, but be explicit)
+*.png  binary
+*.jpg  binary
+*.gz   binary
