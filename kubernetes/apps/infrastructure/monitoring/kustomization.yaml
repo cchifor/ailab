@@ -6,3 +6,4 @@ resources:
   - kube-prometheus-stack.yaml
   - loki.yaml
   - alloy.yaml
+  - ai-llm-dashboard.yaml

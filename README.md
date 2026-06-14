@@ -7,7 +7,7 @@ Fully **Infrastructure-as-Code, rebuildable-from-scratch** home lab for AI workl
 
 Everything that *can* be code is code: **OpenTofu** (`bpg/proxmox`) for the Proxmox API surface and **Ansible** (run from WSL2 Ubuntu) for host-level configuration. The few QNAP storage steps that have no usable API are captured as precise runbooks under `docs/runbooks/`.
 
-> Current focus: **Phase 1 & 2 — storage + network foundation** (see `docs/` and the plan). Kubernetes / AI / observability / internet-exposure are scaffolded under `kubernetes/` and documented as deferred phases.
+> Status: **all phases live** — storage + network foundation, Talos/Cilium/Flux Kubernetes, NFS CSI, observability, the AI LLM appliance (5 models + router + UI), and public/private internet exposure. See the status table below, `docs/`, and the ADRs.
 
 ## Topology (summary)
 
@@ -54,7 +54,7 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 | `ansible/` | host-level config: kernel, Thunderbolt links, storage net, NFS mounts, validation |
 | `tofu/` | OpenTofu (`bpg/proxmox`): datacenter storage now, VMs/K8s later |
 | `scripts/` | bootstrap + read-only discovery helpers |
-| `kubernetes/` | **deferred** scaffold (Talos, CSI, observability, ingress) |
+| `kubernetes/` | live — `infra/` (Talos VMs + `ai-lxc/` GPU LXCs, OpenTofu) + `apps/` (Flux GitOps: CSI, observability, AI, edge/exposure) |
 
 ## Secrets & state
 
@@ -73,9 +73,9 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 | 5 — Register NFS in Proxmox | ✅ done — `qnap-nfs` active on all 3 nodes (`/mnt/pve/qnap-nfs`, 5 TB) |
 | K8s cluster (Talos + Cilium + Flux) | ✅ done — 3-node HA, GitOps live (`docs/k8s-architecture.md`) |
 | K8s storage (NFS RWX CSI, default) | ✅ done — `nfs-csi` via Flux; iSCSI RWO deferred (`docs/k8s-followups.md`) |
-| K8s observability | ✅ metrics (Prometheus/Grafana/node-exporter); 🔧 logs (Loki+Alloy up, label tuning pending) |
-| K8s: AI LLM appliance | ✅ done — 3× privileged GPU LXC, llama.cpp Vulkan (Qwen3-30B-A3B ~87–97 tok/s), `llm.ai.svc:8080`, GPU+inference metrics in Prometheus (`docs/runbooks/ai-host-setup.md`, ADR 0008) |
-| K8s: ingress + internet exposure | pending (needs Cloudflare + Tailscale accounts) |
+| K8s observability | ✅ metrics (Prometheus/Grafana/node-exporter) + AI/GPU Grafana dashboard; logs (Loki+Alloy) |
+| K8s: AI LLM appliance | ✅ done — 3× privileged GPU LXC, llama.cpp Vulkan; **5 models** (Qwen3-30B-A3B, Qwen3-Coder-30B-A3B, gpt-oss-120B, Qwen3.5-122B, Qwen3-VL-8B vision) behind **LiteLLM** + **Open WebUI**; GPU+inference metrics (`docs/runbooks/ai-host-setup.md`, ADR 0008) |
+| K8s: ingress + internet exposure | ✅ done — **Cloudflare Tunnel** (chat.chifor.me + Access) + **Tailscale** subnet-router mesh (192.168.0.0/24 + 10.55.0.0/24); `docs/runbooks/internet-exposure.md` |
 
 **Proven live (2026-06-14):** Linux↔QNAP Thunderbolt T2E works; both TB ports + 10GbE up;
 all nodes reach the NFS service IP `10.55.0.254`; OpenTofu-managed `qnap-nfs` mounted cluster-wide.
