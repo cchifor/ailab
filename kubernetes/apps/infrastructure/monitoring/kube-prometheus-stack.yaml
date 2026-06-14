@@ -55,11 +55,11 @@ spec:
         initContainers:
           - name: init-chown-data
             image: busybox:1.37
-            command: ["sh", "-c", "chown -R 1000:2000 /prometheus"]
+            command: ["sh", "-c", "id; chown -R 1000:2000 /prometheus 2>/dev/null || true; chmod -R 0777 /prometheus; ls -lna /prometheus"]
             securityContext:
               runAsUser: 0
               runAsNonRoot: false
-              capabilities: { add: ["CHOWN"], drop: ["ALL"] }
+              capabilities: { add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"], drop: ["ALL"] }
             volumeMounts:
               - name: prometheus-kube-prometheus-stack-prometheus-db
                 mountPath: /prometheus
