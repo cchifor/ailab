@@ -47,7 +47,7 @@ spec:
     matchNames: [ai]
   selector:
     matchLabels:
-      app.kubernetes.io/name: llm
+      app.kubernetes.io/component: llama-server # matches llm (:8080) + llm-coder (:8081)
   endpoints:
     - port: http
       path: /metrics

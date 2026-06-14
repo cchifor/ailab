@@ -6,3 +6,5 @@ resources:
   - namespace.yaml
   - llm-service.yaml
   - monitoring.yaml
+  - litellm.yaml
+  - open-webui.yaml

@@ -1,0 +1,78 @@
+# Open WebUI — chat UI in front of the LiteLLM router. Persists chats/config on the NFS
+# default StorageClass. Single replica (Recreate) to keep its SQLite store consistent.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: open-webui-data
+  namespace: ai
+spec:
+  accessModes: ["ReadWriteMany"] # nfs-csi
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: open-webui
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # one writer for the SQLite data dir
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-webui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: open-webui
+    spec:
+      containers:
+        - name: open-webui
+          image: ghcr.io/open-webui/open-webui:main
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            # Point at the LiteLLM router; key is ignored (LiteLLM runs open internally).
+            - { name: OPENAI_API_BASE_URL, value: "http://litellm.ai.svc.cluster.local:4000/v1" }
+            - { name: OPENAI_API_KEY, value: "sk-noauth" }
+            - { name: ENABLE_OLLAMA_API, value: "False" } # we only use the OpenAI endpoint
+            - { name: WEBUI_NAME, value: "ailab AI" }
+          volumeMounts:
+            - { name: data, mountPath: /app/backend/data }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30 # first start downloads an embedding model
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 180
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: open-webui-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: open-webui
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: open-webui
+  ports:
+    - { name: http, port: 80, targetPort: http, protocol: TCP }

@@ -4,5 +4,7 @@ metadata:
   name: ai
   labels:
     app.kubernetes.io/part-of: ai-llm
-    # No pods run here yet (the LLM server is the off-cluster ai-llm LXC, surfaced via
-    # the Endpoints below). PodSecurity stays at the cluster default until a UI/gateway lands.
+    # LiteLLM + Open WebUI run here. baseline allows root containers (Open WebUI) while
+    # still blocking host namespaces/privileged/hostPath. The off-cluster llama-servers
+    # are surfaced via the Endpoints below (no pods).
+    pod-security.kubernetes.io/enforce: baseline
