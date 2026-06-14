@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: edge
+  labels:
+    app.kubernetes.io/part-of: edge
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tailscale
+  labels:
+    app.kubernetes.io/part-of: edge
+    # The Tailscale operator/subnet-router needs elevated networking; privileged enforce.
+    pod-security.kubernetes.io/enforce: privileged

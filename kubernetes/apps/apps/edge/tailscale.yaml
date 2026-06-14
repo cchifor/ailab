@@ -1,0 +1,48 @@
+# Tailscale operator + subnet router: private mesh access to the whole lab (nodes, LXCs, Talos
+# VMs, k8s VIP on 192.168.0.0/24 and the storage fabric 10.55.0.0/24) from your Tailscale devices.
+# No public surface. See docs/runbooks/internet-exposure.md.
+#
+# PENDING: create the SOPS secret `operator-oauth` (ns tailscale; keys client_id/client_secret)
+# from a Tailscale OAuth client. Verify the chart version + Connector CRD schema on apply.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: tailscale
+  namespace: flux-system
+spec:
+  interval: 24h
+  url: https://pkgs.tailscale.com/helmcharts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: tailscale-operator
+  namespace: tailscale
+spec:
+  interval: 1h
+  chart:
+    spec:
+      chart: tailscale-operator
+      version: ">=1.74.0" # pin to the current release on apply
+      sourceRef:
+        kind: HelmRepository
+        name: tailscale
+        namespace: flux-system
+  values:
+    # Uses the pre-created `operator-oauth` secret (oauth.* left empty so the chart doesn't recreate it).
+    apiServerProxyConfig:
+      mode: "true" # reach the k8s API over Tailscale
+    operatorConfig:
+      hostname: ailab-operator
+---
+# Subnet router: advertises the LAN + storage fabric into the tailnet.
+apiVersion: tailscale.com/v1alpha1
+kind: Connector
+metadata:
+  name: ailab-subnet
+spec:
+  hostname: ailab-subnet
+  subnetRouter:
+    advertiseRoutes:
+      - "192.168.0.0/24" # nodes .2-.4, k8s VIP .40, Talos VMs .41-.43, ai-llm LXCs .51-.53
+      - "10.55.0.0/24"   # Thunderbolt/10GbE storage fabric + QNAP service IP

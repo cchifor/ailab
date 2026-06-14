@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Edge / internet exposure: Cloudflare Tunnel (public, SSO-gated) + Tailscale (private mesh).
+# NOT yet referenced by ../kustomization.yaml — wired in once the tunnel + OAuth secrets exist
+# (see docs/runbooks/internet-exposure.md). The SOPS secrets are added here at that time:
+#   - cloudflared-creds.sops.yaml   (ns edge)
+#   - tailscale-oauth.sops.yaml     (ns tailscale, Secret operator-oauth)
+resources:
+  - namespace.yaml
+  - cloudflared.yaml
+  - tailscale.yaml
