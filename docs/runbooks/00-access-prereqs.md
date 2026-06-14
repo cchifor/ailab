@@ -10,13 +10,25 @@ The repo lives on the Windows FS (`/mnt/c/Users/chifo/work/home/ailab`). The SSH
 under `/mnt/c/Users/.ssh` cannot hold Unix 600 perms, so bootstrap copies it to `~/.ssh/` in WSL.
 
 ## 2. SSH to the Proxmox nodes (root)
-Public key: `~/.ssh/id_ed25519.pub`. Add it to each node once:
+Public key: `~/.ssh/id_ed25519.pub`. Install it on each node once.
+
+**From WSL/Linux:**
 ```bash
 for h in 192.168.0.2 192.168.0.3 192.168.0.4; do
   ssh-copy-id -i ~/.ssh/id_ed25519.pub root@$h    # prompts for the node root password once
 done
-# verify
-ansible -i ../inventory/hosts.yml pve_nodes -m ping
+```
+
+**From Windows (Git Bash can't do non-interactive password SSH)** — fill `.env` (copy of
+`.env.example`, gitignored) with `NODE_ROOT_PASSWORD`, then:
+```bash
+pip install paramiko
+python scripts/install-ssh-key.py     # reads .env, appends the key to authorized_keys on each node
+```
+
+Verify key-only auth:
+```bash
+ssh -o BatchMode=yes root@192.168.0.2 hostname     # should print without a password prompt
 ```
 
 ## 3. Proxmox API token (for OpenTofu)
