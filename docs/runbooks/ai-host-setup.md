@@ -52,27 +52,36 @@ exposes (`Vulkan0`, ~95 GiB = the 64 GiB VRAM carve + ~31 GiB GTT). Measured for
 The original plan considered reducing the BIOS carve + raising `amdgpu.gttsize`/`ttm.pages_limit`, and
 downsizing the Talos CP VMs 32→24 GiB, to free system RAM. **Measurement made both largely unnecessary
 for the daily driver** (the LXC uses ~0.5 GiB system RAM; a node runs the 32 GiB CP VM + the LXC with
-~33 GiB still free). Revisit **only if heavyweight validation shows GTT pressure**:
-- gpt-oss-120B (63 GB) fits in the 64 GiB VRAM heap; KV spills a few GB to GTT (system RAM).
-- Qwen3.5-122B (76.5 GB) exceeds VRAM by ~12.5 GiB → that much rides in GTT/system RAM. If it won't
-  fit alongside a 32 GiB CP VM, either downsize that node's CP VM to 24 GiB
-  (`kubernetes/infra/variables.tf` `control_planes{}`, rolling reboot — HA tolerates one CP down) or
-  reduce the BIOS UMA carve (manual, per-node) and set kernel `amdgpu.gttsize=131072 ttm.pages_limit=…`.
+~33 GiB still free). **Heavyweight validation (2026-06-14) confirmed both fit the current carve:**
+- gpt-oss-120B (63 GB) loads **entirely in the 64 GiB VRAM heap** (59 GiB used), ~0.6 GiB GTT.
+- Qwen3.5-122B (76.5 GB) **maxes VRAM (64 GiB) and spills ~8 GiB to GTT** (system RAM); it runs alongside
+  a 32 GiB CP VM but pushes `free`→0. For **large contexts** on the 122B, give that node headroom: downsize
+  its CP VM to 24 GiB (`kubernetes/infra/variables.tf` `control_planes{}`, rolling reboot — HA tolerates one
+  CP down) or reduce the BIOS UMA carve (manual, per-node) + set kernel `amdgpu.gttsize=131072 ttm.pages_limit=…`.
 
 ## Running a heavyweight model (on-demand)
-Models are staged to `/mnt/pve/qnap-nfs/models/` (`scripts/fetch-models.sh gpt-oss|qwen3.5|all`). Point a
-node's `llama-server` at one by re-running provisioning with overrides (raise the cap + `--no-mmap` so
-the large GGUF isn't pinned in page cache):
+Both heavyweights are staged on the NFS and **validated on the current 64 GiB carve** (2026-06-14):
+
+| Model | size | VRAM used | GTT spill | decode | host RAM |
+|---|---|---|---|---|---|
+| gpt-oss-120B (MXFP4) | 63.4 GB | 59 GiB (fits VRAM) | 0.6 GiB | **53 tok/s** | tight |
+| Qwen3.5-122B (Q4_K_M) | 76.5 GB | **64 GiB (maxed)** | **8 GiB** | **23 tok/s** | `free`≈0 |
+
+Switch a node's `llama-server` to one by re-running provisioning with overrides (this restarts the
+service → loads the model; revert by re-running with no `--env`):
 
 ```bash
-# raise the host OOM fence first if needed (LXC memory is hot-pluggable, no reboot):
-#   edit lxc_memory_mib in kubernetes/infra/ai-lxc/variables.tf, tofu apply  (or: pct set <id> -memory N)
-python scripts/lxc-exec.py 192.168.0.2 5001 \
+# NOTE (Windows/Git Bash): prefix with MSYS_NO_PATHCONV=1 or the /models/... arg gets mangled to a
+# Windows path. Use --no-mmap for heavyweights (keeps the GGUF out of page cache).
+MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
   --env MODEL=/models/gpt-oss-120b/gpt-oss-120b-mxfp4-00001-of-00003.gguf \
-  --env MODEL_ALIAS=gpt-oss-120b --env CTX=0 --env PARALLEL=1 --env EXTRA_ARGS=--no-mmap
+  --env MODEL_ALIAS=gpt-oss-120b --env CTX=8192 --env PARALLEL=1 --env EXTRA_ARGS=--no-mmap
 ```
-Expected: gpt-oss-120B ~49 tok/s; Qwen3.5-122B ~20 tok/s decode. Run heavyweights on the node with the
-most free RAM; keep the others on the daily driver.
+Both leave the LXC cgroup near the 16 GiB cap and system RAM near `free`=0 (GTT spill + the 32 GiB CP VM)
+— stable, but for **large contexts** on the 122B give that node headroom: downsize its CP VM to 24 GiB
+(`control_planes{}`, rolling reboot) or shrink the BIOS UMA carve. **Don't** point the `llm` k8s service
+at a heavyweight — it advertises `qwen3-30b-a3b`; hit a heavyweight directly on the node IP, or add a
+model router (see `docs/k8s-followups.md`). Steady state: all 3 nodes on the daily driver.
 
 ## Verify
 ```bash

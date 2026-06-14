@@ -136,7 +136,8 @@ systemctl enable prometheus-node-exporter.service || true
 systemctl restart prometheus-node-exporter.service || true # restart so the textfile-dir ARGS take effect
 systemctl enable --now amdgpu-metrics.timer || true
 systemctl start amdgpu-metrics.service || true # generate the first .prom now (timer handles the rest)
-systemctl enable --now llama-server.service
+systemctl enable llama-server.service
+systemctl restart llama-server.service # restart (not just start) so a model/flags change takes effect
 
 echo "OK: ai-llm provisioned. Health: curl http://$(hostname -I | awk '{print $1}'):8080/health"
 echo "    Model: ${MODEL} (alias ${MODEL_ALIAS}); ctx=${CTX} parallel=${PARALLEL}"

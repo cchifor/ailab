@@ -30,13 +30,14 @@ kube-prometheus-stack (they bind locally / kube-proxy is off under Cilium). To g
 metrics, expose them via Talos machine-config (bind addresses) and re-enable the serviceMonitors.
 
 ## 5. AI heavyweight models + router (sub-phase 3 follow-on)
-The daily driver (Qwen3-30B-A3B) is live on all 3 `ai-llm` LXCs. Remaining:
-- **Download + validate heavyweights**: `scripts/fetch-models.sh gpt-oss` / `qwen3.5` / `all`
-  (~63 GB / ~76.5 GB, shared NFS), then run on-demand per `docs/runbooks/ai-host-setup.md`. Confirm they
-  fit the 64 GiB VRAM heap + GTT spill; only then consider downsizing a node's CP VM (32→24 GiB) or
-  reducing the BIOS carve. Expected ~49 / ~20 tok/s.
-- **Optional model router** (e.g. LiteLLM / a small gateway) if we want one endpoint to address multiple
-  models across nodes, plus an Open WebUI in the `ai` namespace.
+The daily driver (Qwen3-30B-A3B) is live on all 3 `ai-llm` LXCs. Status:
+- ✅ **Heavyweights downloaded + validated (2026-06-14)** on the shared NFS, on-demand per
+  `docs/runbooks/ai-host-setup.md`: gpt-oss-120B **53 tok/s** (59 GiB VRAM, fits the carve), Qwen3.5-122B
+  **23 tok/s** (64 GiB VRAM + 8 GiB GTT spill). Both run on the current 64 GiB carve; the 122B is RAM-tight
+  with a 32 GiB CP VM — downsize that node's CP VM (or shrink the carve) only for large 122B contexts.
+- **Model router (open)** — to serve multiple models behind one endpoint, add a router (e.g. LiteLLM)
+  in front of the per-node `llama-server`s; today the `llm` Service advertises only the daily driver, so
+  heavyweights are addressed directly by node IP. Plus an optional Open WebUI in the `ai` namespace.
 - **Grafana dashboard** for `amdgpu_*` + `llamacpp:*` (panels: iGPU busy %, VRAM/GTT used, decode tok/s,
   KV usage, queue depth).
 
