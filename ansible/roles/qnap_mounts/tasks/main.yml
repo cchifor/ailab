@@ -1,0 +1,26 @@
+---
+- name: Ensure NFS client present
+  ansible.builtin.apt:
+    name: nfs-common
+    state: present
+
+- name: Test-mount the QNAP NFS export (validation only)
+  ansible.posix.mount:
+    path: "{{ qnap_nfs_mountpoint }}"
+    src: "{{ qnap_nfs_server }}:{{ qnap_nfs_export }}"
+    fstype: nfs4
+    opts: "{{ qnap_nfs_options }}"
+    state: mounted
+  when: manage_nfs_mount | bool
+
+- name: Report test-mount status
+  ansible.builtin.command: "df -h {{ qnap_nfs_mountpoint }}"
+  register: r_df
+  changed_when: false
+  failed_when: false
+  when: manage_nfs_mount | bool
+
+- name: Show test-mount
+  ansible.builtin.debug:
+    var: r_df.stdout_lines
+  when: manage_nfs_mount | bool and r_df is defined

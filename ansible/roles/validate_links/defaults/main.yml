@@ -1,0 +1,5 @@
+---
+# iperf3 needs `iperf3 -s` running on the target (QNAP or a peer). Off by default.
+run_iperf: false
+iperf_target: "{{ storage_service_ip }}"
+iperf_seconds: 10

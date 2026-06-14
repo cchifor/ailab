@@ -1,0 +1,74 @@
+---
+- name: Show host context
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} — Debian {{ ansible_distribution_release }}, kernel {{ ansible_kernel }}"
+
+# ---- APT repositories (homelab: no enterprise subscription) ----
+- name: Disable PVE enterprise repo (list format / PVE 8 bookworm)
+  ansible.builtin.replace:
+    path: /etc/apt/sources.list.d/pve-enterprise.list
+    regexp: '^(deb\s+.*enterprise.*)$'
+    replace: '# \1'
+  when: pve_disable_enterprise_repo | bool
+  failed_when: false
+
+- name: Disable PVE/Ceph enterprise repos (deb822 / PVE 9 trixie)
+  ansible.builtin.replace:
+    path: "{{ item }}"
+    regexp: '^(Enabled:\s*).*$'
+    replace: '\1false'
+  loop:
+    - /etc/apt/sources.list.d/pve-enterprise.sources
+    - /etc/apt/sources.list.d/ceph.sources
+  when: pve_disable_enterprise_repo | bool
+  failed_when: false
+
+- name: Add PVE no-subscription repo (bookworm / PVE 8)
+  ansible.builtin.apt_repository:
+    repo: "deb http://download.proxmox.com/debian/pve {{ ansible_distribution_release }} pve-no-subscription"
+    filename: pve-no-subscription
+    state: present
+  when:
+    - pve_use_no_subscription_repo | bool
+    - ansible_distribution_release == 'bookworm'
+
+- name: Add PVE no-subscription repo (trixie / PVE 9, deb822)
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/pve-no-subscription.sources
+    mode: "0644"
+    content: |
+      Types: deb
+      URIs: http://download.proxmox.com/debian/pve
+      Suites: {{ ansible_distribution_release }}
+      Components: pve-no-subscription
+      Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+  when:
+    - pve_use_no_subscription_repo | bool
+    - ansible_distribution_release == 'trixie'
+
+- name: APT update
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+# ---- base packages + time sync ----
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ pve_base_packages }}"
+    state: present
+
+- name: Ensure chrony is running
+  ansible.builtin.service:
+    name: chrony
+    state: started
+    enabled: true
+
+# ---- kernel pin (after discovery; guards against silent upgrades) ----
+- name: Pin Proxmox kernel
+  ansible.builtin.command: "proxmox-boot-tool kernel pin {{ pve_pinned_kernel }}"
+  register: kpin
+  changed_when: kpin.rc == 0
+  failed_when: kpin.rc != 0 and 'already' not in (kpin.stderr | default(''))
+  when:
+    - pve_pin_kernel | bool
+    - pve_pinned_kernel | length > 0

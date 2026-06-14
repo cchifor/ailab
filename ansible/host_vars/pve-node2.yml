@@ -1,0 +1,5 @@
+---
+# Network identity is in inventory/hosts.yml. This file holds values DISCOVERED on the hardware.
+
+# ID_PATH of the USB4 controller carrying the cable to QNAP TB port 2:
+tb_pci_path: ""        # e.g. "pci-0000:c4:00.6" — REQUIRED before bring-up

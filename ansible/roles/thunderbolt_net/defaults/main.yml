@@ -1,0 +1,5 @@
+---
+# storage_iface / storage_mtu / tb_pci_path come from inventory + host_vars.
+tb_modules:
+  - thunderbolt
+  - thunderbolt_net

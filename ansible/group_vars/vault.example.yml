@@ -1,0 +1,10 @@
+---
+# Copy to ansible/group_vars/vault.yml and (recommended) `ansible-vault encrypt` it.
+# These are referenced by scripts/runbooks, not committed.
+
+vault_qnap_admin_user: "admin"
+vault_qnap_admin_password: "CHANGE_ME"
+vault_qnap_host: "192.168.1.225"
+
+# Proxmox root (only if you script things outside the API token):
+vault_pve_root_password: "CHANGE_ME"

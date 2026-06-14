@@ -1,0 +1,7 @@
+---
+# Most pve_base settings live in group_vars/all.yml; defaults here are fallbacks.
+pve_use_no_subscription_repo: true
+pve_disable_enterprise_repo: true
+pve_pin_kernel: false
+pve_pinned_kernel: ""
+pve_base_packages: [bolt, iperf3, ethtool, fio, nfs-common, chrony, curl, jq]

@@ -1,0 +1,28 @@
+---
+# Host-level configuration for the Proxmox nodes.
+# Run order matters: base -> thunderbolt -> storage_net -> (QNAP runbook) -> mounts -> validate.
+#
+#   just net       # base + net  (tags: base,net)
+#   just mounts    # NFS test mount (tags: mounts)  -- after QNAP export exists
+#   just validate  # link/throughput checks (tags: validate)
+
+- name: Configure Proxmox nodes — base, Thunderbolt/USB4, storage network
+  hosts: pve_nodes
+  become: true
+  gather_facts: true
+  roles:
+    - role: pve_base
+      tags: [base]
+
+    - role: thunderbolt_net
+      tags: [net, tb]
+      when: storage_role == 'tb'
+
+    - role: storage_net
+      tags: [net]
+
+    - role: qnap_mounts
+      tags: [mounts]
+
+    - role: validate_links
+      tags: [validate]

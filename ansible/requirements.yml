@@ -1,0 +1,6 @@
+# Install with: ansible-galaxy collection install -r requirements.yml -p collections
+collections:
+  - name: community.general    # proxmox_* helpers, modprobe, etc.
+    version: ">=10.0.0"
+  - name: ansible.posix        # mount, sysctl, firewalld
+    version: ">=1.5.0"

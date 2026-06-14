@@ -1,0 +1,8 @@
+# Managed by Ansible (thunderbolt_net). Stable-name the USB4/Thunderbolt netdev.
+[Match]
+Driver=thunderbolt-net
+Path={{ tb_pci_path }}
+
+[Link]
+Name={{ storage_iface }}
+MTUBytes={{ storage_mtu }}

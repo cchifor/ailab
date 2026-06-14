@@ -1,0 +1,32 @@
+---
+# ---- storage fabric (matches docs/network-plan.md) ----
+storage_subnet: "10.55.0.0/24"
+storage_service_ip: "10.55.0.254"   # single QNAP mount target, reached per-link
+
+# ---- kernel pinning ----
+# Strix Halo USB4 + (later) gfx1151 ROCm need a recent kernel. Fill from discovery, then enable.
+pve_pin_kernel: false
+pve_pinned_kernel: ""               # e.g. "6.19.2-1-pve" (set, then pve_pin_kernel: true)
+
+# ---- Proxmox apt repos (homelab: no enterprise subscription) ----
+pve_use_no_subscription_repo: true
+pve_disable_enterprise_repo: true
+
+# ---- base packages ----
+pve_base_packages:
+  - bolt            # Thunderbolt authorization / retimer fix (provides boltctl)
+  - iperf3
+  - ethtool
+  - fio
+  - nfs-common
+  - chrony
+  - curl
+  - tmux
+  - jq
+
+# ---- NFS test mount (validation only; Proxmox itself mounts via tofu storage) ----
+manage_nfs_mount: false             # set true after the QNAP export exists (Phase 3)
+qnap_nfs_server: "{{ storage_service_ip }}"
+qnap_nfs_export: "/share/pve-nfs"   # confirm exact path on the QNAP
+qnap_nfs_mountpoint: "/mnt/qnap-nfs-test"
+qnap_nfs_options: "vers=4.1,_netdev,hard,nconnect=4"

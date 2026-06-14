@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (gitignored) and fill in. See docs/runbooks/00-access-prereqs.md.
+
+pve_endpoint     = "https://192.168.0.2:8006/"
+pve_api_token    = "tofu@pve!tofu=00000000-0000-0000-0000-000000000000"
+pve_insecure     = true
+pve_ssh_username = "root"
+pve_ssh_key_path = "~/.ssh/id_ed25519"
+pve_nodes        = ["pve-node1", "pve-node2", "pve-node3"]
+
+# Filled after the QNAP storage runbook:
+qnap_nfs_server = "10.55.0.254"     # or "192.168.1.225" fallback
+qnap_nfs_export = "/share/pve-nfs"  # confirm exact path on the QNAP

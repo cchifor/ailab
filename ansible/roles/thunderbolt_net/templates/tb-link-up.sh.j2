@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Managed by Ansible (thunderbolt_net). Brings the TB storage link up when it appears.
+set -eu
+IFACE="${1:-{{ storage_iface }}}"
+/sbin/ip link set "$IFACE" up || true
+# Apply addressing defined in /etc/network/interfaces.d/ (ifupdown2)
+/sbin/ifup "$IFACE" 2>/dev/null || true

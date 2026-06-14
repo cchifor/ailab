@@ -1,0 +1,64 @@
+---
+- name: Link status
+  ansible.builtin.command: "ip -br addr show {{ storage_iface }}"
+  register: r_iplink
+  changed_when: false
+  failed_when: false
+
+- name: ethtool (TB often reports Unknown! — rely on iperf3)
+  ansible.builtin.command: "ethtool {{ storage_iface }}"
+  register: r_ethtool
+  changed_when: false
+  failed_when: false
+
+- name: boltctl (TB nodes)
+  ansible.builtin.command: boltctl list
+  register: r_bolt
+  changed_when: false
+  failed_when: false
+  when: storage_role == 'tb'
+
+- name: Ping QNAP peer + service IP
+  ansible.builtin.command: "ping -c3 -W2 {{ item }}"
+  loop:
+    - "{{ qnap_peer_ip }}"
+    - "{{ storage_service_ip }}"
+  register: r_ping
+  changed_when: false
+  failed_when: false
+
+- name: iperf3 --bidir (optional)
+  ansible.builtin.command: "iperf3 -c {{ iperf_target }} --bidir -t {{ iperf_seconds }}"
+  register: r_iperf
+  changed_when: false
+  failed_when: false
+  when: run_iperf | bool
+
+- name: Write validation report to the control node
+  ansible.builtin.copy:
+    dest: "{{ playbook_dir }}/../docs/_generated/validate-{{ inventory_hostname }}.txt"
+    mode: "0644"
+    content: |
+      === {{ inventory_hostname }} ({{ storage_role }}) iface={{ storage_iface }} ===
+      Expected: TB ~10-11 Gbps/dir, eth(2.5G) ~2.35 Gbps, 10GbE ~9.4 Gbps.
+
+      -- ip addr --
+      {{ r_iplink.stdout | default('') }}
+
+      -- ethtool --
+      {{ r_ethtool.stdout | default('') }}
+
+      -- boltctl --
+      {{ r_bolt.stdout | default('n/a (eth node)') }}
+
+      -- ping (peer, service IP) --
+      {{ r_ping.results | default([]) | map(attribute='stdout') | join('\n') }}
+
+      -- iperf3 --
+      {{ r_iperf.stdout | default('(not run; pass -e run_iperf=true with iperf3 -s on target)') }}
+  delegate_to: localhost
+  become: false
+
+- name: Summary
+  ansible.builtin.debug:
+    msg: "Report written to docs/_generated/validate-{{ inventory_hostname }}.txt"

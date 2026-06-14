@@ -1,0 +1,7 @@
+---
+# Network identity is in inventory/hosts.yml. node3 uses a USB->2.5GbE adapter (role: eth),
+# renamed to `enstor`. Match it by MAC (stable) discovered via `ip -br link` / `udevadm info`.
+
+storage_nic_mac: ""    # e.g. "00:e0:4c:xx:xx:xx" of the USB-2.5G adapter — REQUIRED before bring-up
+# Optional: enable jumbo once the adapter chipset is confirmed to support it
+# storage_mtu: 9000    # (overrides inventory; only with TB->10G adapter)
