@@ -1,0 +1,51 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-stack
+  namespace: monitoring
+spec:
+  interval: 1h
+  timeout: 15m
+  chart:
+    spec:
+      chart: kube-prometheus-stack
+      version: "86.2.3"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+  install:
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
+  values:
+    # Talos: kube-proxy is disabled (Cilium); cm/scheduler/etcd bind locally -> disable those
+    # scrape jobs for now (revisit with Talos machine-config to expose them).
+    kubeProxy: { enabled: false }
+    kubeControllerManager: { enabled: false }
+    kubeScheduler: { enabled: false }
+    kubeEtcd: { enabled: false }
+    alertmanager:
+      alertmanagerSpec:
+        storage: {} # ephemeral
+    prometheus:
+      prometheusSpec:
+        retention: 7d
+        retentionSize: "8GB"
+        # Ephemeral (emptyDir) until block storage (iSCSI) is added -- NFS is unsafe for the TSDB.
+        resources:
+          requests: { cpu: 200m, memory: 1Gi }
+          limits: { memory: 2Gi }
+    grafana:
+      admin:
+        existingSecret: grafana-admin
+        userKey: admin-user
+        passwordKey: admin-password
+      persistence:
+        enabled: false # dashboards provisioned as code; no PVC needed
+      defaultDashboardsTimezone: browser
+      additionalDataSources:
+        - name: Loki
+          type: loki
+          access: proxy
+          url: http://loki.monitoring.svc.cluster.local:3100
