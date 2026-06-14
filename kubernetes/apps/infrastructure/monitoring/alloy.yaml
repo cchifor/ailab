@@ -17,6 +17,9 @@ spec:
     controller:
       type: daemonset
     alloy:
+      # mount /var/log so we can read node pod-log files directly (no API-tailing rate limits)
+      mounts:
+        varlog: true
       configMap:
         content: |
           discovery.kubernetes "pods" {
@@ -40,9 +43,28 @@ spec:
               source_labels = ["__meta_kubernetes_pod_node_name"]
               target_label  = "node"
             }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+              target_label  = "app"
+            }
+            // map each container to its on-node log file: /var/log/pods/<ns>_<pod>_<uid>/<container>/*.log
+            rule {
+              source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+              separator     = "/"
+              action        = "replace"
+              replacement   = "/var/log/pods/*$1/*.log"
+              target_label  = "__path__"
+            }
           }
-          loki.source.kubernetes "pods" {
-            targets    = discovery.relabel.pod_logs.output
+          local.file_match "pod_logs" {
+            path_targets = discovery.relabel.pod_logs.output
+          }
+          loki.source.file "pod_logs" {
+            targets    = local.file_match.pod_logs.targets
+            forward_to = [loki.process.pod_logs.receiver]
+          }
+          loki.process "pod_logs" {
+            stage.cri {}
             forward_to = [loki.write.default.receiver]
           }
           loki.write "default" {
