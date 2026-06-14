@@ -25,29 +25,22 @@ NOT on the 10.55 TB fabric so 10.55.0.254 is unreachable), `userCHAP: true` (NOT
 12–16 chars; (d) StorageClass `csi.trident.qnap.io`. **Pin Talos at v1.11.2** — v1.11.3 has an iSCSI
 regression (talos #12119). Talos `iscsi-tools` extension already baked in.
 
-## 3. Docker Hub rate-limiting (recurring)
-Anonymous pulls from `docker.io` hit HTTP 429 several times (kiwigrid sidecar, curl test image,
-during the Alloy roll). quay.io/ghcr.io/registry.k8s.io were fine. Recommended fix: add a
-`docker.io` pull-through mirror / auth in the Talos machine config
-(`.machine.registries.mirrors` / `.config`) in `kubernetes/infra`, then re-apply. Prevents future
-stalls (incl. AI images).
+## 3. Docker Hub rate-limiting — ✅ RESOLVED (2026-06-14)
+Talos machine-config mirrors docker.io through Google's anonymous pull-through cache
+(`machine.registries.mirrors.docker.io -> https://mirror.gcr.io`) on all nodes — no creds, dodges 429s.
 
-## 4. Control-plane component metrics on Talos
-`kube-controller-manager` / `kube-scheduler` / `etcd` / `kube-proxy` scrape jobs are disabled in
-kube-prometheus-stack (they bind locally / kube-proxy is off under Cilium). To get control-plane
-metrics, expose them via Talos machine-config (bind addresses) and re-enable the serviceMonitors.
+## 4. Control-plane component metrics on Talos — ✅ partial (2026-06-14)
+`kube-controller-manager` + `kube-scheduler` now bind `0.0.0.0` (Talos machine-config extraArgs) and are
+scraped by kube-prometheus-stack (3+3 targets up). **etcd metrics deferred** — exposing them needs a
+per-node etcd restart (a parallel tofu apply restarts all 3 etcd at once → quorum risk); do it rolling
+when needed. `kube-proxy` stays off (Cilium).
 
-## 5. AI heavyweight models + router (sub-phase 3 follow-on)
-The daily driver (Qwen3-30B-A3B) is live on all 3 `ai-llm` LXCs. Status:
-- ✅ **Heavyweights downloaded + validated (2026-06-14)** on the shared NFS, on-demand per
-  `docs/runbooks/ai-host-setup.md`: gpt-oss-120B **53 tok/s** (59 GiB VRAM, fits the carve), Qwen3.5-122B
-  **23 tok/s** (64 GiB VRAM + 8 GiB GTT spill). Both run on the current 64 GiB carve; the 122B is RAM-tight
-  with a 32 GiB CP VM — downsize that node's CP VM (or shrink the carve) only for large 122B contexts.
-- **Model router (open)** — to serve multiple models behind one endpoint, add a router (e.g. LiteLLM)
-  in front of the per-node `llama-server`s; today the `llm` Service advertises only the daily driver, so
-  heavyweights are addressed directly by node IP. Plus an optional Open WebUI in the `ai` namespace.
-- **Grafana dashboard** for `amdgpu_*` + `llamacpp:*` (panels: iGPU busy %, VRAM/GTT used, decode tok/s,
-  KV usage, queue depth).
+## 5. AI router + UI + dashboard — ✅ DONE (2026-06-14)
+- Heavyweights downloaded + validated; **5 models** served (general + coder on node1, gpt-oss-120B on
+  node2, Qwen3.5-122B on node3, Qwen3-VL-8B vision on node1). See `docs/runbooks/ai-host-setup.md`.
+- **LiteLLM** router (`litellm.ai.svc:4000/v1`) fronts all models; **Open WebUI** (`open-webui.ai.svc`)
+  is the chat UI (public via Cloudflare at chat.chifor.me).
+- **Grafana dashboard** "AI LLM — Strix Halo iGPU + llama.cpp" provisioned (amdgpu_* + llamacpp:* panels).
 
 ## 6. Fast storage path for k8s PVCs (optional)
 k8s CSI currently uses the QNAP over the mgmt LAN (2.5 GbE) because the Talos VMs aren't on the
