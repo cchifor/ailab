@@ -50,6 +50,19 @@ spec:
               resources:
                 requests:
                   storage: 10Gi
+        # local-path dirs are created root-owned 0755; chown the volume to the non-root
+        # Prometheus uid/gid (1000/2000) so it can write the TSDB. ns is privileged.
+        initContainers:
+          - name: init-chown-data
+            image: busybox:1.37
+            command: ["sh", "-c", "chown -R 1000:2000 /prometheus"]
+            securityContext:
+              runAsUser: 0
+              runAsNonRoot: false
+              capabilities: { add: ["CHOWN"], drop: ["ALL"] }
+            volumeMounts:
+              - name: prometheus-kube-prometheus-stack-prometheus-db
+                mountPath: /prometheus
         resources:
           requests: { cpu: 200m, memory: 1Gi }
           limits: { memory: 2Gi }
