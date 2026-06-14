@@ -87,3 +87,25 @@ metadata:
 subsets:
   - addresses: [{ ip: 192.168.0.53, hostname: ai-llm-3 }]
     ports: [{ name: http, port: 8080, protocol: TCP }]
+---
+# Vision/VL model (Qwen3-VL-8B + mmproj) — 3rd instance on node1 :8082.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-vision
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-vision, app.kubernetes.io/component: llama-server }
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 8082, targetPort: 8082, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llm-vision
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-vision }
+subsets:
+  - addresses: [{ ip: 192.168.0.51, hostname: ai-llm-1 }]
+    ports: [{ name: http, port: 8082, protocol: TCP }]

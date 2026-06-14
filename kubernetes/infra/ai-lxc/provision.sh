@@ -28,6 +28,7 @@ MODEL_ALIAS="${MODEL_ALIAS:-qwen3-30b-a3b}"
 CTX="${CTX:-32768}"
 PARALLEL="${PARALLEL:-4}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+MMPROJ="${MMPROJ:-}"   # optional vision projector GGUF path -> adds --mmproj (enables image input)
 INSTANCE="${INSTANCE:-default}"
 PORT="${PORT:-8080}"
 RENDER_GID="${RENDER_GID:-993}"
@@ -95,6 +96,8 @@ echo "== systemd unit ${UNIT} (port ${PORT}, model ${MODEL_ALIAS}) with warm-up 
 # Only pin the RADV ICD if we actually found it (an empty path would load NO driver -> CPU).
 ICD_LINE=""
 [ -n "$RADV_ICD" ] && ICD_LINE="Environment=VK_ICD_FILENAMES=${RADV_ICD}"
+MMPROJ_FLAG=""
+[ -n "$MMPROJ" ] && MMPROJ_FLAG="--mmproj ${MMPROJ}"
 cat >"/etc/systemd/system/${UNIT}" <<EOF
 [Unit]
 Description=llama.cpp server (Vulkan/RADV gfx1151) — ai-llm [${INSTANCE}]
@@ -108,7 +111,7 @@ ${ICD_LINE}
 ExecStart=${BIN}/llama-server --host 0.0.0.0 --port ${PORT} \\
   -m ${MODEL} -a ${MODEL_ALIAS} \\
   -ngl 99 -c ${CTX} --parallel ${PARALLEL} \\
-  --flash-attn auto --jinja --metrics ${EXTRA_ARGS}
+  --flash-attn auto --jinja --metrics ${MMPROJ_FLAG} ${EXTRA_ARGS}
 # Prime the model/KV after /health is up so the first user request isn't cold:
 ExecStartPost=/usr/local/bin/llama-warmup.sh ${PORT} ${MODEL_ALIAS}
 # Big models (120B/122B) take >90s to load+warm — raise the default start timeout so systemd

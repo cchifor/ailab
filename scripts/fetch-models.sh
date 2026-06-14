@@ -53,14 +53,23 @@ fetch_qwen35() {
   done
 }
 
+fetch_vision() {
+  echo "== Qwen3-VL-8B-Instruct (vision/VL, Q4 ~5.2G + mmproj ~1.2G) =="
+  dl "$HF/unsloth/Qwen3-VL-8B-Instruct-GGUF/resolve/main/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf" \
+     "qwen3-vl-8b/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf"
+  dl "$HF/unsloth/Qwen3-VL-8B-Instruct-GGUF/resolve/main/mmproj-F16.gguf" \
+     "qwen3-vl-8b/mmproj-F16.gguf"
+}
+
 mkdir -p "$MODELS"
 case "$SEL" in
   daily)    fetch_daily ;;
   coder)    fetch_coder ;;
   gpt-oss)  fetch_gpt_oss ;;
   qwen3.5)  fetch_qwen35 ;;
-  all)      fetch_daily; fetch_coder; fetch_gpt_oss; fetch_qwen35 ;;
-  *) echo "usage: fetch-models.sh [daily|coder|gpt-oss|qwen3.5|all]" >&2; exit 2 ;;
+  vision)   fetch_vision ;;
+  all)      fetch_daily; fetch_coder; fetch_gpt_oss; fetch_qwen35; fetch_vision ;;
+  *) echo "usage: fetch-models.sh [daily|coder|gpt-oss|qwen3.5|vision|all]" >&2; exit 2 ;;
 esac
 echo "Done. Store: $MODELS"
 ls -la "$MODELS"/*/ 2>/dev/null || true
