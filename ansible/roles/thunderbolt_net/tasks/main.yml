@@ -1,6 +1,7 @@
 ---
-# Single TB-net device per node (link to the QNAP) -> use the native name `thunderbolt0`,
-# no systemd .link rename needed (avoids a reboot). Modules + a udev bring-up rule suffice.
+# Single TB-net device per node (link to the QNAP) -> native name `thunderbolt0`, no rename.
+# TB interfaces appear late at boot (after the QNAP XDomain handshake) and need an explicit
+# link-up, so a small systemd timer reconciles the link at boot + every 30s.
 
 - name: Load Thunderbolt modules at boot
   ansible.builtin.copy:
@@ -18,15 +19,24 @@
   loop: "{{ tb_modules }}"
   failed_when: false
 
-- name: Install TB link-up helper
+- name: Install TB link-up reconciler
   ansible.builtin.template:
     src: tb-link-up.sh.j2
     dest: /usr/local/sbin/tb-link-up.sh
     mode: "0755"
 
-- name: Install udev rule (bring link up when the TB-net device appears)
+- name: Install tb-link systemd unit + timer
   ansible.builtin.template:
-    src: 10-tb-up.rules.j2
-    dest: /etc/udev/rules.d/10-tb-up.rules
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
     mode: "0644"
-  notify: reload udev
+  loop:
+    - tb-link.service
+    - tb-link.timer
+
+- name: Enable + start tb-link.timer
+  ansible.builtin.systemd:
+    name: tb-link.timer
+    enabled: true
+    state: started
+    daemon_reload: true

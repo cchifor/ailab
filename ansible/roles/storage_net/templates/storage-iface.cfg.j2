@@ -1,5 +1,7 @@
 # Managed by Ansible (storage_net). Storage link for {{ inventory_hostname }}.
+{% if storage_role == 'eth' %}
 auto {{ storage_iface }}
+{% endif %}
 allow-hotplug {{ storage_iface }}
 iface {{ storage_iface }} inet static
     address {{ storage_ip }}/{{ storage_prefix }}

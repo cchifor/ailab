@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Managed by Ansible (thunderbolt_net). Brings the TB storage link up when it appears.
-set -eu
-IFACE="${1:-{{ storage_iface }}}"
-/sbin/ip link set "$IFACE" up || true
-# Apply addressing defined in /etc/network/interfaces.d/ (ifupdown2)
+# Managed by Ansible (thunderbolt_net). Idempotently bring up the TB storage link.
+# TB net interfaces appear late (after the QNAP handshake) and need an explicit link-up;
+# run at boot + every 30s by tb-link.timer so the link self-heals.
+IFACE="{{ storage_iface }}"
+[ -e "/sys/class/net/$IFACE" ] || exit 0
+/sbin/ip link set "$IFACE" up 2>/dev/null || true
 /sbin/ifup "$IFACE" 2>/dev/null || true

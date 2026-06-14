@@ -1,2 +1,0 @@
-# Managed by Ansible (thunderbolt_net).
-ACTION=="add", SUBSYSTEM=="net", NAME=="{{ storage_iface }}", RUN+="/usr/local/sbin/tb-link-up.sh {{ storage_iface }}"

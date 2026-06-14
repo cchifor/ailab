@@ -1,0 +1,7 @@
+[Unit]
+Description=ailab Thunderbolt storage link bring-up ({{ storage_iface }})
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tb-link-up.sh
