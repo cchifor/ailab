@@ -72,7 +72,9 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 | 4 — Validation | ✅ done — reboot-persistence verified (node1 **and** QNAP); ~1.1 GB/s over TB |
 | 5 — Register NFS in Proxmox | ✅ done — `qnap-nfs` active on all 3 nodes (`/mnt/pve/qnap-nfs`, 5 TB) |
 | K8s cluster (Talos + Cilium + Flux) | ✅ done — 3-node HA, GitOps live (`docs/k8s-architecture.md`) |
-| K8s: storage CSI / AI LXC / observability / ingress | pending (Flux app-of-apps ready to populate) |
+| K8s storage (NFS RWX CSI, default) | ✅ done — `nfs-csi` via Flux; iSCSI RWO deferred (`docs/k8s-followups.md`) |
+| K8s observability | ✅ metrics (Prometheus/Grafana/node-exporter); 🔧 logs (Loki+Alloy up, label tuning pending) |
+| K8s: AI LXC / ingress+exposure | pending (AI needs node/model; ingress needs Cloudflare+Tailscale) |
 
 **Proven live (2026-06-14):** Linux↔QNAP Thunderbolt T2E works; both TB ports + 10GbE up;
 all nodes reach the NFS service IP `10.55.0.254`; OpenTofu-managed `qnap-nfs` mounted cluster-wide.
