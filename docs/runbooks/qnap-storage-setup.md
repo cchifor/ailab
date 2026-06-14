@@ -30,19 +30,22 @@ qcli_sharedfolder -T sharename=pve-nfs HostIP=10.55.0.0/24 Permission=rw Squash=
 qcli_sharedfolder -T sharename=pve-nfs HostIP=10.55.1.0/24 Permission=rw Squash=no_root_squash secure=1 sync=1 wdelay=0
 ```
 
-## 2. UI part (one field) — Thunderbolt bridge service IP
-The two TB ports are auto-bridged into the **"Thunderbolt Bridge (System Default)"** (`tbtbr0`).
-`qcli_network` cannot target it (no interface ID), so set it once in the UI:
+## 2. Thunderbolt bridge service IP — persisted as code (no UI)
+The two TB ports auto-bridge into the **"Thunderbolt Bridge (System Default)"** (`tbtbr0`), and
+T2E activates automatically when a node's Thunderbolt interface comes up
+(`/etc/init.d/thunderbolt_net.sh` adds the port to `tbtbr0`) — so no manual "enable T2E" step.
 
-> **Control Panel → Network & Virtual Switch → Interfaces → Thunderbolt** (the bridge) →
-> **Edit / Configure** → IPv4 **Static**: IP **`10.55.0.254`**, mask **`255.255.255.0`**,
-> no gateway → Apply.
+`qcli_network` can't target the system bridge (no interface ID), so `scripts/qnap-setup.sh`
+installs an **idempotent reconciler** on the persistent DOM and a cron entry:
+- `/etc/config/tb-storage-ip.sh` → `ip addr add 10.55.0.254/24 dev tbtbr0` (only if missing)
+- `* * * * * /etc/config/tb-storage-ip.sh` in `/etc/config/crontab` (survives reboot)
 
-This is the **NFS service IP** the whole cluster mounts. It must persist across reboots (UI does this).
-*(Interim, non-persistent, for testing: `sudo ip addr add 10.55.0.254/24 dev tbtbr0`.)*
+The IP self-heals within ~1 min of any QNAP reboot — this is the **NFS service IP** the whole
+cluster mounts.
 
-T2E activates automatically when a node's Thunderbolt interface comes up (`/etc/init.d/thunderbolt_net.sh`
-adds the port to the bridge), so no extra QNAP T2E "enable" step is needed.
+*Alternative (manual, also persistent):* Control Panel → Network & Virtual Switch → Interfaces →
+Thunderbolt → Static `10.55.0.254/255.255.255.0`, no gateway. If you set this, remove the cron
+reconciler to avoid duplication.
 
 ## 3. Optional cleanup of default datasets
 The factory left empty datasets (`ZFS1_DATA`, `ZFS530_DATA`, `Public`, `zfs1107`). They're harmless

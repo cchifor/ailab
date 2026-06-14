@@ -13,6 +13,7 @@ SHARE="${SHARE:-pve-nfs}"
 POOLID="${POOLID:-1}"
 SIZE="${SIZE:-5497558138880}"     # 5 TiB thin quota
 ETH1_IP="${ETH1_IP:-10.55.1.254}" # QNAP 10GbE <-> node3
+SVC_IP="${SVC_IP:-10.55.0.254}"   # NFS service IP on the Thunderbolt bridge (tbtbr0)
 
 python scripts/qnap-ssh.py "
   set -e
@@ -42,5 +43,21 @@ python scripts/qnap-ssh.py "
   echo '-- exportfs --'; exportfs -v 2>/dev/null | grep -i ${SHARE} || true
 "
 echo
-echo "Done. REMINDER: set the Thunderbolt bridge IP 10.55.0.254/24 in the QNAP UI"
-echo "(Network & Virtual Switch -> Interfaces -> Thunderbolt) — see docs/runbooks/qnap-storage-setup.md"
+echo "== persist Thunderbolt-bridge service IP ${SVC_IP} via cron reconciler =="
+# qcli cannot set the system Thunderbolt bridge IP, so we use an idempotent reconciler on the
+# persistent DOM (/etc/config) + a cron entry. Self-heals the IP within 1 min of any reboot.
+python scripts/qnap-ssh.py <<PYEOF
+cat > /tmp/tb-storage-ip.sh <<'SH'
+#!/bin/sh
+# ailab: ensure the Thunderbolt-bridge NFS service IP is present (idempotent).
+/usr/bin/ip addr show dev tbtbr0 2>/dev/null | grep -q "${SVC_IP}/24" || /usr/bin/ip addr add ${SVC_IP}/24 dev tbtbr0 2>/dev/null
+SH
+echo {{QNAP_PW}} | sudo -S -p "" cp /tmp/tb-storage-ip.sh /etc/config/tb-storage-ip.sh
+echo {{QNAP_PW}} | sudo -S -p "" chmod 755 /etc/config/tb-storage-ip.sh
+echo {{QNAP_PW}} | sudo -S -p "" sh -c 'grep -q tb-storage-ip /etc/config/crontab || echo "* * * * * /etc/config/tb-storage-ip.sh >/dev/null 2>&1" >> /etc/config/crontab'
+echo {{QNAP_PW}} | sudo -S -p "" crontab /etc/config/crontab
+echo {{QNAP_PW}} | sudo -S -p "" /etc/config/tb-storage-ip.sh
+ip -br addr show tbtbr0
+PYEOF
+echo
+echo "Done. QNAP storage configured (network + share + service-IP persistence) — all as code."
