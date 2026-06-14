@@ -70,7 +70,7 @@ variable "lxc_memory_mib" {
     docs/runbooks/ai-host-setup.md.
   EOT
   type    = number
-  default = 16384
+  default = 24576
 }
 variable "lxc_cores" {
   type    = number

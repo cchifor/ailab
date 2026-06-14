@@ -111,6 +111,9 @@ ExecStart=${BIN}/llama-server --host 0.0.0.0 --port ${PORT} \\
   --flash-attn auto --jinja --metrics ${EXTRA_ARGS}
 # Prime the model/KV after /health is up so the first user request isn't cold:
 ExecStartPost=/usr/local/bin/llama-warmup.sh ${PORT} ${MODEL_ALIAS}
+# Big models (120B/122B) take >90s to load+warm — raise the default start timeout so systemd
+# doesn't kill the load as a 'timeout' and crashloop.
+TimeoutStartSec=900
 Restart=on-failure
 RestartSec=5
 
