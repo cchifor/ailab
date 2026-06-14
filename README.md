@@ -68,10 +68,13 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 | 0 — Control env + access | ✅ done (SSH key, PVE API token, QNAP qcli) |
 | 1 — Discovery | ✅ done (PVE 9.2.2/k7.0.2; QNAP QuTS hero h5.2.9, RAID-Z1) |
 | 2 — Host networking (TB/10GbE) | ✅ done — 3 storage links up + persistent |
-| 3 — QNAP storage (ZFS/NFS) | ✅ done — `pve-nfs` exported; ⚠ TB-bridge IP needs 1 UI step to persist |
-| 4 — Validation | links + NFS proven (~1.1 GB/s over TB); reboot-persistence test pending |
+| 3 — QNAP storage (ZFS/NFS) | ✅ done — `pve-nfs` exported; service IP + export persisted as code (cron reconciler) |
+| 4 — Validation | ✅ done — reboot-persistence verified (node1 **and** QNAP); ~1.1 GB/s over TB |
 | 5 — Register NFS in Proxmox | ✅ done — `qnap-nfs` active on all 3 nodes (`/mnt/pve/qnap-nfs`, 5 TB) |
 | K8s / AI / observability / exposure | deferred (designed, not built) |
 
 **Proven live (2026-06-14):** Linux↔QNAP Thunderbolt T2E works; both TB ports + 10GbE up;
 all nodes reach the NFS service IP `10.55.0.254`; OpenTofu-managed `qnap-nfs` mounted cluster-wide.
+**Reboot-tested:** node reboot → TB link + mount auto-recover (~46 s); QNAP reboot → cron restores
+the bridge IP and re-exports NFS (fixing a boot-race that left the TB subnet read-only) → all 3
+nodes writable + active automatically.
