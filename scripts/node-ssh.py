@@ -23,6 +23,11 @@ def load_env(p: pathlib.Path) -> dict:
 
 
 def main() -> int:
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     if len(sys.argv) < 2:
         print("usage: node-ssh.py <host> '<command>'", file=sys.stderr)
         return 2

@@ -1,12 +1,6 @@
 ---
-- name: Require the discovered USB4 controller PCI path
-  ansible.builtin.assert:
-    that:
-      - tb_pci_path is defined
-      - tb_pci_path | length > 0
-    fail_msg: >-
-      tb_pci_path is empty for {{ inventory_hostname }}. Run `just discover` and set it in
-      ansible/host_vars/{{ inventory_hostname }}.yml (see docs/runbooks/thunderbolt-bringup.md).
+# Single TB-net device per node (link to the QNAP) -> use the native name `thunderbolt0`,
+# no systemd .link rename needed (avoids a reboot). Modules + a udev bring-up rule suffice.
 
 - name: Load Thunderbolt modules at boot
   ansible.builtin.copy:
@@ -24,20 +18,13 @@
   loop: "{{ tb_modules }}"
   failed_when: false
 
-- name: Install systemd .link (stable name + MTU by PCI path)
-  ansible.builtin.template:
-    src: thunderbolt.link.j2
-    dest: /etc/systemd/network/00-thunderbolt.link
-    mode: "0644"
-  notify: update initramfs
-
 - name: Install TB link-up helper
   ansible.builtin.template:
     src: tb-link-up.sh.j2
     dest: /usr/local/sbin/tb-link-up.sh
     mode: "0755"
 
-- name: Install udev rule (bring link up when the device appears)
+- name: Install udev rule (bring link up when the TB-net device appears)
   ansible.builtin.template:
     src: 10-tb-up.rules.j2
     dest: /etc/udev/rules.d/10-tb-up.rules

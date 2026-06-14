@@ -6,25 +6,7 @@
     state: present
     insertafter: EOF
 
-- name: Require MAC for the USB storage NIC (eth role)
-  ansible.builtin.assert:
-    that:
-      - storage_nic_mac is defined
-      - storage_nic_mac | length > 0
-    fail_msg: >-
-      storage_nic_mac is empty for {{ inventory_hostname }}. Run `just discover` and set it in
-      ansible/host_vars/{{ inventory_hostname }}.yml.
-  when: storage_role == 'eth'
-
-- name: Stable-name the USB storage NIC (eth role)
-  ansible.builtin.template:
-    src: storage-nic.link.j2
-    dest: /etc/systemd/network/05-storage-nic.link
-    mode: "0644"
-  when: storage_role == 'eth'
-  notify: storage_net update initramfs
-
-- name: Write storage interface config (static /30 + route to service IP)
+- name: Write storage interface config (static /24 + route to service IP if off-subnet)
   ansible.builtin.template:
     src: storage-iface.cfg.j2
     dest: "/etc/network/interfaces.d/{{ storage_iface }}.cfg"

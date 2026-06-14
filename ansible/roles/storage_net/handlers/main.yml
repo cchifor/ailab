@@ -1,8 +1,4 @@
 ---
-- name: storage_net update initramfs
-  ansible.builtin.command: update-initramfs -u -k all
-  changed_when: true
-
 - name: storage_net ifreload
   ansible.builtin.command: ifreload -a
   changed_when: true

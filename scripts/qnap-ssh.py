@@ -26,6 +26,11 @@ def load_env(p: pathlib.Path) -> dict:
 
 
 def main() -> int:
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     env = load_env(REPO / ".env")
     cmd = " ".join(sys.argv[1:]).strip() or sys.stdin.read()
     if not cmd.strip():

@@ -65,10 +65,13 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 
 | Phase | State |
 |---|---|
-| 0 — Control env + access | scaffolded; awaiting credentials |
-| 1 — Discovery | pending access |
-| 2 — Host networking (TB/10GbE) | code scaffolded |
-| 3 — QNAP storage (ZFS/NFS/T2E) | runbook scaffolded |
-| 4 — Validation | code scaffolded |
-| 5 — Register NFS in Proxmox | code scaffolded |
+| 0 — Control env + access | ✅ done (SSH key, PVE API token, QNAP qcli) |
+| 1 — Discovery | ✅ done (PVE 9.2.2/k7.0.2; QNAP QuTS hero h5.2.9, RAID-Z1) |
+| 2 — Host networking (TB/10GbE) | ✅ done — 3 storage links up + persistent |
+| 3 — QNAP storage (ZFS/NFS) | ✅ done — `pve-nfs` exported; ⚠ TB-bridge IP needs 1 UI step to persist |
+| 4 — Validation | links + NFS proven (~1.1 GB/s over TB); reboot-persistence test pending |
+| 5 — Register NFS in Proxmox | ✅ done — `qnap-nfs` active on all 3 nodes (`/mnt/pve/qnap-nfs`, 5 TB) |
 | K8s / AI / observability / exposure | deferred (designed, not built) |
+
+**Proven live (2026-06-14):** Linux↔QNAP Thunderbolt T2E works; both TB ports + 10GbE up;
+all nodes reach the NFS service IP `10.55.0.254`; OpenTofu-managed `qnap-nfs` mounted cluster-wide.
