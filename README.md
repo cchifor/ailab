@@ -19,7 +19,7 @@ Everything that *can* be code is code: **OpenTofu** (`bpg/proxmox`) for the Prox
                  │ (T2E)         │ (T2E)        │
        10.55.0.1 │     10.55.0.5 │     10.55.0.9│ (USB→2.5GbE, temp)
      ┌───────────┴──┐ ┌──────────┴──┐ ┌─────────┴────┐
-     │ pve-node1    │ │ pve-node2   │ │ pve-node3    │
+     │ ai-node1     │ │ ai-node2    │ │ ai-node3     │
      │ 192.168.0.2  │ │ 192.168.0.3 │ │ 192.168.0.4  │   (mgmt LAN)
      └──────────────┘ └─────────────┘ └──────────────┘
         Strix Halo       Strix Halo       Strix Halo

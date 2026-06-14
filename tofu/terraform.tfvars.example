@@ -5,7 +5,7 @@ pve_api_token    = "tofu@pve!tofu=00000000-0000-0000-0000-000000000000"
 pve_insecure     = true
 pve_ssh_username = "root"
 pve_ssh_key_path = "~/.ssh/id_ed25519"
-pve_nodes        = ["pve-node1", "pve-node2", "pve-node3"]
+pve_nodes        = ["ai-node1", "ai-node2", "ai-node3"]
 
 # Filled after the QNAP storage runbook:
 qnap_nfs_server = "10.55.0.254"     # or "192.168.1.225" fallback

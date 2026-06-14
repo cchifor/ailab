@@ -31,7 +31,7 @@ variable "pve_ssh_key_path" {
 variable "pve_nodes" {
   description = "Proxmox node names that should mount the shared storage"
   type        = list(string)
-  default     = ["pve-node1", "pve-node2", "pve-node3"]
+  default     = ["ai-node1", "ai-node2", "ai-node3"]
 }
 
 # ---- QNAP NFS storage (fill from docs/runbooks/qnap-storage-setup.md) ----

@@ -1,6 +1,0 @@
----
-# Network identity is in inventory/hosts.yml. This file holds values DISCOVERED on the hardware.
-# Fill via `just discover` + `udevadm info` (see docs/runbooks/thunderbolt-bringup.md).
-
-# ID_PATH of the USB4 controller carrying the cable to QNAP TB port 1:
-tb_pci_path: ""        # e.g. "pci-0000:c4:00.5" — REQUIRED before bring-up

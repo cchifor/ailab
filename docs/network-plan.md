@@ -19,9 +19,9 @@ any-to-any reachability. Storage traffic is kept off both LANs.
 
 | Link | Host iface (renamed) | Host IP /30 | QNAP iface | QNAP IP /30 | MTU |
 |---|---|---|---|---|---|
-| **L1** pve-node1 ↔ QNAP **TB#1** | `en05` | `10.55.0.1` | T2E port 1 | `10.55.0.2` | 4000 |
-| **L2** pve-node2 ↔ QNAP **TB#2** | `en05` | `10.55.0.5` | T2E port 2 ⚠ | `10.55.0.6` | 4000 |
-| **L3** pve-node3 ↔ QNAP **10GbE** | `enstor` | `10.55.0.9` | 10GbE (eth) | `10.55.0.10` | 1500 → 9000* |
+| **L1** ai-node1 ↔ QNAP **TB#1** | `en05` | `10.55.0.1` | T2E port A | `10.55.0.2` | 4000 |
+| **L2** ai-node2 ↔ QNAP **TB#2** | `en05` | `10.55.0.5` | T2E port B ⚠ | `10.55.0.6` | 4000 |
+| **L3** ai-node3 ↔ QNAP **10GbE** | `enstor` | `10.55.0.9` | 10GbE (eth) | `10.55.0.10` | 1500 → 9000* |
 
 \* Node3 link is via a temporary USB→2.5GbE adapter (~2.35 Gbps). Jumbo frames enabled only
 if the adapter chipset supports it (validated in discovery); raise to 9000 with the future
@@ -49,11 +49,16 @@ runbook step (`docs/runbooks/qnap-storage-setup.md`).
 `192.168.1.225` (works cluster-wide, slower, shared with mgmt) and/or per-node-restricted
 Proxmox storage entries on the per-link QNAP IPs.
 
-## Node ↔ cable mapping
+## Node ↔ cable mapping (CONFIRMED by discovery 2026-06-14)
 
-`pve-node1`/`pve-node2` = the two Thunderbolt-connected nodes; `pve-node3` = the 10GbE
-(temp USB-2.5G) node. The exact physical-node → mgmt-IP → cable mapping is **confirmed
-during discovery** and recorded in `inventory/hosts.yml`.
+| Node | Mgmt IP | Storage link | Current kernel name | Key id |
+|---|---|---|---|---|
+| `ai-node1` | 192.168.0.2 | Thunderbolt → QNAP | `thunderbolt0` | USB4 router `pci-0000:c7:00.6` |
+| `ai-node2` | 192.168.0.3 | Thunderbolt → QNAP | `thunderbolt0` | USB4 router `pci-0000:c7:00.6` |
+| `ai-node3` | 192.168.0.4 | USB→2.5GbE → QNAP 10GbE | `enxc0eac367835a` | MAC `c0:ea:c3:67:83:5a` (r8152) |
+
+The QNAP enumerates over Thunderbolt on both TB nodes (`thunderbolt 1-2: … Intel Corp. ai-storage`)
+and a `thunderbolt-net` netdev already exists — so Linux↔QNAP T2E is viable; we just assign IPs.
 
 ## Firewall / routing notes
 
