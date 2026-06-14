@@ -1,8 +1,11 @@
-# Managed by Ansible (storage_net). Point-to-point storage link for {{ inventory_hostname }}.
+# Managed by Ansible (storage_net). Storage link for {{ inventory_hostname }}.
 auto {{ storage_iface }}
 allow-hotplug {{ storage_iface }}
 iface {{ storage_iface }} inet static
     address {{ storage_ip }}/{{ storage_prefix }}
     mtu {{ storage_mtu }}
+{% if qnap_peer_ip != storage_service_ip %}
+    # service IP is off-subnet on this link -> route to it via the QNAP peer
     up   ip route replace {{ storage_service_ip }}/32 via {{ qnap_peer_ip }} dev {{ storage_iface }} || true
     down ip route del {{ storage_service_ip }}/32 via {{ qnap_peer_ip }} dev {{ storage_iface }} 2>/dev/null || true
+{% endif %}

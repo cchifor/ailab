@@ -48,9 +48,9 @@ variable "qnap_nfs_server" {
 }
 
 variable "qnap_nfs_export" {
-  description = "NFS export path on the QNAP (confirm exact path on the device)"
+  description = "NFS export path on the QNAP (QuTS hero exports the share at /<sharename>)"
   type        = string
-  default     = "/share/pve-nfs"
+  default     = "/pve-nfs"
 }
 
 variable "qnap_nfs_content" {
@@ -60,7 +60,7 @@ variable "qnap_nfs_content" {
 }
 
 variable "qnap_nfs_options" {
-  description = "NFS mount options"
+  description = "NFS mount options (QuTS hero negotiates NFSv4.0; 4.1/4.2 not supported)"
   type        = string
-  default     = "vers=4.1"
+  default     = "vers=4.0"
 }

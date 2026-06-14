@@ -8,5 +8,5 @@ pve_ssh_key_path = "~/.ssh/id_ed25519"
 pve_nodes        = ["ai-node1", "ai-node2", "ai-node3"]
 
 # Filled after the QNAP storage runbook:
-qnap_nfs_server = "10.55.0.254"     # or "192.168.1.225" fallback
-qnap_nfs_export = "/share/pve-nfs"  # confirm exact path on the QNAP
+qnap_nfs_server = "10.55.0.254"     # QNAP tbtbr0 (service IP); LAN fallback "192.168.1.225"
+qnap_nfs_export = "/pve-nfs"        # QuTS hero exports the share at /<sharename>
