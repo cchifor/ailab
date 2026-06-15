@@ -52,16 +52,16 @@ when needed. `kube-proxy` stays off (Cilium).
   is the chat UI (public via Cloudflare at chat.chifor.me).
 - **Grafana dashboard** "AI LLM — Strix Halo iGPU + llama.cpp" provisioned (amdgpu_* + llamacpp:* panels).
 
-## 6. Fast storage path for k8s PVCs — ⏸️ BUILD-READY, cutover deferred (2026-06-15)
-k8s CSI still uses the QNAP over the mgmt LAN (2.5 GbE). The chosen path is **Approach A1: host-as-router
-+ SNAT** (NOT a VM bridge/NIC — that depends on unproven thunderbolt-net foreign-MAC bridging and risks
-the VIP). The VM keeps its single NIC; the Proxmox host forwards + SNATs its storage traffic over
-`thunderbolt0`. IaC is **build-ready + canary-validated** (a pod on cp1 reached the QNAP NFS:2049 +
-iSCSI:3260 through the host SNAT; reverted): tofu per-node `host_ip` + the `10.55.0.254/32` route, the
-gated `storage_router` Ansible role, ADR 0011. **The CSI cutover is deferred** until a measured I/O
-bottleneck — see ADR 0011 for the exact cutover steps (roll the route one CP at a time, flip
-storageAddress, migrate the Prometheus iSCSI PV, NFSv4.1+/iSCSI-portal/MTU care, add the storage
-health-check). node3 stays ~2.35 Gbps (USB) until it gets real TB hardware.
+## 6. Fast storage path for k8s PVCs — ✅ DONE: CSI on Thunderbolt (2026-06-15)
+Both `nfs-csi` and `qnap-iscsi` now ride the TB fabric via **Approach A1: host-as-router + SNAT** (the VM
+keeps its single NIC; each Proxmox host forwards + SNATs storage traffic over `thunderbolt0`). `server`/
+`storageAddress` are `10.55.0.254`; the persistent `storage_router` (sysctl + idempotent SNAT + 30 s
+self-heal timer) runs on all 3 hosts; the Talos route + `storage-tier` nodeLabels are on all CPs;
+Prometheus is affinity-pinned to a TB node and attaches via `10.55.0.254:3260`. Measured ~**660 MB/s**
+NFS write (vs ~280 on 2.5 GbE). Findings (see ADR 0011): Trident `storageAddress` is immutable → backend
+delete+recreate; QuTS hero rejects NFSv4.1 → use `nfsvers=4.0`. node3 (USB, 2.5 GbE) reaches `.254` over
+its slower link. **Remaining:** a per-node storage health-check (alert when a host's SNAT path drops);
+`192.168.1.225` is the documented quick-revert.
 
 ## 7. Backup / DR — ✅ Layer A done, Layer B deferred (2026-06-15)
 In-cluster VolumeSnapshots live (external-snapshotter v8 + a `qnap-iscsi` VolumeSnapshotClass;

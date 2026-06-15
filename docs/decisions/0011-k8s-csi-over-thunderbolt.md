@@ -1,7 +1,7 @@
 # ADR 0011 — k8s CSI over Thunderbolt via host-router + SNAT (Approach A1)
 
-**Status:** ACCEPTED (2026-06-15) — IaC build-ready + canary-validated; **CSI cutover DEFERRED** until a
-measured I/O bottleneck. **Supersedes** ADR 0003's "/30 point-to-point" topology claim (see below).
+**Status:** ACCEPTED + **CUTOVER EXECUTED** (2026-06-15) — both nfs-csi and qnap-iscsi now ride the
+Thunderbolt fabric (`10.55.0.254`). **Supersedes** ADR 0003's "/30 point-to-point" topology claim (below).
 **Relates to:** ADR 0007 (k8s storage), the QNAP iSCSI CSI work.
 
 ## Context
@@ -46,17 +46,42 @@ Canary then fully reverted — runtime unchanged, CSI still on mgmt. Feasibility
   if we later want Proxmox to own storage end-to-end.
 - **Longhorn / status-quo-forever:** see ADR 0010 / the throughput goal.
 
-## The deferred cutover (trigger = a measured I/O bottleneck; do in a maintenance window)
-1. `storage_router_enabled: true` in group_vars; `just router` (applies SNAT on all 3 hosts).
-2. Roll the Talos route to all 3 CPs **one at a time** — `tofu apply -target='talos_machine_configuration_apply.cp["cpN"]'` (the `for_each` would otherwise hit all 3 at once → etcd-quorum risk); verify each Ready + etcd healthy between.
-3. Flip `nfs-csi` StorageClass `server` and the `qnap-iscsi` backend `storageAddress` `192.168.1.225 → 10.55.0.254`.
-4. **Migrate the existing Prometheus iSCSI PV** (portal baked at .225, reclaim Retain) via the STS surgery (scale prometheus-operator to 0, delete STS + PVC, scale back). NFS PVCs remount cleanly (same fsid).
-5. Use **NFSv4.1/4.2 over TCP** (NFSv3 aux-RPC is NAT-fragile); confirm the **iSCSI target advertises the `10.55.0.254` portal** (NAT won't rewrite the login payload); keep **MTU 1500** (jumbo deferred — clamp MSS if later enabled).
-6. Deploy a **storage health-check** (blackbox-exporter Probe to `10.55.0.254:2049`+`:3260` from the cluster + a PrometheusRule) — a dropped TB route/SNAT leaves a node `Ready` but storage hung.
-7. node3 stays ~2.35 Gbps (USB) — affinity perf-sensitive workloads (Prometheus) to node1/2. Keep `192.168.1.225` as the documented quick-revert.
+## Cutover — executed 2026-06-15 (what actually happened)
+Pre-flight gate (verified before touching anything): the QNAP serves `:8080` (API), `:2049` (NFS),
+`:3260` (iSCSI) on `10.55.0.254` (dual-stack listen), and all 3 nodes reach them through the SNAT.
+1. **Host routers (all 3):** installed the persistent `storage_router` (sysctl `ip_forward` + idempotent
+   SNAT + 30 s self-heal timer) via SSH. Hardened the script with `flock` + `iptables -w` after a
+   timer/manual race double-added a rule on first deploy.
+2. **Talos route → all 3 CPs, one at a time** (surgical JSON6902 append; VIP/default route preserved, no
+   reboot; etcd healthy between each). Soak-tested: a pod on every node reached `:8080/:2049/:3260`.
+3. **iSCSI flip — finding: `storageAddress` is IMMUTABLE on a live Trident backend** (update rejected
+   *"invalid backend update"*; no outage — it kept running on .225). So the flip is **delete + recreate**
+   the backend, which requires the backend to have **zero volumes** first. Emptied it by tearing down the
+   Prometheus PV (STS surgery; ~hours-old TSDB, negligible loss), deleted the TBC, Flux recreated it on
+   `.254` (new UUID, `Bound/Success` — proving the API works over the SNAT). Recreated Prometheus → fresh
+   PVC provisioned + attached via **`10.55.0.254:3260`** (confirmed by `iscsiadm -m session`).
+4. **NFS flip:** StorageClass `server → 10.55.0.254` (immutable param → delete + recreate the SC; existing
+   Loki/Open-WebUI PVs keep their baked `.225` server, unaffected). **Finding: QuTS hero rejects NFSv4.1**
+   (`mount.nfs: Protocol not supported`) — pinned to **`nfsvers=4.0`** (already single-port / NAT-friendly;
+   the v3 fragility codex flagged never applied). Validated: 1 GiB direct write over the fabric ≈
+   **660 MB/s** vs the ~280 MB/s 2.5 GbE ceiling.
+5. **Prometheus pinned to TB:** Talos `nodeLabels ailab.io/storage-tier` (cp1/cp2=thunderbolt, cp3=ethernet,
+   kept the `exclude-from-external-load-balancers` default) + a preferred `nodeAffinity` → Prometheus moved
+   cp3→cp1 (RWO volume live-migrated, re-attached on `.254`).
+6. **MTU 1500** kept (jumbo deferred). **`192.168.1.225` remains the documented quick-revert.**
+
+## Remaining follow-up
+- **Storage health-check:** a dropped TB route/SNAT leaves a node `Ready` but its CSI I/O hung. The 30 s
+  self-heal timer is the primary mitigation; an *alert* still wants a **per-node** TCP probe to `.254`
+  (a single blackbox Probe lands on one node and misses per-host SNAT failures — needs a DaemonSet-style
+  check or kubelet-volume-stats staleness). Deferred.
 
 ## Consequences
-- ~4–5× CSI throughput ceiling on the 2 TB nodes once cut over; **no steady RAM/CPU cost** (just routing).
-- A new failure MODE after cutover: a node's CSI I/O depends on its host's forward+SNAT path (mitigated by
-  the self-heal timer + the health-check + the mgmt-LAN fallback).
-- IaC stays rebuildable; the host bridge is **not** needed (A1 uses the raw routed `thunderbolt0`).
+- CSI now rides Thunderbolt: ~2.4× measured on the TB nodes (single-stream NFS; iSCSI similar), **no steady
+  RAM/CPU cost** (just routing). node3 (USB, 2.5 GbE, separate /24) reaches `.254` over its slower link —
+  fast-storage workloads are affinity-steered to cp1/cp2.
+- New failure MODE: a node's CSI I/O depends on its host's forward+SNAT path (mitigated by the self-heal
+  timer + the mgmt-LAN fallback; alerting is the open follow-up above).
+- IaC stays rebuildable; the host bridge is **not** needed (A1 uses the raw routed `thunderbolt0`). NOTE:
+  the live route/nodeLabels were applied via talosctl (tofu not installed here); the committed `.tftpl` is
+  the source of truth — a future `tofu apply` converges (no-op).
