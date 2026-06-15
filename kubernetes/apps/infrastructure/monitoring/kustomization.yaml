@@ -4,6 +4,7 @@ resources:
   - namespace.yaml
   - limitrange.yaml
   - grafana-admin.sops.yaml
+  - grafana-oauth.sops.yaml # Authelia OIDC client secret (env into Grafana)
   - kube-prometheus-stack.yaml
   - loki.yaml
   - alloy.yaml

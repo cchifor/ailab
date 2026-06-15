@@ -125,6 +125,27 @@ spec:
       deploymentStrategy:
         type: Recreate
       defaultDashboardsTimezone: browser
+      # SSO via Authelia OIDC (ADR 0012). The client secret comes from the grafana-oauth SOPS secret as
+      # GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET (env overrides grafana.ini). The local admin stays as
+      # break-glass. role_attribute_path maps the Authelia 'admins' group to Grafana Admin.
+      envFromSecret: grafana-oauth
+      grafana.ini:
+        server:
+          root_url: https://grafana.chifor.me
+        auth.generic_oauth:
+          enabled: true
+          name: Authelia
+          client_id: grafana
+          scopes: "openid profile email groups"
+          auth_url: https://sso.chifor.me/api/oidc/authorization
+          token_url: https://sso.chifor.me/api/oidc/token
+          api_url: https://sso.chifor.me/api/oidc/userinfo
+          login_attribute_path: preferred_username
+          groups_attribute_path: groups
+          name_attribute_path: name
+          use_pkce: true
+          auth_style: InHeader
+          role_attribute_path: "contains(groups[*], 'admins') && 'Admin' || 'Viewer'"
       additionalDataSources:
         - name: Loki
           type: loki

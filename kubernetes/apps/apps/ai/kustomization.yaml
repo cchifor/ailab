@@ -6,6 +6,7 @@ resources:
   - namespace.yaml
   - limitrange.yaml
   - litellm-secret.sops.yaml
+  - open-webui-oauth.sops.yaml # Authelia OIDC client secret for Open WebUI
   - llm-service.yaml
   - monitoring.yaml
   - litellm.yaml

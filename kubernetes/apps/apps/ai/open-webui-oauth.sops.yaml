@@ -1,0 +1,24 @@
+# Open WebUI OIDC client secret for the Authelia client 'open-webui' (env OAUTH_CLIENT_SECRET).
+apiVersion: v1
+kind: Secret
+metadata:
+    name: open-webui-oauth
+    namespace: ai
+type: Opaque
+stringData:
+    OAUTH_CLIENT_SECRET: ENC[AES256_GCM,data:RyKVzzowJobXeB6YT5JqQIjrw1i6DM4KgABL4OgrMWg=,iv:Mu+69/DOBlU1gxjYGmBsPRezaL6MWAaQTM27Li9SLzQ=,tag:MrLcSt22IaIwi7e2KjpU4A==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBpTGcxQ1ZFRFNNZ2NNODRm
+            RThjZ1ZrR1NLYjVFQ2hRRGlmaU9LdHBtU1ZBCi9mdTNzcDd4M0hrVHFidFZoQkZD
+            RVdIV2RnNDhiaUNwTW9zSWN2OXJDeEEKLS0tIDAyNFp1Y2dGUkU5ZkE0eG5SdUFq
+            dWtTRTRwQmI3b1RvMGpoN2h3ODlna3cKx58Gz/ceLq9iB+y3zS08Ak0Ry8bAkAmh
+            tmgW6DCEicFjy8x2bP9SjyjWvEh5fQG/uQ6gLMa0toQa83ndgMA6nQ==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-06-15T18:48:00Z"
+    mac: ENC[AES256_GCM,data:YM+qSCUwVC7IYk/2rxsmsp/VSAaYGTXLYQVW1vTRX6oxCO2U+AhKdV4Jrsls2dpcBJOoJ1XvxTdvgi6Kw+Z8wr9mENaGFRLn3r5g/0IM4RoGM4fRhA1hog4R6DDLnbeZoKrzfgzGiR7kSUKpNlyH9OA3p5hcB1Fj2uRrhnPITzg=,iv:EZvELvN3eSYM5EA4s/TsotQ3Zrd1vBe4V05nrM5a/UY=,tag:s2YDDnvah9hV5fW88ngL6Q==,type:str]
+    version: 3.13.1

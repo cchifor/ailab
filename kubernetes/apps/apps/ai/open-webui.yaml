@@ -43,6 +43,22 @@ spec:
                 secretKeyRef: { name: litellm-secret, key: master-key }
             - { name: ENABLE_OLLAMA_API, value: "False" } # we only use the OpenAI endpoint
             - { name: WEBUI_NAME, value: "ailab AI" }
+            # SSO via Authelia OIDC (ADR 0012). Local login stays as break-glass; OAuth sign-up on.
+            - { name: WEBUI_URL, value: "https://chat.chifor.me" }
+            - { name: ENABLE_OAUTH_SIGNUP, value: "true" }
+            - { name: OAUTH_MERGE_ACCOUNTS_BY_EMAIL, value: "true" }
+            - { name: OAUTH_PROVIDER_NAME, value: "Authelia" }
+            - { name: OPENID_PROVIDER_URL, value: "https://sso.chifor.me/.well-known/openid-configuration" }
+            - { name: OAUTH_CLIENT_ID, value: "open-webui" }
+            - name: OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: open-webui-oauth, key: OAUTH_CLIENT_SECRET }
+            - { name: OAUTH_SCOPES, value: "openid email profile groups" }
+            - { name: OAUTH_CODE_CHALLENGE_METHOD, value: "S256" }
+            - { name: ENABLE_OAUTH_ROLE_MANAGEMENT, value: "true" }
+            - { name: OAUTH_ROLES_CLAIM, value: "groups" }
+            - { name: OAUTH_ALLOWED_ROLES, value: "openwebui,openwebui-admin" }
+            - { name: OAUTH_ADMIN_ROLES, value: "openwebui-admin" }
           volumeMounts:
             - { name: data, mountPath: /app/backend/data }
           readinessProbe:

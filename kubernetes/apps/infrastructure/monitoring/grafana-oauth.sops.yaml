@@ -1,0 +1,25 @@
+# Grafana generic_oauth client secret for the Authelia OIDC client 'grafana'. Injected as the
+# GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET env (grafana.envFromSecret), overriding grafana.ini.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: grafana-oauth
+    namespace: monitoring
+type: Opaque
+stringData:
+    GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: ENC[AES256_GCM,data:8dYjxJ2Xs5od2xt/BwCET2VKXm1VodnHesy1Uve3KwY=,iv:4/repSwV4pHwhlK+zYno66HWFoP28JL9Z9Mp7OmDWNc=,tag:3Oie9vu5GWHL6B4+stubeA==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBrTWRPM2pmMUxvdFVuSnlY
+            TVVDYXh5QmVKemV4emk4aFZ2ZkNEdUVJbGdJCjE0WnB1bUU3V1RUbEdJWHFBVm5X
+            Q3lualJhUjlKR1N2b3lkYk5hSzBTWHcKLS0tIEdkZWJOOXNPU0JSY0VNbG1rbXNm
+            VHM0S2hXVExTNHNOWG9SWFBsdkdLZlUK9iXUq+JujQeKyUZ8QOGunUQ7L7hW1AsE
+            KsRVAjG7nOtg/VJvxPirdqal9baIobRtXs1Q4W9viSTjPZkNnRVlhA==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-06-15T18:48:00Z"
+    mac: ENC[AES256_GCM,data:VOl9XZxW5Uv3z5/1pQKwL3frWQMVFGsS9xdxVe75q3JVdyVKiTwidDvoWDS+vJ5sHfOuVKzh6apoS3fp7eFxMIMs1vNxwK/BI0kugpVboXxBgsl8aBJsuxPQKOaICINsvkXzo2ObzolnX8pbzCeoXb2DHLyYYS3fvHLgW2QisSU=,iv:oTT8o/BdStBWdIesAeb3+NlTYLvSByV/RQW20HvW/A8=,tag:1sgNhZQZ2TQyI1Y5zPjscg==,type:str]
+    version: 3.13.1
