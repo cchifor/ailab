@@ -111,8 +111,19 @@ spec:
         existingSecret: grafana-admin
         userKey: admin-user
         passwordKey: admin-password
+      # Durable Grafana DB so UI changes (admin password, prefs, ad-hoc panels) survive restarts.
+      # NOTE: with a persistent DB the secret password is only applied on FIRST init of a fresh PVC;
+      # after that the DB value wins (reset later via `grafana cli admin reset-admin-password`).
       persistence:
-        enabled: false # dashboards provisioned as code; no PVC needed
+        enabled: true
+        type: pvc
+        storageClassName: qnap-iscsi
+        accessModes: ["ReadWriteOnce"]
+        size: 2Gi
+      # RWO block on a Deployment: terminate the old pod before starting the new one, else the rollout
+      # deadlocks on a Multi-Attach error (two pods can't hold the same iSCSI LUN).
+      deploymentStrategy:
+        type: Recreate
       defaultDashboardsTimezone: browser
       additionalDataSources:
         - name: Loki
