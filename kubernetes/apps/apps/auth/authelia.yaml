@@ -78,7 +78,7 @@ spec:
             limits: { memory: 192Mi }
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            readOnlyRootFilesystem: false # Authelia writes beyond /data//tmp at startup; ro-rootfs made it fail. Still non-root + caps dropped (restricted PSA doesn't require ro-rootfs).
             capabilities: { drop: ["ALL"] }
           volumeMounts:
             - { name: config, mountPath: /config, readOnly: true }
