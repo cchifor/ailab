@@ -40,6 +40,10 @@ spec:
         app.kubernetes.io/name: authelia
     spec:
       serviceAccountName: authelia
+      # CRITICAL: the Service is named `authelia`, so k8s would inject AUTHELIA_PORT / AUTHELIA_SERVICE_*
+      # env vars — which Authelia parses as config (AUTHELIA_PORT -> deprecated `port` -> conflicts with
+      # server.address, fatal). Disabling service links removes them.
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
