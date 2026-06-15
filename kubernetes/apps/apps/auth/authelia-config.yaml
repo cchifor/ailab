@@ -11,6 +11,10 @@ data:
     log:
       level: 'info'
       format: 'text'
+    # The pod has no external NTP egress (UDP/123); that startup check is fatal by default — skip it
+    # (the host/kubelet clock is authoritative). Validated 2026-06-15.
+    ntp:
+      disable_startup_check: true
     totp:
       issuer: 'chifor.me'
     identity_validation:
