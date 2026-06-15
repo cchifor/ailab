@@ -81,6 +81,30 @@ spec:
         resources:
           requests: { cpu: 200m, memory: 1Gi }
           limits: { memory: 2Gi }
+        # Per-node storage-fabric reachability: scrape each storage-fabric-probe DaemonSet pod's /probe
+        # against the QNAP NFS(2049)+iSCSI(3260) ports → probe_success{job=storage-fabric-*, node=...}.
+        # (See storage-fabric-probe.yaml + storage-fabric-rules.yaml.)
+        additionalScrapeConfigs:
+          - job_name: storage-fabric-nfs
+            metrics_path: /probe
+            params: { module: ["tcp_connect"], target: ["10.55.0.254:2049"] }
+            kubernetes_sd_configs:
+              - { role: pod, namespaces: { names: ["monitoring"] } }
+            relabel_configs:
+              - { source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name], regex: storage-fabric-probe, action: keep }
+              - { source_labels: [__meta_kubernetes_pod_container_port_number], regex: "9115", action: keep }
+              - { source_labels: [__meta_kubernetes_pod_node_name], target_label: node }
+              - { target_label: fabric, replacement: nfs }
+          - job_name: storage-fabric-iscsi
+            metrics_path: /probe
+            params: { module: ["tcp_connect"], target: ["10.55.0.254:3260"] }
+            kubernetes_sd_configs:
+              - { role: pod, namespaces: { names: ["monitoring"] } }
+            relabel_configs:
+              - { source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name], regex: storage-fabric-probe, action: keep }
+              - { source_labels: [__meta_kubernetes_pod_container_port_number], regex: "9115", action: keep }
+              - { source_labels: [__meta_kubernetes_pod_node_name], target_label: node }
+              - { target_label: fabric, replacement: iscsi }
     grafana:
       priorityClassName: platform-critical
       admin:

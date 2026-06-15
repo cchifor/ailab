@@ -8,3 +8,5 @@ resources:
   - loki.yaml
   - alloy.yaml
   - ai-llm-dashboard.yaml
+  - storage-fabric-probe.yaml # per-node QNAP-fabric reachability (blackbox DaemonSet)
+  - storage-fabric-rules.yaml # alerts on the probes

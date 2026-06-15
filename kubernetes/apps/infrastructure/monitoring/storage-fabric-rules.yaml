@@ -1,0 +1,32 @@
+# Alerts on the per-node storage-fabric probes (storage-fabric-probe.yaml + the additionalScrapeConfigs
+# in kube-prometheus-stack). `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: storage-fabric
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: storage-fabric
+      rules:
+        - alert: StorageFabricUnreachable
+          expr: probe_success{job=~"storage-fabric-.*"} == 0
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "Node {{ $labels.node }} cannot reach QNAP storage ({{ $labels.fabric }}) over the Thunderbolt fabric"
+            description: >-
+              The per-node TCP probe to 10.55.0.254 ({{ $labels.fabric }}) from {{ $labels.node }} has
+              failed for >2m. That node's Proxmox host router/SNAT (storage-router.timer) is likely down,
+              so CSI I/O (NFS/iSCSI) on this node will HANG while the node still reports Ready. Check
+              `systemctl status storage-router.timer` + `iptables -t nat -S POSTROUTING` on the host;
+              the mgmt-LAN fallback is 192.168.1.225 (revert by re-pointing the StorageClass/backend).
+        - alert: StorageFabricProbeSlow
+          expr: probe_duration_seconds{job=~"storage-fabric-.*"} > 1
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Slow storage-fabric probe from {{ $labels.node }} ({{ $labels.fabric }})"
+            description: "TCP connect to 10.55.0.254 ({{ $labels.fabric }}) from {{ $labels.node }} is taking >1s for >5m — possible Thunderbolt link degradation."
