@@ -70,11 +70,13 @@ Pre-flight gate (verified before touching anything): the QNAP serves `:8080` (AP
    cp3→cp1 (RWO volume live-migrated, re-attached on `.254`).
 6. **MTU 1500** kept (jumbo deferred). **`192.168.1.225` remains the documented quick-revert.**
 
-## Remaining follow-up
-- **Storage health-check:** a dropped TB route/SNAT leaves a node `Ready` but its CSI I/O hung. The 30 s
-  self-heal timer is the primary mitigation; an *alert* still wants a **per-node** TCP probe to `.254`
-  (a single blackbox Probe lands on one node and misses per-host SNAT failures — needs a DaemonSet-style
-  check or kubelet-volume-stats staleness). Deferred.
+## Storage health-check — DONE (2026-06-15)
+A **blackbox-exporter DaemonSet** (`storage-fabric-probe`, one pod/node) + two scrape jobs probe
+`10.55.0.254:2049` (NFS) and `:3260` (iSCSI) from **each node's own** route+SNAT path (the path CSI uses),
+yielding `probe_success{job=storage-fabric-*, node=...}`. `PrometheusRule` **StorageFabricUnreachable**
+(critical, >2m) catches the "node Ready but CSI hung" failure mode; **StorageFabricProbeSlow** (warn) flags
+TB degradation. Verified: 6 series (3 nodes × 2 ports) all `=1`; both rules loaded `inactive/ok`. A single
+non-DaemonSet probe was rejected by design — it lands on one node and misses per-host SNAT failures.
 
 ## Consequences
 - CSI now rides Thunderbolt: ~2.4× measured on the TB nodes (single-stream NFS; iSCSI similar), **no steady

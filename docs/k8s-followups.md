@@ -60,7 +60,8 @@ self-heal timer) runs on all 3 hosts; the Talos route + `storage-tier` nodeLabel
 Prometheus is affinity-pinned to a TB node and attaches via `10.55.0.254:3260`. Measured ~**660 MB/s**
 NFS write (vs ~280 on 2.5 GbE). Findings (see ADR 0011): Trident `storageAddress` is immutable → backend
 delete+recreate; QuTS hero rejects NFSv4.1 → use `nfsvers=4.0`. node3 (USB, 2.5 GbE) reaches `.254` over
-its slower link. **Remaining:** a per-node storage health-check (alert when a host's SNAT path drops);
+its slower link. A **per-node storage health-check** (blackbox DaemonSet probing `.254:2049/:3260` from
+each node + `StorageFabricUnreachable` alert) catches a dropped host SNAT (node Ready but CSI hung).
 `192.168.1.225` is the documented quick-revert.
 
 ## 7. Backup / DR — ✅ Layer A done, Layer B deferred (2026-06-15)
