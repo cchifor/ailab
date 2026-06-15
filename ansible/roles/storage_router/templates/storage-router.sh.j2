@@ -6,10 +6,16 @@
 # this host's storage IP for replies to come back over the fabric.
 set -eu
 
+# Serialize instances (timer + a manual run must not race the -C/-A check -> duplicate rules).
+LOCK=/run/storage-router.lock
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+
 IFACE="{{ storage_iface }}"          # this host's storage link (thunderbolt0 / USB-NIC)
 SRCNAT="{{ storage_ip }}"            # SNAT VM traffic to this host's fabric IP
 SVC="{{ storage_service_ip }}"       # QNAP NFS/iSCSI service IP
 VMNET="{{ vm_subnet }}"              # Talos VM / mgmt subnet to forward
+IPT="iptables -w 5"                  # wait up to 5s for the xtables lock
 
 # Runtime forwarding (persistent drop-in is installed separately).
 [ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ] || echo 1 > /proc/sys/net/ipv4/ip_forward
@@ -18,12 +24,12 @@ VMNET="{{ vm_subnet }}"              # Talos VM / mgmt subnet to forward
 ip link show "$IFACE" >/dev/null 2>&1 || exit 0
 
 # SNAT VM->service traffic leaving the storage iface to this host's fabric IP.
-iptables -t nat -C POSTROUTING -s "$VMNET" -d "$SVC" -o "$IFACE" -j SNAT --to-source "$SRCNAT" 2>/dev/null \
-  || iptables -t nat -A POSTROUTING -s "$VMNET" -d "$SVC" -o "$IFACE" -j SNAT --to-source "$SRCNAT"
+$IPT -t nat -C POSTROUTING -s "$VMNET" -d "$SVC" -o "$IFACE" -j SNAT --to-source "$SRCNAT" 2>/dev/null \
+  || $IPT -t nat -A POSTROUTING -s "$VMNET" -d "$SVC" -o "$IFACE" -j SNAT --to-source "$SRCNAT"
 
 # Allow the forward both ways (Proxmox FORWARD policy is usually ACCEPT; be explicit so a hardened
 # host still works).
-iptables -C FORWARD -s "$VMNET" -d "$SVC" -o "$IFACE" -j ACCEPT 2>/dev/null \
-  || iptables -A FORWARD -s "$VMNET" -d "$SVC" -o "$IFACE" -j ACCEPT
-iptables -C FORWARD -d "$VMNET" -i "$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
-  || iptables -A FORWARD -d "$VMNET" -i "$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+$IPT -C FORWARD -s "$VMNET" -d "$SVC" -o "$IFACE" -j ACCEPT 2>/dev/null \
+  || $IPT -A FORWARD -s "$VMNET" -d "$SVC" -o "$IFACE" -j ACCEPT
+$IPT -C FORWARD -d "$VMNET" -i "$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+  || $IPT -A FORWARD -d "$VMNET" -i "$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
