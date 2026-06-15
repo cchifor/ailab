@@ -73,3 +73,10 @@ follow-up — see ADR 0010. Until then a QNAP loss is an accepted residual risk.
 Kubelet kube/systemReserved + evictionHard (all 3 CPs), PriorityClasses, and per-namespace LimitRanges —
 see ADR 0009. Deferred: per-namespace ResourceQuotas (LimitRange-only for now; never quota the
 `trident`/`local-path-storage` privileged DaemonSet namespaces).
+
+## 9. SSO (Authelia OIDC hybrid) — ✅ deployed, ⏸️ user CF step pending (2026-06-15)
+Self-hosted Authelia (ns `auth`, OIDC at sso.chifor.me) live + verified; Grafana + Open WebUI wired as
+OIDC clients (group->role); LiteLLM stays master-key; Cloudflare Access kept as the edge gate. ADR 0012.
+**User must:** `cloudflared tunnel route dns ailab sso.chifor.me` (+ no Access app on sso; relax Access on
+grafana/chat for a single prompt), then browser-test. Gotchas captured in ADR 0012 (ntp/enableServiceLinks/
+readOnlyRootFilesystem/command). Lab user login: chifor / <generated, in the authelia-secrets SOPS users db>.
