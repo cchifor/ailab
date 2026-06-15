@@ -13,6 +13,11 @@ Keep them in sync.
 
 ## Dedicated storage fabric — `10.55.0.0/24`
 
+> ⚠️ **The /30 design below was the original plan and was NOT realized.** Live reality (verified; source of
+> truth `inventory/hosts.yml`): the QNAP bridges both TB ports into `tbtbr0`, so node1/node2 share a **flat
+> `10.55.0.0/24`** (`10.55.0.1`/`10.55.0.2` → `10.55.0.254`); **node3** is on a separate `10.55.1.0/24` via
+> USB→2.5 GbE (`10.55.1.9` → `.254` via `10.55.1.254`), MTU 1500. See ADR 0003 (superseded) + ADR 0011.
+
 Point-to-point **/30s**, one per physical link. This honestly models the topology: the TB
 links are point-to-point cables, **not** a switched fabric, so a flat /24 would not give
 any-to-any reachability. Storage traffic is kept off both LANs.

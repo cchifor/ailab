@@ -14,11 +14,13 @@ data "talos_machine_configuration" "cp" {
 locals {
   cp_patches = {
     for k, v in var.control_planes : k => templatefile("${path.module}/machine-config/controlplane.yaml.tftpl", {
-      node_ip     = v.ip
-      prefix      = var.network_prefix
-      gateway     = var.gateway
-      vip         = var.cluster_vip
-      nameservers = jsonencode(var.nameservers)
+      node_ip            = v.ip
+      prefix             = var.network_prefix
+      gateway            = var.gateway
+      vip                = var.cluster_vip
+      nameservers        = jsonencode(var.nameservers)
+      host_ip            = v.host_ip # WS2: next-hop for the TB storage /32 route
+      storage_service_ip = var.storage_service_ip
     })
   }
 }

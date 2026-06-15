@@ -52,7 +52,23 @@ when needed. `kube-proxy` stays off (Cilium).
   is the chat UI (public via Cloudflare at chat.chifor.me).
 - **Grafana dashboard** "AI LLM — Strix Halo iGPU + llama.cpp" provisioned (amdgpu_* + llamacpp:* panels).
 
-## 6. Fast storage path for k8s PVCs (optional)
-k8s CSI currently uses the QNAP over the mgmt LAN (2.5 GbE) because the Talos VMs aren't on the
-Thunderbolt fabric. To use TB for PVCs, bridge each host's storage link into a Proxmox bridge and
-give each VM a NIC on `10.55.0.0/24`. VM *disks* already use TB (host NFS mount).
+## 6. Fast storage path for k8s PVCs — ⏸️ BUILD-READY, cutover deferred (2026-06-15)
+k8s CSI still uses the QNAP over the mgmt LAN (2.5 GbE). The chosen path is **Approach A1: host-as-router
++ SNAT** (NOT a VM bridge/NIC — that depends on unproven thunderbolt-net foreign-MAC bridging and risks
+the VIP). The VM keeps its single NIC; the Proxmox host forwards + SNATs its storage traffic over
+`thunderbolt0`. IaC is **build-ready + canary-validated** (a pod on cp1 reached the QNAP NFS:2049 +
+iSCSI:3260 through the host SNAT; reverted): tofu per-node `host_ip` + the `10.55.0.254/32` route, the
+gated `storage_router` Ansible role, ADR 0011. **The CSI cutover is deferred** until a measured I/O
+bottleneck — see ADR 0011 for the exact cutover steps (roll the route one CP at a time, flip
+storageAddress, migrate the Prometheus iSCSI PV, NFSv4.1+/iSCSI-portal/MTU care, add the storage
+health-check). node3 stays ~2.35 Gbps (USB) until it gets real TB hardware.
+
+## 7. Backup / DR — ✅ Layer A done, Layer B deferred (2026-06-15)
+In-cluster VolumeSnapshots live (external-snapshotter v8 + a `qnap-iscsi` VolumeSnapshotClass;
+round-trip validated). Off-NAS DR (Velero + CSI data-mover → Cloudflare R2) is the documented Layer B
+follow-up — see ADR 0010. Until then a QNAP loss is an accepted residual risk.
+
+## 8. Control-plane colocation hardening — ✅ DONE (2026-06-15)
+Kubelet kube/systemReserved + evictionHard (all 3 CPs), PriorityClasses, and per-namespace LimitRanges —
+see ADR 0009. Deferred: per-namespace ResourceQuotas (LimitRange-only for now; never quota the
+`trident`/`local-path-storage` privileged DaemonSet namespaces).

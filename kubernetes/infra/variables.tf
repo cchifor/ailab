@@ -73,6 +73,7 @@ variable "control_planes" {
     host_node = string # Proxmox node name (pvesh)
     vm_id     = number
     ip        = string
+    host_ip   = string # the Proxmox host's vmbr0 IP — next-hop for the TB storage route (WS2)
     cores     = number
     memory    = number # MiB
     disk_gb   = number
@@ -84,10 +85,18 @@ variable "control_planes" {
   # docs/runbooks/ai-host-setup.md. Talos has no memory hotplug; a change reboots the VM
   # (roll one node at a time, 3-CP HA tolerates one down).
   default = {
-    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", cores = 8, memory = 32768, disk_gb = 40 }
-    cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", cores = 8, memory = 32768, disk_gb = 40 }
-    cp3 = { host_node = "ai-node3", vm_id = 4003, ip = "192.168.0.43", cores = 8, memory = 32768, disk_gb = 40 }
+    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", host_ip = "192.168.0.2", cores = 8, memory = 32768, disk_gb = 40 }
+    cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", host_ip = "192.168.0.3", cores = 8, memory = 32768, disk_gb = 40 }
+    cp3 = { host_node = "ai-node3", vm_id = 4003, ip = "192.168.0.43", host_ip = "192.168.0.4", cores = 8, memory = 32768, disk_gb = 40 }
   }
+}
+
+# WS2 (Thunderbolt CSI): the QNAP storage service IP on the TB/storage fabric. Each VM reaches it via
+# a /32 route through its own Proxmox host (host_ip), which forwards + SNATs over Thunderbolt. The
+# route is harmless until CSI is cut over to this IP (deferred). See docs/decisions/0011 + the runbook.
+variable "storage_service_ip" {
+  type    = string
+  default = "10.55.0.254"
 }
 
 # Talos system extensions baked into the image (VMs; AI/GPU is a separate LXC, not here)

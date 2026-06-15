@@ -1,0 +1,8 @@
+[Unit]
+Description=Storage-router SNAT reconcile (Talos VM -> QNAP fabric over Thunderbolt)
+After=network.target
+Wants=storage-router.timer
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/storage-router.sh

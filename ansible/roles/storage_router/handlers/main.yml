@@ -1,0 +1,8 @@
+---
+- name: storage_router sysctl reload
+  ansible.builtin.command: sysctl --system
+  changed_when: false
+
+- name: storage_router daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true

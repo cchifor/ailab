@@ -1,0 +1,43 @@
+---
+# Make each Proxmox host a router+SNAT gateway so its Talos VM can reach the QNAP storage service IP
+# over the Thunderbolt/USB storage fabric (Approach A1 — the VM keeps a single NIC, no passthrough).
+# Self-heals via a 30s timer (same pattern as thunderbolt_net's tb-link) so a TB flap / reboot can't
+# silently strand CSI I/O. Gated by storage_router_enabled (build-ready until the deferred cutover).
+
+- name: Persist net.ipv4.ip_forward (drop-in)
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-storage-router.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible (storage_router). Forward Talos-VM storage traffic onto the TB fabric.
+      net.ipv4.ip_forward = 1
+  notify: storage_router sysctl reload
+
+- name: Install the idempotent SNAT reconcile script
+  ansible.builtin.template:
+    src: storage-router.sh.j2
+    dest: /usr/local/sbin/storage-router.sh
+    mode: "0755"
+
+- name: Install the storage-router systemd unit + timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - storage-router.service
+    - storage-router.timer
+  notify: storage_router daemon-reload
+
+- name: Flush handlers so the unit is registered before we enable it
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable + start the storage-router timer
+  ansible.builtin.systemd:
+    name: storage-router.timer
+    enabled: true
+    state: started
+
+- name: Run the reconcile once now
+  ansible.builtin.command: /usr/local/sbin/storage-router.sh
+  changed_when: false

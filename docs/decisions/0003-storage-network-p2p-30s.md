@@ -1,6 +1,12 @@
 # ADR 0003 — Storage network: point-to-point /30s + service IP 10.55.0.254
 
-**Status:** accepted · **Date:** 2026-06-14
+**Status:** SUPERSEDED (2026-06-15) by reality + [ADR 0011](0011-k8s-csi-over-thunderbolt.md) · **Date:** 2026-06-14
+
+> ⚠️ **SUPERSEDED — the /30 plan below was never realized.** Live, SSH-verified topology (source of truth:
+> `inventory/hosts.yml`): the QNAP **bridges both Thunderbolt ports into `tbtbr0`**, so `10.55.0.0/24` is a
+> **single shared L2** for node1 (`10.55.0.1`) + node2 (`10.55.0.2`), both reaching `10.55.0.254` directly.
+> node3 is on a **separate `10.55.1.0/24`** (USB→2.5 GbE) and routes to `.254` via `10.55.1.254`. The
+> "no shared L2, so keep CSI on mgmt" rationale here is therefore moot — see ADR 0011 for the TB CSI plan.
 
 ## Context
 2 nodes connect to the QNAP over Thunderbolt/USB4 (point-to-point cables), 1 node over 10GbE

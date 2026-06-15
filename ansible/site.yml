@@ -21,6 +21,12 @@
     - role: storage_net
       tags: [net]
 
+    # WS2 (Thunderbolt CSI): host router+SNAT so Talos VMs reach the QNAP over the TB fabric.
+    # OFF until storage_router_enabled=true (the deferred CSI cutover). `just router`.
+    - role: storage_router
+      tags: [net, router]
+      when: storage_router_enabled | default(false)
+
     - role: qnap_mounts
       tags: [mounts]
 

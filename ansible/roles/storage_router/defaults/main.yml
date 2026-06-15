@@ -1,0 +1,6 @@
+---
+# WS2 (Thunderbolt CSI). OFF by default — this is build-ready, not the cutover. Flip to true in
+# group_vars (or -e) when migrating k8s CSI onto the storage fabric, then run `just router`.
+storage_router_enabled: false
+# The Talos VM / mgmt subnet whose storage traffic this host forwards + SNATs onto the fabric.
+vm_subnet: "192.168.0.0/24"

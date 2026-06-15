@@ -1,0 +1,10 @@
+[Unit]
+Description=Reconcile the storage-router SNAT every 30s (self-heal after TB flap / reboot)
+
+[Timer]
+OnBootSec=20
+OnUnitActiveSec=30
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

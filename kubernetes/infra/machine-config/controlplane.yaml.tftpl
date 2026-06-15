@@ -12,6 +12,12 @@ machine:
         routes:
           - network: 0.0.0.0/0
             gateway: ${gateway}
+          # WS2 (Thunderbolt CSI): reach the QNAP storage service IP via THIS node's Proxmox host,
+          # which forwards + SNATs over the ~1.1 GB/s TB fabric. Single NIC — no passthrough, VIP and
+          # default route stay put. Harmless until CSI is cut over to ${storage_service_ip} (deferred:
+          # needs the host storage_router SNAT applied; see ADR 0011 + the runbook).
+          - network: ${storage_service_ip}/32
+            gateway: ${host_ip}
         vip:
           ip: ${vip}
   registries:
