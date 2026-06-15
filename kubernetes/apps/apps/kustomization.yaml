@@ -3,4 +3,5 @@ kind: Kustomization
 # Application layer (after infrastructure): user-facing workloads + the AI endpoint wiring.
 resources:
   - ai
+  - auth # Authelia SSO (OIDC provider) — Grafana/Open WebUI clients reference it
   - edge

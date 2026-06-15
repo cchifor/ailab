@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: auth
+  labels:
+    app.kubernetes.io/part-of: sso
+    # Authelia runs fully non-root, no caps, read-only rootfs -> restricted is fine.
+    pod-security.kubernetes.io/enforce: restricted

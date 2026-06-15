@@ -1,0 +1,104 @@
+# Authelia — self-hosted OIDC provider (SSO for Grafana + Open WebUI), per ADR 0012.
+# Single lightweight Go binary (~64-192Mi), file user store, local SQLite on a qnap-iscsi PVC.
+# Config is merged from two files: the readable ConfigMap (configuration.yml) + the SOPS secret's
+# oidc-jwks.yml (RSA issuer key). The four random secrets come in via *_FILE env.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: authelia
+  namespace: auth
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: authelia-data
+  namespace: auth
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: qnap-iscsi
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authelia
+  namespace: auth
+  labels:
+    app.kubernetes.io/name: authelia
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # RWO iSCSI PVC on a Deployment -> avoid Multi-Attach deadlock on rollout
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: authelia
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: authelia
+    spec:
+      serviceAccountName: authelia
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: authelia
+          image: ghcr.io/authelia/authelia:4.39.20
+          args:
+            - "--config=/config/configuration.yml"
+            - "--config=/secrets/oidc-jwks.yml" # merged: carries the RSA issuer key
+          env:
+            - { name: AUTHELIA_SESSION_SECRET_FILE, value: /secrets/session_secret }
+            - { name: AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE, value: /secrets/storage_encryption_key }
+            - { name: AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE, value: /secrets/reset_jwt_secret }
+            - { name: AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE, value: /secrets/oidc_hmac_secret }
+          ports:
+            - { name: http, containerPort: 9091 }
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 192Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: secrets, mountPath: /secrets, readOnly: true }
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap: { name: authelia-config }
+        - name: secrets
+          secret: { secretName: authelia-secrets }
+        - name: data
+          persistentVolumeClaim: { claimName: authelia-data }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authelia
+  namespace: auth
+  labels:
+    app.kubernetes.io/name: authelia
+spec:
+  selector:
+    app.kubernetes.io/name: authelia
+  ports:
+    - { name: http, port: 9091, targetPort: http }
