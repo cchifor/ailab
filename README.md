@@ -72,7 +72,8 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 | 4 — Validation | ✅ done — reboot-persistence verified (node1 **and** QNAP); ~1.1 GB/s over TB |
 | 5 — Register NFS in Proxmox | ✅ done — `qnap-nfs` active on all 3 nodes (`/mnt/pve/qnap-nfs`, 5 TB) |
 | K8s cluster (Talos + Cilium + Flux) | ✅ done — 3-node HA, GitOps live (`docs/k8s-architecture.md`) |
-| K8s storage (3 tiers) | ✅ done — `nfs-csi` (RWX default), `local-path` (node-local NVMe), `qnap-iscsi` (network block from the ZFS pool, RWO, migratable, ZFS snapshots — Trident `csi.trident.qnap.io`). Prometheus TSDB on `qnap-iscsi`. (`docs/k8s-followups.md`) |
+| K8s storage (3 tiers) | ✅ done — `nfs-csi` (RWX default), `local-path` (node-local NVMe), `qnap-iscsi` (network block from the ZFS pool, RWO, migratable — Trident `csi.trident.qnap.io`). Prometheus TSDB on `qnap-iscsi`. **VolumeSnapshots** live (external-snapshotter v8 + class; round-trip validated). (`docs/k8s-followups.md`) |
+| K8s platform hardening | ✅ done — colocation governance (kubelet reservations + PriorityClasses + LimitRanges, ADR 0009); backup Layer A (CSI snapshots, ADR 0010). ⏸️ **build-ready/deferred:** CSI-over-Thunderbolt (host-router+SNAT, A1, canary-proven — ADR 0011) and off-NAS Velero→R2 DR. |
 | K8s observability | ✅ metrics (Prometheus/Grafana/node-exporter) + AI/GPU Grafana dashboard; logs (Loki+Alloy) |
 | K8s: AI LLM appliance | ✅ done — 3× privileged GPU LXC, llama.cpp Vulkan; **5 models** (Qwen3-30B-A3B, Qwen3-Coder-30B-A3B, gpt-oss-120B, Qwen3.5-122B, Qwen3-VL-8B vision) behind **LiteLLM** + **Open WebUI**; GPU+inference metrics (`docs/runbooks/ai-host-setup.md`, ADR 0008) |
 | K8s: ingress + internet exposure | ✅ done — **Cloudflare Tunnel** (chat.chifor.me + Access) + **Tailscale** subnet-router mesh (192.168.0.0/24 + 10.55.0.0/24); `docs/runbooks/internet-exposure.md` |
