@@ -41,6 +41,7 @@ spec:
       labels:
         app.kubernetes.io/name: cloudflared
     spec:
+      priorityClassName: platform-critical # public ingress path — survive pressure
       containers:
         - name: cloudflared
           image: cloudflare/cloudflared:latest # Docker Hub — heed the mirror follow-up; pin a version

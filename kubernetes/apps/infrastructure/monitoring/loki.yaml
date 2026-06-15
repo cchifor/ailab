@@ -43,6 +43,10 @@ spec:
         delete_request_store: filesystem
     singleBinary:
       replicas: 1
+      priorityClassName: platform-critical # log storage — survive pressure
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 1Gi } # explicit so the namespace LimitRange default (512Mi) can't OOM it
       persistence:
         enabled: true
         storageClass: nfs-csi

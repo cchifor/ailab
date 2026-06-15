@@ -18,3 +18,8 @@ spec:
   values:
     externalSnapshotter:
       enabled: false
+    # CSI must survive node pressure or PVC attach/mount breaks cluster-wide
+    controller:
+      priorityClassName: platform-critical
+    node:
+      priorityClassName: platform-critical

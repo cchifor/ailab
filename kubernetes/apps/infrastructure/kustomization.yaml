@@ -3,6 +3,7 @@ kind: Kustomization
 # Infrastructure layer (sync wave before apps): CSI, observability, then cert-manager,
 # ingress, cloudflared, tailscale. Populated per sub-phase.
 resources:
+  - core # PriorityClasses first — workloads below reference them
   - sources
   - storage
   - monitoring

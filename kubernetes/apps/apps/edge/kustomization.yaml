@@ -4,6 +4,7 @@ kind: Kustomization
 # + Tailscale operator/subnet-router (private mesh). See docs/runbooks/internet-exposure.md.
 resources:
   - namespace.yaml
+  - limitrange.yaml
   - cloudflared-creds.sops.yaml
   - cloudflared.yaml
   - tailscale-oauth.sops.yaml

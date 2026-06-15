@@ -1,0 +1,11 @@
+# Default-injection safety net for the ai namespace (see monitoring/limitrange.yaml for rationale).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: ai
+spec:
+  limits:
+    - type: Container
+      default: { cpu: 500m, memory: 512Mi }
+      defaultRequest: { cpu: 50m, memory: 128Mi }

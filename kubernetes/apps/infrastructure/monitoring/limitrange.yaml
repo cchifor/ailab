@@ -1,0 +1,14 @@
+# Default-injection safety net: any container in this namespace that omits requests/limits gets
+# these injected (so nothing runs unbounded next to the host etcd service). default+defaultRequest
+# ONLY — no max/min, so a LimitRange can never REJECT a pod (avoids silently blocking DaemonSet
+# pods); hard caps are left to per-namespace ResourceQuota, deferred as a follow-up.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: monitoring
+spec:
+  limits:
+    - type: Container
+      default: { cpu: 500m, memory: 512Mi }
+      defaultRequest: { cpu: 50m, memory: 128Mi }

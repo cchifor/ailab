@@ -35,9 +35,14 @@ spec:
       serviceMonitor: { https: true, insecureSkipVerify: true }
     alertmanager:
       alertmanagerSpec:
+        priorityClassName: platform-critical
+        resources:
+          requests: { cpu: 25m, memory: 64Mi }
+          limits: { memory: 128Mi }
         storage: {} # ephemeral
     prometheus:
       prometheusSpec:
+        priorityClassName: platform-critical
         retention: 15d
         retentionSize: "8GB" # size cap (whichever hits first); ~80% of the 10Gi PVC
         # Durable, migratable TSDB on QNAP iSCSI block (csi.trident.qnap.io) — survives pod restarts
@@ -69,6 +74,7 @@ spec:
           requests: { cpu: 200m, memory: 1Gi }
           limits: { memory: 2Gi }
     grafana:
+      priorityClassName: platform-critical
       admin:
         existingSecret: grafana-admin
         userKey: admin-user

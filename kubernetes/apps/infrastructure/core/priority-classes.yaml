@@ -1,0 +1,30 @@
+# Platform PriorityClasses — protect the colocated control plane (workloads share the 3 CP nodes
+# with the host-level etcd service). All three sit BELOW the built-in system-cluster-critical
+# (2000000000) and system-node-critical (2000001000), so cluster/node-critical pods always win.
+# platform-normal is the cluster-wide default (only one globalDefault is allowed), so every
+# unlabelled pod gets a sane non-zero priority; the must-survive infra is bumped to platform-critical,
+# and future best-effort/batch work uses platform-low (never preempts).
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-critical
+value: 1000000
+globalDefault: false
+description: "Must-survive platform infra (monitoring, CSI, ingress, log pipeline). Preempts normal/low."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-normal
+value: 100000
+globalDefault: true
+description: "Default for platform workloads. Assigned to any pod that does not set priorityClassName."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-low
+value: 1000
+globalDefault: false
+preemptionPolicy: Never # best-effort/batch: schedules only on spare capacity, never evicts others
+description: "Best-effort / batch work. First to be evicted under pressure; never preempts."

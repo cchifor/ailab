@@ -16,7 +16,11 @@ spec:
   values:
     controller:
       type: daemonset
+      priorityClassName: platform-critical # node log collector — survive pressure
     alloy:
+      resources:
+        requests: { cpu: 50m, memory: 128Mi }
+        limits: { memory: 256Mi }
       # mount /var/log so we can read node pod-log files directly (no API-tailing rate limits)
       mounts:
         varlog: true

@@ -21,6 +21,24 @@ machine:
       docker.io:
         endpoints:
           - https://mirror.gcr.io
+  # Fence host capacity for kubelet + containerd + the Talos etcd HOST service so a workload memory
+  # spike can't starve the colocated control plane. kube/systemReserved reduce schedulable Allocatable
+  # (~31.5 -> ~28 GiB); evictionHard is kubelet-enforced. Kubelet-config change = kubelet restart (not
+  # a reboot); roll one CP at a time with etcd-quorum checks. (WS3, ADR 0009)
+  kubelet:
+    extraConfig:
+      kubeReserved:
+        cpu: 500m
+        memory: 1Gi
+        ephemeral-storage: 1Gi
+      systemReserved:
+        cpu: 500m
+        memory: 1Gi
+        ephemeral-storage: 1Gi
+      evictionHard:
+        memory.available: 5%
+        nodefs.available: 10%
+        imagefs.available: 10%
 cluster:
   allowSchedulingOnControlPlanes: true
   network:
