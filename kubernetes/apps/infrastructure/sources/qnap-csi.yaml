@@ -1,0 +1,12 @@
+# The QNAP-CSI-PlugIn (Trident-based) chart ships only in-repo (no public Helm repo), so it's
+# sourced as a GitRepository + HelmRelease (chart path ./Helm/trident). Driver csi.trident.qnap.io.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: qnap-csi
+  namespace: flux-system
+spec:
+  interval: 24h
+  url: https://github.com/qnap-dev/QNAP-CSI-PlugIn
+  ref:
+    tag: v1.6.0

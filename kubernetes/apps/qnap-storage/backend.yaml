@@ -1,0 +1,20 @@
+# QNAP backend: qnap-nas iSCSI driver talking to the NAS HTTP API at 192.168.1.225 (eth0/Adapter1,
+# the mgmt NIC — reachable from the Talos VMs; the 10.55 TB fabric is not). One virtual pool ->
+# the qnap-iscsi StorageClass selects it via labels. Creds in the SOPS secret backend-qts-secret.
+apiVersion: trident.qnap.io/v1
+kind: TridentBackendConfig
+metadata:
+  name: backend-qts
+  namespace: trident
+spec:
+  version: 1
+  storageDriverName: qnap-nas
+  backendName: qts
+  networkInterfaces: ["Adapter1"] # eth0 / 192.168.1.225 — the iSCSI data portal for the VMs
+  userCHAP: false
+  credentials:
+    name: backend-qts-secret
+  storage:
+    - serviceLevel: pool1
+      labels:
+        performance: performance1

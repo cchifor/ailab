@@ -4,3 +4,4 @@ resources:
   - csi-driver-nfs.yaml
   - prometheus-community.yaml
   - grafana.yaml
+  - qnap-csi.yaml

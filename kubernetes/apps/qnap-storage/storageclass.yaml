@@ -1,0 +1,12 @@
+# Network block storage (RWO, iSCSI) from the QNAP ZFS pool. nfs-csi stays the RWX default;
+# local-path is node-local. Use qnap-iscsi for migratable single-attach block volumes.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: qnap-iscsi
+provisioner: csi.trident.qnap.io
+parameters:
+  selector: "performance=performance1"
+  fsType: "ext4"
+allowVolumeExpansion: true
+reclaimPolicy: Retain

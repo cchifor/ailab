@@ -1,0 +1,31 @@
+# QNAP iSCSI block CSI (Trident operator). Provides network block RWO from the QNAP ZFS pool
+# (zpool1) over iSCSI. The TridentBackendConfig + StorageClass live in the separate `qnap-storage`
+# Flux Kustomization (dependsOn infrastructure) because their CRD is installed by THIS HelmRelease.
+# Talos nodes already have the siderolabs/iscsi-tools extension (iscsid/iscsiadm).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trident
+  labels:
+    # the Trident node DaemonSet needs privileged (iSCSI, host mounts)
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: qnap-trident
+  namespace: trident
+spec:
+  interval: 1h
+  timeout: 10m
+  chart:
+    spec:
+      chart: ./Helm/trident
+      sourceRef:
+        kind: GitRepository
+        name: qnap-csi
+        namespace: flux-system
+  install:
+    createNamespace: false
+  values:
+    forceInstallRancherClusterRoles: false

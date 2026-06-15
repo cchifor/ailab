@@ -4,3 +4,4 @@ resources:
   - csi-driver-nfs.yaml
   - storageclass-nfs.yaml
   - local-path-provisioner.yaml
+  - qnap-csi.yaml
