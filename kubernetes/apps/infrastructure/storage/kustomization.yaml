@@ -5,3 +5,4 @@ resources:
   - storageclass-nfs.yaml
   - local-path-provisioner.yaml
   - qnap-csi.yaml
+  - snapshot-controller # external-snapshotter v8 (CRDs + controller) — enables the VolumeSnapshot API

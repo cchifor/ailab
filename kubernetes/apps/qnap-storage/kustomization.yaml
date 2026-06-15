@@ -7,3 +7,4 @@ resources:
   - backend-secret.sops.yaml
   - backend.yaml
   - storageclass.yaml
+  - volumesnapshotclass.yaml # needs the external-snapshotter CRDs (infrastructure) — already dependsOn it

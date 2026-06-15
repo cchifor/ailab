@@ -1,0 +1,13 @@
+# Point-in-time ZFS snapshots of qnap-iscsi volumes (fast same-NAS "oops" restore). The Trident
+# controller already runs a csi-snapshotter sidecar; this class + the external-snapshotter CRDs
+# (infrastructure/storage/snapshot-controller) are what was missing. deletionPolicy Delete: removing
+# the VolumeSnapshot removes the backing ZFS snapshot on the QNAP. NOT disaster recovery — the
+# snapshot lives on the same NAS; off-NAS Velero->R2 DR is the documented follow-up (ADR 0010).
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: qnap-iscsi
+  labels:
+    velero.io/csi-volumesnapshot-class: "true" # pre-label for the future Velero CSI data-mover
+driver: csi.trident.qnap.io
+deletionPolicy: Delete

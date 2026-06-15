@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Upstream external-snapshotter v8.2.0 (kubernetes-csi/external-snapshotter), vendored verbatim:
+# the VolumeSnapshot* CRDs + the snapshot-controller (registry.k8s.io/sig-storage image — NOT the
+# stale staging image the QNAP plugin ships). Talos ships no snapshot stack; this enables the
+# VolumeSnapshot API cluster-wide so csi.trident.qnap.io (which already has a csi-snapshotter
+# sidecar) can take ZFS snapshots. See docs/decisions/0010-backup-and-dr.md.
+resources:
+  - crd-volumesnapshotclasses.yaml
+  - crd-volumesnapshotcontents.yaml
+  - crd-volumesnapshots.yaml
+  - rbac-snapshot-controller.yaml
+  - setup-snapshot-controller.yaml
