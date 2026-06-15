@@ -70,13 +70,14 @@ variable "image_datastore" {
 variable "control_planes" {
   description = "Talos control-plane VMs (one per Proxmox host)"
   type = map(object({
-    host_node = string # Proxmox node name (pvesh)
-    vm_id     = number
-    ip        = string
-    host_ip   = string # the Proxmox host's vmbr0 IP — next-hop for the TB storage route (WS2)
-    cores     = number
-    memory    = number # MiB
-    disk_gb   = number
+    host_node    = string # Proxmox node name (pvesh)
+    vm_id        = number
+    ip           = string
+    host_ip      = string # the Proxmox host's vmbr0 IP — next-hop for the TB storage route (WS2)
+    storage_tier = string # "thunderbolt" | "ethernet" — node label so fast-storage workloads prefer TB nodes (WS2)
+    cores        = number
+    memory       = number # MiB
+    disk_gb      = number
   }))
   # memory 32768 (32 GiB). The planned 32->24 GiB downsize (to free RAM for the ai-llm GPU
   # LXC) proved unnecessary: with the Vulkan backend the model lives in the iGPU VRAM heap,
@@ -85,9 +86,9 @@ variable "control_planes" {
   # docs/runbooks/ai-host-setup.md. Talos has no memory hotplug; a change reboots the VM
   # (roll one node at a time, 3-CP HA tolerates one down).
   default = {
-    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", host_ip = "192.168.0.2", cores = 8, memory = 32768, disk_gb = 40 }
-    cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", host_ip = "192.168.0.3", cores = 8, memory = 32768, disk_gb = 40 }
-    cp3 = { host_node = "ai-node3", vm_id = 4003, ip = "192.168.0.43", host_ip = "192.168.0.4", cores = 8, memory = 32768, disk_gb = 40 }
+    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", host_ip = "192.168.0.2", storage_tier = "thunderbolt", cores = 8, memory = 32768, disk_gb = 40 }
+    cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", host_ip = "192.168.0.3", storage_tier = "thunderbolt", cores = 8, memory = 32768, disk_gb = 40 }
+    cp3 = { host_node = "ai-node3", vm_id = 4003, ip = "192.168.0.43", host_ip = "192.168.0.4", storage_tier = "ethernet", cores = 8, memory = 32768, disk_gb = 40 }
   }
 }
 

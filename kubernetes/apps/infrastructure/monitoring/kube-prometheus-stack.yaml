@@ -43,6 +43,14 @@ spec:
     prometheus:
       prometheusSpec:
         priorityClassName: platform-critical
+        # Prefer a Thunderbolt-fabric node (cp1/cp2) so the iSCSI TSDB rides ~1.1GB/s, not cp3's 2.5GbE USB.
+        affinity:
+          nodeAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                preference:
+                  matchExpressions:
+                    - { key: ailab.io/storage-tier, operator: In, values: ["thunderbolt"] }
         retention: 15d
         retentionSize: "8GB" # size cap (whichever hits first); ~80% of the 10Gi PVC
         # Durable, migratable TSDB on QNAP iSCSI block (csi.trident.qnap.io) — survives pod restarts

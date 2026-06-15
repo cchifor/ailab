@@ -7,13 +7,13 @@ metadata:
     storageclass.kubernetes.io/is-default-class: "true"
 provisioner: nfs.csi.k8s.io
 parameters:
-  server: 192.168.1.225 # QNAP mgmt IP (Talos VMs reach the QNAP over the mgmt LAN)
+  server: 10.55.0.254 # QNAP storage-fabric IP — reached via the host router+SNAT over Thunderbolt (WS2)
   share: /pve-nfs
   mountPermissions: "0777"
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
 allowVolumeExpansion: true
 mountOptions:
-  - nfsvers=4.0
+  - nfsvers=4.1 # v4.1 (single-port, NAT-friendly) + session trunking pairs better with nconnect
   - hard
   - nconnect=4

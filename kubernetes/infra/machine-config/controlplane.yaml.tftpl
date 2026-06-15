@@ -1,4 +1,9 @@
 machine:
+  # WS2: tag the node's storage fabric so workloads that benefit from fast block I/O (e.g. Prometheus)
+  # prefer the Thunderbolt nodes over the 2.5GbE/USB node via nodeAffinity.
+  nodeLabels:
+    node.kubernetes.io/exclude-from-external-load-balancers: "" # Talos default for control planes — keep it
+    ailab.io/storage-tier: ${storage_tier}
   install:
     disk: /dev/sda
   network:
