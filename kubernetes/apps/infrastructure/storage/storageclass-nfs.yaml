@@ -14,6 +14,6 @@ reclaimPolicy: Delete
 volumeBindingMode: Immediate
 allowVolumeExpansion: true
 mountOptions:
-  - nfsvers=4.1 # v4.1 (single-port, NAT-friendly) + session trunking pairs better with nconnect
+  - nfsvers=4.0 # QuTS hero NFS rejects 4.1 ("Protocol not supported"); 4.0 is single-port + NAT-friendly
   - hard
   - nconnect=4
