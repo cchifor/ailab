@@ -40,18 +40,19 @@ spec:
       prometheusSpec:
         retention: 15d
         retentionSize: "8GB" # size cap (whichever hits first); ~80% of the 10Gi PVC
-        # Durable TSDB on node-local NVMe (local-path SC) — survives pod restarts. NFS is unsafe
-        # for the TSDB (mmap/file-locks); network block (QNAP iSCSI) is the documented alternative.
+        # Durable, migratable TSDB on QNAP iSCSI block (csi.trident.qnap.io) — survives pod restarts
+        # AND node loss (the LUN re-attaches wherever Prometheus reschedules). NFS is unsafe for the
+        # TSDB (mmap/file-locks); local-path was the interim node-local backing before the iSCSI CSI.
         storageSpec:
           volumeClaimTemplate:
             spec:
-              storageClassName: local-path
+              storageClassName: qnap-iscsi
               accessModes: ["ReadWriteOnce"]
               resources:
                 requests:
                   storage: 10Gi
-        # local-path dirs are created root-owned 0755; chown the volume to the non-root
-        # Prometheus uid/gid (1000/2000) so it can write the TSDB. ns is privileged.
+        # Block volumes honour fsGroup (kubelet chowns the ext4 LUN to gid 2000), so this init is
+        # belt-and-suspenders — it also chmods the operator's subPath=prometheus-db data dir.
         initContainers:
           - name: init-chown-data
             image: busybox:1.37
