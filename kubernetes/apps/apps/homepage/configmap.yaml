@@ -40,16 +40,9 @@ data:
               href: https://login.tailscale.com/admin
 
   widgets.yaml: |
-    - kubernetes:
-        cluster:
-          show: true
-          cpu: false      # no metrics-server -> CPU/mem gauges would be blank; show status/count only
-          memory: false
-          label: ailab
-        nodes:
-          show: true
-          cpu: false
-          memory: false
+    # NOTE: the `kubernetes` info widget is intentionally omitted — it always queries metrics-server,
+    # which isn't installed, so it renders a red "API Error". Add it back once metrics-server is
+    # deployed. Live cluster numbers are available via the Prometheus service widget / Grafana.
     - search:
         provider: duckduckgo
         target: _blank
