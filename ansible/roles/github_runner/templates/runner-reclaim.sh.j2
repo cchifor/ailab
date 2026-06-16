@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Between-jobs reclaim — runs BETWEEN ephemeral cycles (no job active), so disposable docker state +
+# logs never fill the disk and no leftover containers hold CPU/RAM while idle. Best-effort: ALWAYS
+# exits 0 (never blocks the runner from starting).
+#
+# MANAGED BY ANSIBLE (role: github_runner). Ported from cchifor/platform:infra/runner/provision.sh.
+set -uo pipefail
+RUNNER_DIR={{ github_runner_dir }}
+if command -v docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1; then
+  ids=$(docker ps -aq 2>/dev/null || true)
+  [ -n "$ids" ] && timeout 120 docker rm -f $ids >/dev/null 2>&1 || true
+  timeout 120 docker image prune -f   >/dev/null 2>&1 || true
+  timeout 120 docker volume prune -f  >/dev/null 2>&1 || true
+  timeout 60  docker network prune -f >/dev/null 2>&1 || true
+  timeout 180 docker builder prune -f --keep-storage 10GB >/dev/null 2>&1 || true
+  use=$(df --output=pcent / 2>/dev/null | tr -dc '0-9'); use=${use:-0}
+  if [ "$use" -ge 80 ]; then
+    timeout 300 docker image prune -af   >/dev/null 2>&1 || true
+    timeout 300 docker builder prune -af >/dev/null 2>&1 || true
+  fi
+fi
+journalctl --vacuum-size=100M >/dev/null 2>&1 || true
+find "$RUNNER_DIR/_diag" -type f -name '*.log' -mtime +1 -delete 2>/dev/null || true
+exit 0

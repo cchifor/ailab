@@ -1,0 +1,27 @@
+---
+# Self-hosted GitHub Actions runner VMs (Ubuntu 24.04). A dedicated playbook (NOT part of site.yml)
+# so a full `just net` never touches these hosts — they're a different host class and must be
+# created first (tofu -chdir=kubernetes/infra/runners apply).
+#   just runners       # provision/refresh the runners
+#   just ping-runners  # connectivity check
+# See docs/runbooks/ci-runners.md + ADR 0013.
+- name: Configure GitHub Actions runner VMs
+  hosts: github_runners
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Load GitHub App private key (SOPS)
+      community.sops.load_vars:
+        file: "{{ playbook_dir }}/secrets/github-runner.sops.yaml"
+      no_log: true
+      tags: [runners]
+      when: github_runner_enabled | default(false)
+  roles:
+    # Fleet observability — the same node_exporter the hypervisors run (the lab scrapes everything).
+    - role: node_exporter
+      tags: [runners, monitoring]
+      when: github_runner_enabled | default(false)
+
+    - role: github_runner
+      tags: [runners]
+      when: github_runner_enabled | default(false)

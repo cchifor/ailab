@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars (gitignored). Reuse the same Proxmox token as ../ (the Talos module).
+pve_endpoint     = "https://192.168.0.2:8006/"
+pve_api_token    = "tofu@pve!tofu=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+pve_insecure     = true
+pve_ssh_username = "root"
+pve_ssh_key_path = "~/.ssh/id_ed25519"
+
+# The control-node SSH public key seeded into the cloud-init `ubuntu` user so Ansible can reach
+# the VMs. Must match the private key in inventory/hosts.yml (ansible_ssh_private_key_file).
+runner_ssh_public_key = "ssh-ed25519 AAAA... user@host"
+
+# Sizing / placement / image all have defaults in variables.tf. Override here if needed, e.g.:
+# runner_memory_mib = 24576
+# runner_rootfs_gb  = 120
+# image_datastore   = "qnap-nfs"

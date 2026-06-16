@@ -1,0 +1,47 @@
+---
+# Self-hosted GitHub Actions runner host config. Replicates the cchifor/platform "self-hosted-hv"
+# ephemeral pool (previously Multipass/Hyper-V Ubuntu VMs) on the codified Proxmox lab. The contract
+# (ephemeral wrapper, systemd unit + drop-ins, job-started hook, between-jobs reclaim, daemon.json)
+# is PORTED from cchifor/platform:infra/runner/ + .github/runner-hooks/ and is asserted nightly by
+# that repo's runner-health.yml canary — keep these in sync with it. The only intentional change vs
+# the live pool is registration auth: a GitHub App (here) instead of a static PAT.
+github_runner_enabled: false # opt-in, like storage_router (flip in group_vars/github_runners.yml)
+
+# ---- pool identity (must match the live self-hosted-hv pool so jobs route to both) ----
+github_runner_repo: cchifor/platform
+github_runner_label: self-hosted-hv
+
+# ---- GitHub App auth ----
+# App ID + installation ID are NOT secret (set in group_vars/github_runners.yml). The App private
+# key IS secret: provided as the var `github_app_private_key`, decrypted from SOPS by site.yml's
+# pre_task (community.sops.load_vars) and written 0400 to the path below. App needs, on cchifor/platform:
+# Administration: read/write (to mint runner registration tokens) + Metadata: read.
+github_runner_app_id: ""
+github_runner_app_installation_id: ""
+github_runner_app_key_dest: /etc/runner/app.pem
+
+# ---- runner agent (auto-updates on connect, so the pin is just the bootstrap version) ----
+github_runner_version: "2.330.0"
+github_runner_arch: x64
+github_runner_user: runner
+github_runner_group: runner
+github_runner_home: /home/runner
+github_runner_dir: /home/runner/actions-runner
+github_runner_service: actions.runner.cchifor-platform.service
+
+# ---- systemd resource caps (MemoryMax MUST stay 10G to satisfy platform's runner-health canary) ----
+github_runner_memory_max: "10G"
+github_runner_memory_high: "9G"
+github_runner_cpu_quota: "760%" # ~8 vCPU, leaving headroom for dockerd + OS
+github_runner_tasks_max: 16384
+
+# ---- toolchain ----
+# Docker Compose pinned to the exact version platform's CI pins (e2e-preflight: "Pin Docker Compose
+# v2.31.0"). Installed as a CLI plugin binary for determinism (independent of the apt repo's churn).
+docker_compose_version: "2.31.0"
+github_runner_install_node: true
+node_major: "20"
+github_runner_install_uv: true
+uv_version: "0.5.11"
+github_runner_install_k6: true
+k6_version: "0.54.0"

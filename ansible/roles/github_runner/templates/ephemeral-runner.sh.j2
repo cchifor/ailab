@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# ephemeral-runner.sh — single-job ephemeral runner cycle (GitHub App auth).
+#
+# MANAGED BY ANSIBLE (role: github_runner). Ported from
+# cchifor/platform:infra/runner/reference/ephemeral-runner.sh; the ONLY change is registration
+# auth — a GitHub App (JWT -> installation token -> registration token) instead of a static PAT.
+# This is the ExecStart of {{ github_runner_service }}: each invocation registers a fresh ephemeral
+# runner named ephem-<host>-<epoch>-<8hex> (matches platform's runner-health canary regex),
+# processes ONE job, then exits (--ephemeral deregisters). systemd Restart=always loops the cycle.
+#
+# Requires: openssl, curl, jq in PATH; the App private key readable at $APP_KEY.
+set -euo pipefail
+
+RUNNER_DIR="${RUNNER_DIR:-{{ github_runner_dir }}}"
+REPO="${REPO:-{{ github_runner_repo }}}"
+LABEL="${LABEL:-{{ github_runner_label }}}"
+APP_ID="${APP_ID:-{{ github_runner_app_id }}}"
+INSTALLATION_ID="${INSTALLATION_ID:-{{ github_runner_app_installation_id }}}"
+APP_KEY="${APP_KEY:-{{ github_runner_app_key_dest }}}"
+
+log() { echo "[ephemeral-runner] $*" >&2; }
+
+[[ -r "$APP_KEY" ]] || { log "ERROR: App key $APP_KEY not readable"; exit 1; }
+
+# --- mint a GitHub App JWT (RS256) with openssl (no python/PyJWT dependency) ---
+b64url() { openssl base64 -e -A | tr '+/' '-_' | tr -d '='; }
+now=$(date +%s)
+header='{"alg":"RS256","typ":"JWT"}'
+payload="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - 60))" "$((now + 540))" "$APP_ID")"
+unsigned="$(printf '%s' "$header" | b64url).$(printf '%s' "$payload" | b64url)"
+signature="$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$APP_KEY" -binary | b64url)"
+jwt="${unsigned}.${signature}"
+
+# --- App JWT -> installation access token -> runner registration token (1h TTL, used immediately) ---
+inst_token="$(curl -fsSL -X POST \
+  -H "Authorization: Bearer ${jwt}" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/app/installations/${INSTALLATION_ID}/access_tokens" | jq -r '.token // empty')"
+[[ -n "$inst_token" ]] || { log "ERROR: failed to obtain installation token"; exit 1; }
+
+reg_token="$(curl -fsSL -X POST \
+  -H "Authorization: token ${inst_token}" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/${REPO}/actions/runners/registration-token" | jq -r '.token // empty')"
+[[ -n "$reg_token" ]] || { log "ERROR: failed to obtain registration token"; exit 1; }
+
+ts="$(date +%s)"
+suffix="$(od -An -N4 -tx4 < /dev/urandom | tr -d ' ')"
+name="ephem-$(hostname)-${ts}-${suffix}"
+
+cd "$RUNNER_DIR"
+./config.sh remove --local 2>/dev/null || true
+
+log "Registering ephemeral runner: ${name}"
+./config.sh \
+  --url "https://github.com/${REPO}" \
+  --token "${reg_token}" \
+  --name "${name}" \
+  --labels "${LABEL}" \
+  --ephemeral \
+  --unattended \
+  --replace
+
+log "Starting run.sh (exits after one job)"
+exec ./run.sh

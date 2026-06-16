@@ -44,3 +44,8 @@
 
     - role: validate_links
       tags: [validate]
+
+# NOTE: the self-hosted GitHub Actions runner VMs are a SEPARATE host class (Ubuntu cloud VMs, not
+# the Proxmox hosts) and are provisioned by their own playbook, ansible/runners.yml (`just runners`).
+# Keeping them out of this site.yml means a full `just net` never tries to connect to runner VMs
+# that may not exist yet.

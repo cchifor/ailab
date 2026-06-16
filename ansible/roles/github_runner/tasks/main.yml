@@ -1,0 +1,295 @@
+---
+# Provision a self-hosted GitHub Actions runner VM (Ubuntu 24.04). Idempotent; safe to re-run.
+# The role is gated as a whole by site.yml (when: github_runner_enabled), so no per-task guards.
+# Day-2 note: a re-run may restart the runner service (handler) and interrupt at most one in-flight
+# job — GitHub re-queues it. Run when the pool is mostly idle for a clean apply.
+
+# ── 0. preflight: App credentials must be present ────────────────────────────
+- name: Assert GitHub App credentials are configured
+  ansible.builtin.assert:
+    that:
+      - github_runner_app_id | string | length > 0
+      - github_runner_app_installation_id | string | length > 0
+      - github_app_private_key is defined
+      - github_app_private_key | length > 0
+    fail_msg: >-
+      Set github_runner_app_id + github_runner_app_installation_id in
+      group_vars/github_runners.yml and provide github_app_private_key via
+      ansible/secrets/github-runner.sops.yaml (loaded by site.yml's pre_task). See
+      docs/runbooks/ci-runners.md.
+  no_log: true
+
+# ── 1. base packages ─────────────────────────────────────────────────────────
+- name: Install base packages (runner deps + JWT/curl toolchain)
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - jq
+      - git
+      - openssl
+      - tar
+      - unzip
+      - acl # lets ansible become an unprivileged user (config dirs owned by runner)
+      - qemu-guest-agent # not in the minimal cloud image; gives PVE graceful shutdown + guest info
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable + start qemu-guest-agent
+  ansible.builtin.systemd:
+    name: qemu-guest-agent
+    enabled: true
+    state: started
+
+- name: Ensure apt keyrings dir
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+# ── 2. Docker engine + Buildx (official Docker apt repo) ─────────────────────
+- name: Add Docker apt signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Add Docker apt repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [stable]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/docker.asc
+    enabled: true
+
+- name: Install Docker engine + CLI + Buildx
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+    state: present
+    update_cache: true
+
+- name: Ensure Docker CLI-plugins dir (for the pinned compose binary)
+  ansible.builtin.file:
+    path: /usr/local/lib/docker/cli-plugins
+    state: directory
+    mode: "0755"
+
+# Pin Compose to the exact version platform's CI pins (e2e-preflight). A plugin binary is
+# deterministic and independent of the Docker apt repo's compose-plugin version churn.
+- name: Install pinned Docker Compose v{{ docker_compose_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/docker/compose/releases/download/v{{ docker_compose_version }}/docker-compose-linux-x86_64"
+    dest: /usr/local/lib/docker/cli-plugins/docker-compose
+    mode: "0755"
+
+- name: Lay down /etc/docker/daemon.json (log rotation + build-cache GC)
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+  notify: Restart docker
+
+- name: Enable + start docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+# ── 3. workload toolchain: Node, uv, k6 (Playwright runs in-container, not on the host) ──
+- name: Add NodeSource apt signing key
+  ansible.builtin.get_url:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /etc/apt/keyrings/nodesource.asc
+    mode: "0644"
+  when: github_runner_install_node | bool
+
+- name: Add NodeSource apt repository (Node {{ node_major }}.x)
+  ansible.builtin.deb822_repository:
+    name: nodesource
+    types: [deb]
+    uris: "https://deb.nodesource.com/node_{{ node_major }}.x"
+    suites: [nodistro]
+    components: [main]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/nodesource.asc
+    enabled: true
+  when: github_runner_install_node | bool
+
+- name: Install Node.js {{ node_major }}.x
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true
+  when: github_runner_install_node | bool
+
+- name: Install uv {{ uv_version }} (Python tool runner)
+  ansible.builtin.unarchive:
+    src: "https://github.com/astral-sh/uv/releases/download/{{ uv_version }}/uv-x86_64-unknown-linux-gnu.tar.gz"
+    dest: /usr/local/bin
+    remote_src: true
+    extra_opts: ["--strip-components=1"] # binaries keep their +x bits from the archive
+    creates: /usr/local/bin/uv
+  when: github_runner_install_uv | bool
+
+- name: Install k6 {{ k6_version }} (load testing)
+  ansible.builtin.unarchive:
+    src: "https://github.com/grafana/k6/releases/download/v{{ k6_version }}/k6-v{{ k6_version }}-linux-amd64.tar.gz"
+    dest: /usr/local/bin
+    remote_src: true
+    extra_opts: ["--strip-components=1", "--wildcards", "*/k6"]
+    creates: /usr/local/bin/k6
+  when: github_runner_install_k6 | bool
+
+# ── 4. runner user (in the docker group, so jobs can use the Docker socket) ──
+- name: Create runner group
+  ansible.builtin.group:
+    name: "{{ github_runner_group }}"
+    system: true
+
+- name: Create runner user
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    groups: [docker]
+    append: true
+    home: "{{ github_runner_home }}"
+    shell: /bin/bash
+    system: true
+
+# ── 5. runner agent (pinned bootstrap; auto-updates on connect) ──────────────
+- name: Ensure runner dir
+  ansible.builtin.file:
+    path: "{{ github_runner_dir }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    mode: "0755"
+
+- name: Download runner agent {{ github_runner_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-{{ github_runner_arch }}-{{ github_runner_version }}.tar.gz"
+    dest: "/tmp/actions-runner-{{ github_runner_version }}.tar.gz"
+    mode: "0644"
+
+- name: Unpack runner agent (re-extracts on a version bump)
+  ansible.builtin.unarchive:
+    src: "/tmp/actions-runner-{{ github_runner_version }}.tar.gz"
+    dest: "{{ github_runner_dir }}"
+    remote_src: true
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    creates: "{{ github_runner_dir }}/.runner-version-{{ github_runner_version }}"
+
+- name: Mark installed runner version
+  ansible.builtin.copy:
+    content: "{{ github_runner_version }}\n"
+    dest: "{{ github_runner_dir }}/.runner-version-{{ github_runner_version }}"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    mode: "0644"
+    force: false
+
+- name: Install runner agent OS dependencies
+  ansible.builtin.command: ./bin/installdependencies.sh
+  args:
+    chdir: "{{ github_runner_dir }}"
+    creates: "{{ github_runner_dir }}/.deps-installed"
+
+- name: Mark runner deps installed
+  ansible.builtin.copy:
+    content: "ok\n"
+    dest: "{{ github_runner_dir }}/.deps-installed"
+    mode: "0644"
+    force: false
+
+# ── 6. the ported contract: ephemeral wrapper, hook, reclaim, systemd unit + drop-ins ──
+- name: Ensure /etc/runner dir (holds the GitHub App key)
+  ansible.builtin.file:
+    path: /etc/runner
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    mode: "0700"
+
+- name: Install GitHub App private key
+  ansible.builtin.copy:
+    content: "{{ github_app_private_key }}"
+    dest: "{{ github_runner_app_key_dest }}"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    mode: "0400"
+  no_log: true
+
+- name: Install ephemeral-runner.sh (GitHub App auth → one ephemeral cycle)
+  ansible.builtin.template:
+    src: ephemeral-runner.sh.j2
+    dest: "{{ github_runner_home }}/ephemeral-runner.sh"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    mode: "0755"
+  notify: Restart github-runner
+
+- name: Ensure runner hooks dir
+  ansible.builtin.file:
+    path: "{{ github_runner_dir }}/hooks"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    mode: "0755"
+
+- name: Install job-started hook (pre-checkout workspace reclaim)
+  ansible.builtin.template:
+    src: job-started.sh.j2
+    dest: "{{ github_runner_dir }}/hooks/job-started.sh"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    mode: "0755"
+
+- name: Install between-jobs reclaim script
+  ansible.builtin.template:
+    src: runner-reclaim.sh.j2
+    dest: /usr/local/bin/runner-reclaim.sh
+    mode: "0755"
+
+- name: Install the runner systemd unit
+  ansible.builtin.template:
+    src: actions.runner.cchifor-platform.service.j2
+    dest: "/etc/systemd/system/{{ github_runner_service }}"
+    mode: "0644"
+  notify: Restart github-runner
+
+- name: Ensure systemd drop-in dir
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ github_runner_service }}.d"
+    state: directory
+    mode: "0755"
+
+- name: Install job-started-hook drop-in (env in systemd, NOT runner .env — config.sh rewrites .env)
+  ansible.builtin.template:
+    src: 10-job-started-hook.conf.j2
+    dest: "/etc/systemd/system/{{ github_runner_service }}.d/10-job-started-hook.conf"
+    mode: "0644"
+  notify: Restart github-runner
+
+- name: Install reclaim drop-in (ExecStartPre between ephemeral cycles)
+  ansible.builtin.template:
+    src: 20-reclaim.conf.j2
+    dest: "/etc/systemd/system/{{ github_runner_service }}.d/20-reclaim.conf"
+    mode: "0644"
+  notify: Restart github-runner
+
+# ── 7. enable + start ────────────────────────────────────────────────────────
+- name: Enable + start the runner service
+  ansible.builtin.systemd:
+    name: "{{ github_runner_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# job-started hook — reclaim root/foreign-owned workspace leftovers BEFORE actions/checkout, so a
+# reused ephemeral runner doesn't fail the next job at checkout with `EACCES: rmdir
+# '.hatchet-config/certs'`. The Hatchet bootstrap container writes .hatchet-config as uid 0, and
+# coverage/playwright runs write dirs as uid 10001 — neither removable by the non-root runner's
+# `git clean`. Best-effort: never fails the job (always exit 0).
+#
+# MANAGED BY ANSIBLE (role: github_runner). Kept in sync with
+# cchifor/platform:.github/runner-hooks/job-started.sh — if a new service writes root/foreign-owned
+# files into the workspace, add its path to DIRS in BOTH places.
+set -uo pipefail
+
+# Need docker to delete files owned by root (the runner user can't).
+command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || exit 0
+
+DIRS='.hatchet-config coverage-data tests/e2e/test-results tests/e2e/blob-report tests/e2e/playwright-report'
+
+reclaim() {
+  base="$1"; [ -n "$base" ] && [ -d "$base" ] || return 0
+  args=""
+  for d in $DIRS; do args="$args /w/$d /w/*/$d"; done
+  docker run --rm -v "$base:/w" busybox sh -c "rm -rf $args" >/dev/null 2>&1 || true
+}
+reclaim "${GITHUB_WORKSPACE:-}"
+reclaim "${RUNNER_WORKSPACE:-}"
+
+exit 0
