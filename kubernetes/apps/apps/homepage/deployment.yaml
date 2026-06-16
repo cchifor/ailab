@@ -1,6 +1,8 @@
 # Homepage (gethomepage.dev) — the lab's app dashboard at home.chifor.me (behind Cloudflare Access).
-# Config is the homepage-config ConfigMap (read-only); /app/config/logs is a writable overlay.
-# HOMEPAGE_ALLOWED_HOSTS is REQUIRED behind the tunnel (Host-header validation -> else 400).
+# Config-as-code lives in the homepage-config ConfigMap. Homepage v1.x COPIES skeleton files
+# (proxmox.yaml, custom.css/js, ...) into /app/config on render and crashes on EROFS if that dir is a
+# read-only ConfigMap mount — so /app/config is a writable emptyDir seeded from the ConfigMap by an
+# initContainer. HOMEPAGE_ALLOWED_HOSTS is REQUIRED behind the tunnel (Host-header validation -> 400).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,7 +25,27 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
         seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # Seed the writable /app/config from the ConfigMap so Homepage can also write its own skeletons.
+        - name: copy-config
+          image: mirror.gcr.io/library/busybox:1.37
+          command:
+            - sh
+            - -c
+            - >-
+              cp -L /config-src/settings.yaml /config-src/services.yaml /config-src/widgets.yaml
+              /config-src/bookmarks.yaml /config-src/kubernetes.yaml /config-src/docker.yaml
+              /config-src/custom.css /config-src/custom.js /app/config/ && mkdir -p /app/config/logs &&
+              ls -la /app/config
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /app/config }
+            - { name: config-src, mountPath: /config-src, readOnly: true }
       containers:
         - name: homepage
           image: ghcr.io/gethomepage/homepage:v1.13.2
@@ -32,8 +54,6 @@ spec:
             - { name: PORT, value: "3000" }
           ports:
             - { name: http, containerPort: 3000 }
-          # Homepage validates the Host header against HOMEPAGE_ALLOWED_HOSTS; kubelet probes default to
-          # the pod IP, so force an allowed Host or the probe 400s and the pod never goes Ready.
           readinessProbe:
             httpGet:
               path: /api/healthcheck
@@ -46,8 +66,9 @@ spec:
               path: /api/healthcheck
               port: http
               httpHeaders: [{ name: Host, value: home.chifor.me }]
-            initialDelaySeconds: 15
+            initialDelaySeconds: 20
             periodSeconds: 30
+            failureThreshold: 5
           resources:
             requests: { cpu: 50m, memory: 64Mi }
             limits: { memory: 256Mi }
@@ -56,14 +77,13 @@ spec:
             readOnlyRootFilesystem: false # Next.js writes a runtime cache; non-root + caps-dropped is enough
             capabilities: { drop: ["ALL"] }
           volumeMounts:
-            - { name: config, mountPath: /app/config, readOnly: true }
-            - { name: logs, mountPath: /app/config/logs }
+            - { name: config, mountPath: /app/config } # writable emptyDir (seeded by initContainer)
             - { name: tmp, mountPath: /tmp }
       volumes:
         - name: config
-          configMap: { name: homepage-config }
-        - name: logs
           emptyDir: {}
+        - name: config-src
+          configMap: { name: homepage-config }
         - name: tmp
           emptyDir: {}
 ---
