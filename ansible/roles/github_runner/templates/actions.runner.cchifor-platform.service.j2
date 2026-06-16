@@ -1,0 +1,33 @@
+# MANAGED BY ANSIBLE (role: github_runner). Ported from
+# cchifor/platform:infra/runner/reference/actions.runner.cchifor-platform.service.
+# The hook env + the between-jobs reclaim are layered via drop-ins (10-/20-) under
+# /etc/systemd/system/{{ github_runner_service }}.d/ — keep this base unit untouched.
+[Unit]
+Description=GitHub Actions Runner (Proxmox ephemeral)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ github_runner_user }}
+WorkingDirectory={{ github_runner_dir }}
+ExecStart={{ github_runner_home }}/ephemeral-runner.sh
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+
+# Resource caps. MemoryMax MUST stay 10G to satisfy platform's runner-health canary
+# (it asserts cgroup memory.max == 10737418240). CPUQuota sized for the VM's vCPU count,
+# leaving headroom for the docker daemon + OS.
+CPUQuota={{ github_runner_cpu_quota }}
+CPUWeight=80
+IOWeight=80
+MemoryMax={{ github_runner_memory_max }}
+MemoryHigh={{ github_runner_memory_high }}
+TasksMax={{ github_runner_tasks_max }}
+
+[Install]
+WantedBy=multi-user.target

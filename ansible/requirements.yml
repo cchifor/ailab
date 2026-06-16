@@ -4,3 +4,5 @@ collections:
     version: ">=10.0.0"
   - name: ansible.posix        # mount, sysctl, firewalld
     version: ">=1.5.0"
+  - name: community.sops       # load_vars for the SOPS-encrypted GitHub App key (github_runner role)
+    version: ">=1.6.0"

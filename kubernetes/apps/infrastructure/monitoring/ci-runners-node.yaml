@@ -1,0 +1,50 @@
+# Host-level node_exporter on the 3 GitHub Actions runner VMs (.47/.48/.49:9100, installed via the
+# github_runner ansible role, which reuses the node_exporter role). Gives true CPU/mem/disk/network
+# for the runner pool so heavy CI load (compose e2e + buildx) is visible on the dashboards alongside
+# the hypervisors. relabel forces job="ci-runner-node" so dashboard queries stay clean.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ci-runner-node
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: ci-runner-node
+spec:
+  clusterIP: None
+  ports:
+    - { name: metrics, port: 9100, targetPort: 9100, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: ci-runner-node
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: ci-runner-node
+subsets:
+  - addresses:
+      - { ip: 192.168.0.47 }
+      - { ip: 192.168.0.48 }
+      - { ip: 192.168.0.49 }
+    ports:
+      - { name: metrics, port: 9100, protocol: TCP }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ci-runner-node
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [monitoring]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ci-runner-node
+  endpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: ci-runner-node

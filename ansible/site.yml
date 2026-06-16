@@ -44,3 +44,30 @@
 
     - role: validate_links
       tags: [validate]
+
+# Self-hosted GitHub Actions runner VMs (Ubuntu). Provisioned by tofu (kubernetes/infra/runners);
+# this play installs the runner agent + Docker toolchain + the ported ephemeral contract.
+# Run it scoped to the runner hosts so a full untagged `just net` isn't required:
+#   just runners       # provision/refresh the runners (--limit github_runners --tags runners)
+#   just ping-runners  # connectivity check
+# These hosts must exist first (run `tofu -chdir=kubernetes/infra/runners apply`).
+- name: Configure GitHub Actions runner VMs
+  hosts: github_runners
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Load GitHub App private key (SOPS)
+      community.sops.load_vars:
+        file: "{{ playbook_dir }}/secrets/github-runner.sops.yaml"
+      no_log: true
+      tags: [runners]
+      when: github_runner_enabled | default(false)
+  roles:
+    # Fleet observability — the same node_exporter the hypervisors run (the lab scrapes everything).
+    - role: node_exporter
+      tags: [runners, monitoring]
+      when: github_runner_enabled | default(false)
+
+    - role: github_runner
+      tags: [runners]
+      when: github_runner_enabled | default(false)

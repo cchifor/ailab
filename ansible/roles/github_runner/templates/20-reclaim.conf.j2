@@ -1,0 +1,7 @@
+# MANAGED BY ANSIBLE (role: github_runner). Runs the between-jobs reclaim each ephemeral cycle
+# (no job active), so disposable docker state + logs never fill the disk.
+[Service]
+ExecStartPre=+/usr/local/bin/runner-reclaim.sh
+# A heavy reclaim (full image prune when disk was >=80%) can take a while; don't let it trip the
+# default 90s start timeout and crash-loop the runner.
+TimeoutStartSec=1800

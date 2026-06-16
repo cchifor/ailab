@@ -1,0 +1,5 @@
+# MANAGED BY ANSIBLE (role: github_runner). The hook env lives in this systemd drop-in, NOT the
+# runner .env — the ephemeral wrapper runs `config.sh --ephemeral` every cycle, which rewrites .env
+# but never touches systemd. The hook reclaims root/foreign-owned _work leftovers before checkout.
+[Service]
+Environment="ACTIONS_RUNNER_HOOK_JOB_STARTED={{ github_runner_dir }}/hooks/job-started.sh"

@@ -1,0 +1,11 @@
+---
+# Self-hosted GitHub Actions runner pool (cchifor/platform, label self-hosted-hv).
+# The runner role is opt-in; this enables it for the github_runners group. App ID + installation ID
+# are NOT secret (they identify, they don't authorize). The App PRIVATE KEY is the secret — it lives
+# in ansible/secrets/github-runner.sops.yaml (SOPS) and is loaded by site.yml's pre_task.
+# Setup: see docs/runbooks/ci-runners.md.
+github_runner_enabled: true
+
+# From the GitHub App page (Settings -> Developer settings -> GitHub Apps -> your app):
+github_runner_app_id: "CHANGE_ME" # "App ID"
+github_runner_app_installation_id: "CHANGE_ME" # the App's installation on cchifor/platform
