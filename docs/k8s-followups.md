@@ -85,11 +85,23 @@ readOnlyRootFilesystem/command). Lab user login: chifor / <generated, in the aut
 Metrics API live (`kubectl top` / HPA / Homepage k8s widget). Helm chart 3.12.2 in `kube-system` with
 `--kubelet-insecure-tls` (Talos kubelets serve self-signed certs). Wired under `infrastructure/monitoring`.
 
-## 11. Gatus uptime + status page — ✅ DONE (2026-06-16), ⏸️ status.chifor.me CNAME pending
+## 11. Gatus uptime + status page — ✅ DONE (2026-06-16)
 Config-as-code uptime checks (ns `gatus`, memory storage, 11 endpoints across AI/Observability/Infra +
 the QNAP storage-fabric TCP ports) — chosen over Uptime Kuma (UI/DB config) for GitOps fit. Surfaced on the
-Homepage via the `gatus` widget. Tunnel route for `status.chifor.me` is in git, but **the public DNS CNAME
-must be created** (user/token): `cloudflared tunnel route dns ailab status.chifor.me`. Until then it 530s.
+Homepage via the `gatus` widget. `status.chifor.me` CNAME now exists and resolves (HTTP 200), adopted into
+the cloudflare tofu module (#13). It is currently **public** (no Access app — typical for a status page).
+
+## 13. Cloudflare edge as IaC — ✅ DNS done (2026-06-16), Access opt-in
+New OpenTofu module `kubernetes/infra/cloudflare/` (`cloudflare/cloudflare` v5.20, local state) manages the
+edge. **DNS:** the six proxied tunnel CNAMEs (home/sso/status/chat/grafana/api) were **adopted via import**
+(`imports.tf`; `terraform apply` = 6 to import, 0 changes — no live DNS touched). **Access:** apps/policies/
+service-tokens scaffolded in `access.tf.example` (opt-in; per the per-host policy only `status` [Allow] and
+`api` [service token] are sensible, `sso` must never be gated, `home/chat/grafana` stay with Authelia). The
+tunnel **ingress** stays locally-managed in `cloudflared.yaml` — deliberately NOT owned by tofu (a tunnel is
+locally- OR remotely-managed, not both). Token (DNS + Access scopes, no Tunnel) via `CLOUDFLARE_API_TOKEN`
+env; tfvars/state gitignored. Closes the ADR 0012 "codify Access/DNS in IaC" follow-up for DNS. Gotcha: the
+DNS-records permission is **Zone-scoped** (`Zone → DNS → Edit`); under Account scope you only see DNS
+Settings/Firewall/Views, which don't manage records.
 
 ## 12. Homepage behind Authelia SSO (oauth2-proxy) — ✅ DONE + e2e verified (2026-06-16)
 `home.chifor.me` now routes cloudflared -> **oauth2-proxy** (homepage ns, OIDC client `homepage` of Authelia,
