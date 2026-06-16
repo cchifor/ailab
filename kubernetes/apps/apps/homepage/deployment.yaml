@@ -32,12 +32,20 @@ spec:
             - { name: PORT, value: "3000" }
           ports:
             - { name: http, containerPort: 3000 }
+          # Homepage validates the Host header against HOMEPAGE_ALLOWED_HOSTS; kubelet probes default to
+          # the pod IP, so force an allowed Host or the probe 400s and the pod never goes Ready.
           readinessProbe:
-            httpGet: { path: /api/healthcheck, port: http }
+            httpGet:
+              path: /api/healthcheck
+              port: http
+              httpHeaders: [{ name: Host, value: home.chifor.me }]
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /api/healthcheck, port: http }
+            httpGet:
+              path: /api/healthcheck
+              port: http
+              httpHeaders: [{ name: Host, value: home.chifor.me }]
             initialDelaySeconds: 15
             periodSeconds: 30
           resources:
