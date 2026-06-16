@@ -7,7 +7,7 @@ Fully **Infrastructure-as-Code, rebuildable-from-scratch** home lab for AI workl
 
 Everything that *can* be code is code: **OpenTofu** (`bpg/proxmox`) for the Proxmox API surface and **Ansible** (run from WSL2 Ubuntu) for host-level configuration. The few QNAP storage steps that have no usable API are captured as precise runbooks under `docs/runbooks/`.
 
-> Status: **all phases live** — storage + network foundation, Talos/Cilium/Flux Kubernetes, NFS CSI, observability, the AI LLM appliance (5 models + router + UI), and public/private internet exposure. See the status table below, `docs/`, and the ADRs.
+> Status: **all phases live** — storage + network foundation, Talos/Cilium/Flux Kubernetes, NFS CSI, observability, the AI LLM appliance (5 models + router + UI), public/private internet exposure, and self-hosted CI runners (`cchifor/platform`). See the status table below, `docs/`, and the ADRs.
 
 ## Topology (summary)
 
@@ -77,6 +77,7 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 | K8s observability | ✅ metrics (Prometheus/Grafana) + logs (Loki+Alloy). Single **"AI Lab Fleet"** default dashboard — Hypervisors (host `node_exporter` on the 3 Proxmox hosts, ansible role `node_exporter`), Instances (VMs/CTs via `prometheus-pve-exporter`), AI (iGPU + llama.cpp), Storage (pools + PVCs + disk I/O + QNAP fabric). (`docs/k8s-followups.md` #14) |
 | K8s: AI LLM appliance | ✅ done — 3× privileged GPU LXC, llama.cpp Vulkan; **5 models** (Qwen3-30B-A3B, Qwen3-Coder-30B-A3B, gpt-oss-120B, Qwen3.5-122B, Qwen3-VL-8B vision) behind **LiteLLM** + **Open WebUI**; GPU+inference metrics (`docs/runbooks/ai-host-setup.md`, ADR 0008) |
 | K8s: ingress + internet exposure | ✅ done — **Cloudflare Tunnel** (chat.chifor.me + Access) + **Tailscale** subnet-router mesh (192.168.0.0/24 + 10.55.0.0/24); `docs/runbooks/internet-exposure.md` |
+| CI: self-hosted runners | ✅ done — 3 ephemeral runner VMs (`gha-runner-1/2/3`, .47/.48/.49, vmid 4101-3) for `cchifor/platform` CI (Docker + Compose 2.31 + Buildx + Playwright + uv + k6); OpenTofu (`kubernetes/infra/runners/`) + ansible role `github_runner`; **GitHub App** auth, joined the `self-hosted-hv` pool, memory ballooning 1→24 GiB; runner-health canary passing on the Proxmox runners. (ADR 0013, `docs/runbooks/ci-runners.md`) |
 
 **Proven live (2026-06-14):** Linux↔QNAP Thunderbolt T2E works; both TB ports + 10GbE up;
 all nodes reach the NFS service IP `10.55.0.254`; OpenTofu-managed `qnap-nfs` mounted cluster-wide.

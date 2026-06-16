@@ -1,7 +1,10 @@
 # ADR 0013 — Self-hosted CI runners on the Proxmox lab (VMs)
 
-**Status:** ACCEPTED (2026-06-16) — codified; not yet applied (the user creates the GitHub App, then
-`tofu apply` + `just runners`).
+**Status:** ACCEPTED + DEPLOYED (2026-06-16). GitHub App `ailab-ci-runners` created; 3 VMs applied
+(`tofu`), runners registered to the `self-hosted-hv` pool, runner-health canary passing on the
+Proxmox runners (the legacy 7G Hyper-V runners fail it). Memory ballooning 1→24 GiB. WSL was down, so
+the runner host config was driven over SSH (mirrors the role); `just runners` from WSL converges.
+**Remaining:** decommission the 4 Hyper-V runners; optionally narrow the App install to platform-only.
 **Relates to:** ADR 0001 (OpenTofu + Ansible), ADR 0006 (Talos/Flux/Cilium), ADR 0008 (AI appliance =
 LXC *outside* Talos), ADR 0009 (control-plane colocation / tight RAM budget).
 
