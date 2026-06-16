@@ -5,6 +5,7 @@ resources:
   - limitrange.yaml
   - grafana-admin.sops.yaml
   - grafana-oauth.sops.yaml # Authelia OIDC client secret (env into Grafana)
+  - metrics-server.yaml # Metrics API (kubectl top / HPA / Homepage k8s widget)
   - kube-prometheus-stack.yaml
   - loki.yaml
   - alloy.yaml
