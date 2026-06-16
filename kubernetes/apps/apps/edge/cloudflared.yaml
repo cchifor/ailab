@@ -16,6 +16,8 @@ data:
     metrics: 0.0.0.0:2000
     no-autoupdate: true
     ingress:
+      - hostname: home.chifor.me
+        service: http://homepage.homepage.svc.cluster.local:8080
       - hostname: sso.chifor.me
         service: http://authelia.auth.svc.cluster.local:9091
       - hostname: chat.chifor.me

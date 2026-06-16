@@ -1,0 +1,73 @@
+# Homepage (gethomepage.dev) — the lab's app dashboard at home.chifor.me (behind Cloudflare Access).
+# Config is the homepage-config ConfigMap (read-only); /app/config/logs is a writable overlay.
+# HOMEPAGE_ALLOWED_HOSTS is REQUIRED behind the tunnel (Host-header validation -> else 400).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homepage
+  namespace: homepage
+  labels:
+    app.kubernetes.io/name: homepage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: homepage
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: homepage
+    spec:
+      serviceAccountName: homepage # read-only, for the kubernetes widget
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: homepage
+          image: ghcr.io/gethomepage/homepage:v1.13.2
+          env:
+            - { name: HOMEPAGE_ALLOWED_HOSTS, value: "home.chifor.me" }
+            - { name: PORT, value: "3000" }
+          ports:
+            - { name: http, containerPort: 3000 }
+          readinessProbe:
+            httpGet: { path: /api/healthcheck, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/healthcheck, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false # Next.js writes a runtime cache; non-root + caps-dropped is enough
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /app/config, readOnly: true }
+            - { name: logs, mountPath: /app/config/logs }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap: { name: homepage-config }
+        - name: logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: homepage
+  namespace: homepage
+  labels:
+    app.kubernetes.io/name: homepage
+spec:
+  selector:
+    app.kubernetes.io/name: homepage
+  ports:
+    - { name: http, port: 8080, targetPort: http }

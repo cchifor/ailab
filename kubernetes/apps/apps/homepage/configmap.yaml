@@ -1,0 +1,102 @@
+# Homepage dashboard-as-code (gethomepage.dev). Edit + flux reconcile + `kubectl rollout restart`
+# to update (Homepage reads config at boot). siteMonitor URLs are polled from the homepage pod for
+# the status dots — kept to in-cluster health endpoints so they're reliable.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: homepage-config
+  namespace: homepage
+data:
+  settings.yaml: |
+    title: ailab
+    theme: dark
+    color: slate
+    headerStyle: clean
+    layout:
+      AI: { style: row, columns: 3 }
+      Observability: { style: row, columns: 3 }
+      Infrastructure: { style: row, columns: 4 }
+
+  kubernetes.yaml: |
+    mode: cluster
+
+  docker.yaml: ""
+
+  bookmarks.yaml: |
+    - Lab:
+        - Repo:
+            - abbr: GH
+              href: https://github.com/cchifor/ailab
+        - Cloudflare:
+            - abbr: CF
+              href: https://one.dash.cloudflare.com
+        - Tailscale:
+            - abbr: TS
+              href: https://login.tailscale.com/admin
+
+  widgets.yaml: |
+    - kubernetes:
+        cluster:
+          show: true
+          cpu: false      # no metrics-server -> CPU/mem gauges would be blank; show status/count only
+          memory: false
+          label: ailab
+        nodes:
+          show: true
+          cpu: false
+          memory: false
+    - search:
+        provider: duckduckgo
+        target: _blank
+    - datetime:
+        format: { timeStyle: short, dateStyle: short }
+
+  services.yaml: |
+    - AI:
+        - Open WebUI:
+            href: https://chat.chifor.me
+            description: Chat UI (LLMs)
+            icon: open-webui.png
+            siteMonitor: http://open-webui.ai.svc.cluster.local:80
+        - LiteLLM:
+            href: https://api.chifor.me
+            description: OpenAI-compatible router
+            icon: litellm.png
+            siteMonitor: http://litellm.ai.svc.cluster.local:4000/health/liveliness
+    - Observability:
+        - Grafana:
+            href: https://grafana.chifor.me
+            description: Dashboards
+            icon: grafana.png
+            siteMonitor: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80/api/health
+        - Prometheus:
+            href: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+            description: Metrics
+            icon: prometheus.png
+            siteMonitor: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/-/healthy
+            widget:
+              type: prometheus
+              url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        - Alertmanager:
+            href: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093
+            description: Alerts
+            icon: prometheus.png
+            siteMonitor: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093/-/healthy
+    - Infrastructure:
+        - SSO (Authelia):
+            href: https://sso.chifor.me
+            description: Login
+            icon: authelia.png
+            siteMonitor: http://authelia.auth.svc.cluster.local:9091/api/health
+        - Proxmox:
+            href: https://192.168.0.2:8006
+            description: ai-node1/2/3
+            icon: proxmox.png
+        - QNAP:
+            href: https://192.168.1.225
+            description: ai-storage (ZFS)
+            icon: qnap.png
+        - Tailscale:
+            href: https://login.tailscale.com/admin
+            description: Private mesh
+            icon: tailscale.png
