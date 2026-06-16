@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# Cloudflare Access scaffolding — NOT loaded (.tf.example). Rename to access.tf to activate, then add
+# the matching variables (allow_email) and `tofu apply`. The provided token already has the Access
+# scopes. Per the lab's per-host policy, MOST hosts should NOT get an interactive Access app:
+#
+#   home.chifor.me     -> already SSO-gated by oauth2-proxy/Authelia; no app (would be a double login)
+#   sso.chifor.me      -> the Authelia IdP itself; MUST NOT get an app (deadlocks every OIDC flow)
+#   chat / grafana     -> Authelia OIDC clients already; leave to Authelia (Bypass if an app must exist)
+#   api.chifor.me      -> machine API; ONLY a Service Token / non_identity policy, never interactive
+#   status.chifor.me   -> the one host worth an interactive Allow app, IF you want it private
+#
+# So the only sensible interactive app is `status` (below), and the only sensible API gate is the
+# api service token (below). Everything else stays with Authelia.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+# variable "allow_email" {
+#   description = "Cloudflare Access allow-list email for interactively-gated hosts."
+#   type        = string
+# }
+
+# --- Optional: gate status.chifor.me with an interactive Allow policy (your email) ---
+# resource "cloudflare_zero_trust_access_policy" "allow_me" {
+#   account_id = var.cloudflare_account_id
+#   name       = "Allow my email"
+#   decision   = "allow"
+#   include    = [{ email = { email = var.allow_email } }]
+# }
+#
+# resource "cloudflare_zero_trust_access_application" "status" {
+#   account_id       = var.cloudflare_account_id
+#   name             = "Status (private)"
+#   type             = "self_hosted"
+#   domain           = "status.chifor.me"
+#   session_duration = "24h"
+#   policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
+# }
+
+# --- Optional: protect api.chifor.me with a Service Token (NON-interactive) ---
+# resource "cloudflare_zero_trust_access_service_token" "api" {
+#   account_id = var.cloudflare_account_id
+#   name       = "api-chifor-me"
+#   # client_id / client_secret are sensitive outputs shown once — store where the API client runs.
+# }
+#
+# resource "cloudflare_zero_trust_access_policy" "api_svc" {
+#   account_id = var.cloudflare_account_id
+#   name       = "Allow api service token"
+#   decision   = "non_identity"
+#   include    = [{ service_token = { token_id = cloudflare_zero_trust_access_service_token.api.id } }]
+# }
+#
+# resource "cloudflare_zero_trust_access_application" "api" {
+#   account_id       = var.cloudflare_account_id
+#   name             = "api.chifor.me"
+#   type             = "self_hosted"
+#   domain           = "api.chifor.me"
+#   session_duration = "24h"
+#   policies         = [{ id = cloudflare_zero_trust_access_policy.api_svc.id, precedence = 1 }]
+# }

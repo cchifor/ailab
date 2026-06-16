@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored by the repo's *.tfvars rule) and fill in.
+# The API TOKEN is NOT set here — export it instead so it never touches a file:
+#   export CLOUDFLARE_API_TOKEN="<scoped DNS+Access token>"
+# (the provider reads that env var automatically).
+
+cloudflare_account_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+zone_id               = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # chifor.me
+# tunnel_id defaults to f93d9a6a-5172-43d3-8bef-13460ea7607b (locally-managed; not created here)
