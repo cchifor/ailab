@@ -132,6 +132,10 @@ spec:
       grafana.ini:
         server:
           root_url: https://grafana.chifor.me
+        dashboards:
+          # "AI Lab Fleet" as the default home dashboard. The sidecar writes the reporting-dashboard
+          # ConfigMap's data key to /tmp/dashboards/reporting.json.
+          default_home_dashboard_path: /tmp/dashboards/reporting.json
         auth.generic_oauth:
           enabled: true
           name: Authelia

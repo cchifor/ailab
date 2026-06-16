@@ -1,0 +1,51 @@
+# Host-level node_exporter on the 3 bare-metal Proxmox hypervisors (.2/.3/.4:9100, installed via apt:
+# `prometheus-node-exporter`). The Proxmox HOSTS otherwise have no metrics (the kube-prometheus
+# node-exporter DaemonSet runs only on the Talos VMs; pve-exporter is an API rollup). This gives true
+# host CPU/mem/load/disk/network for the Hypervisors dashboard section + storage read/write rate.
+# relabel forces job="proxmox-node" so dashboard queries are clean.
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxmox-node
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: proxmox-node
+spec:
+  clusterIP: None
+  ports:
+    - { name: metrics, port: 9100, targetPort: 9100, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: proxmox-node
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: proxmox-node
+subsets:
+  - addresses:
+      - { ip: 192.168.0.2 }
+      - { ip: 192.168.0.3 }
+      - { ip: 192.168.0.4 }
+    ports:
+      - { name: metrics, port: 9100, protocol: TCP }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: proxmox-node
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [monitoring]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: proxmox-node
+  endpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: proxmox-node
