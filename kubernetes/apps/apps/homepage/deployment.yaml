@@ -1,4 +1,5 @@
-# Homepage (gethomepage.dev) — the lab's app dashboard at home.chifor.me (behind Cloudflare Access).
+# Homepage (gethomepage.dev) — the lab's app dashboard at home.chifor.me (behind Authelia SSO via the
+# oauth2-proxy in this namespace; cloudflared routes home.chifor.me -> oauth2-proxy -> this Service).
 # Config-as-code lives in the homepage-config ConfigMap. Homepage v1.x COPIES skeleton files
 # (proxmox.yaml, custom.css/js, ...) into /app/config on render and crashes on EROFS if that dir is a
 # read-only ConfigMap mount — so /app/config is a writable emptyDir seeded from the ConfigMap by an

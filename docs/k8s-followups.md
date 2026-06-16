@@ -80,3 +80,21 @@ OIDC clients (group->role); LiteLLM stays master-key; Cloudflare Access kept as 
 **User must:** `cloudflared tunnel route dns ailab sso.chifor.me` (+ no Access app on sso; relax Access on
 grafana/chat for a single prompt), then browser-test. Gotchas captured in ADR 0012 (ntp/enableServiceLinks/
 readOnlyRootFilesystem/command). Lab user login: chifor / <generated, in the authelia-secrets SOPS users db>.
+
+## 10. metrics-server — ✅ DONE (2026-06-16)
+Metrics API live (`kubectl top` / HPA / Homepage k8s widget). Helm chart 3.12.2 in `kube-system` with
+`--kubelet-insecure-tls` (Talos kubelets serve self-signed certs). Wired under `infrastructure/monitoring`.
+
+## 11. Gatus uptime + status page — ✅ DONE (2026-06-16), ⏸️ status.chifor.me CNAME pending
+Config-as-code uptime checks (ns `gatus`, memory storage, 11 endpoints across AI/Observability/Infra +
+the QNAP storage-fabric TCP ports) — chosen over Uptime Kuma (UI/DB config) for GitOps fit. Surfaced on the
+Homepage via the `gatus` widget. Tunnel route for `status.chifor.me` is in git, but **the public DNS CNAME
+must be created** (user/token): `cloudflared tunnel route dns ailab status.chifor.me`. Until then it 530s.
+
+## 12. Homepage behind Authelia SSO (oauth2-proxy) — ✅ DONE + e2e verified (2026-06-16)
+`home.chifor.me` now routes cloudflared -> **oauth2-proxy** (homepage ns, OIDC client `homepage` of Authelia,
+PKCE/S256, `consent_mode: implicit`) -> Homepage. Full login flow verified headlessly (Playwright): login →
+callback → dashboard renders, no consent prompt. This **locks the Homepage**, so **Cloudflare Access on
+`home` is now redundant** (would be a 2nd login). CF Access remains relevant only for the other public
+hostnames (chat/grafana/api/status) and still needs the user's CF credentials/token. Authelia is still
+`one_factor` — 2FA (TOTP/WebAuthn) is the next hardening step.
