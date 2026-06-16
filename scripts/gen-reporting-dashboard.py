@@ -158,16 +158,17 @@ panels.append(table(
                       {"id": "thresholds", "value": {"mode": "absolute", "steps": PCT}},
                       {"id": "custom.cellOptions", "value": {"type": "gauge", "mode": "gradient"}}]),
         _ov("Root FS %", [{"id": "unit", "value": "percent"}, {"id": "decimals", "value": 1},
-                          {"id": "thresholds", "value": {"mode": "absolute", "steps": PCT}}]),
+                          {"id": "thresholds", "value": {"mode": "absolute", "steps": PCT}},
+                          {"id": "custom.cellOptions", "value": {"type": "gauge", "mode": "gradient"}}]),
         _ov("Uptime", [{"id": "unit", "value": "dtdurations"}]),
     ]))
 panels += [
     ts("Host CPU %", 0, 13, 12, 7, ['pve_cpu_usage_ratio{id=~"node/.*"} * 100'], "percent"),
     ts("Host Memory %", 12, 13, 12, 7,
        ['100 * pve_memory_usage_bytes{id=~"node/.*"} / pve_memory_size_bytes{id=~"node/.*"}'], "percent"),
-    ts("Host Network I/O", 0, 20, 12, 6,
+    ts("Host Network I/O (rx + / tx -)", 0, 20, 12, 6,
        ['rate(pve_network_receive_bytes_total{id=~"node/.*"}[5m])',
-        '-rate(pve_network_transmit_bytes_total{id=~"node/.*"}[5m])'], "Bps", legend="{{id}}"),
+        '0 - rate(pve_network_transmit_bytes_total{id=~"node/.*"}[5m])'], "Bps", legend="{{id}}"),
     ts("iGPU Temperature", 12, 20, 6, 6, ["amdgpu_temp_millicelsius/1000"], "celsius", legend="{{instance}}"),
     ts("iGPU Power", 18, 20, 6, 6, ["amdgpu_power_microwatts/1000000"], "watt", legend="{{instance}}"),
 ]
@@ -226,7 +227,7 @@ panels += [
 ]
 
 # ───────────────────────── Storage ─────────────────────────
-panels.append(row("Storage (Proxmox pools · fabric · k8s PVCs)", 70))
+panels.append(row("Storage (Proxmox pools / fabric / k8s PVCs)", 70))
 panels += [
     bargauge("Proxmox Storage Pools (used %)", 0, 71, 12, 8,
              '100 * pve_disk_usage_bytes{id=~"storage/.*"} / pve_disk_size_bytes{id=~"storage/.*"}',
