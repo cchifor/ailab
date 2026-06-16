@@ -116,8 +116,11 @@ variable "ai_llm_nodes" {
     hostname  = string
   }))
   default = {
-    "ai-llm-1" = { node_name = "ai-node1", vm_id = 5001, ip = "192.168.0.51", hostname = "ai-llm-1" }
-    "ai-llm-2" = { node_name = "ai-node2", vm_id = 5002, ip = "192.168.0.52", hostname = "ai-llm-2" }
-    "ai-llm-3" = { node_name = "ai-node3", vm_id = 5003, ip = "192.168.0.53", hostname = "ai-llm-3" }
+    # IPs moved from .51-.53 into the static-reserved block (.2-.50, outside the router's DHCP pool) to
+    # end an IP conflict — the router had leased .53 to a DHCP client (an MXCHIP IoT device). See
+    # docs/runbooks/ai-host-setup.md. Adjacent to the Talos nodes (.41-.43).
+    "ai-llm-1" = { node_name = "ai-node1", vm_id = 5001, ip = "192.168.0.44", hostname = "ai-llm-1" }
+    "ai-llm-2" = { node_name = "ai-node2", vm_id = 5002, ip = "192.168.0.45", hostname = "ai-llm-2" }
+    "ai-llm-3" = { node_name = "ai-node3", vm_id = 5003, ip = "192.168.0.46", hostname = "ai-llm-3" }
   }
 }

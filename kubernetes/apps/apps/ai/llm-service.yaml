@@ -1,6 +1,6 @@
 # Publishes the off-cluster ai-llm LXCs into the cluster. To fit the heavyweights (which each
-# fill a node's iGPU), models are pinned per node: node1 (.51) runs general :8080 + coder :8081;
-# node2 (.52) runs gpt-oss-120b :8080; node3 (.53) runs qwen3.5-122b :8080. LiteLLM (litellm.yaml)
+# fill a node's iGPU), models are pinned per node: node1 (.44) runs general :8080 + coder :8081;
+# node2 (.45) runs gpt-oss-120b :8080; node3 (.46) runs qwen3.5-122b :8080. LiteLLM (litellm.yaml)
 # fronts all four as one OpenAI endpoint. Shared label app.kubernetes.io/component=llama-server
 # lets one ServiceMonitor scrape them all. Services have no selector → manual Endpoints below.
 ---
@@ -22,7 +22,7 @@ metadata:
   namespace: ai
   labels: { app.kubernetes.io/name: llm }
 subsets:
-  - addresses: [{ ip: 192.168.0.51, hostname: ai-llm-1 }]
+  - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
 apiVersion: v1
@@ -43,7 +43,7 @@ metadata:
   namespace: ai
   labels: { app.kubernetes.io/name: llm-coder }
 subsets:
-  - addresses: [{ ip: 192.168.0.51, hostname: ai-llm-1 }]
+  - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
     ports: [{ name: http, port: 8081, protocol: TCP }]
 ---
 apiVersion: v1
@@ -64,7 +64,7 @@ metadata:
   namespace: ai
   labels: { app.kubernetes.io/name: llm-gptoss }
 subsets:
-  - addresses: [{ ip: 192.168.0.52, hostname: ai-llm-2 }]
+  - addresses: [{ ip: 192.168.0.45, hostname: ai-llm-2 }]
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
 apiVersion: v1
@@ -85,7 +85,7 @@ metadata:
   namespace: ai
   labels: { app.kubernetes.io/name: llm-qwen35 }
 subsets:
-  - addresses: [{ ip: 192.168.0.53, hostname: ai-llm-3 }]
+  - addresses: [{ ip: 192.168.0.46, hostname: ai-llm-3 }]
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
 # Vision/VL model (Qwen3-VL-8B + mmproj) — 3rd instance on node1 :8082.
@@ -107,5 +107,5 @@ metadata:
   namespace: ai
   labels: { app.kubernetes.io/name: llm-vision }
 subsets:
-  - addresses: [{ ip: 192.168.0.51, hostname: ai-llm-1 }]
+  - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
     ports: [{ name: http, port: 8082, protocol: TCP }]

@@ -29,9 +29,9 @@ metadata:
     app.kubernetes.io/name: ai-llm-node
 subsets:
   - addresses:
-      - { ip: 192.168.0.51 }
-      - { ip: 192.168.0.52 }
-      - { ip: 192.168.0.53 }
+      - { ip: 192.168.0.44 }
+      - { ip: 192.168.0.45 }
+      - { ip: 192.168.0.46 }
     ports:
       - { name: metrics, port: 9100, protocol: TCP }
 ---
