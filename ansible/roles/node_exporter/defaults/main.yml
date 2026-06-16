@@ -1,0 +1,10 @@
+---
+# Host-level Prometheus node_exporter on the Proxmox hypervisors. The bare-metal hosts otherwise have
+# no metrics (the kube-prometheus node-exporter DaemonSet runs only inside the Talos VMs). This feeds
+# the in-cluster monitoring/proxmox-node ServiceMonitor (job=proxmox-node) -> the "AI Lab Fleet"
+# Grafana dashboard (Hypervisors section + host disk read/write rate).
+node_exporter_enabled: true
+node_exporter_package: prometheus-node-exporter
+node_exporter_service: prometheus-node-exporter
+node_exporter_listen_address: ":9100" # scraped by monitoring/proxmox-node (kubernetes/apps/infrastructure/monitoring)
+node_exporter_extra_args: "" # extra flags; the Debian package's default collector set is fine for host reporting

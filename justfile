@@ -30,6 +30,10 @@ links:
 validate:
     cd {{ansible_dir}} && ansible-playbook site.yml --tags validate
 
+# Ansible: host node_exporter on the Proxmox hosts (feeds the AI Lab Fleet Grafana dashboard)
+node-exporter:
+    cd {{ansible_dir}} && ansible-playbook site.yml --tags monitoring
+
 # Ansible: connectivity check
 ping:
     cd {{ansible_dir}} && ansible pve_nodes -m ping

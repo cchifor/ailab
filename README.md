@@ -51,7 +51,7 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 |---|---|
 | `docs/` | architecture, network plan, ADRs, runbooks |
 | `inventory/hosts.yml` | single source of truth for hosts, IPs, roles |
-| `ansible/` | host-level config: kernel, Thunderbolt links, storage net, NFS mounts, validation |
+| `ansible/` | host-level config: kernel, Thunderbolt links, storage net, NFS mounts, host `node_exporter`, validation |
 | `tofu/` | OpenTofu (`bpg/proxmox`): datacenter storage now, VMs/K8s later |
 | `scripts/` | bootstrap + read-only discovery helpers |
 | `kubernetes/` | live — `infra/` (Talos VMs + `ai-lxc/` GPU LXCs, OpenTofu) + `apps/` (Flux GitOps: CSI, observability, AI, edge/exposure) |
@@ -74,7 +74,7 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 | K8s cluster (Talos + Cilium + Flux) | ✅ done — 3-node HA, GitOps live (`docs/k8s-architecture.md`) |
 | K8s storage (3 tiers) | ✅ done — `nfs-csi` (RWX default), `local-path` (node-local NVMe), `qnap-iscsi` (network block from the ZFS pool, RWO, migratable — Trident `csi.trident.qnap.io`). Prometheus TSDB on `qnap-iscsi`. **VolumeSnapshots** live (external-snapshotter v8 + class; round-trip validated). (`docs/k8s-followups.md`) |
 | K8s platform hardening | ✅ done — colocation governance (kubelet reservations + PriorityClasses + LimitRanges, ADR 0009); backup Layer A (CSI snapshots, ADR 0010); **CSI now on the Thunderbolt fabric** (host-router+SNAT, A1 — `nfs-csi` + `qnap-iscsi` at `10.55.0.254`, ~660 MB/s vs ~280 on 2.5 GbE, ADR 0011) + a per-node storage-fabric health-check (blackbox DaemonSet + alert). ⏸️ deferred: off-NAS Velero→R2 DR. |
-| K8s observability | ✅ metrics (Prometheus/Grafana/node-exporter) + AI/GPU Grafana dashboard; logs (Loki+Alloy) |
+| K8s observability | ✅ metrics (Prometheus/Grafana) + logs (Loki+Alloy). Single **"AI Lab Fleet"** default dashboard — Hypervisors (host `node_exporter` on the 3 Proxmox hosts, ansible role `node_exporter`), Instances (VMs/CTs via `prometheus-pve-exporter`), AI (iGPU + llama.cpp), Storage (pools + PVCs + disk I/O + QNAP fabric). (`docs/k8s-followups.md` #14) |
 | K8s: AI LLM appliance | ✅ done — 3× privileged GPU LXC, llama.cpp Vulkan; **5 models** (Qwen3-30B-A3B, Qwen3-Coder-30B-A3B, gpt-oss-120B, Qwen3.5-122B, Qwen3-VL-8B vision) behind **LiteLLM** + **Open WebUI**; GPU+inference metrics (`docs/runbooks/ai-host-setup.md`, ADR 0008) |
 | K8s: ingress + internet exposure | ✅ done — **Cloudflare Tunnel** (chat.chifor.me + Access) + **Tailscale** subnet-router mesh (192.168.0.0/24 + 10.55.0.0/24); `docs/runbooks/internet-exposure.md` |
 

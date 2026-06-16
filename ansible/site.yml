@@ -2,9 +2,10 @@
 # Host-level configuration for the Proxmox nodes.
 # Run order matters: base -> thunderbolt -> storage_net -> (QNAP runbook) -> mounts -> validate.
 #
-#   just net       # base + net  (tags: base,net)
-#   just mounts    # NFS test mount (tags: mounts)  -- after QNAP export exists
-#   just validate  # link/throughput checks (tags: validate)
+#   just net           # base + net  (tags: base,net)
+#   just node-exporter # host node_exporter for the AI Lab Fleet dashboard (tags: monitoring)
+#   just mounts        # NFS test mount (tags: mounts)  -- after QNAP export exists
+#   just validate      # link/throughput checks (tags: validate)
 
 - name: Configure Proxmox nodes — base, Thunderbolt/USB4, storage network
   hosts: pve_nodes
@@ -13,6 +14,11 @@
   roles:
     - role: pve_base
       tags: [base]
+
+    # Host metrics for the "AI Lab Fleet" Grafana dashboard (scraped by monitoring/proxmox-node).
+    - role: node_exporter
+      tags: [monitoring]
+      when: node_exporter_enabled | default(true)
 
     - role: thunderbolt_net
       tags: [net, tb]

@@ -1,0 +1,27 @@
+---
+# Install + run node_exporter on each Proxmox host. Idempotent; safe to re-run on a rebuild.
+- name: Install prometheus-node-exporter
+  ansible.builtin.apt:
+    name: "{{ node_exporter_package }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: node_exporter_enabled | bool
+
+- name: Configure node_exporter listen address
+  ansible.builtin.copy:
+    dest: "/etc/default/{{ node_exporter_service }}"
+    mode: "0644"
+    content: |
+      # Managed by ansible (role: node_exporter). Scraped by the cluster's monitoring/proxmox-node
+      # ServiceMonitor (job=proxmox-node) for the AI Lab Fleet dashboard.
+      ARGS="--web.listen-address={{ node_exporter_listen_address }} {{ node_exporter_extra_args }}"
+  when: node_exporter_enabled | bool
+  notify: Restart node_exporter
+
+- name: Ensure node_exporter is enabled and running
+  ansible.builtin.systemd:
+    name: "{{ node_exporter_service }}"
+    enabled: true
+    state: started
+  when: node_exporter_enabled | bool
