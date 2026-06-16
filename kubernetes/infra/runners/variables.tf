@@ -102,7 +102,7 @@ variable "runner_memory_floating_mib" {
     not the balloon. Set equal to runner_memory_mib to disable ballooning.
   EOT
   type        = number
-  default     = 4096
+  default     = 1024 # min 1 GiB (matches the old Hyper-V pool); reclaimed only under host pressure
 }
 variable "runner_rootfs_gb" {
   type    = number
