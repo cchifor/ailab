@@ -20,6 +20,8 @@ data:
         service: http://homepage.homepage.svc.cluster.local:8080
       - hostname: sso.chifor.me
         service: http://authelia.auth.svc.cluster.local:9091
+      - hostname: status.chifor.me
+        service: http://gatus.gatus.svc.cluster.local:8080
       - hostname: chat.chifor.me
         service: http://open-webui.ai.svc.cluster.local:80
       - hostname: grafana.chifor.me

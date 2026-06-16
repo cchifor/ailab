@@ -40,9 +40,16 @@ data:
               href: https://login.tailscale.com/admin
 
   widgets.yaml: |
-    # NOTE: the `kubernetes` info widget is intentionally omitted — it always queries metrics-server,
-    # which isn't installed, so it renders a red "API Error". Add it back once metrics-server is
-    # deployed. Live cluster numbers are available via the Prometheus service widget / Grafana.
+    - kubernetes:
+        cluster:
+          show: true
+          cpu: true # metrics-server is installed -> real CPU/mem gauges
+          memory: true
+          label: ailab
+        nodes:
+          show: true
+          cpu: true
+          memory: true
     - search:
         provider: duckduckgo
         target: _blank
@@ -80,6 +87,14 @@ data:
             description: Alerts
             icon: prometheus.png
             siteMonitor: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093/-/healthy
+        - Uptime (Gatus):
+            href: https://status.chifor.me
+            description: Service status
+            icon: gatus.png
+            siteMonitor: http://gatus.gatus.svc.cluster.local:8080/health
+            widget:
+              type: gatus
+              url: http://gatus.gatus.svc.cluster.local:8080
     - Infrastructure:
         - SSO (Authelia):
             href: https://sso.chifor.me

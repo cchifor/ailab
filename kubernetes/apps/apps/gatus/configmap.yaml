@@ -1,0 +1,78 @@
+# Gatus uptime monitoring — config-as-code (the whole point vs Uptime Kuma's UI/DB config).
+# Probes in-cluster health endpoints + the QNAP storage-fabric TCP ports + the mgmt UIs.
+# Memory storage = stateless/restart-safe (history resets on restart; fine for a lab).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gatus-config
+  namespace: gatus
+data:
+  config.yaml: |
+    web:
+      port: 8080
+    storage:
+      type: memory
+    ui:
+      title: ailab · status
+      header: ailab
+      description: Service health for the home AI lab
+    endpoints:
+      # --- AI ---
+      - name: Open WebUI
+        group: AI
+        url: http://open-webui.ai.svc.cluster.local:80/health
+        interval: 60s
+        conditions: ["[STATUS] == 200"]
+      - name: LiteLLM
+        group: AI
+        url: http://litellm.ai.svc.cluster.local:4000/health/liveliness
+        interval: 60s
+        conditions: ["[STATUS] == 200"]
+      # --- Observability ---
+      - name: Grafana
+        group: Observability
+        url: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80/api/health
+        interval: 60s
+        conditions: ["[STATUS] == 200"]
+      - name: Prometheus
+        group: Observability
+        url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/-/healthy
+        interval: 60s
+        conditions: ["[STATUS] == 200"]
+      - name: Alertmanager
+        group: Observability
+        url: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093/-/healthy
+        interval: 60s
+        conditions: ["[STATUS] == 200"]
+      - name: Loki
+        group: Observability
+        url: http://loki.monitoring.svc.cluster.local:3100/ready
+        interval: 60s
+        conditions: ["[STATUS] == 200"]
+      # --- Infrastructure ---
+      - name: Authelia (SSO)
+        group: Infrastructure
+        url: http://authelia.auth.svc.cluster.local:9091/api/health
+        interval: 60s
+        conditions: ["[STATUS] == 200"]
+      - name: Proxmox node1
+        group: Infrastructure
+        url: tcp://192.168.0.2:8006
+        interval: 120s
+        conditions: ["[CONNECTED] == true"]
+      - name: QNAP (mgmt)
+        group: Infrastructure
+        url: tcp://192.168.1.225:443
+        interval: 120s
+        conditions: ["[CONNECTED] == true"]
+      # --- Storage fabric (Thunderbolt 10.55.0.254) ---
+      - name: QNAP NFS portal
+        group: Storage fabric
+        url: tcp://10.55.0.254:2049
+        interval: 120s
+        conditions: ["[CONNECTED] == true"]
+      - name: QNAP iSCSI portal
+        group: Storage fabric
+        url: tcp://10.55.0.254:3260
+        interval: 120s
+        conditions: ["[CONNECTED] == true"]

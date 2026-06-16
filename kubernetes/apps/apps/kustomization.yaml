@@ -6,3 +6,4 @@ resources:
   - auth # Authelia SSO (OIDC provider) — Grafana/Open WebUI clients reference it
   - edge
   - homepage # app dashboard at home.chifor.me
+  - gatus # uptime monitoring + status page at status.chifor.me
