@@ -44,10 +44,11 @@ ping:
 
 # Ansible: provision/refresh the self-hosted GitHub Actions runner VMs (cchifor/platform pool).
 # Create the VMs first (tofu -chdir=kubernetes/infra/runners apply) + the github-runner SOPS secret.
+# Dedicated playbook (not site.yml), so a full `just net` never touches the runner VMs.
 # See docs/runbooks/ci-runners.md.
 runners:
     cd {{ansible_dir}} && SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
-      ansible-playbook site.yml --limit github_runners --tags runners
+      ansible-playbook runners.yml
 
 # Ansible: connectivity check for the runner VMs
 ping-runners:

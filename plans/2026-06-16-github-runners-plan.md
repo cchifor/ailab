@@ -43,7 +43,7 @@ Docker CE + **docker-compose-plugin pinned 2.31.0** + docker-buildx-plugin (apt 
 
 **New — OpenTofu module `kubernetes/infra/runners/`** (mirror `kubernetes/infra/vms.tf`, reuse `bpg/proxmox ~> 0.109`, local backend, Proxmox **API token** auth):
 - `versions.tf`, `providers.tf`, `backend.tf`, `variables.tf`, `outputs.tf`, `main.tf`.
-- `main.tf`: `proxmox_virtual_environment_download_file` for the Ubuntu **24.04 noble** cloud image (`content_type = "import"`) + `proxmox_virtual_environment_vm` with `for_each = var.runner_nodes`, `agent { enabled = true }`, `cpu { cores = 8 }`, `memory { dedicated = 24576 }`, `disk { import_from = <cloudimg>, size = 120, … }`, and:
+- `main.tf`: `proxmox_virtual_environment_download_file` for the Ubuntu **24.04 noble** cloud image (`content_type = "iso"`) + `proxmox_virtual_environment_vm` with `for_each = var.runner_nodes`, `agent { enabled = false }` (the minimal cloud image ships no qemu-guest-agent — the role installs it; `true` would hang `apply`), `cpu { cores = 8 }`, `memory { dedicated = 24576 }`, `disk { import_from = <cloudimg>, size = 120, … }`, and:
   ```hcl
   initialization {
     ip_config { ipv4 { address = "${each.value.ip}/24"  gateway = "192.168.0.1" } }

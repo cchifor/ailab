@@ -61,8 +61,8 @@ passes unchanged.
 - CI scope is unchanged: the runners execute platform's existing workflows (which push images + commit
   back). ailab's own (optional, read-only) infra CI is out of scope for now and would need its own
   repo-scoped registration (User account → no shared org pool).
-- `ansible/site.yml` gains a second play (`github_runners`); `just net` (full untagged run) will also
-  touch the runners once they exist. Use `just runners` (limited + tagged) for routine runner work.
+- The runners are provisioned by a dedicated `ansible/runners.yml` playbook (`just runners`), kept out
+  of `site.yml` so a full `just net` never connects to runner VMs that may not exist yet.
 - A self-hosted runner remains a trusted-code boundary: safe because both repos are private and
   contributors are trusted. The job-started hook + ephemeral cycle remove the stale-workspace flakes.
 - Keeping the contract in sync across two repos is a maintenance cost, but platform's nightly
