@@ -17,7 +17,7 @@ data:
     no-autoupdate: true
     ingress:
       - hostname: home.chifor.me
-        service: http://homepage.homepage.svc.cluster.local:8080
+        service: http://oauth2-proxy.homepage.svc.cluster.local:4180 # Authelia SSO gate -> Homepage
       - hostname: sso.chifor.me
         service: http://authelia.auth.svc.cluster.local:9091
       - hostname: status.chifor.me
