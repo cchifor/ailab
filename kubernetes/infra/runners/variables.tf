@@ -49,7 +49,8 @@ variable "image_datastore" {
   description = <<-EOT
     Datastore that holds the downloaded Ubuntu cloud image. qnap-nfs is shared + mounted on all
     nodes (like the ai-lxc template), so the image downloads ONCE and every node's VM imports the
-    same file. Its 'iso' content type must be enabled (Datacenter -> Storage -> qnap-nfs).
+    same file. Its 'import' content type must be enabled (Datacenter -> Storage -> qnap-nfs ->
+    Content) — VM disk import_from rejects an 'iso'-typed source.
   EOT
   type        = string
   default     = "qnap-nfs"
@@ -70,8 +71,10 @@ variable "ubuntu_cloud_image_url" {
 variable "ubuntu_cloud_image_file" {
   # Pin a dated copy so a silent upstream re-publish of "current" doesn't change the base out from
   # under a rebuild. Refresh deliberately (bump the date) when you want a newer image.
+  # MUST end in .qcow2/.raw (not .img): the Ubuntu cloud image is qcow2 data, and PVE's "import"
+  # content type validates by extension and rejects .img.
   type    = string
-  default = "noble-server-cloudimg-amd64-20260616.img"
+  default = "noble-server-cloudimg-amd64-20260616.qcow2"
 }
 
 # ---- Runner VM sizing ----

@@ -33,7 +33,11 @@ See ADR 0013. IaC: `kubernetes/infra/runners/` (VMs) + `ansible/roles/github_run
   ```
 
 ## 3. Create the VMs (OpenTofu)
-Prereq: the `qnap-nfs` datastore must have the **iso** content type enabled (Datacenter → Storage).
+Prereq: the `qnap-nfs` datastore must have the **import** content type enabled (Datacenter → Storage
+→ qnap-nfs → Content). The module downloads the Ubuntu cloud image (qcow2) into `import/` and the VM
+disks `import_from` it — PVE rejects importing from an `iso`-typed source, and the file must end in
+`.qcow2`/`.raw` (not `.img`). Enable it via the UI, or:
+`pvesm set qnap-nfs --content backup,vztmpl,iso,images,import`.
 ```bash
 cd kubernetes/infra/runners
 cp terraform.tfvars.example terraform.tfvars   # set pve_api_token + runner_ssh_public_key
