@@ -126,3 +126,14 @@ Storage section uses the existing fabric `probe_success`/`probe_duration_seconds
 admin password is unknown (the SOPS `grafana-admin` value AND the previously-noted rotated value both return
 401) — if UI access is needed, reset it with `kubectl exec <grafana-pod> -n monitoring -c grafana --
 grafana cli admin reset-admin-password <new>`.
+
+**Reworked 2026-06-16** to the user's spec: renamed **"AI Lab Fleet"**, set as Grafana **default home**
+(`grafana.ini default_home_dashboard_path=/tmp/dashboards/reporting.json`), Overview section dropped.
+**Hypervisors** now use **host node_exporter** — `prometheus-node-exporter` installed via `apt` on the 3
+Proxmox hosts (`.2/.3/.4:9100`), scraped by `proxmox-node.yaml` (ServiceMonitor relabels `job=proxmox-node`)
+→ true host CPU/mem/load/disk/network (96 cores, 187 GiB). **HOST PREREQ (not yet in ansible/tofu):** on
+each Proxmox host `apt-get install -y prometheus-node-exporter` (a rebuild must repeat this). **Instances**
+use pve-exporter with `* on(id) group_left(name) pve_guest_info` for friendly legends + an inventory table.
+**AI** gained AI-node CPU%; the KV panel was replaced with `llamacpp:n_busy_slots_per_decode` because this
+llama.cpp build (b9631) exposes **no kv-cache metric**; throughput panels are labeled tokens/s. **Storage**
+gained host disk read/write rate (`node_disk_*`). Every panel query verified against live data.
