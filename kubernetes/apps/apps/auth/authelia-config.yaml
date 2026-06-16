@@ -84,6 +84,7 @@ data:
             client_secret: '$pbkdf2-sha512$310000$E0TyCO.pOHUf1f7/qGL0IQ$MfA8SKebk4E.zU5LmVQ.tWFOWUwctQVgYgHO4i0A8YXYqZeUtppo1E7p4yF1GqXyKaJoKqiOjDs/S2.K8NF9qw'
             public: false
             authorization_policy: 'one_factor'
+            consent_mode: 'implicit' # first-party app: auto-grant consent (no prompt) for seamless SSO
             require_pkce: true
             pkce_challenge_method: 'S256'
             redirect_uris:
