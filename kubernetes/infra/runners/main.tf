@@ -11,7 +11,7 @@
 # (mounted on all nodes), so every node's VM imports the same file. The image is qcow2 (.img),
 # not xz, so download_file imports it directly (unlike the Talos factory image — see infra/image.tf).
 resource "proxmox_virtual_environment_download_file" "ubuntu_cloud" {
-  content_type = "iso" # PVE accepts .img/.qcow2 disk images under the iso content type
+  content_type = "import" # VM disk import_from requires the source in the "import" content type (NOT iso)
   datastore_id = var.image_datastore
   node_name    = var.image_download_node
   url          = var.ubuntu_cloud_image_url
@@ -42,8 +42,12 @@ resource "proxmox_virtual_environment_vm" "runner" {
     type  = "host" # homogeneous CPUs; no live migration (runners are rebuildable)
   }
 
+  # Ballooning: VM floats between floating (idle floor) and dedicated (load ceiling), so idle runners
+  # return RAM to the host (like the old Hyper-V Dynamic Memory pool). Independent of the runner
+  # service's systemd MemoryMax cap.
   memory {
     dedicated = var.runner_memory_mib
+    floating  = var.runner_memory_floating_mib
   }
 
   scsi_hardware = "virtio-scsi-single"

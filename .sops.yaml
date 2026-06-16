@@ -2,7 +2,7 @@ creation_rules:
   # Ansible secrets (host-side vars, not k8s Secrets): encrypt only the private-key value. The App
   # ID + installation ID are non-secret and live in group_vars. First match wins, so this is listed
   # before the generic rule below.
-  - path_regex: ansible/secrets/.*\.sops\.ya?ml$
+  - path_regex: ansible[/\\]secrets[/\\].*\.sops\.ya?ml$ # [/\\] = match on both WSL (/) and Windows (\) paths
     encrypted_regex: ^(github_app_private_key)$
     age: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
   # Kubernetes Secrets (Flux/SOPS): encrypt the data/stringData payload.
