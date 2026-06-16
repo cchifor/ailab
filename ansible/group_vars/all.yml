@@ -27,6 +27,10 @@ pve_base_packages:
 # ---- host metrics (node_exporter on the hypervisors; scraped by monitoring/proxmox-node) ----
 node_exporter_enabled: true
 
+# ---- CPU performance governor (AI hosts; amd-pstate-epp) ----
+cpu_performance_enabled: true
+cpu_governor: performance
+
 # ---- NFS test mount (validation only; Proxmox itself mounts via tofu storage) ----
 manage_nfs_mount: false             # set true after the QNAP export exists (Phase 3)
 qnap_nfs_server: "{{ storage_service_ip }}"

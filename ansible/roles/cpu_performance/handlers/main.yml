@@ -1,0 +1,6 @@
+---
+- name: Restart cpu-governor
+  ansible.builtin.systemd:
+    name: cpu-governor.service
+    state: restarted
+    daemon_reload: true

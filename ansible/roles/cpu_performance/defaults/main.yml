@@ -1,0 +1,7 @@
+---
+# Pin the CPU scaling governor on the Proxmox hypervisors. These are AI hosts (amd-pstate-epp);
+# the 'performance' governor keeps cores at max clock for inference latency/throughput (with
+# amd-pstate-epp this also pins EPP to 'performance'). A small systemd oneshot applies it at boot
+# so it survives reboots. Surfaced on the AI Lab Fleet dashboard via node_cpu_scaling_governor.
+cpu_performance_enabled: true
+cpu_governor: performance

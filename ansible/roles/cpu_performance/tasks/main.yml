@@ -1,0 +1,18 @@
+---
+# Idempotent; safe to re-run on a rebuild. amd-pstate-epp ties EPP to the governor, so pinning the
+# governor to 'performance' is sufficient (no separate EPP step needed).
+- name: Install the CPU-governor systemd unit
+  ansible.builtin.template:
+    src: cpu-governor.service.j2
+    dest: /etc/systemd/system/cpu-governor.service
+    mode: "0644"
+  when: cpu_performance_enabled | bool
+  notify: Restart cpu-governor
+
+- name: Enable + start cpu-governor (pins the governor now and on boot)
+  ansible.builtin.systemd:
+    name: cpu-governor.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: cpu_performance_enabled | bool

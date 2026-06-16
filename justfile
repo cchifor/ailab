@@ -34,6 +34,10 @@ validate:
 node-exporter:
     cd {{ansible_dir}} && ansible-playbook site.yml --tags monitoring
 
+# Ansible: pin the CPU scaling governor to performance on the Proxmox hosts
+perf:
+    cd {{ansible_dir}} && ansible-playbook site.yml --tags performance
+
 # Ansible: connectivity check
 ping:
     cd {{ansible_dir}} && ansible pve_nodes -m ping

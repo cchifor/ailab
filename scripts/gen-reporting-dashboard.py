@@ -108,6 +108,20 @@ def table(title, x, y, w, h, targets, rename, exclude, overrides):
     }
 
 
+def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None):
+    # single instant query -> table (no join); for label-carrying gauges like node_cpu_scaling_governor
+    return {
+        "id": _nid(), "type": "table", "title": title, "datasource": _ds(),
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "fieldConfig": {"defaults": {"custom": {"align": "auto", "cellOptions": {"type": "auto"}}},
+                        "overrides": overrides or []},
+        "options": {"showHeader": True, "footer": {"show": False}, "cellHeight": "sm"},
+        "transformations": [{"id": "organize", "options": {
+            "excludeByName": {k: True for k in exclude}, "renameByName": rename, "indexByName": {}}}],
+        "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "format": "table", "instant": True}],
+    }
+
+
 # group_left(name) join so per-instance panels show the friendly guest name instead of qemu/4001
 def gl(expr):
     return f'{expr} * on(id) group_left(name) pve_guest_info{{{GUEST}}}'
@@ -128,19 +142,29 @@ panels += [
          f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{HOSTS}}}) / sum(node_memory_MemTotal_bytes{{{HOSTS}}}))',
          unit="percent", decimals=1, steps=PCT),
     stat("Fleet Load (1m sum)", 20, 1, 4, 4, f'sum(node_load1{{{HOSTS}}})', unit="short", decimals=2),
-    ts("CPU % per Hypervisor", 0, 5, 12, 8,
+    ts("CPU % per Hypervisor", 0, 5, 8, 8,
        [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{HOSTS},mode="idle"}}[5m])))'],
        "percent", maxv=100),
-    ts("Memory % per Hypervisor", 12, 5, 12, 8,
+    ts("Memory % per Hypervisor", 8, 5, 8, 8,
        [f'100 * (1 - node_memory_MemAvailable_bytes{{{HOSTS}}} / node_memory_MemTotal_bytes{{{HOSTS}}})'],
        "percent", maxv=100),
-    ts("Root Disk Used % per Hypervisor", 0, 13, 12, 8,
+    ts("CPU Clock per Hypervisor (avg)", 16, 5, 8, 8,
+       [f'avg by (instance) (node_cpu_scaling_frequency_hertz{{{HOSTS}}})'], "hertz"),
+    ts("Root Disk Used % per Hypervisor", 0, 13, 8, 8,
        [f'100 * (1 - node_filesystem_avail_bytes{{{HOSTS},mountpoint="/"}} / node_filesystem_size_bytes{{{HOSTS},mountpoint="/"}})'],
        "percent", maxv=100),
-    ts("Network per Hypervisor (RX+ / TX-)", 12, 13, 12, 8,
+    ts("Network per Hypervisor (RX+ / TX-)", 8, 13, 8, 8,
        [f'sum by (instance) (rate(node_network_receive_bytes_total{{{HOSTS},{NETDEV}}}[5m]))',
         f'0 - sum by (instance) (rate(node_network_transmit_bytes_total{{{HOSTS},{NETDEV}}}[5m]))'],
        "Bps", legends=["{{instance}} rx", "{{instance}} tx"]),
+    qtable("CPU Governor per Hypervisor", 16, 13, 8, 8,
+           # node_exporter emits a series per (cpu, governor) — 1=active, 0=inactive — so filter ==1
+           f'count by (instance, governor) (node_cpu_scaling_governor{{{HOSTS}}} == 1)',
+           rename={"instance": "Host", "governor": "Governor", "Value": "Cores"},
+           exclude=["Time", "__name__"],
+           overrides=[_ov("Governor", [{"id": "custom.cellOptions", "value": {"type": "color-text"}},
+                                       {"id": "mappings", "value": [{"type": "value", "options": {
+                                           "performance": {"color": "green", "index": 0}}}]}])]),
 ]
 
 # ───────────────────────── Instances (VMs + Containers) ─────────────────────────

@@ -4,6 +4,7 @@
 #
 #   just net           # base + net  (tags: base,net)
 #   just node-exporter # host node_exporter for the AI Lab Fleet dashboard (tags: monitoring)
+#   just perf          # pin CPU governor to performance (tags: performance)
 #   just mounts        # NFS test mount (tags: mounts)  -- after QNAP export exists
 #   just validate      # link/throughput checks (tags: validate)
 
@@ -19,6 +20,11 @@
     - role: node_exporter
       tags: [monitoring]
       when: node_exporter_enabled | default(true)
+
+    # Pin the CPU scaling governor to 'performance' (AI hosts; amd-pstate-epp) — persists on boot.
+    - role: cpu_performance
+      tags: [performance]
+      when: cpu_performance_enabled | default(true)
 
     - role: thunderbolt_net
       tags: [net, tb]

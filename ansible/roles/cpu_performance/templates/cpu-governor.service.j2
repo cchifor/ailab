@@ -1,0 +1,13 @@
+# Managed by ansible (role: cpu_performance). Pins the CPU scaling governor on boot.
+[Unit]
+Description=Pin CPU scaling governor to {{ cpu_governor }} (ailab)
+Documentation=https://github.com/cchifor/ailab
+After=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo {{ cpu_governor }} > "$g" 2>/dev/null || true; done'
+
+[Install]
+WantedBy=multi-user.target
