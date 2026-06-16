@@ -59,7 +59,7 @@ data:
         - LiteLLM:
             href: https://api.chifor.me
             description: OpenAI-compatible router
-            icon: litellm.png
+            icon: mdi-router-network # litellm.png isn't in the icon CDN -> broken image; use a bundled MDI
             siteMonitor: http://litellm.ai.svc.cluster.local:4000/health/liveliness
     - Observability:
         - Grafana:
