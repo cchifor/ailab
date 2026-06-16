@@ -137,3 +137,7 @@ use pve-exporter with `* on(id) group_left(name) pve_guest_info` for friendly le
 **AI** gained AI-node CPU%; the KV panel was replaced with `llamacpp:n_busy_slots_per_decode` because this
 llama.cpp build (b9631) exposes **no kv-cache metric**; throughput panels are labeled tokens/s. **Storage**
 gained host disk read/write rate (`node_disk_*`). Every panel query verified against live data.
+Later added **CPU Clock per Hypervisor** (`node_cpu_scaling_frequency_hertz`) + a **CPU Governor** table
+(`node_cpu_scaling_governor == 1` — node_exporter emits a series per governor with 1=active, so the `==1`
+filter is required). The governor is pinned `performance` by the new ansible role **`cpu_performance`**
+(systemd oneshot, `just perf` / tag `performance`; AI hosts on amd-pstate-epp) — persists across reboots.

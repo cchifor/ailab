@@ -51,7 +51,7 @@ Run `just` with no args to list all tasks. Raw commands are in each `justfile` r
 |---|---|
 | `docs/` | architecture, network plan, ADRs, runbooks |
 | `inventory/hosts.yml` | single source of truth for hosts, IPs, roles |
-| `ansible/` | host-level config: kernel, Thunderbolt links, storage net, NFS mounts, host `node_exporter`, validation |
+| `ansible/` | host-level config: kernel, Thunderbolt links, storage net, NFS mounts, host `node_exporter`, CPU performance governor, validation |
 | `tofu/` | OpenTofu (`bpg/proxmox`): datacenter storage now, VMs/K8s later |
 | `scripts/` | bootstrap + read-only discovery helpers |
 | `kubernetes/` | live — `infra/` (Talos VMs + `ai-lxc/` GPU LXCs, OpenTofu) + `apps/` (Flux GitOps: CSI, observability, AI, edge/exposure) |
