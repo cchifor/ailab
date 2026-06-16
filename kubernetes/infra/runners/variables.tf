@@ -89,8 +89,20 @@ variable "runner_cores" {
   default = 8
 }
 variable "runner_memory_mib" {
-  type    = number
-  default = 24576
+  description = "Max VM memory (MiB) — the ceiling the balloon can inflate to under CI load."
+  type        = number
+  default     = 24576
+}
+variable "runner_memory_floating_mib" {
+  description = <<-EOT
+    Min VM memory (MiB) = the virtio-balloon floor. floating < dedicated enables ballooning: idle
+    runners release RAM back toward this value (restores the old Hyper-V Dynamic Memory behavior),
+    and the balloon deflates on demand up to runner_memory_mib under load. Independent of the runner
+    service's systemd MemoryMax=10G (a cgroup cap, set in the ansible role) — the canary checks that,
+    not the balloon. Set equal to runner_memory_mib to disable ballooning.
+  EOT
+  type        = number
+  default     = 4096
 }
 variable "runner_rootfs_gb" {
   type    = number

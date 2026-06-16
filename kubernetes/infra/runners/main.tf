@@ -42,8 +42,12 @@ resource "proxmox_virtual_environment_vm" "runner" {
     type  = "host" # homogeneous CPUs; no live migration (runners are rebuildable)
   }
 
+  # Ballooning: VM floats between floating (idle floor) and dedicated (load ceiling), so idle runners
+  # return RAM to the host (like the old Hyper-V Dynamic Memory pool). Independent of the runner
+  # service's systemd MemoryMax cap.
   memory {
     dedicated = var.runner_memory_mib
+    floating  = var.runner_memory_floating_mib
   }
 
   scsi_hardware = "virtio-scsi-single"
