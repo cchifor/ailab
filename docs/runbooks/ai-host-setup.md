@@ -4,8 +4,13 @@ How the per-node **`ai-llm`** LXCs are built and operated. They serve an OpenAI-
 `:8080` from `llama.cpp` (Vulkan/RADV) on each Bosgame M5's Radeon 8060S iGPU (gfx1151), models from
 the shared QNAP NFS store. Surfaced in Kubernetes as `llm.ai.svc.cluster.local:8080`.
 
-- **IaC:** OpenTofu module `kubernetes/infra/ai-lxc/` (3 privileged LXCs, vmid 5001–5003, IP .51–.53),
+- **IaC:** OpenTofu module `kubernetes/infra/ai-lxc/` (3 privileged LXCs, vmid 5001–5003, IP **.44–.46**),
   provisioning scripts in the same dir, k8s wiring in `kubernetes/apps/apps/ai/`.
+  > **IP note (2026-06-16):** the LXCs moved from .51–.53 to **.44–.46**. The router's DHCP pool starts
+  > above .50, so .51–.53 sat *inside* it and the router leased .53 to a DHCP client (an MXCHIP IoT
+  > device) → ARP conflict → qwen3.5-122b intermittently unreachable. Keep the lab's static IPs (Talos
+  > .41–.43, AI LXCs .44–.46) within the reserved .2–.50 block. The manual k8s Endpoints
+  > (`llm-service.yaml`, `monitoring.yaml`) carry these IPs too — change both together.
 - **Helpers:** `scripts/fetch-models.sh` (download GGUFs), `scripts/lxc-exec.py` (push+run provisioning).
 - See ADR `docs/decisions/0008-ai-llm-appliance-implementation.md`.
 
@@ -107,8 +112,8 @@ MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
 
 ## Verify
 ```bash
-curl http://192.168.0.51:8080/health                      # {"status":"ok"}
-curl http://192.168.0.51:8080/v1/models                   # lists the served model
+curl http://192.168.0.44:8080/health                      # {"status":"ok"}  (node1 LXC; .45=node2, .46=node3)
+curl http://192.168.0.44:8080/v1/models                   # lists the served model
 # decode rate: POST /v1/chat/completions, read .timings.predicted_per_second
 kubectl --kubeconfig kubernetes/infra/_out/kubeconfig -n ai get svc,endpoints,servicemonitor
 # in-cluster: wget -qO- http://llm.ai.svc.cluster.local:8080/v1/models
