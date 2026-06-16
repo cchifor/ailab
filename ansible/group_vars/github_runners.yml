@@ -6,6 +6,6 @@
 # Setup: see docs/runbooks/ci-runners.md.
 github_runner_enabled: true
 
-# From the GitHub App page (Settings -> Developer settings -> GitHub Apps -> your app):
-github_runner_app_id: "CHANGE_ME" # "App ID"
-github_runner_app_installation_id: "CHANGE_ME" # the App's installation on cchifor/platform
+# GitHub App `ailab-ci-runners` (github.com/apps/ailab-ci-runners), created 2026-06-16:
+github_runner_app_id: "4070577"
+github_runner_app_installation_id: "140722927" # App installed on the cchifor account (2026-06-16)
