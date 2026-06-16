@@ -1,0 +1,83 @@
+# oauth2-proxy — SSO gate in front of Homepage (which has no native auth). It is an OIDC client of
+# Authelia (sso.chifor.me); unauthenticated requests are redirected to the Authelia login, then proxied
+# to the Homepage service. cloudflared routes home.chifor.me -> this proxy (:4180), not Homepage directly.
+# pass-host-header keeps Host: home.chifor.me so Homepage's HOMEPAGE_ALLOWED_HOSTS check passes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: homepage
+  labels:
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oauth2-proxy
+    spec:
+      priorityClassName: platform-normal
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 2000
+        runAsGroup: 2000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+          args:
+            - --provider=oidc
+            - --oidc-issuer-url=https://sso.chifor.me
+            - --client-id=homepage
+            - --redirect-url=https://home.chifor.me/oauth2/callback
+            - --upstream=http://homepage.homepage.svc.cluster.local:8080
+            - --http-address=0.0.0.0:4180
+            - --email-domain=* # single-user lab: any Authelia-authenticated user
+            - --scope=openid profile email groups
+            - --code-challenge-method=S256 # PKCE (Authelia client requires it)
+            - --cookie-secure=true
+            - --reverse-proxy=true # behind cloudflared: trust X-Forwarded-Proto
+            - --skip-provider-button=true # straight to Authelia, no interstitial
+            - --pass-host-header=true # Homepage needs Host: home.chifor.me
+            - --whitelist-domain=sso.chifor.me
+            - --insecure-oidc-allow-unverified-email=true # Authelia may not set email_verified
+            - --cookie-expire=8h
+            - --cookie-refresh=1h
+          env:
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: oauth2-proxy-homepage, key: OAUTH2_PROXY_CLIENT_SECRET } }
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom: { secretKeyRef: { name: oauth2-proxy-homepage, key: OAUTH2_PROXY_COOKIE_SECRET } }
+          ports:
+            - { name: http, containerPort: 4180 }
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: homepage
+  labels:
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  selector:
+    app.kubernetes.io/name: oauth2-proxy
+  ports:
+    - { name: http, port: 4180, targetPort: http }

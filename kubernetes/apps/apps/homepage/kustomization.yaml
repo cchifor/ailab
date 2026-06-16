@@ -8,3 +8,5 @@ resources:
   - rbac.yaml
   - configmap.yaml
   - deployment.yaml
+  - oauth2-proxy-secret.sops.yaml # SOPS: oauth2-proxy client + cookie secrets
+  - oauth2-proxy.yaml # Authelia SSO gate in front of Homepage

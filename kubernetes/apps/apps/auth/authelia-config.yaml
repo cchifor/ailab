@@ -77,3 +77,16 @@ data:
               - 'https://chat.chifor.me/oauth/oidc/callback'
             scopes: ['openid', 'profile', 'groups', 'email']
             token_endpoint_auth_method: 'client_secret_basic'
+          - client_id: 'homepage'
+            client_name: 'Homepage'
+            # oauth2-proxy gates home.chifor.me (Homepage has no native auth). Secret hash only here;
+            # plaintext is in the SOPS secret oauth2-proxy-homepage (homepage ns).
+            client_secret: '$pbkdf2-sha512$310000$E0TyCO.pOHUf1f7/qGL0IQ$MfA8SKebk4E.zU5LmVQ.tWFOWUwctQVgYgHO4i0A8YXYqZeUtppo1E7p4yF1GqXyKaJoKqiOjDs/S2.K8NF9qw'
+            public: false
+            authorization_policy: 'one_factor'
+            require_pkce: true
+            pkce_challenge_method: 'S256'
+            redirect_uris:
+              - 'https://home.chifor.me/oauth2/callback'
+            scopes: ['openid', 'profile', 'groups', 'email']
+            token_endpoint_auth_method: 'client_secret_basic'
