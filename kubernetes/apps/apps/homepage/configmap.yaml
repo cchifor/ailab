@@ -22,6 +22,11 @@ data:
 
   docker.yaml: ""
 
+  # Homepage copies skeleton custom.css/custom.js into /app/config on first page render; with the
+  # config mounted read-only (ConfigMap) that copy hits EROFS and crashes the app. Provide them empty.
+  custom.css: ""
+  custom.js: ""
+
   bookmarks.yaml: |
     - Lab:
         - Repo:
