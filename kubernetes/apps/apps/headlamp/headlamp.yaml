@@ -32,6 +32,11 @@ spec:
     serviceAccount:
       create: true
       name: headlamp
+    config:
+      # Headlamp is gated by Cloudflare Access (k8s.chifor.me) and uses a READ-ONLY ServiceAccount, so
+      # authenticate every (already-Access'd) request AS that pod SA — this skips the token-paste prompt.
+      # Flagged "unsafe" only because it drops per-user auth; safe here behind the Access proxy + RO RBAC.
+      unsafeUseServiceAccountToken: true
     service:
       type: ClusterIP
       port: 80
