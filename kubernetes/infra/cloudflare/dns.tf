@@ -24,5 +24,8 @@ resource "cloudflare_dns_record" "tunnel" {
   # Create the dev-worker Access apps (access.tf) BEFORE any of these CNAMEs, so dwN.chifor.me is
   # already Access-gated the moment it resolves — never an unauthenticated window to the ttyd shell.
   # No-op ordering for the other (already-imported) records.
-  depends_on = [cloudflare_zero_trust_access_application.dev_worker]
+  depends_on = [
+    cloudflare_zero_trust_access_application.dev_worker,
+    cloudflare_zero_trust_access_application.k8s_tools,
+  ]
 }

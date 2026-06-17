@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: headlamp
+  labels:
+    # Headlamp runs non-root, no privileges/hostPath — baseline is sufficient and avoids depending on
+    # the chart's exact securityContext field keys (restricted would reject if any are unset).
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline

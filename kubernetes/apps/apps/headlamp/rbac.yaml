@@ -1,0 +1,31 @@
+# Read-only cluster access for Headlamp's ServiceAccount. Headlamp auto-uses the pod SA, so this
+# ClusterRole defines what the UI can see. get/list/watch on everything (incl cluster-scoped + CRDs)
+# + pod logs; NO write verbs (no create/update/delete/exec) — the UI is an inspector, not a mutator.
+# NOTE: this includes read on Secrets (decoded in the UI). It's an admin tool behind Cloudflare Access
+# + the LAN-only tunnel, and the operator can already `kubectl get secret`; tighten later if desired.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: headlamp-readonly
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - nonResourceURLs: ["*"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: headlamp-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: headlamp-readonly
+subjects:
+  - kind: ServiceAccount
+    name: headlamp
+    namespace: headlamp

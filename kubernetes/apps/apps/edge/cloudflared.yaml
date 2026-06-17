@@ -42,6 +42,12 @@ data:
       - hostname: dw3.chifor.me
         service: https://192.168.0.39
         originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.39" }
+      # In-cluster k8s tools: Headlamp (read-only cluster explorer) + Hubble UI (Cilium L3/L4/L7
+      # network flows). GATED by Cloudflare Access (kubernetes/infra/cloudflare/access.tf k8s_tools).
+      - hostname: k8s.chifor.me
+        service: http://headlamp.headlamp.svc.cluster.local:80
+      - hostname: hubble.chifor.me
+        service: http://hubble-ui.kube-system.svc.cluster.local:80
       # Strive platform (strive.place) -> in-cluster Traefik (path-routes /api/*,
       # /agent, /auth + the gatekeeper ForwardAuth chain). id.strive.place -> Keycloak.
       # Requires the strive.place zone + these CNAMEs on the tunnel (see RUNBOOK).
