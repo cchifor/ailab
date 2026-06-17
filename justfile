@@ -55,7 +55,6 @@ ping-runners:
     cd {{ansible_dir}} && ansible github_runners -m ping
 
 # OpenTofu: plan/apply ONLY the dev-worker VMs (separate state from runners + Talos).
-# PREREQUISITE: shrink the router DHCP pool to start at .53 first (see docs/network-plan.md).
 dev-workers-plan:
     tofu -chdir=kubernetes/infra/dev-workers plan
 dev-workers-apply:

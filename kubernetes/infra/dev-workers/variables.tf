@@ -120,10 +120,9 @@ variable "dev_worker_ssh_public_key" {
 }
 
 # ---- One dev-worker VM per physical host (fault isolation) ----
-# IPs .50/.51/.52: .50 is the last free address in the static-reserved block (.2-.50); .51/.52 are
-# reclaimed by shrinking the router DHCP pool to start at .53 FIRST (see docs/network-plan.md +
-# docs/runbooks/dev-workers.md). vmids 4201-4203 don't collide (Talos 4001-4003, runners 4101-4103,
-# AI LXC 5001-5003).
+# IPs .37/.38/.39: free static addresses well inside the reserved block (.2-.50) and below the
+# router DHCP pool (starts at .51) — no router change needed. vmids 4201-4203 don't collide
+# (Talos 4001-4003, runners 4101-4103, AI LXC 5001-5003).
 variable "dev_worker_nodes" {
   type = map(object({
     node_name = string
@@ -132,8 +131,8 @@ variable "dev_worker_nodes" {
     hostname  = string
   }))
   default = {
-    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.50", hostname = "dev-worker-1" }
-    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.51", hostname = "dev-worker-2" }
-    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.52", hostname = "dev-worker-3" }
+    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.37", hostname = "dev-worker-1" }
+    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.38", hostname = "dev-worker-2" }
+    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.39", hostname = "dev-worker-3" }
   }
 }

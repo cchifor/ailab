@@ -10,20 +10,20 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
-| dev-worker-1 | ai-node1 | 4201 | 192.168.0.50 | 8 vCPU / 24 GiB (6–24 balloon) / 40+128 GiB |
-| dev-worker-2 | ai-node2 | 4202 | 192.168.0.51 | 8 vCPU / 24 GiB (6–24 balloon) / 40+128 GiB |
-| dev-worker-3 | ai-node3 | 4203 | 192.168.0.52 | 8 vCPU / 24 GiB (6–24 balloon) / 40+128 GiB |
+| dev-worker-1 | ai-node1 | 4201 | 192.168.0.37 | 8 vCPU / 24 GiB (6–24 balloon) / 40+128 GiB |
+| dev-worker-2 | ai-node2 | 4202 | 192.168.0.38 | 8 vCPU / 24 GiB (6–24 balloon) / 40+128 GiB |
+| dev-worker-3 | ai-node3 | 4203 | 192.168.0.39 | 8 vCPU / 24 GiB (6–24 balloon) / 40+128 GiB |
 
-## Pre-flight gates (clear BEFORE `tofu apply`)
+## Pre-flight gate (clear BEFORE `tofu apply`)
 
-1. **Router DHCP pool** — shrink the pool start from `.51` to **`.53`** in the router admin UI (no
-   IaC for the router) so `.51/.52` are safe static addresses. `docs/network-plan.md` already records
-   the new boundary. Skipping this risks a DHCP lease collision on `.51/.52`.
-2. **GPU VRAM carve** — confirm the per-node BIOS VRAM reservation (`docs/runbooks/ai-host-setup.md`;
-   up to ~64 GiB). This sets the real system-RAM budget. The default dev-worker memory is a **24 GiB
-   ballooned ceiling / 6 GiB floor**; if the carve is large and you run heavy local builds alongside
-   the runner VM, drop `dev_worker_memory_mib` to `16384` in
-   `kubernetes/infra/dev-workers/terraform.tfvars`.
+**GPU VRAM carve** — confirm the per-node BIOS VRAM reservation (`docs/runbooks/ai-host-setup.md`;
+up to ~64 GiB). This sets the real system-RAM budget. The default dev-worker memory is a **24 GiB
+ballooned ceiling / 6 GiB floor**; if the carve is large and you run heavy local builds alongside
+the runner VM, drop `dev_worker_memory_mib` to `16384` in
+`kubernetes/infra/dev-workers/terraform.tfvars`.
+
+(IPs `.37/.38/.39` are free static addresses inside the `.2`–`.50` reserve, below the DHCP pool —
+no router change is needed.)
 
 Per-node RAM budget: Talos CP **32 GiB hard** + ai-llm LXC (24 GiB cap, ~0.5 GiB real) + runner
 (24 GiB ceiling / 1 GiB floor) + dev-worker (24 GiB ceiling / 6 GiB floor). Idle footprint is small;
@@ -39,7 +39,7 @@ just dev-workers-plan      # expect 1 download_file + 3 VMs (scsi0 40G import + 
 just dev-workers-apply
 
 # 2. reach the guests (c4 is created by cloud-init on first boot)
-just ping-dev-workers      # or: ssh c4@192.168.0.50
+just ping-dev-workers      # or: ssh c4@192.168.0.37
 
 # 3. ansible — configure (Claude Code + Codex + docker + tmux + ttyd/Caddy + dashboard …)
 just dev-workers
@@ -51,7 +51,7 @@ just dev-workers           # run twice — the 2nd run should report near-zero c
 Auth is **subscription OAuth** — provisioning injects no keys. Once per worker:
 
 ```bash
-ssh c4@192.168.0.50
+ssh c4@192.168.0.37
 sudo -iu claude-agent      # the credential-owner account
 
 claude                     # complete the Claude (Max/Pro) OAuth login once  → ~/.claude
@@ -66,7 +66,7 @@ token files (POSIX default ACLs don't apply retroactively):
 ```bash
 just dev-workers
 # verify c4 can read the shared creds:
-ssh c4@192.168.0.50 'claude --version && codex --version'
+ssh c4@192.168.0.37 'claude --version && codex --version'
 ```
 
 > **CODEX_HOME caveat:** the role exports `CODEX_HOME=/home/claude-agent/.codex` for c4. If the
@@ -99,7 +99,7 @@ git add ansible/secrets/dev-worker.sops.yaml
 - `/workspace` mounted: `mountpoint -q /workspace && echo ok`
 - docker: `docker run --rm hello-world`
 - tmux: `tmux ls` shows `main`; the dashboard is the `sessions` session (`claude-dashboard`)
-- ttyd: browse `https://192.168.0.50/` (trust the Caddy local-CA cert)
+- ttyd: browse `https://192.168.0.37/` (trust the Caddy local-CA cert)
 - metrics: `curl -s localhost:9100/metrics | head`
 - agents (both `c4` + `claude-agent`): `which claude codex` resolve under `~/.npm-global/bin`;
   `claude --version`, `codex --version`; `getfacl ~/.claude ~/.codex` shows c4 `rx`

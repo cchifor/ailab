@@ -5,8 +5,7 @@
 #   tofu -chdir=kubernetes/infra/dev-workers init
 #   tofu -chdir=kubernetes/infra/dev-workers apply        # or: just dev-workers-apply
 #
-# PREREQUISITE: shrink the router DHCP pool to start at .53 BEFORE apply, so .51/.52 are safe
-# static addresses (see docs/network-plan.md + docs/runbooks/dev-workers.md).
+# IPs .37/.38/.39 are free static addresses inside the reserved block — no router change needed.
 
 pve_endpoint     = "https://192.168.0.2:8006/"
 pve_api_token    = "tofu@pve!tofu=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
