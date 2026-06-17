@@ -2,9 +2,10 @@
 # The platform's deploy/ tree (Flux components + gitops DAG + Helm umbrella) is
 # reconciled from here by the platform Kustomization (platform.yaml).
 #
-# NOTE: if cchifor/platform is private, switch url to ssh://git@github.com/cchifor/platform
-# and add a deploy-key secretRef (see RUNBOOK). Pin ref.branch to a tag/sha for
-# immutable deploys once stabilized.
+# cchifor/platform is PRIVATE, so this clones over SSH with a read-only deploy
+# key. The key Secret (platform-deploy-key, flux-system) is SOPS-encrypted under
+# kubernetes/apps/platform-bootstrap and applied by the platform-git-auth
+# Kustomization. Pin ref.branch to a tag/sha for immutable deploys once stabilized.
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:
@@ -14,4 +15,6 @@ spec:
   interval: 10m
   ref:
     branch: main
-  url: https://github.com/cchifor/platform
+  secretRef:
+    name: platform-deploy-key
+  url: ssh://git@github.com/cchifor/platform

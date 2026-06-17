@@ -1,0 +1,28 @@
+# Decrypts + applies the read-only SSH deploy key Secret (platform-deploy-key in
+# flux-system) that the `platform` GitRepository uses to clone the PRIVATE
+# cchifor/platform repo over SSH. The Secret lives in a dedicated path
+# (kubernetes/apps/platform-bootstrap) OUTSIDE clusters/ai, because the
+# bootstrap-generated flux-system Kustomization that sweeps clusters/ai has no
+# decryption and would otherwise apply the ciphertext verbatim.
+#
+# No explicit dependsOn: the `platform` GitRepository simply retries each interval
+# and starts cloning successfully once this Kustomization has applied the Secret.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform-git-auth
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/platform-bootstrap
+  prune: true
+  wait: true
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
