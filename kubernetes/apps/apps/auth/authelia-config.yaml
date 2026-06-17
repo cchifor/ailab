@@ -91,3 +91,19 @@ data:
               - 'https://home.chifor.me/oauth2/callback'
             scopes: ['openid', 'profile', 'groups', 'email']
             token_endpoint_auth_method: 'client_secret_basic'
+          - client_id: 'registry'
+            client_name: 'Container Registry'
+            # zot web-UI login via Authelia. zot does NOT use PKCE (require_pkce: false, unlike the
+            # others). Secret HASH only here; plaintext is in ansible/secrets/registry.sops.yaml
+            # (registry_oidc_client_secret), consumed by the registry_zot role -> zot
+            # http.auth.openid. Docker push (ci/htpasswd) + anonymous pull (Talos) are unaffected.
+            client_secret: '$pbkdf2-sha512$310000$qq/PKAlfJkUAEttvKgwY3A$wEzLVupv9Wtgxw3uxsIiGk2RWL.qxZoXcbz.o1CddtC84NQGawI6XXnD.n.6SRO7rMncrQygfWrrP64rLUwqFA'
+            public: false
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit'
+            require_pkce: false
+            redirect_uris:
+              - 'https://registry.chifor.me/zot/auth/callback/oidc'
+            scopes: ['openid', 'profile', 'groups', 'email']
+            userinfo_signed_response_alg: 'none'
+            token_endpoint_auth_method: 'client_secret_basic'

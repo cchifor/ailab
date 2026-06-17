@@ -18,6 +18,16 @@ registry_zot_data_dir: "/var/lib/registry/store"
 # clients get read-only (pull) per config.json.
 registry_zot_ci_user: "ci"
 
+# Web-UI SSO via Authelia (zot-native OIDC). Docker push (ci/htpasswd) + anonymous pull are
+# UNAFFECTED — only the browser UI gains a "Login with Authelia" button. The plaintext client
+# secret (registry_oidc_client_secret) comes from SOPS (registry.sops.yaml); the Authelia client +
+# secret HASH live in kubernetes/apps/apps/auth/authelia-config.yaml. The provider key MUST equal
+# the Authelia redirect_uri path segment: https://<host>/zot/auth/callback/<key>.
+registry_zot_oidc_enabled: true
+registry_zot_oidc_issuer: "https://sso.chifor.me"
+registry_zot_oidc_client_id: "registry"
+registry_zot_oidc_provider_key: "oidc"
+
 # Let's Encrypt (DNS-01 via Cloudflare). The token (cloudflare_dns_api_token) comes from SOPS and
 # needs Zone:DNS:Edit on chifor.me — the SAME scoped token the cloudflare tofu module uses.
 registry_zot_acme_email: "chifor@gmail.com"
