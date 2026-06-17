@@ -6,7 +6,10 @@ After=network.target
 Type=simple
 User={{ dev_worker_agent_user }}
 Group={{ dev_worker_agent_user }}
-ExecStart=/usr/local/bin/ttyd -i 127.0.0.1 -p 7681 -t titleFixed='{{ inventory_hostname }}' tmux new-session -A -s main
+# -W/--writable: ttyd is READ-ONLY by default (clients can view but not type). Without this the web
+# terminal renders output but ignores keyboard input. It's safe here: the only path in is CF Access
+# (authenticated) or the LAN, and it lands in the operator's own c4 tmux session.
+ExecStart=/usr/local/bin/ttyd -W -i 127.0.0.1 -p 7681 -t titleFixed='{{ inventory_hostname }}' tmux new-session -A -s main
 Restart=on-failure
 RestartSec=5
 
