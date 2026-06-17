@@ -25,11 +25,26 @@
     update_cache: true
     cache_valid_time: 3600
 
-- name: Enable + start qemu-guest-agent
+- name: Enable qemu-guest-agent (auto-starts once the PVE agent channel is attached)
   ansible.builtin.systemd:
     name: qemu-guest-agent
     enabled: true
+
+# The guest-agent virtio channel (/dev/virtio-ports/org.qemu.guest_agent.0) only exists when the VM's
+# `agent` is enabled in tofu. It's disabled at create time so `apply` doesn't block on an agent that
+# isn't installed yet; after this role you can flip the dev-workers tofu `agent { enabled = true }` +
+# re-apply, and qemu-guest-agent then starts on the next boot. Starting it now without the channel
+# fails ("dependency job ... failed"), so only start it when the channel is actually present.
+- name: Check for the QEMU guest-agent virtio channel
+  ansible.builtin.stat:
+    path: /dev/virtio-ports/org.qemu.guest_agent.0
+  register: dev_worker_qga_channel
+
+- name: Start qemu-guest-agent (only if the channel is present)
+  ansible.builtin.systemd:
+    name: qemu-guest-agent
     state: started
+  when: dev_worker_qga_channel.stat.exists
 
 - name: Ensure apt keyrings dir
   ansible.builtin.file:

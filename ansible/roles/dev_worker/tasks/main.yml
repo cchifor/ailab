@@ -9,8 +9,8 @@
 - name: Assert this is an amd64 Ubuntu host
   ansible.builtin.assert:
     that:
-      - ansible_architecture == "x86_64"
-      - ansible_distribution == "Ubuntu"
+      - ansible_facts['architecture'] == "x86_64"
+      - ansible_facts['distribution'] == "Ubuntu"
     fail_msg: "dev_worker targets amd64 Ubuntu (24.04 noble) VMs only."
 
 - name: Base packages, yq, qemu-guest-agent
