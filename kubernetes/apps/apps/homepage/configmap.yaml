@@ -14,6 +14,7 @@ data:
     headerStyle: clean
     layout:
       AI: { style: row, columns: 3 }
+      Dev Workers: { style: row, columns: 3 }
       Observability: { style: row, columns: 3 }
       Infrastructure: { style: row, columns: 4 }
 
@@ -68,6 +69,21 @@ data:
             description: OpenAI-compatible router
             icon: mdi-router-network # litellm.png isn't in the icon CDN -> broken image; use a bundled MDI
             siteMonitor: http://litellm.ai.svc.cluster.local:4000/health/liveliness
+    # Interactive dev-worker web terminals (ttyd behind Caddy local-CA HTTPS). LAN/Tailscale-only —
+    # no siteMonitor (LAN tiles, like Proxmox/QNAP). First visit shows a trust-on-first-use cert warning.
+    - Dev Workers:
+        - dev-worker-1:
+            href: https://192.168.0.37/
+            description: Web terminal · Claude Code + Codex (ai-node1)
+            icon: mdi-console
+        - dev-worker-2:
+            href: https://192.168.0.38/
+            description: Web terminal · Claude Code + Codex (ai-node2)
+            icon: mdi-console
+        - dev-worker-3:
+            href: https://192.168.0.39/
+            description: Web terminal · Claude Code + Codex (ai-node3)
+            icon: mdi-console
     - Observability:
         - Grafana:
             href: https://grafana.chifor.me
