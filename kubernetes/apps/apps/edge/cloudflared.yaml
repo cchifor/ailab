@@ -28,6 +28,18 @@ data:
         service: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
       - hostname: api.chifor.me
         service: http://litellm.ai.svc.cluster.local:4000
+      # Dev-worker web terminals: tunnel -> each VM's Caddy (LAN HTTPS, local-CA self-signed).
+      # GATED by Cloudflare Access (kubernetes/infra/cloudflare/access.tf) — a passwordless-sudo shell.
+      # noTLSVerify: Caddy's cert is local-CA; httpHostHeader: so Caddy matches its IP site block.
+      - hostname: dw1.chifor.me
+        service: https://192.168.0.37
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.37" }
+      - hostname: dw2.chifor.me
+        service: https://192.168.0.38
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.38" }
+      - hostname: dw3.chifor.me
+        service: https://192.168.0.39
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.39" }
       - service: http_status:404
 ---
 apiVersion: apps/v1

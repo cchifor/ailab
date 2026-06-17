@@ -101,13 +101,32 @@ git add ansible/secrets/dev-worker.sops.yaml
 - `/workspace` mounted: `mountpoint -q /workspace && echo ok`
 - docker: `docker run --rm hello-world`
 - tmux: `tmux ls` shows `main`; the dashboard is the `sessions` session (`claude-dashboard`)
-- ttyd: browse `https://192.168.0.37/` (trust the Caddy local-CA cert)
+- ttyd: `https://dw1.chifor.me` (CF Access login) from anywhere, or `https://192.168.0.37/` on LAN/Tailscale (trust the Caddy local-CA cert)
 - metrics: `curl -s localhost:9100/metrics | head`
 - agents (both `c4` + `claude-agent`): `which claude codex` resolve under `~/.npm-global/bin`;
   `claude --version`, `codex --version`; `getfacl ~/.claude ~/.codex` shows c4 `rx`
 - persistence: start a tmux pane, reboot the VM, confirm tmux-continuum restored the session
 - **memory watch (1–2 weeks):** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. If
   pressure appears, lower `dev_worker_memory_mib` (16→12 GiB), rolling one node at a time.
+
+## Remote access (web terminals)
+
+The ttyd terminals are published as `dw1/dw2/dw3.chifor.me` through the **existing in-cluster
+Cloudflare tunnel**, each gated by a **Cloudflare Access** policy (allow-list = `allow_email`):
+
+- ingress: `kubernetes/apps/apps/edge/cloudflared.yaml` routes `dwN.chifor.me` → `https://192.168.0.3N`
+  (the VM's Caddy; `noTLSVerify` + `httpHostHeader` for the local-CA cert).
+- DNS + Access: `kubernetes/infra/cloudflare/` (`dns.tf` CNAMEs + `access.tf` apps). The DNS records
+  `depends_on` the Access apps, so Access is enforcing **before** any `dwN.chifor.me` resolves — never
+  an unauthenticated window to the passwordless-sudo shell.
+
+From anywhere: open the Homepage **Dev Workers** tile (or `https://dw1.chifor.me`) → Cloudflare Access
+login → terminal. On the LAN/Tailscale, `https://192.168.0.37/` still works directly.
+
+**Apply order (security-critical):** merge → Flux applies the ingress → `kubectl -n edge rollout
+restart deploy/cloudflared` → `tofu -chdir=kubernetes/infra/cloudflare apply` (creates Access **then**
+DNS) → `kubectl -n homepage rollout restart deploy/homepage`. (The `dev_worker_enable_cloudflared`
+role toggle — per-VM cloudflared on its own tunnel — is an ALTERNATIVE, not used here.)
 
 ## Notes
 
