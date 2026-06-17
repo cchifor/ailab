@@ -8,7 +8,11 @@ registry_zot_port: 443                  # bind 443 directly (systemd grants CAP_
 registry_zot_user: "zot"
 registry_zot_group: "zot"
 registry_zot_config_dir: "/etc/zot"
-registry_zot_data_dir: "/var/lib/registry"   # the tofu mp0 data disk is mounted here
+# The tofu mp0 data disk mounts at registry_zot_mount_dir; zot's rootDirectory is a SUBDIR of it
+# (registry_zot_data_dir). zot scans its rootDirectory for repos, and the ext4 `lost+found` at the
+# mount root is root:0700 -> the scan fails "permission denied". Using a subdir avoids it entirely.
+registry_zot_mount_dir: "/var/lib/registry"
+registry_zot_data_dir: "/var/lib/registry/store"
 
 # Push identity (authenticated). The password comes from SOPS (registry_ci_password); anonymous
 # clients get read-only (pull) per config.json.
