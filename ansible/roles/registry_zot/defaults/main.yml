@@ -27,6 +27,10 @@ registry_zot_oidc_enabled: true
 registry_zot_oidc_issuer: "https://sso.chifor.me"
 registry_zot_oidc_client_id: "registry"
 registry_zot_oidc_provider_key: "oidc"
+# Authelia group whose SSO-logged-in UI users get full push/admin (zot matches the OIDC `groups`
+# claim against accessControl + adminPolicy). `admins` is the lab's existing admin group (user
+# chifor is a member). Empty string disables the group policy. ci/htpasswd push + anon pull unaffected.
+registry_zot_admin_group: "admins"
 
 # Let's Encrypt (DNS-01 via Cloudflare). The token (cloudflare_dns_api_token) comes from SOPS and
 # needs Zone:DNS:Edit on chifor.me — the SAME scoped token the cloudflare tofu module uses.

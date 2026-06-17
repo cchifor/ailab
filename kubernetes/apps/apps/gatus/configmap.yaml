@@ -55,6 +55,11 @@ data:
         url: http://authelia.auth.svc.cluster.local:9091/api/health
         interval: 60s
         conditions: ["[STATUS] == 200"]
+      - name: Registry (Zot)
+        group: Infrastructure
+        url: https://registry.chifor.me/v2/   # anon-readable OCI API; on the LXC (.36), public LE cert
+        interval: 60s
+        conditions: ["[STATUS] == 200", "[CERTIFICATE_EXPIRATION] > 168h"]
       - name: Proxmox node1
         group: Infrastructure
         url: tcp://192.168.0.2:8006
