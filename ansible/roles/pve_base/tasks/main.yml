@@ -63,6 +63,15 @@
     state: started
     enabled: true
 
+# Spread NIC RX interrupts across cores. Without it the AQC113/atlantic 10G NIC on node3 (PCIe-tunnelled
+# over USB4) lands all RX softirq on a single core, which saturates and caps NFS reads ~300 MB/s. Helps
+# multi-flow reads; the per-flow / per-packet ceiling is addressed by jumbo frames (storage_mtu).
+- name: Ensure irqbalance is running
+  ansible.builtin.service:
+    name: irqbalance
+    state: started
+    enabled: true
+
 # ---- kernel cmdline (legacy GRUB) ----
 # All ai nodes boot via GRUB (proxmox-boot-tool manages no ESPs here), so the kernel cmdline lives in
 # /etc/default/grub + `update-grub`. Declarative + idempotent: node1/2 keep stock "quiet"; node3 adds

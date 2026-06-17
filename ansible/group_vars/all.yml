@@ -23,6 +23,8 @@ pve_base_packages:
   - curl
   - tmux
   - jq
+  - irqbalance      # spread NIC RX IRQs across cores (node3's tunnelled 10G NIC concentrates RX on
+                    #   one core w/o it — single-core softirq caps NFS reads ~300 MB/s; see network-plan)
 
 # ---- host metrics (node_exporter on the hypervisors; scraped by monitoring/proxmox-node) ----
 node_exporter_enabled: true
