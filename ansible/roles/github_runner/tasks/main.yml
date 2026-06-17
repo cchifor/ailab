@@ -164,6 +164,27 @@
     shell: /bin/bash
     system: true
 
+# Passwordless sudo — the platform CI workflows use `sudo` (install the pinned compose binary,
+# start the docker daemon, free stuck ports, reclaim root-owned _work leftovers). The old
+# Multipass/Hyper-V pool granted this; without it every Docker-heavy job fails at its first sudo
+# with "sudo: a password is required" (the pure-Python jobs, which use no sudo, still pass).
+- name: Grant the runner user passwordless sudo
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/90-github-runner
+    content: "{{ github_runner_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    mode: "0440"
+    validate: visudo -cf %s
+
+# Keep the runner's docker config dir owned by the runner (a prior root-run docker command can
+# leave it root-owned → "open ~/.docker/config.json: permission denied" on every subsequent job).
+- name: Ensure ~/.docker is owned by the runner
+  ansible.builtin.file:
+    path: "{{ github_runner_home }}/.docker"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    recurse: true
+
 # ── 5. runner agent (pinned bootstrap; auto-updates on connect) ──────────────
 - name: Ensure runner dir
   ansible.builtin.file:

@@ -89,6 +89,12 @@ drain, then delete the Multipass VMs. In GitHub → Settings → Actions → Run
   GitHub UI.
 
 ## Troubleshooting
+- **Docker/Compose jobs fail with `sudo: a password is required` (Python jobs still pass):** the
+  `runner` user lacks passwordless sudo. Platform workflows `sudo` to install the pinned compose
+  binary, start dockerd, free ports, and reclaim root-owned `_work`. The role installs
+  `/etc/sudoers.d/90-github-runner` (`runner ALL=(ALL) NOPASSWD:ALL`); to fix a live runner:
+  `echo 'runner ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-github-runner && sudo chmod 0440 /etc/sudoers.d/90-github-runner` (sudoers is read per-call — no restart needed). Related symptom:
+  `open ~/.docker/config.json: permission denied` → `sudo chown -R runner:runner /home/runner/.docker`.
 - **Runner not appearing:** check `journalctl -u actions.runner.cchifor-platform -n 100` on the VM —
   usually a bad App ID / installation ID, a key that isn't for this App, or the App missing
   `Administration: Read & write`. The wrapper logs `[ephemeral-runner] ERROR: …` on token failures.
