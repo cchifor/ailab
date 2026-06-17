@@ -19,14 +19,16 @@ storage_router_enabled: true
 # via update-grub) so a node3 rebuild reproduces it. pve_base writes this to /etc/default/grub.
 pve_grub_cmdline_linux_default: "quiet thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0"
 
-# Jumbo frames for the 10G storage link — the fix for the asymmetric read cap. At MTU 1500 a single
-# RX core's NAPI poll caps NFS *reads* at ~300 MB/s (≈ the old 2.5GbE rate) while writes hit full 10G;
-# 9000 cuts packet rate ~6x so one core can drive the link. storage_net writes `mtu {{ storage_mtu }}`
+# Jumbo frames for the 10G storage link. APPLIED 2026-06-17 (QNAP eth1 set to 9000 + node3 enp99s0
+# 9000; jumbo path to the QNAP verified by DF-bit 8972B ping). storage_net writes `mtu {{ storage_mtu }}`
 # to enp99s0.cfg (overrides the pve_nodes group default of 1500).
 #
-# *** GATED — apply ONLY after the QNAP eth1 (10.55.1.254) MTU is ALSO set to 9000 ***
-# QNAP UI: Control Panel -> Network & File Services -> Network & Virtual Switch -> Interfaces ->
-# the 10G adapter (eth1, 10.55.1.254) -> Edit -> Jumbo Frames / MTU 9000 -> Apply. A mismatched MTU
-# on the segment risks large-frame black-holing. Once the QNAP is 9000, apply node3 with `just links`
-# (storage_net re-renders enp99s0.cfg @9000 + ifreload). Until then node3 stays effectively 1500.
+# NOTE — jumbo alone does NOT fix the node3 read cap (~300 MB/s). Measured reality: WRITE is full 10G
+# (1171 MB/s) but READ over the PVE service-IP mount (10.55.0.254) stays ~300 MB/s because the Linux
+# NFS client pins ONE TCP connection per server at MSS 1448 (shared transport) → all read RX lands on
+# one queue/core. Even maximally tuned (mount via the direct eth1 IP 10.55.1.254 → jumbo MSS 8948 +
+# nconnect=8) reads only reach ~450-600 MB/s — the QNAP eth1 TX side is the real ceiling (its eth1 RX
+# is fast). The lever that helps reads is nconnect on the qnap-nfs mount (cluster-wide remount), but
+# impact is low (writes full 10G; host NFS reads are rare; k8s CSI is a separate Talos-mounted path).
+# MTU 9000 is kept because it's the correct link MTU + the direct-IP path does use it; harmless.
 storage_mtu: 9000
