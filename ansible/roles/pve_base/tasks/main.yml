@@ -63,6 +63,19 @@
     state: started
     enabled: true
 
+# ---- kernel cmdline (legacy GRUB) ----
+# All ai nodes boot via GRUB (proxmox-boot-tool manages no ESPs here), so the kernel cmdline lives in
+# /etc/default/grub + `update-grub`. Declarative + idempotent: node1/2 keep stock "quiet"; node3 adds
+# the Thunderbolt/USB4 PCIe-tunnel params (thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0)
+# — without them its TB->10G storage NIC won't enumerate (retimer-disconnect loop). See ai-node3 host_vars.
+- name: Set GRUB kernel cmdline (GRUB_CMDLINE_LINUX_DEFAULT)
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+    line: 'GRUB_CMDLINE_LINUX_DEFAULT="{{ pve_grub_cmdline_linux_default }}"'
+    state: present
+  notify: pve_base update-grub
+
 # ---- kernel pin (after discovery; guards against silent upgrades) ----
 - name: Pin Proxmox kernel
   ansible.builtin.command: "proxmox-boot-tool kernel pin {{ pve_pinned_kernel }}"
