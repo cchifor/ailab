@@ -16,6 +16,6 @@ pve_ssh_key_path = "~/.ssh/id_ed25519"
 # Control-node public key seeded into the cloud-init `c4` user (so Ansible can SSH in).
 dev_worker_ssh_public_key = "ssh-ed25519 AAAA... chifor@gmail.com"
 
-# ---- optional sizing overrides (defaults: 8 vCPU / 24 GiB balloon ceiling / 40+128 GiB) ----
-# dev_worker_memory_mib   = 16384   # drop the ceiling if a large GPU VRAM carve makes a node tight
+# ---- optional sizing overrides (defaults: 8 vCPU / 16 GiB balloon ceiling, 2 GiB floor / 40+128 GiB) ----
+# dev_worker_memory_mib   = 12288   # lower the ceiling further if a large GPU VRAM carve makes a node tight
 # dev_worker_workspace_gb = 160

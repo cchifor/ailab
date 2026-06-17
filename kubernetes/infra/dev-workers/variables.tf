@@ -89,7 +89,7 @@ variable "dev_worker_cores" {
 variable "dev_worker_memory_mib" {
   description = "Max VM memory (MiB) — the ceiling the balloon can inflate to under load."
   type        = number
-  default     = 24576 # 24 GiB; drop to 16384 if a large GPU VRAM carve makes a node tight
+  default     = 16384 # 16 GiB ceiling; lower further if a large GPU VRAM carve makes a node tight
 }
 variable "dev_worker_memory_floating_mib" {
   description = <<-EOT
@@ -98,7 +98,7 @@ variable "dev_worker_memory_floating_mib" {
     dev_worker_memory_mib under load. Set equal to dev_worker_memory_mib to disable ballooning.
   EOT
   type        = number
-  default     = 6144 # 6 GiB idle floor; reclaimed toward this under host pressure
+  default     = 2048 # 2 GiB idle floor; reclaimed toward this under host pressure
 }
 variable "dev_worker_rootfs_gb" {
   description = "Root disk (scsi0) size in GiB; cloud-init growpart expands the root fs to fill it."
