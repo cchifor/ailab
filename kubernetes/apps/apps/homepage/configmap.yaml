@@ -130,3 +130,7 @@ data:
             href: https://login.tailscale.com/admin
             description: Private mesh
             icon: tailscale.png
+        - Registry (Zot):
+            href: https://registry.chifor.me
+            description: Private OCI images · SSO login
+            icon: mdi-package-variant-closed
