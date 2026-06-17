@@ -16,7 +16,7 @@
 - name: Base packages, yq, qemu-guest-agent
   ansible.builtin.import_tasks: packages.yml
 
-- name: Users (create claude-agent, augment the cloud-init c4)
+- name: Users (cloud-init c4; create a separate agent only if configured)
   ansible.builtin.import_tasks: users.yml
 
 # MUST run before docker.yml: docker's data-root lives on /workspace.

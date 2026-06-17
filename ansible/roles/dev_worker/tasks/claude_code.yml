@@ -23,6 +23,21 @@
       # Managed by ansible (role: dev_worker). Put each user's per-user npm global bin on PATH.
       export PATH="$HOME/{{ dev_worker_npm_dir }}/bin:$PATH"
 
+# /etc/profile.d only covers LOGIN shells; tmux panes and the ttyd web terminal are interactive
+# NON-login shells. Also add the npm bin to each user's ~/.bashrc so `claude`/`codex` resolve there
+# (this is what makes the web UI a true peer of the SSH console).
+- name: Ensure the npm global bin is on PATH for interactive non-login shells (tmux/ttyd)
+  ansible.builtin.lineinfile:
+    path: "{{ item.home }}/.bashrc"
+    line: 'export PATH="$HOME/{{ dev_worker_npm_dir }}/bin:$PATH"'
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Probe installed Claude Code per user
   become: true
   become_user: "{{ item.name }}"

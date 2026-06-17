@@ -48,32 +48,34 @@ just dev-workers           # run twice — the 2nd run should report near-zero c
 
 ## One-time manual steps (per worker)
 
-Auth is **subscription OAuth** — provisioning injects no keys. Once per worker:
+Auth is **subscription OAuth** — provisioning injects no keys. By default **everything runs as `c4`**
+(the SSH console, the ttyd web UI, the dashboard, and any agent jobs are all the one `c4` identity),
+so you log in **once as `c4`** and both the console and the web UI are authenticated:
 
 ```bash
-ssh c4@192.168.0.37
-sudo -iu claude-agent      # the credential-owner account
-
-claude                     # complete the Claude (Max/Pro) OAuth login once  → ~/.claude
-codex login                # complete the Codex (ChatGPT) login once         → ~/.codex
-gh auth login              # for the dashboard 'github' window (gh-dash)
-exit
+ssh c4@192.168.0.37          # (.38/.39) — the ttyd web UI is the SAME c4 session
+claude                       # Claude (Max/Pro) OAuth login  → ~/.claude
+codex login                  # Codex (ChatGPT) login         → ~/.codex
+gh auth login                # for the dashboard 'github' window (gh-dash)
 ```
 
-Then **re-run the playbook once** so the recursive ACL task re-asserts read on the freshly-written
-token files (POSIX default ACLs don't apply retroactively):
+No second account, no ACL re-run. `c4` owns its own token store, so **tokens refresh cleanly** during
+normal use. The web UI (ttyd) and SSH attach the same tmux `main` session, so a `claude`/`codex` task
+started in one continues seamlessly in the other.
 
+Verify:
 ```bash
-just dev-workers
-# verify c4 can read the shared creds:
-ssh c4@192.168.0.37 'claude --version && codex --version'
+ssh c4@192.168.0.37 'claude --version && codex --version'   # both resolve from ~/.npm-global/bin
 ```
 
-> **CODEX_HOME caveat:** the role exports `CODEX_HOME=/home/claude-agent/.codex` for c4. If the
-> installed `@openai/codex` build ignores `CODEX_HOME`, replace that export (in
-> `/etc/profile.d/01-claude-shared-oauth.sh`, managed by the role's
-> `profile.d-01-claude-shared-oauth.sh.j2` template) with a per-user symlink
-> `ln -s /home/claude-agent/.codex ~/.codex` for c4.
+### Optional: sandboxed separate agent account
+To isolate the headless agent from `c4`'s sudo, set `dev_worker_agent_user: claude-agent` in
+`group_vars/dev_workers.yml` and re-run. That restores the homelab two-user split: `claude-agent`
+owns the credentials and runs ttyd + `claude-job@`, and `c4` gets read-only shared access (via ACL +
+`CLAUDE_HOME`/`CODEX_HOME`). **Caveat:** read-only sharing means `c4` **can't refresh tokens** — log
+in as `claude-agent` (`sudo -iu claude-agent`) and re-login when they expire (or grant `c4` write on
+`auth.json`). The unified default avoids this entirely; only opt in if you specifically need the
+sandbox.
 
 ## Optional features (off by default)
 

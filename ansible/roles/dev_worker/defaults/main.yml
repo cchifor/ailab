@@ -6,9 +6,17 @@
 # idempotent-Ansible idiom. See docs/runbooks/dev-workers.md.
 dev_worker_enabled: false # opt-in, like github_runner_enabled (flip in group_vars/dev_workers.yml)
 
-# ---- users (c4 is created by cloud-init as a sudoer; the role only augments it + adds claude-agent) ----
+# ---- identity ----
+# By DEFAULT the role uses ONE user (c4) for everything — the SSH console, the ttyd web UI, the
+# dashboard, the claude-job@ runner, and the Claude/Codex credentials. So the web UI and SSH console
+# are literally the same tmux session + the same auth: seamless, and tokens refresh cleanly with no
+# cross-user ACLs. c4 is created by cloud-init as a passwordless sudoer.
 dev_worker_admin_user: c4
-dev_worker_agent_user: claude-agent
+# Headless/agent account. DEFAULT = same as admin (unified, seamless). Set this to a SEPARATE account
+# (e.g. "claude-agent") ONLY to sandbox the headless agent from the human's sudo — that restores the
+# homelab two-user split, where the agent owns the credentials and c4 gets read-only shared access via
+# ACL. NOTE: read-only sharing breaks token refresh for c4 — see docs/runbooks/dev-workers.md.
+dev_worker_agent_user: "{{ dev_worker_admin_user }}"
 
 # ---- /workspace data disk (the blank scsi1 disk the tofu module attaches) ----
 dev_worker_workspace_device: /dev/sdb
