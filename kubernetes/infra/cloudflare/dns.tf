@@ -15,4 +15,9 @@ resource "cloudflare_dns_record" "tunnel" {
   content = local.tunnel_target
   ttl     = 1    # 1 = automatic (required while proxied)
   proxied = true # tunnel CNAMEs must be proxied
+
+  # Create the dev-worker Access apps (access.tf) BEFORE any of these CNAMEs, so dwN.chifor.me is
+  # already Access-gated the moment it resolves — never an unauthenticated window to the ttyd shell.
+  # No-op ordering for the other (already-imported) records.
+  depends_on = [cloudflare_zero_trust_access_application.dev_worker]
 }

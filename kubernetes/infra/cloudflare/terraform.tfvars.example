@@ -6,3 +6,6 @@
 cloudflare_account_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 zone_id               = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # chifor.me
 # tunnel_id defaults to f93d9a6a-5172-43d3-8bef-13460ea7607b (locally-managed; not created here)
+
+# Cloudflare Access allow-list email for the dev-worker terminals (access.tf):
+allow_email = "you@example.com"
