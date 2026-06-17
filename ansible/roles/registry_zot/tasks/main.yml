@@ -1,0 +1,172 @@
+---
+# Zot OCI registry on the registry LXC: native binary + systemd, Let's Encrypt cert via certbot
+# DNS-01 (Cloudflare), bcrypt htpasswd push auth + anonymous pull. Config policy mirrors
+# kubernetes/infra/registry/config.json, templated to listen on :443.
+
+- name: Install packages (certbot DNS-01, htpasswd, ufw)
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - certbot
+      - python3-certbot-dns-cloudflare
+      - apache2-utils       # htpasswd CLI
+      - python3-passlib     # community.general.htpasswd idempotency
+      - python3-bcrypt      # bcrypt backend for passlib
+      - ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create zot system group
+  ansible.builtin.group:
+    name: "{{ registry_zot_group }}"
+    system: true
+
+- name: Create zot system user
+  ansible.builtin.user:
+    name: "{{ registry_zot_user }}"
+    group: "{{ registry_zot_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ registry_zot_config_dir }}"
+    create_home: false
+
+- name: Create zot config + cert dirs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ registry_zot_group }}"
+    mode: "0750"
+  loop:
+    - "{{ registry_zot_config_dir }}"
+    - "{{ registry_zot_config_dir }}/certs"
+
+- name: Ensure data dir exists, owned by zot
+  ansible.builtin.file:
+    path: "{{ registry_zot_data_dir }}"
+    state: directory
+    owner: "{{ registry_zot_user }}"
+    group: "{{ registry_zot_group }}"
+    mode: "0750"
+
+- name: Install the zot binary
+  ansible.builtin.get_url:
+    url: "https://github.com/project-zot/zot/releases/download/{{ registry_zot_version }}/zot-linux-{{ registry_zot_arch }}"
+    dest: /usr/local/bin/zot
+    mode: "0755"
+    owner: root
+    group: root
+  notify: restart zot
+
+# ---- TLS: Let's Encrypt DNS-01 via Cloudflare ----
+- name: Create certbot secrets dir
+  ansible.builtin.file:
+    path: /root/.secrets
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Write certbot Cloudflare credentials
+  ansible.builtin.template:
+    src: cloudflare.ini.j2
+    dest: /root/.secrets/cloudflare.ini
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Ensure certbot deploy-hook dir exists
+  ansible.builtin.file:
+    path: /etc/letsencrypt/renewal-hooks/deploy
+    state: directory
+    mode: "0755"
+
+- name: Install the zot cert deploy hook
+  ansible.builtin.template:
+    src: zot-cert-deploy.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/zot-cert.sh
+    mode: "0755"
+
+- name: Obtain the Let's Encrypt cert (DNS-01) — first issue only; renewals via certbot.timer
+  ansible.builtin.command:
+    argv: "{{ certbot_argv }}"
+    creates: "/etc/letsencrypt/live/{{ registry_zot_hostname }}/fullchain.pem"
+  vars:
+    certbot_argv: >-
+      {{ ['certbot', 'certonly', '--non-interactive', '--agree-tos', '-m', registry_zot_acme_email,
+          '--dns-cloudflare', '--dns-cloudflare-credentials', '/root/.secrets/cloudflare.ini',
+          '--dns-cloudflare-propagation-seconds', '30', '-d', registry_zot_hostname,
+          '--keep-until-expiring']
+          + (['--staging'] if registry_zot_acme_staging | bool else []) }}
+
+- name: Ensure certbot auto-renewal timer is enabled
+  ansible.builtin.systemd:
+    name: certbot.timer
+    enabled: true
+    state: started
+
+- name: Install the issued cert into zot's cert dir (initial run of the deploy hook)
+  ansible.builtin.command: /etc/letsencrypt/renewal-hooks/deploy/zot-cert.sh
+  args:
+    creates: "{{ registry_zot_config_dir }}/certs/tls.crt"
+  notify: restart zot
+
+# ---- Registry config + auth ----
+- name: Deploy zot config.json
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ registry_zot_config_dir }}/config.json"
+    owner: root
+    group: "{{ registry_zot_group }}"
+    mode: "0640"
+  notify: restart zot
+
+- name: Generate bcrypt htpasswd for the push user
+  community.general.htpasswd:
+    path: "{{ registry_zot_config_dir }}/htpasswd"
+    name: "{{ registry_zot_ci_user }}"
+    password: "{{ registry_ci_password }}"
+    crypt_scheme: bcrypt
+    owner: root
+    group: "{{ registry_zot_group }}"
+    mode: "0640"
+  no_log: true
+  notify: restart zot
+
+# ---- Service ----
+- name: Install the zot systemd unit
+  ansible.builtin.template:
+    src: zot.service.j2
+    dest: /etc/systemd/system/zot.service
+    mode: "0644"
+  notify:
+    - reload systemd
+    - restart zot
+
+- name: Flush handlers so the unit is registered before enable/start
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable + start zot
+  ansible.builtin.systemd:
+    name: zot.service
+    enabled: true
+    state: started
+
+# ---- Firewall ----
+- name: Allow SSH + HTTPS through ufw
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: ["22", "443"]
+  when: registry_zot_manage_ufw | bool
+
+- name: Enable ufw (default deny incoming)
+  community.general.ufw:
+    state: enabled
+    policy: deny
+    direction: incoming
+  when: registry_zot_manage_ufw | bool

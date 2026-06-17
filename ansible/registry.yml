@@ -1,0 +1,22 @@
+---
+# Private OCI registry LXC (Zot) — registry.chifor.me. Dedicated playbook (NOT in site.yml) so a
+# full `just net` never touches it. Create the LXC first:
+#   tofu -chdir=kubernetes/infra/registry-lxc apply
+#   just registry        # provision/refresh the registry
+#   just ping-registry   # connectivity check
+# See kubernetes/infra/registry/README.md.
+- name: Configure the Zot registry LXC
+  hosts: registry
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Load registry secrets (SOPS)
+      community.sops.load_vars:
+        file: "{{ playbook_dir }}/secrets/registry.sops.yaml"
+      no_log: true
+      tags: [registry]
+      when: registry_enabled | default(false)
+  roles:
+    - role: registry_zot
+      tags: [registry]
+      when: registry_enabled | default(false)

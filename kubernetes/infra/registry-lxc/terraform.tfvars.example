@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars (gitignored). root@pam PASSWORD auth (same as ai-lxc); the password
+# is the node root password (.env NODE_ROOT_PASSWORD).
+pve_endpoint     = "https://192.168.0.2:8006/"
+pve_username     = "root@pam"
+pve_password     = "your-node-root-password"
+pve_insecure     = true
+pve_ssh_username = "root"
+pve_ssh_key_path = "~/.ssh/id_ed25519"
+
+# Public SSH key for Ansible access to the CT (reuse the runners'/dev-workers' key value).
+ssh_public_key = "ssh-ed25519 AAAA... your-ansible-key"
+
+# Override only if needed, e.g.:
+# data_gb       = 96
+# registry_lxc  = { node_name = "ai-node2", vm_id = 5004, ip = "192.168.0.36", hostname = "registry" }
