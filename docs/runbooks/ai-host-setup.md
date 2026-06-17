@@ -110,6 +110,40 @@ MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
   dense OCR/grounding — costs ~1.7 s prompt vs ~0.5 s without, ~3 s end-to-end (worth it).
   (`lxc-exec.py` shell-quotes env values, so multi-word EXTRA_ARGS passes through intact.)
 
+## Model refresh 2026-06: Qwen3.6-35B-A3B + Gemma-4-26B-A4B (node1)
+Web-validated upgrades (ADR/validation): **Qwen3.6-35B-A3B** (hybrid Gated-DeltaNet MoE, ~35B/3B
+active, coding **+ vision**) replaces `qwen3-coder-30b-a3b` on `:8081`; **Gemma-4-26B-A4B** (Google
+QAT, vision image+video — NOT audio) replaces `qwen3-vl-8b` on `:8082`. Both need the new arches, so
+the llama.cpp pin is bumped **b9631 → b9672** (adds `qwen35moe` + `gemma4`). node1 then holds general
+(~18.6G) + Qwen3.6 (~21G) + Gemma-4 (~15.6G) ≈ 55G — fits the 64 GB carve (tight; smoke-test first).
+```bash
+# 1. Download the GGUFs to NFS (on a Proxmox host)
+ssh root@192.168.0.2 'bash -s' < scripts/fetch-models.sh qwen3.6
+ssh root@192.168.0.2 'bash -s' < scripts/fetch-models.sh gemma4
+
+# 2. Bump node1's llama.cpp to b9672 by re-provisioning the DEFAULT instance (restarts general :8080
+#    on the new build — verify it still answers before continuing).
+python scripts/lxc-exec.py 192.168.0.2 5001   # LLAMA_BUILD now defaults to b9672
+
+# 3. SMOKE-TEST each new arch on Vulkan/gfx1151 as a throwaway instance BEFORE cutting over the
+#    routing (the qwen35moe hybrid + gemma4 vision paths are newer on the Vulkan backend):
+MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
+  --env INSTANCE=qwen36 --env PORT=8081 \
+  --env MODEL=/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+  --env MODEL_ALIAS=qwen3.6-35b-a3b --env MMPROJ=/models/qwen3.6-35b-a3b/mmproj-F16.gguf \
+  --env CTX=32768 --env PARALLEL=2
+MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
+  --env INSTANCE=gemma4 --env PORT=8082 \
+  --env MODEL=/models/gemma-4-26b-a4b/gemma-4-26B_q4_0-it.gguf \
+  --env MODEL_ALIAS=gemma-4-26b-a4b --env MMPROJ=/models/gemma-4-26b-a4b/gemma-4-26B-it-mmproj.gguf \
+  --env CTX=16384 --env PARALLEL=1
+# Confirm: /health ok on :8081 + :8082, a text completion, and an image describe (gemma4 vision is
+# newer in llama.cpp — if mmproj load errors, see issues #21402/#21497 and pin a known-good build).
+```
+The old `qwen3-coder-30b` / `qwen3-vl-8b` GGUFs stay on NFS (revert by re-pointing the instances).
+The k8s Services were renamed `llm-coder→llm-qwen36`, `llm-vision→llm-gemma4` and the LiteLLM
+`model_list` updated (both `supports_vision: true`); a `git push` reconciles them via Flux.
+
 ## Verify
 ```bash
 curl http://192.168.0.44:8080/health                      # {"status":"ok"}  (node1 LXC; .45=node2, .46=node3)

@@ -15,11 +15,13 @@ data:
           model: openai/qwen3-30b-a3b
           api_base: http://llm.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-      - model_name: qwen3-coder-30b-a3b
+      - model_name: qwen3.6-35b-a3b
         litellm_params:
-          model: openai/qwen3-coder-30b-a3b
-          api_base: http://llm-coder.ai.svc.cluster.local:8081/v1
+          model: openai/qwen3.6-35b-a3b
+          api_base: http://llm-qwen36.ai.svc.cluster.local:8081/v1
           api_key: "sk-noauth"
+        model_info:
+          supports_vision: true # Qwen3.6 is multimodal (coding + vision); replaced qwen3-coder-30b
       - model_name: gpt-oss-120b
         litellm_params:
           model: openai/gpt-oss-120b
@@ -30,13 +32,13 @@ data:
           model: openai/qwen3.5-122b
           api_base: http://llm-qwen35.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-      - model_name: qwen3-vl-8b
+      - model_name: gemma-4-26b-a4b
         litellm_params:
-          model: openai/qwen3-vl-8b
-          api_base: http://llm-vision.ai.svc.cluster.local:8082/v1
+          model: openai/gemma-4-26b-a4b
+          api_base: http://llm-gemma4.ai.svc.cluster.local:8082/v1
           api_key: "sk-noauth"
         model_info:
-          supports_vision: true # gates image input in LiteLLM + Open WebUI
+          supports_vision: true # gates image input in LiteLLM + Open WebUI; replaced qwen3-vl-8b
     litellm_settings:
       drop_params: true
       request_timeout: 600

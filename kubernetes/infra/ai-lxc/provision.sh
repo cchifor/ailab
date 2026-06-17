@@ -8,7 +8,10 @@
 # amdgpu-textfile.sh.
 #
 # Env overrides (defaults = the daily driver on the current 64 GB VRAM carve):
-#   LLAMA_BUILD  pinned llama.cpp Vulkan release tag       (default b9631)
+#   LLAMA_BUILD  pinned llama.cpp Vulkan release tag       (default b9672)
+#                (b9672 adds the qwen35moe + gemma4 arches needed by Qwen3.6 / Gemma-4;
+#                 b9631 predated gemma4 vision. Re-provisioning a node's DEFAULT instance
+#                 re-downloads this build and restarts every instance on that node.)
 #   MODEL        GGUF path inside the CT                   (default daily driver)
 #   MODEL_ALIAS  name reported by /v1/models               (default qwen3-30b-a3b)
 #   CTX          total KV context (shared across slots)    (default 32768)
@@ -22,7 +25,7 @@
 ###############################################################################
 set -euo pipefail
 
-LLAMA_BUILD="${LLAMA_BUILD:-b9631}"
+LLAMA_BUILD="${LLAMA_BUILD:-b9672}"
 MODEL="${MODEL:-/models/qwen3-30b-a3b/Qwen3-30B-A3B-Q4_K_M.gguf}"
 MODEL_ALIAS="${MODEL_ALIAS:-qwen3-30b-a3b}"
 CTX="${CTX:-32768}"
