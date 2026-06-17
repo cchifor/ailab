@@ -31,20 +31,13 @@
         tmux new-session -A -s main
       fi
 
+# Static file (NOT copy-content): the script contains bash array syntax ${#ARGS[@]}, whose `{#`
+# would be parsed as a Jinja comment-open if `content` were templated.
 - name: Install tmux-session-menu (status-left click handler)
   ansible.builtin.copy:
+    src: tmux-session-menu.sh
     dest: /usr/local/bin/tmux-session-menu
     mode: "0755"
-    content: |
-      #!/bin/bash
-      # Managed by ansible (role: dev_worker). Flat session picker for the status-left mouse binding.
-      set -euo pipefail
-      ARGS=()
-      while IFS= read -r name; do
-        ARGS+=("$name" "" "switch-client -t '$name'")
-      done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
-      [ "${#ARGS[@]}" -eq 0 ] && exit 0
-      exec tmux display-menu -T '#[align=centre]Sessions' -x M -y W "${ARGS[@]}"
 
 # ---- tmux persistence (resurrect + continuum via TPM) ----
 - name: Clone TPM {{ dev_worker_tpm_version }} per user
