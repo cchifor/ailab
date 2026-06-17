@@ -4,7 +4,7 @@ pve_use_no_subscription_repo: true
 pve_disable_enterprise_repo: true
 pve_pin_kernel: false
 pve_pinned_kernel: ""
-pve_base_packages: [bolt, iperf3, ethtool, fio, nfs-common, chrony, curl, jq]
+pve_base_packages: [bolt, iperf3, ethtool, fio, nfs-common, chrony, curl, jq, irqbalance]
 
 # Kernel cmdline (legacy GRUB — all ai nodes boot via update-grub; proxmox-boot-tool manages no ESPs
 # here). Default matches node1/2 stock. node3 overrides in host_vars to add the Thunderbolt/USB4

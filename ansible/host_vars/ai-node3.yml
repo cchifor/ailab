@@ -18,3 +18,15 @@ storage_router_enabled: true
 # keep the link from runtime-suspending before the tunnel comes up. Codified here (was applied live
 # via update-grub) so a node3 rebuild reproduces it. pve_base writes this to /etc/default/grub.
 pve_grub_cmdline_linux_default: "quiet thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0"
+
+# Jumbo frames for the 10G storage link — the fix for the asymmetric read cap. At MTU 1500 a single
+# RX core's NAPI poll caps NFS *reads* at ~300 MB/s (≈ the old 2.5GbE rate) while writes hit full 10G;
+# 9000 cuts packet rate ~6x so one core can drive the link. storage_net writes `mtu {{ storage_mtu }}`
+# to enp99s0.cfg (overrides the pve_nodes group default of 1500).
+#
+# *** GATED — apply ONLY after the QNAP eth1 (10.55.1.254) MTU is ALSO set to 9000 ***
+# QNAP UI: Control Panel -> Network & File Services -> Network & Virtual Switch -> Interfaces ->
+# the 10G adapter (eth1, 10.55.1.254) -> Edit -> Jumbo Frames / MTU 9000 -> Apply. A mismatched MTU
+# on the segment risks large-frame black-holing. Once the QNAP is 9000, apply node3 with `just links`
+# (storage_net re-renders enp99s0.cfg @9000 + ifreload). Until then node3 stays effectively 1500.
+storage_mtu: 9000
