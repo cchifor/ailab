@@ -1,0 +1,17 @@
+# Strive platform repo — source for the platform deployment.
+# The platform's deploy/ tree (Flux components + gitops DAG + Helm umbrella) is
+# reconciled from here by the platform Kustomization (platform.yaml).
+#
+# NOTE: if cchifor/platform is private, switch url to ssh://git@github.com/cchifor/platform
+# and add a deploy-key secretRef (see RUNBOOK). Pin ref.branch to a tag/sha for
+# immutable deploys once stabilized.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: platform
+  namespace: flux-system
+spec:
+  interval: 10m
+  ref:
+    branch: main
+  url: https://github.com/cchifor/platform
