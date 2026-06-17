@@ -19,16 +19,13 @@ storage_router_enabled: true
 # via update-grub) so a node3 rebuild reproduces it. pve_base writes this to /etc/default/grub.
 pve_grub_cmdline_linux_default: "quiet thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0"
 
-# Jumbo frames for the 10G storage link. APPLIED 2026-06-17 (QNAP eth1 set to 9000 + node3 enp99s0
-# 9000; jumbo path to the QNAP verified by DF-bit 8972B ping). storage_net writes `mtu {{ storage_mtu }}`
-# to enp99s0.cfg (overrides the pve_nodes group default of 1500).
-#
-# NOTE — jumbo alone does NOT fix the node3 read cap (~300 MB/s). Measured reality: WRITE is full 10G
-# (1171 MB/s) but READ over the PVE service-IP mount (10.55.0.254) stays ~300 MB/s because the Linux
-# NFS client pins ONE TCP connection per server at MSS 1448 (shared transport) → all read RX lands on
-# one queue/core. Even maximally tuned (mount via the direct eth1 IP 10.55.1.254 → jumbo MSS 8948 +
-# nconnect=8) reads only reach ~450-600 MB/s — the QNAP eth1 TX side is the real ceiling (its eth1 RX
-# is fast). The lever that helps reads is nconnect on the qnap-nfs mount (cluster-wide remount), but
-# impact is low (writes full 10G; host NFS reads are rare; k8s CSI is a separate Talos-mounted path).
-# MTU 9000 is kept because it's the correct link MTU + the direct-IP path does use it; harmless.
-storage_mtu: 9000
+# storage_mtu: left at the pve_nodes group default (1500). Jumbo MTU 9000 was tested 2026-06-17
+# (QNAP eth1 + node3 enp99s0 both 9000, path DF-ping verified) and REVERTED — it gave no benefit on
+# the production mount: node3 READ stays ~300 MB/s (vs WRITE 1171 = full 10G). Root cause is NOT the
+# MTU: the PVE NFS mount uses the QNAP service IP (10.55.0.254) over ONE NFSv4.0 TCP connection the
+# Linux client pins at MSS 1448 (shared transport per server → all read RX on one queue/core), and
+# even maxed out (direct eth1 IP, jumbo MSS 8948, nconnect=8) reads cap ~450-600 MB/s — the QNAP eth1
+# TX side is the ceiling (its RX is fast). So don't re-enable jumbo expecting faster reads; the lever
+# is nconnect on the qnap-nfs mount (cluster-wide remount). Impact is low (writes full 10G; host NFS
+# reads rare; k8s CSI is a separate Talos path). See docs/network-plan.md. A QNAP-side TX fix is being
+# researched separately.

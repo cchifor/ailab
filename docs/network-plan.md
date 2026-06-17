@@ -59,9 +59,9 @@ Thunderbolt/USB4 PCIe-tunnel boot params to enumerate — codified in `ansible/h
 (`pve_grub_cmdline_linux_default`).
 
 \*\* **Measured (fio, 2026-06-17):** node3 **write 1171 MB/s** (full 10G, ~4× the old 2.5GbE);
-**read ~300 MB/s** (≈ old 2.5G) — asymmetric. Both `irqbalance` (via `pve_base`) and **jumbo MTU 9000**
-(node3 enp99s0 + QNAP eth1, DF-ping verified) are applied, yet the production read is still ~300 MB/s
-because: (a) the PVE NFS mount uses the QNAP **service IP** (`10.55.0.254`) over a *single* NFSv4.0 TCP
+**read ~300 MB/s** (≈ old 2.5G) — asymmetric. `irqbalance` (via `pve_base`) is enabled; **jumbo MTU 9000
+was tested and REVERTED to 1500** (it gave no benefit on the production mount). The production read is
+~300 MB/s regardless of MTU because: (a) the PVE NFS mount uses the QNAP **service IP** (`10.55.0.254`) over a *single* NFSv4.0 TCP
 connection the Linux client pins at MSS 1448 (one transport per server) → all read RX on one queue/core;
 (b) even tuned to the max (mount via the direct eth1 IP `10.55.1.254` → jumbo MSS 8948 + `nconnect=8`,
 9 conns) reads only reach ~450–600 MB/s — the **QNAP eth1 TX side** is the real ceiling (its eth1 RX is
