@@ -133,4 +133,4 @@ data:
         - Registry (Zot):
             href: https://registry.chifor.me
             description: Private OCI images · SSO login
-            icon: mdi-package-variant-closed
+            icon: si-opencontainersinitiative

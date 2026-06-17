@@ -40,10 +40,18 @@
             {
               "users": ["{{ registry_zot_ci_user }}"],
               "actions": ["read", "create", "update", "delete"]
-            }
+            }{% if registry_zot_admin_group %},
+            {
+              "groups": ["{{ registry_zot_admin_group }}"],
+              "actions": ["read", "create", "update", "delete"]
+            }{% endif %}
           ]
         }
-      }
+      }{% if registry_zot_admin_group %},
+      "adminPolicy": {
+        "groups": ["{{ registry_zot_admin_group }}"],
+        "actions": ["read", "create", "update", "delete"]
+      }{% endif %}
     }
   },
   "log": {
