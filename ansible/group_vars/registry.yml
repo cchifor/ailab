@@ -1,0 +1,4 @@
+---
+# Enable the registry_zot role (the registry.yml playbook is a no-op until this is true). The LXC
+# must exist first: tofu -chdir=kubernetes/infra/registry-lxc apply.
+registry_enabled: true

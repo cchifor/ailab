@@ -1,0 +1,9 @@
+#!/bin/sh
+# Managed by Ansible (registry_zot). certbot deploy hook: copy the renewed LE cert into zot's
+# cert dir + reload the service. Runs after every successful issue/renew (certbot systemd timer).
+set -e
+LIVE="/etc/letsencrypt/live/{{ registry_zot_hostname }}"
+install -o {{ registry_zot_user }} -g {{ registry_zot_group }} -m 0644 "$LIVE/fullchain.pem" "{{ registry_zot_config_dir }}/certs/tls.crt"
+install -o {{ registry_zot_user }} -g {{ registry_zot_group }} -m 0640 "$LIVE/privkey.pem"   "{{ registry_zot_config_dir }}/certs/tls.key"
+# zot hot-reloads on cert-file change; restart as a guaranteed fallback.
+systemctl try-reload-or-restart zot.service || true

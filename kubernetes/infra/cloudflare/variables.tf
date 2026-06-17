@@ -19,3 +19,9 @@ variable "tunnel_hostnames" {
   type        = list(string)
   default     = ["home", "sso", "status", "chat", "grafana", "api", "dw1", "dw2", "dw3"]
 }
+
+variable "registry_ip" {
+  description = "LAN IP of the Zot registry LXC (kubernetes/infra/registry-lxc). registry.chifor.me is an A record pointing here, DNS-only (grey-cloud) so Talos nodes resolve it to the LAN IP and pull directly over its LE cert — NOT via the tunnel (Cloudflare can't reach a private IP)."
+  type        = string
+  default     = "192.168.0.36"
+}

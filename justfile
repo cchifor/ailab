@@ -71,6 +71,23 @@ dev-workers:
 ping-dev-workers:
     cd {{ansible_dir}} && ansible dev_workers -m ping
 
+# OpenTofu: plan/apply ONLY the Zot registry LXC (separate state from runners/dev-workers/Talos).
+registry-plan:
+    tofu -chdir=kubernetes/infra/registry-lxc plan
+registry-apply:
+    tofu -chdir=kubernetes/infra/registry-lxc apply
+
+# Ansible: provision/refresh the Zot registry (registry.chifor.me). Create the LXC first
+# (just registry-apply) + the registry SOPS secret. Dedicated playbook (not site.yml).
+# See kubernetes/infra/registry/README.md.
+registry:
+    cd {{ansible_dir}} && SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
+      ansible-playbook registry.yml
+
+# Ansible: connectivity check for the registry LXC
+ping-registry:
+    cd {{ansible_dir}} && ansible registry -m ping
+
 # Lint
 lint:
     cd {{ansible_dir}} && ansible-lint || true

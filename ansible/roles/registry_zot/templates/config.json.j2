@@ -1,0 +1,39 @@
+{
+  "distSpecVersion": "1.1.0",
+  "storage": {
+    "rootDirectory": "{{ registry_zot_data_dir }}",
+    "gc": true,
+    "gcDelay": "1h",
+    "gcInterval": "24h",
+    "dedupe": true
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "{{ registry_zot_port }}",
+    "tls": {
+      "cert": "{{ registry_zot_config_dir }}/certs/tls.crt",
+      "key": "{{ registry_zot_config_dir }}/certs/tls.key"
+    },
+    "auth": {
+      "htpasswd": {
+        "path": "{{ registry_zot_config_dir }}/htpasswd"
+      }
+    },
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "anonymousPolicy": ["read"],
+          "policies": [
+            {
+              "users": ["{{ registry_zot_ci_user }}"],
+              "actions": ["read", "create", "update", "delete"]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "log": {
+    "level": "info"
+  }
+}

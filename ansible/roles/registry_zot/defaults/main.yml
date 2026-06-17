@@ -1,0 +1,23 @@
+---
+# Zot OCI registry (native binary + systemd) on the registry LXC. registry.chifor.me:443.
+registry_zot_version: "v2.1.2"          # pin to a project-zot release; matches docker-compose.yml
+registry_zot_arch: "amd64"
+registry_zot_hostname: "registry.chifor.me"
+registry_zot_port: 443                  # bind 443 directly (systemd grants CAP_NET_BIND_SERVICE)
+
+registry_zot_user: "zot"
+registry_zot_group: "zot"
+registry_zot_config_dir: "/etc/zot"
+registry_zot_data_dir: "/var/lib/registry"   # the tofu mp0 data disk is mounted here
+
+# Push identity (authenticated). The password comes from SOPS (registry_ci_password); anonymous
+# clients get read-only (pull) per config.json.
+registry_zot_ci_user: "ci"
+
+# Let's Encrypt (DNS-01 via Cloudflare). The token (cloudflare_dns_api_token) comes from SOPS and
+# needs Zone:DNS:Edit on chifor.me — the SAME scoped token the cloudflare tofu module uses.
+registry_zot_acme_email: "chifor@gmail.com"
+registry_zot_acme_staging: false        # set true to test against LE staging (untrusted cert)
+
+# ufw (the LXC is on the mgmt LAN; only 22 + 443 need to be open)
+registry_zot_manage_ufw: true
