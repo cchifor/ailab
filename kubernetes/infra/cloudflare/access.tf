@@ -7,8 +7,12 @@
 # opt-in in access.tf.example; this file activates only the dev-worker apps.)
 
 variable "allow_email" {
-  description = "Cloudflare Access allow-list email for the interactively-gated dev-worker terminals."
+  description = "Cloudflare Access allow-list email for the interactively-gated dev-worker terminals. This is the ONLY identity allowed to the sudo shells — keep it correct."
   type        = string
+  validation {
+    condition     = can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.allow_email))
+    error_message = "allow_email must be a valid email address (the sole identity allowed to the dev-worker shells)."
+  }
 }
 
 # One reusable Allow policy (the operator's email) shared by all three dev-worker apps.
@@ -19,6 +23,10 @@ resource "cloudflare_zero_trust_access_policy" "allow_me" {
   include    = [{ email = { email = var.allow_email } }]
 }
 
+# self_hosted Access apps are DEFAULT-DENY: a request only reaches the origin (tunnel -> Caddy -> ttyd)
+# if it matches an attached allow policy. Everything else gets the Access login page and never the
+# shell. The single allow_me policy is the whole allow-list — do not add a `bypass`/`allow` policy here
+# without understanding that it would open the shell.
 resource "cloudflare_zero_trust_access_application" "dev_worker" {
   for_each = toset(["dw1", "dw2", "dw3"])
 

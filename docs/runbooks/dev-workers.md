@@ -123,10 +123,19 @@ Cloudflare tunnel**, each gated by a **Cloudflare Access** policy (allow-list = 
 From anywhere: open the Homepage **Dev Workers** tile (or `https://dw1.chifor.me`) → Cloudflare Access
 login → terminal. On the LAN/Tailscale, `https://192.168.0.37/` still works directly.
 
-**Apply order (security-critical):** merge → Flux applies the ingress → `kubectl -n edge rollout
-restart deploy/cloudflared` → `tofu -chdir=kubernetes/infra/cloudflare apply` (creates Access **then**
-DNS) → `kubectl -n homepage rollout restart deploy/homepage`. (The `dev_worker_enable_cloudflared`
-role toggle — per-VM cloudflared on its own tunnel — is an ALTERNATIVE, not used here.)
+**Apply order:** merge → Flux applies the ingress → `kubectl -n edge rollout restart deploy/cloudflared`
+→ `tofu -chdir=kubernetes/infra/cloudflare apply` (creates Access **then** DNS) → `kubectl -n homepage
+rollout restart deploy/homepage`. The ingress is inert until a `dwN` name resolves (DNS is created only
+by the tofu apply, after Access), so the ingress/cloudflared step ordering is not security-sensitive.
+(The `dev_worker_enable_cloudflared` role toggle — per-VM cloudflared on its own tunnel — is an
+ALTERNATIVE, not used here.)
+
+**Threat model.** The only thing between the internet and a passwordless-sudo shell is the CF Access
+gate, which trusts `allow_email`'s identity + an 8h browser session. So: **enable 2FA on the Access
+login method** (the email account / IdP), treat the Access session cookie as root-equivalent, and
+prefer the LAN/Tailscale path when you can. A compromised `allow_email` mailbox or session cookie =
+shell access for the session window. Consider mTLS / device posture in CF Zero Trust if you want a
+second factor at the edge.
 
 ## Notes
 

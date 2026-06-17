@@ -30,6 +30,8 @@ data:
         service: http://litellm.ai.svc.cluster.local:4000
       # Dev-worker web terminals: tunnel -> each VM's Caddy (LAN HTTPS, local-CA self-signed).
       # GATED by Cloudflare Access (kubernetes/infra/cloudflare/access.tf) — a passwordless-sudo shell.
+      # Access enforces at the CF edge for ALL paths/methods incl. the ttyd /ws WebSocket upgrade,
+      # BEFORE the tunnel — cloudflared + Caddy only ever see authenticated traffic.
       # noTLSVerify: Caddy's cert is local-CA; httpHostHeader: so Caddy matches its IP site block.
       - hostname: dw1.chifor.me
         service: https://192.168.0.37
