@@ -1,0 +1,20 @@
+---
+# node3 is the ONE node cut over to the storage-fabric SNAT path. Its Thunderbolt->10GbE adapter
+# (Ubiquiti UACC, AQC113/atlantic -> enp99s0) is a DIRECT 10G link to the QNAP eth1 (10.55.1.0/24),
+# and talos-cp3's k8s CSI traffic is forwarded+SNATed onto it by the storage_router role. So the
+# SNAT reconcile (storage-router.sh + 30s self-heal timer) MUST stay rendered for the current
+# storage_iface here. node1/2 remain build-ready/deferred (storage_router default false) — they use
+# the native Thunderbolt tbtbr0 bridge and have no SNAT cutover yet. See docs/decisions/
+# 0011-k8s-csi-over-thunderbolt.md and docs/runbooks/dev-workers.md / network-plan.md.
+#
+# Real YAML boolean (not an -e string) so `when: storage_router_enabled | default(false)` stays a
+# clean boolean conditional under ansible-core 2.21's strict checking.
+storage_router_enabled: true
+
+# Thunderbolt/USB4 PCIe-tunnel boot params for the TB->10GbE storage adapter (Ubiquiti UACC,
+# AQC113/atlantic). On this BOSGAME M5 (Ryzen AI Max 395) the adapter won't enumerate without them —
+# a retimer-disconnect / "PCIe tunnel activation failed: -19" loop until link-up. Confirmed AMD-USB4
+# kernel behaviour: host_reset=false stops the retimer reset loop; pcie_aspm=off + thunderbolt.clx=0
+# keep the link from runtime-suspending before the tunnel comes up. Codified here (was applied live
+# via update-grub) so a node3 rebuild reproduces it. pve_base writes this to /etc/default/grub.
+pve_grub_cmdline_linux_default: "quiet thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0"
