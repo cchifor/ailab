@@ -58,13 +58,16 @@ DIRECT to QNAP eth1 — superseding the earlier temporary USB→2.5GbE adapter. 
 Thunderbolt/USB4 PCIe-tunnel boot params to enumerate — codified in `ansible/host_vars/ai-node3.yml`
 (`pve_grub_cmdline_linux_default`).
 
-\*\* **Measured (fio, 2026-06-17):** node3 **write 1171 MB/s** (full 10G, ~4× the old 2.5GbE) but
-**read ~300 MB/s** — asymmetric. Root cause is node3-side, not the QNAP: at MTU 1500 a single RX
-core's NAPI poll saturates (the tunnelled AQC113 concentrates RX softirq on one core), capping reads
-regardless of stream count. Fixes: (1) **`irqbalance`** (now installed via `pve_base`) spreads RX
-IRQs — helps multi-flow; (2) **jumbo MTU 9000** is the real fix (`storage_mtu: 9000` staged in
-`host_vars/ai-node3.yml`, **gated on the QNAP eth1 also being 9000** — see that file for the order).
-Writes (the dominant CSI/backup direction) already run at full 10G, so impact is low today.
+\*\* **Measured (fio, 2026-06-17):** node3 **write 1171 MB/s** (full 10G, ~4× the old 2.5GbE);
+**read ~300 MB/s** (≈ old 2.5G) — asymmetric. Both `irqbalance` (via `pve_base`) and **jumbo MTU 9000**
+(node3 enp99s0 + QNAP eth1, DF-ping verified) are applied, yet the production read is still ~300 MB/s
+because: (a) the PVE NFS mount uses the QNAP **service IP** (`10.55.0.254`) over a *single* NFSv4.0 TCP
+connection the Linux client pins at MSS 1448 (one transport per server) → all read RX on one queue/core;
+(b) even tuned to the max (mount via the direct eth1 IP `10.55.1.254` → jumbo MSS 8948 + `nconnect=8`,
+9 conns) reads only reach ~450–600 MB/s — the **QNAP eth1 TX side** is the real ceiling (its eth1 RX is
+fast: writes hit 1171). So node3 reads can't saturate 10G; the lever that helps is **`nconnect`** on the
+`qnap-nfs` mount (cluster-wide remount). Impact is low: writes are full 10G and host NFS reads are rare
+(k8s CSI is a separate Talos-mounted path; cp3 is the affinity-steered slow tier).
 
 ⚠ QNAP documents a known driver issue with T2E on **Thunderbolt port 2** — validate both
 ports; if port 2 is flaky, swap cabling so the two TB nodes use port 1 + the most stable
