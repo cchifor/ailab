@@ -149,7 +149,10 @@ spec:
           name_attribute_path: name
           use_pkce: true
           auth_style: InHeader
-          role_attribute_path: "contains(groups[*], 'admins') && 'Admin' || 'Viewer'"
+          # admins group -> Grafana Admin; any other SSO user -> Editor (NOT Viewer) so they get
+          # Explore (logs/metrics ad-hoc queries) — Grafana hides Explore from Viewers. Single-operator
+          # lab, so Editor-by-default is fine; the `groups` claim still elevates admins to full Admin.
+          role_attribute_path: "contains(groups[*], 'admins') && 'Admin' || 'Editor'"
       additionalDataSources:
         - name: Loki
           type: loki
