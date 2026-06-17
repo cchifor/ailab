@@ -1,0 +1,14 @@
+[Unit]
+Description=ttyd web terminal (drops to {{ dev_worker_agent_user }}, attaches shared tmux)
+After=network.target
+
+[Service]
+Type=simple
+User={{ dev_worker_agent_user }}
+Group={{ dev_worker_agent_user }}
+ExecStart=/usr/local/bin/ttyd -i 127.0.0.1 -p 7681 -t titleFixed='{{ inventory_hostname }}' tmux new-session -A -s main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

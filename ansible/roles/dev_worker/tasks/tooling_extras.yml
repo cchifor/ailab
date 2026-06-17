@@ -1,0 +1,93 @@
+---
+# Section 1 (homelab): GitHub CLI + gh-dash TUI + gh-actions-fleet, used in the dashboard 'github'
+# window. gh itself is not in the Ubuntu repos, so add the official cli.github.com apt repo.
+- name: Add GitHub CLI apt signing key
+  ansible.builtin.get_url:
+    url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+    dest: /etc/apt/keyrings/githubcli.gpg
+    mode: "0644"
+
+- name: Add GitHub CLI apt repository
+  ansible.builtin.deb822_repository:
+    name: github-cli
+    types: [deb]
+    uris: https://cli.github.com/packages
+    suites: [stable]
+    components: [main]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/githubcli.gpg
+    enabled: true
+
+- name: Install gh (GitHub CLI)
+  ansible.builtin.apt:
+    name: gh
+    state: present
+    update_cache: true
+
+- name: Install gh-dash {{ dev_worker_gh_dash_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/dlvhdr/gh-dash/releases/download/v{{ dev_worker_gh_dash_version }}/gh-dash_v{{ dev_worker_gh_dash_version }}_linux-amd64"
+    dest: "/usr/local/bin/gh-dash-{{ dev_worker_gh_dash_version }}"
+    mode: "0755"
+
+- name: Link /usr/local/bin/gh-dash -> gh-dash-{{ dev_worker_gh_dash_version }}
+  ansible.builtin.file:
+    src: "/usr/local/bin/gh-dash-{{ dev_worker_gh_dash_version }}"
+    dest: /usr/local/bin/gh-dash
+    state: link
+
+- name: Install gh-actions-fleet (compact Actions status view)
+  ansible.builtin.template:
+    src: gh-actions-fleet.j2
+    dest: /usr/local/bin/gh-actions-fleet
+    mode: "0755"
+
+# Pre-seed gh-dash config: disable the panic-prone preview pane (v4.24.x markdown renderer panics
+# under tmux-256color) and drop the noisy default PR sections. /etc/skel covers future users; the
+# per-user copies are seeded once (force: false) so operator edits survive re-runs.
+- name: Ensure /etc/skel gh-dash config dir
+  ansible.builtin.file:
+    path: /etc/skel/.config/gh-dash
+    state: directory
+    mode: "0755"
+
+- name: Ensure per-user gh-dash config dir
+  ansible.builtin.file:
+    path: "{{ item.home }}/.config/gh-dash"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0700"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Seed /etc/skel gh-dash config
+  ansible.builtin.copy:
+    dest: /etc/skel/.config/gh-dash/config.yml
+    mode: "0644"
+    content: |
+      prSections:
+        - title: My Pull Requests
+          filters: is:open author:@me
+      defaults:
+        preview:
+          open: false # workaround for gh-dash v4.24.x markdown renderer panic under tmux-256color
+
+- name: Seed per-user gh-dash config (once; edits survive)
+  ansible.builtin.copy:
+    dest: "{{ item.home }}/.config/gh-dash/config.yml"
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0600"
+    force: false
+    content: |
+      prSections:
+        - title: My Pull Requests
+          filters: is:open author:@me
+      defaults:
+        preview:
+          open: false # workaround for gh-dash v4.24.x markdown renderer panic under tmux-256color
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"

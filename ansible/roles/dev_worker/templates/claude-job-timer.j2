@@ -1,0 +1,16 @@
+[Unit]
+Description=Claude Code job {{ item.name }}{% if item.description is defined %} — {{ item.description }}{% endif %}
+
+
+[Timer]
+{% if item.calendar is defined %}
+OnCalendar={{ item.calendar }}
+Persistent=true
+{% else %}
+OnBootSec={{ item.boot_sec | default('15min') }}
+OnUnitActiveSec={{ item.active_sec | default('6h') }}
+{% endif %}
+Unit=claude-job@{{ item.name }}.service
+
+[Install]
+WantedBy=timers.target

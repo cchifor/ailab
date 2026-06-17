@@ -1,0 +1,46 @@
+---
+# Section 7 (homelab): optional Cloudflare tunnel for public access. Only runs when
+# dev_worker_enable_cloudflared is true; the token comes from SOPS (dev_worker_cf_tunnel_token).
+- name: Assert a Cloudflare tunnel token is configured
+  ansible.builtin.assert:
+    that:
+      - dev_worker_cf_tunnel_token | length > 0
+    fail_msg: >-
+      dev_worker_enable_cloudflared is true but dev_worker_cf_tunnel_token is empty.
+      Set it in ansible/secrets/dev-worker.sops.yaml (see docs/runbooks/dev-workers.md).
+  no_log: true
+
+- name: Add Cloudflare apt signing key
+  ansible.builtin.get_url:
+    url: https://pkg.cloudflare.com/cloudflare-main.gpg
+    dest: /etc/apt/keyrings/cloudflare-main.gpg
+    mode: "0644"
+
+- name: Add Cloudflare apt repository
+  ansible.builtin.deb822_repository:
+    name: cloudflared
+    types: [deb]
+    uris: https://pkg.cloudflare.com/cloudflared
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [main]
+    signed_by: /etc/apt/keyrings/cloudflare-main.gpg
+    enabled: true
+
+- name: Install cloudflared
+  ansible.builtin.apt:
+    name: cloudflared
+    state: present
+    update_cache: true
+
+- name: Install the cloudflared service with the tunnel token
+  ansible.builtin.command: "cloudflared service install {{ dev_worker_cf_tunnel_token }}"
+  args:
+    creates: /etc/systemd/system/cloudflared.service
+  no_log: true
+
+- name: Enable + start cloudflared
+  ansible.builtin.systemd:
+    name: cloudflared
+    enabled: true
+    state: started
+    daemon_reload: true

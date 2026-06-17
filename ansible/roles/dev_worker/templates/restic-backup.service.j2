@@ -1,0 +1,16 @@
+# {{ ansible_managed }} (role: dev_worker)
+[Unit]
+Description=restic backup ({{ dev_worker_restic_backend }} backend)
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/dev-worker/restic.env
+ExecStart=/usr/bin/restic backup --quiet \
+  --exclude /workspace/agent-jobs/*/repos \
+  --exclude /home/*/.cache \
+  --exclude /workspace/docker \
+  {{ dev_worker_restic_paths | join(' ') }}
+ExecStartPost=/usr/bin/restic forget --quiet --prune \
+  --keep-daily {{ dev_worker_restic_keep_daily }} \
+  --keep-weekly {{ dev_worker_restic_keep_weekly }} \
+  --keep-monthly {{ dev_worker_restic_keep_monthly }}

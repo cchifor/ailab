@@ -1,0 +1,68 @@
+---
+# Section 1 (homelab): base packages + yq + qemu-guest-agent. gh + gh-dash live in tooling_extras.yml.
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - curl
+      - wget
+      - git
+      - jq
+      - ripgrep
+      - fzf
+      - bat
+      - tmux
+      - htop
+      - ncdu
+      - unzip
+      - ca-certificates
+      - gnupg
+      - lsb-release
+      - ufw
+      - acl # lets ansible `become` an unprivileged user (per-user npm + ACL tasks)
+      - qemu-guest-agent # not in the minimal cloud image; gives PVE graceful shutdown + guest info
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable qemu-guest-agent (auto-starts once the PVE agent channel is attached)
+  ansible.builtin.systemd:
+    name: qemu-guest-agent
+    enabled: true
+
+# The guest-agent virtio channel (/dev/virtio-ports/org.qemu.guest_agent.0) only exists when the VM's
+# `agent` is enabled in tofu. It's disabled at create time so `apply` doesn't block on an agent that
+# isn't installed yet; after this role you can flip the dev-workers tofu `agent { enabled = true }` +
+# re-apply, and qemu-guest-agent then starts on the next boot. Starting it now without the channel
+# fails ("dependency job ... failed"), so only start it when the channel is actually present.
+- name: Check for the QEMU guest-agent virtio channel
+  ansible.builtin.stat:
+    path: /dev/virtio-ports/org.qemu.guest_agent.0
+  register: dev_worker_qga_channel
+
+- name: Start qemu-guest-agent (only if the channel is present)
+  ansible.builtin.systemd:
+    name: qemu-guest-agent
+    state: started
+  when: dev_worker_qga_channel.stat.exists
+
+- name: Ensure apt keyrings dir
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+# yq is the mikefarah Go binary (the distro 'yq' is the unrelated Python jq-wrapper). Versioned
+# dest + stable symlink: get_url is a no-op once the versioned file exists, and a version bump
+# pulls the new binary and re-points the symlink — idempotent without re-downloading every run.
+- name: Install yq {{ dev_worker_yq_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/mikefarah/yq/releases/download/v{{ dev_worker_yq_version }}/yq_linux_amd64"
+    dest: "/usr/local/bin/yq-{{ dev_worker_yq_version }}"
+    mode: "0755"
+
+- name: Link /usr/local/bin/yq -> yq-{{ dev_worker_yq_version }}
+  ansible.builtin.file:
+    src: "/usr/local/bin/yq-{{ dev_worker_yq_version }}"
+    dest: /usr/local/bin/yq
+    state: link

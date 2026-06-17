@@ -1,0 +1,25 @@
+---
+# Section 3 (homelab): Node.js 20 LTS from NodeSource (needed by Claude Code + Codex). deb822 repo,
+# same idiom as the github_runner role.
+- name: Add NodeSource apt signing key
+  ansible.builtin.get_url:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /etc/apt/keyrings/nodesource.asc
+    mode: "0644"
+
+- name: Add NodeSource apt repository (Node {{ dev_worker_node_major }}.x)
+  ansible.builtin.deb822_repository:
+    name: nodesource
+    types: [deb]
+    uris: "https://deb.nodesource.com/node_{{ dev_worker_node_major }}.x"
+    suites: [nodistro]
+    components: [main]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/nodesource.asc
+    enabled: true
+
+- name: Install Node.js {{ dev_worker_node_major }}.x
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true

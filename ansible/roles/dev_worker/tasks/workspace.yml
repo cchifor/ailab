@@ -1,0 +1,43 @@
+---
+# Section 1 (homelab): /workspace data disk. The tofu module attaches a BLANK scsi1 disk (no
+# import_from) which appears as {{ dev_worker_workspace_device }} (/dev/sdb). Unlike homelab — which
+# probed for the unformatted disk because Proxmox attach order was nondeterministic — ailab VMs are
+# tofu-defined, so we pin the device. mkfs is guarded (force: false) so an existing fs is never wiped.
+
+- name: Create ext4 filesystem (LABEL={{ dev_worker_workspace_label }}) on the data disk
+  community.general.filesystem:
+    fstype: ext4
+    dev: "{{ dev_worker_workspace_device }}"
+    opts: "-L {{ dev_worker_workspace_label }}"
+    # force: false (default) — never reformat a disk that already carries a filesystem
+
+- name: Mount {{ dev_worker_workspace_mount }} by label
+  ansible.posix.mount:
+    path: "{{ dev_worker_workspace_mount }}"
+    src: "LABEL={{ dev_worker_workspace_label }}"
+    fstype: ext4
+    opts: defaults,nofail,noatime # nofail: a future boot with the disk missing won't wedge systemd
+    state: mounted
+
+- name: Ensure /workspace ownership + sgid (group-writable, files inherit group)
+  ansible.builtin.file:
+    path: "{{ dev_worker_workspace_mount }}"
+    state: directory
+    owner: "{{ dev_worker_agent_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "2775"
+
+- name: Ensure /workspace subdirs
+  ansible.builtin.file:
+    path: "{{ dev_worker_workspace_mount }}/{{ item.dir }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "2775"
+  loop:
+    - { dir: "{{ dev_worker_admin_user }}", owner: "{{ dev_worker_admin_user }}", group: "{{ dev_worker_admin_user }}" }
+    - { dir: "{{ dev_worker_agent_user }}", owner: "{{ dev_worker_agent_user }}", group: "{{ dev_worker_agent_user }}" }
+    - { dir: "agent-jobs", owner: "{{ dev_worker_agent_user }}", group: "{{ dev_worker_agent_user }}" }
+    - { dir: "shared", owner: "{{ dev_worker_admin_user }}", group: "{{ dev_worker_admin_user }}" }
+  loop_control:
+    label: "{{ item.dir }}"

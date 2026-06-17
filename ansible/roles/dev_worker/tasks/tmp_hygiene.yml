@@ -1,0 +1,61 @@
+---
+# Section 1 (homelab): /tmp hygiene. We port only the SIMPLE, generally-useful layers — tmpfiles.d
+# 8h aging (IPC-aware) + an hourly systemd-tmpfiles-clean cadence + an operator-editable exclude
+# file. The full homelab machinery (a 12 GiB preallocated loopback image mounted as /tmp + a
+# size-driven LRU tmp-evict watcher, ~420 lines) was built for a specific high-churn forge workload
+# and is overkill for interactive dev. It is intentionally NOT ported here; track it as a follow-up
+# gated by dev_worker_tmp_hygiene_full if a workload ever needs a hard /tmp cap.
+
+- name: Ensure tmpfiles.d + tmpfiles-clean timer drop-in dirs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/tmpfiles.d
+    - /etc/systemd/system/systemd-tmpfiles-clean.timer.d
+
+- name: Install /tmp retention config (8h aging, IPC-aware)
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/00-tmp-retention.conf
+    mode: "0644"
+    content: |
+      # Managed by ansible (role: dev_worker). Generic /tmp hygiene: anything under /tmp not modified
+      # in 8h is fair game for systemd-tmpfiles-clean. Pattern-agnostic — no per-tool list.
+
+      # Preserve IPC/runtime sockets regardless of mtime.
+      x /tmp/.X11-unix
+      x /tmp/.ICE-unix
+      x /tmp/.font-unix
+      x /tmp/.Test-unix
+      x /tmp/.XIM-unix
+      x /tmp/systemd-private-*
+      x /tmp/tmux-*
+      x /tmp/ssh-*
+
+      # Aggressive aging on the rest.
+      d /tmp 1777 root root 8h
+
+- name: Install hourly systemd-tmpfiles-clean drop-in
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/systemd-tmpfiles-clean.timer.d/hourly.conf
+    mode: "0644"
+    content: |
+      [Timer]
+      # Override upstream's daily cadence — /tmp can fill faster than that under build workloads.
+      OnBootSec=
+      OnUnitActiveSec=
+      OnCalendar=hourly
+  notify: Reload systemd
+
+- name: Install operator-editable /tmp excludes (write once; edits survive re-runs)
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/zz-tmp-keep.conf
+    mode: "0644"
+    force: false
+    content: |
+      # Operator-editable exclusions, loaded after 00-tmp-retention.conf ("zz-" prefix). Anything
+      # listed here is excluded from /tmp cleanup regardless of age. Use sparingly — long-lived
+      # scratch belongs under /workspace/$USER/ instead.
+      # Example:
+      # x /tmp/keep-me

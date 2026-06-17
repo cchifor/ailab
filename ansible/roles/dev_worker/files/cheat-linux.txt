@@ -1,0 +1,62 @@
+═══════════════════════════════════════════
+  Linux essentials
+═══════════════════════════════════════════
+
+── Files ──
+  ls -lah                 long, all, human
+  find . -name '*.go' -mtime -7
+  rg 'pattern'            ripgrep
+  grep -RIn 'pat' .       recursive grep
+  fzf                     fuzzy finder
+  batcat FILE             cat with colors (Ubuntu: bat → batcat)
+
+── Disk / IO ──
+  df -h                   filesystems
+  du -sh */               per-dir sizes
+  lsblk                   block devices
+  ncdu /workspace         disk usage TUI
+
+── Process / system ──
+  htop                    process TUI
+  ps auxf                 full tree
+  systemctl status NAME
+  systemctl restart NAME
+  journalctl -u NAME -f
+  journalctl --since '1h ago' -p warning
+
+── Network ──
+  ss -tlnp                listening TCP + procs
+  ip a                    interfaces
+  curl -fsSL URL          silent fail-on-error
+  curl -v URL             debug
+  dig +short HOST         DNS lookup
+
+── Text / streams ──
+  head -20 / tail -20
+  tail -f FILE            follow
+  sed -i 's/a/b/g' FILE
+  awk '{print $2}'
+  cut -d: -f1
+  sort | uniq -c | sort -rn
+  tr A-Z a-z
+  jq '.foo[]'             JSON
+  yq '.foo.bar'           YAML
+
+── Permissions / users ──
+  chmod 0755 PATH
+  chown user:group PATH
+  id NAME / groups NAME
+  sudo -u user CMD
+
+── Compression / archives ──
+  tar -xzf FILE.tar.gz
+  tar -czf OUT.tar.gz DIR
+  unzip FILE.zip
+  zstd / unzstd
+
+── Shell shortcuts (bash) ──
+  Ctrl-R          history search
+  Ctrl-A / Ctrl-E line start / end
+  Ctrl-W          delete word back
+  Ctrl-U          clear line
+  !!  /  !$       last cmd / last arg

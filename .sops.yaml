@@ -1,4 +1,10 @@
 creation_rules:
+  # Dev-worker secrets. MUST precede the generic ansible/secrets rule below: SOPS applies the FIRST
+  # path-matching rule, and that rule's encrypted_regex (github_app_private_key only) would otherwise
+  # leave these keys unencrypted. This specific path matches only dev-worker.sops.yaml.
+  - path_regex: ansible[/\\]secrets[/\\]dev-worker\.sops\.ya?ml$ # [/\\] = WSL (/) + Windows (\) paths
+    encrypted_regex: ^(dev_worker_restic_password|dev_worker_cf_tunnel_token|dev_worker_admin_password)$
+    age: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
   # Ansible secrets (host-side vars, not k8s Secrets): encrypt only the private-key value. The App
   # ID + installation ID are non-secret and live in group_vars. First match wins, so this is listed
   # before the generic rule below.

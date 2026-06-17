@@ -1,0 +1,65 @@
+---
+# Section 1 (homelab) + IMPROVEMENT: tmux config seeded to /etc/skel and both users, plus the
+# tmux-session-menu click handler and the auto-attach profile.d hook. Unlike homelab, we add
+# tmux-resurrect + tmux-continuum (via TPM) so long-running agent sessions survive a reboot.
+
+- name: Template .tmux.conf into /etc/skel + each user's home
+  ansible.builtin.template:
+    src: tmux.conf.j2
+    dest: "{{ item }}/.tmux.conf"
+    mode: "0644"
+  loop: "{{ ['/etc/skel'] + (dev_worker_users | map(attribute='home') | list) }}"
+
+- name: Fix per-user .tmux.conf ownership
+  ansible.builtin.file:
+    path: "{{ item.home }}/.tmux.conf"
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Install tmux auto-attach profile.d hook
+  ansible.builtin.copy:
+    dest: /etc/profile.d/00-tmux-attach.sh
+    mode: "0755"
+    content: |
+      # Managed by ansible (role: dev_worker). Auto-attach interactive shells to the shared 'main'
+      # tmux session (SSH + ttyd both land here; cron/non-tty shells are skipped).
+      if command -v tmux >/dev/null 2>&1 && [ -n "$SSH_TTY" ] && [ -z "$TMUX" ] && [ "$TERM" != "dumb" ]; then
+        tmux new-session -A -s main
+      fi
+
+# Static file (NOT copy-content): the script contains bash array syntax ${#ARGS[@]}, whose `{#`
+# would be parsed as a Jinja comment-open if `content` were templated.
+- name: Install tmux-session-menu (status-left click handler)
+  ansible.builtin.copy:
+    src: tmux-session-menu.sh
+    dest: /usr/local/bin/tmux-session-menu
+    mode: "0755"
+
+# ---- tmux persistence (resurrect + continuum via TPM) ----
+- name: Clone TPM {{ dev_worker_tpm_version }} per user
+  become: true
+  become_user: "{{ item.name }}"
+  ansible.builtin.git:
+    repo: https://github.com/tmux-plugins/tpm
+    dest: "{{ item.home }}/.tmux/plugins/tpm"
+    version: "{{ dev_worker_tpm_version }}"
+    depth: 1
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: dev_worker_tmux_persistence | bool
+
+- name: Install TPM plugins headless per user (resurrect + continuum)
+  become: true
+  become_user: "{{ item.name }}"
+  ansible.builtin.command: "{{ item.home }}/.tmux/plugins/tpm/bin/install_plugins"
+  args:
+    creates: "{{ item.home }}/.tmux/plugins/tmux-continuum"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: dev_worker_tmux_persistence | bool

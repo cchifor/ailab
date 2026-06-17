@@ -1,0 +1,11 @@
+---
+# Interactive dev-worker VMs (Claude Code + Codex). The dev_worker role is opt-in; this enables it
+# for the dev_workers group. Feature toggles default OFF in the role — flip them here as needed.
+# Secrets for the optional features live in ansible/secrets/dev-worker.sops.yaml (SOPS).
+# Setup: see docs/runbooks/dev-workers.md.
+dev_worker_enabled: true
+
+# ---- optional features (each needs a secret in dev-worker.sops.yaml when enabled) ----
+# dev_worker_enable_restic: true          # needs dev_worker_restic_password
+# dev_worker_enable_cloudflared: true     # needs dev_worker_cf_tunnel_token
+# dev_worker_enable_password_auth: true   # needs dev_worker_admin_password

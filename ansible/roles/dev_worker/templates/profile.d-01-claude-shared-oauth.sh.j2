@@ -1,0 +1,10 @@
+# {{ ansible_managed }} (role: dev_worker)
+# Both users share one set of subscription-OAuth tokens, owned by {{ dev_worker_agent_user }}.
+# For {{ dev_worker_admin_user }}'s interactive shells: point CLAUDE_HOME + CODEX_HOME at the agent's
+# dirs (the agent's own shells use the defaults, so no override is needed there).
+# NOTE: if the installed Codex build ignores CODEX_HOME, replace this export with a per-user symlink
+# ~/.codex -> /home/{{ dev_worker_agent_user }}/.codex (see docs/runbooks/dev-workers.md).
+if [ "$USER" = "{{ dev_worker_admin_user }}" ]; then
+  export CLAUDE_HOME=/home/{{ dev_worker_agent_user }}/.claude
+  export CODEX_HOME=/home/{{ dev_worker_agent_user }}/.codex
+fi

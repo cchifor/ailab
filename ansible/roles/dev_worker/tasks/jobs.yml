@@ -1,0 +1,91 @@
+---
+# Sections 10 + 12 (homelab): headless agent-job framework. A parameterised claude-job@.service
+# (one instance per job name) + a per-job memory cap + the claude-run dispatcher + a tightly-scoped
+# sudoers rule. Unlike homelab (which hardcoded two example jobs), jobs are data-driven via
+# dev_worker_jobs (default []), so the framework ships inert until you define jobs.
+
+- name: Install the claude-job@ service template
+  ansible.builtin.template:
+    src: claude-job@.service.j2
+    dest: /etc/systemd/system/claude-job@.service
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Ensure claude-job@ drop-in dir
+  ansible.builtin.file:
+    path: /etc/systemd/system/claude-job@.service.d
+    state: directory
+    mode: "0755"
+
+- name: Install the per-job memory cap drop-in
+  ansible.builtin.template:
+    src: claude-job-memory-cap.conf.j2
+    dest: /etc/systemd/system/claude-job@.service.d/10-memory-cap.conf
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install claude-run dispatcher
+  ansible.builtin.copy:
+    dest: /usr/local/bin/claude-run
+    mode: "0755"
+    content: |
+      #!/bin/bash
+      # Managed by ansible (role: dev_worker). Trigger an agent job by name (same systemd unit the
+      # timer uses). Usage: claude-run <job-name>
+      set -euo pipefail
+      JOB="${1:-}"
+      [ -z "$JOB" ] && { echo "usage: claude-run <job-name>" >&2; exit 1; }
+      DIR="/workspace/agent-jobs/$JOB"
+      [ -d "$DIR" ] || { echo "claude-run: $DIR does not exist" >&2; exit 1; }
+      exec sudo systemctl start --wait "claude-job@${JOB}.service"
+
+- name: Install the claude-job sudoers rule (scoped to claude-job@*.service)
+  ansible.builtin.template:
+    src: claude-job-trigger.sudoers.j2
+    dest: /etc/sudoers.d/claude-job-trigger
+    mode: "0440"
+    validate: visudo -cf %s
+
+# ---- data-driven jobs (no-op when dev_worker_jobs is empty) ----
+- name: Ensure agent-job dirs
+  ansible.builtin.file:
+    path: "/workspace/agent-jobs/{{ item.name }}/output"
+    state: directory
+    owner: "{{ dev_worker_agent_user }}"
+    group: "{{ dev_worker_agent_user }}"
+    mode: "2775"
+  loop: "{{ dev_worker_jobs }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Seed job files (prompt / allowed-tools / job.env) once
+  ansible.builtin.copy:
+    dest: "/workspace/agent-jobs/{{ item.0.name }}/{{ item.1.file }}"
+    content: "{{ item.0[item.1.key] | default('') }}"
+    owner: "{{ dev_worker_agent_user }}"
+    group: "{{ dev_worker_agent_user }}"
+    mode: "0644"
+    force: false
+  loop: "{{ dev_worker_jobs | product([{'file': 'prompt.md', 'key': 'prompt'}, {'file': 'allowed-tools.txt', 'key': 'allowed_tools'}, {'file': 'job.env', 'key': 'env'}]) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}/{{ item.1.file }}"
+
+- name: Install per-job timers
+  ansible.builtin.template:
+    src: claude-job-timer.j2
+    dest: "/etc/systemd/system/claude-job@{{ item.name }}.timer"
+    mode: "0644"
+  loop: "{{ dev_worker_jobs }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload systemd
+
+- name: Enable per-job timers
+  ansible.builtin.systemd:
+    name: "claude-job@{{ item.name }}.timer"
+    enabled: "{{ item.enabled | default(true) }}"
+    state: "{{ 'started' if (item.autostart | default(false)) else 'stopped' }}"
+    daemon_reload: true
+  loop: "{{ dev_worker_jobs }}"
+  loop_control:
+    label: "{{ item.name }}"

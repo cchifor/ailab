@@ -1,0 +1,27 @@
+---
+# NEW vs homelab: Codex, installed per-user into ~/.npm-global exactly like Claude Code (reuses the
+# npm prefix + PATH set up in claude_code.yml). The npm package keeps Claude Code + Codex symmetric
+# and auto-updatable; same presence-probe idempotency.
+
+- name: Probe installed Codex per user
+  become: true
+  become_user: "{{ item.name }}"
+  ansible.builtin.command: "{{ item.home }}/{{ dev_worker_npm_dir }}/bin/codex --version"
+  register: dev_worker_codex_probe
+  changed_when: false
+  failed_when: false
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Install Codex per user (only if absent)
+  become: true
+  become_user: "{{ item.0.name }}"
+  ansible.builtin.command: "npm install -g {{ dev_worker_codex_pkg }}"
+  environment:
+    npm_config_prefix: "{{ item.0.home }}/{{ dev_worker_npm_dir }}"
+  when: item.1.rc != 0
+  changed_when: true
+  loop: "{{ dev_worker_users | zip(dev_worker_codex_probe.results) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}"
