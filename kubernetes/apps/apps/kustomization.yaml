@@ -7,3 +7,4 @@ resources:
   - edge
   - homepage # app dashboard at home.chifor.me
   - gatus # uptime monitoring + status page at status.chifor.me
+  - headlamp # live k8s cluster explorer (read-only) at k8s.chifor.me

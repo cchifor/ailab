@@ -1,0 +1,43 @@
+# Headlamp (kubernetes-sigs / CNCF) — live cluster-object explorer. Runs in-cluster and auto-uses
+# its pod ServiceAccount (bound to the read-only ClusterRole in rbac.yaml), so the UI works with no
+# token prompt and no in-cluster OIDC. It is gated at the edge by Cloudflare Access (k8s.chifor.me).
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: headlamp
+  namespace: headlamp
+spec:
+  interval: 24h
+  url: https://kubernetes-sigs.github.io/headlamp/
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: headlamp
+  namespace: headlamp
+spec:
+  interval: 1h
+  timeout: 10m
+  chart:
+    spec:
+      chart: headlamp
+      version: "0.43.0"
+      sourceRef:
+        kind: HelmRepository
+        name: headlamp
+        namespace: headlamp
+  values:
+    fullnameOverride: headlamp
+    replicaCount: 1
+    serviceAccount:
+      create: true
+      name: headlamp
+    service:
+      type: ClusterIP
+      port: 80
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 256Mi
