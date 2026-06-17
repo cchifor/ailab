@@ -1,0 +1,105 @@
+---
+# Section 11 (homelab): restic backup. homelab pushed to MinIO; ailab has no MinIO, so the default
+# target is a restic REST server on the QNAP (dev_worker_restic_backend: rest). An NFS-mounted local
+# repo (backend: nfs) is also supported. Standing up the QNAP rest-server is out of scope (its own
+# runbook). Off by default (dev_worker_enable_restic).
+- name: Assert a restic password is configured
+  ansible.builtin.assert:
+    that:
+      - dev_worker_restic_password | length > 0
+    fail_msg: >-
+      dev_worker_enable_restic is true but dev_worker_restic_password is empty.
+      Set it in ansible/secrets/dev-worker.sops.yaml (see docs/runbooks/dev-workers.md).
+  no_log: true
+
+- name: Compute the restic repository URL
+  ansible.builtin.set_fact:
+    dev_worker_restic_repo: >-
+      {{ dev_worker_restic_repo_url
+         if dev_worker_restic_backend == 'rest'
+         else (dev_worker_restic_nfs_mount ~ '/dev-worker-' ~ inventory_hostname) }}
+
+- name: Install restic
+  ansible.builtin.apt:
+    name: restic
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure /etc/dev-worker dir
+  ansible.builtin.file:
+    path: /etc/dev-worker
+    state: directory
+    mode: "0700"
+
+- name: Install the restic password file
+  ansible.builtin.copy:
+    content: "{{ dev_worker_restic_password }}\n"
+    dest: /etc/dev-worker/repo.key
+    mode: "0600"
+  no_log: true
+
+- name: Mount the QNAP NFS restic export
+  ansible.posix.mount:
+    path: "{{ dev_worker_restic_nfs_mount }}"
+    src: "{{ dev_worker_restic_nfs_export }}"
+    fstype: nfs
+    opts: "vers=4.1,_netdev,hard,nconnect=4"
+    state: mounted
+  when: dev_worker_restic_backend == 'nfs'
+
+- name: Install restic.env
+  ansible.builtin.template:
+    src: restic-env.j2
+    dest: /etc/dev-worker/restic.env
+    mode: "0600"
+
+- name: Check whether the restic repo is initialized
+  ansible.builtin.command: restic snapshots
+  environment:
+    RESTIC_REPOSITORY: "{{ dev_worker_restic_repo }}"
+    RESTIC_PASSWORD_FILE: /etc/dev-worker/repo.key
+  register: dev_worker_restic_check
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Initialize the restic repo
+  ansible.builtin.command: restic init
+  environment:
+    RESTIC_REPOSITORY: "{{ dev_worker_restic_repo }}"
+    RESTIC_PASSWORD_FILE: /etc/dev-worker/repo.key
+  when: dev_worker_restic_check.rc != 0
+  changed_when: true
+  no_log: true
+
+- name: Install the restic backup unit
+  ansible.builtin.template:
+    src: restic-backup.service.j2
+    dest: /etc/systemd/system/restic-backup.service
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the restic backup timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/restic-backup.timer
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Daily restic backup
+
+      [Timer]
+      OnCalendar=*-*-* 04:00:00
+      Persistent=true
+      Unit=restic-backup.service
+
+      [Install]
+      WantedBy=timers.target
+  notify: Reload systemd
+
+- name: Enable + start the restic backup timer
+  ansible.builtin.systemd:
+    name: restic-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true

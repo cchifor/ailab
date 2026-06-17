@@ -1,0 +1,42 @@
+---
+# Section 2.8 (homelab): guest swapfile — an OOM reclaim valve so a spike throttles into swap instead
+# of tripping the kernel OOM-killer and wedging the VM. Disk-backed (no host-RAM cost); swappiness=10
+# keeps it a safety valve, not a first resort.
+
+- name: Check for active swap
+  ansible.builtin.command: swapon --show=NAME --noheadings
+  register: dev_worker_active_swap
+  changed_when: false
+
+- name: Allocate the swapfile
+  ansible.builtin.command: "fallocate -l {{ dev_worker_swapfile_size }} {{ dev_worker_swapfile_path }}"
+  args:
+    creates: "{{ dev_worker_swapfile_path }}"
+
+- name: Secure swapfile permissions
+  ansible.builtin.file:
+    path: "{{ dev_worker_swapfile_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Initialize + enable swap
+  ansible.builtin.shell: "mkswap {{ dev_worker_swapfile_path }} && swapon {{ dev_worker_swapfile_path }}"
+  when: dev_worker_swapfile_path not in dev_worker_active_swap.stdout
+  changed_when: true
+
+- name: Persist swap in fstab
+  ansible.posix.mount:
+    path: none
+    src: "{{ dev_worker_swapfile_path }}"
+    fstype: swap
+    opts: sw
+    state: present
+
+- name: Set vm.swappiness
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: "{{ dev_worker_swappiness | string }}"
+    sysctl_file: /etc/sysctl.d/99-swappiness.conf
+    state: present
+    reload: true

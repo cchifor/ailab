@@ -1,0 +1,44 @@
+---
+# Section 14 (homelab): claude-dashboard — a 7-window 'sessions' tmux monitoring session
+# (home/system/jobs/github/docker/cluster/cheats), built at boot under the admin user's lingering
+# systemd, plus the cheatsheets it renders. The interactive auto-attach 'main' session is untouched.
+- name: Install dashboard cheatsheets
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/share/{{ item }}"
+    mode: "0644"
+  loop:
+    - cheat-tmux.txt
+    - cheat-linux.txt
+
+- name: Install the claude-dashboard launcher
+  ansible.builtin.copy:
+    src: claude-dashboard.sh
+    dest: /usr/local/bin/claude-dashboard
+    mode: "0755"
+
+- name: Enable lingering for the admin user (dashboard tmux survives logout/reboot)
+  ansible.builtin.command: "loginctl enable-linger {{ dev_worker_admin_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ dev_worker_admin_user }}"
+
+- name: Look up the admin user's uid (for XDG_RUNTIME_DIR)
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ dev_worker_admin_user }}"
+
+- name: Install the claude-dashboard systemd unit
+  ansible.builtin.template:
+    src: claude-dashboard.service.j2
+    dest: /etc/systemd/system/claude-dashboard.service
+    mode: "0644"
+  vars:
+    dev_worker_admin_uid: "{{ getent_passwd[dev_worker_admin_user][1] }}"
+  notify: Reload systemd
+
+- name: Enable + start claude-dashboard
+  ansible.builtin.systemd:
+    name: claude-dashboard.service
+    enabled: true
+    state: started
+    daemon_reload: true

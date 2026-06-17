@@ -1,0 +1,89 @@
+---
+# dev_worker role — interactive Claude Code + Codex agent workstation (Ubuntu 24.04). Idempotent;
+# safe to re-run. The role is gated as a whole by dev-workers.yml (when: dev_worker_enabled), so
+# there are no per-task enable guards beyond the feature toggles below. Ported from the homelab
+# claude-worker bootstrap (platform/files/cloud-init/claude-worker-bootstrap.sh.tftpl) into ailab's
+# idempotent-Ansible idiom. See docs/runbooks/dev-workers.md.
+dev_worker_enabled: false # opt-in, like github_runner_enabled (flip in group_vars/dev_workers.yml)
+
+# ---- users (c4 is created by cloud-init as a sudoer; the role only augments it + adds claude-agent) ----
+dev_worker_admin_user: c4
+dev_worker_agent_user: claude-agent
+
+# ---- /workspace data disk (the blank scsi1 disk the tofu module attaches) ----
+dev_worker_workspace_device: /dev/sdb
+dev_worker_workspace_label: workspace
+dev_worker_workspace_mount: /workspace
+
+# ---- per-user npm global prefix (so `npm install -g` needs no sudo) ----
+dev_worker_npm_dir: .npm-global
+
+# ---- pinned tool versions (bump deliberately) ----
+dev_worker_node_major: "20"
+dev_worker_yq_version: "4.44.5"
+dev_worker_gh_dash_version: "4.24.1"
+dev_worker_oxker_version: "0.13.2"
+dev_worker_helm_version: "v3.16.3"
+dev_worker_k9s_version: "v0.32.5"
+dev_worker_kubectl_minor: "1.30"
+dev_worker_ttyd_version: "1.7.7"
+dev_worker_tpm_version: "v3.1.0"
+
+# ---- npm package ids (latest from npm; both self-update at runtime, so presence is enough) ----
+dev_worker_claude_code_pkg: "@anthropic-ai/claude-code"
+dev_worker_codex_pkg: "@openai/codex"
+
+# ---- feature toggles ----
+dev_worker_install_docker: true
+dev_worker_install_toolchains: true
+dev_worker_install_k8s_tools: true
+dev_worker_enable_ttyd: true
+dev_worker_enable_dashboard: true
+dev_worker_enable_jobs: true
+dev_worker_enable_cloudflared: false
+dev_worker_enable_restic: false
+dev_worker_enable_password_auth: false
+dev_worker_tmux_persistence: true
+dev_worker_tmp_hygiene_full: false # simple tmpfiles.d aging is always on; the homelab loopback+evictor is not
+
+# ---- resource caps (homelab values) ----
+dev_worker_dockerd_memory_max: "2000M"
+dev_worker_dockerd_memory_high: "1700M"
+dev_worker_swapfile_path: /swapfile
+dev_worker_swapfile_size: "4G"
+dev_worker_swappiness: 10
+dev_worker_job_memory_high: "2G"
+dev_worker_job_memory_max: "2560M"
+dev_worker_job_memory_swap_max: "2G"
+
+# ---- tmux persistence (NEW vs homelab) ----
+dev_worker_tmux_continuum_save_interval: "15"
+
+# ---- gh-actions-fleet (repos shown in the dashboard 'github' window) ----
+dev_worker_gh_fleet_repos:
+  - cchifor/platform
+
+# ---- firewall (LAN allowed to reach SSH / Caddy HTTPS / node_exporter) ----
+dev_worker_lan_cidr: "192.168.0.0/24"
+
+# ---- restic (QNAP backend; off by default — see docs/runbooks/dev-workers.md) ----
+dev_worker_restic_backend: rest # rest | nfs | none
+dev_worker_restic_repo_url: "rest:http://192.168.1.225:8000/dev-worker-{{ inventory_hostname }}"
+dev_worker_restic_paths:
+  - /workspace
+  - /home
+  - /etc/dev-worker
+dev_worker_restic_keep_daily: 7
+dev_worker_restic_keep_weekly: 4
+dev_worker_restic_keep_monthly: 6
+dev_worker_restic_nfs_export: "" # e.g. 192.168.1.225:/share/restic (backend=nfs only)
+dev_worker_restic_nfs_mount: /mnt/qnap-restic
+
+# ---- data-driven agent jobs (homelab hardcoded two; ship none by default) ----
+# Each item: { name, description, calendar | (boot_sec + active_sec), enabled (timer), autostart }
+dev_worker_jobs: []
+
+# ---- secrets (provided by SOPS via the playbook pre_task; "" so asserts can detect "unset") ----
+dev_worker_restic_password: ""
+dev_worker_cf_tunnel_token: ""
+dev_worker_admin_password: ""

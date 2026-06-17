@@ -1,0 +1,8 @@
+# {{ ansible_managed }} (role: dev_worker)
+# Bound each headless job to its own cgroup so a runaway `claude` is OOM-killed in isolation
+# (sshd, docker, and other jobs survive). MemoryHigh throttles into swap before MemoryMax hard-kills.
+[Service]
+MemoryAccounting=yes
+MemoryHigh={{ dev_worker_job_memory_high }}
+MemoryMax={{ dev_worker_job_memory_max }}
+MemorySwapMax={{ dev_worker_job_memory_swap_max }}

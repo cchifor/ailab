@@ -1,0 +1,5 @@
+# {{ ansible_managed }} (role: dev_worker)
+# Allow {{ dev_worker_admin_user }} to start claude-job@*.service units WITHOUT a password — but ONLY
+# those units, nothing else.
+{{ dev_worker_admin_user }} ALL=(root) NOPASSWD: /bin/systemctl start --wait claude-job@*.service
+{{ dev_worker_admin_user }} ALL=(root) NOPASSWD: /bin/systemctl start claude-job@*.service

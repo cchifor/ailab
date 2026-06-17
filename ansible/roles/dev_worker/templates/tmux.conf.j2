@@ -1,0 +1,63 @@
+# {{ ansible_managed }} (role: dev_worker)
+# ── core ───────────────────────────────────────────────────────────────
+set -g mouse on
+set -g history-limit 100000
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+set -g focus-events on
+set -sg escape-time 10
+set -g default-terminal "tmux-256color"
+set -ga terminal-overrides ",xterm-256color:Tc"
+
+# vi-style copy mode
+setw -g mode-keys vi
+bind-key -T copy-mode-vi v send-keys -X begin-selection
+bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+
+# ── pane / window keys ─────────────────────────────────────────────────
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+bind c new-window      -c "#{pane_current_path}"
+bind h select-pane -L
+bind j select-pane -D
+bind k select-pane -U
+bind l select-pane -R
+bind -r H resize-pane -L 5
+bind -r J resize-pane -D 5
+bind -r K resize-pane -U 5
+bind -r L resize-pane -R 5
+bind r source-file ~/.tmux.conf \; display "tmux.conf reloaded"
+
+# ── status bar (high-contrast, designed for pure-black terminal bg) ────
+set -g status-interval 5
+set -g status-position bottom
+set -g status-justify left
+set -g status-style "bg=#3a3a3a,fg=#e4e4e4"
+set -g status-left-length 40
+set -g status-right-length 120
+set -g status-left  "#[fg=#5fd7ff,bold] #h #[fg=#767676]│#[fg=#5fff5f,bold] #S #[fg=#767676]│ "
+set -g status-right "#[fg=#ffff5f]load:#(cut -d' ' -f1-3 /proc/loadavg) #[fg=#767676]│#[fg=#ffffff,bold] %a %H:%M "
+setw -g window-status-current-style "fg=#000000,bg=#ffd700,bold"
+setw -g window-status-current-format " #I:#W "
+setw -g window-status-style          "fg=#b0b0b0"
+setw -g window-status-format         " #I:#W "
+set -g pane-border-style        "fg=#5f5f5f"
+set -g pane-active-border-style "fg=#5fd7ff"
+set -g message-style            "fg=#000000,bg=#ffd700,bold"
+
+# Click on the left status segment (hostname / session name) → flat session picker.
+bind -n MouseDown1StatusLeft run-shell "/usr/local/bin/tmux-session-menu"
+{% if dev_worker_tmux_persistence | bool %}
+
+# ── persistence (resurrect + continuum via TPM) — survive reboots ──────
+# Plugin declarations must precede `run tpm`. @continuum-restore auto-restores the last save when
+# the tmux server starts (dashboard.service at boot, or first attach); resurrect keeps pane contents.
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
+set -g @resurrect-capture-pane-contents 'on'
+set -g @continuum-restore 'on'
+set -g @continuum-save-interval '{{ dev_worker_tmux_continuum_save_interval }}'
+run '~/.tmux/plugins/tpm/tpm'
+{% endif %}

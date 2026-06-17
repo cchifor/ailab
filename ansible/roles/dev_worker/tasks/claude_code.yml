@@ -1,0 +1,47 @@
+---
+# Section 3 (homelab): Claude Code, installed per-user into ~/.npm-global (no sudo npm). This file
+# also sets up the SHARED per-user npm prefix + PATH that codex.yml reuses. The presence-probe guard
+# keeps re-runs idempotent (Claude Code self-updates at runtime; we only install when absent).
+
+- name: Set the per-user npm global prefix
+  become: true
+  become_user: "{{ item.name }}"
+  ansible.builtin.command: "npm config set prefix {{ item.home }}/{{ dev_worker_npm_dir }}"
+  args:
+    creates: "{{ item.home }}/.npmrc"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# System-wide PATH for the per-user npm bin (replaces homelab's per-user ~/.bashrc append — one
+# managed file, idempotent by nature). $HOME expands per login user, so one file serves both users.
+- name: Install npm-global PATH profile.d hook
+  ansible.builtin.copy:
+    dest: /etc/profile.d/03-npm-global-path.sh
+    mode: "0755"
+    content: |
+      # Managed by ansible (role: dev_worker). Put each user's per-user npm global bin on PATH.
+      export PATH="$HOME/{{ dev_worker_npm_dir }}/bin:$PATH"
+
+- name: Probe installed Claude Code per user
+  become: true
+  become_user: "{{ item.name }}"
+  ansible.builtin.command: "{{ item.home }}/{{ dev_worker_npm_dir }}/bin/claude --version"
+  register: dev_worker_claude_probe
+  changed_when: false
+  failed_when: false
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Install Claude Code per user (only if absent)
+  become: true
+  become_user: "{{ item.0.name }}"
+  ansible.builtin.command: "npm install -g {{ dev_worker_claude_code_pkg }}"
+  environment:
+    npm_config_prefix: "{{ item.0.home }}/{{ dev_worker_npm_dir }}"
+  when: item.1.rc != 0
+  changed_when: true
+  loop: "{{ dev_worker_users | zip(dev_worker_claude_probe.results) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}"

@@ -1,0 +1,20 @@
+[Unit]
+Description=claude-dashboard tmux session for {{ dev_worker_admin_user }}
+After=network-online.target ttyd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ dev_worker_admin_user }}
+Group={{ dev_worker_admin_user }}
+Environment=HOME=/home/{{ dev_worker_admin_user }}
+Environment=USER={{ dev_worker_admin_user }}
+Environment=XDG_RUNTIME_DIR=/run/user/{{ dev_worker_admin_uid }}
+ExecStart=/usr/local/bin/claude-dashboard
+# Don't kill the spawned tmux server when the oneshot exits; keep the unit active across a one-off OOM.
+KillMode=process
+RemainAfterExit=yes
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target

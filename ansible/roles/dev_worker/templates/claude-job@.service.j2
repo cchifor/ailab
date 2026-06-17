@@ -1,0 +1,17 @@
+[Unit]
+Description=Claude Code headless job (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ dev_worker_agent_user }}
+Group={{ dev_worker_agent_user }}
+WorkingDirectory=/workspace/agent-jobs/%i
+EnvironmentFile=-/workspace/agent-jobs/%i/job.env
+# Pin credential + PATH explicitly (cron-style start does not load /etc/profile.d).
+Environment=CLAUDE_HOME=/home/{{ dev_worker_agent_user }}/.claude
+Environment=CODEX_HOME=/home/{{ dev_worker_agent_user }}/.codex
+Environment=PATH=/home/{{ dev_worker_agent_user }}/{{ dev_worker_npm_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/bin/bash -c 'mkdir -p output && claude -p "$(cat prompt.md)" --output-format json --allowed-tools "$(cat allowed-tools.txt | tr "\n" "," | sed s/,$//)" >> output/$(date -u +%%Y%%m%%dT%%H%%M%%SZ).jsonl 2>&1'
+TimeoutStartSec=30min

@@ -1,0 +1,37 @@
+---
+# Section 2.7 (homelab): keep the access path (sshd) and observability (claude-dashboard) responsive
+# under VM saturation by raising their cgroup-v2 cpu.weight well above the default 100. Cost is zero
+# when there's no contention — weights only matter under pressure. The drop-ins take effect on the
+# next unit restart / reboot (we don't bounce sshd mid-play); systemd discovers the dashboard drop-in
+# lazily even though that unit is created later in dashboard.yml.
+
+- name: Ensure sshd + dashboard systemd drop-in dirs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/systemd/system/ssh.service.d
+    - /etc/systemd/system/claude-dashboard.service.d
+
+- name: Install sshd CPU-priority drop-in (access path, max weight)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ssh.service.d/cpu-priority.conf
+    mode: "0644"
+    content: |
+      [Service]
+      CPUWeight=10000
+      IOWeight=10000
+      Nice=-10
+  notify: Reload systemd
+
+- name: Install claude-dashboard CPU-priority drop-in (observability, 10x)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/claude-dashboard.service.d/cpu-priority.conf
+    mode: "0644"
+    content: |
+      [Service]
+      CPUWeight=1000
+      IOWeight=1000
+      Nice=-5
+  notify: Reload systemd

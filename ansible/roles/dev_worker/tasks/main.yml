@@ -1,0 +1,91 @@
+---
+# dev_worker — configure an Ubuntu 24.04 dev-worker VM for interactive Claude Code + Codex inside
+# tmux, with the homelab claude-worker feature set. Idempotent; safe to re-run. The whole role is
+# gated by dev-workers.yml (when: dev_worker_enabled), so there are no per-task enable guards beyond
+# the feature toggles in defaults/main.yml. Each concern is its own task file (import_tasks, so
+# ansible-lint sees every task, tags propagate, and order is deterministic). ORDER MATTERS — the
+# comments call out the hard dependencies.
+
+- name: Assert this is an amd64 Ubuntu host
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture == "x86_64"
+      - ansible_distribution == "Ubuntu"
+    fail_msg: "dev_worker targets amd64 Ubuntu (24.04 noble) VMs only."
+
+- name: Base packages, yq, qemu-guest-agent
+  ansible.builtin.import_tasks: packages.yml
+
+- name: Users (create claude-agent, augment the cloud-init c4)
+  ansible.builtin.import_tasks: users.yml
+
+# MUST run before docker.yml: docker's data-root lives on /workspace.
+- name: Mount the /workspace data disk
+  ansible.builtin.import_tasks: workspace.yml
+
+- name: "/tmp hygiene (tmpfiles.d aging; full loopback cap behind a toggle)"
+  ansible.builtin.import_tasks: tmp_hygiene.yml
+
+- name: tmux config + persistence
+  ansible.builtin.import_tasks: tmux.yml
+
+- name: Docker engine + compose + oxker
+  ansible.builtin.import_tasks: docker.yml
+  when: dev_worker_install_docker | bool
+
+- name: CPU priority tiering (sshd + dashboard)
+  ansible.builtin.import_tasks: cpu_priority.yml
+
+- name: Guest swapfile (OOM cushion)
+  ansible.builtin.import_tasks: swap.yml
+
+- name: Node.js (for Claude Code + Codex)
+  ansible.builtin.import_tasks: node.yml
+
+- name: Claude Code (per-user npm global)
+  ansible.builtin.import_tasks: claude_code.yml
+
+- name: Codex (per-user npm global)
+  ansible.builtin.import_tasks: codex.yml
+
+# Needs both users + their npm dirs to exist.
+- name: Shared Claude/Codex credential ACLs
+  ansible.builtin.import_tasks: credentials.yml
+
+- name: Language toolchains (python/go/rust)
+  ansible.builtin.import_tasks: toolchains.yml
+  when: dev_worker_install_toolchains | bool
+
+- name: k8s tooling (kubectl/helm/k9s)
+  ansible.builtin.import_tasks: k8s_tools.yml
+  when: dev_worker_install_k8s_tools | bool
+
+- name: GitHub TUI tooling (gh-dash, gh-actions-fleet)
+  ansible.builtin.import_tasks: tooling_extras.yml
+
+- name: ttyd web terminal + Caddy HTTPS
+  ansible.builtin.import_tasks: ttyd_caddy.yml
+  when: dev_worker_enable_ttyd | bool
+
+- name: Cloudflare tunnel
+  ansible.builtin.import_tasks: cloudflared.yml
+  when: dev_worker_enable_cloudflared | bool
+
+- name: Firewall (ufw)
+  ansible.builtin.import_tasks: firewall.yml
+
+- name: Agent job framework (claude-job@ + claude-run)
+  ansible.builtin.import_tasks: jobs.yml
+  when: dev_worker_enable_jobs | bool
+
+- name: restic backup
+  ansible.builtin.import_tasks: restic.yml
+  when: dev_worker_enable_restic | bool
+
+- name: sshd password auth (optional)
+  ansible.builtin.import_tasks: sshd.yml
+  when: dev_worker_enable_password_auth | bool
+
+- name: claude-dashboard session
+  ansible.builtin.import_tasks: dashboard.yml
+  when: dev_worker_enable_dashboard | bool

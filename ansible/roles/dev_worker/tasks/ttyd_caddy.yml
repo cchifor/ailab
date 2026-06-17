@@ -1,0 +1,61 @@
+---
+# Section 6 (homelab): web terminal (ttyd, 127.0.0.1:7681) behind Caddy (LAN HTTPS via its local CA).
+- name: Install ttyd {{ dev_worker_ttyd_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/tsl0922/ttyd/releases/download/{{ dev_worker_ttyd_version }}/ttyd.x86_64"
+    dest: "/usr/local/bin/ttyd-{{ dev_worker_ttyd_version }}"
+    mode: "0755"
+
+- name: Link /usr/local/bin/ttyd -> ttyd-{{ dev_worker_ttyd_version }}
+  ansible.builtin.file:
+    src: "/usr/local/bin/ttyd-{{ dev_worker_ttyd_version }}"
+    dest: /usr/local/bin/ttyd
+    state: link
+
+- name: Install the ttyd systemd unit
+  ansible.builtin.template:
+    src: ttyd.service.j2
+    dest: /etc/systemd/system/ttyd.service
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart ttyd
+
+- name: Add Caddy apt signing key
+  ansible.builtin.get_url:
+    url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+    dest: /etc/apt/keyrings/caddy-stable.asc
+    mode: "0644"
+
+- name: Add Caddy apt repository
+  ansible.builtin.deb822_repository:
+    name: caddy-stable
+    types: [deb]
+    uris: https://dl.cloudsmith.io/public/caddy/stable/deb/debian
+    suites: [any-version]
+    components: [main]
+    signed_by: /etc/apt/keyrings/caddy-stable.asc
+    enabled: true
+
+- name: Install Caddy
+  ansible.builtin.apt:
+    name: caddy
+    state: present
+    update_cache: true
+
+- name: Lay down the Caddyfile (reverse proxy ttyd, local-CA HTTPS)
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /etc/caddy/Caddyfile
+    mode: "0644"
+  notify: Reload caddy
+
+- name: Enable + start ttyd + caddy
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - ttyd.service
+    - caddy.service

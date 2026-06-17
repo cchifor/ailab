@@ -1,0 +1,41 @@
+---
+# Section 1 (homelab): users. c4 is ALREADY created by Proxmox cloud-init (sudoer + SSH key), so the
+# role only (a) creates the claude-agent system user and (b) records both users for later per-user
+# loops. Docker-group membership is added in docker.yml (after the group exists).
+
+- name: Create the claude-agent system user (credential owner + headless jobs)
+  ansible.builtin.user:
+    name: "{{ dev_worker_agent_user }}"
+    system: true
+    create_home: true
+    home: "/home/{{ dev_worker_agent_user }}"
+    shell: /bin/bash
+
+- name: Ensure claude-agent .ssh dir
+  ansible.builtin.file:
+    path: "/home/{{ dev_worker_agent_user }}/.ssh"
+    state: directory
+    owner: "{{ dev_worker_agent_user }}"
+    group: "{{ dev_worker_agent_user }}"
+    mode: "0700"
+
+# Mirror c4's authorized_keys onto claude-agent so the operator can `sudo -iu claude-agent` and so
+# ttyd (which runs as claude-agent) shares the same key trust. Slurp/copy keeps it idempotent.
+- name: Read c4 authorized_keys (seeded by cloud-init)
+  ansible.builtin.slurp:
+    src: "/home/{{ dev_worker_admin_user }}/.ssh/authorized_keys"
+  register: dev_worker_c4_authkeys
+
+- name: Install claude-agent authorized_keys
+  ansible.builtin.copy:
+    content: "{{ dev_worker_c4_authkeys.content | b64decode }}"
+    dest: "/home/{{ dev_worker_agent_user }}/.ssh/authorized_keys"
+    owner: "{{ dev_worker_agent_user }}"
+    group: "{{ dev_worker_agent_user }}"
+    mode: "0600"
+
+- name: Record the dev-worker users (admin + agent) for per-user loops
+  ansible.builtin.set_fact:
+    dev_worker_users:
+      - { name: "{{ dev_worker_admin_user }}", home: "/home/{{ dev_worker_admin_user }}" }
+      - { name: "{{ dev_worker_agent_user }}", home: "/home/{{ dev_worker_agent_user }}" }

@@ -1,0 +1,169 @@
+---
+# Sections 2 / 2.5 / 2.6 / 15 (homelab): Docker Engine + Compose + oxker. ailab change: instead of
+# bind-mounting /var/lib/docker onto /workspace (homelab's tiny-root-disk workaround), set docker's
+# data-root to /workspace/docker directly in daemon.json — same outcome (build/image churn off the
+# OS disk), fewer moving parts. /workspace is mounted first (see tasks/main.yml ordering).
+
+- name: Add Docker apt signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Add Docker apt repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [stable]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/docker.asc
+    enabled: true
+
+- name: Install Docker engine + CLI + Buildx + Compose
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+
+- name: Add the dev-worker users to the docker group
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: docker
+    append: true
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Ensure docker data-root dir on /workspace
+  ansible.builtin.file:
+    path: /workspace/docker
+    state: directory
+    mode: "0710"
+
+- name: Lay down /etc/docker/daemon.json (data-root + log rotation + live-restore)
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+  notify: Restart docker
+
+- name: Enable + start docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+# oxker — lightweight Rust/ratatui Docker TUI for the dashboard 'docker' window.
+- name: Install oxker {{ dev_worker_oxker_version }}
+  ansible.builtin.unarchive:
+    src: "https://github.com/mrjackwills/oxker/releases/download/v{{ dev_worker_oxker_version }}/oxker_linux_x86_64.tar.gz"
+    dest: /usr/local/bin
+    remote_src: true
+    creates: "/usr/local/bin/.oxker-{{ dev_worker_oxker_version }}"
+
+- name: Mark installed oxker version
+  ansible.builtin.copy:
+    content: "{{ dev_worker_oxker_version }}\n"
+    dest: "/usr/local/bin/.oxker-{{ dev_worker_oxker_version }}"
+    mode: "0644"
+    force: false
+
+# Section 2.6: cap dockerd RSS so a leaked daemon is OOM-killed + restarted in isolation instead of
+# dragging the whole VM into swap-thrash. Weekly preventive restart keeps the leak from accumulating.
+- name: Ensure docker.service drop-in dir
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    mode: "0755"
+
+- name: Install dockerd memory-cap drop-in
+  ansible.builtin.template:
+    src: docker-memory-cap.conf.j2
+    dest: /etc/systemd/system/docker.service.d/memory-cap.conf
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart docker
+
+- name: Install docker weekly-restart unit + timer
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    mode: "0644"
+    content: "{{ item.content }}"
+  loop:
+    - dest: docker-weekly-restart.service
+      content: |
+        [Unit]
+        Description=Weekly preventive restart of dockerd (mitigate slow memory growth)
+        # No Requires=/After=docker.service on purpose: try-restart bounces docker only if running,
+        # never starts it from stopped, and reset-failed clears any accumulated start-limit state.
+
+        [Service]
+        Type=oneshot
+        ExecStartPre=/bin/systemctl reset-failed docker.service docker.socket
+        ExecStart=/bin/systemctl try-restart docker.service
+    - dest: docker-weekly-restart.timer
+      content: |
+        [Unit]
+        Description=Trigger weekly preventive docker restart
+
+        [Timer]
+        OnCalendar=Sun 04:00:00
+        Persistent=true
+        Unit=docker-weekly-restart.service
+
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Reload systemd
+
+# Section 15: weekly buildx cache prune so containerd's overlayfs snapshotter doesn't grow unbounded.
+- name: Install docker buildx-prune unit + timer
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    mode: "0644"
+    content: "{{ item.content }}"
+  loop:
+    - dest: docker-buildx-prune.service
+      content: |
+        [Unit]
+        Description=Prune docker buildkit cache older than 7 days
+        Requires=docker.service
+        After=docker.service
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/bin/docker buildx prune -f --filter=until=168h
+    - dest: docker-buildx-prune.timer
+      content: |
+        [Unit]
+        Description=Weekly docker buildx prune
+
+        [Timer]
+        OnCalendar=Sun 03:00
+        Persistent=true
+        Unit=docker-buildx-prune.service
+
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Reload systemd
+
+- name: Enable docker maintenance timers
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - docker-weekly-restart.timer
+    - docker-buildx-prune.timer

@@ -1,0 +1,55 @@
+═══════════════════════════════════════════
+  tmux  (prefix = Ctrl-b ≡ "C-b")
+═══════════════════════════════════════════
+
+── Sessions ──
+  tmux ls          list sessions
+  tmux a           attach (default)
+  tmux a -t NAME   attach to specific
+  C-b d            detach
+  C-b s            pick session
+  C-b $            rename session
+
+── Windows (tabs) ──
+  C-b c            new window
+  C-b 0..9         jump to N
+  C-b n / p        next / previous
+  C-b l            toggle last
+  C-b w            interactive picker
+  C-b ,            rename window
+  C-b &            kill window
+
+── Panes (splits) ──
+  C-b |            split horizontal
+  C-b -            split vertical
+  C-b h j k l      move between panes
+  C-b H J K L      resize 5 cells
+  C-b z            zoom toggle (full)
+  C-b x            kill pane
+  C-b space        cycle layouts
+  C-b !            burst pane → window
+
+── Copy mode (vi) ──
+  C-b [            enter copy mode
+  v                start selection
+  y                yank + exit
+  C-b ]            paste
+  /  or  ?         search fwd / back
+  n / N            next / prev match
+  g  /  G          top / bottom
+  q                exit
+
+── Misc ──
+  C-b r            reload ~/.tmux.conf
+  C-b ?            list all bindings
+  C-b t            big clock (cute)
+  C-b :            command prompt
+
+── This dashboard ──
+  C-b 1            home   (shell)
+  C-b 2            system (htop)
+  C-b 3            jobs   (journalctl)
+  C-b 4            github (gh-dash)
+  C-b 5            docker (oxker)
+  C-b 6            cluster (k9s)
+  C-b 7            cheats (this page)

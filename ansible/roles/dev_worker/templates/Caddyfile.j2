@@ -1,0 +1,13 @@
+# {{ ansible_managed }} (role: dev_worker)
+# Caddy in front of ttyd. tls internal = self-signed via Caddy's local CA (browser shows a
+# trust-on-first-use warning). Reachable by IP or hostname on the LAN.
+{
+  local_certs
+}
+https://{{ ansible_default_ipv4.address }}, https://{{ ansible_hostname }} {
+  tls internal
+  reverse_proxy 127.0.0.1:7681
+}
+:80 {
+  redir https://{host}{uri} permanent
+}
