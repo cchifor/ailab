@@ -54,6 +54,24 @@ runners:
 ping-runners:
     cd {{ansible_dir}} && ansible github_runners -m ping
 
+# OpenTofu: plan/apply ONLY the dev-worker VMs (separate state from runners + Talos).
+# PREREQUISITE: shrink the router DHCP pool to start at .53 first (see docs/network-plan.md).
+dev-workers-plan:
+    tofu -chdir=kubernetes/infra/dev-workers plan
+dev-workers-apply:
+    tofu -chdir=kubernetes/infra/dev-workers apply
+
+# Ansible: provision/refresh the interactive dev-worker VMs (Claude Code + Codex).
+# Create the VMs first (just dev-workers-apply). Dedicated playbook (not site.yml).
+# See docs/runbooks/dev-workers.md.
+dev-workers:
+    cd {{ansible_dir}} && SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
+      ansible-playbook dev-workers.yml
+
+# Ansible: connectivity check for the dev-worker VMs
+ping-dev-workers:
+    cd {{ansible_dir}} && ansible dev_workers -m ping
+
 # Lint
 lint:
     cd {{ansible_dir}} && ansible-lint || true

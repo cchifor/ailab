@@ -11,6 +11,27 @@ Keep them in sync.
 | `192.168.0.0/24` | Proxmox management LAN | nodes `.2/.3/.4`, UI `https://192.168.0.2:8006` |
 | `192.168.1.0/24` | QNAP / general LAN | QNAP mgmt `ai-storage` = `192.168.1.225` (routed from `.0.x`) |
 
+### Management LAN `192.168.0.0/24` — static allocations
+
+Static reservations are `.2`–`.52`; the **router DHCP pool starts at `.53`** (`.53`–`.254`).
+
+| Range / IP | Owner | Source of truth |
+|---|---|---|
+| `.1` | LAN gateway | router |
+| `.2 / .3 / .4` | Proxmox hosts `ai-node1/2/3` | `inventory/hosts.yml` |
+| `.40` | Talos control-plane VIP | `kubernetes/infra/variables.tf` |
+| `.41 / .42 / .43` | Talos control-plane VMs `ai-cp-1/2/3` | `kubernetes/infra/variables.tf` |
+| `.44 / .45 / .46` | AI LLM LXCs `ai-llm-1/2/3` | `kubernetes/infra/ai-lxc/variables.tf` |
+| `.47 / .48 / .49` | GitHub runner VMs `gha-runner-1/2/3` | `kubernetes/infra/runners/variables.tf` |
+| `.50 / .51 / .52` | Dev-worker VMs `dev-worker-1/2/3` | `kubernetes/infra/dev-workers/variables.tf` |
+| `.53`–`.254` | router DHCP pool | router |
+
+> ⚠️ **DHCP boundary change for dev-workers.** `.50` was the last free address in the original
+> static reserve (`.2`–`.50`); `.51/.52` were inside the DHCP pool. Before applying the dev-workers
+> tofu module, **shrink the router DHCP pool start from `.51` to `.53`** so `.51/.52` are safe statics.
+> Skipping this risks a lease collision — exactly the failure that pushed the AI LXCs off `.51`–`.53`
+> into the static block (`kubernetes/infra/ai-lxc/variables.tf`).
+
 ## Dedicated storage fabric — `10.55.0.0/24`
 
 > ⚠️ **The /30 design below was the original plan and was NOT realized.** Live reality (verified; source of
