@@ -1,0 +1,127 @@
+# "Loki — Logs" Grafana dashboard: the most-used Loki queries as panels, with namespace/pod/search
+# template variables. Provisioned via the Grafana sidecar (grafana_dashboard label). From any panel
+# use the panel menu -> Explore to continue the query ad-hoc in Explore (carries the variables).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-logs-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  loki-logs.json: |
+    {
+      "title": "Loki — Logs",
+      "uid": "loki-logs",
+      "tags": ["logs", "loki"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "DS_LOKI",
+            "type": "datasource",
+            "query": "loki",
+            "label": "Datasource",
+            "current": {},
+            "hide": 0,
+            "refresh": 1
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "label": "Namespace",
+            "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+            "query": "label_values(namespace)",
+            "refresh": 2,
+            "sort": 1,
+            "includeAll": true,
+            "allValue": ".+",
+            "multi": true,
+            "current": { "text": "All", "value": "$__all" }
+          },
+          {
+            "name": "pod",
+            "type": "query",
+            "label": "Pod",
+            "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+            "query": "label_values({namespace=~\"$namespace\"}, pod)",
+            "refresh": 2,
+            "sort": 1,
+            "includeAll": true,
+            "allValue": ".+",
+            "multi": true,
+            "current": { "text": "All", "value": "$__all" }
+          },
+          {
+            "name": "search",
+            "type": "textbox",
+            "label": "Search (regex, case-insensitive)",
+            "query": "",
+            "current": { "text": "", "value": "" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "logs",
+          "title": "All logs  ·  {namespace, pod} |~ search",
+          "gridPos": { "x": 0, "y": 0, "w": 24, "h": 11 },
+          "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+          "options": { "showTime": true, "wrapLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" },
+          "targets": [
+            { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "queryType": "range", "expr": "{namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)$search\"" }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "logs",
+          "title": "Errors & warnings  ·  error|warn|fatal|panic|exception|fail",
+          "gridPos": { "x": 0, "y": 11, "w": 24, "h": 10 },
+          "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+          "options": { "showTime": true, "wrapLogMessage": true, "enableLogDetails": true, "sortOrder": "Descending" },
+          "targets": [
+            { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "queryType": "range", "expr": "{namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)(error|err|warn|warning|fatal|panic|exception|fail)\"" }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Log volume by namespace",
+          "gridPos": { "x": 0, "y": 21, "w": 12, "h": 8 },
+          "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } } }, "overrides": [] },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "queryType": "range", "expr": "sum by (namespace) (count_over_time({namespace=~\"$namespace\"}[$__auto]))", "legendFormat": "{{namespace}}" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Error / warning rate by namespace",
+          "gridPos": { "x": 12, "y": 21, "w": 12, "h": 8 },
+          "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } } }, "overrides": [] },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "queryType": "range", "expr": "sum by (namespace) (count_over_time({namespace=~\"$namespace\"} |~ \"(?i)(error|warn|fatal|panic|exception)\"[$__auto]))", "legendFormat": "{{namespace}}" }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Top 10 noisiest pods",
+          "gridPos": { "x": 0, "y": 29, "w": 24, "h": 8 },
+          "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+          "targets": [
+            { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "queryType": "range", "expr": "topk(10, sum by (namespace, pod) (count_over_time({namespace=~\"$namespace\"}[$__auto])))", "legendFormat": "{{namespace}}/{{pod}}" }
+          ]
+        }
+      ]
+    }

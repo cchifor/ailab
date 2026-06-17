@@ -15,5 +15,6 @@ resources:
   - alloy.yaml
   - ai-llm-dashboard.yaml
   - reporting-dashboard.yaml # single infra reporting dashboard (hypervisors/instances/AI/storage)
+  - loki-logs-dashboard.yaml # "Loki — Logs": most-used log queries (errors/volume/search) + Explore
   - storage-fabric-probe.yaml # per-node QNAP-fabric reachability (blackbox DaemonSet)
   - storage-fabric-rules.yaml # alerts on the probes
