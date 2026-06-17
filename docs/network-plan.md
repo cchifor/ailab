@@ -54,9 +54,17 @@ any-to-any reachability. Storage traffic is kept off both LANs.
 | **L3** ai-node3 ↔ QNAP **10GbE** | `enstor` | `10.55.0.9` | 10GbE (eth) | `10.55.0.10` | 1500 → 9000* |
 
 \* Node3 link is now a **Thunderbolt→10GbE** adapter (Ubiquiti UACC, AQC113/`atlantic`, 10 Gbps),
-DIRECT to QNAP eth1 — superseding the earlier temporary USB→2.5GbE adapter. MTU is still 1500; raise
-to 9000 once QNAP eth1 is set to jumbo. The adapter needs the Thunderbolt/USB4 PCIe-tunnel boot params
-to enumerate — codified in `ansible/host_vars/ai-node3.yml` (`pve_grub_cmdline_linux_default`).
+DIRECT to QNAP eth1 — superseding the earlier temporary USB→2.5GbE adapter. The adapter needs the
+Thunderbolt/USB4 PCIe-tunnel boot params to enumerate — codified in `ansible/host_vars/ai-node3.yml`
+(`pve_grub_cmdline_linux_default`).
+
+\*\* **Measured (fio, 2026-06-17):** node3 **write 1171 MB/s** (full 10G, ~4× the old 2.5GbE) but
+**read ~300 MB/s** — asymmetric. Root cause is node3-side, not the QNAP: at MTU 1500 a single RX
+core's NAPI poll saturates (the tunnelled AQC113 concentrates RX softirq on one core), capping reads
+regardless of stream count. Fixes: (1) **`irqbalance`** (now installed via `pve_base`) spreads RX
+IRQs — helps multi-flow; (2) **jumbo MTU 9000** is the real fix (`storage_mtu: 9000` staged in
+`host_vars/ai-node3.yml`, **gated on the QNAP eth1 also being 9000** — see that file for the order).
+Writes (the dominant CSI/backup direction) already run at full 10G, so impact is low today.
 
 ⚠ QNAP documents a known driver issue with T2E on **Thunderbolt port 2** — validate both
 ports; if port 2 is flaky, swap cabling so the two TB nodes use port 1 + the most stable
