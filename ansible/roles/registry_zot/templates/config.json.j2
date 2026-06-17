@@ -10,6 +10,7 @@
   "http": {
     "address": "0.0.0.0",
     "port": "{{ registry_zot_port }}",
+    "externalUrl": "https://{{ registry_zot_hostname }}",
     "tls": {
       "cert": "{{ registry_zot_config_dir }}/certs/tls.crt",
       "key": "{{ registry_zot_config_dir }}/certs/tls.key"
@@ -17,7 +18,19 @@
     "auth": {
       "htpasswd": {
         "path": "{{ registry_zot_config_dir }}/htpasswd"
-      }
+      }{% if registry_zot_oidc_enabled %},
+      "openid": {
+        "providers": {
+          "{{ registry_zot_oidc_provider_key }}": {
+            "name": "Authelia",
+            "issuer": "{{ registry_zot_oidc_issuer }}",
+            "clientid": "{{ registry_zot_oidc_client_id }}",
+            "clientsecret": "{{ registry_oidc_client_secret }}",
+            "keypath": "",
+            "scopes": ["openid", "profile", "email", "groups"]
+          }
+        }
+      }{% endif %}
     },
     "accessControl": {
       "repositories": {
