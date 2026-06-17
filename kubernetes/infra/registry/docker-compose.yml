@@ -1,0 +1,26 @@
+# Private OCI registry for ailab (Zot) — runs OUT of the K8s cluster, on the
+# QNAP (Container Station) or a small Proxmox LXC. Stable LAN endpoint
+# registry.chifor.me:443. Anonymous PULL (Talos nodes pull with no creds, over
+# a publicly-trusted LE cert) + authenticated PUSH (CI runners log in). This
+# keeps the platform images private to the LAN with no Talos node config and no
+# K8s imagePullSecrets. See README.md for cert + htpasswd + DNS setup.
+#
+# Pin the Zot image to the current release (check the project-zot releases).
+services:
+  zot:
+    image: ghcr.io/project-zot/zot-linux-amd64:v2.1.2
+    container_name: zot
+    restart: unless-stopped
+    ports:
+      - "443:5000"          # registry.chifor.me/<repo> implies :443
+    volumes:
+      - registry-data:/var/lib/registry
+      - ./config.json:/etc/zot/config.json:ro
+      - ./certs:/etc/zot/certs:ro       # tls.crt + tls.key (Let's Encrypt, registry.chifor.me)
+      - ./htpasswd:/etc/zot/htpasswd:ro # bcrypt: htpasswd -Bbn <user> <pass>
+    command: ["serve", "/etc/zot/config.json"]
+
+# On the QNAP, point this at a ZFS/iSCSI-backed share instead of a named volume,
+# e.g.  device: /share/registry/data
+volumes:
+  registry-data:
