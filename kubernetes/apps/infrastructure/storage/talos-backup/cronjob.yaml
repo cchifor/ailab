@@ -36,12 +36,11 @@ spec:
                 # only lever. VALIDATE at the acceptance gate that a real snapshot object actually lands.
                 - { name: AWS_REQUEST_CHECKSUM_CALCULATION, value: when_required }
                 - { name: AWS_RESPONSE_CHECKSUM_VALIDATION, value: when_required }
-                # versitygw self-signed cert: at deploy, mount its CA and set AWS_CA_BUNDLE to its path
-                # (the AWS SDK has no insecure-skip env). Until then this leg will fail TLS verification.
-                # - { name: AWS_CA_BUNDLE, value: /etc/ssl/versitygw/ca.pem }
-                # age PUBLIC key (snapshot encryption — NOT secret). REPLACE with your real age recipient
-                # before deploy; the matching PRIVATE key stays OFFLINE (decrypts snapshots in DR).
-                - { name: AGE_RECIPIENT_PUBLIC_KEY, value: "age1REPLACE_BEFORE_DEPLOY_your_age_public_key" }
+                # versitygw self-signed cert: the AWS SDK has no skip-verify env, so trust its CA.
+                - { name: AWS_CA_BUNDLE, value: /etc/ssl/versitygw/ca.pem }
+                # age PUBLIC key (snapshot encryption — NOT secret). Matching PRIVATE key is escrowed
+                # OFFLINE (kubernetes/infra/_out/talos-backup-age.key) — it decrypts snapshots in DR.
+                - { name: AGE_RECIPIENT_PUBLIC_KEY, value: "age1te3n4lfse5wnjjxq2wcjrdyzqdu3amcjsuxftljmxjfthzetcf9syvhm30" }
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_ACCESS_KEY_ID } }
                 - name: AWS_SECRET_ACCESS_KEY
@@ -57,9 +56,13 @@ spec:
                 - { mountPath: /tmp, name: tmp }
                 - { mountPath: /.talos, name: talos }
                 - { mountPath: /var/run/secrets/talos.dev, name: talos-secrets }
+                - { mountPath: /etc/ssl/versitygw, name: versitygw-ca, readOnly: true }
           volumes:
             - { name: tmp, emptyDir: {} }
             - { name: talos, emptyDir: {} }
             - name: talos-secrets
               secret:
                 secretName: talos-backup-secrets # minted by the talos.dev ServiceAccount controller
+            - name: versitygw-ca
+              configMap:
+                name: versitygw-ca
