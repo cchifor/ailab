@@ -2,5 +2,6 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - namespace.yaml
-  - rclone-config.sops.yaml # SOPS: rclone.conf (garage + gdrive + gdrive-crypt remotes)
+  - versitygw-ca.yaml # versitygw self-signed CA (combined with system CAs in the CronJob)
+  - rclone-config.sops.yaml # SOPS: rclone.conf (garage-velero/garage-talos + gdrive + gdrive-crypt)
   - rclone-cronjob.yaml # nightly encrypted sync of the versitygw buckets -> Google Drive

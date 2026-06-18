@@ -1,10 +1,6 @@
-# PLACEHOLDER — replace with the real rclone.conf built on a laptop, then re-encrypt with sops, BEFORE
-# deploying. Must define three remotes:
-#   [garage]       s3 -> versitygw (provider Other, the rclone-key access/secret, endpoint :7070)
-#   [gdrive]       drive -> your OWN OAuth client_id/secret + token (consent screen PUBLISHED to
-#                  Production BEFORE minting, else the token dies in 7 days), root_folder_id pinned
-#   [gdrive-crypt] crypt over gdrive: (filename_encryption=standard, password + password2 via
-#                  `rclone obscure`; KEEP the clear password/salt in an OFFLINE copy)
+# rclone config for the off-site leg: read the two versitygw buckets (garage-velero/garage-talos,
+# scoped keys) and sync them to an ENCRYPTED Google Drive folder (gdrive-crypt over gdrive:ailab-
+# backups). The crypt password/salt are obscured here; the CLEAR copies are escrowed OFFLINE only.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -12,19 +8,19 @@ metadata:
     namespace: backup-offsite
 type: Opaque
 stringData:
-    rclone.conf: ENC[AES256_GCM,data:1u0u9SNNqS+8Njl0Cojed4gIsUps4vDDEBYqpVsreSIriEbuYhEH2d2piRhv4jFJ6XgMpdzzNyDMdtMgbnyjjoJAcCIZE+ZbHeR3K6nUhDrXkPCoJkO6qfXYjheuSOdy31nJvbc/XpWoqWT5d1NNhTgaRVBf18N16v9OhuKGRgEagH43TEwysHahvyUildbAgW+4+/EYvRiyCxS1FxurZAK0RlOQQXu+Br6YAQEclVdUUFPmYk5It0T/3CDMmMm4cmReXZVIbRfjqdW4nezjTOLJEqg6wSPIijjqom6ynYKt906Wx9zltdC9NVwHUp+w+1dGyPOf3rPX7UW+QRGq8MBP2TsJA9p4aQzkQoC5ZOwIbbMb4MLwk50jyaLRTVRy2nt/3BcYvRylrrO45qO7gy7SHdaqJn0cEx2mI2DfNvExGqKrVSDHHc5UBAPACfJvcZM7VTVy4sfpp3HVoDTBN3MCYvW2ihe6boPST+DQjFP9sDz5Z/B54sls6COmTL/1WBitKdbeaw5qQl96GkR/utVK7SqSEOIqEoL6xbhPJmBXvRM9hnW3k6OVKJF8ZZzVLPlAXvFqTUNu6bJYk/FRtngFIgNYNlMfwb5l4pzd75xDws0E0OA++79DHpr80Ej6besUtxNGUqBxUVASkUIVtYzqP3eWjVFgOoU5o7ThpziGEW+AvWvu+7/x2SzXq4wX76YBUkkuQtJUITp4I8N7HEHUlf0RQh/C3Krxw674wOGl2Aclh7JSZxQv3v+emMZvjtt9K1CtIhNIUod27aOWpKaYiAHsD4ocKJye3Wn+fxcdzoFdeHeTkwsRyobsqfh0j8TllKogjqCIT1lLD7O9QRJDIbrAZF2e/YfuktbLZhdkZFsPtYxynOT57Dr5U4njDFjt27UpvA==,iv:+sMs1NRd6aSHBWMimRrinJW6tolnMHdTvSfe2lJoh14=,tag:Ueidl29oKhQt7jR3zby4CA==,type:str]
+    rclone.conf: ENC[AES256_GCM,data:F+57OtqTrByj2D6Nu4ND+YUzwulPkJMobSdFW+oofypmfIhyDee1PCu7D5jvGkwx5QO3zO24iCziQ1KWiJgi0HqiuwcWgmzHVsUyFGKEA8mkSBuRl8Zl+Q7ky/ZuuyJJxNdHjz81TJGFaQOhguDE6Ovkmv6Sk9Ivy5HmuYiz84FOq862WU59PTOllzCeA6EubvBf7e32dAZV/djUGnaouPUzSclZNA4tGwUronSPwkLxV7Tj5SJLyYi2AOetl+AS83KKydK5LapIwUtjVPeStWTfcuFsrub5rB+60D81JG/a4s5tls3GKc0PwOpxqQUV+3Nj0RMWMYMc/VoWrG+/SZxl5VYY4/78jrSx1lPrs7dT+dQUFcSaUG4R5+mQ3Fm7if5bNv3oxrxDzfcYF7Vz5R6sVK42l4w1aICNxW/UfrcBy02Hrzoad7ktJWma90Q6e3e4+ak+n7Yz6eJjrWS3ShflxnYe6nroIDN/LEwGvHnJonN1aWZQY4/9hKBvOczAB7mW2B9LEUf09Mn9ftB9V3L+NZegJeF/tSmfnPSPTlukjw5ZK98XqKrAGYFyDH+4fkaC1rtMzZ8nHrVNnClFwuzV36kxgMYhHP8OgIsqV0Ik23te2bJwOSq4mjii0Yr1w+2bl/LkKhEHmHHxBiE/V1saWFKKa6bq0ToyFQ6y13MquwtXe0kj/8pGAJxJiqSn9IsMQVesk6iZfDqSooA98BXlGKIW37MJ8XDwwU3lEUnSgkZkEXDD/mWnRyO+gdlnmyvi55svBv2zNQdx5N23KjX3Wmw3KeJihoswPqUPUScsEw8HNfuRyS9swGFd/J5OrGqvkGtx+SzE3WLAs67k2ZWsui4yRj8mi7zvkvJVTddSRYZHh2jzDC0WLHvvDABrUkYdilLibR+WBIG1rn2a1obP+oCFWSqZ9E4O3M1ygzv/Tem85MBjaiss/t5QUsv7vRkhyYCqndyHYMTGqDq/h2AuLP6wCABD3edZMZo0aFXOKQ42c5Wb4zFgOh3F6YH1LuSA/I/iEMBwMVrvQC27HCbdEtslWzwJZ6L1TMwGPQlPL0UNj101++KnN6R2RTbZr0Z78haEQoYpYKdn1ar3UymnACYwfnmoePHHPLPfr4LfaoNkMRdBiraTzFEGMC+yMFb7Y4WAxea2dTj8FBqEEQrzn01uSwIJw+NRsWEJJb52lENJMDzw+SaeLEgIGEee2ERiWBdpeL3an0pJERGN59vqb+IBLvGoE+HA37WM0fj9Ln/wZhpLRlfbAZnjuzVL8hTlMTDQie7LixQWeY5iT85qYfiT8JdRLIYmzSoBCT20+Yan2RFRmus5PADkoJR/k9RxjJ71+dLC1hQpzGyMNYj2QNmt21vmSGcFaMoqCiD0rByJcGI1TxfIjdrr8VjdKOTmxjq5egd/6Rixbk5Gy20EgbqYdMy4kh7D3cOyBLo5GvOdeCIOirPJwz1ZkDmcQbsnRkUloOgfNJfdMNT44iL4pnWkkMrFGtGkBxRheVOUHKdyU6qaWkmgFEa8hHvLSb4ERbWztVnWbAE5Nh4smI5mpiYnkXU1IU45m3M37aLUwFkEPrAefi1P1xlPE/fP/hQ5k1sKrLBBBMS03eb7isWOEDcgNpdQf0cq02TvE1oe1VcISFhKreMhaS0yLdf2kIkwUSmsrpTmKL25RaJ87uEJz5kwjeumpBMA8+uJzN28DCggn195Nt9kS8W9OyEaPIoRsdyvZK2NXsCxd55dy5mMc5tjDdxqZzvLcJ9F79siSSB9iy+GbhCMGyvbC5x/hav0FIFjd0xrH/t98QcuHmz/7ulwFvT6MIEttk2pufBx32hFjPphS70lUvSeux/K5s5l73EMtwjCgFo=,iv:IeBPqZJI/vI8trUpcwVo9Xf8d24YHr6DwYfMiKuctfM=,tag:b7KP3LXgcI7td1lu+Vy9Eg==,type:str]
 sops:
     age:
         - enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBSWld3aTlWVGtCeHF5b2pn
-            TFBmZXRBMjJwNXJuVy9iWWY1cGx6VjdkTjJ3CkZvem5tSEVjaCs1MVd2SHNxS1Rt
-            MnVBWjVRdkxnRUJxODJ2d2REVXQ1TUUKLS0tIFJIaEZQbWZFRThTWVNaWkY3YlQz
-            eG5LOFh4Mnl3Y2xxS2pFM001NE5tTmcKboKbWf9gjpxxlJ6r4jfWZbFH+KvP8w+S
-            Q4bD7va1hAbNpTOS+FJEWZO25sgJRiEYvhOinowyvWn9Yqe/OzogGw==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB4dCtCQTJmQ3RyV1RWY21y
+            NEllSXdPWXNQUUJvSmdiMG5GVko2b09sYW1jCndubDFmSVhHOWpLZnlsUmZ3SG9C
+            WFJiRmgrYTJRS3BwRkVCRkFOK1FXMVEKLS0tIFpNamEyZzRWMXlsTk1BYyttOWxl
+            aEprSHZ1RmErcjQwMjk1U0xEK2U4U2MKz1LV3VfqyzzEURaoFsdZDAdiEivM39S6
+            Poh5lHG+JqhMoffgq7SuZPXdgyao4KdnkwzisU3aSC4XGtVgHvG6Tw==
             -----END AGE ENCRYPTED FILE-----
           recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
     encrypted_regex: ^(data|stringData)$
-    lastmodified: "2026-06-18T07:43:48Z"
-    mac: ENC[AES256_GCM,data:Re/9p5JYQK3zU5KjWPcb6XIs6ixTPXf/NpHFlevmXsCU2UI9EwhUhd5Wi/XiiiONDMAuP8M8YWiaagU4222ezxf4+ecoP8WWBWmjYwOw2gJXsSAuoyVl6Mc5kHNp3T6ra/5y0Ouy24x+ZaEcuEfEN4LenvuYb0XiRnY9qDhG9MQ=,iv:JnBSNg0bA1QGL8K4r84ro4pcOF6dK5zN8QWuINTPr2M=,tag:G73tLVkXOIqiEt5vk1Gctw==,type:str]
+    lastmodified: "2026-06-18T14:51:40Z"
+    mac: ENC[AES256_GCM,data:WK1tymkKMw48kVSuMFi/gLshismUlLqCV4F3kaiH+H2ltsznbcCh4Qr6eVr/gekX/PKOlD4OIlJtKogB+hEQnu8HO90cxQBx5bDdi7MC/kAZE2zuMhmdFF0I7ir6jSdQpuvk3Wt4A5s0cCvV5hDtkHs+rEy9hAB+ayuRTWjPxNM=,iv:Vq2/PWrqWEZzczB8uMW9WlZ39TmzcWkFNiEPWRtkaY4=,tag:IH9CUjHI5cw5cdAU4Tq4mA==,type:str]
     version: 3.13.1

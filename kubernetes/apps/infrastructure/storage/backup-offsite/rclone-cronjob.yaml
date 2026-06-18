@@ -36,20 +36,27 @@ spec:
                 - |
                   set -eu
                   export RCLONE_CONFIG=/config/rclone.conf
+                  # rclone's s3 backend has no per-remote TLS-skip, and --ca-cert REPLACES the CA pool —
+                  # so combine the system CAs (for Google Drive) + the versitygw self-signed CA (for the
+                  # garage remotes) into one bundle; both legs then verify properly.
+                  SYS=/etc/ssl/certs/ca-certificates.crt
+                  if [ -f "$SYS" ]; then cat "$SYS" /etc/ssl/versitygw/ca.pem > /tmp/ca-bundle.pem; else cp /etc/ssl/versitygw/ca.pem /tmp/ca-bundle.pem; fi
+                  export RCLONE_CA_CERT=/tmp/ca-bundle.pem
                   # Throttled for Drive's per-USER quota on many small objects (own client_id raises only
                   # the per-PROJECT quota, NOT this one): tpslimit + modest transfers/checkers, and a hard
                   # stop at the 750 GiB/day volume cap.
                   FLAGS="--fast-list --transfers 4 --checkers 8 --tpslimit 8 --tpslimit-burst 16 --drive-stop-on-upload-limit --retries 3 --low-level-retries 10 --stats 2m --stats-one-line -v"
-                  for B in velero talos-etcd-backups; do
-                    echo "=== sync garage:$B -> gdrive-crypt:$B ==="
-                    rclone sync "garage:$B" "gdrive-crypt:$B" $FLAGS
-                  done
+                  echo "=== sync velero bucket -> Drive (encrypted) ==="
+                  rclone sync garage-velero:velero gdrive-crypt:velero $FLAGS
+                  echo "=== sync talos-etcd-backups bucket -> Drive (encrypted) ==="
+                  rclone sync garage-talos:talos-etcd-backups gdrive-crypt:talos-etcd-backups $FLAGS
                   echo "=== off-site quota (alert if near 5TB shared with Photos/Gmail) ==="
                   rclone about gdrive: --json || true
               env:
                 - { name: HOME, value: /tmp }
               volumeMounts:
                 - { name: config, mountPath: /config, readOnly: true }
+                - { name: versitygw-ca, mountPath: /etc/ssl/versitygw, readOnly: true }
                 - { name: cache, mountPath: /tmp }
               securityContext:
                 allowPrivilegeEscalation: false
@@ -62,5 +69,8 @@ spec:
               secret:
                 secretName: rclone-offsite-config
                 items: [{ key: rclone.conf, path: rclone.conf }]
+            - name: versitygw-ca
+              configMap:
+                name: versitygw-ca
             - name: cache
               emptyDir: {}
