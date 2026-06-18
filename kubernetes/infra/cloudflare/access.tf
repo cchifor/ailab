@@ -75,3 +75,16 @@ resource "cloudflare_zero_trust_access_application" "admin_uis" {
   session_duration = "24h"
   policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
 }
+
+# Vaultwarden /admin — PATH-SCOPED Access. The apex vault.chifor.me is deliberately Access-FREE so the
+# Bitwarden native clients (/api, /identity, /notifications/hub) authenticate machine-to-machine (they
+# can't do the Access browser SSO). Only /admin* — the dangerous server-config surface, which native
+# clients never touch — is gated to allow_me. More-specific path wins; the apex stays open.
+resource "cloudflare_zero_trust_access_application" "vault_admin" {
+  account_id       = var.cloudflare_account_id
+  name             = "Vaultwarden /admin"
+  type             = "self_hosted"
+  domain           = "vault.chifor.me/admin"
+  session_duration = "24h"
+  policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
+}
