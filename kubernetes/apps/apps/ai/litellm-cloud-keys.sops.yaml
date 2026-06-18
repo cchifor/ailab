@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: litellm-cloud-keys
+    namespace: ai
+stringData:
+    OPENAI_API_KEY: ENC[AES256_GCM,data:UwWhAD/8/jTTDKaF8kvfeTLMlOjCLhhKJP850fKB30w3pp+7eQnqPdAUy78FicAWVWF4R03k5lOJ5ZrvOs2C+PfS9WcXZk5wEES7z3u2hW9v9R5WXU3ypQCNIB8MlJp145sSo2Cc7QalNwTDEo8HNX+oF9bkrbtb1Ncqr6yeI8AtuxPWRUblZyzMzL8VwezMnqPV7I2bqVZDZni6LFPfolpGHIE=,iv:shKV9crrGNRSNTHBehAgvpbvXNBV+IQAZqCwuf9EBRs=,tag:mA2w5TGnCEEXmnZc4+kjvg==,type:str]
+    ANTHROPIC_API_KEY: ENC[AES256_GCM,data:uSvVAKnn1n9gRRL1Soz2Rbi33tLTnFrG+zBSuSL7bgtZiOFpGP0F44t5Zj2jU/aHD9HOrSPDlmWxOdp5HuehA02WHaBvsbZvCixb4PsEXt6LvNYdABvADlSMs5pusLtnomC+bwmq5D+f+FsV,iv:0E/K48FAu7wTT9SIaxZ2casvY2UzQ+fu1Zz8qxRqFy0=,tag:oH62tk2i1fIUse0NUwj2lA==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBZdzFWblNrRUpIK1lQV0lF
+            NVdsNWJVL3BIMEVGUzhVSWl0NjFyZTBPUERBClVEZFNBcWFFd1k4ZlNlUE55VGoz
+            M0Z0ZGZsQ3dPTU11ckY4ZVNEQmpyYU0KLS0tIGpjd2ZFQy9UTTQ4eEhXQU1UUElh
+            bWV5V0hWcHFNZGNZQTY0VEpCKys4QVUK8O+Z8+e+Tt9BC0Li3KjKUdWYAWkR1NR9
+            VN0mZV1nLfuqxed+sPf3IXqNu926X5dX0fW+FNyAfvhYEMcKrLyVtA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-06-18T20:54:45Z"
+    mac: ENC[AES256_GCM,data:eCyWX5dRhv+zwD6tL8/0AaibhTuLTpy/t8u/GoEv80O/JiwgKro5wFsPO2IRFSpuZ/hl1Pr3/zc1A9bzHG5pJ8vJxTEGzh1xYhNz3d0BsosOkHho9abcICt2QjiB/oxBn9+zQ4mIeBUqCYnUQ/+kgFYLNaRBmtRsuoy6ps73+r0=,iv:FyTyLQWUScun13pKXz2/2Qf5O+mRVgpEJ8yIbg52WoY=,tag:ZSCu9YB8hZ+cJCh7aAV9xw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4
