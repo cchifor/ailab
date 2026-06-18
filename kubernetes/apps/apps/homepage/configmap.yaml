@@ -122,6 +122,11 @@ data:
             description: Cilium L3/L4/L7 flows · CF Access
             icon: cilium.png
             siteMonitor: http://hubble-ui.kube-system.svc.cluster.local:80
+        - ntfy (Alerts):
+            href: https://ntfy.chifor.me
+            description: Push notifications · Alertmanager
+            icon: ntfy.png
+            siteMonitor: http://ntfy.monitoring.svc.cluster.local:80/v1/health
     - Infrastructure:
         - SSO (Authelia):
             href: https://sso.chifor.me
