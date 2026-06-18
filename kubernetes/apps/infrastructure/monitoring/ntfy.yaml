@@ -48,35 +48,35 @@ spec:
       labels:
         app.kubernetes.io/name: ntfy
     spec:
-      initContainers:
-        # Seed the `ailab` admin user from the SOPS password, idempotently (so the topic is auth-gated).
-        - name: seed-user
-          image: binwiederhier/ntfy:v2.11.0
-          command: ["sh", "-c"]
-          args:
-            - |
-              set -e
-              if ntfy user list 2>/dev/null | grep -qw ailab; then
-                echo "ntfy user 'ailab' already exists"
-              else
-                printf '%s\n%s\n' "$NTFY_ADMIN_PASSWORD" "$NTFY_ADMIN_PASSWORD" | ntfy user add --role=admin ailab
-                echo "ntfy user 'ailab' created"
-              fi
-          env:
-            - name: NTFY_ADMIN_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: ntfy-auth
-                  key: password
-          volumeMounts:
-            - { name: config, mountPath: /etc/ntfy/server.yml, subPath: server.yml }
-            - { name: data, mountPath: /var/lib/ntfy }
       containers:
         - name: ntfy
           image: binwiederhier/ntfy:v2.11.0
           args: ["serve"]
           ports:
             - { name: http, containerPort: 80 }
+          env:
+            - name: NTFY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ntfy-auth
+                  key: password
+          # The auth db only exists AFTER the server's first start, so seed the `ailab` admin user via
+          # a postStart hook that waits for the db (idempotent), not an initContainer.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    for i in $(seq 1 60); do
+                      if ntfy user list >/dev/null 2>&1; then
+                        ntfy user list 2>/dev/null | grep -qw ailab || \
+                          printf '%s\n%s\n' "$NTFY_ADMIN_PASSWORD" "$NTFY_ADMIN_PASSWORD" | ntfy user add --role=admin ailab
+                        exit 0
+                      fi
+                      sleep 1
+                    done
           volumeMounts:
             - { name: config, mountPath: /etc/ntfy/server.yml, subPath: server.yml }
             - { name: data, mountPath: /var/lib/ntfy }
