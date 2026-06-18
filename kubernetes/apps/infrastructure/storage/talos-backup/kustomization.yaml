@@ -6,3 +6,4 @@ resources:
   - secret.sops.yaml # SOPS: versitygw creds for the `talos-etcd-backups` bucket
   - versitygw-ca.yaml # self-signed CA -> AWS_CA_BUNDLE for the AWS SDK
   - cronjob.yaml # daily age-encrypted etcd snapshot -> versitygw
+  - prune-cronjob.yaml # retention: delete snapshots older than 30d (talos-backup has no pruning)
