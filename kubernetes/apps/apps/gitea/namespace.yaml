@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitea
+  labels:
+    # Gitea runs as the rootless image (uid 1000, no privilege escalation, no hostPath); baseline is
+    # sufficient and avoids depending on the chart's exact securityContext field keys (restricted
+    # would reject the init containers if any field is unset).
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline

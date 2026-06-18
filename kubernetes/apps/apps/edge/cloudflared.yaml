@@ -66,6 +66,10 @@ data:
       # default + the seeded `ailab` user IS the gate.
       - hostname: ntfy.chifor.me
         service: http://ntfy.monitoring.svc.cluster.local:80
+      # Gitea — NOT behind Cloudflare Access: git clone/push over HTTPS uses Gitea's own auth/tokens,
+      # which an Access browser login would break. Web UI login is Authelia OIDC; registration is off.
+      - hostname: git.chifor.me
+        service: http://gitea-http.gitea.svc.cluster.local:3000
       # Strive platform (strive.place) -> in-cluster Traefik (path-routes /api/*,
       # /agent, /auth + the gatekeeper ForwardAuth chain). id.strive.place -> Keycloak.
       # Requires the strive.place zone + these CNAMEs on the tunnel (see RUNBOOK).

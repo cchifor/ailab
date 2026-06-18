@@ -154,3 +154,8 @@ data:
             description: Cluster explorer (read-only) · CF Access
             icon: headlamp.png
             siteMonitor: http://headlamp.headlamp.svc.cluster.local:80
+        - Gitea:
+            href: https://git.chifor.me
+            description: Git forge · SSO login
+            icon: gitea.png
+            siteMonitor: http://gitea-http.gitea.svc.cluster.local:3000/api/healthz

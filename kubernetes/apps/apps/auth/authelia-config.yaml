@@ -107,3 +107,19 @@ data:
             scopes: ['openid', 'profile', 'groups', 'email']
             userinfo_signed_response_alg: 'none'
             token_endpoint_auth_method: 'client_secret_basic'
+          - client_id: 'gitea'
+            client_name: 'Gitea'
+            # Gitea OIDC login source "Authelia" (gitea.yaml gitea.oauth). Secret HASH only here;
+            # plaintext is in kubernetes/apps/apps/gitea/gitea-oauth.sops.yaml (key=gitea, secret=...).
+            # Gitea authenticates with client_secret_basic and may omit PKCE -> require_pkce: false
+            # (still accepted if sent). Callback is /user/oauth2/<source-name>/callback.
+            client_secret: '$pbkdf2-sha512$310000$Rps1dyu9CKic1A0/rELDHQ$aiXVmLHemqcPCgpZ6IlMxcf5JGSH3eUvDZqptQIcGoH/6OQKrW73PToKeWcCtlJljk3x7frjoxM8AU.GhAfxjg'
+            public: false
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit'
+            require_pkce: false
+            redirect_uris:
+              - 'https://git.chifor.me/user/oauth2/Authelia/callback'
+            scopes: ['openid', 'profile', 'groups', 'email']
+            userinfo_signed_response_alg: 'none'
+            token_endpoint_auth_method: 'client_secret_basic'
