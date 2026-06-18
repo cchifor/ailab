@@ -26,7 +26,9 @@ spec:
               env:
                 - { name: BUCKET, value: talos-etcd-backups }
                 - { name: CUSTOM_S3_ENDPOINT, value: "https://192.168.1.225:7070" } # versitygw on the QNAP
-                - { name: USE_PATH_STYLE, value: "true" }
+                # beta.3 has INVERTED logic: `UsePathStyle = (USE_PATH_STYLE == "false")`. versitygw on
+                # an IP endpoint REQUIRES path-style, so set "false" here to actually turn path-style ON.
+                - { name: USE_PATH_STYLE, value: "false" }
                 - { name: AWS_REGION, value: us-east-1 }
                 - { name: CLUSTER_NAME, value: ailab }
                 - { name: S3_PREFIX, value: etcd }
@@ -40,7 +42,9 @@ spec:
                 - { name: AWS_CA_BUNDLE, value: /etc/ssl/versitygw/ca.pem }
                 # age PUBLIC key (snapshot encryption — NOT secret). Matching PRIVATE key is escrowed
                 # OFFLINE (kubernetes/infra/_out/talos-backup-age.key) — it decrypts snapshots in DR.
-                - { name: AGE_RECIPIENT_PUBLIC_KEY, value: "age1te3n4lfse5wnjjxq2wcjrdyzqdu3amcjsuxftljmxjfthzetcf9syvhm30" }
+                # NOTE: beta.3 reads AGE_X25519_PUBLIC_KEY (the main-branch sample's AGE_RECIPIENT_PUBLIC_KEY
+                # is newer/unreleased); a wrong/empty name -> "malformed recipient" + the job fails.
+                - { name: AGE_X25519_PUBLIC_KEY, value: "age1te3n4lfse5wnjjxq2wcjrdyzqdu3amcjsuxftljmxjfthzetcf9syvhm30" }
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_ACCESS_KEY_ID } }
                 - name: AWS_SECRET_ACCESS_KEY
