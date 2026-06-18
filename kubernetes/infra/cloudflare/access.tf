@@ -55,3 +55,23 @@ resource "cloudflare_zero_trust_access_application" "k8s_tools" {
   session_duration = "24h"
   policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
 }
+
+# Cloudflare Access for the admin UIs now published to the WAN. Proxmox + QNAP have their OWN logins
+# (Access is defense-in-depth in front of a hypervisor / NAS); Prometheus + Alertmanager have NO
+# native auth, so Access is the ONLY thing between the internet and your metrics/alerts. All gated to
+# allow_me. dns.tf `depends_on` these so Access enforces BEFORE the hostnames resolve.
+resource "cloudflare_zero_trust_access_application" "admin_uis" {
+  for_each = {
+    proxmox      = "Proxmox VE"
+    qnap         = "QNAP NAS"
+    prometheus   = "Prometheus"
+    alertmanager = "Alertmanager"
+  }
+
+  account_id       = var.cloudflare_account_id
+  name             = each.value
+  type             = "self_hosted"
+  domain           = "${each.key}.chifor.me"
+  session_duration = "24h"
+  policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
+}

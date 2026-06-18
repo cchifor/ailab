@@ -92,16 +92,16 @@ data:
             icon: grafana.png
             siteMonitor: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80/api/health
         - Prometheus:
-            href: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
-            description: Metrics
+            href: https://prometheus.chifor.me
+            description: Metrics · CF Access
             icon: prometheus.png
             siteMonitor: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/-/healthy
             widget:
               type: prometheus
               url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
         - Alertmanager:
-            href: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093
-            description: Alerts
+            href: https://alertmanager.chifor.me
+            description: Alerts · CF Access
             icon: prometheus.png
             siteMonitor: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093/-/healthy
         - Uptime (Gatus):
@@ -129,12 +129,12 @@ data:
             icon: authelia.png
             siteMonitor: http://authelia.auth.svc.cluster.local:9091/api/health
         - Proxmox:
-            href: https://192.168.0.2:8006
-            description: ai-node1/2/3
+            href: https://proxmox.chifor.me
+            description: ai-node1/2/3 · CF Access
             icon: proxmox.png
         - QNAP:
-            href: https://192.168.1.225
-            description: ai-storage (ZFS)
+            href: https://qnap.chifor.me
+            description: ai-storage (ZFS) · CF Access
             icon: qnap.png
         - Tailscale:
             href: https://login.tailscale.com/admin
