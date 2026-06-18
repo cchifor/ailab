@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "prHourlyLimit": 2,
+  "prConcurrentLimit": 10,
+  "kubernetes": {
+    "managerFilePatterns": ["/kubernetes/apps/.+\\.ya?ml$/"]
+  },
+  "customManagers": [
+    {
+      "description": "Bump tag+digest-pinned images the flux/helm managers can't see (e.g. talos-backup)",
+      "customType": "regex",
+      "managerFilePatterns": ["/kubernetes/.+\\.ya?ml$/"],
+      "matchStrings": [
+        "image:\\s*\"?(?<depName>[^:\"@\\s]+):(?<currentValue>[^@\"\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)\"?"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group kube-prometheus-stack + its CRDs",
+      "matchPackageNames": ["/kube-prometheus-stack/"],
+      "groupName": "kube-prometheus-stack"
+    }
+  ]
+}

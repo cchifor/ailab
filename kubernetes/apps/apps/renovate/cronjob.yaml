@@ -1,0 +1,50 @@
+# Renovate — runs every 4h, scans cchifor/ailab, opens dependency-update PRs (+ a Dependency Dashboard
+# issue). Outbound-only bot: no Service, no WAN route. The CronJob writing git + Flux reconciling main
+# compose cleanly (Renovate edits git; nothing applies until a PR is merged). automerge is OFF.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: renovate
+  namespace: renovate
+spec:
+  schedule: "0 */4 * * *"
+  concurrencyPolicy: Forbid # overlapping runs race the same branches
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 12021
+            fsGroup: 12021
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: renovate
+              image: renovate/renovate:43
+              envFrom:
+                - secretRef:
+                    name: renovate-credentials # RENOVATE_TOKEN + RENOVATE_GITHUB_COM_TOKEN
+              env:
+                - { name: RENOVATE_CONFIG_FILE, value: /usr/src/app/config.js }
+                - { name: LOG_LEVEL, value: info }
+              volumeMounts:
+                - { name: config, mountPath: /usr/src/app/config.js, subPath: config.js, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                readOnlyRootFilesystem: false # Renovate writes clones under /tmp + its own dirs
+              resources:
+                requests: { cpu: 100m, memory: 512Mi }
+                limits: { memory: 2Gi }
+          volumes:
+            - name: config
+              configMap:
+                name: renovate-config
+            - name: tmp
+              emptyDir: {}
