@@ -1,6 +1,11 @@
 # ADR 0010 — Backup & disaster recovery for stateful volumes
 
-**Status:** ACCEPTED (2026-06-15) — Layer A (in-cluster snapshots) live; Layer B (off-NAS DR) deferred.
+**Status:** ACCEPTED (2026-06-15); Layer A live. **Layer B REVISED 2026-06-18** — the deferred
+"Velero → Cloudflare R2" plan is replaced by "Velero → versitygw-on-QNAP-NVMe (local) + rclone-crypt →
+Google Drive (off-site)" after the user ruled out paid R2 (has 5 TB Google One). Design + engine choice
+were workflow/adversarially verified; manifests are pre-staged on `feat/backup-velero` and deploy once
+the user provisions versitygw + the Drive OAuth token + an age key. The single load-bearing DR fix (the
+Talos secrets bundle off-site) is already merged (PR #28).
 **Relates to:** ADR 0007 (k8s storage), the QNAP iSCSI CSI work.
 
 ## Context
@@ -22,13 +27,31 @@ the QNAP plugin vendors) at `kubernetes/apps/infrastructure/storage/snapshot-con
 live), so no Trident change was needed. Gives fast "oops" recovery (drop a bad migration, restore a PVC
 from a ZFS snapshot) — but the snapshot lives on the same NAS, so it is **not** DR.
 
-**Layer B — off-NAS DR (DEFERRED, documented):** **Velero + CSI data-mover (kopia)** streaming snapshot
-data to **Cloudflare R2** (S3-compatible, zero egress, the Cloudflare account already exists). Verified
-gotchas to apply when built: R2 rejects streaming checksums → `checksumAlgorithm: ""` +
-`s3ForcePathStyle: true` + `region: auto` in the `BackupStorageLocation`; creds via a new SOPS secret.
-The `VolumeSnapshotClass` is pre-labelled `velero.io/csi-volumesnapshot-class: "true"` so Velero adopts
-it later. Optionally pair with a `talosctl etcd snapshot` → R2 cron for full cluster-DR (Velero backs up
-API objects + PV data, not the Talos-managed etcd).
+**Layer B — off-NAS DR (REVISED 2026-06-18, free 3-2-1, pre-staged on `feat/backup-velero`):** a real
+3-2-1 with no paid object storage. **Copy 2 (local, authoritative)** = single-node **versitygw**
+(Versity S3 Gateway, **Apache-2.0** — chosen over AGPL Garage/MinIO for a clean license posture on the
+commercial-Strive cluster; MinIO also rejected for CVE-2025-62506 + archived repo) in QNAP Container
+Station on the USB-NVMe (POSIX backend, `--sidecar` for xattr-less mounts). **Copy 3 (off-site,
+best-effort, encrypted)** = nightly one-directional `rclone sync` of the versitygw buckets through an
+`rclone crypt` overlay to the user's 5 TB Google One/Drive (consumer; rate-limited + shared quota — the
+weakest link, never the only copy). Producers, all Flux: (1) **Velero v1.18 (chart 12.0.3) + CSI snapshot
+DATA MOVEMENT (Kopia)** → versitygw `velero` bucket — captures k8s API objects AND PV bytes; (2)
+**talos-backup CronJob** (age-encrypted etcd snapshot via `kubernetesTalosAPIAccess` + a scoped
+`talos.dev` ServiceAccount) → `talos-etcd-backups` bucket. **Verified config corrections:** the AWS SDK
+only sends its trailing checksum over **HTTPS**, so versitygw is served over **HTTPS** + the BSL sets
+`checksumAlgorithm: ""` (NOT `http://` + default CRC32, which fails client-side) + `s3ForcePathStyle:
+true` + dummy `region`; the talos-backup leg sets `AWS_REQUEST/RESPONSE_CHECKSUM_CALCULATION=when_required`.
+The `VolumeSnapshotClass` is already labelled `velero.io/csi-volumesnapshot-class: "true"`. **Total-loss
+fix (DONE, PR #28):** the Talos secrets bundle (cluster/etcd/k8s CA + SA keys) lived ONLY in the
+gitignored `terraform.tfstate`; it is now committed SOPS+age-encrypted at
+`kubernetes/infra/talos-secrets-bundle.sops.yaml` (DR-only, never applied) so `talosctl gen config
+--with-secrets` can reproduce the PKI — without it `bootstrap --recover-from` regenerates a new bundle
+→ CA/PKI mismatch → control plane never converges. **DR order:** secrets bundle → machine config →
+`talosctl bootstrap --recover-from` → Flux/Trident reconcile → Velero restore (drill it). **Acceptance
+gate before trusting:** prove a real Velero backup→delete→restore AND a talos-backup snapshot write+read
+against versitygw over HTTPS (no published Velero-v1.18+versitygw golden report). Offline-escrow the
+rclone crypt password/salt + the age private key + the SOPS age key, or the off-site copy is
+permanently undecryptable in a real site loss.
 
 ## Rejected
 - **Longhorn / Rook-Ceph replicated CSI** — would remove the NAS SPOF for block, but costs ~1 vCPU +

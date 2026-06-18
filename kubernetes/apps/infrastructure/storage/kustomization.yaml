@@ -6,3 +6,6 @@ resources:
   - local-path-provisioner.yaml
   - qnap-csi.yaml
   - snapshot-controller # external-snapshotter v8 (CRDs + controller) — enables the VolumeSnapshot API
+  - velero # Velero CSI data-movement backup -> versitygw S3 on the QNAP (ADR 0010)
+  - talos-backup # daily age-encrypted etcd snapshot -> versitygw (control-plane DR)
+  - backup-offsite # nightly encrypted rclone sync of the versitygw buckets -> Google Drive (copy #3)

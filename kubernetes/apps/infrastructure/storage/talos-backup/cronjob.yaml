@@ -1,0 +1,65 @@
+# talos-backup — daily age-encrypted etcd snapshot to the versitygw `talos-etcd-backups` bucket.
+# This is the control-plane DR leg (Velero backs up k8s API objects + PV data, NOT the Talos etcd).
+# Pinned by digest (beta software — re-pin on bump). Runs at 01:00, BEFORE the off-site rclone window.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: talos-backup
+  namespace: talos-backup
+spec:
+  schedule: "0 1 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: talos-backup
+              image: ghcr.io/siderolabs/talos-backup:v0.1.0-beta.3@sha256:05c86663b251a407551dc948097e32e163a345818117eb52c573b0447bd0c7a7
+              imagePullPolicy: IfNotPresent
+              workingDir: /tmp
+              command: ["/talos-backup"]
+              env:
+                - { name: BUCKET, value: talos-etcd-backups }
+                - { name: CUSTOM_S3_ENDPOINT, value: "https://192.168.1.225:7070" } # versitygw on the QNAP
+                - { name: USE_PATH_STYLE, value: "true" }
+                - { name: AWS_REGION, value: us-east-1 }
+                - { name: CLUSTER_NAME, value: ailab }
+                - { name: S3_PREFIX, value: etcd }
+                - { name: ENABLE_COMPRESSION, value: "true" } # zstd before age-encryption
+                # aws-sdk-go-v2 trailing-checksum suppression for the non-AWS endpoint — talos-backup has
+                # no checksumAlgorithm flag (upstream issue #36 closed not-planned), so this SDK env is the
+                # only lever. VALIDATE at the acceptance gate that a real snapshot object actually lands.
+                - { name: AWS_REQUEST_CHECKSUM_CALCULATION, value: when_required }
+                - { name: AWS_RESPONSE_CHECKSUM_VALIDATION, value: when_required }
+                # versitygw self-signed cert: at deploy, mount its CA and set AWS_CA_BUNDLE to its path
+                # (the AWS SDK has no insecure-skip env). Until then this leg will fail TLS verification.
+                # - { name: AWS_CA_BUNDLE, value: /etc/ssl/versitygw/ca.pem }
+                # age PUBLIC key (snapshot encryption — NOT secret). REPLACE with your real age recipient
+                # before deploy; the matching PRIVATE key stays OFFLINE (decrypts snapshots in DR).
+                - { name: AGE_RECIPIENT_PUBLIC_KEY, value: "age1REPLACE_BEFORE_DEPLOY_your_age_public_key" }
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_ACCESS_KEY_ID } }
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_SECRET_ACCESS_KEY } }
+              securityContext:
+                runAsUser: 1000
+                runAsGroup: 1000
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                seccompProfile: { type: RuntimeDefault }
+              volumeMounts:
+                - { mountPath: /tmp, name: tmp }
+                - { mountPath: /.talos, name: talos }
+                - { mountPath: /var/run/secrets/talos.dev, name: talos-secrets }
+          volumes:
+            - { name: tmp, emptyDir: {} }
+            - { name: talos, emptyDir: {} }
+            - name: talos-secrets
+              secret:
+                secretName: talos-backup-secrets # minted by the talos.dev ServiceAccount controller

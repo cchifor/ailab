@@ -6,3 +6,4 @@ resources:
   - grafana.yaml
   - qnap-csi.yaml
   - metrics-server.yaml
+  - velero.yaml # vmware-tanzu charts (Velero backup)

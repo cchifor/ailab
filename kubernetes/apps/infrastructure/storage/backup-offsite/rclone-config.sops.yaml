@@ -1,0 +1,30 @@
+# PLACEHOLDER — replace with the real rclone.conf built on a laptop, then re-encrypt with sops, BEFORE
+# deploying. Must define three remotes:
+#   [garage]       s3 -> versitygw (provider Other, the rclone-key access/secret, endpoint :7070)
+#   [gdrive]       drive -> your OWN OAuth client_id/secret + token (consent screen PUBLISHED to
+#                  Production BEFORE minting, else the token dies in 7 days), root_folder_id pinned
+#   [gdrive-crypt] crypt over gdrive: (filename_encryption=standard, password + password2 via
+#                  `rclone obscure`; KEEP the clear password/salt in an OFFLINE copy)
+apiVersion: v1
+kind: Secret
+metadata:
+    name: rclone-offsite-config
+    namespace: backup-offsite
+type: Opaque
+stringData:
+    rclone.conf: ENC[AES256_GCM,data:1u0u9SNNqS+8Njl0Cojed4gIsUps4vDDEBYqpVsreSIriEbuYhEH2d2piRhv4jFJ6XgMpdzzNyDMdtMgbnyjjoJAcCIZE+ZbHeR3K6nUhDrXkPCoJkO6qfXYjheuSOdy31nJvbc/XpWoqWT5d1NNhTgaRVBf18N16v9OhuKGRgEagH43TEwysHahvyUildbAgW+4+/EYvRiyCxS1FxurZAK0RlOQQXu+Br6YAQEclVdUUFPmYk5It0T/3CDMmMm4cmReXZVIbRfjqdW4nezjTOLJEqg6wSPIijjqom6ynYKt906Wx9zltdC9NVwHUp+w+1dGyPOf3rPX7UW+QRGq8MBP2TsJA9p4aQzkQoC5ZOwIbbMb4MLwk50jyaLRTVRy2nt/3BcYvRylrrO45qO7gy7SHdaqJn0cEx2mI2DfNvExGqKrVSDHHc5UBAPACfJvcZM7VTVy4sfpp3HVoDTBN3MCYvW2ihe6boPST+DQjFP9sDz5Z/B54sls6COmTL/1WBitKdbeaw5qQl96GkR/utVK7SqSEOIqEoL6xbhPJmBXvRM9hnW3k6OVKJF8ZZzVLPlAXvFqTUNu6bJYk/FRtngFIgNYNlMfwb5l4pzd75xDws0E0OA++79DHpr80Ej6besUtxNGUqBxUVASkUIVtYzqP3eWjVFgOoU5o7ThpziGEW+AvWvu+7/x2SzXq4wX76YBUkkuQtJUITp4I8N7HEHUlf0RQh/C3Krxw674wOGl2Aclh7JSZxQv3v+emMZvjtt9K1CtIhNIUod27aOWpKaYiAHsD4ocKJye3Wn+fxcdzoFdeHeTkwsRyobsqfh0j8TllKogjqCIT1lLD7O9QRJDIbrAZF2e/YfuktbLZhdkZFsPtYxynOT57Dr5U4njDFjt27UpvA==,iv:+sMs1NRd6aSHBWMimRrinJW6tolnMHdTvSfe2lJoh14=,tag:Ueidl29oKhQt7jR3zby4CA==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBSWld3aTlWVGtCeHF5b2pn
+            TFBmZXRBMjJwNXJuVy9iWWY1cGx6VjdkTjJ3CkZvem5tSEVjaCs1MVd2SHNxS1Rt
+            MnVBWjVRdkxnRUJxODJ2d2REVXQ1TUUKLS0tIFJIaEZQbWZFRThTWVNaWkY3YlQz
+            eG5LOFh4Mnl3Y2xxS2pFM001NE5tTmcKboKbWf9gjpxxlJ6r4jfWZbFH+KvP8w+S
+            Q4bD7va1hAbNpTOS+FJEWZO25sgJRiEYvhOinowyvWn9Yqe/OzogGw==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-06-18T07:43:48Z"
+    mac: ENC[AES256_GCM,data:Re/9p5JYQK3zU5KjWPcb6XIs6ixTPXf/NpHFlevmXsCU2UI9EwhUhd5Wi/XiiiONDMAuP8M8YWiaagU4222ezxf4+ecoP8WWBWmjYwOw2gJXsSAuoyVl6Mc5kHNp3T6ra/5y0Ouy24x+ZaEcuEfEN4LenvuYb0XiRnY9qDhG9MQ=,iv:JnBSNg0bA1QGL8K4r84ro4pcOF6dK5zN8QWuINTPr2M=,tag:G73tLVkXOIqiEt5vk1Gctw==,type:str]
+    version: 3.13.1
