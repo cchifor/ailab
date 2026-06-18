@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trivy-system
+  labels:
+    # baseline: the operator + scan jobs run non-root but scan jobs don't always set every restricted
+    # securityContext field; baseline avoids rejected scan jobs (warn=restricted surfaces the gaps).
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted

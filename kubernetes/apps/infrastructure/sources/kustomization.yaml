@@ -7,3 +7,5 @@ resources:
   - qnap-csi.yaml
   - metrics-server.yaml
   - velero.yaml # vmware-tanzu charts (Velero backup)
+  - trivy-operator.yaml # aqua OCI charts (Trivy Operator security scanning)
+  - jetstack.yaml # cert-manager charts

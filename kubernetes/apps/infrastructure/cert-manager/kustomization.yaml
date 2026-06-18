@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - cloudflare-api-token.sops.yaml # SOPS: CF token (DNS:Edit + Zone:Read) for the ACME DNS-01 solver
+  - helmrelease.yaml # cert-manager v1.20.2 (CRDs kept on uninstall)

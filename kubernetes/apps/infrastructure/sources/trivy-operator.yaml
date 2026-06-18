@@ -1,0 +1,10 @@
+# NOTE: use the HTTP chart repo, NOT the ghcr.io OCI mirror — the OCI mirror lags (only to 0.32.1 as of
+# 2026-06), while the HTTP repo carries 0.33.2.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: aqua
+  namespace: flux-system
+spec:
+  interval: 24h
+  url: https://aquasecurity.github.io/helm-charts/
