@@ -39,13 +39,15 @@ spec:
                   rclone rmdirs GT:talos-etcd-backups --leave-root -v || true
               env:
                 - { name: HOME, value: /tmp }
+                # Trust the versitygw self-signed CA (RCLONE_CA_CERT is rclone's GLOBAL --ca-cert; the
+                # s3 backend has no per-remote no_check_certificate option, so that env was ignored).
+                - { name: RCLONE_CA_CERT, value: /etc/ssl/versitygw/ca.pem }
                 # rclone remote `GT` (versitygw) built from env vars — no config file needed.
                 - { name: RCLONE_CONFIG_GT_TYPE, value: s3 }
                 - { name: RCLONE_CONFIG_GT_PROVIDER, value: Other }
                 - { name: RCLONE_CONFIG_GT_ENDPOINT, value: "https://192.168.1.225:7070" }
                 - { name: RCLONE_CONFIG_GT_REGION, value: us-east-1 }
                 - { name: RCLONE_CONFIG_GT_FORCE_PATH_STYLE, value: "true" }
-                - { name: RCLONE_CONFIG_GT_NO_CHECK_CERTIFICATE, value: "true" } # versitygw self-signed
                 - name: RCLONE_CONFIG_GT_ACCESS_KEY_ID
                   valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_ACCESS_KEY_ID } }
                 - name: RCLONE_CONFIG_GT_SECRET_ACCESS_KEY
@@ -55,8 +57,12 @@ spec:
                 capabilities: { drop: ["ALL"] }
               volumeMounts:
                 - { name: tmp, mountPath: /tmp }
+                - { name: versitygw-ca, mountPath: /etc/ssl/versitygw, readOnly: true }
               resources:
                 requests: { cpu: 25m, memory: 64Mi }
                 limits: { memory: 256Mi }
           volumes:
             - { name: tmp, emptyDir: {} }
+            - name: versitygw-ca
+              configMap:
+                name: versitygw-ca
