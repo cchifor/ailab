@@ -1,0 +1,19 @@
+# Self-hosted Renovate BOT config (which repo + how to auth + behavior). The per-repo update rules live
+# in /renovate.json at the repo root. Mounted at /usr/src/app/config.js via RENOVATE_CONFIG_FILE.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: renovate-config
+  namespace: renovate
+data:
+  config.js: |
+    module.exports = {
+      platform: 'github',
+      endpoint: 'https://api.github.com/',
+      repositories: ['cchifor/ailab'],
+      onboarding: false,        // the repo already ships renovate.json — no onboarding PR
+      requireConfig: 'required',
+      gitAuthor: 'Renovate Bot <bot@chifor.me>',
+      binarySource: 'install',  // install tool versions on demand (the full image)
+      // RENOVATE_TOKEN (+ RENOVATE_GITHUB_COM_TOKEN) come from the SOPS secret via envFrom.
+    };
