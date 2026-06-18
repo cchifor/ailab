@@ -1,0 +1,93 @@
+# Vaultwarden — self-hosted Bitwarden-compatible password manager at vault.chifor.me.
+# Internet-exposed (so the Bitwarden mobile/desktop/extension clients reach it) but hardened:
+#   * apex is NOT behind Cloudflare Access (native clients can't do the Access browser SSO) — its own
+#     master-password auth + 2FA is the gate; /admin* IS path-gated by CF Access (access.tf).
+#   * SIGNUPS off (invite-only), SSRF surface removed (DISABLE_ICON_DOWNLOAD), real client IP for the
+#     built-in brute-force limiter (IP_HEADER=X-Forwarded-For — cloudflared never sets the default X-Real-IP).
+#   * pinned 1.36.0-alpine (clears icon-SSRF GHSA-72vh + brute-force-bypass GHSA-c5rv); Renovate bumps it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vaultwarden-data
+  namespace: vaultwarden
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: qnap-iscsi # SQLite needs POSIX locking — block, not NFS (same call as gitea)
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vaultwarden
+  namespace: vaultwarden
+  labels:
+    app.kubernetes.io/name: vaultwarden
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # RWO block: terminate old before new, else Multi-Attach deadlock
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vaultwarden
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vaultwarden
+    spec:
+      containers:
+        - name: vaultwarden
+          image: vaultwarden/server:1.36.0-alpine
+          ports:
+            - { name: http, containerPort: 80 }
+          env:
+            - { name: DOMAIN, value: "https://vault.chifor.me" }
+            - { name: SIGNUPS_ALLOWED, value: "false" } # invite-only
+            - { name: INVITATIONS_ALLOWED, value: "true" } # /admin can whitelist an email to register
+            - { name: SIGNUPS_VERIFY, value: "false" } # no SMTP wired -> don't require email verification
+            # cloudflared forwards X-Forwarded-For / Cf-Connecting-IP but NOT the default X-Real-IP, so the
+            # per-IP LOGIN_RATELIMIT would otherwise see one shared IP. This makes brute-force control real.
+            - { name: IP_HEADER, value: "X-Forwarded-For" }
+            - { name: DISABLE_ICON_DOWNLOAD, value: "true" } # removes the SSRF surface (pod can reach the LAN)
+            - { name: ICON_BLACKLIST_NON_GLOBAL_IPS, value: "true" }
+            - { name: ENABLE_WEBSOCKET, value: "true" } # live sync (rides :80 since v1.29)
+            - { name: LOG_LEVEL, value: "warn" }
+            - { name: EXTENDED_LOGGING, value: "true" }
+            - name: ADMIN_TOKEN # Argon2id PHC hash of the /admin password (SOPS secret)
+              valueFrom:
+                secretKeyRef:
+                  name: vaultwarden-admin
+                  key: ADMIN_TOKEN
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"], add: ["NET_BIND_SERVICE"] } # bind :80
+            readOnlyRootFilesystem: false # writes /data
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          livenessProbe:
+            httpGet: { path: /alive, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /alive, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: vaultwarden-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vaultwarden
+  namespace: vaultwarden
+spec:
+  selector:
+    app.kubernetes.io/name: vaultwarden
+  ports:
+    - { name: http, port: 80, targetPort: http }

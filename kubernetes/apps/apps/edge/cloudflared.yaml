@@ -70,6 +70,11 @@ data:
       # which an Access browser login would break. Web UI login is Authelia OIDC; registration is off.
       - hostname: git.chifor.me
         service: http://gitea-http.gitea.svc.cluster.local:3000
+      # Vaultwarden — apex NOT behind Cloudflare Access (the Bitwarden native clients hit /api,/identity,
+      # /notifications/hub and can't do the Access browser SSO); its own master-password+2FA is the gate.
+      # access.tf path-gates only /admin*.
+      - hostname: vault.chifor.me
+        service: http://vaultwarden.vaultwarden.svc.cluster.local:80
       # Strive platform (strive.place) -> in-cluster Traefik (path-routes /api/*,
       # /agent, /auth + the gatekeeper ForwardAuth chain). id.strive.place -> Keycloak.
       # Requires the strive.place zone + these CNAMEs on the tunnel (see RUNBOOK).

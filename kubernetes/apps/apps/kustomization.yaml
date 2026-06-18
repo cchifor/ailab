@@ -9,3 +9,4 @@ resources:
   - gatus # uptime monitoring + status page at status.chifor.me
   - headlamp # live k8s cluster explorer (read-only) at k8s.chifor.me
   - gitea # self-hosted Git forge at git.chifor.me (OIDC login, SQLite on iSCSI)
+  - vaultwarden # password manager at vault.chifor.me (own auth; /admin behind CF Access)
