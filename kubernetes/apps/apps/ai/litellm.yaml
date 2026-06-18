@@ -39,6 +39,21 @@ data:
           api_key: "sk-noauth"
         model_info:
           supports_vision: true # gates image input in LiteLLM + Open WebUI; replaced qwen3-vl-8b
+      # Cloud models (real OpenAI/Anthropic) for the Strive platform's model
+      # dropdown. Keys come from the litellm-cloud-keys Secret (SOPS), referenced
+      # via os.environ/ so they never appear in this ConfigMap.
+      - model_name: gpt-4.1
+        litellm_params:
+          model: openai/gpt-4.1
+          api_key: os.environ/OPENAI_API_KEY
+      - model_name: gpt-4.1-mini
+        litellm_params:
+          model: openai/gpt-4.1-mini
+          api_key: os.environ/OPENAI_API_KEY
+      - model_name: claude-sonnet-4-6
+        litellm_params:
+          model: anthropic/claude-sonnet-4-6
+          api_key: os.environ/ANTHROPIC_API_KEY
     litellm_settings:
       drop_params: true
       request_timeout: 600
@@ -74,6 +89,14 @@ spec:
             - name: LITELLM_MASTER_KEY
               valueFrom:
                 secretKeyRef: { name: litellm-secret, key: master-key }
+            # Real cloud-provider keys (SOPS, litellm-cloud-keys) for the
+            # gpt-4.1 / gpt-4.1-mini / claude-sonnet-4-6 models registered above.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef: { name: litellm-cloud-keys, key: OPENAI_API_KEY }
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: { name: litellm-cloud-keys, key: ANTHROPIC_API_KEY }
           volumeMounts:
             - { name: config, mountPath: /etc/litellm, readOnly: true }
           readinessProbe:
