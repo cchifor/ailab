@@ -41,6 +41,9 @@ spec:
     trivy:
       ignoreUnfixed: true # only actionable (fixable) CVEs
       severity: "HIGH,CRITICAL"
+      # builtInTrivyServer's DB-cache PVC must be on a class that honors fsGroup — the default nfs-csi
+      # ignores it (NFS server owns the files), so uid 65534 hits "mkdir .cache/trivy: permission denied".
+      storageClassName: qnap-iscsi
       resources:
         requests: { cpu: 100m, memory: 100M }
         limits: { cpu: 500m, memory: 500M }
