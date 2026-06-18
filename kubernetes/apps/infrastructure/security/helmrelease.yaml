@@ -1,0 +1,52 @@
+# Trivy Operator — continuous vulnerability + misconfiguration scanning of cluster workloads. Headless
+# (no UI): findings are CRDs (VulnerabilityReport etc.) + Prometheus metrics, surfaced via the Grafana
+# dashboard (monitoring/trivy-dashboard.yaml). Especially valuable here — the cluster also runs the
+# commercial Strive platform.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: trivy-operator
+  namespace: trivy-system
+spec:
+  interval: 1h
+  timeout: 10m
+  chart:
+    spec:
+      chart: trivy-operator
+      version: "0.33.2" # appVersion 0.31.2
+      sourceRef:
+        kind: HelmRepository
+        name: aqua
+        namespace: flux-system
+  install:
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
+  values:
+    targetNamespaces: "" # cluster-wide
+    excludeNamespaces: "trivy-system,kube-system"
+    operator:
+      scannerReportTTL: "24h"
+      scanJobsConcurrentLimit: 3 # default 10 — throttle so the first sweep doesn't contend with AI/Strive
+      scanJobTimeout: 5m
+      builtInTrivyServer: true # one cached DB server -> thin scan jobs, no per-job GitHub DB pulls
+      vulnerabilityScannerEnabled: true
+      configAuditScannerEnabled: true
+      rbacAssessmentScannerEnabled: true
+      exposedSecretScannerEnabled: true
+      infraAssessmentScannerEnabled: true
+      clusterComplianceEnabled: false # NSA/CIS compliance reports off (heavy, not needed)
+      metricsFindingsEnabled: true
+      metricsVulnIdEnabled: false # per-CVE-id labels = Prometheus cardinality bomb
+    trivy:
+      ignoreUnfixed: true # only actionable (fixable) CVEs
+      severity: "HIGH,CRITICAL"
+      resources:
+        requests: { cpu: 100m, memory: 100M }
+        limits: { cpu: 500m, memory: 500M }
+    serviceMonitor:
+      enabled: true
+      labels:
+        release: kube-prometheus-stack # the stack's ServiceMonitor selector
+    service:
+      headless: false # default true -> clusterIP None -> dead Homepage siteMonitor dot

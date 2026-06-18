@@ -1,0 +1,40 @@
+# cert-manager — in-cluster TLS certificate automation (ADR 0007: the single cert authority for the
+# planned Traefik wildcard *.chifor.me). The ClusterIssuers live in cert-manager-config/ and are applied
+# by a SEPARATE Flux Kustomization that dependsOn this (issuers fail admission until the webhook is Ready).
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+spec:
+  interval: 1h
+  timeout: 10m
+  chart:
+    spec:
+      chart: cert-manager
+      version: "v1.20.2"
+      sourceRef:
+        kind: HelmRepository
+        name: jetstack
+        namespace: flux-system
+  values:
+    crds:
+      enabled: true
+      keep: true # an errant uninstall must NOT garbage-collect every Certificate/Issuer in the cluster
+    prometheus:
+      enabled: true
+      servicemonitor:
+        enabled: true
+        labels:
+          release: kube-prometheus-stack
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+    webhook:
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 64Mi }
+    cainjector:
+      resources:
+        requests: { cpu: 10m, memory: 64Mi }
+        limits: { memory: 128Mi }

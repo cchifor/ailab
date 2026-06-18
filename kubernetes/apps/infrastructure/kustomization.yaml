@@ -5,5 +5,7 @@ kind: Kustomization
 resources:
   - core # PriorityClasses first — workloads below reference them
   - sources
+  - cert-manager # TLS cert automation (ClusterIssuers applied separately via clusters/ai/cert-manager-config.yaml)
   - storage
   - monitoring
+  - security # Trivy Operator (vulnerability + misconfig scanning)

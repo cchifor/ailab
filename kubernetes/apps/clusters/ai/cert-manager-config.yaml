@@ -1,0 +1,20 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cert-manager-config
+  namespace: flux-system
+spec:
+  interval: 1h
+  retryInterval: 1m
+  timeout: 5m
+  # Apply the ClusterIssuers only after `infrastructure` (the cert-manager HelmRelease) is Ready, so the
+  # webhook exists before the issuers are admitted. wait:false — nothing consumes these yet, and the CA
+  # bootstrap must not gate readiness.
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/cert-manager-config
+  prune: true
+  wait: false
