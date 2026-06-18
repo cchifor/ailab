@@ -44,7 +44,7 @@ spec:
                 # OFFLINE (kubernetes/infra/_out/talos-backup-age.key) — it decrypts snapshots in DR.
                 # NOTE: beta.3 reads AGE_X25519_PUBLIC_KEY (the main-branch sample's AGE_RECIPIENT_PUBLIC_KEY
                 # is newer/unreleased); a wrong/empty name -> "malformed recipient" + the job fails.
-                - { name: AGE_X25519_PUBLIC_KEY, value: "age1te3n4lfse5wnjjxq2wcjrdyzqdu3amcjsuxftljmxjfthzetcf9syvhm30" }
+                - { name: AGE_X25519_PUBLIC_KEY, value: "age13ruz38k6mzxf6etzxa6rytngasrz24ll8xvdegdy86l7rwj03fgsjwlkan" }
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_ACCESS_KEY_ID } }
                 - name: AWS_SECRET_ACCESS_KEY
