@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - gitea-admin.sops.yaml # SOPS: break-glass local admin (username/password)
+  - gitea-oauth.sops.yaml # SOPS: Authelia OIDC client (key/secret)
+  - gitea.yaml # HelmRepository + HelmRelease (SQLite on qnap-iscsi, OIDC login)

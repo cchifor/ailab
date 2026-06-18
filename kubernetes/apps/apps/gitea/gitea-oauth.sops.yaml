@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: gitea-oauth
+    namespace: gitea
+type: Opaque
+stringData:
+    key: ENC[AES256_GCM,data:pCSwP3c=,iv:U9P7o6oQ31jst8orPQttYlp49zsklb5TaLg7pSXREGw=,tag:81Zj+o7AL/FF5s8iOncbKw==,type:str]
+    secret: ENC[AES256_GCM,data:cTbntY+X3aSMAuvhHNg+DDEgfYkq0nMXKk6eUexPfjXNr+o1zKGFk8ly1iMZXwuTKJVs0LeXffypNcpW93zUUe4tPhlAUJtL,iv:oEw43HW9yVuj0btKxwwEay/ed2PsCYmxXPEG8BpeW84=,tag:Q9e6wIjw0uDYAMUsb1h8iQ==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA0cksvOVFwWlR6eDY5aEpH
+            WUcyblRLMnZFbnAxSDRLYlZmSEovQlJVQkdFCnpKRFNMZ1FzMEpmcXlwM212cE5x
+            cU50V0szdkp6eUhJUW4vU2NYbGVDOTQKLS0tIExYa3Jxb05iczdhcktvL3NMMHNq
+            S3VjSEtkVDVyS1cwOG1sRDByOTZ5QjgKvTXwr0thfYdJmyXfNEBW0miVZ0zMbizm
+            +isPVoR2ltM712LtyqxuEQsn6jtQqLyJx3sYEZvKSo+7W6d6a8N0pA==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-06-18T06:17:48Z"
+    mac: ENC[AES256_GCM,data:hjJdJtOzYyAWeBBN37RP+6+w2DLfgM7GKnXSXG+b935J2+PsOV8/aSwC7+zO3BkOwNyqZ6cUo5FpnTCQlBSj8vM6zX01CWJkZMMBOa/UQlNarAAEVw5quGXr5JsLXmb0gdpfOELhLduCj0hbOCgTmaDwSp+N86cmBbFKl38hN3g=,iv:LUTEmtdhNbS0wf83jf47L0EJSj1y7yHWRu1p8yv7SXA=,tag:jHMqQB72UEldg9eGs8v6EQ==,type:str]
+    version: 3.13.1

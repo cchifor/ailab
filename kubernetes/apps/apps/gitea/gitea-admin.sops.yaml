@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: gitea-admin
+    namespace: gitea
+type: Opaque
+stringData:
+    username: ENC[AES256_GCM,data:mSY49hp729+FhYc=,iv:DjvdiEGkMdYmwtYB8DeC3rbcEPDsSDr0ElE/0+ypO+A=,tag:maGd0trEDlFDUQ+LqTrE8Q==,type:str]
+    password: ENC[AES256_GCM,data:J17apBccd8HE3Bl3tWFcmy7GvQfIz99cLd2AJ1kOIcw=,iv:qVn3ykR3oOhkDjP2VFIO70DPz9IRPRUZZ2Iw3P6nztw=,tag:Ie7uRin1k5BlN1mgK6iZnA==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBOVy9Cc0hDcFJCSGFnTGtR
+            SnBzRjdQRi9Ua2hMV1haaU43bTBraUNmYXlZCjFvMTJOVVdOcnNQWGZneHBHUkVG
+            ZEczd3FkQ3lBYzRwVlgvYTZOdXI0SnMKLS0tIEhuR2dibzlXeTg2RE9OemtNNVQy
+            dmVyTjhzME51T0owaWJwRkw5azRTQnMK/7tb/+0AjNU1suHLrZ4npbpWRE3cBQDl
+            JTH4Y/cmoQTzE9Go4bMqhZYRR9cPeGNCAz5zd24USalS5otWv1z30Q==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-06-18T06:17:48Z"
+    mac: ENC[AES256_GCM,data:cGZy9xMtK7Zz1eVxvn5olthf66t8MWLCj/vCeb5Kjy71rthacXk9RwSEoR0CcHNB1eB9j3y4cybmkYcRD/8cAnLycNP9KjKUoN6tj9fRNc4u66myKqqxfgEA8n5PTugSRWU9+gkaHDuFarPV+oxmteZFNPZ5NsH0NjwXlAZaFQY=,iv:Ur4m0+Zqshjq3XCB81v8M5HWsINTXUmHJ/Fa2NZMz9s=,tag:x50wfEh9/s+KXCXTyJpUIw==,type:str]
+    version: 3.13.1
