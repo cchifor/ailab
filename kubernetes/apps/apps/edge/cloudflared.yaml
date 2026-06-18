@@ -61,6 +61,11 @@ data:
         service: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
       - hostname: alertmanager.chifor.me
         service: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093
+      # ntfy push notifications — NOT behind Cloudflare Access (the mobile app uses ntfy's own token
+      # auth over a persistent connection that the Access browser flow would break). ntfy's deny-all
+      # default + the seeded `ailab` user IS the gate.
+      - hostname: ntfy.chifor.me
+        service: http://ntfy.monitoring.svc.cluster.local:80
       # Strive platform (strive.place) -> in-cluster Traefik (path-routes /api/*,
       # /agent, /auth + the gatekeeper ForwardAuth chain). id.strive.place -> Keycloak.
       # Requires the strive.place zone + these CNAMEs on the tunnel (see RUNBOOK).

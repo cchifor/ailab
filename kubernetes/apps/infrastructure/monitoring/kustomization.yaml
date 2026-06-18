@@ -16,5 +16,7 @@ resources:
   - ai-llm-dashboard.yaml
   - reporting-dashboard.yaml # single infra reporting dashboard (hypervisors/instances/AI/storage)
   - loki-logs-dashboard.yaml # "Loki — Logs": most-used log queries (errors/volume/search) + Explore
+  - ntfy-auth.sops.yaml # SOPS: ntfy admin password (server seeding + Alertmanager receiver)
+  - ntfy.yaml # self-hosted push notifications; Alertmanager routes all alerts here
   - storage-fabric-probe.yaml # per-node QNAP-fabric reachability (blackbox DaemonSet)
   - storage-fabric-rules.yaml # alerts on the probes
