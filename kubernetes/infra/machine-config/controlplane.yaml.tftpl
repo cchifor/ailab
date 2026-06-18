@@ -50,6 +50,16 @@ machine:
         memory.available: 5%
         nodefs.available: 10%
         imagefs.available: 10%
+  # Let the in-cluster talos-backup CronJob (ns talos-backup) take etcd snapshots through the Talos API
+  # via a scoped talos.dev ServiceAccount — no host talosconfig secret, no cross-node :50000. Scope is
+  # limited to os:etcd:backup and to the talos-backup namespace. (Backup/DR, ADR 0010.)
+  features:
+    kubernetesTalosAPIAccess:
+      enabled: true
+      allowedRoles:
+        - os:etcd:backup
+      allowedKubernetesNamespaces:
+        - talos-backup
 cluster:
   allowSchedulingOnControlPlanes: true
   network:

@@ -1,0 +1,30 @@
+# Self-signed CA for versitygw (https://192.168.1.225:7070). Mounted into the talos-backup
+# CronJob as AWS_CA_BUNDLE (the AWS SDK has no skip-verify env). Public cert, not a secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: versitygw-ca
+  namespace: talos-backup
+data:
+  ca.pem: |
+    -----BEGIN CERTIFICATE-----
+    MIIDaTCCAlGgAwIBAgIUVCqcUFmgGptKud6WYD47kYOmT2AwDQYJKoZIhvcNAQEL
+    BQAwFTETMBEGA1UEAxMKYWktc3RvcmFnZTAeFw0yNjA2MTgxMjQ5NTFaFw0zNjA2
+    MTUxMjQ5NTFaMBUxEzARBgNVBAMTCmFpLXN0b3JhZ2UwggEiMA0GCSqGSIb3DQEB
+    AQUAA4IBDwAwggEKAoIBAQCrNCbA6oqMLC6vcla3ZIjWXGNHV7Fe+1YeErFLXubF
+    9Imt0aSRiaZHnUfVyTn6qx+o7ZJgN1b3Bzptj+xBFhcN4zn20uVdA3S1daXrrFYr
+    Q9Iw1q2sqBEN6zYoN3lgtJeasRYalnJxPkuJ60JZ40cZwU3FR6bVIRQ95PM3IP2c
+    WfWCj7cfkIyMCf37B3BrqiMBOEHMvf8isw4vcvS5owfvb/Z8w3WCeSMh6z+JO9an
+    9g9z5Zgxs1Crsg9AYhGvBaeVRzeHgcWlvyK+MBloTggfA7TMgu9AkfqGq2XT+rBj
+    HQGxx9tbeVwSClGdIgTOH2ofzRLtgt6HAhv7I468IkznAgMBAAGjgbAwga0wHQYD
+    VR0OBBYEFBZe9l2BM3L7NLHnVmu00Qkvv5TAMFAGA1UdIwRJMEeAFBZe9l2BM3L7
+    NLHnVmu00Qkvv5TAoRmkFzAVMRMwEQYDVQQDEwphaS1zdG9yYWdlghRUKpxQWaAa
+    m0q53pZgPjuRg6ZPYDAMBgNVHRMEBTADAQH/MCwGA1UdEQQlMCOHBMCoAeGCCmFp
+    LXN0b3JhZ2WCCWxvY2FsaG9zdIcEfwAAATANBgkqhkiG9w0BAQsFAAOCAQEAmL/D
+    CBBf1tBNAlGJqn6eAXAc+GBxdC7GKF6mxlkVwXi7374ZT56JVgin3Blgl5yadj5A
+    JCa4WE+FYXIcYafVcP8rLPF5Y4gOp5vMujYO1/mDzOsjmZP46UAWkjfYIv2GDkme
+    484Ih3onkBX9/KWOzbg8VvdaxJjQyi1OeK1FGKnHNzhH6EUtf8BYcQfQV/CUBwMt
+    BmytWzEyFgxln6Do+mXNwNuwrDMzS0q+/9sU/Qyfcv4OK/LJzfrlcHO1sfUkvZV9
+    rz7M5pte2Y2Tfv0XeCvYmpXQryKcSHlI1tnc5yIxoCFoIc+UIA/qnhDFGWn0P3TT
+    aOKMVl8rYzXUlQrgWw==
+    -----END CERTIFICATE-----

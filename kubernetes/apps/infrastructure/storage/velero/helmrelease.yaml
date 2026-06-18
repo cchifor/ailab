@@ -1,0 +1,79 @@
+# Velero — cluster-state + PV-data backup via CSI snapshot DATA MOVEMENT (Kopia) into the local
+# versitygw S3 store on the QNAP (ADR 0010). Captures all k8s API objects AND streams PV bytes.
+# CSI is built into Velero v1.18 core (no separate csi plugin); only the AWS object-store plugin is added.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: velero
+  namespace: velero
+spec:
+  interval: 1h
+  timeout: 20m
+  chart:
+    spec:
+      chart: velero
+      version: "12.0.3" # appVersion v1.18.1
+      sourceRef:
+        kind: HelmRepository
+        name: vmware-tanzu
+        namespace: flux-system
+  values:
+    initContainers:
+      - name: velero-plugin-for-aws
+        image: velero/velero-plugin-for-aws:v1.14.0
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+          - mountPath: /target
+            name: plugins
+    # Node-agent + Kopia = the data mover for CSI snapshot data movement. disableHostPath: the data
+    # mover provisions a backupPVC and does NOT need the /host_pods hostPath (we don't use fs-backup) —
+    # cleaner PSA posture on Talos (Velero v1.18 docs confirm it doesn't break data movement).
+    deployNodeAgent: true
+    nodeAgent:
+      disableHostPath: true
+    snapshotsEnabled: true
+    backupsEnabled: true
+    credentials:
+      useSecret: true
+      # SOPS secret.sops.yaml — must contain key `cloud` (aws shared-credentials file format).
+      existingSecret: velero-garage-credentials
+    configuration:
+      # Every backup defaults to CSI snapshot data movement (Kopia streams to the object store).
+      defaultSnapshotMoveData: true
+      backupStorageLocation:
+        - name: default
+          provider: aws
+          bucket: velero
+          default: true
+          config:
+            region: us-east-1 # dummy; required by the AWS SDK
+            s3ForcePathStyle: "true"
+            s3Url: https://192.168.1.225:7070 # versitygw on the QNAP, over HTTPS
+            # aws-sdk-go-v2 can only send its trailing checksum over HTTPS; disabling it sidesteps the
+            # S3-compat trailer edge cases entirely. This is the DEFAULT for versitygw, not a fallback.
+            checksumAlgorithm: ""
+            # versitygw uses a self-signed cert. Swap for `caCert:` (base64 CA) under this BSL once the
+            # cert exists; data is already encrypted at the Kopia layer so skip-verify is acceptable here.
+            insecureSkipTLSVerify: "true"
+      # CSI snapshot data movement uses the labelled VolumeSnapshotClass (qnap-iscsi), NOT a VSL.
+      volumeSnapshotLocation: []
+    schedules:
+      daily:
+        disabled: false
+        schedule: "0 2 * * *"
+        template:
+          ttl: "168h" # 7 days
+          snapshotMoveData: true
+          includedNamespaces: ["*"]
+          excludedNamespaces: [kube-system, velero]
+      weekly:
+        disabled: false
+        schedule: "0 3 * * 0"
+        template:
+          ttl: "720h" # 30 days
+          snapshotMoveData: true
+          includedNamespaces: ["*"]
+          excludedNamespaces: [kube-system, velero]
+    resources:
+      requests: { cpu: 50m, memory: 256Mi }
+      limits: { memory: 1Gi }

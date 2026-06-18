@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml # talos.dev/v1alpha1 ServiceAccount (os:etcd:backup) -> mints talosconfig secret
+  - secret.sops.yaml # SOPS: versitygw creds for the `talos-etcd-backups` bucket
+  - versitygw-ca.yaml # self-signed CA -> AWS_CA_BUNDLE for the AWS SDK
+  - cronjob.yaml # daily age-encrypted etcd snapshot -> versitygw

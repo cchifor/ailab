@@ -1,0 +1,66 @@
+# Off-site leg (copy #3) — nightly one-directional `rclone sync` of the local versitygw buckets to an
+# encrypted (rclone crypt) Google Drive remote. Runs at 04:00, AFTER Velero (02:00/03:00) + talos-backup
+# (01:00) have finished, so it never mirrors a half-written/half-pruned repo. Drive is the best-effort
+# DR tail, NOT a restore-critical path (see ADR 0010). The talos secrets bundle is NOT synced here — it
+# already lives off-site SOPS-encrypted in git (kubernetes/infra/talos-secrets-bundle.sops.yaml).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rclone-offsite
+  namespace: backup-offsite
+spec:
+  schedule: "0 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # The first SEED can take many hours (Drive per-user rate limits on many small Kopia blobs);
+      # give the job a long deadline so it isn't killed mid-seed.
+      activeDeadlineSeconds: 79200 # 22h
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: rclone
+              image: rclone/rclone:1.74.3
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  export RCLONE_CONFIG=/config/rclone.conf
+                  # Throttled for Drive's per-USER quota on many small objects (own client_id raises only
+                  # the per-PROJECT quota, NOT this one): tpslimit + modest transfers/checkers, and a hard
+                  # stop at the 750 GiB/day volume cap.
+                  FLAGS="--fast-list --transfers 4 --checkers 8 --tpslimit 8 --tpslimit-burst 16 --drive-stop-on-upload-limit --retries 3 --low-level-retries 10 --stats 2m --stats-one-line -v"
+                  for B in velero talos-etcd-backups; do
+                    echo "=== sync garage:$B -> gdrive-crypt:$B ==="
+                    rclone sync "garage:$B" "gdrive-crypt:$B" $FLAGS
+                  done
+                  echo "=== off-site quota (alert if near 5TB shared with Photos/Gmail) ==="
+                  rclone about gdrive: --json || true
+              env:
+                - { name: HOME, value: /tmp }
+              volumeMounts:
+                - { name: config, mountPath: /config, readOnly: true }
+                - { name: cache, mountPath: /tmp }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 512Mi }
+          volumes:
+            - name: config
+              secret:
+                secretName: rclone-offsite-config
+                items: [{ key: rclone.conf, path: rclone.conf }]
+            - name: cache
+              emptyDir: {}

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    # Velero's built-in CSI data mover pods MUST run as root (Velero v1.18 docs), so the namespace
+    # has to allow privileged — restricted/baseline would reject the data-mover pods.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged

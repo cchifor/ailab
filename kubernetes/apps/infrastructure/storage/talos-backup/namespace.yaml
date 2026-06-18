@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: talos-backup
+  labels:
+    # talos-backup runs non-root / drop-ALL / seccomp (restricted-compatible). KEEP this namespace
+    # single-tenant: the os:etcd:backup role yields a FULL plaintext-secret etcd snapshot, so nothing
+    # else should be able to schedule pods here.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
