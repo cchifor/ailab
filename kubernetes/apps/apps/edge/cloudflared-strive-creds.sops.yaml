@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: cloudflared-strive-creds
+    namespace: edge
+type: Opaque
+stringData:
+    credentials.json: ENC[AES256_GCM,data:T3fOLWqACzA5hwE0c7vF9crpD5DfM0lby9sJIDsmFtI8WLkx2rAY7PTjV2+/5U9KZU9oia2ABBW3EblpNV6DD+lF98LCCHOsXdW/MDAGiLBTKGHa1ppLOg3RSNzgqkRQ4SoIh9dqwi1Phc3EydeNvly4SKyQLj3ZL6p/V6QD9s9s6pjlpBnRfbgTQPF5z69DaCf3Dnc7DmsUzLBgEdTT1KHzZQTJE1Lj1/3qJxcrzA==,iv:7/567gGpqeqo5Ox/8u+AV3yjdv1dwa8VpCoFTA7uREQ=,tag:QnHjd8q/4fD9defjMtsPaA==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBhaWJkcEF6Mmk4WFNMeTh1
+            QklnR2FkWkEwM05oNCtGOWQ4R2s3c0F5U3c0CjhRbFdEbW5UeCs4d1hpakVWRDBo
+            TmhqRVprZDJEWUFpdk9PN1JacEw3ck0KLS0tIExhdk4vTE9mSE1LUEh0VVpJWFls
+            a0tqcG9zT3VZUzE2bU0vbkZlMTRhdkUKDIOeXPQh4C6+oBs298YI8mD0LkUnlp5J
+            TnKUB+HG5TutxhGn653RHHHntTDcTuYvPElrs40u1XZYGp8wOF9GCA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-06-18T09:00:24Z"
+    mac: ENC[AES256_GCM,data:WeBTZnKJaaLH9g2yzrNYOYPbrF1MEROErQVsSxNbDijzYdprbJYVK0HO7Jlz0Ja5/KCJMzV7OrD6XYW8Jgx/Myui2eKVo/N08CELDkU2WCVcff2WIOPILXIumZ67yzRLG5gWc6DpWKeZgZpqHjz0I8fZVOBKssPnfQUDV/sEmaY=,iv:wNGXVPvG4iZgqRcxyEZV6KB1LxSu47g5zjDyt1GKebc=,tag:k20SekdQbH4y3k7tUs5RzQ==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

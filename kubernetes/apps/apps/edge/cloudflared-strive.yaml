@@ -1,0 +1,79 @@
+# Second cloudflared connector — the Strive platform's public edge.
+#
+# strive.place + auth.strive.place live in the strive.us Cloudflare account
+# (constantin.chifor@strive.us), which is SEPARATE from the chifor@gmail.com
+# account that runs the main cloudflared (cloudflared.yaml). A Cloudflare Tunnel
+# can only serve hostnames whose zone is in its own account, so the platform
+# domain needs its own tunnel here (id c4a832e6-... in the strive.us account).
+#
+# Both connectors terminate at the same in-cluster Traefik
+# (traefik.platform-edge.svc:80), which Host-routes to web/gatekeeper/keycloak.
+#
+# DNS (operator, one-time, in the strive.us account):
+#   cloudflared tunnel route dns strive-platform strive.place
+#   cloudflared tunnel route dns strive-platform auth.strive.place
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudflared-strive-config
+  namespace: edge
+data:
+  config.yaml: |
+    tunnel: c4a832e6-c730-4e99-a948-ded73c1418e9
+    credentials-file: /etc/cloudflared/creds/credentials.json
+    metrics: 0.0.0.0:2000
+    no-autoupdate: true
+    ingress:
+      # Whole platform (SPA + /api/* + /auth + gatekeeper ForwardAuth chain).
+      - hostname: strive.place
+        service: http://traefik.platform-edge.svc.cluster.local:80
+      # Public IdP surface (Keycloak fronted at auth.strive.place; the keycloak
+      # IngressRoute blocks /admin + /realms/master).
+      - hostname: auth.strive.place
+        service: http://traefik.platform-edge.svc.cluster.local:80
+      - service: http_status:404
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared-strive
+  namespace: edge
+  labels:
+    app.kubernetes.io/name: cloudflared-strive
+spec:
+  replicas: 2 # HA: two tunnel connectors
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared-strive
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflared-strive
+    spec:
+      priorityClassName: platform-critical # public ingress path — survive pressure
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:latest # Docker Hub — pin a version (mirror follow-up)
+          args: ["tunnel", "--config", "/etc/cloudflared/config/config.yaml", "run"]
+          ports:
+            - { name: metrics, containerPort: 2000 }
+          livenessProbe:
+            httpGet: { path: /ready, port: metrics }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - { name: config, mountPath: /etc/cloudflared/config, readOnly: true }
+            - { name: creds, mountPath: /etc/cloudflared/creds, readOnly: true }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65532
+      volumes:
+        - name: config
+          configMap: { name: cloudflared-strive-config }
+        - name: creds
+          secret: { secretName: cloudflared-strive-creds } # SOPS: key credentials.json

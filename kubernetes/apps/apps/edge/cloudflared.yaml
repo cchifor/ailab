@@ -70,13 +70,11 @@ data:
       # which an Access browser login would break. Web UI login is Authelia OIDC; registration is off.
       - hostname: git.chifor.me
         service: http://gitea-http.gitea.svc.cluster.local:3000
-      # Strive platform (strive.place) -> in-cluster Traefik (path-routes /api/*,
-      # /agent, /auth + the gatekeeper ForwardAuth chain). id.strive.place -> Keycloak.
-      # Requires the strive.place zone + these CNAMEs on the tunnel (see RUNBOOK).
-      - hostname: strive.place
-        service: http://traefik.platform-edge.svc.cluster.local:80
-      - hostname: id.strive.place
-        service: http://traefik.platform-edge.svc.cluster.local:80
+      # strive.place + auth.strive.place are served by a SEPARATE tunnel in the
+      # strive.us Cloudflare account (see cloudflared-strive.yaml). The strive.us
+      # account owns the strive.place zone, and a Cloudflare Tunnel can only serve
+      # hostnames whose zone is in its own account — so this (chifor@gmail.com)
+      # tunnel cannot route them. Error 1033 otherwise.
       - service: http_status:404
 ---
 apiVersion: apps/v1
