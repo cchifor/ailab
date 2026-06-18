@@ -27,5 +27,6 @@ resource "cloudflare_dns_record" "tunnel" {
   depends_on = [
     cloudflare_zero_trust_access_application.dev_worker,
     cloudflare_zero_trust_access_application.k8s_tools,
+    cloudflare_zero_trust_access_application.admin_uis,
   ]
 }
