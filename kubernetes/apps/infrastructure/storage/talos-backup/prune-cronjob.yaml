@@ -1,0 +1,62 @@
+# Retention for the etcd snapshots — talos-backup itself has NO pruning (it just keeps writing
+# ailab-<ts>.snap.age daily), and versitygw's posix backend can't be relied on to enforce S3
+# lifecycle expiration. So this CronJob deletes snapshots older than 30 days via rclone, reusing the
+# talos key that owns the `talos-etcd-backups` bucket. Runs at 02:00, after the 01:00 backup.
+# NOTE: age-based (not count-based) — if backups stopped for >30d this would eventually delete the last
+# good one too, but a 30-day window is safe given healthy daily backups (and a stalled CronJob is its
+# own alerting problem). ~30 × 60MB ≈ 1.8GB retained. (Velero self-prunes its bucket via backup TTL.)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: talos-backup-prune
+  namespace: talos-backup
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: rclone
+              image: rclone/rclone:1.74.3
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  echo "=== current snapshots ==="; rclone lsf GT:talos-etcd-backups || true
+                  echo "=== deleting snapshots older than 30d ==="
+                  rclone delete --min-age 30d GT:talos-etcd-backups -v
+                  rclone rmdirs GT:talos-etcd-backups --leave-root -v || true
+              env:
+                - { name: HOME, value: /tmp }
+                # rclone remote `GT` (versitygw) built from env vars — no config file needed.
+                - { name: RCLONE_CONFIG_GT_TYPE, value: s3 }
+                - { name: RCLONE_CONFIG_GT_PROVIDER, value: Other }
+                - { name: RCLONE_CONFIG_GT_ENDPOINT, value: "https://192.168.1.225:7070" }
+                - { name: RCLONE_CONFIG_GT_REGION, value: us-east-1 }
+                - { name: RCLONE_CONFIG_GT_FORCE_PATH_STYLE, value: "true" }
+                - { name: RCLONE_CONFIG_GT_NO_CHECK_CERTIFICATE, value: "true" } # versitygw self-signed
+                - name: RCLONE_CONFIG_GT_ACCESS_KEY_ID
+                  valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_ACCESS_KEY_ID } }
+                - name: RCLONE_CONFIG_GT_SECRET_ACCESS_KEY
+                  valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_SECRET_ACCESS_KEY } }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+              resources:
+                requests: { cpu: 25m, memory: 64Mi }
+                limits: { memory: 256Mi }
+          volumes:
+            - { name: tmp, emptyDir: {} }
