@@ -31,7 +31,7 @@ spec:
       initContainers:
         # Seed the writable /app/config from the ConfigMap so Homepage can also write its own skeletons.
         - name: copy-config
-          image: mirror.gcr.io/library/busybox:1.37
+          image: mirror.gcr.io/library/busybox:1.38
           command:
             - sh
             - -c
