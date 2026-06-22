@@ -63,6 +63,32 @@
     },
     "ui": {
       "enable": true
+    },
+    "sync": {
+      "enable": true,
+{% if registry_zot_sync_dockerhub_user | length > 0 %}
+      "credentialsFile": "{{ registry_zot_sync_credentials_file }}",
+{% endif %}
+      "registries": [
+        {
+          "urls": ["https://quay.io"],
+          "onDemand": true,
+          "tlsVerify": true,
+          "content": [{ "prefix": "keycloak/**" }]
+        },
+        {
+          "urls": ["https://mcr.microsoft.com"],
+          "onDemand": true,
+          "tlsVerify": true,
+          "content": [{ "prefix": "playwright" }, { "prefix": "playwright/**" }]
+        },
+        {
+          "urls": ["https://registry-1.docker.io"],
+          "onDemand": true,
+          "tlsVerify": true,
+          "content": [{ "prefix": "library/**" }, { "prefix": "nginxinc/**" }]
+        }
+      ]
     }
   }
 }

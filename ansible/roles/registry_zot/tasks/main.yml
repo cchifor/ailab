@@ -136,6 +136,20 @@
   no_log: true
   notify: restart zot
 
+# Optional Docker Hub credentials for the pull-through cache's UPSTREAM (sync.credentialsFile).
+# Only rendered when registry_zot_sync_dockerhub_user is set; config.json references it only then.
+# Lifts the cache's own Docker Hub egress off the anonymous 100-pulls/6h limit (see defaults).
+- name: Deploy zot sync upstream credentials (Docker Hub)
+  ansible.builtin.template:
+    src: sync-credentials.json.j2
+    dest: "{{ registry_zot_sync_credentials_file }}"
+    owner: root
+    group: "{{ registry_zot_group }}"
+    mode: "0640"
+  no_log: true
+  when: registry_zot_sync_dockerhub_user | length > 0
+  notify: restart zot
+
 # ---- Service ----
 - name: Install the zot systemd unit
   ansible.builtin.template:
