@@ -8,7 +8,7 @@ creation_rules:
   # Registry secrets. Same reason as dev-worker above — MUST precede the generic ansible/secrets rule
   # (which would otherwise encrypt only github_app_private_key and leave these two keys plaintext).
   - path_regex: ansible[/\\]secrets[/\\]registry\.sops\.ya?ml$
-    encrypted_regex: ^(registry_ci_password|cloudflare_dns_api_token|registry_oidc_client_secret)$
+    encrypted_regex: ^(registry_ci_password|cloudflare_dns_api_token|registry_oidc_client_secret|registry_sync_dockerhub_token)$
     age: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
   # Ansible secrets (host-side vars, not k8s Secrets): encrypt only the private-key value. The App
   # ID + installation ID are non-secret and live in group_vars. First match wins, so this is listed

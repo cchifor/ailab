@@ -39,3 +39,20 @@ registry_zot_acme_staging: false        # set true to test against LE staging (u
 
 # ufw (the LXC is on the mgmt LAN; only 22 + 443 need to be open)
 registry_zot_manage_ufw: true
+
+# ---- Pull-through cache (sync extension) ----
+# Zot's `sync` runs registry.chifor.me as an on-demand pull-through MIRROR of upstream base images
+# (docker.io/quay.io/mcr) so the cchifor/platform CI runners stop hitting Docker Hub's anonymous 429.
+# Images are served at the TRANSPARENT upstream path (registry.chifor.me/v2/library/python/... etc),
+# which is what a Docker daemon `registry-mirrors` and a BuildKit `[registry."docker.io"] mirrors`
+# require — proven end-to-end by cchifor/platform's scripts/ci/verify-registry-mirror.sh. The
+# per-upstream content prefixes are DISJOINT (no global "**") so a flat Zot namespace can't confuse
+# which upstream a repo came from. See docs/decisions/0014-registry-pull-through-cache.md.
+#
+# Upstream auth (STRONGLY recommended): on a cache miss Zot pulls from Docker Hub itself, copying the
+# full multi-arch manifest list per image — anonymous egress exhausts Docker Hub's 100-pulls/6h limit
+# fast and the cold fetch then 429s. Set a (free) Docker Hub account here to lift the cache's own
+# upstream to 200/6h+; the token is the SOPS var `registry_sync_dockerhub_token`. Empty user =>
+# anonymous proxy (works, but cold fetches can be rate-limited). quay.io/mcr are not rate-limited.
+registry_zot_sync_dockerhub_user: ""
+registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credentials.json"
