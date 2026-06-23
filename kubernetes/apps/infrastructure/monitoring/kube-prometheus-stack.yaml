@@ -91,7 +91,7 @@ spec:
         # belt-and-suspenders — it also chmods the operator's subPath=prometheus-db data dir.
         initContainers:
           - name: init-chown-data
-            image: busybox:1.37
+            image: busybox:1.38
             command: ["sh", "-c", "id; chown -R 1000:2000 /prometheus 2>/dev/null || true; chmod -R 0777 /prometheus; ls -lna /prometheus"]
             securityContext:
               runAsUser: 0
