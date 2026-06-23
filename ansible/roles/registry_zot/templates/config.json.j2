@@ -3,9 +3,27 @@
   "storage": {
     "rootDirectory": "{{ registry_zot_data_dir }}",
     "gc": true,
-    "gcDelay": "1h",
-    "gcInterval": "24h",
-    "dedupe": true
+    "gcDelay": "2h",
+    "gcInterval": "1h",
+    "dedupe": true,
+    "retention": {
+      "dryRun": false,
+      "policies": [
+        {
+          "repositories": ["strive/**"],
+          "deleteUntagged": true,
+          "keepTags": [
+            { "patterns": ["^latest$"] },
+            { "patterns": ["^sha-.*"], "mostRecentlyPushedCount": {{ registry_zot_strive_keep_recent }} }
+          ]
+        },
+        {
+          "repositories": ["**"],
+          "deleteUntagged": false,
+          "keepTags": [{ "patterns": [".*"] }]
+        }
+      ]
+    }
   },
   "http": {
     "address": "0.0.0.0",
@@ -83,10 +101,10 @@
           "content": [{ "prefix": "playwright" }, { "prefix": "playwright/**" }]
         },
         {
-          "urls": ["https://registry-1.docker.io"],
+          "urls": ["https://mirror.gcr.io", "https://registry-1.docker.io"],
           "onDemand": true,
           "tlsVerify": true,
-          "content": [{ "prefix": "library/**" }, { "prefix": "nginxinc/**" }]
+          "content": [{ "prefix": "**" }]
         }
       ]
     }

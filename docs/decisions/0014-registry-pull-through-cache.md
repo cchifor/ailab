@@ -65,3 +65,26 @@ into any Dockerfile `FROM` line (images stay portable; local dev is unaffected).
   `gc`/`dedupe` (already on) bound growth. Watch headroom; bump the `mp0` disk if needed.
 - **Contract sync.** The runner `daemon.json` mirror is also encoded in `cchifor/platform`'s
   `infra/runner/provision.sh` and asserted by its `runner-health.yml` canary — keep the two in step.
+
+## Update (2026-06-23) — mirror.gcr.io upstream, catch-all docker.io, retention, 192 GiB
+
+A CI outage exposed three gaps in the original shape; all fixed here (applied live, then committed):
+
+1. **Anonymous Docker Hub 429.** The "soft fallback / `with-retry` backstop" was insufficient: on a
+   cache miss Zot pulled Docker Hub **anonymously** and hit `toomanyrequests: unauthenticated pull
+   rate limit`, failing CI. Fix: point the **docker.io sync upstream at Google's anonymous Docker
+   Hub pull-through `https://mirror.gcr.io`** (primary), with `registry-1.docker.io` as failover.
+   mirror.gcr.io serves the **same digests** (digest-pinned pulls match) and has no anon cap, so
+   `registry_zot_sync_dockerhub_user` is now optional (it only authenticates the failover path).
+2. **Disjoint prefixes were too narrow.** docker.io was `library/**` + `nginxinc/**` only, so the
+   platform stacks' other docker.io images (`pgvector`, `grafana`, `prom`, `qdrant`, `valkey`,
+   `rustfs`, `curlimages`, `dpage`, …) 404'd on the mirror. Fix: docker.io is now the **catch-all**
+   (`"**"`), kept LAST in the registries list; quay.io (`keycloak/**`) and mcr (`playwright*`) keep
+   specific prefixes and are listed first, so the "no upstream confusion" guarantee holds via order.
+3. **`gc`/`dedupe` did NOT bound growth** (the optimistic bit of the old "Disk" consequence): with no
+   retention, one `sha-<commit>` tag accrued per repo per platform `main` build until the 64 GiB
+   store hit 100% → blob writes failed (`blob upload unknown` / `provided digest did not match`)
+   while reads still served. Fix: a `storage.retention` policy — `strive/**` keeps `latest` + the 25
+   most-recently-pushed sha tags (GC reclaims the rest); the mirror/cache repos are explicitly
+   **protected** (`deleteUntagged:false`, keep all) so digest-pinned base images are never collected.
+   The mp0 data disk was bumped **64 → 192 GiB** for headroom.

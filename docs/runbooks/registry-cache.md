@@ -16,9 +16,12 @@ The `sync` config is rendered into `/etc/zot/config.json`; a change triggers the
 
 ## Enable Docker Hub upstream auth (recommended)
 
-On a cache miss Zot pulls from Docker Hub itself, copying the full multi-arch manifest list per image,
-so **anonymous** cold fetches can exhaust Docker Hub's 100-pulls/6h limit and 429. A free Docker Hub
-account lifts the cache's own egress to 200/6h+.
+**Now optional (failover only) — see ADR 0014 Update 2026-06-23.** The docker.io sync upstream is
+`https://mirror.gcr.io` (Google's anonymous Docker Hub pull-through, no 100-pulls/6h cap, same
+digests), with `registry-1.docker.io` as failover. So cold fetches no longer 429 anonymously. The
+Docker Hub token below only authenticates the **failover** path; set it only if mirror.gcr.io ever
+lacks an image. On a cache miss the failover pulls Docker Hub directly (anonymous → 100-pulls/6h →
+429); a free Docker Hub account lifts that to 200/6h+.
 
 1. Create a read-only token: <https://app.docker.com/settings/personal-access-tokens>.
 2. Set the username (non-secret) in `ansible/roles/registry_zot/defaults/main.yml` **or** a host/group
@@ -49,7 +52,22 @@ sudo systemctl start zot
 ```
 
 `skopeo` honours the `ci` htpasswd creds for delete (anonymous is read-only); or use the stop/rm/start
-path. Zot `gc` (every 24h) reclaims the orphaned blobs.
+path. Zot `gc` (every `gcInterval`, now 1h) reclaims the orphaned blobs.
+
+> Note: if a cached mirror repo dir is left with a `.sync` staging dir but no `index.json` (e.g. a
+> deleted/partial repo), on-demand re-sync will **not** repair it — `rm -rf` that repo dir entirely so
+> the next pull syncs fresh.
+
+## Disk / retention
+
+The store lives on the mp0 data disk (now **192 GiB**, `kubernetes/infra/registry-lxc` `data_gb`). A
+`storage.retention` policy (config.json.j2) bounds growth: `strive/**` keeps `latest` + the
+`registry_zot_strive_keep_recent` (25) most-recently-pushed `sha-<commit>` tags per repo and GC
+reclaims the rest; mirror/cache repos are protected (`deleteUntagged:false`, keep all) so
+digest-pinned base images are never collected. If the store ever fills again (writes fail with
+`blob upload unknown` / `provided digest did not match` while reads still 200), grow it online —
+`pct resize <vmid> mp0 +NG` then bump `data_gb` + `tofu apply` to match — and/or lower
+`registry_zot_strive_keep_recent`.
 
 ## Verify it's working
 
