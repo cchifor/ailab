@@ -65,14 +65,18 @@ variable "lxc_rootfs_gb" {
 
 # Registry image store -> mounted at /var/lib/registry (mp0). An ALLOCATED volume (not a bind
 # mount), so it grows online later with `pct resize <vmid> mp0 +NG` or by bumping this + tofu apply
-# (grow-only; the pool must have free space). Starting at 64 GiB.
+# (grow-only; the pool must have free space).
+# Bumped 64 -> 192 GiB: at 64 GiB the store filled (no retention pre-fix), 100% full → blob writes
+# failed (`blob upload unknown` / `provided digest did not match`) while reads still served, which
+# reds cchifor/platform CI builds. 192 GiB gives headroom alongside the new storage.retention
+# policy (config.json.j2). Applied live via `pct resize 5004 mp0 192G`; this keeps tofu in sync.
 variable "data_datastore" {
   type    = string
   default = "local-lvm"
 }
 variable "data_gb" {
   type    = number
-  default = 64
+  default = 192
 }
 
 # ---- Debian 13 LXC template (matches ai-lxc). Distinct file_name so a destroy here never deletes

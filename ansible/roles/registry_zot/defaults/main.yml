@@ -45,14 +45,29 @@ registry_zot_manage_ufw: true
 # (docker.io/quay.io/mcr) so the cchifor/platform CI runners stop hitting Docker Hub's anonymous 429.
 # Images are served at the TRANSPARENT upstream path (registry.chifor.me/v2/library/python/... etc),
 # which is what a Docker daemon `registry-mirrors` and a BuildKit `[registry."docker.io"] mirrors`
-# require — proven end-to-end by cchifor/platform's scripts/ci/verify-registry-mirror.sh. The
-# per-upstream content prefixes are DISJOINT (no global "**") so a flat Zot namespace can't confuse
-# which upstream a repo came from. See docs/decisions/0014-registry-pull-through-cache.md.
+# require — proven end-to-end by cchifor/platform's scripts/ci/verify-registry-mirror.sh.
+# Prefix layering (config.json.j2): quay.io (keycloak/**) and mcr (playwright*) keep SPECIFIC
+# prefixes and are listed FIRST, so they win on those repos; docker.io is the catch-all (prefix
+# "**") and is listed LAST. The earlier disjoint design (docker.io = library/** + nginxinc/** only)
+# missed the platform stacks' other docker.io images (pgvector, grafana, prom, qdrant, valkey,
+# rustfs, curlimages, dpage, …) → those 404'd on the mirror → fell back to Docker Hub → 429.
+# Ordering (specific upstreams first, docker.io catch-all last) preserves "no upstream confusion".
+# See docs/decisions/0014-registry-pull-through-cache.md.
 #
-# Upstream auth (STRONGLY recommended): on a cache miss Zot pulls from Docker Hub itself, copying the
-# full multi-arch manifest list per image — anonymous egress exhausts Docker Hub's 100-pulls/6h limit
-# fast and the cold fetch then 429s. Set a (free) Docker Hub account here to lift the cache's own
-# upstream to 200/6h+; the token is the SOPS var `registry_sync_dockerhub_token`. Empty user =>
-# anonymous proxy (works, but cold fetches can be rate-limited). quay.io/mcr are not rate-limited.
+# Docker Hub anonymous 429: solved by pointing the docker.io sync UPSTREAM at Google's anonymous
+# Docker Hub pull-through `mirror.gcr.io` (primary), with `registry-1.docker.io` kept as failover
+# (config.json.j2). mirror.gcr.io serves the SAME image digests as Docker Hub (digest-pinned pulls
+# match) and is not subject to the 100-pulls/6h anonymous cap. So `registry_zot_sync_dockerhub_user`
+# below is now OPTIONAL — it only authenticates the registry-1.docker.io FAILBACK path; leave empty
+# unless mirror.gcr.io ever lacks an image. quay.io/mcr are not rate-limited.
 registry_zot_sync_dockerhub_user: ""
 registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credentials.json"
+
+# ---- Retention (storage.retention in config.json.j2) ----
+# Without retention the store grows unbounded (~one sha-<commit> tag per repo per platform main
+# build) and eventually fills the data disk → 100%-full blob-write failures. The strive/** policy
+# keeps `latest` + the N most-recently-pushed sha tags per repo (GC reclaims the rest). The mirror
+# repos (everything else) are a CACHE: they are explicitly PROTECTED (deleteUntagged:false, keep
+# all tags) so digest-pinned base-image pulls are never GC'd (Zot can't re-sync a bare digest).
+# 25 comfortably covers the deployed ailab pin (which tracks a recent platform build) + headroom.
+registry_zot_strive_keep_recent: 25
