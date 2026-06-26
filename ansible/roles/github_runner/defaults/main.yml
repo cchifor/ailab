@@ -29,6 +29,14 @@ github_runner_home: /home/runner
 github_runner_dir: /home/runner/actions-runner
 github_runner_service: actions.runner.cchifor-platform.service
 
+# ---- guest swap (cchifor/platform#620: heavy e2e peaks spill to the VM's own disk, not OOM) ----
+# None existed on the cloud image. With the balloon floor pinned to 12 GiB (tofu), swap is the
+# second line of defence: a heavy compose/Playwright peak spills to the VM's disk instead of getting
+# OOM-killed (exit 137). swappiness=10 keeps it cold — used only under genuine pressure, not eagerly.
+github_runner_swap_size: "8G"
+github_runner_swap_file: /swapfile
+github_runner_swappiness: 10
+
 # ---- systemd resource caps (MemoryMax MUST stay 10G to satisfy platform's runner-health canary) ----
 github_runner_memory_max: "10G"
 github_runner_memory_high: "9G"

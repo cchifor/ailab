@@ -42,9 +42,10 @@ resource "proxmox_virtual_environment_vm" "runner" {
     type  = "host" # homogeneous CPUs; no live migration (runners are rebuildable)
   }
 
-  # Ballooning: VM floats between floating (idle floor) and dedicated (load ceiling), so idle runners
-  # return RAM to the host (like the old Hyper-V Dynamic Memory pool). Independent of the runner
-  # service's systemd MemoryMax cap.
+  # Ballooning: VM floats between floating (idle floor, 12 GiB) and dedicated (load ceiling, 24 GiB),
+  # so idle runners return RAM to the host. Independent of the runner service's systemd MemoryMax cap.
+  # The floor is held at 12 GiB (not the bpg default 1 GiB) because host RAM pressure was ballooning
+  # the guests down to 1-2 GiB and OOM-killing CI jobs — see cchifor/platform#620 + variables.tf.
   memory {
     dedicated = var.runner_memory_mib
     floating  = var.runner_memory_floating_mib
