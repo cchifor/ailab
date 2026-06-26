@@ -29,9 +29,16 @@ github_runner_home: /home/runner
 github_runner_dir: /home/runner/actions-runner
 github_runner_service: actions.runner.cchifor-platform.service
 
-# ---- systemd resource caps (MemoryMax MUST stay 10G to satisfy platform's runner-health canary) ----
-github_runner_memory_max: "10G"
-github_runner_memory_high: "9G"
+# ---- systemd resource caps ----
+# The runner SERVICE cgroup caps the runner agent + host-side job processes
+# (checkout, uv, node, the compose CLI). Docker containers run under dockerd
+# OUTSIDE this slice, so they get the VM's full 24 GiB minus this cap + OS.
+# Raised 10G->18G after migrating from the 7-8G Hyper-V VMs to 24 GiB Proxmox
+# VMs: the stale 10G was starving host-side job processes and reaping the
+# runner agent ("lost communication", #620). platform's runner-health canary
+# now asserts a >= 9.5 GiB FLOOR (not exact 10G), so this raise is canary-safe.
+github_runner_memory_max: "18G"
+github_runner_memory_high: "16G"
 github_runner_cpu_quota: "760%" # ~8 vCPU, leaving headroom for dockerd + OS
 github_runner_tasks_max: 16384
 

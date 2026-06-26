@@ -19,9 +19,12 @@ KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=5min
 
-# Resource caps. MemoryMax MUST stay 10G to satisfy platform's runner-health canary
-# (it asserts cgroup memory.max == 10737418240). CPUQuota sized for the VM's vCPU count,
-# leaving headroom for the docker daemon + OS.
+# Resource caps for the runner SERVICE slice (agent + host-side job processes;
+# Docker containers run under dockerd OUTSIDE this slice). MemoryMax is set from
+# github_runner_memory_max (18G on the 24 GiB Proxmox VMs). platform's
+# runner-health canary asserts a >= 9.5 GiB FLOOR (not exact 10G), so the value
+# is free to track the VM size. CPUQuota sized for the VM's vCPU count, leaving
+# headroom for the docker daemon + OS.
 CPUQuota={{ github_runner_cpu_quota }}
 CPUWeight=80
 IOWeight=80
