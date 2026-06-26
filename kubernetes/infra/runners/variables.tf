@@ -96,13 +96,19 @@ variable "runner_memory_mib" {
 variable "runner_memory_floating_mib" {
   description = <<-EOT
     Min VM memory (MiB) = the virtio-balloon floor. floating < dedicated enables ballooning: idle
-    runners release RAM back toward this value (restores the old Hyper-V Dynamic Memory behavior),
-    and the balloon deflates on demand up to runner_memory_mib under load. Independent of the runner
-    service's systemd MemoryMax=10G (a cgroup cap, set in the ansible role) — the canary checks that,
-    not the balloon. Set equal to runner_memory_mib to disable ballooning.
+    runners release RAM back toward this value, and the balloon deflates on demand up to
+    runner_memory_mib under load. Independent of the runner service's systemd MemoryMax=10G (a cgroup
+    cap, set in the ansible role) — the canary checks that, not the balloon. Set equal to
+    runner_memory_mib to disable ballooning.
+
+    Pinned to 12 GiB (was 1 GiB). The 1 GiB floor was the root cause of cchifor/platform#620: the
+    Proxmox hosts run the platform at ~80% RAM, so pvestatd ballooned idle-looking runner guests down
+    toward the floor (1-2 GiB) and CI jobs OOM-killed (exit 137) the instant a heavy docker-compose
+    e2e stack started. A 12 GiB floor guarantees each guest enough headroom for the CI peak while the
+    balloon still inflates to 24 GiB under load; hosts verified healthy (79-85% used) at this floor.
   EOT
   type        = number
-  default     = 1024 # min 1 GiB (matches the old Hyper-V pool); reclaimed only under host pressure
+  default     = 12288 # 12 GiB balloon floor — see cchifor/platform#620 (host-pressure ballooning OOM)
 }
 variable "runner_rootfs_gb" {
   type    = number

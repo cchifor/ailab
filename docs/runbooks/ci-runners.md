@@ -6,6 +6,7 @@ See ADR 0013. IaC: `kubernetes/infra/runners/` (VMs) + `ansible/roles/github_run
 | | |
 |---|---|
 | VMs | `gha-runner-1/2/3` — vmid 4101-4103, one per Proxmox host, .47/.48/.49, 8 vCPU / 24 GiB / 120 GiB |
+| Memory | balloon **12-24 GiB** (floor 12 GiB so host RAM pressure can't starve a running job — see #620) + 8 GiB guest swap (`swappiness=10`) |
 | OS | Ubuntu 24.04 cloud image (cloud-init: static IP + `ubuntu` user + the ansible SSH key) |
 | Label | `self-hosted-hv` (repo var `RUNNER_LABEL`; workflows use `runs-on: ${{ vars.RUNNER_LABEL }}`) |
 | Registration | Ephemeral, GitHub App auth → `ephem-<host>-<epoch>-<8hex>`, one job per cycle |
@@ -105,4 +106,13 @@ drain, then delete the Multipass VMs. In GitHub → Settings → Actions → Run
 - **`just runners` can't reach a host:** the VM must exist (`tofu apply`) and the `runner_ssh_public_key`
   must match `~/.ssh/id_ed25519`; `just ping-runners` to isolate SSH vs config issues.
 - **Canary fails `memory.max`:** the `20-reclaim`/unit drop-ins didn't apply — `systemctl daemon-reload`
-  + re-run `just runners`. `MemoryMax` must be `10G` (10737418240 bytes).
+  + re-run `just runners`. `MemoryMax` must be `10G` (10737418240 bytes). NB: `MemoryMax=10G` is the
+  service **cgroup** cap, unrelated to the balloon floor below — don't conflate them.
+- **Jobs OOM / "self-hosted runner lost communication" / exit 137 (cchifor/platform#620):** the
+  Proxmox host is under RAM pressure and `pvestatd` ballooned the guest down toward its floor, starving
+  the running job. The VM resource (`kubernetes/infra/runners`) pins the **balloon floor to 12 GiB**
+  (`runner_memory_floating_mib = 12288`, was the bpg default 1 GiB) so a running guest can't drop below
+  12 GiB, and the `github_runner` role adds an **8 GiB guest swapfile** (`swappiness=10`) so a peak
+  spills to the VM's own disk instead of OOM-killing. Verify on a VM: `free -h` shows ~12 GiB+ and an
+  8 GiB swap; on the host `qm config <vmid> | grep -E 'memory|balloon'` shows `memory: 24576` +
+  `balloon: 12288`. To re-assert: `tofu apply` (floor) + `just runners` (swap).

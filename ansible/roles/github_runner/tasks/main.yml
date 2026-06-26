@@ -48,6 +48,12 @@
     state: directory
     mode: "0755"
 
+# ── 1b. guest swap (cchifor/platform#620) ────────────────────────────────────
+# OOM reclaim valve so a heavy compose/Playwright peak spills to the VM disk instead of exit-137.
+# Pairs with the 12 GiB balloon floor in tofu (kubernetes/infra/runners). See swap.yml + the runbook.
+- name: Configure guest swap
+  ansible.builtin.import_tasks: swap.yml
+
 # ── 2. Docker engine + Buildx (official Docker apt repo) ─────────────────────
 - name: Add Docker apt signing key
   ansible.builtin.get_url:

@@ -4,6 +4,12 @@
 (`tofu`), runners registered to the `self-hosted-hv` pool, runner-health canary passing on the
 Proxmox runners (the legacy 7G Hyper-V runners fail it). Memory ballooning 1→24 GiB. WSL was down, so
 the runner host config was driven over SSH (mirrors the role); `just runners` from WSL converges.
+**Update (2026-06-26, cchifor/platform#620):** CI was OOM-killing ~62% of jobs ("self-hosted runner
+lost communication" / exit 137). Root cause: host RAM pressure (~80% used) drove `pvestatd` to
+balloon the guests down to 1-2 GiB (the bpg default 1 GiB floor), starving running jobs. Fixed by
+pinning the **balloon floor to 12 GiB** (`runner_memory_floating_mib`; the 24 GiB memory ceiling is
+unchanged) and adding an **8 GiB guest swapfile** (`swappiness=10`) as an OOM reclaim valve. Both are
+now codified (tofu + the `github_runner` role). The `MemoryMax=10G` cgroup cap is unrelated, unchanged.
 **Remaining:** decommission the 4 Hyper-V runners; optionally narrow the App install to platform-only.
 **Relates to:** ADR 0001 (OpenTofu + Ansible), ADR 0006 (Talos/Flux/Cilium), ADR 0008 (AI appliance =
 LXC *outside* Talos), ADR 0009 (control-plane colocation / tight RAM budget).
@@ -59,6 +65,11 @@ passes unchanged.
   immediately). Kept `--ephemeral`; JIT can adopt the same `ephem-*` name later, canary-transparent.
 
 ## Consequences
+- **Ballooning needs a floor (#620).** Letting `floating` drop to 1 GiB invited `pvestatd`, under host
+  RAM pressure, to reclaim a *running* runner's RAM and OOM the job. The floor is now 12 GiB so a guest
+  can't be squeezed below the CI working set; the host still reclaims idle headroom up to the 24 GiB
+  ceiling. The 8 GiB guest swap is a backstop, not a substitute. Cost: ~33 GiB of host RAM is now
+  committed across the 3 guests even when idle (hosts verified healthy, 79-85% used).
 - The runner registration auth diverges from the live pool (App vs PAT) — intentional; the App key is
   the only new secret (SOPS, written 0400, never job-readable beyond what a workflow could already do).
 - CI scope is unchanged: the runners execute platform's existing workflows (which push images + commit

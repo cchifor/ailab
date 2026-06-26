@@ -1,0 +1,44 @@
+---
+# Guest swapfile (cchifor/platform#620) — an OOM reclaim valve so a heavy docker-compose e2e /
+# Playwright peak spills to the VM's own disk instead of tripping the kernel OOM-killer (exit 137,
+# "self-hosted runner lost communication"). The minimal cloud image ships no swap. Disk-backed (no
+# host-RAM cost); swappiness=10 keeps it a safety valve, not a first resort. Idempotent: the swapfile
+# is `creates`-guarded and mkswap/swapon only run when this file isn't already an active swap device.
+
+- name: Check for active swap
+  ansible.builtin.command: swapon --show=NAME --noheadings
+  register: github_runner_active_swap
+  changed_when: false
+
+- name: Allocate the swapfile
+  ansible.builtin.command: "fallocate -l {{ github_runner_swap_size }} {{ github_runner_swap_file }}"
+  args:
+    creates: "{{ github_runner_swap_file }}"
+
+- name: Secure swapfile permissions
+  ansible.builtin.file:
+    path: "{{ github_runner_swap_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Initialize + enable swap
+  ansible.builtin.shell: "mkswap {{ github_runner_swap_file }} && swapon {{ github_runner_swap_file }}"
+  when: github_runner_swap_file not in github_runner_active_swap.stdout
+  changed_when: true
+
+- name: Persist swap in fstab
+  ansible.posix.mount:
+    path: none
+    src: "{{ github_runner_swap_file }}"
+    fstype: swap
+    opts: sw
+    state: present
+
+- name: Set vm.swappiness
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: "{{ github_runner_swappiness | string }}"
+    sysctl_file: /etc/sysctl.d/99-swappiness.conf
+    state: present
+    reload: true
