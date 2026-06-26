@@ -131,7 +131,10 @@ MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
   --env INSTANCE=qwen36 --env PORT=8081 \
   --env MODEL=/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
   --env MODEL_ALIAS=qwen3.6-35b-a3b --env MMPROJ=/models/qwen3.6-35b-a3b/mmproj-F16.gguf \
-  --env CTX=32768 --env PARALLEL=2
+  --env CTX=32768 --env PARALLEL=1   # PARALLEL=1 => full 32768 tok/request. llama.cpp splits -c (CTX)
+                                     # across --parallel slots, so PARALLEL=2 gave only 16384/request,
+                                     # which overflowed on tool-heavy agent prompts ("list workflows"
+                                     # ~= 20k tok -> 400 ContextWindowExceededError).
 MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
   --env INSTANCE=gemma4 --env PORT=8082 \
   --env MODEL=/models/gemma-4-26b-a4b/gemma-4-26B_q4_0-it.gguf \
