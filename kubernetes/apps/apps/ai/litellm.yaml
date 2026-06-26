@@ -10,11 +10,19 @@ metadata:
 data:
   config.yaml: |
     model_list:
+      # max_input_tokens = the per-request context window the llama-server
+      # actually serves (n_ctx / --parallel), with output headroom. LiteLLM
+      # fails fast with a clean ContextWindowExceededError above this instead of
+      # forwarding a doomed request; the deepagent codes it as a friendly
+      # context_window_exceeded (platform PR #636). KEEP IN SYNC with the host
+      # launch args in docs/runbooks/ai-host-setup.md.
       - model_name: qwen3-30b-a3b
         litellm_params:
           model: openai/qwen3-30b-a3b
           api_base: http://llm.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
+        model_info:
+          max_input_tokens: 7000 # host CTX=8192
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
@@ -22,16 +30,21 @@ data:
           api_key: "sk-noauth"
         model_info:
           supports_vision: true # Qwen3.6 is multimodal (coding + vision); replaced qwen3-coder-30b
+          max_input_tokens: 30000 # host CTX=32768 PARALLEL=1 (raised from 16384 for tool-heavy agent prompts)
       - model_name: gpt-oss-120b
         litellm_params:
           model: openai/gpt-oss-120b
           api_base: http://llm-gptoss.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
+        model_info:
+          max_input_tokens: 7000 # host CTX=8192
       - model_name: qwen3.5-122b
         litellm_params:
           model: openai/qwen3.5-122b
           api_base: http://llm-qwen35.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
+        model_info:
+          max_input_tokens: 7000 # host CTX=8192
       - model_name: gemma-4-26b-a4b
         litellm_params:
           model: openai/gemma-4-26b-a4b
@@ -39,6 +52,7 @@ data:
           api_key: "sk-noauth"
         model_info:
           supports_vision: true # gates image input in LiteLLM + Open WebUI; replaced qwen3-vl-8b
+          max_input_tokens: 15000 # host CTX=16384 PARALLEL=1
       # Cloud models (real OpenAI/Anthropic) for the Strive platform's model
       # dropdown. Keys come from the litellm-cloud-keys Secret (SOPS), referenced
       # via os.environ/ so they never appear in this ConfigMap.
@@ -101,8 +115,10 @@ spec:
         # Rolls the pod when config.yaml changes — LiteLLM reads the mounted
         # ConfigMap only at startup and there is no Reloader in-cluster, so a
         # ConfigMap-only edit would otherwise be a silent no-op. Recompute on
-        # every model_list change: sha256(config.yaml) | cut -c1-12.
-        checksum/config: "42b0f7b2df45"
+        # every model_list change with EXACTLY:
+        #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
+        #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
+        checksum/config: "64b6fb706a6b"
     spec:
       containers:
         - name: litellm
