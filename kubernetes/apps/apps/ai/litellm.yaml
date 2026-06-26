@@ -54,6 +54,29 @@ data:
         litellm_params:
           model: anthropic/claude-sonnet-4-6
           api_key: os.environ/ANTHROPIC_API_KEY
+      # GPT-5.x flagship tier — completes the Strive platform's 8 "online" catalog
+      # ids. Bare model_name = exactly what pydantic-ai sends over the wire; no
+      # api_base (direct to api.openai.com) reusing the same litellm-cloud-keys key.
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_key: os.environ/OPENAI_API_KEY
+      - model_name: gpt-5.4-mini
+        litellm_params:
+          model: openai/gpt-5.4-mini
+          api_key: os.environ/OPENAI_API_KEY
+      - model_name: gpt-5.4-nano
+        litellm_params:
+          model: openai/gpt-5.4-nano
+          api_key: os.environ/OPENAI_API_KEY
+      - model_name: gpt-5
+        litellm_params:
+          model: openai/gpt-5
+          api_key: os.environ/OPENAI_API_KEY
+      - model_name: gpt-5-mini
+        litellm_params:
+          model: openai/gpt-5-mini
+          api_key: os.environ/OPENAI_API_KEY
     litellm_settings:
       drop_params: true
       request_timeout: 600
@@ -74,6 +97,12 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: litellm
+      annotations:
+        # Rolls the pod when config.yaml changes — LiteLLM reads the mounted
+        # ConfigMap only at startup and there is no Reloader in-cluster, so a
+        # ConfigMap-only edit would otherwise be a silent no-op. Recompute on
+        # every model_list change: sha256(config.yaml) | cut -c1-12.
+        checksum/config: "42b0f7b2df45"
     spec:
       containers:
         - name: litellm
