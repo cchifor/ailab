@@ -84,7 +84,20 @@ A CI outage exposed three gaps in the original shape; all fixed here (applied li
 3. **`gc`/`dedupe` did NOT bound growth** (the optimistic bit of the old "Disk" consequence): with no
    retention, one `sha-<commit>` tag accrued per repo per platform `main` build until the 64 GiB
    store hit 100% → blob writes failed (`blob upload unknown` / `provided digest did not match`)
-   while reads still served. Fix: a `storage.retention` policy — `strive/**` keeps `latest` + the 25
+   while reads still served. Fix: a `storage.retention` policy — `strive/**` keeps `latest` + the 100
    most-recently-pushed sha tags (GC reclaims the rest); the mirror/cache repos are explicitly
    **protected** (`deleteUntagged:false`, keep all) so digest-pinned base images are never collected.
    The mp0 data disk was bumped **64 → 192 GiB** for headroom.
+
+## Update (2026-06-28) — strive retention 25 → 100
+
+`registry_zot_strive_keep_recent` was raised **25 → 100**. The count-based depth of 25, at the
+measured ~5-6 strive builds/day, only covered ~4 days of `sha-<commit>` history — so it GC-pruned
+the **deployed** `sha-b80a376c` build family (9 strive services + 2 workers) out from under the
+live ailab pins. The blobs stayed on node caches, so running pods kept working, but every reschedule
+hit a registry **404 → ImagePullBackOff** (and wedged the gatekeeper HelmRelease into an
+upgrade→rollback loop). A deployed digest that's GC'd is unrecoverable (a bare digest can't be
+re-pulled, only rebuilt), and re-pinning forward off a pruned sha can surface newly-required config
+— so the retention window must comfortably exceed how far the ailab pin can lag main. 100 sha tags
+≈ 2-3 weeks of headroom; still count-based (NOT a time window, which prunes non-deterministically).
+Repos sit ~28 tags today, so no immediate disk impact; the 192 GiB disk + `gc`/`dedupe` bound growth.
