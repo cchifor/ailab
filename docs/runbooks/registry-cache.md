@@ -62,7 +62,7 @@ path. Zot `gc` (every `gcInterval`, now 1h) reclaims the orphaned blobs.
 
 The store lives on the mp0 data disk (now **192 GiB**, `kubernetes/infra/registry-lxc` `data_gb`). A
 `storage.retention` policy (config.json.j2) bounds growth: `strive/**` keeps `latest` + the
-`registry_zot_strive_keep_recent` (25) most-recently-pushed `sha-<commit>` tags per repo and GC
+`registry_zot_strive_keep_recent` (100) most-recently-pushed `sha-<commit>` tags per repo and GC
 reclaims the rest; mirror/cache repos are protected (`deleteUntagged:false`, keep all) so
 digest-pinned base images are never collected. If the store ever fills again (writes fail with
 `blob upload unknown` / `provided digest did not match` while reads still 200), grow it online —

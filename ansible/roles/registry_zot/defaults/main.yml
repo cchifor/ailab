@@ -69,5 +69,11 @@ registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credenti
 # keeps `latest` + the N most-recently-pushed sha tags per repo (GC reclaims the rest). The mirror
 # repos (everything else) are a CACHE: they are explicitly PROTECTED (deleteUntagged:false, keep
 # all tags) so digest-pinned base-image pulls are never GC'd (Zot can't re-sync a bare digest).
-# 25 comfortably covers the deployed ailab pin (which tracks a recent platform build) + headroom.
-registry_zot_strive_keep_recent: 25
+# 100 covers the deployed ailab pin PLUS deep rollback headroom. A GC'd target sha can't be
+# re-pulled (only rebuilt), and re-pinning off a pruned sha can surface new required config, so
+# keep ~100 most-recently-pushed sha tags per repo. COUNT-based on purpose (mostRecentlyPushedCount)
+# — do NOT switch to a time window (pushedWithin/pulledWithin): age pruning is non-deterministic
+# (drops the deployed pin in quiet periods, balloons under heavy CI). Was 25 — too shallow: at
+# ~5-6 strive builds/day it pruned sha-b80a376c out from under the LIVE ailab pins in ~4 days,
+# causing registry-404 ImagePullBackOff on every reschedule (2026-06-28 incident).
+registry_zot_strive_keep_recent: 100
