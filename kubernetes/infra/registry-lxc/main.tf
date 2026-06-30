@@ -79,4 +79,11 @@ resource "proxmox_virtual_environment_container" "registry" {
       keys = [trimspace(var.ssh_public_key)]
     }
   }
+
+  # The mp0 data volume holds the ONLY copy of the pushed/cached images (no backup/replication yet —
+  # see docs/runbooks/registry-cache.md). Guard against an accidental `tofu destroy` (or a
+  # replacement-forcing change) wiping it. Remove this block deliberately to rebuild the LXC.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
