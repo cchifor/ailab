@@ -175,9 +175,13 @@ That is a complete gate: only `chifor@gmail.com`, after passing OTP (or Authelia
 
 ## Part 3 - Per-hostname matrix (what to actually do for each host)
 
-Source of truth: `kubernetes/apps/apps/edge/cloudflared.yaml` (tunnel
-`f93d9a6a-5172-43d3-8bef-13460ea7607b`). These six are the only public hostnames in the tunnel
-(plus the catch-all `http_status:404`).
+Source of truth: `kubernetes/apps/apps/edge/cloudflared.yaml` for the ingress routes (tunnel
+`f93d9a6a-5172-43d3-8bef-13460ea7607b`), and `kubernetes/infra/cloudflare/access.tf` for the
+**codified Access apps + policies**. The tunnel now publishes well beyond the original six: the app
+surface (`home`/`sso`/`status`/`chat`/`grafana`/`api`), the self-hosted apps (`git`/`vault`/`ntfy`),
+the cluster/admin UIs (`k8s`/`hubble`/`dw1`–`dw3`), and — since #24 —
+`proxmox`/`qnap`/`prometheus`/`alertmanager` (plus the catch-all `http_status:404`). The first matrix
+below covers the original app surface; the rows after it cover the apps that `access.tf` now gates.
 
 | Hostname | Backing service | Current auth | Recommended Access action | Why |
 |---|---|---|---|---|
@@ -187,6 +191,17 @@ Source of truth: `kubernetes/apps/apps/edge/cloudflared.yaml` (tunnel
 | `chat.chifor.me` | Open WebUI | Authelia OIDC client `open-webui` (PKCE/S256) | **Relax / Bypass Access** so Authelia is the single gate (or accept a double prompt) | Open WebUI is already an Authelia OIDC client; ADR 0012 intent is one prompt via Authelia. |
 | `grafana.chifor.me` | Grafana | Authelia OIDC client `grafana` (PKCE/S256; group->role `admins`->Admin) | **Relax / Bypass Access** so Authelia is the single gate (or accept a double prompt) | Grafana is already an Authelia OIDC client; ADR 0012 calls for a single Authelia prompt. Grafana keeps a break-glass local admin. |
 | `api.chifor.me` | LiteLLM (`:4000`) | LiteLLM master key (OpenAI-compatible machine API) | **Bypass / Service Token - do NOT use interactive (email/IdP) Access**; or leave as-is behind the master key | Machine API; an interactive Access login would break OpenAI-compatible clients. (ADR 0012; internet-exposure runbook) |
+
+### Codified-in-`access.tf` apps (cluster + admin UIs)
+
+| Hostname(s) | Backing service | Auth (codified in `access.tf`) | Notes |
+|---|---|---|---|
+| `k8s` / `hubble` / `dw1`–`dw3` | Headlamp / Hubble UI / dev-worker ttyd | `allow_email`, default-deny (`k8s_tools`, `dev_worker`) | Cluster internals + passwordless-sudo shells. Headlamp SA is now read-only (chart cluster-admin binding disabled). |
+| `git.chifor.me` | Gitea | Gitea own auth (OIDC + PAT/SSH); **no Access app** | git CLI can't do the Access browser SSO; `REQUIRE_SIGNIN_VIEW` now blocks anonymous browsing. |
+| `vault.chifor.me` | Vaultwarden | master-password + 2FA; `/admin*` Access-gated (`vault_admin`) | Bitwarden native clients can't do Access SSO; only the dangerous `/admin` surface is gated. |
+| `ntfy.chifor.me` | ntfy | ntfy token auth (deny-all default); **no Access app** | The mobile app's persistent connection would break under the Access browser flow. |
+| `proxmox` / `qnap` **(#24)** | Proxmox VE / QNAP | **own login** + `allow_email` Access, **8h** session (`admin_uis`) | Hypervisor/NAS have their own auth → Access is defense-in-depth. Origin `noTLSVerify` → pin the LAN CA (ADR 0007 follow-up). |
+| `prometheus` / `alertmanager` **(#24)** | Prometheus / Alertmanager | **NO native auth** → `allow_email` Access is the **sole** gate, **30m** session (`admin_uis`) | An Access compromise reads metrics + can silence all alerts. Single-factor (email OTP) today; **IdP-backed MFA is the ADR 0007 hardening step.** |
 
 ### Explicit DO-NOT list
 
@@ -247,11 +262,14 @@ state) now manages the edge as code:
 
 - **DNS** (`dns.tf`) — the six proxied tunnel CNAMEs, **adopted via import** (`imports.tf`, done
   2026-06-16, 0 changes). Add/remove hostnames here.
-- **Access** (`access.tf.example`) — ready-to-activate `cloudflare_zero_trust_access_application` +
-  `cloudflare_zero_trust_access_policy` + `cloudflare_zero_trust_access_service_token` scaffolding
-  (reusable policies attached to apps by id). Rename to `access.tf` and `apply` to gate `status` or
-  protect `api` with a service token. The token (DNS + Access scopes) is supplied via the
-  `CLOUDFLARE_API_TOKEN` env var; `terraform.tfvars`/state are gitignored.
+- **Access** (`access.tf`) — **LIVE**. Codifies the `cloudflare_zero_trust_access_application`s + one
+  reusable `allow_me` policy (gated to `var.allow_email`) for: the dev-worker shells (`dev_worker`),
+  the cluster UIs (`k8s_tools` = Headlamp + Hubble), the WAN admin UIs (`admin_uis` =
+  proxmox/qnap/prometheus/alertmanager — per-app session: **8h** for the own-auth hosts, **30m** for
+  the no-native-auth Prometheus/Alertmanager), and `vault_admin` (path-scoped `/admin`). `dns.tf`
+  `depends_on` the apps so Access enforces before each hostname resolves. The token (DNS + Access
+  scopes) is supplied via `CLOUDFLARE_API_TOKEN`; `terraform.tfvars`/state are gitignored. Hardening
+  roadmap (IdP-backed MFA for the no-native-auth UIs; origin CA in place of `noTLSVerify`): ADR 0007.
 
 The tunnel **ingress** stays locally-managed in `cloudflared.yaml` (git+Flux) and is deliberately NOT
 owned by Terraform. See `kubernetes/infra/cloudflare/README.md` and ADR 0001/0012.

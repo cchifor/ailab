@@ -3,7 +3,7 @@
 #   * apex is NOT behind Cloudflare Access (native clients can't do the Access browser SSO) — its own
 #     master-password auth + 2FA is the gate; /admin* IS path-gated by CF Access (access.tf).
 #   * SIGNUPS off (invite-only), SSRF surface removed (DISABLE_ICON_DOWNLOAD), real client IP for the
-#     built-in brute-force limiter (IP_HEADER=X-Forwarded-For — cloudflared never sets the default X-Real-IP).
+#     built-in brute-force limiter (IP_HEADER=CF-Connecting-IP — the edge-set, un-spoofable client IP).
 #   * pinned 1.36.0-alpine (clears icon-SSRF GHSA-72vh + brute-force-bypass GHSA-c5rv); Renovate bumps it.
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -46,9 +46,10 @@ spec:
             - { name: SIGNUPS_ALLOWED, value: "false" } # invite-only
             - { name: INVITATIONS_ALLOWED, value: "true" } # /admin can whitelist an email to register
             - { name: SIGNUPS_VERIFY, value: "false" } # no SMTP wired -> don't require email verification
-            # cloudflared forwards X-Forwarded-For / Cf-Connecting-IP but NOT the default X-Real-IP, so the
-            # per-IP LOGIN_RATELIMIT would otherwise see one shared IP. This makes brute-force control real.
-            - { name: IP_HEADER, value: "X-Forwarded-For" }
+            # Per-IP LOGIN_RATELIMIT needs the real client IP. Use Cf-Connecting-IP: a single, edge-set,
+            # un-spoofable value cloudflared forwards. (X-Forwarded-For is client-appended — CF puts the
+            # real IP LAST but Vaultwarden reads the FIRST entry, so it is trivially spoofable here.)
+            - { name: IP_HEADER, value: "CF-Connecting-IP" }
             - { name: DISABLE_ICON_DOWNLOAD, value: "true" } # removes the SSRF surface (pod can reach the LAN)
             - { name: ICON_BLACKLIST_NON_GLOBAL_IPS, value: "true" }
             - { name: ENABLE_WEBSOCKET, value: "true" } # live sync (rides :80 since v1.29)

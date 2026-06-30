@@ -1,10 +1,21 @@
 # Runbook — internet exposure (Cloudflare Tunnel + Tailscale)
 
-Hybrid model (chosen 2026-06-14):
-- **Public** (via Cloudflare Tunnel + Cloudflare Access SSO — no open ports, no port-forwarding):
-  `chat.chifor.me` → Open WebUI, `grafana.chifor.me` → Grafana, `api.chifor.me` → LiteLLM (OpenAI API).
-- **Private** (via Tailscale mesh): the nodes, LXCs, QNAP, Proxmox UIs, and the k8s API — reachable
-  from your own Tailscale devices through a subnet router. No public surface.
+Hybrid model (chosen 2026-06-14; admin UIs moved public 2026-06-18, PR #24 — see ADR 0007):
+- **Public** (via Cloudflare Tunnel + Cloudflare Access — no open ports, no port-forwarding). Access
+  policies are codified in `kubernetes/infra/cloudflare/access.tf` (every app default-deny → `allow_email`):
+  - App surface: `chat` → Open WebUI, `grafana`, `api` → LiteLLM, `home`/`sso`/`status`, `git` (Gitea,
+    own auth), `vault` (Vaultwarden, own auth; `/admin` path-gated), `ntfy` (own token auth).
+  - Admin / cluster UIs (Access-gated): `k8s` (Headlamp), `hubble`, `dw1/2/3` (dev shells), and — **new
+    in #24** — `proxmox`, `qnap`, `prometheus`, `alertmanager`.
+- **Private** (via Tailscale mesh): L3 reach to the nodes, LXCs, Talos VMs, the k8s API VIP, and the
+  `10.55.0.0/24` storage fabric — for SSH / kubectl / API access that does not go through the web UIs.
+
+> **Threat model for the WAN admin UIs (#24):** Proxmox + QNAP have their OWN logins, so Cloudflare
+> Access is defense-in-depth in front of them. **Prometheus + Alertmanager have NO native auth**, so
+> Access is the SOLE gate — an Access compromise can read all metrics and, worse, **silence every alert**.
+> Today that gate is single-factor (email OTP); these two are given a short Access session as partial
+> mitigation. Accepted for now; the hardening roadmap (IdP-backed MFA; replacing origin `noTLSVerify`
+> with the pinned LAN CA) is tracked in **ADR 0007**.
 
 IaC is scaffolded under `kubernetes/apps/apps/edge/` (cloudflared + Tailscale) and
 `kubernetes/apps/apps/ai/litellm-secret.sops.yaml` (API master key). It is **committed but NOT yet
@@ -85,7 +96,8 @@ Prereq: **`chifor.me` is a zone on your Cloudflare account** (its nameservers po
   follow-up (`docs/k8s-followups.md` #3); pre-pull or add a mirror if the pull 429s.
 - The cloudflared tunnel egresses **outbound only** (no inbound ports) — it dials Cloudflare, so it works
   behind NAT with no router config.
-- Routes are in git (`cloudflared.yaml` ingress rules); Access policies live in the Cloudflare dashboard
-  (can be codified later via the Cloudflare Terraform provider + a CF API token if desired).
+- Routes are in git (`cloudflared.yaml` ingress rules); **Access policies are codified** in
+  `kubernetes/infra/cloudflare/access.tf` (Cloudflare Terraform provider) — every app default-deny gated
+  to `allow_email`, with `dns.tf` depending on the apps so Access enforces before each hostname resolves.
 - Tailscale gives private L3 reach to the whole `192.168.0.0/24` (nodes, LXCs, Talos VMs, k8s VIP) and the
   `10.55.0.0/24` storage fabric via one subnet-router `Connector` — no per-service config.

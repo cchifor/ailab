@@ -68,7 +68,7 @@ spec:
           ttl: "168h" # 7 days
           snapshotMoveData: true
           includedNamespaces: ["*"]
-          excludedNamespaces: [kube-system, velero]
+          excludedNamespaces: [kube-system, velero, trivy-system] # trivy DB cache is rebuildable — keep it out of the off-site chain
       weekly:
         disabled: false
         schedule: "0 3 * * 0"
@@ -76,7 +76,7 @@ spec:
           ttl: "720h" # 30 days
           snapshotMoveData: true
           includedNamespaces: ["*"]
-          excludedNamespaces: [kube-system, velero]
+          excludedNamespaces: [kube-system, velero, trivy-system] # trivy DB cache is rebuildable — keep it out of the off-site chain
     resources:
       requests: { cpu: 50m, memory: 256Mi }
       limits: { memory: 1Gi }

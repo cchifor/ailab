@@ -56,10 +56,18 @@ resource "cloudflare_zero_trust_access_application" "k8s_tools" {
   policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
 }
 
-# Cloudflare Access for the admin UIs now published to the WAN. Proxmox + QNAP have their OWN logins
-# (Access is defense-in-depth in front of a hypervisor / NAS); Prometheus + Alertmanager have NO
-# native auth, so Access is the ONLY thing between the internet and your metrics/alerts. All gated to
-# allow_me. dns.tf `depends_on` these so Access enforces BEFORE the hostnames resolve.
+# Cloudflare Access for the admin UIs now published to the WAN (PR #24; ratified in ADR 0007).
+# Proxmox + QNAP have their OWN logins, so Access is defense-in-depth in front of a hypervisor / NAS.
+# Prometheus + Alertmanager have NO native auth, so Access is the ONLY thing between the internet and
+# your metrics/alerts — and the Alertmanager UI can silence every alert — so they get a tight session
+# as partial mitigation. All gated to allow_me. dns.tf `depends_on` these so Access enforces BEFORE the
+# hostnames resolve.
+#
+# HARDENING ROADMAP (ADR 0007): allow_me is single-factor (email OTP). For real MFA on the
+# no-native-auth UIs, wire an IdP that enforces MFA (e.g. Authelia-as-Access-IdP — see
+# docs/runbooks/cloudflare-access-apps.md Part 1/3) and add a `require` rule, OR keep Alertmanager on
+# the Tailscale admin mesh. Not codified here: email OTP is the only login method until an IdP exists,
+# so adding a `require` now would lock out the sole identity.
 resource "cloudflare_zero_trust_access_application" "admin_uis" {
   for_each = {
     proxmox      = "Proxmox VE"
@@ -68,11 +76,13 @@ resource "cloudflare_zero_trust_access_application" "admin_uis" {
     alertmanager = "Alertmanager"
   }
 
-  account_id       = var.cloudflare_account_id
-  name             = each.value
-  type             = "self_hosted"
-  domain           = "${each.key}.chifor.me"
-  session_duration = "24h"
+  account_id = var.cloudflare_account_id
+  name       = each.value
+  type       = "self_hosted"
+  domain     = "${each.key}.chifor.me"
+  # No-native-auth UIs (Prometheus/Alertmanager) re-auth every 30m; the own-login hosts (Proxmox/QNAP)
+  # get 8h since Access is only their second factor.
+  session_duration = contains(["prometheus", "alertmanager"], each.key) ? "30m" : "8h"
   policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
 }
 
