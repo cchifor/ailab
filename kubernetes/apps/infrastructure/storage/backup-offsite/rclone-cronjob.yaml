@@ -45,7 +45,11 @@ spec:
                   # Throttled for Drive's per-USER quota on many small objects (own client_id raises only
                   # the per-PROJECT quota, NOT this one): tpslimit + modest transfers/checkers, and a hard
                   # stop at the 750 GiB/day volume cap.
-                  FLAGS="--fast-list --transfers 4 --checkers 8 --tpslimit 8 --tpslimit-burst 16 --drive-stop-on-upload-limit --retries 3 --low-level-retries 10 --stats 2m --stats-one-line -v"
+                  # Safety guard: abort the run if more than --max-delete files would be removed on the
+                  # destination, so a wiped/empty/corrupt local source (e.g. versitygw down -> empty
+                  # listing) can't mirror a mass-deletion to the only off-site copy. Tune up if normal
+                  # Kopia maintenance churn trips it (failing safe = not deleting is the desired default).
+                  FLAGS="--max-delete 100 --fast-list --transfers 4 --checkers 8 --tpslimit 8 --tpslimit-burst 16 --drive-stop-on-upload-limit --retries 3 --low-level-retries 10 --stats 2m --stats-one-line -v"
                   echo "=== sync velero bucket -> Drive (encrypted) ==="
                   rclone sync garage-velero:velero gdrive-crypt:velero $FLAGS
                   echo "=== sync talos-etcd-backups bucket -> Drive (encrypted) ==="
