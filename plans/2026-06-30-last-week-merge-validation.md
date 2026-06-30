@@ -1,6 +1,6 @@
 # Validation — last week's merges to `main` (codex cross-reviewed)
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
 **Date:** 2026-06-30 · **Scope:** the 42 PRs merged to `main` Jun 16–18 (#1–#43, no #42).
 **Method:** an agentic workflow ran one Opus review agent per PR cluster (structured findings + per-PR verdict), then the **codex** subagent independently cross-reviewed each Tier‑A cluster and every high‑severity finding (CONFIRM / REFUTE / PARTIAL + missed‑issue hunt). 23 agents, ~1.36M tokens.
@@ -112,6 +112,8 @@ Each ✅ finding, committed separately on `chore/merge-validation-jun`:
 | `250f4e1` | Registry: renovate-track + bump live zot binary v2.1.2→v2.1.17; `no_log` the OIDC config render | #14 |
 
 Validation: `renovate.json` is valid JSON; all 9 edited manifests parse (`yaml.safe_load_all`). The IaC validators (`kustomize`/`kubeconform`/`tofu`/`ansible-lint`) live on WSL2/the cluster, not this host — run `just lint` + a Flux dry-run there before merging.
+
+**Codex final pass (the "review the plan" leg):** codex re-reviewed both this report and the fix diff (`main..HEAD`). Verdict: **all 7 fixes OK, no regressions, no new bugs**; report judged sound with no over-reach. First-round convergence — nothing to escalate on the fixes. Specifically confirmed: the Headlamp `clusterRoleBinding.create` key is correct for chart v0.43.0; `CF-Connecting-IP` casing is right; `REQUIRE_SIGNIN_VIEW` is in the correct gitea `service` section; the ntfy postStart shell is syntactically correct with both failure paths non-zero; the new Renovate Ansible regex matches the annotation across the newline and the old manager's removal loses no coverage; `--max-delete 100` is valid on `rclone sync`; `v2.1.17` is a real release tag.
 
 ## Recommended (operator decision / validation required)
 
