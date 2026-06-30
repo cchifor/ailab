@@ -32,6 +32,11 @@ spec:
     serviceAccount:
       create: true
       name: headlamp
+    clusterRoleBinding:
+      # The chart defaults this to create=true bound to cluster-admin; left on, it UNIONs with the
+      # read-only binding in rbac.yaml and makes the pod SA effectively cluster-admin (RBAC is additive),
+      # defeating the read-only design. Disable it so ONLY headlamp-readonly applies.
+      create: false
     config:
       # Headlamp is gated by Cloudflare Access (k8s.chifor.me) and uses a READ-ONLY ServiceAccount, so
       # authenticate every (already-Access'd) request AS that pod SA — this skips the token-paste prompt.
