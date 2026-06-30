@@ -119,6 +119,11 @@ Validation: `renovate.json` is valid JSON; all 9 edited manifests parse (`yaml.s
 
 The 📋 items above — chiefly: Vaultwarden rootless; ntfy → qnap-iscsi (PVC recreation); Velero at‑rest encryption + caCert; **backup key‑escrow verification + a real restore drill**; Headlamp NetworkPolicy; registry RBAC/supply‑chain hardening + backup; AI cutover teardown + LiteLLM reload. None are auto‑applied because they touch live data/services or need a smoke‑test.
 
-## Escalation
+## Escalation — resolved (ratified)
 
-The **WAN‑exposure model (#24)** is a product decision (keep admin UIs public+Access‑gated and update the docs/ADR, or revert to Tailscale‑only), plus the single‑factor and `noTLSVerify` hardening. Surfaced to the operator separately.
+The **WAN‑exposure model (#24)** was escalated as a product decision; the operator chose to **ratify** (keep the admin UIs public + Access‑gated) and harden. Applied on this branch:
+
+- **Docs/ADR synced to the live config:** `internet-exposure.md` + `cloudflare-access-apps.md` updated (the stale "Tailscale‑only / six public hostnames" claims), and a dated amendment to **ADR 0007** recording the decision, threat model, and accepted risks.
+- **Session hardening:** `access.tf` `admin_uis` now uses per‑app sessions — **30m** for the no‑native‑auth Prometheus/Alertmanager, **8h** for the own‑login Proxmox/QNAP.
+
+Deferred (need operator‑supplied material; documented as the ADR 0007 hardening roadmap): **IdP‑backed MFA** for the no‑native‑auth UIs (email OTP is the only login method until an IdP is wired — a `require` rule now would lock out the sole identity), and replacing origin **`noTLSVerify`** with the pinned LAN CA via `originRequest.caPool`.
