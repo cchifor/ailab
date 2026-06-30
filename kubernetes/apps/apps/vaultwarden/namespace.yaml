@@ -3,6 +3,8 @@ kind: Namespace
 metadata:
   name: vaultwarden
   labels:
-    # Vaultwarden binds :80 (root, no caps); baseline is sufficient (like gitea).
+    # The main vaultwarden process runs ROOTLESS (uid 1000, :8080), but a one-shot root init-container
+    # chowns the existing /data to 1000 (Trident fsGroup on pre-existing data is unproven), so PSA stays
+    # baseline — restricted would reject the root init. Same init-chown pattern as Prometheus.
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: baseline
