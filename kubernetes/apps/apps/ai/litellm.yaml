@@ -22,7 +22,7 @@ data:
           api_base: http://llm.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
         model_info:
-          max_input_tokens: 7000 # host CTX=8192
+          max_input_tokens: 7000 # host CTX=32768 PARALLEL=4 -> 8192/slot (provision.sh defaults; daily driver)
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
@@ -94,6 +94,11 @@ data:
     litellm_settings:
       drop_params: true
       request_timeout: 600
+      # Spend guard: hard ceiling on third-party (OpenAI/Anthropic) cost so a LITELLM_MASTER_KEY leak on
+      # the (soon-public) api.chifor.me can't run up unbounded cloud spend. Global across all models/keys;
+      # tune to comfort. For finer control, move cloud models behind a separate virtual key with its own budget.
+      max_budget: 50 # USD
+      budget_duration: 30d
 ---
 apiVersion: apps/v1
 kind: Deployment
