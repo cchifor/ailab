@@ -71,12 +71,19 @@ spec:
                   - |
                     for i in $(seq 1 60); do
                       if ntfy user list >/dev/null 2>&1; then
-                        ntfy user list 2>/dev/null | grep -qw ailab || \
-                          printf '%s\n%s\n' "$NTFY_ADMIN_PASSWORD" "$NTFY_ADMIN_PASSWORD" | ntfy user add --role=admin ailab
+                        if ! ntfy user list 2>/dev/null | grep -qw ailab; then
+                          printf '%s\n%s\n' "$NTFY_ADMIN_PASSWORD" "$NTFY_ADMIN_PASSWORD" \
+                            | ntfy user add --role=admin ailab \
+                            || { echo 'ntfy postStart: user add failed' >&2; exit 1; }
+                        fi
                         exit 0
                       fi
                       sleep 1
                     done
+                    # Loop exhausted: db never appeared. Fail loudly so the pod restarts instead of
+                    # coming up Ready with deny-all auth and silently 401-ing every Alertmanager webhook.
+                    echo 'ntfy postStart: auth db never appeared in 60s; ailab admin not seeded' >&2
+                    exit 1
           volumeMounts:
             - { name: config, mountPath: /etc/ntfy/server.yml, subPath: server.yml }
             - { name: data, mountPath: /var/lib/ntfy }
