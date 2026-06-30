@@ -5,3 +5,4 @@ resources:
   - namespace.yaml
   - rbac.yaml
   - headlamp.yaml
+  - networkpolicy.yaml # ingress only from the cloudflared tunnel (no in-cluster Access bypass)

@@ -1,0 +1,39 @@
+# Defense-in-depth: Headlamp authenticates every request as its (read-only) ServiceAccount
+# (unsafeUseServiceAccountToken), trusting Cloudflare Access at the edge. Without a NetworkPolicy any
+# in-cluster pod could reach headlamp.headlamp.svc directly and bypass that edge gate. This admits
+# ingress ONLY from the cloudflared tunnel pods (ns edge) plus Homepage's uptime monitor (below), so
+# arbitrary in-cluster pods can't reach it. Egress is left unrestricted (Headlamp needs the
+# kube-apiserver). No port filter — the allowed sources only talk to the one Service, and pinning the
+# pod port would risk blocking it.
+#
+# ⚠️ VALIDATE on the live cluster after applying:
+#   * confirm the Headlamp pod stays Ready — kubelet liveness/readiness probes must still reach it.
+#     Default Cilium allows host->pod, BUT if Cilium runs with the host firewall / `--allow-localhost`
+#     restricted, the probes would be denied and the pod goes NotReady — add a CiliumNetworkPolicy
+#     `fromEntities: [host]` in that case.
+#   * confirm https://k8s.chifor.me still loads through the tunnel and the Homepage status tile is green.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: headlamp-allow-tunnel-only
+  namespace: headlamp
+spec:
+  podSelector: {} # every pod in the headlamp namespace (just Headlamp)
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # The public path: the cloudflared tunnel (-> Cloudflare Access).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+        # Homepage's siteMonitor pings headlamp.svc directly for the status tile — a reachability
+        # health check, not a browsing session (and Headlamp's SA is read-only). Allow it.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: homepage
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: homepage
