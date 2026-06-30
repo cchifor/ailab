@@ -99,7 +99,19 @@ No high‑severity findings; codex pass skipped. Deploy key is SOPS‑encrypted,
 
 ## Applied fixes (this branch)
 
-Committed as separate conventional commits on `chore/merge-validation-jun` — see the section below once committed. Each maps to a ✅ finding above.
+Each ✅ finding, committed separately on `chore/merge-validation-jun`:
+
+| Commit | Fix | Finding |
+|---|---|---|
+| `70da874` | Headlamp: `clusterRoleBinding.create: false` (SA no longer cluster-admin) | **BLOCKER #20/#21** |
+| `a6a10e7` | Vaultwarden: `IP_HEADER: CF-Connecting-IP` (un-spoofable rate-limit) | #38 |
+| `90408a4` | Gitea: `REQUIRE_SIGNIN_VIEW: true` (no anonymous enumeration) | #27 |
+| `4768a33` | ntfy: postStart seed exits non-zero on failure (no silent broken auth) | #26 |
+| `49b0060` | Renovate: drop overlapping customManager + `:dependencyDashboard`/`pinGitHubActionDigests`; `ignorePaths` gotk-components; new Ansible `# renovate:` manager; `/tmp` sizeLimit + ephemeral-storage | #39, #41, #14 |
+| `29cdd76` | Backup: `--max-delete 100` guard on the off-site rclone sync; exclude `trivy-system` from both Velero schedules | #34, #37 |
+| `250f4e1` | Registry: renovate-track + bump live zot binary v2.1.2→v2.1.17; `no_log` the OIDC config render | #14 |
+
+Validation: `renovate.json` is valid JSON; all 9 edited manifests parse (`yaml.safe_load_all`). The IaC validators (`kustomize`/`kubeconform`/`tofu`/`ansible-lint`) live on WSL2/the cluster, not this host — run `just lint` + a Flux dry-run there before merging.
 
 ## Recommended (operator decision / validation required)
 
