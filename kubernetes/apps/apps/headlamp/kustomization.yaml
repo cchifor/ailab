@@ -4,5 +4,6 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - rbac.yaml
+  - rbac-flux.yaml # scoped Flux-CR safe-ops write (patch) for the Headlamp SA — see the file header
   - headlamp.yaml
   - networkpolicy.yaml # ingress only from the cloudflared tunnel (no in-cluster Access bypass)
