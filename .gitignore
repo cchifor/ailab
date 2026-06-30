@@ -11,7 +11,8 @@ id_ed25519*
 
 # ---- OpenTofu / Terraform ----
 .terraform/
-.terraform.lock.hcl
+# .terraform.lock.hcl is intentionally COMMITTED (pins provider versions + hashes for reproducible,
+# supply-chain-verifiable `tofu init`). Run `tofu init` per module and commit the lock.
 *.tfstate
 *.tfstate.*
 crash.log
