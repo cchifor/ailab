@@ -36,7 +36,7 @@ Disposition: ✅ applied · 📋 recommended · 🔺 **priority follow-up (needs
 - 🔺 **#58 `problematic` — Flux controllers hand-bumped, CRDs/RBAC left at v2.8.8.** Only the 4 controller image tags moved (source/kustomize/notification `v1.8.5→v1.9.0`, helm `v1.5.5→v1.6.0`) while the CRDs, RBAC, and `version: v2.8.8` labels in `gotk-components.yaml` stayed — an **unsupported skew** in the GitOps engine itself (`flux check` will complain; next `flux bootstrap` reverts it). **Fix on WSL2:** regenerate `gotk-components.yaml` from a real flux2 release via the `flux` CLI (forward to v2.9.x), *or* revert the 4 tags to v2.8.8's bundled set. Not auto-applied (downgrading/regenerating the live Flux engine needs the CLI). The `ignorePaths` added in part-1 (49b0060) stops Renovate from doing this again.
 - 🔺 **#60 `improvable` — snapshot-controller `v8.0.1→v8.6.0`, CRDs/RBAC vendored at v8.2.0.** Already skewed before #60; #60 widened it. The controller provides the VolumeSnapshot API Velero/Trident depend on (ADR 0010), so missing RBAC verbs = silent DR degradation. **Fix on WSL2:** re-vendor the full external-snapshotter **v8.6.0** bundle (CRDs + RBAC + setup) as a unit + update the kustomization comment. Not a clean revert (image was already ahead of CRDs).
 - ✅ **#48 busybox on Docker Hub** (kube-prometheus-stack init) → switched to `mirror.gcr.io/library/busybox` (homepage already does), off the anonymous 429 path.
-- ✅ **#62 terraform locks not committed** → un-gitignored `.terraform.lock.hcl`. **Operator step (WSL2):** `tofu init` per module + commit the locks (talos floor jumped 0.7→0.11, so also `tofu plan` the talos module to confirm schema). 📋 #61 ai-lxc "validated on 0.109" comment is stale.
+- ✅ **#62 terraform locks not committed** → un-gitignored `.terraform.lock.hcl`. ⚠️ Inspecting the now-visible on-disk locks shows they are **STALE** — they pin `bpg/proxmox 0.109.0` (predating #61's `~>0.111` bump; talos 0.11.0 is fine). **Do NOT commit them as-is** (0.109.0 violates `~>0.111`). **Operator step (WSL2):** `tofu init -upgrade` per module to regenerate the locks at 0.111.x, then commit them; `tofu plan` the talos module (floor jumped 0.7→0.11) to confirm schema. 📋 #61 ai-lxc "validated on 0.109" comment is also stale.
 - The other 12 bumps are low-risk patch/minor (ntfy, zot, velero-plugin, busybox-mirror, blackbox-exporter, oauth2-proxy, flux2 distro #49) — confirmed no major jumps.
 
 ### AI window tuning (#69 acceptable)
@@ -60,7 +60,7 @@ No high-severity findings; codex pass skipped. #68 (balloon floor 12 GiB + 8 GiB
 
 1. 🔺 **#58 Flux skew** — `flux` CLI to realign controllers↔CRDs (forward to v2.9.x or revert to v2.8.8). Highest priority — it's the GitOps engine.
 2. 🔺 **#60 snapshot-controller skew** — re-vendor external-snapshotter v8.6.0 as a unit (CSI/DR dependency).
-3. 🔺 **#62 locks** — `tofu init` per module + commit `.terraform.lock.hcl`; `tofu plan` the talos module.
+3. 🔺 **#62 locks** — the on-disk locks are STALE (pin proxmox 0.109.0 vs the `~>0.111` constraint), so `tofu init -upgrade` per module to regenerate them, then commit `.terraform.lock.hcl`; `tofu plan` the talos module (floor jumped 0.7→0.11).
 4. ⚖️ **`api.chifor.me` Access** + LiteLLM virtual-key segregation for the paid path.
 5. 📋 `gpt-5.4*` model-id smoke test; #70 stable-`ailab`-tag retention (platform CI); qwen3.5-122b runbook snippet; LiteLLM `configMapGenerator`; registry volume backup/`prevent_destroy`.
 
