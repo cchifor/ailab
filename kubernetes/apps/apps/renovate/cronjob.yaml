@@ -40,11 +40,11 @@ spec:
                 capabilities: { drop: ["ALL"] }
                 readOnlyRootFilesystem: false # Renovate writes clones under /tmp + its own dirs
               resources:
-                requests: { cpu: 100m, memory: 512Mi }
-                limits: { memory: 2Gi }
+                requests: { cpu: 100m, memory: 512Mi, ephemeral-storage: 1Gi }
+                limits: { memory: 2Gi, ephemeral-storage: 3Gi }
           volumes:
             - name: config
               configMap:
                 name: renovate-config
             - name: tmp
-              emptyDir: {}
+              emptyDir: { sizeLimit: 2Gi } # cap clone/tool-install scratch so a runaway run can't fill node ephemeral storage
