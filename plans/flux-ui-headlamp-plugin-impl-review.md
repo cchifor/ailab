@@ -1,6 +1,6 @@
 # Implementation review — flux-ui-headlamp-plugin — round 2
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Summary
 
