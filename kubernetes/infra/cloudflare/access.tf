@@ -98,3 +98,34 @@ resource "cloudflare_zero_trust_access_application" "vault_admin" {
   session_duration = "24h"
   policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
 }
+
+# api.chifor.me — the LiteLLM OpenAI-compatible proxy. It is a MACHINE API (the Strive platform +
+# programmatic clients), so it gets a SERVICE TOKEN / non_identity policy — an interactive email/IdP
+# gate would break non-browser callers. The LITELLM_MASTER_KEY stays the app-level auth; this adds a
+# Cloudflare-edge gate so a leaked master key alone can't reach the (paid) cloud models registered in
+# litellm-config. (See docs/runbooks/cloudflare-access-apps.md and the api.chifor.me spend cap in
+# kubernetes/apps/apps/ai/litellm.yaml `max_budget`.)
+#
+# ⚠️ BEFORE `tofu apply`-ing this: wire the token into EVERY api.chifor.me caller (the Strive platform
+# and any script) as the CF-Access-Client-Id + CF-Access-Client-Secret request headers, or they get a
+# 401 at the edge. Retrieve the values with `tofu output -raw api_access_client_secret` (+ _client_id).
+resource "cloudflare_zero_trust_access_service_token" "api" {
+  account_id = var.cloudflare_account_id
+  name       = "api-chifor-me"
+}
+
+resource "cloudflare_zero_trust_access_policy" "api_svc" {
+  account_id = var.cloudflare_account_id
+  name       = "Allow api service token"
+  decision   = "non_identity"
+  include    = [{ service_token = { token_id = cloudflare_zero_trust_access_service_token.api.id } }]
+}
+
+resource "cloudflare_zero_trust_access_application" "api" {
+  account_id       = var.cloudflare_account_id
+  name             = "api.chifor.me"
+  type             = "self_hosted"
+  domain           = "api.chifor.me"
+  session_duration = "24h"
+  policies         = [{ id = cloudflare_zero_trust_access_policy.api_svc.id, precedence = 1 }]
+}

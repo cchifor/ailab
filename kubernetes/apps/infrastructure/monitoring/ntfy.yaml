@@ -20,11 +20,18 @@ data:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ntfy-data
+  name: ntfy-data-iscsi # renamed: storageClassName is immutable, so a new PVC forces the migration
   namespace: monitoring
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: nfs-csi
+  # qnap-iscsi block (ext4, real POSIX locking) — SQLite-on-NFS is unsafe (matches gitea/grafana) and
+  # nfs-csi has no Velero VolumeSnapshotClass so the old PVC was never backed up. Migration: Flux creates
+  # this fresh PVC, the Recreate-strategy Deployment switches to it, and the `ailab` admin auto-reseeds
+  # via the postStart hook.
+  # ⚠️ Flux prunes the now-removed `ntfy-data` PVC on reconcile, and nfs-csi is reclaimPolicy:Delete, so
+  #    its data IS destroyed (the admin reseed makes that acceptable). For a rollback fallback, annotate
+  #    the LIVE old PVC `kustomize.toolkit.fluxcd.io/prune: disabled` BEFORE merging.
+  storageClassName: qnap-iscsi
   resources:
     requests:
       storage: 2Gi
@@ -101,7 +108,7 @@ spec:
             name: ntfy-config
         - name: data
           persistentVolumeClaim:
-            claimName: ntfy-data
+            claimName: ntfy-data-iscsi
         - name: cache
           emptyDir: {}
 ---
