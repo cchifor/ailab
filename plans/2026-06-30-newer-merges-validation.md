@@ -1,6 +1,6 @@
 # Validation — the newer merges to `main` (#44–#70), codex cross-reviewed
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
 **Date:** 2026-06-30 · **Scope:** the 22 commits #44–#70 that were on `origin/main` but **missing from the local clone** during the first validation (which therefore covered #1–#43 only). Same agentic + codex method. 10 agents, ~0.76M tokens.
 
@@ -65,4 +65,6 @@ No high-severity findings; codex pass skipped. #68 (balloon floor 12 GiB + 8 GiB
 5. 📋 `gpt-5.4*` model-id smoke test; #70 stable-`ailab`-tag retention (platform CI); qwen3.5-122b runbook snippet; LiteLLM `configMapGenerator`; registry volume backup/`prevent_destroy`.
 
 ## Verification
-All edited manifests parse; `renovate.json` untouched this round. Run `just lint` + a Flux dry-run on WSL2 before merge. Final codex pass over the fix diff: see the finalize commit.
+All edited manifests parse; `renovate.json` untouched this round. Run `just lint` + a Flux dry-run on WSL2 before merge.
+
+**Codex final pass (fix diff):** all 5 fixes confirmed correct, no regressions. Specifically verified: `litellm_settings.max_budget`/`budget_duration: 30d` are honored by the `main-stable` image and only cap spend; `mirror.gcr.io/library/busybox:1.38` matches homepage's path and the init command is unchanged; the SOPS re-encrypt sequence correctly applies the `.sops.yaml` creation_rule (token ends ciphertext); v2.1.18 is a real release and the Ansible/compose pins now match. Codex's one nit — the `.gitignore` commit's verb "commit" reads stronger than the change (it only un-ignores; committing the locks is the documented operator step) — is cosmetic and already mitigated by the "(un-ignore)" in the message; left as-is. Report classification of #58/#60 as operator follow-ups confirmed sound.
