@@ -95,9 +95,11 @@ ping-registry:
 mirror-image src dst:
     #!/usr/bin/env bash
     set -euo pipefail
+    cd '{{justfile_directory()}}'   # so the relative SOPS/age-key paths resolve regardless of invocation CWD
     SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey \
       sops -d --extract '["registry_ci_password"]' ansible/secrets/registry.sops.yaml \
       | docker login registry.chifor.me -u ci --password-stdin
+    # `imagetools create` PUSHES to the --tag registry by default (no --push flag exists; --dry-run skips).
     docker buildx imagetools create --tag '{{dst}}' '{{src}}'
     echo "--- mirrored; pin THIS index digest in the manifest: ---"
     docker buildx imagetools inspect '{{dst}}'
