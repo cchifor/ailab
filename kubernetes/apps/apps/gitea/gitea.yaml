@@ -85,6 +85,10 @@ spec:
         service:
           DISABLE_REGISTRATION: true # no local self-signup; accounts come via Authelia OIDC
           SHOW_REGISTRATION_BUTTON: false
+          # Internet-exposed WITHOUT Cloudflare Access: require login to view anything, else the UI,
+          # /explore, and the user/repo search API allow anonymous enumeration. OIDC (UI) and
+          # PAT/SSH (clone/push) still work for authenticated users.
+          REQUIRE_SIGNIN_VIEW: true
         openid:
           ENABLE_OPENID_SIGNIN: false # use the Authelia OIDC button, not generic OpenID
           ENABLE_OPENID_SIGNUP: false
