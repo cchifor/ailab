@@ -26,11 +26,18 @@ lacks an image. On a cache miss the failover pulls Docker Hub directly (anonymou
 1. Create a read-only token: <https://app.docker.com/settings/personal-access-tokens>.
 2. Set the username (non-secret) in `ansible/roles/registry_zot/defaults/main.yml` **or** a host/group
    var: `registry_zot_sync_dockerhub_user: "<dockerhub-user>"`.
-3. Add the token to SOPS:
+3. Add the token to SOPS. ⚠️ The **existing** `registry.sops.yaml` embeds its own `encrypted_regex`
+   (which predates this key), and SOPS uses the *embedded* regex — not `.sops.yaml`'s creation_rule —
+   when editing an existing file. So a plain `sops <file>` edit would leave the new key **plaintext**.
+   Re-encrypt from decrypted so the creation_rule's regex applies, then verify it is ciphertext:
    ```bash
-   sops ansible/secrets/registry.sops.yaml     # set registry_sync_dockerhub_token: "<token>"
+   sops ansible/secrets/registry.sops.yaml     # set registry_sync_dockerhub_token: "<token>", save
+   # re-encrypt so the new key is actually covered by the encrypted_regex:
+   sops -d ansible/secrets/registry.sops.yaml > /tmp/r.yaml \
+     && cp /tmp/r.yaml ansible/secrets/registry.sops.yaml \
+     && sops -e -i ansible/secrets/registry.sops.yaml && rm -f /tmp/r.yaml
+   grep registry_sync_dockerhub_token ansible/secrets/registry.sops.yaml   # MUST show ENC[...]
    ```
-   (The `.sops.yaml` `registry` rule already encrypts `registry_sync_dockerhub_token`.)
 4. `just registry` — renders `/etc/zot/sync-credentials.json` (mode 0640, root:zot) and restarts Zot.
 
 Leaving `registry_zot_sync_dockerhub_user` empty runs the cache anonymously (works; cold fetches can
