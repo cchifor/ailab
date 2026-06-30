@@ -122,6 +122,7 @@
     owner: root
     group: "{{ registry_zot_group }}"
     mode: "0640"
+  no_log: true # config.json embeds the OIDC client secret — keep it out of --diff / -v output
   notify: restart zot
 
 - name: Generate bcrypt htpasswd for the push user
