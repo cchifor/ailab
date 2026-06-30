@@ -61,11 +61,11 @@ config:
   unsafeUseServiceAccountToken: true   # unchanged
   pluginsDir: /build/plugins           # NEW — Headlamp reads plugins from here
 initContainers:
-  - name: headlamp-plugin-flux
-    # Mirrored to Zot from ghcr.io/headlamp-k8s/headlamp-plugin-flux:0.6.0; pin by digest after mirroring.
-    image: registry.chifor.me/headlamp-k8s/headlamp-plugin-flux@sha256:<DIGEST>
+  - name: flux-plugin
+    # Mirrored to Zot from ghcr.io/headlamp-k8s/headlamp-plugin-flux:v0.6.0 (note the `v`); multi-arch index digest.
+    image: registry.chifor.me/headlamp-k8s/headlamp-plugin-flux@sha256:055377b9011dcc73235e8969c488ecd92af5cb70aa5d5df0f66c1cea667fdccb
     imagePullPolicy: IfNotPresent
-    command: ['/bin/sh', '-c', 'mkdir -p /build/plugins && cp -r /plugins/* /build/plugins/ && chown -R 100:101 /build/plugins']
+    command: ['/bin/sh', '-c', 'mkdir -p /build/plugins && cp -r /plugins/* /build/plugins/ && chown -R 100:101 /build/plugins && chmod -R a+rX /build/plugins']
     securityContext:
       runAsUser: 0          # copy + chown to Headlamp's uid 100/gid 101 (allowed under baseline PSA)
       runAsNonRoot: false
@@ -140,18 +140,20 @@ subjects:
 Mirror the upstream image into the private registry, then pin the manifest by digest:
 
 ```sh
-# ci creds from registry.sops.yaml; registry.chifor.me = LAN, anon pull / ci push
-skopeo copy --dest-creds ci:$REGISTRY_CI_PASSWORD \
-  docker://ghcr.io/headlamp-k8s/headlamp-plugin-flux:0.6.0 \
-  docker://registry.chifor.me/headlamp-k8s/headlamp-plugin-flux:0.6.0
-# confirm the mirrored digest matches upstream BEFORE pinning (provably the upstream 0.6.0):
-skopeo inspect docker://ghcr.io/headlamp-k8s/headlamp-plugin-flux:0.6.0          | jq -r .Digest
-skopeo inspect docker://registry.chifor.me/headlamp-k8s/headlamp-plugin-flux:0.6.0 | jq -r .Digest
+# `just mirror-image <src> <dst>` wraps this. skopeo is absent on the operator box, so use docker buildx
+# imagetools, which copies the full multi-arch index PRESERVING the digest (== the pinned @sha256 above).
+# Run from the main checkout (needs the gitignored age key for the SOPS ci password).
+just mirror-image \
+  ghcr.io/headlamp-k8s/headlamp-plugin-flux:v0.6.0 \
+  registry.chifor.me/headlamp-k8s/headlamp-plugin-flux:v0.6.0
+# the recipe logs in as `ci`, runs `docker buildx imagetools create --tag <dst> <src>`, then
+# `docker buildx imagetools inspect <dst>` so you can confirm the index digest == sha256:055377…
 ```
 
-- Add a `just` target (e.g. `just mirror-image <src> <dst:tag>`) wrapping this, and a short runbook note, so
-  future bumps are repeatable. Renovate already tracks Flux/chart versions; the plugin mirror is a manual
-  sync step on bump (documented).
+- The recipe is repeatable on bump; Renovate tracks Flux/chart versions, the plugin mirror is a manual sync
+  step on bump. The Zot **catch-all retention** (`["**"]`, `deleteUntagged:false`, keep all tags) protects the
+  mirrored tag from GC. (Alternative: add `ghcr.io` as a Zot pull-through sync upstream per ADR 0014 — more
+  set-and-forget but touches the `registry_zot` role; a one-time mirror is lighter for a single infra image.)
 - **Pull path:** the **kubelet** (node) pulls the init image, *not* the pod — so this is governed by neither the pod
   NetworkPolicy nor the `ci` push creds. Zot serves **anonymous LAN pull** (already proven for the cluster's other
   images), so **no `imagePullSecret` is needed**; verification confirms the kubelet pull (initContainer reaches Ready).
@@ -199,7 +201,8 @@ so the dashboard stays honest. No `siteMonitor`/href change.
   commit `spec.suspend` to Git. (Operational note, not a code change.)
 - **Audit attribution** is to the SA, not the human — inherent to single-SA mode; the per-user OIDC graduation
   path (Authelia → apiserver OIDC → group→role) fixes this if needed later.
-- An **ADR** (next number, ~0013) should record the read-only→safe-ops posture change and the accepted risk.
+- **ADR 0015** (`docs/decisions/0015-headlamp-flux-safeops.md`) records the read-only→safe-ops posture change
+  and the accepted risk.
 
 ## 7. Verification plan
 

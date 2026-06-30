@@ -22,8 +22,9 @@ Four small, independently-reviewable units:
 
 1. **Plugin delivery** (edit `headlamp.yaml` `spec.values`): add `config.pluginsDir: /build/plugins`, an
    `initContainer` that copies the **mirrored, digest-pinned** plugin image
-   (`registry.chifor.me/headlamp-k8s/headlamp-plugin-flux@sha256:<DIGEST>`, mirrored from
-   `ghcr.io/headlamp-k8s/headlamp-plugin-flux:0.6.0`) into a shared `emptyDir`, mounted at `/build/plugins` in
+   (`registry.chifor.me/headlamp-k8s/headlamp-plugin-flux@sha256:055377b9011dcc73235e8969c488ecd92af5cb70aa5d5df0f66c1cea667fdccb`,
+   mirrored from `ghcr.io/headlamp-k8s/headlamp-plugin-flux:v0.6.0` — note the **`v`** prefix; the multi-arch
+   OCI **index** digest is pinned) into a shared `emptyDir`, mounted at `/build/plugins` in
    **both** the init and main containers. The init copies as root then `chown -R 100:101 /build/plugins` — chowning
    the **mounted dir itself**, not only the copied children (`-R` on the mountPath covers both); allowed under the
    namespace's **baseline** PSA. (A `chmod -R a+rX` fallback is cheap insurance if the upstream image ships
@@ -59,10 +60,14 @@ Four small, independently-reviewable units:
      suspend/annotation fields is a ValidatingAdmissionPolicy — out of scope per the "full" choice, recorded as a
      graduation option.
 
-3. **Image mirror** (`justfile` target + runbook note): `skopeo copy` ghcr → `registry.chifor.me` with `ci` creds
-   from `registry.sops.yaml`; then `skopeo inspect` **both** the upstream and the mirrored ref and confirm the
-   digests match before pinning `headlamp.yaml` to `@sha256:<DIGEST>` (so the pinned digest is provably the upstream
-   `0.6.0`). Repeatable on bump.
+3. **Image mirror** (`just mirror-image` + ADR/runbook note): `docker buildx imagetools create` ghcr →
+   `registry.chifor.me` authenticating as `ci` (password from `registry.sops.yaml`). **Tooling note:** `skopeo` is
+   absent on the operator box; `docker buildx imagetools create` copies the full **multi-arch index preserving the
+   digest**, so the pinned `@sha256:055377…` is provably the upstream `v0.6.0`. The Zot **catch-all retention**
+   (`["**"]`, `deleteUntagged:false`, keep all tags) protects the mirrored tag from GC. Repeatable on bump.
+   (Alternative considered: add `ghcr.io` as a Zot **pull-through sync upstream** per ADR 0014 — more set-and-forget
+   but expands the `registry_zot` role + needs `just registry`; a one-time mirror is the lighter, plan-faithful path
+   for a single infra image.)
    - **Pull path:** the **kubelet** (node), not the pod, pulls the init image — so this is a node→Zot reachability
      concern, governed by neither the pod NetworkPolicy nor the `ci` push creds. Zot serves **anonymous LAN pull**
      (already proven for the cluster's other images via `global.imageRegistry=registry.chifor.me`), so **no
@@ -76,7 +81,7 @@ Four small, independently-reviewable units:
 the **running pod's** egress already reaches the apiserver for the Flux API calls — image pulls are node-level, §3);
 no Gatus check (Homepage siteMonitor suffices; Gatus would force a NetworkPolicy ingress exception).
 
-**Accepted risk (record as ADR ~0013, explicitly time-boxed):** single shared SA + single-factor email-OTP CF Access
+**Accepted risk (recorded as ADR 0015, explicitly time-boxed):** single shared SA + single-factor email-OTP CF Access
 (24h) means any Access'd browser can `patch` the in-scope Flux CRs — i.e. reconcile/suspend/force **and** (per §2's
 limitation) mutate source URLs/refs and `serviceAccountName`. Kubernetes audit attributes every such write to the
 shared `headlamp` SA, not a human; CF Access logs are not a substitute for per-user K8s identity. Bounded by the
