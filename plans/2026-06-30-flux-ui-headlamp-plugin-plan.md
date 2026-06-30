@@ -125,4 +125,4 @@ UI (`flux-web-user`/`flux-web-admin` + `SelfSubjectAccessReview`-gated actions).
 - PSA `restricted` for the namespace (needs a baked custom plugin image).
 - Image-automation toolkit RBAC (controllers not installed); Gatus check (NetworkPolicy exception).
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
