@@ -49,8 +49,9 @@ data:
       - hostname: hubble.chifor.me
         service: http://hubble-ui.kube-system.svc.cluster.local:80
       # Admin UIs published to the WAN, GATED by Cloudflare Access (access.tf admin_uis). Proxmox +
-      # QNAP are LAN hosts with self-signed certs (noTLSVerify); Prometheus + Alertmanager are
-      # in-cluster with NO native auth, so Access is the ONLY gate in front of them.
+      # QNAP are LAN hosts with self-signed certs (noTLSVerify — HARDENING: pin their LAN CA via
+      # originRequest.caPool + originServerName instead, ADR 0007 follow-up); Prometheus + Alertmanager
+      # are in-cluster with NO native auth, so Access is the ONLY gate in front of them.
       - hostname: proxmox.chifor.me
         service: https://192.168.0.2:8006
         originRequest: { noTLSVerify: true }
