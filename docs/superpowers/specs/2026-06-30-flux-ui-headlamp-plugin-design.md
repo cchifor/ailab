@@ -42,7 +42,7 @@ Plugin compatibility is confirmed: Flux plugin **0.6.0** declares `version-compa
 |---|---|---|---|
 | Capability | Posture | **Monitoring + safe ops** | View all Flux state + reconcile/suspend/resume from the UI. |
 | Architecture | Where | **Headlamp Flux plugin** | Reuse the existing deploy/exposure/tile/RBAC. |
-| Ops scope | RBAC width | **Full (incl. HelmRelease force-reconcile)** | Broad `patch`/`update` on the installed Flux toolkit CRs; **no** create/delete (that stays Git's job). |
+| Ops scope | RBAC width | **Full** (reconcile/suspend/resume/force) | `patch` on the acted-on Flux toolkit CRs; **no** create/delete (that stays Git's job). RBAC is resource-scoped, not field-scoped — see §6. |
 | Image source | Plugin image | **Mirror to Zot** (`registry.chifor.me`) | Consistent with the lab's private-registry + image-pinning posture; no external fetch at pod start. |
 | Access gate | Hardening | **Accept & defer** | Keep the 24h single-factor CF Access gate; record as an accepted risk; revisit with the ADR 0007 MFA roadmap. |
 
@@ -99,16 +99,15 @@ metadata:
 rules:
   - apiGroups: ["kustomize.toolkit.fluxcd.io"]
     resources: ["kustomizations"]
-    verbs: ["patch", "update"]
+    verbs: ["patch"]                        # plugin issues merge-PATCH for every action; `update` unneeded
   - apiGroups: ["helm.toolkit.fluxcd.io"]
-    resources: ["helmreleases"]            # patch covers reconcile, suspend/resume, AND force-reconcile
-    verbs: ["patch", "update"]
+    resources: ["helmreleases"]            # patch covers reconcile, suspend/resume, and force
+    verbs: ["patch"]
   - apiGroups: ["source.toolkit.fluxcd.io"]
     resources: ["gitrepositories", "helmrepositories", "ocirepositories", "buckets", "helmcharts"]
-    verbs: ["patch", "update"]
-  - apiGroups: ["notification.toolkit.fluxcd.io"]
-    resources: ["alerts", "providers", "receivers"]
-    verbs: ["patch", "update"]
+    verbs: ["patch"]
+  # notification.toolkit.fluxcd.io (alerts/providers/receivers) intentionally NOT granted write:
+  # patching them redirects/alters notification delivery and is not a meaningful safe-op (read stays via wildcard).
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -125,9 +124,14 @@ subjects:
 ```
 
 - **Mechanics:** reconcile = `patch` of the `reconcile.fluxcd.io/requestedAt` annotation; suspend/resume =
-  `patch` of `spec.suspend`; HelmRelease force = `patch` (annotation/field) — all the **same `patch` verb**.
-- **Deliberately excluded:** `create`, `delete` (no destructive Flux-CR ops from the UI); image-automation
-  GVKs (those controllers are not installed); all non-Flux write verbs (the rest of the UI stays read-only).
+  `patch` of `spec.suspend`; force = `patch` of the reconcile/force annotations or `spec.force` (the plugin's force
+  action toggles Kustomization `spec.force`) — all the **same `patch` verb**. Verify the exact action in test.
+- **Deliberately excluded:** `update` (the plugin uses merge-PATCH only); `create`/`delete` (no destructive Flux-CR
+  ops from the UI); `notification` write (patching alerts/providers/receivers redirects notification delivery —
+  read-only via the wildcard rule); image-automation GVKs (controllers not installed); all non-Flux write verbs.
+- **Field-scope caveat (§6):** RBAC is resource-scoped, not field-scoped — `patch` permits mutating *any* field on
+  these CRs (e.g. a source `spec.url`/`ref`, a Kustomization/HelmRelease `spec.serviceAccountName`), not just the
+  suspend/reconcile fields. Accepted as the content of the "full" blast radius; a VAP would be needed to field-scope.
 - **Do NOT** set `clusterRoleBinding.create: true` in the chart — it re-adds the cluster-admin binding which
   unions additively and defeats the whole design.
 
@@ -140,13 +144,17 @@ Mirror the upstream image into the private registry, then pin the manifest by di
 skopeo copy --dest-creds ci:$REGISTRY_CI_PASSWORD \
   docker://ghcr.io/headlamp-k8s/headlamp-plugin-flux:0.6.0 \
   docker://registry.chifor.me/headlamp-k8s/headlamp-plugin-flux:0.6.0
-# read back the digest to pin in headlamp.yaml
+# confirm the mirrored digest matches upstream BEFORE pinning (provably the upstream 0.6.0):
+skopeo inspect docker://ghcr.io/headlamp-k8s/headlamp-plugin-flux:0.6.0          | jq -r .Digest
 skopeo inspect docker://registry.chifor.me/headlamp-k8s/headlamp-plugin-flux:0.6.0 | jq -r .Digest
 ```
 
 - Add a `just` target (e.g. `just mirror-image <src> <dst:tag>`) wrapping this, and a short runbook note, so
   future bumps are repeatable. Renovate already tracks Flux/chart versions; the plugin mirror is a manual
   sync step on bump (documented).
+- **Pull path:** the **kubelet** (node) pulls the init image, *not* the pod — so this is governed by neither the pod
+  NetworkPolicy nor the `ci` push creds. Zot serves **anonymous LAN pull** (already proven for the cluster's other
+  images), so **no `imagePullSecret` is needed**; verification confirms the kubelet pull (initContainer reaches Ready).
 
 ### 4.4 Homepage tile (soften wording in `homepage/configmap.yaml`)
 
@@ -158,8 +166,9 @@ so the dashboard stays honest. No `siteMonitor`/href change.
 
 - **Exposure:** `k8s.chifor.me` + CF Access already gates all paths/methods of the same Service — the plugin
   and its writes are already behind the gate. No new hostname/route/Access app.
-- **NetworkPolicy:** ingress-only (egress unrestricted), so the initContainer can pull from Zot and the pod
-  reaches the apiserver. No change. (A Gatus check would force an ingress exception — see §6, skipped.)
+- **NetworkPolicy:** ingress-only; the **running pod's** egress already reaches the apiserver for the Flux API
+  calls. (Image pulls are node-level, not pod-level — §4.3 — so the policy is irrelevant to the plugin pull.) No
+  change. (A Gatus check would force an ingress exception — see §6, skipped.)
 - **Gatus:** none added; Homepage's `siteMonitor` already provides the health dot.
 
 ## 5. Files changed
@@ -174,13 +183,18 @@ so the dashboard stays honest. No `siteMonitor`/href change.
 
 ## 6. Accepted risks & security notes
 
-- **Single shared SA, no per-user RBAC.** `unsafeUseServiceAccountToken: true` means every CF-Access'd
-  browser acts as the one `headlamp` SA. Granting Flux `patch` makes reconcile/suspend/**force** reachable by
-  **anyone who clears CF Access** (currently single-factor email OTP, 24h session). **Accepted & deferred**
-  per decision; the write grant is scoped to Flux CRs only (no core/workload/secret writes, no create/delete),
-  bounding the blast radius. Revisit with the ADR 0007 MFA-IdP roadmap.
-- **RBAC can't separate reconcile from suspend** (same `patch` on the same object). A reconcile-only posture
-  would need a ValidatingAdmissionPolicy — out of scope given the "Full" decision.
+- **Single shared SA, no per-user RBAC (time-boxed acceptance).** `unsafeUseServiceAccountToken: true` means every
+  CF-Access'd browser acts as the one `headlamp` SA. Granting Flux `patch` makes reconcile/suspend/force reachable by
+  **anyone who clears CF Access** (currently single-factor email OTP, 24h session). Kubernetes audit attributes every
+  write to the shared SA, not a human; CF Access logs are not a substitute for per-user K8s identity. **Accepted &
+  deferred** per decision, recorded as an explicitly time-boxed risk. **Near-term compensating controls** (tracked):
+  lower the `k8s.chifor.me` Access `session_duration` and accelerate the ADR 0007 MFA-IdP work.
+- **`patch` is resource-scoped, not field-scoped — and not a complete safety boundary.** "Flux-CR-only" bounds the
+  grant (no core/workload/secret writes, no create/delete), but `patch` still permits mutating *any* field on those
+  CRs: a source `spec.url`/`ref` (repoint what Flux pulls) or a Kustomization/HelmRelease `spec.serviceAccountName`
+  (change Flux's apply-time impersonation identity) — an escalation-adjacent surface, and Flux mutations can change
+  what gets reconciled. This is the concrete content of the accepted "full" blast radius. A reconcile/suspend-only
+  posture would require a ValidatingAdmissionPolicy field-scoping the patch — out of scope given the "Full" decision.
 - **UI suspend is invisible in Git (drift).** Treat UI suspend/resume as break-glass; for long-lived suspend,
   commit `spec.suspend` to Git. (Operational note, not a code change.)
 - **Audit attribution** is to the SA, not the human — inherent to single-SA mode; the per-user OIDC graduation
