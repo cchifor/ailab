@@ -166,4 +166,4 @@ cd ../../.. && SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey \
   e2e jobs land on the same physical host) and confirm no `exit 137` / "runner lost communication", and no
   OOM/balloon-pressure events in `dmesg` / the PVE task log. This is the true #620 regression test.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
