@@ -10,6 +10,14 @@ balloon the guests down to 1-2 GiB (the bpg default 1 GiB floor), starving runni
 pinning the **balloon floor to 12 GiB** (`runner_memory_floating_mib`; the 24 GiB memory ceiling is
 unchanged) and adding an **8 GiB guest swapfile** (`swappiness=10`) as an OOM reclaim valve. Both are
 now codified (tofu + the `github_runner` role). The `MemoryMax=10G` cgroup cap is unrelated, unchanged.
+**Update (2026-07-01, scale 3→6):** Doubled the pool to **6 runners — two per Proxmox host**
+(`gha-runner-4/5/6`, vmid 4104–4106, IPs .33/.34/.35), **identical** sizing + config to 1–3 via the
+shared `runner_*` vars — additive `runner_nodes` map entries only; no role or secret change. Trade-off:
+the original "one per host" fault isolation becomes two-per-host, and GitHub may co-schedule two heavy
+jobs on one host, so the rollout is **gated on a per-host RAM check** — full budget being Talos CP VM +
+AI LLM LXC + dev-worker + runner ×2 (plus node1's registry LXC and the iGPU VRAM carve) — with
+balloon-reclaim/swap-under-peak treated as a no-go, not steady state (that is #620). See
+`plans/2026-07-01-scale-gha-runners-to-6-plan.md`.
 **Remaining:** decommission the 4 Hyper-V runners; optionally narrow the App install to platform-only.
 **Relates to:** ADR 0001 (OpenTofu + Ansible), ADR 0006 (Talos/Flux/Cilium), ADR 0008 (AI appliance =
 LXC *outside* Talos), ADR 0009 (control-plane colocation / tight RAM budget).

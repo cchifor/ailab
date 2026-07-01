@@ -14,13 +14,15 @@ Keep them in sync.
 ### Management LAN `192.168.0.0/24` — static allocations
 
 Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (`.51`–`.254`).
-`.5`–`.36` and `.50` are free static space (only `.2`–`.4`, the dev-workers, and `.40`–`.49` are in use).
+`.5`–`.32` and `.50` are free static space (`.2`–`.4` and `.33`–`.49` are in use).
 
 | Range / IP | Owner | Source of truth |
 |---|---|---|
 | `.1` | LAN gateway | router |
 | `.2 / .3 / .4` | Proxmox hosts `ai-node1/2/3` | `inventory/hosts.yml` |
-| `.5`–`.36` | free (static) | — |
+| `.5`–`.32` | free (static) | — |
+| `.33 / .34 / .35` | GitHub runner VMs `gha-runner-4/5/6` | `kubernetes/infra/runners/variables.tf` |
+| `.36` | OCI registry LXC `ai-registry` | `kubernetes/infra/registry-lxc/variables.tf` |
 | `.37 / .38 / .39` | Dev-worker VMs `dev-worker-1/2/3` | `kubernetes/infra/dev-workers/variables.tf` |
 | `.40` | Talos control-plane VIP | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `ai-cp-1/2/3` | `kubernetes/infra/variables.tf` |

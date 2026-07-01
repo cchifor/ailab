@@ -123,9 +123,13 @@ variable "runner_ssh_public_key" {
   default = ""
 }
 
-# ---- One runner VM per physical host (fault isolation) ----
-# IPs .47/.48/.49 are free + inside the static-reserved block (.2-.50, outside the router DHCP pool
-# that bit the AI LXCs at .51-.53). vmids 4101-4103 don't collide (Talos 4001-4003, AI LXC 5001-5003).
+# ---- Two runner VMs per physical host (6-wide pool) ----
+# See docs/decisions/0013-ci-self-hosted-runners.md (Update 2026-07-01) + the plan
+# plans/2026-07-01-scale-gha-runners-to-6-plan.md. All 6 draw identical sizing from the shared runner_*
+# vars above; only node_name/vm_id/ip/hostname differ (that identity is what proves "same config").
+# IPs .47/.48/.49 (runners 1-3) + .33/.34/.35 (runners 4-6) sit inside the static-reserved block
+# (.2-.50, outside the router DHCP pool that bit the AI LXCs at .51-.53). vmids 4101-4106 don't collide
+# (Talos 4001-4003, dev-workers 4201-4203, AI LXC 5001-5003, registry 5004).
 variable "runner_nodes" {
   type = map(object({
     node_name = string
@@ -137,5 +141,8 @@ variable "runner_nodes" {
     "gha-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.47", hostname = "gha-runner-1" }
     "gha-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.48", hostname = "gha-runner-2" }
     "gha-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.49", hostname = "gha-runner-3" }
+    "gha-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.33", hostname = "gha-runner-4" }
+    "gha-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.34", hostname = "gha-runner-5" }
+    "gha-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.35", hostname = "gha-runner-6" }
   }
 }

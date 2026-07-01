@@ -1,5 +1,5 @@
-# Host-level node_exporter on the 3 GitHub Actions runner VMs (.47/.48/.49:9100, installed via the
-# github_runner ansible role, which reuses the node_exporter role). Gives true CPU/mem/disk/network
+# Host-level node_exporter on the 6 GitHub Actions runner VMs (.47/.48/.49 + .33/.34/.35:9100, installed
+# via the github_runner ansible role, which reuses the node_exporter role). Gives true CPU/mem/disk/network
 # for the runner pool so heavy CI load (compose e2e + buildx) is visible on the dashboards alongside
 # the hypervisors. relabel forces job="ci-runner-node" so dashboard queries stay clean.
 apiVersion: v1
@@ -26,6 +26,9 @@ subsets:
       - { ip: 192.168.0.47 }
       - { ip: 192.168.0.48 }
       - { ip: 192.168.0.49 }
+      - { ip: 192.168.0.33 }
+      - { ip: 192.168.0.34 }
+      - { ip: 192.168.0.35 }
     ports:
       - { name: metrics, port: 9100, protocol: TCP }
 ---

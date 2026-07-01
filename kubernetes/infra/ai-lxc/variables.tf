@@ -107,7 +107,8 @@ variable "lxc_template_file" {
 }
 
 # ---- One privileged GPU LXC per physical host ----
-# IPs .51/.52/.53 are free: nodes are .2/.3/.4, CP VIP .40, Talos VMs .41/.42/.43.
+# IPs .44/.45/.46 (static-reserved block, adjacent to the Talos nodes .41-.43). The original .51-.53
+# were abandoned because .51+ is the router's DHCP pool — see the inline note below + docs/network-plan.md.
 variable "ai_llm_nodes" {
   type = map(object({
     node_name = string

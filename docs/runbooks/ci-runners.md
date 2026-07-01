@@ -1,11 +1,11 @@
 # Runbook — self-hosted GitHub Actions runners (Proxmox)
 
-3 ephemeral runner VMs on the Proxmox lab, joining the `cchifor/platform` **`self-hosted-hv`** pool.
+6 ephemeral runner VMs (two per Proxmox host) joining the `cchifor/platform` **`self-hosted-hv`** pool.
 See ADR 0013. IaC: `kubernetes/infra/runners/` (VMs) + `ansible/roles/github_runner/` (config).
 
 | | |
 |---|---|
-| VMs | `gha-runner-1/2/3` — vmid 4101-4103, one per Proxmox host, .47/.48/.49, 8 vCPU / 24 GiB / 120 GiB |
+| VMs | `gha-runner-1..6` — vmid 4101-4106, **two per Proxmox host**, .47/.48/.49 + .33/.34/.35, 8 vCPU / 24 GiB / 120 GiB each |
 | Memory | balloon **12-24 GiB** (floor 12 GiB so host RAM pressure can't starve a running job — see #620) + 8 GiB guest swap (`swappiness=10`) |
 | OS | Ubuntu 24.04 cloud image (cloud-init: static IP + `ubuntu` user + the ansible SSH key) |
 | Label | `self-hosted-hv` (repo var `RUNNER_LABEL`; workflows use `runs-on: ${{ vars.RUNNER_LABEL }}`) |
@@ -44,7 +44,7 @@ cd kubernetes/infra/runners
 cp terraform.tfvars.example terraform.tfvars   # set pve_api_token + runner_ssh_public_key
 tofu init
 tofu plan
-tofu apply        # downloads the Ubuntu image once (qnap-nfs), creates the 3 VMs
+tofu apply        # downloads the Ubuntu image once (qnap-nfs), creates the new runner VMs
 tofu output runner_vms
 ```
 
@@ -58,7 +58,7 @@ just runners        # installs Docker/toolchain + the ported runner contract, re
 
 ## 5. Verify
 - **Registered:** GitHub → `cchifor/platform` → Settings → Actions → Runners → `self-hosted-hv` shows
-  `ephem-gha-runner-{1,2,3}-…` **Idle** (alongside the 4 Hyper-V runners during transition).
+  `ephem-gha-runner-{1..6}-…` **Idle** (alongside the 4 Hyper-V runners during transition).
 - **Canary:** Actions → **Runner pool health** → Run workflow. Re-run until it lands on a `gha-runner-N`
   host (check the "Runner identity" step); it asserts the `ephem-*` name, `memory.max == 10G`, the
   wrapper, and the hook env.
