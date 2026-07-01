@@ -8,6 +8,13 @@ set -uo pipefail
 RUNNER_DIR="{{ github_runner_dir }}"
 DOCKER_CFG="{{ github_runner_home }}/.docker"
 if command -v docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1; then
+  # Build cache size (bytes) from docker's own accounting, captured BEFORE the prune below so the beacon
+  # reflects the per-cycle accumulation (reclaim then prunes it back toward --keep-storage 10GB). Parsed
+  # from `docker system df` (default table) to avoid Go-template {{ }} braces clashing with Jinja.
+  bc_bytes=$(timeout 20 docker system df 2>/dev/null | awk '/^Build Cache/{ n=$5; u=$5;
+    gsub(/[0-9.]/,"",u); gsub(/[^0-9.]/,"",n);
+    m=1; if(u=="kB")m=1e3; else if(u=="MB")m=1e6; else if(u=="GB")m=1e9; else if(u=="TB")m=1e12;
+    printf "%d", n*m }')
   ids=$(docker ps -aq 2>/dev/null || true)
   [ -n "$ids" ] && timeout 120 docker rm -f $ids >/dev/null 2>&1 || true
   # Remove per-job buildx builder instances — each docker-container builder leaves a *named*
@@ -55,6 +62,9 @@ if [ -d "$tf_dir" ]; then
     echo '# HELP runner_reclaim_last_success_seconds Unix time of the last completed between-jobs reclaim.'
     echo '# TYPE runner_reclaim_last_success_seconds gauge'
     echo "runner_reclaim_last_success_seconds $(date +%s)"
+    echo '# HELP runner_docker_build_cache_bytes Docker build cache size in bytes at reclaim (pre-prune; floor ~ builder --keep-storage).'
+    echo '# TYPE runner_docker_build_cache_bytes gauge'
+    echo "runner_docker_build_cache_bytes ${bc_bytes:-0}"
   } > "$tmp" 2>/dev/null && mv -f "$tmp" "$tf_dir/runner_health.prom" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 fi
 exit 0
