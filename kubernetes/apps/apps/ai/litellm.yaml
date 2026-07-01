@@ -29,8 +29,11 @@ data:
           api_base: http://llm-qwen36.ai.svc.cluster.local:8081/v1
           api_key: "sk-noauth"
         model_info:
-          supports_vision: true # Qwen3.6 is multimodal (coding + vision); replaced qwen3-coder-30b
-          max_input_tokens: 30000 # host CTX=32768 PARALLEL=1 (raised from 16384 for tool-heavy agent prompts)
+          supports_vision: true # Qwen3.6 is multimodal (image + video); also replaced gemma-4 for vision
+          # host CTX=262144 (native n_ctx_train) PARALLEL=1, q8_0 K/V cache. Extended from 32768 for
+          # agentic tool loops. ~16K reserved for output: Qwen3.6 is a REASONING model (emits a <think>
+          # trace in reasoning_content before the answer/tool-call), so output budget must stay generous.
+          max_input_tokens: 245760
       - model_name: gpt-oss-120b
         litellm_params:
           model: openai/gpt-oss-120b
@@ -45,14 +48,18 @@ data:
           api_key: "sk-noauth"
         model_info:
           max_input_tokens: 7000 # host CTX=8192
-      - model_name: gemma-4-26b-a4b
-        litellm_params:
-          model: openai/gemma-4-26b-a4b
-          api_base: http://llm-gemma4.ai.svc.cluster.local:8082/v1
-          api_key: "sk-noauth"
-        model_info:
-          supports_vision: true # gates image input in LiteLLM + Open WebUI; replaced qwen3-vl-8b
-          max_input_tokens: 15000 # host CTX=16384 PARALLEL=1
+      # gemma-4-26b-a4b is now ON-DEMAND (unlisted so the router never advertises a down backend,
+      # matching the heavyweight policy). It was stopped on node1 :8082 to free ~15 GiB VRAM for
+      # Qwen3.6's extended context; Qwen3.6 covers image+video, so no steady-state vision is lost.
+      # To bring it back: re-provision node1 :8082 (see ai-host-setup.md) and uncomment this block.
+      # - model_name: gemma-4-26b-a4b
+      #   litellm_params:
+      #     model: openai/gemma-4-26b-a4b
+      #     api_base: http://llm-gemma4.ai.svc.cluster.local:8082/v1
+      #     api_key: "sk-noauth"
+      #   model_info:
+      #     supports_vision: true
+      #     max_input_tokens: 15000 # host CTX=16384 PARALLEL=1
       # Cloud models (real OpenAI/Anthropic) for the Strive platform's model
       # dropdown. Keys come from the litellm-cloud-keys Secret (SOPS), referenced
       # via os.environ/ so they never appear in this ConfigMap.

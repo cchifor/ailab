@@ -147,6 +147,35 @@ The old `qwen3-coder-30b` / `qwen3-vl-8b` GGUFs stay on NFS (revert by re-pointi
 The k8s Services were renamed `llm-coder→llm-qwen36`, `llm-vision→llm-gemma4` and the LiteLLM
 `model_list` updated (both `supports_vision: true`); a `git push` reconciles them via Flux.
 
+## Qwen3.6 long-context config for agentic flows (2026-07-01, ADR 0015)
+Qwen3.6 now serves its **native 256K** window (`n_ctx_train=262144`) instead of 32K, so tool-heavy agent
+prompts stop hitting `400 ContextWindowExceededError`. **Gemma-4 was demoted to on-demand** to free the
+VRAM (`systemctl disable --now llama-server-gemma4` on node1; Qwen3.6 covers image **and** video, so no
+steady-state vision is lost). Steady-state launch (source-of-truth — **keep in sync with `litellm.yaml`**):
+```bash
+MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
+  --env INSTANCE=qwen36 --env PORT=8081 \
+  --env MODEL=/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+  --env MODEL_ALIAS=qwen3.6-35b-a3b --env MMPROJ=/models/qwen3.6-35b-a3b/mmproj-F16.gguf \
+  --env CTX=262144 --env PARALLEL=1 \
+  --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0   # new provision.sh knobs -> --cache-type-k/v
+```
+Key facts (measured; see ADR 0015 for the table):
+- **No YaRN** — native `n_ctx_train` is already 262144; just raise `-c`. `--cache-type-k/v q8_0` is
+  near-lossless with flash-attn (auto). On this **hybrid Gated-DeltaNet + SWA** model the KV is tiny:
+  256K KV ≈ **+2.2 GiB** over the 32K baseline → VRAM **44.6 GiB / 64** with `general` co-resident, GTT ~0.
+  A big `-c` is **free until actually used** (cost scales with real prompt length, not the window).
+- **Prefill dominates long-context latency.** Cold/divergent prefill ~895 tok/s @10K, tapering to
+  ~549 tok/s @56K (≈1–5 min at 64K–256K fill); decode ~60 tok/s. A **single growing conversation** on the
+  one slot reuses the retained recurrent state (measured ~1 s to re-attach a 34K prefix); a conversation
+  **switch / edited history / interleaved request** forces a full re-prefill (`forcing full prompt
+  re-processing …` in the journal). Future win: bump the llama.cpp pin when hybrid/SWA prompt-caching improves.
+- **Reasoning model.** Output is a `<think>` trace in `reasoning_content` **before** the answer/tool-call;
+  too small a `max_tokens` returns empty `content` + `finish_reason:"length"`. LiteLLM `max_input_tokens`
+  is **245760** (256K − ~16K output headroom). Tool-calling verified through `--jinja`.
+- **Revert:** re-run the command with `--env CTX=32768` and drop the `CACHE_TYPE_*` envs; re-enable Gemma-4
+  with `systemctl enable --now llama-server-gemma4` (or re-provision `:8082`) + uncomment its LiteLLM block.
+
 ## Verify
 ```bash
 curl http://192.168.0.44:8080/health                      # {"status":"ok"}  (node1 LXC; .45=node2, .46=node3)
