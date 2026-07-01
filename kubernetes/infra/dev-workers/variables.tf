@@ -89,7 +89,10 @@ variable "dev_worker_cores" {
 variable "dev_worker_memory_mib" {
   description = "Max VM memory (MiB) — the ceiling the balloon can inflate to under load."
   type        = number
-  default     = 16384 # 16 GiB ceiling; lower further if a large GPU VRAM carve makes a node tight
+  # 8 GiB ceiling (was 16). Lowered 2026-07-01 to bound peak competition when a SECOND runner VM is
+  # co-located per host (6-wide runner pool — see kubernetes/infra/runners + ADR 0013). Dev-workers sit
+  # near the 2 GiB floor at idle, so this only caps their load-time peak; it doesn't reclaim idle RAM.
+  default = 8192
 }
 variable "dev_worker_memory_floating_mib" {
   description = <<-EOT

@@ -18,6 +18,16 @@ jobs on one host, so the rollout is **gated on a per-host RAM check** — full b
 AI LLM LXC + dev-worker + runner ×2 (plus node1's registry LXC and the iGPU VRAM carve) — with
 balloon-reclaim/swap-under-peak treated as a no-go, not steady state (that is #620). See
 `plans/2026-07-01-scale-gha-runners-to-6-plan.md`.
+*Measured 2026-07-01 (live gate):* hosts expose only **~62 GiB** (the ~64 GiB iGPU carve takes the rest
+of 128 GiB physical) and already run at **78–84 %** with one runner each (Talos ~22 GiB actual, LLM
+1–8 GiB, one runner 5–9 GiB, dev-worker 1–3 GiB) → only **10–14 GiB avail** and light swap. A second
+12 GiB-floor runner does **not** fit in idle headroom (node3 worst: 10.2 GiB avail, and its 122B LLM holds
+7.8 GiB of **non-reclaimable** RSS with LXC `swap=0`, so the LLM cannot be capped down without OOM).
+Shrinking the LLM was therefore **rejected**; only the dev-worker ceilings were cut 16→8 (peak-bounding).
+Net posture: creating the runners is idle-safe (a fresh idle runner uses ~1–2 GiB), but **two concurrent
+heavy jobs on one host — most acutely node3 while a heavyweight LLM is loaded — will push that host into
+swap (#620 territory)**, cushioned by the 12 GiB floor + 8 GiB guest swap. The durable fix is reducing the
+iGPU VRAM carve (frees ~real RAM) or the Talos CP allocation.
 **Remaining:** decommission the 4 Hyper-V runners; optionally narrow the App install to platform-only.
 **Relates to:** ADR 0001 (OpenTofu + Ansible), ADR 0006 (Talos/Flux/Cilium), ADR 0008 (AI appliance =
 LXC *outside* Talos), ADR 0009 (control-plane colocation / tight RAM budget).
