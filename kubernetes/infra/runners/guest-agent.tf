@@ -37,9 +37,12 @@ resource "terraform_data" "enable_guest_agent" {
     }
     command = <<-EOT
       set -eu
-      curl -fsS $PVE_K -X PUT "$PVE_ENDPOINT/api2/json/nodes/$PVE_NODE/qemu/$VMID/config" \
+      # Strip any trailing slash: pve_endpoint may end in "/" (the bpg provider normalizes it, but a
+      # raw curl would build "…:8006//api2/…" → PVE returns HTTP 500 on the double slash).
+      EP="$${PVE_ENDPOINT%/}"
+      curl -fsS $PVE_K -X PUT "$EP/api2/json/nodes/$PVE_NODE/qemu/$VMID/config" \
         -H "Authorization: PVEAPIToken=$PVE_TOKEN" --data-urlencode "agent=1" >/dev/null
-      curl -fsS $PVE_K -X POST "$PVE_ENDPOINT/api2/json/nodes/$PVE_NODE/qemu/$VMID/status/reboot" \
+      curl -fsS $PVE_K -X POST "$EP/api2/json/nodes/$PVE_NODE/qemu/$VMID/status/reboot" \
         -H "Authorization: PVEAPIToken=$PVE_TOKEN" >/dev/null
     EOT
   }

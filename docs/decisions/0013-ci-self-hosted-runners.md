@@ -44,10 +44,12 @@ volumes, so ~40 GiB had piled up → a latent disk-full failure). (2) **Observab
 `PrometheusRule` (`ci-runners`) alerts on runner down / disk filling / #620 memory-pressure, plus a
 node_exporter textfile **health beacon** (`runner_docker_config_root_owned`) that trips
 **CIRunnerDockerConfigRootOwned** if the self-heal ever regresses. (3) The manual guest-agent enable step
-is **codified** via the PVE API (`terraform_data.enable_guest_agent`, no SSH). (4) The ephemeral wrapper
-got a bounded token-fetch retry. Recommended follow-up: strengthen platform's `runner-health.yml` canary
-with a `~/.docker` ownership assert + a real `docker buildx build` smoke test (the true regression gate).
-**Remaining:** decommission the 4 Hyper-V runners; optionally narrow the App install to platform-only.
+is **codified** via the PVE API (`terraform_data.enable_guest_agent`, no SSH) — APPLIED (needed a
+trailing-slash fix on `pve_endpoint`, #82, or the raw curl 500s on the double slash). (4) The ephemeral
+wrapper got a bounded token-fetch retry. (5) Cross-repo gate DONE: platform's `runner-health.yml` canary
+now asserts `~/.docker` is runner-owned + runs a `docker buildx build` smoke test (cchifor/platform#682).
+**Remaining:** optionally narrow the App install to platform-only; optionally purge the drained,
+powered-off BEAST Multipass VMs. (The 4 Hyper-V runners were decommissioned 2026-06-16.)
 **Relates to:** ADR 0001 (OpenTofu + Ansible), ADR 0006 (Talos/Flux/Cilium), ADR 0008 (AI appliance =
 LXC *outside* Talos), ADR 0009 (control-plane colocation / tight RAM budget).
 
