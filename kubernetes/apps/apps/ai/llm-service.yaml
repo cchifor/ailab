@@ -1,10 +1,11 @@
 # Publishes the off-cluster ai-llm LXCs into the cluster. To fit the heavyweights (which each
-# fill a node's iGPU), models are pinned per node: node1 (.44) runs general :8080 +
-# qwen3.6-35b-a3b :8081 (coding+vision) + gemma-4-26b-a4b :8082 (vision); node2 (.45) runs
-# gpt-oss-120b :8080; node3 (.46) runs qwen3.5-122b :8080. LiteLLM (litellm.yaml) fronts them as
-# one OpenAI endpoint. Shared label app.kubernetes.io/component=llama-server lets one
+# fill a node's iGPU), models are pinned per node: node1 (.44) runs qwen3.6-35b-a3b :8080
+# (daily driver — coding + image/video vision) + gemma-4-26b-a4b :8082 (on-demand); node2 (.45)
+# runs gpt-oss-120b :8080; node3 (.46) runs qwen3.5-122b :8080. LiteLLM (litellm.yaml) fronts them
+# as one OpenAI endpoint. Shared label app.kubernetes.io/component=llama-server lets one
 # ServiceMonitor scrape them all. Services have no selector → manual Endpoints below.
-# (2026-06: qwen3.6 replaced qwen3-coder-30b on :8081; gemma-4 replaced qwen3-vl-8b on :8082.)
+# (2026-07: qwen3.6 became node1's :8080 daily driver, replacing qwen3-30b-a3b; the separate
+#  :8081 instance + its llm-qwen36 Service were removed. gemma-4 is on-demand — see litellm.yaml.)
 ---
 apiVersion: v1
 kind: Service
@@ -26,28 +27,6 @@ metadata:
 subsets:
   - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
     ports: [{ name: http, port: 8080, protocol: TCP }]
----
-# Qwen3.6-35B-A3B (coding+vision) — node1 :8081 (replaced qwen3-coder-30b-a3b, 2026-06).
-apiVersion: v1
-kind: Service
-metadata:
-  name: llm-qwen36
-  namespace: ai
-  labels: { app.kubernetes.io/name: llm-qwen36, app.kubernetes.io/component: llama-server }
-spec:
-  type: ClusterIP
-  ports:
-    - { name: http, port: 8081, targetPort: 8081, protocol: TCP }
----
-apiVersion: v1
-kind: Endpoints
-metadata:
-  name: llm-qwen36
-  namespace: ai
-  labels: { app.kubernetes.io/name: llm-qwen36 }
-subsets:
-  - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
-    ports: [{ name: http, port: 8081, protocol: TCP }]
 ---
 apiVersion: v1
 kind: Service

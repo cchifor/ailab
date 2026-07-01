@@ -17,8 +17,9 @@ the shared QNAP NFS store. Surfaced in Kubernetes as `llm.ai.svc.cluster.local:8
 ## Rebuild from scratch
 
 ```bash
-# 1. Models -> shared NFS (run ON a Proxmox host). Daily driver first (~18.6 GB).
-ssh root@192.168.0.2 'bash -s' < scripts/fetch-models.sh daily      # or: coder | gpt-oss | qwen3.5 | all
+# 1. Models -> shared NFS (run ON a Proxmox host). Daily driver first (~22 GB).
+ssh root@192.168.0.2 'bash -s' < scripts/fetch-models.sh qwen3.6    # daily driver; or: gpt-oss | qwen3.5 | gemma4 | all
+#    (`daily` still fetches the retired qwen3-30b-a3b GGUF, kept on NFS for revert.)
 
 # 2. Create the 3 LXCs (device passthrough + /models bind mount). Uses root@pam (see gotcha #1).
 cp kubernetes/infra/terraform.tfvars kubernetes/infra/ai-lxc/terraform.tfvars   # then set pve_password
@@ -40,8 +41,8 @@ python scripts/lxc-exec.py 192.168.0.4 5003
 | iGPU | Radeon 8060S = **gfx1151**, Mesa **RADV** (Mesa 25.0.7 in Debian 13 supports it) |
 | BIOS VRAM carve | **64 GiB** (`amdgpu: VRAM 65536M`); GTT ~31 GiB ⇒ **~95 GiB GPU-addressable** |
 | System RAM (after carve) | ~62 GiB |
-| Engine | llama.cpp `llama-server`, **Vulkan backend**, pinned build **b9631** |
-| Daily driver | Qwen3-30B-A3B Q4_K_M (18.6 GB) → **~87–97 tok/s decode** |
+| Engine | llama.cpp `llama-server`, **Vulkan backend**, pinned build **b9672** (qwen35moe + gemma4 arches) |
+| Daily driver | **Qwen3.6-35B-A3B** Q4_K_M (~21 GB), node1 :8080, 256K ctx → **~60 tok/s decode** (replaced qwen3-30b-a3b 2026-07-01) |
 
 ### Where memory actually lives (important)
 With the **Vulkan backend + `-ngl 99`**, llama.cpp allocates the model + KV in the GPU heap that RADV
@@ -147,23 +148,27 @@ The old `qwen3-coder-30b` / `qwen3-vl-8b` GGUFs stay on NFS (revert by re-pointi
 The k8s Services were renamed `llm-coder→llm-qwen36`, `llm-vision→llm-gemma4` and the LiteLLM
 `model_list` updated (both `supports_vision: true`); a `git push` reconciles them via Flux.
 
-## Qwen3.6 long-context config for agentic flows (2026-07-01, ADR 0015)
-Qwen3.6 now serves its **native 256K** window (`n_ctx_train=262144`) instead of 32K, so tool-heavy agent
-prompts stop hitting `400 ContextWindowExceededError`. **Gemma-4 was demoted to on-demand** to free the
-VRAM (`systemctl disable --now llama-server-gemma4` on node1; Qwen3.6 covers image **and** video, so no
-steady-state vision is lost). Steady-state launch (source-of-truth — **keep in sync with `litellm.yaml`**):
+## Qwen3.6 daily driver + long-context config for agentic flows (2026-07-01, ADR 0015)
+Qwen3.6 is node1's **daily driver on :8080** (the `llm` Service) and serves its **native 256K** window
+(`n_ctx_train=262144`) instead of 32K, so tool-heavy agent prompts stop hitting `400
+ContextWindowExceededError`. It **replaced qwen3-30b-a3b** (retired 2026-07-01 — Qwen3.6 is a strict
+upgrade: coding + image/video vision) and was **consolidated from the old :8081 `qwen36` instance onto
+:8080** (that unit + the `llm-qwen36` Service were removed). **Gemma-4 is on-demand** on :8082
+(`systemctl disable --now llama-server-gemma4`); Qwen3.6 covers image+video, so no steady-state vision is
+lost. Steady-state launch is the **default instance** (:8080) — source-of-truth, **keep in sync with
+`litellm.yaml`**:
 ```bash
 MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
-  --env INSTANCE=qwen36 --env PORT=8081 \
   --env MODEL=/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
   --env MODEL_ALIAS=qwen3.6-35b-a3b --env MMPROJ=/models/qwen3.6-35b-a3b/mmproj-F16.gguf \
   --env CTX=262144 --env PARALLEL=1 \
-  --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0   # new provision.sh knobs -> --cache-type-k/v
+  --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0   # default instance (:8080); provision.sh KV knobs
 ```
 Key facts (measured; see ADR 0015 for the table):
 - **No YaRN** — native `n_ctx_train` is already 262144; just raise `-c`. `--cache-type-k/v q8_0` is
   near-lossless with flash-attn (auto). On this **hybrid Gated-DeltaNet + SWA** model the KV is tiny:
-  256K KV ≈ **+2.2 GiB** over the 32K baseline → VRAM **44.6 GiB / 64** with `general` co-resident, GTT ~0.
+  256K KV ≈ **+2.2 GiB** over the 32K baseline. node1 now runs **only Qwen3.6** (~21 GiB weights + KV ⇒
+  VRAM **~23 GiB / 64**, GTT ~0) after retiring qwen3-30b-a3b and moving Gemma-4 on-demand.
   A big `-c` is **free until actually used** (cost scales with real prompt length, not the window).
 - **Prefill dominates long-context latency.** Cold/divergent prefill ~895 tok/s @10K, tapering to
   ~549 tok/s @56K (≈1–5 min at 64K–256K fill); decode ~60 tok/s. A **single growing conversation** on the
@@ -173,8 +178,9 @@ Key facts (measured; see ADR 0015 for the table):
 - **Reasoning model.** Output is a `<think>` trace in `reasoning_content` **before** the answer/tool-call;
   too small a `max_tokens` returns empty `content` + `finish_reason:"length"`. LiteLLM `max_input_tokens`
   is **245760** (256K − ~16K output headroom). Tool-calling verified through `--jinja`.
-- **Revert:** re-run the command with `--env CTX=32768` and drop the `CACHE_TYPE_*` envs; re-enable Gemma-4
-  with `systemctl enable --now llama-server-gemma4` (or re-provision `:8082`) + uncomment its LiteLLM block.
+- **Revert:** re-run with `--env CTX=32768` and drop the `CACHE_TYPE_*` envs. To restore qwen3-30b-a3b as a
+  separate model (GGUF kept on NFS): re-provision it as an `INSTANCE=<name> PORT=8081` instance + re-add its
+  LiteLLM entry and the `llm-qwen36` Service. Re-enable Gemma-4 with `systemctl enable --now llama-server-gemma4`.
 
 ## Verify
 ```bash

@@ -89,3 +89,21 @@ length, not the configured window.
   until then the gateway still caps Qwen3.6 input at 30000 even though the model serves 256K directly on :8081.
 - **Rebuild reproducibility.** The steady-state `qwen36` launch is a runbook command, not a committed unit;
   the extended-context args now live in `ai-host-setup.md` and must stay in sync with `litellm.yaml`.
+
+## Update (2026-07-01) — consolidated onto :8080, retired qwen3-30b-a3b (supersedes "Approach A")
+The original decision kept the separate `general` **qwen3-30b-a3b** daily driver co-resident on node1
+:8080 (Approach A). Since the hybrid Qwen3.6 KV turned out to be tiny (~2.2 GiB at 256K), keeping two
+30B-class models on node1 bought nothing, and **Qwen3.6 is a strict upgrade** over qwen3-30b-a3b (coding +
+image/video vision). So we completed **Approach B**: **qwen3-30b-a3b is removed** and Qwen3.6 is now node1's
+sole daily driver, moved from the `qwen36` :8081 instance onto the **default `:8080` instance** (applied
+live via `lxc-exec.py` with the same 256K/q8_0/mmproj env; the default instance re-runs base setup
+idempotently). Sequenced to avoid a gap: switch :8080 → Qwen3.6 first (both ports served it), deploy the
+router repoint, then retire :8081.
+- **Removed:** the `qwen3-30b-a3b` LiteLLM entry; the `llama-server-qwen36.service` :8081 unit; the
+  `llm-qwen36` Service+Endpoints. **Repointed:** LiteLLM `qwen3.6-35b-a3b` `api_base` → the `llm` Service
+  (`llm.ai.svc:8080`); `checksum/config` bumped again. **provision.sh** default `MODEL/MODEL_ALIAS` → Qwen3.6
+  (CTX/PARALLEL/MMPROJ/CACHE_TYPE defaults left generic so they don't leak into node2/3 heavyweight
+  re-provisions). The Qwen3-30B **GGUF is kept on NFS** for revert.
+- **Result:** node1 runs **only Qwen3.6** (~21 GiB weights + KV ⇒ VRAM ~23 GiB / 64, GTT ~0) + Gemma-4
+  on-demand. The `llm` general endpoint now fronts Qwen3.6; nothing else referenced qwen3-30b-a3b or the
+  `llm-qwen36` Service (Open WebUI / homepage / gatus / cloudflared all go through LiteLLM :4000).

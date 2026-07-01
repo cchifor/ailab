@@ -16,17 +16,12 @@ data:
       # forwarding a doomed request; the deepagent codes it as a friendly
       # context_window_exceeded (platform PR #636). KEEP IN SYNC with the host
       # launch args in docs/runbooks/ai-host-setup.md.
-      - model_name: qwen3-30b-a3b
-        litellm_params:
-          model: openai/qwen3-30b-a3b
-          api_base: http://llm.ai.svc.cluster.local:8080/v1
-          api_key: "sk-noauth"
-        model_info:
-          max_input_tokens: 7000 # host CTX=32768 PARALLEL=4 -> 8192/slot (provision.sh defaults; daily driver)
+      # qwen3.6-35b-a3b is node1's daily driver on :8080 (the `llm` Service). It replaced
+      # qwen3-30b-a3b (removed 2026-07-01) — a strict upgrade (coding + image/video vision).
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
-          api_base: http://llm-qwen36.ai.svc.cluster.local:8081/v1
+          api_base: http://llm.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
         model_info:
           supports_vision: true # Qwen3.6 is multimodal (image + video); also replaced gemma-4 for vision
@@ -130,7 +125,7 @@ spec:
         # every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
-        checksum/config: "422418c34aaf"
+        checksum/config: "96ed7e6455f2"
     spec:
       containers:
         - name: litellm
