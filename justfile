@@ -47,12 +47,12 @@ ping:
 # Dedicated playbook (not site.yml), so a full `just net` never touches the runner VMs.
 # See docs/runbooks/ci-runners.md.
 runners:
-    cd {{ansible_dir}} && SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
+    cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
       ansible-playbook runners.yml
 
 # Ansible: connectivity check for the runner VMs
 ping-runners:
-    cd {{ansible_dir}} && ansible github_runners -m ping
+    cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible github_runners -m ping
 
 # OpenTofu: plan/apply ONLY the dev-worker VMs (separate state from runners + Talos).
 dev-workers-plan:

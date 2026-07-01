@@ -28,10 +28,12 @@ resource "proxmox_virtual_environment_vm" "runner" {
   pool_id   = "ailab"
   tags      = ["vm", "ci", "github-runner", "ailab"]
 
-  # The minimal Ubuntu cloud image does NOT ship qemu-guest-agent, so leave the agent disabled:
-  # with it enabled, bpg would block `apply` waiting for an agent that never reports, then time out.
-  # The static IP comes from cloud-init (below), not the agent. The github_runner role installs +
-  # enables qemu-guest-agent on the guest; flip this to true afterward if you want PVE<->agent info.
+  # The minimal Ubuntu cloud image does NOT ship qemu-guest-agent, so CREATE with the agent disabled:
+  # with it enabled, bpg would block `apply` waiting for an agent that isn't installed yet, then time out.
+  # The static IP comes from cloud-init (below), not the agent. REQUIRED post-create step (see the runbook,
+  # §4): `qm set <vmid> --agent enabled=1 && qm reboot <vmid>` BEFORE running the github_runner role — the
+  # role's qemu-guest-agent task fails without the virtio-serial channel Proxmox only attaches when the
+  # agent is enabled. `agent` is in lifecycle.ignore_changes below so this out-of-band enable isn't reverted.
   agent {
     enabled = false
   }
@@ -92,6 +94,9 @@ resource "proxmox_virtual_environment_vm" "runner" {
 
   lifecycle {
     # Avoid churn after first boot (cloud-init only applies once); ignore image_datastore drift.
-    ignore_changes = [initialization]
+    # `agent` is ignored too: VMs are created with agent=false (above, so apply doesn't hang), but the
+    # guest agent is enabled out-of-band post-create (qm set --agent enabled=1 + reboot). Without this,
+    # a later apply reverts agent -> false and breaks qemu-guest-agent.service on every runner.
+    ignore_changes = [initialization, agent]
   }
 }

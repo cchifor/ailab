@@ -51,6 +51,12 @@ tofu output runner_vms
 ## 4. Configure + register (Ansible)
 Prereqs on the control node (WSL): `ansible-galaxy collection install -r ansible/requirements.yml -p
 ansible/collections` (adds `community.sops`), plus `sops` + the age key.
+
+**Per NEW VM — enable the QEMU guest agent first.** VMs are created with the agent disabled (so `tofu
+apply` doesn't hang on an agent that isn't installed yet), but the `github_runner` role's guest-agent
+task fails without the virtio-serial channel Proxmox only attaches when the agent is enabled. On the VM's
+Proxmox host: `qm set <vmid> --agent enabled=1 && qm reboot <vmid>`, then wait for it to boot. (`agent`
+is in the tofu module's `ignore_changes`, so this out-of-band enable isn't reverted on a later apply.)
 ```bash
 just ping-runners   # SSH reachability (ansible_user=ubuntu)
 just runners        # installs Docker/toolchain + the ported runner contract, registers ephemerally
@@ -90,6 +96,13 @@ drain, then delete the Multipass VMs. In GitHub → Settings → Actions → Run
   GitHub UI.
 
 ## Troubleshooting
+- **`just runners` / a direct `ansible-playbook` does nothing ("skipping: no hosts matched"):** on WSL,
+  `/mnt/c` is world-writable, so Ansible silently ignores `ansible.cfg` (and thus the inventory). The
+  `just` recipes now set `ANSIBLE_CONFIG` explicitly; invoking `ansible-playbook` by hand needs
+  `ANSIBLE_CONFIG="$(pwd)/ansible.cfg"` from the `ansible/` dir.
+- **Role fails at `Enable + start qemu-guest-agent` ("A dependency job … failed"):** the VM was created
+  with the agent disabled, so Proxmox never attached the guest-agent virtio-serial channel. Enable it +
+  reboot (§4: `qm set <vmid> --agent enabled=1 && qm reboot <vmid>`), then re-run.
 - **Docker/Compose jobs fail with `sudo: a password is required` (Python jobs still pass):** the
   `runner` user lacks passwordless sudo. Platform workflows `sudo` to install the pinned compose
   binary, start dockerd, free ports, and reclaim root-owned `_work`. The role installs
