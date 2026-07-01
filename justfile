@@ -88,6 +88,22 @@ registry:
 ping-registry:
     cd {{ansible_dir}} && ansible registry -m ping
 
+# Mirror an upstream image into the Zot registry (registry.chifor.me), preserving the multi-arch index + digest.
+# Uses `docker buildx imagetools create` (no skopeo needed); authenticates as `ci` from the registry SOPS secret.
+# Run from the main checkout (needs the gitignored age key). The Zot catch-all retention keeps tagged images.
+# e.g.: just mirror-image ghcr.io/headlamp-k8s/headlamp-plugin-flux:v0.6.0 registry.chifor.me/headlamp-k8s/headlamp-plugin-flux:v0.6.0
+mirror-image src dst:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{justfile_directory()}}'   # so the relative SOPS/age-key paths resolve regardless of invocation CWD
+    SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey \
+      sops -d --extract '["registry_ci_password"]' ansible/secrets/registry.sops.yaml \
+      | docker login registry.chifor.me -u ci --password-stdin
+    # `imagetools create` PUSHES to the --tag registry by default (no --push flag exists; --dry-run skips).
+    docker buildx imagetools create --tag '{{dst}}' '{{src}}'
+    echo "--- mirrored; pin THIS index digest in the manifest: ---"
+    docker buildx imagetools inspect '{{dst}}'
+
 # Lint
 lint:
     cd {{ansible_dir}} && ansible-lint || true

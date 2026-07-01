@@ -36,12 +36,29 @@ spec:
       labels:
         app.kubernetes.io/name: vaultwarden
     spec:
+      securityContext:
+        fsGroup: 1000 # new files land in gid 1000; the init-chown below guarantees the EXISTING db too
+        seccompProfile: { type: RuntimeDefault }
+      # One-shot: chown the existing root-written /data to 1000:1000 so the rootless main container can
+      # open its db. Idempotent (a no-op once migrated) and lockout-proof even if Trident ignores fsGroup
+      # on pre-existing files. Runs as root then exits (not internet-exposed). Same pattern as Prometheus.
+      initContainers:
+        - name: init-chown-data
+          image: mirror.gcr.io/library/busybox:1.38
+          command: ["sh", "-c", "chown -R 1000:1000 /data && ls -lan /data"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"], add: ["CHOWN"] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
       containers:
         - name: vaultwarden
           image: vaultwarden/server:1.36.0-alpine
           ports:
-            - { name: http, containerPort: 80 }
+            - { name: http, containerPort: 8080 }
           env:
+            - { name: ROCKET_PORT, value: "8080" } # rootless: listen on 8080, no privileged-port bind
             - { name: DOMAIN, value: "https://vault.chifor.me" }
             - { name: SIGNUPS_ALLOWED, value: "false" } # invite-only
             - { name: INVITATIONS_ALLOWED, value: "true" } # /admin can whitelist an email to register
@@ -63,8 +80,11 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /data }
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
             allowPrivilegeEscalation: false
-            capabilities: { drop: ["ALL"], add: ["NET_BIND_SERVICE"] } # bind :80
+            capabilities: { drop: ["ALL"] } # rootless on :8080 — no privileged-port bind needed
             readOnlyRootFilesystem: false # writes /data
           resources:
             requests: { cpu: 50m, memory: 128Mi }

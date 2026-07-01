@@ -160,7 +160,7 @@ data:
             icon: si-opencontainersinitiative
         - Headlamp (K8s):
             href: https://k8s.chifor.me
-            description: Cluster explorer (read-only) · CF Access
+            description: Cluster explorer + Flux safe-ops · CF Access
             icon: headlamp.png
             siteMonitor: http://headlamp.headlamp.svc.cluster.local:80
         - Gitea:

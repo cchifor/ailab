@@ -41,7 +41,12 @@ spec:
       # Headlamp is gated by Cloudflare Access (k8s.chifor.me) and uses a READ-ONLY ServiceAccount, so
       # authenticate every (already-Access'd) request AS that pod SA — this skips the token-paste prompt.
       # Flagged "unsafe" only because it drops per-user auth; safe here behind the Access proxy + RO RBAC.
+      # NOTE: with the Flux plugin's safe-ops RBAC (rbac-flux.yaml) this SA can now PATCH Flux CRs
+      # (reconcile/suspend/resume/force) — see docs/decisions/0015-headlamp-flux-safeops.md.
       unsafeUseServiceAccountToken: true
+      # Load plugins (the Flux GitOps plugin) from a writable emptyDir that an initContainer seeds (below).
+      # Overriding the default /headlamp/plugins; the bundled static plugins use a separate dir, so this is safe.
+      pluginsDir: /build/plugins
     service:
       type: ClusterIP
       port: 80
@@ -51,3 +56,33 @@ spec:
         memory: 128Mi
       limits:
         memory: 256Mi
+    # --- Flux GitOps plugin (headlamp-flux v0.6.0) ------------------------------------------------------
+    # Delivered the GitOps way: an initContainer copies the pinned, Zot-mirrored plugin image into a shared
+    # emptyDir mounted at config.pluginsDir (/build/plugins) in BOTH containers, so the plugin re-seeds on
+    # every restart and always matches the pinned digest. Mirror to Zot FIRST: `just mirror-image` (justfile).
+    # The image stores the plugin at /plugins/flux → it lands at /build/plugins/flux/ (a subdir — required).
+    # Root copy + chown to Headlamp's uid/gid (100/101) is allowed under this ns's BASELINE PSA (not restricted).
+    initContainers:
+      - name: flux-plugin
+        # ghcr.io/headlamp-k8s/headlamp-plugin-flux:v0.6.0 mirrored to registry.chifor.me; pinned by the
+        # multi-arch OCI index digest (docker buildx imagetools / skopeo copy preserve it).
+        image: registry.chifor.me/headlamp-k8s/headlamp-plugin-flux@sha256:055377b9011dcc73235e8969c488ecd92af5cb70aa5d5df0f66c1cea667fdccb
+        imagePullPolicy: IfNotPresent
+        command:
+          - /bin/sh
+          - -c
+          - mkdir -p /build/plugins && cp -r /plugins/* /build/plugins/ && chown -R 100:101 /build/plugins && chmod -R a+rX /build/plugins
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+        volumeMounts:
+          - name: flux-plugin
+            mountPath: /build/plugins
+    # Headlamp (main) container mount — reads the seeded plugins
+    volumeMounts:
+      - name: flux-plugin
+        mountPath: /build/plugins
+    # Pod volume — ephemeral; re-seeded from the pinned image each start (no PVC needed at 1 replica)
+    volumes:
+      - name: flux-plugin
+        emptyDir: {}

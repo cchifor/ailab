@@ -1,0 +1,43 @@
+# Flux "safe-ops" write grant for Headlamp's ServiceAccount — SEPARATE from headlamp-readonly so that role
+# stays honestly read-only and this privileged delta is isolated/auditable. Bound to the SAME SA, so under
+# config.unsafeUseServiceAccountToken these actions are available to anyone who clears Cloudflare Access.
+#
+# Verb is `patch` ONLY (the plugin issues merge-PATCH for every action): reconcile patches the
+# reconcile.fluxcd.io/requestedAt annotation; suspend/resume patch spec.suspend; force patches the
+# reconcile/force annotation or spec.force. get/list/watch already come from headlamp-readonly's wildcard.
+#
+# SCOPED to the Flux toolkit resources the plugin acts on. NOT granted: create/delete (destructive — Git's
+# job); notification CRs (patching alerts/providers/receivers redirects notification delivery — read-only via
+# the wildcard); image-automation GVKs (controllers not installed); any non-Flux resource.
+#
+# KNOWN LIMITATION (accepted, see docs/decisions/0015-headlamp-flux-safeops.md): RBAC is resource-scoped, not
+# field-scoped — `patch` permits mutating ANY field on these CRs (e.g. a source spec.url/ref, or a
+# Kustomization/HelmRelease spec.serviceAccountName = Flux's apply-time impersonation identity). Field-scoping
+# would require a ValidatingAdmissionPolicy (deferred per the "full ops" decision).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: headlamp-flux-safeops
+rules:
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["patch"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["patch"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["gitrepositories", "helmrepositories", "ocirepositories", "buckets", "helmcharts"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: headlamp-flux-safeops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: headlamp-flux-safeops
+subjects:
+  - kind: ServiceAccount
+    name: headlamp
+    namespace: headlamp
