@@ -97,3 +97,20 @@ spec:
               so reclaim isn't writing its beacon (reclaim not running, or node_exporter's textfile
               collector disabled) — the CIRunnerDockerConfigRootOwned regression detector is blind until
               restored. Check `journalctl -u actions.runner.*` and --collector.textfile.directory.
+        # Build cache is the runners' dominant disk consumer. reclaim prunes it toward
+        # `builder prune --keep-storage 10GB` each cycle and the beacon reports the POST-prune resting
+        # size, so a value that stays far above the ~10 GB floor means the prune is not clearing cache
+        # (broken/mis-timed reclaim) — a heads-up well before CIRunnerDiskFilling. Post-prune (not the
+        # pre-prune peak) so a one-cycle spike that was immediately pruned can't false-fire this alert.
+        - alert: CIRunnerBuildCacheHigh
+          expr: runner_docker_build_cache_bytes{job="ci-runner-node"} > 20e9
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} docker build cache >20 GB after prune"
+            description: >-
+              Runner {{ $labels.instance }} build cache is >20 GB even after the between-jobs reclaim
+              prune (floor `docker builder prune --keep-storage 10GB` ≈ 10 GB SI) — so the prune isn't
+              clearing cache (broken or mis-timed reclaim), a precursor to disk pressure. Inspect
+              `docker system df` and `journalctl -u actions.runner.*`. CIRunnerDiskFilling/WillFillSoon
+              backstop actual disk exhaustion.
