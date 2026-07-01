@@ -13,7 +13,7 @@
 #                 b9631 predated gemma4 vision. Re-provisioning a node's DEFAULT instance
 #                 re-downloads this build and restarts every instance on that node.)
 #   MODEL        GGUF path inside the CT                   (default daily driver)
-#   MODEL_ALIAS  name reported by /v1/models               (default qwen3-30b-a3b)
+#   MODEL_ALIAS  name reported by /v1/models               (default qwen3.6-35b-a3b)
 #   CTX          total KV context (shared across slots)    (default 32768)
 #   PARALLEL     concurrent server slots                   (default 4)
 #   EXTRA_ARGS   extra llama-server flags (e.g. --no-mmap) (default empty)
@@ -28,8 +28,12 @@
 set -euo pipefail
 
 LLAMA_BUILD="${LLAMA_BUILD:-b9672}"
-MODEL="${MODEL:-/models/qwen3-30b-a3b/Qwen3-30B-A3B-Q4_K_M.gguf}"
-MODEL_ALIAS="${MODEL_ALIAS:-qwen3-30b-a3b}"
+# Daily driver = Qwen3.6-35B-A3B (replaced qwen3-30b-a3b, retired 2026-07-01). node1's full
+# steady-state launch (CTX=262144 PARALLEL=1 CACHE_TYPE_K/V=q8_0 + MMPROJ) is passed explicitly —
+# see docs/runbooks/ai-host-setup.md. CTX/PARALLEL/MMPROJ/CACHE_TYPE defaults stay generic so they
+# don't leak into node2/3 heavyweight re-provisions (which override MODEL/CTX/PARALLEL but not these).
+MODEL="${MODEL:-/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf}"
+MODEL_ALIAS="${MODEL_ALIAS:-qwen3.6-35b-a3b}"
 CTX="${CTX:-32768}"
 PARALLEL="${PARALLEL:-4}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
