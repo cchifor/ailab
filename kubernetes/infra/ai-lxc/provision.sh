@@ -17,6 +17,8 @@
 #   CTX          total KV context (shared across slots)    (default 32768)
 #   PARALLEL     concurrent server slots                   (default 4)
 #   EXTRA_ARGS   extra llama-server flags (e.g. --no-mmap) (default empty)
+#   CACHE_TYPE_K KV-cache K quant, e.g. q8_0                (default empty => f16)
+#   CACHE_TYPE_V KV-cache V quant, e.g. q8_0 (needs FA)     (default empty => f16)
 #   INSTANCE     instance name; "default" => llama-server.service on 8080.
 #                Any other name => a SECOND unit llama-server-<INSTANCE>.service
 #                (base setup is skipped — run the default instance first).
@@ -31,6 +33,8 @@ MODEL_ALIAS="${MODEL_ALIAS:-qwen3-30b-a3b}"
 CTX="${CTX:-32768}"
 PARALLEL="${PARALLEL:-4}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+CACHE_TYPE_K="${CACHE_TYPE_K:-}"   # KV-cache K quant (e.g. q8_0); empty => llama.cpp default (f16)
+CACHE_TYPE_V="${CACHE_TYPE_V:-}"   # KV-cache V quant (e.g. q8_0); needs flash-attn (auto, enabled below)
 MMPROJ="${MMPROJ:-}"   # optional vision projector GGUF path -> adds --mmproj (enables image input)
 INSTANCE="${INSTANCE:-default}"
 PORT="${PORT:-8080}"
@@ -101,6 +105,12 @@ ICD_LINE=""
 [ -n "$RADV_ICD" ] && ICD_LINE="Environment=VK_ICD_FILENAMES=${RADV_ICD}"
 MMPROJ_FLAG=""
 [ -n "$MMPROJ" ] && MMPROJ_FLAG="--mmproj ${MMPROJ}"
+# Optional KV-cache quantization (halves KV memory at q8_0, near-lossless with flash-attn).
+# Note: on hybrid/recurrent models (e.g. Qwen3.6) only the attention-KV honors this; the
+# recurrent/conv state stays f32. Empty vars => llama.cpp default (f16), preserving prior behavior.
+KV_FLAGS=""
+[ -n "$CACHE_TYPE_K" ] && KV_FLAGS="--cache-type-k ${CACHE_TYPE_K}"
+[ -n "$CACHE_TYPE_V" ] && KV_FLAGS="${KV_FLAGS} --cache-type-v ${CACHE_TYPE_V}"
 cat >"/etc/systemd/system/${UNIT}" <<EOF
 [Unit]
 Description=llama.cpp server (Vulkan/RADV gfx1151) — ai-llm [${INSTANCE}]
@@ -114,7 +124,7 @@ ${ICD_LINE}
 ExecStart=${BIN}/llama-server --host 0.0.0.0 --port ${PORT} \\
   -m ${MODEL} -a ${MODEL_ALIAS} \\
   -ngl 99 -c ${CTX} --parallel ${PARALLEL} \\
-  --flash-attn auto --jinja --metrics ${MMPROJ_FLAG} ${EXTRA_ARGS}
+  --flash-attn auto --jinja --metrics ${KV_FLAGS} ${MMPROJ_FLAG} ${EXTRA_ARGS}
 # Prime the model/KV after /health is up so the first user request isn't cold:
 ExecStartPost=/usr/local/bin/llama-warmup.sh ${PORT} ${MODEL_ALIAS}
 # Big models (120B/122B) take >90s to load+warm — raise the default start timeout so systemd
