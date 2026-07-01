@@ -1,24 +1,60 @@
 #!/usr/bin/env bash
 # Between-jobs reclaim — runs BETWEEN ephemeral cycles (no job active), so disposable docker state +
 # logs never fill the disk and no leftover containers hold CPU/RAM while idle. Best-effort: ALWAYS
-# exits 0 (never blocks the runner from starting).
+# exits 0 (never blocks the runner from starting). Runs as ROOT (20-reclaim.conf ExecStartPre=+).
 #
 # MANAGED BY ANSIBLE (role: github_runner). Ported from cchifor/platform:infra/runner/provision.sh.
 set -uo pipefail
-RUNNER_DIR={{ github_runner_dir }}
+RUNNER_DIR="{{ github_runner_dir }}"
+DOCKER_CFG="{{ github_runner_home }}/.docker"
 if command -v docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1; then
   ids=$(docker ps -aq 2>/dev/null || true)
   [ -n "$ids" ] && timeout 120 docker rm -f $ids >/dev/null 2>&1 || true
-  timeout 120 docker image prune -f   >/dev/null 2>&1 || true
-  timeout 120 docker volume prune -f  >/dev/null 2>&1 || true
-  timeout 60  docker network prune -f >/dev/null 2>&1 || true
+  # Remove per-job buildx builder instances — each docker-container builder leaves a *named*
+  # buildx_buildkit_builder-<uuid>_state volume that `docker volume prune -f` (no -a) will NOT reap,
+  # so they accumulate unbounded (observed: 40+ GiB). --all-inactive skips the current/default builder.
+  timeout 60  docker buildx rm --all-inactive --force >/dev/null 2>&1 || true
+  timeout 120 docker image prune -f    >/dev/null 2>&1 || true
+  # -af (not -f): also drop *named* volumes (the buildkit builder state above). Safe between jobs — an
+  # ephemeral runner keeps nothing, and docker skips any volume still referenced by a container.
+  timeout 120 docker volume prune -af  >/dev/null 2>&1 || true
+  timeout 60  docker network prune -f  >/dev/null 2>&1 || true
   timeout 180 docker builder prune -f --keep-storage 10GB >/dev/null 2>&1 || true
   use=$(df --output=pcent / 2>/dev/null | tr -dc '0-9'); use=${use:-0}
   if [ "$use" -ge 80 ]; then
     timeout 300 docker image prune -af   >/dev/null 2>&1 || true
+    timeout 300 docker volume prune -af  >/dev/null 2>&1 || true
     timeout 300 docker builder prune -af >/dev/null 2>&1 || true
   fi
 fi
 journalctl --vacuum-size=100M >/dev/null 2>&1 || true
 find "$RUNNER_DIR/_diag" -type f -name '*.log' -mtime +1 -delete 2>/dev/null || true
+
+# Self-heal ~/.docker ownership. A job that ran docker/buildx under sudo leaves root-owned files here
+# (esp. .docker/buildx/{instances,certs}), which break the NEXT ephemeral job's buildx with
+# "stat …/buildx/instances: permission denied" or "EACCES … mkdir …/buildx/certs". Reclaim runs as
+# root before run.sh, so this guarantees every job starts with a runner-owned config. Unconditional
+# (outside the docker-info guard): ownership must be fixed even if the daemon is down.
+# If a (root-capable, NOPASSWD-sudo) job swapped ~/.docker for a symlink, drop it first so the recursive
+# root chown can't be misdirected outside the home dir — then docker recreates a real dir. `--` guards
+# against any option-like rendered path. Defense-in-depth (the runner is already root-capable).
+[ -L "$DOCKER_CFG" ] && rm -f -- "$DOCKER_CFG"
+chown -R -- {{ github_runner_user }}:{{ github_runner_group }} "$DOCKER_CFG" >/dev/null 2>&1 || true
+
+# Health beacon → node_exporter textfile collector (Debian package convention path; the dir + the
+# --collector.textfile.directory flag exist only where enabled = the runner group. If absent, no-op).
+tf_dir=/var/lib/prometheus/node-exporter
+if [ -d "$tf_dir" ]; then
+  # Root-owned files left under ~/.docker AFTER the self-heal above (should be 0; 1 => self-heal broke).
+  root_owned=$(find "$DOCKER_CFG" -user root -print -quit 2>/dev/null | grep -c . || true)
+  tmp="$tf_dir/runner_health.prom.$$"
+  {
+    echo '# HELP runner_docker_config_root_owned Root-owned files under ~/.docker after reclaim self-heal (1=heal failed).'
+    echo '# TYPE runner_docker_config_root_owned gauge'
+    echo "runner_docker_config_root_owned ${root_owned:-0}"
+    echo '# HELP runner_reclaim_last_success_seconds Unix time of the last completed between-jobs reclaim.'
+    echo '# TYPE runner_reclaim_last_success_seconds gauge'
+    echo "runner_reclaim_last_success_seconds $(date +%s)"
+  } > "$tmp" 2>/dev/null && mv -f "$tmp" "$tf_dir/runner_health.prom" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+fi
 exit 0

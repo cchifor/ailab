@@ -52,11 +52,13 @@ tofu output runner_vms
 Prereqs on the control node (WSL): `ansible-galaxy collection install -r ansible/requirements.yml -p
 ansible/collections` (adds `community.sops`), plus `sops` + the age key.
 
-**Per NEW VM — enable the QEMU guest agent first.** VMs are created with the agent disabled (so `tofu
-apply` doesn't hang on an agent that isn't installed yet), but the `github_runner` role's guest-agent
-task fails without the virtio-serial channel Proxmox only attaches when the agent is enabled. On the VM's
-Proxmox host: `qm set <vmid> --agent enabled=1 && qm reboot <vmid>`, then wait for it to boot. (`agent`
-is in the tofu module's `ignore_changes`, so this out-of-band enable isn't reverted on a later apply.)
+**QEMU guest agent — now codified.** VMs are created with the agent disabled (so `tofu apply` doesn't
+hang on an agent that isn't installed yet), then `terraform_data.enable_guest_agent`
+(`kubernetes/infra/runners/guest-agent.tf`) enables it via the **PVE API** (same api_token, no SSH) and
+cold-reboots to attach the virtio-serial channel — no manual step in the normal flow. It's
+`on_failure = continue`, so if that API call is skipped (e.g. applied from a shell without `sh`+`curl`),
+fall back to the manual step on the VM's Proxmox host: `qm set <vmid> --agent enabled=1 && qm reboot
+<vmid>`. (`agent` is in the tofu module's `ignore_changes`, so the enable isn't reverted on re-apply.)
 ```bash
 just ping-runners   # SSH reachability (ansible_user=ubuntu)
 just runners        # installs Docker/toolchain + the ported runner contract, registers ephemerally
@@ -80,6 +82,13 @@ just runners        # installs Docker/toolchain + the ported runner contract, re
   `EACCES … .hatchet-config` checkout flake.
 - **Metrics:** the VMs appear as `job=ci-runner-node` scrape targets in Prometheus (CI load on the
   dashboards).
+- **Alerts:** `kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml` (PrometheusRule
+  `ci-runners`, routed to ntfy via Alertmanager): **CIRunnerNodeDown** (VM/exporter down 10m),
+  **CIRunnerDiskFilling** + **CIRunnerDiskWillFillSoon** (root fs <12% / projected to fill in 4h),
+  **CIRunnerLowMemory** + **CIRunnerSwapPressure** (#620 precursors), **CIRunnerDockerConfigRootOwned**
+  (the buildx self-heal regressed). The last is fed by a health beacon that `runner-reclaim.sh` writes to
+  node_exporter's textfile collector (`/var/lib/prometheus/node-exporter/runner_health.prom`) — enabled
+  for the runner group only via `node_exporter_extra_args` in `group_vars/github_runners.yml`.
 
 ## 6. Decommission the Hyper-V pool (after the Proxmox 3 are proven)
 On `BEAST` (elevated shell): stop each runner service so it doesn't re-register, let in-flight jobs
@@ -109,6 +118,16 @@ drain, then delete the Multipass VMs. In GitHub → Settings → Actions → Run
   `/etc/sudoers.d/90-github-runner` (`runner ALL=(ALL) NOPASSWD:ALL`); to fix a live runner:
   `echo 'runner ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-github-runner && sudo chmod 0440 /etc/sudoers.d/90-github-runner` (sudoers is read per-call — no restart needed). Related symptom:
   `open ~/.docker/config.json: permission denied` → `sudo chown -R runner:runner /home/runner/.docker`.
+- **Docker/Buildx jobs fail with `stat ~/.docker/buildx/instances: permission denied` or `EACCES …
+  mkdir ~/.docker/buildx/certs` (Python jobs still pass):** a job ran `docker buildx` under `sudo` and
+  left `~/.docker/buildx` **root-owned**; because the runner *VM* persists across ephemeral jobs, every
+  later docker-build job on it then fails. `runner-reclaim.sh` now **self-heals** this — it runs as root
+  before every job (`20-reclaim.conf` `ExecStartPre=+`) and does `chown -R runner:runner
+  /home/runner/.docker` (plus `docker buildx rm --all-inactive` + `docker volume prune -af` to reap the
+  named `buildx_buildkit_builder-*_state` volumes that `prune -f` skips and that otherwise fill the
+  disk). To fix a live runner immediately: `sudo chown -R runner:runner /home/runner/.docker; sudo docker
+  buildx rm --all-inactive --force; sudo docker volume prune -af`. Alert **CIRunnerDockerConfigRootOwned**
+  fires if the self-heal ever fails to restore ownership.
 - **Runner not appearing:** check `journalctl -u actions.runner.cchifor-platform -n 100` on the VM —
   usually a bad App ID / installation ID, a key that isn't for this App, or the App missing
   `Administration: Read & write`. The wrapper logs `[ephemeral-runner] ERROR: …` on token failures.

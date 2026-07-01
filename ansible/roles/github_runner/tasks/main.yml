@@ -181,8 +181,12 @@
     mode: "0440"
     validate: visudo -cf %s
 
-# Keep the runner's docker config dir owned by the runner (a prior root-run docker command can
-# leave it root-owned → "open ~/.docker/config.json: permission denied" on every subsequent job).
+# Heal-at-source: keep the runner's docker config dir runner-owned. A root-run docker/buildx command
+# can leave it root-owned → "open ~/.docker/config.json: permission denied" or, for buildx,
+# "stat ~/.docker/buildx/instances: permission denied" / "EACCES … mkdir ~/.docker/buildx/certs" on
+# every subsequent job. This is the earliest valid spot (needs the runner user, created just above);
+# the *durable, every-ephemeral-cycle* guarantee is the identical chown in runner-reclaim.sh, which
+# runs as root before each job and re-heals ownership a job may have re-rooted mid-run.
 - name: Ensure ~/.docker is owned by the runner
   ansible.builtin.file:
     path: "{{ github_runner_home }}/.docker"

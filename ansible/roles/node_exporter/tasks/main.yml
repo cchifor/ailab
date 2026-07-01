@@ -8,6 +8,17 @@
     cache_valid_time: 3600
   when: node_exporter_enabled | bool
 
+# Textfile-collector dir. Created unconditionally (safe/empty where no .prom files are written) so
+# enabling --collector.textfile.directory via node_exporter_extra_args (e.g. the runner group) never
+# points at a missing dir. Root-owned 0755 is world-readable, so the prometheus service user can read
+# the .prom beacons that root-run scripts (e.g. runner-reclaim.sh) drop here.
+- name: Ensure node_exporter textfile-collector dir exists
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}"
+    state: directory
+    mode: "0755"
+  when: node_exporter_enabled | bool
+
 - name: Configure node_exporter listen address
   ansible.builtin.copy:
     dest: "/etc/default/{{ node_exporter_service }}"

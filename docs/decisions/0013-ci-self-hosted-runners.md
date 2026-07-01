@@ -31,6 +31,22 @@ take a second runner (both fit the floor at rest — 12.7 / 14.4 GiB avail); the
 concurrent-peak case (two heavy jobs on one host), cushioned by the 12 GiB floor + 8 GiB guest swap and
 bounded by the dev-worker 16→8 cut. Add `gha-runner-6` after reducing node3's iGPU VRAM carve (or the Talos
 CP allocation), which frees real host RAM.
+**Update (2026-07-01, rock-solid hardening):** live triage found the pool's dominant CI failure was NOT
+capacity but a **buildx ownership bug** — `~/.docker/buildx` becoming **root-owned** (a job ran `docker
+buildx` under `sudo`) and staying that way across ephemeral cycles, so every later docker-build job on
+that VM failed with `stat ~/.docker/buildx/instances: permission denied` / `EACCES … buildx/certs` (~10
+of the last 12 failed runs). Because the runner *VM* persists (only the *registration* is ephemeral),
+nothing re-chowned it; the original 3 runners only escaped via a one-off manual `chown` in PR #4. Fixes:
+(1) **`runner-reclaim.sh` now self-heals** — it runs as root before every job (`ExecStartPre=+`) and
+`chown -R runner:runner ~/.docker`, and reaps the accumulating **named `buildx_buildkit_builder-*_state`
+volumes** (via `docker buildx rm --all-inactive` + `docker volume prune -af`; `prune -f` skipped named
+volumes, so ~40 GiB had piled up → a latent disk-full failure). (2) **Observability gap closed** — a new
+`PrometheusRule` (`ci-runners`) alerts on runner down / disk filling / #620 memory-pressure, plus a
+node_exporter textfile **health beacon** (`runner_docker_config_root_owned`) that trips
+**CIRunnerDockerConfigRootOwned** if the self-heal ever regresses. (3) The manual guest-agent enable step
+is **codified** via the PVE API (`terraform_data.enable_guest_agent`, no SSH). (4) The ephemeral wrapper
+got a bounded token-fetch retry. Recommended follow-up: strengthen platform's `runner-health.yml` canary
+with a `~/.docker` ownership assert + a real `docker buildx build` smoke test (the true regression gate).
 **Remaining:** decommission the 4 Hyper-V runners; optionally narrow the App install to platform-only.
 **Relates to:** ADR 0001 (OpenTofu + Ansible), ADR 0006 (Talos/Flux/Cilium), ADR 0008 (AI appliance =
 LXC *outside* Talos), ADR 0009 (control-plane colocation / tight RAM budget).
