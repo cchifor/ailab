@@ -32,17 +32,31 @@ signature="$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$APP_KEY" -bi
 jwt="${unsigned}.${signature}"
 
 # --- App JWT -> installation access token -> runner registration token (1h TTL, used immediately) ---
-inst_token="$(curl -fsSL -X POST \
-  -H "Authorization: Bearer ${jwt}" \
-  -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/app/installations/${INSTALLATION_ID}/access_tokens" | jq -r '.token // empty')"
-[[ -n "$inst_token" ]] || { log "ERROR: failed to obtain installation token"; exit 1; }
+# Bounded retry (3x, 3s/6s backoff) smooths a transient GitHub 5xx/network blip so a single hiccup
+# doesn't cost a full 10s systemd restart cycle. Still exits non-zero after 3 tries, so systemd
+# (Restart=always) stays the ultimate backstop for a sustained GitHub outage. The JWT exp is +9min,
+# comfortably longer than the worst-case retry window.
+gh_post_token() { # $1=url  $2=authorization-header-value ; prints .token on success, non-zero on give-up
+  local url="$1" auth="$2" attempt token
+  for attempt in 1 2 3; do
+    token="$(curl -fsSL --max-time 30 -X POST \
+      -H "Authorization: ${auth}" \
+      -H "Accept: application/vnd.github+json" \
+      "$url" | jq -r '.token // empty')" || token=""
+    [[ -n "$token" ]] && { printf '%s' "$token"; return 0; }
+    log "token fetch (${url##*/}) attempt ${attempt}/3 failed"
+    [[ "$attempt" -lt 3 ]] && sleep "$((attempt * 3))"
+  done
+  return 1
+}
 
-reg_token="$(curl -fsSL -X POST \
-  -H "Authorization: token ${inst_token}" \
-  -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/${REPO}/actions/runners/registration-token" | jq -r '.token // empty')"
-[[ -n "$reg_token" ]] || { log "ERROR: failed to obtain registration token"; exit 1; }
+inst_token="$(gh_post_token \
+  "https://api.github.com/app/installations/${INSTALLATION_ID}/access_tokens" "Bearer ${jwt}")" \
+  || { log "ERROR: failed to obtain installation token after retries"; exit 1; }
+
+reg_token="$(gh_post_token \
+  "https://api.github.com/repos/${REPO}/actions/runners/registration-token" "token ${inst_token}")" \
+  || { log "ERROR: failed to obtain registration token after retries"; exit 1; }
 
 ts="$(date +%s)"
 suffix="$(od -An -N4 -tx4 < /dev/urandom | tr -d ' ')"
