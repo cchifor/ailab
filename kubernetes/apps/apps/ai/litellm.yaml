@@ -130,7 +130,7 @@ spec:
         # every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
-        checksum/config: "64b6fb706a6b"
+        checksum/config: "422418c34aaf"
     spec:
       containers:
         - name: litellm
