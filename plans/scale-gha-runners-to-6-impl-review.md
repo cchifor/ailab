@@ -1,6 +1,6 @@
 # Implementation review — scale-gha-runners-to-6 — round 1
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Outcome
 Codex reviewed the implementation diff (`5b24d5c..c547d2c`) against the finalized plan and found
