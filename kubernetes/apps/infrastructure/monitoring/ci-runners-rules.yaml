@@ -81,3 +81,19 @@ spec:
               of ~/.docker — the buildx-permission regression (root-owned ~/.docker/buildx) is back
               and docker-build jobs will fail. Inspect: `sudo ls -la /home/runner/.docker/buildx` and
               confirm runner-reclaim.sh runs as root (20-reclaim.conf ExecStartPre=+).
+        # Guards the blind spot in CIRunnerDockerConfigRootOwned: if the beacon is never written, its
+        # last "0" would stay green forever. Uses ABSENCE (not time-staleness): the gauge persists once
+        # written, so this does NOT false-fire on idle runners (reclaim is job-cycle-triggered, not
+        # periodic — a `time() - last_success > N` alert would flap every quiet night). `for: 30m` rides
+        # over the first-boot window before the first reclaim writes the beacon.
+        - alert: CIRunnerHealthBeaconMissing
+          expr: up{job="ci-runner-node"} == 1 unless on(instance) runner_reclaim_last_success_seconds
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} health beacon missing"
+            description: >-
+              Runner {{ $labels.instance }} is scraped but emits no runner_reclaim_last_success_seconds,
+              so reclaim isn't writing its beacon (reclaim not running, or node_exporter's textfile
+              collector disabled) — the CIRunnerDockerConfigRootOwned regression detector is blind until
+              restored. Check `journalctl -u actions.runner.*` and --collector.textfile.directory.

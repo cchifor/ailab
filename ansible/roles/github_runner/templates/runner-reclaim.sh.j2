@@ -5,8 +5,8 @@
 #
 # MANAGED BY ANSIBLE (role: github_runner). Ported from cchifor/platform:infra/runner/provision.sh.
 set -uo pipefail
-RUNNER_DIR={{ github_runner_dir }}
-DOCKER_CFG={{ github_runner_home }}/.docker
+RUNNER_DIR="{{ github_runner_dir }}"
+DOCKER_CFG="{{ github_runner_home }}/.docker"
 if command -v docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1; then
   ids=$(docker ps -aq 2>/dev/null || true)
   [ -n "$ids" ] && timeout 120 docker rm -f $ids >/dev/null 2>&1 || true
@@ -35,7 +35,11 @@ find "$RUNNER_DIR/_diag" -type f -name '*.log' -mtime +1 -delete 2>/dev/null || 
 # "stat …/buildx/instances: permission denied" or "EACCES … mkdir …/buildx/certs". Reclaim runs as
 # root before run.sh, so this guarantees every job starts with a runner-owned config. Unconditional
 # (outside the docker-info guard): ownership must be fixed even if the daemon is down.
-chown -R {{ github_runner_user }}:{{ github_runner_group }} "$DOCKER_CFG" >/dev/null 2>&1 || true
+# If a (root-capable, NOPASSWD-sudo) job swapped ~/.docker for a symlink, drop it first so the recursive
+# root chown can't be misdirected outside the home dir — then docker recreates a real dir. `--` guards
+# against any option-like rendered path. Defense-in-depth (the runner is already root-capable).
+[ -L "$DOCKER_CFG" ] && rm -f -- "$DOCKER_CFG"
+chown -R -- {{ github_runner_user }}:{{ github_runner_group }} "$DOCKER_CFG" >/dev/null 2>&1 || true
 
 # Health beacon → node_exporter textfile collector (Debian package convention path; the dir + the
 # --collector.textfile.directory flag exist only where enabled = the runner group. If absent, no-op).

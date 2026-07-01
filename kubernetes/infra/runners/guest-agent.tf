@@ -10,10 +10,14 @@
 # applies pending device changes; a soft ACPI reboot would not). The github_runner Ansible role then
 # installs+starts qemu-guest-agent into that channel.
 #
-# on_failure = continue: this NEVER blocks the VM apply. If the API call fails (transient PVE error, or
-# applied from a shell without /bin/sh + curl, e.g. Windows terraform), the VM is still created and the
-# documented manual `qm` step remains the fallback; a re-apply retries. `agent` stays in the VM's
-# lifecycle.ignore_changes so this enable is not reverted on later applies.
+# Failure handling: the provisioner is allowed to FAIL (no on_failure=continue). On failure — transient
+# PVE error, or applied from a shell without /bin/sh+curl (e.g. Windows terraform) — Terraform taints
+# this terraform_data resource, so the NEXT `apply` re-runs it (correct retry). We deliberately do NOT
+# swallow the error: on_failure=continue would mark the step done-in-state and NEVER retry, silently
+# leaving agent=false while Ansible later fails on the missing virtio-serial channel. The VMs themselves
+# are already created (separate resources); only this step retries. The documented manual
+# `qm set <vmid> --agent enabled=1 && qm reboot` remains the fallback, and `agent` stays in the VM's
+# lifecycle.ignore_changes so the enable isn't reverted. Canonical apply path is WSL/Linux.
 ###############################################################################
 
 resource "terraform_data" "enable_guest_agent" {
@@ -23,8 +27,7 @@ resource "terraform_data" "enable_guest_agent" {
   triggers_replace = [proxmox_virtual_environment_vm.runner[each.key].id]
 
   provisioner "local-exec" {
-    interpreter = ["/bin/sh", "-c"] # canonical apply path is WSL/Linux; on_failure=continue covers others
-    on_failure  = continue
+    interpreter = ["/bin/sh", "-c"] # canonical apply path is WSL/Linux
     environment = {
       PVE_ENDPOINT = var.pve_endpoint
       PVE_TOKEN    = var.pve_api_token # user@realm!tokenid=secret — same as the provider api_token
