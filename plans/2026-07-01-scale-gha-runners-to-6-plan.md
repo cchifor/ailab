@@ -166,4 +166,15 @@ cd ../../.. && SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey \
   e2e jobs land on the same physical host) and confirm no `exit 137` / "runner lost communication", and no
   OOM/balloon-pressure events in `dmesg` / the PVE task log. This is the true #620 regression test.
 
+## Deployment outcome (2026-07-01)
+Live capacity measurement (recorded in ADR 0013) showed the hosts expose only ~62 GiB (iGPU carve) and
+already run at 78–84 % with one runner each. A second same-config runner (12 GiB floor) does **not** fit
+node3's idle headroom while its qwen3.5-122b LLM is loaded (~7.8 GiB non-reclaimable RSS, LXC `swap=0`),
+and that LLM can't be squeezed without OOM. **Decision: deploy 5 — `gha-runner-4` (node1) + `gha-runner-5`
+(node2); node3 stays at one runner; `gha-runner-6` is reserved (.35 / vmid 4106) and DEFERRED** until
+node3's iGPU VRAM carve (or the Talos CP allocation) is reduced. Dev-worker ceilings were cut 16→8 to
+bound peak. Residual risk: concurrent heavy jobs on node1/node2 lean on the 12 GiB floor + 8 GiB guest
+swap (cushioned, monitored). This deviates from the literal "6" ask by one VM, by measured necessity;
+every deployed runner remains byte-identical in configuration.
+
 <!-- codex-review-status: finalized -->

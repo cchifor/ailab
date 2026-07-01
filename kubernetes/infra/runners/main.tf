@@ -1,5 +1,5 @@
 ###############################################################################
-# Self-hosted GitHub Actions runner VMs — two per Proxmox node (6-wide pool; see variables.tf).
+# Self-hosted GitHub Actions runner VMs — 5 active: 2 on node1/node2, 1 on node3 (6th reserved; see variables.tf).
 # Replicates the existing cchifor/platform "self-hosted-hv" ephemeral pool
 # (Multipass/Hyper-V Ubuntu 24.04) onto the codified lab as Proxmox QEMU VMs.
 # Docker-heavy CI (compose v2.31.0 + buildx + Playwright-in-container + k6).

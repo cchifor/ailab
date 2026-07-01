@@ -10,9 +10,10 @@ balloon the guests down to 1-2 GiB (the bpg default 1 GiB floor), starving runni
 pinning the **balloon floor to 12 GiB** (`runner_memory_floating_mib`; the 24 GiB memory ceiling is
 unchanged) and adding an **8 GiB guest swapfile** (`swappiness=10`) as an OOM reclaim valve. Both are
 now codified (tofu + the `github_runner` role). The `MemoryMax=10G` cgroup cap is unrelated, unchanged.
-**Update (2026-07-01, scale 3→6):** Doubled the pool to **6 runners — two per Proxmox host**
-(`gha-runner-4/5/6`, vmid 4104–4106, IPs .33/.34/.35), **identical** sizing + config to 1–3 via the
-shared `runner_*` vars — additive `runner_nodes` map entries only; no role or secret change. Trade-off:
+**Update (2026-07-01, scale 3→5):** Expanded the pool to **5 runners — two on node1/node2, one on
+node3** (`gha-runner-4/5`, vmid 4104/4105, IPs .33/.34), **identical** sizing + config to 1–3 via the
+shared `runner_*` vars — additive `runner_nodes` map entries only; no role or secret change.
+**gha-runner-6 (node3, .35 / vmid 4106) is reserved but DEFERRED** — see the measured finding below. Trade-off:
 the original "one per host" fault isolation becomes two-per-host, and GitHub may co-schedule two heavy
 jobs on one host, so the rollout is **gated on a per-host RAM check** — full budget being Talos CP VM +
 AI LLM LXC + dev-worker + runner ×2 (plus node1's registry LXC and the iGPU VRAM carve) — with
@@ -24,10 +25,12 @@ of 128 GiB physical) and already run at **78–84 %** with one runner each (Talo
 12 GiB-floor runner does **not** fit in idle headroom (node3 worst: 10.2 GiB avail, and its 122B LLM holds
 7.8 GiB of **non-reclaimable** RSS with LXC `swap=0`, so the LLM cannot be capped down without OOM).
 Shrinking the LLM was therefore **rejected**; only the dev-worker ceilings were cut 16→8 (peak-bounding).
-Net posture: creating the runners is idle-safe (a fresh idle runner uses ~1–2 GiB), but **two concurrent
-heavy jobs on one host — most acutely node3 while a heavyweight LLM is loaded — will push that host into
-swap (#620 territory)**, cushioned by the 12 GiB floor + 8 GiB guest swap. The durable fix is reducing the
-iGPU VRAM carve (frees ~real RAM) or the Talos CP allocation.
+Decision: deploy **5** — node3's second runner (`gha-runner-6`) is **deferred** precisely because it can't
+hold its 12 GiB floor while the 122b is loaded; node3 keeps its existing single runner. node1/node2 each
+take a second runner (both fit the floor at rest — 12.7 / 14.4 GiB avail); their residual risk is only the
+concurrent-peak case (two heavy jobs on one host), cushioned by the 12 GiB floor + 8 GiB guest swap and
+bounded by the dev-worker 16→8 cut. Add `gha-runner-6` after reducing node3's iGPU VRAM carve (or the Talos
+CP allocation), which frees real host RAM.
 **Remaining:** decommission the 4 Hyper-V runners; optionally narrow the App install to platform-only.
 **Relates to:** ADR 0001 (OpenTofu + Ansible), ADR 0006 (Talos/Flux/Cilium), ADR 0008 (AI appliance =
 LXC *outside* Talos), ADR 0009 (control-plane colocation / tight RAM budget).
