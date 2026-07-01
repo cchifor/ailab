@@ -1,38 +1,35 @@
 # Scale the self-hosted GitHub Actions runner pool from 3 → 6
 
-## Codex Review
-- The additive map-entry approach is sound: `variables.tf` uses `for_each = var.runner_nodes`, `outputs.tf` derives from that map, and the Ansible role has no runner-count coupling; the shared sizing variables satisfy “same allocation.”
-- `.33/.34/.35` and `4104/4105/4106` are free in the checked repo files, but the plan still needs live Proxmox and LAN/DHCP checks before apply.
-- The unresolved risk is RAM under simultaneous CI: each host already carries a 32 GiB Talos VM, a 24 GiB AI LXC cap, dev-worker ballooning, and one runner; idle `free` alone is not a strong enough gate.
-- Security is not unchanged in blast radius: the same GitHub App private key is installed on three more job-running VMs. GitHub’s repo registration-token endpoint does support GitHub App installation tokens with repository `Administration` write: https://docs.github.com/en/rest/actions/self-hosted-runners?apiVersion=2022-11-28#create-a-registration-token-for-a-repository
-- No major over-engineering; the missing pieces are live collision checks, deterministic per-host/canary validation, and a stronger abort/rollback criterion for RAM pressure.
-
 ## Context
 The lab runs an ephemeral self-hosted runner pool (`self-hosted-hv`) for `cchifor/platform` CI:
 3 Ubuntu 24.04 QEMU VMs (`gha-runner-1/2/3`), one per Proxmox host, provisioned by the OpenTofu
 module `kubernetes/infra/runners/` and configured by the Ansible role `github_runner` (`just runners`).
 See ADR 0013. We want **6 runners total** — 3 more, with the **same resource allocation and
-configuration** as the existing three — to increase CI concurrency (the platform workload is heavy
+configuration** as the existing three — to raise CI concurrency (the platform workload is heavy
 Docker-Compose e2e + Buildx + Playwright + k6, and jobs currently queue on a 3-wide pool).
-<!-- codex: Doubling CI concurrency can also double pressure on shared dependencies such as the registry, lab services, and host storage/network; include a real max-concurrency validation, not only runner registration. -->
 
 The existing module was already built for this: the VM resource is `for_each = var.runner_nodes`, and
 every VM draws its sizing from the **shared** scalar vars (`runner_cores`, `runner_memory_mib`,
 `runner_memory_floating_mib`, `runner_rootfs_gb`). So "same config for all" is guaranteed structurally —
-adding runners is purely additive map entries; `main.tf` does not change.
-<!-- codex: Functionally correct, but `main.tf` still has a header comment saying “one per Proxmox node”; either update that comment or explicitly accept it as non-functional drift. -->
+adding runners is purely additive map entries.
+
+Doubling pool width also roughly doubles pressure on shared dependencies the jobs touch (the Zot
+registry, host storage/network, any lab services the e2e stack calls). That's acceptable, but it makes
+**host RAM the binding constraint** and means the rollout must be gated on real capacity data and
+validated under genuine concurrency — not just "runners registered" (see the Pre-apply gate).
 
 ## Key decision — placement (2 runners per host)
 There are only **3 physical Proxmox nodes** (`ai-node1/2/3`). Six identically-sized runners therefore
 means **two per host** — one additional runner co-located on each node. This is the only interpretation
 consistent with "6 total, same allocation for all" absent new hardware.
-<!-- codex: True given the current hardware, but GitHub can now schedule two heavy jobs onto the same physical host with no per-host concurrency guard; capacity validation must use that worst case. -->
 
 Trade-off (documented, not blocking): the original design was "one runner per host for fault isolation".
-Two-per-host means a host failure removes 2 runners instead of 1, and raises steady-state RAM commitment
-per host. Mitigations already in the design carry over unchanged: 12 GiB balloon floor (prevents the #620
-OOM-under-pressure), 8 GiB guest swap (`swappiness=10`), and the `ci-runner-node` Prometheus scrape.
-<!-- codex: These mitigations protect the guest from starving, but they do not prove the host has enough RAM after adding another 12 GiB floor per node. -->
+Two-per-host means (a) a host failure removes 2 runners instead of 1, and (b) GitHub can now schedule
+**two heavy jobs onto the same physical host** with no per-host concurrency guard — so capacity must be
+validated against that worst case, not the average. The #620 mitigations (12 GiB balloon floor, 8 GiB
+guest swap `swappiness=10`) protect each *guest* from being starved, but they do **not** by themselves
+prove the *host* has enough RAM once a second 12 GiB floor is committed and both guests inflate toward
+24 GiB. That proof is the Pre-apply gate below.
 
 ## Approach
 Add `gha-runner-4/5/6` as a second runner on each node, **identical** to `1/2/3`:
@@ -43,93 +40,130 @@ Add `gha-runner-4/5/6` as a second runner on each node, **identical** to `1/2/3`
 | `gha-runner-5` | ai-node2 | 4105 | 192.168.0.34 | " |
 | `gha-runner-6` | ai-node3 | 4106 | 192.168.0.35 | " |
 
-- **`vm_id` 4104–4106** are free (Talos 4001–4003, runners 4101–4103, dev-workers 4201–4203, AI LXC
-  5001–5003, registry 5004 — the 41xx runner series continues cleanly).
-<!-- codex: Correct against the checked OpenTofu defaults, but not proven against live Proxmox state; add `pvesh`/`qm list`/`pct list` checks for 4104-4106 before apply. -->
+- **`vm_id` 4104–4106** are free against the checked OpenTofu defaults (Talos 4001–4003, runners
+  4101–4103, dev-workers 4201–4203, AI LXC 5001–5003, registry 5004 — the 41xx runner series continues
+  cleanly). This is confirmed against repo state; the Pre-apply gate re-confirms against **live** Proxmox.
 - **IPs `.33/.34/.35`** are free static addresses inside the reserved `.2`–`.50` block, just below the
-  registry (`.36`). They are **not** in the router DHCP pool (`.51`+) — using `.50/.51/.52` would repeat
-  the exact collision that displaced the AI LXCs off `.51`–`.53`. The three sit contiguous for tidiness;
-  `.50` stays free. (`docs/network-plan.md` is the authoritative allocation table.)
-<!-- codex: Correct against inventory and network docs, but not live LAN state; add ARP/DHCP lease/ping checks for .33-.35. Also consider fixing the stale `ai-lxc/variables.tf` comment that still mentions .51-.53. -->
-- **No new secrets, no GitHub-side change.** All 6 share the one GitHub App (`ailab-ci-runners`, App
-  4070577 / installation 140722927) and its SOPS key. The ephemeral wrapper derives the runner name from
-  `hostname`, so each new VM self-registers as `ephem-gha-runner-{4,5,6}-<epoch>-<8hex>` into
-  `self-hosted-hv` with zero config change. The App's `Administration: read/write` already mints
-  registration tokens for any number of repo runners; platform's `runner-health.yml` canary passes
-  because config is byte-identical.
-<!-- codex: No new secret value is created, but the existing App private key is copied to three additional VMs and jobs running as `runner` can read it; verify the App is installed only on `cchifor/platform` and document the larger blast radius. -->
-<!-- codex: The canary passing is an external assumption, not guaranteed by this repo; verify the canary source or run enough jobs to cover each new VM. -->
+  registry (`.36`), per `docs/network-plan.md` (authoritative) + `inventory/hosts.yml`. They are **not**
+  in the router DHCP pool (`.51`+) — using `.50/.51/.52` would repeat the exact collision that displaced
+  the AI LXCs off `.51`–`.53`. The three sit contiguous for tidiness; `.50` stays free. The Pre-apply gate
+  re-confirms they are unused on the **live** LAN (ping/ARP/lease).
+- **No new secret value; unchanged GitHub side.** All 6 share the one GitHub App (`ailab-ci-runners`,
+  App 4070577 / installation 140722927) and its SOPS key. The ephemeral wrapper derives the runner name
+  from `hostname`, so each new VM self-registers as `ephem-gha-runner-{4,5,6}-<epoch>-<8hex>` into
+  `self-hosted-hv` with zero config change. The App's `Administration: read/write` mints registration
+  tokens for any number of repo runners.
+  - *Blast-radius note (security):* the existing App private key is now copied to **3 more** job-running
+    VMs at `/etc/runner/app.pem` (`0400`, owned by `runner`). Jobs execute **as** `runner`, so this
+    widens the surface by which a malicious job could exfiltrate the key — but that surface already exists
+    on runners 1–3 and is accepted under ADR 0013 (both repos private, contributors trusted). Confirm the
+    App remains installed on **only** `cchifor/platform` (least privilege); the key rotation runbook is
+    unchanged.
 
 ### Edits (declarative only; all reversible, in-repo)
 1. **`kubernetes/infra/runners/variables.tf`** — add the 3 entries to the `runner_nodes` map `default`;
    update the header comment (currently "one runner VM per physical host" / lists `.47`–`.49`, 4101–4103)
    to describe 2-per-host and the new IPs/vmids. Leave all sizing vars untouched.
-2. **`inventory/hosts.yml`** — add `gha-runner-4/5/6` (`ansible_host` `.33/.34/.35`) to the
+2. **`kubernetes/infra/runners/main.tf`** — **comment-only**: the file header still says "one per Proxmox
+   node"; reword to "two per Proxmox node (see variables.tf)". No resource/logic change.
+3. **`inventory/hosts.yml`** — add `gha-runner-4/5/6` (`ansible_host` `.33/.34/.35`) to the
    `github_runners` group.
-3. **`kubernetes/apps/infrastructure/monitoring/ci-runners-node.yaml`** — add `.33/.34/.35` to the
-   `Endpoints.addresses`; update the "3 … .47/.48/.49" header comment to 6 + the full IP list.
-<!-- codex: Because this manifest is Flux-managed, include a Flux/kubectl verification that the updated Endpoints object reached the cluster; editing YAML alone does not update Prometheus targets. -->
-4. **`docs/network-plan.md`** — add a `gha-runner-4/5/6 → .33/.34/.35` row to the static-allocation
-   table; correct the free-space note (`.5–.36` + `.50` → `.5–.32` + `.50`) and add the missing
-   `.36 = ai-registry` row it currently omits (needed so the "`.33`–`.35` free" claim is verifiable).
-5. **`docs/runbooks/ci-runners.md`** — "3 ephemeral runner VMs" → 6; update the VMs table row (vmid
+4. **`kubernetes/apps/infrastructure/monitoring/ci-runners-node.yaml`** — add `.33/.34/.35` to the
+   `Endpoints.addresses`; update the "3 … .47/.48/.49" header comment to 6 + the full IP list. *(This
+   manifest is Flux-managed and tracked on `main`; it only reaches the cluster after the change is merged
+   and Flux reconciles — verified explicitly below.)*
+5. **`docs/network-plan.md`** — add a `gha-runner-4/5/6 → .33/.34/.35` row to the static-allocation table;
+   correct the free-space note (`.5–.36` + `.50` → `.5–.32` + `.50`) and add the missing `.36 = ai-registry`
+   row it currently omits (so the "`.33`–`.35` free" claim is self-verifiable).
+6. **`docs/runbooks/ci-runners.md`** — "3 ephemeral runner VMs" → 6; update the VMs table row (vmid
    4101–4106, IPs, "two per host"); update the verify step to expect `ephem-gha-runner-{1..6}`.
-6. **`docs/decisions/0013-ci-self-hosted-runners.md`** — append a dated `Update (2026-07-01)` note (same
+7. **`docs/decisions/0013-ci-self-hosted-runners.md`** — append a dated `Update (2026-07-01)` note (same
    style as the existing #620 note) recording the 3→6 scale, the 2-per-host placement, the retained
-   fault-isolation trade-off, and the capacity gate below. (A full new ADR is unwarranted — same module,
-   role, and pool; incremental scale, not a new architectural decision.)
+   fault-isolation trade-off, and the capacity gate. (A full new ADR is unwarranted — same module, role,
+   and pool; incremental scale, not a new architectural decision.)
+8. **`kubernetes/infra/ai-lxc/variables.tf`** — small adjacent cleanup: the header comment still narrates
+   the abandoned `.51–.53` LXC IPs as if current; align it with the network plan so the `.51+`-is-DHCP
+   rationale referenced above stays consistent. (Skip if it reads as out-of-scope at review.)
 
-`kubernetes/infra/runners/main.tf`, the `github_runner` role, `group_vars/github_runners.yml`, and the
-SOPS secret are **unchanged** by design.
-<!-- codex: `main.tf` and the Ansible role need no functional changes, but `main.tf`'s stale “one per Proxmox node” header should be updated or called out as accepted comment drift. -->
+The `github_runner` role, `group_vars/github_runners.yml`, and the SOPS secret are **unchanged** — the
+new runners are byte-identical in config to the existing three, which is what proves "same configuration".
 
-## Capacity gate (the real risk — validate before apply)
-ADR 0013 records the hosts at **79–85 % RAM** with one runner each (12 GiB floor ≈ 33 GiB committed
-across the 3 guests) alongside Talos + the AI LLM LXC. Adding a second runner per host commits another
-~12 GiB floor/host and, under simultaneous CI peaks, both guests inflate toward the 24 GiB ceiling.
-This is feasible but materially tighter than 1-per-host. **Before `tofu apply`, verify per-host headroom**
-so we don't reintroduce #620:
-<!-- codex: Include dev-worker VMs (2 GiB floor / 16 GiB ceiling), node1's registry LXC, host overhead, and the BIOS GPU VRAM carve in the budget; the current text only names Talos, AI LXC, and runners. -->
-<!-- codex: Feasibility is not established by repo state alone; current comments conflict between old “ample headroom” assumptions and ADR #620's 79-85% host RAM pressure. -->
+## Pre-apply gate (hard go/no-go — the real risk lives here)
+Repo state alone does **not** establish feasibility, and the tree carries a stale optimistic note
+(`variables.tf`: "~119 GiB free each") that predates the dev-workers, the registry LXC, and the #620
+finding that hosts already run at **79–85 % RAM** with a single runner each. So gate on **live data**, not
+optimism, and abort if a host is short rather than reintroducing #620.
 
+**(A) Live collision re-check (must be clean on every host):**
 ```bash
-for h in 2 3 4; do ssh root@192.168.0.$h 'hostname; free -g | awk "/Mem:/{print \$2\" GiB total, \"\$7\" GiB avail\"}"'; done
+# VMIDs 4104-4106 must not exist anywhere in the cluster:
+ssh root@192.168.0.2 'pvesh get /cluster/resources --type vm --output-format json' | \
+  jq -r '.[].vmid' | sort -n | grep -E '^(4104|4105|4106)$' && echo "COLLISION" || echo "vmids free"
+# IPs .33/.34/.35 must be dark on the live LAN (no ping, no ARP entry, no DHCP lease):
+for o in 33 34 35; do ping -c1 -W1 192.168.0.$o >/dev/null 2>&1 && echo ".$o IN USE" || echo ".$o free"; done
 ```
-<!-- codex: Use MiB/Prometheus/PVE data, not only rounded `free -g`; also collect VM/LXC configured limits, current balloon state, and MemAvailable trends because idle host memory does not model peak runner inflation. -->
 
-Require ≥ ~14 GiB available headroom per host at idle (one runner's floor + margin). If a host is short,
-options in order of preference: (a) trim the AI LLM LXC ceiling on that host, (b) stagger — bring the new
-runners up one at a time and watch `node_memory_MemAvailable` on the CI-runner dashboard, (c) as a last
-resort accept balloon-reclaim + guest swap under peak (the #620 mitigations are designed for exactly this).
-Do **not** lower the shared 12 GiB floor or 24 GiB ceiling — that would violate "same config" and re-open #620.
-<!-- codex: 14 GiB only covers the new floor plus a small margin; it does not cover both runners inflating, dev-worker inflation, AI LXC growth, or node1's registry. -->
-<!-- codex: Treat balloon reclaim/swap under expected peak as a degraded condition with rollback/abort criteria, not as an acceptable steady-state outcome, or #620 risk is effectively reintroduced. -->
+**(B) Capacity budget — full per-host accounting, real numbers.** Each host today carries, *before* the
+new runner: a **Talos CP VM (~32 GiB, non-ballooning)**, the **AI LLM LXC (24 GiB cap)**, a **dev-worker
+VM (~16 GiB ceiling / ~2 GiB floor)**, one **gha-runner (24 GiB ceiling / 12 GiB floor)**, plus PVE/host
+overhead and the **iGPU VRAM/GTT carve** (modest on the daily-driver model, but up to ~64 GiB when a
+heavyweight LLM is loaded on-demand). `ai-node1` **also** hosts the **registry LXC**. Adding a second
+runner commits **another ~12 GiB floor** and, at worst case, **+24 GiB ceiling** that can coincide with
+the other guests' peaks. Collect the real picture (not rounded `free -g`):
+```bash
+for h in 2 3 4; do echo "== 192.168.0.$h =="; ssh root@192.168.0.$h '
+  free -m | awk "/Mem:/{printf \"MemTotal=%dMiB MemAvailable=%dMiB\n\",\$2,\$7}";
+  for id in $(qm list | awk "NR>1{print \$1}"); do echo -n "vm $id: "; qm config $id | grep -E "^(memory|balloon):" | tr "\n" " "; echo; done;
+  for id in $(pct list | awk "NR>1{print \$1}"); do echo -n "ct $id: "; pct config $id | grep -E "^memory:"; done'
+done
+# Also read the trend, not a single sample: node_memory_MemAvailable_bytes per host on the CI-runner
+# Grafana dashboard over a representative busy window.
+```
+**Go criterion:** each host must retain enough headroom that the new runner's **12 GiB floor** fits with
+margin *and* a realistic concurrent peak (both local runners busy + the AI LXC at its cap + dev-worker
+active) does not drive the host into sustained balloon-reclaim or swap. Idle `MemAvailable` ≳ 14 GiB is a
+*necessary floor check, not sufficient* — weigh it against the ceiling sum above and the live balloon
+state. **Balloon reclaim / guest swap under an expected peak is a DEGRADED condition, not an acceptable
+steady state** (that is exactly #620); if the data shows a host would routinely land there, treat it as
+**no-go** for that host.
 
-## Verification (end-to-end, operator-run — outward-facing, hard to reverse)
-These steps create real VMs and register real runners; run them deliberately after the capacity gate.
-<!-- codex: Add pre-apply live collision checks here: PVE cluster resources for VMIDs 4104-4106 and LAN/DHCP/ARP checks for .33-.35. -->
+**If a host is short (in order of preference):** (a) stagger — bring the new runners up **one host at a
+time**, watch `MemAvailable` under a real e2e load before proceeding to the next; (b) trim the AI LLM LXC
+ceiling on the tight host, or schedule heavyweight-LLM runs to not overlap peak CI; (c) pause and consult
+before proceeding — do **not** lower the shared 12 GiB floor / 24 GiB ceiling (that would violate "same
+config" and re-open #620). Record the go/no-go outcome in the ADR update.
+
+## Apply & register (operator-run — outward-facing, hard to reverse)
+Only after the gate passes. These create real VMs and register real runners.
 ```bash
 cd kubernetes/infra/runners
-tofu plan          # EXPECT: 3 VMs to add (gha-runner-4/5/6), 0 to change/destroy on 1/2/3
-tofu apply         # creates the 3 new VMs (image already downloaded)
-tofu output runner_vms   # 6 entries
-just ping-runners  # SSH reachability for all 6 (ansible_user=ubuntu)
-just runners       # idempotent: installs the toolchain + ephemeral contract on 4/5/6, re-asserts 1/2/3
+tofu fmt -check && tofu validate      # static hygiene
+tofu plan                             # EXPECT: 3 to add (gha-runner-4/5/6); 0 to change/destroy.
+                                      # Scan the plan: NO diffs to gha-runner-1/2/3 disks or cloud-init.
+tofu apply
+tofu output runner_vms                # 6 entries
+# Configure/register ONLY the new hosts first, so 1/2/3's in-flight jobs aren't restarted:
+cd ../../.. && SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey \
+  ansible-playbook ansible/runners.yml --limit 'gha-runner-4,gha-runner-5,gha-runner-6'
+# (`just runners` runs the whole group and may bounce 1/2/3 — use it only during an idle window.)
 ```
-<!-- codex: Add `tofu fmt -check`, `tofu validate`, and an explicit check that existing runner disks/cloud-init are unchanged in the plan. -->
-<!-- codex: `just runners` may restart runner services on 1/2/3 and interrupt jobs; schedule during idle or first run Ansible with a limit for only the new hosts. -->
-<!-- codex: Add direct config checks for `qm config 4104/4105/4106` and in-guest swap/systemd drop-ins to prove “same allocation and configuration” beyond relying on shared variables. -->
-Then confirm:
-- **GitHub** → `cchifor/platform` → Settings → Actions → Runners → `self-hosted-hv` shows `Idle`
-  `ephem-gha-runner-{4,5,6}-…` alongside the existing three (6 total).
-<!-- codex: Also verify via GitHub API that runner count is six and offline ephemeral entries are not accumulating; UI state alone can miss registration-loop cleanup issues. -->
-- **Canary** → Actions → "Runner pool health" — re-run until it lands on a new host; asserts the
-  `ephem-*` name, `MemoryMax=10G`, wrapper, hook env.
-<!-- codex: This is probabilistic and can still miss one of 4/5/6; add a deterministic matrix/load test or verify job logs/API data cover every new VM. -->
-- **Metrics** → Prometheus shows **6** `job=ci-runner-node` targets up (`.33/.34/.35` + `.47/.48/.49`).
-<!-- codex: Also verify Flux applied the Endpoints manifest and node_exporter is listening on each new VM; target count can lag or include stale endpoints. -->
-- **Host RAM** → the CI-runner dashboard's `node_memory_MemAvailable` on each host stays healthy under a
-  real PR's e2e run (no exit-137).
-<!-- codex: Make this a max-concurrency test that can place two heavy jobs on one physical host, and check PVE logs/dmesg for OOM or balloon-pressure events. -->
+
+## Verification (prove identical config + healthy under load)
+- **Config identity (not just "shared vars"):** on the host, `qm config 4104` shows `memory: 24576` +
+  `balloon: 12288` + `cores: 8` (and same for 4105/4106); in-guest, `free -h` shows the 8 GiB swap and
+  `systemctl show -p MemoryMax actions.runner.cchifor-platform.service` is `10737418240` — i.e. 4/5/6
+  match 1/2/3 exactly.
+- **Registration (API, not just UI):** `gh api repos/cchifor/platform/actions/runners` lists **6** online
+  `self-hosted-hv` runners and **no** growing backlog of offline `ephem-*` entries (registration-loop
+  cleanup working).
+- **Per-VM canary (deterministic, not luck):** confirm the `runner-health.yml` canary result covers each
+  of 4/5/6 — check job logs / API for the host identity, or run a small matrix so every new VM executes at
+  least once. (The canary lives in `cchifor/platform`; a single re-run is probabilistic across 6 runners.)
+- **Metrics (Flux actually applied it):** after merge, `flux reconcile kustomization infrastructure` (or
+  wait for sync), then `kubectl -n monitoring get endpoints ci-runner-node` shows all 6 IPs and Prometheus
+  reports **6** `job=ci-runner-node` targets `up` (node_exporter listening on `.33/.34/.35:9100`).
+- **Host RAM under real concurrency:** drive a max-concurrency load (enough platform jobs that two heavy
+  e2e jobs land on the same physical host) and confirm no `exit 137` / "runner lost communication", and no
+  OOM/balloon-pressure events in `dmesg` / the PVE task log. This is the true #620 regression test.
 
 <!-- codex-review-status: complete -->
