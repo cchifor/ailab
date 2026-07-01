@@ -8,3 +8,7 @@ node_exporter_package: prometheus-node-exporter
 node_exporter_service: prometheus-node-exporter
 node_exporter_listen_address: ":9100" # scraped by monitoring/proxmox-node (kubernetes/apps/infrastructure/monitoring)
 node_exporter_extra_args: "" # extra flags; the Debian package's default collector set is fine for host reporting
+# Textfile-collector dir (Debian convention). Always created (harmless/empty on hosts that don't emit
+# .prom files); the --collector.textfile.directory flag is enabled per-group via node_exporter_extra_args
+# (e.g. group_vars/github_runners.yml for the CI-runner health beacon).
+node_exporter_textfile_dir: /var/lib/prometheus/node-exporter

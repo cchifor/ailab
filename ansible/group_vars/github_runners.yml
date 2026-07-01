@@ -9,3 +9,9 @@ github_runner_enabled: true
 # GitHub App `ailab-ci-runners` (github.com/apps/ailab-ci-runners), created 2026-06-16:
 github_runner_app_id: "4070577"
 github_runner_app_installation_id: "140722927" # App installed on the cchifor account (2026-06-16)
+
+# Enable node_exporter's textfile collector ONLY on the runners (the shared node_exporter role stays
+# flagless on Proxmox/AI-LXC/dev-workers). runner-reclaim.sh drops a health beacon here each cycle
+# (runner_docker_config_root_owned / runner_reclaim_last_success_seconds) → CIRunner* alert rules.
+# Path matches node_exporter_textfile_dir (kept literal to avoid var-ordering surprises).
+node_exporter_extra_args: "--collector.textfile.directory=/var/lib/prometheus/node-exporter"

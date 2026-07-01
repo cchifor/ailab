@@ -1,0 +1,83 @@
+# Alerts for the CI runner VMs (metrics via ci-runners-node.yaml, job=ci-runner-node). Closes the
+# monitoring gap that let a 40%-of-fleet buildx-ownership outage run silently for hours (see ADR 0013).
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ci-runners
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: ci-runners
+      rules:
+        - alert: CIRunnerNodeDown
+          expr: up{job="ci-runner-node"} == 0
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} is down (no node_exporter scrape)"
+            description: >-
+              node_exporter on runner {{ $labels.instance }} has been unscrapeable for >10m — the VM
+              is likely down or unreachable, cutting CI capacity. node_exporter is independent of the
+              ephemeral runner service, so this is NOT registration churn. Check the VM on Proxmox
+              (`qm status <vmid>`) and `just ping-runners`.
+        - alert: CIRunnerDiskFilling
+          expr: |
+            node_filesystem_avail_bytes{job="ci-runner-node",mountpoint="/"}
+              / node_filesystem_size_bytes{job="ci-runner-node",mountpoint="/"} < 0.12
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} root filesystem <12% free"
+            description: >-
+              Runner {{ $labels.instance }} root fs is under 12% free for >15m. Between-jobs reclaim
+              (runner-reclaim.sh) should be pruning docker images/volumes/build-cache; if it keeps
+              climbing, check for accumulating named volumes (`docker volume ls`) or a wedged prune.
+        - alert: CIRunnerDiskWillFillSoon
+          expr: |
+            predict_linear(node_filesystem_avail_bytes{job="ci-runner-node",mountpoint="/"}[6h], 4 * 3600) < 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} root filesystem projected to fill within 4h"
+            description: >-
+              The 6h trend for runner {{ $labels.instance }} projects the root filesystem reaching 0
+              free within 4h — early warning before jobs start failing on ENOSPC. Investigate docker
+              disk usage / reclaim before it fills.
+        - alert: CIRunnerLowMemory
+          expr: node_memory_MemAvailable_bytes{job="ci-runner-node"} < 1.5e9
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} low available memory (<1.5 GiB)"
+            description: >-
+              Runner {{ $labels.instance }} has <1.5 GiB MemAvailable for >10m — the #620 precursor
+              (host RAM pressure ballooning the guest below its 12 GiB floor → OOM-killed jobs / exit
+              137). Check host RAM on the owning Proxmox node and the balloon target
+              (`qm config <vmid>` → balloon 12288).
+        - alert: CIRunnerSwapPressure
+          expr: |
+            node_memory_SwapTotal_bytes{job="ci-runner-node"} > 0
+              and (node_memory_SwapTotal_bytes{job="ci-runner-node"} - node_memory_SwapFree_bytes{job="ci-runner-node"})
+                  / node_memory_SwapTotal_bytes{job="ci-runner-node"} > 0.5
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} using >50% of its swap"
+            description: >-
+              Runner {{ $labels.instance }} is >50% into its 8 GiB safety-valve swap for >10m (the
+              second line of #620 defense after the 12 GiB balloon floor). Sustained swap means jobs
+              are near OOM — check host RAM headroom on the owning Proxmox node.
+        - alert: CIRunnerDockerConfigRootOwned
+          expr: runner_docker_config_root_owned{job="ci-runner-node"} == 1
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} has root-owned ~/.docker after self-heal"
+            description: >-
+              The reclaim self-heal on runner {{ $labels.instance }} did NOT restore runner ownership
+              of ~/.docker — the buildx-permission regression (root-owned ~/.docker/buildx) is back
+              and docker-build jobs will fail. Inspect: `sudo ls -la /home/runner/.docker/buildx` and
+              confirm runner-reclaim.sh runs as root (20-reclaim.conf ExecStartPre=+).
