@@ -66,10 +66,11 @@ just runners        # installs Docker/toolchain + the ported runner contract, re
 
 ## 5. Verify
 - **Registered:** GitHub → `cchifor/platform` → Settings → Actions → Runners → `self-hosted-hv` shows
-  `ephem-gha-runner-{1..5}-…` **Idle** (alongside the 4 Hyper-V runners during transition).
+  `ephem-gha-runner-{1..5}-…` **Idle** (Proxmox-only pool; the legacy Hyper-V runners are retired — §6).
 - **Canary:** Actions → **Runner pool health** → Run workflow. Re-run until it lands on a `gha-runner-N`
   host (check the "Runner identity" step); it asserts the `ephem-*` name, `memory.max == 10G`, the
-  wrapper, and the hook env.
+  wrapper, the hook env, **and (2026-07-01) that `~/.docker` is runner-owned + `docker buildx build`
+  works** — the buildx self-heal regression gate (cchifor/platform#682).
 - **On a VM:**
   ```bash
   ssh ubuntu@192.168.0.47 'systemctl status actions.runner.cchifor-platform.service --no-pager; \
@@ -90,10 +91,11 @@ just runners        # installs Docker/toolchain + the ported runner contract, re
   node_exporter's textfile collector (`/var/lib/prometheus/node-exporter/runner_health.prom`) — enabled
   for the runner group only via `node_exporter_extra_args` in `group_vars/github_runners.yml`.
 
-## 6. Decommission the Hyper-V pool (after the Proxmox 3 are proven)
-On `BEAST` (elevated shell): stop each runner service so it doesn't re-register, let in-flight jobs
-drain, then delete the Multipass VMs. In GitHub → Settings → Actions → Runners, remove the now-offline
-`ephem-hv-runner-*` entries. No `RUNNER_LABEL`/workflow change — the pool just shrinks to the Proxmox 3.
+## 6. Hyper-V pool — RETIRED (2026-06-16)
+The legacy 4-runner Multipass/Hyper-V pool on `BEAST` was drained: its runner services stopped, and the
+`ephem-hv-runner-*` registrations removed from GitHub. The `self-hosted-hv` pool is now the **5 Proxmox
+runners only** (no `RUNNER_LABEL`/workflow change). The powered-off Multipass VMs on `BEAST` can be purged
+to reclaim disk when convenient: `multipass delete --purge hv-runner-{1..4}` (irreversible).
 
 ## Day-2
 - **Runner version bump:** set `github_runner_version` (role defaults) → `just runners` (re-extracts;
