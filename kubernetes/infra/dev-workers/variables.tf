@@ -89,19 +89,10 @@ variable "dev_worker_cores" {
 variable "dev_worker_memory_mib" {
   description = "Max VM memory (MiB) — the ceiling the balloon can inflate to under load."
   type        = number
-  # 8 GiB ceiling (was 16). Lowered 2026-07-01 to bound peak competition when a SECOND runner VM is
-  # co-located per host (6-wide runner pool — see kubernetes/infra/runners + ADR 0013). Dev-workers sit
-  # near the 2 GiB floor at idle, so this only caps their load-time peak; it doesn't reclaim idle RAM.
-  default = 8192
-}
-variable "dev_worker_memory_floating_mib" {
-  description = <<-EOT
-    Min VM memory (MiB) = the virtio-balloon floor. floating < dedicated enables ballooning: idle
-    dev workers release RAM back toward this value and the balloon deflates on demand up to
-    dev_worker_memory_mib under load. Set equal to dev_worker_memory_mib to disable ballooning.
-  EOT
-  type        = number
-  default     = 2048 # 2 GiB idle floor; reclaimed toward this under host pressure
+  # 16 GiB ceiling. (The 2026-07-01 cut to 8 GiB was reverted: it was never applied to the live VMs,
+  # and after freeing host RAM by downsizing the Talos CP VMs — kubernetes/infra/variables.tf — the
+  # dev-workers can use a higher ceiling. Per-node idle FLOORS now live in dev_worker_nodes[].floating.)
+  default = 16384
 }
 variable "dev_worker_rootfs_gb" {
   description = "Root disk (scsi0) size in GiB; cloud-init growpart expands the root fs to fill it."
@@ -126,16 +117,21 @@ variable "dev_worker_ssh_public_key" {
 # IPs .37/.38/.39: free static addresses well inside the reserved block (.2-.50) and below the
 # router DHCP pool (starts at .51) — no router change needed. vmids 4201-4203 don't collide
 # (Talos 4001-4003, runners 4101-4103, AI LXC 5001-5003).
+# Per-node balloon FLOOR (`floating`, MiB), sized to each host's spare RAM after the CP downsize
+# (2026-07-02): dw1=8192 (node1), dw2=10240 (node2, heaviest use), dw3=6144 (node3). Raised from a
+# uniform 2 GiB — that floor let the guests OOM-thrash under host oversubscription. Ceiling
+# (dev_worker_memory_mib) stays uniform 16 GiB. See docs/runbooks/dev-workers.md.
 variable "dev_worker_nodes" {
   type = map(object({
     node_name = string
     vm_id     = number
     ip        = string
     hostname  = string
+    floating  = optional(number, 2048) # per-node virtio-balloon FLOOR (MiB); see header comment
   }))
   default = {
-    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.37", hostname = "dev-worker-1" }
-    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.38", hostname = "dev-worker-2" }
-    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.39", hostname = "dev-worker-3" }
+    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.37", hostname = "dev-worker-1", floating = 8192 }
+    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.38", hostname = "dev-worker-2", floating = 10240 }
+    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.39", hostname = "dev-worker-3", floating = 6144 }
   }
 }
