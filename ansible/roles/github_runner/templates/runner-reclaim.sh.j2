@@ -26,6 +26,14 @@ if command -v docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1; 
     timeout 300 docker volume prune -af  >/dev/null 2>&1 || true
     timeout 300 docker builder prune -af >/dev/null 2>&1 || true
   fi
+  # Build cache size (bytes) AFTER the prunes above — the resting footprint (healthy: at/below the builder
+  # keep-storage floor; persistently high => the prune is not clearing cache). Post-prune (not pre) so the
+  # beacon does not hold a stale one-cycle peak that would false-fire the alert on an idle runner. Parsed
+  # from `docker system df` default table; its Go-template output uses brace delimiters ansible would eat.
+  bc_bytes=$(timeout 20 docker system df 2>/dev/null | awk '/^Build Cache/{ n=$5; u=$5;
+    gsub(/[0-9.]/,"",u); gsub(/[^0-9.]/,"",n);
+    m=1; if(u=="kB")m=1e3; else if(u=="MB")m=1e6; else if(u=="GB")m=1e9; else if(u=="TB")m=1e12;
+    printf "%d", n*m }')
 fi
 journalctl --vacuum-size=100M >/dev/null 2>&1 || true
 find "$RUNNER_DIR/_diag" -type f -name '*.log' -mtime +1 -delete 2>/dev/null || true
@@ -55,6 +63,9 @@ if [ -d "$tf_dir" ]; then
     echo '# HELP runner_reclaim_last_success_seconds Unix time of the last completed between-jobs reclaim.'
     echo '# TYPE runner_reclaim_last_success_seconds gauge'
     echo "runner_reclaim_last_success_seconds $(date +%s)"
+    echo '# HELP runner_docker_build_cache_bytes Docker build cache size in bytes after reclaim prune (healthy at/below the builder --keep-storage floor).'
+    echo '# TYPE runner_docker_build_cache_bytes gauge'
+    echo "runner_docker_build_cache_bytes ${bc_bytes:-0}"
   } > "$tmp" 2>/dev/null && mv -f "$tmp" "$tf_dir/runner_health.prom" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 fi
 exit 0
