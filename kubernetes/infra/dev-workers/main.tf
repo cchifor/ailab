@@ -41,12 +41,13 @@ resource "proxmox_virtual_environment_vm" "dev_worker" {
     type  = "host" # homogeneous CPUs; no live migration (dev workers are rebuildable)
   }
 
-  # Ballooning: VM floats between floating (idle floor) and dedicated (load ceiling), so idle
+  # Ballooning: VM floats between floating (per-node idle floor) and dedicated (load ceiling), so idle
   # dev workers return RAM to the host. Important on the memory-tight Strix Halo nodes (GPU VRAM
-  # carve + a hard 32 GiB Talos CP VM per node) — see docs/runbooks/dev-workers.md.
+  # carve + a Talos CP VM per node) — see docs/runbooks/dev-workers.md. The floor is PER-NODE
+  # (each.value.floating) because host headroom differs after the 2026-07-02 CP downsize — see variables.tf.
   memory {
     dedicated = var.dev_worker_memory_mib
-    floating  = var.dev_worker_memory_floating_mib
+    floating  = each.value.floating
   }
 
   scsi_hardware = "virtio-scsi-single"

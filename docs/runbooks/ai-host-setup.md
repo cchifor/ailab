@@ -62,8 +62,11 @@ for the daily driver** (the LXC uses ~0.5 GiB system RAM; a node runs the 32 GiB
 - gpt-oss-120B (63 GB) loads **entirely in the 64 GiB VRAM heap** (59 GiB used), ~0.6 GiB GTT.
 - Qwen3.5-122B (76.5 GB) **maxes VRAM (64 GiB) and spills ~8 GiB to GTT** (system RAM); it runs alongside
   a 32 GiB CP VM but pushes `free`→0. For **large contexts** on the 122B, give that node headroom: downsize
-  its CP VM to 24 GiB (`kubernetes/infra/variables.tf` `control_planes{}`, rolling reboot — HA tolerates one
-  CP down) or reduce the BIOS UMA carve (manual, per-node) + set kernel `amdgpu.gttsize=131072 ttm.pages_limit=…`.
+  its CP VM (`kubernetes/infra/variables.tf` `control_planes{}`, rolling reboot via `talosctl shutdown` — HA
+  tolerates one CP down) or reduce the BIOS UMA carve (manual, per-node) + set kernel `amdgpu.gttsize=131072
+  ttm.pages_limit=…`. **CP sizing is now per-node (2026-07-02): cp1 32 / cp2 24 / cp3 28 GiB** — cp2/cp3 were
+  downsized to free host RAM for the co-located dev-workers (CP working set is only ~8-10 GiB; see
+  docs/runbooks/dev-workers.md).
 
 ## Running a heavyweight model (on-demand)
 Both heavyweights are staged on the NFS and **validated on the current 64 GiB carve** (2026-06-14):

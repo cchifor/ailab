@@ -10,24 +10,27 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
-| dev-worker-1 | ai-node1 | 4201 | 192.168.0.37 | 8 vCPU / 16 GiB (2–16 balloon) / 40+128 GiB |
-| dev-worker-2 | ai-node2 | 4202 | 192.168.0.38 | 8 vCPU / 16 GiB (2–16 balloon) / 40+128 GiB |
-| dev-worker-3 | ai-node3 | 4203 | 192.168.0.39 | 8 vCPU / 16 GiB (2–16 balloon) / 40+128 GiB |
+| dev-worker-1 | ai-node1 | 4201 | 192.168.0.37 | 8 vCPU / 16 GiB (8–16 balloon) / 40+128 GiB |
+| dev-worker-2 | ai-node2 | 4202 | 192.168.0.38 | 8 vCPU / 16 GiB (10–16 balloon) / 40+128 GiB |
+| dev-worker-3 | ai-node3 | 4203 | 192.168.0.39 | 8 vCPU / 16 GiB (6–16 balloon) / 40+128 GiB |
 
 ## Pre-flight gate (clear BEFORE `tofu apply`)
 
 **GPU VRAM carve** — confirm the per-node BIOS VRAM reservation (`docs/runbooks/ai-host-setup.md`;
-up to ~64 GiB). This sets the real system-RAM budget. The default dev-worker memory is a **16 GiB
-ballooned ceiling / 2 GiB floor**; if the carve is large and you run heavy local builds alongside
-the runner VM, lower `dev_worker_memory_mib` further (e.g. `12288`) in
-`kubernetes/infra/dev-workers/terraform.tfvars`.
+up to ~64 GiB). This sets the real system-RAM budget. Dev-worker memory is a **16 GiB ballooned
+ceiling with a per-node floor** (`dev_worker_nodes[].floating`: dw1 8 / dw2 10 / dw3 6 GiB — raised
+2026-07-02 from a uniform 2 GiB, which let the guests OOM-thrash under host oversubscription). The
+floors are sized to each host's spare RAM after the CP downsize (below); tune them per node in
+`kubernetes/infra/dev-workers/variables.tf`.
 
 (IPs `.37/.38/.39` are free static addresses inside the `.2`–`.50` reserve, below the DHCP pool —
 no router change is needed.)
 
-Per-node RAM budget: Talos CP **32 GiB hard** + ai-llm LXC (24 GiB cap, ~0.5 GiB real) + runner
-(24 GiB ceiling / 1 GiB floor) + dev-worker (16 GiB ceiling / 2 GiB floor). Idle footprint is small;
-the pressure point is simultaneous heavy CI + dev build on one node (balloon + swap absorb it).
+Per-node RAM budget: Talos CP (**cp1 32 / cp2 24 / cp3 28 GiB hard**, downsized 2026-07-02 to free
+host RAM — `kubernetes/infra/variables.tf`) + ai-llm LXC (24 GiB cap, ~0.5 GiB real) + runner (24 GiB
+ceiling / **12 GiB floor**, ×2 on node1/node2 and ×1 on node3) + dev-worker (16 GiB ceiling /
+per-node 8–10–6 GiB floor). Hosts run ~82–90% used; the per-node floors are each guest's guaranteed
+working set that pvestatd can't reclaim, so a dev-worker can't be starved into the OOM-thrash again.
 
 ## Provision
 
@@ -106,8 +109,10 @@ git add ansible/secrets/dev-worker.sops.yaml
 - agents (both `c4` + `claude-agent`): `which claude codex` resolve under `~/.npm-global/bin`;
   `claude --version`, `codex --version`; `getfacl ~/.claude ~/.codex` shows c4 `rx`
 - persistence: start a tmux pane, reboot the VM, confirm tmux-continuum restored the session
-- **memory watch (1–2 weeks):** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. If
-  pressure appears, lower `dev_worker_memory_mib` (16→12 GiB), rolling one node at a time.
+- **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The per-node balloon
+  floors (dw1 8 / dw2 10 / dw3 6 GiB) guarantee each guest's working set; if a host still shows
+  sustained pressure, free real host RAM by downsizing that node's Talos CP VM (`control_planes{}`,
+  rolling reboot via `talosctl shutdown` — see `ai-host-setup.md`) rather than starving the dev-worker.
 
 ## Remote access (web terminals)
 
