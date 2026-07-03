@@ -50,6 +50,13 @@ wrapper got a bounded token-fetch retry. (5) Cross-repo gate DONE: platform's `r
 now asserts `~/.docker` is runner-owned + runs a `docker buildx build` smoke test (cchifor/platform#682).
 **Remaining:** optionally narrow the App install to platform-only; optionally purge the drained,
 powered-off BEAST Multipass VMs. (The 4 Hyper-V runners were decommissioned 2026-06-16.)
+**Update (2026-07-03) — dev-worker/CP memory rebalance.** The "dev-worker ceilings cut 16→8" note above
+was **reverted**: it was never applied to the live VMs, and the dev-workers OOM-thrashed at their 2 GiB
+balloon floor under host oversubscription. Fix: **per-node balloon floors** (dw1 8 / dw2 10 / dw3 6 GiB,
+ceiling back to 16) + **downsized the Talos CP VMs** (cp1 24 / cp2 24 / cp3 28 GiB) to free host RAM —
+measured CP working set is only ~9 GiB, so the 32 GiB reservation was mostly reclaimable cache (ADR 0009
+Update 2026-07-03). **gha-runner-6 stays DEFERRED:** the CP downsize freed ~4–8 GiB/node, but node3's
+122B still maxes VRAM+GTT and a 2nd runner needs a full 12 GiB floor node3 can't hold. See cchifor/ailab#85, #86.
 **Relates to:** ADR 0001 (OpenTofu + Ansible), ADR 0006 (Talos/Flux/Cilium), ADR 0008 (AI appliance =
 LXC *outside* Talos), ADR 0009 (control-plane colocation / tight RAM budget).
 
