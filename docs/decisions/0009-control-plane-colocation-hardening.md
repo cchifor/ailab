@@ -40,6 +40,17 @@ budget is **finite (~84 GiB across 3 nodes minus current monitoring/AI/edge)** �
 service must carry a request/limit and (eventually) a quota slot. This is why admission governance
 matters more here than on an elastic cloud cluster.
 
+**Update (2026-07-03) — CP VMs downsized (per-node), colocation budget rebalanced.** 24h Prometheus
+showed each CP's real working set is only **~8–10 GiB** (peak ≤10.4 GiB) — the 32 GiB reservation was
+mostly reclaimable guest page cache, not need. So the CP VMs were **downsized to free host RAM for the
+co-located dev-worker/runner VMs**, which had been OOM-thrashing at a too-low balloon floor under host
+oversubscription: **cp1 24 / cp2 24 / cp3 28 GiB** (cp3 kept larger — node3 runs the 122B + 1 runner,
+no registry LXC). Allocatable drops to ≈19.5 GiB (24 GiB VMs) / ≈24 GiB (28 GiB VM) — still far above the
+~9–10 GiB CP working set and the 4–9% platform request load, so the etcd/kubelet fence still holds. The
+dev-worker balloon floors were also made **per-node** (dw1 8 / dw2 10 / dw3 6 GiB, up from a uniform
+2 GiB; ceiling kept 16). Rolled one CP at a time via `talosctl shutdown` with etcd-quorum checks. See
+cchifor/ailab#85, #86 + docs/runbooks/{ai-host-setup,dev-workers}.md.
+
 ## Consequences
 - A workload memory spike now hits `evictionHard` and evicts low/normal-priority pods before the node
   runs the kubelet/etcd out of memory; `platform-critical` infra survives longest.

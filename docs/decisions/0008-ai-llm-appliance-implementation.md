@@ -40,3 +40,8 @@ targets up). **Heavyweights validated on the current 64 GiB carve (2026-06-14):*
 (59 GiB VRAM, fits), Qwen3.5-122B 23 tok/s (64 GiB VRAM + 8 GiB GTT spill) — so the BIOS carve change is
 not required; the 122B is only RAM-tight with a 32 GiB CP VM. An optional model router and internet
 exposure are tracked in `docs/k8s-followups.md`. Operations: `docs/runbooks/ai-host-setup.md`.
+
+**Update (2026-07-03):** the deferred CP-VM downsize (above) was later done — CPs are now **cp1 24 /
+cp2 24 / cp3 28 GiB**, freeing host RAM for the co-located dev-worker/runner VMs (measured CP working
+set ~9 GiB, so the 32 GiB was mostly reclaimable cache). node3's 122B is now slightly less RAM-tight
+(28 GiB CP). See ADR 0009 (Update 2026-07-03) + cchifor/ailab#85, #86.
