@@ -26,7 +26,7 @@ floors are sized to each host's spare RAM after the CP downsize (below); tune th
 (IPs `.37/.38/.39` are free static addresses inside the `.2`–`.50` reserve, below the DHCP pool —
 no router change is needed.)
 
-Per-node RAM budget: Talos CP (**cp1 32 / cp2 24 / cp3 28 GiB hard**, downsized 2026-07-02 to free
+Per-node RAM budget: Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB hard**, downsized 2026-07-02/03 to free
 host RAM — `kubernetes/infra/variables.tf`) + ai-llm LXC (24 GiB cap, ~0.5 GiB real) + runner (24 GiB
 ceiling / **12 GiB floor**, ×2 on node1/node2 and ×1 on node3) + dev-worker (16 GiB ceiling /
 per-node 8–10–6 GiB floor). Hosts run ~82–90% used; the per-node floors are each guest's guaranteed

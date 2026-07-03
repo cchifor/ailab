@@ -64,7 +64,7 @@ for the daily driver** (the LXC uses ~0.5 GiB system RAM; a node runs the 32 GiB
   a 32 GiB CP VM but pushes `free`→0. For **large contexts** on the 122B, give that node headroom: downsize
   its CP VM (`kubernetes/infra/variables.tf` `control_planes{}`, rolling reboot via `talosctl shutdown` — HA
   tolerates one CP down) or reduce the BIOS UMA carve (manual, per-node) + set kernel `amdgpu.gttsize=131072
-  ttm.pages_limit=…`. **CP sizing is now per-node (2026-07-02): cp1 32 / cp2 24 / cp3 28 GiB** — cp2/cp3 were
+  ttm.pages_limit=…`. **CP sizing is now per-node (2026-07-02, cp1 2026-07-03): cp1 24 / cp2 24 / cp3 28 GiB** — all three were
   downsized to free host RAM for the co-located dev-workers (CP working set is only ~8-10 GiB; see
   docs/runbooks/dev-workers.md).
 
