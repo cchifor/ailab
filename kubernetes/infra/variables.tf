@@ -79,15 +79,17 @@ variable "control_planes" {
     memory       = number # MiB
     disk_gb      = number
   }))
-  # Per-node memory (MiB). cp2 32->24 / cp3 32->28 GiB downsized 2026-07-02 to free host RAM for the
-  # co-located dev-worker VMs (which OOM-thrashed at their 2 GiB balloon floor under host
-  # oversubscription). Safe: measured CP working set is only ~8-10 GiB (24h peak <=10.4 GiB; the
-  # ~20-24 GiB `qm` "used" is mostly reclaimable guest page cache). cp1 kept at 32 GiB. Talos has no
-  # memory hotplug, so a change reboots the VM — roll ONE node at a time (3-CP HA tolerates one down),
-  # graceful-stop via `talosctl shutdown` (ACPI/`qm shutdown` does NOT stop Talos), and verify
-  # `talosctl etcd status` shows 3/3 in-sync between nodes. See docs/runbooks/ai-host-setup.md.
+  # Per-node memory (MiB). cp2 32->24 / cp3 32->28 GiB (2026-07-02), then cp1 32->24 GiB (2026-07-03),
+  # all downsized to free host RAM for the co-located dev-worker VMs (which OOM-thrashed at their 2 GiB
+  # balloon floor under host oversubscription; node1 needed the same once its dev-worker floor was
+  # raised to 8 GiB, leaving node1 at ~5.6 GiB swap). Safe: measured CP working set is only ~8-10 GiB
+  # (24h peak <=10.4 GiB; the ~20-24 GiB `qm` "used" is mostly reclaimable guest page cache). cp3 stays
+  # 28 (node3 is lighter: 1 runner, no registry LXC). Talos has no memory hotplug, so a change reboots
+  # the VM — roll ONE node at a time (3-CP HA tolerates one down), graceful-stop via `talosctl shutdown`
+  # (ACPI/`qm shutdown` does NOT stop Talos), and verify `talosctl etcd status` 3/3 in-sync between nodes.
+  # See docs/runbooks/ai-host-setup.md.
   default = {
-    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", host_ip = "192.168.0.2", storage_tier = "thunderbolt", cores = 8, memory = 32768, disk_gb = 40 }
+    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", host_ip = "192.168.0.2", storage_tier = "thunderbolt", cores = 8, memory = 24576, disk_gb = 40 }
     cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", host_ip = "192.168.0.3", storage_tier = "thunderbolt", cores = 8, memory = 24576, disk_gb = 40 }
     cp3 = { host_node = "ai-node3", vm_id = 4003, ip = "192.168.0.43", host_ip = "192.168.0.4", storage_tier = "ethernet", cores = 8, memory = 28672, disk_gb = 40 }
   }
