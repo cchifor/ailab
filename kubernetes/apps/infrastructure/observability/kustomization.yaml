@@ -3,4 +3,5 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - limitrange.yaml
-  - alloy-otlp.yaml # OTLP metrics collector for the strive platform (stage A: metrics only)
+  - alloy-otlp.yaml # OTLP collector for the strive platform (metrics → prometheus, sampled traces → tempo)
+  - tempo.yaml # trace store (grafana/tempo single-binary) + ingest/query NetworkPolicy
