@@ -1,0 +1,96 @@
+# Alerts over the strive platform's WEEKLY read-mostly soak (cchifor/platform
+# deploy/components/load — k6-weekly-soak CronJob, Sunday 02:00, 90 min @
+# <=10 RPS vs the live edge). The soak streams k6 metrics into this
+# Prometheus tagged env=weekly-soak; the k6-load-rules.yaml recording rules
+# (max by scenario, env) already cover them, so these alerts read the cheap
+# recorded series. Raw k6_* series only exist while a run is in flight —
+# the recorded series are sparse soak-only bursts, which is what makes
+# "k6:*{env=weekly-soak} present" a usable is-the-soak-running gate.
+#
+# Three signals (all route to ntfy via the catch-all Alertmanager route):
+#   K6SoakStarted        info — fires while a soak is streaming; the "first
+#                        run supervised" heads-up + resolves when it ends.
+#   K6SoakErrorRateHigh  the soak's error rate crossed the 5% abort
+#                        threshold. k6 itself aborts on this (abortOnFail,
+#                        5m eval delay), so a hard break usually surfaces
+#                        as the stock KubeJobFailed instead; this catches
+#                        the hovering-just-over case.
+#   StriveSoakMemoryLeak the point of the soak: a strive-ailab container's
+#                        working set grew by BOTH >64MiB AND >25% across a
+#                        75m span that lies entirely INSIDE an active soak
+#                        (gated on the k6 series being present now and 75m
+#                        ago — no false positives from deploys/restarts at
+#                        idle). 75m < the 90m soak so it can fire before
+#                        the run ends; the Monday soak-report workflow
+#                        (cchifor/platform load-weekly-report.yml) computes
+#                        the same delta over the exact window as the
+#                        offline backstop. The k6 runner pod excludes
+#                        itself — its trend buffers legitimately grow all
+#                        run. container_memory_working_set_bytes comes from
+#                        the chart's default kubelet/cAdvisor scrape.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it
+# up (same as k6-load-rules.yaml / storage-fabric-rules.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: soak-leak
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: soak-leak
+      rules:
+        - alert: K6SoakStarted
+          expr: count(k6:http_req_duration:p95{env="weekly-soak"}) > 0
+          labels: { severity: info }
+          annotations:
+            summary: "Weekly read-mostly soak is running against the live edge"
+            description: >-
+              k6 (env=weekly-soak) is streaming metrics — the Sunday 02:00 soak (or a
+              supervised ad-hoc run) is in flight at <=10 RPS vs https://strive.place.
+              Watch the k6-nightly dashboard and StriveSoakMemoryLeak. Resolves when
+              the run ends.
+        - alert: K6SoakErrorRateHigh
+          expr: max by (scenario) (k6:http_req_failed:rate{env="weekly-soak"}) > 0.05
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "Weekly soak error rate >5% ({{ $labels.scenario }})"
+            description: >-
+              The read-mostly soak's http_req_failed rate has exceeded 5% for 10m
+              ({{ $value | humanizePercentage }}). k6's own abortOnFail threshold
+              should be stopping the run — if the k6-weekly-soak Job is still
+              running, check the live edge / auth chain (a broken gatekeeper
+              session turns every read into a 401).
+        - alert: StriveSoakMemoryLeak
+          # Absolute AND relative growth over a 75m span, gated on the soak
+          # being active across that whole span (series present now AND 75m
+          # ago). The and-on() gates compare against a single no-label
+          # count() element, keeping every container's labels on the alert.
+          expr: |-
+            (
+                container_memory_working_set_bytes{namespace="strive-ailab",container!="",container!="POD",pod!~"k6-weekly-soak.*"}
+              - container_memory_working_set_bytes{namespace="strive-ailab",container!="",container!="POD",pod!~"k6-weekly-soak.*"} offset 75m
+              > 67108864
+            )
+            and
+            (
+                container_memory_working_set_bytes{namespace="strive-ailab",container!="",container!="POD",pod!~"k6-weekly-soak.*"}
+              > 1.25 * container_memory_working_set_bytes{namespace="strive-ailab",container!="",container!="POD",pod!~"k6-weekly-soak.*"} offset 75m
+            )
+            and on ()
+            (count(k6:http_req_duration:p95{env="weekly-soak"}) > 0)
+            and on ()
+            (count(k6:http_req_duration:p95{env="weekly-soak"} offset 75m) > 0)
+          labels: { severity: warning }
+          annotations:
+            summary: "Possible RSS leak in {{ $labels.namespace }}/{{ $labels.pod }} ({{ $labels.container }}) under the weekly soak"
+            description: >-
+              {{ $labels.container }}'s working set grew {{ $value | humanize1024 }}B
+              (and >25%) over 75 minutes of steady read-mostly load — flat traffic
+              should mean flat memory. Compare Sunday's soak window in the k6-nightly
+              dashboard, and expect the same container flagged in Monday's 'Weekly
+              soak report' issue (cchifor/platform). If it OOM-kills first, the stock
+              KubeContainerOOMKilledCount/KubePodCrashLooping alerts fire too.
