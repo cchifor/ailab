@@ -1,0 +1,303 @@
+# "k6 — Nightly load (strive)": per-run RPS / p95-p99 / error rate / VUs /
+# checks for the strive platform's nightly k6 lane, plus 30-day trend panels
+# over the k6:* recording rules (k6-load-rules.yaml). Data arrives via k6's
+# experimental-prometheus-rw output from the CI runner VMs through the
+# prometheus-lan NodePort (cchifor/platform load-nightly.yml; adapted from
+# that repo's LOCAL-grafana deploy/observability/dashboards/k6-load.json).
+# Templated on scenario + testid (one per run: <scenario>-<gh run_id>) + env
+# (nightly vs ad-hoc). NOTE: k6's rw output stores durations in SECONDS —
+# unlike the platform's summary exports (ms) — hence the "s" units here.
+# Provisioned via the Grafana sidecar (grafana_dashboard label).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k6-nightly-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  k6-nightly.json: |
+    {
+      "title": "k6 — Nightly load (strive)",
+      "uid": "k6-nightly",
+      "tags": ["strive", "load", "k6"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "1m",
+      "time": { "from": "now-24h", "to": "now" },
+      "graphTooltip": 1,
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROMETHEUS",
+            "type": "datasource",
+            "query": "prometheus",
+            "label": "Datasource",
+            "current": {},
+            "hide": 0,
+            "refresh": 1
+          },
+          {
+            "name": "env",
+            "label": "env",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(k6_http_reqs_total, env)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "allValue": ".*",
+            "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+          },
+          {
+            "name": "scenario",
+            "label": "scenario",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(k6_http_req_duration_p95{env=~\"$env\"}, scenario)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "allValue": ".*",
+            "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+          },
+          {
+            "name": "testid",
+            "label": "testid (run)",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(k6_http_reqs_total{env=~\"$env\"}, testid)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "allValue": ".*",
+            "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Request rate (req/s)",
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "sum by (scenario) (rate(k6_http_reqs_total{scenario=~\"$scenario\", testid=~\"$testid\", env=~\"$env\"}[1m]))",
+              "legendFormat": "{{scenario}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "HTTP duration p95 / p99",
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "auto" }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "k6_http_req_duration_p95{scenario=~\"$scenario\", testid=~\"$testid\", env=~\"$env\"}",
+              "legendFormat": "p95 {{scenario}}"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "k6_http_req_duration_p99{scenario=~\"$scenario\", testid=~\"$testid\", env=~\"$env\"}",
+              "legendFormat": "p99 {{scenario}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Error rate (http_req_failed)",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "auto" }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "k6_http_req_failed_rate{scenario=~\"$scenario\", testid=~\"$testid\", env=~\"$env\"}",
+              "legendFormat": "{{scenario}}"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Virtual users",
+          "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "k6_vus{testid=~\"$testid\", env=~\"$env\"}",
+              "legendFormat": "VUs {{testid}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Checks success rate",
+          "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "auto" }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "k6_checks_rate{scenario=~\"$scenario\", testid=~\"$testid\", env=~\"$env\"}",
+              "legendFormat": "{{scenario}}"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Iteration duration p95",
+          "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "auto" }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "k6_iteration_duration_p95{scenario=~\"$scenario\", testid=~\"$testid\", env=~\"$env\"}",
+              "legendFormat": "{{scenario}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "p95 trend — 30d daily max (recording rule)",
+          "description": "max_over_time day buckets over k6:http_req_duration:p95 — the same series the nightly regression gate medians over 7d. Sparse points: one burst per nightly run.",
+          "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+          "timeFrom": "30d",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "drawStyle": "points", "pointSize": 6, "showPoints": "always", "spanNulls": false }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "max_over_time(k6:http_req_duration:p95{scenario=~\"$scenario\", env=~\"$env\"}[1d])",
+              "legendFormat": "{{scenario}} ({{env}})"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Error-rate trend — 30d daily max (recording rule)",
+          "description": "max_over_time day buckets over k6:http_req_failed:rate — the regression gate's error-rate baseline series.",
+          "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+          "timeFrom": "30d",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "custom": { "drawStyle": "points", "pointSize": 6, "showPoints": "always", "spanNulls": false }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "max_over_time(k6:http_req_failed:rate{scenario=~\"$scenario\", env=~\"$env\"}[1d])",
+              "legendFormat": "{{scenario}} ({{env}})"
+            }
+          ]
+        }
+      ]
+    }
