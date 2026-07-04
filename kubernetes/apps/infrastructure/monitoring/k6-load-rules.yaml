@@ -1,0 +1,32 @@
+# Recording rules over the k6 remote-write series the strive platform's
+# nightly load lane streams in (cchifor/platform load-nightly.yml → the
+# prometheus-lan NodePort → /api/v1/write). k6's experimental-prometheus-rw
+# output emits one gauge per trend stat — k6_http_req_duration_p95 in
+# SECONDS (rw native unit; the platform's summary exports are ms) — and a
+# 0-1 rate gauge (k6_http_req_failed_rate); every sample carries
+# scenario / testid / env tags (env=nightly for the nightly lane). The
+# rules collapse testid so downstream reads one stable, cheap series per
+# (scenario, env): the 7-day baseline queries in the platform's
+# scripts/load/check-regression.mjs and the k6-nightly dashboard's trend
+# panels. Raw k6_* series only exist while a run is in flight, so the
+# recorded series are sparse nightly bursts — exactly what the
+# max_over_time day-bucketing downstream expects.
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it
+# up (same as ci-runners-rules.yaml / storage-fabric-rules.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: k6-load
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: k6-load.recording
+      rules:
+        # nightly p95 latency per scenario — seconds (see header).
+        - record: k6:http_req_duration:p95
+          expr: max by (scenario, env) (k6_http_req_duration_p95)
+        # nightly error rate per scenario — 0-1 ratio.
+        - record: k6:http_req_failed:rate
+          expr: max by (scenario, env) (k6_http_req_failed_rate)
