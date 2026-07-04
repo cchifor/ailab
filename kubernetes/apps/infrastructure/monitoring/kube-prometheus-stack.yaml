@@ -66,6 +66,10 @@ spec:
     prometheus:
       prometheusSpec:
         priorityClassName: platform-critical
+        # Accept remote_write on /api/v1/write — the alloy-otlp collector
+        # (apps/infrastructure/observability) pushes the strive platform's
+        # OTLP RED metrics here.
+        enableRemoteWriteReceiver: true
         # Prefer a Thunderbolt-fabric node (cp1/cp2) so the iSCSI TSDB rides ~1.1GB/s, not cp3's 2.5GbE USB.
         affinity:
           nodeAffinity:
