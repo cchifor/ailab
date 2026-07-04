@@ -1,0 +1,14 @@
+# Default-injection safety net (same rationale as monitoring/limitrange.yaml):
+# any container in this namespace that omits requests/limits gets these
+# injected. default+defaultRequest ONLY — no max/min, so the LimitRange can
+# never REJECT a pod.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: observability
+spec:
+  limits:
+    - type: Container
+      default: { cpu: 500m, memory: 512Mi }
+      defaultRequest: { cpu: 50m, memory: 128Mi }

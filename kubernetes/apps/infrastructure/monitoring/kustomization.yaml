@@ -17,6 +17,7 @@ resources:
   - reporting-dashboard.yaml # single infra reporting dashboard (hypervisors/instances/AI/storage)
   - loki-logs-dashboard.yaml # "Loki — Logs": most-used log queries (errors/volume/search) + Explore
   - trivy-dashboard.yaml # Trivy Operator security-scan dashboard (grafana.com ID 17813)
+  - strive-red-dashboard.yaml # strive platform per-service RPS/error/p95 (OTLP RED metrics via alloy-otlp remote_write)
   - ntfy-auth.sops.yaml # SOPS: ntfy admin password (server seeding + Alertmanager receiver)
   - ntfy.yaml # self-hosted push notifications; Alertmanager routes all alerts here
   - storage-fabric-probe.yaml # per-node QNAP-fabric reachability (blackbox DaemonSet)

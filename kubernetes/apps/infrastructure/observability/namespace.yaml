@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    # OTLP metrics collector only — no hostPath/host access (unlike `monitoring`,
+    # which needs `privileged` for node-exporter + the log Alloy's /var/log
+    # mounts), so the strictest PodSecurity level applies.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted

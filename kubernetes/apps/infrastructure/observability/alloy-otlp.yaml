@@ -1,0 +1,142 @@
+# OTLP metrics collector for the strive platform (stage A: metrics only).
+#
+# DISTINCT from monitoring/alloy.yaml (the log-only node DaemonSet shipping pod
+# logs to Loki — do not fold the two together): this is a single-replica
+# Deployment in its own `observability` namespace because the platform helm
+# charts HARDCODE the exporter endpoint
+#   http://alloy.observability.svc.cluster.local:4318
+# (cchifor/platform deploy/helm/templates/_helpers.tpl) and their
+# NetworkPolicies' standardEgress admits exactly ns=observability +
+# app.kubernetes.io/name=alloy on 4317/4318. The HelmRelease is named
+# alloy-otlp so it can't collide with monitoring/alloy tooling-wise;
+# fullnameOverride pins the Service (= chart fullname) to `alloy`, which is
+# what makes the hardcoded DNS name above resolve.
+#
+# Pipeline: otelcol.receiver.otlp (grpc 4317 / http 4318)
+#   → otelcol.processor.transform (route-label cardinality guard, see below)
+#   → otelcol.processor.batch
+#   → otelcol.exporter.prometheus (service.name → job label)
+#   → prometheus.remote_write → kube-prometheus-stack (ns monitoring;
+#     requires prometheusSpec.enableRemoteWriteReceiver, set in
+#     monitoring/kube-prometheus-stack.yaml).
+# NO traces pipeline (stage A): the receiver's output forwards metrics only,
+# so trace posts (services run OTEL_TRACES_ENABLED=true) are accepted and
+# dropped. Stage B (Tempo) = add a traces consumer + list it in output{}.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: alloy-otlp
+  namespace: observability
+spec:
+  interval: 1h
+  chart:
+    spec:
+      chart: alloy
+      version: "1.10.0" # keep in lockstep with monitoring/alloy.yaml
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: flux-system
+  values:
+    # Service name must be exactly `alloy` (see header) — the chart names the
+    # Service after the release fullname, which would otherwise be alloy-otlp.
+    fullnameOverride: alloy
+    # NO cluster RBAC: the chart names its ClusterRole/ClusterRoleBinding after
+    # the fullname, and the log Alloy release (ns monitoring, fullname also
+    # `alloy`) already owns the cluster-scoped `alloy` ClusterRole — a second
+    # owner fails helm-controller's ownership check. This pipeline is a pure
+    # OTLP receiver → remote_write (no discovery.kubernetes / API access), so
+    # it needs none.
+    rbac:
+      create: false
+    controller:
+      type: deployment # central collector, not per-node (no host mounts)
+      replicas: 1
+    alloy:
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 512Mi }
+      # The namespace enforces PSA `restricted`; the chart default securityContext
+      # is empty, so satisfy it explicitly (uid 473 = the image's `alloy` user).
+      securityContext:
+        runAsUser: 473
+        runAsGroup: 473
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+      # OTLP ports on the container AND the Service (the chart only exposes
+      # 12345/http-metrics by default).
+      extraPorts:
+        - { name: otlp-grpc, port: 4317, targetPort: 4317, protocol: TCP }
+        - { name: otlp-http, port: 4318, targetPort: 4318, protocol: TCP }
+      configMap:
+        content: |
+          // OTLP in — the strive services' weld-observability SDK POSTs RED
+          // metrics to http://alloy.observability.svc.cluster.local:4318.
+          otelcol.receiver.otlp "default" {
+            grpc {
+              endpoint = "0.0.0.0:4317"
+            }
+            http {
+              endpoint = "0.0.0.0:4318"
+            }
+            output {
+              // metrics only — stage A drops traces here (no traces consumer).
+              metrics = [otelcol.processor.transform.sanitize_routes.input]
+            }
+          }
+
+          // Cardinality guard: weld-observability's MetricsMiddleware labels
+          // every datapoint with the RAW request path (http.route =
+          // request.url.path, NOT the route template — sdks/weld-observability/
+          // src/weld/observability/metrics.py), so UUID/numeric path params
+          // would mint one series per resource. Collapse them to :id before
+          // they reach the TSDB.
+          otelcol.processor.transform "sanitize_routes" {
+            error_mode = "ignore"
+            metric_statements {
+              context = "datapoint"
+              statements = [
+                // UUIDs → :id
+                `replace_pattern(attributes["http.route"], "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", ":id")`,
+                // long hex tokens (16+, e.g. object keys/hashes) → :id
+                `replace_pattern(attributes["http.route"], "/[0-9a-fA-F]{16,}", "/:id")`,
+                // purely numeric path segments → :id ("/v1" etc. are unaffected:
+                // the digits must directly follow the slash)
+                `replace_pattern(attributes["http.route"], "/[0-9]+", "/:id")`,
+              ]
+            }
+            output {
+              metrics = [otelcol.processor.batch.default.input]
+            }
+          }
+
+          otelcol.processor.batch "default" {
+            output {
+              metrics = [otelcol.exporter.prometheus.default.input]
+            }
+          }
+
+          // OTLP → Prometheus naming: service.name becomes the `job` label;
+          // http.server.request.duration (unit s) lands as
+          // http_server_request_duration_seconds_{bucket,sum,count}, the
+          // request counter as http_server_request_count_total.
+          otelcol.exporter.prometheus "default" {
+            forward_to = [prometheus.remote_write.kps.receiver]
+          }
+
+          prometheus.remote_write "kps" {
+            endpoint {
+              url = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/api/v1/write"
+            }
+          }
+    configReloader:
+      # Same PSA `restricted` requirements as the alloy container above.
+      securityContext:
+        runAsUser: 473
+        runAsGroup: 473
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
