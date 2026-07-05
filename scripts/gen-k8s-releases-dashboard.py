@@ -208,7 +208,9 @@ dashboard = {
          "current": {}, "hide": 0, "label": "Loki", "refresh": 1},
         {"name": "namespace", "type": "query", "datasource": PROM,
          "query": "label_values(kube_namespace_status_phase, namespace)",
-         "includeAll": True, "multi": True, "allValue": ".*", "sort": 1,
+         # allValue must be ".+" (not ".*"): Loki rejects an all-empty-compatible stream selector
+         # ({namespace=~".*"}). ".+" also matches every (non-empty) namespace for the Prometheus panels.
+         "includeAll": True, "multi": True, "allValue": ".+", "sort": 1,
          "current": {"text": "All", "value": "$__all"}, "refresh": 2},
         {"name": "pod", "type": "query", "label": "Pod", "datasource": LOKI,
          "query": "label_values({namespace=~\"$namespace\"}, pod)",
