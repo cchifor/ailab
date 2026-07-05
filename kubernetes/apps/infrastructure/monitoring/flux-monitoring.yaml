@@ -1,0 +1,25 @@
+# Scrape the 4 Flux controllers' Prometheus endpoints (container port http-prom=8080). Yields
+# gotk_reconcile_condition / gotk_reconcile_duration_seconds / gotk_suspend_status. The controllers
+# already expose these; nothing collected them. PodMonitor lives in `monitoring` (like the other
+# monitors, proven-scraped) and selects the flux-system pods by their `app` label.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: flux-controllers
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [flux-system]
+  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [source-controller, kustomize-controller, helm-controller, notification-controller]
+  podMetricsEndpoints:
+    - port: http-prom
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: flux

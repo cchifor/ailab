@@ -14,6 +14,7 @@ resources:
   - kube-prometheus-stack.yaml
   - loki.yaml
   - alloy.yaml
+  - flux-monitoring.yaml # PodMonitor for the 4 Flux controllers (gotk_reconcile_* metrics)
   - ai-llm-dashboard.yaml
   - reporting-dashboard.yaml # single infra reporting dashboard (hypervisors/instances/AI/storage)
   - loki-logs-dashboard.yaml # "Loki — Logs": most-used log queries (errors/volume/search) + Explore
