@@ -3,9 +3,12 @@
 
 Emits kubernetes/apps/infrastructure/monitoring/k8s-releases-dashboard.yaml — a ConfigMap labeled
 grafana_dashboard=1 so the kube-prometheus-stack Grafana sidecar auto-loads it. Sections:
-  Row 1 Releases (Flux) — gotk_resource_info (KSM custom-resource-state) + gotk_reconcile_* (controllers)
-  Row 2 Resource usage  — cadvisor (container_*) + kube-state-metrics (kube_pod_*)
-  Row 3 Errors & Warnings — Loki logs. Datasource template vars ${DS_PROMETHEUS} / ${DS_LOKI}.
+  Row 1 Releases (Flux) — KPI stats + Ready/Not-Ready/Suspended trend + an all-resources status table
+                          (newest-first, with last-change datetime) + reconcile duration by kind.
+  Row 2 Resource usage  — cadvisor (container_*) + kube-state-metrics (kube_pod_*).
+  Row 3 Logs            — Loki explorer: errors first, then all-logs (search/pod), volume, rate, noisiest.
+Datasource template vars ${DS_PROMETHEUS} / ${DS_LOKI}. Loki metric panels set queryType=range so
+Grafana interpolates $__auto (otherwise Loki gets a literal [$__auto] -> parse error).
 
     python scripts/gen-k8s-releases-dashboard.py
 """
@@ -15,6 +18,7 @@ import pathlib
 PROM = {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}
 LOKI = {"type": "loki", "uid": "${DS_LOKI}"}
 NS = 'namespace=~"$namespace"'
+POD = 'pod=~"$pod"'
 _pid = 0
 
 
@@ -40,15 +44,28 @@ def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, ds=PROM):
             "targets": [{"refId": "A", "datasource": ds, "expr": expr, "instant": True}]}
 
 
-def ts(title, x, y, w, h, exprs, unit="short", legends=None, ds=PROM, fill=10):
+def _color(name, col):
+    return {"matcher": {"id": "byName", "options": name},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": col}}]}
+
+
+def ts(title, x, y, w, h, exprs, unit="short", legends=None, ds=PROM, fill=10, draw="line",
+       stack=False, overrides=None):
     legends = legends or ["{{namespace}}"] * len(exprs)
+    custom = {"drawStyle": draw, "fillOpacity": fill, "showPoints": "never"}
+    if stack:
+        custom["stacking"] = {"mode": "normal"}
+    tgts = []
+    for i, e in enumerate(exprs):
+        t = {"refId": chr(65 + i), "datasource": ds, "expr": e, "legendFormat": legends[i]}
+        if ds is LOKI:
+            t["queryType"] = "range"   # so Grafana interpolates $__auto (else Loki parse-errors on [$__auto])
+        tgts.append(t)
     return {"id": _nid(), "type": "timeseries", "title": title, "datasource": ds,
             "gridPos": {"x": x, "y": y, "w": w, "h": h},
-            "fieldConfig": {"defaults": {"unit": unit,
-                "custom": {"drawStyle": "line", "fillOpacity": fill, "showPoints": "never"}}, "overrides": []},
+            "fieldConfig": {"defaults": {"unit": unit, "custom": custom}, "overrides": overrides or []},
             "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
-            "targets": [{"refId": chr(65 + i), "datasource": ds, "expr": e,
-                         "legendFormat": legends[i]} for i, e in enumerate(exprs)]}
+            "targets": tgts}
 
 
 def logs(title, x, y, w, h, expr):
@@ -56,29 +73,56 @@ def logs(title, x, y, w, h, expr):
             "gridPos": {"x": x, "y": y, "w": w, "h": h},
             "options": {"showTime": True, "wrapLogMessage": True, "sortOrder": "Descending",
                         "enableLogDetails": True, "dedupStrategy": "none"},
-            "targets": [{"refId": "A", "datasource": LOKI, "expr": expr, "queryType": "range"}]}
+            "targets": [{"refId": "A", "datasource": LOKI, "queryType": "range", "expr": expr}]}
 
 
-def rel_table(title, x, y, w, h):
-    # not-ready OR suspended Flux resources; instant table; organize renames the real KSM CRS labels.
-    expr = 'gotk_resource_info{ready!="True"} or gotk_resource_info{suspended="true"}'
-    keep_rename = {"customresource_kind": "Kind", "name": "Name", "exported_namespace": "Namespace",
-                   "ready": "Ready", "suspended": "Suspended", "revision": "Revision"}
-    exclude = ["Time", "Value", "__name__", "customresource_group", "customresource_version",
+# Status value-mapping (the `ready` label True/False -> coloured text) and Suspended mapping.
+STATUS_MAP = [{"type": "value", "options": {
+    "True": {"text": "● Ready", "color": "green", "index": 0},
+    "False": {"text": "● Not Ready", "color": "red", "index": 1},
+    "Unknown": {"text": "● Unknown", "color": "yellow", "index": 2}}}]
+SUSPEND_MAP = [{"type": "value", "options": {
+    "true": {"text": "Suspended", "color": "yellow", "index": 0},
+    "false": {"text": "—", "color": "text", "index": 1}}}]
+
+
+def releases_table(title, x, y, w, h):
+    # One query: last-transition timestamp (ms) with ready/suspended/revision grafted on via group_left.
+    # Value = epoch ms -> rendered as a date; table sorted newest-first.
+    expr = ('(gotk_status_last_transition_timestamp{type="Ready"} * 1000)'
+            ' * on(customresource_kind, name, exported_namespace)'
+            ' group_left(ready, suspended, revision) gotk_resource_info')
+    rename = {"customresource_kind": "Kind", "name": "Name", "exported_namespace": "Namespace",
+              "ready": "Status", "suspended": "Suspended", "revision": "Revision", "Value": "Last change"}
+    order = {"customresource_kind": 0, "name": 1, "exported_namespace": 2, "ready": 3,
+             "suspended": 4, "revision": 5, "Value": 6}
+    exclude = ["Time", "type", "__name__", "customresource_group", "customresource_version",
                "container", "endpoint", "instance", "job", "namespace", "pod", "service", "uid"]
+    overrides = [
+        {"matcher": {"id": "byName", "options": "Status"},
+         "properties": [{"id": "mappings", "value": STATUS_MAP},
+                        {"id": "custom.cellOptions", "value": {"type": "color-text"}}]},
+        {"matcher": {"id": "byName", "options": "Suspended"},
+         "properties": [{"id": "mappings", "value": SUSPEND_MAP},
+                        {"id": "custom.cellOptions", "value": {"type": "color-text"}}]},
+        {"matcher": {"id": "byName", "options": "Last change"},
+         "properties": [{"id": "unit", "value": "dateTimeAsIso"}]},
+    ]
     return {"id": _nid(), "type": "table", "title": title, "datasource": PROM,
             "gridPos": {"x": x, "y": y, "w": w, "h": h},
             "fieldConfig": {"defaults": {"custom": {"align": "auto", "filterable": True,
-                "cellOptions": {"type": "auto"}}}, "overrides": []},
-            "options": {"showHeader": True, "footer": {"show": False}, "cellHeight": "sm"},
+                "cellOptions": {"type": "auto"}}}, "overrides": overrides},
+            "options": {"showHeader": True, "footer": {"show": False}, "cellHeight": "sm",
+                        "sortBy": [{"displayName": "Last change", "desc": True}]},
             "transformations": [{"id": "organize", "options": {
-                "excludeByName": {k: True for k in exclude}, "renameByName": keep_rename, "indexByName": {}}}],
+                "excludeByName": {k: True for k in exclude}, "renameByName": rename, "indexByName": order}}],
             "targets": [{"refId": "A", "datasource": PROM, "expr": expr, "format": "table", "instant": True}]}
 
 
 GREEN0_REDpos = [{"color": "green", "value": None}, {"color": "red", "value": 1}]
 BLUE_YELLOW1 = [{"color": "blue", "value": None}, {"color": "yellow", "value": 1}]
 SRC = 'customresource_kind=~"GitRepository|HelmRepository|OCIRepository"'
+TREND_COLORS = [_color("Ready", "green"), _color("Not Ready", "red"), _color("Suspended", "yellow")]
 
 panels = []
 # ───────────────────────── Row 1: Releases (Flux) ─────────────────────────
@@ -97,45 +141,56 @@ panels += [
     stat("Reconcile p99", 20, 1, 4, 4,
          'histogram_quantile(0.99, sum by (le) (rate(gotk_reconcile_duration_seconds_bucket[5m])))',
          unit="s", decimals=2),
-    rel_table("Not-ready / suspended resources", 0, 5, 24, 7),
-    # reconcile duration by kind (Flux gotk_reconcile_duration_seconds carries `kind`, not `controller`)
-    ts("Reconcile duration p50 / p99 by kind", 0, 12, 24, 7,
+    # Trend: how ready/not-ready/suspended counts evolve over time.
+    ts("Ready / Not-Ready / Suspended (trend)", 0, 5, 24, 7,
+       ['count(gotk_resource_info{ready="True"}) or vector(0)',
+        'count(gotk_resource_info{ready!="True"}) or vector(0)',
+        'count(gotk_resource_info{suspended="true"}) or vector(0)'],
+       "short", legends=["Ready", "Not Ready", "Suspended"], fill=15, overrides=TREND_COLORS),
+    # All Flux resources with status, newest change first.
+    releases_table("Releases — all resources (newest first)", 0, 12, 24, 10),
+    # reconcile duration by kind (gotk_reconcile_duration_seconds carries `kind`)
+    ts("Reconcile duration p50 / p99 by kind", 0, 22, 24, 7,
        ['histogram_quantile(0.5, sum by (le, kind) (rate(gotk_reconcile_duration_seconds_bucket[5m])))',
         'histogram_quantile(0.99, sum by (le, kind) (rate(gotk_reconcile_duration_seconds_bucket[5m])))'],
        "s", legends=["{{kind}} p50", "{{kind}} p99"]),
 ]
 # ───────────────────────── Row 2: Resource usage ─────────────────────────
-panels.append(row("Resource usage (workloads)", 19))
+panels.append(row("Resource usage (workloads)", 29))
 panels += [
-    ts("CPU by namespace (cores)", 0, 20, 12, 7,
+    ts("CPU by namespace (cores)", 0, 30, 12, 7,
        [f'sum by (namespace) (rate(container_cpu_usage_seconds_total{{container!="",{NS}}}[5m]))'], "short"),
-    ts("Memory (working set) by namespace", 12, 20, 12, 7,
+    ts("Memory (working set) by namespace", 12, 30, 12, 7,
        [f'sum by (namespace) (container_memory_working_set_bytes{{container!="",{NS}}})'], "bytes"),
-    ts("Top 10 pods by CPU (cores)", 0, 27, 12, 7,
+    ts("Top 10 pods by CPU (cores)", 0, 37, 12, 7,
        [f'topk(10, sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{{container!="",pod!="",{NS}}}[5m])))'],
        "short", legends=["{{namespace}}/{{pod}}"]),
-    ts("Top 10 pods by memory", 12, 27, 12, 7,
+    ts("Top 10 pods by memory", 12, 37, 12, 7,
        [f'topk(10, sum by (namespace, pod) (container_memory_working_set_bytes{{container!="",pod!="",{NS}}}))'],
        "bytes", legends=["{{namespace}}/{{pod}}"]),
-    ts("Pod restarts (increase, 1h)", 0, 34, 12, 7,
+    ts("Pod restarts (increase, 1h)", 0, 44, 12, 7,
        [f'sum by (namespace) (increase(kube_pod_container_status_restarts_total{{{NS}}}[1h]))'], "short"),
-    # count of not-ready pods that are still active (excludes Succeeded/Failed via `and on` phase filter).
-    # count() of the surviving series (NOT sum, which would add zeros). `and on(...)` avoids group_left.
-    stat("Pods not ready", 12, 34, 12, 7,
+    stat("Pods not ready", 12, 44, 12, 7,
          f'count((kube_pod_status_ready{{condition="true",{NS}}} == 0) and on(namespace,pod) '
          f'(kube_pod_status_phase{{phase=~"Pending|Running|Unknown",{NS}}} == 1)) or vector(0)',
          steps=GREEN0_REDpos),
 ]
-# ───────────────────────── Row 3: Errors & Warnings (logs) ─────────────────────────
-ERR = r'"(?i)(error|warn|fatal|panic|exception|fail)"'
-panels.append(row("Errors & Warnings (logs)", 41))
+# ───────────────────────── Row 3: Logs (Loki explorer) ─────────────────────────
+ERR = r'"(?i)(error|err|warn|warning|fatal|panic|exception|fail)"'
+ERRRATE = r'"(?i)(error|warn|fatal|panic|exception)"'
+panels.append(row("Logs (Loki — errors first, then explorer)", 51))
 panels += [
-    logs("Error / warning logs", 0, 42, 24, 8, f'{{{NS}}} |~ {ERR}'),
-    ts("Error/warn rate by namespace", 0, 50, 12, 7,
-       [f'sum by (namespace) (count_over_time({{{NS}}} |~ {ERR} [$__auto]))'], "short", ds=LOKI),
-    ts("Top 10 noisiest (error/warn) pods", 12, 50, 12, 7,
-       [f'topk(10, sum by (namespace, pod) (count_over_time({{{NS}}} |~ {ERR} [$__auto])))'],
-       "short", legends=["{{namespace}}/{{pod}}"], ds=LOKI),
+    logs("Errors & warnings", 0, 52, 24, 10, f'{{{NS}, {POD}}} |~ {ERR}'),
+    logs("All logs · {namespace, pod} |~ search", 0, 62, 24, 10, f'{{{NS}, {POD}}} |~ "(?i)$search"'),
+    ts("Log volume by namespace", 0, 72, 12, 8,
+       [f'sum by (namespace) (count_over_time({{{NS}}}[$__auto]))'],
+       "short", ds=LOKI, draw="bars", fill=60, stack=True),
+    ts("Error / warn rate by namespace", 12, 72, 12, 8,
+       [f'sum by (namespace) (count_over_time({{{NS}}} |~ {ERRRATE}[$__auto]))'],
+       "short", ds=LOKI, draw="bars", fill=60, stack=True),
+    ts("Top 10 noisiest (error/warn) pods", 0, 80, 24, 8,
+       [f'topk(10, sum by (namespace, pod) (count_over_time({{{NS}}} |~ {ERRRATE}[$__auto])))'],
+       "short", ds=LOKI, legends=["{{namespace}}/{{pod}}"]),
 ]
 
 dashboard = {
@@ -153,8 +208,14 @@ dashboard = {
          "current": {}, "hide": 0, "label": "Loki", "refresh": 1},
         {"name": "namespace", "type": "query", "datasource": PROM,
          "query": "label_values(kube_namespace_status_phase, namespace)",
-         "includeAll": True, "multi": True, "allValue": ".*",
+         "includeAll": True, "multi": True, "allValue": ".*", "sort": 1,
          "current": {"text": "All", "value": "$__all"}, "refresh": 2},
+        {"name": "pod", "type": "query", "label": "Pod", "datasource": LOKI,
+         "query": "label_values({namespace=~\"$namespace\"}, pod)",
+         "includeAll": True, "multi": True, "allValue": ".+", "sort": 1,
+         "current": {"text": "All", "value": "$__all"}, "refresh": 2},
+        {"name": "search", "type": "textbox", "label": "Search (regex, case-insensitive)",
+         "query": "", "current": {"text": "", "value": ""}},
     ]},
     "panels": panels,
 }
