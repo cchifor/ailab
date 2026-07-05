@@ -119,9 +119,10 @@ panels += [
        "bytes", legends=["{{namespace}}/{{pod}}"]),
     ts("Pod restarts (increase, 1h)", 0, 34, 12, 7,
        [f'sum by (namespace) (increase(kube_pod_container_status_restarts_total{{{NS}}}[1h]))'], "short"),
-    # count of not-ready pods that are NOT Succeeded/Completed. count() of the ==0 filter (NOT sum, which adds zeros).
+    # count of not-ready pods that are still active (excludes Succeeded/Failed via `and on` phase filter).
+    # count() of the surviving series (NOT sum, which would add zeros). `and on(...)` avoids group_left.
     stat("Pods not ready", 12, 34, 12, 7,
-         f'count((kube_pod_status_ready{{condition="true",{NS}}} == 0) * on(namespace,pod) group_left '
+         f'count((kube_pod_status_ready{{condition="true",{NS}}} == 0) and on(namespace,pod) '
          f'(kube_pod_status_phase{{phase=~"Pending|Running|Unknown",{NS}}} == 1)) or vector(0)',
          steps=GREEN0_REDpos),
 ]
