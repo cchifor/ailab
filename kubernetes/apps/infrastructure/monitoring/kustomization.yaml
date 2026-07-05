@@ -18,6 +18,7 @@ resources:
   - ai-llm-dashboard.yaml
   - reporting-dashboard.yaml # single infra reporting dashboard (hypervisors/instances/AI/storage)
   - loki-logs-dashboard.yaml # "Loki — Logs": most-used log queries (errors/volume/search) + Explore
+  - k8s-releases-dashboard.yaml # "Kubernetes — Releases & Workloads": Flux status + workload usage + error/warn logs
   - trivy-dashboard.yaml # Trivy Operator security-scan dashboard (grafana.com ID 17813)
   - ntfy-auth.sops.yaml # SOPS: ntfy admin password (server seeding + Alertmanager receiver)
   - ntfy.yaml # self-hosted push notifications; Alertmanager routes all alerts here
