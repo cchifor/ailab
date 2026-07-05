@@ -178,18 +178,22 @@ panels += [
 # ───────────────────────── Row 3: Logs (Loki explorer) ─────────────────────────
 ERR = r'"(?i)(error|err|warn|warning|fatal|panic|exception|fail)"'
 ERRRATE = r'"(?i)(error|warn|fatal|panic|exception)"'
+# Exclude benign lines that merely contain the substring "error" (e.g. Gatus "success=true; errors=0"
+# health checks) so the error views show real problems. Root-cause noise is also cut at the source
+# (Gatus GATUS_LOG_LEVEL=WARN; alloy remotecfg dropped in the log pipeline) — this is defence-in-depth.
+NEG = r'!~ "success=true"'
 panels.append(row("Logs (Loki — errors first, then explorer)", 51))
 panels += [
-    logs("Errors & warnings", 0, 52, 24, 10, f'{{{NS}, {POD}}} |~ {ERR}'),
+    logs("Errors & warnings", 0, 52, 24, 10, f'{{{NS}, {POD}}} |~ {ERR} {NEG}'),
     logs("All logs · {namespace, pod} |~ search", 0, 62, 24, 10, f'{{{NS}, {POD}}} |~ "(?i)$search"'),
     ts("Log volume by namespace", 0, 72, 12, 8,
        [f'sum by (namespace) (count_over_time({{{NS}}}[$__auto]))'],
        "short", ds=LOKI, draw="bars", fill=60, stack=True),
     ts("Error / warn rate by namespace", 12, 72, 12, 8,
-       [f'sum by (namespace) (count_over_time({{{NS}}} |~ {ERRRATE}[$__auto]))'],
+       [f'sum by (namespace) (count_over_time({{{NS}}} |~ {ERRRATE} {NEG}[$__auto]))'],
        "short", ds=LOKI, draw="bars", fill=60, stack=True),
     ts("Top 10 noisiest (error/warn) pods", 0, 80, 24, 8,
-       [f'topk(10, sum by (namespace, pod) (count_over_time({{{NS}}} |~ {ERRRATE}[$__auto])))'],
+       [f'topk(10, sum by (namespace, pod) (count_over_time({{{NS}}} |~ {ERRRATE} {NEG}[$__auto])))'],
        "short", ds=LOKI, legends=["{{namespace}}/{{pod}}"]),
 ]
 

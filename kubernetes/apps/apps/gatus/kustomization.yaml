@@ -5,3 +5,5 @@ resources:
   - limitrange.yaml
   - configmap.yaml
   - deployment.yaml
+  - servicemonitor.yaml # scrape gatus_results_* metrics
+  - prometheusrule.yaml # GatusEndpointDown alert -> ntfy

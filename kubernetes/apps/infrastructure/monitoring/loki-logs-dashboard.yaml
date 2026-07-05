@@ -84,7 +84,7 @@ data:
           "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
           "options": { "showTime": true, "wrapLogMessage": true, "enableLogDetails": true, "sortOrder": "Descending" },
           "targets": [
-            { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "queryType": "range", "expr": "{namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)(error|err|warn|warning|fatal|panic|exception|fail)\"" }
+            { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "queryType": "range", "expr": "{namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)(error|err|warn|warning|fatal|panic|exception|fail)\" !~ \"success=true\"" }
           ]
         },
         {
@@ -108,7 +108,7 @@ data:
           "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } } }, "overrides": [] },
           "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
           "targets": [
-            { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "queryType": "range", "expr": "sum by (namespace) (count_over_time({namespace=~\"$namespace\"} |~ \"(?i)(error|warn|fatal|panic|exception)\"[$__auto]))", "legendFormat": "{{namespace}}" }
+            { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "queryType": "range", "expr": "sum by (namespace) (count_over_time({namespace=~\"$namespace\"} |~ \"(?i)(error|warn|fatal|panic|exception)\" !~ \"success=true\"[$__auto]))", "legendFormat": "{{namespace}}" }
           ]
         },
         {

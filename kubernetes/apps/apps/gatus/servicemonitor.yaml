@@ -1,0 +1,18 @@
+# Scrape Gatus's native Prometheus metrics (gatus_results_*, enabled via metrics: true in the config).
+# The operator's serviceMonitorNamespaceSelector is {} (all namespaces) and selects by the
+# release=kube-prometheus-stack label, so this ServiceMonitor works from the gatus namespace.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gatus
+  namespace: gatus
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gatus
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 60s

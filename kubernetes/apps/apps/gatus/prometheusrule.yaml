@@ -1,0 +1,25 @@
+# Alert when a Gatus-monitored endpoint's last check is failing. Replaces log-scraping as the
+# failure signal now that the per-check success logs are silenced (GATUS_LOG_LEVEL=WARN).
+# Routes to ntfy via the existing Alertmanager config (all alerts -> ntfy). release label so the
+# operator's ruleSelector (release=kube-prometheus-stack) discovers it from the gatus namespace.
+# NOTE: the exact metric/label names are verified live after metrics: true takes effect.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gatus
+  namespace: gatus
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: gatus-endpoints
+      rules:
+        - alert: GatusEndpointDown
+          # gatus_results_endpoint_success is a 0/1 gauge of the last check per endpoint.
+          expr: gatus_results_endpoint_success == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Gatus endpoint {{ $labels.name }} ({{ $labels.group }}) is failing"
+            description: "Health check '{{ $labels.name }}' in group '{{ $labels.group }}' (key {{ $labels.key }}) has reported failure for 5m."
