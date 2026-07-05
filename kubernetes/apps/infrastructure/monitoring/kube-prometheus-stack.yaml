@@ -213,3 +213,89 @@ spec:
               enabled: true
             serviceMap:
               datasourceUid: prometheus
+    kube-state-metrics:
+      # Flux custom-resource-state → gotk_resource_info{customresource_kind, name, exported_namespace,
+      # ready, suspended, revision}. Powers the "Kubernetes — Releases & Workloads" dashboard Row 1.
+      # Default collectors stay ON (the k8s dashboard uses kube_pod_*/container_*/kube_namespace_*).
+      rbac:
+        extraRules:
+          - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+            resources: ["kustomizations"]
+            verbs: ["list", "watch"]
+          - apiGroups: ["helm.toolkit.fluxcd.io"]
+            resources: ["helmreleases"]
+            verbs: ["list", "watch"]
+          - apiGroups: ["source.toolkit.fluxcd.io"]
+            resources: ["gitrepositories", "helmrepositories", "helmcharts", "ocirepositories", "buckets"]
+            verbs: ["list", "watch"]
+      customResourceState:
+        enabled: true
+        config:
+          kind: CustomResourceStateMetrics
+          spec:
+            resources:
+              - groupVersionKind: { group: kustomize.toolkit.fluxcd.io, version: v1, kind: Kustomization }
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: "The current state of a Flux Kustomization resource."
+                    each:
+                      type: Info
+                      info: { labelsFromPath: { name: [metadata, name] } }
+                    labelsFromPath:
+                      exported_namespace: [metadata, namespace]
+                      ready: [status, conditions, "[type=Ready]", status]
+                      suspended: [spec, suspend]
+                      revision: [status, lastAppliedRevision]
+              - groupVersionKind: { group: helm.toolkit.fluxcd.io, version: v2, kind: HelmRelease }
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: "The current state of a Flux HelmRelease resource."
+                    each:
+                      type: Info
+                      info: { labelsFromPath: { name: [metadata, name] } }
+                    labelsFromPath:
+                      exported_namespace: [metadata, namespace]
+                      ready: [status, conditions, "[type=Ready]", status]
+                      suspended: [spec, suspend]
+                      revision: [status, history, "0", chartVersion]  # deployed release (codex round1)
+              - groupVersionKind: { group: source.toolkit.fluxcd.io, version: v1, kind: GitRepository }
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: "The current state of a Flux GitRepository resource."
+                    each:
+                      type: Info
+                      info: { labelsFromPath: { name: [metadata, name] } }
+                    labelsFromPath:
+                      exported_namespace: [metadata, namespace]
+                      ready: [status, conditions, "[type=Ready]", status]
+                      suspended: [spec, suspend]
+                      revision: [status, artifact, revision]
+              - groupVersionKind: { group: source.toolkit.fluxcd.io, version: v1, kind: HelmRepository }
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: "The current state of a Flux HelmRepository resource."
+                    each:
+                      type: Info
+                      info: { labelsFromPath: { name: [metadata, name] } }
+                    labelsFromPath:
+                      exported_namespace: [metadata, namespace]
+                      ready: [status, conditions, "[type=Ready]", status]
+                      suspended: [spec, suspend]
+                      revision: [status, artifact, revision]
+              - groupVersionKind: { group: source.toolkit.fluxcd.io, version: v1, kind: OCIRepository }
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: "The current state of a Flux OCIRepository resource."
+                    each:
+                      type: Info
+                      info: { labelsFromPath: { name: [metadata, name] } }
+                    labelsFromPath:
+                      exported_namespace: [metadata, namespace]
+                      ready: [status, conditions, "[type=Ready]", status]
+                      suspended: [spec, suspend]
+                      revision: [status, artifact, revision]
