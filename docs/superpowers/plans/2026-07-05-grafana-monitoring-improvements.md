@@ -620,3 +620,5 @@ Confirm the existing Fleet rows (Hypervisors, Instances, AI, Storage) still rend
 **Placeholder scan:** CRS `revision` label paths flagged with an explicit upstream cross-check (Task 2 Step 4) rather than left vague; all queries are concrete. The two transform scripts are described with exact inputs/outputs and validated by lint gates — acceptable because the deterministic artifact (the resulting JSON) is fully specified by the panel tables + templates and checked by the lint.
 
 **Type/label consistency:** job labels (`ci-runner-node`, `dev-worker-node`, `ai-llm-node`) consistent across tasks; `gotk_resource_info` label names (`customresource_kind`, `ready`, `suspended`, `exported_namespace`, `revision`) consistent between Task 2 (producer) and Task 4 (consumer); panel ids unique and non-overlapping (verified by lint gates in Tasks 3 & 4).
+
+<!-- codex-review-status: pending -->
