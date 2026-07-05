@@ -69,6 +69,12 @@ spec:
           }
           loki.process "pod_logs" {
             stage.cri {}
+            // Drop Alloy's benign one-time-per-startup remotecfg error (remotecfg is unconfigured
+            // by design -> err="noop client"); it's cosmetic and otherwise pollutes error/warn views.
+            stage.drop {
+              expression          = "remotecfg.+noop client"
+              drop_counter_reason = "alloy_remotecfg_noop"
+            }
             forward_to = [loki.write.default.receiver]
           }
           loki.write "default" {
