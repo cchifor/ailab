@@ -250,8 +250,8 @@ panels.append(row("GitHub Actions Runners (host node_exporter)", 86))
 panels += [
     stat("Runners Up", 0, 87, 4, 4, f'count(up{{{RUNNERS}}} == 1) or vector(0)',
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 5}]),
-    stat("Runner Cores", 4, 87, 4, 4, f'count(node_cpu_seconds_total{{{RUNNERS},mode="idle"}})'),
-    stat("Runner Memory", 8, 87, 4, 4, f'sum(node_memory_MemTotal_bytes{{{RUNNERS}}})', unit="bytes", decimals=1),
+    stat("Runner Cores", 4, 87, 4, 4, f'count(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}) or vector(0)'),
+    stat("Runner Memory", 8, 87, 4, 4, f'sum(node_memory_MemTotal_bytes{{{RUNNERS}}}) or vector(0)', unit="bytes", decimals=1),
     stat("Fleet CPU Used", 12, 87, 6, 4,
          f'100 * (1 - avg(rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))',
          unit="percent", decimals=1, steps=PCT),
@@ -279,8 +279,8 @@ panels.append(row("Dev Workers (host node_exporter)", 105))
 panels += [
     stat("Workers Up", 0, 106, 4, 4, f'count(up{{{WORKERS}}} == 1) or vector(0)',
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 3}]),
-    stat("Worker Cores", 4, 106, 4, 4, f'count(node_cpu_seconds_total{{{WORKERS},mode="idle"}})'),
-    stat("Worker Memory", 8, 106, 4, 4, f'sum(node_memory_MemTotal_bytes{{{WORKERS}}})', unit="bytes", decimals=1),
+    stat("Worker Cores", 4, 106, 4, 4, f'count(node_cpu_seconds_total{{{WORKERS},mode="idle"}}) or vector(0)'),
+    stat("Worker Memory", 8, 106, 4, 4, f'sum(node_memory_MemTotal_bytes{{{WORKERS}}}) or vector(0)', unit="bytes", decimals=1),
     stat("Fleet CPU Used", 12, 106, 6, 4,
          f'100 * (1 - avg(rate(node_cpu_seconds_total{{{WORKERS},mode="idle"}}[5m])))',
          unit="percent", decimals=1, steps=PCT),
