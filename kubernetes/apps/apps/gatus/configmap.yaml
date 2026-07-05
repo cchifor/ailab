@@ -10,6 +10,10 @@ data:
   config.yaml: |
     web:
       port: 8080
+    # Expose Prometheus metrics (gatus_results_*) at /metrics so endpoint health is an
+    # alertable signal (see servicemonitor.yaml + prometheusrule.yaml) instead of log-scraping.
+    # This lets us quiet the per-check success logs (GATUS_LOG_LEVEL=WARN in deployment.yaml).
+    metrics: true
     storage:
       type: memory
     ui:
