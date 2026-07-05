@@ -10,6 +10,7 @@ resources:
   - pve-exporter.yaml # Proxmox VE metrics (hypervisors + VMs/CTs + storage pools)
   - proxmox-node.yaml # host node_exporter on the 3 Proxmox hosts (scrape target)
   - ci-runners-node.yaml # host node_exporter on the 3 GitHub Actions runner VMs (scrape target)
+  - dev-workers-node.yaml # host node_exporter on the 3 dev-worker VMs (scrape target)
   - kube-prometheus-stack.yaml
   - loki.yaml
   - alloy.yaml

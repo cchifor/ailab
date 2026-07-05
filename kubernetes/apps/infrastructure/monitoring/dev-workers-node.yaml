@@ -1,0 +1,50 @@
+# Host-level node_exporter on the 3 dev-worker VMs (.37/.38/.39:9100, installed via the dev_worker
+# ansible role which reuses the node_exporter role; its firewall is already open). Gives true
+# CPU/mem/disk/network for the interactive dev/build workloads, shown on the AI Lab Fleet dashboard
+# alongside the hypervisors and CI runners. relabel forces job="dev-worker-node". Mirror of ci-runners-node.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dev-worker-node
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: dev-worker-node
+spec:
+  clusterIP: None
+  ports:
+    - { name: metrics, port: 9100, targetPort: 9100, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: dev-worker-node
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: dev-worker-node
+subsets:
+  - addresses:
+      - { ip: 192.168.0.37 }
+      - { ip: 192.168.0.38 }
+      - { ip: 192.168.0.39 }
+    ports:
+      - { name: metrics, port: 9100, protocol: TCP }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dev-worker-node
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [monitoring]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dev-worker-node
+  endpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: dev-worker-node
