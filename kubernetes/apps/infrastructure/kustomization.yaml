@@ -8,4 +8,5 @@ resources:
   - cert-manager # TLS cert automation (ClusterIssuers applied separately via clusters/ai/cert-manager-config.yaml)
   - storage
   - monitoring
+  - observability # OTLP metrics collector (alloy-otlp) for the strive platform — remote-writes into monitoring's Prometheus
   - security # Trivy Operator (vulnerability + misconfig scanning)

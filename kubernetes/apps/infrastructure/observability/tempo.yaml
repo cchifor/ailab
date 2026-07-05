@@ -1,0 +1,115 @@
+# Tempo — trace store for the strive platform (stage B of the OTLP pipeline).
+#
+# Receives OTLP spans from the alloy-otlp collector in this namespace (which
+# head-samples them — see alloy-otlp.yaml) and serves TraceQL queries to the
+# monitoring Grafana (Tempo datasource in kube-prometheus-stack.yaml,
+# http://tempo.observability.svc.cluster.local:3200).
+#
+# Chart: grafana/tempo (Single Binary Mode) — right-sized for one homelab
+# replica with local-disk blocks. NOTE the chart is marked `deprecated: true`
+# upstream (grafana consolidated on tempo-distributed, whose monolithic mode
+# is far heavier to configure); it still renders/installs fine and 1.24.x
+# tracks current Tempo (2.9). Revisit if a needed Tempo release stops landing.
+#
+# INGEST SURFACE: the chart's config/Service unconditionally expose the whole
+# receiver zoo (jaeger/zipkin/opencensus + OTLP) and its _ports.tpl
+# nil-derefs `receivers.jaeger.protocols.*`, so the unused receivers cannot
+# be removed via values (jaeger: null fails the render). Enforcement is the
+# NetworkPolicy below instead: OTLP 4317/4318 from the alloy collector pods
+# only, 3200 from the monitoring Grafana only, everything else to tempo pods
+# dropped.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: tempo
+  namespace: observability
+spec:
+  interval: 1h
+  chart:
+    spec:
+      chart: tempo
+      version: "1.24.4" # Tempo 2.9.0
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: flux-system
+  values:
+    tempo:
+      # 72h block retention (compactor.compaction.block_retention): three
+      # nightly load runs + ad-hoc debugging headroom. With the collector's
+      # 25% head sampling this stays comfortably inside the 10Gi PVC.
+      retention: 72h
+      # No Go ballast (default 1024 MB): a ballast the size of double the
+      # memory limit guarantees OOMKill at this pod size.
+      memBallastSizeMbs: 0
+      # No usage phoning-home from the homelab.
+      reportingEnabled: false
+      resources:
+        requests: { cpu: 200m, memory: 512Mi }
+        limits: { memory: 1Gi }
+      # PSA `restricted` namespace (see namespace.yaml): the chart's container
+      # securityContext default is EMPTY, so satisfy restricted explicitly
+      # (uid 10001 matches the chart's pod-level default below).
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+    # Pod-level securityContext (the chart default carries uid/fsGroup 10001
+    # but NO seccompProfile, which restricted PSA requires). fsGroup 10001
+    # makes the iSCSI block PVC below group-writable for the tempo user —
+    # same mechanism the monitoring Prometheus relies on.
+    securityContext:
+      runAsUser: 10001
+      runAsGroup: 10001
+      fsGroup: 10001
+      runAsNonRoot: true
+      seccompProfile: { type: RuntimeDefault }
+    # Durable trace blocks + WAL at /var/tempo on QNAP iSCSI block storage —
+    # the same class backing the monitoring Prometheus TSDB (NFS is unsafe
+    # for mmap/file-lock workloads; see kube-prometheus-stack.yaml).
+    persistence:
+      enabled: true
+      storageClassName: qnap-iscsi
+      accessModes: ["ReadWriteOnce"]
+      size: 10Gi
+---
+# Ingest/query lockdown (see the header): only the alloy-otlp collector may
+# push OTLP, only the monitoring Grafana may query. Selecting the tempo pods
+# with an ingress policy default-denies every other peer/port combination —
+# including the chart's always-open jaeger/zipkin/opencensus receivers.
+# Kubelet /ready probes keep working (Cilium admits host-local traffic).
+# Ingress-only: egress stays unrestricted (DNS, iSCSI CSI, etc.).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tempo
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tempo
+      app.kubernetes.io/instance: tempo
+  policyTypes: [Ingress]
+  ingress:
+    # OTLP ingest — the alloy-otlp collector only (fullnameOverride `alloy`,
+    # so its pods carry app.kubernetes.io/name=alloy; same-namespace peer).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alloy
+      ports:
+        - { protocol: TCP, port: 4317 } # otlp grpc
+        - { protocol: TCP, port: 4318 } # otlp http
+    # Query API (TraceQL / trace lookup) — the monitoring Grafana only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - { protocol: TCP, port: 3200 }

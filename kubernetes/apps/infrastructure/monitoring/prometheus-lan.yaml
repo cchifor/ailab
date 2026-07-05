@@ -1,0 +1,52 @@
+# LAN-only NodePort in front of the kube-prometheus-stack Prometheus.
+#
+# Why: the platform's nightly k6 lane (cchifor/platform load-nightly.yml)
+# runs on the self-hosted runner VMs (192.168.0.47-.49 / .33-.34), which
+# share the flat mgmt LAN with the Talos nodes (.41-.43) but sit OUTSIDE
+# the cluster. It needs two endpoints on this Prometheus:
+#   - POST /api/v1/write       — k6's experimental-prometheus-rw output
+#     (prometheusSpec.enableRemoteWriteReceiver is already on for alloy-otlp)
+#   - GET  /api/v1/query_range — the platform's check-regression.mjs reads
+#     its 7-day baseline over the k6:* recording rules (k6-load-rules.yaml)
+#
+# Exposure trade-off (deliberate): a NodePort cannot path-scope, so this
+# exposes the full Prometheus HTTP API — read access to all cluster metrics
+# plus remote-write ingestion — to the LAN. Accepted because (a) the mgmt
+# LAN is single-operator/private and node IPs have no WAN route (public
+# ingress stays cloudflared/tailscale-only, see apps/edge); (b) the
+# mutating endpoints (delete_series/snapshot) stay off — they require
+# prometheusSpec.enableAdminAPI, which kube-prometheus-stack.yaml does NOT
+# set; (c) every path-scoped alternative adds a moving part this cluster
+# doesn't run (no LAN ingress controller / LoadBalancer exists) or CF
+# dashboard churn (Access service tokens) for a hop that never leaves the
+# LAN. If LAN trust ever changes, put an auth/path-scoping proxy in front
+# and repoint this Service's selector — the platform side only knows a URL
+# (repo var LOAD_PROM_RW_URL).
+#
+# The monitoring namespace runs no NetworkPolicies (nothing to conform to
+# here); source-IP scoping to the runner subnet would need
+# externalTrafficPolicy: Local + a Cilium policy and is deferred until
+# something untrusted joins the LAN.
+#
+# Reachable at http://<any-node-ip>:30090 (.41/.42/.43 — .40 is the
+# API-server VIP only). Selector matches the chart's own
+# kube-prometheus-stack-prometheus Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-lan
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus-lan
+    app.kubernetes.io/part-of: kube-prometheus-stack
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: prometheus
+    operator.prometheus.io/name: kube-prometheus-stack-prometheus
+  ports:
+    - name: http-web
+      port: 9090
+      targetPort: 9090
+      nodePort: 30090
+      protocol: TCP
