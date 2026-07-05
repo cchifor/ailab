@@ -4,19 +4,37 @@
 
 **Goal:** Add runner/worker resource sections to the AI Lab Fleet dashboard, add a new Kubernetes releases+workloads+logs dashboard (backed by new Flux metric collection), and fix the two real issues found in the dashboard audit.
 
-**Architecture:** Everything lives under `kubernetes/apps/infrastructure/monitoring/` (Flux-reconciled on merge to `main`), except one relabel in `kubernetes/apps/apps/ai/monitoring.yaml`. Two new scrape/collection resources unlock missing data (dev-worker node_exporter; Flux `gotk_*`), then dashboards consume it. Dashboard JSON lives in ConfigMaps (one minified JSON string under a `data` key), edited by parse→mutate→re-minify scripts — never by hand — to avoid corruption.
+**Architecture:** Everything lives under `kubernetes/apps/infrastructure/monitoring/` (Flux-reconciled on merge to `main`), except one relabel in `kubernetes/apps/apps/ai/monitoring.yaml`. Two new scrape/collection resources unlock missing data (dev-worker node_exporter; Flux `gotk_*`), then dashboards consume it. **Both Fleet and the new dashboard are produced by Python generator scripts under `scripts/` (`gen-reporting-dashboard.py`, new `gen-k8s-releases-dashboard.py`) — the `*-dashboard.yaml` ConfigMaps are generated output; never hand-edit them.**
 
-**Tech Stack:** Kubernetes (Talos), Flux, kube-prometheus-stack (Prometheus Operator, kube-state-metrics, Grafana + dashboard sidecar), Loki + Alloy, PromQL/LogQL, Grafana dashboard schema v39.
+**Tech Stack:** Kubernetes (Talos), Flux v2.8, kube-prometheus-stack (Prometheus Operator, kube-state-metrics, Grafana + dashboard sidecar), Loki + Alloy, PromQL/LogQL, Grafana dashboard schema v39, Python dashboard generators.
 
 ## Global Constraints
 
-- **Reconcile model:** `kubernetes/apps/**` is GitOps — Flux applies on merge to `main`. Pre-merge validation is local (`kustomize build`) + optional server-side dry-run; full behavioral validation is post-merge (Task 6). Copy verbatim from spec.
-- **Operator discovery:** every `ServiceMonitor`/`PodMonitor` MUST carry label `release: kube-prometheus-stack` or the Prometheus Operator's selector ignores it.
-- **Dashboard provisioning:** every dashboard ConfigMap MUST carry label `grafana_dashboard: "1"` (the Grafana sidecar selector). No folder annotations are used (all land in the default folder), matching the 4 existing dashboards.
-- **Datasource references:** dashboards reference datasources ONLY through template variables — `${DS_PROMETHEUS}` (query `prometheus`) and `${DS_LOKI}` (query `loki`). Never hardcode datasource UIDs.
-- **Cluster context:** all live checks use `kubectl --context admin@ai` (the default context is a DIFFERENT cluster). Prometheus is distroless → port-forward + curl the HTTP API.
+- **Reconcile model:** `kubernetes/apps/**` is GitOps — Flux applies on merge to `main`. Pre-merge validation is local (`kustomize build`) + optional server-side dry-run; full behavioral validation is post-merge (Task 6).
+- **Operator discovery:** every `ServiceMonitor`/`PodMonitor` MUST carry label `release: kube-prometheus-stack`.
+- **Dashboard provisioning:** every dashboard ConfigMap MUST carry label `grafana_dashboard: "1"`. No folder annotations.
+- **Dashboards are generated:** edit the `scripts/gen-*.py` generator, then run it to regenerate the ConfigMap. Never edit `reporting-dashboard.yaml`/`k8s-releases-dashboard.yaml` by hand. Panel `id`s are auto-assigned by the generator's `_nid()` counter in creation order — do NOT hand-number panels.
+- **Datasource references:** dashboards reference datasources ONLY through template variables `${DS_PROMETHEUS}` / `${DS_LOKI}`. Never hardcode datasource UIDs.
+- **Cluster context:** all live checks use `kubectl --context admin@ai`. Prometheus is distroless → port-forward + curl the HTTP API.
 - **Kustomization registration:** every new resource file MUST be added to `kubernetes/apps/infrastructure/monitoring/kustomization.yaml`.
-- **Fleet layout:** `reporting-dashboard.yaml` is a flat 24-column grid of uncollapsed `type:"row"` markers + sibling panels positioned by `gridPos.y`. Current bottom `y=86`, next free panel `id=41`. New panels append at `y>=86`; `x`+`w` sum ≤24 per horizontal band; ids unique and ascending from 41.
+- **Grid invariants (assert in every generator's self-check):** unique panel ids, no gridPos overlaps, `x+w<=24` per band, and the Fleet dashboard ends at `maxY=124` after the two new sections.
+
+## Codex Review (Round 1) — Dispositions
+
+Genuine codex `gpt-5.5` review (27 markers; artifact at `plans/2026-07-05-grafana-monitoring-codex-review-round1.md`). All findings **accepted and folded into the tasks below**, except two where the intent is honored but the exact expression is corrected (documented inline):
+
+- **Fleet is script-generated** → Task 3 now edits `scripts/gen-reporting-dashboard.py` (not the JSON). *(critical)*
+- **AI-CPU keep/trim contradiction** → AI row keeps **5** panels incl. AI Node CPU (fixed to job label); removes 5. Counts updated everywhere.
+- **PodMonitor** → lives in ns `monitoring`, `namespaceSelector: [flux-system]`, `podMetricsEndpoints`, `app In (...)` — verified against live pods (label `app: <controller>`, port `http-prom`).
+- **HelmRelease revision** → `status.history[0].chartVersion` (the deployed release), not `lastAttemptedRevision`.
+- **KSM CRS** → keep default collectors enabled (Task 4 needs standard `kube_*`); `metricNamePrefix: gotk` + `resource_info` per kind; plural RBAC; exact GVKs.
+- **`ready`/`suspended` casing** → `ready="True"`, Not-Ready uses `ready!="True"` (catches `Unknown`), `suspended="true"`.
+- **Zero-target guards** → `... or vector(0)` on discrete count stats (Up, Not Ready, Suspended, Pods-not-ready).
+- **k8s dashboard panel count** → **17** non-row panels (8+6+3), not 15; grid overlap lint added.
+- **Table label names** → organize transform renames the real KSM labels `customresource_kind`/`exported_namespace`.
+- **topk before aggregation** + `pod!=""`; **namespace var** `label_values(kube_namespace_status_phase, namespace)` + `allValue: ".*"`.
+- **Refinement 1 (vs codex):** Pods-not-ready uses `count(kube_pod_status_ready{condition="true"} == 0) or vector(0)` — `count` of the filtered series, NOT `sum` (codex suggested `sum`, which would add zeros and always yield 0). Also excludes Succeeded/Completed pods via a `kube_pod_status_phase` join filter.
+- **Refinement 2 (vs codex):** reconcile-duration breakdown groups by `kind` (`sum by(le, kind)`), the label Flux's `gotk_reconcile_duration_seconds` actually carries, not `controller`; Task 6 verifies the real label once metrics flow and switches if needed.
 
 ---
 
@@ -27,10 +45,9 @@ Unlocks CPU/mem/disk/net for dev-workers `.37/.38/.39` (node_exporter already ru
 **Files:**
 - Create: `kubernetes/apps/infrastructure/monitoring/dev-workers-node.yaml`
 - Modify: `kubernetes/apps/infrastructure/monitoring/kustomization.yaml`
-- Validate: local (`kustomize build`), optional server dry-run
 
 **Interfaces:**
-- Produces: Prometheus series `node_*{job="dev-worker-node"}` for 3 instances (`192.168.0.37/.38/.39:9100`). Consumed by Task 3 (Fleet Dev Workers section).
+- Produces: `node_*{job="dev-worker-node"}` for `192.168.0.37/.38/.39:9100`. Consumed by Task 3.
 
 - [ ] **Step 1: Write the scrape manifest**
 
@@ -40,8 +57,7 @@ Create `kubernetes/apps/infrastructure/monitoring/dev-workers-node.yaml`:
 # Host-level node_exporter on the 3 dev-worker VMs (.37/.38/.39:9100, installed via the dev_worker
 # ansible role which reuses the node_exporter role; its firewall is already open). Gives true
 # CPU/mem/disk/network for the interactive dev/build workloads, shown on the AI Lab Fleet dashboard
-# alongside the hypervisors and CI runners. relabel forces job="dev-worker-node" so dashboard queries
-# stay clean. Mirror of ci-runners-node.yaml.
+# alongside the hypervisors and CI runners. relabel forces job="dev-worker-node". Mirror of ci-runners-node.yaml.
 apiVersion: v1
 kind: Service
 metadata:
@@ -92,23 +108,20 @@ spec:
 
 - [ ] **Step 2: Register in kustomization**
 
-In `kubernetes/apps/infrastructure/monitoring/kustomization.yaml`, add after the `ci-runners-node.yaml` line (line 12):
+In `kustomization.yaml`, add after the `ci-runners-node.yaml` line (line 12):
 
 ```yaml
   - dev-workers-node.yaml # host node_exporter on the 3 dev-worker VMs (scrape target)
 ```
 
-- [ ] **Step 3: Validate the manifest fails BEFORE and builds AFTER**
+- [ ] **Step 3: Validate**
 
-Run (from repo root): `python -c "import yaml,sys; list(yaml.safe_load_all(open('kubernetes/apps/infrastructure/monitoring/dev-workers-node.yaml'))); print('yaml OK')"`
-Expected: `yaml OK` (3 docs parse).
-
-Run: `kubectl kustomize kubernetes/apps/infrastructure/monitoring >/dev/null && echo "kustomize OK"`
-Expected: `kustomize OK` (dev-worker-node resources present, no errors).
-
-Optional server dry-run (validates ServiceMonitor CRD schema against the live cluster, no apply):
-`kubectl --context admin@ai apply --dry-run=server -f kubernetes/apps/infrastructure/monitoring/dev-workers-node.yaml`
-Expected: `service/dev-worker-node created (server dry run)`, `endpoints/dev-worker-node created (server dry run)`, `servicemonitor.monitoring.coreos.com/dev-worker-node created (server dry run)`.
+```
+python -c "import yaml; list(yaml.safe_load_all(open('kubernetes/apps/infrastructure/monitoring/dev-workers-node.yaml'))); print('yaml OK')"
+kubectl kustomize kubernetes/apps/infrastructure/monitoring >/dev/null && echo "kustomize OK"
+kubectl --context admin@ai apply --dry-run=server -f kubernetes/apps/infrastructure/monitoring/dev-workers-node.yaml
+```
+Expected: `yaml OK`; `kustomize OK`; three `... created (server dry run)` lines.
 
 - [ ] **Step 4: Commit**
 
@@ -122,33 +135,31 @@ git commit -m "feat(monitoring): scrape dev-worker node_exporter (job=dev-worker
 
 ### Task 2: Flux metrics collection (PodMonitor + kube-state-metrics custom-resource-state)
 
-Unlocks `gotk_reconcile_*` (from the controllers) and `gotk_resource_info` (per HelmRelease/Kustomization/source, from KSM). Neither exists today.
+Unlocks `gotk_reconcile_*` (controllers, via PodMonitor) and `gotk_resource_info` (per HelmRelease/Kustomization/source, via KSM CRS). Neither exists today (verified: `gotk_*` returns empty pre-merge).
 
 **Files:**
 - Create: `kubernetes/apps/infrastructure/monitoring/flux-monitoring.yaml`
-- Modify: `kubernetes/apps/infrastructure/monitoring/kube-prometheus-stack.yaml` (add `kube-state-metrics:` values block)
+- Modify: `kubernetes/apps/infrastructure/monitoring/kube-prometheus-stack.yaml`
 - Modify: `kubernetes/apps/infrastructure/monitoring/kustomization.yaml`
 
-**Interfaces:**
-- Produces:
-  - `gotk_reconcile_condition{type,status,kind,name,exported_namespace}`, `gotk_reconcile_duration_seconds_bucket{le,controller,kind}`, `gotk_suspend_status` (via PodMonitor).
-  - `gotk_resource_info{customresource_kind, customresource_group, name, exported_namespace, ready, suspended, revision}` (Info metric, value 1; state in labels) via KSM CRS.
-- Consumed by Task 4 (k8s-releases dashboard, Row 1).
+**Interfaces (verified against live cluster, Flux v2.8.8):**
+- Controller pods carry label `app: <controller>` and container port `http-prom=8080`.
+- Produces `gotk_reconcile_condition{type,status,kind,name,...}`, `gotk_reconcile_duration_seconds_bucket{le,kind,...}` (PodMonitor); `gotk_resource_info{customresource_kind, customresource_group, name, exported_namespace, ready, suspended, revision}` (KSM CRS, Info metric value 1). Consumed by Task 4.
 
-- [ ] **Step 1: Write the Flux PodMonitor**
+- [ ] **Step 1: Write the Flux PodMonitor** (in ns `monitoring`, mirroring where the other monitors live)
 
 Create `kubernetes/apps/infrastructure/monitoring/flux-monitoring.yaml`:
 
 ```yaml
-# Scrape the 4 Flux controllers' Prometheus endpoints (containerPort 8080, port name http-prom in
-# gotk-components). Yields gotk_reconcile_condition / gotk_reconcile_duration_seconds / gotk_suspend_status.
-# The controllers already expose these; there was no PodMonitor/ServiceMonitor collecting them.
-# label release=kube-prometheus-stack so the operator's podMonitorSelector discovers it.
+# Scrape the 4 Flux controllers' Prometheus endpoints (container port http-prom=8080). Yields
+# gotk_reconcile_condition / gotk_reconcile_duration_seconds / gotk_suspend_status. The controllers
+# already expose these; nothing collected them. PodMonitor lives in `monitoring` (like the other
+# monitors, proven-scraped) and selects the flux-system pods by their `app` label.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: flux-controllers
-  namespace: flux-system
+  namespace: monitoring
   labels:
     release: kube-prometheus-stack
 spec:
@@ -169,12 +180,13 @@ spec:
 
 - [ ] **Step 2: Add kube-state-metrics custom-resource-state to the HelmRelease values**
 
-In `kubernetes/apps/infrastructure/monitoring/kube-prometheus-stack.yaml`, add a top-level `kube-state-metrics:` block under `spec.values:` (same indent level as `prometheus:`, `grafana:`, `alertmanager:`). The kube-prometheus-stack chart passes this straight to the `kube-state-metrics` subchart; when `customResourceState.enabled` is true the subchart auto-adds `--custom-resource-state-config-file` and mounts the config, and the existing KSM ServiceMonitor scrapes the extra series (no additional scrape wiring).
+In `kube-prometheus-stack.yaml`, add a top-level `kube-state-metrics:` block under `spec.values:` (same indent as `prometheus:`/`grafana:`). **Keep default KSM collectors enabled** (do NOT set `collectors: []` or `--custom-resource-state-only`) — Task 4 needs standard `kube_pod_*`, `container_*`, `kube_namespace_*` metrics. The subchart auto-adds `--custom-resource-state-config-file` and mounts the config when `customResourceState.enabled`; the existing KSM ServiceMonitor scrapes the extra series.
 
 ```yaml
     kube-state-metrics:
       # Flux custom-resource-state → gotk_resource_info{customresource_kind, name, exported_namespace,
       # ready, suspended, revision}. Powers the "Kubernetes — Releases & Workloads" dashboard Row 1.
+      # Default collectors stay ON (Task 4 uses kube_pod_*/container_*/kube_namespace_*).
       rbac:
         extraRules:
           - apiGroups: ["kustomize.toolkit.fluxcd.io"]
@@ -217,7 +229,7 @@ In `kubernetes/apps/infrastructure/monitoring/kube-prometheus-stack.yaml`, add a
                       exported_namespace: [metadata, namespace]
                       ready: [status, conditions, "[type=Ready]", status]
                       suspended: [spec, suspend]
-                      revision: [status, lastAttemptedRevision]
+                      revision: [status, history, "0", chartVersion]  # deployed release (codex round1)
               - groupVersionKind: { group: source.toolkit.fluxcd.io, version: v1, kind: GitRepository }
                 metricNamePrefix: gotk
                 metrics:
@@ -243,6 +255,7 @@ In `kubernetes/apps/infrastructure/monitoring/kube-prometheus-stack.yaml`, add a
                       exported_namespace: [metadata, namespace]
                       ready: [status, conditions, "[type=Ready]", status]
                       suspended: [spec, suspend]
+                      revision: [status, artifact, revision]
               - groupVersionKind: { group: source.toolkit.fluxcd.io, version: v1, kind: OCIRepository }
                 metricNamePrefix: gotk
                 metrics:
@@ -255,33 +268,26 @@ In `kubernetes/apps/infrastructure/monitoring/kube-prometheus-stack.yaml`, add a
                       exported_namespace: [metadata, namespace]
                       ready: [status, conditions, "[type=Ready]", status]
                       suspended: [spec, suspend]
+                      revision: [status, artifact, revision]
 ```
 
-**Verify label paths against upstream before committing:** the `ready`/`suspended` paths are stable across Flux kinds, but per-kind `revision` paths (`lastAppliedRevision` for Kustomization, `lastAttemptedRevision` for HelmRelease, `artifact.revision` for sources) should be diffed against the canonical Flux KSM config at `https://github.com/fluxcd/flux2-monitoring-example` (`monitoring/configs/kube-state-metrics/`). `revision` is a table-only nicety — a wrong path drops that one label, it does not break the ready/suspended queries the dashboard depends on. Fetch the upstream config in Step 4.
-
-- [ ] **Step 3: Register the PodMonitor in kustomization**
-
-In `kustomization.yaml`, add after the `alloy.yaml` line:
+- [ ] **Step 3: Register the PodMonitor in kustomization** — add after the `alloy.yaml` line:
 
 ```yaml
   - flux-monitoring.yaml # PodMonitor for the 4 Flux controllers (gotk_reconcile_* metrics)
 ```
 
-- [ ] **Step 4: Cross-check the CRS config against upstream, then validate**
+- [ ] **Step 4: Cross-check upstream, then validate**
 
-Fetch upstream to diff the `revision`/label paths (do NOT wholesale-replace the structure above — just confirm the `labelsFromPath` values): open `https://github.com/fluxcd/flux2-monitoring-example` → `monitoring/configs/kube-state-metrics/`. Adjust any `revision` path that differs; keep `ready`/`suspended` as written.
+Diff the per-kind `revision` paths against `https://github.com/fluxcd/flux2-monitoring-example` (`monitoring/configs/kube-state-metrics/`); `ready`/`suspended` are stable. `revision` is table-only — a wrong path drops that one column, not the ready/suspended queries.
 
-Run: `python -c "import yaml; d=yaml.safe_load(open('kubernetes/apps/infrastructure/monitoring/kube-prometheus-stack.yaml')); ksm=d['spec']['values']['kube-state-metrics']; assert ksm['customResourceState']['enabled']; assert ksm['customResourceState']['config']['kind']=='CustomResourceStateMetrics'; print('KSM CRS values OK,', len(ksm['customResourceState']['config']['spec']['resources']), 'resources')"`
-Expected: `KSM CRS values OK, 5 resources`
-
-Run: `python -c "import yaml; list(yaml.safe_load_all(open('kubernetes/apps/infrastructure/monitoring/flux-monitoring.yaml'))); print('podmonitor yaml OK')"`
-Expected: `podmonitor yaml OK`
-
-Run: `kubectl kustomize kubernetes/apps/infrastructure/monitoring >/dev/null && echo "kustomize OK"`
-Expected: `kustomize OK`
-
-Optional server dry-run (PodMonitor CRD schema): `kubectl --context admin@ai apply --dry-run=server -f kubernetes/apps/infrastructure/monitoring/flux-monitoring.yaml`
-Expected: `podmonitor.monitoring.coreos.com/flux-controllers created (server dry run)`
+```
+python -c "import yaml; d=yaml.safe_load(open('kubernetes/apps/infrastructure/monitoring/kube-prometheus-stack.yaml')); ksm=d['spec']['values']['kube-state-metrics']; assert ksm['customResourceState']['enabled']; assert ksm['customResourceState']['config']['kind']=='CustomResourceStateMetrics'; print('KSM CRS OK,', len(ksm['customResourceState']['config']['spec']['resources']), 'resources'); assert 'collectors' not in ksm or ksm['collectors'], 'default collectors must stay enabled'"
+python -c "import yaml; list(yaml.safe_load_all(open('kubernetes/apps/infrastructure/monitoring/flux-monitoring.yaml'))); print('podmonitor yaml OK')"
+kubectl kustomize kubernetes/apps/infrastructure/monitoring >/dev/null && echo "kustomize OK"
+kubectl --context admin@ai apply --dry-run=server -f kubernetes/apps/infrastructure/monitoring/flux-monitoring.yaml
+```
+Expected: `KSM CRS OK, 5 resources`; `podmonitor yaml OK`; `kustomize OK`; `podmonitor.monitoring.coreos.com/flux-controllers created (server dry run)`.
 
 - [ ] **Step 5: Commit**
 
@@ -294,78 +300,18 @@ git commit -m "feat(monitoring): collect Flux metrics (PodMonitor + KSM custom-r
 
 ---
 
-### Task 3: AI Lab Fleet — Runners + Workers sections + AI fixes
+### Task 3: AI Lab Fleet — Runners + Workers sections + AI fixes (edit the generator)
 
-Edit the single minified JSON in `reporting-dashboard.yaml` via a transform script (parse → append rows/panels + trim AI row + fix AI-CPU query → re-minify), and add a job relabel to the AI scrape.
+The Fleet dashboard is generated by `scripts/gen-reporting-dashboard.py` (helpers `row/ts/stat/...`; ids auto-assigned by `_nid()`; panels appended in order). Edit the generator and regenerate — do NOT touch `reporting-dashboard.yaml`.
 
 **Files:**
-- Modify: `kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml` (`data.reporting.json`)
+- Modify: `scripts/gen-reporting-dashboard.py`
+- Regenerate (output): `kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml`
 - Modify: `kubernetes/apps/apps/ai/monitoring.yaml` (relabel AI scrape)
-- Script (scratch, not committed): `scratchpad/edit_reporting.py`
 
-**Interfaces:**
-- Consumes: `node_*{job="ci-runner-node"}` (exists), `node_*{job="dev-worker-node"}` (Task 1), `node_*{job="ai-llm-node"}` (this task's relabel).
-- Produces: updated `reporting.json` with 2 new rows (ids 41+), a trimmed AI row, and an IP-free AI-CPU panel.
+- [ ] **Step 1: Fix A — relabel the AI scrape**
 
-**Canonical panel templates** (match the existing dashboard exactly). Stat tile:
-
-```json
-{ "id": 42, "type": "stat", "title": "Runners Up",
-  "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-  "gridPos": { "x": 0, "y": 87, "w": 4, "h": 4 },
-  "fieldConfig": { "defaults": { "unit": "none", "decimals": 0,
-    "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 5 } ] } }, "overrides": [] },
-  "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-    "colorMode": "value", "graphMode": "area", "textMode": "auto", "justifyMode": "auto" },
-  "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-    "expr": "count(up{job=\"ci-runner-node\"} == 1)", "instant": true } ] }
-```
-
-Timeseries panel:
-
-```json
-{ "id": 46, "type": "timeseries", "title": "CPU % per Runner",
-  "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-  "gridPos": { "x": 0, "y": 91, "w": 12, "h": 7 },
-  "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100,
-    "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
-  "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
-  "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-    "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job=\"ci-runner-node\",mode=\"idle\"}[5m])))",
-    "legendFormat": "{{instance}}" } ] }
-```
-
-**Runners section** — row marker `id=41` at `y=86` (`title:"GitHub Actions Runners (host node_exporter)"`), then:
-
-| id | type | x,y,w,h | title | expr |
-|----|------|---------|-------|------|
-| 42 | stat | 0,87,4,4 | Runners Up | `count(up{job="ci-runner-node"}==1)` (green≥5) |
-| 43 | stat | 4,87,4,4 | Cores | `count(node_cpu_seconds_total{job="ci-runner-node",mode="idle"})` |
-| 44 | stat | 8,87,4,4 | Memory | `sum(node_memory_MemTotal_bytes{job="ci-runner-node"})` (unit bytes) |
-| 45 | stat | 12,87,6,4 | Fleet CPU % | `100*(1-avg(rate(node_cpu_seconds_total{job="ci-runner-node",mode="idle"}[5m])))` (unit percent) |
-| 46 | stat | 18,87,6,4 | Fleet Mem % | `100*(1-sum(node_memory_MemAvailable_bytes{job="ci-runner-node"})/sum(node_memory_MemTotal_bytes{job="ci-runner-node"}))` (unit percent) |
-| 47 | timeseries | 0,91,12,7 | CPU % per Runner | `100*(1-avg by(instance)(rate(node_cpu_seconds_total{job="ci-runner-node",mode="idle"}[5m])))` |
-| 48 | timeseries | 12,91,12,7 | Mem % per Runner | `100*(1-node_memory_MemAvailable_bytes{job="ci-runner-node"}/node_memory_MemTotal_bytes{job="ci-runner-node"})` |
-| 49 | timeseries | 0,98,12,7 | Root Disk Used % | `100*(1-node_filesystem_avail_bytes{job="ci-runner-node",mountpoint="/"}/node_filesystem_size_bytes{job="ci-runner-node",mountpoint="/"})` |
-| 50 | timeseries | 12,98,12,7 | Network RX+/TX- | A: `sum by(instance)(rate(node_network_receive_bytes_total{job="ci-runner-node",device!~"lo\|veth.*\|docker.*\|cali.*\|cni.*\|br.*"}[5m]))` legend `{{instance}} rx`; B: `-sum by(instance)(rate(node_network_transmit_bytes_total{...same...}[5m]))` legend `{{instance}} tx` (unit Bps) |
-
-**Workers section** — row marker `id=51` at `y=105` (`title:"Dev Workers (host node_exporter)"`), then panels ids 52–60 identical in shape to 42–50 but `job="dev-worker-node"`, Up threshold green≥3, y offset +19 (row stats at `y=106`, ts at `y=110` and `y=117`):
-
-| id | type | x,y,w,h | title | expr (swap job=dev-worker-node) |
-|----|------|---------|-------|------|
-| 52 | stat | 0,106,4,4 | Workers Up | `count(up{job="dev-worker-node"}==1)` (green≥3) |
-| 53 | stat | 4,106,4,4 | Cores | `count(node_cpu_seconds_total{job="dev-worker-node",mode="idle"})` |
-| 54 | stat | 8,106,4,4 | Memory | `sum(node_memory_MemTotal_bytes{job="dev-worker-node"})` |
-| 55 | stat | 12,106,6,4 | Fleet CPU % | `100*(1-avg(rate(node_cpu_seconds_total{job="dev-worker-node",mode="idle"}[5m])))` |
-| 56 | stat | 18,106,6,4 | Fleet Mem % | `100*(1-sum(node_memory_MemAvailable_bytes{job="dev-worker-node"})/sum(node_memory_MemTotal_bytes{job="dev-worker-node"}))` |
-| 57 | timeseries | 0,110,12,7 | CPU % per Worker | `100*(1-avg by(instance)(rate(node_cpu_seconds_total{job="dev-worker-node",mode="idle"}[5m])))` |
-| 58 | timeseries | 12,110,12,7 | Mem % per Worker | `100*(1-node_memory_MemAvailable_bytes{job="dev-worker-node"}/node_memory_MemTotal_bytes{job="dev-worker-node"})` |
-| 59 | timeseries | 0,117,12,7 | Root Disk Used % | `100*(1-node_filesystem_avail_bytes{job="dev-worker-node",mountpoint="/"}/node_filesystem_size_bytes{job="dev-worker-node",mountpoint="/"})` |
-| 60 | timeseries | 12,117,12,7 | Network RX+/TX- | same as id 50 with `job="dev-worker-node"` |
-
-- [ ] **Step 1: Relabel the AI scrape (Fix A)**
-
-In `kubernetes/apps/apps/ai/monitoring.yaml`, the `ai-llm-node` ServiceMonitor (endpoints block ~line 69-71) currently has no relabeling. Add a `relabelings` under the endpoint so `job` is forced:
+In `kubernetes/apps/apps/ai/monitoring.yaml`, the `ai-llm-node` ServiceMonitor endpoint (~line 69-71) has no relabeling. Add:
 
 ```yaml
   endpoints:
@@ -376,149 +322,319 @@ In `kubernetes/apps/apps/ai/monitoring.yaml`, the `ai-llm-node` ServiceMonitor (
           replacement: ai-llm-node
 ```
 
-- [ ] **Step 2: Write the transform script**
+- [ ] **Step 2: Fix A (cont.) + AI trim in the generator**
 
-Create `scratchpad/edit_reporting.py` (path: the session scratchpad). It must: load the ConfigMap YAML, `json.loads` the `data['reporting.json']`, then (a) **fix the AI-CPU panel**: find the panel whose title contains "AI Node CPU" and replace its target expr's `instance=~"192.168.0.4[456]:9100"` selector with `job="ai-llm-node"`; (b) **trim the AI row**: keep only panels titled iGPU Utilization, VRAM (VRAM Used vs Total), Decode Throughput, iGPU Temperature within the AI row's y-band (y 50–70), removing the other AI panels (GTT, Prompt Throughput, Busy Slots, iGPU Power, Requests) and re-flow the 4 kept panels to a tidy 2×2 (x 0/12, w 12) so no gap remains; (c) **append** the Runners row+panels and Workers row+panels per the tables above; (d) re-serialize with `json.dumps(dash, separators=(",",":"))` back into `data['reporting.json']`; (e) dump the ConfigMap YAML preserving the block. Because the file is a hand-written ConfigMap with one long JSON line, prefer editing ONLY that line: read the file text, locate the `reporting.json: |`-style key (it is inline JSON as a quoted string or block), replace the JSON payload, and write back — do not reformat the surrounding YAML.
+In `scripts/gen-reporting-dashboard.py`:
 
-- [ ] **Step 3: Run the transform**
+(a) Change the AI-node selector constant (line 20) from the hardcoded IPs to the job label:
 
-Run: `python scratchpad/edit_reporting.py`
-Expected: prints `panels: 40 -> N` and `OK` (N = 40 − removed-AI-panels + 2 rows + 18 new panels).
+```python
+AINODE = 'job="ai-llm-node"'  # the 3 AI LXCs' node_exporter (relabeled; was instance-IP regex)
+```
 
-- [ ] **Step 4: Validate the resulting dashboard**
+(b) Replace the entire AI section panel list (lines 213-229) with the trimmed 5-panel version — keep AI Node CPU (now IP-free via AINODE), iGPU Utilization, VRAM, Decode Throughput, iGPU Temperature; drop GTT, Prompt Throughput, Busy Slots, iGPU Power, Requests. Filter the `amdgpu_*` series by the AI job label so no other node_exporter textfile metric can leak in:
 
-Run this lint (parses the edited JSON, checks datasource consistency, and panel overlap):
+```python
+panels += [
+    ts("AI Node CPU %", 0, 51, 8, 7,
+       [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{AINODE},mode="idle"}}[5m])))'],
+       "percent", maxv=100),
+    ts("iGPU Utilization", 8, 51, 8, 7, ['amdgpu_gpu_busy_percent{job="ai-llm-node"}'], "percent"),
+    ts("VRAM Used vs Total", 16, 51, 8, 7,
+       ['amdgpu_vram_used_bytes{job="ai-llm-node"}', 'amdgpu_vram_total_bytes{job="ai-llm-node"}'],
+       "bytes", legends=["{{instance}} used", "{{instance}} total"]),
+    ts("Decode Throughput (tokens/s)", 0, 58, 12, 7, ["llamacpp:predicted_tokens_seconds"], "tok/s"),
+    ts("iGPU Temperature", 12, 58, 12, 7, ['amdgpu_temp_millicelsius{job="ai-llm-node"}/1000'], "celsius"),
+]
+```
+
+Storage stays at its existing y (row 71). The trimmed AI block ends at y=65, leaving a harmless 6px gap before Storage (Grafana renders rows fine; leaving Storage's y untouched keeps the diff minimal and avoids reflow risk).
+
+- [ ] **Step 3: Add Runners + Workers sections (append after Storage in the generator)**
+
+After the Storage `panels += [...]` block (after line 248, before the `dashboard = {...}` dict), append. Note `NETDEV` already excludes docker/veth (correct for runner hosts). Ids are auto-assigned; positions are explicit:
+
+```python
+# ───────────────────────── GitHub Actions Runners ─────────────────────────
+RUNNERS = 'job="ci-runner-node"'
+panels.append(row("GitHub Actions Runners (host node_exporter)", 86))
+panels += [
+    stat("Runners Up", 0, 87, 4, 4, f'count(up{{{RUNNERS}}} == 1) or vector(0)',
+         steps=[{"color": "red", "value": None}, {"color": "green", "value": 5}]),
+    stat("Runner Cores", 4, 87, 4, 4, f'count(node_cpu_seconds_total{{{RUNNERS},mode="idle"}})'),
+    stat("Runner Memory", 8, 87, 4, 4, f'sum(node_memory_MemTotal_bytes{{{RUNNERS}}})', unit="bytes", decimals=1),
+    stat("Fleet CPU Used", 12, 87, 6, 4,
+         f'100 * (1 - avg(rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))',
+         unit="percent", decimals=1, steps=PCT),
+    stat("Fleet Memory Used", 18, 87, 6, 4,
+         f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{RUNNERS}}}) / sum(node_memory_MemTotal_bytes{{{RUNNERS}}}))',
+         unit="percent", decimals=1, steps=PCT),
+    ts("CPU % per Runner", 0, 91, 12, 7,
+       [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))'],
+       "percent", maxv=100),
+    ts("Memory % per Runner", 12, 91, 12, 7,
+       [f'100 * (1 - node_memory_MemAvailable_bytes{{{RUNNERS}}} / node_memory_MemTotal_bytes{{{RUNNERS}}})'],
+       "percent", maxv=100),
+    ts("Root Disk Used % per Runner", 0, 98, 12, 7,
+       [f'100 * (1 - node_filesystem_avail_bytes{{{RUNNERS},mountpoint="/"}} / node_filesystem_size_bytes{{{RUNNERS},mountpoint="/"}})'],
+       "percent", maxv=100),
+    ts("Network per Runner (RX+ / TX-)", 12, 98, 12, 7,
+       [f'sum by (instance) (rate(node_network_receive_bytes_total{{{RUNNERS},{NETDEV}}}[5m]))',
+        f'0 - sum by (instance) (rate(node_network_transmit_bytes_total{{{RUNNERS},{NETDEV}}}[5m]))'],
+       "Bps", legends=["{{instance}} rx", "{{instance}} tx"]),
+]
+
+# ───────────────────────── Dev Workers ─────────────────────────
+WORKERS = 'job="dev-worker-node"'
+panels.append(row("Dev Workers (host node_exporter)", 105))
+panels += [
+    stat("Workers Up", 0, 106, 4, 4, f'count(up{{{WORKERS}}} == 1) or vector(0)',
+         steps=[{"color": "red", "value": None}, {"color": "green", "value": 3}]),
+    stat("Worker Cores", 4, 106, 4, 4, f'count(node_cpu_seconds_total{{{WORKERS},mode="idle"}})'),
+    stat("Worker Memory", 8, 106, 4, 4, f'sum(node_memory_MemTotal_bytes{{{WORKERS}}})', unit="bytes", decimals=1),
+    stat("Fleet CPU Used", 12, 106, 6, 4,
+         f'100 * (1 - avg(rate(node_cpu_seconds_total{{{WORKERS},mode="idle"}}[5m])))',
+         unit="percent", decimals=1, steps=PCT),
+    stat("Fleet Memory Used", 18, 106, 6, 4,
+         f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{WORKERS}}}) / sum(node_memory_MemTotal_bytes{{{WORKERS}}}))',
+         unit="percent", decimals=1, steps=PCT),
+    ts("CPU % per Worker", 0, 110, 12, 7,
+       [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{WORKERS},mode="idle"}}[5m])))'],
+       "percent", maxv=100),
+    ts("Memory % per Worker", 12, 110, 12, 7,
+       [f'100 * (1 - node_memory_MemAvailable_bytes{{{WORKERS}}} / node_memory_MemTotal_bytes{{{WORKERS}}})'],
+       "percent", maxv=100),
+    ts("Root Disk Used % per Worker", 0, 117, 12, 7,
+       [f'100 * (1 - node_filesystem_avail_bytes{{{WORKERS},mountpoint="/"}} / node_filesystem_size_bytes{{{WORKERS},mountpoint="/"}})'],
+       "percent", maxv=100),
+    ts("Network per Worker (RX+ / TX-)", 12, 117, 12, 7,
+       [f'sum by (instance) (rate(node_network_receive_bytes_total{{{WORKERS},{NETDEV}}}[5m]))',
+        f'0 - sum by (instance) (rate(node_network_transmit_bytes_total{{{WORKERS},{NETDEV}}}[5m]))'],
+       "Bps", legends=["{{instance}} rx", "{{instance}} tx"]),
+]
+```
+
+- [ ] **Step 4: Regenerate and validate**
+
+```
+python scripts/gen-reporting-dashboard.py
+```
+Expected: `wrote …/reporting-dashboard.yaml (49 panels, 6 rows)`.
+
+Then lint the generated output (datasource consistency, no hardcoded IPs, no overlaps, unique ids, x+w≤24, contiguity, maxY):
 
 ```bash
 python - <<'PY'
 import yaml, json
 docs=list(yaml.safe_load_all(open("kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml",encoding="utf-8")))
 cm=[d for d in docs if d and d.get("kind")=="ConfigMap"][0]
-dash=json.loads(cm["data"]["reporting.json"])
-panels=[p for p in dash["panels"] if p.get("type")!="row"]
-# datasource consistency
-bad=[p["id"] for p in panels if json.dumps(p.get("datasource"))!='{"type": "prometheus", "uid": "${DS_PROMETHEUS}"}']
-assert not bad, f"non-standard datasource on panels {bad}"
-# no hardcoded IPs remain
-raw=cm["data"]["reporting.json"]
+raw=cm["data"]["reporting.json"]; dash=json.loads(raw)
 assert "192.168.0.4" not in raw, "hardcoded IP still present"
-# overlap check
-cells={}; overlap=[]
+panels=[p for p in dash["panels"] if p.get("type")!="row"]
+bad=[p["id"] for p in panels if json.dumps(p.get("datasource"))!='{"type": "prometheus", "uid": "${DS_PROMETHEUS}"}']
+assert not bad, f"non-standard datasource {bad}"
+ids=[p["id"] for p in dash["panels"]]; assert len(ids)==len(set(ids)), "dup ids"
+cells={}; overlap=set()
 for p in panels:
-    g=p["gridPos"]
+    g=p["gridPos"]; assert g["x"]+g["w"]<=24, (p["id"],"x+w>24")
     for yy in range(g["y"],g["y"]+g["h"]):
         for xx in range(g["x"],g["x"]+g["w"]):
-            if (yy,xx) in cells: overlap.append((p["id"],cells[(yy,xx)]))
+            if (yy,xx) in cells: overlap.add((p["id"],cells[(yy,xx)]))
             cells[(yy,xx)]=p["id"]
-assert not overlap, f"overlaps: {set(overlap)}"
-ids=[p["id"] for p in dash["panels"]]
-assert len(ids)==len(set(ids)), "duplicate ids"
-print(f"OK panels={len(panels)} rows={len([p for p in dash['panels'] if p.get('type')=='row'])} maxY={max(p['gridPos']['y']+p['gridPos']['h'] for p in panels)}")
+assert not overlap, f"overlaps {overlap}"
+rows=sorted(p["gridPos"]["y"] for p in dash["panels"] if p.get("type")=="row")
+maxY=max(p["gridPos"]["y"]+p["gridPos"]["h"] for p in panels)
+assert rows[-2:]==[86,105], f"runner/worker rows at {rows}"
+assert maxY==124, f"maxY={maxY}"
+print(f"OK panels={len(panels)} rows={len(rows)} rowY={rows} maxY={maxY}")
 PY
+python -c "import yaml; list(yaml.safe_load_all(open('kubernetes/apps/apps/ai/monitoring.yaml'))); print('ai monitoring yaml OK')"
 ```
-Expected: `OK panels=… rows=6 maxY=124` (no assertion errors; 6 rows = original 4 + Runners + Workers).
-
-Run: `python -c "import yaml; list(yaml.safe_load_all(open('kubernetes/apps/apps/ai/monitoring.yaml'))); print('ai monitoring yaml OK')"`
-Expected: `ai monitoring yaml OK`
+Expected: `OK panels=49 rows=6 rowY=[0, 21, 50, 71, 86, 105] maxY=124`; `ai monitoring yaml OK`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml \
+git add scripts/gen-reporting-dashboard.py \
+        kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml \
         kubernetes/apps/apps/ai/monitoring.yaml
 git commit -m "feat(monitoring): Fleet runner+worker sections; fix AI-node job label; trim AI row"
 ```
 
 ---
 
-### Task 4: New dashboard — "Kubernetes — Releases & Workloads"
+### Task 4: New dashboard — "Kubernetes — Releases & Workloads" (new generator)
 
-Build a new dashboard ConfigMap. Author the dashboard as pretty JSON in scratch, validate, then embed minified into the ConfigMap.
+Create a generator `scripts/gen-k8s-releases-dashboard.py` (same style as `gen-reporting-dashboard.py`) emitting the ConfigMap. 3 rows / **17** non-row panels (8 Flux + 6 resource + 3 logs).
 
 **Files:**
-- Create: `kubernetes/apps/infrastructure/monitoring/k8s-releases-dashboard.yaml`
+- Create: `scripts/gen-k8s-releases-dashboard.py`
+- Generate (output): `kubernetes/apps/infrastructure/monitoring/k8s-releases-dashboard.yaml`
 - Modify: `kubernetes/apps/infrastructure/monitoring/kustomization.yaml`
-- Script (scratch): `scratchpad/build_k8s_releases.py` (assembles panels → minified JSON → ConfigMap)
 
-**Interfaces:**
-- Consumes: `gotk_resource_info`, `gotk_reconcile_duration_seconds_bucket`, `gotk_reconcile_condition` (Task 2); `container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`, `kube_pod_container_status_restarts_total`, `kube_pod_status_ready` (existing cadvisor/KSM); Loki logs (existing).
+- [ ] **Step 1: Write the generator**
 
-Dashboard header:
+Create `scripts/gen-k8s-releases-dashboard.py`:
 
-```json
-{ "title": "Kubernetes — Releases & Workloads", "uid": "k8s-releases",
-  "tags": ["kubernetes","flux","releases","logs"], "timezone": "browser",
-  "schemaVersion": 39, "refresh": "30s", "time": { "from": "now-6h", "to": "now" },
-  "templating": { "list": [
-    { "name": "DS_PROMETHEUS", "type": "datasource", "query": "prometheus", "current": {}, "hide": 0, "label": "Prometheus", "refresh": 1 },
-    { "name": "DS_LOKI", "type": "datasource", "query": "loki", "current": {}, "hide": 0, "label": "Loki", "refresh": 1 },
-    { "name": "namespace", "type": "query", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "query": "label_values(kube_namespace_status_phase, namespace)", "includeAll": true, "multi": true, "current": { "text": "All", "value": "$__all" }, "refresh": 2 } ] } }
+```python
+#!/usr/bin/env python3
+"""Generate the "Kubernetes — Releases & Workloads" Grafana dashboard ConfigMap.
+
+Row 1 Releases (Flux): gotk_resource_info (KSM CRS) + gotk_reconcile_* (controllers).
+Row 2 Resource usage: cadvisor + kube-state-metrics.
+Row 3 Errors & Warnings: Loki logs. Datasource vars ${DS_PROMETHEUS} / ${DS_LOKI}.
+
+    python scripts/gen-k8s-releases-dashboard.py
+"""
+import json, pathlib
+
+PROM = {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}
+LOKI = {"type": "loki", "uid": "${DS_LOKI}"}
+NS = 'namespace=~"$namespace"'
+_pid = 0
+def _nid():
+    global _pid; _pid += 1; return _pid
+
+def row(title, y):
+    return {"id": _nid(), "type": "row", "title": title, "collapsed": False,
+            "gridPos": {"x": 0, "y": y, "w": 24, "h": 1}, "panels": []}
+
+def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, ds=PROM):
+    return {"id": _nid(), "type": "stat", "title": title, "datasource": ds,
+            "gridPos": {"x": x, "y": y, "w": w, "h": h},
+            "fieldConfig": {"defaults": {"unit": unit, "decimals": decimals,
+                "thresholds": {"mode": "absolute", "steps": steps or [{"color": "blue", "value": None}]}},
+                "overrides": []},
+            "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+                        "colorMode": "value", "graphMode": "none", "textMode": "auto", "justifyMode": "auto"},
+            "targets": [{"refId": "A", "datasource": ds, "expr": expr, "instant": True}]}
+
+def ts(title, x, y, w, h, exprs, unit="short", legends=None, ds=PROM, fill=10):
+    legends = legends or ["{{namespace}}"] * len(exprs)
+    return {"id": _nid(), "type": "timeseries", "title": title, "datasource": ds,
+            "gridPos": {"x": x, "y": y, "w": w, "h": h},
+            "fieldConfig": {"defaults": {"unit": unit,
+                "custom": {"drawStyle": "line", "fillOpacity": fill, "showPoints": "never"}}, "overrides": []},
+            "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+            "targets": [{"refId": chr(65+i), "datasource": ds, "expr": e,
+                         "legendFormat": legends[i]} for i, e in enumerate(exprs)]}
+
+def logs(title, x, y, w, h, expr):
+    return {"id": _nid(), "type": "logs", "title": title, "datasource": LOKI,
+            "gridPos": {"x": x, "y": y, "w": w, "h": h},
+            "options": {"showTime": True, "wrapLogMessage": True, "sortOrder": "Descending",
+                        "enableLogDetails": True, "dedupStrategy": "none"},
+            "targets": [{"refId": "A", "datasource": LOKI, "expr": expr, "queryType": "range"}]}
+
+def rel_table(title, x, y, w, h):
+    # not-ready OR suspended Flux resources; instant table; organize renames the real KSM labels.
+    expr = 'gotk_resource_info{ready!="True"} or gotk_resource_info{suspended="true"}'
+    keep_rename = {"customresource_kind": "Kind", "name": "Name", "exported_namespace": "Namespace",
+                   "ready": "Ready", "suspended": "Suspended", "revision": "Revision"}
+    exclude = ["Time", "Value", "__name__", "customresource_group", "customresource_version",
+               "container", "endpoint", "instance", "job", "namespace", "pod", "service", "uid"]
+    return {"id": _nid(), "type": "table", "title": title, "datasource": PROM,
+            "gridPos": {"x": x, "y": y, "w": w, "h": h},
+            "fieldConfig": {"defaults": {"custom": {"align": "auto", "filterable": True,
+                "cellOptions": {"type": "auto"}}}, "overrides": []},
+            "options": {"showHeader": True, "footer": {"show": False}, "cellHeight": "sm"},
+            "transformations": [{"id": "organize", "options": {
+                "excludeByName": {k: True for k in exclude}, "renameByName": keep_rename, "indexByName": {}}}],
+            "targets": [{"refId": "A", "datasource": PROM, "expr": expr, "format": "table", "instant": True}]}
+
+GREEN0_REDpos = [{"color": "green", "value": None}, {"color": "red", "value": 1}]
+BLUE_YELLOW1 = [{"color": "blue", "value": None}, {"color": "yellow", "value": 1}]
+SRC = 'customresource_kind=~"GitRepository|HelmRepository|OCIRepository"'
+
+panels = []
+# ── Row 1: Releases (Flux) ──
+panels.append(row("Releases (Flux — reconcile status)", 0))
+panels += [
+    stat("HelmReleases Ready", 0, 1, 4, 4,
+         'count(gotk_resource_info{customresource_kind="HelmRelease",ready="True"}) or vector(0)'),
+    stat("Kustomizations Ready", 4, 1, 4, 4,
+         'count(gotk_resource_info{customresource_kind="Kustomization",ready="True"}) or vector(0)'),
+    stat("Sources Ready", 8, 1, 4, 4,
+         f'count(gotk_resource_info{{{SRC},ready="True"}}) or vector(0)'),
+    stat("Suspended", 12, 1, 4, 4,
+         'count(gotk_resource_info{suspended="true"}) or vector(0)', steps=BLUE_YELLOW1),
+    stat("Not Ready", 16, 1, 4, 4,
+         'count(gotk_resource_info{ready!="True"}) or vector(0)', steps=GREEN0_REDpos),
+    stat("Reconcile p99", 20, 1, 4, 4,
+         'histogram_quantile(0.99, sum by (le) (rate(gotk_reconcile_duration_seconds_bucket[5m])))',
+         unit="s", decimals=2),
+    rel_table("Not-ready / suspended resources", 0, 5, 24, 7),
+    # reconcile duration by kind (Flux gotk_reconcile_duration_seconds carries `kind`, not `controller`)
+    ts("Reconcile duration p50 / p99 by kind", 0, 12, 24, 7,
+       ['histogram_quantile(0.5, sum by (le, kind) (rate(gotk_reconcile_duration_seconds_bucket[5m])))',
+        'histogram_quantile(0.99, sum by (le, kind) (rate(gotk_reconcile_duration_seconds_bucket[5m])))'],
+       "s", legends=["{{kind}} p50", "{{kind}} p99"]),
+]
+# ── Row 2: Resource usage ──
+panels.append(row("Resource usage (workloads)", 19))
+panels += [
+    ts("CPU by namespace (cores)", 0, 20, 12, 7,
+       [f'sum by (namespace) (rate(container_cpu_usage_seconds_total{{container!="",{NS}}}[5m]))'], "short"),
+    ts("Memory (working set) by namespace", 12, 20, 12, 7,
+       [f'sum by (namespace) (container_memory_working_set_bytes{{container!="",{NS}}})'], "bytes"),
+    ts("Top 10 pods by CPU (cores)", 0, 27, 12, 7,
+       [f'topk(10, sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{{container!="",pod!="",{NS}}}[5m])))'],
+       "short", legends=["{{namespace}}/{{pod}}"]),
+    ts("Top 10 pods by memory", 12, 27, 12, 7,
+       [f'topk(10, sum by (namespace, pod) (container_memory_working_set_bytes{{container!="",pod!="",{NS}}}))'],
+       "bytes", legends=["{{namespace}}/{{pod}}"]),
+    ts("Pod restarts (increase, 1h)", 0, 34, 12, 7,
+       [f'sum by (namespace) (increase(kube_pod_container_status_restarts_total{{{NS}}}[1h]))'], "short"),
+    # count of not-ready pods that are NOT Succeeded/Completed. count() of the ==0 filter (NOT sum, which adds zeros).
+    stat("Pods not ready", 12, 34, 12, 7,
+         f'count((kube_pod_status_ready{{condition="true",{NS}}} == 0) * on(namespace,pod) group_left '
+         f'(kube_pod_status_phase{{phase=~"Pending|Running|Unknown",{NS}}} == 1)) or vector(0)',
+         steps=GREEN0_REDpos),
+]
+# ── Row 3: Errors & Warnings (logs) ──
+ERR = r'"(?i)(error|warn|fatal|panic|exception|fail)"'
+panels.append(row("Errors & Warnings (logs)", 41))
+panels += [
+    logs("Error / warning logs", 0, 42, 24, 8, f'{{{NS}}} |~ {ERR}'),
+    ts("Error/warn rate by namespace", 0, 50, 12, 7,
+       [f'sum by (namespace) (count_over_time({{{NS}}} |~ {ERR} [$__auto]))'], "short", ds=LOKI),
+    ts("Top 10 noisiest (error/warn) pods", 12, 50, 12, 7,
+       [f'topk(10, sum by (namespace, pod) (count_over_time({{{NS}}} |~ {ERR} [$__auto])))'],
+       "short", legends=["{{namespace}}/{{pod}}"], ds=LOKI),
+]
+
+dashboard = {
+    "title": "Kubernetes — Releases & Workloads", "uid": "k8s-releases",
+    "tags": ["kubernetes", "flux", "releases", "logs"], "timezone": "browser",
+    "schemaVersion": 39, "refresh": "30s", "time": {"from": "now-6h", "to": "now"},
+    "templating": {"list": [
+        {"name": "DS_PROMETHEUS", "type": "datasource", "query": "prometheus",
+         "current": {}, "hide": 0, "label": "Prometheus", "refresh": 1},
+        {"name": "DS_LOKI", "type": "datasource", "query": "loki",
+         "current": {}, "hide": 0, "label": "Loki", "refresh": 1},
+        {"name": "namespace", "type": "query", "datasource": PROM,
+         "query": "label_values(kube_namespace_status_phase, namespace)",
+         "includeAll": True, "multi": True, "allValue": ".*",
+         "current": {"text": "All", "value": "$__all"}, "refresh": 2}]},
+    "panels": panels,
+}
+configmap = {
+    "apiVersion": "v1", "kind": "ConfigMap",
+    "metadata": {"name": "k8s-releases-dashboard", "namespace": "monitoring",
+                 "labels": {"grafana_dashboard": "1"}},
+    "data": {"k8s-releases.json": json.dumps(dashboard, indent=2)},
+}
+out = pathlib.Path(__file__).resolve().parents[1] / "kubernetes/apps/infrastructure/monitoring/k8s-releases-dashboard.yaml"
+out.write_text(json.dumps(configmap, indent=2) + "\n", encoding="utf-8")
+print(f"wrote {out} ({len([p for p in panels if p['type']!='row'])} panels, {len([p for p in panels if p['type']=='row'])} rows)")
 ```
 
-**Row 1 — Releases (Flux)** (row marker `id=1` y=0):
+- [ ] **Step 2: Generate and validate**
 
-| id | type | x,y,w,h | title | query |
-|----|------|---------|-------|-------|
-| 2 | stat | 0,1,4,4 | HelmReleases Ready | `count(gotk_resource_info{customresource_kind="HelmRelease",ready="True"})` / total via 2nd target `count(gotk_resource_info{customresource_kind="HelmRelease"})` |
-| 3 | stat | 4,1,4,4 | Kustomizations Ready | `count(gotk_resource_info{customresource_kind="Kustomization",ready="True"})` |
-| 4 | stat | 8,1,4,4 | Sources Ready | `count(gotk_resource_info{customresource_group="source.toolkit.fluxcd.io",ready="True"})` |
-| 5 | stat | 12,1,4,4 | Suspended | `count(gotk_resource_info{suspended="true"})` (yellow≥1) |
-| 6 | stat | 16,1,4,4 | Not Ready | `count(gotk_resource_info{ready="False"})` (red≥1, green=0) |
-| 7 | stat | 20,1,4,4 | Reconcile p99 | `histogram_quantile(0.99, sum by(le)(rate(gotk_reconcile_duration_seconds_bucket[5m])))` (unit s) |
-| 8 | table | 0,5,24,7 | Not-ready / suspended resources | `gotk_resource_info{ready="False"} or gotk_resource_info{suspended="true"}`, `instant:true, format:table`; transforms: `labelsToFields` then `organize` to show columns customresource_kind, name, exported_namespace, ready, suspended, revision; hide Time/Value |
-| 9 | timeseries | 0,12,24,7 | Reconcile duration p50/p99 by controller | A `histogram_quantile(0.5, sum by(le,controller)(rate(gotk_reconcile_duration_seconds_bucket[5m])))` legend `{{controller}} p50`; B p99 legend `{{controller}} p99` (unit s) |
-
-**Row 2 — Resource usage** (row marker `id=20` y=19):
-
-| id | type | x,y,w,h | title | query |
-|----|------|---------|-------|-------|
-| 21 | timeseries | 0,20,12,7 | CPU by namespace | `sum by(namespace)(rate(container_cpu_usage_seconds_total{container!="",namespace=~"$namespace"}[5m]))` (unit "short", legend `{{namespace}}`) |
-| 22 | timeseries | 12,20,12,7 | Memory (working set) by namespace | `sum by(namespace)(container_memory_working_set_bytes{container!="",namespace=~"$namespace"})` (unit bytes) |
-| 23 | timeseries | 0,27,12,7 | Top 10 pods by CPU | `topk(10, sum by(namespace,pod)(rate(container_cpu_usage_seconds_total{container!="",namespace=~"$namespace"}[5m])))` legend `{{namespace}}/{{pod}}` |
-| 24 | timeseries | 12,27,12,7 | Top 10 pods by memory | `topk(10, sum by(namespace,pod)(container_memory_working_set_bytes{container!="",namespace=~"$namespace"}))` (unit bytes) |
-| 25 | timeseries | 0,34,12,7 | Pod restarts (1h) | `sum by(namespace)(increase(kube_pod_container_status_restarts_total{namespace=~"$namespace"}[1h]))` |
-| 26 | stat | 12,34,12,7 | Pods not ready | `count(kube_pod_status_ready{condition="true",namespace=~"$namespace"}==0)` (red≥1) |
-
-**Row 3 — Errors & Warnings (logs)** (row marker `id=30` y=41):
-
-| id | type | x,y,w,h | title | query (LogQL, datasource `${DS_LOKI}`) |
-|----|------|---------|-------|------|
-| 31 | logs | 0,42,24,8 | Error / warning logs | `{namespace=~"$namespace"} \|~ "(?i)(error\|warn\|fatal\|panic\|exception\|fail)"` (options: showTime, wrapLogMessage, sortOrder Descending) |
-| 32 | timeseries | 0,50,12,7 | Error/warn rate by namespace | `sum by(namespace)(count_over_time({namespace=~"$namespace"} \|~ "(?i)(error\|warn\|fatal\|panic\|exception)"[$__auto]))` |
-| 33 | timeseries | 12,50,12,7 | Top 10 noisiest (error/warn) pods | `topk(10, sum by(namespace,pod)(count_over_time({namespace=~"$namespace"} \|~ "(?i)(error\|warn\|fatal)"[$__auto])))` legend `{{namespace}}/{{pod}}` |
-
-- [ ] **Step 1: Build the dashboard JSON**
-
-Create `scratchpad/build_k8s_releases.py` that constructs the dashboard dict (header + the three rows and panels above, using the stat/timeseries/table/logs templates from the existing dashboards — copy the `logs` panel shape from `loki-logs-dashboard.yaml`, the `table` shape from Fleet id 23, timeseries from `ai-llm-dashboard.yaml`). Row-1/2/3 panels use `${DS_PROMETHEUS}` except Row-3 which uses `{ "type":"loki","uid":"${DS_LOKI}" }`. Serialize minified and write the ConfigMap:
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: k8s-releases-dashboard
-  namespace: monitoring
-  labels:
-    grafana_dashboard: "1"
-data:
-  k8s-releases.json: |
-    <minified JSON here>
 ```
-
-- [ ] **Step 2: Run the builder**
-
-Run: `python scratchpad/build_k8s_releases.py`
-Expected: `wrote k8s-releases-dashboard.yaml, panels=15 rows=3`
-
-- [ ] **Step 3: Register in kustomization**
-
-In `kustomization.yaml`, add after the `loki-logs-dashboard.yaml` line:
-
-```yaml
-  - k8s-releases-dashboard.yaml # "Kubernetes — Releases & Workloads": Flux release status + workload resource usage + error/warn logs
+python scripts/gen-k8s-releases-dashboard.py
 ```
-
-- [ ] **Step 4: Validate**
+Expected: `wrote …/k8s-releases-dashboard.yaml (17 panels, 3 rows)`.
 
 ```bash
 python - <<'PY'
@@ -528,22 +644,37 @@ assert d["metadata"]["labels"]["grafana_dashboard"]=="1"
 dash=json.loads(d["data"]["k8s-releases.json"])
 vars={v["name"] for v in dash["templating"]["list"]}
 assert {"DS_PROMETHEUS","DS_LOKI","namespace"} <= vars, vars
-# every prometheus panel uses ${DS_PROMETHEUS}, every loki panel uses ${DS_LOKI}
-for p in dash["panels"]:
-    if p.get("type")=="row": continue
+panels=[p for p in dash["panels"] if p.get("type")!="row"]
+for p in panels:
     for t in p.get("targets",[]):
         u=(t.get("datasource") or p.get("datasource") or {}).get("uid","")
-        assert u in ("${DS_PROMETHEUS}","${DS_LOKI}"), (p["id"], u)
-print("OK panels", len([p for p in dash["panels"] if p.get("type")!="row"]))
+        assert u in ("${DS_PROMETHEUS}","${DS_LOKI}"), (p["id"],u)
+cells={}; overlap=set()
+for p in panels:
+    g=p["gridPos"]; assert g["x"]+g["w"]<=24, (p["id"],"x+w>24")
+    for yy in range(g["y"],g["y"]+g["h"]):
+        for xx in range(g["x"],g["x"]+g["w"]):
+            if (yy,xx) in cells: overlap.add((p["id"],cells[(yy,xx)]))
+            cells[(yy,xx)]=p["id"]
+assert not overlap, f"overlaps {overlap}"
+ids=[p["id"] for p in dash["panels"]]; assert len(ids)==len(set(ids))
+print(f"OK panels={len(panels)} rows={len([p for p in dash['panels'] if p.get('type')=='row'])}")
 PY
 kubectl kustomize kubernetes/apps/infrastructure/monitoring >/dev/null && echo "kustomize OK"
 ```
-Expected: `OK panels 15` then `kustomize OK`
+Expected: `OK panels=17 rows=3`; `kustomize OK`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Register in kustomization** — add after the `loki-logs-dashboard.yaml` line:
+
+```yaml
+  - k8s-releases-dashboard.yaml # "Kubernetes — Releases & Workloads": Flux status + workload usage + error/warn logs
+```
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add kubernetes/apps/infrastructure/monitoring/k8s-releases-dashboard.yaml \
+git add scripts/gen-k8s-releases-dashboard.py \
+        kubernetes/apps/infrastructure/monitoring/k8s-releases-dashboard.yaml \
         kubernetes/apps/infrastructure/monitoring/kustomization.yaml
 git commit -m "feat(monitoring): add Kubernetes Releases & Workloads dashboard"
 ```
@@ -552,8 +683,6 @@ git commit -m "feat(monitoring): add Kubernetes Releases & Workloads dashboard"
 
 ### Task 5: Open PR
 
-**Files:** none (git/gh only).
-
 - [ ] **Step 1: Push and open the PR**
 
 ```bash
@@ -561,13 +690,13 @@ git push -u origin feat/grafana-monitoring-improvements
 gh pr create --base main --title "feat(monitoring): Grafana improvements — runner/worker Fleet sections, k8s releases dashboard, dashboard audit" \
   --body "$(cat <<'BODY'
 ## What
-- AI Lab Fleet: new **GitHub Actions Runners** + **Dev Workers** resource sections.
+- AI Lab Fleet: new **GitHub Actions Runners** + **Dev Workers** resource sections (via the dashboard generator).
 - New **Kubernetes — Releases & Workloads** dashboard (Flux release status + workload resource usage + error/warn logs).
 - New collection: `dev-worker-node` scrape; Flux PodMonitor + kube-state-metrics custom-resource-state (`gotk_resource_info`).
 - Dashboard audit: fix hardcoded AI-node IPs (→ `job=ai-llm-node`); trim AI-row/AI-LLM redundancy. Keep all 4 dashboards.
 
 ## Validation
-Local: JSON parse + datasource/overlap lint + `kubectl kustomize` all pass. Post-merge live verification per plan Task 6.
+Local: generators re-run cleanly; JSON parse + datasource/overlap/grid lint + `kubectl kustomize` all pass. Post-merge live verification per plan Task 6.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 BODY
@@ -579,46 +708,22 @@ Expected: PR URL printed.
 
 ### Task 6: Post-merge live verification (after Flux reconciles)
 
-**Files:** none (live cluster checks). Run after the PR merges and Flux reconciles (`flux get kustomizations` shows the monitoring KS reconciled).
+Run after merge + `flux get kustomizations` shows the monitoring KS reconciled. Port-forward: `kubectl --context admin@ai -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090`.
 
-- [ ] **Step 1: New scrape targets are up**
-
-Port-forward Prometheus, then curl the API:
-```bash
-kubectl --context admin@ai -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
-sleep 3
-curl -s 'http://localhost:9090/api/v1/query?query=up{job="dev-worker-node"}' | python -c "import sys,json; r=json.load(sys.stdin)['data']['result']; print('dev-worker up series:', len(r), [x['value'][1] for x in r])"
-```
-Expected: `dev-worker up series: 3 ['1','1','1']`
-
-- [ ] **Step 2: Flux metrics present**
-
-```bash
-curl -s 'http://localhost:9090/api/v1/query?query=count(gotk_resource_info{customresource_kind="HelmRelease"})' | python -c "import sys,json; print('helmreleases:', json.load(sys.stdin)['data']['result'])"
-curl -s 'http://localhost:9090/api/v1/query?query=count(gotk_reconcile_duration_seconds_count)' | python -c "import sys,json; print('reconcile series:', json.load(sys.stdin)['data']['result'])"
-```
-Expected: non-empty results; helmreleases count matches `kubectl --context admin@ai get helmrelease -A | wc -l` (minus header).
-
-- [ ] **Step 3: Dashboards render**
-
-In Grafana (`https://grafana.chifor.me`): open **AI Lab Fleet** → confirm the two new bottom sections (Runners, Workers) show live data, and the AI row shows all 3 AI nodes' CPU (no "No data") and only the 4 trimmed panels. Open **Kubernetes — Releases & Workloads** → all three rows populate; the not-ready table is empty or lists genuinely-failing resources; the logs panel streams. Confirm no datasource errors.
-
-- [ ] **Step 4: No regressions**
-
-Confirm the existing Fleet rows (Hypervisors, Instances, AI, Storage) still render, and the standalone AI LLM / Loki / Trivy dashboards are unchanged.
+- [ ] **Step 1: New scrape targets up** — `up{job="dev-worker-node"}` = 3 series all `1`; Flux PodMonitor targets healthy.
+- [ ] **Step 2: Flux metrics present (both sources, independently)** — `count(gotk_resource_info{customresource_kind="HelmRelease"})` matches `kubectl --context admin@ai get helmrelease -A` count; `gotk_reconcile_duration_seconds_bucket` returns data. **Confirm the reconcile-duration label is `kind`** (`sum by(kind)(gotk_reconcile_duration_seconds_count)`); if Flux emits a different label, adjust the id-9 panel and regenerate.
+- [ ] **Step 3: Dashboards render** — Fleet shows Runners + Workers sections with data, AI row shows all 3 AI nodes (no "No data") and the 5 trimmed panels. k8s-releases: 3 rows populate; not-ready table empty or lists genuine failures; logs stream.
+- [ ] **Step 4: Edge cases** — with all dev-worker/Flux targets absent, the Up/Not-Ready/Suspended stats render `0` (not "No data"); one AI node down still shows the other two AI series; Fleet stays contiguous to `maxY=124`; empty `gotk_resource_info` (e.g. CRS misconfig) does not break the namespace variable or stat panels.
+- [ ] **Step 5: No regressions** — existing Fleet rows (Hypervisors/Instances/Storage) unchanged; AI-LLM / Loki / Trivy dashboards unchanged.
 
 ---
 
 ## Self-Review
 
-**Spec coverage:**
-- Runner section → Task 3. Worker section → Task 1 (scrape) + Task 3 (panels). ✓
-- New k8s dashboard: releases → Task 2 (metrics) + Task 4 Row 1; resource usage → Task 4 Row 2; error/warn logs → Task 4 Row 3. ✓
-- Review/cleanup: keep-all + Fix A (AI IP) → Task 3 Step 1/2; Fix B (AI redundancy trim) → Task 3 Step 2. ✓
-- Cross-review: handled by the codex-reviewed-planning skill wrapping this plan (plan review now, impl review after Task 4). ✓
+**Spec coverage:** Runner section → Task 3; Worker section → Task 1 + Task 3; k8s dashboard releases → Task 2 + Task 4 Row 1; resource usage → Task 4 Row 2; error/warn logs → Task 4 Row 3; audit keep-all + Fix A (AI IP) + Fix B (AI trim) → Task 3. Cross-review → this skill (round 1 done; impl review after Task 4). ✓
 
-**Placeholder scan:** CRS `revision` label paths flagged with an explicit upstream cross-check (Task 2 Step 4) rather than left vague; all queries are concrete. The two transform scripts are described with exact inputs/outputs and validated by lint gates — acceptable because the deterministic artifact (the resulting JSON) is fully specified by the panel tables + templates and checked by the lint.
+**Placeholder scan:** all generator code and PromQL/LogQL is concrete; `revision` paths carry an upstream cross-check; no TODO/TBD. ✓
 
-**Type/label consistency:** job labels (`ci-runner-node`, `dev-worker-node`, `ai-llm-node`) consistent across tasks; `gotk_resource_info` label names (`customresource_kind`, `ready`, `suspended`, `exported_namespace`, `revision`) consistent between Task 2 (producer) and Task 4 (consumer); panel ids unique and non-overlapping (verified by lint gates in Tasks 3 & 4).
+**Type/label consistency:** job labels (`ci-runner-node`, `dev-worker-node`, `ai-llm-node`) consistent; KSM CRS labels (`customresource_kind`, `ready`, `suspended`, `exported_namespace`, `revision`) consistent between Task 2 (producer) and Task 4 (consumer/table); panel ids auto-assigned + overlap/grid-asserted by each generator's lint. ✓
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: finalized -->
