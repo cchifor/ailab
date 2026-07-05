@@ -17,7 +17,7 @@ import pathlib
 DS = "${DS_PROMETHEUS}"
 _pid = 0
 HOSTS = 'job="proxmox-node"'           # the 3 Proxmox hosts' node_exporter
-AINODE = 'instance=~"192.168.0.4[456]:9100"'  # the 3 AI LXCs' node_exporter
+AINODE = 'job="ai-llm-node"'           # the 3 AI LXCs' node_exporter (relabeled; was instance-IP regex)
 GUEST = 'id=~"qemu/.*|lxc/.*"'         # pve-exporter VMs + containers
 NETDEV = 'device!~"lo|veth.*|fw.*|tap.*|vmbr.*|bond.*|docker.*"'
 DISKDEV = 'device=~"nvme.*|sd.*"'
@@ -209,23 +209,20 @@ panels.append(table(
     ]))
 
 # ───────────────────────── AI ─────────────────────────
+# Compact summary only — the full deep-dive (GTT, prompt tput, busy-slots, power, requests) lives in the
+# standalone "AI LLM" dashboard (gen-ai-dashboard.py). amdgpu_* filtered by the AI job so no other
+# node_exporter textfile metric can leak into this row.
 panels.append(row("AI (llama.cpp on Strix Halo iGPU)", 50))
 panels += [
     ts("AI Node CPU %", 0, 51, 8, 7,
        [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{AINODE},mode="idle"}}[5m])))'],
        "percent", maxv=100),
-    ts("iGPU Utilization", 8, 51, 8, 7, ["amdgpu_gpu_busy_percent"], "percent"),
-    ts("VRAM Used vs Total", 16, 51, 8, 7, ["amdgpu_vram_used_bytes", "amdgpu_vram_total_bytes"],
+    ts("iGPU Utilization", 8, 51, 8, 7, ['amdgpu_gpu_busy_percent{job="ai-llm-node"}'], "percent"),
+    ts("VRAM Used vs Total", 16, 51, 8, 7,
+       ['amdgpu_vram_used_bytes{job="ai-llm-node"}', 'amdgpu_vram_total_bytes{job="ai-llm-node"}'],
        "bytes", legends=["{{instance}} used", "{{instance}} total"]),
-    ts("GTT Used (system-RAM spill)", 0, 58, 8, 7, ["amdgpu_gtt_used_bytes"], "bytes"),
-    ts("Decode Throughput (tokens/s)", 8, 58, 8, 7, ["llamacpp:predicted_tokens_seconds"], "tok/s"),
-    ts("Prompt Throughput (tokens/s)", 16, 58, 8, 7, ["llamacpp:prompt_tokens_seconds"], "tok/s"),
-    ts("Busy Slots per Decode", 0, 65, 8, 6, ["llamacpp:n_busy_slots_per_decode"], "short"),
-    ts("iGPU Temperature", 8, 65, 4, 6, ["amdgpu_temp_millicelsius/1000"], "celsius"),
-    ts("iGPU Power", 12, 65, 4, 6, ["amdgpu_power_microwatts/1000000"], "watt"),
-    ts("Requests: processing / deferred", 16, 65, 8, 6,
-       ["llamacpp:requests_processing", "llamacpp:requests_deferred"], "short",
-       legends=["{{instance}} processing", "{{instance}} deferred"]),
+    ts("Decode Throughput (tokens/s)", 0, 58, 12, 7, ["llamacpp:predicted_tokens_seconds"], "tok/s"),
+    ts("iGPU Temperature", 12, 58, 12, 7, ['amdgpu_temp_millicelsius{job="ai-llm-node"}/1000'], "celsius"),
 ]
 
 # ───────────────────────── Storage ─────────────────────────
@@ -245,6 +242,64 @@ panels += [
        "short", legends=["{{fabric}} @ {{node}}"], fill=0, maxv=1),
     ts("QNAP Fabric Probe Latency", 12, 80, 12, 6, ["probe_duration_seconds"],
        "s", legends=["{{fabric}} @ {{node}}"]),
+]
+
+# ───────────────────────── GitHub Actions Runners ─────────────────────────
+RUNNERS = 'job="ci-runner-node"'       # the 5 GHA runner VMs' node_exporter
+panels.append(row("GitHub Actions Runners (host node_exporter)", 86))
+panels += [
+    stat("Runners Up", 0, 87, 4, 4, f'count(up{{{RUNNERS}}} == 1) or vector(0)',
+         steps=[{"color": "red", "value": None}, {"color": "green", "value": 5}]),
+    stat("Runner Cores", 4, 87, 4, 4, f'count(node_cpu_seconds_total{{{RUNNERS},mode="idle"}})'),
+    stat("Runner Memory", 8, 87, 4, 4, f'sum(node_memory_MemTotal_bytes{{{RUNNERS}}})', unit="bytes", decimals=1),
+    stat("Fleet CPU Used", 12, 87, 6, 4,
+         f'100 * (1 - avg(rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))',
+         unit="percent", decimals=1, steps=PCT),
+    stat("Fleet Memory Used", 18, 87, 6, 4,
+         f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{RUNNERS}}}) / sum(node_memory_MemTotal_bytes{{{RUNNERS}}}))',
+         unit="percent", decimals=1, steps=PCT),
+    ts("CPU % per Runner", 0, 91, 12, 7,
+       [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))'],
+       "percent", maxv=100),
+    ts("Memory % per Runner", 12, 91, 12, 7,
+       [f'100 * (1 - node_memory_MemAvailable_bytes{{{RUNNERS}}} / node_memory_MemTotal_bytes{{{RUNNERS}}})'],
+       "percent", maxv=100),
+    ts("Root Disk Used % per Runner", 0, 98, 12, 7,
+       [f'100 * (1 - node_filesystem_avail_bytes{{{RUNNERS},mountpoint="/"}} / node_filesystem_size_bytes{{{RUNNERS},mountpoint="/"}})'],
+       "percent", maxv=100),
+    ts("Network per Runner (RX+ / TX-)", 12, 98, 12, 7,
+       [f'sum by (instance) (rate(node_network_receive_bytes_total{{{RUNNERS},{NETDEV}}}[5m]))',
+        f'0 - sum by (instance) (rate(node_network_transmit_bytes_total{{{RUNNERS},{NETDEV}}}[5m]))'],
+       "Bps", legends=["{{instance}} rx", "{{instance}} tx"]),
+]
+
+# ───────────────────────── Dev Workers ─────────────────────────
+WORKERS = 'job="dev-worker-node"'      # the 3 dev-worker VMs' node_exporter
+panels.append(row("Dev Workers (host node_exporter)", 105))
+panels += [
+    stat("Workers Up", 0, 106, 4, 4, f'count(up{{{WORKERS}}} == 1) or vector(0)',
+         steps=[{"color": "red", "value": None}, {"color": "green", "value": 3}]),
+    stat("Worker Cores", 4, 106, 4, 4, f'count(node_cpu_seconds_total{{{WORKERS},mode="idle"}})'),
+    stat("Worker Memory", 8, 106, 4, 4, f'sum(node_memory_MemTotal_bytes{{{WORKERS}}})', unit="bytes", decimals=1),
+    stat("Fleet CPU Used", 12, 106, 6, 4,
+         f'100 * (1 - avg(rate(node_cpu_seconds_total{{{WORKERS},mode="idle"}}[5m])))',
+         unit="percent", decimals=1, steps=PCT),
+    stat("Fleet Memory Used", 18, 106, 6, 4,
+         f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{WORKERS}}}) / sum(node_memory_MemTotal_bytes{{{WORKERS}}}))',
+         unit="percent", decimals=1, steps=PCT),
+    ts("CPU % per Worker", 0, 110, 12, 7,
+       [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{WORKERS},mode="idle"}}[5m])))'],
+       "percent", maxv=100),
+    ts("Memory % per Worker", 12, 110, 12, 7,
+       [f'100 * (1 - node_memory_MemAvailable_bytes{{{WORKERS}}} / node_memory_MemTotal_bytes{{{WORKERS}}})'],
+       "percent", maxv=100),
+    ts("Root Disk Used % per Worker", 0, 117, 12, 7,
+       [f'100 * (1 - node_filesystem_avail_bytes{{{WORKERS},mountpoint="/"}} / node_filesystem_size_bytes{{{WORKERS},mountpoint="/"}})'],
+       "percent", maxv=100),
+    ts("Network per Worker (RX+ / TX-)", 12, 117, 12, 7,
+       [f'sum by (instance) (rate(node_network_receive_bytes_total{{{WORKERS},{NETDEV}}}[5m]))',
+        f'0 - sum by (instance) (rate(node_network_transmit_bytes_total{{{WORKERS},{NETDEV}}}[5m]))'],
+       "Bps", legends=["{{instance}} rx", "{{instance}} tx"]),
 ]
 
 dashboard = {

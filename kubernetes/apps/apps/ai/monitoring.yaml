@@ -69,3 +69,6 @@ spec:
   endpoints:
     - port: metrics
       interval: 15s
+      relabelings:
+        - targetLabel: job
+          replacement: ai-llm-node
