@@ -1,26 +1,22 @@
 # Implementation review — grafana-monitoring — round 1
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
-Genuine codex `gpt-5.5` review of `be0d638..HEAD` against the finalized plan (model confirmed via codex.log; verbatim output at `.claude/worktrees/codex-review-20260705-115746/codex-out.txt`).
-
-## Summary
-
-No blocker findings. The implementation matches the plan: new monitors are registered, Flux PodMonitor shape is correct, KSM CRS is under `spec.values.kube-state-metrics`, dashboards come from generators, k8s-releases has 17 non-row panels + 3 rows, Fleet has 49 non-row panels + 6 rows with maxY 124. Two non-blocking findings below.
+Genuine codex `gpt-5.5` review of `be0d638..HEAD` against the finalized plan (model confirmed via codex.log; verbatim output at `.claude/worktrees/codex-review-20260705-115746/codex-out.txt`). No blockers; converged in one round.
 
 ## Findings
 
-### Missing zero-target guards on new discrete count stats
+### Missing zero-target guards on new discrete count stats — FIXED
 
 **Location:** `scripts/gen-reporting-dashboard.py` (Runner/Worker Cores + Memory stats)
 **Severity:** important
-<!-- codex: The Runner/Worker "Up" stats use `or vector(0)`, but the new core-count stats `count(node_cpu_seconds_total{job=...,mode="idle"})` (and the memory-total `sum(...)` stats) do not. If a pool is fully powered off, Grafana renders "No data" instead of 0. Add `or vector(0)` to those discrete summary stats. -->
+**Outcome:** fixed — added `or vector(0)` to Runner Cores, Runner Memory, Worker Cores, Worker Memory (commit after this review). Verified 4/4 guards present; maxY still 124.
 
-### Fleet dashboard has a vertical gap after the AI row
+### Fleet dashboard has a vertical gap after the AI row — ACCEPTED (no change)
 
 **Location:** `scripts/gen-reporting-dashboard.py` (AI row ends y=65, Storage starts y=71)
 **Severity:** nit
-<!-- codex: After trimming the AI row to 5 panels, the last AI panels end at y=65 but Storage still starts at y=71, leaving a 6-grid-unit blank gap. No overlap; maxY=124 preserved. Either move Storage + later rows up by 6, or explicitly accept the gap. -->
+**Outcome:** no change (documented decision). The plan explicitly chose to accept the 6-unit gap: closing it means reflowing Storage + both new sections and losing the round `maxY=124`, for a cosmetic gain Grafana rows largely absorb. Codex offered "explicitly accept the gap" as a valid resolution.
 
 ## Checks Passed
 
