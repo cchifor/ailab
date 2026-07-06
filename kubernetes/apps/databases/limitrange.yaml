@@ -6,7 +6,9 @@ metadata:
 spec:
   limits:
     - type: Container
-      # infra-pg sets explicit resources (512Mi req=lim); these defaults only catch strays
-      # (debug pods, operator jobs without explicit resources).
-      default: { cpu: 500m, memory: 512Mi }
+      # Memory-only default LIMIT: LimitRange defaulting is per-resource, so a default cpu limit here
+      # would be silently injected into the infra-pg postgres containers (they set a memory limit but
+      # deliberately no cpu limit — that default would throttle the DB). Strays still get a memory cap
+      # and request defaults.
+      default: { memory: 512Mi }
       defaultRequest: { cpu: 50m, memory: 128Mi }

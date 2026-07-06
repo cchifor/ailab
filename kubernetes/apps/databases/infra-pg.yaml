@@ -26,7 +26,10 @@ spec:
     storageClass: qnap-iscsi
   resources:
     requests: { cpu: 250m, memory: 512Mi }
-    limits: { memory: 512Mi } # req=lim on memory (predictable QoS); no cpu limit, repo style
+    # req=lim on memory (predictable QoS). No cpu limit — and the databases LimitRange deliberately
+    # sets no default cpu LIMIT either (LimitRange defaulting is per-resource: it would silently
+    # inject one into any container omitting it, as strive-ailab's LimitRange does to strive-pg today).
+    limits: { memory: 512Mi }
   affinity:
     enablePodAntiAffinity: true
     topologyKey: kubernetes.io/hostname
@@ -50,5 +53,22 @@ spec:
         login: true
         passwordSecret:
           name: infra-pg-authelia
-  monitoring:
-    enablePodMonitor: true # kube-prometheus-stack scrapes it; cnpg_* metrics in Prometheus
+  # NB: monitoring.enablePodMonitor stays OFF — the CNPG-generated PodMonitor carries only cnpg.io
+  # labels, and the kps Prometheus only selects PodMonitors labeled `release: kube-prometheus-stack`
+  # (verified live: strive-pg's operator-generated PodMonitor has produced zero cnpg_* series). The
+  # hand-written PodMonitor below (flux-monitoring.yaml precedent) carries the right label; the
+  # instance pods expose the metrics port (9187) regardless.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: infra-pg
+  namespace: databases
+  labels:
+    release: kube-prometheus-stack # kps Prometheus podMonitorSelector — without this it is ignored
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: infra-pg
+  podMetricsEndpoints:
+    - port: metrics # CNPG instance-pod exporter :9187 (cnpg_* series)

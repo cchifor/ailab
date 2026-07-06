@@ -12,6 +12,11 @@ spec:
   # depending on it wouldn't guarantee the operator anyway. On a fresh bootstrap this Kustomization
   # fails-and-retries until the platform repo has installed the postgresql.cnpg.io CRDs — expected,
   # converges via retryInterval (same pattern as qnap-storage.yaml's CRD ordering).
+  # ⚠ FRESH-BOOTSTRAP (DR rebuild) CYCLE — needs one manual unblock: grafana (a kps chart resource
+  # inside `infrastructure`, wait:true) needs infra-pg; infra-pg needs the CNPG operator; the operator
+  # comes from `platform`, which dependsOn infrastructure. Rebuilding from scratch: `flux suspend hr
+  # kube-prometheus-stack -n monitoring` (or scale grafana to 0) until platform + databases converge,
+  # then resume. See ADR 0016 Consequences. Irrelevant during normal operations.
   dependsOn:
     - name: infrastructure
   sourceRef:
@@ -21,10 +26,12 @@ spec:
   prune: true
   wait: true
   # kstatus doesn't know CNPG Clusters — gate health on the Cluster's Ready condition (Flux >=2.5 CEL).
+  # Deliberately NO `failed` expression: CNPG publishes Ready=False for EVERY non-healthy phase
+  # (initial bootstrap, switchover, rolling restart) and Flux fail-fast would abort the health check
+  # on those routine transients instead of polling to the timeout. Not-Ready == still-progressing.
   healthCheckExprs:
     - apiVersion: postgresql.cnpg.io/v1
       kind: Cluster
-      failed: status.conditions.filter(e, e.type == 'Ready').all(e, e.status == 'False')
       current: status.conditions.filter(e, e.type == 'Ready').all(e, e.status == 'True')
   decryption:
     provider: sops
