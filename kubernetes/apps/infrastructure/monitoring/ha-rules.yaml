@@ -36,6 +36,25 @@ spec:
               {{ $labels.deployment }} has had <2 available replicas for >10m — redundancy on the
               public-ingress/SSO path is gone (one more failure = outage). Check for a pending pod
               (node down? unsatisfiable constraint?) or a replicas:1 regression in git (ADR 0016 Tier A).
+        # infra-pg (CNPG, databases ns) ready-instance count via pod readiness — CNPG manages bare
+        # pods named <cluster>-<n> (no StatefulSet, so kube_statefulset_* is blind), and the cnpg_*
+        # exporter metrics come from the PRIMARY's exporter (absent exactly when the primary is down).
+        # `or on() vector(0)` so total absence (cluster deleted / all pods gone) still fires.
+        - alert: InfraPostgresSingleInstance
+          expr: |
+            (
+              sum(kube_pod_status_ready{condition="true", namespace="databases", pod=~"infra-pg-[0-9]+"})
+              or on() vector(0)
+            ) < 2
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: "infra-pg has fewer than 2 ready instances"
+            description: >-
+              The infra-pg CNPG cluster has had <2 ready instances for >10m — authelia/grafana lose
+              their DB if the survivor's node dies. Check `kubectl get cluster -n databases` /
+              `kubectl cnpg status infra-pg -n databases`; if a node is hard-down, see
+              docs/runbooks/node-maintenance.md (out-of-service taint).
         # The drain-blocker signal (the strive-pg-primary allowed-disruptions=0 burn from the 2026-07-06
         # reboots): any PDB that cannot tolerate a single eviction for >1h will wedge `talosctl
         # shutdown`'s drain. `.*-primary` is excluded BY DESIGN: CloudNativePG's per-cluster primary PDB

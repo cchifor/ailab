@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: databases
+spec:
+  limits:
+    - type: Container
+      # infra-pg sets explicit resources (512Mi req=lim); these defaults only catch strays
+      # (debug pods, operator jobs without explicit resources).
+      default: { cpu: 500m, memory: 512Mi }
+      defaultRequest: { cpu: 50m, memory: 128Mi }

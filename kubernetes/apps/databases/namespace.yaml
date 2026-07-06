@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: databases
+  labels:
+    app.kubernetes.io/part-of: databases
+    # CNPG pods run non-root/no-caps -> restricted is fine. Deliberately NOT the `monitoring` ns
+    # (PSA privileged for the hostPath exporters): the estate's credential store shouldn't live there,
+    # and the consumers are split across namespaces anyway (grafana=monitoring, authelia=auth).
+    pod-security.kubernetes.io/enforce: restricted
