@@ -54,7 +54,7 @@ exposes (`Vulkan0`, ~95 GiB = the 64 GiB VRAM carve + ~31 GiB GTT). Measured for
 - **Do not enable the ROCm/CPU path by accident** — on the CPU backend the model loads into cgroup
   RAM and OOM-kills at the cap (see gotcha #2).
 
-### BIOS carve / VM sizing — deferred, evidence-based
+### BIOS carve / VM sizing — evidence (carve→GTT reduction is now an active rollout, ↓)
 The original plan considered reducing the BIOS carve + raising `amdgpu.gttsize`/`ttm.pages_limit`, and
 downsizing the Talos CP VMs 32→24 GiB, to free system RAM. **Measurement made both largely unnecessary
 for the daily driver** (the LXC uses ~0.5 GiB system RAM; a node runs the 32 GiB CP VM + the LXC with
@@ -64,6 +64,90 @@ for the daily driver** (the LXC uses ~0.5 GiB system RAM; a node runs the 32 GiB
   a 32 GiB CP VM but pushes `free`→0. For **large contexts** on the 122B, give that node headroom: downsize
   its CP VM to 24 GiB (`kubernetes/infra/variables.tf` `control_planes{}`, rolling reboot — HA tolerates one
   CP down) or reduce the BIOS UMA carve (manual, per-node) + set kernel `amdgpu.gttsize=131072 ttm.pages_limit=…`.
+
+## Reclaiming the BIOS UMA carve → GTT (per-node rollout)
+**Why.** The fixed **64 GiB BIOS UMA VRAM carve** cannot be reclaimed by the OS without a BIOS change; it
+strands ~40 GiB whenever a node runs the light daily driver (node1 even swaps while that carve sits idle).
+Fix = **small BIOS carve (512 MB) + large GTT** (`ttm.pages_limit`), so each node borrows exactly what its
+loaded model needs. Worth doing only if heavyweight tok/s **hold** on GTT — validate with
+`scripts/bench-llm.py` (baseline + reproduce in `bench/README.md`; methodology in
+`docs/superpowers/specs/2026-07-06-llm-carve-vs-gtt-benchmark-design.md`).
+
+**Do ONE node at a time and pass the gate before advancing** — etcd needs ≥2/3 CPs, so sequential host
+reboots are forced regardless. Order: **node2 (gpt-oss, cleanest carve→GTT signal) → node3 (122B, tightest
+memory) → node1 (daily driver, ends its swapping)**. Conservative alt: node1 first, to prove the mechanics
+on a node that runs no heavyweight. Host↔CP map: node1 .2 → cp1 .41 (vmid 4001) · node2 .3 → cp2 .42 (4002)
+· node3 .4 → cp3 .43 (4003).
+
+**Memory reframe — the model moves from the isolated carve into shared OS RAM (GTT).** Post-carve one
+~127 GiB pool must hold VM working sets **+ the full model** (today the model sits in the separate carve and
+does not count against OS RAM). Validate for OOM/swap, not just tok/s. Configured VM commit per node (actual
+RSS is lower — all three run ~90 GiB of VMs on 62 GiB today via swap):
+
+| node | running VMs (configured) | + model in GTT | peak vs ~127 GiB |
+|---|---|---|---|
+| node2 (.3) | ~90 GiB (cp2 + 2 runners + dev-worker) | gpt-oss ~59 | ~119 — fits, moderately tight |
+| node3 (.4) | ~70 GiB (cp3 + **1** runner + dev-worker) | 122B ~72 | ~122 — tightest |
+| node1 (.2) | ~90 GiB (cp1 + 2 runners + dev-worker) | daily driver ~24 | ~114 — comfortable |
+
+### Kernel cmdline (GRUB — `proxmox-boot-tool` is NOT in use here)
+Append to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, then `update-grub`:
+```
+ttm.pages_limit=33554432 amdgpu.gttsize=131072
+```
+- `ttm.pages_limit=33554432` (×4 KiB = **128 GiB**) — **required.** Default is ~50% of visible RAM
+  (~63 GiB post-carve), short of the 122B's ~72 GiB. Raises the ceiling (a cap, not a reservation).
+- `amdgpu.gttsize=131072` (=128 GiB) — belt-and-suspenders; deprecated on recent kernels (may be a no-op).
+- **Do NOT add `amd_iommu=off` initially.** It is safe here (verified: no VFIO, no `hostpci` passthrough on
+  any node) but changes a 2nd variable, and IOMMU is on today with GTT already working (node3 spills 8 GiB).
+  Add it **only if** the after-run shows large-GTT allocation failures or a big *prefill* regression, then
+  re-bench.
+
+Per-node target (append — node3 carries extra thunderbolt params, preserve them):
+```
+node1/node2:  GRUB_CMDLINE_LINUX_DEFAULT="quiet ttm.pages_limit=33554432 amdgpu.gttsize=131072"
+node3:        GRUB_CMDLINE_LINUX_DEFAULT="quiet thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0 ttm.pages_limit=33554432 amdgpu.gttsize=131072"
+```
+
+### Per-node procedure (root on the Proxmox host unless noted)
+```bash
+# 0. workstation: confirm quorum BEFORE starting
+_out/talosctl-1112.exe -n 192.168.0.41 etcd status            # 3/3 in-sync
+
+# 1. edit grub (append once; sed is NOT idempotent — verify the line)
+cp /etc/default/grub /etc/default/grub.bak.$(date +%F)
+sed -i -E 's/^(GRUB_CMDLINE_LINUX_DEFAULT=".*)"/\1 ttm.pages_limit=33554432 amdgpu.gttsize=131072"/' /etc/default/grub
+grep GRUB_CMDLINE_LINUX_DEFAULT /etc/default/grub             # sanity-check it appended exactly once
+update-grub
+
+# 2. workstation: gracefully stop THIS host's Talos CP (NOT qm shutdown / ACPI — won't stop Talos)
+_out/talosctl-1112.exe shutdown -n <cp-ip>                    # cp1 .41 / cp2 .42 / cp3 .43
+#    wait until stopped:  qm status <4001|4002|4003>  ->  stopped
+
+# 3. reboot the host and ENTER BIOS -> UMA Frame Buffer / iGPU VRAM = 512 MB (or Auto/min) -> save & exit
+reboot                                                        # also restarts the AI LXC + co-located VMs
+```
+
+### Validation gate — ALL must pass before touching the next node
+```bash
+free -g                                                       # ~126 GiB total; not swapping
+cat /sys/module/ttm/parameters/pages_limit                   # 33554432
+for f in vram_total gtt_total gtt_used vram_used; do echo $f=$(cat /sys/class/drm/card0/device/mem_info_$f); done
+#   expect: vram_total ~512 MiB, gtt_total ~120+ GiB
+dmesg | grep -i amdgpu | grep -iE 'error|fail|reset' || echo 'amdgpu clean'
+```
+1. **Quorum** restored: `talosctl … etcd status` = **3/3 in-sync** (CP rejoined).
+2. **Reclaimed:** `free -g` ~126 GiB; `vram_total` ~512 MiB; `gtt_total` ~120+ GiB.
+3. **Model loads from GTT:** reload the heavyweight (same `n_ctx=8192`, same build), `/health` ok,
+   `gtt_used` ≈ model size, `vram_used` tiny, dmesg clean.
+4. **No memory pressure:** `free -g` not swapping under VMs + model.
+5. **tok/s holds:** `python scripts/bench-llm.py run --sizes 512,4096,7680 --label after-bios --targets <node>`
+   then `compare` vs the baseline. Treat >~10% decode or >~20–30% prefill regression as *investigate* (a big
+   prefill drop points at IOMMU overhead → try `amd_iommu=off`, re-bench).
+
+### Rollback
+If quorum won't restore, OOM/heavy swap, GPU ring resets, or tok/s regresses past tolerance: restore
+`/etc/default/grub.bak.*` → `update-grub` → raise the BIOS carve back → reboot that host. Do not advance.
 
 ## Running a heavyweight model (on-demand)
 Both heavyweights are staged on the NFS and **validated on the current 64 GiB carve** (2026-06-14):
