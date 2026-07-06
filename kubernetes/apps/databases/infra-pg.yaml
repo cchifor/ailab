@@ -1,0 +1,54 @@
+# infra-pg — shared 2-instance CloudNativePG cluster for the platform's own stateful apps
+# (ADR 0016 Tier A). Hosts the `grafana` and `authelia` databases so both apps can shed their
+# SQLite-on-RWO singletons and run 2 replicas.
+#
+# Operator: cnpg-system (v1.24.x), installed by the external cchifor/platform repo — consumed
+# dependency, documented in ADR 0016. Notes pinned to operator 1.24:
+#   - No `Database` CRD yet (CNPG >=1.25), so the second database is created via initdb postInitSQL
+#     (runs ONCE at first bootstrap, as superuser). On an already-bootstrapped cluster, create the
+#     role/DB manually before pointing an app at it.
+#   - The operator auto-creates the primary PDB (`infra-pg-primary`, allowed-disruptions 0 — BY
+#     DESIGN: it relocates the primary via switchover ahead of a drain; see
+#     docs/runbooks/node-maintenance.md). A replicas PDB only appears at instances >= 3.
+#   - `managed.roles` reconciles the authelia password from its secret AFTER bootstrap (seconds).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: infra-pg
+  namespace: databases
+spec:
+  instances: 2
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.10
+  primaryUpdateStrategy: unsupervised
+  priorityClassName: platform-critical
+  storage:
+    size: 5Gi # grafana+authelia are MBs; no separate walStorage needed at this write volume
+    storageClass: qnap-iscsi
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 512Mi } # req=lim on memory (predictable QoS); no cpu limit, repo style
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+    # `required` (vs strive-pg's `preferred`): 2 pods on 3 nodes is still satisfiable with one node
+    # down, and colocating primary+standby would void the whole point. (3-instance clusters must use
+    # preferred — required would pin an evicted instance Pending during drains.)
+    podAntiAffinityType: required
+  bootstrap:
+    initdb:
+      database: grafana
+      owner: grafana
+      secret:
+        name: infra-pg-grafana # our password (SOPS), not an operator-generated one
+      postInitSQL:
+        - CREATE ROLE authelia LOGIN;
+        - CREATE DATABASE authelia OWNER authelia;
+  managed:
+    roles:
+      - name: authelia
+        ensure: present
+        login: true
+        passwordSecret:
+          name: infra-pg-authelia
+  monitoring:
+    enablePodMonitor: true # kube-prometheus-stack scrapes it; cnpg_* metrics in Prometheus
