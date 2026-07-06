@@ -26,7 +26,7 @@ spec:
         - alert: CriticalWorkloadSingleReplica
           expr: |
             max by (namespace, deployment) (
-              kube_deployment_status_replicas_available{deployment=~"cloudflared"}
+              kube_deployment_status_replicas_available{deployment=~"cloudflared|cloudflared-strive"}
             ) < 2
           for: 10m
           labels: { severity: critical }
@@ -69,7 +69,7 @@ spec:
             (
               max by (namespace, deployment) (
                 kube_deployment_spec_replicas{
-                  namespace!~"kube-system|flux-system|cnpg-system|trident|local-path-storage|cert-manager|velero|tailscale|trivy-system|gatekeeper-system|strive-.*|platform-.*",
+                  namespace!~"kube-system|flux-system|cnpg-system|trident|local-path-storage|cert-manager|velero|tailscale|trivy-system|kyverno|strive-.*|platform-.*",
                   deployment!~"ntfy|litellm|open-webui|homepage|oauth2-proxy|gatus|headlamp|vaultwarden|gitea|renovate|pve-exporter|metrics-server|auth-valkey|alloy.*|local-path-provisioner|kube-prometheus-stack-.*|snapshot-controller"
                 } == 1
               )
@@ -78,7 +78,7 @@ spec:
             (
               max by (namespace, statefulset) (
                 kube_statefulset_replicas{
-                  namespace!~"kube-system|flux-system|cnpg-system|trident|local-path-storage|cert-manager|velero|tailscale|trivy-system|gatekeeper-system|strive-.*|platform-.*",
+                  namespace!~"kube-system|flux-system|cnpg-system|trident|local-path-storage|cert-manager|velero|tailscale|trivy-system|kyverno|strive-.*|platform-.*",
                   statefulset!~"loki|tempo|prometheus-kube-prometheus-stack-prometheus|alertmanager-kube-prometheus-stack-alertmanager"
                 } == 1
               )

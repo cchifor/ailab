@@ -91,13 +91,14 @@ join job (`pg_basebackup` clone from the primary, WAL streamed via the pre-exist
 loss possible mid-join) → hot standby + HA slot. The primary is never restarted → zero downtime.
 Minutes per replica for a few-GiB DB; worst case ~4–6 min per replica for a full 20 Gi at 1 GbE.
 
-**Pre-checks:**
+**Pre-checks** (NB: kubectl rejects global flags BEFORE a plugin name — for `cnpg` commands the
+`--context` goes AFTER the arguments):
 
 ```bash
 # actual DB size (clone time ∝ data, not PVC size)
-kubectl --context admin@ai cnpg psql strive-pg -n strive-ailab -- \
+kubectl cnpg psql strive-pg -n strive-ailab --context admin@ai -- \
   -tAc "SELECT pg_size_pretty(sum(pg_database_size(oid))) FROM pg_database;"
-kubectl --context admin@ai cnpg psql strive-pg -n strive-ailab -- -tAc "SHOW max_wal_senders;"   # default 10, fine
+kubectl cnpg psql strive-pg -n strive-ailab --context admin@ai -- -tAc "SHOW max_wal_senders;"   # default 10, fine
 kubectl --context admin@ai top nodes                                     # +1 Gi req lands on each of 2 nodes
 # QNAP pool: >= ~60 Gi free for 2x(20+5) Gi thin LUNs
 ```
@@ -105,24 +106,29 @@ kubectl --context admin@ai top nodes                                     # +1 Gi
 **Verification:**
 
 ```bash
-kubectl --context admin@ai cnpg status strive-pg -n strive-ailab
+kubectl cnpg status strive-pg -n strive-ailab --context admin@ai
 #  -> 3 instances, "Cluster in healthy state", replication lag ~0, slots _cnpg_* active
 kubectl --context admin@ai get pods -n strive-ailab -l cnpg.io/cluster=strive-pg -o wide   # one per node
 kubectl --context admin@ai get pdb -n strive-ailab
 #  -> strive-pg-primary (allowed 0, by design) AND strive-pg (minAvailable 1, allowed 1)
 ```
 
-**Monitoring hook (small, recommended):** alert on CNPG replication-lag / inactive-slot metrics from
-the already-enabled PodMonitor (an inactive slot from a long-dead replica = WAL bloat on the 5 Gi WAL
-volume).
+**Monitoring hook (small, recommended):** alert on CNPG replication-lag / inactive-slot metrics (an
+inactive slot from a long-dead replica = WAL bloat on the 5 Gi WAL volume). ⚠ `enablePodMonitor: true`
+alone is NOT enough on this cluster: the kps Prometheus only selects PodMonitors labeled
+`release: kube-prometheus-stack`, and CNPG-generated PodMonitors carry only `cnpg.io/*` labels —
+verified live, strive-pg's 19-day-old PodMonitor has produced **zero `cnpg_*` series**. Fix alongside:
+either add the label via the Cluster's `inheritedMetadata.labels`, or ship a hand-written PodMonitor
+with the release label (ailab does the latter for infra-pg — copy that manifest).
 
 ## 2. Valkey
 
 ### 2.1 The bug — 4 Deployments point at a Service that does not exist
 
-Only `valkey-master` + `valkey-headless` Services exist. 13 of 17 strive workloads use the correct
-`redis://valkey-master.strive-ailab.svc.cluster.local:6379` (incl. airlock's
-`APP__AIRLOCK__RATE_LIMIT_REDIS_URL`); these four use `redis://valkey-primary...` (NXDOMAIN):
+Only `valkey-master` + `valkey-headless` Services exist. 12 of 16 strive workloads use the correct
+`redis://valkey-master.strive-ailab.svc.cluster.local:6379` (13 of 17 env references — airlock carries
+two: `REDIS_URL` + `APP__AIRLOCK__RATE_LIMIT_REDIS_URL`); these four use `redis://valkey-primary...`
+(NXDOMAIN):
 
 | Deployment | Env | Owner |
 |---|---|---|
@@ -207,7 +213,7 @@ Preconditions: §1 rolled out, `cnpg` kubectl plugin installed, cluster healthy 
 
 ```bash
 # A) cluster watch
-watch -n2 "kubectl --context admin@ai cnpg status strive-pg -n strive-ailab | head -30"
+watch -n2 "kubectl cnpg status strive-pg -n strive-ailab --context admin@ai | head -30"
 
 # B) continuous WRITE probe through -rw (a read probe would hide a primary outage)
 PGPASS=$(kubectl --context admin@ai get secret strive-pg-app -n strive-ailab -o jsonpath='{.data.password}' | base64 -d)
@@ -236,7 +242,7 @@ kubectl --context admin@ai drain "$PRIMARY_NODE" --ignore-daemonsets --delete-em
 
 # wrap-up
 kubectl --context admin@ai uncordon "$PRIMARY_NODE"   # and the replica node
-kubectl --context admin@ai cnpg psql strive-pg -n strive-ailab -- -c "DROP TABLE ha_probe"
+kubectl cnpg psql strive-pg -n strive-ailab --context admin@ai -- -c "DROP TABLE ha_probe"
 kubectl --context admin@ai delete pod db-probe app-probe -n strive-ailab
 ```
 

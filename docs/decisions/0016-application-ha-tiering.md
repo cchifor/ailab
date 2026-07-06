@@ -12,10 +12,12 @@ platform down (issue #100). Kubernetes tolerated every node loss; the *workload 
   while its node is away, and on a *hard* node loss the RWO iSCSI LUN takes ~6 min to force-detach
   (`maxWaitForUnmountDuration`, hard-coded) before the pod can even reschedule. StatefulSet pods on an
   unreachable node additionally stick in `Terminating` until human action.
-- The audit found **2 PDBs cluster-wide** — one of which (`strive-pg-primary`, allowed-disruptions 0
-  over a 1-instance cluster) *blocked* every drain for the full 5-min timeout and got the DB
-  hard-killed each time. Zero topologySpreadConstraints; the sole multi-replica app (cloudflared ×2)
-  had neither PDB nor spread.
+- The audit found **2 PDBs cluster-wide** — gatekeeper (strive-ailab, ×2, working) and
+  `strive-pg-primary` (allowed-disruptions 0 over a 1-instance cluster), which *blocked* every drain
+  for the full 5-min timeout and got the DB hard-killed each time. Zero topologySpreadConstraints;
+  the sole multi-replica app **in this repo** (cloudflared ×2) had neither PDB nor spread. The audit
+  also surfaced **`cloudflared-strive` ×2 (edge ns): hand-`kubectl apply`d, in no git repo at all** —
+  the strive platform's public tunnel exists only as live-cluster drift (see Consequences).
 - ADR 0009's finite RAM budget (~84 GiB stateful across 3 nodes, limits already overcommitted on
   cp2/cp3) makes HA-everything unaffordable. Availability must be a *deliberate, per-workload* choice.
 
@@ -90,6 +92,16 @@ the `ailab:workload_singletons:unaccepted` inventory recording rule.
   `cchifor/platform` repo; ailab's `databases` Flux Kustomization consumes its CRDs (fail-retry until
   present on a fresh bootstrap). If the platform repo ever leaves this cluster, the operator install
   moves into `kubernetes/apps/infrastructure/`.
+- **Fresh-bootstrap (DR rebuild) cycle — manual unblock required once:** grafana (a kps chart
+  resource inside `infrastructure`, wait: true) needs infra-pg; infra-pg needs the CNPG operator;
+  the operator comes from `platform`, which `dependsOn: infrastructure`. On a from-scratch rebuild
+  the kps helm install waits on a crash-looping grafana and `infrastructure` never goes Ready. Unblock:
+  `flux suspend hr kube-prometheus-stack -n monitoring` (or scale grafana to 0) until `platform` +
+  `databases` converge, then resume. Irrelevant for normal operations on the live cluster (infra-pg
+  exists before grafana points at it — PR merge order B → C).
+- **Drift finding (follow-up):** `cloudflared-strive` ×2 runs hand-applied in `edge` with no manifest
+  in any repo — bring it under IaC (this repo's edge dir or the platform repo) and give it the Tier-A
+  pattern; until then it is at least covered by `CriticalWorkloadSingleReplica` (regex includes it).
 - Grafana/Authelia lose their SQLite fragility class entirely (the 2026-07 grafana UID-mismatch
   crash-loop cannot recur on Postgres).
 

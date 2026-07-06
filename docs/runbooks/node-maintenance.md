@@ -35,16 +35,19 @@ _out/talosctl-1112.exe -n 192.168.0.41 etcd status
 #    ahead of the drain — the manual step just makes the timing yours. (infra-pg in the databases ns,
 #    strive-pg in strive-ailab.)
 kubectl --context admin@ai get pods -A -l cnpg.io/instanceRole=primary -o wide
-kubectl --context admin@ai cnpg status strive-pg -n strive-ailab           # needs the cnpg kubectl plugin
-kubectl --context admin@ai cnpg promote strive-pg <replica-not-on-that-node> -n strive-ailab
+# NB: kubectl rejects global flags BEFORE a plugin name ("flags cannot be placed before plugin
+# name") — for `cnpg` commands the --context goes AFTER:
+kubectl cnpg status strive-pg -n strive-ailab --context admin@ai           # needs the cnpg kubectl plugin
+kubectl cnpg promote strive-pg <replica-not-on-that-node> -n strive-ailab --context admin@ai
 
 # 2. know your alerting blind spot: if alertmanager/ntfy live on this node, pushes pause during the
 #    move — watch gatus (status.chifor.me) instead.
 kubectl --context admin@ai get pods -n monitoring -o wide | grep -E 'alertmanager|ntfy'
 
-# 3. graceful stop of that host's CP (drains ~5 min, then powers off; poll for stopped)
+# 3. graceful stop of that host's CP (drains ~5 min, then powers off; poll for stopped).
+#    `qm` only exists ON the Proxmox host -> run the poll through node-ssh.py:
 _out/talosctl-1112.exe shutdown -n <cp-ip>
-for i in $(seq 1 90); do [ "$(qm status <vmid> | awk '{print $2}')" = stopped ] && break; sleep 5; done
+python scripts/node-ssh.py <host-ip> "for i in \$(seq 1 90); do qm status <vmid> | grep -q stopped && break; sleep 5; done; qm status <vmid>"
 
 # 4. host work (BIOS / kernel / Proxmox upgrade / hardware), then reboot the host.
 
@@ -55,7 +58,8 @@ python scripts/node-ssh.py <host-ip> "pct start <ctid>"
 ```
 
 **Workloads-only variant** (node stays up, e.g. testing eviction behaviour):
-`kubectl drain <node> --ignore-daemonsets --delete-emptydir-data` … then `kubectl uncordon <node>`.
+`kubectl --context admin@ai drain <node> --ignore-daemonsets --delete-emptydir-data` … then
+`kubectl --context admin@ai uncordon <node>`.
 
 ## Expected blips during a planned drain (Tier B accepted singletons — ADR 0016)
 
