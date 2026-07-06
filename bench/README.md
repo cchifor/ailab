@@ -29,8 +29,9 @@ python scripts/bench-llm.py compare bench/results/before-bios-*.json bench/resul
 ```
 
 Notes:
-- `--sizes` **must match** across runs. The current heavyweights launch at `n_ctx=8192`, so the sweep
-  tops out at 7680 (7680 + 256 gen + margin < 8192); the default `16384` point would be auto-skipped.
+- `--sizes` **must match** across runs. The default is `512,4096,7680` (matches this baseline). The current
+  heavyweights launch at `n_ctx=8192`, so the sweep tops out at 7680 (7680 + 256 gen + margin < 8192); any
+  larger point (e.g. 16384) is auto-skipped and logged.
   If you raise `n_ctx` after the carve change to exploit the freed memory, keep a `512,4096,7680` run for
   the clean carve→GTT delta, and optionally add a long-context run (`--sizes 512,16384,65536 --label
   after-bios-longctx`) to probe prefill where a GTT penalty is most visible.

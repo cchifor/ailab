@@ -40,7 +40,8 @@ Built-in node map (LXC endpoint → Proxmox host, for sysfs reads over SSH):
 Targets are overridable on the CLI so any node/model/port (incl. a future small-carve node) can be run.
 
 ## Workload (standard sweep)
-Prompt sizes **[512, 4096, 16384]** tokens × **(1 warmup + 3 measured)**, `n_predict:256`.
+Prompt sizes **[512, 4096, 7680]** tokens (the default; matches the committed baseline at `n_ctx=8192`) ×
+**(1 warmup + 3 measured)**, `n_predict:256`.
 - Prompts generated **deterministically** (a fixed filler paragraph repeated to the target size) so
   before/after prompts are byte-identical. Actual `prompt_n` from the response is recorded regardless.
 - **Auto-fit guard:** read `n_ctx` from `/props`; skip (and log) any sweep size that would not fit
@@ -81,10 +82,10 @@ Immediately before and after each model's sweep, SSH the mapped Proxmox host via
 
 ## How to run
 ```bash
-# Baseline (before BIOS), both heavyweights in place:
-python scripts/bench-llm.py run --label before-bios          # defaults to node2+node3 heavyweights
-# After the BIOS carve reduction + ttm.pages_limit, reload same models on same nodes, then:
-python scripts/bench-llm.py run --label after-bios
+# Baseline (before BIOS), both heavyweights in place (node2+node3 default; sizes match the baseline):
+python scripts/bench-llm.py run --sizes 512,4096,7680 --label before-bios
+# After the BIOS carve reduction + ttm.pages_limit, reload same models on same nodes, then (identical --sizes):
+python scripts/bench-llm.py run --sizes 512,4096,7680 --label after-bios
 python scripts/bench-llm.py compare bench/results/before-bios-*.json bench/results/after-bios-*.json
 ```
 

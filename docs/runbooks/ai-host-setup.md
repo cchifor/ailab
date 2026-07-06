@@ -49,8 +49,9 @@ With the **Vulkan backend + `-ngl 99`**, llama.cpp allocates the model + KV in t
 exposes (`Vulkan0`, ~95 GiB = the 64 GiB VRAM carve + ~31 GiB GTT). Measured for the daily driver:
 `mem_info_vram_used ≈ 20.35 GiB`, **LXC cgroup `memory.current` ≈ 0.5 GiB**. So:
 - The model is **NOT** charged to the container cgroup (it's in the firmware-reserved VRAM heap).
-- The `lxc_memory_mib` cap (default **16 GiB**) is a host OOM fence, not the model budget; the daily
-  driver uses ~0.5 GiB of it.
+- The `lxc_memory_mib` cap (default **24 GiB**) is a host OOM fence, not the model budget; the daily
+  driver uses ~0.5 GiB of it. (This holds only while weights are VRAM-carve-resident — see the carve→GTT
+  rollout below, where GTT *is* charged here and the cap must be raised.)
 - **Do not enable the ROCm/CPU path by accident** — on the CPU backend the model loads into cgroup
   RAM and OOM-kills at the cap (see gotcha #2).
 
@@ -79,16 +80,37 @@ memory) → node1 (daily driver, ends its swapping)**. Conservative alt: node1 f
 on a node that runs no heavyweight. Host↔CP map: node1 .2 → cp1 .41 (vmid 4001) · node2 .3 → cp2 .42 (4002)
 · node3 .4 → cp3 .43 (4003).
 
-**Memory reframe — the model moves from the isolated carve into shared OS RAM (GTT).** Post-carve one
-~127 GiB pool must hold VM working sets **+ the full model** (today the model sits in the separate carve and
-does not count against OS RAM). Validate for OOM/swap, not just tok/s. Configured VM commit per node (actual
-RSS is lower — all three run ~90 GiB of VMs on 62 GiB today via swap):
+**Memory reframe — the model moves from the isolated carve into shared OS RAM (GTT), which is charged to
+BOTH the host pool AND the LXC cgroup.** Today only the carve matters; post-carve two limits must hold:
 
-| node | running VMs (configured) | + model in GTT | peak vs ~127 GiB |
+1. **Host RAM pool (~127 GiB):** now holds VM working sets **+ the full model** (today the model sits in the
+   separate carve, off the OS books). Validate for OOM/swap, not just tok/s.
+2. **LXC cgroup cap (`lxc_memory_mib`):** GTT **is** charged to the CT's memcg — confirmed on node3 today
+   (`memory.current` 8.8 GiB ≈ its 7.9 GiB GTT spill). The ai-lxc default cap is **24 GiB**; the full model
+   in GTT (~59–72 GiB) blows past it → **OOM-kill on model load** unless raised first (see below). The IaC
+   already documents this (`kubernetes/infra/ai-lxc/variables.tf` `lxc_memory_mib`: "raise toward ~96 GiB …
+   after reducing the BIOS carve").
+
+Host-pool headroom (estimated working-set RSS — all three run today on 62 GiB visible, so RSS is bounded;
+configured VM max in parens, peak = RSS + model):
+
+| node | VM RSS est. (configured) | + model in GTT | peak vs ~127 GiB |
 |---|---|---|---|
-| node2 (.3) | ~90 GiB (cp2 + 2 runners + dev-worker) | gpt-oss ~59 | ~119 — fits, moderately tight |
-| node3 (.4) | ~70 GiB (cp3 + **1** runner + dev-worker) | 122B ~72 | ~122 — tightest |
-| node1 (.2) | ~90 GiB (cp1 + 2 runners + dev-worker) | daily driver ~24 | ~114 — comfortable |
+| node2 (.3) | ~55 GiB (90 configured) | gpt-oss ~59 | ~114 — fits, tight |
+| node3 (.4) | ~45 GiB (70 configured) | 122B ~72 | ~117 — tightest |
+| node1 (.2) | ~55 GiB (90 configured) | daily driver ~24 | ~79 — comfortable |
+
+### First, raise the LXC memory cap (once, before the per-node loop)
+GTT is charged to the CT cgroup, so the default 24 GiB `lxc_memory_mib` fence would OOM-kill a heavyweight
+served from GTT. Raise it to ~96 GiB (fits the 122B's ~72 GiB + headroom) via the ai-lxc module — it's a
+cap, not a reservation, so it's harmless on the daily-driver nodes and on nodes not yet carve-reduced:
+```bash
+# kubernetes/infra/ai-lxc/  (OpenTofu, applied by hand — see CLAUDE.md)
+#   set lxc_memory_mib = 98304   (96 GiB; variables.tf default is 24576)
+tofu -chdir=kubernetes/infra/ai-lxc apply     # in-place memory update (no CT recreate)
+#   the CT picks up the new cap on its next restart (the host reboot in step 3 below).
+# Quick live alternative on one host: pct set <5001|5002|5003> -memory 98304
+```
 
 ### Kernel cmdline (GRUB — `proxmox-boot-tool` is NOT in use here)
 Append to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, then `update-grub`:
@@ -134,12 +156,15 @@ free -g                                                       # ~126 GiB total; 
 cat /sys/module/ttm/parameters/pages_limit                   # 33554432
 for f in vram_total gtt_total gtt_used vram_used; do echo $f=$(cat /sys/class/drm/card0/device/mem_info_$f); done
 #   expect: vram_total ~512 MiB, gtt_total ~120+ GiB
+ctid=<5001|5002|5003>; for c in memory.current memory.max; do echo "cgroup $c=$(cat /sys/fs/cgroup/lxc/$ctid/$c)"; done
+#   expect: memory.current (≈ model size in GTT) < memory.max (the raised ~96 GiB cap)
 dmesg | grep -i amdgpu | grep -iE 'error|fail|reset' || echo 'amdgpu clean'
 ```
 1. **Quorum** restored: `talosctl … etcd status` = **3/3 in-sync** (CP rejoined).
 2. **Reclaimed:** `free -g` ~126 GiB; `vram_total` ~512 MiB; `gtt_total` ~120+ GiB.
-3. **Model loads from GTT:** reload the heavyweight (same `n_ctx=8192`, same build), `/health` ok,
-   `gtt_used` ≈ model size, `vram_used` tiny, dmesg clean.
+3. **Model loads from GTT (no cgroup OOM):** reload the heavyweight (same `n_ctx=8192`, same build), `/health`
+   ok, `gtt_used` ≈ model size, `vram_used` tiny, and the CT cgroup `memory.current` < `memory.max` (the
+   raised cap — else it OOM-kills on model load), dmesg clean.
 4. **No memory pressure:** `free -g` not swapping under VMs + model.
 5. **tok/s holds:** `python scripts/bench-llm.py run --sizes 512,4096,7680 --label after-bios --targets <node>`
    then `compare` vs the baseline. Treat >~10% decode or >~20–30% prefill regression as *investigate* (a big
