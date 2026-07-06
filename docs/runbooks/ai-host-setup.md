@@ -188,16 +188,20 @@ If quorum won't restore, OOM/heavy swap, GPU ring resets, or tok/s regresses pas
   on the CT unit would self-heal it.)
 - **`talosctl shutdown` takes ~5 min** (full node drain), not seconds — see the note in step 2.
 
-### Validated on node2 + node3 (2026-07-06)
-Ran the full rollout on both heavyweight nodes. **tok/s held on both — prefill +6–9%, decode flat-to-up**
-(tables in `bench/README.md`); OS RAM 62 → 124 GiB, etcd back to 3/3, **0 OOM**.
+### Validated — full rollout complete, all 3 nodes (2026-07-06)
+Ran the rollout on all three nodes; **all now run small-carve (512 MB) + GTT**, OS RAM 62 → 124 GiB each,
+etcd 3/3 throughout, **0 OOM**. tok/s **held on both heavyweights — prefill +6–9%, decode flat-to-up**
+(tables in `bench/README.md`).
 - **node2** (gpt-oss): GTT 59.2 GiB, cgroup ~10–35 GiB / 96 cap, host ~112/124 used, no swap.
 - **node3** (122B, stress case): GTT 71.4 GiB, cgroup peaked ~27 GiB / 96 cap, host ~103/124 used, **swap 0**
   — tight but stable.
+- **node1** (daily driver, qwen3.6): GTT 24 GiB, cgroup ~22 GiB / 96 cap, host ~46/124 used, **swap 5 GiB → 0**
+  — the original problem (stranded carve + swapping) fixed; 56 GiB free.
 
-Notes: the cgroup charges only a *fraction* of GTT (node2 ~10–35 of 59, node3 ~27 of 71) but still exceeds
-the old 24 GiB cap (node3 peaked ~27), so the `lxc_memory_mib` raise was genuinely required; `amd_iommu=off`
-was **not** needed. **node1 (daily driver) remains** — the easy case (most headroom, ends its swapping).
+Notes: the cgroup charges only a *fraction* of GTT (e.g. node2 ~10–35 of 59) but still approaches/exceeds the
+old **24 GiB** cap on every node (node3 ~27, node1 ~22), so the `lxc_memory_mib` raise was genuinely required
+fleet-wide; `amd_iommu=off` was **not** needed. Boot-race note applies to all three — `pct start <ctid>` if
+the LXC is stopped after a reboot.
 
 ## Running a heavyweight model (on-demand)
 Both heavyweights are staged on the NFS and **validated on the current 64 GiB carve** (2026-06-14):
