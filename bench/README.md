@@ -68,3 +68,22 @@ Interpretation for the after-BIOS comparison:
   signal.
 - the 122B baseline **already runs ~8 GiB from GTT** with no obvious penalty — encouraging, but after the
   carve reduction the *entire* ~72 GiB moves to GTT, which the after-run will measure directly.
+
+## Result — `after-bios` node2, 2026-07-06 (512 MB carve, gpt-oss served from GTT)
+
+BIOS UMA carve dropped 64 GiB → 512 MB; `ttm.pages_limit=33554432` raised the GTT ceiling to 128 GiB;
+`lxc_memory_mib` raised 24 → 96 GiB. gpt-oss-120b then loaded **entirely from GTT** (VRAM 0.5 GiB, GTT
+59.2 GiB), cgroup `memory.current` ~10–35 GiB (well under the 96 GiB cap), **no OOM**. OS RAM went 62 →
+124 GiB (no swap).
+
+**Verdict: no carve→GTT penalty — prefill actually gained ~7–8%, decode flat.**
+
+| ctx | prefill: carve → GTT | decode: carve → GTT |
+|---:|---|---|
+| 512 | 426.3 → 458.0 (**+7.4%**) | 49.2 → 50.6 (+2.9%) |
+| 4096 | 512.9 → 556.1 (**+8.4%**) | 48.1 → 49.7 (+3.4%) |
+| 7680 | 496.9 → 532.8 (**+7.2%**) | 46.6 → 46.4 (−0.4%) |
+
+On Strix Halo GTT and the carve are the same LPDDR5X, so there was never a bandwidth reason for a penalty,
+and the feared IOMMU-translation overhead did not appear — **`amd_iommu=off` was not needed.** Reproduce:
+`python scripts/bench-llm.py compare bench/results/before-bios-*.json bench/results/after-bios-*.json`.

@@ -62,15 +62,16 @@ variable "models_host_path" {
 # ---- LXC sizing ----
 variable "lxc_memory_mib" {
   description = <<-EOT
-    Hard memory cap (MiB, host OOM fence). 16 GiB suits the daily-driver model on the
-    CURRENT 64 GB BIOS VRAM carve: weights are GPU-resident (firmware-reserved VRAM, NOT
-    charged to this cgroup), so the CT only needs host RAM for the llama-server process.
-    Raise toward ~96 GiB ONLY after reducing the BIOS carve + raising GTT for the 120B/122B
-    models (GTT spill is pageable system RAM and can be charged here). See
-    docs/runbooks/ai-host-setup.md.
+    Hard memory cap (MiB, host OOM fence). ~96 GiB for the small-carve + large-GTT config:
+    with a reduced BIOS VRAM carve the model weights live in GTT (pageable system RAM) and
+    ARE charged to this cgroup, so the cap must cover the largest model (122B ~72 GiB) +
+    headroom. Validated on node2 (2026-07-06): gpt-oss served from GTT charges ~10-35 GiB
+    here, no OOM. (On the OLD 64 GiB carve, 24 GiB sufficed — weights were firmware-reserved
+    VRAM, NOT charged here.) A cap, not a reservation: harmless on nodes still on the 64 GiB
+    carve. See docs/runbooks/ai-host-setup.md.
   EOT
   type    = number
-  default = 24576
+  default = 98304
 }
 variable "lxc_cores" {
   type    = number
