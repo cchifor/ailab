@@ -147,7 +147,9 @@ update-grub
 
 # 2. workstation: gracefully stop THIS host's Talos CP (NOT qm shutdown / ACPI — won't stop Talos)
 _out/talosctl-1112.exe shutdown -n <cp-ip>                    # cp1 .41 / cp2 .42 / cp3 .43
-#    wait until stopped:  qm status <4001|4002|4003>  ->  stopped
+#    NOTE: DRAINS the node first (evicts pods, 5-min drain timeout) THEN powers off — ~5 min total, and it
+#    bounces that CP's k8s workloads (they reschedule to the other 2 nodes). Poll for stopped, don't assume:
+#    for i in $(seq 1 90); do [ "$(qm status <4001|4002|4003> | awk '{print $2}')" = stopped ] && break; sleep 5; done
 
 # 3. reboot the host and ENTER BIOS -> UMA Frame Buffer / iGPU VRAM = 512 MB (or Auto/min) -> save & exit
 reboot                                                        # also restarts the AI LXC + co-located VMs
@@ -157,8 +159,8 @@ reboot                                                        # also restarts th
 ```bash
 free -g                                                       # ~126 GiB total; not swapping
 cat /sys/module/ttm/parameters/pages_limit                   # 33554432
-for f in vram_total gtt_total gtt_used vram_used; do echo $f=$(cat /sys/class/drm/card0/device/mem_info_$f); done
-#   expect: vram_total ~512 MiB, gtt_total ~120+ GiB
+for c in /sys/class/drm/card*/device; do [ -e "$c/mem_info_vram_total" ] || continue; for f in vram_total gtt_total gtt_used vram_used; do echo "$f=$(cat $c/mem_info_$f)"; done; done
+#   expect: vram_total ~512 MiB, gtt_total ~120+ GiB  (NOTE: tiny carve renumbers the iGPU card0 -> card1)
 ctid=<5001|5002|5003>; for c in memory.current memory.max; do echo "cgroup $c=$(cat /sys/fs/cgroup/lxc/$ctid/$c)"; done
 #   expect: memory.current (≈ model size in GTT) < memory.max (the raised ~96 GiB cap)
 dmesg | grep -i amdgpu | grep -iE 'error|fail|reset' || echo 'amdgpu clean'
@@ -176,6 +178,30 @@ dmesg | grep -i amdgpu | grep -iE 'error|fail|reset' || echo 'amdgpu clean'
 ### Rollback
 If quorum won't restore, OOM/heavy swap, GPU ring resets, or tok/s regresses past tolerance: restore
 `/etc/default/grub.bak.*` → `update-grub` → raise the BIOS carve back → reboot that host. Do not advance.
+
+### Gotchas seen during rollout
+- **iGPU renumbers `card0` → `card1`** once the carve is tiny (a boot framebuffer claims card0). Use the
+  `/sys/class/drm/card*/device` glob for `mem_info_*`, not a hardcoded `card0`.
+- **The ai-llm LXC fails to auto-start on the first boot** after the change — pve-container starts it at
+  ~1 s but amdgpu/`renderD128` only appears at ~6 s (device race), so it exits 1/FAILURE. Just
+  `pct start <ctid>` once the devices exist; it starts fine. (Recurs each reboot — a systemd `After=`/delay
+  on the CT unit would self-heal it.)
+- **`talosctl shutdown` takes ~5 min** (full node drain), not seconds — see the note in step 2.
+
+### Validated — full rollout complete, all 3 nodes (2026-07-06)
+Ran the rollout on all three nodes; **all now run small-carve (512 MB) + GTT**, OS RAM 62 → 124 GiB each,
+etcd 3/3 throughout, **0 OOM**. tok/s **held on both heavyweights — prefill +6–9%, decode flat-to-up**
+(tables in `bench/README.md`).
+- **node2** (gpt-oss): GTT 59.2 GiB, cgroup ~10–35 GiB / 96 cap, host ~112/124 used, no swap.
+- **node3** (122B, stress case): GTT 71.4 GiB, cgroup peaked ~27 GiB / 96 cap, host ~103/124 used, **swap 0**
+  — tight but stable.
+- **node1** (daily driver, qwen3.6): GTT 24 GiB, cgroup ~22 GiB / 96 cap, host ~46/124 used, **swap 5 GiB → 0**
+  — the original problem (stranded carve + swapping) fixed; 56 GiB free.
+
+Notes: the cgroup charges only a *fraction* of GTT (e.g. node2 ~10–35 of 59) but still approaches/exceeds the
+old **24 GiB** cap on every node (node3 ~27, node1 ~22), so the `lxc_memory_mib` raise was genuinely required
+fleet-wide; `amd_iommu=off` was **not** needed. Boot-race note applies to all three — `pct start <ctid>` if
+the LXC is stopped after a reboot.
 
 ## Running a heavyweight model (on-demand)
 Both heavyweights are staged on the NFS and **validated on the current 64 GiB carve** (2026-06-14):
