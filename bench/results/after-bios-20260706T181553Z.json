@@ -1,0 +1,172 @@
+{
+  "tool_version": "1.0.0",
+  "label": "after-bios",
+  "started_at": "2026-07-06T18:10:52.892730+00:00",
+  "params": {
+    "sizes": [
+      512,
+      4096,
+      7680
+    ],
+    "n_predict": 256,
+    "runs": 3,
+    "warmup": 1,
+    "port": 8080
+  },
+  "targets": [
+    {
+      "node": "node3",
+      "endpoint": "http://192.168.0.46:8080",
+      "model_id": "qwen3.5-122b",
+      "n_ctx": 8192,
+      "total_slots": 1,
+      "model_path": "/models/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf",
+      "server_info": "b9631-6e14286ed",
+      "mem_before": {
+        "vram_total": 536870912,
+        "vram_used": 525647872,
+        "gtt_total": 137438953472,
+        "gtt_used": 76711006208,
+        "cmdline": "BOOT_IMAGE=/boot/vmlinuz-7.0.2-6-pve root=/dev/mapper/pve-root ro quiet thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0 ttm.pages_limit=33554432 amdgpu.gttsize=131072"
+      },
+      "mem_after": {
+        "vram_total": 536870912,
+        "vram_used": 525922304,
+        "gtt_total": 137438953472,
+        "gtt_used": 76717395968,
+        "cmdline": "BOOT_IMAGE=/boot/vmlinuz-7.0.2-6-pve root=/dev/mapper/pve-root ro quiet thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0 ttm.pages_limit=33554432 amdgpu.gttsize=131072"
+      },
+      "sweep": [
+        {
+          "prompt_size": 512,
+          "prompt_method": "tokenize",
+          "prompt_n": 512,
+          "decode_tps": {
+            "median": 23.19,
+            "min": 23.14,
+            "max": 23.21,
+            "n": 3
+          },
+          "prefill_tps": {
+            "median": 277.1,
+            "min": 276.72,
+            "max": 281.23,
+            "n": 3
+          },
+          "runs": [
+            {
+              "prefill_tps": 277.09811167378626,
+              "decode_tps": 23.136317647181098,
+              "prompt_n": 512,
+              "predicted_n": 256,
+              "prompt_ms": 1847.721,
+              "predicted_ms": 11064.855
+            },
+            {
+              "prefill_tps": 276.72354993076505,
+              "decode_tps": 23.1935298024627,
+              "prompt_n": 512,
+              "predicted_n": 256,
+              "prompt_ms": 1850.222,
+              "predicted_ms": 11037.561
+            },
+            {
+              "prefill_tps": 281.23199387441565,
+              "decode_tps": 23.21006852772733,
+              "prompt_n": 512,
+              "predicted_n": 256,
+              "prompt_ms": 1820.561,
+              "predicted_ms": 11029.696
+            }
+          ]
+        },
+        {
+          "prompt_size": 4096,
+          "prompt_method": "tokenize",
+          "prompt_n": 4096,
+          "decode_tps": {
+            "median": 22.8,
+            "min": 22.74,
+            "max": 22.86,
+            "n": 3
+          },
+          "prefill_tps": {
+            "median": 305.74,
+            "min": 305.59,
+            "max": 306.12,
+            "n": 3
+          },
+          "runs": [
+            {
+              "prefill_tps": 306.1248207514363,
+              "decode_tps": 22.742512471958307,
+              "prompt_n": 4096,
+              "predicted_n": 256,
+              "prompt_ms": 13380.163,
+              "predicted_ms": 11256.452
+            },
+            {
+              "prefill_tps": 305.59205102551647,
+              "decode_tps": 22.858071466296174,
+              "prompt_n": 4096,
+              "predicted_n": 256,
+              "prompt_ms": 13403.49,
+              "predicted_ms": 11199.545
+            },
+            {
+              "prefill_tps": 305.7434230454404,
+              "decode_tps": 22.802285038360836,
+              "prompt_n": 4096,
+              "predicted_n": 256,
+              "prompt_ms": 13396.854,
+              "predicted_ms": 11226.945
+            }
+          ]
+        },
+        {
+          "prompt_size": 7680,
+          "prompt_method": "tokenize",
+          "prompt_n": 7680,
+          "decode_tps": {
+            "median": 22.47,
+            "min": 22.37,
+            "max": 22.62,
+            "n": 3
+          },
+          "prefill_tps": {
+            "median": 293.31,
+            "min": 293.17,
+            "max": 294.75,
+            "n": 3
+          },
+          "runs": [
+            {
+              "prefill_tps": 294.75189642909606,
+              "decode_tps": 22.623146801953087,
+              "prompt_n": 7680,
+              "predicted_n": 256,
+              "prompt_ms": 26055.812,
+              "predicted_ms": 11315.844
+            },
+            {
+              "prefill_tps": 293.31248675940463,
+              "decode_tps": 22.37159143461675,
+              "prompt_n": 7680,
+              "predicted_n": 256,
+              "prompt_ms": 26183.679,
+              "predicted_ms": 11443.084
+            },
+            {
+              "prefill_tps": 293.16600272965036,
+              "decode_tps": 22.46500220306203,
+              "prompt_n": 7680,
+              "predicted_n": 256,
+              "prompt_ms": 26196.762,
+              "predicted_ms": 11395.503
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

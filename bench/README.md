@@ -69,20 +69,30 @@ Interpretation for the after-BIOS comparison:
 - the 122B baseline **already runs ~8 GiB from GTT** with no obvious penalty — encouraging, but after the
   carve reduction the *entire* ~72 GiB moves to GTT, which the after-run will measure directly.
 
-## Result — `after-bios` node2, 2026-07-06 (512 MB carve, gpt-oss served from GTT)
+## Results — `after-bios`, 2026-07-06 (512 MB carve, models served from GTT)
 
-BIOS UMA carve dropped 64 GiB → 512 MB; `ttm.pages_limit=33554432` raised the GTT ceiling to 128 GiB;
-`lxc_memory_mib` raised 24 → 96 GiB. gpt-oss-120b then loaded **entirely from GTT** (VRAM 0.5 GiB, GTT
-59.2 GiB), cgroup `memory.current` ~10–35 GiB (well under the 96 GiB cap), **no OOM**. OS RAM went 62 →
-124 GiB (no swap).
+Rolled out on node2 (gpt-oss) then node3 (122B). BIOS UMA carve 64 GiB → 512 MB; `ttm.pages_limit=33554432`
+raised the GTT ceiling to 128 GiB; `lxc_memory_mib` raised 24 → 96 GiB. Each model then loaded **entirely
+from GTT** with no OOM; OS RAM went 62 → 124 GiB on both.
 
-**Verdict: no carve→GTT penalty — prefill actually gained ~7–8%, decode flat.**
+**Verdict: no carve→GTT penalty on either — prefill gained ~6–9%, decode flat-to-slightly-up.**
+
+**node2 · gpt-oss-120b** — GTT 59.2 GiB, cgroup ~10–35 GiB / 96 cap, host ~112/124 GiB used, no swap.
 
 | ctx | prefill: carve → GTT | decode: carve → GTT |
 |---:|---|---|
 | 512 | 426.3 → 458.0 (**+7.4%**) | 49.2 → 50.6 (+2.9%) |
 | 4096 | 512.9 → 556.1 (**+8.4%**) | 48.1 → 49.7 (+3.4%) |
 | 7680 | 496.9 → 532.8 (**+7.2%**) | 46.6 → 46.4 (−0.4%) |
+
+**node3 · qwen3.5-122b** (stress case) — GTT 71.4 GiB, cgroup peaked ~27 GiB / 96 cap (> the old 24 GiB
+cap → the raise was required here), host ~103/124 GiB used, **swap 0** (tight but stable).
+
+| ctx | prefill: carve → GTT | decode: carve → GTT |
+|---:|---|---|
+| 512 | 258.5 → 277.1 (**+7.2%**) | 22.2 → 23.2 (+4.2%) |
+| 4096 | 281.1 → 305.7 (**+8.8%**) | 22.1 → 22.8 (+3.2%) |
+| 7680 | 276.4 → 293.3 (**+6.1%**) | 21.9 → 22.5 (+2.7%) |
 
 On Strix Halo GTT and the carve are the same LPDDR5X, so there was never a bandwidth reason for a penalty,
 and the feared IOMMU-translation overhead did not appear — **`amd_iommu=off` was not needed.** Reproduce:

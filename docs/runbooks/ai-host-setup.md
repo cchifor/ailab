@@ -188,14 +188,16 @@ If quorum won't restore, OOM/heavy swap, GPU ring resets, or tok/s regresses pas
   on the CT unit would self-heal it.)
 - **`talosctl shutdown` takes ~5 min** (full node drain), not seconds — see the note in step 2.
 
-### Validated on node2 (2026-07-06)
-Full rollout run on node2 (gpt-oss-120b). Outcome: **OS RAM 62 → 124 GiB (no swap)**, gpt-oss served
-**entirely from GTT** (VRAM 0.5 GiB, GTT 59.2 GiB), cgroup `memory.current` ~10–35 GiB (< 96 GiB cap),
-**0 OOM kills**, etcd back to 3/3. **tok/s held — prefill +7–8%, decode flat** (table in `bench/README.md`).
-Notes: the cgroup charges only a *fraction* of GTT (~10–35 of 59 GiB) but still > the old 24 GiB cap, so the
-`lxc_memory_mib` raise was genuinely required; `amd_iommu=off` was **not** needed. Host sits at ~112/124 GiB
-used (VMs + model) — "tight but fits"; **node3's 122B (~72 GiB) will be the tightest** — watch `free`/swap
-at its gate.
+### Validated on node2 + node3 (2026-07-06)
+Ran the full rollout on both heavyweight nodes. **tok/s held on both — prefill +6–9%, decode flat-to-up**
+(tables in `bench/README.md`); OS RAM 62 → 124 GiB, etcd back to 3/3, **0 OOM**.
+- **node2** (gpt-oss): GTT 59.2 GiB, cgroup ~10–35 GiB / 96 cap, host ~112/124 used, no swap.
+- **node3** (122B, stress case): GTT 71.4 GiB, cgroup peaked ~27 GiB / 96 cap, host ~103/124 used, **swap 0**
+  — tight but stable.
+
+Notes: the cgroup charges only a *fraction* of GTT (node2 ~10–35 of 59, node3 ~27 of 71) but still exceeds
+the old 24 GiB cap (node3 peaked ~27), so the `lxc_memory_mib` raise was genuinely required; `amd_iommu=off`
+was **not** needed. **node1 (daily driver) remains** — the easy case (most headroom, ends its swapping).
 
 ## Running a heavyweight model (on-demand)
 Both heavyweights are staged on the NFS and **validated on the current 64 GiB carve** (2026-06-14):
