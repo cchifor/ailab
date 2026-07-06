@@ -5,6 +5,7 @@ resources:
   - limitrange.yaml
   - grafana-admin.sops.yaml
   - grafana-oauth.sops.yaml # Authelia OIDC client secret (env into Grafana)
+  - grafana-db.sops.yaml # infra-pg postgres password (GF_DATABASE_PASSWORD; twin of databases/infra-pg-grafana)
   - metrics-server.yaml # Metrics API (kubectl top / HPA / Homepage k8s widget)
   - pve-exporter-secret.sops.yaml # SOPS: read-only PVE token (PVEAuditor) for pve-exporter
   - pve-exporter.yaml # Proxmox VE metrics (hypervisors + VMs/CTs + storage pools)

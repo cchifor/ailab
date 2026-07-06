@@ -1,0 +1,30 @@
+# Grafana's infra-pg password for the consumer side (GF_DATABASE_PASSWORD via envValueFrom).
+# Same value as databases/infra-pg-grafana.sops.yaml — SOPS cross-ns duplication, repo pattern.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: grafana-db
+    namespace: monitoring
+type: Opaque
+stringData:
+    password: ENC[AES256_GCM,data:ma60cXx9WlX3KqVGccl+f4UNCa72pZo7VzmN8tvGGnZqNJZ+B74u4Q/Jp518nwTm,iv:OJVEdFYE9zWWmcXFL6zJmLFgEe6RBAF3dTBQv1MWXBQ=,tag:5ByAD6R8HZ+3kRg6gRSDSQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBINDRUT29iUlJBaG85ZlhS
+            Z3lGZzMzTGZDNnhqaDBKb2UvOEN5MkdWWmtNCmhnWTdWcUthMnlBTUJDWUc5QktR
+            MTRCSHFRUUpCdG9oakI2MzE1OTc5MU0KLS0tIGVYT3Q3eEY5Qi9HUzRDMWJPMThx
+            UFZwcWJobnRDd3ZBS05wclFmU3hPUkkKKvNoIS4XppE9hJgUoTfS+RPQghFxw5zF
+            Tbx7Xl/fnIPj5p775wNYmYFh5IRPyGbm1gicnzRyyoE6gmSHvjGobA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-06T20:30:15Z"
+    mac: ENC[AES256_GCM,data:6Hp4Tim9Nv9HmBFjDDPj0jDDlLMrxdOPW8GpCjR+aT1gfpSRoK8yIwaAUMJ4Pis31UO2jJn8yEqWksi5pdJk7moZi4TY+t7y0+RuGBkBNnrSVgydQbFT0LBByG4C5ntDKTjrkaB0JL7oUo5LIHWqcIvx14zHvnG1UhcAlnGsvTE=,iv:y9ZLhR8IxJBuvuS+pDQw9qToiE3T+tUNAR9fKt8R630=,tag:cu6D2Wf7IhdWSveN2/8kSw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4
