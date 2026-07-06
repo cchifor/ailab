@@ -31,6 +31,12 @@ data:
     access_control:
       default_policy: 'one_factor'
     session:
+      # Shared session store (ADR 0016): both authelia replicas see the same sessions. Password via
+      # AUTHELIA_SESSION_REDIS_PASSWORD_FILE env. auth-valkey is accepted-ephemeral — a bounce means
+      # one estate-wide re-login.
+      redis:
+        host: 'auth-valkey.auth.svc.cluster.local'
+        port: 6379
       cookies:
         - domain: 'chifor.me'
           authelia_url: 'https://sso.chifor.me'
@@ -45,9 +51,18 @@ data:
       find_time: '2 minutes'
       ban_time: '5 minutes'
     storage:
-      local:
-        path: '/data/db.sqlite3'
+      # infra-pg (databases ns, ADR 0016) — replaces local SQLite so 2 replicas can share state
+      # (TOTP/WebAuthn credentials, OIDC consents, regulation records). Password via
+      # AUTHELIA_STORAGE_POSTGRES_PASSWORD_FILE env; schema migrates automatically on first start
+      # (same storage_encryption_key as before).
+      postgres:
+        address: 'tcp://infra-pg-rw.databases.svc.cluster.local:5432'
+        database: 'authelia'
+        username: 'authelia'
+        timeout: '5s'
     notifier:
+      # Per-pod emptyDir now (no SMTP relay in the estate): a password-reset notification lands on
+      # whichever replica served the request — `kubectl exec` into BOTH pods to find it.
       filesystem:
         filename: '/data/notification.txt'
     identity_providers:

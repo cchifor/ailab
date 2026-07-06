@@ -26,7 +26,7 @@ spec:
         - alert: CriticalWorkloadSingleReplica
           expr: |
             max by (namespace, deployment) (
-              kube_deployment_status_replicas_available{deployment=~"cloudflared|cloudflared-strive|kube-prometheus-stack-grafana"}
+              kube_deployment_status_replicas_available{deployment=~"cloudflared|cloudflared-strive|kube-prometheus-stack-grafana|authelia"}
             ) < 2
           for: 10m
           labels: { severity: critical }

@@ -50,5 +50,9 @@ issuer `https://sso.chifor.me` + authorization/token/userinfo/jwks endpoints + P
   Cloudflare-public and Tailscale-private paths (same issuer).
 - Authelia is a single-replica login SPOF (RWO iSCSI, Recreate); existing sessions survive an outage;
   `platform-normal` priority so it never preempts etcd/monitoring. Break-glass logins remain.
+  - **Update (2026-07-06, ADR 0016):** no longer true — Authelia runs **2 replicas** backed by
+    infra-pg Postgres (storage) + auth-valkey (shared sessions); the PVC/SQLite/Recreate constraint
+    is gone. Sessions are now server-side in auth-valkey (accepted-ephemeral: a valkey bounce = one
+    estate-wide re-login).
 - Future: raise to `two_factor` (TOTP/WebAuthn); codify Cloudflare Access (CF Terraform provider);
   add more apps as OIDC clients; revisit Authentik only if central RBAC/passkeys/outpost are needed.
