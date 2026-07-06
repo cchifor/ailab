@@ -135,6 +135,10 @@ node3:        GRUB_CMDLINE_LINUX_DEFAULT="quiet thunderbolt.host_reset=false pci
 ```
 
 ### Per-node procedure (root on the Proxmox host unless noted)
+
+> Generic drain / etcd-quorum / expected-app-blip discipline lives in
+> [`node-maintenance.md`](node-maintenance.md) — this section keeps only the BIOS/GRUB/LXC specifics.
+
 ```bash
 # 0. workstation: confirm quorum BEFORE starting
 _out/talosctl-1112.exe -n 192.168.0.41 etcd status            # 3/3 in-sync

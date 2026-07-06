@@ -1,0 +1,85 @@
+# Application-HA guardrails (ADR 0016, issue #100). `release: kube-prometheus-stack` so the operator's
+# ruleSelector picks it up. All alerts route to ntfy (catch-all receiver).
+#
+# Staging: CriticalWorkloadSingleReplica's regex lists only the workloads that are ALREADY multi-replica
+# — each app's HA PR extends it (grafana, authelia) and the infra-pg PR adds InfraPostgresSingleInstance.
+# Listing a workload before it runs >=2 replicas would page from day one.
+#
+# The singleton INVENTORY is a recording rule, NOT an alert: with repeat_interval 4h a permanently-firing
+# info alert would push to the phone 6x/day. Query it in Grafana Explore / dashboards instead; empty
+# result = every singleton is on the ADR 0016 Tier-B accepted list.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ha
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: application-ha
+      rules:
+        # Tier-A (ADR 0016) workloads must keep >=2 available replicas. available<2 also catches a git
+        # regression back to replicas:1 (available <= spec). Overlaps the stock
+        # KubeDeploymentReplicasMismatch (warning) during genuine degradation — intentional: this one is
+        # the "you are one failure away from a public-path outage" signal, at critical.
+        - alert: CriticalWorkloadSingleReplica
+          expr: |
+            max by (namespace, deployment) (
+              kube_deployment_status_replicas_available{deployment=~"cloudflared"}
+            ) < 2
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: "Tier-A workload {{ $labels.namespace }}/{{ $labels.deployment }} is below 2 available replicas"
+            description: >-
+              {{ $labels.deployment }} has had <2 available replicas for >10m — redundancy on the
+              public-ingress/SSO path is gone (one more failure = outage). Check for a pending pod
+              (node down? unsatisfiable constraint?) or a replicas:1 regression in git (ADR 0016 Tier A).
+        # The drain-blocker signal (the strive-pg-primary allowed-disruptions=0 burn from the 2026-07-06
+        # reboots): any PDB that cannot tolerate a single eviction for >1h will wedge `talosctl
+        # shutdown`'s drain. `.*-primary` is excluded BY DESIGN: CloudNativePG's per-cluster primary PDB
+        # is minAvailable 1 over a single primary pod, so its allowed-disruptions is always 0 — the
+        # operator relocates the primary via switchover AHEAD of a drain, so it never actually blocks
+        # one (once instances >= 2). 1h `for` rides over transient dips (a 2-replica app briefly at 1
+        # during a rollout or maintenance).
+        - alert: PodDisruptionBudgetBlockingDrains
+          expr: |
+            kube_poddisruptionbudget_status_pod_disruptions_allowed{poddisruptionbudget!~".*-primary"} == 0
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "PDB {{ $labels.namespace }}/{{ $labels.poddisruptionbudget }} allows 0 disruptions"
+            description: >-
+              This PDB has allowed no voluntary disruptions for >1h — the next node drain will hang on
+              it (talosctl's 5-min drain timeout, then a hard stop). Either the workload is degraded
+              (heal it) or the PDB is mis-sized for its replica count — PDBs only belong on
+              replicas>=2 workloads (ADR 0016). See docs/runbooks/node-maintenance.md.
+    - name: application-ha-inventory
+      rules:
+        # Inventory of single-replica workloads NOT on the ADR 0016 Tier-B accepted list. The two
+        # curated negative regexes ARE the accept-list encoding (git-reviewed, one place, no extra
+        # infra): namespace!~ excludes system/platform namespaces wholesale (charts / the platform repo
+        # own them); the name!~ lists are the intentional singletons — keep them in sync with the
+        # ADR 0016 Tier-B table. New app namespaces are auto-included: an unlisted singleton shows up
+        # here until it is either replicated or explicitly accepted. Value 1 per offending workload;
+        # empty result = clean. Surfaced in Grafana; deliberately NOT alerted (see file header).
+        - record: ailab:workload_singletons:unaccepted
+          expr: |
+            (
+              max by (namespace, deployment) (
+                kube_deployment_spec_replicas{
+                  namespace!~"kube-system|flux-system|cnpg-system|trident|local-path-storage|cert-manager|velero|tailscale|trivy-system|gatekeeper-system|strive-.*|platform-.*",
+                  deployment!~"ntfy|litellm|open-webui|homepage|oauth2-proxy|gatus|headlamp|vaultwarden|gitea|renovate|pve-exporter|metrics-server|auth-valkey|alloy.*|local-path-provisioner|kube-prometheus-stack-.*|snapshot-controller"
+                } == 1
+              )
+            )
+            or
+            (
+              max by (namespace, statefulset) (
+                kube_statefulset_replicas{
+                  namespace!~"kube-system|flux-system|cnpg-system|trident|local-path-storage|cert-manager|velero|tailscale|trivy-system|gatekeeper-system|strive-.*|platform-.*",
+                  statefulset!~"loki|tempo|prometheus-kube-prometheus-stack-prometheus|alertmanager-kube-prometheus-stack-alertmanager"
+                } == 1
+              )
+            )
