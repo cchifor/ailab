@@ -1,0 +1,33 @@
+# Credentials for the grafana database on infra-pg (initdb owner). The same password is duplicated
+# into monitoring/grafana-db.sops.yaml for the consumer (SOPS cross-ns duplication, repo pattern).
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-grafana
+    namespace: databases
+    labels:
+        cnpg.io/reload: "true"
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:wYgvGaOfcA==,iv:oEqu3QgFVUoR0VSUGrLHHQABe+Zho/Wody10cGum97Y=,tag:d/qNojIFknwJGBv9UjfhFw==,type:str]
+    password: ENC[AES256_GCM,data:TQ2fBcFnkcRQgTpsh33akMsuAo7Ja1P3prTYY/DYpd+2O7g9PqVeuymEbOQnjQ9i,iv:jQQbBU1u7FwMGBU2LgsXaIs44dFoGhxWTV2L/qfhGFw=,tag:+GjbLjCx+PRHHv6Hr08Hjw==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBBR1VKVmVhSWVjZDllUnJU
+            VERmVUxnN3d0MFdEbjFnQjdGYno2WGllQUhvCjJQQzgwZWJsTy9QTVpFb04yckxU
+            K1BnUVlPRUs4d2dyOXNVaTc2WEpBdDAKLS0tIHVEeXNybjBnbnlkejBBdFFieHBl
+            RGJtRlRXSTNqSEIyem4rVUJ1R3J4SUEKPlzaqg06VdZArjeNnSdZZkoAS7WVb9Jp
+            wR3OMg2iIIy14dPvwPtUT4eeXwLKtn4p5Md21NMRsMR7Cyz9u5kMCQ==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-06T20:27:21Z"
+    mac: ENC[AES256_GCM,data:nMffCvb5AJe3QgkexinbYHyUz6BVU2gjVSy9H+R5t/Jef24PoeFqUERrAhh7b/WQozhJvp9c0lrVD/TG4QtZUBD1wAxKx7MtdZu1PMUcD5KttSl30kGPdmODwfQ1zIw/dymlL0hSFQC46uJGf9IGJ2/C6vu8Bo7foH0iLJ4eBkA=,iv:mTHsDH9Rk8lSEGjMG6Cih0F3upxOM1YraKXEc+R2fSs=,tag:SSvRvS8bUZMyvmqlH2SKkg==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

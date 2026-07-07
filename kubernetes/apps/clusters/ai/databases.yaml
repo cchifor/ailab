@@ -1,0 +1,39 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: databases
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 15m # first bootstrap: image pull + initdb + standby pg_basebackup join
+  # Only `infrastructure` (priority classes, PodMonitor CRD). Deliberately NOT `platform`, even though
+  # the CNPG operator + its CRDs come from there (ADR 0016 consequences): platform runs wait:false, so
+  # depending on it wouldn't guarantee the operator anyway. On a fresh bootstrap this Kustomization
+  # fails-and-retries until the platform repo has installed the postgresql.cnpg.io CRDs — expected,
+  # converges via retryInterval (same pattern as qnap-storage.yaml's CRD ordering).
+  # ⚠ FRESH-BOOTSTRAP (DR rebuild) CYCLE — needs one manual unblock: grafana (a kps chart resource
+  # inside `infrastructure`, wait:true) needs infra-pg; infra-pg needs the CNPG operator; the operator
+  # comes from `platform`, which dependsOn infrastructure. Rebuilding from scratch: `flux suspend hr
+  # kube-prometheus-stack -n monitoring` (or scale grafana to 0) until platform + databases converge,
+  # then resume. See ADR 0016 Consequences. Irrelevant during normal operations.
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/databases
+  prune: true
+  wait: true
+  # kstatus doesn't know CNPG Clusters — gate health on the Cluster's Ready condition (Flux >=2.5 CEL).
+  # Deliberately NO `failed` expression: CNPG publishes Ready=False for EVERY non-healthy phase
+  # (initial bootstrap, switchover, rolling restart) and Flux fail-fast would abort the health check
+  # on those routine transients instead of polling to the timeout. Not-Ready == still-progressing.
+  healthCheckExprs:
+    - apiVersion: postgresql.cnpg.io/v1
+      kind: Cluster
+      current: status.conditions.filter(e, e.type == 'Ready').all(e, e.status == 'True')
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
