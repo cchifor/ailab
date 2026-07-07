@@ -103,6 +103,21 @@ spec:
         app.kubernetes.io/name: cloudflared
     spec:
       priorityClassName: platform-critical # public ingress path — survive pressure
+      # ADR 0016: spread the 2 connectors across nodes so one node loss keeps the tunnel up.
+      # ScheduleAnyway (not DoNotSchedule): a hard constraint deadlocks surge rollouts while a node is
+      # drained (2 replicas + maxSurge 1 need a 3rd hostname domain); the scheduler still spreads in
+      # steady state.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      # ADR 0016: stateless + no PVC -> evict fast off an unreachable node (default is 300s).
+      tolerations:
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
       containers:
         - name: cloudflared
           image: cloudflare/cloudflared:latest # Docker Hub — heed the mirror follow-up; pin a version
@@ -129,3 +144,18 @@ spec:
           configMap: { name: cloudflared-config }
         - name: creds
           secret: { secretName: cloudflared-creds } # SOPS: key credentials.json
+---
+# ADR 0016: allow exactly one connector to be evicted at a time — a drain proceeds while the other
+# keeps the tunnel up. PDB only because replicas>=2 (a PDB on a singleton blocks drains — the
+# strive-pg-primary lesson from the 2026-07-06 reboots).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudflared
+  namespace: edge
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow # crash-looping pods must never wedge a drain (GA in k8s 1.31)
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
