@@ -62,7 +62,10 @@ spec:
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
-  name: infra-pg
+  # NOT named `infra-pg`: CNPG treats a PodMonitor with the CLUSTER'S OWN NAME as its managed object
+  # and, with enablePodMonitor off, actively deletes it every reconcile (observed live — Flux applied
+  # it, the operator removed it, and the Kustomization health check hung on the missing object).
+  name: infra-pg-metrics
   namespace: databases
   labels:
     release: kube-prometheus-stack # kps Prometheus podMonitorSelector — without this it is ignored
