@@ -138,19 +138,38 @@ spec:
         existingSecret: grafana-admin
         userKey: admin-user
         passwordKey: admin-password
-      # Durable Grafana DB so UI changes (admin password, prefs, ad-hoc panels) survive restarts.
-      # NOTE: with a persistent DB the secret password is only applied on FIRST init of a fresh PVC;
-      # after that the DB value wins (reset later via `grafana cli admin reset-admin-password`).
-      persistence:
-        enabled: true
-        type: pvc
-        storageClassName: qnap-iscsi
-        accessModes: ["ReadWriteOnce"]
-        size: 2Gi
-      # RWO block on a Deployment: terminate the old pod before starting the new one, else the rollout
-      # deadlocks on a Multi-Attach error (two pods can't hold the same iSCSI LUN).
+      # ADR 0016 Tier A: Grafana's DB lives in infra-pg Postgres (databases ns) — no PVC, so 2
+      # replicas share state and ride through a node drain. Dashboards/datasources are all
+      # sidecar-provisioned; OIDC users recreate on login; the admin secret seeds on first init of
+      # the empty DB (reset later via `grafana cli admin reset-admin-password`).
+      # NOTE: no Grafana-MANAGED alert rules exist (alerting is PrometheusRule -> Alertmanager ->
+      # ntfy). If any are ever added, 2 replicas need `headlessService: true` +
+      # `[unified_alerting] ha_peers`, else they double-evaluate/notify.
+      replicas: 2
       deploymentStrategy:
-        type: Recreate
+        type: RollingUpdate # no RWO PVC anymore (was Recreate for the iSCSI Multi-Attach guard)
+      podDisruptionBudget:
+        maxUnavailable: 1
+        unhealthyPodEvictionPolicy: AlwaysAllow # crash-looping pods must never wedge a drain
+      # ScheduleAnyway, not DoNotSchedule: a hard constraint deadlocks surge rollouts while a node
+      # is drained (ADR 0016).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+              app.kubernetes.io/instance: kube-prometheus-stack
+      # Stateless now -> evict fast off an unreachable node (default 300s; ADR 0016).
+      tolerations:
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
+      envValueFrom:
+        GF_DATABASE_PASSWORD:
+          secretKeyRef:
+            name: grafana-db # SOPS twin of databases/infra-pg-grafana.sops.yaml
+            key: password
       defaultDashboardsTimezone: browser
       # SSO via Authelia OIDC (ADR 0012). The client secret comes from the grafana-oauth SOPS secret as
       # GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET (env overrides grafana.ini). The local admin stays as
@@ -159,6 +178,14 @@ spec:
       grafana.ini:
         server:
           root_url: https://grafana.chifor.me
+        database:
+          type: postgres
+          host: infra-pg-rw.databases.svc.cluster.local:5432
+          name: grafana
+          user: grafana
+          # password via GF_DATABASE_PASSWORD (envValueFrom above; env overrides grafana.ini).
+          # In-cluster hop; verify-full would need the infra-pg CA mounted — consciously skipped.
+          ssl_mode: disable
         dashboards:
           # "AI Lab Fleet" as the default home dashboard. The sidecar writes the reporting-dashboard
           # ConfigMap's data key to /tmp/dashboards/reporting.json.
