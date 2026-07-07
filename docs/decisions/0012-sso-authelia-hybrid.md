@@ -50,5 +50,16 @@ issuer `https://sso.chifor.me` + authorization/token/userinfo/jwks endpoints + P
   Cloudflare-public and Tailscale-private paths (same issuer).
 - Authelia is a single-replica login SPOF (RWO iSCSI, Recreate); existing sessions survive an outage;
   `platform-normal` priority so it never preempts etcd/monitoring. Break-glass logins remain.
+  - **Update (2026-07-06, ADR 0016):** no longer true — Authelia runs **2 replicas** backed by
+    infra-pg Postgres (storage) + auth-valkey (shared sessions); the PVC/SQLite/Recreate constraint
+    is gone. Sessions are now server-side in auth-valkey (accepted-ephemeral: a valkey bounce = one
+    estate-wide re-login).
+    **Cutover constraint (one-time, order-sensitive):** the SQLite→Postgres switch does NOT migrate
+    data, and Authelia mints new OIDC opaque identifiers (`sub`) on demand — Gitea links accounts by
+    `sub`, so skipping this silently unlinks Gitea accounts. BEFORE merging the switch, from the old
+    pod: `kubectl --context admin@ai exec -n auth deploy/authelia -- authelia storage user
+    identifiers export --file /tmp/ids.yml --config /config/configuration.yml`, then `kubectl cp` it
+    out. AFTER the new pods are up and BEFORE anyone logs in: `kubectl cp` it into a new pod and run
+    `authelia storage user identifiers import --file ... --config /config/configuration.yml`.
 - Future: raise to `two_factor` (TOTP/WebAuthn); codify Cloudflare Access (CF Terraform provider);
   add more apps as OIDC clients; revisit Authentik only if central RBAC/passkeys/outpost are needed.

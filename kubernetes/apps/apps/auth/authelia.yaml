@@ -1,24 +1,13 @@
-# Authelia — self-hosted OIDC provider (SSO for Grafana + Open WebUI), per ADR 0012.
-# Single lightweight Go binary (~64-192Mi), file user store, local SQLite on a qnap-iscsi PVC.
+# Authelia — self-hosted OIDC provider (SSO for Grafana + Open WebUI), per ADR 0012 (HA per ADR 0016).
+# Two lightweight Go replicas (~64-192Mi each), file user store; state in infra-pg Postgres
+# (databases ns) + sessions in auth-valkey (valkey.yaml) — no PVC, so a node loss just reschedules.
 # Config is merged from two files: the readable ConfigMap (configuration.yml) + the SOPS secret's
-# oidc-jwks.yml (RSA issuer key). The four random secrets come in via *_FILE env.
+# oidc-jwks.yml (RSA issuer key). The random secrets + DB/session passwords come in via *_FILE env.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: authelia
   namespace: auth
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: authelia-data
-  namespace: auth
-spec:
-  accessModes: ["ReadWriteOnce"]
-  storageClassName: qnap-iscsi
-  resources:
-    requests:
-      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -28,9 +17,7 @@ metadata:
   labels:
     app.kubernetes.io/name: authelia
 spec:
-  replicas: 1
-  strategy:
-    type: Recreate # RWO iSCSI PVC on a Deployment -> avoid Multi-Attach deadlock on rollout
+  replicas: 2 # ADR 0016 Tier A: SSO fronts the whole estate — survive one node down
   selector:
     matchLabels:
       app.kubernetes.io/name: authelia
@@ -40,6 +27,19 @@ spec:
         app.kubernetes.io/name: authelia
     spec:
       serviceAccountName: authelia
+      # ScheduleAnyway, not DoNotSchedule: a hard constraint deadlocks surge rollouts while a node
+      # is drained (ADR 0016).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: authelia
+      # Stateless now (no PVC) -> evict fast off an unreachable node (default 300s; ADR 0016).
+      tolerations:
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
       # CRITICAL: the Service is named `authelia`, so k8s would inject AUTHELIA_PORT / AUTHELIA_SERVICE_*
       # env vars — which Authelia parses as config (AUTHELIA_PORT -> deprecated `port` -> conflicts with
       # server.address, fatal). Disabling service links removes them.
@@ -63,6 +63,8 @@ spec:
             - { name: AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE, value: /secrets/storage_encryption_key }
             - { name: AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE, value: /secrets/reset_jwt_secret }
             - { name: AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE, value: /secrets/oidc_hmac_secret }
+            - { name: AUTHELIA_STORAGE_POSTGRES_PASSWORD_FILE, value: /secrets/storage_postgres_password }
+            - { name: AUTHELIA_SESSION_REDIS_PASSWORD_FILE, value: /secrets/session_redis_password }
           ports:
             - { name: http, containerPort: 9091 }
           readinessProbe:
@@ -91,7 +93,7 @@ spec:
         - name: secrets
           secret: { secretName: authelia-secrets }
         - name: data
-          persistentVolumeClaim: { claimName: authelia-data }
+          emptyDir: {} # per-pod scratch (filesystem notifier); durable state is in infra-pg
         - name: tmp
           emptyDir: {}
 ---
@@ -107,3 +109,17 @@ spec:
     app.kubernetes.io/name: authelia
   ports:
     - { name: http, port: 9091, targetPort: http }
+---
+# ADR 0016: allow exactly one replica to be evicted at a time — a drain proceeds while the other
+# keeps SSO up. PDB only because replicas>=2.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: authelia
+  namespace: auth
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow # crash-looping pods must never wedge a drain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: authelia

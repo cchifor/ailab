@@ -8,3 +8,4 @@ resources:
   - authelia-secret.sops.yaml
   - authelia-config.yaml
   - authelia.yaml
+  - valkey.yaml # auth-valkey: shared (ephemeral) session store enabling authelia x2 (ADR 0016)

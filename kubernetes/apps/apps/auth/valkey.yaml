@@ -1,0 +1,115 @@
+# auth-valkey — Authelia's shared session store (ADR 0016), enabling authelia to run 2 replicas.
+# Deliberately ACCEPTED-EPHEMERAL: 1 replica, NO persistence (save/AOF off, emptyDir) — sessions are
+# re-login-able, and a PVC would only slow rescheduling (RWO detach). A bounce = everyone re-logs in
+# once; node loss = back in ~100s (60s tolerations + no volume). Official valkey image, NOT the frozen
+# bitnamilegacy namespace.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-valkey
+  namespace: auth
+  labels:
+    app.kubernetes.io/name: auth-valkey
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single-writer session store: clean handover beats a brief dual-instance split
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: auth-valkey
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: auth-valkey
+    spec:
+      enableServiceLinks: false # hygiene (same reason as authelia: auto-injected *_PORT env vars)
+      priorityClassName: platform-critical # SSO session path — both authelia replicas need it
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999 # `valkey` uid in the official image
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: { type: RuntimeDefault }
+      # ADR 0016: stateless (emptyDir only) -> evict fast off an unreachable node.
+      tolerations:
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
+      containers:
+        - name: valkey
+          image: valkey/valkey:8.1.8-alpine
+          # No persistence (save "" + no AOF); tiny memory box with TTL-aware eviction (all Authelia
+          # session keys carry expiries, so volatile-lru can always reclaim).
+          args:
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - 48mb
+            - --maxmemory-policy
+            - volatile-lru
+            - --requirepass
+            - $(VALKEY_PASSWORD)
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: authelia-secrets, key: session_redis_password }
+            - name: REDISCLI_AUTH # lets the probe `valkey-cli ping` authenticate
+              valueFrom:
+                secretKeyRef: { name: authelia-secrets, key: session_redis_password }
+          ports:
+            - { name: valkey, containerPort: 6379 }
+          readinessProbe:
+            exec:
+              command: ["valkey-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["valkey-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /data } # image WORKDIR; nothing durable lands here
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-valkey
+  namespace: auth
+  labels:
+    app.kubernetes.io/name: auth-valkey
+spec:
+  selector:
+    app.kubernetes.io/name: auth-valkey
+  ports:
+    - { name: valkey, port: 6379, targetPort: valkey }
+---
+# Defense-in-depth on top of requirepass: only authelia pods may talk to the session store.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: auth-valkey
+  namespace: auth
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: auth-valkey
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: authelia
+      ports:
+        - { port: valkey, protocol: TCP }
