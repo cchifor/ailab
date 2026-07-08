@@ -14,13 +14,14 @@ Keep them in sync.
 ### Management LAN `192.168.0.0/24` — static allocations
 
 Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (`.51`–`.254`).
-`.5`–`.32` and `.50` are free static space (`.2`–`.4` and `.33`–`.49` are in use).
+`.8`–`.32` and `.50` are free static space (`.2`–`.7` and `.33`–`.49` are in use).
 
 | Range / IP | Owner | Source of truth |
 |---|---|---|
 | `.1` | LAN gateway | router |
 | `.2 / .3 / .4` | Proxmox hosts `ai-node1/2/3` | `inventory/hosts.yml` |
-| `.5`–`.32` | free (static) | — |
+| `.5 / .6 / .7` | Dev-worker VMs `dev-worker-4/5/6` (2nd per node) | `kubernetes/infra/dev-workers/variables.tf` |
+| `.8`–`.32` | free (static) | — |
 | `.33 / .34` | GitHub runner VMs `gha-runner-4/5` | `kubernetes/infra/runners/variables.tf` |
 | `.35` | GitHub runner VM `gha-runner-6` — reserved, deferred (node3 RAM) | `kubernetes/infra/runners/variables.tf` |
 | `.36` | OCI registry LXC `ai-registry` | `kubernetes/infra/registry-lxc/variables.tf` |
@@ -35,7 +36,7 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 > **Keep all lab static IPs inside `.2`–`.50`.** The DHCP pool starts at `.51`, so anything `.51`+
 > can be leased to a random client — exactly the collision that pushed the AI LXCs off `.51`–`.53`
 > into the static block (`kubernetes/infra/ai-lxc/variables.tf`). The dev-workers use `.37`–`.39`
-> (free static space), so no router change is needed.
+> + `.5`–`.7` (free static space), so no router change is needed.
 
 ## Dedicated storage fabric — `10.55.0.0/24`
 

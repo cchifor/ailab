@@ -89,10 +89,24 @@ variable "dev_worker_cores" {
 variable "dev_worker_memory_mib" {
   description = "Max VM memory (MiB) — the ceiling the balloon can inflate to under load."
   type        = number
-  # 16 GiB ceiling. (The 2026-07-01 cut to 8 GiB was reverted: it was never applied to the live VMs,
-  # and after freeing host RAM by downsizing the Talos CP VMs — kubernetes/infra/variables.tf — the
-  # dev-workers can use a higher ceiling. Per-node idle FLOORS now live in dev_worker_nodes[].floating.)
+  # 16 GiB ceiling, uniform across all workers. Now genuinely reachable via ballooning: the rarely-used
+  # heavyweight LLMs on node2/node3 are behind llama-swap (idle-unload), so once a node's model is
+  # unloaded pvestatd can inflate a busy worker up to this ceiling. See docs/runbooks/dev-workers.md.
   default = 16384
+}
+variable "dev_worker_memory_floating_mib" {
+  description = <<-EOT
+    Uniform balloon FLOOR (MiB) for EVERY dev-worker — a single scalar (mirrors the runners module),
+    NOT a per-node override, so all workers share one spec. Low by design (4 GiB): with the heavyweight
+    LLMs now idle-unloaded via llama-swap, ballooning works, so the floor only has to cover an
+    idle/light worker (~2-3 GiB) with margin and the balloon inflates on demand toward
+    dev_worker_memory_mib. 4 GiB is also what lets a node hold its on-demand heavyweight (~59/71 GiB)
+    AND 2 workers-at-floor at once (node3: 71 + cp3 28 + runner 10 + 2*4 = 117 < 125 GiB). During a
+    rare heavyweight session the co-located workers are pinned near this floor (light use only).
+    See docs/runbooks/dev-workers.md and docs/runbooks/ai-model-swap.md.
+  EOT
+  type        = number
+  default     = 4096
 }
 variable "dev_worker_rootfs_gb" {
   description = "Root disk (scsi0) size in GiB; cloud-init growpart expands the root fs to fill it."
@@ -113,25 +127,29 @@ variable "dev_worker_ssh_public_key" {
   default = ""
 }
 
-# ---- One dev-worker VM per physical host (fault isolation) ----
-# IPs .37/.38/.39: free static addresses well inside the reserved block (.2-.50) and below the
-# router DHCP pool (starts at .51) — no router change needed. vmids 4201-4203 don't collide
-# (Talos 4001-4003, runners 4101-4103, AI LXC 5001-5003).
-# Per-node balloon FLOOR (`floating`, MiB), sized to each host's spare RAM after the CP downsize
-# (2026-07-02): dw1=8192 (node1), dw2=10240 (node2, heaviest use), dw3=6144 (node3). Raised from a
-# uniform 2 GiB — that floor let the guests OOM-thrash under host oversubscription. Ceiling
-# (dev_worker_memory_mib) stays uniform 16 GiB. See docs/runbooks/dev-workers.md.
+# ---- TWO dev-worker VMs per physical host (was one) ----
+# All six share ONE uniform spec: cores + dev_worker_memory_mib (16 GiB ceiling) +
+# dev_worker_memory_floating_mib (4 GiB floor) are module-wide scalars, so this map carries only
+# identity (node/vmid/ip/hostname) — no per-node sizing override. Placement stays one-more-per-node
+# (fault isolation): dw1/4 -> node1, dw2/5 -> node2, dw3/6 -> node3.
+# IPs: .37/.38/.39 (existing) + .5/.6/.7 (new) — all free static addresses inside the reserved block
+# (.2-.50), below the router DHCP pool (starts at .51), so no router change is needed. vmids 42xx band
+# (4201-4206) don't collide (Talos 4001-4003, runners 4101-4105, AI LXC 5001-5003, registry 5004).
+# The 2nd worker per node fits because the rarely-used heavyweight LLMs on node2/node3 are now
+# idle-unloaded (llama-swap) — see docs/runbooks/ai-model-swap.md + dev-workers.md.
 variable "dev_worker_nodes" {
   type = map(object({
     node_name = string
     vm_id     = number
     ip        = string
     hostname  = string
-    floating  = optional(number, 2048) # per-node virtio-balloon FLOOR (MiB); see header comment
   }))
   default = {
-    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.37", hostname = "dev-worker-1", floating = 8192 }
-    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.38", hostname = "dev-worker-2", floating = 10240 }
-    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.39", hostname = "dev-worker-3", floating = 6144 }
+    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.37", hostname = "dev-worker-1" }
+    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.38", hostname = "dev-worker-2" }
+    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.39", hostname = "dev-worker-3" }
+    "dev-worker-4" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.5", hostname = "dev-worker-4" }
+    "dev-worker-5" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.6", hostname = "dev-worker-5" }
+    "dev-worker-6" = { node_name = "ai-node3", vm_id = 4206, ip = "192.168.0.7", hostname = "dev-worker-6" }
   }
 }

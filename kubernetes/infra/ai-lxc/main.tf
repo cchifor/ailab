@@ -73,6 +73,20 @@ resource "proxmox_virtual_environment_container" "ai_llm" {
     backup    = false # don't vzdump an NFS-backed share
   }
 
+  # Optional local-NVMe model cache -> /models-local (managed local-lvm volume, sized per node). Present
+  # only where ai_llm_nodes[].model_cache_gb > 0 (node2/node3): staging the idle-unloaded heavyweight
+  # here makes llama-swap cold loads ~7-15x faster than reading the GGUF over NFS. node1 gets none, so
+  # its LXC is unchanged. backup=false: models are re-stageable, never vzdump ~60-76 GiB of weights.
+  dynamic "mount_point" {
+    for_each = try(each.value.model_cache_gb, 0) > 0 ? [each.value.model_cache_gb] : []
+    content {
+      volume = var.model_cache_datastore
+      size   = "${mount_point.value}G"
+      path   = "/models-local"
+      backup = false
+    }
+  }
+
   network_interface {
     name   = "eth0"
     bridge = var.bridge

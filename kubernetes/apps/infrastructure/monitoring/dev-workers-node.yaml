@@ -26,6 +26,9 @@ subsets:
       - { ip: 192.168.0.37 }
       - { ip: 192.168.0.38 }
       - { ip: 192.168.0.39 }
+      - { ip: 192.168.0.5 } # dev-worker-4 (ai-node1)
+      - { ip: 192.168.0.6 } # dev-worker-5 (ai-node2)
+      - { ip: 192.168.0.7 } # dev-worker-6 (ai-node3)
     ports:
       - { name: metrics, port: 9100, protocol: TCP }
 ---

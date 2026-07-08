@@ -85,6 +85,18 @@ data:
             href: https://dw3.chifor.me
             description: Web terminal · Claude Code + Codex (ai-node3)
             icon: mdi-console
+        - dev-worker-4:
+            href: https://dw4.chifor.me
+            description: Web terminal · Claude Code + Codex (ai-node1)
+            icon: mdi-console
+        - dev-worker-5:
+            href: https://dw5.chifor.me
+            description: Web terminal · Claude Code + Codex (ai-node2)
+            icon: mdi-console
+        - dev-worker-6:
+            href: https://dw6.chifor.me
+            description: Web terminal · Claude Code + Codex (ai-node3)
+            icon: mdi-console
         - Renovate:
             href: https://github.com/cchifor/ailab/issues?q=is%3Aissue+is%3Aopen+label%3Arenovate
             description: Dependency update PRs · Dashboard
