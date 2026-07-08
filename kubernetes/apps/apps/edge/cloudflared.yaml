@@ -33,25 +33,25 @@ data:
       # Access enforces at the CF edge for ALL paths/methods incl. the ttyd /ws WebSocket upgrade,
       # BEFORE the tunnel — cloudflared + Caddy only ever see authenticated traffic.
       # noTLSVerify: Caddy's cert is local-CA; httpHostHeader: so Caddy matches its IP site block.
+      # Dev-worker web terminals — consecutive IPs .8-.13 (dw1->.8 .. dw6->.13; 2 per node).
       - hostname: dw1.chifor.me
-        service: https://192.168.0.37
-        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.37" }
+        service: https://192.168.0.8
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.8" }
       - hostname: dw2.chifor.me
-        service: https://192.168.0.38
-        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.38" }
+        service: https://192.168.0.9
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.9" }
       - hostname: dw3.chifor.me
-        service: https://192.168.0.39
-        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.39" }
-      # 2nd dev-worker per node (dw4->node1 .5, dw5->node2 .6, dw6->node3 .7). Same Access gate.
+        service: https://192.168.0.10
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.10" }
       - hostname: dw4.chifor.me
-        service: https://192.168.0.5
-        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.5" }
+        service: https://192.168.0.11
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.11" }
       - hostname: dw5.chifor.me
-        service: https://192.168.0.6
-        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.6" }
+        service: https://192.168.0.12
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.12" }
       - hostname: dw6.chifor.me
-        service: https://192.168.0.7
-        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.7" }
+        service: https://192.168.0.13
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.13" }
       # In-cluster k8s tools: Headlamp (read-only cluster explorer) + Hubble UI (Cilium L3/L4/L7
       # network flows). GATED by Cloudflare Access (kubernetes/infra/cloudflare/access.tf k8s_tools).
       - hostname: k8s.chifor.me

@@ -14,12 +14,18 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
-| dev-worker-1 | ai-node1 | 4201 | 192.168.0.37 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-2 | ai-node2 | 4202 | 192.168.0.38 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-3 | ai-node3 | 4203 | 192.168.0.39 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-4 | ai-node1 | 4204 | 192.168.0.5  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-5 | ai-node2 | 4205 | 192.168.0.6  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-6 | ai-node3 | 4206 | 192.168.0.7  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-2 | ai-node2 | 4202 | 192.168.0.9  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-3 | ai-node3 | 4203 | 192.168.0.10 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-4 | ai-node1 | 4204 | 192.168.0.11 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-5 | ai-node2 | 4205 | 192.168.0.12 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-6 | ai-node3 | 4206 | 192.168.0.13 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+
+> **IP renumber (consecutive .8–.13).** cloud-init fixes the IP at create and the tofu module has
+> `lifecycle.ignore_changes = [initialization]`, so the live IPs were changed **in-guest** (not by tofu):
+> per worker — add the new IP live, rewrite the address in `/etc/netplan/50-cloud-init.yaml`, write
+> `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` (`network: {config: disabled}`) so cloud-init
+> won't revert it, then `netplan apply`. The map IPs above are kept in sync as documentation.
 
 ## Pre-flight gate (clear BEFORE `tofu apply`)
 

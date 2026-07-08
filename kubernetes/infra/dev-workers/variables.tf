@@ -132,11 +132,12 @@ variable "dev_worker_ssh_public_key" {
 # dev_worker_memory_floating_mib (4 GiB floor) are module-wide scalars, so this map carries only
 # identity (node/vmid/ip/hostname) — no per-node sizing override. Placement stays one-more-per-node
 # (fault isolation): dw1/4 -> node1, dw2/5 -> node2, dw3/6 -> node3.
-# IPs: .37/.38/.39 (existing) + .5/.6/.7 (new) — all free static addresses inside the reserved block
-# (.2-.50), below the router DHCP pool (starts at .51), so no router change is needed. vmids 42xx band
-# (4201-4206) don't collide (Talos 4001-4003, runners 4101-4105, AI LXC 5001-5003, registry 5004).
-# The 2nd worker per node fits because the rarely-used heavyweight LLMs on node2/node3 are now
-# idle-unloaded (llama-swap) — see docs/runbooks/ai-model-swap.md + dev-workers.md.
+# IPs: consecutive .8-.13 (free static block, inside the .2-.50 reserve, below the router DHCP pool at
+# .51 — no router change needed). vmids 42xx band (4201-4206) don't collide (Talos 4001-4003, runners
+# 4101-4105, AI LXC 5001-5003, registry 5004). NOTE: cloud-init sets the IP at create and
+# lifecycle.ignore_changes=[initialization] means editing `ip` here is DOCUMENTATION ONLY — the live IP
+# was changed in-guest (netplan), see docs/runbooks/dev-workers.md. The 2nd worker per node fits because
+# the rarely-used heavyweight LLMs on node2/node3 are idle-unloaded (llama-swap) — see ai-model-swap.md.
 variable "dev_worker_nodes" {
   type = map(object({
     node_name = string
@@ -145,11 +146,11 @@ variable "dev_worker_nodes" {
     hostname  = string
   }))
   default = {
-    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.37", hostname = "dev-worker-1" }
-    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.38", hostname = "dev-worker-2" }
-    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.39", hostname = "dev-worker-3" }
-    "dev-worker-4" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.5", hostname = "dev-worker-4" }
-    "dev-worker-5" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.6", hostname = "dev-worker-5" }
-    "dev-worker-6" = { node_name = "ai-node3", vm_id = 4206, ip = "192.168.0.7", hostname = "dev-worker-6" }
+    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.8", hostname = "dev-worker-1" }
+    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.9", hostname = "dev-worker-2" }
+    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.10", hostname = "dev-worker-3" }
+    "dev-worker-4" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.11", hostname = "dev-worker-4" }
+    "dev-worker-5" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.12", hostname = "dev-worker-5" }
+    "dev-worker-6" = { node_name = "ai-node3", vm_id = 4206, ip = "192.168.0.13", hostname = "dev-worker-6" }
   }
 }
