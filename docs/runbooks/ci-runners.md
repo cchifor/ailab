@@ -5,7 +5,7 @@ See ADR 0013. IaC: `kubernetes/infra/runners/` (VMs) + `ansible/roles/github_run
 
 | | |
 |---|---|
-| VMs | `gha-runner-1..5` — vmid 4101-4105, **2 on node1/node2, 1 on node3** (gha-runner-6 reserved), .47/.48/.49 + .33/.34, 8 vCPU / 24 GiB / 120 GiB each |
+| VMs | `gha-runner-1..5` — vmid 4101-4105, **2 on node1/node2, 1 on node3** (gha-runner-6 reserved .19), consecutive IPs .14-.18, 8 vCPU / 24 GiB / 120 GiB each |
 | Memory | balloon **12-24 GiB** (floor 12 GiB so host RAM pressure can't starve a running job — see #620) + 8 GiB guest swap (`swappiness=10`) |
 | OS | Ubuntu 24.04 cloud image (cloud-init: static IP + `ubuntu` user + the ansible SSH key) |
 | Label | `self-hosted-hv` (repo var `RUNNER_LABEL`; workflows use `runs-on: ${{ vars.RUNNER_LABEL }}`) |
@@ -73,7 +73,7 @@ just runners        # installs Docker/toolchain + the ported runner contract, re
   works** — the buildx self-heal regression gate (cchifor/platform#682).
 - **On a VM:**
   ```bash
-  ssh ubuntu@192.168.0.47 'systemctl status actions.runner.cchifor-platform.service --no-pager; \
+  ssh ubuntu@192.168.0.14 'systemctl status actions.runner.cchifor-platform.service --no-pager; \
     docker compose version; docker buildx version; uv --version; k6 version; \
     systemctl show -p Environment -p ExecStartPre actions.runner.cchifor-platform.service'
   ```

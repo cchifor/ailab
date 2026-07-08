@@ -1,7 +1,7 @@
 # LAN-only NodePort in front of the kube-prometheus-stack Prometheus.
 #
 # Why: the platform's nightly k6 lane (cchifor/platform load-nightly.yml)
-# runs on the self-hosted runner VMs (192.168.0.47-.49 / .33-.34), which
+# runs on the self-hosted runner VMs (192.168.0.14-.18), which
 # share the flat mgmt LAN with the Talos nodes (.41-.43) but sit OUTSIDE
 # the cluster. It needs two endpoints on this Prometheus:
 #   - POST /api/v1/write       — k6's experimental-prometheus-rw output

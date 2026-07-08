@@ -23,12 +23,12 @@ metadata:
     app.kubernetes.io/name: ci-runner-node
 subsets:
   - addresses:
-      - { ip: 192.168.0.47 }
-      - { ip: 192.168.0.48 }
-      - { ip: 192.168.0.49 }
-      - { ip: 192.168.0.33 }
-      - { ip: 192.168.0.34 }
-      # - { ip: 192.168.0.35 }  # gha-runner-6 (node3) DEFERRED — see ADR 0013
+      - { ip: 192.168.0.14 } # gha-runner-1 (ai-node1)
+      - { ip: 192.168.0.15 } # gha-runner-2 (ai-node2)
+      - { ip: 192.168.0.16 } # gha-runner-3 (ai-node3)
+      - { ip: 192.168.0.17 } # gha-runner-4 (ai-node1)
+      - { ip: 192.168.0.18 } # gha-runner-5 (ai-node2)
+      # - { ip: 192.168.0.19 }  # gha-runner-6 (node3) DEFERRED — see ADR 0013
     ports:
       - { name: metrics, port: 9100, protocol: TCP }
 ---
