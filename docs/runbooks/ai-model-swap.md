@@ -90,6 +90,24 @@ node serve *multiple* models (swap between them on demand), add more entries und
   models are used ~10 % of the time, workers balloon freely the rest of the time. See
   `docs/runbooks/dev-workers.md`.
 
+## OOM protection (why an over-subscribed load never kills the cluster)
+
+node3 (the heavyweight node) can still momentarily over-subscribe — a loaded model + a busy runner + 2
+busy dev-workers exceeds 125 GiB. On **2026-07-08 this OOM-killed cp2 AND cp3** (both Talos CPs),
+dropping etcd below quorum and taking the k8s API down until they were restarted. To make that
+non-fatal, **`scripts/oom-protect-guests.sh`** (a per-host systemd timer, `oom-protect-guests.timer`,
+re-applied every 60 s) biases the host OOM killer:
+
+- **Talos CPs (4001/4002/4003) → `oom_score_adj = -1000`** — never killed (etcd quorum protected).
+- **GHA-runner + dev-worker VMs → `+750`** — rebuildable, the preferred victims (a runner re-registers,
+  a worker is re-created) so a memory crunch sacrifices one of them, not a CP or the loaded model.
+- The AI-LLM LXCs keep the default score — protected only relative to the de-prioritised guests, so a
+  loaded model usually survives (a runner/worker dies first) without the absolute pin the CPs get.
+
+Deployed to all 3 hosts via `scripts/node-ssh.py`. **Recovery if a CP is OOM-killed anyway:** free the
+node's RAM (`pct exec <ctid> -- systemctl restart llama-swap.service` unloads the model) then
+`qm start <cp-vmid>`; etcd rejoins on boot. TODO: fold the timer into the `pve_base` ansible role.
+
 ## Monitoring
 
 `ServiceMonitor ai-llm-llamacpp` scrapes `:8080/metrics`. With llama-swap the port always answers, but
