@@ -23,12 +23,12 @@ metadata:
     app.kubernetes.io/name: dev-worker-node
 subsets:
   - addresses:
-      - { ip: 192.168.0.37 }
-      - { ip: 192.168.0.38 }
-      - { ip: 192.168.0.39 }
-      - { ip: 192.168.0.5 } # dev-worker-4 (ai-node1)
-      - { ip: 192.168.0.6 } # dev-worker-5 (ai-node2)
-      - { ip: 192.168.0.7 } # dev-worker-6 (ai-node3)
+      - { ip: 192.168.0.8 }  # dev-worker-1 (ai-node1)
+      - { ip: 192.168.0.9 }  # dev-worker-2 (ai-node2)
+      - { ip: 192.168.0.10 } # dev-worker-3 (ai-node3)
+      - { ip: 192.168.0.11 } # dev-worker-4 (ai-node1)
+      - { ip: 192.168.0.12 } # dev-worker-5 (ai-node2)
+      - { ip: 192.168.0.13 } # dev-worker-6 (ai-node3)
     ports:
       - { name: metrics, port: 9100, protocol: TCP }
 ---
