@@ -36,7 +36,7 @@ spec:
         - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
       containers:
         - name: valkey
-          image: valkey/valkey:8.1.8-alpine
+          image: valkey/valkey:9.1.0-alpine
           # No persistence (save "" + no AOF); tiny memory box with TTL-aware eviction (all Authelia
           # session keys carry expiries, so volatile-lru can always reclaim).
           args:
