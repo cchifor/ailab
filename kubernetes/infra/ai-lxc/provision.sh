@@ -144,12 +144,13 @@ fi
 
 # ---- Stage the model onto local NVMe (/models-local) for fast cold (re)loads ----
 # Only when MODEL_STAGE_SRC is set AND MODEL points at the local copy. Idempotent (rsync skips
-# already-staged shards). Requires the local-lvm mount from tofu (ai_llm_nodes[].model_cache_gb).
+# already-staged shards). Requires the /models-local mount (added out-of-band via `pct set` —
+# see docs/runbooks/ai-model-swap.md).
 if [ -n "$MODEL_STAGE_SRC" ]; then
   DEST_DIR="$(dirname "$MODEL")"
   echo "== staging model: ${MODEL_STAGE_SRC}/ -> ${DEST_DIR}/ (local NVMe; ~7-15x faster cold loads) =="
   test -d "$MODEL_STAGE_SRC" || { echo "FATAL: MODEL_STAGE_SRC is not a directory: $MODEL_STAGE_SRC" >&2; exit 1; }
-  mountpoint -q /models-local || echo "WARNING: /models-local is not a mount — staging onto the CT rootfs (add ai_llm_nodes[].model_cache_gb + tofu apply)." >&2
+  mountpoint -q /models-local || echo "WARNING: /models-local is not a mount — staging onto the CT rootfs (add the mount: pct set <ctid> -mp1 local-lvm:160,mp=/models-local)." >&2
   mkdir -p "$DEST_DIR"
   rsync -a --partial "${MODEL_STAGE_SRC}/" "${DEST_DIR}/" # --partial resumes a killed copy; -a skips unchanged shards
   test -f "$MODEL" || { echo "FATAL: model file missing after staging: $MODEL (check MODEL vs MODEL_STAGE_SRC)" >&2; exit 1; }

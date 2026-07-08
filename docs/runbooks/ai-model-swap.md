@@ -21,10 +21,19 @@ dev-workers fit. node1's daily driver stays pinned (interactive latency).
 
 ## Deploy (per managed node)
 
-**Prerequisite — add the local model cache first.** `tofu -chdir=kubernetes/infra/ai-lxc apply` adds a
-`/models-local` mount (managed local-lvm volume) to the node2/node3 LXCs (`ai_llm_nodes[].model_cache_gb`).
-This restarts those CTs (brief LLM downtime) but leaves node1 untouched. Then provision: `provision.sh`
-rsyncs the GGUF from NFS to `/models-local` (first run only, ~1-5 min copy) and serves it from local NVMe.
+**Prerequisite — add the local model cache mount (OUT-OF-BAND, per node).** Do NOT add this via tofu:
+bpg marks a `mount_point`'s volume/size as ForceNew, so a tofu-managed mount would destroy+recreate the
+running LLM container. Add it with `pct set` (non-destructive; the CT restarts to pick up the mount):
+
+```bash
+# node2 (ctid 5002) + node3 (ctid 5003): a 160 GiB local-lvm volume at /models-local
+python scripts/node-ssh.py 192.168.0.3 "pct set 5002 -mp1 local-lvm:160,mp=/models-local && pct reboot 5002"
+python scripts/node-ssh.py 192.168.0.4 "pct set 5003 -mp1 local-lvm:160,mp=/models-local && pct reboot 5003"
+```
+
+`main.tf` has `lifecycle.ignore_changes = [mount_point]`, so this out-of-band mount persists and a future
+`tofu apply` won't try to remove it. Then provision (below): `provision.sh` rsyncs the GGUF from NFS to
+`/models-local` on first run (~1-5 min copy) and serves it from local NVMe. node1 is not touched.
 
 `lxc-exec.py` pushes `provision.sh` + companions into the CT and runs it with the env below. Verify
 the current llama-swap release tag first and pass `--env LLAMA_SWAP_VERSION=vNNN` if the default in

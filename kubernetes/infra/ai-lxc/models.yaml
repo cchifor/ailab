@@ -10,8 +10,8 @@
 # model is unloaded and its GTT returned to the host. swap: false => direct llama-server.service
 # (no llama-swap); swap: true => served on :8080 by llama-swap, load-on-first-request.
 #
-# Local cache: managed (idle-unloaded) heavyweights are STAGED on local NVMe (/models-local, via
-# ai_llm_nodes[].model_cache_gb in kubernetes/infra/ai-lxc/variables.tf) so a cold reload reads the GGUF
+# Local cache: managed (idle-unloaded) heavyweights are STAGED on local NVMe (/models-local — an
+# out-of-band `pct set` mount, see docs/runbooks/ai-model-swap.md) so a cold reload reads the GGUF
 # at ~2-4 GB/s (~30-60s) instead of ~300 MB/s over NFS (~5 min). `gguf` points at the local copy and
 # `stage_from` names the NFS source that provision.sh rsyncs in (MODEL_STAGE_SRC). node1's pinned daily
 # driver stays on NFS (no local cache — it never idle-unloads).
