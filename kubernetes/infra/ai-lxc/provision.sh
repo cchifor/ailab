@@ -58,7 +58,7 @@ VIDEO_GID="${VIDEO_GID:-44}"
 # node serves — identical to the direct-mode args. See docs/runbooks/ai-model-swap.md + models.yaml.
 SWAP="${SWAP:-}"
 TTL="${TTL:-900}"                       # idle seconds before llama-swap unloads the model (0 = never)
-LLAMA_SWAP_VERSION="${LLAMA_SWAP_VERSION:-v137}"   # github.com/mostlygeek/llama-swap release tag (pin)
+LLAMA_SWAP_VERSION="${LLAMA_SWAP_VERSION:-v236}"   # github.com/mostlygeek/llama-swap release tag (pin; latest 2026-07-07)
 SWAP_DIR=/opt/llama-swap
 SWAP_BIN="${SWAP_DIR}/llama-swap"
 
