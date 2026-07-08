@@ -1,13 +1,15 @@
 # Publishes the off-cluster ai-llm LXCs into the cluster. Topology (2026-07-08, see
-# kubernetes/infra/ai-lxc/models.yaml): node1 (.44) + node2 (.45) BOTH run qwen3.6-35b-a3b :8080
-# pinned (the daily driver) — so the `llm` Service has TWO endpoints and LiteLLM load-balances /
-# fails over across them. node3 (.46) runs llama-swap serving ONLY qwen3.5-122b on demand (`llm-qwen35`
-# → .46:8080). gpt-oss-120b was retired from node3 (2026-07-08): two ~60-71 GiB heavyweights cannot
-# co-reside in node3's 96 GiB LXC, and interleaving interactive + platform demand thrashed the single
-# iGPU (~55-82s reload per crossover). Its LiteLLM model_name is shimmed to qwen3.6 (litellm.yaml), so
-# no `llm-gptoss` Service is needed. LiteLLM (litellm.yaml) fronts these as one OpenAI endpoint. Shared
-# label app.kubernetes.io/component=llama-server lets one ServiceMonitor scrape them all. Services have
-# no selector → manual Endpoints below. gemma-4 (node1 :8082) is on-demand — see litellm.yaml.
+# kubernetes/infra/ai-lxc/models.yaml): node1 (.44) + node2 (.45) BOTH run qwen3.6-35b-a3b :8080 pinned
+# (the daily driver). `llm` fronts both (metrics scraping + compat DNS); LiteLLM routes chat via the
+# per-node `llm-node1`/`llm-node2` Services so it health-aware load-balances the pair (kube-proxy's blind
+# round-robin over `llm` has no readiness → a down node still gets ~50% of connections). node3 (.46) runs
+# llama-swap serving ONLY qwen3.5-122b on demand (`llm-qwen35` → .46:8080). gpt-oss-120b was retired from
+# node3 (2026-07-08): two ~60-71 GiB heavyweights cannot co-reside in node3's 96 GiB LXC, and interleaving
+# interactive + platform demand thrashed the single iGPU (~55-82s reload per crossover); its LiteLLM
+# model_name is shimmed to qwen3.6 (litellm.yaml), so no `llm-gptoss` Service is needed. LiteLLM fronts
+# these as one OpenAI endpoint. Label app.kubernetes.io/component=llama-server selects the ServiceMonitor
+# scrape set (the per-node `llm-node*` are intentionally unlabelled to avoid double-scraping .44/.45).
+# Services have no selector → manual Endpoints below. gemma-4 (node1 :8082) is on-demand — see litellm.yaml.
 ---
 apiVersion: v1
 kind: Service
@@ -27,10 +29,58 @@ metadata:
   namespace: ai
   labels: { app.kubernetes.io/name: llm }
 subsets:
-  # qwen3.6-35b-a3b is pinned on BOTH node1 and node2 — the Service round-robins / fails over across them.
+  # qwen3.6-35b-a3b is pinned on BOTH node1 and node2. `llm` stays for metrics scraping + the compat
+  # /v1/models DNS; LiteLLM no longer routes chat here (it uses the per-node Services below for
+  # health-aware LB — blind kube-proxy round-robin has no readiness, so a down node still gets ~50%).
   - addresses:
       - { ip: 192.168.0.44, hostname: ai-llm-1 }
       - { ip: 192.168.0.45, hostname: ai-llm-2 }
+    ports: [{ name: http, port: 8080, protocol: TCP }]
+---
+# Per-node Services for the pinned qwen3.6 pair — used ONLY by LiteLLM to load-balance the two nodes as
+# separate deployments (native cooldown + retry → a down/restarting node is parked, not blindly hit).
+# Deliberately NOT labelled app.kubernetes.io/component=llama-server: the `llm` Service above already
+# scrapes .44+.45, so labelling these too would double-scrape both nodes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-node1
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-node1 }
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llm-node1
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-node1 }
+subsets:
+  - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
+    ports: [{ name: http, port: 8080, protocol: TCP }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-node2
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-node2 }
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llm-node2
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-node2 }
+subsets:
+  - addresses: [{ ip: 192.168.0.45, hostname: ai-llm-2 }]
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
 apiVersion: v1
