@@ -1,23 +1,24 @@
 # Runbook: on-demand LLM loading (llama-swap)
 
-The two heavyweight models are **rarely used** but each pins ~59 GiB (gpt-oss, node2) / ~71 GiB
-(Qwen3.5-122B, node3) of **GTT (system RAM lent to the iGPU)** for the life of the `llama-server`
-process. Pinned, they keep node2/node3 at ~85–95 % RAM, break virtio-ballooning, and block a 2nd
-dev-worker per node. **llama-swap** fronts `:8080`, loads the model on the first request, and
-**idle-unloads it after a TTL** — returning that GTT to the host so ballooning works and the
-dev-workers fit. node1's daily driver stays pinned (interactive latency).
+**Topology (2026-07-08).** The daily driver **Qwen3.6-35B (~24 GiB) is PINNED on node1 AND node2** —
+two warm nodes give redundancy + LiteLLM load-balancing, and keep node2 light so its runners/dev-workers
+have RAM (the old "gpt-oss pinned on node2" layout over-subscribed node2 → OOM). **node3 is the
+heavyweight node: llama-swap serves qwen3.5-122b OR gpt-oss-120b on demand** (only one loads at a time
+on the single iGPU; switched by the request's model name), idle-unloading after the TTL so node3's GTT
+is free the rest of the time.
 
-- provisioner: `kubernetes/infra/ai-lxc/provision.sh` (`SWAP=true` mode) via `scripts/lxc-exec.py`
+- provisioner: `kubernetes/infra/ai-lxc/provision.sh` — direct/pinned (`MODEL`) or llama-swap
+  (`SWAP=true`, single `MODEL` or multi-model `MODELS_JSON`) — via `scripts/lxc-exec.py`
 - config source-of-truth: `kubernetes/infra/ai-lxc/models.yaml`
-- router: `kubernetes/apps/apps/ai/litellm.yaml` (backends already point at `:8080`; `request_timeout: 900` covers cold start)
+- routing: `kubernetes/apps/apps/ai/llm-service.yaml` (Endpoints) + `litellm.yaml` (`request_timeout: 900`)
 
 ## Model → node → mode
 
-| Node | ctid | LXC IP | Model | Mode | GTT freed when idle |
-|---|---|---|---|---|---|
-| ai-node1 | 5001 | .44 | Qwen3.6-35B (daily driver) | **pinned** (direct `llama-server.service`) | — (kept warm) |
-| ai-node2 | 5002 | .45 | gpt-oss-120B | **llama-swap**, ttl 900 s | ~59 GiB |
-| ai-node3 | 5003 | .46 | Qwen3.5-122B | **llama-swap**, ttl 900 s | ~71 GiB |
+| Node | ctid | LXC IP | Model(s) | Mode |
+|---|---|---|---|---|
+| ai-node1 | 5001 | .44 | Qwen3.6-35B (daily driver) | **pinned** (direct, from NFS) |
+| ai-node2 | 5002 | .45 | Qwen3.6-35B (daily driver) | **pinned** (direct, from local NVMe) |
+| ai-node3 | 5003 | .46 | Qwen3.5-122B **or** gpt-oss-120B | **llama-swap** multi-model, ttl 1800 s, local NVMe |
 
 ## Deploy (per managed node)
 
@@ -40,24 +41,27 @@ the current llama-swap release tag first and pass `--env LLAMA_SWAP_VERSION=vNNN
 `provision.sh` is stale (asset: `llama-swap_<NNN>_linux_amd64.tar.gz`). `MODEL` points at the LOCAL copy;
 `MODEL_STAGE_SRC` is the NFS source that gets staged in.
 
-```bash
-# node2 — gpt-oss-120B, managed (idle-unload 15 min), served from local NVMe
-python scripts/lxc-exec.py 192.168.0.3 5002 \
-  --env SWAP=true --env TTL=900 \
-  --env MODEL=/models-local/gpt-oss-120b/gpt-oss-120b-mxfp4-00001-of-00003.gguf \
-  --env MODEL_STAGE_SRC=/models/gpt-oss-120b \
-  --env MODEL_ALIAS=gpt-oss-120b --env CTX=8192 --env PARALLEL=1 --env EXTRA_ARGS=--no-mmap
+**Run these from PowerShell**, not Git Bash — MSYS rewrites the `/model...` paths in `--env` args (see
+[[ailab-vm-renumber-gotchas]]). node1 is untouched. `\` = bash continuation (use `` ` `` in PowerShell).
 
-# node3 — Qwen3.5-122B, managed. This is what frees node3 for dev-worker-6.
-python scripts/lxc-exec.py 192.168.0.4 5003 \
-  --env SWAP=true --env TTL=900 \
-  --env MODEL=/models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf \
-  --env MODEL_STAGE_SRC=/models/qwen3.5-122b-a10b \
-  --env MODEL_ALIAS=qwen3.5-122b --env CTX=8192 --env PARALLEL=1 --env EXTRA_ARGS=--no-mmap
+```bash
+# node2 -> Qwen3.6-35B PINNED (no SWAP), staged to local NVMe. Same config as node1 (256K ctx, q8_0 KV,
+# vision mmproj) so both nodes serve an identical model behind the load-balanced `llm` Service.
+python scripts/lxc-exec.py 192.168.0.3 5002 --env LLAMA_BUILD=b9672 \
+  --env MODEL=/models-local/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+  --env MODEL_STAGE_SRC=/models/qwen3.6-35b-a3b \
+  --env MMPROJ=/models-local/qwen3.6-35b-a3b/mmproj-F16.gguf \
+  --env MODEL_ALIAS=qwen3.6-35b-a3b --env CTX=262144 --env PARALLEL=1 --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0
+
+# node3 -> llama-swap MULTI-MODEL: qwen3.5-122b + gpt-oss-120b (both staged; one loads at a time on demand).
+python scripts/lxc-exec.py 192.168.0.4 5003 --env SWAP=true --env LLAMA_BUILD=b9631 \
+  --env MODELS_JSON='[{"alias":"qwen3.5-122b","gguf":"/models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf","stage_from":"/models/qwen3.5-122b-a10b","ctx":8192,"parallel":1,"extra":"--no-mmap","ttl":1800},{"alias":"gpt-oss-120b","gguf":"/models-local/gpt-oss-120b/gpt-oss-120b-mxfp4-00001-of-00003.gguf","stage_from":"/models/gpt-oss-120b","ctx":8192,"parallel":1,"extra":"--no-mmap","ttl":1800}]'
 ```
 
-Omit `MODEL_STAGE_SRC` (and point `MODEL` back at `/models/...`) to serve straight from NFS without the
-local cache.
+`MODELS_JSON` (a jq array) overrides the single `MODEL` and lets one node's llama-swap serve several
+models. Omit staging (`stage_from`/`MODEL_STAGE_SRC`) + point `gguf`/`MODEL` at `/models/...` to serve
+straight from NFS. LiteLLM routing is set by `llm-service.yaml` Endpoints (llm -> .44+.45, llm-gptoss +
+llm-qwen35 -> .46).
 
 `provision.sh` (SWAP mode) installs the llama-swap binary, renders `/etc/llama-swap/config.yaml` (one
 model, the `cmd` = the same `llama-server` invocation, `ttl` = `TTL`), writes `llama-swap.service` on
