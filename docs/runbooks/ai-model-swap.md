@@ -3,9 +3,19 @@
 **Topology (2026-07-08).** The daily driver **Qwen3.6-35B (~24 GiB) is PINNED on node1 AND node2** —
 two warm nodes give redundancy + LiteLLM load-balancing, and keep node2 light so its runners/dev-workers
 have RAM (the old "gpt-oss pinned on node2" layout over-subscribed node2 → OOM). **node3 is the
-heavyweight node: llama-swap serves qwen3.5-122b OR gpt-oss-120b on demand** (only one loads at a time
-on the single iGPU; switched by the request's model name), idle-unloading after the TTL so node3's GTT
-is free the rest of the time.
+heavyweight node: llama-swap serves ONLY qwen3.5-122b on demand**, idle-unloading after the TTL so
+node3's GTT is free the rest of the time.
+
+> **Single-model on node3 (2026-07-08).** node3 previously multi-served qwen3.5-122b **OR** gpt-oss-120b.
+> But the two (~71 GiB + ~59 GiB) cannot co-reside in node3's 96 GiB iGPU LXC, so llama-swap held only
+> one at a time. With interactive traffic on qwen3.5-122b and the deepagent platform on gpt-oss, the two
+> demand streams **interleaved and forced a full evict + cold-reload on nearly every crossover** — measured
+> **~55–82 s per request, 4/4**, turning ordinary use into "loading doesn't work". Fix: node3 serves a
+> **single** heavyweight (qwen3.5-122b). gpt-oss-120b is retired locally and its LiteLLM `model_name` is
+> **shimmed to the pinned qwen3.6** (`kubernetes/apps/apps/ai/litellm.yaml`) so callers keep working. The
+> LiteLLM routing change alone stops the thrash (no traffic reaches node3's gpt-oss); re-provisioning node3
+> to a single-model llama-swap config (below) is follow-up cleanup. To bring gpt-oss back you must give up
+> qwen3.5-122b — they cannot share node3.
 
 - provisioner: `kubernetes/infra/ai-lxc/provision.sh` — direct/pinned (`MODEL`) or llama-swap
   (`SWAP=true`, single `MODEL` or multi-model `MODELS_JSON`) — via `scripts/lxc-exec.py`
@@ -18,7 +28,7 @@ is free the rest of the time.
 |---|---|---|---|---|
 | ai-node1 | 5001 | .44 | Qwen3.6-35B (daily driver) | **pinned** (direct, from NFS) |
 | ai-node2 | 5002 | .45 | Qwen3.6-35B (daily driver) | **pinned** (direct, from local NVMe) |
-| ai-node3 | 5003 | .46 | Qwen3.5-122B **or** gpt-oss-120B | **llama-swap** multi-model, ttl 1800 s, local NVMe |
+| ai-node3 | 5003 | .46 | Qwen3.5-122B (gpt-oss-120B retired) | **llama-swap** single-model, ttl 1800 s, local NVMe |
 
 ## Deploy (per managed node)
 
@@ -53,9 +63,12 @@ python scripts/lxc-exec.py 192.168.0.3 5002 --env LLAMA_BUILD=b9672 \
   --env MMPROJ=/models-local/qwen3.6-35b-a3b/mmproj-F16.gguf \
   --env MODEL_ALIAS=qwen3.6-35b-a3b --env CTX=262144 --env PARALLEL=1 --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0
 
-# node3 -> llama-swap MULTI-MODEL: qwen3.5-122b + gpt-oss-120b (both staged; one loads at a time on demand).
-python scripts/lxc-exec.py 192.168.0.4 5003 --env SWAP=true --env LLAMA_BUILD=b9631 \
-  --env MODELS_JSON='[{"alias":"qwen3.5-122b","gguf":"/models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf","stage_from":"/models/qwen3.5-122b-a10b","ctx":8192,"parallel":1,"extra":"--no-mmap","ttl":1800},{"alias":"gpt-oss-120b","gguf":"/models-local/gpt-oss-120b/gpt-oss-120b-mxfp4-00001-of-00003.gguf","stage_from":"/models/gpt-oss-120b","ctx":8192,"parallel":1,"extra":"--no-mmap","ttl":1800}]'
+# node3 -> llama-swap SINGLE-MODEL: qwen3.5-122b only (gpt-oss-120b retired 2026-07-08 to end swap-thrash).
+# Re-running this rewrites /etc/llama-swap/config.yaml with ONE model, so a stale gpt-oss entry is dropped.
+python scripts/lxc-exec.py 192.168.0.4 5003 --env SWAP=true --env LLAMA_BUILD=b9631 `
+  --env MODEL=/models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf `
+  --env MODEL_STAGE_SRC=/models/qwen3.5-122b-a10b `
+  --env MODEL_ALIAS=qwen3.5-122b --env CTX=8192 --env PARALLEL=1 --env EXTRA_ARGS=--no-mmap --env TTL=1800
 ```
 
 `MODELS_JSON` (a jq array) overrides the single `MODEL` and lets one node's llama-swap serve several

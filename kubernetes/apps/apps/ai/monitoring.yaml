@@ -47,7 +47,7 @@ spec:
     matchNames: [ai]
   selector:
     matchLabels:
-      app.kubernetes.io/component: llama-server # matches all llama-server Services (llm/llm-gemma4/llm-gptoss/llm-qwen35)
+      app.kubernetes.io/component: llama-server # matches all llama-server Services (llm/llm-gemma4/llm-qwen35)
   endpoints:
     - port: http
       path: /metrics

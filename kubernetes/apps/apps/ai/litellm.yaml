@@ -1,8 +1,9 @@
 # LiteLLM proxy: one OpenAI-compatible endpoint (litellm.ai.svc:4000/v1) that routes by
-# model name to the per-node llama-server backends. The heavyweights (gpt-oss-120b, qwen3.5-122b) ARE
-# listed: their nodes now run llama-swap (kubernetes/infra/ai-lxc, docs/runbooks/ai-model-swap.md), so
-# the :8080 backend always answers and loads the model on first request — no "down backend" window.
-# The first request after idle pays a multi-minute cold start, which request_timeout (below) covers.
+# model name to the per-node llama-server backends. node3 (llama-swap) now serves ONLY qwen3.5-122b —
+# the sole local heavyweight — which loads on first request (multi-minute cold start covered by
+# request_timeout below) and idle-unloads after its ttl. gpt-oss-120b is retired locally (it thrashed
+# node3's single iGPU against qwen3.5-122b) and its model_name is shimmed to the pinned qwen3.6 (below).
+# See kubernetes/infra/ai-lxc + docs/runbooks/ai-model-swap.md.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -30,13 +31,23 @@ data:
           # agentic tool loops. ~16K reserved for output: Qwen3.6 is a REASONING model (emits a <think>
           # trace in reasoning_content before the answer/tool-call), so output budget must stay generous.
           max_input_tokens: 245760
+      # gpt-oss-120b RETIRED as a LOCAL model (2026-07-08): node3 now serves ONLY qwen3.5-122b. Reason —
+      # qwen3.5-122b and gpt-oss-120b (both ~60-71 GiB) cannot co-reside in node3's single 96 GiB iGPU
+      # LXC, so when interactive traffic (qwen3.5-122b) and the deepagent platform (gpt-oss) interleave,
+      # llama-swap evicted+cold-reloaded on nearly EVERY request (measured ~55-82s reload per crossover,
+      # 4/4). Removing this route is what ends the thrash: no traffic reaches node3's gpt-oss anymore.
+      # The model_name is KEPT and SHIMMED to the always-warm, local, zero-cost qwen3.6 daily driver so
+      # existing callers that request "gpt-oss-120b" keep working (the chosen "falls back to qwen3.6"
+      # path). To serve a real gpt-oss-class model instead, point model/api_key at gpt-5.4 (mind the
+      # global max_budget) — or delete this entry to hard-retire the name. See docs/runbooks/ai-model-swap.md.
       - model_name: gpt-oss-120b
         litellm_params:
-          model: openai/gpt-oss-120b
-          api_base: http://llm-gptoss.ai.svc.cluster.local:8080/v1
+          model: openai/qwen3.6-35b-a3b
+          api_base: http://llm.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
         model_info:
-          max_input_tokens: 7000 # host CTX=8192
+          supports_vision: true # now served by qwen3.6 (multimodal)
+          max_input_tokens: 245760 # now served by qwen3.6 (host CTX=262144)
       - model_name: qwen3.5-122b
         litellm_params:
           model: openai/qwen3.5-122b
@@ -136,7 +147,7 @@ spec:
         # every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
-        checksum/config: "ac946730b5df"
+        checksum/config: "7406619d82ee"
     spec:
       containers:
         - name: litellm
