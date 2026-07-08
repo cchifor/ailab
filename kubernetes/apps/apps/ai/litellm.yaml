@@ -1,7 +1,8 @@
 # LiteLLM proxy: one OpenAI-compatible endpoint (litellm.ai.svc:4000/v1) that routes by
-# model name to the per-node llama-server pools. Heavyweights are intentionally NOT listed
-# (they're on-demand, addressed by node IP) so the router never advertises a down backend.
-# Internal-only for now (no master key); add LITELLM_MASTER_KEY before internet exposure.
+# model name to the per-node llama-server backends. The heavyweights (gpt-oss-120b, qwen3.5-122b) ARE
+# listed: their nodes now run llama-swap (kubernetes/infra/ai-lxc, docs/runbooks/ai-model-swap.md), so
+# the :8080 backend always answers and loads the model on first request — no "down backend" window.
+# The first request after idle pays a multi-minute cold start, which request_timeout (below) covers.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -102,7 +103,10 @@ data:
           api_key: os.environ/OPENAI_API_KEY
     litellm_settings:
       drop_params: true
-      request_timeout: 600
+      # 900s to cover a llama-swap COLD START: the first request to an idle-unloaded heavyweight
+      # (gpt-oss ~1.5-4 min, qwen3.5-122b ~4-5 min over NFS) must not time out before the model loads.
+      # Matches llama-swap's healthCheckTimeout (kubernetes/infra/ai-lxc/provision.sh SWAP mode).
+      request_timeout: 900
       # Spend guard: hard ceiling on third-party (OpenAI/Anthropic) cost so a LITELLM_MASTER_KEY leak on
       # the (soon-public) api.chifor.me can't run up unbounded cloud spend. Global across all models/keys;
       # tune to comfort. For finer control, move cloud models behind a separate virtual key with its own budget.
@@ -132,7 +136,7 @@ spec:
         # every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
-        checksum/config: "c92cdd272c49"
+        checksum/config: "ac946730b5df"
     spec:
       containers:
         - name: litellm

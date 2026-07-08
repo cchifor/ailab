@@ -42,6 +42,16 @@ data:
       - hostname: dw3.chifor.me
         service: https://192.168.0.39
         originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.39" }
+      # 2nd dev-worker per node (dw4->node1 .5, dw5->node2 .6, dw6->node3 .7). Same Access gate.
+      - hostname: dw4.chifor.me
+        service: https://192.168.0.5
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.5" }
+      - hostname: dw5.chifor.me
+        service: https://192.168.0.6
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.6" }
+      - hostname: dw6.chifor.me
+        service: https://192.168.0.7
+        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.7" }
       # In-cluster k8s tools: Headlamp (read-only cluster explorer) + Hubble UI (Cilium L3/L4/L7
       # network flows). GATED by Cloudflare Access (kubernetes/infra/cloudflare/access.tf k8s_tools).
       - hostname: k8s.chifor.me

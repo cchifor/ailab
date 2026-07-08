@@ -15,9 +15,9 @@ variable "tunnel_id" {
 }
 
 variable "tunnel_hostnames" {
-  description = "Subdomains under chifor.me published by the tunnel; each gets a proxied CNAME -> <tunnel>.cfargotunnel.com. Existing records are adopted via imports.tf; NEW ones (status, dw1/dw2/dw3) are created. The dw* hosts are the dev-worker ttyd terminals and are gated by access.tf."
+  description = "Subdomains under chifor.me published by the tunnel; each gets a proxied CNAME -> <tunnel>.cfargotunnel.com. Existing records are adopted via imports.tf; NEW ones (status, dw1-dw6) are created. The dw* hosts are the dev-worker ttyd terminals (2 per node) and are gated by access.tf."
   type        = list(string)
-  default     = ["home", "sso", "status", "chat", "grafana", "api", "dw1", "dw2", "dw3", "k8s", "hubble", "proxmox", "qnap", "prometheus", "alertmanager", "ntfy", "git", "vault"]
+  default     = ["home", "sso", "status", "chat", "grafana", "api", "dw1", "dw2", "dw3", "dw4", "dw5", "dw6", "k8s", "hubble", "proxmox", "qnap", "prometheus", "alertmanager", "ntfy", "git", "vault"]
 }
 
 variable "registry_ip" {

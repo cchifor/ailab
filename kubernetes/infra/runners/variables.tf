@@ -101,14 +101,17 @@ variable "runner_memory_floating_mib" {
     cap, set in the ansible role) — the canary checks that, not the balloon. Set equal to
     runner_memory_mib to disable ballooning.
 
-    Pinned to 12 GiB (was 1 GiB). The 1 GiB floor was the root cause of cchifor/platform#620: the
-    Proxmox hosts run the platform at ~80% RAM, so pvestatd ballooned idle-looking runner guests down
-    toward the floor (1-2 GiB) and CI jobs OOM-killed (exit 137) the instant a heavy docker-compose
-    e2e stack started. A 12 GiB floor guarantees each guest enough headroom for the CI peak while the
-    balloon still inflates to 24 GiB under load; hosts verified healthy (79-85% used) at this floor.
+    Was 12 GiB (fixing cchifor/platform#620: at ~80% host RAM, pvestatd ballooned idle runners to
+    1-2 GiB and CI jobs OOM-killed at exit 137). Now 10 GiB — the runner-service systemd cgroup cap
+    (MemoryMax=10G): the observed CI-job working set peaks ~7 GiB (idle ~1-2 GiB, busy ~10% of the
+    time), so 10 GiB still covers the peak while the balloon inflates to 24 GiB under load, and it
+    frees ~2 GiB/runner (~10 GiB cluster-wide) now that the host RAM is no longer dominated by the
+    pinned heavyweight LLMs (llama-swap idle-unload — docs/runbooks/ai-model-swap.md). DO NOT go below
+    10 GiB: that would let pvestatd squeeze the guest under the runner's own cgroup cap and re-open
+    #620. Validate under a two-heavy-jobs-on-one-host CI run before relying on the freed RAM.
   EOT
   type        = number
-  default     = 12288 # 12 GiB balloon floor — see cchifor/platform#620 (host-pressure ballooning OOM)
+  default     = 10240 # 10 GiB balloon floor = runner-service MemoryMax cap; was 12288 — see cchifor/platform#620
 }
 variable "runner_rootfs_gb" {
   type    = number

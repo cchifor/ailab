@@ -1,36 +1,51 @@
 # Runbook: dev-worker VMs (Claude Code + Codex)
 
-Three interactive developer VMs (`dev-worker-1/2/3`, one per Proxmox node) that run **Claude Code**
+Six interactive developer VMs (`dev-worker-1..6`, **two per Proxmox node**) that run **Claude Code**
 and **Codex** inside tmux, with the homelab claude-worker feature set ported to ailab's idiom: a
 tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 
 - tofu: `kubernetes/infra/dev-workers/`
 - role: `ansible/roles/dev_worker/` · playbook: `ansible/dev-workers.yml`
-- inventory group: `dev_workers` (`.50/.51/.52`) · secrets: `ansible/secrets/dev-worker.sops.yaml`
+- inventory group: `dev_workers` (`.37/.38/.39` + `.5/.6/.7`) · secrets: `ansible/secrets/dev-worker.sops.yaml`
+
+**All six share one uniform spec** — cores + ceiling + floor are module-wide scalars in
+`kubernetes/infra/dev-workers/variables.tf` (`dev_worker_cores`, `dev_worker_memory_mib`,
+`dev_worker_memory_floating_mib`); the `dev_worker_nodes` map carries only identity.
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
-| dev-worker-1 | ai-node1 | 4201 | 192.168.0.37 | 8 vCPU / 16 GiB (8–16 balloon) / 40+128 GiB |
-| dev-worker-2 | ai-node2 | 4202 | 192.168.0.38 | 8 vCPU / 16 GiB (10–16 balloon) / 40+128 GiB |
-| dev-worker-3 | ai-node3 | 4203 | 192.168.0.39 | 8 vCPU / 16 GiB (6–16 balloon) / 40+128 GiB |
+| dev-worker-1 | ai-node1 | 4201 | 192.168.0.37 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-2 | ai-node2 | 4202 | 192.168.0.38 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-3 | ai-node3 | 4203 | 192.168.0.39 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-4 | ai-node1 | 4204 | 192.168.0.5  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-5 | ai-node2 | 4205 | 192.168.0.6  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-6 | ai-node3 | 4206 | 192.168.0.7  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
 
 ## Pre-flight gate (clear BEFORE `tofu apply`)
 
-**GPU VRAM carve** — confirm the per-node BIOS VRAM reservation (`docs/runbooks/ai-host-setup.md`;
-up to ~64 GiB). This sets the real system-RAM budget. Dev-worker memory is a **16 GiB ballooned
-ceiling with a per-node floor** (`dev_worker_nodes[].floating`: dw1 8 / dw2 10 / dw3 6 GiB — raised
-2026-07-02 from a uniform 2 GiB, which let the guests OOM-thrash under host oversubscription). The
-floors are sized to each host's spare RAM after the CP downsize (below); tune them per node in
-`kubernetes/infra/dev-workers/variables.tf`.
+**On-demand heavyweight LLMs (the prerequisite for the 2nd worker per node).** The 2nd worker per
+host fits only because the rarely-used heavyweight models on node2/node3 (gpt-oss ~59 GiB, Qwen3.5-122B
+~71 GiB GTT) are now **idle-unloaded via llama-swap** rather than pinned resident — see
+`docs/runbooks/ai-model-swap.md`. With the model idle, the host drops to ~45% used and ballooning
+actually works, so a worker inflates toward the 16 GiB ceiling on demand. Dev-worker memory is a
+**uniform 16 GiB ceiling with a uniform 4 GiB floor** (module scalars
+`dev_worker_memory_mib` / `dev_worker_memory_floating_mib`) — low floor by design, because ballooning
+now inflates busy workers and 4 GiB is what lets a node hold its on-demand heavyweight **plus** its
+two workers-at-floor at once.
 
-(IPs `.37/.38/.39` are free static addresses inside the `.2`–`.50` reserve, below the DHCP pool —
-no router change is needed.)
+(IPs `.37/.38/.39` + `.5/.6/.7` are free static addresses inside the `.2`–`.50` reserve, below the
+DHCP pool — no router change is needed.)
 
-Per-node RAM budget: Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB hard**, downsized 2026-07-02/03 to free
-host RAM — `kubernetes/infra/variables.tf`) + ai-llm LXC (24 GiB cap, ~0.5 GiB real) + runner (24 GiB
-ceiling / **12 GiB floor**, ×2 on node1/node2 and ×1 on node3) + dev-worker (16 GiB ceiling /
-per-node 8–10–6 GiB floor). Hosts run ~82–90% used; the per-node floors are each guest's guaranteed
-working set that pvestatd can't reclaim, so a dev-worker can't be starved into the OOM-thrash again.
+Per-node RAM budget (~125 GiB usable): Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB hard** —
+`kubernetes/infra/variables.tf`) + ai-llm LXC (96 GiB cap; **~0 GiB when idle-unloaded**, ~59/71 GiB
+when a heavyweight is loaded on demand) + runner (24 GiB ceiling / **10 GiB floor**, ×2 node1/node2,
+×1 node3) + dev-worker (16 GiB ceiling / **4 GiB floor**, ×2 per node). In steady state (heavyweight
+unloaded) node2/node3 sit ~45% used and workers balloon freely toward 16 GiB. **Time-share rule:** a
+node serves *either* its on-demand heavyweight *or* its two workers at full tilt — not both. Loading
+the 122B on node3 (71 GiB) fits alongside cp3 28 + runner 10 + 2×dev-worker-at-floor 4 = 117 < 125,
+with the co-located workers pinned near their 4 GiB floor for that session. If a host shows sustained
+`node_pressure_memory`, prefer unloading its heavyweight (or shortening its llama-swap TTL) over
+starving a worker.
 
 ## Provision
 
@@ -109,10 +124,12 @@ git add ansible/secrets/dev-worker.sops.yaml
 - agents (both `c4` + `claude-agent`): `which claude codex` resolve under `~/.npm-global/bin`;
   `claude --version`, `codex --version`; `getfacl ~/.claude ~/.codex` shows c4 `rx`
 - persistence: start a tmux pane, reboot the VM, confirm tmux-continuum restored the session
-- **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The per-node balloon
-  floors (dw1 8 / dw2 10 / dw3 6 GiB) guarantee each guest's working set; if a host still shows
-  sustained pressure, free real host RAM by downsizing that node's Talos CP VM (`control_planes{}`,
-  rolling reboot via `talosctl shutdown` — see `ai-host-setup.md`) rather than starving the dev-worker.
+- **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The uniform 4 GiB
+  balloon floor guarantees each guest's idle working set; a busy worker inflates toward 16 GiB when
+  the node's LLM is idle-unloaded. If a host shows sustained pressure, the first lever is its
+  heavyweight LLM — confirm it idle-unloaded (or shorten the llama-swap TTL, `docs/runbooks/ai-model-swap.md`)
+  — then, only if still pressured, downsize that node's Talos CP VM (`control_planes{}`, rolling reboot
+  via `talosctl shutdown` — see `ai-host-setup.md`) rather than starving a dev-worker.
 
 ## Remote access (web terminals)
 

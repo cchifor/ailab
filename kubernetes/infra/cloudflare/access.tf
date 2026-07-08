@@ -28,7 +28,7 @@ resource "cloudflare_zero_trust_access_policy" "allow_me" {
 # shell. The single allow_me policy is the whole allow-list — do not add a `bypass`/`allow` policy here
 # without understanding that it would open the shell.
 resource "cloudflare_zero_trust_access_application" "dev_worker" {
-  for_each = toset(["dw1", "dw2", "dw3"])
+  for_each = toset(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"])
 
   account_id       = var.cloudflare_account_id
   name             = "${each.value} dev-worker terminal"
