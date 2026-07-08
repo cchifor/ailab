@@ -114,6 +114,10 @@ data:
           api_key: os.environ/OPENAI_API_KEY
     litellm_settings:
       drop_params: true
+      # Retry a failed upstream call (5xx / dropped connection) before surfacing an error — smooths over a
+      # llama-server that is briefly unavailable (mid-restart / cold-loading) and a LiteLLM replica rollover.
+      # (This does NOT multi-endpoint-failover the qwen3.6 .44/.45 pair — that needs two api_base entries.)
+      num_retries: 2
       # 900s to cover a llama-swap COLD START: the first request to an idle-unloaded heavyweight
       # (gpt-oss ~1.5-4 min, qwen3.5-122b ~4-5 min over NFS) must not time out before the model loads.
       # Matches llama-swap's healthCheckTimeout (kubernetes/infra/ai-lxc/provision.sh SWAP mode).
@@ -132,7 +136,14 @@ metadata:
   labels:
     app.kubernetes.io/name: litellm
 spec:
-  replicas: 1
+  # 2 replicas so a single-pod OOMKill (LiteLLM main-stable grows unbounded under sustained agentic
+  # load) no longer blanks the WHOLE gateway — the surviving replica keeps serving every model while
+  # the OOMed one restarts. LiteLLM is stateless here (STORE_MODEL_IN_DB=False) so replicas are safe.
+  # NOTE: max_budget is tracked IN-MEMORY PER REPLICA, so the $50/30d cloud guard is now ~2x and resets
+  # on any restart — for a hard cloud-cost cap use a DB/Redis-backed virtual-key budget instead.
+  replicas: 2
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } # never drop below 2 healthy during a rollout
   selector:
     matchLabels:
       app.kubernetes.io/name: litellm
@@ -147,11 +158,23 @@ spec:
         # every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
-        checksum/config: "7406619d82ee"
+        checksum/config: "a1514ae88df2"
     spec:
+      # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
+      # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: { matchLabels: { app.kubernetes.io/name: litellm } }
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: litellm
-          image: ghcr.io/berriai/litellm:main-stable
+          # Pinned by DIGEST (main-stable is a MOVING tag → silent, unreviewed upgrades). This digest =
+          # ghcr.io/berriai/litellm:main-stable as of 2026-07-08. Bump deliberately: pull main-stable,
+          # read `docker inspect --format '{{index .RepoDigests 0}}'`, update here, review, merge.
+          image: ghcr.io/berriai/litellm@sha256:078f96272f0c84da383e6a1f197478390b5204a86dcf00a181bcfe02a00e5dfa
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:
@@ -210,3 +233,19 @@ spec:
     app.kubernetes.io/name: litellm
   ports:
     - { name: http, port: 4000, targetPort: http, protocol: TCP }
+---
+# Keep at least one gateway pod during VOLUNTARY disruptions (node drain, rollout) so a maintenance
+# action can't take the whole LiteLLM gateway down. (Does not guard involuntary OOMKills — replicas:2
+# + anti-affinity cover those.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: litellm
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: litellm
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: litellm
