@@ -171,8 +171,14 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 20
           resources:
-            requests: { cpu: 100m, memory: 512Mi }
-            limits: { memory: 2Gi } # LiteLLM loads heavy Python deps/tokenizers; <1Gi OOMs at startup
+            requests: { cpu: 100m, memory: 1Gi }
+            # LiteLLM loads heavy Python deps/tokenizers; <1Gi OOMs at startup.
+            # 2Gi OOMKills mid-request under heavy agentic load (long qwen
+            # reasoning turns via the router_orchestrator profile stream large
+            # bodies + connection-pool buffers through the proxy) — the drop
+            # surfaces to callers as "incomplete chunked read" / connection
+            # errors. 6Gi gives headroom for concurrent streamed completions.
+            limits: { memory: 6Gi }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
