@@ -137,7 +137,7 @@ variable "runner_ssh_public_key" {
 # gha-runner-6 (node3, .35 / vmid 4106) is RESERVED but DEFERRED: measured 2026-07-01, node3 has no room
 # for a second runner while its qwen3.5-122b LLM is loaded (~7.8 GiB non-reclaimable RSS; the LXC runs
 # swap=0). Uncomment to deploy after reducing node3's iGPU VRAM carve (or the Talos CP allocation) — the
-# .35 IP + vmid 4106 stay reserved for it. See ADR 0013.
+# .19 IP + vmid 4106 stay reserved for it. See ADR 0013.
 variable "runner_nodes" {
   type = map(object({
     node_name = string
@@ -146,12 +146,15 @@ variable "runner_nodes" {
     hostname  = string
   }))
   default = {
-    "gha-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.47", hostname = "gha-runner-1" }
-    "gha-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.48", hostname = "gha-runner-2" }
-    "gha-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.49", hostname = "gha-runner-3" }
-    "gha-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.33", hostname = "gha-runner-4" }
-    "gha-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.34", hostname = "gha-runner-5" }
+    # Consecutive IPs .14-.18 (.19 reserved for the deferred runner-6). cloud-init sets the IP at create
+    # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
+    # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
+    "gha-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "gha-runner-1" }
+    "gha-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "gha-runner-2" }
+    "gha-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "gha-runner-3" }
+    "gha-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "gha-runner-4" }
+    "gha-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "gha-runner-5" }
     # DEFERRED — node3's second runner; uncomment after freeing node3 RAM (see header + ADR 0013):
-    # "gha-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.35", hostname = "gha-runner-6" }
+    # "gha-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "gha-runner-6" }
   }
 }
