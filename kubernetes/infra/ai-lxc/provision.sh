@@ -58,6 +58,11 @@ VIDEO_GID="${VIDEO_GID:-44}"
 # node serves — identical to the direct-mode args. See docs/runbooks/ai-model-swap.md + models.yaml.
 SWAP="${SWAP:-}"
 TTL="${TTL:-900}"                       # idle seconds before llama-swap unloads the model (0 = never)
+# MODELS_JSON (SWAP multi-model): a jq array of objects, each
+#   {alias,gguf,ctx,parallel,extra,ttl,stage_from,mmproj,cache_k,cache_v}
+# lets ONE node's llama-swap serve SEVERAL models (loaded one-at-a-time, switched on request). When set,
+# it OVERRIDES the single MODEL/MODEL_ALIAS. Used on node3 (qwen3.5-122b + gpt-oss-120b). See models.yaml.
+MODELS_JSON="${MODELS_JSON:-}"
 LLAMA_SWAP_VERSION="${LLAMA_SWAP_VERSION:-v236}"   # github.com/mostlygeek/llama-swap release tag (pin; latest 2026-07-07)
 SWAP_DIR=/opt/llama-swap
 SWAP_BIN="${SWAP_DIR}/llama-swap"
@@ -142,10 +147,23 @@ else
   test -x "$BIN/llama-server" || { echo "FATAL: run the default instance first (binary missing)" >&2; exit 1; }
 fi
 
-# ---- Stage the model onto local NVMe (/models-local) for fast cold (re)loads ----
-# Only when MODEL_STAGE_SRC is set AND MODEL points at the local copy. Idempotent (rsync skips
-# already-staged shards). Requires the /models-local mount (added out-of-band via `pct set` —
-# see docs/runbooks/ai-model-swap.md).
+# ---- Stage the model(s) onto local NVMe (/models-local) for fast cold (re)loads ----
+# Requires the /models-local mount (added out-of-band via `pct set` — see docs/runbooks/ai-model-swap.md).
+# Multi-model (MODELS_JSON): stage each model's `stage_from` dir -> dirname(gguf). Idempotent (rsync).
+if [ -n "$MODELS_JSON" ]; then
+  while IFS= read -r _m; do
+    _src="$(printf '%s' "$_m" | jq -r '.stage_from // empty')"
+    _gguf="$(printf '%s' "$_m" | jq -r '.gguf')"
+    [ -n "$_src" ] || continue
+    _dest="$(dirname "$_gguf")"
+    echo "== staging ${_src}/ -> ${_dest}/ (local NVMe) =="
+    mountpoint -q /models-local || echo "WARNING: /models-local is not a mount." >&2
+    mkdir -p "$_dest"
+    rsync -a --partial "${_src}/" "${_dest}/"
+    test -f "$_gguf" || { echo "FATAL: model file missing after staging: $_gguf" >&2; exit 1; }
+  done < <(printf '%s' "$MODELS_JSON" | jq -c '.[]')
+fi
+# Single-model staging (MODEL_STAGE_SRC set AND MODEL points at the local copy).
 if [ -n "$MODEL_STAGE_SRC" ]; then
   DEST_DIR="$(dirname "$MODEL")"
   echo "== staging model: ${MODEL_STAGE_SRC}/ -> ${DEST_DIR}/ (local NVMe; ~7-15x faster cold loads) =="
@@ -171,19 +189,45 @@ KV_FLAGS=""
 [ -n "$CACHE_TYPE_V" ] && KV_FLAGS="${KV_FLAGS} --cache-type-v ${CACHE_TYPE_V}"
 
 if [ -n "$SWAP" ]; then
-  echo "== systemd unit ${UNIT}: llama-swap on :${PORT} serving '${MODEL_ALIAS}' on-demand (ttl=${TTL}s) =="
+  _swap_models="${MODEL_ALIAS}"; [ -n "$MODELS_JSON" ] && _swap_models="$(printf '%s' "$MODELS_JSON" | jq -r '[.[].alias] | join(", ")')"
+  echo "== systemd unit ${UNIT}: llama-swap on :${PORT} serving on-demand: ${_swap_models} =="
   # llama-swap owns the listen port and spawns llama-server (on its \${PORT} macro) on first request,
   # then idle-unloads it after ttl seconds — returning the model's GTT to the host. The model cmd is the
   # SAME llama-server invocation as direct mode; no warm-up (on-demand loading is the whole point).
   install -d -o llama -g llama /etc/llama-swap
   # NOTE: \${PORT} below is a llama-swap MACRO (auto-assigned upstream port) — it must reach the config
   # literally, so it is backslash-escaped here to survive this (unquoted) heredoc. ttl=0 => never unload.
-  cat >/etc/llama-swap/config.yaml <<EOF
+  cat >/etc/llama-swap/config.yaml <<HDR
 # Rendered by provision.sh (SWAP=true). Intent/source-of-truth: kubernetes/infra/ai-lxc/models.yaml.
-# One model per node (iGPU affinity). Tune idle-unload via TTL (0 = pin: load-once, never unload).
-healthCheckTimeout: 900   # seconds to wait for a cold model to become healthy (a 122B load is minutes)
+# llama-swap loads ONE model at a time on this node's iGPU, switching on request. ttl 0 = pin.
+healthCheckTimeout: 900   # seconds to wait for a cold model to become healthy (a 120-122B load is minutes)
 logLevel: info
 models:
+HDR
+  # ${PORT} below is a llama-swap MACRO (auto-assigned upstream port); backslash-escaped so it reaches
+  # the config LITERALLY through these unquoted heredocs.
+  if [ -n "$MODELS_JSON" ]; then
+    while IFS= read -r _m; do
+      _a="$(printf '%s' "$_m" | jq -r '.alias')"; _g="$(printf '%s' "$_m" | jq -r '.gguf')"
+      _c="$(printf '%s' "$_m" | jq -r '.ctx // 8192')"; _p="$(printf '%s' "$_m" | jq -r '.parallel // 1')"
+      _e="$(printf '%s' "$_m" | jq -r '.extra // ""')"; _t="$(printf '%s' "$_m" | jq -r '.ttl // 900')"
+      _mm="$(printf '%s' "$_m" | jq -r '.mmproj // empty')"; _mmf=""; [ -n "$_mm" ] && _mmf="--mmproj ${_mm}"
+      _ck="$(printf '%s' "$_m" | jq -r '.cache_k // empty')"; _cv="$(printf '%s' "$_m" | jq -r '.cache_v // empty')"
+      _kv=""; [ -n "$_ck" ] && _kv="--cache-type-k ${_ck}"; [ -n "$_cv" ] && _kv="${_kv} --cache-type-v ${_cv}"
+      cat >>/etc/llama-swap/config.yaml <<ENTRY
+  "${_a}":
+    cmd: >
+      ${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
+      -m ${_g} -a ${_a}
+      -ngl 99 -c ${_c} --parallel ${_p}
+      --flash-attn auto --jinja --metrics ${_kv} ${_mmf} ${_e}
+    proxy: "http://127.0.0.1:\${PORT}"
+    checkEndpoint: /health
+    ttl: ${_t}
+ENTRY
+    done < <(printf '%s' "$MODELS_JSON" | jq -c '.[]')
+  else
+    cat >>/etc/llama-swap/config.yaml <<ENTRY
   "${MODEL_ALIAS}":
     cmd: >
       ${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
@@ -193,11 +237,12 @@ models:
     proxy: "http://127.0.0.1:\${PORT}"
     checkEndpoint: /health
     ttl: ${TTL}
-EOF
+ENTRY
+  fi
   chown -R llama:llama /etc/llama-swap
   cat >"/etc/systemd/system/${UNIT}" <<EOF
 [Unit]
-Description=llama-swap (on-demand llama.cpp model load/idle-unload) — ai-llm [${MODEL_ALIAS}]
+Description=llama-swap (on-demand llama.cpp model load/idle-unload) — ai-llm [${MODEL_ALIAS:-multi-model}]
 After=network-online.target
 Wants=network-online.target
 
@@ -241,6 +286,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+  # Free :${PORT}: if this node previously ran llama-swap, stop+disable it (switching swap -> pinned).
+  systemctl disable --now llama-swap.service 2>/dev/null || true
 fi
 
 if [ "$INSTANCE" = "default" ]; then

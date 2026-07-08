@@ -1,56 +1,59 @@
-# AI-LXC model catalog — the human source of truth for which model each node serves and whether it is
-# PINNED (always resident) or MANAGED (idle-unloaded on demand via llama-swap).
+# AI-LXC model catalog — the human source of truth for which node serves which model(s) and whether a
+# model is PINNED (always resident) or MANAGED (idle-unloaded on demand via llama-swap).
 #
 # This file is documentation + a deploy checklist, NOT auto-applied: the appliance is provisioned by
-# `scripts/lxc-exec.py <host> <ctid> --env ... bash provision.sh` (there is no `just ai` recipe). Each
-# row below maps 1:1 to a provision command in docs/runbooks/ai-model-swap.md. Keep them in sync, and
-# keep the max_input_tokens in kubernetes/apps/apps/ai/litellm.yaml in sync with `ctx`.
+# `scripts/lxc-exec.py <host> <ctid> --env ... bash provision.sh`. Each entry maps to a provision command
+# in docs/runbooks/ai-model-swap.md. Keep the max_input_tokens in kubernetes/apps/apps/ai/litellm.yaml in
+# sync with `ctx`.
 #
-# ttl semantics (llama-swap): 0 = pinned (load once, never idle-unload); >0 = idle seconds before the
-# model is unloaded and its GTT returned to the host. swap: false => direct llama-server.service
-# (no llama-swap); swap: true => served on :8080 by llama-swap, load-on-first-request.
+# Topology (2026-07-08):
+#   node1 + node2 : qwen3.6-35b-a3b PINNED on BOTH (the daily driver) -> redundancy + LiteLLM
+#                   load-balancing across the two `llm` Service endpoints (.44 + .45).
+#   node3         : llama-swap MULTI-MODEL — serves qwen3.5-122b OR gpt-oss-120b on demand (only one
+#                   loads at a time on the single iGPU; switched by the model name in the request).
+# This replaced the earlier "gpt-oss pinned on node2" layout, which over-subscribed node2 (59 GiB model
+# + 2 runners + 2 dev-workers -> OOM). qwen3.6 (~24 GiB) frees ~35 GiB on node2 for its runners/workers.
 #
-# Local cache: managed (idle-unloaded) heavyweights are STAGED on local NVMe (/models-local — an
-# out-of-band `pct set` mount, see docs/runbooks/ai-model-swap.md) so a cold reload reads the GGUF
-# at ~2-4 GB/s (~30-60s) instead of ~300 MB/s over NFS (~5 min). `gguf` points at the local copy and
-# `stage_from` names the NFS source that provision.sh rsyncs in (MODEL_STAGE_SRC). node1's pinned daily
-# driver stays on NFS (no local cache — it never idle-unloads).
-#
-# Node iGPU affinity: one model fills a node's iGPU, so each node serves ONE model here. node1's daily
-# driver stays warm (swap:false) for interactive latency; node2/node3's rarely-used heavyweights are
-# managed so their ~59/71 GiB GTT is freed for the 2nd dev-worker per node + working ballooning.
-# See docs/runbooks/ai-model-swap.md and docs/runbooks/dev-workers.md.
+# ttl semantics (llama-swap): 0 = pinned (load once, never idle-unload); >0 = idle seconds before unload
+# (returning GTT to the host). swap:false => direct llama-server.service (no llama-swap). Managed models
+# are STAGED on local NVMe (/models-local — an out-of-band `pct set` mount) so cold reload is ~2-4 GB/s
+# (~30-60s) vs ~300 MB/s over NFS; `gguf` = local copy, `stage_from` = NFS source (provision.sh rsyncs it).
 
 models:
+  # ---- Daily driver: PINNED on node1 AND node2 (coding + image/video vision; the always-warm chat path) ----
   qwen3.6-35b-a3b:
-    node: ai-node1            # ctid 5001 / 192.168.0.44
-    alias: qwen3.6-35b-a3b    # daily driver — coding + image/video vision; the always-warm chat path
-    gguf: /models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
-    mmproj: /models/qwen3.6-35b-a3b/mmproj-F16.gguf
+    nodes: [ai-node1, ai-node2]   # ctid 5001/.44 (NFS) + ctid 5002/.45 (local NVMe); both direct/pinned
+    alias: qwen3.6-35b-a3b
+    gguf: /models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf         # node1 serves from NFS
+    gguf_node2: /models-local/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf  # node2 serves from local NVMe
+    stage_from: /models/qwen3.6-35b-a3b   # node2 stages the GGUF + mmproj to /models-local once
+    mmproj: /models/qwen3.6-35b-a3b/mmproj-F16.gguf   # node1 (NFS); node2 uses /models-local/.../mmproj-F16.gguf
     ctx: 262144
     parallel: 1
     cache_type: q8_0          # K + V
-    swap: false               # PINNED (direct llama-server.service) — keep interactive latency
+    swap: false               # PINNED (direct llama-server.service) on both nodes
     ttl: 0
 
-  gpt-oss-120b:
-    node: ai-node2            # ctid 5002 / 192.168.0.45
-    alias: gpt-oss-120b
-    gguf: /models-local/gpt-oss-120b/gpt-oss-120b-mxfp4-00001-of-00003.gguf  # served from local NVMe (fast cold load)
-    stage_from: /models/gpt-oss-120b   # NFS source; provision.sh rsyncs -> /models-local once (MODEL_STAGE_SRC)
-    ctx: 8192
-    parallel: 1
-    extra: "--no-mmap"
-    swap: true                # MANAGED — idle-unload frees ~59 GiB GTT for dev-worker-2/5 + ballooning
-    ttl: 900                  # 15 min idle
-
+  # ---- node3 llama-swap MULTI-MODEL — qwen3.5-122b OR gpt-oss-120b on demand (ctid 5003 / .46) ----
+  # Deploy together via one provision call with MODELS_JSON (both entries). Both staged on /models-local.
   qwen3.5-122b:
-    node: ai-node3            # ctid 5003 / 192.168.0.46
+    node: ai-node3
     alias: qwen3.5-122b
-    gguf: /models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf  # local NVMe
-    stage_from: /models/qwen3.5-122b-a10b   # NFS source; rsync'd to /models-local once
+    gguf: /models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf
+    stage_from: /models/qwen3.5-122b-a10b
     ctx: 8192
     parallel: 1
     extra: "--no-mmap"
-    swap: true                # MANAGED — idle-unload frees ~71 GiB GTT; REQUIRED for dev-worker-6 on node3
-    ttl: 900                  # 15 min idle. Local NVMe cold load ~30-60s (vs ~4-5 min over NFS).
+    swap: true                # MANAGED on node3's llama-swap
+    ttl: 1800                 # 30 min idle (raised from 900 to keep a Q&A session warm)
+
+  gpt-oss-120b:
+    node: ai-node3            # MOVED from node2; now the switchable alternative on node3
+    alias: gpt-oss-120b
+    gguf: /models-local/gpt-oss-120b/gpt-oss-120b-mxfp4-00001-of-00003.gguf
+    stage_from: /models/gpt-oss-120b
+    ctx: 8192
+    parallel: 1
+    extra: "--no-mmap"
+    swap: true                # MANAGED on node3's llama-swap (loads when requested; unloads the 122b)
+    ttl: 1800
