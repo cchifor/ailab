@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-openwebui
+    namespace: databases
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:q3OkHiDhnu+V,iv:CWylxflYIPa3q2mktJKwNqbkqSnP/XrC6q957Ch1LfE=,tag:J0jU3qf/MTCD6qerOSofXg==,type:str]
+    password: ENC[AES256_GCM,data:2BRTHfdM1bK0oRvArGyUeLwuLT9YJRmPmwBfc1hbxgz6BLWvFadnxg==,iv:iF/24g9W9hPpIPRKBcak1e8idBi3p0WczH7dhVfL4us=,tag:JRNxi337RFusmc3FJepShw==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBVeFduNm14ZGhjbFZKYTBE
+            eXpvY3Q2c1hKdHNkS0RwUmt5SkJRN2RXMXprCjE1V0pUaGg4UTc5WmJPRHdZQlNu
+            YzRaRENoRmFmL2poc043azNwb05uMGcKLS0tIGpBMk9KWVFsTlR2MkdBd1pJTklI
+            Tkp4VFdJc1Rsd1ord3Y2eDJXVVB6c28K2BU56ZPUAFVC6yv9mGgKUO7NT0qNbhcs
+            /OXu0YFhCd9KeJ/jHjqJLNcs6TAkb9sNyGwukR2k6HuEjAhqWy07ag==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-09T16:34:06Z"
+    mac: ENC[AES256_GCM,data:p6DB+NIdP84lr8YGfSChdhbJQHq5Fw+/Ttta3hiymElEtqE3fhyWdWLZNSbeAJEgcRnq4PkvD15+QuHEMNnoEH8eoAmcUC9RycATI/cIkW8Wp/UW98OISLcZZHHTQGKD46amBiPX1DB4Q3gitA0zItVL/cCTXQi0YGcJmPM73Xk=,iv:pSALH955m/d+X/0l7ekdp1/MPSy9Bww1eezykiy9oPI=,tag:rlUeKlnI7BjhaC+vQUm8Tg==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

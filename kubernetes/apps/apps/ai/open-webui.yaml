@@ -19,9 +19,15 @@ metadata:
   labels:
     app.kubernetes.io/name: open-webui
 spec:
-  replicas: 1
+  # 2 replicas for HA + real concurrency, now that state lives in Postgres (not single-writer SQLite-on-NFS)
+  # and websockets are Redis-backed. A 2026-07-09 load test showed the single replica serialized every chat
+  # (lockstep latencies) and a busy /health got it liveness-killed.
+  replicas: 2
   strategy:
-    type: Recreate # one writer for the SQLite data dir
+    # maxUnavailable:0 + maxSurge:1 also brings pods up ONE at a time, so the first new pod runs the
+    # Alembic schema migration on the fresh Postgres alone before the second starts (no migration race).
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+    type: RollingUpdate
   selector:
     matchLabels:
       app.kubernetes.io/name: open-webui
@@ -64,6 +70,24 @@ spec:
             - { name: OAUTH_ROLES_CLAIM, value: "groups" }
             - { name: OAUTH_ALLOWED_ROLES, value: "openwebui,openwebui-admin" }
             - { name: OAUTH_ADMIN_ROLES, value: "openwebui-admin" }
+            # --- Multi-replica state (replaces single-writer SQLite-on-NFS) ---
+            # Relational store -> infra-pg Postgres (ADR 0016 pattern, alongside grafana/authelia). The old
+            # webui.db + chroma.sqlite3 stay on the PVC as a reversible backup (unused while DATABASE_URL is set).
+            - name: DATABASE_URL # postgresql://openwebui:***@infra-pg-rw.databases.svc:5432/openwebui
+              valueFrom:
+                secretKeyRef: { name: open-webui-db, key: DATABASE_URL }
+            # RAG vectors -> pgvector (shared, multi-replica-safe). The default file-based Chroma on the RWX
+            # PVC would be corrupted by 2 replicas writing concurrently. Reuses the same Postgres DB.
+            - { name: VECTOR_DB, value: "pgvector" }
+            - name: PGVECTOR_DB_URL
+              valueFrom:
+                secretKeyRef: { name: open-webui-db, key: DATABASE_URL }
+            # Socket.IO backplane: an event produced on one replica must reach a client connected to another,
+            # or streaming breaks across replicas. Dedicated owui-valkey (db 0 = websockets, db 1 = app cache).
+            - { name: ENABLE_WEBSOCKET_SUPPORT, value: "true" }
+            - { name: WEBSOCKET_MANAGER, value: "redis" }
+            - { name: WEBSOCKET_REDIS_URL, value: "redis://owui-valkey.ai.svc.cluster.local:6379/0" }
+            - { name: REDIS_URL, value: "redis://owui-valkey.ai.svc.cluster.local:6379/1" }
           volumeMounts:
             - { name: data, mountPath: /app/backend/data }
           readinessProbe:
@@ -109,3 +133,17 @@ spec:
     app.kubernetes.io/name: open-webui
   ports:
     - { name: http, port: 80, targetPort: http, protocol: TCP }
+---
+# Keep at least one OWUI pod during voluntary disruptions (node drain, rollout) now that it is HA.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: open-webui
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: open-webui
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-webui

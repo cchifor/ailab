@@ -1,0 +1,61 @@
+# owui-valkey — dedicated in-memory Redis (valkey) for Open WebUI's Socket.IO manager. Multi-replica OWUI
+# needs a shared websocket backplane so an event produced on one replica reaches a client connected to
+# another (WEBSOCKET_MANAGER=redis). State here is EPHEMERAL (live socket sessions only) — no persistence;
+# a bounce just forces clients to reconnect. Kept separate from auth-valkey (Authelia) to avoid coupling
+# the chat's websockets to the SSO session store. Single replica is fine: it is a soft dependency and the
+# blast radius of a restart is a reconnect, not data loss.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: owui-valkey
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: owui-valkey
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single in-memory instance; no rolling needed
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: owui-valkey
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: owui-valkey
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:8-alpine
+          # No persistence (--save "" + appendonly no); cap memory and evict LRU so a socket leak can never
+          # OOM the node. Bind is handled by the image default (0.0.0.0).
+          args: ["--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+          ports:
+            - { name: redis, containerPort: 6379 }
+          readinessProbe:
+            tcpSocket: { port: redis }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: redis }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 25m, memory: 48Mi }
+            limits: { memory: 192Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: owui-valkey
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: owui-valkey
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: owui-valkey
+  ports:
+    - { name: redis, port: 6379, targetPort: redis, protocol: TCP }

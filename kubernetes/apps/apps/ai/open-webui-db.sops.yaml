@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: open-webui-db
+    namespace: ai
+type: Opaque
+stringData:
+    DATABASE_URL: ENC[AES256_GCM,data:Hzpc41c61cqhtMpXWRv3ekA7kz4Sx2Rt0EONLMESmtyNCYpoZSaOz6o6CjeWIv7B3f9xoarOwrV1ne7G5VHx4MSVxS1/L6BcqkkJT7/fh+h36oyrHQ+Id3FzUkhlqv8Y5mZOvzT6s3BDsNMC4BiNt9HyKp6LSg==,iv:FqbwkqRDYuwJ1wRcubjooQI9bXHSXXP6hXZELr4dNW4=,tag:86rDcS23Z2YdIrGgNTqGFQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB6Lzg0aEN4WU1rdUQvYUpM
+            MkUzem1uS0dzVWhpcDZocUV2Rm94NHMxMEJRCjc0NVc0ODVsSkVnWnZhUlNsRjJj
+            UFdRTmY0UkxKS05KSzUzMWhJSjlpQU0KLS0tIDRzTEF4b2c3Z1FDZkdybEoyN0VI
+            MXpqV1pvcU9aQ09oNGJIVTh5UUtmVEEKZ73x+8Wrv/OYgyy8bz6XtaL5nE53XOf5
+            bPoP/3adxfI0abnps4CVcRTqSWe4tnyGajWRzQOKOClPJfZae/3qhw==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-09T16:34:06Z"
+    mac: ENC[AES256_GCM,data:6vmLt/yQ808KRWt5SNgIdPc/pnVcLxWvK0MUSzsbEL7XiFH4AISEboyEXeqO9u1bvlokpStPz6fl9DyoUuMEv7gLWHQ7jLxri6J1YL+D00LJqmLzgANLn604lkJn0Aytn+laletlXqgTTf3HtmzfaZzNJW1qBzq5ZXW1JgDTf6U=,iv:h50VjjlWRV7HgHQSX18T1M0yLQxR7A77MJmJKm33TOY=,tag:mZRlf22egypxZQFahLzvXA==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

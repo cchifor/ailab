@@ -1,6 +1,6 @@
 # infra-pg — shared 2-instance CloudNativePG cluster for the platform's own stateful apps
-# (ADR 0016 Tier A). Hosts the `grafana` and `authelia` databases so both apps can shed their
-# SQLite-on-RWO singletons and run 2 replicas.
+# (ADR 0016 Tier A). Hosts the `grafana`, `authelia`, and `openwebui` databases so those apps can shed
+# their SQLite singletons and run 2 replicas. (open-webui also uses pgvector here for RAG.)
 #
 # Operator: cnpg-system (v1.24.x), installed by the external cchifor/platform repo — consumed
 # dependency, documented in ADR 0016. Notes pinned to operator 1.24:
@@ -46,6 +46,12 @@ spec:
       postInitSQL:
         - CREATE ROLE authelia LOGIN;
         - CREATE DATABASE authelia OWNER authelia;
+        # open-webui: relational store + pgvector RAG (lets OWUI run 2 replicas off Postgres, ADR 0016).
+        # NB: on an already-bootstrapped cluster this block does NOT run — the role/DB were created by hand,
+        # and pgvector needs a manual `\c openwebui; CREATE EXTENSION vector; ALTER SCHEMA public OWNER TO
+        # openwebui;` as superuser (postInitSQL can't switch DBs). Documented in docs/runbooks (ai-host-setup).
+        - CREATE ROLE openwebui LOGIN;
+        - CREATE DATABASE openwebui OWNER openwebui;
   managed:
     roles:
       - name: authelia
@@ -53,6 +59,11 @@ spec:
         login: true
         passwordSecret:
           name: infra-pg-authelia
+      - name: openwebui
+        ensure: present
+        login: true
+        passwordSecret:
+          name: infra-pg-openwebui
   # NB: monitoring.enablePodMonitor stays OFF — the CNPG-generated PodMonitor carries only cnpg.io
   # labels, and the kps Prometheus only selects PodMonitors labeled `release: kube-prometheus-stack`
   # (verified live: strive-pg's operator-generated PodMonitor has produced zero cnpg_* series). The
