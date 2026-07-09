@@ -1,0 +1,12 @@
+---
+# Gitea Actions runner pool (act_runner, host mode) — the forge-migration pilot.
+# The role is opt-in; this enables it for the gitea_runners group (node1/node2 VMs only). The org
+# runner-registration token is the secret and lives in ansible/secrets/gitea-runner.sops.yaml (SOPS),
+# loaded by gitea-runners.yml's pre_task. Setup: see docs/runbooks/ci-runners.md.
+gitea_runner_enabled: true
+
+# Gitea instance + pool label. The label matches the GitHub pool (self-hosted-hv) so platform's
+# `runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}` seam is untouched — set the Gitea Actions org
+# variable RUNNER_LABEL=self-hosted-hv. HOST execution (:host schema) is set in the role defaults.
+gitea_runner_instance_url: https://git.chifor.me
+gitea_runner_label: self-hosted-hv

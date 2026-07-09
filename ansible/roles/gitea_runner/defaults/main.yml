@@ -1,0 +1,72 @@
+---
+# Gitea Actions runner (act_runner) host config. Registers a PERSISTENT act_runner daemon against the
+# in-cluster Gitea (git.chifor.me) so the same VMs that run the GitHub self-hosted-hv pool can also run
+# Gitea Actions during the forge migration (Gitea master, GitHub backup — see the forge-migration ADR).
+#
+# Deliberately a SEPARATE role from github_runner: act_runner is a different binary with a different
+# registration model (static org runner-registration token, NOT a GitHub-App JWT), a persistent daemon
+# (NOT one ephemeral --replace cycle per job), and NO ACTIONS_RUNNER_HOOK_JOB_STARTED. The two roles
+# share only the base host toolchain (Docker/uv/k6/Node + the `runner` user), which is installed by
+# github_runner and assumed present here (run `just runners` before `just gitea-runners`). Extracting a
+# shared `runner_common` role is a post-cutover follow-up (once github_runner is retired).
+gitea_runner_enabled: false # opt-in, like github_runner (flip in group_vars/gitea_runners.yml)
+
+# ---- Gitea instance + pool identity ----
+# The label matches the GitHub pool (self-hosted-hv) so platform's `runs-on: ${{ vars.RUNNER_LABEL ||
+# 'ubuntu-latest' }}` seam needs no change — set the Gitea Actions org variable RUNNER_LABEL=self-hosted-hv.
+# HOST execution is REQUIRED (see below), so the runner registers the label with the `:host` schema.
+gitea_runner_instance_url: https://git.chifor.me
+gitea_runner_label: self-hosted-hv
+gitea_runner_label_schema: host # HOST mode, NOT docker://: platform workflows host-bind-mount
+#   ${{ github.workspace }} (docker run -v "$WS:/w" reclaim steps) and `sudo systemctl start docker` —
+#   under act_runner's default *container* execution the host daemon can't bind-mount an in-container
+#   path, so jobs must run directly on the host. See the forge-migration ADR.
+
+# ---- registration (ORG scope) ----
+# Org runner-registration token from git.chifor.me/org/<org>/settings/actions/runners ("Create Runner").
+# It is reusable to register many runners until reset → treat as a secret: provide via the var
+# gitea_runner_registration_token, decrypted from SOPS by gitea-runners.yml's pre_task
+# (community.sops.load_vars on secrets/gitea-runner.sops.yaml). An org runner serves ALL repos in the
+# org, so one pool covers platform + ailab + every other migrated repo.
+gitea_runner_registration_token: ""
+
+# ---- act_runner agent (bootstrap pin; bump deliberately, verify vs the running Gitea 1.26.x) ----
+# 0.6.1 is the current release (dl.gitea.com/act_runner) — recent enough for artifact v4+/checkout v5.
+gitea_runner_version: "0.6.1"
+gitea_runner_arch: amd64
+gitea_runner_bin: /usr/local/bin/act_runner
+
+# ---- runner identity/paths (reuse the github_runner `runner` user: already in the docker group) ----
+gitea_runner_user: runner
+gitea_runner_group: runner
+gitea_runner_home: /home/runner
+gitea_runner_config_dir: /home/runner/act-runner
+gitea_runner_workdir_parent: /home/runner/act-runner/work
+gitea_runner_service: gitea-act-runner.service
+gitea_runner_name: "act-{{ inventory_hostname }}"
+
+# ---- daemon behaviour ----
+gitea_runner_capacity: 1 # one heavy job at a time (a platform e2e run is ~32 containers). Do NOT raise
+#   without headroom — host-mode job children live under this daemon's cgroup (MemoryMax below).
+gitea_runner_job_timeout: 3h
+gitea_runner_fetch_interval: 2s
+
+# ---- built-in Actions cache server (actions/cache + setup-* caches) ----
+# In HOST mode the job runs on the same host as the daemon, so the cache server on localhost is
+# reachable (unlike docker mode, where the job container can't reach the runner's localhost and you must
+# advertise a LAN IP). Leave host empty for auto-detect; override to the VM's LAN IP if caching errors.
+gitea_runner_cache_enabled: true
+gitea_runner_cache_host: ""
+gitea_runner_cache_port: 8088
+gitea_runner_cache_dir: /home/runner/act-runner/.cache/actcache
+
+# ---- systemd resource caps (bounds the daemon AND its host-mode job children) ----
+# During co-location the GitHub runner service is capped at MemoryMax=10G; keep the SUM of both under
+# the VM's 24 GiB ceiling. With capacity=1 on each side, a single Gitea heavy job + a single GitHub
+# heavy job is ~20G — tight. The `heavy-compose-stack` concurrency throttle is per-forge and will NOT
+# coordinate a GitHub e2e stack with a Gitea e2e stack on the same VM, so during the bake-in keep heavy
+# e2e off one side (or lower this). See ADR / cchifor:platform#620 (double-heavyweight OOM).
+gitea_runner_memory_max: "10G"
+gitea_runner_memory_high: "9G"
+gitea_runner_cpu_quota: "760%" # ~8 vCPU, leaving headroom for dockerd + OS
+gitea_runner_tasks_max: 16384

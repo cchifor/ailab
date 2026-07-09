@@ -1,0 +1,23 @@
+---
+# Gitea Actions runner VMs (act_runner daemon, HOST mode). A dedicated playbook (NOT part of site.yml,
+# and separate from runners.yml) targeting the gitea_runners group — a SUBSET of the GitHub runner VMs
+# on node1/node2 only (node3 is excluded: its 122b LLM leaves no RAM for a second heavy runner — ADR
+# 0013 / cchifor:platform#620). Run `just runners` FIRST (installs Docker + the `runner` user), then:
+#   just gitea-runners       # install/register the act_runner daemon alongside the GitHub agent
+#   just ping-gitea-runners  # connectivity check
+# See docs/runbooks/ci-runners.md + the forge-migration ADR.
+- name: Configure Gitea Actions runner VMs (act_runner)
+  hosts: gitea_runners
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Load Gitea runner registration token (SOPS)
+      community.sops.load_vars:
+        file: "{{ playbook_dir }}/secrets/gitea-runner.sops.yaml"
+      no_log: true
+      tags: [gitea-runners]
+      when: gitea_runner_enabled | default(false)
+  roles:
+    - role: gitea_runner
+      tags: [gitea-runners]
+      when: gitea_runner_enabled | default(false)

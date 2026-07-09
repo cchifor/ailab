@@ -1,0 +1,116 @@
+---
+# Provision a Gitea Actions runner (act_runner daemon, HOST mode) on a runner VM. Idempotent; safe to
+# re-run. Gated as a whole by gitea-runners.yml (when: gitea_runner_enabled), so no per-task guards.
+# Assumes the base toolchain (Docker + the `runner` user) is already installed by the github_runner role
+# — run `just runners` before `just gitea-runners`. Day-2: a re-run restarts the daemon (handler),
+# interrupting at most the in-flight job (Gitea re-queues it); run when the pool is mostly idle.
+
+# ── 0. preflight ─────────────────────────────────────────────────────────────
+- name: Assert the Gitea org runner-registration token is configured
+  ansible.builtin.assert:
+    that:
+      - gitea_runner_registration_token is defined
+      - gitea_runner_registration_token | length > 0
+    fail_msg: >-
+      Provide gitea_runner_registration_token via ansible/secrets/gitea-runner.sops.yaml (loaded by
+      gitea-runners.yml's pre_task). Get an ORG runner token from
+      {{ gitea_runner_instance_url }}/org/<org>/settings/actions/runners → "Create new Runner".
+      See docs/runbooks/ci-runners.md.
+  no_log: true
+
+- name: Assert the base host toolchain (Docker) is present
+  ansible.builtin.command: docker --version
+  register: _gitea_runner_docker
+  changed_when: false
+  failed_when: _gitea_runner_docker.rc != 0
+  # gitea_runner intentionally does NOT install Docker/uv/k6/Node — that is github_runner's job. Run
+  # `just runners` on these hosts first. (Post-cutover, a shared runner_common role will own the base.)
+
+# ── 1. runner user (idempotent; normally already created by github_runner) ───
+- name: Ensure runner group
+  ansible.builtin.group:
+    name: "{{ gitea_runner_group }}"
+    system: true
+
+- name: Ensure runner user (in the docker group, so host-mode jobs can use the Docker socket)
+  ansible.builtin.user:
+    name: "{{ gitea_runner_user }}"
+    group: "{{ gitea_runner_group }}"
+    groups: [docker]
+    append: true
+    home: "{{ gitea_runner_home }}"
+    shell: /bin/bash
+    system: true
+
+# ── 2. act_runner binary ─────────────────────────────────────────────────────
+- name: Install act_runner {{ gitea_runner_version }}
+  ansible.builtin.get_url:
+    # dl.gitea.com is the documented release mirror; the binary is a single file (no archive).
+    url: "https://dl.gitea.com/act_runner/{{ gitea_runner_version }}/act_runner-{{ gitea_runner_version }}-linux-{{ gitea_runner_arch }}"
+    dest: "{{ gitea_runner_bin }}"
+    mode: "0755"
+    owner: root
+    group: root
+
+# ── 3. config dir + workspace + cache ────────────────────────────────────────
+- name: Ensure act_runner config + work + cache dirs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ gitea_runner_user }}"
+    group: "{{ gitea_runner_group }}"
+    mode: "0755"
+  loop:
+    - "{{ gitea_runner_config_dir }}"
+    - "{{ gitea_runner_workdir_parent }}"
+    - "{{ gitea_runner_cache_dir }}"
+
+- name: Lay down act_runner config.yaml (labels, capacity, host-mode, cache)
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ gitea_runner_config_dir }}/config.yaml"
+    owner: "{{ gitea_runner_user }}"
+    group: "{{ gitea_runner_group }}"
+    mode: "0644"
+  notify: Restart gitea-act-runner
+
+# ── 4. register (one-time; creates .runner) ──────────────────────────────────
+# The org token registers a runner scoped to the whole org. `creates:` makes this idempotent — a
+# re-run does NOT re-register (which would orphan the old entry in the Gitea UI). To force a fresh
+# registration (e.g. token reset / label change), delete {{ gitea_runner_config_dir }}/.runner first.
+- name: Register act_runner against Gitea (org scope, host label)
+  become: true
+  become_user: "{{ gitea_runner_user }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ gitea_runner_bin }}"
+      - register
+      - --no-interactive
+      - --instance
+      - "{{ gitea_runner_instance_url }}"
+      - --token
+      - "{{ gitea_runner_registration_token }}"
+      - --name
+      - "{{ gitea_runner_name }}"
+      - --labels
+      - "{{ gitea_runner_label }}:{{ gitea_runner_label_schema }}"
+    chdir: "{{ gitea_runner_config_dir }}"
+    creates: "{{ gitea_runner_config_dir }}/.runner"
+  no_log: true
+  notify: Restart gitea-act-runner
+
+# ── 5. systemd unit ──────────────────────────────────────────────────────────
+- name: Install the act_runner systemd unit
+  ansible.builtin.template:
+    src: gitea-act-runner.service.j2
+    dest: "/etc/systemd/system/{{ gitea_runner_service }}"
+    mode: "0644"
+  notify: Restart gitea-act-runner
+
+# ── 6. enable + start ────────────────────────────────────────────────────────
+- name: Enable + start the act_runner daemon
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true

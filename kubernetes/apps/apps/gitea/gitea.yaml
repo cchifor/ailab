@@ -4,6 +4,11 @@
 #   * Authelia OIDC login (gitea-oauth secret) + a break-glass local admin (gitea-admin secret).
 #   * Exposed via the CF tunnel WITHOUT Cloudflare Access (git clone/push over HTTPS uses Gitea's own
 #     auth/tokens — an Access login page would break the git CLI). SSH (gitea-ssh) stays in-cluster.
+#   * Actions ENABLED (ADR 0017 forge migration). Artifacts/logs land on the local PVC for now, capped
+#     by ARTIFACT_RETENTION_DAYS/LOG_RETENTION_DAYS. Offloading them to versitygw S3 (to spare the 10Gi
+#     PVC) is a FOLLOW-UP blocked on a versitygw `gitea-actions` bucket + a scoped key — see the
+#     commented [storage.actions_*] block below and gitea-actions-s3.sops.yaml.example. Runners =
+#     external act_runner (ansible/roles/gitea_runner), NOT the chart (12.6.0 ships no bundled runner).
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
@@ -69,6 +74,23 @@ spec:
           existingSecret: gitea-oauth # keys: key (client id), secret (client secret)
           autoDiscoverUrl: "https://sso.chifor.me/.well-known/openid-configuration"
           scopes: "openid profile email groups"
+      # ── S3 artifact/log offload — FOLLOW-UP, disabled until the versitygw `gitea-actions` bucket +
+      # a scoped access key exist (the VELERO key is bucket-scoped and can't create buckets; QNAP/
+      # versitygw-admin access is needed). To enable: create the bucket+key, fill+encrypt
+      # gitea-actions-s3.sops.yaml (from .example), add it back to kustomization.yaml, and UNCOMMENT
+      # this block + the [storage.actions_*] block below. Env-to-ini escaping: '.' -> _0X2E_, '__' is
+      # the section/key separator, a single '_' is literal (section [storage.actions_s3]).
+      # additionalConfigFromEnvs:
+      #   - name: GITEA__storage_0X2E_actions_s3__MINIO_ACCESS_KEY_ID
+      #     valueFrom:
+      #       secretKeyRef:
+      #         name: gitea-actions-s3
+      #         key: access-key
+      #   - name: GITEA__storage_0X2E_actions_s3__MINIO_SECRET_ACCESS_KEY
+      #     valueFrom:
+      #       secretKeyRef:
+      #         name: gitea-actions-s3
+      #         key: secret-key
       config:
         server:
           DOMAIN: git.chifor.me
@@ -95,3 +117,35 @@ spec:
         oauth2_client:
           ENABLE_AUTO_REGISTRATION: true # first OIDC login auto-creates the Gitea account
           USERNAME: preferred_username
+        # ── Gitea Actions (forge migration, ADR 0017) ──────────────────────────────────────────────
+        repository:
+          # Adds repo.actions to the default unit set — NEW repos only. Existing repos (platform,
+          # ailab) must enable Actions per-repo (Settings -> Units) — go-gitea #23724 (no retro switch).
+          DEFAULT_REPO_UNITS: repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects,repo.packages,repo.actions
+        actions:
+          ENABLED: true
+          DEFAULT_ACTIONS_URL: github # `uses: actions/checkout@vN` resolves from github.com
+          # Retention caps apply to the CURRENT local-PVC backend too — the PVC's guard until S3 lands.
+          ARTIFACT_RETENTION_DAYS: 14
+          LOG_RETENTION_DAYS: 30 # default is 365; trim to protect the 10Gi PVC
+        # ── S3 artifact/log offload — FOLLOW-UP (disabled; see the header + the commented
+        # additionalConfigFromEnvs above). A *named* [storage.actions_s3] section so ONLY Actions moves
+        # to S3 (a global [storage] STORAGE_TYPE=minio would divert attachments/LFS/avatars/packages
+        # too). Uncomment together with the env block + the kustomization secret once the versitygw
+        # `gitea-actions` bucket + scoped key exist (ADR 0010: QNAP, path-style, self-signed TLS;
+        # SERVE_DIRECT stays off so clients never reach the LAN-only endpoint).
+        # storage.actions_s3:
+        #   STORAGE_TYPE: minio
+        #   MINIO_ENDPOINT: 192.168.1.225:7070 # host:port, NO scheme
+        #   MINIO_BUCKET: gitea-actions
+        #   MINIO_LOCATION: us-east-1
+        #   MINIO_USE_SSL: true
+        #   MINIO_INSECURE_SKIP_VERIFY: true # versitygw self-signed cert
+        #   MINIO_BUCKET_LOOKUP_TYPE: path # path-style addressing (s3ForcePathStyle)
+        #   MINIO_CHECKSUM_ALGORITHM: md5 # versitygw rejects the default CRC32C checksum header (cf. Velero)
+        # storage.actions_artifacts:
+        #   STORAGE_TYPE: actions_s3 # inherit endpoint/creds/bucket from the named section above
+        #   MINIO_BASE_PATH: actions_artifacts/ # explicit prefix so it can't collide with logs
+        # storage.actions_log:
+        #   STORAGE_TYPE: actions_s3
+        #   MINIO_BASE_PATH: actions_log/
