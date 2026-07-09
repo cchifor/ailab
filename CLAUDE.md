@@ -2,12 +2,19 @@
 
 100%-IaC home AI lab: 3× Bosgame M5 (Strix Halo / gfx1151 iGPU) **Proxmox** cluster + a QNAP NAS,
 running **Talos** Kubernetes (3-CP HA) with **Cilium** + **Flux** (GitOps), an **llama.cpp/Vulkan** LLM
-appliance in privileged LXCs, self-hosted **GitHub Actions runners**, and interactive dev-worker VMs.
+appliance in privileged LXCs, self-hosted **CI runners** (Gitea Actions — GitHub Actions dormant), and interactive dev-worker VMs.
 Provisioned with **OpenTofu** (bpg/proxmox) + Python/paramiko scripts. This file is orientation +
 gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 
+>  **Forge = Gitea (`git.chifor.me`), NOT GitHub.** As of 2026-07-09 (ADR 0017) Gitea is the
+> **master** forge for this repo and `cchifor/platform`. Push, open PRs, and run CI on
+> **Gitea** (`git.chifor.me/cchifor/ailab`, org `cchifor`). `github.com/cchifor/*` is a
+> **read-only push-mirror backup** (GitHub Actions dormant). **Flux reconciles from in-cluster
+> Gitea** (`gitea-http.gitea.svc:3000`). Use the Gitea API / `tea` / `scripts/forge.sh` (gitea
+> arm), **NOT `gh`**. Log in at git.chifor.me via Authelia.
+
 ## Workflow / GitOps
-- **Kubernetes** (`kubernetes/apps/**`): **Flux** reconciles `main` — merge to ship. Changes go via PR → squash-merge.
+- **Kubernetes** (`kubernetes/apps/**`): **Flux** reconciles `main` **from Gitea** (`git.chifor.me/cchifor/ailab`) — merge to ship. Push/PRs go to **Gitea** (squash-merge); GitHub is a backup mirror.
 - **VMs/LXCs** (`kubernetes/infra/**`): **OpenTofu**, applied by hand via `just` (Flux does NOT manage these).
   Modules: `infra/` (Talos CPs) · `infra/runners/` · `infra/dev-workers/` · `infra/ai-lxc/` · `infra/registry-lxc/`.
   Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just registry` (+ `*-plan/apply`). `just --list` for all.
