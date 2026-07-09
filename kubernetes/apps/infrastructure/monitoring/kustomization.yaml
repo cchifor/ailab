@@ -31,4 +31,5 @@ resources:
   - storage-fabric-probe.yaml # per-node QNAP-fabric reachability (blackbox DaemonSet)
   - storage-fabric-rules.yaml # alerts on the probes
   - ci-runners-rules.yaml # alerts on the runner VMs (down / disk / memory / buildx self-heal beacon)
+  - gitea-rules.yaml # alerts on the Gitea forge (down / memory / restart) — critical master forge
   - ha-rules.yaml # ADR 0016 guardrails: Tier-A replica loss, PDB drain-blockers, unaccepted-singleton inventory
