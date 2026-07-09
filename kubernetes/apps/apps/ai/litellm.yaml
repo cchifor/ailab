@@ -22,21 +22,23 @@ data:
       # deployments (llm-node1 / llm-node2) so the LiteLLM router health-aware load-balances the pair:
       # on failure it retries the OTHER node and parks the bad one (router_settings below), instead of
       # kube-proxy's readiness-blind round-robin over the `llm` Service. Replaced qwen3-30b-a3b (2026-07-01).
-      # host CTX=262144 (native n_ctx_train) PARALLEL=1, q8_0 K/V cache; ~16K output headroom — Qwen3.6 is a
-      # REASONING model (emits a <think> trace in reasoning_content), so keep max_input_tokens generous.
+      # host CTX=262144 (native n_ctx_train) split across --parallel 2 slots on BOTH nodes => per-slot
+      # n_ctx = 131072. max_input_tokens = 131072 - ~16K output headroom = 114688; a request above that
+      # overflows one slot, so LiteLLM fails fast here instead of forwarding a doomed request. --parallel 2
+      # lets each node serve 2 concurrent chats. Qwen3.6 is a REASONING model (<think> in reasoning_content).
       # supports_vision: multimodal (image + video); also replaced gemma-4 for vision.
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 245760 }
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 245760 }
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
       # gpt-oss-120b RETIRED as a LOCAL model (2026-07-08): node3 now serves ONLY qwen3.5-122b. Reason —
       # qwen3.5-122b and gpt-oss-120b (both ~60-71 GiB) cannot co-reside in node3's single 96 GiB iGPU
       # LXC, so when interactive traffic (qwen3.5-122b) and the deepagent platform (gpt-oss) interleave,
@@ -52,13 +54,13 @@ data:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 245760 }
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
       - model_name: gpt-oss-120b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 245760 }
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
       - model_name: qwen3.5-122b
         litellm_params:
           model: openai/qwen3.5-122b
@@ -140,7 +142,12 @@ data:
     # cooldown_time — so a down/restarting daily-driver node degrades gracefully instead of ~50% errors.
     # (Single-deployment models like qwen3.5-122b/cloud still benefit from num_retries on transient 5xx.)
     router_settings:
-      routing_strategy: simple-shuffle
+      # least-busy: route to the deployment with the fewest in-flight requests. With --parallel 2 on each
+      # node the pair exposes 4 effective slots; least-busy spreads concurrent chats far more evenly than
+      # simple-shuffle's per-request coin-flip (a 2026-07-09 load test saw simple-shuffle pile ~12-60x the
+      # tokens on node1 while node2 sat idle). Per-replica in-memory view (2 litellm replicas each track
+      # their own), so it is best-effort across the pair — still strictly better than random.
+      routing_strategy: least-busy
       num_retries: 2
       allowed_fails: 2
       cooldown_time: 30
@@ -175,7 +182,7 @@ spec:
         # every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
-        checksum/config: "60bbc9ec4db2"
+        checksum/config: "d1609664ae05"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
