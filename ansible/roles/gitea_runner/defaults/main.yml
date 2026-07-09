@@ -43,7 +43,7 @@ gitea_runner_home: /home/runner
 gitea_runner_config_dir: /home/runner/act-runner
 gitea_runner_workdir_parent: /home/runner/act-runner/work
 gitea_runner_service: gitea-act-runner.service
-gitea_runner_name: "act-{{ inventory_hostname }}"
+gitea_runner_name: "{{ inventory_hostname }}"
 
 # ---- daemon behaviour ----
 gitea_runner_capacity: 1 # one heavy job at a time (a platform e2e run is ~32 containers). Do NOT raise
