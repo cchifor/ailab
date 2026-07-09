@@ -9,10 +9,18 @@
 # Topology (2026-07-08):
 #   node1 + node2 : qwen3.6-35b-a3b PINNED on BOTH (the daily driver) -> redundancy + LiteLLM
 #                   load-balancing across the two `llm` Service endpoints (.44 + .45).
-#   node3         : llama-swap MULTI-MODEL — serves qwen3.5-122b OR gpt-oss-120b on demand (only one
-#                   loads at a time on the single iGPU; switched by the model name in the request).
+#   node3         : llama-swap serves ONLY qwen3.5-122b on demand (loads on first request, idle-unloads
+#                   after ttl). gpt-oss-120b was RETIRED from node3 on 2026-07-08 — see below.
 # This replaced the earlier "gpt-oss pinned on node2" layout, which over-subscribed node2 (59 GiB model
 # + 2 runners + 2 dev-workers -> OOM). qwen3.6 (~24 GiB) frees ~35 GiB on node2 for its runners/workers.
+#
+# Why node3 is SINGLE-MODEL (2026-07-08): qwen3.5-122b (~71 GiB) and gpt-oss-120b (~59 GiB) cannot
+# co-reside in node3's 96 GiB iGPU LXC, so llama-swap could hold only one at a time. With interactive
+# traffic hitting qwen3.5-122b and the deepagent platform hitting gpt-oss, the two demand streams
+# interleaved and forced a full evict+cold-reload on nearly every crossover (measured ~55-82s PER
+# request, 4/4). Serving a single heavyweight ends the thrash. gpt-oss's LiteLLM model_name is shimmed
+# to the pinned qwen3.6 (kubernetes/apps/apps/ai/litellm.yaml) so callers still work. To bring gpt-oss
+# back you must give up qwen3.5-122b (they cannot share node3) — do NOT re-add it here as a 2nd model.
 #
 # ttl semantics (llama-swap): 0 = pinned (load once, never idle-unload); >0 = idle seconds before unload
 # (returning GTT to the host). swap:false => direct llama-server.service (no llama-swap). Managed models
@@ -34,8 +42,8 @@ models:
     swap: false               # PINNED (direct llama-server.service) on both nodes
     ttl: 0
 
-  # ---- node3 llama-swap MULTI-MODEL — qwen3.5-122b OR gpt-oss-120b on demand (ctid 5003 / .46) ----
-  # Deploy together via one provision call with MODELS_JSON (both entries). Both staged on /models-local.
+  # ---- node3 llama-swap SINGLE-MODEL — qwen3.5-122b on demand (ctid 5003 / .46) ----
+  # Deploy via a single-MODEL provision call (SWAP=true, no MODELS_JSON) — see docs/runbooks/ai-model-swap.md.
   qwen3.5-122b:
     node: ai-node3
     alias: qwen3.5-122b
@@ -44,16 +52,9 @@ models:
     ctx: 8192
     parallel: 1
     extra: "--no-mmap"
-    swap: true                # MANAGED on node3's llama-swap
+    swap: true                # MANAGED on node3's llama-swap (sole model; loads on request, idle-unloads)
     ttl: 1800                 # 30 min idle (raised from 900 to keep a Q&A session warm)
 
-  gpt-oss-120b:
-    node: ai-node3            # MOVED from node2; now the switchable alternative on node3
-    alias: gpt-oss-120b
-    gguf: /models-local/gpt-oss-120b/gpt-oss-120b-mxfp4-00001-of-00003.gguf
-    stage_from: /models/gpt-oss-120b
-    ctx: 8192
-    parallel: 1
-    extra: "--no-mmap"
-    swap: true                # MANAGED on node3's llama-swap (loads when requested; unloads the 122b)
-    ttl: 1800
+  # gpt-oss-120b: RETIRED from node3 on 2026-07-08 to end the two-heavyweight swap-thrash (see the
+  # "Why node3 is SINGLE-MODEL" note above). The GGUF stays staged on node3's /models-local for a fast
+  # bring-back, but it is intentionally NOT registered here or in llama-swap: node3 cannot serve both.
