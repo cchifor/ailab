@@ -52,6 +52,8 @@ models:
     stage_from: /models/qwen3.5-122b-a10b
     ctx: 8192
     parallel: 1
+    cache_type: q8_0          # q8_0 K/V (needs flash-attn, which --flash-attn auto engages) — ~halves KV GTT
+                              # and a few % faster decode at ctx 8192; near-lossless. (2026-07-09 perf tuning)
     extra: "--no-mmap"
     swap: true                # MANAGED on node3's llama-swap (sole model; loads on request, idle-unloads)
     ttl: 1800                 # 30 min idle (raised from 900 to keep a Q&A session warm)

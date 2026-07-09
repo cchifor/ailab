@@ -68,7 +68,8 @@ python scripts/lxc-exec.py 192.168.0.3 5002 --env LLAMA_BUILD=b9672 \
 python scripts/lxc-exec.py 192.168.0.4 5003 --env SWAP=true --env LLAMA_BUILD=b9631 `
   --env MODEL=/models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf `
   --env MODEL_STAGE_SRC=/models/qwen3.5-122b-a10b `
-  --env MODEL_ALIAS=qwen3.5-122b --env CTX=8192 --env PARALLEL=1 --env EXTRA_ARGS=--no-mmap --env TTL=1800
+  --env MODEL_ALIAS=qwen3.5-122b --env CTX=8192 --env PARALLEL=1 --env EXTRA_ARGS=--no-mmap --env TTL=1800 `
+  --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0   # q8_0 K/V (needs FA, engaged by --flash-attn auto): near-lossless, matches qwen3.6
 ```
 
 `MODELS_JSON` (a jq array) overrides the single `MODEL` and lets one node's llama-swap serve several
