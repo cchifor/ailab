@@ -12,6 +12,13 @@ StartLimitIntervalSec=0
 Type=simple
 User={{ gitea_runner_user }}
 WorkingDirectory={{ gitea_runner_config_dir }}
+{% if gitea_runner_reclaim_enabled | bool %}
+# Race-free clean slate on every (re)start: reclaim reused host-mode workspaces BEFORE the daemon
+# starts polling, so no job can be in flight. The '+' prefix runs it as root (User= above is runner),
+# which is required to delete root-owned leftovers. act_runner has no per-job hook, so the between-jobs
+# case is handled by gitea-runner-reclaim.timer. Best-effort (the script always exits 0).
+ExecStartPre=+{{ gitea_runner_reclaim_bin }}
+{% endif %}
 ExecStart={{ gitea_runner_bin }} daemon --config {{ gitea_runner_config_dir }}/config.yaml
 Restart=always
 RestartSec=10

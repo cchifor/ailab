@@ -4,3 +4,17 @@
     name: "{{ gitea_runner_service }}"
     state: restarted
     daemon_reload: true
+
+# Reclaim unit-file changes reload systemd but MUST NOT restart the daemon (that would interrupt an
+# in-flight job). The timer restart also picks up a changed .timer; the changed .service is read on the
+# next tick. daemon_reload here makes the new/edited units known to systemd.
+- name: Reload systemd for gitea reclaim
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart gitea reclaim timer
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_reclaim_timer }}"
+    state: restarted
+    enabled: true
+    daemon_reload: true

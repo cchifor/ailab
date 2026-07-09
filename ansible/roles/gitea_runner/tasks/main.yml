@@ -99,6 +99,42 @@
   no_log: true
   notify: Restart gitea-act-runner
 
+# ── 4b. workspace reclaim (act_runner has NO per-job hook) ───────────────────
+# Reclaim the REUSED host-mode workspace out-of-band as root: root-owned artifact leftovers otherwise
+# accumulate until a new job can't enter its cwd (`fork/exec /usr/bin/bash: no such file or directory`).
+# Two triggers: ExecStartPre (clean slate on daemon (re)start, wired in the unit template) + an
+# idle-guarded timer (between-jobs sweep). Installed BEFORE the daemon unit so ExecStartPre finds the
+# script on first start. NB: changing these does NOT restart the daemon (only the timer) — safe day-2.
+- name: Install the workspace-reclaim config (env sourced by the reclaim script)
+  ansible.builtin.template:
+    src: gitea-runner-reclaim.env.j2
+    dest: "{{ gitea_runner_reclaim_env }}"
+    mode: "0644"
+  when: gitea_runner_reclaim_enabled | bool
+
+- name: Install the workspace-reclaim script
+  ansible.builtin.copy:
+    src: gitea-runner-reclaim.sh
+    dest: "{{ gitea_runner_reclaim_bin }}"
+    mode: "0755"
+  when: gitea_runner_reclaim_enabled | bool
+
+- name: Install the workspace-reclaim oneshot service
+  ansible.builtin.template:
+    src: gitea-runner-reclaim.service.j2
+    dest: "/etc/systemd/system/{{ gitea_runner_reclaim_service }}"
+    mode: "0644"
+  notify: Reload systemd for gitea reclaim
+  when: gitea_runner_reclaim_enabled | bool
+
+- name: Install the workspace-reclaim timer
+  ansible.builtin.template:
+    src: gitea-runner-reclaim.timer.j2
+    dest: "/etc/systemd/system/{{ gitea_runner_reclaim_timer }}"
+    mode: "0644"
+  notify: Restart gitea reclaim timer
+  when: gitea_runner_reclaim_enabled | bool
+
 # ── 5. systemd unit ──────────────────────────────────────────────────────────
 - name: Install the act_runner systemd unit
   ansible.builtin.template:
@@ -114,3 +150,11 @@
     enabled: true
     state: started
     daemon_reload: true
+
+- name: Enable + start the workspace-reclaim timer
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_reclaim_timer }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: gitea_runner_reclaim_enabled | bool

@@ -70,3 +70,32 @@ gitea_runner_memory_max: "10G"
 gitea_runner_memory_high: "9G"
 gitea_runner_cpu_quota: "760%" # ~8 vCPU, leaving headroom for dockerd + OS
 gitea_runner_tasks_max: 16384
+
+# ---- workspace reclaim (closes act_runner's missing per-job hook) ────────────
+# act_runner (0.6.x, HOST mode) has NO per-job hook (no ACTIONS_RUNNER_HOOK_JOB_STARTED — verified vs
+# `act_runner generate-config`) and NO "fresh/clean workspace" option: it REUSES the per-repo workspace
+# work/<repo-hash>/hostexecutor across jobs. Job containers write artifact dirs into that bind-mounted
+# workspace as uid 0; the root-owned leftovers accumulate until a NEW job can't enter its cwd and fails
+# its FIRST step with the misleading `fork/exec /usr/bin/bash: no such file or directory` (bash exists;
+# the *working dir* is inaccessible). The GitHub fix (ACTIONS_RUNNER_HOOK_JOB_STARTED) does not exist
+# here, so we reclaim out-of-band as root: ExecStartPre (clean slate on restart) + an idle-guarded
+# systemd timer (between-jobs sweep). See templates/gitea-runner-reclaim.* and files/…-reclaim.sh.
+gitea_runner_reclaim_enabled: true
+gitea_runner_reclaim_bin: /usr/local/bin/gitea-runner-reclaim.sh
+gitea_runner_reclaim_env: /etc/gitea-runner-reclaim.env
+gitea_runner_reclaim_service: gitea-runner-reclaim.service
+gitea_runner_reclaim_timer: gitea-runner-reclaim.timer
+gitea_runner_reclaim_interval: 30s # OnUnitInactiveSec between idle-guarded sweeps (tighten if flakes recur)
+gitea_runner_reclaim_boot_delay: 90s # OnBootSec — let the daemon settle before the first sweep
+# Artifact subdirs job containers write as root/foreign uid into the reused workspace. KEEP IN SYNC
+# with cchifor/platform:.github/runner-hooks/job-started.sh AND the github_runner role's job-started.sh.
+gitea_runner_reclaim_dirs:
+  - .hatchet-config
+  - coverage-data
+  - tests/e2e/test-results
+  - tests/e2e/blob-report
+  - tests/e2e/playwright-report
+# Health beacon → node_exporter textfile collector (its OWN file/metrics; does NOT collide with the
+# github_runner beacon). No-op where the textfile dir is absent.
+gitea_runner_reclaim_beacon: true
+gitea_runner_reclaim_textfile_dir: /var/lib/prometheus/node-exporter

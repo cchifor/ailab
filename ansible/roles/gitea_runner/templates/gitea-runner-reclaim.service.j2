@@ -1,0 +1,19 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Oneshot triggered by gitea-runner-reclaim.timer: an
+# idle-guarded reclaim of the REUSED act_runner host-mode workspaces (act_runner has no per-job hook —
+# see the script header). Runs as ROOT (no User=) so it can delete root-owned leftovers + chown-heal.
+# The script itself no-ops when a gitea job is in flight, so this is safe to fire on a short interval.
+[Unit]
+Description=Reclaim reused act_runner host-mode workspaces (idle-guarded)
+After=docker.service
+# Do not race a manual/day-2 stop of the daemon; the script also self-guards.
+After={{ gitea_runner_service }}
+
+[Service]
+Type=oneshot
+ExecStart={{ gitea_runner_reclaim_bin }}
+# The reclaim is fast, but a chown-heal over a large checkout could take a few seconds — don't let a
+# slow tick be killed mid-heal.
+TimeoutStartSec=120
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

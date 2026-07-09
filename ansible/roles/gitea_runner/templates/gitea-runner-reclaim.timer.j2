@@ -1,0 +1,17 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Fires the idle-guarded workspace reclaim between jobs.
+# act_runner is a PERSISTENT daemon (one process for many jobs), so — unlike the GitHub ephemeral
+# runner, where an ExecStartPre reclaim runs before EVERY job — an ExecStartPre alone would only fire
+# on daemon (re)start. This timer closes that gap: it sweeps every {{ gitea_runner_reclaim_interval }}
+# during long uptimes, and the reclaim script's idle guard makes each sweep a no-op while a job runs.
+[Unit]
+Description=Periodic idle-guarded reclaim of reused act_runner workspaces
+
+[Timer]
+# OnUnitInactiveSec measures from when the oneshot last FINISHED, so ticks never overlap a long heal.
+OnBootSec={{ gitea_runner_reclaim_boot_delay }}
+OnUnitInactiveSec={{ gitea_runner_reclaim_interval }}
+AccuracySec=10s
+Unit=gitea-runner-reclaim.service
+
+[Install]
+WantedBy=timers.target
