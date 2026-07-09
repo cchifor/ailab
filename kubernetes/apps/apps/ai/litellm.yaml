@@ -18,19 +18,25 @@ data:
       # forwarding a doomed request; the deepagent codes it as a friendly
       # context_window_exceeded (platform PR #636). KEEP IN SYNC with the host
       # launch args in docs/runbooks/ai-host-setup.md.
-      # qwen3.6-35b-a3b is node1's daily driver on :8080 (the `llm` Service). It replaced
-      # qwen3-30b-a3b (removed 2026-07-01) — a strict upgrade (coding + image/video vision).
+      # qwen3.6-35b-a3b — the daily driver, PINNED on node1 (.44) AND node2 (.45). Registered as TWO
+      # deployments (llm-node1 / llm-node2) so the LiteLLM router health-aware load-balances the pair:
+      # on failure it retries the OTHER node and parks the bad one (router_settings below), instead of
+      # kube-proxy's readiness-blind round-robin over the `llm` Service. Replaced qwen3-30b-a3b (2026-07-01).
+      # host CTX=262144 (native n_ctx_train) PARALLEL=1, q8_0 K/V cache; ~16K output headroom — Qwen3.6 is a
+      # REASONING model (emits a <think> trace in reasoning_content), so keep max_input_tokens generous.
+      # supports_vision: multimodal (image + video); also replaced gemma-4 for vision.
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
-          api_base: http://llm.ai.svc.cluster.local:8080/v1
+          api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info:
-          supports_vision: true # Qwen3.6 is multimodal (image + video); also replaced gemma-4 for vision
-          # host CTX=262144 (native n_ctx_train) PARALLEL=1, q8_0 K/V cache. Extended from 32768 for
-          # agentic tool loops. ~16K reserved for output: Qwen3.6 is a REASONING model (emits a <think>
-          # trace in reasoning_content before the answer/tool-call), so output budget must stay generous.
-          max_input_tokens: 245760
+        model_info: { supports_vision: true, max_input_tokens: 245760 }
+      - model_name: qwen3.6-35b-a3b
+        litellm_params:
+          model: openai/qwen3.6-35b-a3b
+          api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
+          api_key: "sk-noauth"
+        model_info: { supports_vision: true, max_input_tokens: 245760 }
       # gpt-oss-120b RETIRED as a LOCAL model (2026-07-08): node3 now serves ONLY qwen3.5-122b. Reason —
       # qwen3.5-122b and gpt-oss-120b (both ~60-71 GiB) cannot co-reside in node3's single 96 GiB iGPU
       # LXC, so when interactive traffic (qwen3.5-122b) and the deepagent platform (gpt-oss) interleave,
@@ -40,14 +46,19 @@ data:
       # existing callers that request "gpt-oss-120b" keep working (the chosen "falls back to qwen3.6"
       # path). To serve a real gpt-oss-class model instead, point model/api_key at gpt-5.4 (mind the
       # global max_budget) — or delete this entry to hard-retire the name. See docs/runbooks/ai-model-swap.md.
+      # Shimmed to qwen3.6, and (like qwen3.6) registered on BOTH nodes so the shim path is load-balanced too.
       - model_name: gpt-oss-120b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
-          api_base: http://llm.ai.svc.cluster.local:8080/v1
+          api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info:
-          supports_vision: true # now served by qwen3.6 (multimodal)
-          max_input_tokens: 245760 # now served by qwen3.6 (host CTX=262144)
+        model_info: { supports_vision: true, max_input_tokens: 245760 }
+      - model_name: gpt-oss-120b
+        litellm_params:
+          model: openai/qwen3.6-35b-a3b
+          api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
+          api_key: "sk-noauth"
+        model_info: { supports_vision: true, max_input_tokens: 245760 }
       - model_name: qwen3.5-122b
         litellm_params:
           model: openai/qwen3.5-122b
@@ -114,10 +125,6 @@ data:
           api_key: os.environ/OPENAI_API_KEY
     litellm_settings:
       drop_params: true
-      # Retry a failed upstream call (5xx / dropped connection) before surfacing an error — smooths over a
-      # llama-server that is briefly unavailable (mid-restart / cold-loading) and a LiteLLM replica rollover.
-      # (This does NOT multi-endpoint-failover the qwen3.6 .44/.45 pair — that needs two api_base entries.)
-      num_retries: 2
       # 900s to cover a llama-swap COLD START: the first request to an idle-unloaded heavyweight
       # (gpt-oss ~1.5-4 min, qwen3.5-122b ~4-5 min over NFS) must not time out before the model loads.
       # Matches llama-swap's healthCheckTimeout (kubernetes/infra/ai-lxc/provision.sh SWAP mode).
@@ -127,6 +134,16 @@ data:
       # tune to comfort. For finer control, move cloud models behind a separate virtual key with its own budget.
       max_budget: 50 # USD
       budget_duration: 30d
+    # Router (all proxy traffic flows through it): health-aware load-balancing across a model's
+    # deployments. qwen3.6-35b-a3b (and the gpt-oss shim) have TWO deployments (llm-node1/llm-node2);
+    # on a failed call the router retries the OTHER node and, after allowed_fails, parks the bad one for
+    # cooldown_time — so a down/restarting daily-driver node degrades gracefully instead of ~50% errors.
+    # (Single-deployment models like qwen3.5-122b/cloud still benefit from num_retries on transient 5xx.)
+    router_settings:
+      routing_strategy: simple-shuffle
+      num_retries: 2
+      allowed_fails: 2
+      cooldown_time: 30
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -158,7 +175,7 @@ spec:
         # every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
-        checksum/config: "a1514ae88df2"
+        checksum/config: "60bbc9ec4db2"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
