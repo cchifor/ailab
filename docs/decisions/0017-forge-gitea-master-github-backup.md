@@ -93,3 +93,26 @@ VMs. Chosen after two independent adversarial reviews; the load-bearing correcti
   Gitea); the main-branch/nightly-e2e baseline columns return via an object-store follow-up.
 - Post-cutover follow-up: extract a shared `runner_common` Ansible role (Docker/uv/k6/Node + the `runner`
   user) once `github_runner` is retired, so `gitea_runner` is standalone.
+
+## Validation (2026-07-09, executed live)
+Stood up and verified end-to-end: Gitea Actions enabled (chart values merged, Flux-reconciled); org
+`cchifor` created; **4 act_runners** online on gha-runner-1/2/4/5 (host mode, `self-hosted-hv:host`);
+versitygw scoped `gitea` user + `gitea-actions` bucket, **S3 artifact/log storage verified** (run logs
+land in the bucket); `platform` imported; org **vars** (`RUNNER_LABEL`, `STATIC_RUNNER_LABEL` =
+`self-hosted-hv`) + **secrets** (`SOPS_AGE_KEY`, `REGISTRY_USERNAME`/`PASSWORD`, `OPENAI_API_KEY`) set;
+platform **cutover** done (Gitea branch protection, push-mirror → GitHub, GitHub Actions disabled);
+platform CI confirmed **running on Gitea** (full CI + Contract matrix scheduled on the runners).
+
+**Empirical findings (from a live pilot repo + the platform run):**
+- **V1 confirmed** — a path-filtered job SKIPS and the always-run aggregator gate reports SUCCESS, so the
+  PR is **mergeable** with the gate as the required check. The `ci-gate`/`contract-gate` design works.
+- **V3 confirmed** — Gitea's status-check context is **`<workflow name> / <job> (pull_request)`** (e.g.
+  `CI / ci-gate (pull_request)`), NOT the bare job name. Gitea branch protection uses glob patterns
+  (`CI / ci-gate*`); the GitHub-shaped `branch-protection.json` keeps the bare names for the dormant fallback.
+- **`STATIC_RUNNER_LABEL` required** — `contract.yml` routes PR micro-jobs to `vars.STATIC_RUNNER_LABEL ||
+  ubuntu-latest`; on Gitea `ubuntu-latest` has no runner, so the org sets `STATIC_RUNNER_LABEL=self-hosted-hv`.
+- **Artifacts** — `checkout@v4` / `paths-filter@v3` resolve from github.com and run, but
+  **`upload-artifact@v4+` / `download-artifact@v4+` are unsupported on Gitea** (it reports as GHES). We do
+  NOT pin to `@v3` (GitHub deprecated v3, and `uses:` can't be forge-conditional) — platform's uploads are
+  `continue-on-error`, so they degrade (no artifacts on Gitea) without failing the gates. Native artifacts
+  on Gitea are a follow-up (Gitea-compatible action or the coverage-baseline-via-registry work).

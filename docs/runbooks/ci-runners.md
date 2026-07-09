@@ -112,9 +112,14 @@ platform workflows host-bind-mount `${{ github.workspace }}` and drive the host 
 2. **versitygw bucket:** create the `gitea-actions` bucket on the QNAP endpoint (ADR 0010).
 3. **Gitea org + repos:** create the org; import repos; enable Actions **per repo** (Settings → Units —
    `DEFAULT_REPO_UNITS` only affects *new* repos, go-gitea #23724).
-4. **Org Actions vars/secrets:** set variable `RUNNER_LABEL=self-hosted-hv` (+ `DOCKERHUB_USER`) and
-   secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`/`SOPS_AGE_KEY`/`OPENAI_API_KEY`/`DOCKERHUB_TOKEN` at
+4. **Org Actions vars/secrets:** set variables `RUNNER_LABEL=self-hosted-hv` **and
+   `STATIC_RUNNER_LABEL=self-hosted-hv`** (+ `DOCKERHUB_USER`) — `contract.yml` routes PR micro-jobs to
+   `STATIC_RUNNER_LABEL || ubuntu-latest`, and `ubuntu-latest` has NO Gitea runner (jobs would hang).
+   Secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`/`SOPS_AGE_KEY`/`OPENAI_API_KEY`/`DOCKERHUB_TOKEN` at
    org scope. `GITHUB_TOKEN` is auto-aliased to `GITEA_TOKEN` in jobs.
+5. **Gitea branch protection:** required-check contexts use Gitea's format
+   **`<workflow name> / <job> (pull_request)`** (globs), e.g. `CI / ci-gate*`, `E2E Preflight / preflight*`,
+   `E2E Tests / smoke*`, `Contract Tests / contract-gate*` — NOT the bare GitHub job names.
 
 **Provide the runner token + configure:**
 ```bash

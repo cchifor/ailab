@@ -5,6 +5,8 @@
 Description=Gitea Actions runner (act_runner, host mode)
 After=network-online.target docker.service
 Wants=network-online.target
+# StartLimit* live in [Unit] on systemd >= 229 (Ubuntu 24.04); in [Service] they warn + are ignored.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -13,7 +15,6 @@ WorkingDirectory={{ gitea_runner_config_dir }}
 ExecStart={{ gitea_runner_bin }} daemon --config {{ gitea_runner_config_dir }}/config.yaml
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=0
 KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=5min
