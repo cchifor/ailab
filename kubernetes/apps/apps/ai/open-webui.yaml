@@ -42,6 +42,11 @@ spec:
               valueFrom:
                 secretKeyRef: { name: litellm-secret, key: master-key }
             - { name: ENABLE_OLLAMA_API, value: "False" } # we only use the OpenAI endpoint
+            # Match LiteLLM request_timeout (900s) + llama-swap healthCheckTimeout (900s). A qwen3.5-122b
+            # cold-load + long reasoning turn can run minutes; OWUI's aiohttp client would otherwise abort
+            # the streamed response at its ~300s default and surface as "loading failed" in the browser
+            # while the backend is still generating. See docs/runbooks/ai-model-swap.md.
+            - { name: AIOHTTP_CLIENT_TIMEOUT, value: "900" }
             - { name: WEBUI_NAME, value: "ailab AI" }
             # SSO via Authelia OIDC (ADR 0012). Local login stays as break-glass; OAuth sign-up on.
             - { name: WEBUI_URL, value: "https://chat.chifor.me" }
