@@ -322,6 +322,53 @@ EOF
   systemctl start amdgpu-metrics.service || true # generate the first .prom now (timer handles the rest)
 fi
 
+if [ -n "$SWAP" ]; then
+  echo "== llama-swap child llama.cpp /metrics -> node_exporter textfile (swap nodes only) =="
+  # llama-swap's own :${PORT}/metrics is llamaswap_* (system) only; the model CHILD exposes the llama.cpp
+  # llamacpp:* inference metrics (tokens/s, kv-cache, queue) on a DYNAMIC port. This collector reads
+  # /running for the ready model's port and scrapes the child DIRECTLY (bypassing the swap proxy, so it does
+  # NOT reset the idle-unload ttl), then writes a textfile the local node_exporter serves. When no model is
+  # loaded the file is removed so the series gap out. (Direct-mode nodes already expose llamacpp:* on :8080;
+  # on swap nodes these arrive under the node_exporter target, instance <ip>:9100.)
+  mkdir -p /var/lib/prometheus/node-exporter
+  cat >/usr/local/bin/llamacpp-swap-textfile.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -uo pipefail
+SWAP_PORT="${1:-8080}"; OUTDIR="${2:-/var/lib/prometheus/node-exporter}"
+OUT="$OUTDIR/llamacpp.prom"; TMP="$OUT.tmp.$$"
+cport="$(curl -s -m 3 "http://127.0.0.1:${SWAP_PORT}/running" 2>/dev/null \
+  | jq -r '.running[]? | select(.state=="ready") | .cmd' 2>/dev/null \
+  | grep -oE -- '--port [0-9]+' | awk '{print $2}' | head -1)"
+if [ -n "${cport:-}" ] && curl -s -m 3 "http://127.0.0.1:${cport}/metrics" -o "$TMP" 2>/dev/null \
+   && grep -q '^llamacpp:' "$TMP"; then
+  mv -f "$TMP" "$OUT"
+else
+  rm -f "$OUT" "$TMP"
+fi
+SCRIPT
+  chmod +x /usr/local/bin/llamacpp-swap-textfile.sh
+  cat >/etc/systemd/system/llamacpp-metrics.service <<EOF
+[Unit]
+Description=llama-swap child llama.cpp /metrics -> Prometheus textfile
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/llamacpp-swap-textfile.sh ${PORT} /var/lib/prometheus/node-exporter
+EOF
+  cat >/etc/systemd/system/llamacpp-metrics.timer <<'EOF'
+[Unit]
+Description=Scrape llama-swap child metrics every 15s
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=15s
+AccuracySec=1s
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now llamacpp-metrics.timer || true
+  systemctl start llamacpp-metrics.service || true
+fi
+
 systemctl daemon-reload
 systemctl enable "${UNIT}"
 systemctl restart "${UNIT}" # restart (not just start) so a model/flags change takes effect
