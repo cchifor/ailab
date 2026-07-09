@@ -18,6 +18,13 @@ dev_worker_admin_user: c4
 # ACL. NOTE: read-only sharing breaks token refresh for c4 — see docs/runbooks/dev-workers.md.
 dev_worker_agent_user: "{{ dev_worker_admin_user }}"
 
+# ---- Gitea (git.chifor.me) forge access (ADR 0017 — Gitea is the master forge) ----
+# Configures per-user git credentials so agents/devs can clone/push private cchifor/* repos over HTTPS
+# without prompting. Token = a `chifor` read/write-repository Gitea token; provide it via SOPS
+# (ansible/secrets/dev-worker.sops.yaml -> dev_worker_gitea_token). Empty = skip (no-op).
+dev_worker_gitea_user: chifor
+dev_worker_gitea_token: ""
+
 # ---- /workspace data disk (the blank scsi1 disk the tofu module attaches) ----
 dev_worker_workspace_device: /dev/sdb
 dev_worker_workspace_label: workspace

@@ -5,7 +5,7 @@ See ADR 0013. IaC: `kubernetes/infra/runners/` (VMs) + `ansible/roles/github_run
 
 | | |
 |---|---|
-| VMs | `gha-runner-1..5` — vmid 4101-4105, **2 on node1/node2, 1 on node3** (gha-runner-6 reserved .19), consecutive IPs .14-.18, 8 vCPU / 24 GiB / 120 GiB each |
+| VMs | `ci-runner-1..5` — vmid 4101-4105, **2 on node1/node2, 1 on node3** (ci-runner-6 reserved .19), consecutive IPs .14-.18, 8 vCPU / 24 GiB / 120 GiB each |
 | Memory | balloon **12-24 GiB** (floor 12 GiB so host RAM pressure can't starve a running job — see #620) + 8 GiB guest swap (`swappiness=10`) |
 | OS | Ubuntu 24.04 cloud image (cloud-init: static IP + `ubuntu` user + the ansible SSH key) |
 | Label | `self-hosted-hv` (repo var `RUNNER_LABEL`; workflows use `runs-on: ${{ vars.RUNNER_LABEL }}`) |
@@ -66,8 +66,8 @@ just runners        # installs Docker/toolchain + the ported runner contract, re
 
 ## 5. Verify
 - **Registered:** GitHub → `cchifor/platform` → Settings → Actions → Runners → `self-hosted-hv` shows
-  `ephem-gha-runner-{1..5}-…` **Idle** (Proxmox-only pool; the legacy Hyper-V runners are retired — §6).
-- **Canary:** Actions → **Runner pool health** → Run workflow. Re-run until it lands on a `gha-runner-N`
+  `ephem-ci-runner-{1..5}-…` **Idle** (Proxmox-only pool; the legacy Hyper-V runners are retired — §6).
+- **Canary:** Actions → **Runner pool health** → Run workflow. Re-run until it lands on a `ci-runner-N`
   host (check the "Runner identity" step); it asserts the `ephem-*` name, `memory.max == 10G`, the
   wrapper, the hook env, **and (2026-07-01) that `~/.docker` is runner-owned + `docker buildx build`
   works** — the buildx self-heal regression gate (cchifor/platform#682).
@@ -101,7 +101,7 @@ to reclaim disk when convenient: `multipass delete --purge hv-runner-{1..4}` (ir
 Second pool on the **same VMs** for the Gitea master forge (`git.chifor.me`). `act_runner` (persistent
 daemon, **HOST mode**) runs **alongside** the GitHub agent during the bake-in. IaC:
 `ansible/roles/gitea_runner/` + `ansible/gitea-runners.yml`. Pool = **node1/node2 VMs only**
-(`gitea_runners` inventory group: gha-runner-1/-4/-2/-5) — node3's runner is excluded (its 122b LLM
+(`gitea_runners` inventory group: ci-runner-1/-4/-2/-5) — node3's runner is excluded (its 122b LLM
 leaves no RAM for a second heavy runner). Label **`self-hosted-hv:host`** (host execution is required —
 platform workflows host-bind-mount `${{ github.workspace }}` and drive the host Docker daemon).
 
@@ -133,7 +133,7 @@ just gitea-runners    # installs act_runner + registers the daemon on node1/node
 ```
 
 **Verify:**
-- Gitea → org → Settings → Actions → Runners: `act-gha-runner-{1,2,4,5}` **Online**, label
+- Gitea → org → Settings → Actions → Runners: `act-ci-runner-{1,2,4,5}` **Online**, label
   `self-hosted-hv` (host).
 - On a VM: `ssh ubuntu@192.168.0.14 'systemctl status gitea-act-runner.service --no-pager'` (active) —
   note **both** `gitea-act-runner.service` and `actions.runner.cchifor-platform.service` run here.

@@ -128,13 +128,13 @@ variable "runner_ssh_public_key" {
 
 # ---- Runner VMs — 5 active: node1 ×2, node2 ×2, node3 ×1 (node3's 2nd is deferred) ----
 # See docs/decisions/0013-ci-self-hosted-runners.md (Update 2026-07-01) + the plan
-# plans/2026-07-01-scale-gha-runners-to-6-plan.md. Every runner draws identical sizing from the shared
+# plans/2026-07-01-scale-ci-runners-to-6-plan.md. Every runner draws identical sizing from the shared
 # runner_* vars above; only node_name/vm_id/ip/hostname differ (that identity is what proves "same
 # config"). IPs .47/.48/.49 (runners 1-3) + .33/.34 (runners 4-5) sit inside the static-reserved block
 # (.2-.50, outside the router DHCP pool that bit the AI LXCs at .51-.53). vmids 4101-4105 don't collide
 # (Talos 4001-4003, dev-workers 4201-4203, AI LXC 5001-5003, registry 5004).
 #
-# gha-runner-6 (node3, .35 / vmid 4106) is RESERVED but DEFERRED: measured 2026-07-01, node3 has no room
+# ci-runner-6 (node3, .35 / vmid 4106) is RESERVED but DEFERRED: measured 2026-07-01, node3 has no room
 # for a second runner while its qwen3.5-122b LLM is loaded (~7.8 GiB non-reclaimable RSS; the LXC runs
 # swap=0). Uncomment to deploy after reducing node3's iGPU VRAM carve (or the Talos CP allocation) — the
 # .19 IP + vmid 4106 stay reserved for it. See ADR 0013.
@@ -149,12 +149,12 @@ variable "runner_nodes" {
     # Consecutive IPs .14-.18 (.19 reserved for the deferred runner-6). cloud-init sets the IP at create
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
-    "gha-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "gha-runner-1" }
-    "gha-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "gha-runner-2" }
-    "gha-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "gha-runner-3" }
-    "gha-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "gha-runner-4" }
-    "gha-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "gha-runner-5" }
+    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1" }
+    "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2" }
+    "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
+    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4" }
+    "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
     # DEFERRED — node3's second runner; uncomment after freeing node3 RAM (see header + ADR 0013):
-    # "gha-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "gha-runner-6" }
+    # "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
   }
 }

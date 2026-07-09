@@ -23,8 +23,8 @@ Free static space: `.5`–`.7`, `.20`–`.35`, `.37`–`.39`, `.47`–`.50` (dev
 | `.2 / .3 / .4` | Proxmox hosts `ai-node1/2/3` | `inventory/hosts.yml` |
 | `.5 / .6 / .7` | free (static) — vacated by the dev-worker renumber | — |
 | `.8`–`.13` | Dev-worker VMs `dev-worker-1..6` (2 per node) | `kubernetes/infra/dev-workers/variables.tf` |
-| `.14`–`.18` | GitHub runner VMs `gha-runner-1..5` (2 node1/node2, 1 node3) | `kubernetes/infra/runners/variables.tf` |
-| `.19` | GitHub runner VM `gha-runner-6` — reserved, deferred (node3 RAM) | `kubernetes/infra/runners/variables.tf` |
+| `.14`–`.18` | GitHub runner VMs `ci-runner-1..5` (2 node1/node2, 1 node3) | `kubernetes/infra/runners/variables.tf` |
+| `.19` | GitHub runner VM `ci-runner-6` — reserved, deferred (node3 RAM) | `kubernetes/infra/runners/variables.tf` |
 | `.20`–`.35` | free (static) | — |
 | `.36` | OCI registry LXC `ai-registry` | `kubernetes/infra/registry-lxc/variables.tf` |
 | `.37 / .38 / .39` | free (static) — vacated by the dev-worker renumber | — |

@@ -11,25 +11,25 @@ pinning the **balloon floor to 12 GiB** (`runner_memory_floating_mib`; the 24 Gi
 unchanged) and adding an **8 GiB guest swapfile** (`swappiness=10`) as an OOM reclaim valve. Both are
 now codified (tofu + the `github_runner` role). The `MemoryMax=10G` cgroup cap is unrelated, unchanged.
 **Update (2026-07-01, scale 3→5):** Expanded the pool to **5 runners — two on node1/node2, one on
-node3** (`gha-runner-4/5`, vmid 4104/4105, IPs .33/.34), **identical** sizing + config to 1–3 via the
+node3** (`ci-runner-4/5`, vmid 4104/4105, IPs .33/.34), **identical** sizing + config to 1–3 via the
 shared `runner_*` vars — additive `runner_nodes` map entries only; no role or secret change.
-**gha-runner-6 (node3, .35 / vmid 4106) is reserved but DEFERRED** — see the measured finding below. Trade-off:
+**ci-runner-6 (node3, .35 / vmid 4106) is reserved but DEFERRED** — see the measured finding below. Trade-off:
 the original "one per host" fault isolation becomes two-per-host, and GitHub may co-schedule two heavy
 jobs on one host, so the rollout is **gated on a per-host RAM check** — full budget being Talos CP VM +
 AI LLM LXC + dev-worker + runner ×2 (plus node1's registry LXC and the iGPU VRAM carve) — with
 balloon-reclaim/swap-under-peak treated as a no-go, not steady state (that is #620). See
-`plans/2026-07-01-scale-gha-runners-to-6-plan.md`.
+`plans/2026-07-01-scale-ci-runners-to-6-plan.md`.
 *Measured 2026-07-01 (live gate):* hosts expose only **~62 GiB** (the ~64 GiB iGPU carve takes the rest
 of 128 GiB physical) and already run at **78–84 %** with one runner each (Talos ~22 GiB actual, LLM
 1–8 GiB, one runner 5–9 GiB, dev-worker 1–3 GiB) → only **10–14 GiB avail** and light swap. A second
 12 GiB-floor runner does **not** fit in idle headroom (node3 worst: 10.2 GiB avail, and its 122B LLM holds
 7.8 GiB of **non-reclaimable** RSS with LXC `swap=0`, so the LLM cannot be capped down without OOM).
 Shrinking the LLM was therefore **rejected**; only the dev-worker ceilings were cut 16→8 (peak-bounding).
-Decision: deploy **5** — node3's second runner (`gha-runner-6`) is **deferred** precisely because it can't
+Decision: deploy **5** — node3's second runner (`ci-runner-6`) is **deferred** precisely because it can't
 hold its 12 GiB floor while the 122b is loaded; node3 keeps its existing single runner. node1/node2 each
 take a second runner (both fit the floor at rest — 12.7 / 14.4 GiB avail); their residual risk is only the
 concurrent-peak case (two heavy jobs on one host), cushioned by the 12 GiB floor + 8 GiB guest swap and
-bounded by the dev-worker 16→8 cut. Add `gha-runner-6` after reducing node3's iGPU VRAM carve (or the Talos
+bounded by the dev-worker 16→8 cut. Add `ci-runner-6` after reducing node3's iGPU VRAM carve (or the Talos
 CP allocation), which frees real host RAM.
 **Update (2026-07-01, rock-solid hardening):** live triage found the pool's dominant CI failure was NOT
 capacity but a **buildx ownership bug** — `~/.docker/buildx` becoming **root-owned** (a job ran `docker
@@ -55,7 +55,7 @@ was **reverted**: it was never applied to the live VMs, and the dev-workers OOM-
 balloon floor under host oversubscription. Fix: **per-node balloon floors** (dw1 8 / dw2 10 / dw3 6 GiB,
 ceiling back to 16) + **downsized the Talos CP VMs** (cp1 24 / cp2 24 / cp3 28 GiB) to free host RAM —
 measured CP working set is only ~9 GiB, so the 32 GiB reservation was mostly reclaimable cache (ADR 0009
-Update 2026-07-03). **gha-runner-6 stays DEFERRED:** the CP downsize freed ~4–8 GiB/node, but node3's
+Update 2026-07-03). **ci-runner-6 stays DEFERRED:** the CP downsize freed ~4–8 GiB/node, but node3's
 122B still maxes VRAM+GTT and a 2nd runner needs a full 12 GiB floor node3 can't hold. See cchifor/ailab#85, #86.
 **Relates to:** ADR 0001 (OpenTofu + Ansible), ADR 0006 (Talos/Flux/Cilium), ADR 0008 (AI appliance =
 LXC *outside* Talos), ADR 0009 (control-plane colocation / tight RAM budget).
@@ -75,7 +75,7 @@ retire the Hyper-V VMs. `cchifor` is a GitHub **User** account → runners are n
 **repo-scoped** to `cchifor/platform` (user accounts can't host org-level runners).
 
 ## Decision
-Provision **3 full QEMU VMs** (Ubuntu 24.04 cloud image), one per Proxmox host (`gha-runner-1/2/3`,
+Provision **3 full QEMU VMs** (Ubuntu 24.04 cloud image), one per Proxmox host (`ci-runner-1/2/3`,
 vmid 4101–4103, IPs .47/.48/.49 in the static-reserved `.2–.50` block, 8 vCPU / 24 GiB / 120 GiB), via
 a new OpenTofu root module `kubernetes/infra/runners/` (bpg/proxmox, API-token auth + ssh, mirroring
 the Talos `infra/` module). Configure them with the Ansible role **`github_runner`** (`just runners`),

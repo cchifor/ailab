@@ -96,7 +96,7 @@ VMs. Chosen after two independent adversarial reviews; the load-bearing correcti
 
 ## Validation (2026-07-09, executed live)
 Stood up and verified end-to-end: Gitea Actions enabled (chart values merged, Flux-reconciled); org
-`cchifor` created; **4 act_runners** online on gha-runner-1/2/4/5 (host mode, `self-hosted-hv:host`);
+`cchifor` created; **4 act_runners** online on ci-runner-1/2/4/5 (host mode, `self-hosted-hv:host`);
 versitygw scoped `gitea` user + `gitea-actions` bucket, **S3 artifact/log storage verified** (run logs
 land in the bucket); `platform` imported; org **vars** (`RUNNER_LABEL`, `STATIC_RUNNER_LABEL` =
 `self-hosted-hv`) + **secrets** (`SOPS_AGE_KEY`, `REGISTRY_USERNAME`/`PASSWORD`, `OPENAI_API_KEY`) set;

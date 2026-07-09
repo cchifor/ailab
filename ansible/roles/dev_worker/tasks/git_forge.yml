@@ -1,0 +1,32 @@
+---
+# Gitea (git.chifor.me) forge access for the dev-worker users. Gitea is the master forge now
+# (ADR 0017), so agents/devs on the worker clone/push private cchifor/* repos over HTTPS. This writes a
+# per-user credential.helper=store + a ~/.git-credentials line using a `chifor` read/write-repository
+# Gitea token (dev_worker_gitea_token, SOPS). No-op when the token isn't provided. Gitea SSH is
+# in-cluster only (not tunnelled), so HTTPS+token is the access path.
+- name: Configure Gitea git credentials (per dev-worker user)
+  when: dev_worker_gitea_token | default('') | length > 0
+  block:
+    - name: Enable the per-user git credential store
+      become: true
+      become_user: "{{ item.name }}"
+      ansible.builtin.command:
+        cmd: git config --global credential.helper store
+      changed_when: false
+      loop: "{{ dev_worker_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Write the git.chifor.me credential (per user, 0600)
+      # copy(content) owns the whole file — dev-workers use Gitea as the forge, so a single line is the
+      # intended state. Add other hosts' creds out-of-band if ever needed.
+      ansible.builtin.copy:
+        dest: "{{ item.home }}/.git-credentials"
+        content: "https://{{ dev_worker_gitea_user }}:{{ dev_worker_gitea_token }}@git.chifor.me\n"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: "0600"
+      loop: "{{ dev_worker_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true

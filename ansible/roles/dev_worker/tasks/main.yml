@@ -52,6 +52,9 @@
 - name: Shared Claude/Codex credential ACLs
   ansible.builtin.import_tasks: credentials.yml
 
+- name: Gitea (git.chifor.me) forge git credentials — Gitea is master (ADR 0017)
+  ansible.builtin.import_tasks: git_forge.yml
+
 - name: Language toolchains (python/go/rust)
   ansible.builtin.import_tasks: toolchains.yml
   when: dev_worker_install_toolchains | bool
