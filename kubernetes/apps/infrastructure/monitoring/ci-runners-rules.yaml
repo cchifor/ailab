@@ -1,11 +1,12 @@
 # Alerts for the CI runner VMs (metrics via ci-runners-node.yaml, job=ci-runner-node). Closes the
 # monitoring gap that let a 40%-of-fleet buildx-ownership outage run silently for hours (see ADR 0013).
 # `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
-# Node-level alerts (down/disk/mem/swap) are forge-agnostic. The reclaim-beacon alerts
-# (CIRunnerDockerConfigRootOwned / CIRunnerHealthBeaconMissing) rely on runner_reclaim_last_success_seconds
-# emitted by the GitHub agent (github_runner role) — valid while it is co-located with the Gitea
-# act_runner (ADR 0017 bake-in). When the GitHub agent is retired, rework/remove those two (else
-# beacon-missing false-fires on the ci-runner VMs).
+# Node-level alerts (down/disk/mem/swap) are forge-agnostic. Maintenance/disk alerts now key off the
+# GITEA runner beacons (gitea_runner_reclaim_* + gitea_runner_cleanup_*, emitted by the gitea_runner role
+# on ALL 5 act_runners) — NOT the retiring GitHub agent's runner_reclaim_* (already retired on ci-runner-3,
+# node3). CIRunnerDockerConfigRootOwned still reads the GitHub agent's buildx-perm beacon and applies only
+# where that agent is co-located (metric absent => no data => no fire on retired runners); fold it into the
+# gitea reclaim (heal ~/.docker/buildx) when the GitHub agent is fully retired.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -37,9 +38,11 @@ spec:
           annotations:
             summary: "CI runner {{ $labels.instance }} root filesystem <12% free"
             description: >-
-              Runner {{ $labels.instance }} root fs is under 12% free for >15m. Between-jobs reclaim
-              (runner-reclaim.sh) should be pruning docker images/volumes/build-cache; if it keeps
-              climbing, check for accumulating named volumes (`docker volume ls`) or a wedged prune.
+              Runner {{ $labels.instance }} root fs is under 12% free for >15m. gitea-runner-cleanup.sh
+              (15-min idle-guarded timer with disk-pressure escalation) should be pruning build cache +
+              stale images; if it keeps climbing the cleanup is wedged or out-run — check
+              `docker system df`, `journalctl -t gitea-runner-cleanup`, and the cleanup beacon
+              (gitea_runner_cleanup_build_cache_bytes / _disk_freed_percent).
         - alert: CIRunnerDiskWillFillSoon
           expr: |
             predict_linear(node_filesystem_avail_bytes{job="ci-runner-node",mountpoint="/"}[6h], 4 * 3600) < 0
@@ -49,8 +52,9 @@ spec:
             summary: "CI runner {{ $labels.instance }} root filesystem projected to fill within 4h"
             description: >-
               The 6h trend for runner {{ $labels.instance }} projects the root filesystem reaching 0
-              free within 4h — early warning before jobs start failing on ENOSPC. Investigate docker
-              disk usage / reclaim before it fills.
+              free within 4h — early warning before jobs fail on ENOSPC. Check `docker system df` and
+              whether gitea-runner-cleanup.sh is keeping up (its escalation tightens the retention
+              window to 6h at 80% disk and to a 1h window + actcache trim at 92%).
         - alert: CIRunnerLowMemory
           expr: node_memory_MemAvailable_bytes{job="ci-runner-node"} < 1.5e9
           for: 10m
@@ -86,36 +90,53 @@ spec:
               of ~/.docker — the buildx-permission regression (root-owned ~/.docker/buildx) is back
               and docker-build jobs will fail. Inspect: `sudo ls -la /home/runner/.docker/buildx` and
               confirm runner-reclaim.sh runs as root (20-reclaim.conf ExecStartPre=+).
-        # Guards the blind spot in CIRunnerDockerConfigRootOwned: if the beacon is never written, its
-        # last "0" would stay green forever. Uses ABSENCE (not time-staleness): the gauge persists once
-        # written, so this does NOT false-fire on idle runners (reclaim is job-cycle-triggered, not
-        # periodic — a `time() - last_success > N` alert would flap every quiet night). `for: 30m` rides
-        # over the first-boot window before the first reclaim writes the beacon.
-        - alert: CIRunnerHealthBeaconMissing
-          expr: up{job="ci-runner-node"} == 1 unless on(instance) runner_reclaim_last_success_seconds
+        # Is the gitea_runner maintenance running at all? Uses ABSENCE of the reclaim beacon (the gauge
+        # persists once written, so this does NOT false-fire on idle runners). `for: 30m` rides over the
+        # first-boot window before the first reclaim writes the beacon. Migrated off the retiring GitHub
+        # agent's runner_reclaim_* (gone on ci-runner-3) to the gitea beacon present on all 5.
+        - alert: CIRunnerMaintenanceBeaconMissing
+          expr: up{job="ci-runner-node"} == 1 unless on(instance) gitea_runner_reclaim_last_run_seconds
           for: 30m
           labels: { severity: warning }
           annotations:
-            summary: "CI runner {{ $labels.instance }} health beacon missing"
+            summary: "CI runner {{ $labels.instance }} gitea maintenance beacon missing"
             description: >-
-              Runner {{ $labels.instance }} is scraped but emits no runner_reclaim_last_success_seconds,
-              so reclaim isn't writing its beacon (reclaim not running, or node_exporter's textfile
-              collector disabled) — the CIRunnerDockerConfigRootOwned regression detector is blind until
-              restored. Check `journalctl -u actions.runner.*` and --collector.textfile.directory.
-        # Build cache is the runners' dominant disk consumer. reclaim prunes it toward
-        # `builder prune --keep-storage 10GB` each cycle and the beacon reports the POST-prune resting
-        # size, so a value that stays far above the ~10 GB floor means the prune is not clearing cache
-        # (broken/mis-timed reclaim) — a heads-up well before CIRunnerDiskFilling. Post-prune (not the
-        # pre-prune peak) so a one-cycle spike that was immediately pruned can't false-fire this alert.
+              Runner {{ $labels.instance }} is scraped but emits no gitea_runner_reclaim_last_run_seconds
+              — the gitea_runner maintenance (workspace reclaim + docker cleanup) isn't writing its beacon
+              (the reclaim/cleanup timers aren't running, or node_exporter's textfile collector is off).
+              Check `systemctl status gitea-runner-reclaim.timer gitea-runner-cleanup.timer` and
+              --collector.textfile.directory.
+        # The docker/storage cleanup timer is TIME-triggered (every 15m — even while a job runs it fires
+        # and writes a busy_skip beacon), so unlike the job-cycle reclaim a staleness check is reliable
+        # and won't flap on idle nights. A stalled cleanup means build cache + images accumulate unbounded.
+        - alert: CIRunnerCleanupStale
+          expr: |
+            up{job="ci-runner-node"} == 1
+              and (time() - gitea_runner_cleanup_last_run_seconds) > 3600
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} docker cleanup hasn't run in >1h"
+            description: >-
+              gitea-runner-cleanup.timer (15-min) has not written its beacon on runner
+              {{ $labels.instance }} for >1h — docker/storage reclamation is stalled, so build cache +
+              images will accumulate toward a full disk. Check `systemctl status gitea-runner-cleanup.timer`
+              + `journalctl -t gitea-runner-cleanup`.
+        # Build cache is the runners' dominant disk consumer (10-33 GB/runner observed). The cleanup
+        # beacon reports the POST-cleanup resting size, so a value that stays high means the retention
+        # prune isn't clearing it (CI out-running the window, or a wedged cleanup) — a heads-up before
+        # CIRunnerDiskFilling. Post-cleanup (not a mid-run peak) so a spike that was immediately pruned
+        # can't false-fire. Migrated off the (now-absent) GitHub runner_docker_build_cache_bytes.
         - alert: CIRunnerBuildCacheHigh
-          expr: runner_docker_build_cache_bytes{job="ci-runner-node"} > 20e9
+          expr: gitea_runner_cleanup_build_cache_bytes{job="ci-runner-node"} > 25e9
           for: 30m
           labels: { severity: warning }
           annotations:
-            summary: "CI runner {{ $labels.instance }} docker build cache >20 GB after prune"
+            summary: "CI runner {{ $labels.instance }} docker build cache >25 GB after cleanup"
             description: >-
-              Runner {{ $labels.instance }} build cache is >20 GB even after the between-jobs reclaim
-              prune (floor `docker builder prune --keep-storage 10GB` ≈ 10 GB SI) — so the prune isn't
-              clearing cache (broken or mis-timed reclaim), a precursor to disk pressure. Inspect
-              `docker system df` and `journalctl -u actions.runner.*`. CIRunnerDiskFilling/WillFillSoon
-              backstop actual disk exhaustion.
+              Runner {{ $labels.instance }} build cache is >25 GB even after gitea-runner-cleanup.sh
+              (post-cleanup value from its beacon) — the dominant disk accumulator isn't being cleared:
+              CI is out-running the 48h retention (the pressure escalation should tighten it at 80% disk)
+              or the cleanup is wedged. Inspect `docker system df`, `docker builder du`, and
+              `journalctl -t gitea-runner-cleanup`. CIRunnerDiskFilling/WillFillSoon backstop actual
+              disk exhaustion.

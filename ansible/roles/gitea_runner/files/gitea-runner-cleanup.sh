@@ -127,7 +127,13 @@ fi
 
 after="$(disk_pct)"; is_num "$after" || after=0
 freed=$(( before - after )); [ "$freed" -lt 0 ] && freed=0
-log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s)"
+# Post-cleanup docker resource sizes for the beacon (build cache is the dominant accumulator). Docker's
+# HumanSize is base-1000, so numfmt --from=si. Best-effort; fallback 0 so a parse failure never fabricates.
+dfsize() { docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null | awk -F'|' -v t="$1" '$1==t{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null; }
+bc_bytes="$(dfsize 'Build Cache')"; is_num "$bc_bytes" || bc_bytes=0
+img_bytes="$(dfsize 'Images')"; is_num "$img_bytes" || img_bytes=0
+log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), build-cache ${bc_bytes}B"
 write_beacon "busy_skip 0" "last_run_seconds $(date +%s)" "disk_used_percent ${after}" \
-  "disk_freed_percent ${freed}" "reaped_containers ${reaped}"
+  "disk_freed_percent ${freed}" "reaped_containers ${reaped}" \
+  "build_cache_bytes ${bc_bytes}" "images_bytes ${img_bytes}"
 exit 0

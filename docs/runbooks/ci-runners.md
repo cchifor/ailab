@@ -100,10 +100,12 @@ to reclaim disk when convenient: `multipass delete --purge hv-runner-{1..4}` (ir
 ## 7. Gitea Actions runner pool (act_runner — forge migration, ADR 0017)
 Second pool on the **same VMs** for the Gitea master forge (`git.chifor.me`). `act_runner` (persistent
 daemon, **HOST mode**) runs **alongside** the GitHub agent during the bake-in. IaC:
-`ansible/roles/gitea_runner/` + `ansible/gitea-runners.yml`. Pool = **node1/node2 VMs only**
-(`gitea_runners` inventory group: ci-runner-1/-4/-2/-5) — node3's runner is excluded (its 122b LLM
-leaves no RAM for a second heavy runner). Label **`self-hosted-hv:host`** (host execution is required —
-platform workflows host-bind-mount `${{ github.workspace }}` and drive the host Docker daemon).
+`ansible/roles/gitea_runner/` + `ansible/gitea-runners.yml`. Pool = **all 5 VMs** (`gitea_runners`
+inventory group: ci-runner-1..5). **ci-runner-3 (node3) was commissioned 2026-07-09** by RETIRING its
+dormant GitHub agent — so node3 hosts ONE runner (`capacity: 1`, `MemoryMax=10G`) within the 122b LLM's
+headroom, not the two the co-location caveat below warns about. Label **`self-hosted-hv:host`** (host
+execution is required — platform workflows host-bind-mount `${{ github.workspace }}` and drive the host
+Docker daemon).
 
 **Prereqs (in order):**
 1. **Gitea Actions on:** merge the `gitea.yaml` change (Actions + `[storage.actions_s3]`) and let Flux
@@ -133,8 +135,8 @@ just gitea-runners    # installs act_runner + registers the daemon on node1/node
 ```
 
 **Verify:**
-- Gitea → org → Settings → Actions → Runners: `act-ci-runner-{1,2,4,5}` **Online**, label
-  `self-hosted-hv` (host).
+- Gitea → org → Settings → Actions → Runners: `ci-runner-1..5` **Online**, label `self-hosted-hv` (host).
+  API: `curl -u <admin> https://git.chifor.me/api/v1/orgs/cchifor/actions/runners`.
 - On a VM: `ssh ubuntu@192.168.0.14 'systemctl status gitea-act-runner.service --no-pager'` (active) —
   note **both** `gitea-act-runner.service` and `actions.runner.cchifor-platform.service` run here.
 - Real job: push a branch to a Gitea repo with a workflow; confirm it lands on an `act-*` runner and
@@ -148,6 +150,46 @@ e2e off one side during the bake-in (platform#620 double-heavyweight OOM).
 **Day-2 (Gitea pool):** version bump = set `gitea_runner_version` → `just gitea-runners`. Re-register =
 delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Retire (post-cutover) =
 `systemctl disable --now gitea-act-runner` or flip `gitea_runner_enabled: false`.
+
+**Maintenance automation (act_runner has NO per-job hook — the `gitea_runner` role ships two idle-guarded timers):**
+- **Workspace reclaim** (`gitea-runner-reclaim.sh`, `.timer` ~30s + a daemon `ExecStartPre`): act_runner
+  REUSES the per-repo host workspace across jobs; job containers leave root-owned artifact dirs until a new
+  job can't `chdir` into its cwd and dies at its first step with the MISLEADING
+  `fork/exec /usr/bin/bash: no such file or directory` (bash exists — the cwd is inaccessible). The reclaim
+  removes the artifact subdirs (never the checkout) + chown-heals; idle-guarded so it never touches a live job.
+- **Docker/storage cleanup** (`gitea-runner-cleanup.sh`, `.timer` 15min): CI compose stacks accumulate tens
+  of GB on the SHARED Docker daemon — **build cache 10-33 GB/runner + stale images** — until the disk fills
+  and CI breaks (**ci-runner-2 hit 100%**). Prunes build cache + unused images + stopped/stale-running
+  containers + orphaned networks, with disk-pressure escalation (retention **48h → 6h at ≥80% → hard 1h +
+  actcache trim at ≥92%**). **Safe-by-construction** (hardened by an adversarial 3-lens review — the daemon
+  is shared with the GitHub agent and act_runner's idle signal is unreliable): window-based prunes
+  (`--filter until=…`, never `-af`) never touch in-use/recent resources; running containers are reaped only
+  past the **4h job timeout** and NEVER the persistent `buildx_buildkit_builder`; NO `docker volume prune`;
+  the idle check spans BOTH the gitea and GitHub runners. Tunables: `defaults/main.yml` `gitea_runner_cleanup_*`.
+- **Beacons → node_exporter textfile** (`gitea_runner_{reclaim,cleanup}_*.prom`, mode **0644** so
+  node_exporter can read them): `gitea_runner_cleanup_{disk_used_percent,disk_freed_percent,build_cache_bytes,
+  images_bytes,reaped_containers,busy_skip,last_run_seconds}`. Alerts (`monitoring/ci-runners-rules.yaml`):
+  **CIRunnerDiskFilling** / **DiskWillFillSoon** (node_filesystem), **CIRunnerBuildCacheHigh** (>25 GB
+  post-cleanup), **CIRunnerCleanupStale** (timer not run >1h), **CIRunnerMaintenanceBeaconMissing** (gitea
+  reclaim beacon absent). These migrated off the retiring GitHub agent's `runner_reclaim_*` beacons.
+- **Manual one-shot:** `ssh ubuntu@<ip> 'sudo systemctl start gitea-runner-cleanup.service'` (idle-guarded;
+  a no-op if a job is in flight). Emergency disk relief on an idle runner:
+  `sudo docker builder prune -f --filter until=24h; sudo docker image prune -af --filter until=24h`.
+
+**Rollout without Ansible (this control node can't run it — no binary; WSL-over-`/mnt/c` is broken, so the
+pool is HAND-installed over SSH, mirroring the role):**
+- **Non-disruptive role change** (scripts/timers): install the files + `systemctl daemon-reload` + start the
+  **TIMER** only — do NOT restart `gitea-act-runner.service` (that interrupts an in-flight job; an
+  `ExecStartPre` edit activates on the next natural restart).
+- **Restart a daemon** only when the runner is idle: `mp=$(systemctl show -p MainPID --value
+  gitea-act-runner.service); pgrep -P $mp` must be empty (0 children = no job). NB: a persistent
+  `buildx_buildkit_builder` container is NOT a job — it blocks a strict `docker ps` gate but not the
+  children check.
+- **Commission a new runner / re-provision** without `just`: fresh org token via
+  `POST /api/v1/orgs/cchifor/actions/runners/registration-token` (the SOPS `gitea-runner.sops.yaml` token
+  may be an empty placeholder) → download `act_runner` → write `config.yaml` (copy an existing runner's) →
+  `sudo -u runner act_runner register --no-interactive --instance https://git.chifor.me --token <T> --name
+  ci-runner-N --labels self-hosted-hv:host` → install the reclaim/cleanup + daemon units → start.
 
 ## Day-2
 - **Runner version bump:** set `github_runner_version` (role defaults) → `just runners` (re-extracts;
