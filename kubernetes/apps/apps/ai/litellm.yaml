@@ -191,7 +191,7 @@ spec:
           # Pinned by DIGEST (main-stable is a MOVING tag → silent, unreviewed upgrades). This digest =
           # ghcr.io/berriai/litellm:main-stable as of 2026-07-08. Bump deliberately: pull main-stable,
           # read `docker inspect --format '{{index .RepoDigests 0}}'`, update here, review, merge.
-          image: ghcr.io/berriai/litellm@sha256:078f96272f0c84da383e6a1f197478390b5204a86dcf00a181bcfe02a00e5dfa
+          image: ghcr.io/berriai/litellm@sha256:47afa74b495c802317712e5b8c8a65e7ca30c96636e9b618a5f8130eec72a8ee
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:
