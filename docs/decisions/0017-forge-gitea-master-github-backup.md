@@ -53,10 +53,10 @@ VMs. Chosen after two independent adversarial reviews; the load-bearing correcti
    single 10 GiB SQLite RWO PVC would fill it in days and contend with DB writes. Target =
    `[storage.actions_artifacts]`/`actions_log` at the **versitygw S3 on the QNAP**
    (`https://192.168.1.225:7070`, path-style, self-signed TLS) in a new `gitea-actions` bucket.
-   **Deferred (2026-07-09):** creating that bucket + a bucket-scoped key needs versitygw-admin/QNAP
-   access (the Velero key is bucket-scoped and can't create buckets). **Interim:** Actions enabled with
-   artifacts/logs on the local PVC, capped by `ARTIFACT_RETENTION_DAYS=14`/`LOG_RETENTION_DAYS=30`; the
-   S3 block is committed but commented (`gitea.yaml`), uncomment once the bucket/key exist.
+   **Done (2026-07-09):** created a scoped versitygw `gitea` IAM user + a `gitea-actions` bucket owned
+   by it (via `versitygw admin create-user`/`create-bucket`); the S3 block in `gitea.yaml` is live with
+   creds in the `gitea-actions-s3` secret. Retention `ARTIFACT_RETENTION_DAYS=14`/`LOG_RETENTION_DAYS=30`
+   still applies. (Interim before this: artifacts on the local PVC.)
 
 6. **Required checks via always-run aggregator jobs.** platform's path-filtered jobs (`frontend`,
    `gatekeeper`, `openapi-drift`; `contract / producer`) **skip** on unrelated PRs, and GitHub counts a
