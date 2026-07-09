@@ -1,5 +1,11 @@
 # ailab — Home AI Lab Infrastructure-as-Code
 
+> **Forge = Gitea (2026-07-09, ADR 0017).** This repo's master is **Gitea** at
+> `git.chifor.me/cchifor/ailab` (org `cchifor`). Push, open PRs, and run CI on **Gitea**;
+> `github.com/cchifor/ailab` is a **read-only push-mirror backup**. Log in at git.chifor.me
+> via Authelia. Agents: see `CLAUDE.md` — use the Gitea API / `scripts/forge.sh` (not `gh`).
+
+
 *Fully Infrastructure-as-Code, rebuildable-from-scratch home lab for AI workloads.*
 
 - **Compute:** 3× Bosgame M5 (AMD Ryzen AI Max+ 395 "Strix Halo", 128 GB unified RAM, 2 TB NVMe) running a **Proxmox VE** cluster.
