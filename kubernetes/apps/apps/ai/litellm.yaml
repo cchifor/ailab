@@ -22,21 +22,23 @@ data:
       # deployments (llm-node1 / llm-node2) so the LiteLLM router health-aware load-balances the pair:
       # on failure it retries the OTHER node and parks the bad one (router_settings below), instead of
       # kube-proxy's readiness-blind round-robin over the `llm` Service. Replaced qwen3-30b-a3b (2026-07-01).
-      # host CTX=262144 (native n_ctx_train) PARALLEL=1, q8_0 K/V cache; ~16K output headroom — Qwen3.6 is a
-      # REASONING model (emits a <think> trace in reasoning_content), so keep max_input_tokens generous.
+      # host CTX=262144 total, PARALLEL=2 => 131072 (128K) per concurrent slot, q8_0 K/V cache. max_input
+      # 114688 = 128K/slot minus ~16K output headroom (Qwen3.6 is a REASONING model, emits a <think> trace).
+      # Dropped from 256K/PARALLEL=1 on 2026-07-09 so each node serves 2 requests at once — --parallel 1 was
+      # single-slot head-of-line blocking under Open WebUI's per-message fan-out. KEEP IN SYNC with models.yaml.
       # supports_vision: multimodal (image + video); also replaced gemma-4 for vision.
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 245760 }
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 245760 }
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
       # gpt-oss-120b RETIRED as a LOCAL model (2026-07-08): node3 now serves ONLY qwen3.5-122b. Reason —
       # qwen3.5-122b and gpt-oss-120b (both ~60-71 GiB) cannot co-reside in node3's single 96 GiB iGPU
       # LXC, so when interactive traffic (qwen3.5-122b) and the deepagent platform (gpt-oss) interleave,
@@ -52,13 +54,13 @@ data:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 245760 }
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
       - model_name: gpt-oss-120b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 245760 }
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
       - model_name: qwen3.5-122b
         litellm_params:
           model: openai/qwen3.5-122b
@@ -135,12 +137,13 @@ data:
       max_budget: 50 # USD
       budget_duration: 30d
     # Router (all proxy traffic flows through it): health-aware load-balancing across a model's
-    # deployments. qwen3.6-35b-a3b (and the gpt-oss shim) have TWO deployments (llm-node1/llm-node2);
-    # on a failed call the router retries the OTHER node and, after allowed_fails, parks the bad one for
-    # cooldown_time — so a down/restarting daily-driver node degrades gracefully instead of ~50% errors.
-    # (Single-deployment models like qwen3.5-122b/cloud still benefit from num_retries on transient 5xx.)
+    # deployments. qwen3.6-35b-a3b (and the gpt-oss shim) have TWO deployments (llm-node1/llm-node2).
+    # least-busy routes each call to the deployment with the FEWEST in-flight requests — it fills an idle
+    # node instead of simple-shuffle's blind random pick (which, observed 2026-07-09, piled a deep queue
+    # onto one node while the other sat idle). On failure the router retries the OTHER node and, after
+    # allowed_fails, parks the bad one for cooldown_time. (Single-deployment models still get num_retries.)
     router_settings:
-      routing_strategy: simple-shuffle
+      routing_strategy: least-busy
       num_retries: 2
       allowed_fails: 2
       cooldown_time: 30
@@ -175,7 +178,7 @@ spec:
         # every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
-        checksum/config: "60bbc9ec4db2"
+        checksum/config: "ddd93d21b6e3"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

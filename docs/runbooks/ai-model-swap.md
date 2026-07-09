@@ -61,7 +61,8 @@ python scripts/lxc-exec.py 192.168.0.3 5002 --env LLAMA_BUILD=b9672 \
   --env MODEL=/models-local/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
   --env MODEL_STAGE_SRC=/models/qwen3.6-35b-a3b \
   --env MMPROJ=/models-local/qwen3.6-35b-a3b/mmproj-F16.gguf \
-  --env MODEL_ALIAS=qwen3.6-35b-a3b --env CTX=262144 --env PARALLEL=1 --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0
+  --env MODEL_ALIAS=qwen3.6-35b-a3b --env CTX=262144 --env PARALLEL=2 --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0
+  # PARALLEL=2 (2026-07-09): 2 concurrent requests/node, 131072 (128K) per slot. litellm max_input_tokens=114688.
 
 # node3 -> llama-swap SINGLE-MODEL: qwen3.5-122b only (gpt-oss-120b retired 2026-07-08 to end swap-thrash).
 # Re-running this rewrites /etc/llama-swap/config.yaml with ONE model, so a stale gpt-oss entry is dropped.
