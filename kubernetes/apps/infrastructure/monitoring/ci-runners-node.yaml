@@ -1,5 +1,6 @@
-# Host-level node_exporter on the 5 GitHub Actions runner VMs (.47/.48/.49 + .33/.34:9100, installed
-# via the github_runner ansible role, which reuses the node_exporter role). Gives true CPU/mem/disk/network
+# Host-level node_exporter on the 5 CI runner VMs (.14-.18:9100), installed via the github_runner +
+# gitea_runner ansible roles (both reuse the node_exporter role). The VMs run Gitea Actions (act_runner),
+# plus the GitHub agent co-located during the bake-in (ADR 0017). Gives true CPU/mem/disk/network
 # for the runner pool so heavy CI load (compose e2e + buildx) is visible on the dashboards alongside
 # the hypervisors. relabel forces job="ci-runner-node" so dashboard queries stay clean.
 apiVersion: v1
