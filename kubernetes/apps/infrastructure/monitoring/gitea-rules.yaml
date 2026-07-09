@@ -1,0 +1,49 @@
+# Alerts for the Gitea forge (git.chifor.me) — the MASTER forge for cchifor/* (ADR 0017). All CI
+# (Gitea Actions) and the ailab GitOps source depend on it (Flux reconciles from in-cluster Gitea), so
+# it is critical infra. A full CI matrix once OOM-killed it at 1Gi (raised to 3Gi); these alerts catch a
+# repeat before it takes CI + GitOps down. `release: kube-prometheus-stack` so the operator picks it up.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gitea-forge
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: gitea-forge
+      rules:
+        - alert: GiteaForgeDown
+          expr: kube_deployment_status_replicas_available{namespace="gitea", deployment="gitea"} < 1
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "Gitea forge is down (0 available replicas)"
+            description: >-
+              The gitea deployment has had 0 available replicas for >5m — the master forge is DOWN, which
+              blocks ALL Gitea Actions CI and ailab GitOps (Flux reconciles from in-cluster Gitea). It is a
+              single-instance SQLite pod (Recreate), so a brief 0 during a rollout is normal; sustained
+              means a crash / OOM / PVC (Multi-Attach) issue. Check `kubectl -n gitea get pods` + logs.
+        - alert: GiteaForgeMemoryHigh
+          expr: |
+            container_memory_working_set_bytes{namespace="gitea", container="gitea"}
+              / on(namespace, pod, container) kube_pod_container_resource_limits{namespace="gitea", container="gitea", resource="memory"}
+              > 0.85
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "Gitea forge memory >85% of its limit (OOM precursor)"
+            description: >-
+              The gitea container has been over 85% of its memory limit for >10m. Gitea Actions streams
+              runner logs + task updates in-memory; a full CI matrix OOM-killed the pod at 1Gi (now 3Gi).
+              If this fires under CI load, raise limits.memory in kubernetes/apps/apps/gitea/gitea.yaml.
+        - alert: GiteaForgeRestarting
+          expr: increase(kube_pod_container_status_restarts_total{namespace="gitea", container="gitea"}[15m]) > 0
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: "Gitea forge container restarted (possible OOMKill / crashloop)"
+            description: >-
+              The gitea container restarted in the last 15m — likely an OOMKill (exit 137) or crash. The
+              Recreate rollout interrupts in-flight Actions jobs. Check `kubectl -n gitea describe pod`
+              (lastState.terminated.reason) and memory headroom; the 1Gi->3Gi OOM fix is in gitea.yaml.
