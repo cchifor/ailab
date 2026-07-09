@@ -58,8 +58,11 @@ spec:
       ssh: { type: ClusterIP, port: 22 }
     ingress: { enabled: false }
     resources:
-      requests: { cpu: 50m, memory: 256Mi }
-      limits: { memory: 1Gi }
+      # Gitea Actions streams runner logs + task updates in-memory; 1Gi was OOM-killed (exit 137) under
+      # a full CI matrix (ADR 0017 validation, 2026-07-09) — the pod crash-looped and 502'd. 3Gi gives
+      # headroom for ~4 concurrent host-mode jobs streaming logs. Revisit if the pool/concurrency grows.
+      requests: { cpu: 50m, memory: 512Mi }
+      limits: { memory: 3Gi }
     gitea:
       # Break-glass local admin; OIDC is the day-to-day login. passwordMode keepUpdated re-syncs the
       # password from the secret on every start.
