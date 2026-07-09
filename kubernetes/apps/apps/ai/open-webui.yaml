@@ -76,6 +76,13 @@ spec:
             - name: DATABASE_URL # postgresql://openwebui:***@infra-pg-rw.databases.svc:5432/openwebui
               valueFrom:
                 secretKeyRef: { name: open-webui-db, key: DATABASE_URL }
+            # Shared JWT signing key — REQUIRED for >1 replica. Without it each replica generates its own
+            # .webui_secret_key, so a token issued by one replica gets 401 when the request is load-balanced
+            # to another. (cloudflared fronts the Service from a single source IP, so sessionAffinity:ClientIP
+            # can't help — it would pin all traffic to one pod.)
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: open-webui-db, key: WEBUI_SECRET_KEY }
             # RAG vectors -> pgvector (shared, multi-replica-safe). The default file-based Chroma on the RWX
             # PVC would be corrupted by 2 replicas writing concurrently. Reuses the same Postgres DB.
             - { name: VECTOR_DB, value: "pgvector" }
