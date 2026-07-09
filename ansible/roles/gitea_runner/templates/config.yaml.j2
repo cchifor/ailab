@@ -1,0 +1,44 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). act_runner daemon config for the Gitea Actions pool.
+# Registration state (instance URL, token, uuid) lives in the sibling .runner file written by
+# `act_runner register`; this file governs runtime behaviour. Docs: https://docs.gitea.com/usage/actions/act-runner
+log:
+  level: info
+
+runner:
+  file: .runner
+  # One heavy job at a time — a platform e2e run brings up ~32 containers. Raising this multiplies the
+  # memory footprint under this daemon's systemd MemoryMax (see the unit file).
+  capacity: {{ gitea_runner_capacity }}
+  timeout: {{ gitea_runner_job_timeout }}
+  # Poll the Gitea instance for jobs. insecure=false: git.chifor.me presents a valid (Cloudflare) cert.
+  insecure: false
+  fetch_timeout: 5s
+  fetch_interval: {{ gitea_runner_fetch_interval }}
+  # HOST execution. `runs-on: {{ gitea_runner_label }}` maps to running the job directly on this VM
+  # (NOT inside a container) — required because platform workflows host-bind-mount ${{ '{{' }} github.workspace {{ '}}' }}
+  # and drive the host Docker daemon. Keep in sync with the label passed to `act_runner register`.
+  labels:
+    - "{{ gitea_runner_label }}:{{ gitea_runner_label_schema }}"
+
+cache:
+  # Built-in Actions cache server (serves actions/cache + setup-uv/setup-node/setup-python caches).
+  enabled: {{ gitea_runner_cache_enabled | bool | ternary('true', 'false') }}
+  dir: "{{ gitea_runner_cache_dir }}"
+  # host/port the cache server advertises to jobs. Empty host = auto-detect; in HOST mode the job runs
+  # on this same VM so localhost is reachable. If caching errors ("dial tcp ... connection refused"),
+  # set gitea_runner_cache_host to this VM's LAN IP.
+  host: "{{ gitea_runner_cache_host }}"
+  port: {{ gitea_runner_cache_port }}
+
+# `container:` only applies to labels using the docker:// schema — inert for our :host label, but keep
+# sane defaults so a future docker-mode label doesn't inherit surprises.
+container:
+  network: ""
+  privileged: false
+  options: ""
+  force_pull: false
+  valid_volumes: []
+
+host:
+  # Parent dir for host-mode job workspaces (the equivalent of the GitHub runner's _work).
+  workdir_parent: "{{ gitea_runner_workdir_parent }}"

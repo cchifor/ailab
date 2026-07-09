@@ -1,0 +1,32 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Persistent act_runner daemon (HOST mode) for Gitea Actions.
+# Unlike the GitHub runner (one ephemeral --replace cycle per job via ephemeral-runner.sh), act_runner
+# is a long-running daemon that polls Gitea and executes up to `runner.capacity` jobs (config.yaml).
+[Unit]
+Description=Gitea Actions runner (act_runner, host mode)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ gitea_runner_user }}
+WorkingDirectory={{ gitea_runner_config_dir }}
+ExecStart={{ gitea_runner_bin }} daemon --config {{ gitea_runner_config_dir }}/config.yaml
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+
+# Resource caps bound the daemon AND its host-mode job children (they run in this unit's cgroup).
+# During co-location the GitHub runner is capped at 10G; keep the SUM under the VM's 24 GiB. See the
+# defaults + the forge-migration ADR for the double-heavyweight OOM caveat (concurrency is per-forge).
+CPUQuota={{ gitea_runner_cpu_quota }}
+CPUWeight=80
+IOWeight=80
+MemoryMax={{ gitea_runner_memory_max }}
+MemoryHigh={{ gitea_runner_memory_high }}
+TasksMax={{ gitea_runner_tasks_max }}
+
+[Install]
+WantedBy=multi-user.target

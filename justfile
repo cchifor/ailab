@@ -54,6 +54,17 @@ runners:
 ping-runners:
     cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible github_runners -m ping
 
+# Ansible: install/register the Gitea Actions runner (act_runner, host mode) on the node1/node2 runner
+# VMs, ALONGSIDE the GitHub agent (forge-migration pilot). Run `just runners` first (base toolchain +
+# `runner` user) and create the gitea-runner SOPS secret (org runner token). See docs/runbooks/ci-runners.md.
+gitea-runners:
+    cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
+      ansible-playbook gitea-runners.yml
+
+# Ansible: connectivity check for the Gitea Actions runner VMs
+ping-gitea-runners:
+    cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible gitea_runners -m ping
+
 # OpenTofu: plan/apply ONLY the dev-worker VMs (separate state from runners + Talos).
 dev-workers-plan:
     tofu -chdir=kubernetes/infra/dev-workers plan

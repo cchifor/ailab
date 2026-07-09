@@ -97,6 +97,53 @@ The legacy 4-runner Multipass/Hyper-V pool on `BEAST` was drained: its runner se
 runners only** (no `RUNNER_LABEL`/workflow change). The powered-off Multipass VMs on `BEAST` can be purged
 to reclaim disk when convenient: `multipass delete --purge hv-runner-{1..4}` (irreversible).
 
+## 7. Gitea Actions runner pool (act_runner — forge migration, ADR 0017)
+Second pool on the **same VMs** for the Gitea master forge (`git.chifor.me`). `act_runner` (persistent
+daemon, **HOST mode**) runs **alongside** the GitHub agent during the bake-in. IaC:
+`ansible/roles/gitea_runner/` + `ansible/gitea-runners.yml`. Pool = **node1/node2 VMs only**
+(`gitea_runners` inventory group: gha-runner-1/-4/-2/-5) — node3's runner is excluded (its 122b LLM
+leaves no RAM for a second heavy runner). Label **`self-hosted-hv:host`** (host execution is required —
+platform workflows host-bind-mount `${{ github.workspace }}` and drive the host Docker daemon).
+
+**Prereqs (in order):**
+1. **Gitea Actions on:** merge the `gitea.yaml` change (Actions + `[storage.actions_s3]`) and let Flux
+   reconcile. Create the SOPS secret first: `cp gitea-actions-s3.sops.yaml.example gitea-actions-s3.sops.yaml`,
+   fill the versitygw keys, `sops --encrypt --in-place …` (see the file header).
+2. **versitygw bucket:** create the `gitea-actions` bucket on the QNAP endpoint (ADR 0010).
+3. **Gitea org + repos:** create the org; import repos; enable Actions **per repo** (Settings → Units —
+   `DEFAULT_REPO_UNITS` only affects *new* repos, go-gitea #23724).
+4. **Org Actions vars/secrets:** set variable `RUNNER_LABEL=self-hosted-hv` (+ `DOCKERHUB_USER`) and
+   secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`/`SOPS_AGE_KEY`/`OPENAI_API_KEY`/`DOCKERHUB_TOKEN` at
+   org scope. `GITHUB_TOKEN` is auto-aliased to `GITEA_TOKEN` in jobs.
+
+**Provide the runner token + configure:**
+```bash
+# Org runner-registration token: git.chifor.me/org/<org>/settings/actions/runners -> "Create new Runner"
+cp ansible/secrets/gitea-runner.sops.yaml.example ansible/secrets/gitea-runner.sops.yaml
+# paste the token into gitea_runner_registration_token, then:
+SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey \
+  sops --encrypt --in-place ansible/secrets/gitea-runner.sops.yaml   # confirm ENC[...]
+just runners          # FIRST — installs Docker/toolchain + the `runner` user (gitea_runner depends on it)
+just gitea-runners    # installs act_runner + registers the daemon on node1/node2
+```
+
+**Verify:**
+- Gitea → org → Settings → Actions → Runners: `act-gha-runner-{1,2,4,5}` **Online**, label
+  `self-hosted-hv` (host).
+- On a VM: `ssh ubuntu@192.168.0.14 'systemctl status gitea-act-runner.service --no-pager'` (active) —
+  note **both** `gitea-act-runner.service` and `actions.runner.cchifor-platform.service` run here.
+- Real job: push a branch to a Gitea repo with a workflow; confirm it lands on an `act-*` runner and
+  artifacts appear under the `gitea-actions` bucket.
+
+**Capacity caveat (bake-in):** each daemon is `capacity: 1` with a systemd `MemoryMax=10G`; co-located
+with the GitHub 10G runner that's ~20G on a 24 GiB VM. The `heavy-compose-stack` concurrency throttle is
+**per-forge** and won't coordinate a GitHub e2e stack with a Gitea e2e stack on the same VM — keep heavy
+e2e off one side during the bake-in (platform#620 double-heavyweight OOM).
+
+**Day-2 (Gitea pool):** version bump = set `gitea_runner_version` → `just gitea-runners`. Re-register =
+delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Retire (post-cutover) =
+`systemctl disable --now gitea-act-runner` or flip `gitea_runner_enabled: false`.
+
 ## Day-2
 - **Runner version bump:** set `github_runner_version` (role defaults) → `just runners` (re-extracts;
   the agent also auto-updates on connect).

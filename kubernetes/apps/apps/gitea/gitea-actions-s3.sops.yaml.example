@@ -1,0 +1,20 @@
+# S3 credentials for Gitea Actions artifact + log storage (versitygw on the QNAP, ADR 0010/0017).
+# Consumed by gitea.yaml via gitea.additionalConfigFromEnvs -> the [storage.actions_s3] section.
+#
+# Setup:
+#   1. On versitygw, create a `gitea-actions` bucket and an access/secret key pair scoped to it
+#      (or reuse the pair Velero already holds for the endpoint).
+#   2. Copy this file to `gitea-actions-s3.sops.yaml`, paste the real keys below.
+#   3. Encrypt IN PLACE (generic .sops.yaml rule encrypts data/stringData for *.sops.yaml):
+#        SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey \
+#          sops --encrypt --in-place kubernetes/apps/apps/gitea/gitea-actions-s3.sops.yaml
+#      Confirm stringData shows ENC[...] BEFORE committing. It is referenced by kustomization.yaml.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitea-actions-s3
+  namespace: gitea
+type: Opaque
+stringData:
+  access-key: REPLACE_ME_versitygw_access_key # -> GITEA__storage_0X2E_actions_s3__MINIO_ACCESS_KEY_ID
+  secret-key: REPLACE_ME_versitygw_secret_key # -> GITEA__storage_0X2E_actions_s3__MINIO_SECRET_ACCESS_KEY
