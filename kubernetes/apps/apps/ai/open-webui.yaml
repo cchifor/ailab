@@ -70,11 +70,21 @@ spec:
             httpGet: { path: /health, port: http }
             initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 5 # default 1s is too tight — the single worker can't answer /health mid-stream
             failureThreshold: 30 # first start downloads an embedding model
           livenessProbe:
             httpGet: { path: /health, port: http }
             initialDelaySeconds: 180
             periodSeconds: 30
+            # OWUI is a SINGLE replica / single uvicorn worker: while it streams several concurrent chats its
+            # event loop can briefly miss the /health probe. A concurrent-load test (2026-07-09) showed the
+            # DEFAULT probe (timeoutSeconds 1, failureThreshold 3) killing OWUI mid-chat — kubelet SIGKILL,
+            # exit 137, Reason=Error (NOT an OOM: memory held ~0.7/2Gi) — which orphaned every in-flight
+            # stream and failed all active sessions. Give the busy loop slack: 5s per check, and ~3min
+            # (6×30s) of SUSTAINED failure before a restart. Real fix for the serialization is multi-replica
+            # OWUI on Postgres (off SQLite-on-NFS) — tracked separately.
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             requests: { cpu: 200m, memory: 512Mi }
             limits: { memory: 2Gi }
