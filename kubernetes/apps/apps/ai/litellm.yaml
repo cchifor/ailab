@@ -67,7 +67,7 @@ data:
           api_base: http://llm-qwen35.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
         model_info:
-          max_input_tokens: 7000 # host CTX=8192
+          max_input_tokens: 24576 # host CTX=32768 --parallel 1 (single 32K slot); ~8K output headroom for reasoning
       # gemma-4-26b-a4b is now ON-DEMAND (unlisted so the router never advertises a down backend,
       # matching the heavyweight policy). It was stopped on node1 :8082 to free ~15 GiB VRAM for
       # Qwen3.6's extended context; Qwen3.6 covers image+video, so no steady-state vision is lost.

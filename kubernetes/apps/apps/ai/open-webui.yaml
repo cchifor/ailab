@@ -95,14 +95,25 @@ spec:
             - { name: WEBSOCKET_MANAGER, value: "redis" }
             - { name: WEBSOCKET_REDIS_URL, value: "redis://owui-valkey.ai.svc.cluster.local:6379/0" }
             - { name: REDIS_URL, value: "redis://owui-valkey.ai.svc.cluster.local:6379/1" }
-            # Disable the per-message auxiliary LLM calls (title/tags/follow-up/autocomplete). Each was an
-            # EXTRA completion per user turn — under 3-way concurrent load they multiplied backend + OWUI
-            # event-loop work several-fold and helped choke the pinned replica (2026-07-09 load test). The
-            # user-visible chat is unaffected; chats just won't get auto-titles/tags/suggestions.
+            # CRITICAL: make env vars authoritative. OWUI settings are "PersistentConfig" — seeded from env
+            # only on FIRST boot, then served from the DB and env is IGNORED. Our ENABLE_*_GENERATION=false
+            # below were silently overridden by DB values (all still `true`), so title/tags/follow-up kept
+            # firing. ENABLE_PERSISTENT_CONFIG=false makes env win on every boot (safe here: connection, auth,
+            # DB, vector, redis are ALL env-driven — nothing critical is UI-only). See 2026-07-09 diagnosis.
+            - { name: ENABLE_PERSISTENT_CONFIG, value: "false" }
+            # Disable the per-message auxiliary LLM calls (title/tags/follow-up/autocomplete). Each is an EXTRA
+            # completion per user turn that, by default, hits the CURRENT chat model. On the slow qwen3.5-122b
+            # they ran full-context AFTER each answer, filled both llama.cpp slots and EVICTED the prefix cache,
+            # so the NEXT message queued + re-prefilled — measured 47-159s to first token (vs ~1s once disabled;
+            # 2026-07-09 root-cause). Chats just won't get auto-titles/tags/suggestions.
             - { name: ENABLE_TITLE_GENERATION, value: "false" }
             - { name: ENABLE_TAGS_GENERATION, value: "false" }
             - { name: ENABLE_FOLLOW_UP_GENERATION, value: "false" }
             - { name: ENABLE_AUTOCOMPLETE_GENERATION, value: "false" }
+            # Belt-and-suspenders: any task that DOES fire (web-search / retrieval / image query generation,
+            # only when those features are used) is routed to the fast, always-warm daily driver — NEVER the
+            # slow 122b. LiteLLM models are OpenAI-compatible, so OWUI uses TASK_MODEL_EXTERNAL (not TASK_MODEL).
+            - { name: TASK_MODEL_EXTERNAL, value: "qwen3.6-35b-a3b" }
           volumeMounts:
             - { name: data, mountPath: /app/backend/data }
           readinessProbe:

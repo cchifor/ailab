@@ -50,11 +50,18 @@ models:
     alias: qwen3.5-122b
     gguf: /models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf
     stage_from: /models/qwen3.5-122b-a10b
-    ctx: 16384                # total across 2 slots => 8192 tokens/slot (same per-request window as before)
-    parallel: 2               # 2 concurrent slots. A single request still runs at full speed (only 1 slot
-                              # active); a 2nd request runs CONCURRENTLY at ~half decode (memory-bound) instead
-                              # of QUEUING behind the first. Fixes interactive requests waiting 45s-4min behind
-                              # long/overlapping 122b requests on the old single slot (2026-07-09 diagnosis).
+    ctx: 32768                # a SINGLE 32K-token window (was 16384 total / 8192 per slot). The interactive
+                              # "waits 45s-4min between messages" was NOT slot contention — it was Open WebUI's
+                              # title/tags/follow-up task calls (re-enabled in OWUI's DB despite env, the
+                              # PersistentConfig gotcha) hitting 122b after every message, filling both slots
+                              # and EVICTING the prefix cache. Fixed at the source (open-webui.yaml:
+                              # ENABLE_PERSISTENT_CONFIG=false + TASK_MODEL_EXTERNAL=qwen3.6). With the extra
+                              # calls gone, a single deep-reasoning user needs ONE slot, so we spend the KV on a
+                              # BIGGER window instead of a 2nd slot: max context + best prefix reuse across turns.
+    parallel: 1               # single slot => the full 32K window serves each request (best for max context +
+                              # sequential reasoning). Tradeoff: if you fire a 2nd chat while a long 122b answer
+                              # is still generating it queues (rare for single-user). q8_0 KV for 32K adds only
+                              # ~2 GiB GTT (weights ~70 GiB dominate); node3 host stays within its ~18 GiB free.
     cache_type: q8_0          # q8_0 K/V (needs flash-attn, which --flash-attn auto engages). At ctx 16384 this
                               # keeps KV GTT ~= the original f16-@-8192 footprint; near-lossless.
     extra: "--no-mmap"
