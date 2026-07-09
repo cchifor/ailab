@@ -1,6 +1,11 @@
 # Alerts for the CI runner VMs (metrics via ci-runners-node.yaml, job=ci-runner-node). Closes the
 # monitoring gap that let a 40%-of-fleet buildx-ownership outage run silently for hours (see ADR 0013).
 # `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+# Node-level alerts (down/disk/mem/swap) are forge-agnostic. The reclaim-beacon alerts
+# (CIRunnerDockerConfigRootOwned / CIRunnerHealthBeaconMissing) rely on runner_reclaim_last_success_seconds
+# emitted by the GitHub agent (github_runner role) — valid while it is co-located with the Gitea
+# act_runner (ADR 0017 bake-in). When the GitHub agent is retired, rework/remove those two (else
+# beacon-missing false-fires on the ci-runner VMs).
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
