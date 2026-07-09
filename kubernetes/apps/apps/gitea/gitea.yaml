@@ -76,6 +76,14 @@ spec:
           existingSecret: gitea-oauth # keys: key (client id), secret (client secret)
           autoDiscoverUrl: "https://sso.chifor.me/.well-known/openid-configuration"
           scopes: "openid profile email groups"
+      # Expose Gitea's own /metrics (gitea_* app metrics: repos/users/orgs/mirrors/issues + Go runtime).
+      # enabled=true adds [metrics] ENABLED to app.ini; the TOKEN comes from the gitea-metrics secret via
+      # the env override below (keeps it out of git). The chart's own ServiceMonitor can't wire a bearer
+      # token, so it stays off — we ship a hand-rolled one (servicemonitor.yaml) with bearerTokenSecret.
+      metrics:
+        enabled: true
+        serviceMonitor:
+          enabled: false
       # S3 artifact/log offload (ADR 0017): credentials injected as GITEA__ env overrides, merged into
       # the [storage.actions_s3] section below. Env-to-ini escaping: '.' -> _0X2E_, '__' is the
       # section/key separator, a single '_' is literal (section [storage.actions_s3]). Keys come from
@@ -91,6 +99,13 @@ spec:
             secretKeyRef:
               name: gitea-actions-s3
               key: secret-key
+        # [metrics] TOKEN — required in the Authorization: Bearer header to read /metrics (the endpoint is
+        # internet-reachable via the CF tunnel). The ServiceMonitor sends the same secret value.
+        - name: GITEA__metrics__TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gitea-metrics
+              key: token
       config:
         server:
           DOMAIN: git.chifor.me

@@ -5,4 +5,6 @@ resources:
   - gitea-admin.sops.yaml # SOPS: break-glass local admin (username/password)
   - gitea-oauth.sops.yaml # SOPS: Authelia OIDC client (key/secret)
   - gitea-actions-s3.sops.yaml # SOPS: versitygw S3 creds for Actions artifacts/logs (ADR 0017)
+  - gitea-metrics.sops.yaml # SOPS: bearer token protecting /metrics (Prometheus scrape)
+  - servicemonitor.yaml # Prometheus scrape of Gitea /metrics (gitea_* app metrics) with bearer auth
   - gitea.yaml # HelmRepository + HelmRelease (SQLite on qnap-iscsi, OIDC login, Actions on S3)

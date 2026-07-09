@@ -1,0 +1,28 @@
+# Prometheus scrape of Gitea's own /metrics endpoint — gitea_* application metrics (repositories, users,
+# organizations, mirrors, issues, ...) plus Go runtime metrics. The kube-prometheus-stack Prometheus
+# selects ServiceMonitors by `release: kube-prometheus-stack` across all namespaces. /metrics is
+# token-protected ([metrics] TOKEN, ADR 0017) because it is internet-reachable via the CF tunnel; we
+# authenticate with the bearer token from the gitea-metrics SOPS secret (same value Gitea reads).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gitea
+  namespace: gitea
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [gitea]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitea
+      app.kubernetes.io/instance: gitea
+  endpoints:
+    # Only gitea-http carries the `http` (3000) port; gitea-ssh has no such port so it is not scraped.
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 30s
+      bearerTokenSecret:
+        name: gitea-metrics
+        key: token

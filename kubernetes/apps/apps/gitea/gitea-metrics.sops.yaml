@@ -1,0 +1,32 @@
+# Bearer token protecting the Gitea /metrics endpoint (Prometheus scrape). git.chifor.me/metrics is
+# reachable via the CF tunnel (same 3000 port as the UI); REQUIRE_SIGNIN_VIEW gates UI views but NOT
+# /metrics, so we require a token. Consumed twice: gitea.yaml -> GITEA__metrics__TOKEN ([metrics] TOKEN),
+# and servicemonitor.yaml -> endpoints[].bearerTokenSecret (Prometheus sends 'Authorization: Bearer').
+apiVersion: v1
+kind: Secret
+metadata:
+    name: gitea-metrics
+    namespace: gitea
+type: Opaque
+stringData:
+    token: ENC[AES256_GCM,data:/zgvyf7HgyKrjPd4V8iCrrbb8hQGTa26yu7KQ19aas5rnqKGGA9tn/h8Z32lEg0C0Tuy3FezAFUCwcjnvV8AvA==,iv:1vg34ZNDZHmK9RX6KCIH6jM5ex3KN+N4+t/YeWlWGLs=,tag:cgUIT6mE2y1HZkZIdCw60w==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA2cEZsZVBwT3h4Nlg5c2Ri
+            T3ZucDV0STA2TGRTUnRlOWlaQTdQSHl0UjBvCkY5OUVqMURWZUdybW1QRElwVCtt
+            RHVtV25DcEdzc3VRMWZkaUdOaUNyeGMKLS0tIGpmdFRFc25SVHhKSXpCT25OTTNj
+            czNYR0lzMDVFSmp6UjVlc2U2c2J6eWMKCxbRxCKPPam7vywUSdB9QESNppAL3v2p
+            Ms4WBNytWDQzOblKrjv0JocLjQTUVo4QfLaBUmf2BglSBwTLylXq7g==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-09T16:36:54Z"
+    mac: ENC[AES256_GCM,data:fmTiNQoGx/tejPZlHG8fctFx5epF/alrzENIy6jgz95AUzRlh/wahlUVcaTgoJMo5ysFov2WEmDr7+Kqo3PXBHdsUELfggTodOdz+Pb/nJhLcQ8xIBsZzlbtmeiSNo1VmXhoQc8zHqNQb29eFBA5VydT7As05Nr9ruQ48Cvxe2I=,iv:4bWNfx/DUdUBU+J4NV2tzjJQVLlvGu7m6K2byuH9Pgk=,tag:z1Jhm3pn8eZH9T+r/NpyFQ==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4
