@@ -50,10 +50,13 @@ models:
     alias: qwen3.5-122b
     gguf: /models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf
     stage_from: /models/qwen3.5-122b-a10b
-    ctx: 8192
-    parallel: 1
-    cache_type: q8_0          # q8_0 K/V (needs flash-attn, which --flash-attn auto engages) — ~halves KV GTT
-                              # and a few % faster decode at ctx 8192; near-lossless. (2026-07-09 perf tuning)
+    ctx: 16384                # total across 2 slots => 8192 tokens/slot (same per-request window as before)
+    parallel: 2               # 2 concurrent slots. A single request still runs at full speed (only 1 slot
+                              # active); a 2nd request runs CONCURRENTLY at ~half decode (memory-bound) instead
+                              # of QUEUING behind the first. Fixes interactive requests waiting 45s-4min behind
+                              # long/overlapping 122b requests on the old single slot (2026-07-09 diagnosis).
+    cache_type: q8_0          # q8_0 K/V (needs flash-attn, which --flash-attn auto engages). At ctx 16384 this
+                              # keeps KV GTT ~= the original f16-@-8192 footprint; near-lossless.
     extra: "--no-mmap"
     swap: true                # MANAGED on node3's llama-swap (sole model; loads on request, idle-unloads)
     ttl: 1800                 # 30 min idle (raised from 900 to keep a Q&A session warm)
