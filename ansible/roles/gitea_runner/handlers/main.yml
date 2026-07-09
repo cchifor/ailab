@@ -18,3 +18,12 @@
     state: restarted
     enabled: true
     daemon_reload: true
+
+# Cleanup is timer-only (no ExecStartPre, no daemon coupling) — restarting the timer is always safe and
+# never touches the act_runner daemon or an in-flight job.
+- name: Restart gitea cleanup timer
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_cleanup_timer }}"
+    state: restarted
+    enabled: true
+    daemon_reload: true

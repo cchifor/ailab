@@ -1,0 +1,19 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Oneshot fired by gitea-runner-cleanup.timer: idle-guarded
+# reclamation of the heavy Docker/storage accumulators (build cache, stale images, leaked containers/
+# networks/volumes) the CI compose stacks leave behind. Runs as ROOT (no User=) to drive the Docker
+# daemon + trim the actions cache. The script self-guards (no-op while a job is in flight), so the timer
+# can fire on a short interval safely.
+[Unit]
+Description=Idle-guarded docker + storage reclamation for the act_runner host
+After=docker.service
+After={{ gitea_runner_service }}
+
+[Service]
+Type=oneshot
+ExecStart={{ gitea_runner_cleanup_bin }}
+# Pruning tens of GB of build cache/images can take a while — don't kill it mid-prune.
+TimeoutStartSec=900
+# Lowest priority: cleanup must never starve a job that arrives; nice + idle I/O.
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

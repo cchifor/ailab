@@ -99,3 +99,34 @@ gitea_runner_reclaim_dirs:
 # github_runner beacon). No-op where the textfile dir is absent.
 gitea_runner_reclaim_beacon: true
 gitea_runner_reclaim_textfile_dir: /var/lib/prometheus/node-exporter
+
+# ---- docker + storage cleanup (bounds disk; the reclaim above only handles workspace artifact dirs) ──
+# A full CI run leaves tens of GB on the SHARED Docker daemon: build cache (unbounded, 10-33 GB/runner
+# observed), stale image layers, and occasionally leaked containers/networks/volumes. A full root disk
+# breaks CI (image pulls + artifact writes fail — ci-runner-2 hit 100%). gitea-runner-cleanup.sh reclaims
+# these on an idle-guarded timer (NEVER mid-job) with disk-pressure escalation. Retention windows keep
+# recently-used images/cache so a fresh job doesn't re-pull from scratch.
+gitea_runner_cleanup_enabled: true
+gitea_runner_cleanup_bin: /usr/local/bin/gitea-runner-cleanup.sh
+gitea_runner_cleanup_env: /etc/gitea-runner-cleanup.env
+gitea_runner_cleanup_service: gitea-runner-cleanup.service
+gitea_runner_cleanup_timer: gitea-runner-cleanup.timer
+gitea_runner_cleanup_interval: 15min # OnUnitInactiveSec between idle-guarded cleanups
+gitea_runner_cleanup_boot_delay: 3min # OnBootSec — let the daemon settle first
+gitea_runner_cleanup_disk_path: / # filesystem whose %-used drives the escalation
+gitea_runner_cleanup_routine_until: 48h # steady state: keep images/build-cache used within this window
+gitea_runner_cleanup_pressure_pct: 80 # disk% >= this: tighten the retention window to *_pressure_until
+gitea_runner_cleanup_pressure_until: 6h
+gitea_runner_cleanup_critical_pct: 92 # disk% >= this: hard *_critical_until window + trim actions cache
+gitea_runner_cleanup_critical_until: 1h # critical window (NEVER 0/`-a` — still protects a <1h live build)
+gitea_runner_cleanup_actcache_max_mb: 1536 # trim the act_runner actions cache above this (critical only)
+# Reap RUNNING containers older than this (seconds). MUST exceed the job timeout (gitea_runner_job_timeout
+# 3h) so a live job's containers are never touched — only crashed/timed-out leftovers. 4h default.
+gitea_runner_cleanup_reap_age_sec: 14400
+# Never reap containers whose image/name matches this (the persistent buildx/buildkit builder is shared
+# infra, not a job leftover).
+gitea_runner_cleanup_infra_exclude_re: "buildkit|buildx"
+# Co-located runner services that ALSO share this Docker daemon — treated as "busy" so cleanup skips work
+# while EITHER pool runs a job (the GitHub self-hosted agent during the forge-migration bake-in).
+gitea_runner_cleanup_peer_services: "actions.runner.cchifor-platform.service"
+gitea_runner_cleanup_beacon: true # node_exporter textfile beacon (gitea_runner_cleanup_*.prom)

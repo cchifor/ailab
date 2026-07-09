@@ -1,0 +1,16 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Fires the idle-guarded docker/storage cleanup. Heavier + far
+# less frequent than gitea-runner-reclaim.timer (workspace artifacts, ~30s): docker prune is I/O-heavy
+# and mostly a no-op thanks to the retention window, so a ~15min cadence keeps the disk bounded without
+# churn. OnUnitInactiveSec measures from the last FINISH, so a long prune never overlaps the next tick;
+# the script's idle guard makes any tick a no-op while a job runs.
+[Unit]
+Description=Periodic idle-guarded docker/storage cleanup for the act_runner host
+
+[Timer]
+OnBootSec={{ gitea_runner_cleanup_boot_delay }}
+OnUnitInactiveSec={{ gitea_runner_cleanup_interval }}
+AccuracySec=30s
+Unit={{ gitea_runner_cleanup_service }}
+
+[Install]
+WantedBy=timers.target

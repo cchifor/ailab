@@ -135,6 +135,40 @@
   notify: Restart gitea reclaim timer
   when: gitea_runner_reclaim_enabled | bool
 
+# ── 4c. docker + storage cleanup (bounds disk; the reclaim above only handles workspace artifact dirs) ─
+# The shared Docker daemon accumulates build cache (unbounded) + stale images across CI runs until the
+# root disk fills and CI breaks. gitea-runner-cleanup.sh reclaims them on an idle-guarded timer (NEVER
+# mid-job) with disk-pressure escalation. Timer-only (no ExecStartPre, no daemon restart) — safe day-2.
+- name: Install the docker/storage cleanup config (env sourced by the cleanup script)
+  ansible.builtin.template:
+    src: gitea-runner-cleanup.env.j2
+    dest: "{{ gitea_runner_cleanup_env }}"
+    mode: "0644"
+  when: gitea_runner_cleanup_enabled | bool
+
+- name: Install the docker/storage cleanup script
+  ansible.builtin.copy:
+    src: gitea-runner-cleanup.sh
+    dest: "{{ gitea_runner_cleanup_bin }}"
+    mode: "0755"
+  when: gitea_runner_cleanup_enabled | bool
+
+- name: Install the docker/storage cleanup oneshot service
+  ansible.builtin.template:
+    src: gitea-runner-cleanup.service.j2
+    dest: "/etc/systemd/system/{{ gitea_runner_cleanup_service }}"
+    mode: "0644"
+  notify: Reload systemd for gitea reclaim
+  when: gitea_runner_cleanup_enabled | bool
+
+- name: Install the docker/storage cleanup timer
+  ansible.builtin.template:
+    src: gitea-runner-cleanup.timer.j2
+    dest: "/etc/systemd/system/{{ gitea_runner_cleanup_timer }}"
+    mode: "0644"
+  notify: Restart gitea cleanup timer
+  when: gitea_runner_cleanup_enabled | bool
+
 # ── 5. systemd unit ──────────────────────────────────────────────────────────
 - name: Install the act_runner systemd unit
   ansible.builtin.template:
@@ -158,3 +192,11 @@
     state: started
     daemon_reload: true
   when: gitea_runner_reclaim_enabled | bool
+
+- name: Enable + start the docker/storage cleanup timer
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_cleanup_timer }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: gitea_runner_cleanup_enabled | bool
