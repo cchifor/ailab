@@ -47,6 +47,18 @@ spec:
             # the streamed response at its ~300s default and surface as "loading failed" in the browser
             # while the backend is still generating. See docs/runbooks/ai-model-swap.md.
             - { name: AIOHTTP_CLIENT_TIMEOUT, value: "900" }
+            # Open WebUI fires up to ~4 requests PER message (main + title + tags + follow-up), all to the
+            # chat model. On the reasoning daily-driver qwen3.6 (--parallel 1 per node → one request at a
+            # time) that fan-out head-of-line-blocked the single slot — measured 4 deferred requests and
+            # multi-minute "delays" that looked like the model being evicted. Disable the per-message task
+            # generations so 1 chat message = exactly 1 backend request. TASK_MODEL_EXTERNAL keeps the rare
+            # search/RAG query-gen (only fires with web-search/knowledge) on a fast cloud model, off qwen3.6.
+            # NOTE: these are Open WebUI PersistentConfig — on an EXISTING install the DB value (set live via
+            # the admin Settings/API) WINS and these env vars only SEED a fresh PVC. Keep them in sync.
+            - { name: ENABLE_TITLE_GENERATION, value: "False" }
+            - { name: ENABLE_TAGS_GENERATION, value: "False" }
+            - { name: ENABLE_FOLLOW_UP_GENERATION, value: "False" }
+            - { name: TASK_MODEL_EXTERNAL, value: "gpt-4.1-mini" }
             - { name: WEBUI_NAME, value: "ailab AI" }
             # SSO via Authelia OIDC (ADR 0012). Local login stays as break-glass; OAuth sign-up on.
             - { name: WEBUI_URL, value: "https://chat.chifor.me" }
