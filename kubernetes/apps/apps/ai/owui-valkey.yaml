@@ -23,11 +23,19 @@ spec:
       labels:
         app.kubernetes.io/name: owui-valkey
     spec:
+      # Run as the image's non-root valkey user (uid 999). Required because we bypass the entrypoint below.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: valkey
           image: valkey/valkey:8-alpine
-          # No persistence (--save "" + appendonly no); cap memory and evict LRU so a socket leak can never
-          # OOM the node. Bind is handled by the image default (0.0.0.0).
+          # Bypass the image entrypoint (it setuid's root->valkey via setpriv, which fails under
+          # capabilities.drop:[ALL]) and run valkey-server directly as the non-root uid above. No persistence
+          # (--save "" + appendonly no); cap memory + LRU-evict so a socket leak can't OOM the node.
+          command: ["valkey-server"]
           args: ["--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
           ports:
             - { name: redis, containerPort: 6379 }
