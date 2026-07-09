@@ -36,8 +36,10 @@ models:
     gguf_node2: /models-local/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf  # node2 serves from local NVMe
     stage_from: /models/qwen3.6-35b-a3b   # node2 stages the GGUF + mmproj to /models-local once
     mmproj: /models/qwen3.6-35b-a3b/mmproj-F16.gguf   # node1 (NFS); node2 uses /models-local/.../mmproj-F16.gguf
-    ctx: 262144
-    parallel: 1
+    ctx: 262144               # TOTAL context; split across `parallel` slots -> 131072 (128K) per request
+    parallel: 2               # 2 concurrent requests per node (2026-07-09): --parallel 1 single-slot
+                              # head-of-line-blocked under Open WebUI fan-out. litellm max_input_tokens
+                              # 114688 (=128K/slot - ~16K output) MUST track this. Provision: --env PARALLEL=2.
     cache_type: q8_0          # K + V
     swap: false               # PINNED (direct llama-server.service) on both nodes
     ttl: 0

@@ -7,6 +7,14 @@ of the `qwen36` instance): `CTX=262144 PARALLEL=1 CACHE_TYPE_K=q8_0 CACHE_TYPE_V
 entry commented out (on-demand). Validated: health, tool-call, 34K/56K needle-retrieval, VRAM/GTT.
 **Relates to:** ADR 0008 (AI-LLM appliance), `docs/runbooks/ai-host-setup.md` (launch args — keep in sync).
 
+**AMENDED 2026-07-09 — PARALLEL 1 → 2 (per-request context 256K → 128K).** With `--parallel 1` the single
+slot head-of-line-blocked under Open WebUI's per-message request fan-out (measured: a deep request queue on
+one node). Both node1+node2 re-provisioned to `PARALLEL=2` (total `CTX=262144` unchanged → **131072 (128K)
+per concurrent slot**, 2 requests/node), and `litellm.yaml` `max_input_tokens` **245760 → 114688**. This
+trades max single-request context (256K→128K) for concurrency; agentic flows needing >128K must go back to
+`PARALLEL=1` (and accept 1 request/node). Also disabled Open WebUI title/tags/follow-up task generation and
+switched litellm `routing_strategy` to `least-busy`. See `docs/runbooks/ai-model-swap.md`.
+
 ## Context
 Qwen3.6-35B-A3B (node1 `:8081`, the coder+vision model that replaced qwen3-coder-30b) served a **32,768**
 context — its `-c 32768` was well under the model's real capacity. Tool-heavy agentic prompts brushed and

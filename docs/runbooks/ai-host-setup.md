@@ -303,8 +303,10 @@ lost. Steady-state launch is the **default instance** (:8080) — source-of-trut
 MSYS_NO_PATHCONV=1 python scripts/lxc-exec.py 192.168.0.2 5001 \
   --env MODEL=/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
   --env MODEL_ALIAS=qwen3.6-35b-a3b --env MMPROJ=/models/qwen3.6-35b-a3b/mmproj-F16.gguf \
-  --env CTX=262144 --env PARALLEL=1 \
+  --env CTX=262144 --env PARALLEL=2 \
   --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0   # default instance (:8080); provision.sh KV knobs
+  # PARALLEL=2 (2026-07-09): 2 concurrent slots, 131072 (128K)/request. Was PARALLEL=1 (256K single-slot)
+  # → head-of-line blocking under Open WebUI's per-message fan-out. litellm max_input_tokens=114688.
 ```
 Key facts (measured; see ADR 0015 for the table):
 - **No YaRN** — native `n_ctx_train` is already 262144; just raise `-c`. `--cache-type-k/v q8_0` is
