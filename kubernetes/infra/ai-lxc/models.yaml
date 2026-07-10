@@ -48,7 +48,11 @@ models:
     # 0.8/top-k 40/min-p 0.05 hurt Qwen3 quality; top-k/min-p/repeat can't be forwarded by OWUI/LiteLLM so
     # they MUST be server-side). Plus --reasoning-format deepseek (split <think> -> reasoning_content for
     # OWUI's Thinking panel) and --flash-attn on (pinned; q8_0 KV needs it). For a coding/precise instance
-    # pass TEMP=0.6 PRESENCE_PENALTY=0.0. To cap runaway thinking on trivial prompts: --reasoning-budget N.
+    # pass TEMP=0.6 PRESENCE_PENALTY=0.0. Both nodes provisioned with REASONING_BUDGET=3000 — a GENEROUS
+    # runaway-thinking backstop (forces answer after 3000 reasoning tokens). NOTE: the sampling fix above is
+    # what actually TAMED the over-reasoning (a trivial prompt that pre-fix wrote ~6000 think-tokens/110s now
+    # writes ~250; even a 5-part hard prompt stays ~1930, well under 3000) — the budget rarely triggers and
+    # exists only to bound a future pathological loop. Raise/clear REASONING_BUDGET if a hard task gets clipped.
 
   # ---- node3 llama-swap SINGLE-MODEL — qwen3.5-122b on demand (ctid 5003 / .46) ----
   # Deploy via a single-MODEL provision call (SWAP=true, no MODELS_JSON) — see docs/runbooks/ai-model-swap.md.

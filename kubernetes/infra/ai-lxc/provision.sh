@@ -198,6 +198,13 @@ SAMPLING_FLAGS="--temp ${TEMP:-1.0} --top-p ${TOP_P:-0.95} --top-k ${TOP_K:-20} 
 # Split <think>…</think> into a separate reasoning_content field so Open WebUI renders a collapsible
 # "Thinking" panel and the visible answer isn't polluted with the trace (Qwen's official llama.cpp flag).
 REASONING_FLAG="--reasoning-format ${REASONING_FORMAT:-deepseek}"
+# Optional runaway-thinking ceiling: Qwen3.x can occasionally spiral into a multi-thousand-token <think>
+# trace even for a simple question (measured ~9.5k chars / 64s for "train 60km in 45min"). --reasoning-budget
+# forces the model to stop thinking + answer after N reasoning tokens (llama.cpp sampler; the correct
+# sampling above already tames MOST over-reasoning). Set GENEROUSLY so genuine hard reasoning / coding-agent
+# multi-step traces aren't clipped (tricky-but-correct answers here used ≤800 reasoning tokens). Empty =
+# unlimited. Tune per node via REASONING_BUDGET. (2026-07-10)
+[ -n "${REASONING_BUDGET:-}" ] && REASONING_FLAG="${REASONING_FLAG} --reasoning-budget ${REASONING_BUDGET}"
 # Pin flash-attn ON (was auto): q8_0 KV REQUIRES the FA path on Vulkan/gfx1151 — never let a heuristic
 # disable it and silently change the KV code path (llama.cpp discussion #20969).
 FA_MODE="${FLASH_ATTN:-on}"
