@@ -1,5 +1,11 @@
 # AgentForge — Autonomous Agentic Development System on ailab (Gitea + dev-workers)
 
+## Codex Review
+
+- ALIGNED: The five round-2 concerns are resolved in-plan, with no round-3 blocker or new contradiction found.
+- The v1 playground enforcement and Phase 4/Phase 5 rollout now agree: non-playground allowlists are blocked until `privilege_hardening: "v1.1"` after dedicated-user/container hardening.
+- The marker-first `af:run` transition, litellm-local child-only token wiring, and update restart/version/MainPID contract are each reflected in corresponding tests/smokes and consistent with the rest of the plan.
+
 ## Context
 
 Build a fully autonomous, label-driven multi-agent software development system on existing ailab
