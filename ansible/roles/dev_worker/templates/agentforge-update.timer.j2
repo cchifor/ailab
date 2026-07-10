@@ -1,0 +1,16 @@
+# {{ ansible_managed }} (role: dev_worker). Fires the agentforge self-update every 2 min — the pin
+# bump in cchifor/agentforge-config converges the fleet in <=2 min, and a pin REVERT is the
+# rollback path (docs/runbooks/agentforge.md). A same-pin tick is a cheap no-op (one authenticated
+# raw-file GET, then exit 0); the script's flock serializes any overlap. Modeled on the
+# gitea_runner maintenance timers.
+[Unit]
+Description=Periodic AgentForge self-update (release-pin convergence)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=30s
+Unit=agentforge-update.service
+
+[Install]
+WantedBy=timers.target

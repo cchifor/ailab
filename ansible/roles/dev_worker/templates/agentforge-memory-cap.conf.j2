@@ -1,0 +1,10 @@
+# {{ ansible_managed }} (role: dev_worker)
+# Bound the orchestrator AND its agent subprocesses (claude/codex CLI runs, repo test_cmd) to one
+# cgroup so a runaway run is OOM-killed in isolation (sshd, docker, the interactive tmux session
+# survive). MemoryHigh throttles into swap before MemoryMax hard-kills — mirror of
+# claude-job-memory-cap.conf.j2.
+[Service]
+MemoryAccounting=yes
+MemoryHigh={{ dev_worker_agentforge_memory_high }}
+MemoryMax={{ dev_worker_agentforge_memory_max }}
+MemorySwapMax={{ dev_worker_agentforge_memory_swap_max }}

@@ -12,7 +12,8 @@
   gather_facts: true
   pre_tasks:
     # Only load secrets when a feature that needs them is enabled (restic / cloudflared / password
-    # auth). default(false) keeps this safe even though the role defaults aren't bound yet here.
+    # auth / agentforge). default(false) keeps this safe even though the role defaults aren't bound
+    # yet here.
     - name: Load dev-worker secrets (SOPS)
       community.sops.load_vars:
         file: "{{ playbook_dir }}/secrets/dev-worker.sops.yaml"
@@ -22,7 +23,8 @@
         - dev_worker_enabled | default(false)
         - (dev_worker_enable_restic | default(false)) or
           (dev_worker_enable_cloudflared | default(false)) or
-          (dev_worker_enable_password_auth | default(false))
+          (dev_worker_enable_password_auth | default(false)) or
+          (dev_worker_enable_agentforge | default(false))
   roles:
     # Fleet observability — the same node_exporter the hypervisors + runners emit (scraped at :9100).
     - role: node_exporter

@@ -28,6 +28,15 @@
     name: cloudflared
     state: restarted
 
+# try-restart = restart only if running. On the FIRST provisioning run the service cannot start
+# until agentforge-update.sh installs a release (timer-first bootstrap), so a plain
+# `state: restarted` would fail the play; try-restart is a no-op then, and day-2 env/unit changes
+# restart the running service as expected.
+- name: Restart agentforge
+  ansible.builtin.command: systemctl try-restart agentforge.service
+  changed_when: true
+  when: dev_worker_enable_agentforge | default(false) | bool
+
 - name: Apply sysctl
   ansible.builtin.command: sysctl --system
   changed_when: false

@@ -81,6 +81,11 @@
   ansible.builtin.import_tasks: jobs.yml
   when: dev_worker_enable_jobs | bool
 
+# Needs toolchains (pipx) + the firewall allow rules above; secrets come from the playbook pre_task.
+- name: AgentForge orchestrator (autonomous dev agents — ADR 0018)
+  ansible.builtin.import_tasks: agentforge.yml
+  when: dev_worker_enable_agentforge | bool
+
 - name: restic backup
   ansible.builtin.import_tasks: restic.yml
   when: dev_worker_enable_restic | bool

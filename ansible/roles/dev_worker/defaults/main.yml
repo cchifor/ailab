@@ -98,7 +98,31 @@ dev_worker_restic_nfs_mount: /mnt/qnap-restic
 # Each item: { name, description, calendar | (boot_sec + active_sec), enabled (timer), autostart }
 dev_worker_jobs: []
 
+# ---- agentforge — autonomous dev-agent orchestrator (ADR 0018; opt-in via group_vars at go-live) ----
+# The role installs only the runtime shell (env, dirs, units, atomic self-updater); the code arrives
+# as pinned releases from the Gitea generic package registry, selected by the `release` pin in the
+# config repo's agentforge.json. See docs/runbooks/agentforge.md.
+dev_worker_enable_agentforge: false
+dev_worker_agentforge_port: 8700 # webhook receiver + /healthz + /readyz (LAN-only via ufw)
+dev_worker_agentforge_metrics_port: 9464 # prometheus exporter (scraped via monitoring/agentforge.yaml)
+dev_worker_agentforge_config_repo: "cchifor/agentforge-config" # owner/name; agentforge.json = control plane
+dev_worker_agentforge_litellm_base: "http://192.168.0.41:30400" # litellm-local LAN NodePort (local models ONLY)
+# Memory caps for the orchestrator + its agent subprocesses (claude/codex CLIs) — one cgroup, so a
+# runaway run is OOM-killed in isolation (same idea as dev_worker_job_memory_* above).
+dev_worker_agentforge_memory_high: "6G"
+dev_worker_agentforge_memory_max: "8G"
+dev_worker_agentforge_memory_swap_max: "2G"
+
 # ---- secrets (provided by SOPS via the playbook pre_task; "" so asserts can detect "unset") ----
 dev_worker_restic_password: ""
 dev_worker_cf_tunnel_token: ""
 dev_worker_admin_password: ""
+# agentforge secrets (asserted non-empty in tasks/agentforge.yml when the feature is enabled).
+# Bot PATs + the webhook HMAC are minted print-once by cchifor/agentforge's bootstrap_gitea.py;
+# the litellm key is litellm-local-secret's master-key (kubernetes/apps/apps/ai).
+dev_worker_agentforge_webhook_secret: ""
+dev_worker_agentforge_litellm_key: ""
+dev_worker_agentforge_planner_token: ""
+dev_worker_agentforge_tester_token: ""
+dev_worker_agentforge_impl_token: ""
+dev_worker_agentforge_reviewer_token: ""

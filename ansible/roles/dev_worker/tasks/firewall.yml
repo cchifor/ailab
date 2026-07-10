@@ -17,6 +17,22 @@
   loop_control:
     label: "{{ item.port }} ({{ item.comment }})"
 
+# AgentForge (ADR 0018): the Gitea org webhooks deliver to :8700, and Prometheus (in-cluster,
+# monitoring/agentforge.yaml) scrapes the forge_* exporter on :9464 — both LAN-sourced.
+- name: Allow LAN inbound on the agentforge ports
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ dev_worker_lan_cidr }}"
+    to_port: "{{ item.port }}"
+    proto: tcp
+    comment: "{{ item.comment }}"
+  loop:
+    - { port: "{{ dev_worker_agentforge_port }}", comment: "agentforge webhook receiver from LAN" }
+    - { port: "{{ dev_worker_agentforge_metrics_port }}", comment: "agentforge metrics scrape from LAN" }
+  loop_control:
+    label: "{{ item.port }} ({{ item.comment }})"
+  when: dev_worker_enable_agentforge | bool
+
 - name: Default deny incoming
   community.general.ufw:
     direction: incoming
