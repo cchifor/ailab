@@ -1,12 +1,5 @@
 # AgentForge — Autonomous Agentic Development System on ailab (Gitea + dev-workers)
 
-## Codex Review
-
-- Round 2 resolves most of the original concern classes: local-only LiteLLM isolation, subscription auth canaries, last-good config durability, convention/monitoring files, and unified cross-review accounting are now materially specified.
-- I am not fully aligned yet: the epoch-bound claim design still has a real non-atomic transition window around label flips versus `af:run` marker creation.
-- Two rollout-critical implementation gaps remain: LiteLLM-local auth is not wired into the Claude runner env, and the update transaction can health-check the old process unless restart/version verification is explicit.
-- The privilege staging is directionally right, but same-UID credential exposure plus pre-v1.1 dogfooding of `agentforge` conflicts with the stated playground-only safety gate.
-
 ## Context
 
 Build a fully autonomous, label-driven multi-agent software development system on existing ailab
@@ -66,8 +59,12 @@ orchestrator process; git push auth is injected per-invocation via `-c http.extr
 written to disk or child env. **Gate for onboarding any repo beyond playground (v1.1, tracked as
 an ADR-0018 condition): dedicated non-sudo `agentforge` service user + repo `test_cmd` executed in
 a docker container (workspace-mounted, no creds, no network by default).** The ADR documents this
-threat model.
-<!-- codex: round-2: Scrubbing child envs is not a credential boundary while agent/test_cmd code runs under the same `c4` UID as the orchestrator. Same-UID processes can inspect `/proc/<pid>/environ`, leave background watchers, or race the `git -c http.extraHeader` push command line. This is only acceptable if v1 is strictly playground-only until the v1.1 isolation gate lands. -->
+threat model, EXPLICITLY including the same-UID residual risk: under one UID, env scrubbing is
+hygiene, not a boundary (same-UID processes can read /proc/<pid>/environ, plant watchers, race
+command lines). Therefore v1's playground-only limit is ENFORCED IN CODE, not convention: the
+config validator refuses any allowlist beyond `cchifor/agentforge-playground` until the config
+carries an explicit `privilege_hardening: "v1.1"` acknowledgment (set only after the dedicated
+user + containerized test_cmd land).
 
 - **Events**: 6 org-level Gitea webhooks (one per worker, `http://192.168.0.{8..13}:8700/webhook`,
   shared HMAC, events issues/issue_comment/pull_request/pull_request_review/push). Workers filter
@@ -92,10 +89,18 @@ threat model.
      (min 10 min) — not a fixed 45 min, so crash recovery latency tracks actual run length.
      Reaper (reconciler) treats expired claims as dead. Graceful shutdown (SIGTERM) releases all
      held claims before exit.
-  5. Before EVERY transition (label flip + `af:run` marker post), the worker revalidates: own
-     claim still valid+winning AND issue state/base unchanged; any foreign change → abort the
-     step, release, requeue. Assignee + `af:wip:dwN` remain cosmetic mirrors.
-<!-- codex: round-2: The epoch protocol is still not fully race-free because the transition is two separate forge writes. If labels flip before the `af:run` marker, a next-state worker can claim and start work on the old base; if the marker posts before labels, an old-state worker can claim against the new base unless validity also checks the marker's target state. Add a deterministic transition order plus a claim validity rule such as "latest transition marker target must equal current state" or a transient transition sentinel, and contract-test that gap. -->
+  5. **The transition marker IS the transition (single atomic write).** State is derived
+     MARKER-FIRST: current state = the `to` of the latest `af:run` transition marker; the state
+     label is only authoritative for issues with no marker yet (fresh human intake). Deterministic
+     write order: post the marker (authoritative, atomic) → then flip the label (human-visible
+     mirror/trigger). There is no two-write race: claim validity keys on (state-from-markers,
+     latest-marker-id), so a worker that reads a stale or early label still resolves the same
+     epoch from the marker chain; the reconciler heals marker↔label divergence (re-flips the label
+     to the marker's state after a crash between the two writes). This exact gap — crash/read
+     between marker post and label flip — is a named contract-claims test case.
+  6. Before EVERY transition, the worker revalidates: own claim still valid+winning AND
+     marker-derived state/base unchanged; any foreign change → abort the step, release, requeue.
+     Assignee + `af:wip:dwN` remain cosmetic mirrors.
 - **Clean architecture** (`src/agentforge/`): `domain/` (states, models, policy — pure), `ports/`
   (ForgeClient, AgentRunner, ConfigSource, EventSink Protocols), `adapters/` (gitea
   client+webhook+labels, runners claude_code+codex+litellm_chat, config gitea_repo, events
@@ -112,12 +117,13 @@ threat model.
      state), posts an `af:run` failure, and the reconciler retries later; 2 consecutive auth
      failures → `needs-human` + alert.
   2. `ClaudeCodeRunner(auth=litellm_local)` — same CLI, `ANTHROPIC_BASE_URL=http://192.168.0.41:30400`
-     (litellm-local NodePort), `ANTHROPIC_MODEL=qwen3.6-35b-a3b`,
+     (litellm-local NodePort), `ANTHROPIC_AUTH_TOKEN=<litellm-local master key>` (from
+     /etc/agentforge env; injected into THIS child env only — never into subscription-mode or
+     test_cmd envs), `ANTHROPIC_MODEL=qwen3.6-35b-a3b`,
      `ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3.6-35b-a3b`, `API_TIMEOUT_MS=900000`. That the CLI honors
      these env vars against litellm under systemd is a VERIFIED dependency (M4 smoke: real CLI vs
-     llm-stub AND vs real litellm-local), with error-envelope fixtures (auth expired, rate-limit
-     text, partial JSON on timeout).
-<!-- codex: round-2: `litellm-local` has its own master key, but this runner env never passes it to Claude Code as the Anthropic API key/header env the CLI actually honors. As written, qwen calls through the NodePort either fail auth or require disabling the master-key guard. Wire the local key into only this child env and include it in the M4 real-litellm smoke. -->
+     llm-stub AND an AUTHENTICATED call vs real litellm-local), with error-envelope fixtures (auth
+     expired/401, rate-limit text, partial JSON on timeout).
   3. `CodexRunner` — `codex exec` headless (read-only sandbox for critique, `--cd <ws>`,
      `--skip-git-repo-check`, `--output-last-message <file>`) with Codex Pro OAuth; same auth
      canary + reauth runbook; on subscription refusal the gate DEFERS (backoff + retry, ledger
@@ -224,15 +230,18 @@ threat model.
   `agentforge.env.j2`, memory-cap drop-in MemoryHigh=6G/MemoryMax=8G,
   `agentforge-update.{service,timer}` + `files/agentforge-update.sh`): `/opt/agentforge/releases/
   <ver>` + `current` symlink, `uv sync --frozen`, 2-min self-update from config-repo pin. The
-  update script is HARDENED: `flock` singleton; download to tmp; sha256 verified against the
-  config's `release_sha256`; extract + `uv sync` in the versioned dir; only then atomically flip
-  `current`; post-switch health check (`/healthz` within 60s) → on failure automatic symlink
-  rollback + beacon; keep last 3 releases. Version skew is bounded by config
-  `min_agent_version` (old workers degrade rather than misbehave) and observable via
-  `forge_build_info{version}` per worker; protocol-changing releases follow pause → pin-bump →
-  resume. Wire into `tasks/main.yml` after jobs, gated `when: dev_worker_enable_agentforge |
-  bool`; defaults; firewall allow tcp/8700 from LAN; restart handler.
-<!-- codex: round-2: The update transaction never explicitly restarts/reloads `agentforge.service` after flipping `current`, nor requires `/healthz`/`/readyz` to report the newly pinned version. A health check can pass against the old in-memory process, so rollback may only move the symlink while the worker is still running old code. Make restart + version-matched readiness + rollback restart part of the atomic update contract. -->
+  update script is HARDENED — the atomic update contract is: `flock` singleton; download to tmp;
+  sha256 verified against the config's `release_sha256`; extract + `uv sync` in the versioned dir;
+  atomically flip `current`; **`systemctl restart agentforge`; then poll `/healthz` (≤60s) and
+  require it to report `version == <pinned release>`** (the endpoint serves the running build's
+  version, so a check can never pass against the old in-memory process) **and a changed systemd
+  MainPID; on any failure: flip the symlink back AND restart again onto the previous release**
+  (rollback includes its own restart + version-matched health check); beacon on rollback; keep
+  last 3 releases. Version skew is bounded by config `min_agent_version` (old workers degrade
+  rather than misbehave) and observable via `forge_build_info{version}` per worker;
+  protocol-changing releases follow pause → pin-bump → resume. Wire into `tasks/main.yml` after
+  jobs, gated `when: dev_worker_enable_agentforge | bool`; defaults; firewall allow tcp/8700 from
+  LAN; restart handler.
 - `ansible/dev-workers.yml`: extend SOPS pre_task `when:` with the agentforge toggle (also fix the
   existing gap: git_forge.yml's `dev_worker_gitea_token` isn't in the list today).
 - `.sops.yaml`: extend dev-worker `encrypted_regex` with `|dev_worker_agentforge_.*`. New keys in
@@ -290,14 +299,17 @@ Phase 2: chaos (kill mid-task/lease recovery, manual label flip, low caps, updat
 publish vA/vB, pin-bump, one worker's update deliberately failed → health-check rollback proves
 `current` never breaks, then pin revert).
 Phase 3: role-per-worker fleet-wide, 2 implementers (live claim contention), ~10-issue 48h soak.
-Phase 4: dogfood — agentforge PR#1 merged BY HAND (codex+human review; no circular trust), then
-PR#2+ flow through the deployed system; reviewer-bot merges with dual Claude+Codex approval.
-<!-- codex: round-2: This appears to onboard `cchifor/agentforge` before the v1.1 privilege gate that the plan says is required for any repo beyond playground. Move dogfood after v1.1 hardening or explicitly keep Phase 4 limited to `agentforge-playground`. -->
-Phase 5: onboard repos one at a time — **gated on the v1.1 privilege hardening** (dedicated
-service user + containerized test_cmd); weekly smoke timer. Rollback anywhere: set `FORGE_PAUSED`
-in config FIRST (propagation ≤2 min incl. webhook push; workers finish/release claims and stop
-claiming), then `systemctl stop agentforge` if needed; SIGTERM releases held claims, expired
-leases cover crashes; runbook documents observed propagation time.
+Phase 4: **v1.1 privilege hardening lands FIRST** (dedicated non-sudo `agentforge` service user,
+containerized `test_cmd`, ansible follow-up) — this is the gate for ANY repo beyond playground,
+and the dogfood target is exactly such a repo (its code runs on the workers and touches the
+deploy pipeline). Config's `privilege_hardening: "v1.1"` ack is set only now.
+Phase 5: dogfood — agentforge PR#1 merged BY HAND (codex+human review; no circular trust), then
+`cchifor/agentforge` enters the allowlist and PR#2+ flow through the deployed system;
+reviewer-bot merges with dual Claude+Codex approval.
+Phase 6: onboard further repos one at a time; weekly smoke timer. Rollback anywhere: set
+`FORGE_PAUSED` in config FIRST (propagation ≤2 min incl. webhook push; workers finish/release
+claims and stop claiming), then `systemctl stop agentforge` if needed; SIGTERM releases held
+claims, expired leases cover crashes; runbook documents observed propagation time.
 
 ## Critical files
 
