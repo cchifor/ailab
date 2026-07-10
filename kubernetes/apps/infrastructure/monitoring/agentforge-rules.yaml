@@ -1,0 +1,81 @@
+# Alerts for the agentforge autonomous dev-agent fleet (ADR 0018; metrics via agentforge.yaml,
+# job=agentforge). The system is designed to degrade loudly rather than act wrongly — a stopped
+# worker, a stuck issue, a needs-human escalation, HMAC probes, or reconciler drift must reach the
+# operator (ntfy via Alertmanager), because agents merge code autonomously on allowlisted repos.
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentforge
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: agentforge
+      rules:
+        - alert: ForgeWorkerDown
+          expr: up{job="agentforge"} == 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "AgentForge worker {{ $labels.instance }} is down (no metrics scrape)"
+            description: >-
+              The agentforge exporter on {{ $labels.instance }} has been unscrapeable for >5m — the
+              service is stopped/crash-looping (or the VM is down; cross-check DevWorkerNode via
+              job=dev-worker-node). Its held claims release on SIGTERM or expire with the lease TTL,
+              so work recovers — but fleet capacity is cut and its Gitea webhooks pile into retries.
+              Check `systemctl status agentforge` on the worker and
+              `journalctl -u agentforge -t agentforge-update` (a failed release update beacons there).
+        # Placeholder threshold: forge_issue_state_seconds = time the issue has sat in its current
+        # state (exported per issue). 4h is well above any healthy stage (per-stage budget 2h);
+        # tune once real stage-duration data exists.
+        - alert: ForgeIssueStuck
+          expr: forge_issue_state_seconds{job="agentforge"} > 14400
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge issue {{ $labels.issue }} stuck in {{ $labels.state }} >4h"
+            description: >-
+              An issue has sat in one lifecycle state for >4h — beyond the 2h per-stage wall-clock
+              budget, so either no worker claims it (role offline? claims expiring?) or a run loops
+              without transitioning. Inspect the issue's af:run/af:claim comment ledger on
+              git.chifor.me and the owning worker's journal; `needs-human` + FORGE_PAUSED are the
+              stop levers (docs/runbooks/agentforge.md).
+        - alert: ForgeNeedsHumanPending
+          expr: forge_needs_human_pending{job="agentforge"} > 0
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge has {{ $value }} needs-human issue(s) unattended >30m"
+            description: >-
+              One or more issues carry the needs-human label (budget breach, protected-path diff,
+              repeated gate disagreement, or auth failure) and nobody has picked them up in 30m.
+              needs-human is a GLOBAL STOP for the issue — no agent will touch it until the label is
+              cleared. Review the disagreement-summary comment on the issue and resume or close
+              (docs/runbooks/agentforge.md).
+        - alert: ForgeWebhookHMACFailures
+          expr: increase(forge_webhooks_total{job="agentforge", result="bad_hmac"}[10m]) > 3
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge worker {{ $labels.instance }}: repeated webhook HMAC failures"
+            description: >-
+              >3 webhook deliveries with a bad HMAC signature in 10m on {{ $labels.instance }}.
+              Either the shared webhook secret has drifted (Gitea org webhook vs
+              dev_worker_agentforge_webhook_secret in SOPS — re-run bootstrap_gitea.py + `just
+              dev-workers` to reconverge) or something on the LAN is probing the receiver — the
+              port is LAN-open by design (ufw, mgmt LAN single-operator), so drift is the likely
+              cause; probing warrants a look at the source IPs in the worker's journal.
+        - alert: ForgeReconcileDriftHigh
+          expr: increase(forge_reconcile_drift_total{job="agentforge"}[30m]) > 5
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge worker {{ $labels.instance }}: reconciler fixing >5 drifts/30m"
+            description: >-
+              The 60s reconciler on {{ $labels.instance }} keeps re-discovering work the webhook
+              path should have delivered (or healing marker↔label divergence). Occasional drift is
+              the design working (webhooks are hints, the poll is the guarantee); a sustained rate
+              means webhooks are not arriving (Gitea webhook ALLOWED_HOST_LIST / delivery failures
+              under git.chifor.me org settings) or a worker keeps crashing between writes.
