@@ -53,7 +53,7 @@ spec:
               cleared. Review the disagreement-summary comment on the issue and resume or close
               (docs/runbooks/agentforge.md).
         - alert: ForgeWebhookHMACFailures
-          expr: increase(forge_webhooks_total{job="agentforge", result="bad_hmac"}[10m]) > 3
+          expr: increase(forge_webhooks_total{job="agentforge", result="bad_signature"}[10m]) > 3
           for: 1m
           labels: { severity: warning }
           annotations:
