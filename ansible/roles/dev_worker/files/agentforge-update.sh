@@ -48,6 +48,16 @@ config_json="$(curl -fsSL --max-time 30 "${AUTH[@]}" \
   "$AF_GITEA_URL/api/v1/repos/$AF_CONFIG_REPO/raw/agentforge.json")"
 pinned="$(jq -r '.release // empty' <<<"$config_json")"
 pinned_sha="$(jq -r '.release_sha256 // empty' <<<"$config_json")"
+# the pin comes from a remote repo and becomes a root-owned filesystem path —
+# refuse anything that is not a plain release id (codex impl-review finding)
+if ! [[ "$pinned" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || [[ "$pinned" == *".."* ]]; then
+  log "refusing suspicious release pin: '$pinned'"
+  exit 1
+fi
+if ! [[ "$pinned_sha" =~ ^[a-f0-9]{64}$ ]]; then
+  log "refusing malformed release_sha256"
+  exit 1
+fi
 if [ -z "$pinned" ] || [ -z "$pinned_sha" ]; then
   beacon "config agentforge.json has no release/release_sha256 pin; nothing to do"
   exit 0

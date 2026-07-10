@@ -27,21 +27,19 @@ spec:
               so work recovers — but fleet capacity is cut and its Gitea webhooks pile into retries.
               Check `systemctl status agentforge` on the worker and
               `journalctl -u agentforge -t agentforge-update` (a failed release update beacons there).
-        # Placeholder threshold: forge_issue_state_seconds = time the issue has sat in its current
-        # state (exported per issue). 4h is well above any healthy stage (per-stage budget 2h);
-        # tune once real stage-duration data exists.
-        - alert: ForgeIssueStuck
-          expr: forge_issue_state_seconds{job="agentforge"} > 14400
+        # Every reconcile pass stamps forge_last_reconcile_timestamp; a stalled
+        # loop (Gitea unreachable, orchestrator wedged) stops the stamp and —
+        # since reconciliation is the delivery guarantee — strands issues.
+        - alert: ForgeReconcileStalled
+          expr: time() - forge_last_reconcile_timestamp{job="agentforge"} > 900
           for: 10m
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge issue {{ $labels.issue }} stuck in {{ $labels.state }} >4h"
+            summary: "AgentForge on {{ $labels.instance }} has not reconciled for >15m"
             description: >-
-              An issue has sat in one lifecycle state for >4h — beyond the 2h per-stage wall-clock
-              budget, so either no worker claims it (role offline? claims expiring?) or a run loops
-              without transitioning. Inspect the issue's af:run/af:claim comment ledger on
-              git.chifor.me and the owning worker's journal; `needs-human` + FORGE_PAUSED are the
-              stop levers (docs/runbooks/agentforge.md).
+              The reconcile loop is the webhook backstop; when it stalls, dropped
+              webhooks strand issues in place. Check Gitea reachability from the
+              worker and `journalctl -u agentforge` for reconcile backoff errors.
         - alert: ForgeNeedsHumanPending
           expr: forge_needs_human_pending{job="agentforge"} > 0
           for: 30m

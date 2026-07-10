@@ -50,8 +50,12 @@
   ansible.builtin.template:
     src: agentforge.env.j2
     dest: /etc/agentforge/agentforge.env
-    owner: "{{ dev_worker_agent_user }}"
-    group: "{{ dev_worker_agent_user }}"
+    # root-owned on purpose: systemd reads EnvironmentFile= as the manager
+    # (root) before dropping to User=; agent/test subprocesses running as the
+    # same UID as the service must NOT be able to read bot PATs off disk
+    # (codex impl-review finding).
+    owner: root
+    group: root
     mode: "0600"
   notify: Restart agentforge
 
