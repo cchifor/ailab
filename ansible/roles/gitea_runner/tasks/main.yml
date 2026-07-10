@@ -42,6 +42,23 @@
     shell: /bin/bash
     system: true
 
+# ── 1b. host network: prefer IPv4 (the LAN has no IPv6 egress) ───────────────
+# git.chifor.me (Cloudflare) is dual-stack, but the runner mgmt LAN is IPv4-only — the AAAA route is
+# dead. getaddrinfo clients that try IPv6 first then hang/fail reaching Gitea. Give IPv4-mapped
+# addresses higher precedence so curl/python/etc. resolve IPv4-first. NOTE: node/undici's Happy-Eyeballs
+# still races to IPv6 despite this, so github-script/octokit steps ALSO need the workflow-side
+# `NODE_OPTIONS: --dns-result-order=ipv4first --no-network-family-autoselection` (see the platform
+# eval-nightly.yml reporting step). Root cause + evidence: docs/runbooks/ci-runners.md.
+- name: Prefer IPv4 in getaddrinfo (Cloudflare is dual-stack; the LAN has no IPv6 egress)
+  ansible.builtin.lineinfile:
+    path: /etc/gai.conf
+    line: "precedence ::ffff:0:0/96  100"
+    regexp: '^\s*precedence\s+::ffff:0:0/96'
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+
 # ── 2. act_runner binary ─────────────────────────────────────────────────────
 - name: Install act_runner {{ gitea_runner_version }}
   ansible.builtin.get_url:

@@ -227,6 +227,21 @@ pool is HAND-installed over SSH, mirroring the role):**
 - **Runner not appearing:** check `journalctl -u actions.runner.cchifor-platform -n 100` on the VM —
   usually a bad App ID / installation ID, a key that isn't for this App, or the App missing
   `Administration: Read & write`. The wrapper logs `[ephemeral-runner] ERROR: …` on token failures.
+- **(Gitea) `actions/github-script` / any node-based Gitea-API step fails with `HttpError: fetch failed`
+  (intermittent, ~1 in 10 runs):** the runner mgmt LAN is **IPv4-only** (the IPv6/AAAA egress is dead),
+  but `git.chifor.me` (Cloudflare) is **dual-stack**, so node/undici's Happy-Eyeballs races to the
+  unreachable IPv6 and the whole fetch throws. `act_runner` and `curl` are unaffected — they fall back to
+  IPv4. This is what silently broke `eval-nightly`'s "Eval nightly scores" issue upsert (masked by
+  `continue-on-error`). **Two-part fix, both shipped:** (1) the `gitea_runner` role writes
+  `precedence ::ffff:0:0/96 100` to `/etc/gai.conf` so getaddrinfo clients prefer IPv4; (2) node's
+  Happy-Eyeballs ignores gai.conf, so github-script steps ALSO set
+  `NODE_OPTIONS: --dns-result-order=ipv4first --no-network-family-autoselection` in the workflow to force
+  IPv4-only (ipv4first alone is *not* enough — the parallel IPv6 attempt still races; verified 0/100
+  failures across all 5 runners only with autoselection off). Check on a VM:
+  `NODE_OPTIONS='--dns-result-order=ipv4first --no-network-family-autoselection' node -e 'fetch("https://git.chifor.me/api/v1/version").then(r=>console.log(r.status)).catch(()=>console.log("FAIL"))'`
+  must never print FAIL. **Any new Gitea workflow with a node-based forge-API step needs the same
+  NODE_OPTIONS.** (A separate Gitea-ism: issue create/addLabels/list-filter want int64 label **IDs**, not
+  names — resolve name→id via `listLabelsForRepo`; see platform `eval-nightly.yml`.)
 - **`tofu apply` hangs / VM unreachable:** the module sets `agent { enabled = false }` precisely so
   apply doesn't wait on a guest agent the minimal cloud image lacks (the role installs it later). The
   static IP comes from cloud-init, so if a VM is unreachable after apply, check cloud-init on the
