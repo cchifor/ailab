@@ -1,5 +1,12 @@
 # AgentForge — Autonomous Agentic Development System on ailab (Gitea + dev-workers)
 
+## Codex Review
+
+- Round 2 resolves most of the original concern classes: local-only LiteLLM isolation, subscription auth canaries, last-good config durability, convention/monitoring files, and unified cross-review accounting are now materially specified.
+- I am not fully aligned yet: the epoch-bound claim design still has a real non-atomic transition window around label flips versus `af:run` marker creation.
+- Two rollout-critical implementation gaps remain: LiteLLM-local auth is not wired into the Claude runner env, and the update transaction can health-check the old process unless restart/version verification is explicit.
+- The privilege staging is directionally right, but same-UID credential exposure plus pre-v1.1 dogfooding of `agentforge` conflicts with the stated playground-only safety gate.
+
 ## Context
 
 Build a fully autonomous, label-driven multi-agent software development system on existing ailab
@@ -60,6 +67,7 @@ written to disk or child env. **Gate for onboarding any repo beyond playground (
 an ADR-0018 condition): dedicated non-sudo `agentforge` service user + repo `test_cmd` executed in
 a docker container (workspace-mounted, no creds, no network by default).** The ADR documents this
 threat model.
+<!-- codex: round-2: Scrubbing child envs is not a credential boundary while agent/test_cmd code runs under the same `c4` UID as the orchestrator. Same-UID processes can inspect `/proc/<pid>/environ`, leave background watchers, or race the `git -c http.extraHeader` push command line. This is only acceptable if v1 is strictly playground-only until the v1.1 isolation gate lands. -->
 
 - **Events**: 6 org-level Gitea webhooks (one per worker, `http://192.168.0.{8..13}:8700/webhook`,
   shared HMAC, events issues/issue_comment/pull_request/pull_request_review/push). Workers filter
@@ -87,6 +95,7 @@ threat model.
   5. Before EVERY transition (label flip + `af:run` marker post), the worker revalidates: own
      claim still valid+winning AND issue state/base unchanged; any foreign change → abort the
      step, release, requeue. Assignee + `af:wip:dwN` remain cosmetic mirrors.
+<!-- codex: round-2: The epoch protocol is still not fully race-free because the transition is two separate forge writes. If labels flip before the `af:run` marker, a next-state worker can claim and start work on the old base; if the marker posts before labels, an old-state worker can claim against the new base unless validity also checks the marker's target state. Add a deterministic transition order plus a claim validity rule such as "latest transition marker target must equal current state" or a transient transition sentinel, and contract-test that gap. -->
 - **Clean architecture** (`src/agentforge/`): `domain/` (states, models, policy — pure), `ports/`
   (ForgeClient, AgentRunner, ConfigSource, EventSink Protocols), `adapters/` (gitea
   client+webhook+labels, runners claude_code+codex+litellm_chat, config gitea_repo, events
@@ -108,6 +117,7 @@ threat model.
      these env vars against litellm under systemd is a VERIFIED dependency (M4 smoke: real CLI vs
      llm-stub AND vs real litellm-local), with error-envelope fixtures (auth expired, rate-limit
      text, partial JSON on timeout).
+<!-- codex: round-2: `litellm-local` has its own master key, but this runner env never passes it to Claude Code as the Anthropic API key/header env the CLI actually honors. As written, qwen calls through the NodePort either fail auth or require disabling the master-key guard. Wire the local key into only this child env and include it in the M4 real-litellm smoke. -->
   3. `CodexRunner` — `codex exec` headless (read-only sandbox for critique, `--cd <ws>`,
      `--skip-git-repo-check`, `--output-last-message <file>`) with Codex Pro OAuth; same auth
      canary + reauth runbook; on subscription refusal the gate DEFERS (backoff + retry, ledger
@@ -222,6 +232,7 @@ threat model.
   `forge_build_info{version}` per worker; protocol-changing releases follow pause → pin-bump →
   resume. Wire into `tasks/main.yml` after jobs, gated `when: dev_worker_enable_agentforge |
   bool`; defaults; firewall allow tcp/8700 from LAN; restart handler.
+<!-- codex: round-2: The update transaction never explicitly restarts/reloads `agentforge.service` after flipping `current`, nor requires `/healthz`/`/readyz` to report the newly pinned version. A health check can pass against the old in-memory process, so rollback may only move the symlink while the worker is still running old code. Make restart + version-matched readiness + rollback restart part of the atomic update contract. -->
 - `ansible/dev-workers.yml`: extend SOPS pre_task `when:` with the agentforge toggle (also fix the
   existing gap: git_forge.yml's `dev_worker_gitea_token` isn't in the list today).
 - `.sops.yaml`: extend dev-worker `encrypted_regex` with `|dev_worker_agentforge_.*`. New keys in
@@ -281,6 +292,7 @@ publish vA/vB, pin-bump, one worker's update deliberately failed → health-chec
 Phase 3: role-per-worker fleet-wide, 2 implementers (live claim contention), ~10-issue 48h soak.
 Phase 4: dogfood — agentforge PR#1 merged BY HAND (codex+human review; no circular trust), then
 PR#2+ flow through the deployed system; reviewer-bot merges with dual Claude+Codex approval.
+<!-- codex: round-2: This appears to onboard `cchifor/agentforge` before the v1.1 privilege gate that the plan says is required for any repo beyond playground. Move dogfood after v1.1 hardening or explicitly keep Phase 4 limited to `agentforge-playground`. -->
 Phase 5: onboard repos one at a time — **gated on the v1.1 privilege hardening** (dedicated
 service user + containerized test_cmd); weekly smoke timer. Rollback anywhere: set `FORGE_PAUSED`
 in config FIRST (propagation ≤2 min incl. webhook push; workers finish/release claims and stop
