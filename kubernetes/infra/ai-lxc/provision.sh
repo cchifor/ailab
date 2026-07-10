@@ -188,6 +188,20 @@ KV_FLAGS=""
 [ -n "$CACHE_TYPE_K" ] && KV_FLAGS="--cache-type-k ${CACHE_TYPE_K}"
 [ -n "$CACHE_TYPE_V" ] && KV_FLAGS="${KV_FLAGS} --cache-type-v ${CACHE_TYPE_V}"
 
+# Sampling defaults for Qwen3.x REASONING models (2026-07-10 web research). llama.cpp's GENERIC defaults
+# (temp 0.8, top-k 40, min-p 0.05) hurt Qwen3 quality on every axis; these are the Qwen3.6-35B-A3B model
+# card "general thinking" values. CRITICAL: top-k / min-p / repeat-penalty are NOT OpenAI-standard, so
+# Open WebUI / LiteLLM cannot forward them per-request — they MUST be set here server-side or they silently
+# stay at the wrong llama.cpp defaults. Override per node via env for a precise/coding profile
+# (TEMP=0.6 PRESENCE_PENALTY=0.0) or for a non-Qwen model. Qwen also says: never greedy-decode thinking mode.
+SAMPLING_FLAGS="--temp ${TEMP:-1.0} --top-p ${TOP_P:-0.95} --top-k ${TOP_K:-20} --min-p ${MIN_P:-0.0} --presence-penalty ${PRESENCE_PENALTY:-1.5} --frequency-penalty ${FREQUENCY_PENALTY:-0.0} --repeat-penalty ${REPEAT_PENALTY:-1.0}"
+# Split <think>…</think> into a separate reasoning_content field so Open WebUI renders a collapsible
+# "Thinking" panel and the visible answer isn't polluted with the trace (Qwen's official llama.cpp flag).
+REASONING_FLAG="--reasoning-format ${REASONING_FORMAT:-deepseek}"
+# Pin flash-attn ON (was auto): q8_0 KV REQUIRES the FA path on Vulkan/gfx1151 — never let a heuristic
+# disable it and silently change the KV code path (llama.cpp discussion #20969).
+FA_MODE="${FLASH_ATTN:-on}"
+
 if [ -n "$SWAP" ]; then
   _swap_models="${MODEL_ALIAS}"; [ -n "$MODELS_JSON" ] && _swap_models="$(printf '%s' "$MODELS_JSON" | jq -r '[.[].alias] | join(", ")')"
   echo "== systemd unit ${UNIT}: llama-swap on :${PORT} serving on-demand: ${_swap_models} =="
@@ -220,7 +234,7 @@ HDR
       ${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
       -m ${_g} -a ${_a}
       -ngl 99 -c ${_c} --parallel ${_p}
-      --flash-attn auto --jinja --metrics ${_kv} ${_mmf} ${_e}
+      --flash-attn ${FA_MODE} ${SAMPLING_FLAGS} ${REASONING_FLAG} --jinja --metrics ${_kv} ${_mmf} ${_e}
     proxy: "http://127.0.0.1:\${PORT}"
     checkEndpoint: /health
     ttl: ${_t}
@@ -233,7 +247,7 @@ ENTRY
       ${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
       -m ${MODEL} -a ${MODEL_ALIAS}
       -ngl 99 -c ${CTX} --parallel ${PARALLEL}
-      --flash-attn auto --jinja --metrics ${KV_FLAGS} ${MMPROJ_FLAG} ${EXTRA_ARGS}
+      --flash-attn ${FA_MODE} ${SAMPLING_FLAGS} ${REASONING_FLAG} --jinja --metrics ${KV_FLAGS} ${MMPROJ_FLAG} ${EXTRA_ARGS}
     proxy: "http://127.0.0.1:\${PORT}"
     checkEndpoint: /health
     ttl: ${TTL}
@@ -274,7 +288,7 @@ ${ICD_LINE}
 ExecStart=${BIN}/llama-server --host 0.0.0.0 --port ${PORT} \\
   -m ${MODEL} -a ${MODEL_ALIAS} \\
   -ngl 99 -c ${CTX} --parallel ${PARALLEL} \\
-  --flash-attn auto --jinja --metrics ${KV_FLAGS} ${MMPROJ_FLAG} ${EXTRA_ARGS}
+  --flash-attn ${FA_MODE} ${SAMPLING_FLAGS} ${REASONING_FLAG} --jinja --metrics ${KV_FLAGS} ${MMPROJ_FLAG} ${EXTRA_ARGS}
 # Prime the model/KV after /health is up so the first user request isn't cold:
 ExecStartPost=/usr/local/bin/llama-warmup.sh ${PORT} ${MODEL_ALIAS}
 # Big models (120B/122B) take >90s to load+warm — raise the default start timeout so systemd

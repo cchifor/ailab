@@ -42,6 +42,13 @@ models:
     cache_type: q8_0          # K + V
     swap: false               # PINNED (direct llama-server.service) on both nodes
     ttl: 0
+    # Sampling + reasoning flags are provision.sh DEFAULTS (not per-model here), applied to both nodes on
+    # re-provision (2026-07-10 web research): Qwen3.6-35B-A3B "general thinking" profile — temp 1.0, top-p
+    # 0.95, top-k 20, min-p 0, presence-penalty 1.5, repeat-penalty 1.0 (llama.cpp generic defaults temp
+    # 0.8/top-k 40/min-p 0.05 hurt Qwen3 quality; top-k/min-p/repeat can't be forwarded by OWUI/LiteLLM so
+    # they MUST be server-side). Plus --reasoning-format deepseek (split <think> -> reasoning_content for
+    # OWUI's Thinking panel) and --flash-attn on (pinned; q8_0 KV needs it). For a coding/precise instance
+    # pass TEMP=0.6 PRESENCE_PENALTY=0.0. To cap runaway thinking on trivial prompts: --reasoning-budget N.
 
   # ---- node3 llama-swap SINGLE-MODEL — qwen3.5-122b on demand (ctid 5003 / .46) ----
   # Deploy via a single-MODEL provision call (SWAP=true, no MODELS_JSON) — see docs/runbooks/ai-model-swap.md.
