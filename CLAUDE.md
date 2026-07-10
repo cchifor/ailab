@@ -41,7 +41,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 | Proxmox hosts | ai-node1/2/3 = .2 / .3 / .4 | — |
 | Talos CPs | .41 / .42 / .43 (API VIP .40:6443) | 4001–4003 |
 | GHA runners | .47 / .48 / .49 + .33 / .34 | 4101–4105 |
-| dev-workers | .37 / .38 / .39 (user `c4`) | 4201–4203 |
+| dev-workers | .8–.13 (user `c4`; also the agentforge hosts, ADR 0018) | 4201–4206 |
 | AI LLM LXCs | .44 / .45 / .46 | 5001–5003 |
 | registry LXC (node1) | — | 5004 |
 
