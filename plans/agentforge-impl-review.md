@@ -1,34 +1,28 @@
 # Implementation review ? agentforge (ailab companion) ? round 1
 
-<!-- codex-impl-review-status: pending -->
-
-## Summary
-- The core infra shape mostly matches the plan: Gitea webhook allowlist syntax is correct for Gitea 1.26, litellm-local is structurally local-only, and the NodePort selects the local deployment.
-- The biggest rollout gap is that monitoring/rules are applied while AgentForge is not enabled and the real dev-worker SOPS file is absent.
-- Monitoring rules drift from the app's metric contract: two alerts use metrics AgentForge does not export.
-- The updater implements most of the atomic contract, but it still trusts the release pin as a filesystem path; the env-file ownership also weakens the planned secrets hygiene.
+<!-- codex-impl-review-status: complete -->
 
 ## Findings
 
 ### Monitoring is live while AgentForge is not deployable
 **Location:** ansible/group_vars/dev_workers.yml:12; ansible/secrets/dev-worker.sops.yaml; kubernetes/apps/infrastructure/monitoring/agentforge-rules.yaml:18
 **Severity:** blocker
-<!-- codex: The plan's Deployment section calls for the go-live toggle and real re-encrypted dev-worker SOPS secrets, but this diff only adds a commented toggle and the example file. At the same time Flux will apply the ServiceMonitor and critical down alert, so Prometheus will scrape closed ports and page for all six workers until a separate manual enable/secrets step happens; either make this a real go-live change or keep the scrape/rules disabled or muted until the rollout step that enables the service. -->
+**Resolution (9c4726c):** ACCEPTED — the agentforge scrape target and rules are now commented out in monitoring/kustomization.yaml with an explicit note; rollout Phase 0 (runbook) enables them together with dev_worker_enable_agentforge and the real SOPS secrets.
 
 ### Alert rules reference metrics AgentForge does not export
 **Location:** kubernetes/apps/infrastructure/monitoring/agentforge-rules.yaml:34
 **Severity:** important
-<!-- codex: forge_issue_state_seconds and forge_needs_human_pending are not in the app metric contract, so ForgeIssueStuck and ForgeNeedsHumanPending will never fire. Rework these alerts around exported metrics or add the missing gauges in the app; also consider using forge_worker_up for app-level worker readiness instead of scrape-only up. -->
+**Resolution (9c4726c + app a22e225):** ACCEPTED — ForgeIssueStuck replaced by ForgeReconcileStalled on forge_last_reconcile_timestamp; the app now exports that gauge plus forge_needs_human_pending (reconciler-stamped via on_reconcile), so both remaining alerts reference real series.
 
 ### Bot PATs are written to a same-UID-readable file
 **Location:** ansible/roles/dev_worker/tasks/agentforge.yml:53
 **Severity:** important
-<!-- codex: /etc/agentforge/agentforge.env is installed as owner/group dev_worker_agent_user with mode 0600, but v1 runs agent subprocesses and repo test_cmd under that same UID. Prompt-injected code can read the bot PATs, webhook secret, and litellm key from disk, contradicting the plan's "bot PATs live only in the orchestrator process" hygiene; make the env file root-owned 0600 so systemd and the root updater can read it while same-UID children cannot. -->
+**Resolution (9c4726c):** ACCEPTED — /etc/agentforge/agentforge.env is root:root 0600; systemd reads EnvironmentFile as the manager before dropping to User=, so same-UID agent/test children cannot read the PATs off disk.
 
 ### Release pin is used as a root filesystem path without validation
 **Location:** ansible/roles/dev_worker/files/agentforge-update.sh:71
 **Severity:** important
-<!-- codex: pinned comes from the config repo and is concatenated into $RELEASES_DIR/$pinned before rm -rf, mkdir, tar, and chown -R run as root. Reject pins that are not simple release IDs and verify the resolved destination stays under /opt/agentforge/releases before any filesystem mutation. -->
+**Resolution (9c4726c):** ACCEPTED — the updater now rejects pins that are not plain release ids (^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$, no '..') and malformed sha256 values before any filesystem mutation.
 
 ## Diff stat
  .sops.yaml                                         |   2 +-
