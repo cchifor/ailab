@@ -7,10 +7,12 @@ resources:
   - limitrange.yaml
   - litellm-secret.sops.yaml
   - litellm-cloud-keys.sops.yaml # real OpenAI/Anthropic keys for the cloud models in litellm-config
+  - litellm-local-secret.sops.yaml # own master key for litellm-local (LAN gateway — no cloud keys)
   - open-webui-oauth.sops.yaml # Authelia OIDC client secret for Open WebUI
   - open-webui-db.sops.yaml # Postgres DATABASE_URL for Open WebUI (infra-pg openwebui DB)
   - llm-service.yaml
   - monitoring.yaml
   - litellm.yaml
+  - litellm-local.yaml # local-models-only LiteLLM + litellm-lan NodePort :30400 (agentforge, ADR 0018)
   - owui-valkey.yaml # dedicated valkey for the OWUI Socket.IO backplane (multi-replica)
   - open-webui.yaml
