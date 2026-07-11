@@ -138,3 +138,21 @@ data:
             scopes: ['openid', 'profile', 'groups', 'email']
             userinfo_signed_response_alg: 'none'
             token_endpoint_auth_method: 'client_secret_basic'
+          - client_id: 'agentforge'
+            client_name: 'AgentForge'
+            # AgentForge v2 control plane (FastAPI OIDC RP) at agentforge.chifor.me (ADR 0019). Secret
+            # HASH only here (pbkdf2-sha512, 310000 iters — matches the other clients); plaintext is in
+            # kubernetes/apps/apps/agentforge/agentforge-oauth.sops.yaml (ns agentforge, key
+            # OIDC_CLIENT_SECRET). The CP reads the `groups` claim for org RBAC. Regenerate the pair with:
+            #   authelia crypto hash generate pbkdf2 --variant sha512 --iterations 310000 --random \
+            #            --random.length 72 --random.charset rfc3986
+            client_secret: '$pbkdf2-sha512$310000$zrkLDIixE/Cgd..skMs.AA$9qg5GdRSlahtbsovzdg4VwIngaVH3NY6ju/UGGZQPwFDlKOr9llUfBfyuMXUus/b.BH65Ehl8P3rLXQWnrNTlQ'
+            public: false
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit' # first-party app: auto-grant consent (no prompt) for seamless SSO
+            require_pkce: true
+            pkce_challenge_method: 'S256'
+            redirect_uris:
+              - 'https://agentforge.chifor.me/auth/callback'
+            scopes: ['openid', 'profile', 'groups', 'email']
+            token_endpoint_auth_method: 'client_secret_basic'

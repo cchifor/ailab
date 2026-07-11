@@ -9,7 +9,7 @@ resources:
   - rbac-flux.yaml # scoped patch-only nudge on Flux Kustomizations (field-locked by the admission policy)
   - deployment.yaml # CP ServiceAccount + Deployment + Service
   - networkpolicy.yaml # ingress only from the cloudflared tunnel
-  # - agentforge-oauth.sops.yaml # (added with the Authelia OIDC client)
+  - agentforge-oauth.sops.yaml # OIDC client secret (Authelia client 'agentforge')
   # - agentforge-db.sops.yaml     # (added with the platform Postgres DB)
   # - db-migrate.yaml             # (added with the platform Postgres DB)
   # - admission                   # (added with the ValidatingAdmissionPolicies)

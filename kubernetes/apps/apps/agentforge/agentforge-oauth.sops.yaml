@@ -1,0 +1,25 @@
+# AgentForge CP OIDC client secret (plaintext) for the Authelia client 'agentforge'
+# (env OIDC_CLIENT_SECRET). The matching pbkdf2 HASH is inline in auth/authelia-config.yaml.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: agentforge-oauth
+    namespace: agentforge
+type: Opaque
+stringData:
+    OIDC_CLIENT_SECRET: ENC[AES256_GCM,data:PVbQOMNv4wjP1v0n1JRq3lO7s7vjUlKZ+tbWEgB2vMQMKj7R9ATrQun2lqQaE1/SnfhevHl3CmmEsd9M8nOQOr39mni4ryj7,iv:jdufTGBagqGjlOrYZhE6HbAA7pBX4SVBGKmr6i9L+NU=,tag:XLJhR6ChL7IRlDKZkccNRQ==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBnNzJjOVExcEJ3TlVhbUxE
+            M1d4cW5Dc0Q2eWFNdkRtZVlnZzV1SHlQQ0hjCjR3Z1Bpa0oweGlqQzdWa0RzcXl3
+            aVlpMGdqV1VxWFJjbXZROTRhVTBhZVEKLS0tIGh1Y3BrMjdpSTNnUVVHbTg2RDZw
+            UTVDRUhWZ1NxZk9FdEpOUUMyTFdwbDQKkarI7sgWxg2Zw+rHw4YgrTO0u0mC9IDy
+            IT827FKMYEbnirCClKciLph9RcOC/WAL300s1+vrfTz5kfBulWz/lg==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-07-11T13:02:52Z"
+    mac: ENC[AES256_GCM,data:H4sjG/1OkcnzUAedII3kSfSiXsDxW3QoORjCmGToQKdbgY6SizMOlhfUkfHI9Ho2yFrt4KWzAI9PQmXTLnHoXDlyOghyJP8t5d+x3N+/4B1qru/yigOv9Brc3w6XCudkV2L2Md897mVnnWCbmG/3DXsnE8m8SKnOedanVQnKr58=,iv:mfWCHHjs1s+IU7aFlm0BiIPIwXXRPvOYyTp51rdO/r8=,tag:b3yP7bno5aRFlle7S0gg7A==,type:str]
+    version: 3.13.1
