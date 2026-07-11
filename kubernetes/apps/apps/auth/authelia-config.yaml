@@ -140,6 +140,11 @@ data:
             token_endpoint_auth_method: 'client_secret_basic'
           - client_id: 'agentforge'
             client_name: 'AgentForge'
+            # OPERATOR PREREQUISITE (usability): the CP derives org membership from the `groups` claim
+            # (a group `af:<org>:<role>` grants membership; empty groups => the CP fails SHUT, everyone
+            # denied). No user has an AgentForge group yet, so seed one on the tenant-zero owner in the
+            # Authelia user DB (authelia-secret.sops.yaml), e.g. add `af:tenant-zero:owner` to your
+            # groups, before expecting to log in and provision.
             # AgentForge v2 control plane (FastAPI OIDC RP) at agentforge.chifor.me (ADR 0019). Secret
             # HASH only here (pbkdf2-sha512, 310000 iters — matches the other clients); plaintext is in
             # kubernetes/apps/apps/agentforge/agentforge-oauth.sops.yaml (ns agentforge, key
@@ -153,6 +158,8 @@ data:
             require_pkce: true
             pkce_challenge_method: 'S256'
             redirect_uris:
-              - 'https://agentforge.chifor.me/auth/callback'
+              # Must match the CP's actual callback route (FastAPI auth router prefix is /api/auth)
+              # AND the app's AFP_OIDC_REDIRECT_URL — the app rejects a mismatched redirect_uri.
+              - 'https://agentforge.chifor.me/api/auth/callback'
             scopes: ['openid', 'profile', 'groups', 'email']
             token_endpoint_auth_method: 'client_secret_basic'
