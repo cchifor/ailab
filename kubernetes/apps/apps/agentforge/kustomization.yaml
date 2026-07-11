@@ -13,4 +13,4 @@ resources:
   - agentforge-db.sops.yaml # platform Postgres DSN (consumer copy)
   # db-migrate.yaml is INTENTIONALLY not listed — it is an operator-run one-shot (see its header);
   # under the wait:true `apps` Kustomization a failing migration Job would wedge the whole apps layer.
-  # - admission                   # (added with the ValidatingAdmissionPolicies)
+  - admission # ValidatingAdmissionPolicies: tenant-path allowlist + CP Flux-patch field-lock

@@ -1,0 +1,37 @@
+# ValidatingAdmissionPolicy — field-locks the CP's Flux "nudge-reconcile" grant (rbac-flux.yaml).
+# The CP SA has `patch` on Flux Kustomizations so it can poke the reconcile annotation after committing
+# tenant state; RBAC is resource-scoped, not field-scoped, so `patch` would otherwise also permit
+# changing spec.sourceRef (source-redirect) or spec.serviceAccountName (apply-time impersonation). This
+# fires ONLY for the CP SA's UPDATEs to Kustomizations and rejects any change to those two fields — so
+# even a compromised CP can nudge, but never redirect the reconciler or escalate its identity. Closes
+# the ADR 0015 field-scoping gap for this path.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-cp-flux-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["kustomizations"]
+  matchConditions:
+    - name: only-agentforge-cp
+      expression: "request.userInfo.username == 'system:serviceaccount:agentforge:agentforge-platform'"
+  validations:
+    - expression: "object.spec.sourceRef == oldObject.spec.sourceRef"
+      message: "agentforge CP may not change a Kustomization spec.sourceRef (source-redirect)."
+    - expression: >-
+        (has(object.spec.serviceAccountName) ? object.spec.serviceAccountName : '') ==
+        (has(oldObject.spec.serviceAccountName) ? oldObject.spec.serviceAccountName : '')
+      message: "agentforge CP may not change a Kustomization spec.serviceAccountName (impersonation)."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-cp-flux-guard
+spec:
+  policyName: agentforge-cp-flux-guard
+  validationActions: ["Deny"]

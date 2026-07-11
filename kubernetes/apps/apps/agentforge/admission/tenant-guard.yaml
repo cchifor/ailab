@@ -1,0 +1,66 @@
+# ValidatingAdmissionPolicy — the SECOND layer boxing in the CP-written tenant path (the first is the
+# reconciler SA's minimal RBAC). Native VAP (admissionregistration.k8s.io/v1, GA on this 1.31 cluster;
+# no Kyverno in the estate). It fires ONLY for objects applied by the tenant reconciler SA
+# (matchConditions on userInfo), so it governs exactly the cchifor/agentforge-tenants path and nothing
+# else. It enforces the tenant ALLOWLIST: only a fixed set of namespaced GVKs, no cluster-scoped RBAC,
+# no wildcard-verb Roles, and no privileged pods outside sandbox namespaces. Because Flux GVKs
+# (kustomize/source.toolkit.fluxcd.io) are NOT in the allowlist, the tenant path also cannot create a
+# Flux Kustomization/GitRepository to redirect reconciliation (sourceRef/serviceAccountName escape).
+#
+# P1 scope = GVK/field allowlist for the tenant path. The full sandbox-POD-SHAPE pinning (runtimeClass
+# kata, image-digest allowlist, automountServiceAccountToken:false, no hostPath/host*, required Cilium
+# labels, DinD only in the sandbox ns) is P2 — added when the sandbox namespaces + RuntimeClasses land.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-tenant-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["*"]
+        scope: "*"
+  matchConditions:
+    # Only govern what the dedicated tenant reconciler SA applies (the CP-written tenant path).
+    - name: only-tenant-reconciler
+      expression: "request.userInfo.username == 'system:serviceaccount:flux-system:agentforge-tenants-reconciler'"
+  variables:
+    - name: nsLabels
+      expression: "(namespaceObject != null && has(namespaceObject.metadata) && has(namespaceObject.metadata.labels)) ? namespaceObject.metadata.labels : {}"
+    - name: isSandboxNs
+      expression: "'ailab.io/agentforge-sandbox' in variables.nsLabels && variables.nsLabels['ailab.io/agentforge-sandbox'] == 'true'"
+  validations:
+    # (1) GVK allowlist — reject any kind the tenant path is not permitted to create.
+    - expression: >-
+        (request.kind.group == '' && request.kind.kind in ['Namespace', 'ServiceAccount', 'Service', 'ConfigMap', 'Secret', 'PersistentVolumeClaim']) ||
+        (request.kind.group == 'apps' && request.kind.kind == 'Deployment') ||
+        (request.kind.group == 'rbac.authorization.k8s.io' && request.kind.kind in ['Role', 'RoleBinding']) ||
+        (request.kind.group == 'networking.k8s.io' && request.kind.kind == 'NetworkPolicy') ||
+        (request.kind.group == 'cilium.io' && request.kind.kind == 'CiliumNetworkPolicy')
+      message: "agentforge tenant path: this GVK is not in the tenant allowlist (no cluster RBAC, no Flux source/Kustomization, no arbitrary kinds)."
+    # (2) Explicitly bar cluster-scoped RBAC (clearer message than the allowlist miss).
+    - expression: "!(request.kind.group == 'rbac.authorization.k8s.io' && request.kind.kind in ['ClusterRole', 'ClusterRoleBinding'])"
+      message: "agentforge tenant path: ClusterRole/ClusterRoleBinding are forbidden (namespaced Role/RoleBinding only)."
+    # (3) No wildcard verb/apiGroup/resource in a tenant Role (no '*'-verb escalation).
+    - expression: >-
+        request.kind.kind != 'Role' || !has(object.rules) ||
+        object.rules.all(r, !('*' in r.verbs) && !('*' in r.apiGroups) && !('*' in r.resources))
+      message: "agentforge tenant path: Role rules may not use '*' verbs/apiGroups/resources."
+    # (4) No privileged containers outside a sandbox namespace (P1: no sandbox ns exists yet, so this
+    #     effectively denies privileged; sandbox namespaces get the label in P2).
+    - expression: >-
+        request.kind.kind != 'Deployment' || variables.isSandboxNs ||
+        (object.spec.template.spec.containers + (has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers : [])).all(c,
+          !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged != true)
+      message: "agentforge tenant path: privileged containers are only allowed in sandbox namespaces (P2)."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-tenant-guard
+spec:
+  policyName: agentforge-tenant-guard
+  validationActions: ["Deny"]
