@@ -1,13 +1,5 @@
 # AgentForge v2 — Self-Service Control Plane (multi-tenant, cloud-native, sandboxed)
 
-## Codex Review
-
-- NOT ALIGNED: the separate Kata sandbox pod resolves the original same-pod isolation flaw, but the rewrite still leaves boundary-level gaps around the orchestrator's runtime pod-create authority and the sandbox-to-orchestrator diff/log readback channel.
-- The forge-backed account lease is directionally correct, but the plan says "same primitive" rather than specifying the same epoch-safe lease protocol; crash and scale-to-zero recovery are not proven without TTL/heartbeat/stale-break and compare-on-release semantics.
-- P1 is now coherent: it no longer has hidden kro/OpenBao/Kata dependencies, and the shadow-orchestrator slice is correctly scoped as non-hardening/non-v1.1.
-- The warm-pool versus scale-to-zero split is internally consistent as written: interactive accounts stay warm, non-interactive/overnight work can scale to zero.
-- The per-tenant Flux SA plus admission design is enforceable only if the CP's git credential is actually constrained server-side to tenant sources; a repo-wide push token can still bypass the reconciler boundary by changing Flux/admission/root paths.
-
 ## Context
 
 AgentForge v1 (built + merged, ADR 0018) runs as host systemd services on 6 Proxmox dev-worker VMs,
@@ -32,12 +24,17 @@ puts untrusted execution in an isolated sandbox pod.
 
 ## Governing principles
 
-- **Web app writes desired state; a reconciler converges it — behind an admission gate.** The CP
-  holds only a scoped git-push identity; a **per-tenant Flux Kustomization with a minimal-RBAC
-  ServiceAccount** applies the tenant path, and a **ValidatingAdmissionPolicy (or Kyverno)**
-  restricts tenant paths to an allowlist of GVKs and fields (no ClusterRole/RBAC/`*`-verb objects,
-  no privileged pods outside the sandbox namespace). A compromised CP cannot commit cluster-admin.
-<!-- codex: round-2: The per-tenant Flux SA/admission gate constrains objects only after Flux applies them. It does not by itself constrain a compromised CP git-push token if that token can modify root Flux Kustomizations, admission policies, or other non-tenant paths in the same repo. The write path is enforceable only if the "scoped git-push identity" is server-side path-constrained or points at a tenant-only source repo. -->
+- **Web app writes desired state; a reconciler converges it — behind BOTH a server-side write scope
+  AND an admission gate.** The CP bot pushes ONLY to a **separate `cchifor/agentforge-tenants`
+  Gitea repo** (Gitea repo-level permissions enforce this server-side — the CP bot has **no write
+  to `cchifor/ailab`**, where the root Flux config, the tenant Flux Kustomization definitions, and
+  the admission policies live). A dedicated **tenant Flux Kustomization (its own minimal-RBAC SA,
+  `wait: false`)** reconciles `agentforge-tenants`, and a **ValidatingAdmissionPolicy (or Kyverno)**
+  — itself defined in the CP-unwritable `ailab` repo — restricts that path to an allowlist of GVKs
+  and fields (no ClusterRole/RBAC/`*`-verb objects, no privileged pods outside the sandbox
+  namespace, no changes to Flux `sourceRef`/`serviceAccountName`). So even a fully compromised CP
+  can neither redirect the reconciler nor commit cluster-admin: its token physically cannot reach
+  the root/admission paths, and admission rejects anything outside the tenant allowlist.
 - **The security boundary is the POD, not the container.** Containers in one pod share the network
   namespace and (by default) the SA token, and any pod container can reach a sidecar Docker socket -
   so a "three-tier split inside one pod" is a blast-radius reduction, **not** a boundary. Untrusted
@@ -47,10 +44,14 @@ puts untrusted execution in an isolated sandbox pod.
   or Docker API. This is what actually satisfies ADR 0018's v1.1 gate — proven by the boundary tests.
 - **Forge/DB are the source of truth; workers stateless — but subscription concurrency is an
   explicit lease, not an emergent property.** v1's claim lock dedups work per issue; it does NOT cap
-  per-account parallelism. v2 adds a **forge-backed per-account lease** (same append-only-comment
-  primitive as the claim lock) checked before every run; KEDA `maxReplicaCount` + `maxSurge: 0` +
-  per-pod concurrency 1 are the coarse cap, the lease is the correct one.
-<!-- codex: round-2: The lease is called the same append-only-comment primitive, but not the same epoch-safe lease protocol. To be crash/scale-to-zero safe it needs an owner epoch, expiry/heartbeat, stale-break, and compare-on-release; otherwise a crashed pod can strand the account semaphore or a late release can clear a newer lease. -->
+  per-account parallelism. v2 adds a **forge-backed per-account lease that reuses v1's EXACT
+  epoch-bound claim protocol** (`ClaimService`, already contract-tested): a lease is an append-only
+  comment carrying an **owner epoch + worker id + TTL/`expires`**; acquisition is the same
+  lowest-valid-id election, held leases **heartbeat** their `expires`, the reconciler/reaper
+  **stale-breaks** expired leases (a crashed pod can't strand the semaphore), and **release is
+  compare-on-owner** (a late release cannot clear a newer epoch's lease). N valid account leases =
+  at most N concurrent runs on that account. KEDA `maxReplicaCount` + `maxSurge: 0` + per-pod
+  concurrency 1 are the coarse cap; the lease is the correct, crash/scale-to-zero-safe one.
 - **Every boundary is enforced in code + admission, never UI-only.** Engine gating, org membership,
   tenant scoping, and allowed-GVK are enforced at the CP API, the generated config, worker startup
   validation, AND admission policy.
@@ -74,9 +75,16 @@ puts untrusted execution in an isolated sandbox pod.
 - **Orchestrator pod** (per OAuth account, KEDA-scaled): runs the Python orchestrator loop, holds
   the forge bot PATs / git-push token / config bearer, does ALL forge writes + git push. It runs
   **no untrusted code and no agent CLI**. Egress: forge, OpenBao, CP, model-routing only. It has
-  scoped RBAC to create/delete **sandbox Pods in a dedicated `af-sandbox-<tenant>` namespace only**
-  (a small, admission-constrained surface — not cluster-wide pod-create).
-<!-- codex: round-2: Pod-create in a sandbox namespace that permits privileged DinD is still a privileged confused-deputy surface unless admission pins the sandbox pod shape: runtimeClassName=kata, allowed digest image(s), fixed serviceAccountName with automount disabled, no hostPath/hostNetwork/hostPID/hostIPC, allowed volume types, and required NetworkPolicy labels. "Admission-constrained" is asserted but not made explicit enough to close the create-pod escalation path. -->
+  scoped RBAC to create/delete **sandbox Pods in a dedicated `af-sandbox-<tenant>` namespace only**.
+  That create-pod surface is closed by a **ValidatingAdmissionPolicy on the sandbox namespace that
+  PINS the pod shape** — any sandbox Pod the orchestrator submits MUST have: `runtimeClassName:
+  kata`; images from the **allowed digest allowlist only** (the pinned sandbox image); a **fixed
+  `serviceAccountName` with `automountServiceAccountToken: false`**; **no `hostPath`/`hostNetwork`/
+  `hostPID`/`hostIPC`/host ports**; volumes restricted to `emptyDir`/`projected`/the per-job PVC;
+  and the **required NetworkPolicy/Cilium labels** (so the model-only egress policy always binds).
+  The privileged DinD container is allowed **only** in this namespace (narrow PodSecurity exemption)
+  and only in the pinned shape. A compromised orchestrator therefore cannot mint an escalated pod
+  (host mounts, extra creds, broad egress, or a foreign image) — admission rejects it.
 - **Sandbox pod** (ephemeral, Kata, one per job; warm pool to hide boot): runs the **agent CLI
   (claude/codex) AND `test_cmd`**. It holds **only the inference OAuth** (mounted just for the agent
   container) and the job checkout (per-job volume). Its SA has **no Secret RBAC and no automounted
@@ -176,7 +184,20 @@ puts untrusted execution in an isolated sandbox pod.
   most to the model API* - accepted for tenant-zero, removed by the P3 broker.
   `CLAUDE_CODE_OAUTH_TOKEN` is added to the agent container's env only (never `test_cmd`), proven by
   a `test_cmd` dump-env negative test.
-<!-- codex: round-2: The shared checkout/diff/stdout channel is an egress path through the trusted orchestrator. A prompt-injected agent that can read the inference OAuth can write it into the checkout, logs, or generated diff, and the orchestrator can then publish it to forge; model-only Cilium egress does not make the model API the only exfil destination. P2 needs brokered/ephemeral inference credentials or mandatory outbound secret scanning/redaction before treating the sandbox boundary as closed. -->
+- **Closing the readback exfil channel (P2, gating the v1.1 flip).** Model-only Cilium egress does
+  NOT make the model API the only exfil path: the diff/logs/stdout the orchestrator reads back and
+  publishes to the forge is itself an egress channel, and a prompt-injected agent that can read the
+  inference OAuth could smuggle it into the diff. Two defenses, BOTH required before the sandbox is
+  "closed" (moved earlier from P3):
+  1. **Brokered ephemeral inference creds** — the sandbox agent gets NO durable token; Claude's
+     `apiKeyHelper` (and the Codex equivalent) fetch a short-lived token over a unix socket from a
+     broker sidecar in the sandbox pod that holds the OpenBao identity. There is no long-lived
+     secret in the agent env to smuggle. (This was P3; it is now a **P2 prerequisite** for the flip.)
+  2. **Mandatory outbound redaction** — everything the orchestrator publishes (PR diffs, `af:*`
+     comments, logs, events) passes a secret-scanner/redactor (token shapes + known credential
+     fingerprints) before any forge write. Defense-in-depth even after (1).
+  The v1.1 gate flips only when the boundary tests below prove both a durable-token exfil attempt
+  (no token to steal) and a redaction bypass attempt fail.
 - **Egress = per-POD Cilium policy** (now correct, since orchestrator and sandbox are separate pods):
   orchestrator pod → forge/OpenBao/CP/model-routing; sandbox pod → the one model endpoint only;
   `test_cmd` container → `--network none` (opt-in pull-through package proxy).
@@ -227,15 +248,17 @@ puts untrusted execution in an isolated sandbox pod.
 - **P2 — secrets + scaling + the sandbox boundary (the unlock)**: OpenBao + ESO + KEDA + kro; secrets
   → OpenBao (namespaced SecretStore, `automountServiceAccountToken:false`, no worker Secret RBAC,
   admission preventing ClusterSecretStore/path escapes); Kata node extensions + RuntimeClasses;
-  **the ephemeral sandbox-pod SandboxExecutor** + per-pod Cilium egress + the forge-backed account
-  lease + KEDA + `af-dispatcher` + k8s-native CI runners; kro RGD DRYs the tenant expansion. **All
+  **the ephemeral sandbox-pod SandboxExecutor** + the **admission-pinned sandbox pod shape** +
+  per-pod Cilium egress + **brokered ephemeral inference creds (apiKeyHelper→broker sidecar)** +
+  **outbound diff/comment/log redaction** + the epoch-safe forge-backed account lease + KEDA +
+  `af-dispatcher` + k8s-native CI runners; kro RGD DRYs the tenant expansion. **All
   sandbox-boundary tests green (below) → flip `privilege_hardening: v1.1` → unlock non-playground
   repos.** The flip is valid only because untrusted exec is now a separate pod with no creds, no
   Docker API reachability, and default-deny+model-only egress.
 - **P3 — external clusters + full multi-tenant compute + fleet**: spoke onboarding (pull model,
   read-only deploy keys, hostile-payload handling); per-org quotas (ResourceQuota, lease caps,
-  OpenBao namespace policies); **per-tenant LiteLLM virtual keys w/ budget caps**; the Claude
-  `apiKeyHelper`→broker so the sandbox never holds a durable token; dogfood. **`claude_max` is
+  OpenBao namespace policies); **per-tenant LiteLLM virtual keys w/ budget caps**; dogfood (the
+  inference-cred broker already landed in P2). **`claude_max` is
   rejected for non-tenant-zero orgs at the CP API, the generated config, worker startup, AND
   admission - and tenant-zero OAuth Secrets are never referenced by shared templates or spoke git
   targets.**
@@ -264,12 +287,18 @@ puts untrusted execution in an isolated sandbox pod.
   localhost service, OpenBao, or the forge; reach the **Docker API** directly; symlink/hardlink-escape
   the shared checkout; and egress to **every destination allowed for any pod** - assert all fail.
   Assert `uname -r` shows the Kata guest kernel; assert privileged DinD cannot escape the microVM to
-  the node. **Cross-tenant + cross-container negatives**: agent can't read forge creds; `test_cmd`
+  the node. **Readback-exfil**: with the broker in place there is no durable token in the agent env
+  to smuggle, AND an attempt to write a token-shaped string into the diff/comment/log is redacted
+  before the forge write — assert both. **Admission-pinned pod**: the orchestrator cannot create a
+  sandbox pod with a host mount, extra secret, foreign image, or broad egress (admission rejects).
+  **Cross-tenant + cross-container negatives**: agent can't read forge creds; `test_cmd`
   can't read inference creds; worker SA can't list Secrets; one workspace bearer can't fetch another's
   config; non-tenant-zero can't resolve `claude_max`.
 - **KEDA + lease**: seed K issues → scale to `min(K, maxReplicaCount)`, process (claims + the account
   lease prevent both collision and over-parallelism), return to warm/zero; assert the cap holds by
-  counting **Running+Terminating** pods during rapid up/down, auth-canary delay, and pod crash.
+  counting **Running+Terminating** pods during rapid up/down, auth-canary delay, and pod crash;
+  assert a **crashed lease-holder is stale-broken** (semaphore recovers) and a **late release
+  cannot clear a newer epoch's lease** (reuse v1's ClaimService lease tests).
 - **GitOps admission**: commit a malicious manifest (ClusterRole, privileged pod, source-redirect
   patch) to a tenant path → assert admission + Flux SA scoping reject it; seeing benign objects
   reconcile is not sufficient.
@@ -288,8 +317,10 @@ puts untrusted execution in an isolated sandbox pod.
 2. **Multi-tenant secret isolation** - namespaced SecretStore is necessary but insufficient: also
    `automountServiceAccountToken:false` by default, projected tokens only where needed, **no worker
    RBAC to Secrets**, and admission preventing ClusterSecretStore/path escapes.
-3. **GitOps write path** — generated-manifests-only + admission allowlist + per-tenant Flux SA; a
-   compromised CP cannot escalate. Malicious-manifest rejection is a required test.
+3. **GitOps write path** — the CP bot writes ONLY to `agentforge-tenants` (server-side repo
+   permission; no write to `ailab` where root Flux + admission live) + generated-manifests-only +
+   admission allowlist + per-tenant Flux SA. A compromised CP can neither redirect the reconciler
+   nor escalate. Malicious-manifest + write-outside-tenant-repo rejection are required tests.
 4. **External-cluster trust** — pull-based; hub can't attest spoke execution; every spoke payload is
    hostile input with replay protection, schema validation, per-spoke quotas, and reported-vs-trusted
    state separation; read-only deploy keys + rotatable per-workspace creds.
