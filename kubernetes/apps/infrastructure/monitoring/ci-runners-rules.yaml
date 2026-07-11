@@ -54,7 +54,28 @@ spec:
               The 6h trend for runner {{ $labels.instance }} projects the root filesystem reaching 0
               free within 4h — early warning before jobs fail on ENOSPC. Check `docker system df` and
               whether gitea-runner-cleanup.sh is keeping up (its escalation tightens the retention
-              window to 6h at 80% disk and to a 1h window + actcache trim at 92%).
+              window to 6h at 75% disk and to a 1h window + actcache trim at 92%, and now runs even
+              while a job is in flight).
+        # A runner this close to full is about to fail EVERY job at actions/checkout with ENOSPC
+        # (`copy_file_range: no space left on device`) and become a job-blackhole reding whole runs —
+        # the exact fleet-wide outage of 2026-07-11. CRITICAL (paging), unlike the 12% warning above,
+        # with a short window so it escalates before the runner starts eating jobs. Since
+        # gitea-runner-cleanup now runs its window-safe pressure/critical prune EVEN WHILE BUSY, a
+        # runner reaching 5% means the cleanup is genuinely out-run or wedged — act, don't wait.
+        - alert: CIRunnerDiskCritical
+          expr: |
+            node_filesystem_avail_bytes{job="ci-runner-node",mountpoint="/"}
+              / node_filesystem_size_bytes{job="ci-runner-node",mountpoint="/"} < 0.05
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} root filesystem <5% free — ENOSPC/CI-outage imminent"
+            description: >-
+              Runner {{ $labels.instance }} root fs is <5% free for >5m. Near 0% every job dies at
+              actions/checkout (`copy_file_range: no space left on device`) and the runner reds whole
+              runs. Reclaim NOW on the VM: `docker image prune -af && docker builder prune -af`
+              (reaches the containerd moby-ns image store); then check `journalctl -t gitea-runner-cleanup`
+              for why the timer's pressure prune isn't keeping up.
         - alert: CIRunnerLowMemory
           expr: node_memory_MemAvailable_bytes{job="ci-runner-node"} < 1.5e9
           for: 10m
@@ -136,7 +157,7 @@ spec:
             description: >-
               Runner {{ $labels.instance }} build cache is >25 GB even after gitea-runner-cleanup.sh
               (post-cleanup value from its beacon) — the dominant disk accumulator isn't being cleared:
-              CI is out-running the 48h retention (the pressure escalation should tighten it at 80% disk)
-              or the cleanup is wedged. Inspect `docker system df`, `docker builder du`, and
+              CI is out-running the 24h retention (the pressure escalation should tighten it at 75% disk,
+              even while busy) or the cleanup is wedged. Inspect `docker system df`, `docker builder du`, and
               `journalctl -t gitea-runner-cleanup`. CIRunnerDiskFilling/WillFillSoon backstop actual
               disk exhaustion.
