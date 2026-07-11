@@ -27,3 +27,9 @@
     state: restarted
     enabled: true
     daemon_reload: true
+
+# Re-reads /etc/systemd/resolved.conf.d/*.conf. Safe: does not touch the act_runner daemon or a job.
+- name: Restart systemd-resolved
+  ansible.builtin.systemd:
+    name: systemd-resolved
+    state: restarted
