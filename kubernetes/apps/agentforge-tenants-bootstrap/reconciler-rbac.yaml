@@ -5,6 +5,12 @@
 # namespaced GVKs a per-workspace tenant manifest needs — deliberately NO clusterroles/-bindings, NO
 # wildcard verbs, NO Flux source/Kustomization objects. So a malicious manifest in the tenant repo
 # can at most create objects of these kinds, and admission rejects the dangerous shapes among them.
+#
+# NOTE: these grants are CLUSTER-WIDE (ClusterRole+ClusterRoleBinding) by necessity — the per-workspace
+# af-tenant-* namespaces are created dynamically, so the Roles cannot be pre-bound per-namespace. The
+# namespace CONFINEMENT is enforced at admission (agentforge-tenant-guard validation 5 pins every tenant
+# object to an af-tenant-* namespace, and validation 6 bars RoleBinding->ClusterRole), so this SA cannot
+# actually write a Secret/Deployment/RoleBinding into flux-system/kube-system/databases.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

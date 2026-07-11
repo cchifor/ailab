@@ -1,10 +1,12 @@
-# ValidatingAdmissionPolicy — field-locks the CP's Flux "nudge-reconcile" grant (rbac-flux.yaml).
-# The CP SA has `patch` on Flux Kustomizations so it can poke the reconcile annotation after committing
-# tenant state; RBAC is resource-scoped, not field-scoped, so `patch` would otherwise also permit
-# changing spec.sourceRef (source-redirect) or spec.serviceAccountName (apply-time impersonation). This
-# fires ONLY for the CP SA's UPDATEs to Kustomizations and rejects any change to those two fields — so
-# even a compromised CP can nudge, but never redirect the reconciler or escalate its identity. Closes
-# the ADR 0015 field-scoping gap for this path.
+# ValidatingAdmissionPolicy — field-locks the CP's Flux "nudge-reconcile" grant (rbac-flux.yaml) as
+# DEFENSE-IN-DEPTH behind the resourceName-scoped Role. The CP SA has get+patch on ONLY the
+# `agentforge-tenants` Kustomization; its sole legitimate use is to poke the reconcile annotation
+# (metadata.annotations["reconcile.fluxcd.io/requestedAt"]) after committing tenant state. That nudge
+# NEVER changes spec, so this fires for the CP SA's UPDATEs and rejects ANY spec change — a strictly
+# stronger lock than the old two-field (sourceRef/serviceAccountName) one, which left spec.suspend,
+# spec.patches, spec.postBuild, spec.path, spec.prune, spec.force and spec.decryption mutable. Even if
+# the RBAC were ever loosened, a compromised CP still cannot redirect, suspend, or inject patches into
+# any Kustomization.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -21,12 +23,11 @@ spec:
     - name: only-agentforge-cp
       expression: "request.userInfo.username == 'system:serviceaccount:agentforge:agentforge-platform'"
   validations:
-    - expression: "object.spec.sourceRef == oldObject.spec.sourceRef"
-      message: "agentforge CP may not change a Kustomization spec.sourceRef (source-redirect)."
-    - expression: >-
-        (has(object.spec.serviceAccountName) ? object.spec.serviceAccountName : '') ==
-        (has(oldObject.spec.serviceAccountName) ? oldObject.spec.serviceAccountName : '')
-      message: "agentforge CP may not change a Kustomization spec.serviceAccountName (impersonation)."
+    # Whole-spec lock: the reconcile nudge is a metadata-annotation-only change, so spec must be
+    # byte-for-byte unchanged. Blocks sourceRef/serviceAccountName AND suspend/patches/postBuild/
+    # path/prune/force/decryption in one rule.
+    - expression: "object.spec == oldObject.spec"
+      message: "agentforge CP may only nudge a Kustomization's reconcile annotation, never change its spec."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

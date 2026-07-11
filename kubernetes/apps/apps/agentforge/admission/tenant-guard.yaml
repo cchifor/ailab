@@ -56,6 +56,20 @@ spec:
         (object.spec.template.spec.containers + (has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers : [])).all(c,
           !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged != true)
       message: "agentforge tenant path: privileged containers are only allowed in sandbox namespaces (P2)."
+    # (5) NAMESPACE PINNING — tenant objects may only land in an af-tenant-* namespace (matches the CP
+    #     renderer's NS_PREFIX). Without this, the reconciler's cluster-wide namespaced-write RBAC (a
+    #     Role/RoleBinding/Secret/Deployment CREATE anywhere) could target flux-system/kube-system/
+    #     databases. A Namespace object itself must be named af-tenant-*; every other (namespaced) kind
+    #     must set metadata.namespace to af-tenant-*.
+    - expression: >-
+        (request.kind.kind == 'Namespace')
+          ? object.metadata.name.startsWith('af-tenant-')
+          : (has(object.metadata.namespace) && object.metadata.namespace.startsWith('af-tenant-'))
+      message: "agentforge tenant path: objects must be an af-tenant-* Namespace or live in one (no writes to system namespaces)."
+    # (6) A tenant RoleBinding may only bind a namespaced Role (never a ClusterRole such as
+    #     cluster-admin). With (5), the bound Role is a tenant-local, non-wildcard Role → no escalation.
+    - expression: "request.kind.kind != 'RoleBinding' || object.roleRef.kind == 'Role'"
+      message: "agentforge tenant path: a RoleBinding may only bind a namespaced Role, never a ClusterRole."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

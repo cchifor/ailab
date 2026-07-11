@@ -13,13 +13,16 @@ kind: ClusterRole
 metadata:
   name: agentforge-cp-readonly
 rules:
-  # Core capacity/status surface for the analyzer + monitoring aggregation. NO secrets, NO configmaps.
+  # Core capacity/status surface for the analyzer + monitoring aggregation. NO secrets, NO configmaps,
+  # and NO pods/log: cluster-wide log read is a credential-exfil equivalent (init/app logs leak bearer
+  # tokens, DSNs, API keys) — the analyzer sizes from allocatable/usage (metrics.k8s.io) + workload
+  # status (apps/batch), and monitoring is fed by the hardened POST /api/ingest/events path, so raw
+  # log content is never needed. A namespace-scoped diagnostic log Role can be added per-tenant in P2.
   - apiGroups: [""]
     resources:
       - nodes
       - nodes/status
       - pods
-      - pods/log
       - namespaces
       - services
       - endpoints
