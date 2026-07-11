@@ -1,13 +1,5 @@
 # AgentForge v2 — Self-Service Control Plane (multi-tenant, cloud-native, sandboxed)
 
-## Codex Review
-
-- The v2 direction is plausible, but the current plan overclaims the pod-level security boundary: same-pod network identity, service account token handling, Docker daemon access, and shared writable volumes must be closed before calling it airtight or ADR 0018-compliant.
-- KEDA `maxReplicaCount` is useful capacity control, not a strict subscription semaphore by itself; rollout surge, terminating pods, internal concurrency, and multi-role accounting still need explicit controls.
-- P1 is not a coherent shippable slice as written because it depends on `kro` and credential-minting pieces scheduled for P2, and "multi-tenant from day 1" conflicts with org/RLS enforcement deferred to P3.
-- The hub-spoke and GitOps models reduce direct kubeconfig exposure, but the hub's GitOps write path, Flux apply identity, RBAC precedent, and untrusted spoke input need admission controls, payload validation, and rate limits.
-- The two seam claims are only clean if agent CLI execution and repo test execution remain separate trust classes; forcing OAuth-bearing runner subprocesses through the same executor path risks breaking auth or leaking inference credentials.
-
 ## Context
 
 AgentForge v1 (built + merged, ADR 0018) runs as host systemd services on 6 Proxmox dev-worker VMs,
@@ -23,219 +15,279 @@ can reach.
 
 Settled scope (user decisions): **multi-user + arbitrary external clusters** (true SaaS shape),
 **dedicated Kata-capable Talos node pool** for compute, **OpenBao + External Secrets Operator** for
-the keystore, **GitOps provisioning** (web app → Gitea commit → Flux + a kro operator reconcile). The
-ailab cluster is "tenant-zero"; multi-tenant from day 1. **v1 is reused, not rewritten** — the
-orchestrator, role handlers, codex alignment gates, epoch-locked claim lock, GiteaClient, Ledger are
-unchanged; v2 adds a control plane, containerizes + sandboxes the worker, and swaps two clean seams
-(config source, exec).
-<!-- codex: "Multi-tenant from day 1" contradicts the phasing section, where org RBAC, RLS enforcement, quotas, and external tenants are deferred to P3. Either enforce tenant isolation in P1 or scope P1 explicitly to tenant-zero only. -->
+the keystore, **GitOps provisioning** (web app → Gitea commit → Flux + a kro operator reconcile).
+**The data/auth model is multi-tenant and RLS+org-membership is enforced from P1; only the
+*compute + secrets vault* start as tenant-zero (the ailab cluster) and generalize in P2/P3.** v1 is
+reused, not rewritten — the orchestrator, role handlers, codex alignment gates, epoch-locked claim
+lock, GiteaClient, Ledger are unchanged; v2 adds a control plane, containerizes the worker, and
+puts untrusted execution in an isolated sandbox pod.
 
 ## Governing principles
 
-- **Web app writes desired state; a reconciler converges it.** No standing broad mutation rights on
-  the web app — it commits CRs/manifests to git; Flux (hub) / a kro RGD / a spoke agent (external
-  clusters) apply. Auditable, drift-correcting, matches the existing Flux+Gitea.
-<!-- codex: A GitOps write token is still an indirect cluster-mutation capability if Flux applies from that path with broad permissions. The plan needs admission policy, path scoping, and Flux service-account scoping so a compromised CP cannot commit arbitrary cluster-admin manifests. -->
-- **Security boundary = credential-split, not Kata alone.** Untrusted agent/test code runs in a
-  container that mounts ZERO high-value secrets, in a separate PID/mount namespace from the
-  orchestrator, inside a Kata microVM, behind default-deny egress. This *is* ADR 0018's v1.1 gate.
-<!-- codex: Same-pod containers share the pod network namespace and usually the same pod service account identity, so NetworkPolicy and localhost controls are not per-container boundaries. This does not yet satisfy ADR 0018's v1.1 gate unless the pod spec proves no shared process namespace, no default SA token, no agent access to the Docker API, and no shared writable path that becomes a confused-deputy channel. -->
-- **Forge/DB are the source of truth; workers stay stateless.** v1's claim lock already dedups across
-  pods, so autoscaling needs no new coordination.
-<!-- codex: Claim deduplication prevents duplicate work on one issue, but it does not enforce subscription concurrency. The v1 semaphore came from fixed topology plus per-worker concurrency; v2 still needs explicit per-account admission or hard pod/concurrency controls. -->
+- **Web app writes desired state; a reconciler converges it — behind an admission gate.** The CP
+  holds only a scoped git-push identity; a **per-tenant Flux Kustomization with a minimal-RBAC
+  ServiceAccount** applies the tenant path, and a **ValidatingAdmissionPolicy (or Kyverno)**
+  restricts tenant paths to an allowlist of GVKs and fields (no ClusterRole/RBAC/`*`-verb objects,
+  no privileged pods outside the sandbox namespace). A compromised CP cannot commit cluster-admin.
+- **The security boundary is the POD, not the container.** Containers in one pod share the network
+  namespace and (by default) the SA token, and any pod container can reach a sidecar Docker socket —
+  so a "three-tier split inside one pod" is a blast-radius reduction, **not** a boundary. Untrusted
+  agent + `test_cmd` execution therefore runs in a **separate ephemeral Kata sandbox pod** with its
+  own scoped SA (`automountServiceAccountToken: false`, zero Secret RBAC), its own default-deny
+  CiliumNetworkPolicy (model endpoint only), and no path to the orchestrator's creds, forge route,
+  or Docker API. This is what actually satisfies ADR 0018's v1.1 gate — proven by the boundary tests.
+- **Forge/DB are the source of truth; workers stateless — but subscription concurrency is an
+  explicit lease, not an emergent property.** v1's claim lock dedups work per issue; it does NOT cap
+  per-account parallelism. v2 adds a **forge-backed per-account lease** (same append-only-comment
+  primitive as the claim lock) checked before every run; KEDA `maxReplicaCount` + `maxSurge: 0` +
+  per-pod concurrency 1 are the coarse cap, the lease is the correct one.
+- **Every boundary is enforced in code + admission, never UI-only.** Engine gating, org membership,
+  tenant scoping, and allowed-GVK are enforced at the CP API, the generated config, worker startup
+  validation, AND admission policy.
 
-## Approach
+## Architecture
 
 ### Two repos
 
 - `cchifor/agentforge` (v1, extended): orchestrator/roles/gates unchanged **+** new
-  `ControlPlaneConfigSource`, `Executor` port, `deploy/Dockerfile`, `dispatcher` subcommand. Runs as
-  the worker image on the agent node pool / spokes.
+  `ControlPlaneConfigSource`, `Executor` port (routes untrusted exec to the sandbox), `deploy/`
+  images, `dispatcher` subcommand, `sandbox-runner` entrypoint. Runs as the worker image.
 - `cchifor/agentforge-platform` (NEW): control-plane API (FastAPI + Authelia OIDC), webapp SPA (3
-  sections), kro RGDs + `ConnectedCluster` reconciler, resource analyzer, OpenBao/git/kube adapters.
-  Runs on the hub cluster, ns `agentforge`. Depends on v1 for the config schema only
-  (`AgentForgeConfig` + `compatibility()`), so hub↔worker skew stays gated.
-<!-- codex: Depending on "config schema only" is optimistic: CP-generated configs now carry tenant, secret, pool, engine-plan, and executor policy semantics that workers must enforce. Compatibility needs contract tests across CP and worker versions, not just schema parsing. -->
+  sections), kro RGDs + `ConnectedCluster` reconciler, resource analyzer, OpenBao/git/kube adapters,
+  admission policies. Runs on the hub, ns `agentforge`. Depends on v1 for the config schema.
+  **CP↔worker compatibility is contract-tested** (not just schema-parsed): a versioned fixture suite
+  asserts every CP-generated config a worker of version X must enforce (tenant/pool/engine/executor
+  policy), run in both repos' CI.
+
+### Worker topology — orchestrator pod + ephemeral sandbox pod (the boundary)
+
+- **Orchestrator pod** (per OAuth account, KEDA-scaled): runs the Python orchestrator loop, holds
+  the forge bot PATs / git-push token / config bearer, does ALL forge writes + git push. It runs
+  **no untrusted code and no agent CLI**. Egress: forge, OpenBao, CP, model-routing only. It has
+  scoped RBAC to create/delete **sandbox Pods in a dedicated `af-sandbox-<tenant>` namespace only**
+  (a small, admission-constrained surface — not cluster-wide pod-create).
+- **Sandbox pod** (ephemeral, Kata, one per job; warm pool to hide boot): runs the **agent CLI
+  (claude/codex) AND `test_cmd`**. It holds **only the inference OAuth** (mounted just for the agent
+  container) and the job checkout (per-job volume). Its SA has **no Secret RBAC and no automounted
+  token**; its CiliumNetworkPolicy allows **only the model endpoint** (Anthropic / OpenAI /
+  litellm-local) — never forge, never OpenBao, never the orchestrator. `test_cmd` runs in a nested
+  DinD container with `--network none` + no cred mount; DinD's socket is reachable only within the
+  sandbox pod (which itself can't reach anything but the model), so the confused-deputy path is
+  closed. The orchestrator streams the prompt in and the diff out over a scoped exec channel, then
+  reaps the pod. The inference OAuth is a **tenant-zero-only** high-value credential (see gating);
+  P3 replaces even that with an `apiKeyHelper`→broker so the agent env never holds a durable token.
+- **Latency**: a **warm sandbox pool** (a few pre-booted Kata pods per account, `minReplicaCount≥1`
+  for interactive roles) hides Kata boot + image pull + auth canary; true scale-to-zero only for
+  non-interactive/overnight. First-issue latency SLO: < 30s warm, < 120s cold.
 
 ### Control plane
 
-- **Auth**: FastAPI OIDC RP against Authelia (`sso.chifor.me`, auth-code + PKCE/S256); add a client
-  block to `kubernetes/apps/apps/auth/authelia-config.yaml` (PBKDF2 hash in the ConfigMap, plaintext
-  SOPS secret in the app ns); `groups` claim → org RBAC. Exposed at `agentforge.chifor.me` via
-  cloudflared + CF Access (`allow_me`; per-org policies in P3).
-<!-- codex: `allow_me` and P3 per-org policies mean the external multi-user access boundary is not present in P1/P2. FastAPI must still enforce org membership on every API route because CF Access is only an outer gate. -->
-- **DB**: new `agentforge_platform` DB+role on CNPG `infra-pg` (`infra-pg-rw.databases.svc:5432`),
-  DSN in a SOPS secret (precedent `open-webui-db.sops.yaml`); bump the 5Gi PVC. Multi-tenant with
-  **Postgres RLS** (`SET LOCAL app.current_org` per request): orgs, users, memberships(role),
-  connected_clusters, workspaces, agent_worker_pools, secret_refs (OpenBao pointers — never values),
-  workspace_config_versions, cluster_node_snapshots, audit_log. Isolation = RLS (data) × k8s
-  namespace per workspace × OpenBao namespace per org.
-<!-- codex: The existing CNPG manifest notes postInitSQL only ran at first bootstrap, so adding this DB/role needs an explicit migration/manual SQL job path. RLS also needs tests for missing `SET LOCAL`, background jobs, connection-pool reuse, and service/admin bypass paths. -->
-- **k8s access** = Headlamp's shape: dedicated ns+SA, `headlamp-readonly` ClusterRole (analyzer +
-  status) + a SEPARATE scoped-write role (patch Flux CRs to nudge reconcile) — never
-  create/update/delete on workloads; NetworkPolicy admits only cloudflared.
-<!-- codex: The Headlamp readonly precedent grants wildcard read including Secrets, which is not acceptable for a multi-tenant control plane analyzer. The Flux patch precedent also documents field-level escape risk; patching Flux CRs can redirect sources or impersonation unless admission policy constrains fields. -->
+- **Auth**: FastAPI OIDC RP against Authelia (auth-code + PKCE/S256); client block in
+  `authelia-config.yaml`, plaintext in a SOPS secret. **The CP does its own OIDC, so it is NOT
+  behind CF Access** (that would double-login and estate convention leaves OIDC apps Access-free);
+  exposure is cloudflared → CP. **Org membership + role are enforced by FastAPI on every route** from
+  P1 (CF Access is not the boundary; there is none in front of the API). `groups` claim → org/role.
+- **DB**: new `agentforge_platform` DB+role on CNPG `infra-pg`. `postInitSQL` does NOT run on the
+  live cluster → a **one-shot migration Job** (alembic + a bootstrap SQL that creates the role/DB)
+  is the provisioning path; SOPS DSN secret; bump the PVC (verify `allowVolumeExpansion`). Model:
+  orgs, users, memberships(role), connected_clusters, workspaces, agent_worker_pools, secret_refs
+  (OpenBao pointers — never values), workspace_config_versions, cluster_node_snapshots, audit_log.
+  **RLS is on from the first migration** (`SET LOCAL app.current_org`), with tests for the bypass
+  traps codex named: missing-SET, background jobs, pooled-connection reuse, ingest endpoints, and
+  admin/service paths (a dedicated non-RLS admin role is explicit and audited, never the default).
+- **k8s access**: dedicated ns+SA + a **tightened read ClusterRole** — NOT Headlamp's wildcard: the
+  analyzer reads nodes/pods/metrics/kube-state (allocatable + usage) but **has no `secrets` read**;
+  status reads are per-tenant-namespace scoped. The scoped-write role is **only** `patch` on Flux
+  Kustomizations to nudge reconcile, and an admission policy constrains which fields (no
+  `spec.sourceRef`/`serviceAccountName` changes → no source-redirect/impersonation). NetworkPolicy
+  admits only cloudflared.
 - **3-section webapp** (vue-router over v1 dashboard components): Infrastructure (connect cluster;
-  analyzer view; Provision → git), Workspaces (add repo; access key → OpenBao; per-workspace config;
+  analyzer; Provision → git), Workspaces (add repo; access key → OpenBao; per-workspace config;
   Gitea bootstrap via v1 `bootstrap.py`), Monitoring (v1 kanban+feed+worker-strip, fleet/per-workspace
-  + utilization; fed by workers pushing to `POST /api/ingest/events`, CP keeps the board read model +
-  rebroadcasts SSE).
-<!-- codex: Worker event ingest is an untrusted multi-tenant write path and needs idempotency keys, schema limits, tenant/workspace authorization, replay protection, and cardinality/rate limits. Otherwise a malicious spoke or worker can corrupt the read model or overload metrics/SSE. -->
-- **Provisioning**: CP renders `Workspace`/`AgentWorkerPool` CRs + manifests, commits via GiteaClient
-  to `kubernetes/apps/apps/agentforge/tenants/<org>/<workspace>/`; hub Flux reconciles; a **kro RGD**
-  expands each into ns/SA/ESO SecretStore+ExternalSecret/KEDA ScaledObject/worker Deployment/RBAC/
-  NetworkPolicy. `ConnectedCluster` (cross-cluster) reconciled by the CP itself.
-<!-- codex: Tenant paths alone are not a security boundary if Flux applies them with one broad identity. The plan needs generated-only manifests, server-side validation/admission for allowed GVKs/fields, and a decision on whether tenants can ever write to these Git paths directly. -->
-- **External clusters (hub-spoke, pull-based)**: each spoke runs its own Flux (or the "our agent"
-  bundle), pulls only its tenant's desired state from a per-tenant git target; spoke→hub limited to
-  worker-config fetch, event ingest, node-snapshot push (per-workspace-bearer scoped). Hub's only
-  outward privilege = a scoped git push target, never a spoke kubeconfig.
-<!-- codex: This protects the hub from holding spoke kubeconfigs, but it cannot make a malicious spoke trustworthy: it can fake status, ignore desired state, run modified workers, replay events, or exfiltrate secrets intentionally delivered to it. The hub must treat every spoke payload as hostile and use read-only spoke deploy keys plus per-workspace, rotatable credentials. -->
+  + utilization). **Event ingest (`POST /api/ingest/events`) is a hardened untrusted write path**:
+  per-workspace bearer authz (a worker can only write its own workspace's events), idempotency key +
+  replay window, strict schema + field-size caps, per-workspace rate + cardinality limits; the CP
+  keeps the board read model and rebroadcasts SSE. Malicious worker/spoke input cannot corrupt the
+  model or overload metrics.
+- **Provisioning**: CP renders `Workspace`/`AgentWorkerPool` CRs **from templates only** (never
+  arbitrary user YAML) and commits via GiteaClient to
+  `kubernetes/apps/apps/agentforge/tenants/<org>/<workspace>/`. A **per-tenant Flux Kustomization
+  (its own minimal-RBAC SA, `wait: false` so tenant churn can't wedge the apps layer)** reconciles
+  it; the **admission policy rejects any GVK/field outside the tenant allowlist** — tested with a
+  malicious-manifest attempt. In P1, kro is NOT yet installed, so the CP renders **plain
+  hand-authored manifests** (ns/SA/Deployment/RBAC/NetworkPolicy) directly; **P2 introduces the kro
+  RGD** to DRY the expansion. `ConnectedCluster` is reconciled by the CP itself.
+- **External clusters (hub-spoke, pull-based — P3)**: each spoke runs its own Flux (or the "our
+  agent" bundle) and pulls only its tenant's desired state via a **read-only spoke deploy key**;
+  spoke→hub is limited to worker-config fetch, event ingest, node-snapshot push, all per-workspace
+  bearer + the ingest hardening above. **The hub treats every spoke payload as hostile** and cannot
+  attest a spoke actually ran the intended manifests or protected delivered secrets — the platform
+  distinguishes *reported* from *trusted* state, and per-workspace creds are short-lived + rotatable.
+  Hub's only outward privilege = the scoped git push target.
 - **Resource analyzer** = CP async read-only job: node allocatable (metrics-server + kube-state-metrics;
-  spokes push snapshots), 60–70% p95 headroom, +~128 MiB/Kata-pod, `recommended_workers` → advisory in
-  DB; Provision → git commit sets `AgentWorkerPool.maxReplicas` → kro → `ScaledObject.maxReplicaCount`.
-<!-- codex: +128 MiB per Kata pod is likely too low once the guest kernel, agent image, DinD daemon, Docker graph storage, and runner/test containers are included. External clusters may not have metrics-server/KSM or may report malicious snapshots, so recommendations must be advisory with conservative floor/ceiling validation. -->
+  spokes push snapshots — validated with conservative floors/ceilings since a spoke may lie or lack
+  metrics-server). Per-worker footprint budgets the **full sandbox cost** (Kata guest kernel + agent
+  image + DinD daemon + Docker graph storage + test containers ≈ **512 MiB–1 GiB/job**, not 128 MiB)
+  at 60–70% p95 headroom → advisory `recommended_workers` in DB. "Provision" → git commit sets
+  `AgentWorkerPool.maxReplicas`. Advisory only; never auto-applies destructive changes.
 
-### Worker + sandbox
+### Worker + sandbox (agentforge extended)
 
-- **Config seam**: `adapters/config/control_plane.py` (`ControlPlaneConfigSource`, ~100 lines, mirrors
-  `gitea_repo.py`). `AF_CONFIG_SOURCE=control_plane`; fetches
-  `GET /api/v1/workspaces/{ws}/pools/{pool}/config` with a per-workspace bearer (OpenBao-minted,
-  ESO-synced). Reuses v1 poll loop; a CP "config changed" hint triggers immediate refresh.
-<!-- codex: This P1/P2 dependency is inconsistent: P1 says no OpenBao/ESO yet, but this seam depends on an OpenBao-minted, ESO-synced bearer. P1 needs an explicit SOPS/static-token fallback and the same persisted last-good behavior as v1 for CP outages. -->
-- **Image** (`deploy/Dockerfile`, multi-stage): dashboard build → uv venv → runtime (python3.12 + git
-  + Node + `@anthropic-ai/claude-code` + `@openai/codex` + docker CLI + tini), non-root uid 1000,
-  volumes state_dir + jobs_root. Built+pushed to `registry.chifor.me` (anonymous-pull, no
-  imagePullSecret) by a new `image` job in `release.yml`; pin references `worker@sha256:…`.
-<!-- codex: The fat image is a cold-start and supply-chain risk under scale-to-zero; pre-pull helps image transfer only, not Kata boot, DinD startup, auth canary, or nested test image pulls. Pinning by digest is good, but the plan should add vulnerability scanning/signing and separate images if dashboard/worker/DinD tooling diverge. -->
-- **Three-tier privilege split per pod** (the airtight boundary): orchestrator container holds bot
-  PATs/HMAC/git-push/OpenBao-SA; agent container (claude/codex CLI) holds inference OAuth only, no PAT
-  mount; test_cmd/setup_cmd run in a DinD container with `--network none` and NO cred mount.
-<!-- codex: "Airtight" is not justified while all tiers are in one pod: localhost, pod-level egress policy, pod SA token projection, and any shared Docker API/socket can cross tiers. Inference OAuth is also a high-value tenant-zero credential, and prompt-injected agent tools may read it from their own env/home unless the runner prevents tool-env inheritance or uses a broker. -->
-- **Credential injection (OpenBao+ESO)**: `af-forge-creds` → orchestrator only; `af-claude-oauth`
-  (`CLAUDE_CODE_OAUTH_TOKEN`, ~1yr, no auto-refresh → rotate on the yearly auth-canary alert; P3
-  apiKeyHelper-via-broker) → agent env only; `af-codex-auth` (`~/.codex/auth.json`, auto-refreshes →
-  writable emptyDir seeded by init) → agent only; `af-runner-token` → CI runners only. Wire the
-  runners' `home=` seam from `AF_CLAUDE_HOME`/`AF_CODEX_HOME`; add `CLAUDE_CODE_OAUTH_TOKEN` to
-  `scrubbed_env` passthrough (agent children only, never test_cmd).
-<!-- codex: Adding OAuth tokens to agent child envs weakens the scrubbed-env model because Claude/Codex tool subprocesses may inherit and expose them through Bash, files, or model output. Treat this as a temporary tenant-zero-only exception with tests proving test_cmd and repo shell tools cannot read it, or move directly to a broker/helper. -->
-- **Executor port** (`ports/executor.py`): both untrusted call sites route through it —
-  `Workspace.run_cmd` and the runner CLI subprocesses. `LocalExecutor` = today's subprocess
-  (dev/tests); `SandboxExecutor` = `docker run` into a per-pod DinD sidecar (safe in the Kata
-  microVM), `--network none` default, `--cap-drop ALL`, `--read-only`, pids/mem limits,
-  kill-on-timeout. The shared jobs volume must mount at an identical path in orchestrator + agent +
-  DinD (the `-v` resolves in the DinD daemon's FS — the load-bearing pod-spec detail). Opt-in
-  `repo.sandbox: {kind|vcluster}` for k8s-sandbox tests.
-<!-- codex: The runner CLI and repo test_cmd are different trust classes: Claude/Codex need OAuth homes and network egress, while tests need no credentials and default-deny network. A single executor path will either break runner auth/networking or accidentally grant repo-controlled Bash access to inference credentials. -->
-<!-- codex: Privileged DinD inside Kata is a blast-radius reduction, not proof of safety; it depends on the RuntimeClass applying to the whole pod, Kata privileged-device behavior, no hostPath mounts, and no exposed Docker TCP socket. The Docker API must be reachable only by the orchestrator, because `--network none` on child containers does not protect against another pod container using dockerd directly. -->
-<!-- codex: The identical-path shared volume detail can work for DinD bind mounts only if the volume is mounted into the DinD daemon container at that exact path with correct ownership and propagation semantics. It also creates a shared writable channel from untrusted code back to the orchestrator, so outputs need strict ownership, path, and symlink validation. -->
-- **Egress (Cilium default-deny + allowlist)**: per-Deployment CiliumNetworkPolicy (Claude→anthropic,
-  Codex→openai, tester→litellm-local, orchestrator→forge/OpenBao/litellm); per-exec test_cmd→
-  `--network none` (opt-in pull-through package proxy).
-<!-- codex: Pod-level network policy cannot distinguish orchestrator, agent, and DinD containers inside the same pod, so allowing orchestrator egress to Forge/OpenBao also allows agent code in that pod to attempt the same destinations. Per-container egress requires separate pods, a service-mesh/proxy design, or another enforceable mechanism. -->
-- **Deployment/role model**: one image, roles via config, one Deployment per OAuth account
-  (`af-claude-max1` planner/reviewer, `af-claude-max2` implementer +DinD, `af-codex` cross-reviewer,
-  `af-tester` litellm +DinD, `af-dashboard` trusted/runc). Only implementer+tester get DinD. Distinct
-  `AF_WORKER_NAME` per pod via downward API.
-<!-- codex: One Deployment per account is the right shape for KEDA caps, but planner+reviewer sharing `af-claude-max1` means scaling and pending metrics must be account-aware, not only role-aware. Also set worker internal concurrency to 1 and rolling-update `maxSurge: 0` if the pod count is intended to be the hard account cap. -->
-- **Autoscaling (KEDA scale-to-zero)**: `maxReplicaCount = accounts[X].max_parallel` — the KEDA cap IS
-  v1's per-account semaphore (claim lock dedups; no new code). Signal from an always-on read-only
-  `af-dispatcher` (scale-to-zero can't self-report): polls Gitea, exports `forge_pending{role,repo}`,
-  Prometheus scaler. Cron warm-floor for interactive roles; pre-pull DaemonSet for cold start.
-<!-- codex: `maxReplicaCount` caps desired replicas for a ScaledObject, but it is not a strict runtime semaphore during rollouts, termination grace, HPA/KEDA handoff, or if each pod can run multiple claims. Keep an app-level per-account lease or add explicit Deployment strategy, termination, and concurrency tests that count Running+Terminating pods. -->
-<!-- codex: The dispatcher metric shape omits account/pool, claim state, and tenant, which can over-scale shared-account deployments or leak tenant workload shape through Prometheus. The oracle should subtract valid in-flight claims and expose labels that match the exact ScaledObject/account being controlled. -->
-- **CI runners (k8s-native)**: KEDA `ScaledJob` — one ephemeral Kata runner + privileged DinD per
-  queued job (token from OpenBao/ESO, label `self-hosted-hv` with `docker://` schema). Same sandbox
-  mechanism as workers; deletes v1's workspace-reclaim machinery.
-<!-- codex: CI jobs are tenant-controlled code with a runner token and Docker access, so they need a separate threat model from workers: short-lived registration tokens, no shared cache secrets, bounded egress, and cleanup of DinD graph storage. KEDA ScaledJob concurrency also needs a per-org cap, not just queue depth. -->
+- **Config seam**: `adapters/config/control_plane.py` (`ControlPlaneConfigSource`, mirrors
+  `gitea_repo.py`: `current/degraded/refresh()`, persisted last-good, `compatibility()`). Fetches
+  `GET /api/v1/workspaces/{ws}/pools/{pool}/config` with a bearer. **P1 credential source = a SOPS
+  static per-workspace token** (no OpenBao/ESO dependency); **P2 switches to an OpenBao-minted,
+  ESO-synced bearer.** Same persisted-last-good so a CP outage keeps the worker draining, `readyz`
+  degraded, no new claims. `serve()` always builds the `GiteaClient` (issues/PRs) regardless of
+  config source — the source only swaps where the config JSON comes from.
+- **Images**: multi-stage, split by concern to bound the fat-image/supply-chain risk — an
+  **orchestrator image** (python + git + the orchestrator; no agent CLIs, no docker) and a
+  **sandbox image** (agent CLIs claude/codex + docker CLI + test toolchain). Both non-root uid 1000,
+  built+pushed to `registry.chifor.me` by a `release.yml` image job, **scanned by the existing ailab
+  Trivy** and referenced by digest (`@sha256:…`, immutable). Pre-pull DaemonSet on the agent pool.
+- **Executor port** (`ports/executor.py`): the ONE place untrusted exec is dispatched.
+  `ExecSpec{argv|shell, cwd, env, timeout_s, stdin, creds: none|inference, egress: none|model,
+  image}`. **`LocalExecutor` is the DEFAULT** (`executor or LocalExecutor()`), preserving today's
+  subprocess behavior so the entire existing suite stays green with zero edits (verified: only
+  test_workspace/test_handlers_workspace/test_runners_* touch the seam and pass because behavior is
+  preserved; litellm runner is HTTP, not routed). `SandboxExecutor` (P2) dispatches into the
+  ephemeral sandbox pod. **The agent CLI and `test_cmd` are DISTINCT trust classes**: the agent CLI
+  runs with `creds=inference, egress=model`; `test_cmd`/`setup_cmd` run with `creds=none,
+  egress=none` — the port carries the class so they can never be conflated. Unify the Windows kill
+  path on `taskkill /T` (strict superset). Shared checkout volume is written only by the sandbox and
+  read back by the orchestrator with **strict path/ownership/symlink validation** (the diff is the
+  only channel out).
+- **Credential injection (P2, OpenBao+ESO)**: `af-forge-creds` (PATs/HMAC/git-push/config-bearer) →
+  **orchestrator pod only**; `af-claude-oauth` (`CLAUDE_CODE_OAUTH_TOKEN`) + `af-codex-auth`
+  (`~/.codex/auth.json`, writable emptyDir seeded by init) → **sandbox pod's agent container only**;
+  `af-runner-token` → CI runners only. Because the sandbox is a separate pod with model-only egress
+  and no Secret RBAC, a prompt-injected agent holds only the inference token and can exfil it *at
+  most to the model API* — accepted for tenant-zero, removed by the P3 broker.
+  `CLAUDE_CODE_OAUTH_TOKEN` is added to the agent container's env only (never `test_cmd`), proven by
+  a `test_cmd` dump-env negative test.
+- **Egress = per-POD Cilium policy** (now correct, since orchestrator and sandbox are separate pods):
+  orchestrator pod → forge/OpenBao/CP/model-routing; sandbox pod → the one model endpoint only;
+  `test_cmd` container → `--network none` (opt-in pull-through package proxy).
+- **Deployment/role + concurrency**: one orchestrator image, roles via config, **one orchestrator
+  Deployment per OAuth account**; `maxSurge: 0`, per-pod concurrency 1, and a **forge-backed
+  per-account lease** as the true semaphore (KEDA cap is coarse). Scaling + the dispatcher metric are
+  **account-aware, not role-aware** (planner+reviewer share max1). Distinct `AF_WORKER_NAME` per pod
+  via the downward API.
+- **Autoscaling (KEDA)**: interactive roles use `minReplicaCount≥1` (warm), non-interactive scale to
+  zero. The always-on read-only **`af-dispatcher`** exports `forge_pending{account,pool,role,repo}`
+  **minus valid in-flight claims** (so it doesn't over-scale shared accounts or leak workload shape).
+  `maxReplicaCount = accounts[X].max_parallel`; the lease enforces the hard cap. KEDA verification
+  counts **Running+Terminating** pods across rollouts/termination, not just desired replicas.
+- **CI runners (P2, k8s-native)** — a **separate threat model** from workers: KEDA `ScaledJob`, one
+  ephemeral Kata runner + DinD per queued job, **short-lived registration token** from OpenBao/ESO,
+  no shared cache secrets, bounded egress, DinD graph-storage cleanup on teardown, and a **per-org
+  concurrency cap** (not just queue depth). Label `self-hosted-hv` with the `docker://` schema.
 
 ### Infrastructure (ailab)
 
-- **Dedicated Talos agent node pool** (new tofu `kubernetes/infra/agent-nodes/`, mirrors
-  `dev-workers/main.tf`): Proxmox VMs, `cpu type=host` (nested virt), joined as workers
-  (`machine_type=worker`, new `worker.yaml.tftpl`) with Kata + gVisor Talos system extensions, kernel
-  modules `vhost_net`/`vhost_vsock`, label `ailab.io/agent-pool` + taint `dedicated=agent`. Nested virt
-  must be enabled on the Proxmox hosts (`kvm_amd nested=1`) or Kata `/dev/kvm` is absent → gVisor
-  fallback for compute-only roles.
-<!-- codex: Mirroring `dev-workers/main.tf` is only a rough pattern: Talos worker joining needs machine secrets, install image/extensions, node cert bootstrap, CNI readiness, and safe rolling replacement. gVisor fallback cannot cover privileged DinD roles, so scheduling must fail closed when Kata is unavailable. -->
-- **RuntimeClasses** `kata` (QEMU) + `gvisor` (runsc), agent-pool nodeSelector/toleration.
-<!-- codex: RuntimeClass is pod-scoped, so every sidecar in the pod must run under Kata for the DinD safety claim to hold. Namespace PSA/PodSecurity exemptions for privileged DinD should be narrowly scoped, otherwise tenant namespaces become broadly privileged. -->
-- **New operators (Flux)**: OpenBao, External Secrets Operator, KEDA, kro under
-  `kubernetes/apps/infrastructure/{security,autoscaling}/`.
+- **Dedicated Talos agent node pool**: Talos **worker** nodes must reuse the existing cluster
+  `machine_secrets` bundle (in `infra/terraform.tfstate`) — a fresh `talos_machine_secrets` forks
+  the PKI and never joins. Design: read `infra/` remote state via sensitive outputs (or fold the
+  pool into `infra/`); a new `worker.yaml.tftpl` (nodeLabels `ailab.io/agent-pool`, taint
+  `dedicated=agent`, kernel modules `vhost_net`/`vhost_vsock`); **Kata + gVisor as Image-Factory
+  extensions** (not machine-config patches — verify gVisor extension availability). **Nested virt is
+  a new Proxmox-host prerequisite** (`kvm_amd nested=1`, configured nowhere today) + `cpu type=host`;
+  without `/dev/kvm`, Kata pods fail — and **scheduling of DinD/sandbox roles must fail closed** (not
+  silently fall back to gVisor, which can't host privileged DinD).
+- **RuntimeClasses** `kata` (QEMU, pod-scoped → every sandbox sidecar runs under Kata) + `gvisor`,
+  agent-pool nodeSelector/toleration; narrow PodSecurity exemption for the privileged DinD scoped to
+  the sandbox namespaces only.
+- **New operators (Flux, P2)**: OpenBao, ESO, KEDA, kro under
+  `kubernetes/apps/infrastructure/{security,autoscaling}/` (CRDs before operators; note ordering).
 
-## Phasing
+## Phasing (revised for coherent slices)
 
-- **P1 — tenant-zero, hub only, full vertical slice**: agentforge-platform repo (CP API + Authelia
-  OIDC + Postgres schema + 3-section webapp); connect one cluster = the hub (Headlamp-style SA);
-  Workspaces CRUD → CRs → kro materializes (secrets still SOPS, no OpenBao yet); worker image +
-  ControlPlaneConfigSource; the dedicated agent node pool (plain, no Kata yet); monitoring
-  fleet-aggregation; expose `agentforge.chifor.me`. One shadow Deployment (planner, merge disabled,
-  playground) proving auth-canary + config fetch + a 1→2 transition.
-<!-- codex: P1 cannot both rely on `kro materializes` and defer `kro installed` to P2. Either install kro in P1 with SOPS/static-secret templates, or make P1 commit plain manifests without kro. -->
-<!-- codex: The shadow worker also needs a config bearer and OAuth secret path, but P1 says no OpenBao/ESO yet while the Worker section assumes OpenBao-minted ESO-synced credentials. Define the P1 credential source explicitly so the vertical slice is actually shippable. -->
-- **P2 — secrets + scaling + sandbox (the unlock)**: OpenBao + ESO + KEDA + kro installed; migrate
-  secrets off SOPS into OpenBao (namespaced SecretStore per workspace); Kata node-pool extensions +
-  RuntimeClasses; full per-account Deployment set + DinD + SandboxExecutor + Cilium egress + KEDA
-  scale-to-zero + af-dispatcher + k8s-native CI runners. All sandbox-boundary tests green → flip
-  `privilege_hardening: v1.1` → unlock non-playground repos.
-<!-- codex: Flipping `privilege_hardening: v1.1` after P2 is only valid if the tests prove the same guarantees ADR 0018 required: no credential read, no network by default for test_cmd, and no same-UID/same-pod escape. As written, same-pod networking and Docker API access leave the gate unsatisfied. -->
-- **P3 — external clusters + multi-user + fleet**: spoke "install our agent" onboarding (pull model);
-  Authelia groups → org RBAC + Postgres RLS enforced; per-org quotas; per-tenant LiteLLM virtual keys
-  w/ budget caps; dogfood (`cchifor/agentforge` PRs flow through the deployed system); optional Claude
-  apiKeyHelper-via-broker hardening.
-<!-- codex: Subscription-OAuth gating must be enforced before external tenants exist, not only as P3 policy. The CP config generator and worker validator should reject `claude_max` for non-tenant-zero orgs, and the corresponding Secrets must not exist outside tenant-zero namespaces. -->
+- **P1 — tenant-zero compute, real multi-tenant data/auth, no OpenBao/kro/Kata yet**:
+  agentforge-platform repo (CP API + Authelia OIDC + Postgres schema **with RLS + org enforcement +
+  migration Job**); the 3-section webapp; connect one cluster = the hub (tightened read SA, no Secret
+  read); Workspaces CRUD → **plain hand-authored manifests** committed to the tenant path behind the
+  **admission policy + per-tenant Flux Kustomization**; worker orchestrator image +
+  `ControlPlaneConfigSource` with a **SOPS static token**; the dedicated agent node pool (plain, no
+  Kata); monitoring aggregation with hardened ingest; expose `agentforge.chifor.me` (no CF Access).
+  One **shadow orchestrator Deployment** (planner, merge disabled, playground) proving OIDC login →
+  create workspace → git commit → Flux applies → config fetch → a 1→2 transition. **No claim of
+  sandbox hardening or full multi-tenant compute yet.**
+- **P2 — secrets + scaling + the sandbox boundary (the unlock)**: OpenBao + ESO + KEDA + kro; secrets
+  → OpenBao (namespaced SecretStore, `automountServiceAccountToken:false`, no worker Secret RBAC,
+  admission preventing ClusterSecretStore/path escapes); Kata node extensions + RuntimeClasses;
+  **the ephemeral sandbox-pod SandboxExecutor** + per-pod Cilium egress + the forge-backed account
+  lease + KEDA + `af-dispatcher` + k8s-native CI runners; kro RGD DRYs the tenant expansion. **All
+  sandbox-boundary tests green (below) → flip `privilege_hardening: v1.1` → unlock non-playground
+  repos.** The flip is valid only because untrusted exec is now a separate pod with no creds, no
+  Docker API reachability, and default-deny+model-only egress.
+- **P3 — external clusters + full multi-tenant compute + fleet**: spoke onboarding (pull model,
+  read-only deploy keys, hostile-payload handling); per-org quotas (ResourceQuota, lease caps,
+  OpenBao namespace policies); **per-tenant LiteLLM virtual keys w/ budget caps**; the Claude
+  `apiKeyHelper`→broker so the sandbox never holds a durable token; dogfood. **`claude_max` is
+  rejected for non-tenant-zero orgs at the CP API, the generated config, worker startup, AND
+  admission — and tenant-zero OAuth Secrets are never referenced by shared templates or spoke git
+  targets.**
 
 ## Critical files
 
 - agentforge (v1 seams): `src/agentforge/main.py`, `app/workspace.py`,
   `adapters/runners/{_envelope,claude_code,codex}.py`, `infra/{settings,metrics}.py`, NEW
-  `adapters/config/control_plane.py`, NEW `deploy/Dockerfile`, `.github/workflows/release.yml`.
+  `ports/executor.py` + `adapters/exec/{local,sandbox}.py`, NEW `adapters/config/control_plane.py`,
+  NEW `deploy/{orchestrator,sandbox}.Dockerfile`, `.github/workflows/release.yml`, NEW
+  `sandbox-runner`/`dispatcher` entrypoints.
 - agentforge-platform (new): `src/agentforge_platform/{api,domain,adapters,operator}/**`, `webapp/**`,
-  `crds/**`, `deploy/**`.
-- ailab: `kubernetes/infra/agent-nodes/**` + `machine-config/worker.yaml.tftpl`,
-  `kubernetes/apps/apps/agentforge/**`, `kubernetes/apps/infrastructure/{security,autoscaling}/**`,
-  `kubernetes/apps/apps/auth/authelia-config.yaml`, `kubernetes/apps/databases/**`, cloudflared +
-  `cloudflare/{access,dns}.tf`, `docs/decisions/0019-agentforge-v2-control-plane.md`.
-<!-- codex: Add admission/policy manifests and contract tests to the critical file list; they are central to the GitOps, tenant, and credential boundaries. Without them, several key controls exist only as renderer convention. -->
+  `crds/**`, `admission/**` (VAP/Kyverno), `deploy/**`, `tests/contract/**` (CP↔worker).
+- ailab: `kubernetes/infra/{agent-nodes or infra}/**` + `machine-config/worker.yaml.tftpl`,
+  `kubernetes/apps/apps/agentforge/**` (RuntimeClasses, orchestrator + sandbox RBAC/NetworkPolicy,
+  admission policies, per-tenant Flux Kustomization + tenants/ subtree), Proxmox nested-virt task,
+  `kubernetes/apps/infrastructure/{security,autoscaling}/**`, `authelia-config.yaml`,
+  `kubernetes/apps/databases/**` (+ migration Job), cloudflared + `cloudflare/dns.tf` (no Access app),
+  `docs/decisions/0019-agentforge-v2-control-plane.md`.
 
 ## Verification
 
-- **Sandbox boundary (the #1 gate)**: a canary malicious repo + prompt-injected issue whose
-  test_cmd/agent try to read bot PATs, inference OAuth, OpenBao, orchestrator `/proc/1/environ`, and
-  egress to the internet — assert every attempt fails (no cred mounts, separate ns, `--network none`);
-  assert `uname -r` shows the Kata guest kernel; assert the egress allowlist matrix; assert privileged
-  DinD can't escape the microVM.
-<!-- codex: `/proc/1/environ` is not enough: in separate PID namespaces, `/proc/1` is the local container init, not the orchestrator. Tests must also attempt pod SA token use, localhost service access, Docker API access, shared-volume symlink/hardlink attacks, and egress to every destination allowed for any container in the pod. -->
-- **KEDA 0→N→0**: seed K issues → scale to `min(K, maxReplicaCount)`, process (claims don't collide —
-  reuse `contract-claims`), return to 0 after cooldown; assert the cap holds.
-<!-- codex: This verification should count active claims and Running+Terminating pods during rollouts, rapid scale up/down, auth-canary delays, and pod crashes. Otherwise it only proves KEDA's desired replica cap, not the subscription concurrency cap. -->
-- **Credential injection**: pod auth-canary passes non-interactively from ESO creds; rotate OpenBao →
-  ESO re-sync → pod roll → canary passes; Codex refresh persists then re-seeds.
-<!-- codex: Add negative credential tests across tenants and containers: agent cannot read forge creds, test_cmd cannot read inference creds, worker SA cannot list Secrets, one workspace bearer cannot fetch another workspace config, and non-tenant-zero cannot resolve subscription OAuth. -->
-- **Platform**: OIDC login; create workspace → git commit → kro materializes; analyzer recommends vs
-  live allocatable; monitoring aggregates the fleet; RLS blocks cross-org reads (P3).
-<!-- codex: RLS should not wait for P3 if the DB schema exists in P1; test it from the first migration. Also include background jobs, ingest endpoints, and admin/service code paths, which often bypass request-scoped `SET LOCAL`. -->
-- **k8s/GitOps**: `kubectl --context admin@ai` sees tenant namespaces, RuntimeClasses, ScaledObjects,
-  synced ExternalSecrets; Flux reconciles the committed tenant tree; cloudflared serves the app.
-<!-- codex: GitOps verification should include a malicious manifest attempt in a tenant path and prove admission/Flux scoping rejects it. Seeing objects reconcile is not enough to prove the CP cannot mutate unrelated cluster resources. -->
+- **Sandbox boundary (the #1 gate — full matrix, not just `/proc/1/environ`)**: a canary malicious
+  repo + prompt-injected issue whose agent/`test_cmd` attempt to: read bot PATs / inference OAuth /
+  any Secret; **use the sandbox pod SA token** (must be absent/unmounted); reach the orchestrator, a
+  localhost service, OpenBao, or the forge; reach the **Docker API** directly; symlink/hardlink-escape
+  the shared checkout; and egress to **every destination allowed for any pod** — assert all fail.
+  Assert `uname -r` shows the Kata guest kernel; assert privileged DinD cannot escape the microVM to
+  the node. **Cross-tenant + cross-container negatives**: agent can't read forge creds; `test_cmd`
+  can't read inference creds; worker SA can't list Secrets; one workspace bearer can't fetch another's
+  config; non-tenant-zero can't resolve `claude_max`.
+- **KEDA + lease**: seed K issues → scale to `min(K, maxReplicaCount)`, process (claims + the account
+  lease prevent both collision and over-parallelism), return to warm/zero; assert the cap holds by
+  counting **Running+Terminating** pods during rapid up/down, auth-canary delay, and pod crash.
+- **GitOps admission**: commit a malicious manifest (ClusterRole, privileged pod, source-redirect
+  patch) to a tenant path → assert admission + Flux SA scoping reject it; seeing benign objects
+  reconcile is not sufficient.
+- **RLS (from P1)**: cross-org read blocked from the first migration, including background jobs,
+  ingest endpoints, and admin/service code paths.
+- **Platform**: OIDC login + org-membership enforced on every route; create workspace → git commit →
+  (P1 plain manifests / P2 kro) materializes; analyzer recommends vs live allocatable with the
+  corrected sandbox footprint; ingest rejects unauthorized/oversized/replayed events.
+- **CP↔worker contract**: the versioned fixture suite passes in both repos' CI.
 
 ## Risks
 
-1. **Multi-tenant secret isolation (highest)** — enforce in the kro RGD: always a namespaced
-   SecretStore (never Cluster), OpenBao k8s-auth role pinned to exact namespace+SA, policy scoped to
-   `af/<org>/<workspace>/*`, NetworkPolicy so workers reach only ESO/OpenBao/CP.
-<!-- codex: Namespaced SecretStore is necessary but insufficient: ESO still materializes Kubernetes Secrets, and any pod with secret RBAC or mounted/token access can read them. Add automountServiceAccountToken=false by default, projected tokens only where needed, no worker RBAC to Secrets, and admission that prevents ClusterSecretStore/path escapes. -->
-2. **External-cluster trust boundary** — pull-based only; hub's sole outward privilege = scoped git
-   push; config endpoint per-workspace-bearer scoped; every spoke→hub call is untrusted input.
-<!-- codex: This risk should explicitly state the residual limitation: the platform cannot attest that an external spoke ran the intended manifests or protected tenant secrets once delivered. Hub APIs need replay protection, schema validation, per-spoke quotas, and audit trails that distinguish reported state from trusted state. -->
-3. **Subscription-OAuth sharing across tenants** — `claude_max` is tenant-zero only; external tenants
-   get per-tenant LiteLLM virtual keys with per-org budget caps; allowed engines gated by org plan.
-<!-- codex: "Allowed engines gated by org plan" must be enforced in the CP API, generated config, worker startup validation, and admission policy; UI-only gating is bypassable. Also ensure tenant-zero OAuth Secrets are never referenced by shared templates or external-cluster Git targets. -->
-4. **Cold-start latency** — fat image + Kata boot + auth canary; pre-pull DaemonSet + cron warm-floor;
-   true zero overnight.
-<!-- codex: This risk is understated economically: pre-pull does not warm Kata microVMs, DinD graph layers, package installs, or auth canaries, and external clusters may not support image pre-pull. Define acceptable first-issue latency and when interactive roles should use minReplicaCount instead of true zero. -->
-5. **Scope** — multi-month platform; P1 near-term, P2 unlocks safe non-playground use, P3 full
-   SaaS/fleet. Execute per phase.
-<!-- codex: P1 should be reduced to a truly coherent slice: CP API/UI, DB/RLS, static hub manifests or installed kro, SOPS-backed tenant-zero secret path, one shadow worker, and no claims about full multi-tenancy or v1.1 hardening until P2 tests pass. -->
+1. **Same-pod isolation illusion (was the top design flaw; now resolved)** — untrusted exec is a
+   **separate pod** with no Secret RBAC, no automounted token, model-only egress, and no orchestrator
+   Docker-API reachability; the boundary tests above are the proof, gating the v1.1 flip.
+2. **Multi-tenant secret isolation** — namespaced SecretStore is necessary but insufficient: also
+   `automountServiceAccountToken:false` by default, projected tokens only where needed, **no worker
+   RBAC to Secrets**, and admission preventing ClusterSecretStore/path escapes.
+3. **GitOps write path** — generated-manifests-only + admission allowlist + per-tenant Flux SA; a
+   compromised CP cannot escalate. Malicious-manifest rejection is a required test.
+4. **External-cluster trust** — pull-based; hub can't attest spoke execution; every spoke payload is
+   hostile input with replay protection, schema validation, per-spoke quotas, and reported-vs-trusted
+   state separation; read-only deploy keys + rotatable per-workspace creds.
+5. **Subscription-OAuth** — `claude_max` tenant-zero-only, enforced at API+config+worker+admission;
+   external tenants get per-tenant LiteLLM virtual keys with budget caps; tenant-zero OAuth Secrets
+   never referenced by shared/spoke templates.
+6. **Cold-start economics** — warm sandbox pool + `minReplicaCount≥1` for interactive roles + pre-pull
+   + Trivy-scanned split images; true zero only overnight/non-interactive; first-issue SLO defined.
+7. **Scope** — multi-month; P1 is a coherent slice (CP+UI+DB/RLS+admission+plain manifests+SOPS
+   token+one shadow orchestrator, no sandbox/v1.1 claim); P2 delivers the sandbox boundary + the
+   unlock; P3 the full SaaS/fleet.
 
 <!-- codex-review-status: complete -->
