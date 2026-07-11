@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Tenant-reconciler bootstrap (applied by the agentforge-tenants-git-auth Flux Kustomization, which
+# has SOPS decryption). Holds the read-only deploy-key Secret the agentforge-tenants GitRepository
+# clones with + the minimal-RBAC SA/ClusterRole the tenant Kustomization impersonates. OUTSIDE
+# clusters/ai because the bootstrap flux-system sweep of clusters/ai has no decryption. ADR 0019.
+resources:
+  - reconciler-rbac.yaml
+  - agentforge-tenants-deploy-key.sops.yaml
