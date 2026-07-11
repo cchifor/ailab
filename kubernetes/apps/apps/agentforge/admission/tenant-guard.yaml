@@ -70,6 +70,28 @@ spec:
     #     cluster-admin). With (5), the bound Role is a tenant-local, non-wildcard Role → no escalation.
     - expression: "request.kind.kind != 'RoleBinding' || object.roleRef.kind == 'Role'"
       message: "agentforge tenant path: a RoleBinding may only bind a namespaced Role, never a ClusterRole."
+    # (7) POD SECURITY — a tenant Namespace MUST enforce at least PSA baseline so every pod in it is
+    #     blocked from host escape (hostPath, hostNetwork/PID/IPC, hostPort, privileged). Without this a
+    #     Deployment could hostPath-mount the node FS (the privileged-only check in (4) is not enough).
+    - expression: >-
+        request.kind.kind != 'Namespace' ||
+        (has(object.metadata.labels) &&
+         'pod-security.kubernetes.io/enforce' in object.metadata.labels &&
+         object.metadata.labels['pod-security.kubernetes.io/enforce'] in ['baseline', 'restricted'])
+      message: "agentforge tenant path: a tenant Namespace must set pod-security.kubernetes.io/enforce to baseline or restricted."
+    # (8) A tenant may NOT self-assign the sandbox label — it exempts (4)'s privileged check and is
+    #     operator/P2-controlled. Blocks creating/updating a Namespace with sandbox=true.
+    - expression: >-
+        request.kind.kind != 'Namespace' || !has(object.metadata.labels) ||
+        !('ailab.io/agentforge-sandbox' in object.metadata.labels) ||
+        object.metadata.labels['ailab.io/agentforge-sandbox'] != 'true'
+      message: "agentforge tenant path: tenant namespaces may not self-assign the sandbox label (P2/operator-only)."
+    # (9) No nodeName pinning (PSA does not cover it) — a Deployment must schedule via the pool's
+    #     nodeSelector/toleration, never target a specific (e.g. control-plane) node directly.
+    - expression: >-
+        request.kind.kind != 'Deployment' ||
+        !has(object.spec.template.spec.nodeName)
+      message: "agentforge tenant path: a tenant Deployment may not set spec.template.spec.nodeName."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

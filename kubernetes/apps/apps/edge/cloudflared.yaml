@@ -84,9 +84,9 @@ data:
       # AgentForge v2 control plane (ADR 0019) — NOT behind Cloudflare Access: the CP does its OWN
       # Authelia OIDC (browser SSO) and enforces org membership on every route, so an Access gate would
       # double-login. Estate convention for own-auth apps (Gitea above, Vaultwarden apex below) is
-      # Access-free. Service/port match the CP Service (agentforge/deployment.yaml: :80 -> :8080).
+      # Access-free. Dials the CP Service on :8080 (== container port; no DNAT port translation).
       - hostname: agentforge.chifor.me
-        service: http://agentforge-platform.agentforge.svc.cluster.local:80
+        service: http://agentforge-platform.agentforge.svc.cluster.local:8080
       # Vaultwarden — apex NOT behind Cloudflare Access (the Bitwarden native clients hit /api,/identity,
       # /notifications/hub and can't do the Access browser SSO); its own master-password+2FA is the gate.
       # access.tf path-gates only /admin*.

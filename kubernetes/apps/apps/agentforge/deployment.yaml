@@ -77,9 +77,13 @@ spec:
                 secretKeyRef: { name: agentforge-runtime, key: AFP_SESSION_SECRET }
             # -- SPA: serve the built Vue webapp bundled at /app/webapp in the image --
             - { name: AFP_WEBAPP_DIST, value: "/app/webapp" }
-            # -- workers fetch their config from the CP over this in-cluster URL. Matches the Service
-            #    (agentforge-platform.agentforge.svc :80 -> targetPort http/8080). --
-            - { name: AFP_CONTROL_PLANE_INTERNAL_URL, value: "http://agentforge-platform.agentforge.svc:80" }
+            # -- server-owned worker image the CP renders into tenant Deployments. Provisioning REFUSES
+            #    (503) unless this is a pinned digest (repo@sha256:<64hex>) — the p1-worker release CI
+            #    fills it. Placeholder here so the CP can start; provisioning is gated until it's real. --
+            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:REPLACE_ME" }
+            # -- workers fetch their config from the CP over this in-cluster URL. The Service exposes
+            #    :8080 (== container port, no DNAT port translation — see serviceaccount-service.yaml). --
+            - { name: AFP_CONTROL_PLANE_INTERNAL_URL, value: "http://agentforge-platform.agentforge.svc:8080" }
             # -- tenant git push target (the ONLY repo the CP bot may write); explicit for clarity --
             - { name: AFP_TENANTS_GITEA_URL, value: "https://git.chifor.me" }
             - { name: AFP_TENANTS_REPO, value: "cchifor/agentforge-tenants" }

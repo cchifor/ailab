@@ -10,9 +10,9 @@
 #     CiliumNetworkPolicy fromEntities:[host] so the probes aren't denied.
 #   * confirm https://agentforge.chifor.me loads through the tunnel.
 #
-# FLAG (P2): the CP also receives POST /api/ingest/events from workers (plan §monitoring). The P1
-# shadow worker lives in a tenant namespace on the agent pool; when the worker->CP ingest path lands,
-# add an ingress `from` selector for the agent-pool worker namespace(s). Kept cloudflared-only for P1.
+# Ingress = the cloudflared tunnel (public SSO path) + tenant workers. In P1 the shadow worker must
+# GET /api/v1/.../config and POST /api/ingest/events from its tenant namespace, so the worker->CP path
+# is admitted here (not deferred to P2) — scoped to CP-managed tenant namespaces + the CP http port.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -30,3 +30,11 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: cloudflared
+    - from:
+        # Tenant workers (config fetch + ingest). Scoped to CP-rendered tenant namespaces
+        # (label app.kubernetes.io/managed-by: agentforge-cp — set by the renderer's namespace).
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: agentforge-cp
+      ports:
+        - { protocol: TCP, port: 8080 } # the CP container/http port
