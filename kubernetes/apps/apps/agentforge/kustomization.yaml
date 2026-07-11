@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge v2 self-service control plane at agentforge.chifor.me (ADR 0019). Hosts ONLY the CP;
+# per-workspace workers live in tenant namespaces reconciled from the separate cchifor/agentforge-tenants
+# repo (clusters/ai/agentforge-tenants*.yaml). SOPS secrets decrypt via the `apps` Flux Kustomization.
+resources:
+  - namespace.yaml
+  - rbac.yaml # tightened read-only ClusterRole for the analyzer (NO secrets) — see the file header
+  - rbac-flux.yaml # scoped patch-only nudge on Flux Kustomizations (field-locked by the admission policy)
+  - deployment.yaml # CP ServiceAccount + Deployment + Service
+  - networkpolicy.yaml # ingress only from the cloudflared tunnel
+  # - agentforge-oauth.sops.yaml # (added with the Authelia OIDC client)
+  # - agentforge-db.sops.yaml     # (added with the platform Postgres DB)
+  # - db-migrate.yaml             # (added with the platform Postgres DB)
+  # - admission                   # (added with the ValidatingAdmissionPolicies)

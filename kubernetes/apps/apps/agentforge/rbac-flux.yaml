@@ -1,0 +1,35 @@
+# Scoped Flux "nudge-reconcile" grant for the AgentForge CP's ServiceAccount — SEPARATE from
+# agentforge-cp-readonly so that role stays honestly read-only and this privileged delta is
+# isolated/auditable. TIGHTER than Headlamp's flux-safeops: `patch` on ONLY
+# kustomize.toolkit.fluxcd.io/kustomizations (NOT helmreleases, NOT sources). The CP's only write to
+# the cluster's own GitOps is to poke the tenant Flux Kustomization's reconcile annotation after it
+# commits desired state to cchifor/agentforge-tenants — it never creates/updates/deletes workloads
+# (Git's job, per the plan's governing principle).
+#
+# FIELD-SCOPING (the ADR 0015 limitation, now CLOSED for this path): `patch` on the RBAC layer still
+# permits mutating ANY field on a Kustomization — including spec.sourceRef (source-redirect) or
+# spec.serviceAccountName (apply-time impersonation identity). That is closed here by the
+# ValidatingAdmissionPolicy agentforge-cp-flux-guard (admission/), which rejects any patch by this SA
+# that changes spec.sourceRef or spec.serviceAccountName. RBAC + admission together = a true
+# nudge-only grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentforge-cp-flux-safeops
+rules:
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentforge-cp-flux-safeops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentforge-cp-flux-safeops
+subjects:
+  - kind: ServiceAccount
+    name: agentforge-platform
+    namespace: agentforge

@@ -1,0 +1,32 @@
+# Defense-in-depth: the CP authenticates every request itself (FastAPI OIDC RP against Authelia) and
+# is exposed via cloudflared (NO CF Access — it does its own SSO). Without a NetworkPolicy any
+# in-cluster pod could reach agentforge-platform.agentforge.svc directly. This admits ingress ONLY
+# from the cloudflared tunnel pods (ns edge) so arbitrary in-cluster pods can't reach the API. Egress
+# is left unrestricted (the CP needs the kube-apiserver, infra-pg, Authelia, and the in-cluster Gitea).
+#
+# ⚠️ VALIDATE on the live cluster after applying:
+#   * confirm the agentforge-platform pod stays Ready — kubelet liveness/readiness probes must still
+#     reach it. Default Cilium allows host->pod; if Cilium runs the host firewall restricted, add a
+#     CiliumNetworkPolicy fromEntities:[host] so the probes aren't denied.
+#   * confirm https://agentforge.chifor.me loads through the tunnel.
+#
+# FLAG (P2): the CP also receives POST /api/ingest/events from workers (plan §monitoring). The P1
+# shadow worker lives in a tenant namespace on the agent pool; when the worker->CP ingest path lands,
+# add an ingress `from` selector for the agent-pool worker namespace(s). Kept cloudflared-only for P1.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentforge-allow-tunnel-only
+  namespace: agentforge
+spec:
+  podSelector: {} # every pod in the agentforge namespace (just the CP)
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # The public path: the cloudflared tunnel (-> the CP's own Authelia OIDC).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
