@@ -94,7 +94,8 @@ puts untrusted execution in an isolated sandbox pod.
   sandbox pod (which itself can't reach anything but the model), so the confused-deputy path is
   closed. The orchestrator streams the prompt in and the diff out over a scoped exec channel, then
   reaps the pod. The inference OAuth is a **tenant-zero-only** high-value credential (see gating);
-  P3 replaces even that with an `apiKeyHelper`→broker so the agent env never holds a durable token.
+  **P2's broker (apiKeyHelper→broker sidecar) removes even the durable token from the agent env**
+  before the v1.1 flip — see "Closing the readback exfil channel" below.
 - **Latency**: a **warm sandbox pool** (a few pre-booted Kata pods per account, `minReplicaCount≥1`
   for interactive roles) hides Kata boot + image pull + auth canary; true scale-to-zero only for
   non-interactive/overnight. First-issue latency SLO: < 30s warm, < 120s cold.
