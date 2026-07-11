@@ -85,7 +85,12 @@ gitea_runner_reclaim_bin: /usr/local/bin/gitea-runner-reclaim.sh
 gitea_runner_reclaim_env: /etc/gitea-runner-reclaim.env
 gitea_runner_reclaim_service: gitea-runner-reclaim.service
 gitea_runner_reclaim_timer: gitea-runner-reclaim.timer
-gitea_runner_reclaim_interval: 30s # OnUnitInactiveSec between idle-guarded sweeps (tighten if flakes recur)
+gitea_runner_reclaim_interval: 5s # OnUnitInactiveSec between idle-guarded sweeps. Tightened 30s->5s:
+#   the reclaim only runs in the brief IDLE gap between back-to-back jobs (the global daemon_busy gate
+#   protects a live job's mid-step artifacts, so it can't run during a job), and a 30s cadence missed
+#   that gap under sustained CI, letting a prior job's root-owned leftovers red the NEXT job at its first
+#   step with `fork/exec /usr/bin/bash: no such file or directory` (the #574 EACCES flake). 5s catches
+#   the inter-job window ~6x more often. Cheap while busy (daemon_busy short-circuits before the scan).
 gitea_runner_reclaim_boot_delay: 90s # OnBootSec — let the daemon settle before the first sweep
 # Artifact subdirs job containers write as root/foreign uid into the reused workspace. KEEP IN SYNC
 # with cchifor/platform:.github/runner-hooks/job-started.sh AND the github_runner role's job-started.sh.
