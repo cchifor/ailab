@@ -62,7 +62,7 @@ spec:
       # gracefully (assumes step 1 above was run by hand). optional:true keeps this appliable without it.
       initContainers:
         - name: bootstrap-role-db
-          image: ghcr.io/cloudnative-pg/postgresql:17.10
+          image: ghcr.io/cloudnative-pg/postgresql:18.4
           command: ["/bin/sh", "-c"]
           args:
             - |
