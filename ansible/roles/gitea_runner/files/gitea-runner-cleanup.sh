@@ -67,13 +67,35 @@ any_job_running() {
   return 1
 }
 
-if any_job_running; then
-  log "skip: a co-located runner has a job in flight"
-  write_beacon "busy_skip 1" "last_run_seconds $(date +%s)"
-  exit 0
-fi
+# Prune the build cache of every NON-default buildx builder. `docker builder prune` only reaches the
+# default builder; CI's setup-buildx-action creates docker-container-driver builders (buildx_buildkit_*)
+# whose cache it never sees and which are EXCLUDED from container reaping (INFRA_EXCLUDE_RE) — so without
+# this their cache grows unbounded (the ~41 GB of build cache seen on the wedged ci-runner-2). Window-safe
+# (same `--filter until=` retention as the default-builder prune), so it can run under the pressure gate.
+prune_extra_builders() {
+  local win="$1" b
+  docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -vE '^$|^default$' | sort -u | while read -r b; do
+    docker buildx prune -f --filter "until=$win" --builder "$b" >/dev/null 2>&1 || true
+  done
+}
 
 before="$(disk_pct)"; is_num "$before" || before=0
+busy=0; any_job_running && busy=1
+
+# Pressure-aware busy gate (fix for the ENOSPC starvation death spiral). Every prune below is
+# safe-by-construction: it uses a retention window (`--filter until=`) LONGER than a job's max wall-clock
+# (the pressure window 6h > the 3h job timeout, mirroring REAP_AGE 4h > 3h), so it can never remove a
+# resource a live/recent build is using. The busy check is therefore ONLY an optimisation that suppresses
+# the ROUTINE (non-pressure) sweep — it must NEVER suppress the pressure/critical reclaim. The old code
+# exited unconditionally when busy, so on a runner kept continuously busy by back-to-back jobs the
+# pressure reclaim NEVER ran and the disk climbed to 100% (ci-runner-2). See the cchifor/platform CI
+# ENOSPC incident.
+if [ "$busy" -eq 1 ] && [ "$before" -lt "$PRESSURE_PCT" ]; then
+  log "skip routine sweep: co-located runner busy and disk ${before}% < ${PRESSURE_PCT}% pressure"
+  write_beacon "busy_skip 1" "last_run_seconds $(date +%s)" "disk_used_percent ${before}"
+  exit 0
+fi
+[ "$busy" -eq 1 ] && log "pressure override: disk ${before}% >= ${PRESSURE_PCT}% -> window-safe reclaim despite busy runner"
 
 # 1. stopped containers — always safe (never touches running).
 docker container prune -f >/dev/null 2>&1 || true
@@ -103,6 +125,7 @@ pct="$(disk_pct)"; is_num "$pct" || pct=0
 win="$ROUTINE_UNTIL"; [ "$pct" -ge "$PRESSURE_PCT" ] && win="$PRESSURE_UNTIL"
 docker network prune -f --filter "until=$win" >/dev/null 2>&1 || true
 docker builder prune -f --filter "until=$win" >/dev/null 2>&1 || true
+prune_extra_builders "$win"
 docker image prune -af --filter "until=$win" >/dev/null 2>&1 || true
 
 # 4. critical: still very high -> hard 1h window (NOT `-af`: a <1h running build is still protected) +
@@ -111,6 +134,7 @@ pct="$(disk_pct)"; is_num "$pct" || pct=0
 if [ "$pct" -ge "$CRITICAL_PCT" ]; then
   log "critical disk ${pct}% -> ${CRITICAL_UNTIL} window + actcache trim"
   docker builder prune -f --filter "until=$CRITICAL_UNTIL" >/dev/null 2>&1 || true
+  prune_extra_builders "$CRITICAL_UNTIL"
   docker image prune -af --filter "until=$CRITICAL_UNTIL" >/dev/null 2>&1 || true
   case "$ACTCACHE_DIR" in
     /*/*) # require an absolute path with >=2 components so we can never rm '/' or a top-level dir
