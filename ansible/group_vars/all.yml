@@ -12,6 +12,11 @@ pve_pinned_kernel: ""               # e.g. "6.19.2-1-pve" (set, then pve_pin_ker
 pve_use_no_subscription_repo: true
 pve_disable_enterprise_repo: true
 
+# ---- nested virtualization (AgentForge v2 Kata agent-node pool, ADR 0019) ----
+# Writes `options kvm_amd nested=1` (Strix Halo = AMD). Effective on the next kvm_amd load: a host
+# reboot, or `modprobe -r kvm_amd && modprobe kvm_amd` only when NO VMs run. docs/runbooks/agent-nodes.md.
+pve_enable_nested_virt: true
+
 # ---- base packages ----
 pve_base_packages:
   - bolt            # Thunderbolt authorization / retimer fix (provides boltctl)

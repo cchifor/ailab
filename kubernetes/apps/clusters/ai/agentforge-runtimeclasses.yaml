@@ -1,0 +1,19 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agentforge-runtimeclasses
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  # Own path/Kustomization (NOT a line in infrastructure/kustomization.yaml) so this does not collide
+  # with the concurrent P2 operators work under infrastructure/{security,autoscaling}. RuntimeClasses
+  # are cluster-scoped and have no dependencies — the handlers they reference are baked into the agent
+  # pool's Talos image (kubernetes/infra/agent-nodes), applied out-of-band by tofu, not Flux.
+  path: ./kubernetes/apps/infrastructure/agentforge-runtimeclasses
+  prune: true
+  wait: true

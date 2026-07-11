@@ -6,6 +6,11 @@ pve_pin_kernel: false
 pve_pinned_kernel: ""
 pve_base_packages: [bolt, iperf3, ethtool, fio, nfs-common, chrony, curl, jq, irqbalance]
 
+# AMD nested virtualization (kvm_amd nested=1) — required so the AgentForge v2 Kata agent-node pool
+# gets /dev/kvm inside the Talos worker (ADR 0019). Writes /etc/modprobe.d/kvm-nested.conf; effective
+# on next kvm_amd load (host reboot or a no-VM `modprobe -r`/reload). See docs/runbooks/agent-nodes.md.
+pve_enable_nested_virt: true
+
 # Kernel cmdline (legacy GRUB — all ai nodes boot via update-grub; proxmox-boot-tool manages no ESPs
 # here). Default matches node1/2 stock. node3 overrides in host_vars to add the Thunderbolt/USB4
 # PCIe-tunnel boot params its TB->10G storage NIC needs to enumerate (see host_vars/ai-node3.yml).

@@ -85,6 +85,39 @@
     state: present
   notify: pve_base update-grub
 
+# ---- AMD nested virtualization (AgentForge v2 Kata agent-node pool prereq, ADR 0019) ----
+# Kata's QEMU microVM needs /dev/kvm INSIDE the Talos worker VM, which requires `kvm_amd nested=1` on
+# the host (+ cpu:host on the VM — set in kubernetes/infra/agent-nodes/main.tf). Declarative: write the
+# modprobe option. It takes effect on the NEXT kvm_amd load — a host REBOOT, or `modprobe -r kvm_amd &&
+# modprobe kvm_amd` only when NO VMs are running on this host (a live reload fails while guests use it).
+# We do NOT hot-reload here (disruptive on a host with running guests). See docs/runbooks/agent-nodes.md.
+- name: Enable AMD nested virtualization (kvm_amd nested=1)
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/kvm-nested.conf
+    mode: "0644"
+    content: |
+      options kvm_amd nested=1
+  register: kvm_nested_conf
+  when: pve_enable_nested_virt | bool
+
+- name: Read current nested-virt runtime state
+  ansible.builtin.slurp:
+    src: /sys/module/kvm_amd/parameters/nested
+  register: kvm_nested_now
+  changed_when: false
+  failed_when: false
+  when: pve_enable_nested_virt | bool
+
+- name: Warn if nested virt is not yet active at runtime (needs module reload or host reboot)
+  ansible.builtin.debug:
+    msg: >-
+      kvm_amd nested=1 written to /etc/modprobe.d/kvm-nested.conf but runtime nested=
+      '{{ (kvm_nested_now.content | b64decode | trim) if kvm_nested_now.content is defined else "unknown" }}'.
+      Reload with `modprobe -r kvm_amd && modprobe kvm_amd` (ONLY when no VMs run on this host) or reboot.
+  when:
+    - pve_enable_nested_virt | bool
+    - (kvm_nested_now.content is not defined) or ((kvm_nested_now.content | b64decode | trim) != 'Y')
+
 # ---- kernel pin (after discovery; guards against silent upgrades) ----
 - name: Pin Proxmox kernel
   ansible.builtin.command: "proxmox-boot-tool kernel pin {{ pve_pinned_kernel }}"

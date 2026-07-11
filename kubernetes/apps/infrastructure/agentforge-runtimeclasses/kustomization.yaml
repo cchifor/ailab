@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge v2 sandbox RuntimeClasses (kata/gvisor). Deliberately its OWN directory + a dedicated Flux
+# Kustomization (clusters/ai/agentforge-runtimeclasses.yaml) rather than a line in
+# infrastructure/kustomization.yaml — that shared aggregator index is concurrently edited by the P2
+# operators work (infrastructure/{security,autoscaling}), so this stays out of its way.
+resources:
+  - runtimeclasses.yaml
