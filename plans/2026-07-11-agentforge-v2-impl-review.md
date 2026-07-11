@@ -1,61 +1,27 @@
-# Implementation review — agentforge-v2 — round 2
+# Implementation review — agentforge-v2 — round 3
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: pending -->
 
-Round 2 re-reviewed the round-1 fixes and found 3 blockers + 4 important residuals
-(the round-1 fixes were correct but incomplete). All 7 accepted and fixed with
-tests. Round 3 verifies.
+## Summary
 
-## Findings & resolutions
+- R2-1 is resolved: empty/default-placeholder secrets are rejected in dev mode, and production requires at least 32 characters.
+- R2-2 is resolved: DNS over UDP/TCP 53, the control-plane API on TCP 8080, and HTTPS on TCP 443 are permitted. Destination-specific tightening remains correctly deferred.
+- R2-4 through R2-7 are resolved without a new blocker: ingest has no await in the check/apply/mark window, audit failure cannot replay the event, bootstrap uses its distinct credential with 501 when absent, commit paths are batch-preflighted, and both Codex gate paths use `AF_JOBS_ROOT`.
+- R2-3 is only partially resolved: the stable identity is rendered and checked for explicit pools, but the replica limit remains configurable above one and an empty pool bypasses the required-worker check.
+- No other new blocker or important regression was found in the reviewed changes.
 
-### R2-1. Weak/dev-mode session secrets still servable — blocker → FIXED
-Raised the production floor to 32 chars and made an empty/placeholder key refused
-even in `dev_mode` (no key = no signing; dev_mode only relaxes the length floor).
-CP `630663f` — `test_session_hardening.py`.
+## Findings
 
-### R2-2. NetworkPolicy blocked the control-plane config endpoint — blocker → FIXED
-Egress allowed only TCP 443, so a fresh worker could not DNS-resolve or reach the
-in-cluster CP config API on 8080 (and had no last-good yet). Egress now allows DNS
-(53 UDP+TCP) + CP (8080) + forge/model (443).
-CP `924e17c` — `test_gitops_renderer.py::test_networkpolicy_allows_dns_and_control_plane`.
+### P1 single-replica invariant is only a default
+**Location:** src/agentforge_platform/settings.py:98
+**Severity:** important
+<!-- codex: `max_worker_replicas` is an unconstrained environment setting, so setting it above 1 makes `create_workspace()` render multiple replicas sharing the same stable worker/claim identity. Make the P1 limit non-configurable or validate it with an upper bound of 1, defensively reject `PoolSpec.max_replicas > 1`, and test an attempted environment override. -->
 
-### R2-3. Pod identity could not match fetched config — blocker → FIXED
-`AF_WORKER_NAME` was the random pod name, but the worker resolves roles via
-`cfg.roles_for(AF_WORKER_NAME)` — pods started role-less. Now a stable
-`{slug}-{pool}` identity (single-replica P1; used for role lookup AND the claim
-owner), `bind_workspace_policy` requires the config to declare that worker, and
-`max_worker_replicas=1` (P2 adds a per-pod claim id + KEDA).
-CP `924e17c` — `test_api_workspaces.py::test_put_config_requires_declared_worker`.
+### Empty pool bypasses the required-worker policy
+**Location:** src/agentforge_platform/api/workspaces.py:183
+**Severity:** important
+<!-- codex: Omitting `pool` leaves `required_worker=None`, so a valid config that does not declare the provisioned `{workspace}-{pool}` worker is accepted under the empty pool while the deployed worker subsequently fetches its named pool and receives no usable config. Require a non-empty, existing pool for P1 config writes and always bind that pool's rendered worker identity before persistence. -->
 
-### R2-4. Ingest idempotency racy + partially applied — important → FIXED
-The mark happened after an awaited audit, opening a race and letting an audit
-failure re-emit the event. Commit the key immediately after apply (steps 4-7 are
-synchronous — no await in the window), and make the audit best-effort.
-CP `97adeac` — `test_api_ingest.py`, `test_readmodel.py`.
+## Verdict
 
-### R2-5. Bootstrap used the tenant-repo commit token — important → FIXED
-`GiteaLabelBootstrapper` was built with `tenants_bot_token` (scoped to the tenants
-repo, must not write workspace repos). Now a distinct `bootstrap_token`; empty =>
-501, keeping the GitOps boundary intact.
-CP `272dab5`.
-
-### R2-6. Committer validation not normalized/preflighted — important → FIXED
-`safe_content_path` now also rejects backslash + percent-encoded traversal +
-single-dot segments, and `commit()` validates the whole file batch before any HTTP
-so one unsafe name can't land after earlier-safe writes.
-CP `272dab5` — `test_gitops_committer.py`.
-
-### R2-7. Codex gate output missed the shared job root — important → FIXED
-The alignment gate built codex jobs with `cwd=Path(".")`, so the round-1 scratch
-dir landed under the process CWD, not `AF_JOBS_ROOT`. The gate now allocates a
-validated per-issue dir under the shared jobs root and passes it to every codex
-job (both `run` and `critique_once`).
-worker `ca8320f` — `test_gates.py::TestCritiqueWorkspace`.
-
-## Gate status after fixes
-- agentforge-platform: 115 passed, ruff + mypy clean.
-- agentforge: 356 passed / 20 skipped, ruff + mypy clean.
-
-## Diff stat
-Round-2 fixes: CP `1e56c7c..272dab5` (924e17c, 630663f, 97adeac, 272dab5) and
-worker `ca8320f`.
+The P1 slice is not yet fully ALIGNED; enforce the single-replica invariant and require an existing pool on every P1 config write before proceeding.
