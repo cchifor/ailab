@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Reconciled by the dedicated clusters/ai/external-secrets.yaml Flux Kustomization (dependsOn openbao).
+resources:
+  - namespace.yaml
+  - helmrelease.yaml

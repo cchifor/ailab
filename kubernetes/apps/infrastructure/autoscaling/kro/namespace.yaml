@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  # kro's own docs/chart default namespace is `kro-system`.
+  name: kro-system
+  labels:
+    # kro's controller runs non-root with a restricted-compliant pod spec.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted

@@ -9,3 +9,7 @@ resources:
   - velero.yaml # vmware-tanzu charts (Velero backup)
   - trivy-operator.yaml # aqua OCI charts (Trivy Operator security scanning)
   - jetstack.yaml # cert-manager charts
+  - openbao.yaml # OpenBao secrets vault (AgentForge v2 P2 — ADR 0019)
+  - external-secrets.yaml # External Secrets Operator (AgentForge v2 P2)
+  - keda.yaml # KEDA event-driven autoscaling (AgentForge v2 P2)
+  - kro.yaml # kro / kube-resource-orchestrator, OCI chart (AgentForge v2 P2)
