@@ -1,86 +1,52 @@
-# Implementation review — agentforge-v2 — round 1
+# Implementation review — agentforge-v2 — round 2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: pending -->
 
-Round-1 codex review of the P1 tenant-zero vertical slice found 4 blockers + 6
-important findings (no invented nits). All 10 were accepted and fixed with tests;
-each resolution is a focused commit in `agentforge-platform` (CP) or `agentforge`
-(worker). Round 2 re-reviews these fixes.
+## Summary
 
-## Findings & resolutions
+- Tenant-zero commit gating, server-owned image/replica selection, and the RLS record/compute split are sound.
+- Repo and auto-merge policy binding, degraded claim admission, single-replica ingest deployment, SPA route ordering, and bootstrap flag timing are resolved.
+- Session validation still permits forgeable secrets, and rendered workers remain unable to fetch config or resolve roles.
+- Ingest and GitOps commits retain atomicity/fail-closed gaps; bootstrap uses the wrong credential scope.
+- Codex output is not consistently placed beneath the shared job root.
 
-### 1. Public default permitted forged authenticated sessions — blocker → FIXED
-The session cookie signs the principal + memberships and a hardcoded/optional
-signing key made owner-session forgery trivial. `build_app()` now refuses a
-weak/known/empty `AFP_SESSION_SECRET` (dev_mode opts out), the cookie defaults to
-`https_only=True`, and the deploy Secret ref is non-optional.
-CP `90d6c3d` — `tests/unit/test_session_hardening.py`.
+## Findings
 
-### 2. Any operator could provision an arbitrary image on the hub — blocker → FIXED
-Split the RLS-scoped workspace RECORD (any org) from COMPUTE provisioning
-(tenant-zero only in P1). The caller-supplied `image` is gone (server picks the
-digest-pinned `worker_image`), replicas are clamped, and no manifests are ever
-committed for a non-tenant-zero org.
-CP `743d0c9` — `test_api_workspaces.py`.
+### Weak or development-mode session secrets remain servable
+**Location:** agentforge-platform/src/agentforge_platform/main.py:119
+**Severity:** blocker
+<!-- codex: Any repeated or known value of 16 characters passes, and AFP_DEV_MODE=true permits even an empty key without proving the app is local, so a publicly served deployment can still accept forgeable sessions. Require a generated secret with at least 32 bytes of validated key material and remove or strictly localize the weak-secret development escape. -->
 
-### 3. Rendered workers could not start or fetch config — blocker → FIXED
-The ConfigMap shipped only unused `AF_WORKER_POOL/AF_ROLES`. It now emits the real
-`AF_CONFIG_SOURCE=control_plane` + `AF_GITEA_URL` + the `/api/v1/.../config`
-endpoint, a downward-API `AF_WORKER_NAME`, and the previously-dead
-`config_bearer_secret` wired as an `envFrom` secretRef. The P1 execution image is
-the new combined `p1-worker` (orchestrator + agent CLIs) since LocalExecutor runs
-the agent in-process.
-CP `743d0c9`, `1e56c7c` · worker `9bedabe` — `test_gitops_renderer.py`, release.yml.
+### NetworkPolicy blocks the control-plane config endpoint
+**Location:** agentforge-platform/src/agentforge_platform/adapters/gitops/renderer.py:151
+**Severity:** blocker
+<!-- codex: The ConfigMap points workers at HTTP port 8080, but egress permits only TCP 443 and does not permit DNS, so a fresh worker cannot resolve or fetch config and has no last-good fallback. Allow DNS plus the control-plane Service on port 8080 while retaining the intended forge/model egress. -->
 
-### 4. Workspace policy accepted as caller-supplied config — blocker → FIXED
-`PUT /config` did schema validation only. `bind_workspace_policy()` now rejects
-(422) any config that targets a foreign repo, enables `auto_merge` on the
-merge-disabled P1 shadow, or uses an engine outside the org allowlist.
-CP `fafa6ba` — `test_api_workspaces.py`.
+### Pod identity cannot match the fetched worker configuration
+**Location:** agentforge-platform/src/agentforge_platform/adapters/gitops/renderer.py:175
+**Severity:** blocker
+<!-- codex: AF_WORKER_NAME is the generated pod name, while the worker selects roles with cfg.roles_for(settings.worker_name) and PUT /config cannot predict ReplicaSet pod suffixes, so provisioned pods start with no roles. Introduce a stable pool/config identity for role lookup while retaining a separate unique worker identity for claims, or generate stable pod identities and matching config entries. -->
 
-### 5. Degraded config source did not stop new claims — important → FIXED
-`degraded` previously affected only `/readyz`. An admission predicate is now
-checked immediately before `ClaimService.acquire` on both the reconcile and
-webhook paths; in-flight work drains, no new work is admitted.
-worker `741be7c` — `test_orchestrator_degraded.py`.
+### Ingest idempotency remains racy and partially applied
+**Location:** agentforge-platform/src/agentforge_platform/api/ingest.py:108
+**Severity:** important
+<!-- codex: For transition/escalation events, apply occurs before an awaited audit write and mark_applied, allowing concurrent requests with the same key to both apply; an audit failure also leaves an emitted event unmarked and retryable, duplicating feed/SSE effects. Serialize or reserve each workspace/key before effects, roll the reservation back on failure, and commit the applied state only after all effects succeed. -->
 
-### 6. Ingest hardening process-local + lost retryable events — important → FIXED
-The idempotency key was recorded at check-time, before rate-limit/apply, so a
-rejected event's retry was swallowed. Split into `already_applied` (peek) +
-`mark_applied` (post-apply commit); pinned the CP to `replicas: 1` for P1 (the
-read model/idempotency/rate state are in-memory; shared store + HA is P2).
-CP `edc5420` — `test_readmodel.py`, `test_api_ingest.py`.
+### Bootstrap uses the tenant-repository commit token
+**Location:** agentforge-platform/src/agentforge_platform/main.py:224
+**Severity:** important
+<!-- codex: GiteaLabelBootstrapper is constructed with tenants_bot_token, whose required scope is only cchifor/agentforge-tenants, so a correctly restricted CP bot cannot create labels on workspace repositories; broadening it would violate the GitOps boundary. Use a distinct workspace-scoped bootstrap credential/adapter and leave bootstrap unconfigured with 501 when that credential is absent. -->
 
-### 7. Repository bootstrap was a success-reporting stub — important → FIXED
-Added a `Bootstrapper` port + `GiteaLabelBootstrapper` (idempotent lifecycle-label
-creation); the endpoint delegates and flips `bootstrapped` only on success, and
-returns 501 when no adapter is wired instead of lying.
-CP `d33977b` — `test_api_workspaces.py`.
+### Committer validation is neither fully normalized nor preflighted
+**Location:** agentforge-platform/src/agentforge_platform/adapters/gitops/gitea.py:26
+**Severity:** important
+<!-- codex: safe_content_path rejects only literal `..` components, accepting encoded traversal such as `%2e%2e`, and commit validates files lazily so an earlier safe file can trigger HTTP calls before a later unsafe name fails. Normalize and reject encoded/backslash/dot components, validate the complete batch and fixed repository target first, then perform any HTTP request. -->
 
-### 8. Vue app absent from the deployed control plane — important → FIXED
-Added a node build stage to the image and SPA serving from FastAPI at `/` with
-client-side-routing fallback (deep links load index.html), gated on
-`Settings.webapp_dist`; `/api` + health routes keep their behavior.
-CP `20fbe8d` — `test_spa_serving.py`.
+### Codex gate output still misses the shared job root
+**Location:** agentforge/src/agentforge/app/gates.py:174
+**Severity:** important
+<!-- codex: The primary Codex alignment-gate path supplies cwd=Path("."), so the new scratch directory lands under the orchestrator working directory rather than AF_JOBS_ROOT and will not be visible to a separate executor pod. Allocate a validated per-job directory beneath the shared jobs root and pass it to every Codex AgentJob; retain the existing credential-directory separation. -->
 
-### 9. Required GitOps boundary negatives not exercised — important → FIXED
-`safe_content_path()` fails closed on traversal/repo-root escape; tests prove
-every committer request targets only `cchifor/agentforge-tenants` under
-`tenants/` and that an escaping `path_prefix` raises before any HTTP call. The
-deployed-bot + admission integration negatives remain P2.
-CP `0daebdf` — `test_gitops_committer.py`.
+## Verdict
 
-### 10. Codex executor assumed a shared orchestrator /tmp — important → FIXED
-Codex's output-last-message file now lives under the shared job checkout (unique
-per run, traversal-checked, cleaned up) instead of an orchestrator-local temp
-dir, so a future SandboxExecutor in a separate pod can produce it.
-worker `1aa85ec` — `test_runners_codex.py`.
-
-## Gate status after fixes
-- agentforge-platform: 106 passed, ruff + mypy clean, webapp builds.
-- agentforge: 354 passed / 20 skipped, ruff + mypy clean. (One rare order-dependent
-  flake under pytest-randomly, passes deterministically; pre-existing, tracked.)
-
-## Diff stat
-Round-1 fixes span CP commits `90d6c3d..1e56c7c` and worker commits
-`741be7c`, `1aa85ec`, `9bedabe`.
+The P1 slice is not yet sound to proceed; the three blockers and four important residuals above must be fixed.
