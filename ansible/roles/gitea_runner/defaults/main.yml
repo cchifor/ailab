@@ -113,9 +113,13 @@ gitea_runner_cleanup_service: gitea-runner-cleanup.service
 gitea_runner_cleanup_timer: gitea-runner-cleanup.timer
 gitea_runner_cleanup_interval: 15min # OnUnitInactiveSec between idle-guarded cleanups
 gitea_runner_cleanup_boot_delay: 3min # OnBootSec — let the daemon settle first
-gitea_runner_cleanup_disk_path: / # filesystem whose %-used drives the escalation
-gitea_runner_cleanup_routine_until: 48h # steady state: keep images/build-cache used within this window
-gitea_runner_cleanup_pressure_pct: 80 # disk% >= this: tighten the retention window to *_pressure_until
+gitea_runner_cleanup_disk_path: / # filesystem whose %-used drives the escalation (docker data-root is on /)
+gitea_runner_cleanup_routine_until: 24h # steady state: keep images/build-cache used within this window
+#   (was 48h — a full CI day of 18-20-image builds outran it; the busy-starved cleanup then never caught up
+#   and ci-runner-2 hit 100%. Pressure/critical reclaim now runs even while busy, so 24h steady-state is safe.)
+gitea_runner_cleanup_pressure_pct: 75 # disk% >= this: tighten the retention window to *_pressure_until AND
+#   run the window-safe reclaim even when a co-located runner is busy (was 80; pressure reclaim is
+#   safe-by-construction — its window always exceeds the job timeout — so starting sooner just bounds growth)
 gitea_runner_cleanup_pressure_until: 6h
 gitea_runner_cleanup_critical_pct: 92 # disk% >= this: hard *_critical_until window + trim actions cache
 gitea_runner_cleanup_critical_until: 1h # critical window (NEVER 0/`-a` — still protects a <1h live build)
