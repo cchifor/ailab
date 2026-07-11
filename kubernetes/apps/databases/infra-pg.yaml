@@ -22,7 +22,10 @@ spec:
   primaryUpdateStrategy: unsupervised
   priorityClassName: platform-critical
   storage:
-    size: 5Gi # grafana+authelia are MBs; no separate walStorage needed at this write volume
+    # 5Gi -> 10Gi for the AgentForge v2 platform DB (ADR 0019). Live expansion is safe: qnap-iscsi
+    # has allowVolumeExpansion=true (verified live 2026-07-11). CNPG expands the instance PVCs in
+    # place; shrinking is impossible.
+    size: 10Gi
     storageClass: qnap-iscsi
   resources:
     requests: { cpu: 250m, memory: 512Mi }
@@ -52,6 +55,12 @@ spec:
         # openwebui;` as superuser (postInitSQL can't switch DBs). Documented in docs/runbooks (ai-host-setup).
         - CREATE ROLE openwebui LOGIN;
         - CREATE DATABASE openwebui OWNER openwebui;
+        # AgentForge v2 platform DB (ADR 0019). NB: on an already-bootstrapped cluster this block does
+        # NOT run — the role/DB are created as superuser by the one-shot migration Job's bootstrap SQL
+        # (kubernetes/apps/apps/agentforge/db-migrate.yaml) or by hand (kubectl exec ... psql). managed.roles
+        # below then reconciles the password from the secret. Kept here to document intent for a DR rebuild.
+        - CREATE ROLE agentforge_platform LOGIN;
+        - CREATE DATABASE agentforge_platform OWNER agentforge_platform;
   managed:
     roles:
       - name: authelia
@@ -64,6 +73,11 @@ spec:
         login: true
         passwordSecret:
           name: infra-pg-openwebui
+      - name: agentforge_platform
+        ensure: present
+        login: true
+        passwordSecret:
+          name: infra-pg-agentforge
   # NB: monitoring.enablePodMonitor stays OFF — the CNPG-generated PodMonitor carries only cnpg.io
   # labels, and the kps Prometheus only selects PodMonitors labeled `release: kube-prometheus-stack`
   # (verified live: strive-pg's operator-generated PodMonitor has produced zero cnpg_* series). The

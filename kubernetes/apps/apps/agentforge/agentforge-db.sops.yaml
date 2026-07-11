@@ -1,0 +1,26 @@
+# AgentForge CP Postgres DSN (consumer copy). Targets the infra-pg RW service; role/DB/password
+# match infra-pg-agentforge (databases ns) reconciled by managed.roles. Password must stay in sync
+# with kubernetes/apps/databases/infra-pg-agentforge.sops.yaml.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: agentforge-db
+    namespace: agentforge
+type: Opaque
+stringData:
+    DATABASE_URL: ENC[AES256_GCM,data:lG7IxHXRcsSQz0cUCjyqnMh8bk8QwVK29tBED7Ze3VDgUo58PBPMvPZgFc2TOnR/EEFfxdW52S3WsbLdphpBBDvOt5o5R8JZIJjEHwheeFDDXCDlS4M/BGe1T3lnwpXZiiosv8+J/C91Vuvy5XOR5kr1UzwlOa6hjjryaaQy/8o0dUPwwrFIrOUx,iv:YfkBEldWSL+hek3DVp0P598VtJVqHhvrDMFEc9DYDcQ=,tag:RluDdYVMXKvwcqma4Mi8EQ==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBEc2k4aDdkZ1kyb0NBeCtq
+            NmZuakxrVWYvYWpmRUtWZ25nMk9RdjhGL0F3Cjl2QlVFZlBSWjRzYzdqL2l2UlVR
+            ZWkycS9DWUtXaEFwWkVxSExnN3ZFTWcKLS0tIHYwSU1BQU5VTitqL2V1RlBrYU9h
+            Ri90dmFQN0paRlhXazhQQ0RibTNud3MK+ZImA2RQUQbMbKST88rzGdD4BXFnK2MF
+            je8ATcuHU73nT4ENpTa2bweu8OLp5JxbH7kkMsStg9FB2oo83qgaDA==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-07-11T13:04:10Z"
+    mac: ENC[AES256_GCM,data:OVEBuo3h11+uP1msros7v+S2i1Xf8ziV0A/Cqw0ADItOGSVU4x8bBshihpdb9gX9ZXrT65gRWFEOjwtt8RJpVAGU7tTWLiueivMs+g5Ow/85m7raH8watMj+3UXivv34jvCXBbP+KoJ0EaJwR4/1yh/VbcABvSQ7osi1WuLUN7E=,iv:jLlKW+b1sUmR71tvdtuaLLXsMUFtywrmfZt19bqnid8=,tag:xO6yFFwYTi8sSL2h9J7xpg==,type:str]
+    version: 3.13.1
