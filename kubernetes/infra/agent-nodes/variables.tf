@@ -57,6 +57,34 @@ variable "talos_version" {
   type    = string
   default = "v1.11.2"
 }
+
+# ---- Talos system extensions baked into the AGENT-POOL boot image (P2) ----
+# Superset of the CP base set (infra/variables.tf: qemu-guest-agent for the QEMU guest agent that
+# main.tf's `agent{enabled=true}` needs, + iscsi-tools/util-linux-tools for parity/CSI) PLUS the two
+# sandbox runtimes:
+#   - siderolabs/kata-containers → registers the containerd handler `kata` (QEMU microVM; the real
+#     security boundary). Needs /dev/kvm inside the worker ⇒ cpu.type=host (main.tf) + `kvm_amd
+#     nested=1` on the Proxmox host (operator prereq, docs/runbooks/agent-nodes.md) + the
+#     vhost_net/vhost_vsock kernel modules (machine-config/worker.yaml.tftpl).
+#   - siderolabs/gvisor → registers the containerd handler `runsc` (user-space; the compute-only /
+#     no-KVM fallback runtime).
+# Both are OFFICIAL Image Factory extensions (verified on factory.talos.dev for v1.11.2). The runtime
+# handlers are auto-registered by the extensions — no CRI config patch is required; only the
+# RuntimeClasses (kubernetes/apps/infrastructure/agentforge-runtimeclasses/) point at these handlers.
+#
+# ── SWITCH back to the PLAIN P1 pool: remove kata-containers + gvisor from this list (leave the CP
+#    base set), then re-stage the image. The schematic ID changes → a plain agent image is baked under
+#    the same filename; the pool still boots, just without the Kata/gVisor handlers. ──
+variable "talos_extensions" {
+  type = list(string)
+  default = [
+    "siderolabs/qemu-guest-agent",
+    "siderolabs/iscsi-tools",
+    "siderolabs/util-linux-tools",
+    "siderolabs/kata-containers",
+    "siderolabs/gvisor",
+  ]
+}
 variable "kubernetes_version" {
   type    = string
   default = "v1.31.4"

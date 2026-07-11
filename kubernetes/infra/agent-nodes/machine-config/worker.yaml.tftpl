@@ -30,13 +30,15 @@ machine:
 # NO cluster: stanza — a worker has no etcd/controllerManager/scheduler/allowSchedulingOnControlPlanes.
 #
 # ── P2 (spec §1b + §2): Kata + gVisor. The runtimes ship as Talos SYSTEM EXTENSIONS baked into the
-#    boot IMAGE (image factory schematic / talos_extensions), NOT as config_patches — so P2 needs a
-#    distinct agent-node image (add e.g. siderolabs/kata-containers to talos_extensions; verify the
-#    gVisor extension exists on the Sidero Image Factory) re-staged via scripts/stage-talos-image.sh
-#    and the VMs re-imported. The kernel modules below are the machine-config HALF of that P2 work and
-#    stay commented until the extensions land + nested virt is enabled on the hosts (kvm_amd nested=1,
-#    docs/runbooks/agent-nodes.md). RuntimeClasses (kata/gvisor) then point at these handlers. ──
-#  kernel:
-#    modules:
-#      - name: vhost_net
-#      - name: vhost_vsock
+#    boot IMAGE via the Image Factory schematic (../image.tf: siderolabs/kata-containers +
+#    siderolabs/gvisor in var.talos_extensions), NOT config_patches — the agent pool has its OWN image
+#    (staged via scripts/stage-talos-image.sh, imported in ../main.tf). The kernel modules below are the
+#    machine-config HALF of that work: vhost_net/vhost_vsock accelerate Kata's microVM networking (and
+#    vhost_vsock is the agent<->guest transport). Requires nested virt on the hosts (kvm_amd nested=1,
+#    docs/runbooks/agent-nodes.md) + cpu.type=host (../main.tf) so /dev/kvm exists in the worker. The
+#    RuntimeClasses (kata → handler `kata`; gvisor → handler `runsc`) are auto-registered by the
+#    extensions and live in kubernetes/apps/infrastructure/agentforge-runtimeclasses/. ──
+  kernel:
+    modules:
+      - name: vhost_net
+      - name: vhost_vsock
