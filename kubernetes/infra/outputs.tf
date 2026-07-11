@@ -35,3 +35,17 @@ output "kubeconfig_path" {
 output "talosconfig_path" {
   value = local_sensitive_file.talosconfig.filename
 }
+
+# Cluster PKI bundle, consumed READ-ONLY by the separate agent-nodes/ module (via
+# terraform_remote_state) so Talos WORKERS join THIS cluster instead of forking a new PKI. Emitting
+# outputs changes no infrastructure — a `tofu apply` here after adding them does NOT touch the CP
+# VMs (for_each keys are stable). See kubernetes/infra/agent-nodes/talos.tf + ADR 0019 (Option B).
+output "machine_secrets" {
+  value     = talos_machine_secrets.this.machine_secrets
+  sensitive = true
+}
+
+output "client_configuration" {
+  value     = talos_machine_secrets.this.client_configuration
+  sensitive = true
+}

@@ -16,8 +16,8 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 ## Workflow / GitOps
 - **Kubernetes** (`kubernetes/apps/**`): **Flux** reconciles `main` **from Gitea** (`git.chifor.me/cchifor/ailab`) — merge to ship. Push/PRs go to **Gitea** (squash-merge); GitHub is a backup mirror.
 - **VMs/LXCs** (`kubernetes/infra/**`): **OpenTofu**, applied by hand via `just` (Flux does NOT manage these).
-  Modules: `infra/` (Talos CPs) · `infra/runners/` · `infra/dev-workers/` · `infra/ai-lxc/` · `infra/registry-lxc/`.
-  Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just registry` (+ `*-plan/apply`). `just --list` for all.
+  Modules: `infra/` (Talos CPs) · `infra/runners/` · `infra/dev-workers/` · `infra/agent-nodes/` (Talos workers, AgentForge v2) · `infra/ai-lxc/` · `infra/registry-lxc/`.
+  Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just agent-nodes-plan/apply` · `just registry` (+ `*-plan/apply`). `just --list` for all.
 - Secrets = **SOPS + age** (`.sops.yaml`, key at `_out/age.agekey`). **Never commit `_out/`** — kubeconfig, talosconfig, age key, and tofu creds all live there (gitignored).
 - Run **tofu on Windows** (`~/.tofubin/tofu.exe`): providers are `windows_amd64` and **WSL has no internet**, so Ansible-over-`/mnt/c` and tofu provider downloads fail there. State is **local** (`kubernetes/infra/**/terraform.tfstate`).
 
@@ -42,6 +42,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 | Talos CPs | .41 / .42 / .43 (API VIP .40:6443) | 4001–4003 |
 | GHA runners | .47 / .48 / .49 + .33 / .34 | 4101–4105 |
 | dev-workers | .8–.13 (user `c4`; also the agentforge hosts, ADR 0018) | 4201–4206 |
+| Agent nodes (Talos workers, AgentForge v2, ADR 0019) | .14 / .15 / .16 | 4301–4303 |
 | AI LLM LXCs | .44 / .45 / .46 | 5001–5003 |
 | registry LXC (node1) | — | 5004 |
 
