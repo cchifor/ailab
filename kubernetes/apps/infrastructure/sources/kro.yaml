@@ -1,0 +1,13 @@
+# kro (kube-resource-orchestrator) chart — AgentForge v2 P2 provides the ResourceGraphDefinition CRD the
+# CP uses to DRY the per-tenant expansion (ADR 0019 P2). kro ships ONLY as an OCI Helm chart (no HTTP
+# repo), hosted on the Kubernetes registry, so this is an `type: oci` HelmRepository (the repo's first).
+# Full ref resolved by the HelmRelease = oci://registry.k8s.io/kro/charts/kro.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: kro
+  namespace: flux-system
+spec:
+  type: oci
+  interval: 24h
+  url: oci://registry.k8s.io/kro/charts

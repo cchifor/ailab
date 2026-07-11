@@ -1,0 +1,45 @@
+# External Secrets Operator (ESO) — AgentForge v2 P2 (ADR 0019). Installs the operator + CRDs
+# (SecretStore/ClusterSecretStore/ExternalSecret/...). At runtime the CP renders a NAMESPACED
+# SecretStore per workspace (pointing at OpenBao's k8s-auth role) + ExternalSecrets that materialise
+# OpenBao paths into k8s Secrets. Those SecretStores/ExternalSecrets are a DIFFERENT stream — this
+# HelmRelease ONLY installs the operator + CRDs. (Admission in the tenant path forbids
+# ClusterSecretStore / path escapes — plan §Multi-tenant secret isolation.)
+#
+# Ordering: the dedicated clusters/ai/external-secrets.yaml Flux Kustomization dependsOn `openbao`, so
+# the vault is reconciled first (CP SecretStores that reference it won't dangle).
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: external-secrets
+  namespace: external-secrets
+spec:
+  interval: 1h
+  timeout: 10m
+  chart:
+    spec:
+      chart: external-secrets
+      version: "2.7.0" # appVersion v2.7.0
+      sourceRef:
+        kind: HelmRepository
+        name: external-secrets
+        namespace: flux-system
+  values:
+    installCRDs: true # ESO ships its CRDs as chart templates (gated by this flag) — keep on
+    replicaCount: 1
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }
+      limits: { memory: 256Mi }
+    webhook:
+      replicaCount: 1
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 128Mi }
+    certController:
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 128Mi }
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: kube-prometheus-stack # the kube-prometheus-stack ServiceMonitor selector
+    # bitwarden-sdk-server (an optional subchart) stays disabled by default — no external dep pulled.

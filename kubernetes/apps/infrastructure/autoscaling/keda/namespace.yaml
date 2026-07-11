@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keda
+  labels:
+    # KEDA (operator, metrics-apiserver, admission webhooks) ships a restricted-compliant pod spec
+    # (runAsNonRoot, drop ALL, readOnlyRootFilesystem, seccomp RuntimeDefault). baseline enforce +
+    # restricted warn matches the estate posture.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted

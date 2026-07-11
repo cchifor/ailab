@@ -1,0 +1,9 @@
+# OpenBao Helm chart repo (AgentForge v2 P2 secrets vault — ADR 0019). HTTP chart repo.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: openbao
+  namespace: flux-system
+spec:
+  interval: 24h
+  url: https://openbao.github.io/openbao-helm

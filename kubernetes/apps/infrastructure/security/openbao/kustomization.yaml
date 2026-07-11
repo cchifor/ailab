@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Reconciled by the DEDICATED clusters/ai/openbao.yaml Flux Kustomization (wait:false), NOT the shared
+# `infrastructure` one — a sealed OpenBao is not Ready and must not gate the infra layer.
+resources:
+  - namespace.yaml
+  - helmrelease.yaml

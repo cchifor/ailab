@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Reconciled by the dedicated clusters/ai/kro.yaml Flux Kustomization.
+resources:
+  - namespace.yaml
+  - helmrelease.yaml

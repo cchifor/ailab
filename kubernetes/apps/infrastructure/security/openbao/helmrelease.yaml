@@ -1,0 +1,75 @@
+# OpenBao — the AgentForge v2 P2 secrets vault (ADR 0019). Access keys (forge PATs/HMAC/git-push/
+# config bearers, per-workspace tokens) live here; External Secrets Operator (see ../external-secrets)
+# syncs them into namespaced k8s Secrets. This installs ONLY the operator/server — all secret material
+# and auth-backend wiring is operator-run at bootstrap (like the other manual bootstrap secrets).
+#
+# ── OPERATOR BOOTSTRAP (manual, one-time — NOT baked here; sealed until done) ────────────────────────
+# A freshly-installed OpenBao is SEALED: its pod is NOT Ready until initialised + unsealed. That is why
+# this is reconciled by a DEDICATED Flux Kustomization with `wait: false` (clusters/ai/openbao.yaml) —
+# a sealed pod must never gate/wedge the infrastructure layer.
+#   1. Init (once):   kubectl -n openbao exec -it openbao-0 -- bao operator init -key-shares=1 -key-threshold=1
+#                     → SAVE the unseal key + root token OFFLINE (e.g. Vaultwarden). NEVER commit them.
+#   2. Unseal (each pod, after every restart until auto-unseal is configured):
+#                     kubectl -n openbao exec -it openbao-0 -- bao operator unseal <unseal-key>
+#   3. Enable the Kubernetes auth backend ESO will use (runtime, NOT here):
+#                     bao auth enable kubernetes
+#                     bao write auth/kubernetes/config kubernetes_host="https://kubernetes.default.svc"
+#                     # then a policy granting read on the AgentForge secret paths + a k8s-auth ROLE bound
+#                     # to the ESO ServiceAccount (external-secrets ns). ESO's SecretStore (a DIFFERENT
+#                     # stream) references THIS role. Role/policy content is operator/runtime, not IaC.
+#   4. (Recommended) configure auto-unseal (transit/KMS) so pod restarts don't re-seal — homelab may
+#      keep manual unseal; document the unseal key location in the runbook.
+#
+# ── HA NOTE ──────────────────────────────────────────────────────────────────────────────────────────
+# This runs single-node raft (replicas: 1) — a real on-disk vault (NOT dev/in-memory), dev-ish sizing
+# for the homelab. To grow to HA: bump server.ha.replicas to 3, then `bao operator raft join` +
+# `bao operator unseal` each new pod (operator step). Integrated-storage raft is the HA path.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: openbao
+  namespace: openbao
+spec:
+  interval: 1h
+  timeout: 10m
+  chart:
+    spec:
+      chart: openbao
+      version: "0.28.4" # appVersion OpenBao v2.5.5
+      sourceRef:
+        kind: HelmRepository
+        name: openbao
+        namespace: flux-system
+  values:
+    # ESO reads secrets over the API — the Vault Agent injector sidecar is not needed.
+    injector:
+      enabled: false
+    csi:
+      enabled: false
+    server:
+      # Single-node integrated-storage (raft). standalone(file) is auto-off when ha.enabled.
+      standalone:
+        enabled: false
+      ha:
+        enabled: true
+        replicas: 1 # homelab dev-ish; HA = 3 + `bao operator raft join` (see header)
+        raft:
+          enabled: true
+          setNodeId: true
+          # Chart ships a working default raft HCL (storage "raft" path=/openbao/data, tcp listener,
+          # service_registration kubernetes, disable_mlock=true) — not overriding it. To expose
+          # Prometheus metrics later, add a telemetry{} stanza + unauthenticated_metrics_access here.
+      dataStorage:
+        enabled: true
+        size: 2Gi # a secrets vault raft store is tiny
+        # Block storage that HONORS fsGroup — the default nfs-csi does NOT (NFS server owns the files),
+        # so the non-root openbao uid would hit "permission denied" writing /openbao/data. Same reason
+        # trivy-operator's cache PVC pins qnap-iscsi. The qnap-iscsi SC comes from the `qnap-storage`
+        # Flux Kustomization; the PVC stays Pending until that converges — fine (init is manual anyway).
+        storageClass: qnap-iscsi
+      # auditStorage left default-off — enable an audit device at runtime if desired.
+      resources:
+        requests: { cpu: 50m, memory: 128Mi }
+        limits: { memory: 512Mi }
+    ui:
+      enabled: true # cluster-internal only (no ingress) — reach via `kubectl port-forward`
