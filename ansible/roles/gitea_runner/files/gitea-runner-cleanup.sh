@@ -80,7 +80,7 @@ prune_extra_builders() {
 }
 
 before="$(disk_pct)"; is_num "$before" || before=0
-busy=0; any_job_running && busy=1
+busy=0; any_job_running && busy=1 || true # `|| true`: keep the compound exit 0 (robust if `set -e` is ever added)
 
 # Pressure-aware busy gate (fix for the ENOSPC starvation death spiral). Every prune below is
 # safe-by-construction: it uses a retention window (`--filter until=`) LONGER than a job's max wall-clock
