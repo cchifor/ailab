@@ -8,8 +8,11 @@
 # the CP vms.tf (nocloud raw import, serial console, guest agent on, NO cloud-init user_account —
 # Talos reads only the nocloud static IP).
 #
-# P1 = PLAIN pool (no Kata/gVisor extensions yet; those are P2 image-factory artifacts). Sizing +
-# cpu.type=host are already set so the SAME VMs gain Kata in P2 without a reshape.
+# P2 = the SAME VMs now boot the Kata/gVisor-enabled Talos image (image.tf schematic:
+# siderolabs/kata-containers + siderolabs/gvisor) and enable the vhost_net/vhost_vsock kernel modules
+# (machine-config/worker.yaml.tftpl). cpu.type=host (below) + `kvm_amd nested=1` on the Proxmox host
+# (operator prereq, docs/runbooks/agent-nodes.md) give the worker /dev/kvm for Kata's QEMU microVM. No
+# reshape from P1 — only the boot image + kernel modules changed.
 ###############################################################################
 
 resource "proxmox_virtual_environment_vm" "agent" {
@@ -42,12 +45,14 @@ resource "proxmox_virtual_environment_vm" "agent" {
 
   disk {
     datastore_id = var.vm_datastore
-    import_from  = "${var.image_datastore}:import/talos-${var.talos_version}-nocloud-amd64.raw"
-    interface    = "scsi0"
-    size         = var.agent_node_disk_gb
-    file_format  = "raw"
-    iothread     = true
-    discard      = "on"
+    # P2: the agent pool boots its OWN Kata/gVisor-enabled image (image.tf), staged under a distinct
+    # "-agent-" basename so it coexists with the plain CP image on the same node's local:import.
+    import_from = "${var.image_datastore}:import/${local.agent_image_file}"
+    interface   = "scsi0"
+    size        = var.agent_node_disk_gb
+    file_format = "raw"
+    iothread    = true
+    discard     = "on"
   }
 
   network_device {

@@ -4,13 +4,20 @@
 # download + `xz -d` on each node here; the VM disk imports from local:import/<file>.
 # Enables the 'import' content type on the 'local' storage (idempotent).
 # Keep TALOS_VER + SCHEMATIC in sync with kubernetes/infra (`tofu output schematic_id`).
+#
+# Stages ONE image per invocation. Defaults = the CP/control-plane image. To stage a DIFFERENT image
+# (e.g. the AgentForge v2 agent pool's Kata/gVisor image — kubernetes/infra/agent-nodes/image.tf)
+# override SCHEMATIC + FILE, which coexist on local:import because FILE is distinct:
+#   SCHEMATIC=$(tofu -chdir=kubernetes/infra/agent-nodes output -raw schematic_id) \
+#   FILE=$(tofu -chdir=kubernetes/infra/agent-nodes output -raw agent_image_file) \
+#     scripts/stage-talos-image.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TALOS_VER="${TALOS_VER:-v1.11.2}"
 SCHEMATIC="${SCHEMATIC:-53513e54bb39202f35694412577a6bc53d484744d35a126e5d42ef34785c0d83}"
 URL="https://factory.talos.dev/image/${SCHEMATIC}/${TALOS_VER}/nocloud-amd64.raw.xz"
-FILE="talos-${TALOS_VER}-nocloud-amd64.raw" # import content needs .raw (not .img)
+FILE="${FILE:-talos-${TALOS_VER}-nocloud-amd64.raw}" # import content needs .raw (not .img); override for the agent image
 NODES="${NODES:-192.168.0.2 192.168.0.3 192.168.0.4}"
 
 for ip in $NODES; do

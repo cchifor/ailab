@@ -1,0 +1,53 @@
+# AgentForge v2 sandbox RuntimeClasses (ADR 0019 P2 — "the security boundary is the POD, not the
+# container"). Both handlers are auto-registered on the agent pool by the Talos system extensions
+# baked into its boot image (kubernetes/infra/agent-nodes/image.tf: siderolabs/kata-containers +
+# siderolabs/gvisor) — no CRI config patch. A Pod opts in with `runtimeClassName: kata` (or gvisor);
+# the RuntimeClass `scheduling` block then AUTOMATICALLY injects the agent-pool nodeSelector + the
+# dedicated=agent toleration, so every sandbox pod lands on the dedicated Kata-capable pool and only
+# there. Nodes without /dev/kvm (nested virt not enabled on that host) cannot run `kata` — DinD/sandbox
+# scheduling must FAIL CLOSED onto Kata-capable nodes, never silently fall back to gVisor (which cannot
+# host privileged DinD). See docs/runbooks/agent-nodes.md.
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata
+# QEMU microVM per pod — the real isolation boundary for untrusted agent + test_cmd execution.
+# Needs /dev/kvm in the worker (cpu.type=host + host `kvm_amd nested=1`) and the vhost_net/vhost_vsock
+# kernel modules (worker.yaml.tftpl).
+handler: kata
+scheduling:
+  nodeSelector:
+    ailab.io/agent-pool: "true"
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: agent
+      effect: NoSchedule
+# Charge the guest-kernel/VMM footprint to the pod so the scheduler + ResourceQuota account for it.
+# ESTIMATE for Kata-QEMU — tune after measuring a real sandbox pod (see the plan's analyzer note).
+overhead:
+  podFixed:
+    cpu: 250m
+    memory: 160Mi
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+# gVisor / runsc — user-space kernel, no KVM required. The compute-only fallback for roles that do
+# NOT need privileged DinD (which gVisor cannot host). Registered by the siderolabs/gvisor extension.
+handler: runsc
+scheduling:
+  nodeSelector:
+    ailab.io/agent-pool: "true"
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: agent
+      effect: NoSchedule
+# gVisor's sentry overhead is small; ESTIMATE — tune after measuring.
+overhead:
+  podFixed:
+    cpu: 80m
+    memory: 24Mi
