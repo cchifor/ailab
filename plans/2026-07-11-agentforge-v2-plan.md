@@ -130,11 +130,13 @@ puts untrusted execution in an isolated sandbox pod.
   keeps the board read model and rebroadcasts SSE. Malicious worker/spoke input cannot corrupt the
   model or overload metrics.
 - **Provisioning**: CP renders `Workspace`/`AgentWorkerPool` CRs **from templates only** (never
-  arbitrary user YAML) and commits via GiteaClient to
-  `kubernetes/apps/apps/agentforge/tenants/<org>/<workspace>/`. A **per-tenant Flux Kustomization
-  (its own minimal-RBAC SA, `wait: false` so tenant churn can't wedge the apps layer)** reconciles
-  it; the **admission policy rejects any GVK/field outside the tenant allowlist** — tested with a
-  malicious-manifest attempt. In P1, kro is NOT yet installed, so the CP renders **plain
+  arbitrary user YAML) and commits via GiteaClient to **the separate `cchifor/agentforge-tenants`
+  repo** at `tenants/<org>/<workspace>/` (this is the ONLY repo the CP bot can write — it has no
+  write to `cchifor/ailab`). A **Flux `GitRepository` + per-tenant Kustomization (defined in the
+  CP-unwritable `ailab` repo, its own minimal-RBAC SA, `wait: false` so tenant churn can't wedge the
+  apps layer)** reconciles `agentforge-tenants`; the **admission policy (also in `ailab`) rejects any
+  GVK/field outside the tenant allowlist** — tested with a malicious-manifest attempt AND a
+  write-outside-the-tenant-repo attempt. In P1, kro is NOT yet installed, so the CP renders **plain
   hand-authored manifests** (ns/SA/Deployment/RBAC/NetworkPolicy) directly; **P2 introduces the kro
   RGD** to DRY the expansion. `ConnectedCluster` is reconciled by the CP itself.
 - **External clusters (hub-spoke, pull-based - P3)**: each spoke runs its own Flux (or the "our
@@ -181,10 +183,10 @@ puts untrusted execution in an isolated sandbox pod.
   **orchestrator pod only**; `af-claude-oauth` (`CLAUDE_CODE_OAUTH_TOKEN`) + `af-codex-auth`
   (`~/.codex/auth.json`, writable emptyDir seeded by init) → **sandbox pod's agent container only**;
   `af-runner-token` → CI runners only. Because the sandbox is a separate pod with model-only egress
-  and no Secret RBAC, a prompt-injected agent holds only the inference token and can exfil it *at
-  most to the model API* - accepted for tenant-zero, removed by the P3 broker.
-  `CLAUDE_CODE_OAUTH_TOKEN` is added to the agent container's env only (never `test_cmd`), proven by
-  a `test_cmd` dump-env negative test.
+  and no Secret RBAC, a prompt-injected agent holds at most the inference token and can exfil it
+  *only to the model API* — and **P2's broker (below) removes even that durable token before the
+  v1.1 flip**. `CLAUDE_CODE_OAUTH_TOKEN` is added to the agent container's env only (never
+  `test_cmd`), proven by a `test_cmd` dump-env negative test.
 - **Closing the readback exfil channel (P2, gating the v1.1 flip).** Model-only Cilium egress does
   NOT make the model API the only exfil path: the diff/logs/stdout the orchestrator reads back and
   publishes to the forge is itself an egress channel, and a prompt-injected agent that can read the
@@ -275,7 +277,9 @@ puts untrusted execution in an isolated sandbox pod.
   `crds/**`, `admission/**` (VAP/Kyverno), `deploy/**`, `tests/contract/**` (CP↔worker).
 - ailab: `kubernetes/infra/{agent-nodes or infra}/**` + `machine-config/worker.yaml.tftpl`,
   `kubernetes/apps/apps/agentforge/**` (RuntimeClasses, orchestrator + sandbox RBAC/NetworkPolicy,
-  admission policies, per-tenant Flux Kustomization + tenants/ subtree), Proxmox nested-virt task,
+  admission policies, Flux GitRepository + per-tenant Kustomization pointing at the SEPARATE
+  `cchifor/agentforge-tenants` repo — which holds the CP-written `tenants/<org>/<workspace>/`
+  subtree and is the only repo the CP bot can write), Proxmox nested-virt task,
   `kubernetes/apps/infrastructure/{security,autoscaling}/**`, `authelia-config.yaml`,
   `kubernetes/apps/databases/**` (+ migration Job), cloudflared + `cloudflare/dns.tf` (no Access app),
   `docs/decisions/0019-agentforge-v2-control-plane.md`.
@@ -334,4 +338,4 @@ puts untrusted execution in an isolated sandbox pod.
    token+one shadow orchestrator, no sandbox/v1.1 claim); P2 delivers the sandbox boundary + the
    unlock; P3 the full SaaS/fleet.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
