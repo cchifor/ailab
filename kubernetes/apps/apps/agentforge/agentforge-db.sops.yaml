@@ -1,6 +1,11 @@
-# AgentForge CP Postgres DSN (consumer copy). Targets the infra-pg RW service; role/DB/password
-# match infra-pg-agentforge (databases ns) reconciled by managed.roles. Password must stay in sync
-# with kubernetes/apps/databases/infra-pg-agentforge.sops.yaml.
+# AgentForge CP Postgres DSNs (consumer copy). Two DSNs = the RLS boundary the platform relies on
+# (agentforge_platform.settings): AFP_APP_DSN connects as afp_app (RLS-enforced request path,
+# NOBYPASSRLS, non-owner); AFP_ADMIN_DSN connects as afp_admin (migrations + audited service path,
+# BYPASSRLS, owns the DB). SQLAlchemy async driver (postgresql+asyncpg) against the infra-pg RW svc.
+#
+# ⚠️ DRIFT COUPLING: each embedded password MUST stay in sync with the matching CNPG managed-role
+# secret in databases ns — afp_app pw ↔ infra-pg-afp-app, afp_admin pw ↔ infra-pg-afp-admin. The DB
+# role passwords are set from those secrets; the CP connects with these DSNs. Change both together.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -8,19 +13,25 @@ metadata:
     namespace: agentforge
 type: Opaque
 stringData:
-    DATABASE_URL: ENC[AES256_GCM,data:lG7IxHXRcsSQz0cUCjyqnMh8bk8QwVK29tBED7Ze3VDgUo58PBPMvPZgFc2TOnR/EEFfxdW52S3WsbLdphpBBDvOt5o5R8JZIJjEHwheeFDDXCDlS4M/BGe1T3lnwpXZiiosv8+J/C91Vuvy5XOR5kr1UzwlOa6hjjryaaQy/8o0dUPwwrFIrOUx,iv:YfkBEldWSL+hek3DVp0P598VtJVqHhvrDMFEc9DYDcQ=,tag:RluDdYVMXKvwcqma4Mi8EQ==,type:str]
+    AFP_APP_DSN: ENC[AES256_GCM,data:hy1JSg2nWOCD1cZgmPdGkc5werTWi6AVCsaRRs8qMu58olj7xIKlSwUplzGwff0X/GVIx4nIs7j6/xXGpb5GeEuKnezjwjYcVgdldyGfN9G45uzp7K/HoLwGYmzrbERXVckMowLgTdPnGWZtRNI0T0FeMAGOQ1bbGaZC8Q4j6gpEmCDUbm4=,iv:B6lD5ECBR8RjCcijBb9xuqfBhFJlJ1wcu7+ig/O4rDM=,tag:HCkvJl47Qe5KiqygO7myCQ==,type:str]
+    AFP_ADMIN_DSN: ENC[AES256_GCM,data:AZ2Adv2U1NVxPCrt3zbQejBnQTc+10V3HK6MBNn9Uvut2sbp/yRQ8cSxh6UO51NSexov9tbWHxKnhCsbrFrjKRyF8q6pWVZhRqHD3KP06lUhWUUofs7rDHD+NoNuYVaHIOUfWumkWqpSmo9EnrUuzq4u/OVjt9Og+V81UJh/1ftpXmW+pBGlEg==,iv:rvQXHxWkR52ezO57HqZiEk6/BC392+VZ07VPhvQnd+E=,tag:+ozM4JgD5dzqLeBrCsdGsA==,type:str]
 sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
     age:
-        - enc: |
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBEc2k4aDdkZ1kyb0NBeCtq
-            NmZuakxrVWYvYWpmRUtWZ25nMk9RdjhGL0F3Cjl2QlVFZlBSWjRzYzdqL2l2UlVR
-            ZWkycS9DWUtXaEFwWkVxSExnN3ZFTWcKLS0tIHYwSU1BQU5VTitqL2V1RlBrYU9h
-            Ri90dmFQN0paRlhXazhQQ0RibTNud3MK+ZImA2RQUQbMbKST88rzGdD4BXFnK2MF
-            je8ATcuHU73nT4ENpTa2bweu8OLp5JxbH7kkMsStg9FB2oo83qgaDA==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBqS2MzQ1FUTS9Db1BUS0pL
+            Wm9kWlV6Y2c0SkFHL3NoaTJlR1M0Zk1aZjIwCjBHRUVUMGZLNDNrOTlMVWMvTjlV
+            NG1JOERXODNnUlRCdjkyeWFHeEdjMGsKLS0tIEx2aDNldkpVbEdQR3pENlNrUmxq
+            SEdYQUU5WjRQaFFMTEU2aUNHN0JaaU0KxwxA3tRvnKz5noBu0wi8EBWySM1SeWBX
+            dmVy2rGUu746+5JRHxyPNFnSxV4vbWOKuvoy7seMyDEOcRJFMyhsBg==
             -----END AGE ENCRYPTED FILE-----
-          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    lastmodified: "2026-07-11T17:27:17Z"
+    mac: ENC[AES256_GCM,data:/B/LGw9TVNwp/MtHm94aqI5SXgaWXYVtNPyLGg5z8MTtyb9gi9WX9RiufveETuX4EAXPz6gYCBjuKlPFiXcUSaVQru2Gn8t7lBPqu4vGp4ymt0k4iLUptmEPsWomUkWVckjM35nf989fcKrygIBjlhX0WkIODUnUBWT6DLDX2/A=,iv:7nfjcdg5dzasNWrCFAaSwKyeV5ql0HqN6GjwPvwZmOw=,tag:Wc1vhWYbd3Dbtg3nOh0euA==,type:str]
+    pgp: []
     encrypted_regex: ^(data|stringData)$
-    lastmodified: "2026-07-11T13:04:10Z"
-    mac: ENC[AES256_GCM,data:OVEBuo3h11+uP1msros7v+S2i1Xf8ziV0A/Cqw0ADItOGSVU4x8bBshihpdb9gX9ZXrT65gRWFEOjwtt8RJpVAGU7tTWLiueivMs+g5Ow/85m7raH8watMj+3UXivv34jvCXBbP+KoJ0EaJwR4/1yh/VbcABvSQ7osi1WuLUN7E=,iv:jLlKW+b1sUmR71tvdtuaLLXsMUFtywrmfZt19bqnid8=,tag:xO6yFFwYTi8sSL2h9J7xpg==,type:str]
-    version: 3.13.1
+    version: 3.9.4

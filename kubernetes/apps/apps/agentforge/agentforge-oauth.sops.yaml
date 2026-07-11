@@ -1,5 +1,5 @@
 # AgentForge CP OIDC client secret (plaintext) for the Authelia client 'agentforge'
-# (env OIDC_CLIENT_SECRET). The matching pbkdf2 HASH is inline in auth/authelia-config.yaml.
+# (env AFP_OIDC_CLIENT_SECRET). The matching pbkdf2 HASH is inline in auth/authelia-config.yaml.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -7,19 +7,24 @@ metadata:
     namespace: agentforge
 type: Opaque
 stringData:
-    OIDC_CLIENT_SECRET: ENC[AES256_GCM,data:PVbQOMNv4wjP1v0n1JRq3lO7s7vjUlKZ+tbWEgB2vMQMKj7R9ATrQun2lqQaE1/SnfhevHl3CmmEsd9M8nOQOr39mni4ryj7,iv:jdufTGBagqGjlOrYZhE6HbAA7pBX4SVBGKmr6i9L+NU=,tag:XLJhR6ChL7IRlDKZkccNRQ==,type:str]
+    AFP_OIDC_CLIENT_SECRET: ENC[AES256_GCM,data:fjkqg7ZW69OSrDaRE5CVQiWKmvgWifW+rw6moVHAqbPmSdg31xyVRarheUvnqsNtCVXLn5sAyWdf/AmKv5H6bBSF0rGKxhV7,iv:dOF2/ivy5sZUZXsMPt+oNXgSNBTZQewcMISaRoL3R1U=,tag:nwyFM+LgAAtMU+dhoHeb4g==,type:str]
 sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
     age:
-        - enc: |
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBnNzJjOVExcEJ3TlVhbUxE
-            M1d4cW5Dc0Q2eWFNdkRtZVlnZzV1SHlQQ0hjCjR3Z1Bpa0oweGlqQzdWa0RzcXl3
-            aVlpMGdqV1VxWFJjbXZROTRhVTBhZVEKLS0tIGh1Y3BrMjdpSTNnUVVHbTg2RDZw
-            UTVDRUhWZ1NxZk9FdEpOUUMyTFdwbDQKkarI7sgWxg2Zw+rHw4YgrTO0u0mC9IDy
-            IT827FKMYEbnirCClKciLph9RcOC/WAL300s1+vrfTz5kfBulWz/lg==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA5R09qTlZzb3RBZnFjWks1
+            K1dVRkwvYVFuT2xKcndpSmVacE9qOUdrUmtBCkd4UEwzNlc3bEdtb1hOMWx0Rkdt
+            QWNDQ25qL21SYmlMcXhWOGpNallTdlUKLS0tIEplaHpKTzlaZkoxUFJQL2dwaXE3
+            UlNoZmNzQXBCUVVZdGNJN0N6ZWhQOW8KMMS5pyOlhBKWkyK+vZXbr1esMEHaoG2b
+            ZtCOjyAvVKmVMQz2AiQgICfJWxeK1mEQ50TtVyWKu2a68BH/Kvphcw==
             -----END AGE ENCRYPTED FILE-----
-          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    lastmodified: "2026-07-11T17:27:17Z"
+    mac: ENC[AES256_GCM,data:HFdohYMszD+cV4t+E1F6W4BP/RaaZ31eoMvHzkoEHnyw/KZqD4ZY21mYeC7gfnHMTAH70TxGHDtke0KHOKMI8dJzJtHLXcJhanV7okb6ktGYo6dTgjmDfW5pg1lRPjPqaAbMOSfHOS7RpQfPoVn58LpKzL0Er26NSDFXDeWjta8=,iv:w6PGD7m3s9Z1LlkY4GW3Uas4z2k2MKT6D4KAtm4uoKc=,tag:nnWDGJF+OF2DK0aS54YTog==,type:str]
+    pgp: []
     encrypted_regex: ^(data|stringData)$
-    lastmodified: "2026-07-11T13:02:52Z"
-    mac: ENC[AES256_GCM,data:H4sjG/1OkcnzUAedII3kSfSiXsDxW3QoORjCmGToQKdbgY6SizMOlhfUkfHI9Ho2yFrt4KWzAI9PQmXTLnHoXDlyOghyJP8t5d+x3N+/4B1qru/yigOv9Brc3w6XCudkV2L2Md897mVnnWCbmG/3DXsnE8m8SKnOedanVQnKr58=,iv:mfWCHHjs1s+IU7aFlm0BiIPIwXXRPvOYyTp51rdO/r8=,tag:b3yP7bno5aRFlle7S0gg7A==,type:str]
-    version: 3.13.1
+    version: 3.9.4

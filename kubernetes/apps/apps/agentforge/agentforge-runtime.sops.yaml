@@ -1,0 +1,38 @@
+# AgentForge CP runtime secrets (AFP_ prefix, agentforge_platform.settings). Three values:
+#   * AFP_SESSION_SECRET — signs the session cookie (principal + memberships). build_app() REFUSES to
+#     serve without a strong, non-placeholder key (>=32 chars). App-internal, not an operator
+#     credential; the value below is a real generated 64-hex random (openssl rand -hex 32).
+#   * AFP_TENANTS_BOT_TOKEN — the CP bot's Gitea WRITE token to cchifor/agentforge-tenants. OPERATOR
+#     MUST FILL: provisioning is non-functional until a real token replaces the placeholder.
+#   * AFP_BOOTSTRAP_TOKEN — workspace-repo label bootstrap token (distinct from the tenants token; must
+#     NOT be able to write the tenants repo). OPERATOR MUST FILL; empty/placeholder => bootstrap 501.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: agentforge-runtime
+    namespace: agentforge
+type: Opaque
+stringData:
+    AFP_SESSION_SECRET: ENC[AES256_GCM,data:b0FwQ6QynJ5mLf8jAefBWvYUj/2nWOPL33I0I7cJi58WWF480ucC0hDUV6+LAkdq/1IKdYDUoco95rRKdoa3Jw==,iv:8uW+qXsbGr5qCJW28HVr6E5AfGkVDnVZHbu9Lywy7Wo=,tag:G77RS4fswzejfN8OINHYjQ==,type:str]
+    AFP_TENANTS_BOT_TOKEN: ENC[AES256_GCM,data:wjl3VtAyyNMlQ+Ayrwe+FohJtI6CVIrWlTgA3UxQ+N7dEg==,iv:akefH6vkt7izKaW/WekWoj9VQxkB0+85M3Lwqq4hCvo=,tag:y8qbMWhoavrdIy1ybGjG8Q==,type:str]
+    AFP_BOOTSTRAP_TOKEN: ENC[AES256_GCM,data:vsPozi7NgeWC6qxzRz07uMm9bWb9fjdpifpzmbL1NM4=,iv:nVQ8cqMyOG0drjgnhoLaUNwLvpNsARG1xjh1ydvJ11U=,tag:Djv2e9VOLcafJSwINRMDPQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBWSXRsRlpKVzQ4NjYwOVpj
+            by9jdnhUa0k1ckIxQzM4VGh4Umppa2hPSzE0ClJSc21rT3lNelhYMUhsVkxlVG1J
+            Y2N0UkROZ2NJYlVSWkJYUlF6WGhWV28KLS0tIFhmenBrdklRSWI0NlorWjBCYTV1
+            R1hXS3NSQjVzYmJBblhyYXdhOSt2YnMKUKA13UgHuMs2iQUlTH74owEGAUPH/s+P
+            j9FzXUpUivwFpUkhFcgP9CYv661JqLjISOZe1uxRVyY0+wS0tgiDeA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-11T17:27:18Z"
+    mac: ENC[AES256_GCM,data:G3BOrVwtJBqRgan32xHEJBCWB4/2Bvv/ivJwPJjoDaCjh5dp6fEsIOQuj+OpDKeOTu43xo4KC4mptK7c1AeiQzOZ6A9Zsz7PTD4XQf+ebLK1asF5FxXWpZ5xr36v6yY2ZfMIDXJXKxHFl5oJr5ROrcFW6BG9GkIBxZ0z/IkFvl8=,iv:AqpzawEPpnyzo9Nwnq5YsTncz+I7Z9ZVSCU4ZbrkrLk=,tag:v8BJUeawwAjVdH9t29kkpQ==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

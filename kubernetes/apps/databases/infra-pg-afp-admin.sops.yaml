@@ -1,0 +1,38 @@
+# CNPG managed-role credentials for afp_admin on infra-pg (AgentForge v2, ADR 0019). afp_admin owns
+# DB agentforge_platform and is BYPASSRLS — the CP's migrations + audited service path (admin_dsn).
+#
+# ⚠️ DRIFT COUPLING: this password MUST equal the afp_admin password embedded in AFP_ADMIN_DSN in
+# kubernetes/apps/apps/agentforge/agentforge-db.sops.yaml. managed.roles (infra-pg.yaml) sets the DB
+# role password from HERE; the CP connects with the DSN THERE — if they diverge, the CP auth-fails.
+# Change both together.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-afp-admin
+    namespace: databases
+    labels:
+        cnpg.io/reload: "true"
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:D+GW1Kh1vF9A,iv:JpfiK7KP9oJBTu604g4H25Da2BULPjzKvd9sl3vE+4E=,tag:chrGvzfo7E8WiI3VPpsYxw==,type:str]
+    password: ENC[AES256_GCM,data:+wEyvqeAIT+kG56kuWby8XKN/3k3w9NyIL9AvCIuQHcWeE1iOVtkGg==,iv:JokKq/YYuNc27YLzvryGjPBlMInSKfeQsBHgEVxC49c=,tag:5BVPxHgdVRaO12t0+6e0IQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA1SXJuYjFxNEl5ZWo3N1Jp
+            V0daMC9BYUJ2T3A3MThmZVdHWEpSU2pqVWgwCkFvenB4dStXNTJwUlErOExYZXB0
+            SDhENUlOQU1zSTRVQ0laczhqOHNRTXMKLS0tIFRtZGg3UWk2OEpBSmlZZmpVbC9m
+            ZGxvYmFYVWlkODJJblBDbFdGaUFpZXMKRTf7wAbD+J5ofL821u/YlJCA7JEZkdYS
+            fw/C1AXzcRQGciNvV6vQG0yPoizVrqQiE+eRCg1UA1rAWcYTT/q3Uw==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-11T17:27:16Z"
+    mac: ENC[AES256_GCM,data:E8TtPd+rvf9z/o736Yh6kzZTcWzClqW9aHiK8u3juMbiqOdmWmddil3WZI9LrkB5VuaefMj2jbhvn5V7qHlJzhjMOESIE6Q1ZVdTim9oREfBOGW6T/d7t/L613moQyaGZK1qZ1ZQnvrszOGoOjL58Gd250lHHDZaNtbw6WMCq8s=,iv:4DLygLt/SCCzHQd6w5ocDYE1+lmOD5e2//bwVMupozo=,tag:KvE5R9Mf4CTX7Gd3B6E71w==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

@@ -9,5 +9,8 @@ resources:
   - infra-pg-grafana.sops.yaml # basic-auth creds for the grafana DB (initdb owner)
   - infra-pg-authelia.sops.yaml # basic-auth creds for the authelia DB (managed role)
   - infra-pg-openwebui.sops.yaml # basic-auth creds for the openwebui DB (managed role)
-  - infra-pg-agentforge.sops.yaml # basic-auth creds for the agentforge_platform DB (managed role, ADR 0019)
+  # AgentForge v2 RLS boundary (ADR 0019): two managed roles, one basic-auth secret each. Each password
+  # MUST stay in sync with the matching DSN in apps/agentforge/agentforge-db.sops.yaml (see those headers).
+  - infra-pg-afp-admin.sops.yaml # basic-auth creds for afp_admin (DB owner, BYPASSRLS — admin_dsn)
+  - infra-pg-afp-app.sops.yaml # basic-auth creds for afp_app (non-owner, NOBYPASSRLS — app_dsn)
   - infra-pg.yaml

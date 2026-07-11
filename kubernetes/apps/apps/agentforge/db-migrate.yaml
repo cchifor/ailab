@@ -14,9 +14,9 @@
 #   kubectl --context admin@ai apply -f kubernetes/apps/apps/agentforge/db-migrate.yaml
 #   kubectl --context admin@ai -n agentforge wait --for=condition=complete job/agentforge-db-migrate
 #
-# managed.roles (infra-pg.yaml) reconciles the role password from infra-pg-agentforge within seconds,
-# so the hand-created role just needs to exist. RLS is created by the platform's `migrate` (RLS on
-# from the first migration, per the plan) — NOT by this bootstrap SQL.
+# managed.roles (infra-pg.yaml) reconciles each role password from its secret (infra-pg-afp-admin /
+# infra-pg-afp-app) within seconds, so the hand-created roles just need to exist. RLS is created by the
+# platform's `migrate` (RLS on from the first migration, per the plan) — NOT by this bootstrap SQL.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -24,11 +24,15 @@ metadata:
   namespace: agentforge
 data:
   bootstrap.sql: |
-    -- Superuser one-shot: create the agentforge_platform role + DB (idempotent). CREATE DATABASE
-    -- cannot run in a DO block, so use psql \gexec. Password is set by managed.roles afterward.
-    SELECT 'CREATE ROLE agentforge_platform LOGIN'
-      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'agentforge_platform')\gexec
-    SELECT 'CREATE DATABASE agentforge_platform OWNER agentforge_platform'
+    -- Superuser one-shot: create the RLS-boundary roles + DB (idempotent). afp_admin owns the DB and
+    -- BYPASSRLS (migrations/service path); afp_app is a NON-owner NOBYPASSRLS login (request path).
+    -- CREATE ROLE/DATABASE cannot run in a DO block, so use psql \gexec. Passwords are set afterward by
+    -- managed.roles (infra-pg.yaml) from infra-pg-afp-admin / infra-pg-afp-app.
+    SELECT 'CREATE ROLE afp_admin LOGIN BYPASSRLS'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'afp_admin')\gexec
+    SELECT 'CREATE ROLE afp_app LOGIN NOBYPASSRLS'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'afp_app')\gexec
+    SELECT 'CREATE DATABASE agentforge_platform OWNER afp_admin'
       WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'agentforge_platform')\gexec
 ---
 apiVersion: batch/v1
@@ -85,9 +89,11 @@ spec:
           image: registry.chifor.me/cchifor/agentforge-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000
           command: ["agentforge-platform", "migrate"]
           env:
-            - name: DATABASE_URL
+            # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
+            # platform's main._migrate. Must be AFP_ADMIN_DSN (env_prefix AFP_), NOT the app DSN.
+            - name: AFP_ADMIN_DSN
               valueFrom:
-                secretKeyRef: { name: agentforge-db, key: DATABASE_URL }
+                secretKeyRef: { name: agentforge-db, key: AFP_ADMIN_DSN }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
