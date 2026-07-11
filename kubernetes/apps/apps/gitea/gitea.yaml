@@ -133,6 +133,10 @@ spec:
           ENABLE_AUTO_REGISTRATION: true # first OIDC login auto-creates the Gitea account
           USERNAME: preferred_username
           ACCOUNT_LINKING: auto # link an OIDC login to a pre-existing account by email (site-admin bootstrap)
+        # Gitea refuses webhook delivery to private IPs by default; "external" PRESERVES that default
+        # for public targets, the CIDR enables the LAN agentforge receivers (dw1-6 :8700 — ADR 0018).
+        webhook:
+          ALLOWED_HOST_LIST: "external, 192.168.0.0/24"
         # ── Gitea Actions (forge migration, ADR 0017) ──────────────────────────────────────────────
         repository:
           # Adds repo.actions to the default unit set — NEW repos only. Existing repos (platform,

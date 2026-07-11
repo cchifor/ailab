@@ -1,0 +1,155 @@
+# litellm-local: a SECOND, stripped LiteLLM deployment that serves ONLY the local llama.cpp models
+# (qwen3.6-35b-a3b on node1/node2, qwen3.5-122b on node3). It exists so the agentforge workers
+# (ADR 0018) get a LAN endpoint that is local-only STRUCTURALLY, not by app-side filtering: this
+# deployment's ConfigMap lists no cloud models and its pod carries NO cloud credentials
+# (no OPENAI_API_KEY / ANTHROPIC_API_KEY env) — a leaked litellm-local master key can spend zero
+# cloud dollars. The cloud-enabled `litellm` deployment stays ClusterIP-only, untouched.
+# KEEP THE model_list IN SYNC with the local entries in litellm.yaml (same backends, same
+# max_input_tokens rationale — see the comments there and docs/runbooks/ai-host-setup.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-local-config
+  namespace: ai
+data:
+  config.yaml: |
+    model_list:
+      # qwen3.6-35b-a3b — the daily driver, PINNED on node1 (.44) AND node2 (.45). TWO deployments
+      # so the router health-aware load-balances the pair (see litellm.yaml for the full rationale).
+      # max_input_tokens: host CTX=262144 across --parallel 2 slots => per-slot n_ctx = 131072;
+      # minus ~16K output headroom = 114688 — LiteLLM fails fast above that instead of forwarding
+      # a doomed request.
+      - model_name: qwen3.6-35b-a3b
+        litellm_params:
+          model: openai/qwen3.6-35b-a3b
+          api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
+          api_key: "sk-noauth"
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
+      - model_name: qwen3.6-35b-a3b
+        litellm_params:
+          model: openai/qwen3.6-35b-a3b
+          api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
+          api_key: "sk-noauth"
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
+      # qwen3.5-122b — the sole local heavyweight, llama-swap on node3 (loads on first request;
+      # multi-minute cold start covered by request_timeout below, idle-unloads after its ttl).
+      - model_name: qwen3.5-122b
+        litellm_params:
+          model: openai/qwen3.5-122b
+          api_base: http://llm-qwen35.ai.svc.cluster.local:8080/v1
+          api_key: "sk-noauth"
+        model_info:
+          max_input_tokens: 24576 # host CTX=32768 --parallel 1 (single 32K slot); ~8K output headroom for reasoning
+    litellm_settings:
+      drop_params: true
+      # 900s to cover a llama-swap COLD START of qwen3.5-122b (~4-5 min over NFS) — matches
+      # litellm.yaml. No max_budget/budget_duration here: those guard CLOUD spend, and this
+      # deployment physically has no cloud keys to spend with.
+      request_timeout: 900
+    # Same health-aware router as litellm.yaml: least-busy across the qwen3.6 node1/node2 pair,
+    # retry the OTHER node on failure, park a failing deployment for cooldown_time.
+    router_settings:
+      routing_strategy: least-busy
+      num_retries: 2
+      allowed_fails: 2
+      cooldown_time: 30
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-local
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: litellm-local
+spec:
+  # Single replica: the agentforge fleet is the only consumer and tolerates a brief gateway restart
+  # (its runs retry/back off). The interactive path keeps the 2-replica `litellm` deployment.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: litellm-local
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: litellm-local
+      annotations:
+        # Rolls the pod when config.yaml changes (LiteLLM reads the mounted ConfigMap only at
+        # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
+        #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
+        #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
+        checksum/config: "5719fd89def6"
+    spec:
+      containers:
+        - name: litellm
+          # SAME digest pin as litellm.yaml (ghcr.io/berriai/litellm:main-stable as of 2026-07-08).
+          # Bump BOTH files together — see the pin-bump procedure comment in litellm.yaml.
+          image: ghcr.io/berriai/litellm@sha256:078f96272f0c84da383e6a1f197478390b5204a86dcf00a181bcfe02a00e5dfa
+          command: ["litellm"]
+          args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
+          ports:
+            - { name: http, containerPort: 4000 }
+          env:
+            - { name: STORE_MODEL_IN_DB, value: "False" }
+            - { name: LITELLM_LOG, value: "INFO" }
+            # Own master key (litellm-local-secret) — NOT litellm-secret, so the LAN-exposed
+            # gateway shares no credential with the cloud-enabled one. Deliberately NO
+            # OPENAI_API_KEY / ANTHROPIC_API_KEY here: local-only is structural.
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: { name: litellm-local-secret, key: master-key }
+          volumeMounts:
+            - { name: config, mountPath: /etc/litellm, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /health/liveliness, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health/liveliness, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 1Gi }
+            # Modest vs litellm's 6Gi: a handful of agentforge workers, no OWUI/interactive fan-in.
+            # LiteLLM still loads heavy deps/tokenizers, so <1Gi OOMs at startup.
+            limits: { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: config
+          configMap: { name: litellm-local-config }
+---
+# LAN-only NodePort in front of litellm-local.
+#
+# Why: the agentforge workers (dev-worker VMs, 192.168.0.8-.13 — ADR 0018) sit OUTSIDE the cluster
+# on the flat mgmt LAN and need an OpenAI-compatible endpoint for the local qwen models (the Tester
+# role + the litellm_local runner: ANTHROPIC_BASE_URL=http://192.168.0.41:30400).
+#
+# Exposure trade-off (deliberate, mirrors prometheus-lan.yaml): a NodePort cannot path-scope or
+# auth-scope, so this exposes the LiteLLM API to the LAN. Accepted because (a) the mgmt LAN is
+# single-operator/private and node IPs have no WAN route (public ingress stays
+# cloudflared/tailscale-only, see apps/edge); (b) the API still requires the litellm-local master
+# key (its own Secret, distinct from the cloud gateway's); (c) this deployment PHYSICALLY has no
+# cloud credentials and lists only the local qwen models — worst case for a leaked key is free
+# local-token consumption, not cloud spend; (d) every path-scoped alternative adds a moving part
+# this cluster doesn't run (no LAN ingress controller / LoadBalancer exists). The cloud-enabled
+# `litellm` Service stays ClusterIP-only.
+#
+# Reachable at http://<any-node-ip>:30400 (.41/.42/.43 — .40 is the API-server VIP only).
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-lan
+  namespace: ai
+  labels:
+    app.kubernetes.io/name: litellm-local
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: litellm-local
+  ports:
+    - name: http
+      port: 4000
+      targetPort: http
+      nodePort: 30400
+      protocol: TCP

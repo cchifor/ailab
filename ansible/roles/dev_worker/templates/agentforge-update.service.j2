@@ -1,0 +1,17 @@
+# {{ ansible_managed }} (role: dev_worker). Oneshot fired by agentforge-update.timer: the atomic
+# self-update (config-repo release pin -> Gitea generic package -> sha256 -> uv sync -> symlink flip
+# -> restart -> version-matched health check, rollback on failure). Runs as ROOT (no User=): it must
+# restart agentforge.service; the release files are chowned back to the service user afterwards.
+# Modeled on gitea-runner-cleanup.service.j2.
+[Unit]
+Description=AgentForge atomic self-update (config-repo release pin)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/agentforge-update.sh
+# uv lives in the agent user's pipx bin (~/.local/bin) — put it on the script's PATH.
+Environment=PATH=/home/{{ dev_worker_agent_user }}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# download + uv sync + restart + 60s health poll (+ possible rollback with its own poll)
+TimeoutStartSec=600

@@ -1,0 +1,29 @@
+# {{ ansible_managed }} (role: dev_worker)
+# AgentForge orchestrator (ADR 0018): label-driven autonomous dev agents against git.chifor.me.
+# /opt/agentforge/current is a symlink flipped atomically by agentforge-update.sh (timer-first
+# bootstrap: the unit is enabled at provision time but first STARTED by the update script after the
+# first successful release install — before that, ExecStart does not exist yet).
+[Unit]
+Description=AgentForge orchestrator (autonomous dev agents)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ dev_worker_agent_user }}
+Group={{ dev_worker_agent_user }}
+WorkingDirectory=/opt/agentforge/current
+EnvironmentFile=/etc/agentforge/agentforge.env
+# Pin HOME + credential homes + PATH explicitly (mirrors claude-job@.service.j2 — a systemd start
+# does not load /etc/profile.d, and the claude/codex CLIs the runners drive live in per-user dirs;
+# headless subscription-auth durability depends on these pointing at the logged-in OAuth stores).
+Environment=HOME=/home/{{ dev_worker_agent_user }}
+Environment=CLAUDE_HOME=/home/{{ dev_worker_agent_user }}/.claude
+Environment=CODEX_HOME=/home/{{ dev_worker_agent_user }}/.codex
+Environment=PATH=/home/{{ dev_worker_agent_user }}/{{ dev_worker_npm_dir }}/bin:/home/{{ dev_worker_agent_user }}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/agentforge/current/.venv/bin/agentforge serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

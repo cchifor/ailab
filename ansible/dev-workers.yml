@@ -11,8 +11,21 @@
   become: true
   gather_facts: true
   pre_tasks:
-    # Only load secrets when a feature that needs them is enabled (restic / cloudflared / password
-    # auth). default(false) keeps this safe even though the role defaults aren't bound yet here.
+    # Load the SOPS secrets whenever the (optional, gitignored-until-created) secrets file EXISTS —
+    # not only when a toggled feature needs it. git_forge.yml consumes dev_worker_gitea_token
+    # UNCONDITIONALLY (it has no feature toggle; the token itself is the on/off switch), so gating
+    # the load on the restic/cloudflared/password/agentforge toggles silently skipped the token and
+    # left the workers without forge credentials. File presence is the operator's signal; the two
+    # tasks stay safe on a fresh clone where only the .example exists.
+    - name: Check for the dev-worker secrets file (control node)
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/secrets/dev-worker.sops.yaml"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: dev_worker_secrets_stat
+      tags: [dev_workers]
+
     - name: Load dev-worker secrets (SOPS)
       community.sops.load_vars:
         file: "{{ playbook_dir }}/secrets/dev-worker.sops.yaml"
@@ -20,9 +33,7 @@
       tags: [dev_workers]
       when:
         - dev_worker_enabled | default(false)
-        - (dev_worker_enable_restic | default(false)) or
-          (dev_worker_enable_cloudflared | default(false)) or
-          (dev_worker_enable_password_auth | default(false))
+        - dev_worker_secrets_stat.stat.exists
   roles:
     # Fleet observability — the same node_exporter the hypervisors + runners emit (scraped at :9100).
     - role: node_exporter

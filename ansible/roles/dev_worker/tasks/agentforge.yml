@@ -1,0 +1,121 @@
+---
+# AgentForge (ADR 0018): host systemd deployment of the autonomous dev-agent orchestrator
+# (cchifor/agentforge). This installs only the RUNTIME SHELL — env, dirs, units, and the atomic
+# self-updater; the code itself arrives as pinned releases from the Gitea generic package registry,
+# selected by the `release` pin in cchifor/agentforge-config (agentforge.json). Timer-first
+# bootstrap: agentforge.service is ENABLED here but never started by ansible — before the first
+# release download /opt/agentforge/current does not exist, so a start could only fail. The update
+# script performs the first install and (re)starts the service itself. See docs/runbooks/agentforge.md.
+
+- name: Assert the agentforge secrets are configured
+  ansible.builtin.assert:
+    that:
+      - dev_worker_agentforge_webhook_secret | length > 0
+      - dev_worker_agentforge_litellm_key | length > 0
+      - dev_worker_agentforge_planner_token | length > 0
+      - dev_worker_agentforge_tester_token | length > 0
+      - dev_worker_agentforge_impl_token | length > 0
+      - dev_worker_agentforge_reviewer_token | length > 0
+    fail_msg: >-
+      Provide the dev_worker_agentforge_* secrets via ansible/secrets/dev-worker.sops.yaml (loaded
+      by dev-workers.yml's pre_task). The 4 bot PATs + the webhook HMAC are minted print-once by
+      cchifor/agentforge's scripts/bootstrap_gitea.py; the litellm key is litellm-local-secret's
+      master-key. See docs/runbooks/agentforge.md.
+  no_log: true
+
+# uv builds each release's venv (`uv sync --frozen` in agentforge-update.sh). pipx comes from
+# toolchains.yml; install per-user so ~/.local/bin/uv is on the service/updater PATH.
+- name: Install uv for the agent user (pipx)
+  become: true
+  become_user: "{{ dev_worker_agent_user }}"
+  community.general.pipx:
+    name: uv
+    state: present
+
+- name: Ensure agentforge dirs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ dev_worker_agent_user }}"
+    group: "{{ dev_worker_agent_user }}"
+    mode: "0755"
+  loop:
+    - /opt/agentforge
+    - /opt/agentforge/releases
+    - /etc/agentforge
+    - /workspace/agentforge # per-issue working trees (clones live here, not in /home)
+    - /var/lib/agentforge # persisted last-good config (survives bad remote config + restarts)
+
+- name: Install the agentforge env (config + secrets; orchestrator-only)
+  ansible.builtin.template:
+    src: agentforge.env.j2
+    dest: /etc/agentforge/agentforge.env
+    # root-owned on purpose: systemd reads EnvironmentFile= as the manager
+    # (root) before dropping to User=; agent/test subprocesses running as the
+    # same UID as the service must NOT be able to read bot PATs off disk
+    # (codex impl-review finding).
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart agentforge
+
+- name: Install the agentforge service
+  ansible.builtin.template:
+    src: agentforge.service.j2
+    dest: /etc/systemd/system/agentforge.service
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart agentforge
+
+- name: Ensure agentforge drop-in dir
+  ansible.builtin.file:
+    path: /etc/systemd/system/agentforge.service.d
+    state: directory
+    mode: "0755"
+
+- name: Install the agentforge memory cap drop-in
+  ansible.builtin.template:
+    src: agentforge-memory-cap.conf.j2
+    dest: /etc/systemd/system/agentforge.service.d/10-memory-cap.conf
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart agentforge
+
+- name: Install the agentforge self-update script
+  ansible.builtin.copy:
+    src: agentforge-update.sh
+    dest: /usr/local/bin/agentforge-update.sh
+    mode: "0755"
+
+- name: Install the agentforge self-update service
+  ansible.builtin.template:
+    src: agentforge-update.service.j2
+    dest: /etc/systemd/system/agentforge-update.service
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the agentforge self-update timer
+  ansible.builtin.template:
+    src: agentforge-update.timer.j2
+    dest: /etc/systemd/system/agentforge-update.timer
+    mode: "0644"
+  notify: Reload systemd
+
+# Enabled so the service survives reboots, but NOT started here (timer-first bootstrap — see the
+# header comment): agentforge-update.sh starts it after the first successful release install.
+- name: Enable the agentforge service (started by the update script)
+  ansible.builtin.systemd:
+    name: agentforge.service
+    enabled: true
+    daemon_reload: true
+
+# Starting a timer whose OnBootSec already elapsed fires it immediately, so this also kicks the
+# first install without a separate bootstrap task.
+- name: Enable + start the agentforge self-update timer
+  ansible.builtin.systemd:
+    name: agentforge-update.timer
+    enabled: true
+    state: started
+    daemon_reload: true
