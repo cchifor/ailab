@@ -1,0 +1,111 @@
+# AgentForge v2 control plane (agentforge-platform) — FastAPI OIDC RP + webapp + resource analyzer +
+# GiteaClient (commits tenant desired state to the SEPARATE cchifor/agentforge-tenants repo) + the
+# ConnectedCluster reconciler. Runs on the hub, ns agentforge. Image built + pushed to
+# registry.chifor.me by the cchifor/agentforge-platform repo's release CI (anonymous-pull, Talos
+# already trusts the registry — no imagePullSecret; precedent: headlamp/cloudflared).
+#
+# ⚠️ DELIBERATELY NOT LISTED in kustomization.yaml (mirrors db-migrate.yaml). The image below is a
+# PLACEHOLDER @sha256:0000… — unpullable. This Deployment lives under the wait:true `apps` Flux
+# Kustomization, so if Flux applied it now it would ImagePullBackOff, never go Ready, and wedge the
+# ENTIRE apps layer (and everything that dependsOn it, incl. the agentforge-tenants reconciler). The
+# ServiceAccount + Service were split into serviceaccount-service.yaml (which IS listed) so RBAC and
+# the cloudflared/NetworkPolicy references stay satisfied meanwhile. To ship the CP: the platform
+# release CI pins the immutable @sha256 of the built image here, then add `- deployment.yaml` back to
+# kustomization.yaml (or `kubectl apply -f` it by hand once, ahead of the Flux entry).
+#
+# P1: single replica (SSE broadcast state is in-memory; HA is P3). No PDB — a PDB on a singleton
+# blocks node drains (the strive-pg-primary lesson). Structure mirrors auth/authelia.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentforge-platform
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/name: agentforge-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-platform
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentforge-platform
+    spec:
+      serviceAccountName: agentforge-platform
+      # The Service is named `agentforge-platform`, so k8s would inject AGENTFORGE_PLATFORM_SERVICE_*
+      # env vars; disable service links so they can't collide with the app's own config env.
+      enableServiceLinks: false
+      # Stateless (no PVC) -> evict fast off an unreachable node (default 300s).
+      tolerations:
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: platform
+          # PLACEHOLDER digest — the release CI pins the immutable @sha256 of the built image (see header).
+          image: registry.chifor.me/cchifor/agentforge-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          ports:
+            - { name: http, containerPort: 8080 }
+          # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
+          # values here; secrets come from SOPS Secrets via secretKeyRef.
+          env:
+            # -- OIDC RP against Authelia (client block in auth/authelia-config.yaml) --
+            - { name: AFP_OIDC_ISSUER, value: "https://sso.chifor.me" }
+            - { name: AFP_OIDC_CLIENT_ID, value: "agentforge" }
+            # auth router prefix is /api/auth (main._auth_router), so the callback is /api/auth/callback.
+            - { name: AFP_OIDC_REDIRECT_URL, value: "https://agentforge.chifor.me/api/auth/callback" }
+            - name: AFP_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: agentforge-oauth, key: AFP_OIDC_CLIENT_SECRET }
+            # -- database (RLS boundary): two DSNs. app_dsn = afp_app (RLS-enforced request path);
+            #    admin_dsn = afp_admin (migrations + audited service path, BYPASSRLS, DB owner). --
+            - name: AFP_APP_DSN
+              valueFrom:
+                secretKeyRef: { name: agentforge-db, key: AFP_APP_DSN }
+            - name: AFP_ADMIN_DSN
+              valueFrom:
+                secretKeyRef: { name: agentforge-db, key: AFP_ADMIN_DSN }
+            # -- sessions: build_app() refuses to serve without a strong, non-placeholder key --
+            - name: AFP_SESSION_SECRET
+              valueFrom:
+                secretKeyRef: { name: agentforge-runtime, key: AFP_SESSION_SECRET }
+            # -- SPA: serve the built Vue webapp bundled at /app/webapp in the image --
+            - { name: AFP_WEBAPP_DIST, value: "/app/webapp" }
+            # -- server-owned worker image the CP renders into tenant Deployments. Provisioning REFUSES
+            #    (503) unless this is a pinned digest (repo@sha256:<64hex>) — the p1-worker release CI
+            #    fills it. Placeholder here so the CP can start; provisioning is gated until it's real. --
+            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:REPLACE_ME" }
+            # -- workers fetch their config from the CP over this in-cluster URL. The Service exposes
+            #    :8080 (== container port, no DNAT port translation — see serviceaccount-service.yaml). --
+            - { name: AFP_CONTROL_PLANE_INTERNAL_URL, value: "http://agentforge-platform.agentforge.svc:8080" }
+            # -- tenant git push target (the ONLY repo the CP bot may write); explicit for clarity --
+            - { name: AFP_TENANTS_GITEA_URL, value: "https://git.chifor.me" }
+            - { name: AFP_TENANTS_REPO, value: "cchifor/agentforge-tenants" }
+            # CP bot token -> write access to cchifor/agentforge-tenants (operator-filled placeholder).
+            - name: AFP_TENANTS_BOT_TOKEN
+              valueFrom:
+                secretKeyRef: { name: agentforge-runtime, key: AFP_TENANTS_BOT_TOKEN }
+            # Workspace-repo label bootstrap token (distinct from the tenants token; operator-filled).
+            - name: AFP_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef: { name: agentforge-runtime, key: AFP_BOOTSTRAP_TOKEN }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

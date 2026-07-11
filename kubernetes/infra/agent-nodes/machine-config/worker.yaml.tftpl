@@ -1,0 +1,42 @@
+machine:
+  # AgentForge v2 dedicated compute pool. The label lets workloads target the pool
+  # (RuntimeClass scheduling, nodeSelector); the taint keeps everything ELSE off it so agent/sandbox
+  # pods (which carry the matching toleration) own these nodes.
+  nodeLabels:
+    ailab.io/agent-pool: "true"
+  nodeTaints:
+    dedicated: agent:NoSchedule
+  install:
+    disk: /dev/sda # matches controlplane.yaml.tftpl
+  network:
+    nameservers: ${nameservers}
+    interfaces:
+      - deviceSelector:
+          driver: virtio_net
+        dhcp: false
+        addresses:
+          - ${node_ip}/${prefix}
+        routes:
+          - network: 0.0.0.0/0
+            gateway: ${gateway}
+        # NO vip: workers do not carry the control-plane VIP (that is CP-only, controlplane.yaml.tftpl).
+  registries:
+    mirrors:
+      # Pull docker.io through Google's anonymous pull-through cache to dodge Docker Hub rate limits
+      # (HTTP 429), same as the CPs (controlplane.yaml.tftpl).
+      docker.io:
+        endpoints:
+          - https://mirror.gcr.io
+# NO cluster: stanza — a worker has no etcd/controllerManager/scheduler/allowSchedulingOnControlPlanes.
+#
+# ── P2 (spec §1b + §2): Kata + gVisor. The runtimes ship as Talos SYSTEM EXTENSIONS baked into the
+#    boot IMAGE (image factory schematic / talos_extensions), NOT as config_patches — so P2 needs a
+#    distinct agent-node image (add e.g. siderolabs/kata-containers to talos_extensions; verify the
+#    gVisor extension exists on the Sidero Image Factory) re-staged via scripts/stage-talos-image.sh
+#    and the VMs re-imported. The kernel modules below are the machine-config HALF of that P2 work and
+#    stay commented until the extensions land + nested virt is enabled on the hosts (kvm_amd nested=1,
+#    docs/runbooks/agent-nodes.md). RuntimeClasses (kata/gvisor) then point at these handlers. ──
+#  kernel:
+#    modules:
+#      - name: vhost_net
+#      - name: vhost_vsock

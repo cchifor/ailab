@@ -1,0 +1,28 @@
+# Decrypts + applies the tenant-reconciler plumbing that must NOT live in the (decryption-less)
+# clusters/ai sweep: the read-only SSH deploy-key Secret (agentforge-tenants-deploy-key) the
+# agentforge-tenants GitRepository clones with, AND the minimal-RBAC reconciler SA + ClusterRole/
+# -Binding it impersonates. Dedicated path kubernetes/apps/agentforge-tenants-bootstrap, same split
+# as platform-git-auth -> platform-bootstrap.
+#
+# No explicit dependsOn: the GitRepository simply retries each interval and clones successfully once
+# this Kustomization has applied the Secret; the tenant Kustomization's impersonation works once the
+# SA/RBAC land.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agentforge-tenants-git-auth
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/agentforge-tenants-bootstrap
+  prune: true
+  wait: true
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

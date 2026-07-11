@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentforge
+  labels:
+    # The CP (agentforge-platform) runs non-root, no privileges/hostPath — baseline is sufficient and
+    # avoids depending on the image's exact securityContext field keys (restricted rejects any unset).
+    # This ns hosts ONLY the control plane; per-workspace WORKER namespaces (af-*) are created by the
+    # tenant reconcile path (the separate cchifor/agentforge-tenants repo), not here.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline

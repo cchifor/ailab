@@ -82,6 +82,17 @@ dev-workers:
 ping-dev-workers:
     cd {{ansible_dir}} && ansible dev_workers -m ping
 
+# OpenTofu: plan/apply ONLY the Talos AGENT node pool (AgentForge v2 compute; separate state from
+# runners/dev-workers/Talos-CPs). Talos WORKERS that JOIN the existing cluster — the module reads
+# infra/'s state READ-ONLY for the cluster machine_secrets (Option B, ADR 0019), so `tofu apply` in
+# infra/ must have run once to expose the machine_secrets/client_configuration outputs FIRST. Run
+# from Windows in practice (the talos provider is windows_amd64) — these are the WSL mirrors.
+# Requires the Talos nocloud image staged on each node (scripts/stage-talos-image.sh) FIRST.
+agent-nodes-plan:
+    tofu -chdir=kubernetes/infra/agent-nodes plan
+agent-nodes-apply:
+    tofu -chdir=kubernetes/infra/agent-nodes apply
+
 # OpenTofu: plan/apply ONLY the Zot registry LXC (separate state from runners/dev-workers/Talos).
 registry-plan:
     tofu -chdir=kubernetes/infra/registry-lxc plan

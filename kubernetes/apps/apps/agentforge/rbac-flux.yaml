@@ -1,0 +1,38 @@
+# Scoped Flux "nudge-reconcile" grant for the AgentForge CP's ServiceAccount — SEPARATE from
+# agentforge-cp-readonly so that role stays honestly read-only and this privileged delta is
+# isolated/auditable. The CP's only write to the cluster's own GitOps is to poke the TENANT Flux
+# Kustomization's reconcile annotation after it commits desired state to cchifor/agentforge-tenants —
+# it never creates/updates/deletes workloads (Git's job, per the plan's governing principle).
+#
+# CONTAINMENT (plan's core boundary: a compromised CP "physically cannot reach the root/admission
+# paths"): this is a NAMESPACED Role in flux-system (where all Kustomizations live), scoped by
+# `resourceNames` to the single `agentforge-tenants` Kustomization, with verbs get+patch only. So the
+# token CANNOT touch the root `apps`/`infrastructure`/`flux-system` Kustomizations at all — not even to
+# suspend them or inject spec.patches/postBuild (which, on the cluster-admin-run root reconcilers, would
+# be an escalation). list/watch are dropped: they cannot be resourceName-scoped and are not needed to
+# poke the annotation on a known-named object. Defense-in-depth field-locking is in the paired
+# ValidatingAdmissionPolicy agentforge-cp-flux-guard (admission/cp-flux-guard.yaml).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentforge-cp-flux-safeops
+  namespace: flux-system
+rules:
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    resourceNames: ["agentforge-tenants"] # ONLY the tenant Kustomization — never root/apps/infra
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentforge-cp-flux-safeops
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentforge-cp-flux-safeops
+subjects:
+  - kind: ServiceAccount
+    name: agentforge-platform
+    namespace: agentforge

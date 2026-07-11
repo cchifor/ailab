@@ -22,7 +22,10 @@ spec:
   primaryUpdateStrategy: unsupervised
   priorityClassName: platform-critical
   storage:
-    size: 5Gi # grafana+authelia are MBs; no separate walStorage needed at this write volume
+    # 5Gi -> 10Gi for the AgentForge v2 platform DB (ADR 0019). Live expansion is safe: qnap-iscsi
+    # has allowVolumeExpansion=true (verified live 2026-07-11). CNPG expands the instance PVCs in
+    # place; shrinking is impossible.
+    size: 10Gi
     storageClass: qnap-iscsi
   resources:
     requests: { cpu: 250m, memory: 512Mi }
@@ -52,6 +55,16 @@ spec:
         # openwebui;` as superuser (postInitSQL can't switch DBs). Documented in docs/runbooks (ai-host-setup).
         - CREATE ROLE openwebui LOGIN;
         - CREATE DATABASE openwebui OWNER openwebui;
+        # AgentForge v2 platform DB (ADR 0019). Two roles on purpose — the RLS boundary the CP relies on
+        # (agentforge_platform Settings): afp_admin owns the DB + BYPASSRLS (migrations + audited service
+        # paths); afp_app is a NON-owner, NOBYPASSRLS login used for the RLS-enforced request path. NB: on
+        # an already-bootstrapped cluster this block does NOT run — the roles/DB are created as superuser by
+        # the one-shot migration Job's bootstrap SQL (kubernetes/apps/apps/agentforge/db-migrate.yaml) or by
+        # hand (kubectl exec ... psql). managed.roles below then reconciles each password from its secret.
+        # Kept here to document intent for a DR rebuild.
+        - CREATE ROLE afp_admin LOGIN BYPASSRLS;
+        - CREATE ROLE afp_app LOGIN NOBYPASSRLS;
+        - CREATE DATABASE agentforge_platform OWNER afp_admin;
   managed:
     roles:
       - name: authelia
@@ -64,6 +77,20 @@ spec:
         login: true
         passwordSecret:
           name: infra-pg-openwebui
+      # AgentForge v2 RLS boundary (ADR 0019): two roles, one password secret each. bypassrls is set
+      # explicitly on both — afp_admin BYPASSRLS (owner/migrations), afp_app NOBYPASSRLS (request path).
+      - name: afp_admin
+        ensure: present
+        login: true
+        bypassrls: true
+        passwordSecret:
+          name: infra-pg-afp-admin
+      - name: afp_app
+        ensure: present
+        login: true
+        bypassrls: false
+        passwordSecret:
+          name: infra-pg-afp-app
   # NB: monitoring.enablePodMonitor stays OFF — the CNPG-generated PodMonitor carries only cnpg.io
   # labels, and the kps Prometheus only selects PodMonitors labeled `release: kube-prometheus-stack`
   # (verified live: strive-pg's operator-generated PodMonitor has produced zero cnpg_* series). The

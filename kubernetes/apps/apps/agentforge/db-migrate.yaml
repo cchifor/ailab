@@ -1,0 +1,102 @@
+# AgentForge v2 platform DB migration — OPERATOR-RUN ONE-SHOT (deliberately NOT listed in
+# kustomization.yaml, so Flux never applies/health-gates it: a long/failing migration Job under the
+# wait:true `apps` Kustomization would wedge the whole apps layer AND everything that dependsOn it,
+# incl. the agentforge-tenants reconciler). Run it by hand, ONCE, after the role/DB exist:
+#
+#   # 1. Create the role + DB as SUPERUSER (postInitSQL does NOT run on the already-bootstrapped
+#   #    infra-pg). Peer-auth superuser inside the pod — no password needed:
+#   kubectl --context admin@ai -n databases exec -i infra-pg-1 -- psql -v ON_ERROR_STOP=1 \
+#     < <(kubectl --context admin@ai -n agentforge get cm agentforge-db-bootstrap -o \
+#        jsonpath='{.data.bootstrap\.sql}')
+#   #    (or apply this file's ConfigMap first, then exec; or provide a superuser DSN in the optional
+#   #     Secret agentforge-db-superuser so the Job's initContainer runs bootstrap.sql itself.)
+#   # 2. Apply this file to run the platform schema/RLS migration:
+#   kubectl --context admin@ai apply -f kubernetes/apps/apps/agentforge/db-migrate.yaml
+#   kubectl --context admin@ai -n agentforge wait --for=condition=complete job/agentforge-db-migrate
+#
+# managed.roles (infra-pg.yaml) reconciles each role password from its secret (infra-pg-afp-admin /
+# infra-pg-afp-app) within seconds, so the hand-created roles just need to exist. RLS is created by the
+# platform's `migrate` (RLS on from the first migration, per the plan) — NOT by this bootstrap SQL.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentforge-db-bootstrap
+  namespace: agentforge
+data:
+  bootstrap.sql: |
+    -- Superuser one-shot: create the RLS-boundary roles + DB (idempotent). afp_admin owns the DB and
+    -- BYPASSRLS (migrations/service path); afp_app is a NON-owner NOBYPASSRLS login (request path).
+    -- CREATE ROLE/DATABASE cannot run in a DO block, so use psql \gexec. Passwords are set afterward by
+    -- managed.roles (infra-pg.yaml) from infra-pg-afp-admin / infra-pg-afp-app.
+    SELECT 'CREATE ROLE afp_admin LOGIN BYPASSRLS'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'afp_admin')\gexec
+    SELECT 'CREATE ROLE afp_app LOGIN NOBYPASSRLS'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'afp_app')\gexec
+    SELECT 'CREATE DATABASE agentforge_platform OWNER afp_admin'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'agentforge_platform')\gexec
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agentforge-db-migrate
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/name: agentforge-platform
+    app.kubernetes.io/component: db-migrate
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600 # auto-clean an hour after completion
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentforge-platform
+        app.kubernetes.io/component: db-migrate
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      # OPTIONAL: creates the role/DB itself IF a superuser DSN is supplied (Secret
+      # agentforge-db-superuser, key ADMIN_DATABASE_URL pointing at .../postgres). Absent -> skips
+      # gracefully (assumes step 1 above was run by hand). optional:true keeps this appliable without it.
+      initContainers:
+        - name: bootstrap-role-db
+          image: ghcr.io/cloudnative-pg/postgresql:17.10
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -z "${PGADMIN_URL:-}" ]; then
+                echo "No superuser DSN (Secret agentforge-db-superuser); skipping role/DB bootstrap."
+                echo "Run bootstrap.sql once as superuser (see db-migrate.yaml header)."
+                exit 0
+              fi
+              psql "$PGADMIN_URL" -v ON_ERROR_STOP=1 -f /sql/bootstrap.sql
+          env:
+            - name: PGADMIN_URL
+              valueFrom:
+                secretKeyRef: { name: agentforge-db-superuser, key: ADMIN_DATABASE_URL, optional: true }
+          volumeMounts:
+            - { name: bootstrap, mountPath: /sql, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: migrate
+          # Same image as the CP Deployment (pinned by the platform release CI). Adjust the argv to the
+          # platform's actual migrate entrypoint (e.g. alembic upgrade head) at execution.
+          image: registry.chifor.me/cchifor/agentforge-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          command: ["agentforge-platform", "migrate"]
+          env:
+            # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
+            # platform's main._migrate. Must be AFP_ADMIN_DSN (env_prefix AFP_), NOT the app DSN.
+            - name: AFP_ADMIN_DSN
+              valueFrom:
+                secretKeyRef: { name: agentforge-db, key: AFP_ADMIN_DSN }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: bootstrap
+          configMap: { name: agentforge-db-bootstrap }

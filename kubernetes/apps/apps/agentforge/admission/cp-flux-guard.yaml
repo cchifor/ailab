@@ -1,0 +1,38 @@
+# ValidatingAdmissionPolicy — field-locks the CP's Flux "nudge-reconcile" grant (rbac-flux.yaml) as
+# DEFENSE-IN-DEPTH behind the resourceName-scoped Role. The CP SA has get+patch on ONLY the
+# `agentforge-tenants` Kustomization; its sole legitimate use is to poke the reconcile annotation
+# (metadata.annotations["reconcile.fluxcd.io/requestedAt"]) after committing tenant state. That nudge
+# NEVER changes spec, so this fires for the CP SA's UPDATEs and rejects ANY spec change — a strictly
+# stronger lock than the old two-field (sourceRef/serviceAccountName) one, which left spec.suspend,
+# spec.patches, spec.postBuild, spec.path, spec.prune, spec.force and spec.decryption mutable. Even if
+# the RBAC were ever loosened, a compromised CP still cannot redirect, suspend, or inject patches into
+# any Kustomization.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-cp-flux-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["kustomizations"]
+  matchConditions:
+    - name: only-agentforge-cp
+      expression: "request.userInfo.username == 'system:serviceaccount:agentforge:agentforge-platform'"
+  validations:
+    # Whole-spec lock: the reconcile nudge is a metadata-annotation-only change, so spec must be
+    # byte-for-byte unchanged. Blocks sourceRef/serviceAccountName AND suspend/patches/postBuild/
+    # path/prune/force/decryption in one rule.
+    - expression: "object.spec == oldObject.spec"
+      message: "agentforge CP may only nudge a Kustomization's reconcile annotation, never change its spec."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-cp-flux-guard
+spec:
+  policyName: agentforge-cp-flux-guard
+  validationActions: ["Deny"]

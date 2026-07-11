@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge v2 admission gates (native ValidatingAdmissionPolicy, k8s 1.31). Defined in the
+# CP-unwritable cchifor/ailab repo so a compromised CP cannot disable them. ADR 0019.
+resources:
+  - tenant-guard.yaml # allowlist on the tenant reconcile path (GVK/field)
+  - cp-flux-guard.yaml # field-lock on the CP's Flux nudge (no sourceRef/serviceAccountName change)

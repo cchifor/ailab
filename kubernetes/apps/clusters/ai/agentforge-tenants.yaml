@@ -1,0 +1,34 @@
+# Per-tenant reconciler for the CP-written cchifor/agentforge-tenants repo. This definition lives in
+# the CP-UNWRITABLE cchifor/ailab repo — so even a fully compromised CP cannot redirect the
+# reconciler (change sourceRef), broaden its identity (serviceAccountName), or turn off the admission
+# gate. Two hard limits on this path:
+#   1. serviceAccountName -> a DEDICATED minimal-RBAC SA (agentforge-tenants-reconciler, flux-system),
+#      NOT cluster-admin: it can create only the enumerated namespaced GVKs a tenant workspace needs
+#      (see kubernetes/apps/agentforge-tenants-bootstrap/reconciler-rbac.yaml) — no ClusterRole/-Binding.
+#   2. a ValidatingAdmissionPolicy (kubernetes/apps/apps/agentforge/admission/) rejects anything this
+#      SA applies that is outside the tenant GVK/field allowlist (no cluster RBAC, no wildcard verbs,
+#      no privileged pods outside sandbox ns, no Flux source/SA objects).
+# wait:false so tenant churn/breakage can NEVER wedge the apps layer; prune:true so a removed
+# workspace dir GCs its objects; decryption:sops for per-workspace SOPS tokens (P1 static bearer).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agentforge-tenants
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 1m
+  timeout: 5m
+  dependsOn:
+    - name: apps # the agentforge CP (ns + Deployment) exists before its tenants reconcile
+  sourceRef:
+    kind: GitRepository
+    name: agentforge-tenants
+  path: ./tenants
+  prune: true
+  wait: false
+  serviceAccountName: agentforge-tenants-reconciler
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

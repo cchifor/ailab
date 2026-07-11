@@ -1,0 +1,36 @@
+# Read-only SSH deploy key the agentforge-tenants GitRepository clones cchifor/agentforge-tenants
+# with. Flux SSH auth Secret shape: identity (private key), identity.pub, known_hosts.
+#
+# OPERATOR (real values are a follow-up — these are PLACEHOLDERS):
+#   1. On Gitea, add a READ-ONLY deploy key to the cchifor/agentforge-tenants repo (Settings -> Deploy
+#      Keys; leave "Enable Write Access" OFF). Generate the pair: ssh-keygen -t ed25519 -N '' -f af_tenants
+#   2. Capture the in-cluster gitea-ssh host key for known_hosts, e.g.:
+#      kubectl --context admin@ai -n gitea exec deploy/gitea -- sh -c \
+#        'ssh-keyscan -p 22 gitea-ssh.gitea.svc.cluster.local' 2>/dev/null
+#   3. Put the private key in `identity`, the .pub in `identity.pub`, the keyscan line in `known_hosts`,
+#      then re-encrypt: sops -e -i kubernetes/apps/agentforge-tenants-bootstrap/agentforge-tenants-deploy-key.sops.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+    name: agentforge-tenants-deploy-key
+    namespace: flux-system
+type: Opaque
+stringData:
+    identity: ENC[AES256_GCM,data:mq88HvL1GKvEiNKigCY2lwgdsFBSo8iF7nsUC+MZJOtymjknv+fl/3gZOPvlTuZFbfcxaZfFUxAibZJvHpBnTrt4W3Rm/gROJSxGK8H5MqI=,iv:P5KKq80PQfwShUSy2vIc6PsMLylf9NltjWf/u73ZbTo=,tag:u4XukCXFKzsNOvG3cIl4oA==,type:str]
+    identity.pub: ENC[AES256_GCM,data:6gX1xI/FkBtS1+YvuoqPWHHKGXDtzMHk8yV/IysJ16dZyJ2k,iv:Mv9IcWAyMha5afVdxOTX40w48RgD9+oQvNphtmaqV1Q=,tag:rh7R3QJlUZEbtwQx7Rk6ww==,type:str]
+    known_hosts: ENC[AES256_GCM,data:5Qh6jsXIuI/gKA37UiqFD81OgxN5tnUE2IplZqzXd9qNtnJ1VpWDbBV59JPQ9ZkGBoLyboMSYWwnxSNcF3Tf9NfO+HJG4am1yaykhCh8j+Jz/UXH5w==,iv:Gh4lk2tAfuwvYC13egIlbNWXGIS8rpYIbq0LMIIz1tE=,tag:L0titPDsOV9E/zacrQo6pA==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBOSlR5N1hzQ2NRcThlank1
+            c0FtN0tBVExCQ1BWZWRreVpvckRyTnRVcG5vCjdkU3Q3RjgxMHlJcFhrNGV4dTQ2
+            YmlyRDF3b0h0L3ZqbWJkYzRBSlB3L1UKLS0tIDEySUVtb0FkWno2M3NnQ3dkRy9o
+            cHNIS2xucERLRmRRZWVhTXpaKzdwN2sKf1BV7MrtiE/NpKgXzrrxsdyEKhR2ybxv
+            bqFwSc8BLxBCnft9moqXkkg0pqpR/3Ixo8tXc34t5UtWHyxBZ0zu1A==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-07-11T13:09:35Z"
+    mac: ENC[AES256_GCM,data:ECIAGWiDmNlrUO1hMlg9SleNiPHWhWajbbO+9w7oGqnalVh20p6gtHuCuqwxSQCCZO/X0+tC0t19pLTSNye3Ri3ZXB83gEIcyPaguVYv2s94Mq+Q8lD7TuPbi1/sbn/runAnlkUKwYiZa7DJSrQ6rgsKU06YcfCgC8iYAHTPS7Q=,iv:/sTJXOoECkxMuhxQb0bbmPbaKS/PtD+JPZlRtO11Jh0=,tag:J2QgWaCikSM4fLDjjzPVSg==,type:str]
+    version: 3.13.1

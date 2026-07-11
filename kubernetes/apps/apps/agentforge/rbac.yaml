@@ -1,0 +1,62 @@
+# TIGHTENED read-only cluster access for the AgentForge control plane's ServiceAccount
+# (agentforge-platform). Deliberately NOT Headlamp's `["*"]/["*"]` wildcard: the CP's resource
+# analyzer needs node/pod allocatable + usage + workload status to size the agent pool, but it must
+# NOT be able to read Secrets (unlike Headlamp, which decodes them in a UI). So this enumerates the
+# exact read surface and OMITS secrets entirely. No write verbs (the scoped Flux-patch delta is in
+# rbac-flux.yaml, isolated + auditable).
+#
+# NOTE (per the plan): per-tenant status reads should ultimately be namespace-scoped Roles; for P1
+# (tenant-zero = the hub) a cluster-wide read minus Secrets is the pragmatic scope. Narrowing to
+# per-tenant-namespace Roles is P2/P3 (spoke onboarding).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentforge-cp-readonly
+rules:
+  # Core capacity/status surface for the analyzer + monitoring aggregation. NO secrets, NO configmaps,
+  # and NO pods/log: cluster-wide log read is a credential-exfil equivalent (init/app logs leak bearer
+  # tokens, DSNs, API keys) — the analyzer sizes from allocatable/usage (metrics.k8s.io) + workload
+  # status (apps/batch), and monitoring is fed by the hardened POST /api/ingest/events path, so raw
+  # log content is never needed. A namespace-scoped diagnostic log Role can be added per-tenant in P2.
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/status
+      - pods
+      - namespaces
+      - services
+      - endpoints
+      - persistentvolumeclaims
+      - persistentvolumes
+      - resourcequotas
+      - limitranges
+      - events
+    verbs: ["get", "list", "watch"]
+  # Workload status (Deployment/pool health, replica counts).
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  # Live allocatable/usage from metrics-server (the analyzer's node/pod footprint budgeting).
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+  # StorageClass read for PVC sizing advice (never write).
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentforge-cp-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentforge-cp-readonly
+subjects:
+  - kind: ServiceAccount
+    name: agentforge-platform
+    namespace: agentforge

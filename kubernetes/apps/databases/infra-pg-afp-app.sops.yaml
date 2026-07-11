@@ -1,0 +1,38 @@
+# CNPG managed-role credentials for afp_app on infra-pg (AgentForge v2, ADR 0019). afp_app is a
+# NON-owner, NOBYPASSRLS login — the CP's RLS-enforced request path (app_dsn).
+#
+# ⚠️ DRIFT COUPLING: this password MUST equal the afp_app password embedded in AFP_APP_DSN in
+# kubernetes/apps/apps/agentforge/agentforge-db.sops.yaml. managed.roles (infra-pg.yaml) sets the DB
+# role password from HERE; the CP connects with the DSN THERE — if they diverge, the CP auth-fails.
+# Change both together.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-afp-app
+    namespace: databases
+    labels:
+        cnpg.io/reload: "true"
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:HdbiEHWl1w==,iv:1woVi2KJt9EWUNigOtOPCzsW2lS5pXPREyrmNLgZtLg=,tag:W01jrNGIthAlcns9iNe2sg==,type:str]
+    password: ENC[AES256_GCM,data:f3qEOwsydbQQubWor2rLcFGwnGhiIJN2QNpSFtUXVQbhz4KfUHKxPw==,iv:HuMPXCBUewTWQ0LKxQwGqeMp2OwPgv7zE2ggEG+JXIQ=,tag:n5/2ciLgkA0+vkjHUHfjOA==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA0VE5lUlhLUVF1OXFSVWJL
+            elNpOWh4VTNnZjhjQWtDREZ1V25CRW1IYXc4CmpkWUl3S1g0Yzc3NmRaQm50Rzd5
+            MTYxa3NJQ2w0OHVRbjNGVGtwSzBWcTAKLS0tIDd5bDVwSzlQUzYva1V2L3JxVnY2
+            VTl6ZFluTFVlT016WElJcmFoeS9HbUEKEslt6gkrIrueQsEBa3v6jZi/72STxncY
+            cj1dTI2M8jwp5ZuisZaZMm8rJl12bVPIJdDw9m1/lFOZOLC6FmBJWg==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-11T17:27:17Z"
+    mac: ENC[AES256_GCM,data:bs7ktiXd/uLImhOOKtXhffi4ia9ejMjWBn9fUNULpN27AGO8Ch7iYoD2sRdVzG696zz7VW3y9s0AdKP5zSX4BJNSe7i8UrKZBT/wpNmrMixUGURriCFnx9y4YevbFarrEFHFZMy5a+6WFjEyol9wtnXZpJEU4hlivIrI7T6n3IY=,iv:E0CJ4xUvVqje/i/mHoDQ/r4X7WEyqfYDow4TkYfUFwo=,tag:Fl8vbCbJ6oWcgThw1h5CEg==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4
