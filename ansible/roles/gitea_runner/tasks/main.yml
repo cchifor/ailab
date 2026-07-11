@@ -186,6 +186,15 @@
   notify: Restart gitea cleanup timer
   when: gitea_runner_cleanup_enabled | bool
 
+# ── 4d. resilient DNS (act_runner clones actions/* from github.com every job) ─
+- name: Install resilient DNS drop-in for CI runners
+  ansible.builtin.copy:
+    src: 20-ci-resilient-dns.conf
+    dest: /etc/systemd/resolved.conf.d/20-ci-resilient-dns.conf
+    mode: "0644"
+  notify: Restart systemd-resolved
+  when: gitea_runner_enabled | bool
+
 # ── 5. systemd unit ──────────────────────────────────────────────────────────
 - name: Install the act_runner systemd unit
   ansible.builtin.template:
