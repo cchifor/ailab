@@ -14,8 +14,8 @@
 #        requests.storage: 5Gi
 #   The orchestrator Deployment mounts that PVC at AF_SANDBOX_STAGING_ROOT=/workspace/agentforge/sandbox
 #   so <staging_root>/<job-id>/ resolves to <export>/<job-id> — the SAME NFS bytes the sandbox mounts at
-#   /workspace (subPath <job-id>) and the reaper reclaims. The lease it writes lives at
-#   <staging_root>/.leases/<job-id> (outside every job subPath).
+#   /workspace (subPath <job-id>) and the reaper reclaims. Ownership is a coordination.k8s.io Lease
+#   (RBAC + apiserver CAS), not a file on this NFS.
 #
 # Same shared export + mountOptions as the workspace/reaper PVs.
 apiVersion: v1

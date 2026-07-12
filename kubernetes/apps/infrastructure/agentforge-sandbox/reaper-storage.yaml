@@ -3,12 +3,13 @@
 # sandbox-guard VAP + the zero-egress default-deny would reject it) into `agentforge`; PVCs are
 # ns-scoped, so it needs its own PVC there, pointing at the SAME export as the workspace/staging PVs.
 #
-# The reaper mounts this PVC at AF_SANDBOX_STAGING_ROOT=/workspace/agentforge/sandbox, so it reads
-# each job's lease at <staging_root>/.leases/<job-id> and rmtree's reclaimed <staging_root>/<job-id>/
-# dirs — the exact same NFS bytes the orchestrator staged and the sandbox mounted.
+# The reaper mounts this PVC at AF_SANDBOX_STAGING_ROOT=/workspace/agentforge/sandbox, so it scans for
+# orphan <staging_root>/<job-id>/ dirs and rmtree's the ones it reclaims — the exact same NFS bytes the
+# orchestrator staged and the sandbox mounted. (Ownership itself is a k8s Lease, not an NFS file; the
+# reaper only rmtree's a dir AFTER winning that Lease's CAS.)
 #
 # Pre-staged ACTIVE (a bound PV+PVC is harmless without the gated reaper Deployment) so enabling the
-# reaper is just pinning the image digest + re-adding the Deployment/lease Secret to kustomization.yaml.
+# reaper is just pinning the image digest + re-adding the Deployment to kustomization.yaml.
 apiVersion: v1
 kind: PersistentVolume
 metadata:

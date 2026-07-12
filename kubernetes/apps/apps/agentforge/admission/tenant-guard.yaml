@@ -12,7 +12,7 @@
 # labels, DinD only in the sandbox ns) is P2 — added when the sandbox namespaces + RuntimeClasses land.
 # P2 F1a adds the ESO GVKs (external-secrets.io SecretStore/ExternalSecret) to the allowlist + field pins
 # (validations 10-11) so the CP-rendered per-tenant SecretStore/ExternalSecrets are admitted, but ONLY in
-# the OpenBao/vault + creationPolicy=Owner + per-tenant/shared-key shape — nothing else.
+# the OpenBao/vault + creationPolicy=Owner + per-tenant-key shape — nothing else.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
