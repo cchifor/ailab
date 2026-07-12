@@ -118,20 +118,20 @@ spec:
          has(object.spec.provider.vault.auth.kubernetes.serviceAccountRef) &&
          has(object.spec.provider.vault.auth.kubernetes.serviceAccountRef.name))
       message: "agentforge tenant path: a SecretStore must be provider.vault at the in-cluster OpenBao Service, KV mount 'af', kubernetes-auth via a serviceAccountRef — no other provider/server/mount/auth."
-    # (11) ESO ExternalSecret pin (P2 F1a) — two are rendered per tenant ns: the `orchestrator-creds` ES
-    #      (forge/CP creds from the per-tenant OpenBao subtree af/data/<org>/<workspace>/*) and the
-    #      `af-sbx-lease` ES (the SHARED lease HMAC from af/sandbox/lease-hmac → Secret af-sbx-lease, key
-    #      AF_LEASE_HMAC_KEY). Pin: target.creationPolicy=Owner (the ES owns the Secret it writes — no
-    #      Merge/Orphan onto a pre-existing Secret); secretStoreRef.kind=SecretStore (bars pointing at a
-    #      ClusterSecretStore); at least one source (dataFrom/data) present; and EVERY source key
-    #      (dataFrom[].extract.key AND data[].remoteRef.key — `find` is rejected via has(extract)) is
-    #      EITHER the shared 'sandbox/lease-hmac' OR a per-tenant '<org>/<workspace>/…' subtree key (a
-    #      mount-relative multi-segment path, no leading '/', no '.'/'..' traversal, and NOT under the
-    #      reserved 'sandbox/' prefix). LEFT UNPINNED (the tenant-guard carries no org→namespace map): the
-    #      <org>/<workspace> segments are NOT cross-checked against THIS namespace — cross-tenant reads are
-    #      prevented at OpenBao (the per-workspace role grants read on af/data/<org>/<workspace>/* only,
-    #      authenticating as the per-ns eso SA). The target Secret name is unpinned (orchestrator-creds vs
-    #      af-sbx-lease). KEDA ScaledObject pinning is a SEPARATE blocker (scaling), not part of F1a.
+    # (11) ESO ExternalSecret pin (P2 F1a) — ONE is rendered per tenant ns: the `orchestrator-creds` ES
+    #      (forge/CP creds from the per-tenant OpenBao subtree af/data/<org>/<workspace>/*). (The earlier
+    #      shared `af-sbx-lease` HMAC ExternalSecret was retired when the worker moved its owner-lease to a
+    #      coordination.k8s.io Lease gated by RBAC + resourceVersion CAS — no lease Secret exists anymore.)
+    #      Pin: target.creationPolicy=Owner (the ES owns the Secret it writes — no Merge/Orphan onto a
+    #      pre-existing Secret); secretStoreRef.kind=SecretStore (bars pointing at a ClusterSecretStore);
+    #      at least one source (dataFrom/data) present; and EVERY source key (dataFrom[].extract.key AND
+    #      data[].remoteRef.key — `find` is rejected via has(extract)) is a per-tenant '<org>/<workspace>/…'
+    #      subtree key (a mount-relative multi-segment path, no leading '/', no '.'/'..' traversal, and NOT
+    #      under the reserved 'sandbox/' prefix). LEFT UNPINNED (the tenant-guard carries no org→namespace
+    #      map): the <org>/<workspace> segments are NOT cross-checked against THIS namespace — cross-tenant
+    #      reads are prevented at OpenBao (the per-workspace role grants read on af/data/<org>/<workspace>/*
+    #      only, authenticating as the per-ns eso SA). The target Secret name is unpinned. KEDA ScaledObject
+    #      pinning is a SEPARATE blocker (scaling), not part of F1a.
     - expression: >-
         request.kind.kind != 'ExternalSecret' ||
         (has(object.spec.target) && has(object.spec.target.creationPolicy) &&
@@ -141,15 +141,13 @@ spec:
          (has(object.spec.dataFrom) || has(object.spec.data)) &&
          (!has(object.spec.dataFrom) || object.spec.dataFrom.all(d,
             has(d.extract) && has(d.extract.key) &&
-            (d.extract.key == 'sandbox/lease-hmac' ||
-             (d.extract.key.matches('^[A-Za-z0-9][A-Za-z0-9/_-]*$') &&
-              d.extract.key.contains('/') && !d.extract.key.startsWith('sandbox/'))))) &&
+            d.extract.key.matches('^[A-Za-z0-9][A-Za-z0-9/_-]*$') &&
+            d.extract.key.contains('/') && !d.extract.key.startsWith('sandbox/'))) &&
          (!has(object.spec.data) || object.spec.data.all(d,
             has(d.remoteRef) && has(d.remoteRef.key) &&
-            (d.remoteRef.key == 'sandbox/lease-hmac' ||
-             (d.remoteRef.key.matches('^[A-Za-z0-9][A-Za-z0-9/_-]*$') &&
-              d.remoteRef.key.contains('/') && !d.remoteRef.key.startsWith('sandbox/'))))))
-      message: "agentforge tenant path: an ExternalSecret must set target.creationPolicy=Owner, secretStoreRef.kind=SecretStore, and every source key must be 'sandbox/lease-hmac' or a per-tenant '<org>/<workspace>/…' key (multi-segment, not under 'sandbox/', no traversal)."
+            d.remoteRef.key.matches('^[A-Za-z0-9][A-Za-z0-9/_-]*$') &&
+            d.remoteRef.key.contains('/') && !d.remoteRef.key.startsWith('sandbox/'))))
+      message: "agentforge tenant path: an ExternalSecret must set target.creationPolicy=Owner, secretStoreRef.kind=SecretStore, and every source key must be a per-tenant '<org>/<workspace>/…' key (multi-segment, not under 'sandbox/', no traversal)."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

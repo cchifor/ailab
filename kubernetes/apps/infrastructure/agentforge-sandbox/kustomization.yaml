@@ -21,11 +21,9 @@ resources:
   - reaper-rbac.yaml # reaper SA (agentforge ns) + Jobs/Pods GC Role + cross-ns RoleBinding (pre-staged, active)
   - reaper-storage.yaml # af-sbx-reaper static PV + PVC (agentforge ns) -> same shared export (pre-staged)
   - reaper-netpol.yaml # reaper egress CiliumNetworkPolicy (agentforge ns): kube-apiserver + DNS only
-  # reaper-lease.yaml (af-eso-reaper SecretStore + af-sbx-lease ExternalSecret, agentforge ns) +
-  # reaper-deployment.yaml are INTENTIONALLY not listed yet — the reaper image is a PLACEHOLDER @sha256
-  # (unpullable). The single authoritative lease source is OpenBao `af/sandbox/lease-hmac` (ESO, not a
-  # per-ns SOPS copy): the reaper ExternalSecret here and the CP's tenant af-sbx-lease ExternalSecret
-  # both extract AF_LEASE_HMAC_KEY from that ONE path. Re-add BOTH once the p1-worker digest is pinned
-  # and OpenBao af/sandbox/lease-hmac is seeded (see reaper-deployment.yaml + reaper-lease.yaml headers).
-  # - reaper-lease.yaml
+  # reaper-deployment.yaml is INTENTIONALLY not listed yet — the reaper image is a PLACEHOLDER @sha256
+  # (unpullable). The owner-lease is a coordination.k8s.io Lease gated by reaper-rbac.yaml (already
+  # active) + apiserver resourceVersion CAS — there is NO lease Secret to seed (the earlier SOPS/ESO
+  # af-sbx-lease copy was retired when the worker moved to a k8s Lease). Re-add reaper-deployment.yaml
+  # once the p1-worker digest is pinned (see reaper-deployment.yaml header).
   # - reaper-deployment.yaml

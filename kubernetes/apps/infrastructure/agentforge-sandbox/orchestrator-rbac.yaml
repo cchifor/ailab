@@ -36,6 +36,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # Owner-lease per job: a coordination.k8s.io Lease `af-sbx-<job-id>` the orchestrator CREATEs before
+  # staging, renews via resourceVersion CAS (update) for the whole run/quiesce/import, and deletes on
+  # success. NO list/watch (it addresses its own lease by name). The reaper holds the mirror grant; the
+  # tokenless sandbox pod has NO API access at all, so it can never touch the Lease.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
