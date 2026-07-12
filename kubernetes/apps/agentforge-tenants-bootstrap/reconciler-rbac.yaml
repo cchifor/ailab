@@ -46,6 +46,13 @@ rules:
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # ESO (External Secrets Operator): the CP renderer emits, per tenant ns, a NAMESPACED SecretStore
+  # (OpenBao/vault via k8s-auth) + ExternalSecrets that materialise OpenBao paths into ns-local Secrets
+  # (the orchestrator-creds ES + the shared af-sbx-lease HMAC ES, F1a). NAMESPACED kinds only — NO
+  # clustersecretstores (admission also rejects ClusterSecretStore, mirroring the Role/ClusterRole split).
+  - apiGroups: ["external-secrets.io"]
+    resources: ["secretstores", "externalsecrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Flux writes events for the objects it applies as this identity.
   - apiGroups: [""]
     resources: ["events"]
