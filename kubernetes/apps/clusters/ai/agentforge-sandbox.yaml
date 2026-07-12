@@ -1,0 +1,29 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agentforge-sandbox
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  # Its OWN path/Kustomization (NOT a line in apps/ or infrastructure/kustomization.yaml) so the
+  # operator-owned sandbox boundary does not collide with the P1 agentforge admission (apps layer) or
+  # the concurrent P2 operators work under infrastructure/{security,autoscaling}. Mirrors the
+  # agentforge-runtimeclasses wiring. dependsOn infrastructure so the nfs-csi StorageClass (the
+  # workspace PVC's class) exists first.
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/agentforge-sandbox
+  prune: true
+  # wait:false so a not-yet-pinned reaper image (once its Deployment is re-added) can never wedge this
+  # or any dependent Flux Kustomization; the VAPs/RBAC/NetworkPolicies still apply immediately.
+  wait: false
+  # decryption ready for reaper-lease.sops.yaml (the SOPS lease-HMAC Secret) when the reaper is enabled.
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

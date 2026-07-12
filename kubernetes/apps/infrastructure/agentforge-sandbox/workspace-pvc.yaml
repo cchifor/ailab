@@ -1,0 +1,28 @@
+# Per-WORKSPACE RWX staging volume for the tenant-zero shadow. The orchestrator stages each job's cwd
+# content into <staging_root>/<job-id>/ on this PVC; the sandbox pod mounts the SAME PVC with
+# subPath: <job-id> at /workspace (RWX so orchestrator + sandbox + reaper can all reach the per-job
+# dirs). ONE PVC per workspace, named af-sbx-ws-<workspace> — the sandbox-guard VAP pins every pod's
+# workspace volume claimName to 'af-sbx-ws-' + its own agentforge.io/workspace label, so a pod can
+# never mount a different workspace's PVC. To onboard another workspace sharing this ns, add another
+# af-sbx-ws-<slug> PVC here (and its orchestrator RoleBinding subject).
+#
+# RWX class = nfs-csi (the cluster's RWX default). NOTE for go-live: nfs-csi does NOT honor fsGroup
+# (the NFS server owns the files), so the export must let uid 65532 (the sandbox) read+write the job
+# subPath and uid 1000 (orchestrator/reaper) manage the dirs — verify NFS squash/permissions when the
+# executor is switched on. 5Gi is a modest R-1 ceiling; size per workspace as needed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: af-sbx-ws-playground
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/workspace: playground
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-csi
+  resources:
+    requests:
+      storage: 5Gi

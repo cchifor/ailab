@@ -1,0 +1,37 @@
+# Shared owner-lease HMAC key. The reaper verifies each sandbox job dir's .af-owner-lease with this
+# key; the ORCHESTRATOR signs leases with the SAME key (set AF_LEASE_HMAC_KEY to this value on the
+# tenant worker). A real random 64-hex value (openssl rand -hex 32), like agentforge-runtime's
+# AFP_SESSION_SECRET — app-internal, not an operator credential; rotate by replacing + restarting both.
+# Gated with reaper-deployment.yaml (both commented out of kustomization.yaml until the image digest
+# lands). SOPS/age encrypted; the sandbox Flux Kustomization decrypts with the sops-age key.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: agentforge-sandbox-lease
+    namespace: agentforge-sandbox
+    labels:
+        app.kubernetes.io/managed-by: agentforge-operator
+        app.kubernetes.io/part-of: agentforge
+type: Opaque
+stringData:
+    AF_LEASE_HMAC_KEY: ENC[AES256_GCM,data:D0IjRVfTGu+yNUeCWCpelNyhhSTsucpg2g+OTLmnwNCETdfWvEtCBoAWRU+nfiHbfthqz3VEo98CC1wpHQT6mA==,iv:BIWmFL0Q9FUqa2OBxuWCX6TBW4Zjw83WhC6dSiA1/Iw=,tag:y48pks9fxWbooPCkUecGBQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBWelFNQU8yQTJLZVhRQ3Er
+            YWxma08xS0lHRjQ4QzJ2MTRVaVpLOHNQaTA4CjhCYW5YVW53cUdzNXVFS1RCSElu
+            aUpQZGZrUzhWVXB4UzYxWnpIdUt4NkEKLS0tIEdvQ2FjeE43VUJuZ0xKRGdpNFhN
+            RTlMY1dkcUttUnhWWjJZakVWRFo1ejAKJh1lPfueZHMNJEH4nNc61JuLtr5/zzxd
+            ZIZV/h2D/MGrWE56PeDT8eIw9D/4QptIHtV6/82iEwQR/V2k0zXPxA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-12T07:26:44Z"
+    mac: ENC[AES256_GCM,data:+oA6kK8XNddw9WH7Ukk37waPG9Cjm80Fw4InPSuHwpjOHO5O2Vdg742i6F/yTfSHw56sQPTqu6YuriTg1w5TvaXwHies5TK7aMrZoQTnYX7BQoJ+Evuru7hVuj3crFPR9s2Pt34M86Y8lp0az5bDrb+tAxIUTlM7gnOf2rhxNOA=,iv:Wt9qENccdTL7WFOiZ5owEYFivJZoRdeRSiCgrWZyE0o=,tag:UW8yO4zW95DJqHv1B+DBjw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

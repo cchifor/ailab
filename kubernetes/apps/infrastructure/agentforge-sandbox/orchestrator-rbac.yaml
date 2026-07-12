@@ -1,0 +1,55 @@
+# Orchestrator -> sandbox RBAC (JOBS-ONLY). The orchestrator SA lives in its tenant namespace (a
+# cross-namespace subject); this Role in agentforge-sandbox is the ONLY grant it has here. It may
+# create/delete Jobs and read/delete Pods — but it has NO pods:create (only the Job controller makes
+# Pods, and agentforge-sandbox-guard pins their shape), NO pods/exec|attach|portforward, NO
+# update/patch on anything, NO Secret/SA-token/impersonation. So a compromised orchestrator can start
+# and reap sandbox Jobs of the pinned shape and nothing else.
+#
+# Subject = the tenant-zero SHADOW orchestrator SA. The agentforge-platform renderer names it
+# `af-orch-<workspace>-<pool>` in namespace `af-tenant-<org>-<workspace>`
+# (agentforge-platform/src/agentforge_platform/adapters/gitops/renderer.py: sa/name + namespace_name).
+# For the R-1 shadow (org=tenant-zero, workspace=playground, pool=planner default) that is
+# `af-orch-playground-planner` in `af-tenant-tenant-zero-playground`. Add a RoleBinding subject per
+# additional workspace/pool that shares this sandbox ns.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentforge-orchestrator-sandbox
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+rules:
+  # Create + reap the ephemeral sandbox Jobs; read their status (the exit state is derived from the
+  # container status, never a sandbox-written field). NO create-Pods, NO update/patch.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs/status"]
+    verbs: ["get"]
+  # Read pod status (phase + container exit code) and delete leaked pods during quiesce. NO create.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Read bounded sandbox stdout (kube read_namespaced_pod_log -> pods/log get). Read-only subresource.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentforge-orchestrator-sandbox
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentforge-orchestrator-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: af-orch-playground-planner
+    namespace: af-tenant-tenant-zero-playground
