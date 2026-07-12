@@ -1,6 +1,13 @@
 # P2 R-2 — model-gateway broker + credential split + isolated OpenBao provisioner
 
-<!-- codex-review-status: pending -->
+## Codex Review — round 3 (final)
+
+- **NOT CONVERGED** — one true blocker survives; R-2 is not yet safe to enter Phase B.
+- Source-IP TOFU is sound for the declared deployment: this repo configures kube-proxy-free Cilium, the broker is an internal ClusterIP with no L7 ingress hop, and no in-cluster SNAT path is configured that would hide the originating pod IP; pod-IP reuse alone does not enable replay without possession of the still-live token. [Cilium documentation](https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/)
+- **BLOCKER:** no authenticated, network-admitted writer can perform the promised job-end ledger close. §5 grants the ledger role to the broker, §8 admits only sandbox pods to broker ingress, and the tokenless broker has no Kubernetes Job visibility; therefore the orchestrator/reaper cannot close a session before import/log publication as designed.
+- Phase B is blocked until the design assigns an explicit close authority and path—for example, a separately authenticated orchestrator/reaper close endpoint admitted by policy, or a narrow direct ledger role plus egress—with idempotent retry/fail-closed behavior and job-end/reaper tests.
+
+<!-- codex-review-status: complete -->
 
 ## Context
 R-1 (merged) delivered the sandbox boundary CORE: untrusted code runs in a separate ephemeral Kata Job
@@ -182,6 +189,7 @@ A standalone application-layer gateway (not a proxy, not a sidecar), in the dedi
   raw-socket HTTP/1.1+HTTP/2 conformance/fuzz suite runs through THAT path, not just the app test client.
 
 ### 5. Bounds, ledger, capacity, audit (fail-closed, replica-safe)
+<!-- codex: round-3: BLOCKER — no component has both authority and network reachability to close ledger sessions on Job end: only the broker is given the DB role, broker ingress admits only sandbox pods, and the broker cannot observe Kubernetes Job lifecycle. Assign an authenticated orchestrator/reaper close path or a narrow direct ledger role+egress, and prove idempotent retry/fail-closed closure before import/log publication. -->
 - **Shared TRANSACTIONAL ledger on Postgres (NOT broker memory).** Session/request/rate/concurrency/spend
   state lives in a transactional Postgres schema on the existing CNPG `infra-pg` (the broker gets a narrow
   DB role; adds a broker→infra-pg egress dependency — enumerated in the netpol, §8), chosen over OpenBao
