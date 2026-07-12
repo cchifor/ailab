@@ -10,6 +10,9 @@
 # P1 scope = GVK/field allowlist for the tenant path. The full sandbox-POD-SHAPE pinning (runtimeClass
 # kata, image-digest allowlist, automountServiceAccountToken:false, no hostPath/host*, required Cilium
 # labels, DinD only in the sandbox ns) is P2 — added when the sandbox namespaces + RuntimeClasses land.
+# P2 F1a adds the ESO GVKs (external-secrets.io SecretStore/ExternalSecret) to the allowlist + field pins
+# (validations 10-11) so the CP-rendered per-tenant SecretStore/ExternalSecrets are admitted, but ONLY in
+# the OpenBao/vault + creationPolicy=Owner + per-tenant/shared-key shape — nothing else.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -39,8 +42,9 @@ spec:
         (request.kind.group == 'apps' && request.kind.kind == 'Deployment') ||
         (request.kind.group == 'rbac.authorization.k8s.io' && request.kind.kind in ['Role', 'RoleBinding']) ||
         (request.kind.group == 'networking.k8s.io' && request.kind.kind == 'NetworkPolicy') ||
-        (request.kind.group == 'cilium.io' && request.kind.kind == 'CiliumNetworkPolicy')
-      message: "agentforge tenant path: this GVK is not in the tenant allowlist (no cluster RBAC, no Flux source/Kustomization, no arbitrary kinds)."
+        (request.kind.group == 'cilium.io' && request.kind.kind == 'CiliumNetworkPolicy') ||
+        (request.kind.group == 'external-secrets.io' && request.kind.kind in ['SecretStore', 'ExternalSecret'])
+      message: "agentforge tenant path: this GVK is not in the tenant allowlist (no cluster RBAC, no ClusterSecretStore, no Flux source/Kustomization, no arbitrary kinds)."
     # (2) Explicitly bar cluster-scoped RBAC (clearer message than the allowlist miss).
     - expression: "!(request.kind.group == 'rbac.authorization.k8s.io' && request.kind.kind in ['ClusterRole', 'ClusterRoleBinding'])"
       message: "agentforge tenant path: ClusterRole/ClusterRoleBinding are forbidden (namespaced Role/RoleBinding only)."
@@ -92,6 +96,60 @@ spec:
         request.kind.kind != 'Deployment' ||
         !has(object.spec.template.spec.nodeName)
       message: "agentforge tenant path: a tenant Deployment may not set spec.template.spec.nodeName."
+    # (10) ESO SecretStore pin (P2 F1a) — the CP renders a NAMESPACED OpenBao/vault SecretStore per
+    #      tenant ns (agentforge-platform renderer; same shape as ../../../infrastructure/
+    #      agentforge-sandbox/reaper-lease.yaml). Pin the exfil-relevant fields: provider MUST be `vault`
+    #      (bars a webhook/aws/gcp/etc. provider that could ship secrets to an attacker endpoint), the
+    #      server is the in-cluster OpenBao Service, the KV mount is `af`, and auth is the `kubernetes`
+    #      backend authenticating as an in-namespace ServiceAccount (bars token/appRole auth with a
+    #      smuggled static credential). ClusterSecretStore is already barred by the (1) allowlist (only the
+    #      namespaced SecretStore kind is listed). LEFT UNPINNED (they vary per workspace and are bound
+    #      end-to-end by the per-workspace OpenBao role → exact ns+SA): the k8s-auth role name and the
+    #      serviceAccountRef SA name (only its presence is required).
+    - expression: >-
+        request.kind.kind != 'SecretStore' ||
+        (has(object.spec.provider) && has(object.spec.provider.vault) &&
+         has(object.spec.provider.vault.server) &&
+         object.spec.provider.vault.server in ['https://openbao.openbao.svc:8200', 'https://openbao.openbao.svc.cluster.local:8200'] &&
+         has(object.spec.provider.vault.path) && object.spec.provider.vault.path == 'af' &&
+         has(object.spec.provider.vault.auth) && has(object.spec.provider.vault.auth.kubernetes) &&
+         (!has(object.spec.provider.vault.auth.kubernetes.mountPath) ||
+          object.spec.provider.vault.auth.kubernetes.mountPath == 'kubernetes') &&
+         has(object.spec.provider.vault.auth.kubernetes.serviceAccountRef) &&
+         has(object.spec.provider.vault.auth.kubernetes.serviceAccountRef.name))
+      message: "agentforge tenant path: a SecretStore must be provider.vault at the in-cluster OpenBao Service, KV mount 'af', kubernetes-auth via a serviceAccountRef — no other provider/server/mount/auth."
+    # (11) ESO ExternalSecret pin (P2 F1a) — two are rendered per tenant ns: the `orchestrator-creds` ES
+    #      (forge/CP creds from the per-tenant OpenBao subtree af/data/<org>/<workspace>/*) and the
+    #      `af-sbx-lease` ES (the SHARED lease HMAC from af/sandbox/lease-hmac → Secret af-sbx-lease, key
+    #      AF_LEASE_HMAC_KEY). Pin: target.creationPolicy=Owner (the ES owns the Secret it writes — no
+    #      Merge/Orphan onto a pre-existing Secret); secretStoreRef.kind=SecretStore (bars pointing at a
+    #      ClusterSecretStore); at least one source (dataFrom/data) present; and EVERY source key
+    #      (dataFrom[].extract.key AND data[].remoteRef.key — `find` is rejected via has(extract)) is
+    #      EITHER the shared 'sandbox/lease-hmac' OR a per-tenant '<org>/<workspace>/…' subtree key (a
+    #      mount-relative multi-segment path, no leading '/', no '.'/'..' traversal, and NOT under the
+    #      reserved 'sandbox/' prefix). LEFT UNPINNED (the tenant-guard carries no org→namespace map): the
+    #      <org>/<workspace> segments are NOT cross-checked against THIS namespace — cross-tenant reads are
+    #      prevented at OpenBao (the per-workspace role grants read on af/data/<org>/<workspace>/* only,
+    #      authenticating as the per-ns eso SA). The target Secret name is unpinned (orchestrator-creds vs
+    #      af-sbx-lease). KEDA ScaledObject pinning is a SEPARATE blocker (scaling), not part of F1a.
+    - expression: >-
+        request.kind.kind != 'ExternalSecret' ||
+        (has(object.spec.target) && has(object.spec.target.creationPolicy) &&
+         object.spec.target.creationPolicy == 'Owner' &&
+         has(object.spec.secretStoreRef) && has(object.spec.secretStoreRef.kind) &&
+         object.spec.secretStoreRef.kind == 'SecretStore' &&
+         (has(object.spec.dataFrom) || has(object.spec.data)) &&
+         (!has(object.spec.dataFrom) || object.spec.dataFrom.all(d,
+            has(d.extract) && has(d.extract.key) &&
+            (d.extract.key == 'sandbox/lease-hmac' ||
+             (d.extract.key.matches('^[A-Za-z0-9][A-Za-z0-9/_-]*$') &&
+              d.extract.key.contains('/') && !d.extract.key.startsWith('sandbox/'))))) &&
+         (!has(object.spec.data) || object.spec.data.all(d,
+            has(d.remoteRef) && has(d.remoteRef.key) &&
+            (d.remoteRef.key == 'sandbox/lease-hmac' ||
+             (d.remoteRef.key.matches('^[A-Za-z0-9][A-Za-z0-9/_-]*$') &&
+              d.remoteRef.key.contains('/') && !d.remoteRef.key.startsWith('sandbox/'))))))
+      message: "agentforge tenant path: an ExternalSecret must set target.creationPolicy=Owner, secretStoreRef.kind=SecretStore, and every source key must be 'sandbox/lease-hmac' or a per-tenant '<org>/<workspace>/…' key (multi-segment, not under 'sandbox/', no traversal)."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
