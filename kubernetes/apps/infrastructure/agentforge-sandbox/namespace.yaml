@@ -4,11 +4,12 @@
 # compromised control plane can neither relax the PSA level, drop the admission policies that pin the
 # sandbox pod shape, nor grant the sandbox SA any RBAC.
 #
-# Single SHARED sandbox namespace for R-1 (one tenant-zero shadow workspace). Per-workspace ISOLATION
-# is by PVC name (af-sbx-ws-<workspace>, one PVC per workspace) + the sandbox-guard VAP binding each
-# pod to exactly `af-sbx-ws-<its workspace label>` mounted at the per-job subPath == its job-id label.
-# If workspaces ever need HARD namespace isolation, clone this dir per workspace (ns af-sbx-<ws>); the
-# admission CEL is workspace-agnostic (it derives the PVC name from the pod's own workspace label).
+# Single SHARED sandbox namespace for R-1 (one tenant-zero shadow workspace). Per-org/workspace
+# ISOLATION is by PVC name (af-sbx-ws-<org>-<workspace>, one PVC per org/workspace; P2 R-2 §C) + the
+# sandbox-guard VAP binding each pod to exactly `af-sbx-ws-<its org label>-<its workspace label>`
+# mounted at the per-job subPath == its job-id label. If org/workspaces ever need HARD namespace
+# isolation, clone this dir per org/workspace (ns af-sbx-<org>-<ws>); the admission CEL is
+# org/workspace-agnostic (it derives the PVC name from the pod's own org+workspace labels).
 apiVersion: v1
 kind: Namespace
 metadata:

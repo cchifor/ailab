@@ -31,6 +31,8 @@ spec:
       expression: "has(variables.tspec.securityContext) ? variables.tspec.securityContext : {}"
     - name: tworkspace
       expression: "'agentforge.io/workspace' in variables.tlabels ? variables.tlabels['agentforge.io/workspace'] : ''"
+    - name: torg
+      expression: "'agentforge.io/org' in variables.tlabels ? variables.tlabels['agentforge.io/org'] : ''"
     - name: tjobId
       expression: "'agentforge.io/job-id' in variables.tlabels ? variables.tlabels['agentforge.io/job-id'] : ''"
   validations:
@@ -75,7 +77,8 @@ spec:
         !has(variables.tspec.hostAliases) &&
         (!has(variables.tspec.shareProcessNamespace) || variables.tspec.shareProcessNamespace == false)
       message: "sandbox Job template may not set hostNetwork/hostPID/hostIPC/nodeName/hostAliases/shareProcessNamespace."
-    # (P5) Cilium/lifecycle identity labels on the template (the Pod inherits them).
+    # (P5) Cilium/lifecycle identity labels on the template (the Pod inherits them). org+workspace TOGETHER
+    #      name the PVC (P6) — both must be present dns-slugs (P2 R-2 §C multi-tenant keying).
     - expression: >-
         'agentforge.io/job-id' in variables.tlabels &&
         variables.tlabels['agentforge.io/job-id'].matches('^[a-z0-9]{32}$') &&
@@ -85,23 +88,25 @@ spec:
         variables.tlabels['app.kubernetes.io/managed-by'] == 'agentforge' &&
         'app.kubernetes.io/component' in variables.tlabels &&
         variables.tlabels['app.kubernetes.io/component'] == 'sandbox' &&
+        variables.torg.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
         variables.tworkspace.matches('^[a-z0-9][a-z0-9-]{0,62}$')
-      message: "sandbox Job template must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, workspace (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
+      message: "sandbox Job template must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, org (dns-slug), workspace (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
     # (P6) VOLUMES — EXACT 2-volume set for BOTH trust-classes (P2 R-2 §B, mirror of pod-guard (6)):
     #      {workspace PVC, home emptyDir}. The broker-cap emptyDir is gone (the per-job capability is now a
-    #      workspace file, not a mounted volume), so test AND agent share the same 2-volume shape.
+    #      workspace file, not a mounted volume), so test AND agent share the same 2-volume shape. The
+    #      claimName is org-keyed (P2 R-2 §C): af-sbx-ws-<org label>-<workspace label>.
     - expression: >-
         variables.tvols.exists(v, v.name == 'workspace') &&
         variables.tvols.exists(v, v.name == 'home') &&
         size(variables.tvols) == 2 &&
         variables.tvols.all(v,
           (v.name == 'workspace' && has(v.persistentVolumeClaim) &&
-            v.persistentVolumeClaim.claimName == 'af-sbx-ws-' + variables.tworkspace) ||
+            v.persistentVolumeClaim.claimName == 'af-sbx-ws-' + variables.torg + '-' + variables.tworkspace) ||
           (v.name == 'home' && has(v.emptyDir) &&
             (!has(v.emptyDir.medium) || v.emptyDir.medium == '') &&
             has(v.emptyDir.sizeLimit) &&
             quantity(v.emptyDir.sizeLimit).isLessThan(quantity('2Gi'))))
-      message: "sandbox Job template volumes must be EXACTLY {workspace PVC 'af-sbx-ws-<workspace>', home emptyDir (disk, sizeLimit <2Gi)} for BOTH trust-class=test and trust-class=agent (2 volumes) — no other, missing, or duplicate volumes; no broker-cap."
+      message: "sandbox Job template volumes must be EXACTLY {workspace PVC 'af-sbx-ws-<org>-<workspace>', home emptyDir (disk, sizeLimit <2Gi)} for BOTH trust-class=test and trust-class=agent (2 volumes) — no other, missing, or duplicate volumes; no broker-cap."
     # (P8) CONTAINER securityContext — the enumerated restricted set.
     - expression: >-
         variables.tctrs.all(c,

@@ -34,6 +34,8 @@ spec:
       expression: "has(object.spec.securityContext) ? object.spec.securityContext : {}"
     - name: workspace
       expression: "'agentforge.io/workspace' in variables.labels ? variables.labels['agentforge.io/workspace'] : ''"
+    - name: org
+      expression: "'agentforge.io/org' in variables.labels ? variables.labels['agentforge.io/org'] : ''"
     - name: jobId
       expression: "'agentforge.io/job-id' in variables.labels ? variables.labels['agentforge.io/job-id'] : ''"
   validations:
@@ -71,7 +73,8 @@ spec:
         (!has(object.spec.shareProcessNamespace) || object.spec.shareProcessNamespace == false)
       message: "sandbox pod may not set hostNetwork/hostPID/hostIPC/nodeName/hostAliases/shareProcessNamespace."
     # (5) Cilium/lifecycle identity labels. job-id is the UNGUESSABLE 32-hex handle (also the subPath
-    #     and lease key); trust-class drives the egress profile; workspace names the PVC (validation 6).
+    #     and lease key); trust-class drives the egress profile; org+workspace TOGETHER name the PVC
+    #     (validation 6) — both must be present dns-slugs (P2 R-2 §C multi-tenant keying).
     - expression: >-
         'agentforge.io/job-id' in variables.labels &&
         variables.labels['agentforge.io/job-id'].matches('^[a-z0-9]{32}$') &&
@@ -81,27 +84,29 @@ spec:
         variables.labels['app.kubernetes.io/managed-by'] == 'agentforge' &&
         'app.kubernetes.io/component' in variables.labels &&
         variables.labels['app.kubernetes.io/component'] == 'sandbox' &&
+        variables.org.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
         variables.workspace.matches('^[a-z0-9][a-z0-9-]{0,62}$')
-      message: "sandbox pod must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, workspace (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
+      message: "sandbox pod must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, org (dns-slug), workspace (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
     # (6) VOLUMES — the EXACT 2-volume set for BOTH trust-classes (P2 R-2 §B): {workspace PVC, home
     #     emptyDir}. The agent profile no longer carries a broker-cap emptyDir (the per-job capability is
     #     delivered as a workspace file <workspace>/.af/broker-cap.jwt, not a mounted volume), so test AND
     #     agent share the SAME shape — exactly 2 volumes. workspace + home are ALWAYS required; the
-    #     claimName == af-sbx-ws-<workspace label> so a pod can never mount another workspace's PVC. ANY
-    #     secret/configMap/projected/csi/hostPath/downwardAPI volume (or an unknown name) is rejected.
-    #     The home emptyDir must be DISK-backed (no Memory medium) with a BOUNDED sizeLimit (node-DoS).
+    #     claimName == af-sbx-ws-<org label>-<workspace label> (P2 R-2 §C org-keyed) so a pod can never
+    #     mount another org/workspace's PVC. ANY secret/configMap/projected/csi/hostPath/downwardAPI
+    #     volume (or an unknown name) is rejected. The home emptyDir must be DISK-backed (no Memory
+    #     medium) with a BOUNDED sizeLimit (node-DoS).
     - expression: >-
         variables.vols.exists(v, v.name == 'workspace') &&
         variables.vols.exists(v, v.name == 'home') &&
         size(variables.vols) == 2 &&
         variables.vols.all(v,
           (v.name == 'workspace' && has(v.persistentVolumeClaim) &&
-            v.persistentVolumeClaim.claimName == 'af-sbx-ws-' + variables.workspace) ||
+            v.persistentVolumeClaim.claimName == 'af-sbx-ws-' + variables.org + '-' + variables.workspace) ||
           (v.name == 'home' && has(v.emptyDir) &&
             (!has(v.emptyDir.medium) || v.emptyDir.medium == '') &&
             has(v.emptyDir.sizeLimit) &&
             quantity(v.emptyDir.sizeLimit).isLessThan(quantity('2Gi'))))
-      message: "sandbox pod volumes must be EXACTLY {workspace PVC 'af-sbx-ws-<workspace>', home emptyDir (disk, sizeLimit <2Gi)} for BOTH trust-class=test and trust-class=agent (2 volumes) — no other, missing, or duplicate volumes; no broker-cap/secret/configMap/projected/csi/hostPath/downwardAPI, no Memory medium."
+      message: "sandbox pod volumes must be EXACTLY {workspace PVC 'af-sbx-ws-<org>-<workspace>', home emptyDir (disk, sizeLimit <2Gi)} for BOTH trust-class=test and trust-class=agent (2 volumes) — no other, missing, or duplicate volumes; no broker-cap/secret/configMap/projected/csi/hostPath/downwardAPI, no Memory medium."
     # (8) CONTAINER securityContext — the enumerated restricted set the SandboxExecutor renders.
     - expression: >-
         variables.ctrs.all(c,
