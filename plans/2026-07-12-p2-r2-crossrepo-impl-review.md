@@ -1,6 +1,14 @@
 # Implementation review — agentforge v2 P2 R-2 cross-repo coordination
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
+
+**FINALIZED (codex round 4 = CLOSED, READY TO MERGE).** Round 3 CONFIRMED org-canon + result-leak
+and ACCEPTED the preflight pushback, leaving one blocker: the codex credential handoff (route was
+staged, credential artifact was not). Fixed in agentforge `4442b38` — `agent_broker_credential_files`
+stages `.af/codex/auth.json`={OPENAI_API_KEY:capability} for codex (claude keeps the request-time
+apiKeyHelper → no staged credential), wired into the run, unit-pinned that the credential carries the
+capability while env+argv stay bearer-free. Round 4 (confirmation) = CLOSED, READY TO MERGE both
+branches to main (dormant behind v1.1); real-CLI recording-broker acceptance remains the preflight gate.
 
 Cross-repo tranche: agentforge `feat/r2-capability-delivery` + agentforge-platform
 `feat/r2-crossrepo` (the ailab VAP/PV changes ride `feat/p2-unlock`). Round 1 raised 5
