@@ -1,0 +1,54 @@
+# REAPER PV+PVC — the reaper's view of the shared NFS export, in the reaper's TRUSTED home namespace
+# `agentforge` (codex R-1 #1/#5). The reaper was moved OUT of agentforge-sandbox (where the
+# sandbox-guard VAP + the zero-egress default-deny would reject it) into `agentforge`; PVCs are
+# ns-scoped, so it needs its own PVC there, pointing at the SAME export as the workspace/staging PVs.
+#
+# The reaper mounts this PVC at AF_SANDBOX_STAGING_ROOT=/workspace/agentforge/sandbox, so it reads
+# each job's lease at <staging_root>/.leases/<job-id> and rmtree's reclaimed <staging_root>/<job-id>/
+# dirs — the exact same NFS bytes the orchestrator staged and the sandbox mounted.
+#
+# Pre-staged ACTIVE (a bound PV+PVC is harmless without the gated reaper Deployment) so enabling the
+# reaper is just pinning the image digest + re-adding the Deployment/lease Secret to kustomization.yaml.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: af-sbx-reaper
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/role: sandbox-reaper
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4.0
+    - hard
+    - nconnect=4
+  nfs:
+    server: 10.55.0.254
+    path: /pve-nfs/agentforge-sandbox # SAME export as af-sbx-ws-playground + af-sbx-stage-playground
+  claimRef:
+    namespace: agentforge
+    name: af-sbx-reaper
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: af-sbx-reaper
+  namespace: agentforge # the reaper's trusted home (NOT agentforge-sandbox)
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/role: sandbox-reaper
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: af-sbx-reaper
+  resources:
+    requests:
+      storage: 5Gi

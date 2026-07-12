@@ -9,14 +9,20 @@ kind: Kustomization
 resources:
   - namespace.yaml # agentforge-sandbox ns (restricted PSA, pinned v1.31) + tokenless SA
   - sandbox-guard.yaml # VAP: pins the sandbox POD shape (fail-closed) on Pod CREATE/UPDATE
-  - sandbox-job-guard.yaml # VAP: pins the sandbox JOB knobs (fail-closed) on Job CREATE/UPDATE
+  - sandbox-job-guard.yaml # VAP: pins Job knobs + MIRRORS the full pod shape (fail-closed) on Job CREATE/UPDATE
   - orchestrator-rbac.yaml # Jobs-only Role + RoleBinding for the tenant-zero shadow orchestrator SA
   - networkpolicy.yaml # namespace default-deny (ingress + egress)
   - cilium-egress.yaml # trust-class=test ZERO egress (R-1) + the R-2 agent-allow stub (documented)
-  - workspace-pvc.yaml # af-sbx-ws-playground RWX PVC (per-workspace job staging)
-  - reaper-rbac.yaml # reaper SA + Jobs/Pods GC Role + RoleBinding (pre-staged, active)
-  # reaper-lease.sops.yaml + reaper-deployment.yaml are INTENTIONALLY not listed yet — the reaper
-  # image is a PLACEHOLDER @sha256 (unpullable). Re-add BOTH once the p1-worker digest is pinned and
-  # the orchestrator shares AF_LEASE_HMAC_KEY (see reaper-deployment.yaml header).
+  - resource-limits.yaml # namespace ResourceQuota + LimitRange (node-DoS ceiling)
+  # --- Genuinely-shared NFS backing (10.55.0.254:/pve-nfs/agentforge-sandbox), one static PV per consumer ---
+  - workspace-pvc.yaml # SANDBOX ns: af-sbx-ws-playground static PV + PVC (Jobs mount subPath <job-id>)
+  - staging-pv.yaml # TENANT ns: af-sbx-stage-playground static PV ONLY (operator-owned; CP renders the PVC)
+  # --- Reaper: TRUSTED `agentforge` ns (moved out of agentforge-sandbox), cross-ns RBAC into the sandbox ns ---
+  - reaper-rbac.yaml # reaper SA (agentforge ns) + Jobs/Pods GC Role + cross-ns RoleBinding (pre-staged, active)
+  - reaper-storage.yaml # af-sbx-reaper static PV + PVC (agentforge ns) -> same shared export (pre-staged)
+  - reaper-netpol.yaml # reaper egress CiliumNetworkPolicy (agentforge ns): kube-apiserver + DNS only
+  # reaper-lease.sops.yaml (af-sbx-lease, agentforge ns) + reaper-deployment.yaml are INTENTIONALLY not
+  # listed yet — the reaper image is a PLACEHOLDER @sha256 (unpullable). Re-add BOTH once the p1-worker
+  # digest is pinned and the orchestrator shares AF_LEASE_HMAC_KEY (see reaper-deployment.yaml header).
   # - reaper-lease.sops.yaml
   # - reaper-deployment.yaml

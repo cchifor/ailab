@@ -86,15 +86,22 @@ spec:
     # (6) VOLUMES allowlist — ONLY: workspace PVC (claimName == af-sbx-ws-<workspace label>, so a pod
     #     can never mount another workspace's PVC), home emptyDir, broker-cap emptyDir. ANY
     #     secret/configMap/projected/csi/hostPath/downwardAPI volume (or an unknown name) is rejected.
+    #     The emptyDirs must be DISK-backed (no Memory medium) with a BOUNDED sizeLimit (node-DoS).
     - expression: >-
         size(variables.vols) >= 1 && size(variables.vols) <= 3 &&
         variables.vols.exists(v, v.name == 'workspace') &&
         variables.vols.all(v,
           (v.name == 'workspace' && has(v.persistentVolumeClaim) &&
             v.persistentVolumeClaim.claimName == 'af-sbx-ws-' + variables.workspace) ||
-          (v.name == 'home' && has(v.emptyDir)) ||
-          (v.name == 'broker-cap' && has(v.emptyDir)))
-      message: "sandbox pod volumes must be ONLY: workspace PVC 'af-sbx-ws-<workspace>', home emptyDir, broker-cap emptyDir (no secret/configMap/projected/csi/hostPath/downwardAPI)."
+          (v.name == 'home' && has(v.emptyDir) &&
+            (!has(v.emptyDir.medium) || v.emptyDir.medium == '') &&
+            has(v.emptyDir.sizeLimit) &&
+            quantity(v.emptyDir.sizeLimit).isLessThan(quantity('2Gi'))) ||
+          (v.name == 'broker-cap' && has(v.emptyDir) &&
+            (!has(v.emptyDir.medium) || v.emptyDir.medium == '') &&
+            has(v.emptyDir.sizeLimit) &&
+            quantity(v.emptyDir.sizeLimit).isLessThan(quantity('256Mi'))))
+      message: "sandbox pod volumes must be ONLY: workspace PVC 'af-sbx-ws-<workspace>', home emptyDir (disk, sizeLimit <2Gi), broker-cap emptyDir (disk, sizeLimit <256Mi) — no secret/configMap/projected/csi/hostPath/downwardAPI, no Memory medium."
     # (7) broker-cap (the per-job model-broker capability) is the AGENT profile only. A test/setup pod
     #     (R-1's only live profile) must never carry it.
     - expression: >-
@@ -143,6 +150,50 @@ spec:
         (size(object.spec.containers) == 1 && size(oldObject.spec.containers) == 1 &&
          object.spec.containers[0].image == oldObject.spec.containers[0].image)
       message: "sandbox container image may not change on UPDATE."
+    # (12) NO envFrom and NO env[].valueFrom of ANY kind (secretKeyRef/configMapKeyRef/fieldRef/
+    #      resourceFieldRef). Otherwise a deviating Job could secretKeyRef ANY Secret in the ns — the
+    #      kubelet resolves it WITHOUT the sandbox SA having Secret RBAC — and exfiltrate e.g. the reaper
+    #      lease-HMAC key, making leases forgeable. R-1 sandbox env is plain literal values only.
+    - expression: >-
+        variables.ctrs.all(c,
+          !has(c.envFrom) &&
+          (!has(c.env) || c.env.all(e, !has(e.valueFrom))))
+      message: "sandbox container may not use envFrom or any env[].valueFrom (secretKeyRef/configMapKeyRef/fieldRef/resourceFieldRef) — only plain-value env is allowed."
+    # (13) EXACT resource requests+limits: cpu/memory/ephemeral-storage all present on BOTH, with
+    #      requests<=limits and each within a bounded range (node-DoS). Uses the CEL quantity() library.
+    - expression: >-
+        variables.ctrs.all(c,
+          has(c.resources) && has(c.resources.requests) && has(c.resources.limits) &&
+          'cpu' in c.resources.requests && 'memory' in c.resources.requests &&
+          'ephemeral-storage' in c.resources.requests &&
+          'cpu' in c.resources.limits && 'memory' in c.resources.limits &&
+          'ephemeral-storage' in c.resources.limits &&
+          quantity(c.resources.requests.cpu).compareTo(quantity('50m')) >= 0 &&
+          quantity(c.resources.requests.cpu).compareTo(quantity(c.resources.limits.cpu)) <= 0 &&
+          quantity(c.resources.limits.cpu).compareTo(quantity('2')) <= 0 &&
+          quantity(c.resources.requests.memory).compareTo(quantity('64Mi')) >= 0 &&
+          quantity(c.resources.requests.memory).compareTo(quantity(c.resources.limits.memory)) <= 0 &&
+          quantity(c.resources.limits.memory).compareTo(quantity('4Gi')) <= 0 &&
+          quantity(c.resources.requests['ephemeral-storage']).compareTo(quantity('64Mi')) >= 0 &&
+          quantity(c.resources.requests['ephemeral-storage']).compareTo(quantity(c.resources.limits['ephemeral-storage'])) <= 0 &&
+          quantity(c.resources.limits['ephemeral-storage']).compareTo(quantity('8Gi')) <= 0)
+      message: "sandbox container must set cpu/memory/ephemeral-storage requests AND limits, requests<=limits, within [50m..2 cpu, 64Mi..4Gi mem, 64Mi..8Gi ephemeral-storage]."
+    # (14) Pin remaining container fields: no lifecycle hooks, no interactive stdin/tty, no raw block
+    #      volumeDevices. (command/args are fixed by the digest-pinned image entrypoint.)
+    - expression: >-
+        variables.ctrs.all(c,
+          !has(c.lifecycle) &&
+          (!has(c.stdin) || c.stdin == false) &&
+          (!has(c.stdinOnce) || c.stdinOnce == false) &&
+          (!has(c.tty) || c.tty == false) &&
+          !has(c.volumeDevices))
+      message: "sandbox container may not set lifecycle, stdin/stdinOnce/tty, or volumeDevices."
+    # (15) Pod-level pins: no imagePullSecrets (the registry is anonymous-pull), and the default
+    #      scheduler only (no custom scheduler that could bypass taints/quota).
+    - expression: >-
+        (!has(object.spec.imagePullSecrets) || size(object.spec.imagePullSecrets) == 0) &&
+        (!has(object.spec.schedulerName) || object.spec.schedulerName == 'default-scheduler')
+      message: "sandbox pod may not set imagePullSecrets and must use the default scheduler."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

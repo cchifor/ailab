@@ -1,0 +1,41 @@
+# Reaper egress policy (codex R-1 #5). The reaper lives in `agentforge` (trusted), where the existing
+# agentforge-allow-tunnel-only NetworkPolicy is INGRESS-only (egress there is unrestricted). The reaper
+# needs to reach ONLY the kube-apiserver (list/watch/delete sandbox Jobs+Pods) and kube-dns; give it
+# exactly that. A CiliumNetworkPolicy (Cilium is the CNI, precedent: cilium-egress.yaml) is used
+# because `toEntities: [kube-apiserver]` is the only clean, environment-agnostic way to name the API
+# server (it is the Talos CP VIP, not an in-cluster pod/CIDR a plain NetworkPolicy could target).
+#
+# Selecting the reaper endpoint for egress puts it into egress default-deny (Cilium), so this is the
+# reaper's COMPLETE allowed egress. It selects ONLY the reaper pod (by label), so the CP pod's
+# unrestricted egress is untouched. NFS is mounted by the kubelet in the host netns, not the pod netns,
+# so it is not gated here. Applied ACTIVE (a policy selecting a not-yet-created pod is a no-op) so the
+# reaper is fully wired the moment its Deployment is un-gated.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: agentforge-reaper-egress
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-reaper
+  egress:
+    # (1) kube-apiserver — the Talos control-plane VIP; Cilium resolves the `kube-apiserver` entity.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - { port: "6443", protocol: TCP }
+    # (2) kube-dns (so the in-cluster k8s client can resolve if it ever needs a name; the SA-token API
+    #     path uses KUBERNETES_SERVICE_HOST by IP, but DNS is cheap defense-in-depth).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }

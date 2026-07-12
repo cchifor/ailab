@@ -1,16 +1,24 @@
 # Reaper Deployment — `agentforge reaper` (the SAME orchestrator/p1-worker image). Leader-elected GC of
-# leaked sandbox Jobs/Pods/dirs by signed owner-lease. replicas:1 is REQUIRED — the shipped elector
+# leaked sandbox Jobs/Pods/dirs by signed owner-lease. Lives in the TRUSTED `agentforge` namespace
+# (codex R-1 #5): agentforge-sandbox would reject it (sandbox-guard demands a Kata `sandbox` container +
+# sandbox SA) and deny its API egress (zero-egress default-deny). Here it runs under baseline PSA, its
+# cross-ns RBAC (reaper-rbac.yaml) lets it reap Jobs/Pods in agentforge-sandbox, and its egress policy
+# (reaper-netpol.yaml) allows the kube-apiserver + DNS. replicas:1 is REQUIRED — the shipped elector
 # (SingleReplicaElector) is an always-leader stub safe ONLY at one replica; strategy Recreate so a
-# rollout never briefly runs two reapers. Mounts the workspace PVC at the staging root to read each
-# job dir's .af-owner-lease and rmtree reclaimed dirs.
+# rollout never briefly runs two reapers. Mounts the af-sbx-reaper PVC (SAME NFS export as the
+# workspace/staging PVs) at the staging root to read each job's .leases/<job-id> and rmtree reclaimed
+# dirs.
 #
 # ⚠️ DELIBERATELY NOT LISTED in kustomization.yaml (mirrors the CP deployment.yaml precedent). The
 # image below is a PLACEHOLDER @sha256:0000… — unpullable. TO ENABLE THE REAPER:
 #   1. pin the immutable @sha256 of the built p1-worker image (registry.chifor.me/agentforge/p1-worker,
 #      from the cchifor/agentforge release CI — same digest the CP's AFP_WORKER_IMAGE gets);
 #   2. add `- reaper-lease.sops.yaml` + `- reaper-deployment.yaml` back to kustomization.yaml;
-#   3. ensure the ORCHESTRATOR (tenant worker) is configured with the SAME AF_LEASE_HMAC_KEY (from the
-#      same Secret value) and AF_SANDBOX_STAGING_ROOT so the leases verify, and with
+#   3. ensure the ORCHESTRATOR (tenant worker) is configured with the SAME AF_LEASE_HMAC_KEY. Both
+#      sides read the identical value from the operator SOPS Secret `af-sbx-lease`, key AF_LEASE_HMAC_KEY
+#      (reaper: the agentforge-ns copy mounted here; orchestrator: the CP commits the SAME plaintext,
+#      SOPS-encrypted to the same age recipient, into a `af-sbx-lease` Secret in the tenant ns and reads
+#      it via secretKeyRef). The orchestrator must also set AF_SANDBOX_STAGING_ROOT (same value below),
 #      AF_SANDBOX_NAMESPACE=agentforge-sandbox, AF_SANDBOX_WORKSPACE=playground,
 #      AF_SANDBOX_WORKSPACE_PVC=af-sbx-ws-playground (the VAP rejects any pod whose workspace PVC name
 #      != 'af-sbx-ws-' + its workspace label).
@@ -18,7 +26,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: agentforge-reaper
-  namespace: agentforge-sandbox
+  namespace: agentforge # trusted home; NOT agentforge-sandbox
   labels:
     app.kubernetes.io/name: agentforge-reaper
     app.kubernetes.io/component: reaper
@@ -33,6 +41,7 @@ spec:
   template:
     metadata:
       labels:
+        # app.kubernetes.io/name: agentforge-reaper is also the reaper-netpol.yaml egress selector.
         app.kubernetes.io/name: agentforge-reaper
         app.kubernetes.io/component: reaper
         app.kubernetes.io/part-of: agentforge
@@ -60,26 +69,29 @@ spec:
             - { name: AF_WORKER_NAME, value: "agentforge-reaper" }
             - { name: AF_GITEA_URL, value: "https://git.chifor.me" }
             - { name: AF_SANDBOX_NAMESPACE, value: "agentforge-sandbox" }
+            # MUST equal the orchestrator's staging root + the reaper PVC mountPath below, so
+            # <staging_root>/<job-id> and <staging_root>/.leases/<job-id> resolve to the shared export.
             - { name: AF_SANDBOX_STAGING_ROOT, value: "/workspace/agentforge/sandbox" }
             - { name: AF_REAPER_INTERVAL_S, value: "60" }
-            # Shared HMAC key that authenticates the per-job owner-lease. MUST match the orchestrator's.
+            # Shared HMAC key that authenticates the per-job owner-lease. IDENTICAL value on the
+            # orchestrator (see header). Not under sandbox-guard here, so secretKeyRef is allowed.
             - name: AF_LEASE_HMAC_KEY
               valueFrom:
-                secretKeyRef: { name: agentforge-sandbox-lease, key: AF_LEASE_HMAC_KEY }
+                secretKeyRef: { name: af-sbx-lease, key: AF_LEASE_HMAC_KEY }
           volumeMounts:
-            # The workspace PVC mounted at the staging root: the reaper reads <root>/<job-id>/
-            # .af-owner-lease and removes reclaimed dirs. RWX so it shares the volume with the
-            # orchestrator + sandbox pods.
-            - name: workspace
+            # The af-sbx-reaper PVC (same NFS export) at the staging root: reads <root>/.leases/<job-id>
+            # and rmtree's reclaimed <root>/<job-id>/ dirs.
+            - name: staging
               mountPath: /workspace/agentforge/sandbox
           resources:
-            requests: { cpu: 25m, memory: 64Mi }
-            limits: { memory: 128Mi }
+            requests: { cpu: 25m, memory: 64Mi, ephemeral-storage: 64Mi }
+            limits: { cpu: 250m, memory: 128Mi, ephemeral-storage: 256Mi }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
             seccompProfile: { type: RuntimeDefault }
       volumes:
-        - name: workspace
+        - name: staging
           persistentVolumeClaim:
-            claimName: af-sbx-ws-playground
+            claimName: af-sbx-reaper # agentforge-ns PVC -> shared NFS export
