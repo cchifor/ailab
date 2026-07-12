@@ -39,14 +39,19 @@ for secrets already in the repo.
    orchestrator deletes the Job with `propagationPolicy: Foreground` and **waits until the Job object is
    gone AND no Pod with the `agentforge.io/job-id` label exists** (watch, not poll). Only then open the
    job dir for import. Collect bounded stdout + a schema-validated result.
-5. **Lease-based lifecycle (no importer↔reaper race).** Each job dir carries a signed
-   `owner-lease` (job_id + orchestrator instance + `expiry`, HMAC'd). The orchestrator owns the dir until
-   `expiry` (renewed while running/importing); it deletes the dir after a successful import.
-   The **reaper** = a dedicated leader-elected controller (not an ad-hoc CP job) that GC's a Job/Pod/dir/
-   PVC ONLY when the lease is **absent or past `expiry`** AND the Job is not `Active` — so it can never
-   race a live importer (which holds an unexpired lease). On orchestrator crash the lease simply expires
-   and the reaper reclaims; the in-flight import is abandoned (the job is retried fresh), never
-   half-applied.
+5. **Lease-based lifecycle (no importer↔reaper race).** Each job's ownership is a **`coordination.k8s.io/v1`
+   Lease `af-sbx-<job_id>`** (agentforge-sandbox ns) — NOT an NFS file and NOT an HMAC (superseded in R-1
+   round 3; the apiserver's `resourceVersion` compare-and-swap + RBAC are the integrity boundary, and the
+   tokenless sandbox pod has no API access so it can never touch the Lease). The orchestrator CREATEs the
+   Lease with `holderIdentity`=itself BEFORE staging exposes the dir, renews it via `resourceVersion` CAS
+   for the whole run→quiesce→import interval (any renewal 409/exception/missed deadline ⇒ fail closed:
+   `LostClaimError`, abort before apply), and deletes it after a successful import. The **reaper** = a
+   dedicated leader-elected controller that reclaims a Job/Pod/dir ONLY by CAS-**acquiring** an
+   **absent-or-expired** Lease (`renewTime + leaseDurationSeconds < now`) AND finding the Job not `Active`
+   — a CAS conflict means the orchestrator renewed, so it backs off; it can never race a live importer.
+   RBAC: orchestrator+reaper get `leases.coordination.k8s.io` verbs in agentforge-sandbox (see
+   orchestrator-rbac.yaml / reaper-rbac.yaml). On orchestrator crash the Lease simply expires and the
+   reaper reclaims; the in-flight import is abandoned (retried fresh), never half-applied.
 
 ### Normative hostile-import validator (the RWX filesystem is an untrusted channel)
 Import descriptor-relatively (`openat2` `RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS`, or an equivalent
@@ -179,17 +184,20 @@ epoch-safe account lease pass crash/late-release tests; only then lift >1.
    broker fail-closed hold.
 
 ### v1.1-flip prerequisites beyond the 6 proofs (R-1, image-gated)
-The reaper Deployment + its lease ExternalSecret ship COMMENTED OUT of the agentforge-sandbox
-kustomization (the reaper image is an unbuilt `@sha256:REPLACE_ME` placeholder), so two enablement
-prerequisites join the 6 proofs before the flip:
+The reaper Deployment ships COMMENTED OUT of the agentforge-sandbox kustomization (the reaper image is an
+unbuilt `@sha256:REPLACE_ME` placeholder), so these enablement prerequisites join the 6 proofs before the
+flip:
 - **Build the worker image, then un-gate the reaper.** build+push+digest-pin the agentforge worker image
   (`registry.chifor.me/agentforge/{p1-worker,sandbox}` — the registry has no `agentforge/*` repo yet),
-  then un-gate the reaper Deployment + the `af-sbx-lease` lease ExternalSecret (re-add `reaper-lease.yaml`
-  + `reaper-deployment.yaml` to the ailab kustomization with the pinned digest). Only then can the live
+  then un-gate the reaper Deployment (re-add `reaper-deployment.yaml` to the ailab kustomization with the
+  pinned digest; the leases RBAC in `reaper-rbac.yaml` is already active — there is NO lease Secret to
+  seed, the owner-lease is a k8s Lease gated by RBAC + `resourceVersion` CAS). Only then can the live
   env→Settings→Job→VAP→quiesce/import/reaper integration proof run.
-- **Seed the shared lease HMAC in OpenBao.** seed OpenBao `af/sandbox/lease-hmac` (field
-  `AF_LEASE_HMAC_KEY`) — the ONE authoritative source both the reaper and every tenant orchestrator pull
-  via ESO — and grant each tenant OpenBao role (plus the reaper's `af-reaper` role) read on it.
+- **Seed OpenBao + install ESO for the credential path.** seed the per-tenant OpenBao subtree
+  `af/data/<org>/<workspace>/orchestrator` (forge PATs + CP bearer) that the tenant `orchestrator-creds`
+  ExternalSecret extracts, and let the `external-secrets` HelmRelease reconcile so the ESO CRDs exist —
+  then run the tenant-guard good-admit/bad-deny ExternalSecret dry-run (currently blocked on the CRDs).
+  (No shared lease HMAC to seed — that surface was removed with the move to a k8s Lease.)
 
 ## Critical files
 - agentforge: `adapters/exec/sandbox.py` (Job create + import), NEW `adapters/exec/import_validator.py` +
