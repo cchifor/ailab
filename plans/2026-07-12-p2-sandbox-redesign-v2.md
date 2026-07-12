@@ -35,10 +35,18 @@ for secrets already in the repo.
    capability; test: none).
 3. Wait on the Job/Pod status (deadline → the Job's own `activeDeadlineSeconds` + orchestrator delete).
    **Derive exit state from the k8s container status**, never a sandbox-written field.
-4. **Quiesce** (Job terminated, no writer can mutate the dir), then **import** the content via the
-   normative validator (below). Collect bounded stdout + a schema-validated result.
-5. Delete the Job. An independent **reaper** (a controller or a periodic CP job keyed on signed expiry
-   metadata) GC's leaked Jobs/Pods/dirs/PVCs after an orchestrator crash.
+4. **Quiesce → import.** The importer runs ONLY after a race-free proof that no writer remains: the
+   orchestrator deletes the Job with `propagationPolicy: Foreground` and **waits until the Job object is
+   gone AND no Pod with the `agentforge.io/job-id` label exists** (watch, not poll). Only then open the
+   job dir for import. Collect bounded stdout + a schema-validated result.
+5. **Lease-based lifecycle (no importer↔reaper race).** Each job dir carries a signed
+   `owner-lease` (job_id + orchestrator instance + `expiry`, HMAC'd). The orchestrator owns the dir until
+   `expiry` (renewed while running/importing); it deletes the dir after a successful import.
+   The **reaper** = a dedicated leader-elected controller (not an ad-hoc CP job) that GC's a Job/Pod/dir/
+   PVC ONLY when the lease is **absent or past `expiry`** AND the Job is not `Active` — so it can never
+   race a live importer (which holds an unexpired lease). On orchestrator crash the lease simply expires
+   and the reaper reclaims; the in-flight import is abandoned (the job is retried fresh), never
+   half-applied.
 
 ### Normative hostile-import validator (the RWX filesystem is an untrusted channel)
 Import descriptor-relatively (`openat2` `RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS`, or an equivalent
@@ -89,10 +97,29 @@ Documented non-goal: generic DLP / repo-content confidentiality vs the model.
   nodeSelector/DNS, exactly the allowed volumes/mounts/subPaths (job dir + writable home + broker-cap;
   **no secret/configMap/projected/CSI/hostPath volumes**, no ephemeral containers), and the exact Cilium
   identity labels. No other webhook may mutate the pod after validation.
-- Orchestrator SA RBAC: `create/get/delete` Jobs+Pods **in the sandbox ns only** — and provably NOTHING
-  else (no impersonation, controller-create, pod update/patch, `pods/exec|attach|portforward`, Service/
-  EndpointSlice create, PVC mutate, TokenRequest, Secret get, admission mutate). Assert via
-  SelfSubjectRulesReview + rejected-create tests.
+- Orchestrator SA RBAC: `create/get/delete` **Jobs** + `get/list/watch/delete` **Pods** in the sandbox
+  ns only — **no Pod `create`** (only the Job controller makes Pods, and the sandbox-guard VAP pins their
+  shape). Provably NOTHING else (no impersonation, controller/Deployment/Service/EndpointSlice create,
+  pod update/patch, `pods/exec|attach|portforward`, PVC mutate, TokenRequest, Secret get, admission
+  mutate). Assert via SelfSubjectRulesReview + rejected-create tests.
+- **`agentforge-sandbox-job-guard` VAP** (fail-closed, sandbox ns, Job CREATE/UPDATE by the orchestrator
+  SA): pins `spec.parallelism==1`, `spec.completions==1`, `spec.backoffLimit==0`,
+  `spec.activeDeadlineSeconds` in a bounded range, `spec.ttlSecondsAfterFinished` set,
+  `spec.podReplacementPolicy: Failed`, and the pod template = the sandbox-guard shape (so a Job can't
+  smuggle a non-conforming pod template).
+- **Fixed sandbox securityContext** the sandbox-guard VAP enumerates + requires: `runAsNonRoot: true`,
+  `runAsUser: 65532`, `runAsGroup: 65532`, `fsGroup: 65532`, `allowPrivilegeEscalation: false`,
+  `capabilities.drop: [ALL]` (no `add`), `seccompProfile.type: RuntimeDefault`,
+  `readOnlyRootFilesystem: true`, `procMount: Default`. Forbidden pod fields: `privileged`, `hostNetwork/
+  PID/IPC`, `hostPath`, `nodeName`, host ports, `shareProcessNamespace`, `ephemeralContainers`,
+  `hostAliases`, unsafe `sysctls`, `serviceAccountName != <tokenless sandbox SA>`,
+  `automountServiceAccountToken != false`, any `secret`/`configMap`/`projected`/`csi`/`downwardAPI`
+  volume. Allowed volumes ONLY: the workspace PVC via `subPath: <job_id>` (RO for the source import step,
+  RW workdir), a writable-home `emptyDir` (`sizeLimit`), and (agent profile only) the per-job broker-cap
+  `emptyDir`/projected-token. **subPath authorization**: the VAP requires `volumeMounts[].subPath` and
+  the pod's `agentforge.io/job-id` label to be EQUAL, the label to match `^[a-z0-9]{32}$` (unguessable),
+  and the claimed PVC name to equal the pod's workspace label's PVC — so a pod can never mount another
+  job's or workspace's subPath.
 - `tenant-guard.yaml`: add `external-secrets.io/v1` + `keda.sh/v1alpha1` GVKs WITH field pins
   (SecretStore provider/role→this ns+SA; ExternalSecret path/target; ScaledObject target/query keep
   org/workspace/account/pool labels; reject ClusterSecretStore/foreign ns/SA/path/scale-target/
@@ -119,11 +146,15 @@ Documented non-goal: generic DLP / repo-content confidentiality vs the model.
 epoch-safe account lease pass crash/late-release tests; only then lift >1.
 
 ## Phasing (each tranche codex-reviewed before the next)
-- **R-1 boundary core**: SandboxExecutor→Job (DinD removed); restricted-PSA sandbox pod renderer +
-  the sandbox-guard VAP (fail-closed) + orchestrator Job/Pod-only RBAC; per-job subPath I/O + writer
-  quiescence + the normative import validator + the trusted-checkout/git-hardening + the reaper +
-  resource/quota limits. Proves the credential + node boundary WITHOUT the broker (agent jobs run with
-  no model access yet; only test/setup + import prove out).
+- **R-1 boundary core** (must be a SELF-CONTAINED boundary): SandboxExecutor→Job (DinD removed);
+  restricted-PSA sandbox pod renderer + the sandbox-guard + sandbox-job-guard VAPs (fail-closed) +
+  orchestrator Jobs-only RBAC (no Pod-create); per-job subPath I/O + writer quiescence + the normative
+  import validator + the trusted-checkout/git-hardening + the lease-based reaper + resource/quota limits.
+  **Egress is enforced IN R-1, not deferred**: the operator sandbox ns gets a **default-deny**
+  (Cilium)NetworkPolicy, and the **test/setup profile has ZERO egress** (no broker, no DNS) — so R-1
+  runs hostile test/setup code behind a real boundary from day one. (The agent profile's broker egress
+  is R-2, so R-1 exercises test/setup jobs + the import path, not live agent runs.) Proves the
+  credential + node boundary without the broker.
 - **R-2 creds/model**: the standalone broker gateway + per-job capability + secret split + the isolated
   OpenBao provisioner + `eso-auth` SA + ESO v1 + Cilium (broker ingress/egress).
 - **R-3 redaction + scaling + egress hardening**: the `redact()`/quarantine gate; the af-dispatcher
@@ -160,4 +191,4 @@ epoch-safe account lease pass crash/late-release tests; only then lift >1.
   the broker Deployment/Service + NetworkPolicy, the af-dispatcher Deployment/Service/ServiceMonitor,
   the reaper, and the isolated OpenBao-provisioner + `eso-auth` wiring + notes.
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: aligned (round 2; R-1 contract fixed) -->
