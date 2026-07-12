@@ -165,8 +165,8 @@ spec:
       message: "sandbox container image may not change on UPDATE."
     # (12) NO envFrom and NO env[].valueFrom of ANY kind (secretKeyRef/configMapKeyRef/fieldRef/
     #      resourceFieldRef). Otherwise a deviating Job could secretKeyRef ANY Secret in the ns — the
-    #      kubelet resolves it WITHOUT the sandbox SA having Secret RBAC — and exfiltrate e.g. the reaper
-    #      lease-HMAC key, making leases forgeable. R-1 sandbox env is plain literal values only.
+    #      kubelet resolves it WITHOUT the sandbox SA having Secret RBAC — and exfiltrate it. R-1 sandbox
+    #      env is plain literal values only (defense-in-depth: the tokenless sandbox has no API access).
     - expression: >-
         variables.ctrs.all(c,
           !has(c.envFrom) &&

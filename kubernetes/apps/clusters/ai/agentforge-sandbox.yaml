@@ -25,7 +25,8 @@ spec:
   # wait:false so a not-yet-pinned reaper image (once its Deployment is re-added) can never wedge this
   # or any dependent Flux Kustomization; the VAPs/RBAC/NetworkPolicies still apply immediately.
   wait: false
-  # decryption ready for reaper-lease.sops.yaml (the SOPS lease-HMAC Secret) when the reaper is enabled.
+  # decryption (SOPS) retained for any future SOPS-encrypted operator Secret in this tree — currently
+  # none (the reaper owner-lease is a k8s Lease gated by RBAC + resourceVersion CAS, not a SOPS Secret).
   decryption:
     provider: sops
     secretRef:

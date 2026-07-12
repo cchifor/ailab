@@ -97,8 +97,7 @@ spec:
         !has(object.spec.template.spec.nodeName)
       message: "agentforge tenant path: a tenant Deployment may not set spec.template.spec.nodeName."
     # (10) ESO SecretStore pin (P2 F1a) — the CP renders a NAMESPACED OpenBao/vault SecretStore per
-    #      tenant ns (agentforge-platform renderer; same shape as ../../../infrastructure/
-    #      agentforge-sandbox/reaper-lease.yaml). Pin the exfil-relevant fields: provider MUST be `vault`
+    #      tenant ns (agentforge-platform renderer). Pin the exfil-relevant fields: provider MUST be `vault`
     #      (bars a webhook/aws/gcp/etc. provider that could ship secrets to an attacker endpoint), the
     #      server is the in-cluster OpenBao Service, the KV mount is `af`, and auth is the `kubernetes`
     #      backend authenticating as an in-namespace ServiceAccount (bars token/appRole auth with a
