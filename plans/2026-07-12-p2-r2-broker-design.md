@@ -1,6 +1,13 @@
 # P2 R-2 — model-gateway broker + credential split + isolated OpenBao provisioner
 
-<!-- codex-review-status: pending -->
+## Codex Review
+- **CLOSED — 1 Ownership:** broker, broker OAuth, provisioner, policy, and admission objects are operator-owned; the CP only needs its existing ConfigMap/render authority for non-secret references, so no tenant-path widening is required.
+- **PARTIALLY-CLOSED — 2 Capability delivery; 6 merged-code fixes:** the two-volume VAP shape is coherent, and the identified runner/router/env fixes are correct, but shared-NFS tenant isolation, reserved-file handling, copied-capability revocation, stdin transport, and typed path translation remain unspecified.
+- **PARTIALLY-CLOSED — 3 Capability protocol; 7 ledger/capacity; 8 Cilium:** asymmetric signing, operator ceilings, shared atomic reservations, and the network-policy split are sound directions. Broker-visible pod identity, signer-to-tenant binding, session closure, reservation recovery, HA placement, and refresh-related egress remain unresolved.
+- **OPEN — 4 ESO wildcard; PARTIALLY-CLOSED — 5 provisioner:** `af/data/broker/...` still overlaps the allowed tenant template when a valid tenant uses `org=broker`; merged tenant admission also leaves critical ESO names/roles/SAs unpinned. Immutable synthesized bodies address confused-deputy escalation, but lifecycle ordering, ownership, collision handling, and signing-key lifecycle are incomplete.
+- **PARTIALLY-CLOSED — 9 Preflight:** the real-Kata recording test is valuable, but a fake broker cannot prove real provider OAuth use/refresh, and the gate currently requires unimplemented R-2 SandboxExecutor/VAP changes before “ANY Phase-B build.” Exact auth/capability suppression belongs in R-2; generic publish-sink redaction remains R-3.
+
+<!-- codex-review-status: complete -->
 
 ## Context
 R-1 (merged) delivered the sandbox boundary CORE: untrusted code runs in a separate ephemeral Kata Job
@@ -67,6 +74,10 @@ elsewhere. This removes the broker-cap volume entirely; the sandbox-guard/job-gu
 the 2-volume shape (a SMALLER attack surface, changed in the operator repo atomically with the agentforge
 manifest contract).
 
+<!-- codex: round-2: The merged pod/job guards will admit the proposed shape once both broker-cap branches are removed atomically, but the actual merged storage contract is not tenant-isolated. The operator PVs expose the same NFS export root, tenant orchestrators mount that root, and the renderer/VAP key sandbox PVC identity only by workspace slug, not org+workspace. Another tenant orchestrator can therefore enumerate other job directories/capabilities, and equal workspace slugs collide. Production R-2 needs server-side per-org/workspace export directories (or equivalent enforced isolation), org-qualified PVC/identity names, and cross-tenant negative tests. Unguessable job IDs and Kubernetes subPath do not constrain another orchestrator mounting the export root. -->
+
+<!-- codex: round-2: `.af/` must be a reserved staging namespace, not copied from the hostile checkout. The merged `stage()` preserves nested symlinks, so a repository-supplied `.af/broker-cap.jwt` symlink can redirect a naive write. Reject a source `.af`, create the directory/file atomically with no-follow/exclusive semantics and restrictive modes, and clean it on every pre-Job failure. Also, skipping `.af/` does not stop hostile code copying the readable bearer token into another imported file or stdout. Close/revoke the ledger session before import/log publication and either suppress exact capability bytes or weaken the claim from “never appears” to “cannot remain usable”; generic redaction can remain R-3. -->
+
 ### 3. Capability protocol (session capability + asymmetric signature + operator ceilings)
 - **Reusable session capability, not single-use.** Claude Code and Codex make MANY streamed model calls
   per job (incl. helper/compact/aux-model calls), so a single-use nonce is wrong. The capability is a
@@ -93,6 +104,10 @@ manifest contract).
   against a compromised orchestrator — the orchestrator is a trusted tier; the broker ceilings + audit are
   the backstop against orchestrator misbehavior.
 
+<!-- codex: round-2: Reusable-session semantics are correct, but the anti-replay binding is not implementable as written. Cilium enforces an endpoint selector; it does not deliver an authenticated Cilium identity/job label to the ASGI broker. The broker normally sees only a source IP, and the design gives it no Kubernetes/Cilium lookup, authenticated proxy header, mTLS identity, or post-scheduling registration protocol. The capability is minted before the Pod IP exists. Define a trustworthy broker-visible binding and session open/close/revoke state; otherwise any allowed agent pod that obtains a token can replay it until expiry/budget exhaustion. A logged sequence that the CLI does not authenticate is not an anti-replay control. -->
+
+<!-- codex: round-2: The key registry must bind each `kid` to an operator-owned issuer, tenant/workspace, broker audience, and ceilings; do not select a tenant ceiling from the token's self-asserted `tenant` claim alone. Keypair generation, delivery, reload, overlap, revocation, and retirement-after-max-TTL are also absent from the provisioner lifecycle. Public-only verification does cryptographically prevent JWT signing by a compromised broker, but it does not prevent that broker from ignoring verification/ledger checks and directly spending its mounted OAuth. State that residual trust explicitly rather than treating “cannot mint” as containment of a compromised broker. -->
+
 ### 4. Model gateway broker
 A standalone application-layer gateway (not a proxy, not a sidecar), in the dedicated broker image.
 - **Exact request reconstruction (JSON-schema, not header allowlist).** Parse the inbound body against the
@@ -114,6 +129,8 @@ A standalone application-layer gateway (not a proxy, not a sidecar), in the dedi
   writer of its own `auth.json`.
 - **Smuggling surface**: if any ingress proxy (Envoy/Service) sits in front of the ASGI server, the
   raw-socket HTTP/1.1+HTTP/2 conformance/fuzz suite runs through THAT path, not just the app test client.
+
+<!-- codex: round-2: Mandatory SPKI pinning for third-party subscription APIs is operationally brittle unless the provider publishes a supported pin set and overlap/rotation contract; an ordinary SaaS certificate rotation would fail-close every agent. CA validation + exact hostname/SNI + fixed reconstructed destinations + Cilium FQDN/CIDR controls are the R-2 boundary. Keep SPKI as an optional provider-supported hardening item rather than an unconditional blocker; broader network hardening belongs in R-3. -->
 
 ### 5. Bounds, ledger, capacity, audit (fail-closed, replica-safe)
 - **Shared atomic ledger** (NOT broker memory): nonce/session, per-request sequence, rate, concurrency,
@@ -139,6 +156,8 @@ A standalone application-layer gateway (not a proxy, not a sidecar), in the dedi
   availability** — a full/broken audit buffer drops audit lines but still enforces + serves (or fails
   closed on the ENFORCEMENT store, not the audit sink).
 
+<!-- codex: round-2: “Postgres ledger” is not yet an enforceable replica-safe specification. Define a transactional session/request schema with unique `jti`/request-id semantics, atomic reserve-and-concurrency acquisition, authenticated session state, close/revoke, and expiring concurrency leases for broker crashes. Worst-case reservation must conservatively include validated input tokens plus maximum output/auxiliary usage, not only a model alias limit. Fairness/rate state must be global in the ledger rather than per-replica, and uncertain dispatched requests must retain their reservation. Two replicas plus a PDB is not HA without anti-affinity/topology spread and confirmation that `infra-pg` itself has a failover topology; otherwise a node or database outage remains a service-wide fail-closed DoS. -->
+
 ### 6. Credential split + no ESO wildcard escape
 - `orchestrator-creds` (forge PATs + CP bearer + git-push + the capability PRIVATE signing key) →
   **orchestrator** ns/SA only, from OpenBao `af/data/<org>/<workspace>/orchestrator` via the tenant
@@ -163,6 +182,12 @@ A standalone application-layer gateway (not a proxy, not a sidecar), in the dedi
   refresh (leader-elected or a single refresh-owner replica); malformed/partial auth.json fails closed.
   (Whether Codex/Claude subscription OAuth actually supports broker-side refresh is a PREFLIGHT gate.)
 
+<!-- codex: round-2: The broker prefix is not actually disjoint from the tenant template. The identifier regex permits `org=broker`; a tenant with workspace equal to a provider gets policy `af/data/broker/<provider>/*`, which covers `af/data/broker/<provider>/<account>/oauth`. Move tenant data under an unambiguous reserved prefix such as `af/data/tenants/<org>/<workspace>/*` and operator data under `af/data/operator/broker/...`, or at minimum reserve every operator top-level slug in validation and migration tests. Until then the ESO wildcard escape remains OPEN. -->
+
+<!-- codex: round-2: The merged tenant-guard confirms the admission half is still incomplete: `ExternalSecret.target.name` and `secretStoreRef.name` are unpinned; `SecretStore` metadata name, Kubernetes auth role, and serviceAccountRef value are unpinned; source keys are only syntactically checked and are not correlated to the namespace's org/workspace. The revision promises only some of these pins and provides no trustworthy org/workspace map for CEL. Use deterministic names plus an operator-owned VAP parameter/mapping (or equivalent immutable operator metadata), pin the SecretStore role/SA/version and exact source key, and test updates as well as creates. OpenBao ACL containment remains mandatory even after admission hardening. -->
+
+<!-- codex: round-2: Refresh persistence contradicts the isolation and egress design. ESO is read-only from the application's perspective; with token automount off, the broker has no specified credential for writing OpenBao, and §8 does not allow broker→OpenBao egress. Supplying such authority also increases the broker's blast radius and invalidates “neither side needs OpenBao transit connectivity.” Further, each of two replicas has a private writable emptyDir: refreshing only the leader leaves the other replica's copied auth.json stale. Specify broker authentication to OpenBao, narrowly scoped write policy, egress/admission volume shape, CAS/versioned writes, leader failover, and how every serving replica reloads the refreshed token—or use a separate operator refresh controller so the request broker remains read-only. -->
+
 ### 7. Isolated OpenBao provisioner (operator controller, immutable templates)
 **Chosen: option (b), hardened.** A small **operator-owned controller** (ailab) reconciles per-tenant
 OpenBao objects. It reads ONLY validated IDENTIFIERS from the CP's desired state (the `<org>`,
@@ -182,6 +207,8 @@ repair; audit of every OpenBao write; documented break-glass (operator root, out
 `af/data/broker/<provider>/<account>/oauth`. Separate orchestrator vs broker auth roles/policies; the
 broker role is operator-owned and unreachable via any tenant SecretStore.
 
+<!-- codex: round-2: Immutable in-image templates establish non-escalation against CP-supplied policy/role bodies, but the lifecycle spec is not adequate. The stated order is backwards: create namespace/SA, then policy, then the auth role that references it; delete/revoke in reverse with token/lease handling. Clarify whether “operator git desired-state” is a separate operator-reviewed source—the merged tenant repo is CP-written—and define stable collision-free object names, reserved identifiers, ownership/adoption records, CAS/ETag updates, retry/backoff, partial-failure recovery, finalizers/tombstones, rotation overlap, drift conflict policy, deletion grace, audit durability, and break-glass reconciliation suspension. The per-tenant reconciler must not synthesize the broker role from tenant inputs. Capability keypair issuance/publication/revocation must also be included or assigned to a separate operator controller. -->
+
 ### 8. Cilium (agent→broker + broker→upstream are R-2 BLOCKERS, not R-3)
 Per codex, the minimum enforceable policies to make LIVE agents safe are R-2, not R-3 (R-3 adds canary +
 FQDN-on-broker hardening only):
@@ -196,6 +223,8 @@ FQDN-on-broker hardening only):
 - **broker egress**: the enumerated upstream API + auth/OAuth hosts (from preflight; FQDN L7 + explicit
   deny of private/link-local/service/node ranges; test IPv4/IPv6/CNAME/DNS-rebinding/stale-IP) + the
   ledger (infra-pg) + DNS. No other cluster-internal reach.
+
+<!-- codex: round-2: The three policy directions are the correct R-2 minimum, and capability verification correctly belongs in broker logic. However, “broker checking the source identity” still lacks an identity handoff, so a selector admitting agent pods cannot prove that a request came from the token's exact `job_id`; resolve that before calling replay denial proven. Broker egress must also include the narrowly defined OpenBao endpoint/auth path if broker-side refresh writeback remains, contradicting “No other cluster-internal reach.” Keep high-cardinality per-job labels out of Cilium security-identity allocation unless the cluster is explicitly configured and load-tested for that churn. -->
 
 ### 9. Merged-code fixes in agentforge (real bugs blocking live agents)
 - **Codex stdin + path translation (BLOCKER)**: `SandboxExecutor` currently drops `ExecSpec.stdin` and
@@ -215,6 +244,8 @@ FQDN-on-broker hardening only):
   secret vars; no credential-named var can cross). Fail-fast reject an empty broker URL / missing capability
   before Job creation. Test that unknown/new provider credential names cannot cross.
 
+<!-- codex: round-2: Inspection confirms all four merged defects: `ExecSpec` has no typed model contract; `SandboxExecutor` ignores `stdin`, passes host argv unchanged, uses a denylist, and renders an unpopulated broker-cap emptyDir; `litellm_local` injects a key/base URL that the sandbox strips/overwrites. The proposed directions are right, but “pipe stdin into the Job” is not an implementation: a Pod spec with `stdin:false` has no create-time byte stream, and the current client has no attach/exec channel. Define a reserved staged stdin file plus a fixed wrapper that reads it and supplies EOF, or an equally bounded authenticated transport, and skip/remove it like other control files. Path conversion must be structural—only `Path`-typed fields proven beneath `spec.cwd`, including Codex output scratch—not global string replacement in argv/shell/env. Choose one capability env name (`AF_BROKER_CAP_FILE` versus merged `AF_BROKER_CAPABILITY_FILE`) and make the CLI wrapper/helper consume it. -->
+
 ### 10. Preflight (HARD Phase-B entry gate, recorded artifacts)
 Before ANY Phase-B build, prove — with **digest/version-pinned production CLI binaries run through a REAL
 Kata Job against a RECORDING fake broker** (not a local CLI call) — and record transcripts + automated
@@ -231,6 +262,8 @@ regression tests, for BOTH Claude Code and Codex:
 If a CLI needs `apiKeyHelper` / immutable config / a wrapper / a different volume shape, BOTH sandbox-guard
 and sandbox-job-guard change together (operator repo) — and the current VAPs forbid init containers + all
 projected/Secret/ConfigMap volumes, so any such need is designed + admitted explicitly.
+
+<!-- codex: round-2: This gate conflates two different proofs. A recording fake broker can discover CLI→broker behavior, but cannot prove that the real provider accepts broker-side subscription OAuth use/refresh; that needs a separately authorized real-provider end-to-end test through the deployed broker, with saved artifacts sanitized of refresh/access tokens. The sequencing is also impossible as written: the merged agent Job is rejected/unpopulatable and cannot transport stdin or translate paths until R-2 code and both VAPs change, yet those results are required “before ANY Phase-B build.” Split the gate into (A) an operator-owned real-Kata CLI discovery harness allowed during Phase A and (B) a Phase-B integration gate after the minimal SandboxExecutor/VAP implementation, before production rollout. -->
 
 ## Critical files
 - **agentforge** (merged main → new branch): NEW `src/agentforge/broker/{gateway,capability,bounds,
