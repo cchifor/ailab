@@ -1,0 +1,53 @@
+# Namespace ResourceQuota + LimitRange (codex R-1 #2). The sandbox-guard VAP already REQUIRES every
+# container to declare exact cpu/memory/ephemeral-storage requests+limits within a bounded per-container
+# range; these two objects add the NAMESPACE-WIDE ceiling (aggregate node-DoS protection) and an
+# independent per-container backstop that holds even if a VAP is ever disabled.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: agentforge-sandbox-quota
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  hard:
+    pods: "20"
+    count/jobs.batch: "40"
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    requests.ephemeral-storage: 32Gi
+    limits.cpu: "16"
+    limits.memory: 32Gi
+    limits.ephemeral-storage: 64Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: agentforge-sandbox-limits
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  limits:
+    # Per-container backstop. `max` mirrors the VAP's upper bounds; `min` its floors. `default`/
+    # `defaultRequest` only fill in when a field is omitted — sandbox pods must set them explicitly
+    # (the VAP rejects omissions), so these defaults are just a safety net for any other pod.
+    - type: Container
+      max:
+        cpu: "2"
+        memory: 4Gi
+        ephemeral-storage: 8Gi
+      min:
+        cpu: 50m
+        memory: 64Mi
+        ephemeral-storage: 64Mi
+      default:
+        cpu: "1"
+        memory: 512Mi
+        ephemeral-storage: 1Gi
+      defaultRequest:
+        cpu: 250m
+        memory: 256Mi
+        ephemeral-storage: 256Mi

@@ -10,8 +10,11 @@ spec:
   # Its OWN path/Kustomization (NOT a line in apps/ or infrastructure/kustomization.yaml) so the
   # operator-owned sandbox boundary does not collide with the P1 agentforge admission (apps layer) or
   # the concurrent P2 operators work under infrastructure/{security,autoscaling}. Mirrors the
-  # agentforge-runtimeclasses wiring. dependsOn infrastructure so the nfs-csi StorageClass (the
-  # workspace PVC's class) exists first.
+  # agentforge-runtimeclasses wiring. dependsOn ONLY infrastructure — deliberately NOT `apps`, so the
+  # security VAPs/RBAC/NetworkPolicies keep reconciling even if the apps layer is unhealthy. The staging
+  # volumes are STATIC NFS PVs (storageClassName ""), so the nfs-csi StorageClass is no longer required.
+  # The reaper objects target the `agentforge` ns (created by `apps`); on a cold bootstrap they retry
+  # (wait:false, retryInterval 1m) until that ns exists — the boundary's other objects apply meanwhile.
   dependsOn:
     - name: infrastructure
   sourceRef:
