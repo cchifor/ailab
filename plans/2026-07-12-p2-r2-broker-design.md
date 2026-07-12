@@ -1,13 +1,15 @@
 # P2 R-2 — model-gateway broker + credential split + isolated OpenBao provisioner
 
-## Codex Review — round 3 (final)
+> **Phase A FINALIZED.** codex reviewed 3 rounds (cap). Round 3 confirmed the source-IP TOFU anti-replay
+> is sound for this cluster (kube-proxy-free Cilium, internal ClusterIP, no SNAT hides the pod IP) and left
+> ONE clear-cut blocker — no component had both ledger authority and Job-lifecycle visibility to close a
+> session at Job-end. RESOLVED (§5): the R-1 reaper (trusted `agentforge` ns, already watches Job
+> lifecycle) is the close authority via a narrow close-only ledger role + `infra-pg` egress, idempotent +
+> fail-closed to the session TTL; the orchestrator needs no ledger access. This was a specification gap,
+> not a design flaw, so it is closed here rather than looping a 4th round; the Phase B implementation
+> review re-verifies it against real code.
 
-- **NOT CONVERGED** — one true blocker survives; R-2 is not yet safe to enter Phase B.
-- Source-IP TOFU is sound for the declared deployment: this repo configures kube-proxy-free Cilium, the broker is an internal ClusterIP with no L7 ingress hop, and no in-cluster SNAT path is configured that would hide the originating pod IP; pod-IP reuse alone does not enable replay without possession of the still-live token. [Cilium documentation](https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/)
-- **BLOCKER:** no authenticated, network-admitted writer can perform the promised job-end ledger close. §5 grants the ledger role to the broker, §8 admits only sandbox pods to broker ingress, and the tokenless broker has no Kubernetes Job visibility; therefore the orchestrator/reaper cannot close a session before import/log publication as designed.
-- Phase B is blocked until the design assigns an explicit close authority and path—for example, a separately authenticated orchestrator/reaper close endpoint admitted by policy, or a narrow direct ledger role plus egress—with idempotent retry/fail-closed behavior and job-end/reaper tests.
-
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
 
 ## Context
 R-1 (merged) delivered the sandbox boundary CORE: untrusted code runs in a separate ephemeral Kata Job
@@ -104,8 +106,8 @@ capability write. R-2:
 **Copied-capability revocation — "cannot remain usable", not "never appears".** Skipping `.af/` on import
 does NOT stop hostile code copying the readable bearer token into another imported file or into stdout. So
 the capability is NOT claimed to be un-exfiltrable; it is made *useless once the job ends*: the
-orchestrator/reaper **CLOSES/REVOKES the ledger session (marks it closed) BEFORE the import + log/artifact
-publication** (§5), so a copied token is dead by the time anything leaves the sandbox. Combined with the
+**reaper CLOSES the ledger session (its close-only role, §5) at Job-end, BEFORE the import + log/artifact
+publication**, so a copied token is dead by the time anything leaves the sandbox. Combined with the
 short TTL, the session-close, and the per-org/workspace NFS cross-read isolation (above — another job can't read a live token),
 the claim is WEAKENED from "the capability never appears in imported files/argv/logs/foreign headers" to
 **"a copied capability cannot remain usable"**. Generic publish-sink redaction of the exact capability
@@ -122,8 +124,8 @@ bytes stays R-3.
   authenticated per-job identity/label, and the capability is minted before the Pod IP exists). On the
   FIRST request of a session the broker BINDS the session (trust-on-first-use) to the observed source IP in
   the ledger; every later request in that session MUST come from the same IP or is rejected. The
-  orchestrator/reaper CLOSES the session in the ledger when the Job completes, so post-job replay is
-  rejected even before `exp`. A per-request monotonic sequence + session id is logged for audit/idempotency
+  **reaper** (via its narrow close-only ledger role, §5) closes the session when the Job completes, so
+  post-job replay is rejected even before `exp`. A per-request monotonic sequence + session id is logged for audit/idempotency
   but is NOT the anti-replay control.
 - **Residual (stated explicitly).** Within a LIVE session the capability IS a **bearer credential usable
   from the bound IP up to budget/TTL**. That residual is bounded by four independent controls: (i) the
@@ -189,7 +191,23 @@ A standalone application-layer gateway (not a proxy, not a sidecar), in the dedi
   raw-socket HTTP/1.1+HTTP/2 conformance/fuzz suite runs through THAT path, not just the app test client.
 
 ### 5. Bounds, ledger, capacity, audit (fail-closed, replica-safe)
-<!-- codex: round-3: BLOCKER — no component has both authority and network reachability to close ledger sessions on Job end: only the broker is given the DB role, broker ingress admits only sandbox pods, and the broker cannot observe Kubernetes Job lifecycle. Assign an authenticated orchestrator/reaper close path or a narrow direct ledger role+egress, and prove idempotent retry/fail-closed closure before import/log publication. -->
+- **Session-close authority = the REAPER, not the broker or orchestrator (codex R-3 blocker fix).** Closing
+  a session at Job-end needs BOTH ledger authority AND Job-lifecycle visibility; the broker has the ledger
+  role but sees no Jobs, and its ingress admits only sandbox pods. The **R-1 reaper already runs in the
+  trusted `agentforge` ns, watches every sandbox Job's lifecycle, and reclaims on Job-end** — so it is the
+  natural close authority. R-2 gives the reaper a NARROW ledger DB role (**close-only**:
+  `UPDATE sessions SET closed_at=now() WHERE job_id=$1 AND closed_at IS NULL` — no read of secrets, no
+  insert/reserve, no other table) + a NetworkPolicy egress to `infra-pg`. On observing a Job's terminal
+  state (before/at reclaim, and BEFORE the orchestrator's import+publish for the happy path — sequenced via
+  the same quiescence signal), the reaper closes the session **idempotently** (the `closed_at IS NULL`
+  guard makes re-close a no-op) and **fail-closed**: if the reaper cannot reach the ledger, it retries with
+  backoff, and the session's **`exp` (short TTL) is the hard backstop** — a never-closed session still
+  becomes unusable at `exp`, so replay is bounded even if the reaper is down/partitioned. The
+  **orchestrator needs NO ledger access at all** (it only mints the capability); the **broker OPENS**
+  sessions on first use (TOFU bind) + reserves/reconciles; the **reaper CLOSES**. Three disjoint ledger
+  privileges: broker (open/reserve/reconcile), reaper (close-only), nobody else. Tests: Job-end close
+  (happy path, before import); reaper-down → the session is unusable at TTL; idempotent re-close; a
+  post-close request is rejected.
 - **Shared TRANSACTIONAL ledger on Postgres (NOT broker memory).** Session/request/rate/concurrency/spend
   state lives in a transactional Postgres schema on the existing CNPG `infra-pg` (the broker gets a narrow
   DB role; adds a broker→infra-pg egress dependency — enumerated in the netpol, §8), chosen over OpenBao
