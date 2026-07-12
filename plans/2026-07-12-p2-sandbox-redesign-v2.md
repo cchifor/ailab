@@ -197,6 +197,21 @@ flip:
   `af/data/<org>/<workspace>/orchestrator` (forge PATs + CP bearer) that the tenant `orchestrator-creds`
   ExternalSecret extracts, and let the `external-secrets` HelmRelease reconcile so the ESO CRDs exist —
   then run the tenant-guard good-admit/bad-deny ExternalSecret dry-run (currently blocked on the CRDs).
+
+**Lease-fencing adjudication (round 5 → independent tie-breaker, BENIGN).** codex round 5 flagged the
+owner-lease as unable to fence the unbounded NFS `apply_back`/cleanup and asked for a storage-honored
+fencing token. An independent neutral adjudication (`plans/2026-07-12-p2-r1-lease-fencing-adjudication.md`)
+ruled **BENIGN**: a reaper takeover during apply cannot corrupt `spec.cwd` or duplicate a forge effect,
+because the reaper's target (`job_dir`) is DISJOINT from the stale orchestrator's source/sink
+(`import_dir` + the private local checkout), every `job_dir` read completes before apply, and ownership is
+re-checked before any imported tree is applied; the apply-then-lose→retry path is covered by v1's epoch
+claim lock + deterministic-branch PR dedup. No fencing token / prove-dead is required for R-1. The
+**load-bearing invariant** (documented in `sandbox.py` run() + `kube.py` `list_job_ids`): the reaper must
+NEVER reclaim or sweep a `.import` scratch — if a future change lets the reaper or another worker touch
+`import_dir` or the same `spec.cwd`, real fencing WOULD then be required. Operational follow-up (not
+R-1-blocking, needs the running reaper): a conservative **aged-`.import`-scratch cleanup** (e.g. remove
+`<id>.import` older than ≫ max apply time whose `<id>` job dir + Lease are gone) to reclaim scratch left
+by a hard orchestrator crash mid-import.
   (No shared lease HMAC to seed — that surface was removed with the move to a k8s Lease.)
 
 ## Critical files
