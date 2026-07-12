@@ -2,30 +2,36 @@
 #
 # PVCs are namespace-scoped, so a dynamic PVC in agentforge-sandbox could NOT be shared with the
 # orchestrator (tenant ns) or the reaper (agentforge ns). R-1 therefore uses a genuinely-shared NFS
-# backing: ONE operator-created export dir `10.55.0.254:/pve-nfs/agentforge-sandbox` (chmod 0777 so
-# uid 65532 (sandbox) AND the orchestrator/reaper uids all read+write — this also sidesteps the
-# NFS-ignores-fsGroup caveat), fronted by a STATIC PV per consumer, all pointing at that SAME
-# server:path. This file is the sandbox consumer:
-#   * PV  af-sbx-ws-playground (cluster-scoped) — pre-bound (claimRef) to the PVC below.
-#   * PVC af-sbx-ws-playground (agentforge-sandbox ns) — the sandbox Jobs mount it at /workspace with
-#     subPath: <job-id> (sandbox-guard pins subPath == the pod's job-id label), so job X sees only
-#     <export>/<jobX>. The owner-lease is NOT on this NFS at all — it is a coordination.k8s.io Lease
-#     (RBAC + apiserver CAS); the tokenless sandbox has no API access, so it can never touch it (R-1 #5).
+# backing. P2 R-2 §C keys that backing on ORG+workspace for multi-tenant isolation: each org/workspace
+# gets its OWN operator-created export subdir `10.55.0.254:/pve-nfs/agentforge-sandbox/<org>/<ws>`
+# (here tenant-zero/playground; chmod 0777 so uid 65532 (sandbox) AND the orchestrator/reaper uids all
+# read+write — this also sidesteps the NFS-ignores-fsGroup caveat), fronted by a STATIC PV per consumer,
+# all three (ws/stage/reaper) pointing at that SAME per-org/ws server:path — so one tenant orchestrator's
+# PV can never reach another org's tree. Operator PREREQUISITE: `mkdir -m 0777` the per-org/ws export
+# subdir before the flip (see plans/2026-07-12-p2-sandbox-redesign-v2.md). This file is the sandbox
+# consumer:
+#   * PV  af-sbx-ws-tenant-zero-playground (cluster-scoped) — pre-bound (claimRef) to the PVC below.
+#   * PVC af-sbx-ws-tenant-zero-playground (agentforge-sandbox ns) — the sandbox Jobs mount it at
+#     /workspace with subPath: <job-id> (sandbox-guard pins subPath == the pod's job-id label), so job X
+#     sees only <export>/<jobX>. The owner-lease is NOT on this NFS at all — it is a coordination.k8s.io
+#     Lease (RBAC + apiserver CAS); the tokenless sandbox has no API access, so it can never touch it
+#     (R-1 #5).
 #
-# The sibling PVs af-sbx-stage-<ws> (staging-pv.yaml; the operator PROVIDES the PV, the CP renders the
-# tenant-ns PVC) and af-sbx-reaper (reaper-storage.yaml) point at the SAME export, so a file the
-# orchestrator writes to <staging_root>/<jobX>/ is the exact byte the sandbox reads at /workspace and
-# the reaper reclaims. storageClassName:"" + volumeName bind statically (NOT the dynamic nfs-csi
-# default); reclaim Retain so operator data is never auto-deleted. mountOptions mirror storageclass-nfs.
-# To onboard another workspace sharing this ns, clone this file as af-sbx-ws-<slug> (+ the staging PV,
-# + the orchestrator RoleBinding subject).
+# The sibling PVs af-sbx-stage-<org>-<ws> (staging-pv.yaml; the operator PROVIDES the PV, the CP renders
+# the tenant-ns PVC) and af-sbx-reaper-<org>-<ws> (reaper-storage.yaml) point at the SAME per-org/ws
+# export subdir, so a file the orchestrator writes to <staging_root>/<jobX>/ is the exact byte the
+# sandbox reads at /workspace and the reaper reclaims. storageClassName:"" + volumeName bind statically
+# (NOT the dynamic nfs-csi default); reclaim Retain so operator data is never auto-deleted. mountOptions
+# mirror storageclass-nfs. To onboard another org/workspace sharing this ns, clone this file as
+# af-sbx-ws-<org>-<ws> (+ its export subdir, the staging PV, + the orchestrator RoleBinding subject).
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: af-sbx-ws-playground
+  name: af-sbx-ws-tenant-zero-playground
   labels:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
     agentforge.io/workspace: playground
     agentforge.io/role: sandbox-workspace
 spec:
@@ -41,26 +47,27 @@ spec:
     - nconnect=4
   nfs:
     server: 10.55.0.254 # QNAP storage-fabric IP (host router + SNAT over Thunderbolt)
-    path: /pve-nfs/agentforge-sandbox # the ONE shared export; same server:path on all three PVs
+    path: /pve-nfs/agentforge-sandbox/tenant-zero/playground # per-org/ws export subdir; same server:path on all three PVs
   # Pre-bind to exactly this PVC so no other claim can grab the PV (cross-consumer safety).
   claimRef:
     namespace: agentforge-sandbox
-    name: af-sbx-ws-playground
+    name: af-sbx-ws-tenant-zero-playground
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: af-sbx-ws-playground
+  name: af-sbx-ws-tenant-zero-playground
   namespace: agentforge-sandbox
   labels:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
     agentforge.io/workspace: playground
 spec:
   accessModes:
     - ReadWriteMany
   storageClassName: "" # bind to the static PV below, not the dynamic default
-  volumeName: af-sbx-ws-playground
+  volumeName: af-sbx-ws-tenant-zero-playground
   resources:
     requests:
       storage: 5Gi

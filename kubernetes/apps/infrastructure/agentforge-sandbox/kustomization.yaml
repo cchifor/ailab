@@ -14,12 +14,12 @@ resources:
   - networkpolicy.yaml # namespace default-deny (ingress + egress)
   - cilium-egress.yaml # trust-class=test ZERO egress (R-1) + the R-2 agent-allow stub (documented)
   - resource-limits.yaml # namespace ResourceQuota + LimitRange (node-DoS ceiling)
-  # --- Genuinely-shared NFS backing (10.55.0.254:/pve-nfs/agentforge-sandbox), one static PV per consumer ---
-  - workspace-pvc.yaml # SANDBOX ns: af-sbx-ws-playground static PV + PVC (Jobs mount subPath <job-id>)
-  - staging-pv.yaml # TENANT ns: af-sbx-stage-playground static PV ONLY (operator-owned; CP renders the PVC)
+  # --- Per-org/ws NFS backing (10.55.0.254:/pve-nfs/agentforge-sandbox/<org>/<ws>), one static PV per consumer ---
+  - workspace-pvc.yaml # SANDBOX ns: af-sbx-ws-tenant-zero-playground static PV + PVC (Jobs mount subPath <job-id>)
+  - staging-pv.yaml # TENANT ns: af-sbx-stage-tenant-zero-playground static PV ONLY (operator-owned; CP renders the PVC)
   # --- Reaper: TRUSTED `agentforge` ns (moved out of agentforge-sandbox), cross-ns RBAC into the sandbox ns ---
   - reaper-rbac.yaml # reaper SA (agentforge ns) + Jobs/Pods GC Role + cross-ns RoleBinding (pre-staged, active)
-  - reaper-storage.yaml # af-sbx-reaper static PV + PVC (agentforge ns) -> same shared export (pre-staged)
+  - reaper-storage.yaml # af-sbx-reaper-tenant-zero-playground static PV + PVC (agentforge ns) -> same per-org/ws subdir (pre-staged)
   - reaper-netpol.yaml # reaper egress CiliumNetworkPolicy (agentforge ns): kube-apiserver + DNS only
   # reaper-deployment.yaml is INTENTIONALLY not listed yet — the reaper image is a PLACEHOLDER @sha256
   # (unpullable). The owner-lease is a coordination.k8s.io Lease gated by reaper-rbac.yaml (already
