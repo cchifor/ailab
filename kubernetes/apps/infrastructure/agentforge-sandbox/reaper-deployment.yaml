@@ -55,9 +55,9 @@ spec:
         - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000 # the p1-worker image's USER
-        runAsGroup: 1000
-        fsGroup: 1000
+        runAsUser: 65532 # the p1-worker image's unified nonroot USER (== orchestrator + sandbox; F1b)
+        runAsGroup: 65532
+        fsGroup: 65532 # so the reaper can rmtree the 65532-owned job dirs on the shared NFS export
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: reaper
