@@ -1,0 +1,51 @@
+# Reaper identity + RBAC (ACTIVE; pre-staged so enabling the reaper is just uncommenting the
+# Deployment + Secret once the image digest lands). The reaper is a dedicated leader-elected controller
+# (`agentforge reaper`) that GC's leaked sandbox Jobs/Pods/dirs whose signed owner-lease is absent or
+# past expiry AND whose Job is not Active — so it can never race a live importer. It needs to read Job
+# status + delete Jobs (foreground -> cascades the Pods) and read/delete Pods.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentforge-reaper
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/component: reaper
+    app.kubernetes.io/part-of: agentforge
+automountServiceAccountToken: true # the reaper DOES talk to the apiserver (unlike the sandbox SA)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentforge-reaper
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentforge-reaper
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentforge-reaper
+subjects:
+  - kind: ServiceAccount
+    name: agentforge-reaper
+    namespace: agentforge-sandbox

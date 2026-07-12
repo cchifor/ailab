@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge v2 P2 R-1 — the OPERATOR-OWNED, CP-UNWRITABLE sandbox boundary (ADR 0019, plans/
+# 2026-07-12-p2-sandbox-redesign-v2.md). Its OWN directory + a dedicated Flux Kustomization
+# (clusters/ai/agentforge-sandbox.yaml) rather than a line in a shared aggregator index — the P1
+# agentforge admission lives under apps/agentforge/admission (the `apps` Kustomization) and the P2
+# operators concurrently edit infrastructure/{security,autoscaling}; keeping this self-contained (the
+# runtimeclasses precedent) avoids colliding with either. NO shared aggregator index is edited.
+resources:
+  - namespace.yaml # agentforge-sandbox ns (restricted PSA, pinned v1.31) + tokenless SA
+  - sandbox-guard.yaml # VAP: pins the sandbox POD shape (fail-closed) on Pod CREATE/UPDATE
+  - sandbox-job-guard.yaml # VAP: pins the sandbox JOB knobs (fail-closed) on Job CREATE/UPDATE
+  - orchestrator-rbac.yaml # Jobs-only Role + RoleBinding for the tenant-zero shadow orchestrator SA
+  - networkpolicy.yaml # namespace default-deny (ingress + egress)
+  - cilium-egress.yaml # trust-class=test ZERO egress (R-1) + the R-2 agent-allow stub (documented)
+  - workspace-pvc.yaml # af-sbx-ws-playground RWX PVC (per-workspace job staging)
+  - reaper-rbac.yaml # reaper SA + Jobs/Pods GC Role + RoleBinding (pre-staged, active)
+  # reaper-lease.sops.yaml + reaper-deployment.yaml are INTENTIONALLY not listed yet — the reaper
+  # image is a PLACEHOLDER @sha256 (unpullable). Re-add BOTH once the p1-worker digest is pinned and
+  # the orchestrator shares AF_LEASE_HMAC_KEY (see reaper-deployment.yaml header).
+  # - reaper-lease.sops.yaml
+  # - reaper-deployment.yaml

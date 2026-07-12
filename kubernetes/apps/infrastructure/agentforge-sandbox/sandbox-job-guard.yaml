@@ -1,0 +1,51 @@
+# ValidatingAdmissionPolicy — pins the JOB-level knobs of every sandbox Job (the orchestrator SA is
+# Jobs-only: it creates Jobs, never Pods). failurePolicy: Fail (fail-closed). The Pod SHAPE is pinned
+# by agentforge-sandbox-guard when the Job controller creates the pod; this guard bounds the Job itself
+# so it cannot run forever, retry, spawn replacements, or smuggle a non-conforming pod template.
+# Mirrors agentforge/src/agentforge/adapters/exec/sandbox.py::build_job_manifest (spec block).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-sandbox-job-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  variables:
+    - name: tmpl
+      expression: "has(object.spec.template.spec) ? object.spec.template.spec : {}"
+  validations:
+    # (1) Single, non-retrying, non-replacing, TTL-swept run with a bounded hard deadline.
+    - expression: >-
+        has(object.spec.parallelism) && object.spec.parallelism == 1 &&
+        has(object.spec.completions) && object.spec.completions == 1 &&
+        has(object.spec.backoffLimit) && object.spec.backoffLimit == 0 &&
+        has(object.spec.activeDeadlineSeconds) &&
+        object.spec.activeDeadlineSeconds >= 1 && object.spec.activeDeadlineSeconds <= 7200 &&
+        has(object.spec.ttlSecondsAfterFinished) && object.spec.ttlSecondsAfterFinished >= 0 &&
+        has(object.spec.podReplacementPolicy) && object.spec.podReplacementPolicy == 'Failed'
+      message: "sandbox Job must set parallelism=1, completions=1, backoffLimit=0, activeDeadlineSeconds in [1,7200], ttlSecondsAfterFinished set, podReplacementPolicy=Failed."
+    # (2) Defense-in-depth: the pod template's boundary-critical fields must already match the
+    #     sandbox-guard shape, so a rejected pod never even gets created (fail fast at Job admission).
+    - expression: >-
+        has(variables.tmpl.runtimeClassName) && variables.tmpl.runtimeClassName == 'kata' &&
+        has(variables.tmpl.serviceAccountName) && variables.tmpl.serviceAccountName == 'agentforge-sandbox' &&
+        has(variables.tmpl.automountServiceAccountToken) && variables.tmpl.automountServiceAccountToken == false &&
+        has(variables.tmpl.restartPolicy) && variables.tmpl.restartPolicy == 'Never'
+      message: "sandbox Job pod template must set runtimeClassName=kata, serviceAccountName=agentforge-sandbox, automountServiceAccountToken=false, restartPolicy=Never."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-sandbox-job-guard
+spec:
+  policyName: agentforge-sandbox-job-guard
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: agentforge-sandbox
