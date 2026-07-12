@@ -83,13 +83,15 @@ spec:
         variables.labels['app.kubernetes.io/component'] == 'sandbox' &&
         variables.workspace.matches('^[a-z0-9][a-z0-9-]{0,62}$')
       message: "sandbox pod must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, workspace (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
-    # (6) VOLUMES allowlist — ONLY: workspace PVC (claimName == af-sbx-ws-<workspace label>, so a pod
-    #     can never mount another workspace's PVC), home emptyDir, broker-cap emptyDir. ANY
+    # (6) VOLUMES — the EXACT set per trust-class (F2): test => {workspace PVC, home emptyDir} (2 vols);
+    #     agent => {workspace PVC, home emptyDir, broker-cap emptyDir} (3 vols). workspace + home are
+    #     ALWAYS required (a template can no longer pass without the bounded home emptyDir); the
+    #     claimName == af-sbx-ws-<workspace label> so a pod can never mount another workspace's PVC. ANY
     #     secret/configMap/projected/csi/hostPath/downwardAPI volume (or an unknown name) is rejected.
     #     The emptyDirs must be DISK-backed (no Memory medium) with a BOUNDED sizeLimit (node-DoS).
     - expression: >-
-        size(variables.vols) >= 1 && size(variables.vols) <= 3 &&
         variables.vols.exists(v, v.name == 'workspace') &&
+        variables.vols.exists(v, v.name == 'home') &&
         variables.vols.all(v,
           (v.name == 'workspace' && has(v.persistentVolumeClaim) &&
             v.persistentVolumeClaim.claimName == 'af-sbx-ws-' + variables.workspace) ||
@@ -100,8 +102,12 @@ spec:
           (v.name == 'broker-cap' && has(v.emptyDir) &&
             (!has(v.emptyDir.medium) || v.emptyDir.medium == '') &&
             has(v.emptyDir.sizeLimit) &&
-            quantity(v.emptyDir.sizeLimit).isLessThan(quantity('256Mi'))))
-      message: "sandbox pod volumes must be ONLY: workspace PVC 'af-sbx-ws-<workspace>', home emptyDir (disk, sizeLimit <2Gi), broker-cap emptyDir (disk, sizeLimit <256Mi) — no secret/configMap/projected/csi/hostPath/downwardAPI, no Memory medium."
+            quantity(v.emptyDir.sizeLimit).isLessThan(quantity('256Mi')))) &&
+        ((variables.labels['agentforge.io/trust-class'] == 'test' &&
+            size(variables.vols) == 2 && !variables.vols.exists(v, v.name == 'broker-cap')) ||
+         (variables.labels['agentforge.io/trust-class'] == 'agent' &&
+            size(variables.vols) == 3 && variables.vols.exists(v, v.name == 'broker-cap')))
+      message: "sandbox pod volumes must be EXACTLY {workspace PVC 'af-sbx-ws-<workspace>', home emptyDir (disk, sizeLimit <2Gi)} for trust-class=test, plus the broker-cap emptyDir (disk, sizeLimit <256Mi) for trust-class=agent — no other, missing, or duplicate volumes; no secret/configMap/projected/csi/hostPath/downwardAPI, no Memory medium."
     # (7) broker-cap (the per-job model-broker capability) is the AGENT profile only. A test/setup pod
     #     (R-1's only live profile) must never carry it.
     - expression: >-
@@ -130,20 +136,27 @@ spec:
           c.image.matches('^[^@]+@sha256:[0-9a-f]{64}$') &&
           (!has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))
       message: "sandbox container must set workingDir=/workspace, a digest-pinned image (repo@sha256:<64hex>), and no hostPort."
-    # (10) volumeMounts allowlist + subPath AUTHORIZATION: the workspace mount's subPath must EQUAL the
-    #      pod's own agentforge.io/job-id label (validated 32-hex in (5)) — so a pod can never mount
-    #      another job's subPath. home/broker-cap have fixed paths and NO subPath; broker-cap is RO.
+    # (10) volumeMounts — the EXACT set per trust-class (F2, mirrors (6)): workspace + home are ALWAYS
+    #      required; broker-cap only on agent (test=2 mounts, agent=3). subPath AUTHORIZATION: the
+    #      workspace mount's subPath must EQUAL the pod's own agentforge.io/job-id label (validated
+    #      32-hex in (5)) — so a pod can never mount another job's subPath. home is at /home/nonroot with
+    #      NO subPath; broker-cap is RO at /var/run/af/broker with NO subPath.
     - expression: >-
         variables.ctrs.all(c,
           has(c.volumeMounts) &&
           c.volumeMounts.exists(m, m.name == 'workspace') &&
+          c.volumeMounts.exists(m, m.name == 'home') &&
           c.volumeMounts.all(m,
             (m.name == 'workspace' && m.mountPath == '/workspace' &&
               has(m.subPath) && m.subPath == variables.jobId) ||
             (m.name == 'home' && m.mountPath == '/home/nonroot' && !has(m.subPath)) ||
             (m.name == 'broker-cap' && m.mountPath == '/var/run/af/broker' &&
-              !has(m.subPath) && has(m.readOnly) && m.readOnly == true)))
-      message: "sandbox container mounts must be ONLY: workspace at /workspace subPath==<job-id label>, home at /home/nonroot, broker-cap (RO) at /var/run/af/broker."
+              !has(m.subPath) && has(m.readOnly) && m.readOnly == true)) &&
+          ((variables.labels['agentforge.io/trust-class'] == 'test' &&
+              size(c.volumeMounts) == 2 && !c.volumeMounts.exists(m, m.name == 'broker-cap')) ||
+           (variables.labels['agentforge.io/trust-class'] == 'agent' &&
+              size(c.volumeMounts) == 3 && c.volumeMounts.exists(m, m.name == 'broker-cap'))))
+      message: "sandbox container mounts must be EXACTLY: workspace at /workspace subPath==<job-id label> + home at /home/nonroot for trust-class=test, plus broker-cap (RO) at /var/run/af/broker for trust-class=agent — both workspace and home are required."
     # (11) On UPDATE the image may NOT change (both revisions passed (1), so exactly one container).
     - expression: >-
         request.operation != 'UPDATE' ||
