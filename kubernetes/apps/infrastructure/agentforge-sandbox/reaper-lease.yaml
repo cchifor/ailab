@@ -78,5 +78,7 @@ spec:
     name: af-sbx-lease
     creationPolicy: Owner
   dataFrom:
+    # mount-RELATIVE key (SecretStore prepends the `af` KV v2 mount → full path
+    # af/sandbox/lease-hmac); matches the tenant orchestrator's af-sbx-lease ES.
     - extract:
-        key: af/sandbox/lease-hmac # shared, cluster-constant; carries field AF_LEASE_HMAC_KEY
+        key: sandbox/lease-hmac # shared, cluster-constant; carries field AF_LEASE_HMAC_KEY
