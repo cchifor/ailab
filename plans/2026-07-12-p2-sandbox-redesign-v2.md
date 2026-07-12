@@ -197,6 +197,15 @@ flip:
   `af/data/<org>/<workspace>/orchestrator` (forge PATs + CP bearer) that the tenant `orchestrator-creds`
   ExternalSecret extracts, and let the `external-secrets` HelmRelease reconcile so the ESO CRDs exist —
   then run the tenant-guard good-admit/bad-deny ExternalSecret dry-run (currently blocked on the CRDs).
+- **Create the per-org/workspace NFS export subdir (P2 R-2 §C).** the static workspace/staging/reaper
+  PVs now point at a per-org/ws subdir `/pve-nfs/agentforge-sandbox/<org>/<ws>` (e.g.
+  `.../tenant-zero/playground`) instead of the shared export root — keying sandbox storage on org+workspace
+  so one tenant orchestrator's PV cannot reach another org's tree. NFS does NOT auto-create the subdir, so
+  before the flip the operator must `mkdir -m 0777` that per-org/ws path on the QNAP export (0777 so uid
+  65532 (sandbox) + the orchestrator/reaper uids all read+write, matching the shared-export rationale).
+  A missing subdir surfaces as an NFS mount failure on the first sandbox Job — not a silent cross-tenant
+  read — but it is a hard prerequisite for the tenant-zero/playground bring-up and for every new org/ws
+  onboarded thereafter.
 
 **Lease-fencing adjudication (round 5 → independent tie-breaker, BENIGN).** codex round 5 flagged the
 owner-lease as unable to fence the unbounded NFS `apply_back`/cleanup and asked for a storage-honored
