@@ -178,6 +178,19 @@ epoch-safe account lease pass crash/late-release tests; only then lift >1.
 6. **DoS/quota**: exhaust CPU/mem/PIDs/disk/output/model-budget/job-count → tenant-scoped limits + the
    broker fail-closed hold.
 
+### v1.1-flip prerequisites beyond the 6 proofs (R-1, image-gated)
+The reaper Deployment + its lease ExternalSecret ship COMMENTED OUT of the agentforge-sandbox
+kustomization (the reaper image is an unbuilt `@sha256:REPLACE_ME` placeholder), so two enablement
+prerequisites join the 6 proofs before the flip:
+- **Build the worker image, then un-gate the reaper.** build+push+digest-pin the agentforge worker image
+  (`registry.chifor.me/agentforge/{p1-worker,sandbox}` — the registry has no `agentforge/*` repo yet),
+  then un-gate the reaper Deployment + the `af-sbx-lease` lease ExternalSecret (re-add `reaper-lease.yaml`
+  + `reaper-deployment.yaml` to the ailab kustomization with the pinned digest). Only then can the live
+  env→Settings→Job→VAP→quiesce/import/reaper integration proof run.
+- **Seed the shared lease HMAC in OpenBao.** seed OpenBao `af/sandbox/lease-hmac` (field
+  `AF_LEASE_HMAC_KEY`) — the ONE authoritative source both the reaper and every tenant orchestrator pull
+  via ESO — and grant each tenant OpenBao role (plus the reaper's `af-reaper` role) read on it.
+
 ## Critical files
 - agentforge: `adapters/exec/sandbox.py` (Job create + import), NEW `adapters/exec/import_validator.py` +
   `redact.py`; NEW broker service (own module/entrypoint) `adapters/broker/` + `agentforge broker` CLI;

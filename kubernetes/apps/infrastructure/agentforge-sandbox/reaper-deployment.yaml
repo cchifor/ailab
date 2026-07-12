@@ -13,12 +13,13 @@
 # image below is a PLACEHOLDER @sha256:0000… — unpullable. TO ENABLE THE REAPER:
 #   1. pin the immutable @sha256 of the built p1-worker image (registry.chifor.me/agentforge/p1-worker,
 #      from the cchifor/agentforge release CI — same digest the CP's AFP_WORKER_IMAGE gets);
-#   2. add `- reaper-lease.sops.yaml` + `- reaper-deployment.yaml` back to kustomization.yaml;
-#   3. ensure the ORCHESTRATOR (tenant worker) is configured with the SAME AF_LEASE_HMAC_KEY. Both
-#      sides read the identical value from the operator SOPS Secret `af-sbx-lease`, key AF_LEASE_HMAC_KEY
-#      (reaper: the agentforge-ns copy mounted here; orchestrator: the CP commits the SAME plaintext,
-#      SOPS-encrypted to the same age recipient, into a `af-sbx-lease` Secret in the tenant ns and reads
-#      it via secretKeyRef). The orchestrator must also set AF_SANDBOX_STAGING_ROOT (same value below),
+#   2. seed OpenBao af/sandbox/lease-hmac (field AF_LEASE_HMAC_KEY) + grant the af-reaper role read on
+#      it, then add `- reaper-lease.yaml` + `- reaper-deployment.yaml` back to kustomization.yaml;
+#   3. the ORCHESTRATOR (tenant worker) reads the SAME AF_LEASE_HMAC_KEY. Both sides pull it from the ONE
+#      authoritative OpenBao path af/sandbox/lease-hmac via ESO: reaper-lease.yaml materializes the
+#      `af-sbx-lease` Secret in agentforge (read here via secretKeyRef); the CP renders an IDENTICAL
+#      `af-sbx-lease` ExternalSecret into each tenant ns from the same path (orchestrator reads it via
+#      secretKeyRef). The orchestrator must also set AF_SANDBOX_STAGING_ROOT (same value below),
 #      AF_SANDBOX_NAMESPACE=agentforge-sandbox, AF_SANDBOX_WORKSPACE=playground,
 #      AF_SANDBOX_WORKSPACE_PVC=af-sbx-ws-playground (the VAP rejects any pod whose workspace PVC name
 #      != 'af-sbx-ws-' + its workspace label).
