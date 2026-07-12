@@ -1,47 +1,78 @@
-# Implementation review — agentforge v2 P2 R-2 cross-repo coordination — round 1
+# Implementation review — agentforge v2 P2 R-2 cross-repo coordination
 
 <!-- codex-impl-review-status: pending -->
 
-## Summary
+Cross-repo tranche: agentforge `feat/r2-capability-delivery` + agentforge-platform
+`feat/r2-crossrepo` (the ailab VAP/PV changes ride `feat/p2-unlock`). Round 1 raised 5
+findings; round 2 CLOSED 2 (pool signing, per-engine routes/clamp-safe quota) and left 3.
+This file records the round-2 survivors and the round-3 responses (opus fixes / pushback).
 
-- Minting takes audience/model/budget from the typed ExecSpec, tenant/workspace/pool from SandboxConfig, requires an Ed25519 signing key, and bounds TTL by both the Job deadline and MAX_TTL_S; no hostile argv/repository value is parsed into a signed claim.
-- Reserved `.af` delivery uses O_NOFOLLOW+O_EXCL+0600, pre-Job cleanup, and top-level import skipping. The Job/pod manifests carry the org label and exactly `{workspace, home}` for both profiles, matching the separate ailab VAP and the default `af-sbx-ws-<org>-<workspace>` name.
-- Platform's org-qualified workspace/staging identities and `tenants/<org>/<workspace>/orchestrator` key are correct; `broker` is nested beneath the sole operator top-level prefix `operator`, so the reserved-set contents `{tenants, operator}` cover the current OpenBao layout.
-- The tranche is not merge-ready because deployed jobs do not receive audience-specific broker routing or the real pool claim, capability policy defaults break non-Claude/low-ceiling configurations, org identifiers are not canonicalized, and a hostile job can copy the capability into imported output or captured logs.
-- `git diff --check` is clean in both repositories. The managed read-only review environment rejected pytest/ruff/mypy execution, so the branches' claimed green gates were not independently rerun here; LocalExecutor and broker application sources are untouched by these diffs.
+## Round-2 survivors + round-3 responses
 
-## Findings
+### [CLOSED r2] Platform silently mints every deployed pool as `default`
+Fixed round 2 (`AF_SANDBOX_POOL` rendered + signed + cross-repo asserted).
 
-### Broker routing is absent from platform output and cannot follow the signed audience
+### [CLOSED r2] Capability route and quota defaults — per-engine route + clamp-safe quota
+Fixed round 2 (per-engine `_ENGINE_CAPABILITY_ROUTES`; broker `verify_against_policy` clamps).
 
-**Location:** agentforge/src/agentforge/adapters/exec/sandbox.py:825  
-**Severity:** blocker  
-<!-- codex: Every agent container receives the one global `cfg.broker_base_url`, while the signed `aud` varies as `<provider>/<account>`. The broker is explicitly one deployment with one expected audience, and the shared executor can run Anthropic plus OpenAI cross-review jobs, so one of those tokens will be sent to the wrong broker and rejected. In addition, platform renders no `AF_SANDBOX_BROKER_BASE_URL`, leaving the real Settings default empty and causing `_agent_env_allowlist` to fail before Job creation unless an undocumented secret field supplies it. Add a trusted provider/account-to-URL map (or an equivalent audience-keyed endpoint setting), select the URL with the same typed values used to form `aud`, render/provision it explicitly, fail before lease/staging when that exact mapping is absent, and test at least Anthropic and OpenAI accounts on one worker. -->
+### [FIXED r3] Capability never attached to CLI requests + `is_broker_url` empty authority
+**Location:** agentforge `deploy/sandbox.Dockerfile`, `src/agentforge/adapters/exec/broker_launch.py`, `.../sandbox.py`; platform `renderer.py:66`
+Round-2 finding: the delivery minted+dropped the JWT but no wrapper made the stock claude/
+codex CLIs read it and attach `Authorization: Bearer`; also `http://` (empty authority)
+passed `is_broker_url`.
+Round-3 fix (agentforge `b76fd3c..e5d3dd8`):
+- `deploy/af-broker-key`: a request-time key helper baked read-only into the sandbox image;
+  emits the capability read FRESH from the reserved file each call (never argv / a credential
+  env var); fails closed if the file is absent/empty.
+- `broker_launch.py`: per-engine consumer wiring as DATA (plain-value env only) — claude
+  `ANTHROPIC_BASE_URL` + `CLAUDE_CONFIG_DIR` + `apiKeyHelper=af-broker-key`; codex `CODEX_HOME`
+  + `config.toml base_url`. Takes only `(engine, url)` — no capability param — so a staged
+  config structurally cannot bake the bearer.
+- `sandbox.py`: `_agent_env_allowlist` merges `agent_broker_env`; the run stages the config
+  under the reserved `.af/` (`write_agent_config`, O_NOFOLLOW+O_EXCL+0600, import-skipped),
+  located via a plain-value path env (the VAP forbids `valueFrom`/`envFrom`).
+- Tests: helper reads-fresh + fails-closed; wiring never carries a bearer in env/argv; run
+  stages after mint / before Job; and an END-TO-END recording-broker test proves the helper's
+  output is accepted as a bearer by the REAL broker app for `/v1/messages` and `/v1/responses`.
+Round-3 fix (platform `ccda672`): `is_broker_url` now uses `urlsplit` + requires a non-empty
+hostname, so `http://`, `https://`, `http:///v1` are all rejected (unit-tested).
+<!-- opus-pushback: The REAL claude/codex-CLI recording-broker test cannot run in the unit
+tier — it needs the built sandbox image + the real CLIs + a live broker on a Kata node (no
+egress/CLIs/image here). That is preflight-gated by construction (your own "preflight-confirmed
+per-engine wrapper" phrasing + plan §preflight -> real-Kata CLI discovery). It is landed as a
+skipped @pytest.mark.integration scaffold gated on AF_SANDBOX_IMAGE, run by the preflight
+harness before the v1.1 flip. The unit tier proves the mechanism end-to-end against the real
+broker via the actual helper; the residual is the real-CLI acceptance, which is the preflight
+gate, not a unit-tier gap. -->
 
-### Platform silently mints every deployed pool as `default`
+### [FIXED r3] Org canonicalization still accepts a trailing hyphen
+**Location:** platform `renderer.py:108` (`_CANONICAL_SLUG`)
+Round-2 finding: the leading-anchor-only regex accepted `acme-`, a valid slug prefix but an
+invalid k8s label value that fails at Job-create instead of at ingestion.
+Round-3 fix (platform `ccda672`): `_CANONICAL_SLUG = [a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?` — a
+full DNS label, both ends alphanumeric, 1-63. Rejected now at BOTH `PoolSpec` construction and
+OIDC `parse_groups` (shared `is_canonical_slug`); trailing/leading/double-hyphen tests added at
+both call sites.
 
-**Location:** agentforge-platform/src/agentforge_platform/adapters/gitops/renderer.py:463  
-**Severity:** blocker  
-<!-- codex: Agentforge added `AF_SANDBOX_POOL` and signs `SandboxConfig.pool`, but the platform env list emits only the org/workspace and never emits the trusted `PoolSpec.pool`. Thus planner, implementer, and reviewer deployments all mint `pool="default"`: a correctly narrow kid policy rejects them, while a policy that permits `default` loses the intended pool/role binding. Render `AF_SANDBOX_POOL=spec.pool`, include it in the real cross-repo Settings test, and assert the verified JWT carries the provisioned pool. -->
+### [FIXED r3] Capability can escape through result-schema error messages
+**Location:** agentforge `sandbox.py:1254`, `import_validator.py:716` (`parse_result`)
+Round-2 finding: `.af-result.json` is import-skipped so `contains_bytes` never scanned it, and
+`parse_result` interpolated Pydantic's ValidationError (hostile field name/value) into
+`ImportRejected` -> orchestrator escalation text.
+Round-3 fix (agentforge `b7c2e3e`):
+- `sandbox.py`: scan the BOUNDED raw result bytes for the exact capability BEFORE parsing;
+  reject fail-closed with a constant `CapabilityLeakError` (no capability in the message);
+  `apply_back` never runs. Transformed copies remain the documented residual (TTL/session-close
+  /source-IP).
+- `parse_result`: raise CONSTANT, hostile-free messages and break the exception chain
+  (`from None`) so neither the message nor a downstream `format_exc`/`__cause__` render can
+  carry a smuggled field name/value outward. Regression asserts the exact token is absent from
+  the raised error (str + repr) and that `__cause__` is None.
 
-### Capability route and quota defaults are global, non-configurable, and not actually clamp-safe
+## Diff ranges for round 3
+- agentforge `feat/r2-capability-delivery`: `b76fd3c..e5d3dd8` (result-leak + CLI-consumer wiring)
+- agentforge-platform `feat/r2-crossrepo`: `050b2ff..ccda672` (is_broker_url + org DNS-label regex)
 
-**Location:** agentforge/src/agentforge/adapters/exec/sandbox.py:569  
-**Severity:** important  
-<!-- codex: The production composition never supplies these SandboxConfig fields, so every engine/account gets `/v1/messages`, POST, rate 60, concurrency 4. That route is Claude-specific and cannot authorize a Codex request. Also, the broker calls `verify_against_policy` before its later `min(...)` calls, so a requested default above an operator ceiling is rejected rather than clamped. Source route/method/rate/concurrency from a trusted per-engine or per-audience configuration, ensure requested values are within the operator record (or make the broker's documented clamp real), and add Codex plus lower-ceiling tests. -->
-
-### The capability can be copied into imported output or ExecResult stdout
-
-**Location:** agentforge/src/agentforge/adapters/exec/sandbox.py:1114  
-**Severity:** important  
-<!-- codex: Skipping the original `.af` path does not establish the stated no-result-leak property. The hostile process can read `/workspace/.af/broker-cap.jwt`, print it into pod logs, or copy it to an ordinary workspace file; `_safe_logs` is returned verbatim as `ExecResult.stdout`, and `import_tree` accepts the copied ordinary file. Retain the minted bytes long enough to reject/redact exact occurrences in captured logs and the bounded validated import before apply-back, add tests covering both `cat` to stdout and copying to another file, and explicitly document the residual for transformed exfiltration that session close/source-IP binding must contain. -->
-
-### Reserved-prefix enforcement accepts non-slug org identifiers
-
-**Location:** agentforge-platform/src/agentforge_platform/adapters/gitops/renderer.py:165  
-**Severity:** blocker  
-<!-- codex: `PoolSpec.__post_init__` performs only an exact, case-sensitive set lookup. It accepts empty strings, whitespace, uppercase/case variants, Unicode, `/`, and dot segments; OIDC `parse_groups` also accepts any non-empty org text and can persist it. Those values violate the DNS-label/Vault-path assumptions on which PVC identity and reserved-prefix separation rely, and fail only later or produce a differently segmented key. Enforce the same canonical lowercase ASCII DNS-slug fullmatch used for workspaces at PoolSpec construction and org ingestion, reject reserved names after canonical validation, and test empty/whitespace/case/Unicode/slash/dot inputs as well as `tenants` and `operator`. -->
-
-## Verdict
-
-Not ready to merge agentforge + platform. The cryptographic mint and reserved-file mechanics are sound against a hostile repository, and the two-volume/org-qualified shape agrees with the separate ailab VAP/PV work, but the deployed coordination does not reliably route a capability to its audience, signs the wrong pool, has unusable provider/quota defaults, permits non-canonical org identities at the reserved-prefix boundary, and can return the bearer through imported output or captured stdout. These need fixes and green agentforge/platform regression gates before merge; ailab VAP/PV changes still land separately on `feat/p2-unlock`.
+## Gates
+- agentforge: full `uv run pytest` green; `ruff check src tests` clean; `mypy` clean on changed modules.
+- platform: `uv run pytest` renderer/auth/cross-repo suites green; `ruff` clean.
