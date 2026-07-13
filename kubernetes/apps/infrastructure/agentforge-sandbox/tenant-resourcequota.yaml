@@ -1,0 +1,65 @@
+# P3 per-org quota (governance) — tenant-zero/playground. OPERATOR-OWNED: committed here (ailab) and
+# applied by the MAIN Flux, NOT the CP tenant-reconciler. This is the governance-correct ownership: a
+# ResourceQuota/LimitRange bounds a tenant's compute, so the CP must NOT be able to set its own —
+# and it cannot: `ResourceQuota`/`LimitRange` are absent from the tenant-guard GVK allowlist (validation
+# 1), so the tenants-reconciler SA is rejected if it tries to create either. The operator sets the bound
+# here; the KEDA `maxReplicaCount` (agentforge-workers) is the per-account concurrency cap, and this
+# ResourceQuota is the namespace-total backstop (a runaway scale-up / an ESO Secret flood can't exceed it).
+#
+# Scope: bounds the tenant's OWN namespace (af-tenant-tenant-zero-playground) — the orchestrator worker
+# Deployment (KEDA 0..2 replicas) + the dispatcher's ESO Secrets + the staging PVC. The untrusted sandbox
+# JOBS run in the SEPARATE agentforge-sandbox namespace, bounded by its own resource-limits.yaml.
+#
+# The full CP-PLAN-DRIVEN per-org quota (each org's tier → a rendered quota, VAP-pinned to the operator
+# ceiling) is a P3-LIVE concern (multi-tenant); this dormant tenant-zero bound is the single-tenant shape.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: af-tenant-quota
+  namespace: af-tenant-tenant-zero-playground
+  labels:
+    app.kubernetes.io/part-of: agentforge
+    app.kubernetes.io/managed-by: agentforge-operator
+spec:
+  hard:
+    # total compute the tenant namespace may reserve/burst (the orchestrator + KEDA replicas).
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    requests.ephemeral-storage: 8Gi
+    limits.ephemeral-storage: 16Gi
+    # object caps — a compromised/misconfigured tenant can't flood the ns.
+    pods: "12"
+    persistentvolumeclaims: "4"
+    secrets: "20"
+    configmaps: "20"
+    services: "6"
+    count/deployments.apps: "4"
+    count/jobs.batch: "0"       # the tenant ns creates NO Jobs (sandbox Jobs live in agentforge-sandbox)
+---
+# Default + max per-container bounds so every pod in the tenant ns is quota-accountable (a container
+# with no requests/limits would otherwise be rejected once a ResourceQuota on requests/limits exists).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: af-tenant-limits
+  namespace: af-tenant-tenant-zero-playground
+  labels:
+    app.kubernetes.io/part-of: agentforge
+    app.kubernetes.io/managed-by: agentforge-operator
+spec:
+  limits:
+    - type: Container
+      default:                 # applied when a container omits limits
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+      defaultRequest:          # applied when a container omits requests
+        cpu: 100m
+        memory: 128Mi
+        ephemeral-storage: 256Mi
+      max:                     # a single container can't exceed this
+        cpu: "4"
+        memory: 8Gi
+        ephemeral-storage: 8Gi
