@@ -89,7 +89,10 @@ spec:
                 secretKeyRef:
                   name: agentforge-reaper-ledger
                   key: AF_REAPER_LEDGER_DSN
-                  optional: true # gated: the Secret is NotReady until OpenBao/ledger are provisioned
+                  optional: false # FAIL-CLOSED: the reaper must NOT start without its close-only ledger
+                  # credential (a fail-OPEN reaper would run GC without close authority). Safe: the
+                  # Deployment is gated/unlisted, so this binds only at activation — where the Secret is
+                  # Ready by construction (OpenBao/ledger provisioned before the image is pinned + listed).
           volumeMounts:
             # The af-sbx-reaper-tenant-zero-playground PVC (same per-org/ws NFS subdir) at the staging root: scans for orphan <job-id> dirs
             # and rmtree's reclaimed <root>/<job-id>/ dirs AFTER a successful Lease CAS-acquire.
