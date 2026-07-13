@@ -121,7 +121,7 @@ variable "agent_node_disk_gb" {
 
 # ---- Talos agent-worker VMs (one per physical host) ----
 # Extends the CLAUDE.md inventory: vmid band 4301-4303 (free — CPs 4001-4003, runners 4101-4105,
-# dev-workers 4201-4206, AI LXC 5001-5003, registry 5004), IPs .14-.16 (consecutive, inside the
+# dev-workers 4201-4206, AI LXC 5001-5003, registry 5004), IPs .47-.49 (free after the runner renumber to .14-.18; inside the
 # .2-.50 static reserve, below the router DHCP pool at .51 — no router change). Placement one-per-node
 # for fault isolation. NOTE: cloud-init/nocloud sets the IP at create and
 # lifecycle.ignore_changes=[initialization] means editing `ip` here is DOCUMENTATION ONLY once booted.
@@ -132,9 +132,13 @@ variable "agent_nodes" {
     ip        = string
     hostname  = string
   }))
+  # IPs .47/.48/.49 (NOT .14/.15/.16): the ci-runners were renumbered to consecutive .14-.18 (live
+  # netplan, runners #113) and OWN .14/.15/.16 — the old .14/.15/.16 here COLLIDED with the live
+  # runners (they won ARP, shadowing the agent nodes' Talos apid). .47/.48/.49 are free (runners'
+  # pre-renumber IPs, now vacated). See docs/runbooks/agent-nodes.md.
   default = {
-    "agent-node-1" = { node_name = "ai-node1", vm_id = 4301, ip = "192.168.0.14", hostname = "agent-node-1" }
-    "agent-node-2" = { node_name = "ai-node2", vm_id = 4302, ip = "192.168.0.15", hostname = "agent-node-2" }
-    "agent-node-3" = { node_name = "ai-node3", vm_id = 4303, ip = "192.168.0.16", hostname = "agent-node-3" }
+    "agent-node-1" = { node_name = "ai-node1", vm_id = 4301, ip = "192.168.0.47", hostname = "agent-node-1" }
+    "agent-node-2" = { node_name = "ai-node2", vm_id = 4302, ip = "192.168.0.48", hostname = "agent-node-2" }
+    "agent-node-3" = { node_name = "ai-node3", vm_id = 4303, ip = "192.168.0.49", hostname = "agent-node-3" }
   }
 }
