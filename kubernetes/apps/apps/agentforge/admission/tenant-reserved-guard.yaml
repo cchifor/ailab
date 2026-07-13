@@ -1,0 +1,45 @@
+# Companion to tenant-guard.yaml validation (16): the RESERVED-namespace guard on DELETE. The main
+# tenant-guard VAP matches only CREATE/UPDATE (its validations dereference `object`, which is null on
+# DELETE), so it cannot bar the reconciler from DELETING the operator's shadow-tenant namespace. This VAP
+# closes that verb: the CP `agentforge-tenants-reconciler` SA (cluster-wide `namespaces: delete`, per
+# reconciler-rbac.yaml) may NOT delete `af-tenant-tenant-zero-playground` NOR any object inside it —
+# structurally preventing it from dropping the operator ResourceQuota by deleting the namespace.
+#
+# Together, tenant-guard (16) [CREATE/UPDATE] + this [DELETE] make tenant-zero a name the CP tenant path
+# cannot touch at all (codex round-2 fix: enforce the reservation in admission, not a comment). Only the
+# operator (main Flux, a different identity) owns it. A single resourceRule (DELETE / all kinds / any
+# scope) covers both the cluster-scoped Namespace delete and any namespaced-object delete; every other
+# reconciler DELETE (e.g. pruning a REAL tenant's ns at deprovision) is admitted unchanged.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-tenant-reserved-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["DELETE"]
+        resources: ["*"]
+        scope: "*"
+  matchConditions:
+    # Governs ONLY the tenant reconciler SA — the operator's own main-Flux identity is unaffected and
+    # remains free to manage (incl. delete) the reserved namespace.
+    - name: only-tenant-reconciler
+      expression: "request.userInfo.username == 'system:serviceaccount:flux-system:agentforge-tenants-reconciler'"
+  validations:
+    # Deny when the DELETE targets the reserved Namespace itself (request.name on a cluster-scoped ns
+    # delete) OR any object living in it (request.namespace on a namespaced delete). Admit everything else.
+    - expression: >-
+        request.name != 'af-tenant-tenant-zero-playground' &&
+        (!has(request.namespace) || request.namespace != 'af-tenant-tenant-zero-playground')
+      message: "agentforge tenant path: af-tenant-tenant-zero-playground is RESERVED for the operator (shadow tenant) — the CP tenant reconciler may not delete it or any object within it."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-tenant-reserved-guard
+spec:
+  policyName: agentforge-tenant-reserved-guard
+  validationActions: ["Deny"]

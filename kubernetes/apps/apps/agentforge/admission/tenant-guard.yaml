@@ -288,6 +288,19 @@ spec:
          (!has(object.spec.data) || object.spec.data.all(d,
             has(d.remoteRef) && has(d.remoteRef.key) && d.remoteRef.key.matches(variables.keyRegex))))
       message: "agentforge tenant path: every ExternalSecret source key must match '^tenants/<org>/<workspace>/…$' (segment-safe) for THIS namespace's mapped org/workspace — rejecting other-tenant/'operator/*'/legacy 'af/data/<org>/<ws>' keys, a '.'/'..' segment (incl. terminal '..'), empty segments ('//', leading/trailing '/'), and non-slug segments."
+    # (16) RESERVED NAMESPACE — af-tenant-tenant-zero-playground is the OPERATOR's shadow tenant, owned end
+    #      to end by the main Flux (agentforge-sandbox/tenant-namespace.yaml + the worker/dispatcher/quota).
+    #      The CP tenant path must NOT co-own it: without this, the reconciler's af-tenant-* write grant
+    #      (validation 5) would ADMIT a CP-rendered tenant-zero, producing DUAL ownership under which the
+    #      reconciler could delete+recreate the ns and drop the operator ResourceQuota. STRUCTURALLY reserve
+    #      the name here (a comment-only invariant is not enough — codex): the reconciler may neither create/
+    #      update the tenant-zero Namespace nor any object inside it. (DELETE of the ns is barred by the
+    #      companion tenant-reserved-guard.yaml, since this VAP matches only CREATE/UPDATE.)
+    - expression: >-
+        (request.kind.kind == 'Namespace')
+          ? object.metadata.name != 'af-tenant-tenant-zero-playground'
+          : (!has(object.metadata.namespace) || object.metadata.namespace != 'af-tenant-tenant-zero-playground')
+      message: "agentforge tenant path: af-tenant-tenant-zero-playground is RESERVED for the operator (shadow tenant) — the CP tenant path may not create/update it or any object within it."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
