@@ -65,6 +65,25 @@ spec:
         - CREATE ROLE afp_admin LOGIN BYPASSRLS;
         - CREATE ROLE afp_app LOGIN NOBYPASSRLS;
         - CREATE DATABASE agentforge_platform OWNER afp_admin;
+        # AgentForge v2 R-2 broker LEDGER (design §5) — a DEDICATED database + the THREE-role DISJOINT
+        # authority split, materialized declaratively (the split must be real, not a comment). Roles:
+        #   * agentforge_broker_admin — OWNS the DB + tables + the close_session() SECURITY DEFINER fn;
+        #     runs the ledger migration (operator, activation-time).
+        #   * agentforge_broker — the broker's NARROW login: open/reserve/reconcile ONLY (SELECT/INSERT/
+        #     UPDATE on sessions/requests/rate_buckets), NEVER close. ESO cred (broker-ledger).
+        #   * agentforge_reaper — the reaper's CLOSE-ONLY login: EXECUTE on close_session() ONLY, NO table
+        #     privilege. ESO cred (agentforge-reaper-ledger).
+        # The DISJOINT GRANTs themselves are NOT here (they need the tables + fn to exist first): they live
+        # in agentforge broker/ledger.py — SCHEMA_SQL + BROKER_GRANTS_SQL + REAPER_GRANTS_SQL — and are
+        # applied by agentforge_broker_admin AT ACTIVATION. Passwords are set at activation from the
+        # OpenBao DSNs (ESO), NOT a CNPG-managed SOPS secret (so no passwordSecret below). NB: on an
+        # already-bootstrapped cluster this postInitSQL block does NOT run — managed.roles (below)
+        # reconciles the roles into existence on the live cluster; kept here as the DR-rebuild source of
+        # truth (mirrors the afp_* pattern above).
+        - CREATE ROLE agentforge_broker_admin LOGIN;
+        - CREATE ROLE agentforge_broker LOGIN;
+        - CREATE ROLE agentforge_reaper LOGIN;
+        - CREATE DATABASE agentforge_broker OWNER agentforge_broker_admin;
   managed:
     roles:
       - name: authelia
@@ -91,6 +110,21 @@ spec:
         bypassrls: false
         passwordSecret:
           name: infra-pg-afp-app
+      # AgentForge v2 R-2 broker ledger DISJOINT roles (design §5) — reconciled into existence on the
+      # LIVE cluster (postInitSQL only runs at first bootstrap). NO passwordSecret: their passwords live
+      # in OpenBao (ESO DSNs), set at activation — CNPG ensures the roles EXIST; the operator ALTER ROLE
+      # ... PASSWORD from the OpenBao DSN at activation. The DISJOINT grants (open/reserve/reconcile for
+      # agentforge_broker vs EXECUTE close_session ONLY for agentforge_reaper) are applied by the ledger
+      # migration (agentforge broker/ledger.py) after SCHEMA_SQL, since they require the tables + fn.
+      - name: agentforge_broker_admin
+        ensure: present
+        login: true
+      - name: agentforge_broker
+        ensure: present
+        login: true
+      - name: agentforge_reaper
+        ensure: present
+        login: true
   # NB: monitoring.enablePodMonitor stays OFF — the CNPG-generated PodMonitor carries only cnpg.io
   # labels, and the kps Prometheus only selects PodMonitors labeled `release: kube-prometheus-stack`
   # (verified live: strive-pg's operator-generated PodMonitor has produced zero cnpg_* series). The
