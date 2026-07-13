@@ -1,0 +1,44 @@
+# NON-SECRET broker env (design §5) — the AF_BROKER_-prefixed knobs BrokerSettings reads (agentforge
+# broker/config.py). NO secret material lives here: the ledger PASSWORD/DSN-with-auth comes from the
+# ESO-synced broker-ledger Secret (AF_BROKER_LEDGER_DSN via secretKeyRef — see deployment.yaml), and the
+# OAuth + kid public keys come from mounted ESO Secrets. Only the broker's identity, the bounds
+# defaults, ports, and the (non-secret) ledger COORDINATES are here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentforge-broker-env
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: agentforge-broker
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+data:
+  # This broker instance's identity = provider/account (design §3). A capability is accepted only if
+  # its `aud` == this. ONE broker Deployment per (provider, account); the tenant-zero shadow's planner
+  # pool targets the Claude subscription -> anthropic/default.
+  AF_BROKER_AUDIENCE: "anthropic/default"
+  # Upstream provider base — CONFIG ONLY (the gateway proxy is PREFLIGHT-gated, design §4/§10); the exact
+  # enumerated host(s) land with the preflight. Left empty until then.
+  AF_BROKER_UPSTREAM_BASE_URL: ""
+  # Conservative per-request worst-case token reservation (design §5) — reserved BEFORE dispatch so the
+  # budget bound is real even before the precise (validated-input + max-output + aux) figure lands.
+  AF_BROKER_WORST_CASE_TOKENS: "200000"
+  AF_BROKER_LEASE_TTL_S: "120"       # expiring-concurrency lease TTL (crash reclaim)
+  AF_BROKER_SWEEP_INTERVAL_S: "30"   # supervised lease-sweep interval (< lease TTL)
+  AF_BROKER_MAX_BODY_BYTES: "1048576"      # smuggling/DoS body cap (1 MiB)
+  AF_BROKER_BODY_READ_TIMEOUT_S: "30"      # wall-clock deadline for the pre-admission body read
+  AF_BROKER_PORT: "8700"             # HTTP API (the DIRECT ClusterIP the sandbox reaches, source-IP TOFU)
+  AF_BROKER_METRICS_PORT: "9464"     # Prometheus metrics
+  # The mounted operator kid-registry JSON (public verify keys + per-kid ceilings), synced by ESO from
+  # OpenBao (externalsecret-kids.yaml) and mounted read-only. Public keys are non-secret, but syncing
+  # via ESO matches the operator keypair-controller publish path (design §3/§7).
+  AF_BROKER_KID_REGISTRY_PATH: "/var/run/broker/kids/registry.json"
+  # NON-SECRET ledger coordinates (documentation + operational reference). The broker CONNECTS via the
+  # full AF_BROKER_LEDGER_DSN from the broker-ledger Secret; the PASSWORD is NEVER in this ConfigMap. The
+  # DB login is agentforge_broker: open/reserve/reconcile ONLY, NEVER close (the reaper alone holds
+  # close, design §5).
+  LEDGER_HOST: "infra-pg-rw.databases.svc.cluster.local"
+  LEDGER_PORT: "5432"
+  LEDGER_DB: "agentforge_broker"
+  LEDGER_USER: "agentforge_broker"

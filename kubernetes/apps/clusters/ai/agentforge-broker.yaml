@@ -1,0 +1,32 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agentforge-broker
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  # Its OWN path/Kustomization (NOT a line in apps/ or infrastructure/kustomization.yaml) so the
+  # operator-owned broker boundary does not collide with the P1 agentforge admission (apps layer) or the
+  # concurrent P2 operators work under infrastructure/{security,autoscaling}. Mirrors the
+  # agentforge-sandbox wiring. dependsOn ONLY infrastructure — deliberately NOT `apps`/`databases`, so
+  # the ns/SA/ESO/CNP keep reconciling even if those layers are unhealthy.
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/agentforge-broker
+  prune: true
+  # wait:false so a not-yet-Ready ESO ExternalSecret (broker-oauth/kids/ledger sync NotReady until the
+  # operator provisions OpenBao) — or a not-yet-pinned broker image (once its Deployment is re-added) —
+  # can never wedge this or any dependent Flux Kustomization; the ns/SA/Service/CNP still apply
+  # immediately.
+  wait: false
+  # decryption (SOPS) retained for any future SOPS-encrypted operator Secret in this tree — currently
+  # none (broker creds are ESO-synced from OpenBao, not SOPS).
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

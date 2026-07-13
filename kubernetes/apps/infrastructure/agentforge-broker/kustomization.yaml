@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge v2 P2 R-2 — the OPERATOR-OWNED, CP-UNWRITABLE model-gateway broker (design §5/§6/§8). Its
+# OWN directory + a dedicated Flux Kustomization (clusters/ai/agentforge-broker.yaml), mirroring the
+# agentforge-sandbox precedent: self-contained so it never collides with the P1 agentforge admission
+# (apps layer) or the concurrent P2 operators editing infrastructure/{security,autoscaling}. NO shared
+# aggregator index (infrastructure/kustomization.yaml) is edited.
+resources:
+  - namespace.yaml # agentforge-broker ns (restricted PSA, pinned v1.31) + default-deny NetworkPolicy
+  - serviceaccount.yaml # broker SA (automount off, NO Role) — zero kube-apiserver access
+  - configmap.yaml # non-secret AF_BROKER_ env + non-secret ledger coordinates (NEVER the password)
+  - service.yaml # ClusterIP (the DIRECT broker the sandbox reaches for source-IP TOFU)
+  - externalsecret-oauth.yaml # ESO auth SA + operator SecretStore + broker-oauth ExternalSecret (READ-ONLY)
+  - externalsecret-kids.yaml # broker-kids kid-registry (PUBLIC verify keys + ceilings) ExternalSecret
+  - externalsecret-ledger.yaml # broker-ledger DSN (open/reserve/reconcile ONLY, never close) ExternalSecret
+  - ciliumnetworkpolicy.yaml # broker ingress (matching-pool agent only) + egress (upstream+DNS+infra-pg ONLY)
+  # deployment.yaml is INTENTIONALLY not listed yet — the broker image is a PLACEHOLDER @sha256
+  # (unpullable) and nothing here flips privilege_hardening. Re-add `- deployment.yaml` once the digest
+  # is pinned + OpenBao/ledger provisioned (see deployment.yaml header). The Deployment carries its own
+  # PodDisruptionBudget, so both stay gated together.
+  # - deployment.yaml

@@ -1,0 +1,164 @@
+# Broker Deployment — `agentforge broker` (the DEDICATED broker image: the `broker` extra ONLY —
+# pyjwt[crypto] + asyncpg, NO OpenBao/k8s client, no CLI/agent surface around the durable OAuth, design
+# §2/§4). The security flow (verify -> reserve -> mark_dispatched -> [gateway] -> reconcile) is enforced
+# around a PREFLIGHT-gated upstream stub (design §4/§10).
+#
+# ⚠️ DELIBERATELY NOT LISTED in kustomization.yaml (mirrors reaper-deployment.yaml + the CP
+# deployment.yaml precedent). The image below is a PLACEHOLDER @sha256:0000… — unpullable. Nothing here
+# flips `privilege_hardening`; the broker stays gated until the operator's manual activation. TO ENABLE:
+#   1. build + pin the immutable @sha256 of the dedicated broker image
+#      (registry.chifor.me/agentforge/broker, the `broker` extra) from the cchifor/agentforge release CI;
+#   2. provision the OpenBao role/data (af-operator-broker + operator/broker/anthropic/default/{oauth,
+#      kids,ledger}) so broker-oauth/broker-kids/broker-ledger sync Ready;
+#   3. apply the ledger SCHEMA_SQL + BROKER_GRANTS_SQL to infra-pg (DB agentforge_broker);
+#   4. add `- deployment.yaml` to kustomization.yaml.
+#
+# HA (design §5): 2 replicas + a PodDisruptionBudget + pod anti-affinity + topology-spread across nodes
+# so a single node loss never takes out all replicas. The ledger is the SHARED source of truth, so a
+# rolling replica can't double-spend (RollingUpdate is safe).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentforge-broker
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: agentforge-broker
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-broker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentforge-broker
+        app.kubernetes.io/component: broker
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      serviceAccountName: agentforge-broker
+      automountServiceAccountToken: false # belt-and-suspenders with the SA (no kube-apiserver access)
+      enableServiceLinks: false
+      # Run on the dedicated agent pool (co-scheduled with the sandbox Jobs it serves; the sandboxes are
+      # Kata microVMs so colocation is safe, and the broker is network-isolated by the default-deny + CNP).
+      nodeSelector:
+        ailab.io/agent-pool: "true"
+      tolerations:
+        - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+      # HA placement (design §5): spread the 2 replicas across the 3 agent nodes so one node loss keeps a
+      # replica up. Anti-affinity is a hard-preference; topology-spread is the DoNotSchedule backstop.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: agentforge-broker
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentforge-broker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532 # so the 0440 mounted ESO Secret files are group-readable by uid 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: broker
+          # PLACEHOLDER digest — pin the real broker image @sha256 (see header) before enabling.
+          image: registry.chifor.me/agentforge/broker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
+          # broker` (composes to: tini -- agentforge broker).
+          args: ["agentforge", "broker"]
+          envFrom:
+            - configMapRef:
+                name: agentforge-broker-env # AF_BROKER_ non-secret knobs + non-secret ledger coordinates
+          env:
+            # The ledger DSN carries the agentforge_broker password, so it is Secret-sourced (NEVER the
+            # ConfigMap). open/reserve/reconcile ONLY — never close (§5).
+            - name: AF_BROKER_LEDGER_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: broker-ledger
+                  key: AF_BROKER_LEDGER_DSN
+          ports:
+            - { name: http, containerPort: 8700, protocol: TCP }
+            - { name: metrics, containerPort: 9464, protocol: TCP }
+          volumeMounts:
+            # ONLY the ESO-written Secrets, read-only files (design §5): the durable OAuth + the kid
+            # public-key registry. The broker READS these mounts (reload-on-change); it never writes and
+            # has NO OpenBao/ESO egress. The ledger cred is env (secretKeyRef above), not a file.
+            - name: broker-oauth
+              mountPath: /var/run/broker/oauth
+              readOnly: true
+            - name: broker-kids
+              mountPath: /var/run/broker/kids
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            # FAIL CLOSED on ledger/credential loss (design §5): /readyz returns 503 when the ledger is
+            # unreachable, so the pod sheds load instead of passing requests through without its
+            # enforcement store.
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi }
+            limits: { cpu: "1", memory: 512Mi, ephemeral-storage: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: broker-oauth
+          secret:
+            secretName: broker-oauth
+            defaultMode: 0440
+        - name: broker-kids
+          secret:
+            secretName: broker-kids
+            defaultMode: 0440
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+# Keep >=1 replica available across voluntary disruptions (drains/rollouts) — design §5 HA. With 2
+# replicas, minAvailable 1 lets a single node drain proceed while the broker stays serving.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: agentforge-broker
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: agentforge-broker
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-broker

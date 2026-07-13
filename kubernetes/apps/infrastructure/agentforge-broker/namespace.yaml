@@ -1,0 +1,43 @@
+# AgentForge v2 P2 R-2 — the OPERATOR-OWNED, CP-UNWRITABLE model-gateway broker namespace (design
+# §5/§6). The broker is a TRUSTED-BUT-ISOLATED tier: it holds the durable subscription OAuth
+# (broker-oauth) and injects it upstream so the untrusted sandbox never sees it. It is created in the
+# CP-unwritable cchifor/ailab repo, so a compromised control plane can neither relax its PSA level nor
+# grant its SA any RBAC.
+#
+# restricted PSA (pinned v1.31) — the broker container is unprivileged + non-root + seccomp
+# RuntimeDefault + drop ALL (see deployment.yaml). ISOLATED tier: a default-deny NetworkPolicy (below)
+# closes both directions; the broker's ONLY reach (agent ingress, upstream+DNS+infra-pg egress, NO
+# ESO/OpenBao) is opened by the CiliumNetworkPolicy (ciliumnetworkpolicy.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentforge-broker
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.31
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.31
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.31
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+---
+# Namespace-wide DEFAULT-DENY (k8s NetworkPolicy). Selecting all pods with both policyTypes and NO
+# ingress/egress rules denies ALL traffic in both directions — the ISOLATED-tier baseline. The broker's
+# narrow allowances (agent ingress on 8700, upstream/DNS/infra-pg egress) are a CiliumNetworkPolicy
+# (ciliumnetworkpolicy.yaml). Deliberately NOT baseline-only: the broker guards the durable OAuth, so it
+# starts from zero connectivity and opens the minimum.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  podSelector: {} # every pod in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  # no ingress: [] / egress: [] rules -> deny all in both directions
