@@ -1,0 +1,22 @@
+# ClusterIP over the dispatcher's Prometheus metrics port ONLY (the dispatcher has no data/API port — it
+# is a read-only poller). The dispatcher-servicemonitor.yaml selects this Service so kube-prometheus
+# scrapes forge_pending (the KEDA scale oracle the ScaledObject queries).
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentforge-dispatcher
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/name: agentforge-dispatcher
+    app.kubernetes.io/component: dispatcher
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agentforge-dispatcher
+  ports:
+    - name: metrics
+      port: 9464
+      targetPort: metrics
+      protocol: TCP

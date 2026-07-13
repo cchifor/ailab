@@ -1,0 +1,66 @@
+# af-dispatcher network boundary (plan §1). Cilium is the CNI; SELECTING the dispatcher endpoint for
+# ingress AND egress puts it into both-direction default-deny, so these rules are its COMPLETE allowed
+# reach. It selects ONLY the dispatcher pod (by label), so the CP's / reaper's own policies in this ns are
+# untouched. A CiliumNetworkPolicy (not a plain NetworkPolicy) is used so egress can be expressed by
+# ENDPOINT identity (in-cluster Gitea) with a world/metadata egressDeny belt — the reaper-netpol.yaml
+# precedent in this same namespace.
+#
+# The dispatcher reaches the forge in-cluster (gitea-http.gitea.svc:3000), so world is DENIED (no public
+# git.chifor.me / FQDN egress needed). It needs NO kube-apiserver (read-only poller, token-automount off),
+# NO OpenBao/ESO (that sync is controller-side), NO broker/litellm.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: agentforge-dispatcher
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-dispatcher
+  ingress:
+    # Prometheus metrics scrape — scoped to the metrics port ONLY, from the monitoring namespace. No
+    # security decision depends on it; the dispatcher has no data/API port.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+      toPorts:
+        - ports:
+            - { port: "9464", protocol: TCP }
+  egress:
+    # (1) DNS -> kube-dns (resolve the in-cluster Gitea service name).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # (2) the FORGE — in-cluster Gitea (gitea-http.gitea.svc:3000). Matched by ENDPOINT identity
+    #     (namespace gitea + the gitea app label), so the private-range/world egressDeny below never blocks
+    #     it. The dispatcher fetches its config + counts open issues here.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: gitea
+            app.kubernetes.io/name: gitea
+      toPorts:
+        - ports:
+            - { port: "3000", protocol: TCP }
+  egressDeny:
+    # No direct internet / node-local / metadata-via-node. world = any non-cluster IP; host/remote-node =
+    # the nodes themselves. Pod-to-pod (gitea/kube-dns) is identity-based, so these never block (1)/(2).
+    - toEntities:
+        - world
+        - host
+        - remote-node
+    # metadata (169.254.169.254), link-local, and ALL IPv6 — explicit direct-IP belt.
+    - toCIDR:
+        - 169.254.169.254/32
+        - 169.254.0.0/16
+        - ::/0
