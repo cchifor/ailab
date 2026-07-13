@@ -46,7 +46,7 @@ policy — NO new RBAC/PVC/SA needed):
   `AF_SANDBOX_NAMESPACE=agentforge-sandbox`, `AF_SANDBOX_IMAGE`=<gated digest>, `AF_SANDBOX_SERVICE_ACCOUNT`,
   `AF_SANDBOX_WORKSPACE_PVC=af-sbx-ws-tenant-zero-playground`, `AF_SANDBOX_ORG=tenant-zero`,
   `AF_SANDBOX_WORKSPACE=playground`, `AF_SANDBOX_POOL=planner`, `AF_SANDBOX_BROKER_URLS`, `AF_LEASE_DURATION_S`.
-- ESO `af-forge-creds` (orchestrator-only): the forge PATs/HMAC/git-push token/litellm key from OpenBao
+- ESO `af-creds-playground-planner` (the ACTUAL Wave-B-ii-rendered orchestrator credential Secret for this ns — `creds_secret_name`, NOT the stale `af-forge-creds`): the forge PATs/HMAC/git-push token/litellm key from OpenBao
   `af/data/tenants/tenant-zero/playground/orchestrator`, PLUS templating the ACTIVE private
   `AF_CAPABILITY_SIGNING_KEY` **and** `AF_CAPABILITY_KID` (both required by the Settings/broker capability
   contract; the private signing key stays orchestrator-only — NEVER a sandbox Job). Restricted-ish runc
@@ -59,7 +59,7 @@ policy — NO new RBAC/PVC/SA needed):
 PENDING work, not in-flight-subtracted, so maxReplicas bounds concurrency; the claim epoch-lock dedups
 duplicate claims). Triggers:
 - **prometheus**: `serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090`;
-  `query: sum(forge_pending{account="anthropic/max1", pool="planner", role=~"planner|reviewer"})` — MUST
+  `query: sum(forge_pending{account="anthropic/default", pool="planner", role=~"planner|reviewer"})` — MUST
   filter account+pool (the gauge is `{account,pool,role,repo}`; role-only would let another account's
   backlog scale this one), with a role MATCHER for a multi-role worker; `threshold: "1"`;
   `activationThreshold`; `ignoreNullValues: true` + an explicit scrape-missing posture (don't flap to 0 on
@@ -78,12 +78,11 @@ Deny world/metadata/IPv6.
 
 ## Critical files
 - NEW `kubernetes/apps/infrastructure/agentforge-workers/**` (dispatcher deploy[gated]/svc/servicemonitor/
-  netpol; worker deploy[gated] in the tenant ns + its af-forge-creds ESO [if not already present];
+  netpol; worker deploy[gated] in the tenant ns [reusing the existing af-creds-playground-planner ESO/Secret];
   scaledobject; cilium-egress; kustomization — Deployments UNLISTED/gated).
 - NEW `kubernetes/apps/clusters/ai/agentforge-workers.yaml` (Flux Kustomization, `wait:false`, dependsOn
   the sandbox/broker/tenant-map/ESO+KEDA CRDs — mirrors `agentforge-broker.yaml`).
-- Verify the existing `af-forge-creds` / orchestrator ESO already renders the capability signing key + kid;
-  if not, add it (orchestrator-only).
+- Verify the existing `af-creds-playground-planner` orchestrator ESO already templates `AF_CAPABILITY_SIGNING_KEY` + `AF_CAPABILITY_KID` (orchestrator-only); if not, add it to that ESO.
 
 ## Verification
 - `kubectl kustomize` builds; all Deployments UNLISTED/gated with placeholder digests; no
@@ -109,4 +108,6 @@ Deny world/metadata/IPv6.
   0→N on forge work.
 - codex Phase A on this plan, then Phase B on the rendered manifests (cap 3 each).
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
+
+<!-- Phase A: codex round 1 (crux CONFIRMED sound; 16 wiring findings) + round 2 (2 residuals: use the ACTUAL provisioned names af-creds-playground-planner + account anthropic/default, not the deferred-fleet af-forge-creds/anthropic-max1) — all accepted; no pushback. Finalized. -->
