@@ -10,11 +10,17 @@ spec:
   # Its OWN path/Kustomization (NOT a line in apps/ or infrastructure/kustomization.yaml) so the
   # operator-owned worker-autoscaling boundary does not collide with the P1 agentforge admission (apps
   # layer) or the concurrent P2 operators work under infrastructure/{security,autoscaling}. Mirrors the
-  # agentforge-broker wiring. dependsOn infrastructure (ESO/Cilium/ServiceMonitor CRDs + PriorityClasses)
-  # AND keda (the ScaledObject CRD) — deliberately NOT `apps`/`databases`, so the SA/ESO/Service/SM/CNP/
-  # ScaledObject keep reconciling even if those layers are unhealthy.
+  # agentforge-broker wiring. dependsOn:
+  #   * external-secrets — installs the external-secrets.io/v1 CRDs (SecretStore/ExternalSecret) this tree's
+  #     dispatcher-externalsecret.yaml applies; without it a bootstrap/rebuild could try to apply those CRs
+  #     before the CRDs exist (codex Phase B #3).
+  #   * keda — installs the keda.sh/v1alpha1 ScaledObject CRD.
+  #   * infrastructure — Cilium/ServiceMonitor CRDs + PriorityClasses.
+  # Deliberately NOT `apps`/`databases`, so the SA/ESO/Service/SM/CNP/ScaledObject keep reconciling even if
+  # those layers are unhealthy.
   dependsOn:
     - name: infrastructure
+    - name: external-secrets
     - name: keda
   sourceRef:
     kind: GitRepository
