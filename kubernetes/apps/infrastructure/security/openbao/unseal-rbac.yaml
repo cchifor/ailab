@@ -34,11 +34,15 @@ rules:
     resources: ["secrets"]
     resourceNames: ["openbao-keys", "openbao-bootstrap-token"]
     verbs: ["get"]
-  # read the provisioned sentinel to tell "normal post-provision" from "partial-death" (never write it).
+  # the openbao-state sentinel: read it (partial-death vs post-provision), AND write cluster_id to it after
+  # unseal (persist-before-unseal reorder moved cluster_id out of the one-shot keys Secret into this CM).
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"] # create cannot be resourceName-scoped
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["openbao-state"]
-    verbs: ["get"]
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
