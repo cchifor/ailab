@@ -98,6 +98,11 @@ spec:
     # segment check, at validation-11's proven cost profile).
     - name: keyRegex
       expression: "'^tenants/' + variables.org + '/' + variables.ws + '/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$'"
+    # The SecretStore's vault.auth block (or {} for non-SecretStore / malformed) — validation 13 asserts
+    # it has EXACTLY the `kubernetes` key (size 1) so no additional auth method (appRole/token/ldap/jwt/…)
+    # can smuggle a static credential past the kubernetes-auth pin.
+    - name: ssVaultAuth
+      expression: "(request.kind.kind == 'SecretStore' && has(object.spec) && has(object.spec.provider) && has(object.spec.provider.vault) && has(object.spec.provider.vault.auth)) ? object.spec.provider.vault.auth : {}"
     # The SecretStore's kubernetes-auth block (or {} for non-SecretStore / malformed) so validation 13
     # can read role/serviceAccountRef without nested has() chains erroring.
     - name: ssK8sAuth
@@ -237,13 +242,14 @@ spec:
         request.kind.kind != 'SecretStore' ||
         (params != null && variables.hasEntry && variables.entryOk &&
          object.metadata.name == variables.esoStoreName &&
+         size(variables.ssVaultAuth) == 1 && 'kubernetes' in variables.ssVaultAuth &&
          'role' in variables.ssK8sAuth && variables.ssK8sAuth.role == variables.vaultRole &&
          'serviceAccountRef' in variables.ssK8sAuth &&
          'name' in variables.ssK8sAuth.serviceAccountRef &&
          variables.ssK8sAuth.serviceAccountRef.name == variables.esoStoreName &&
          (!('namespace' in variables.ssK8sAuth.serviceAccountRef) ||
           variables.ssK8sAuth.serviceAccountRef.namespace == variables.esoNs))
-      message: "agentforge tenant path: a SecretStore must be named 'af-eso-<workspace>', use the OpenBao kubernetes-auth role 'af-tenant-<org>-<workspace>', and authenticate as serviceAccountRef 'af-eso-<workspace>' in THIS namespace — all correlated to the operator tenant-map entry for its namespace."
+      message: "agentforge tenant path: a SecretStore must be named 'af-eso-<workspace>', use vault auth with EXACTLY the kubernetes method (no appRole/token/ldap/etc.), the OpenBao kubernetes-auth role 'af-tenant-<org>-<workspace>', and authenticate as serviceAccountRef 'af-eso-<workspace>' in THIS namespace — all correlated to the operator tenant-map entry for its namespace."
     # (14) P2 R-2 §6 — ExternalSecret secretStoreRef/target PIN + reject dataFrom.find + FORBID per-source
     #      store override. secretStoreRef must be {name: 'af-eso-<workspace>', kind: SecretStore}; target.name
     #      must be one of the operator-mapped allowed creds; every dataFrom entry must be an `extract` (a
