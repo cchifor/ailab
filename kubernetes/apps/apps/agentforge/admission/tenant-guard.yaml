@@ -244,10 +244,14 @@ spec:
          (!('namespace' in variables.ssK8sAuth.serviceAccountRef) ||
           variables.ssK8sAuth.serviceAccountRef.namespace == variables.esoNs))
       message: "agentforge tenant path: a SecretStore must be named 'af-eso-<workspace>', use the OpenBao kubernetes-auth role 'af-tenant-<org>-<workspace>', and authenticate as serviceAccountRef 'af-eso-<workspace>' in THIS namespace — all correlated to the operator tenant-map entry for its namespace."
-    # (14) P2 R-2 §6 — ExternalSecret secretStoreRef/target PIN + reject dataFrom.find. secretStoreRef
-    #      must be {name: 'af-eso-<workspace>', kind: SecretStore}; target.name must be one of the
-    #      operator-mapped allowed creds names; and every dataFrom entry must be an `extract` (a
-    #      `dataFrom.find` — a wildcard OpenBao search — is rejected outright).
+    # (14) P2 R-2 §6 — ExternalSecret secretStoreRef/target PIN + reject dataFrom.find + FORBID per-source
+    #      store override. secretStoreRef must be {name: 'af-eso-<workspace>', kind: SecretStore}; target.name
+    #      must be one of the operator-mapped allowed creds; every dataFrom entry must be an `extract` (a
+    #      `dataFrom.find` wildcard OpenBao search is rejected). CRITICAL: ESO lets a `data[].sourceRef` /
+    #      `dataFrom[].sourceRef` / `dataFrom[].generatorRef` OVERRIDE the top-level secretStoreRef per
+    #      source — so a single source could point at a DIFFERENT store or a generator while the top-level
+    #      ref looks correct. The CP NEVER sets per-source refs, so forbid them outright: no sourceRef on any
+    #      data[]/dataFrom[] entry, and no dataFrom[].generatorRef.
     - expression: >-
         request.kind.kind != 'ExternalSecret' ||
         (params != null && variables.hasEntry && variables.entryOk &&
@@ -257,9 +261,11 @@ spec:
          object.spec.secretStoreRef.kind == 'SecretStore' &&
          has(object.spec.target) && has(object.spec.target.name) &&
          variables.allowedCreds.exists(c, c == object.spec.target.name) &&
+         (!has(object.spec.data) || object.spec.data.all(d, !has(d.sourceRef))) &&
          (!has(object.spec.dataFrom) || object.spec.dataFrom.all(d,
-            !has(d.find) && has(d.extract) && has(d.extract.key))))
-      message: "agentforge tenant path: an ExternalSecret must reference secretStoreRef {name:'af-eso-<workspace>', kind:SecretStore}, set target.name to one of the operator-mapped allowed creds, and use extract only (dataFrom.find is forbidden) — all correlated to the operator tenant-map entry."
+            !has(d.find) && !has(d.sourceRef) && !has(d.generatorRef) &&
+            has(d.extract) && has(d.extract.key))))
+      message: "agentforge tenant path: an ExternalSecret must reference secretStoreRef {name:'af-eso-<workspace>', kind:SecretStore}, set target.name to one of the operator-mapped allowed creds, use extract only (dataFrom.find forbidden), and set NO per-source sourceRef/generatorRef (which would override the pinned store) — all correlated to the operator tenant-map entry."
     # (15) P2 R-2 §6 — ExternalSecret SOURCE-KEY correlation, segment-safe. Every data[].remoteRef.key
     #      and dataFrom[].extract.key must match the ANCHORED per-tenant regex for THIS namespace's mapped
     #      org/ws (variables.keyRegex). By construction that rejects any other tenant, 'operator/*', a
