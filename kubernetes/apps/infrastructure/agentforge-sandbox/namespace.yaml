@@ -1,0 +1,45 @@
+# AgentForge v2 P2 R-1 — the OPERATOR-OWNED untrusted-sandbox namespace (ADR 0019, plans/
+# 2026-07-12-p2-sandbox-redesign-v2.md). This is the fail-closed side of the boundary: it is created
+# in the CP-UNWRITABLE cchifor/ailab repo (NOT the tenant reconcile path, NOT the CP), so a fully
+# compromised control plane can neither relax the PSA level, drop the admission policies that pin the
+# sandbox pod shape, nor grant the sandbox SA any RBAC.
+#
+# Single SHARED sandbox namespace for R-1 (one tenant-zero shadow workspace). Per-org/workspace
+# ISOLATION is by PVC name (af-sbx-ws-<org>-<workspace>, one PVC per org/workspace; P2 R-2 §C) + the
+# sandbox-guard VAP binding each pod to exactly `af-sbx-ws-<its org label>-<its workspace label>`
+# mounted at the per-job subPath == its job-id label. If org/workspaces ever need HARD namespace
+# isolation, clone this dir per org/workspace (ns af-sbx-<org>-<ws>); the admission CEL is
+# org/workspace-agnostic (it derives the PVC name from the pod's own org+workspace labels).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentforge-sandbox
+  labels:
+    # Restricted PSA — every pod here must be unprivileged + non-root + seccomp RuntimeDefault + drop
+    # ALL. The Kata sandbox pod conforms (runtimeClassName selection is NOT blocked by restricted PSA,
+    # so NO runtimeClass exemption is needed). enforce-version is PINNED so a newer API server can't
+    # silently relax what "restricted" means (the cluster is k8s 1.31 — see admission/tenant-guard.yaml).
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.31
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.31
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.31
+    # Semantic marker (also the label tenant-guard.yaml uses to recognise a sandbox ns). Operator-set;
+    # the tenant path is forbidden from self-assigning it (tenant-guard validation 8).
+    ailab.io/agentforge-sandbox: "true"
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+---
+# The tokenless identity every sandbox pod runs as. It has NO RoleBinding of its own anywhere — the
+# sandbox pod must never talk to the kube-apiserver. automountServiceAccountToken:false here AND on the
+# pod (pinned by the sandbox-guard VAP) means no projected token volume is ever injected.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentforge-sandbox
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/component: sandbox
+automountServiceAccountToken: false

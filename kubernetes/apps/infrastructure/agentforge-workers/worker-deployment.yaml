@@ -1,0 +1,166 @@
+# tenant-zero orchestrator WORKER — the KEDA scale TARGET (`agentforge serve`, AF_EXECUTOR=sandbox: a PURE
+# orchestrator that stages each job + creates an ephemeral sandbox Job; NO DinD, R-1 redesign). The SAME
+# p1-worker image as the reaper/dispatcher. It runs in the CP-rendered TENANT namespace
+# `af-tenant-tenant-zero-playground` under the EXISTING orchestrator SA `af-orch-playground-planner`
+# (agentforge-sandbox/orchestrator-rbac.yaml RoleBinding subject) — so it INHERITS, with NO new
+# RBAC/PVC/SA/tenant-map/broker-policy: the cross-ns Jobs/pods/log/lease RBAC in agentforge-sandbox, the
+# tenant staging PVC, the tenant-map entry, and the broker ingress/kid policy. This is the SINGLE existing
+# tenant-zero identity; the per-OAuth-account fleet (max1/max2/codex/tester) is a P3 provisioner concern.
+#
+# Because this Deployment is OPERATOR-authored (applied by the agentforge-workers Flux Kustomization, NOT
+# the tenant reconciler), the agentforge-tenant-guard VAP (which fires ONLY for the tenant reconciler SA)
+# does not gate it; the tenant ns is baseline PSA and this pod is baseline-compliant (non-root 65532).
+#
+# ⚠ DELIBERATELY NOT LISTED in kustomization.yaml (mirrors reaper-deployment.yaml + the broker precedent).
+# The images below are PLACEHOLDER @sha256:0000… — unpullable. Nothing here flips privilege_hardening. The
+# ScaledObject (scaledobject.yaml) targets this Deployment by name and stays Ready:False (no target) until
+# it is un-gated — harmless while dormant. TO ENABLE:
+#   1. build + pin the immutable @sha256 of BOTH the p1-worker image (this container) AND the sandbox image
+#      (AF_SANDBOX_IMAGE) from the cchifor/agentforge release CI;
+#   2. ensure the CP-rendered `af-creds-playground-planner` Secret + `af-sbx-stage-tenant-zero-playground`
+#      PVC exist (tenant reconcile path) and the OpenBao tenant orchestrator subtree
+#      `af/data/tenants/tenant-zero/playground/orchestrator` carries the forge PATs/HMAC/litellm key PLUS
+#      the ACTIVE private AF_CAPABILITY_SIGNING_KEY + AF_CAPABILITY_KID (the ESO extracts the WHOLE subtree
+#      via dataFrom.extract, so both surface here automatically once provisioned — orchestrator-only, NEVER
+#      a sandbox Job);
+#   3. add `- worker-deployment.yaml` to kustomization.yaml.
+# ⚠ POD LABELS ARE OPERATOR-ONLY (codex Phase B #2). The worker shares the CP-rendered tenant namespace,
+# whose CP tenant NetworkPolicy (agentforge-platform renderer 40-networkpolicy.yaml) selects
+# podSelector={agentforge.io/pool: <pool>} with `ingress: []` + BROAD egress (53/8080/443). If this
+# operator worker carried `agentforge.io/pool: planner` it would be SHADOWED by that k8s NetworkPolicy:
+# its egress would UNION to any :443/:8080 (defeating the forge+apiserver-only Cilium boundary) and its
+# ingress would be CP-denied. So the worker carries NO agentforge.io/* pod label — only app.kubernetes.io
+# operator labels — and its Cilium policy (cilium-egress.yaml) selects on those. This is SAFE against the
+# sandbox VAPs: sandbox-guard/sandbox-job-guard pin agentforge.io/pool on the SANDBOX JOB pods (trust-class
+# agent/test) the worker CREATES via AF_SANDBOX_POOL, NOT on this orchestrator pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: af-orch-playground-planner # == the SA + the KEDA scaleTargetRef name
+  namespace: af-tenant-tenant-zero-playground
+  labels:
+    app.kubernetes.io/name: agentforge-worker
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  # replicas is OWNED by KEDA (scaledobject.yaml, minReplicaCount 0). Seed at 0 so the gated Deployment is
+  # scaled-to-zero at activation and KEDA drives it up on forge backlog.
+  replicas: 0
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0 # AF_WORKER_NAME is the shared claim-lock owner; avoid a second live orchestrator on rollout
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-worker
+      app.kubernetes.io/managed-by: agentforge-operator
+  template:
+    metadata:
+      labels:
+        # OPERATOR-ONLY labels (see header) — no agentforge.io/pool, so the CP tenant NetworkPolicy never
+        # selects this pod. cilium-egress.yaml keys its endpointSelector on these.
+        app.kubernetes.io/name: agentforge-worker
+        app.kubernetes.io/component: orchestrator
+        app.kubernetes.io/part-of: agentforge
+        app.kubernetes.io/managed-by: agentforge-operator
+    spec:
+      serviceAccountName: af-orch-playground-planner # the EXISTING orchestrator SA (do NOT create a new one)
+      automountServiceAccountToken: true # REQUIRED: the orchestrator creates/watches Jobs + CAS's the Lease
+      enableServiceLinks: false
+      nodeSelector:
+        ailab.io/agent-pool: "true"
+      tolerations:
+        - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+      # Unify the shared-NFS identity on uid/gid 65532 (nonroot): the orchestrator STAGES into the shared
+      # tree, the sandbox runs as 65532, and the importer rejects entries not owned by 65532 (AF_SANDBOX_
+      # IMPORT_EXPECTED_UID). fsGroup 65532 so staged entries are group-writable on the 0777 NFS export.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: orchestrator
+          # PLACEHOLDER digest — pin the real p1-worker @sha256 (see header) before enabling.
+          image: registry.chifor.me/agentforge/p1-worker@sha256:9efafd0a5c7ddacbd7bcfe8dec7695219597c7f394bb05e495074d49eeb4f498
+          # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
+          args: ["agentforge", "serve"]
+          ports:
+            # Prometheus metrics (metrics_port). The webhook API (8700) is NOT declared/exposed: it has no
+            # Service and cilium-egress.yaml puts the worker in ingress default-deny except this metrics port.
+            - { name: metrics, containerPort: 9464, protocol: TCP }
+          env:
+            # FIXED worker identity — a CONFIGURED constant, NOT the pod name (a per-pod name would break
+            # roles_for(worker_name) and the claim-lock owner). Shared across KEDA replicas is safe: claims
+            # are epoch-elected per issue. Must match a `workers` entry in the forge AgentForgeConfig
+            # (see reconciliation note in the tranche report re: the renderer's worker_identity).
+            - { name: AF_WORKER_NAME, value: "af-orch-playground-planner" }
+            # Forge-backed config (tenant-zero is NOT control_plane): fetch AgentForgeConfig from in-cluster
+            # Gitea; AF_CONFIG_REPO/AF_CONFIG_PATH keep their defaults.
+            - { name: AF_CONFIG_SOURCE, value: "gitea" }
+            - { name: AF_GITEA_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000" }
+            # -- SandboxExecutor selection + the sandbox Job knobs (must match the Wave B-ii VAP-pinned
+            #    shape byte-for-byte; the agentforge-sandbox-guard / -job-guard reject any deviation) --
+            - { name: AF_EXECUTOR, value: "sandbox" }
+            - { name: AF_SANDBOX_NAMESPACE, value: "agentforge-sandbox" }
+            # PLACEHOLDER sandbox image digest — pin the real sandbox @sha256 (see header) before enabling.
+            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:e50dbab89ec40f90d3af49746f50dc5a2a26165708092a93b42ee690b5ec47a8" }
+            - { name: AF_SANDBOX_SERVICE_ACCOUNT, value: "agentforge-sandbox" } # the tokenless sandbox SA
+            - { name: AF_SANDBOX_ORG, value: "tenant-zero" }       # -> agentforge.io/org label + capability tenant
+            - { name: AF_SANDBOX_WORKSPACE, value: "playground" }  # -> agentforge.io/workspace label
+            - { name: AF_SANDBOX_POOL, value: "planner" }          # -> capability pool/role claim
+            - { name: AF_SANDBOX_WORKSPACE_PVC, value: "af-sbx-ws-tenant-zero-playground" } # VAP: af-sbx-ws-<org>-<ws>
+            # aud (<provider>/<account>) -> broker URL. The worker selects the broker by the SAME aud it
+            # signs; anthropic/default is the tenant-zero planner's Claude subscription broker (aud pinned by
+            # the broker configmap AF_BROKER_AUDIENCE). The DIRECT broker ClusterIP (source-IP TOFU, no proxy).
+            - { name: AF_SANDBOX_BROKER_URLS, value: '{"anthropic/default":"http://agentforge-broker.agentforge-broker.svc.cluster.local:8700"}' }
+            # Owner-lease leaseDurationSeconds (coordination.k8s.io Lease af-sbx-<job_id>; apiserver CAS + RBAC).
+            - { name: AF_LEASE_DURATION_S, value: "300" }
+            # The sandbox pod runs as 65532 on the 0777 NFS export, so the importer must expect that uid.
+            - { name: AF_SANDBOX_IMPORT_EXPECTED_UID, value: "65532" }
+            # Staging root == the sandbox-staging PVC mountPath below, so <root>/<job_id>/ is the SAME NFS
+            # bytes the sandbox Job mounts (subPath <job_id>) + the reaper reclaims.
+            - { name: AF_SANDBOX_STAGING_ROOT, value: "/workspace/agentforge/sandbox" }
+          envFrom:
+            # The EXISTING CP-rendered orchestrator credential Secret (creds_secret_name = af-creds-<ws>-<pool>;
+            # tenant-map: af-tenant-tenant-zero-playground -> tenant-zero/playground/af-creds-playground-planner).
+            # Its ExternalSecret dataFrom.extract's the WHOLE OpenBao orchestrator subtree, so it injects the
+            # forge PATs/HMAC/git-push token/litellm key PLUS the orchestrator-only AF_CAPABILITY_SIGNING_KEY
+            # + AF_CAPABILITY_KID (the private signing key stays orchestrator-side — NEVER a sandbox Job).
+            - secretRef:
+                name: af-creds-playground-planner
+          volumeMounts:
+            # The tenant staging PVC at the staging root (same shared per-org/ws NFS export as the sandbox's
+            # af-sbx-ws PVC + the reaper PVC) — like the reaper mounts its staging PVC.
+            - { name: sandbox-staging, mountPath: /workspace/agentforge/sandbox }
+            # Writable paths on a read-only root fs: config-lastgood.json (state_dir), throwaway checkouts
+            # (jobs_root), and /tmp.
+            - { name: state, mountPath: /var/lib/agentforge }
+            - { name: jobs, mountPath: /workspace/agentforge/jobs }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 128Mi }
+            limits: { cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi }
+          # Restricted-ish hardening (trusted tier — it creates Jobs). Baseline PSA is the ns floor; this is
+          # stricter defense-in-depth. readOnlyRootFilesystem with the writable mounts above.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: sandbox-staging
+          persistentVolumeClaim:
+            claimName: af-sbx-stage-tenant-zero-playground # CP-rendered tenant-ns PVC -> operator NFS staging PV
+        - name: state
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: jobs
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

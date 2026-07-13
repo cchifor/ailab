@@ -1,0 +1,83 @@
+# Per-worker Cilium boundary (plan §4 + codex Phase B #2) — the operator worker's COMPLETE allowed reach.
+# Cilium is the CNI; selecting the worker endpoint for ingress AND egress puts it into both-direction
+# default-deny, so this is the whole allow-list.
+#
+# DECOUPLING (codex #2): this selects the worker by its OPERATOR-ONLY labels (app.kubernetes.io/name +
+# managed-by), NOT agentforge.io/pool. The worker deliberately carries NO agentforge.io/pool label, so the
+# CP-rendered tenant NetworkPolicy (podSelector={agentforge.io/pool: planner}, ingress:[] + broad
+# egress 53/8080/443) never selects it — which would otherwise UNION its egress to any :443/:8080 and defeat
+# this boundary. Because no k8s NetworkPolicy selects the worker anymore, THIS CNP restores both the tight
+# egress AND an ingress default-deny (the CP netpol's `ingress: []` protection): only the metrics scrape is
+# admitted; the worker's webhook API (8700) stays ingress-denied (it has no Service in this tranche).
+#
+# The orchestrator ONLY (a) reaches the FORGE (in-cluster Gitea — config fetch + issue/PR ops), (b) reaches
+# the kube-apiserver to create/watch sandbox Jobs, read pod logs, and CAS the owner-lease, and (c) resolves
+# DNS. NO OpenBao/ESO (controller-side sync), NO direct broker/litellm — the SANDBOX JOBS are the broker/
+# litellm clients (locked by the Wave B-ii sandbox CNP); the orchestrator only stages the capability +
+# creates the Job. world/metadata/IPv6 denied.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: agentforge-worker
+  namespace: af-tenant-tenant-zero-playground
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-worker
+      app.kubernetes.io/managed-by: agentforge-operator
+  ingress:
+    # Prometheus metrics scrape ONLY, from the monitoring namespace, on the metrics port. This is also what
+    # establishes ingress default-deny for everything else (e.g. the webhook API 8700), replacing the CP
+    # tenant NetworkPolicy's `ingress: []` protection that no longer selects this operator-labeled pod.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+      toPorts:
+        - ports:
+            - { port: "9464", protocol: TCP }
+  egress:
+    # (1) DNS -> kube-dns (resolve the in-cluster Gitea service name; the apiserver path uses
+    #     KUBERNETES_SERVICE_HOST by IP, but DNS is cheap defense-in-depth).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # (2) kube-apiserver — the Talos control-plane VIP; Cilium resolves the `kube-apiserver` entity.
+    #     REQUIRED to create/watch sandbox Jobs, read pod logs, and CAS the coordination.k8s.io Lease
+    #     (safe under the narrow cross-ns Jobs-only RBAC in agentforge-sandbox/orchestrator-rbac.yaml).
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - { port: "6443", protocol: TCP }
+    # (3) the FORGE — in-cluster Gitea (gitea-http.gitea.svc:3000). Matched by ENDPOINT identity so the
+    #     world/private-range egressDeny below never blocks it. NO public git.chifor.me / FQDN egress.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: gitea
+            app.kubernetes.io/name: gitea
+      toPorts:
+        - ports:
+            - { port: "3000", protocol: TCP }
+  egressDeny:
+    # No direct internet / node-local / metadata-via-node. Pod-to-pod (gitea/kube-dns) + the apiserver
+    # entity are identity-based, so these never block (1)/(2)/(3). Mirrors the sandbox agent egressDeny.
+    - toEntities:
+        - world
+        - host
+        - remote-node
+    # metadata (169.254.169.254), link-local, and ALL IPv6 — explicit direct-IP belt.
+    - toCIDR:
+        - 169.254.169.254/32
+        - 169.254.0.0/16
+        - ::/0

@@ -3,5 +3,7 @@ kind: Kustomization
 # AgentForge v2 admission gates (native ValidatingAdmissionPolicy, k8s 1.31). Defined in the
 # CP-unwritable cchifor/ailab repo so a compromised CP cannot disable them. ADR 0019.
 resources:
-  - tenant-guard.yaml # allowlist on the tenant reconcile path (GVK/field)
+  - tenant-map.yaml # operator-owned ns->(org/workspace/creds) map — the tenant-guard paramRef (P2 R-2 §6)
+  - tenant-guard.yaml # allowlist on the tenant reconcile path (GVK/field) + ESO correlation (paramRef)
+  - tenant-reserved-guard.yaml # DELETE-verb reservation of the operator's tenant-zero shadow ns (companion to tenant-guard (16))
   - cp-flux-guard.yaml # field-lock on the CP's Flux nudge (no sourceRef/serviceAccountName change)

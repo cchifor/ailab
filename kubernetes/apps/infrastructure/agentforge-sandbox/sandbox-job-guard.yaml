@@ -1,0 +1,198 @@
+# ValidatingAdmissionPolicy — pins the JOB-level knobs AND MIRRORS the full sandbox POD shape on the
+# Job's spec.template (codex R-1 #2). The orchestrator SA is Jobs-only (it creates Jobs, never Pods);
+# the Job controller later creates the Pod, which agentforge-sandbox-guard re-validates. This guard
+# fails FAST at Job admission: a Job whose template would produce a non-conforming Pod is rejected
+# before any Pod exists. failurePolicy: Fail (fail-closed). It duplicates, on spec.template.spec, the
+# SAME container/securityContext/volume/env/resource constraints the pod-guard enforces — NOT just
+# runtimeClass/SA/restartPolicy — so the two guards cannot diverge. Mirrors
+# agentforge/src/agentforge/adapters/exec/sandbox.py::build_job_manifest.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-sandbox-job-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  variables:
+    - name: tspec
+      expression: "has(object.spec.template.spec) ? object.spec.template.spec : {}"
+    - name: tlabels
+      expression: "has(object.spec.template.metadata) && has(object.spec.template.metadata.labels) ? object.spec.template.metadata.labels : {}"
+    - name: tctrs
+      expression: "has(variables.tspec.containers) ? variables.tspec.containers : []"
+    - name: tvols
+      expression: "has(variables.tspec.volumes) ? variables.tspec.volumes : []"
+    - name: tpsc
+      expression: "has(variables.tspec.securityContext) ? variables.tspec.securityContext : {}"
+    - name: tworkspace
+      expression: "'agentforge.io/workspace' in variables.tlabels ? variables.tlabels['agentforge.io/workspace'] : ''"
+    - name: torg
+      expression: "'agentforge.io/org' in variables.tlabels ? variables.tlabels['agentforge.io/org'] : ''"
+    - name: tjobId
+      expression: "'agentforge.io/job-id' in variables.tlabels ? variables.tlabels['agentforge.io/job-id'] : ''"
+    # P2 R-2 §C: the STABLE per-pool identity label (canonical dns-slug), mirror of pod-guard's `pool`.
+    # The per-pool broker Cilium ingress selector keys on it, so the Job template must carry it too.
+    - name: tpool
+      expression: "'agentforge.io/pool' in variables.tlabels ? variables.tlabels['agentforge.io/pool'] : ''"
+  validations:
+    # (J1) Single, non-retrying, non-replacing, TTL-swept run with a bounded hard deadline.
+    - expression: >-
+        has(object.spec.parallelism) && object.spec.parallelism == 1 &&
+        has(object.spec.completions) && object.spec.completions == 1 &&
+        has(object.spec.backoffLimit) && object.spec.backoffLimit == 0 &&
+        has(object.spec.activeDeadlineSeconds) &&
+        object.spec.activeDeadlineSeconds >= 1 && object.spec.activeDeadlineSeconds <= 7200 &&
+        has(object.spec.ttlSecondsAfterFinished) && object.spec.ttlSecondsAfterFinished >= 0 &&
+        has(object.spec.podReplacementPolicy) && object.spec.podReplacementPolicy == 'Failed'
+      message: "sandbox Job must set parallelism=1, completions=1, backoffLimit=0, activeDeadlineSeconds in [1,7200], ttlSecondsAfterFinished set, podReplacementPolicy=Failed."
+    # ---- The following MIRROR agentforge-sandbox-guard, on spec.template.spec ----
+    # (P1) EXACTLY one container named `sandbox`; NO init/ephemeral containers.
+    - expression: >-
+        size(variables.tctrs) == 1 && variables.tctrs[0].name == 'sandbox' &&
+        !has(variables.tspec.initContainers) && !has(variables.tspec.ephemeralContainers)
+      message: "sandbox Job template must have exactly one container named 'sandbox' and no init/ephemeral containers."
+    # (P2) Fixed pod-level fields: Never-restart, runtimeClassName=kata, tokenless SA, bounded grace.
+    - expression: >-
+        has(variables.tspec.restartPolicy) && variables.tspec.restartPolicy == 'Never' &&
+        has(variables.tspec.runtimeClassName) && variables.tspec.runtimeClassName == 'kata' &&
+        has(variables.tspec.serviceAccountName) && variables.tspec.serviceAccountName == 'agentforge-sandbox' &&
+        has(variables.tspec.automountServiceAccountToken) && variables.tspec.automountServiceAccountToken == false &&
+        has(variables.tspec.terminationGracePeriodSeconds) &&
+        variables.tspec.terminationGracePeriodSeconds >= 1 && variables.tspec.terminationGracePeriodSeconds <= 30
+      message: "sandbox Job template must set restartPolicy=Never, runtimeClassName=kata, serviceAccountName=agentforge-sandbox, automountServiceAccountToken=false, terminationGracePeriodSeconds in [1,30]."
+    # (P3) Pod securityContext: non-root 65532 + fsGroup 65532 + seccomp RuntimeDefault.
+    - expression: >-
+        variables.tpsc.runAsNonRoot == true &&
+        variables.tpsc.runAsUser == 65532 && variables.tpsc.runAsGroup == 65532 &&
+        variables.tpsc.fsGroup == 65532 &&
+        has(variables.tpsc.seccompProfile) && variables.tpsc.seccompProfile.type == 'RuntimeDefault'
+      message: "sandbox Job template pod securityContext must be runAsNonRoot + runAsUser/runAsGroup/fsGroup 65532 + seccompProfile RuntimeDefault."
+    # (P4) Forbidden pod-level host-escape / node-targeting fields.
+    - expression: >-
+        (!has(variables.tspec.hostNetwork) || variables.tspec.hostNetwork == false) &&
+        (!has(variables.tspec.hostPID) || variables.tspec.hostPID == false) &&
+        (!has(variables.tspec.hostIPC) || variables.tspec.hostIPC == false) &&
+        !has(variables.tspec.nodeName) &&
+        !has(variables.tspec.hostAliases) &&
+        (!has(variables.tspec.shareProcessNamespace) || variables.tspec.shareProcessNamespace == false)
+      message: "sandbox Job template may not set hostNetwork/hostPID/hostIPC/nodeName/hostAliases/shareProcessNamespace."
+    # (P5) Cilium/lifecycle identity labels on the template (the Pod inherits them). org+workspace TOGETHER
+    #      name the PVC (P6) — both must be present dns-slugs (P2 R-2 §C multi-tenant keying).
+    - expression: >-
+        'agentforge.io/job-id' in variables.tlabels &&
+        variables.tlabels['agentforge.io/job-id'].matches('^[a-z0-9]{32}$') &&
+        'agentforge.io/trust-class' in variables.tlabels &&
+        variables.tlabels['agentforge.io/trust-class'] in ['agent', 'test'] &&
+        'app.kubernetes.io/managed-by' in variables.tlabels &&
+        variables.tlabels['app.kubernetes.io/managed-by'] == 'agentforge' &&
+        'app.kubernetes.io/component' in variables.tlabels &&
+        variables.tlabels['app.kubernetes.io/component'] == 'sandbox' &&
+        variables.torg.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
+        variables.tworkspace.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
+        variables.tpool.matches('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+      message: "sandbox Job template must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, org (dns-slug), workspace (dns-slug), pool (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
+    # (P6) VOLUMES — EXACT 2-volume set for BOTH trust-classes (P2 R-2 §B, mirror of pod-guard (6)):
+    #      {workspace PVC, home emptyDir}. The broker-cap emptyDir is gone (the per-job capability is now a
+    #      workspace file, not a mounted volume), so test AND agent share the same 2-volume shape. The
+    #      claimName is org-keyed (P2 R-2 §C): af-sbx-ws-<org label>-<workspace label>.
+    - expression: >-
+        variables.tvols.exists(v, v.name == 'workspace') &&
+        variables.tvols.exists(v, v.name == 'home') &&
+        size(variables.tvols) == 2 &&
+        variables.tvols.all(v,
+          (v.name == 'workspace' && has(v.persistentVolumeClaim) &&
+            v.persistentVolumeClaim.claimName == 'af-sbx-ws-' + variables.torg + '-' + variables.tworkspace) ||
+          (v.name == 'home' && has(v.emptyDir) &&
+            (!has(v.emptyDir.medium) || v.emptyDir.medium == '') &&
+            has(v.emptyDir.sizeLimit) &&
+            quantity(v.emptyDir.sizeLimit).isLessThan(quantity('2Gi'))))
+      message: "sandbox Job template volumes must be EXACTLY {workspace PVC 'af-sbx-ws-<org>-<workspace>', home emptyDir (disk, sizeLimit <2Gi)} for BOTH trust-class=test and trust-class=agent (2 volumes) — no other, missing, or duplicate volumes; no broker-cap."
+    # (P8) CONTAINER securityContext — the enumerated restricted set.
+    - expression: >-
+        variables.tctrs.all(c,
+          has(c.securityContext) &&
+          c.securityContext.runAsNonRoot == true &&
+          c.securityContext.runAsUser == 65532 && c.securityContext.runAsGroup == 65532 &&
+          c.securityContext.allowPrivilegeEscalation == false &&
+          (!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+          has(c.securityContext.capabilities) && c.securityContext.capabilities.drop == ['ALL'] &&
+          !has(c.securityContext.capabilities.add) &&
+          has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+          c.securityContext.readOnlyRootFilesystem == true &&
+          has(c.securityContext.procMount) && c.securityContext.procMount == 'Default')
+      message: "sandbox Job template container securityContext must be runAsNonRoot 65532/65532, allowPrivilegeEscalation=false, drop:[ALL] (no add), seccomp RuntimeDefault, readOnlyRootFilesystem=true, procMount=Default, not privileged."
+    # (P9) workingDir=/workspace, DIGEST-PINNED image, no hostPort.
+    - expression: >-
+        variables.tctrs.all(c,
+          c.workingDir == '/workspace' &&
+          c.image.matches('^[^@]+@sha256:[0-9a-f]{64}$') &&
+          (!has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))
+      message: "sandbox Job template container must set workingDir=/workspace, a digest-pinned image (repo@sha256:<64hex>), and no hostPort."
+    # (P10) volumeMounts — EXACT 2-mount set for BOTH trust-classes + subPath == the template's own job-id
+    #       label (P2 R-2 §B, mirror of pod-guard (10)): workspace + home only (the broker-cap mount is gone).
+    - expression: >-
+        variables.tctrs.all(c,
+          has(c.volumeMounts) &&
+          size(c.volumeMounts) == 2 &&
+          c.volumeMounts.exists(m, m.name == 'workspace') &&
+          c.volumeMounts.exists(m, m.name == 'home') &&
+          c.volumeMounts.all(m,
+            (m.name == 'workspace' && m.mountPath == '/workspace' &&
+              has(m.subPath) && m.subPath == variables.tjobId) ||
+            (m.name == 'home' && m.mountPath == '/home/nonroot' && !has(m.subPath))))
+      message: "sandbox Job template mounts must be EXACTLY: workspace at /workspace subPath==<job-id label> + home at /home/nonroot (2 mounts) for BOTH trust-class=test and trust-class=agent — both workspace and home are required, no broker-cap or other mounts."
+    # (P12) NO envFrom and NO env[].valueFrom of ANY kind (blocks secretKeyRef exfil of the lease key).
+    - expression: >-
+        variables.tctrs.all(c,
+          !has(c.envFrom) &&
+          (!has(c.env) || c.env.all(e, !has(e.valueFrom))))
+      message: "sandbox Job template container may not use envFrom or any env[].valueFrom — only plain-value env is allowed."
+    # (P13) EXACT resource requests+limits within bounds.
+    - expression: >-
+        variables.tctrs.all(c,
+          has(c.resources) && has(c.resources.requests) && has(c.resources.limits) &&
+          'cpu' in c.resources.requests && 'memory' in c.resources.requests &&
+          'ephemeral-storage' in c.resources.requests &&
+          'cpu' in c.resources.limits && 'memory' in c.resources.limits &&
+          'ephemeral-storage' in c.resources.limits &&
+          quantity(c.resources.requests.cpu).compareTo(quantity('50m')) >= 0 &&
+          quantity(c.resources.requests.cpu).compareTo(quantity(c.resources.limits.cpu)) <= 0 &&
+          quantity(c.resources.limits.cpu).compareTo(quantity('2')) <= 0 &&
+          quantity(c.resources.requests.memory).compareTo(quantity('64Mi')) >= 0 &&
+          quantity(c.resources.requests.memory).compareTo(quantity(c.resources.limits.memory)) <= 0 &&
+          quantity(c.resources.limits.memory).compareTo(quantity('4Gi')) <= 0 &&
+          quantity(c.resources.requests['ephemeral-storage']).compareTo(quantity('64Mi')) >= 0 &&
+          quantity(c.resources.requests['ephemeral-storage']).compareTo(quantity(c.resources.limits['ephemeral-storage'])) <= 0 &&
+          quantity(c.resources.limits['ephemeral-storage']).compareTo(quantity('8Gi')) <= 0)
+      message: "sandbox Job template container must set cpu/memory/ephemeral-storage requests AND limits, requests<=limits, within [50m..2 cpu, 64Mi..4Gi mem, 64Mi..8Gi ephemeral-storage]."
+    # (P14) No lifecycle, stdin/stdinOnce/tty, volumeDevices.
+    - expression: >-
+        variables.tctrs.all(c,
+          !has(c.lifecycle) &&
+          (!has(c.stdin) || c.stdin == false) &&
+          (!has(c.stdinOnce) || c.stdinOnce == false) &&
+          (!has(c.tty) || c.tty == false) &&
+          !has(c.volumeDevices))
+      message: "sandbox Job template container may not set lifecycle, stdin/stdinOnce/tty, or volumeDevices."
+    # (P15) No imagePullSecrets; default scheduler only.
+    - expression: >-
+        (!has(variables.tspec.imagePullSecrets) || size(variables.tspec.imagePullSecrets) == 0) &&
+        (!has(variables.tspec.schedulerName) || variables.tspec.schedulerName == 'default-scheduler')
+      message: "sandbox Job template may not set imagePullSecrets and must use the default scheduler."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-sandbox-job-guard
+spec:
+  policyName: agentforge-sandbox-job-guard
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: agentforge-sandbox

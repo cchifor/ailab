@@ -1,0 +1,19 @@
+# Namespace-wide DEFAULT-DENY (k8s NetworkPolicy). Selecting all pods with both policyTypes and NO
+# ingress/egress rules denies ALL traffic in both directions for every pod in agentforge-sandbox —
+# including DNS. This is the R-1 baseline: with nothing opening egress, a test/setup sandbox pod
+# reaches NOTHING (no broker, no DNS, no cluster service, no node). The agent profile's narrow
+# broker+DNS allowance is R-2 (a CiliumNetworkPolicy selecting trust-class=agent — see cilium-egress.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  podSelector: {} # every pod in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  # no ingress: [] / egress: [] rules -> deny all in both directions

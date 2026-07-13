@@ -1,0 +1,81 @@
+# Reaper CLOSE-ONLY ledger credential (P2 R-2 §5) — the reaper's session-close authority, in its TRUSTED
+# home namespace `agentforge`. The DB login is `agentforge_reaper`, granted EXECUTE on the pinned
+# public.close_session(text, double precision) SECURITY DEFINER function ONLY and NOTHING on the tables
+# (REAPER_GRANTS_SQL in agentforge broker/ledger.py) — so it can ONLY close (stamp closed_at, idempotent,
+# never reopen), and can never read secrets, reserve, or touch `requests`. This is disjoint from the
+# broker's open/reserve/reconcile role: a compromised broker can never close a session out from under the
+# reaper, and a compromised reaper can never spend (§5 three-disjoint-privileges).
+#
+# ESO-synced (READ-ONLY to the reaper) from a DISTINCT operator OpenBao path
+# `af/data/operator/reaper/ledger` behind an operator-owned SecretStore/role (af-operator-reaper) that no
+# tenant/broker role can read. Delivered as AF_REAPER_LEDGER_DSN and mounted into the reaper (the reaper
+# Deployment is gated; see reaper-deployment.yaml — the close wiring is forward-looking, activated with
+# the broker/ledger).
+#
+# ⚠ ACTIVATION: the operator provisions the OpenBao role `af-operator-reaper` (bound to ns agentforge +
+# SA af-reaper-eso) + the KV data at `af/data/operator/reaper/ledger` (key AF_REAPER_LEDGER_DSN), and
+# applies REAPER_GRANTS_SQL to infra-pg. NotReady until then (harmless: the reaper Deployment is gated +
+# the sandbox Flux Kustomization is wait:false).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: af-reaper-eso
+  namespace: agentforge # the reaper's trusted home (NOT agentforge-sandbox)
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/component: eso-auth
+    app.kubernetes.io/part-of: agentforge
+# ESO mints a short-TTL token for this SA (TokenRequest); no pod runs as it, so keep its token unmounted.
+automountServiceAccountToken: false
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: agentforge-reaper-store
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  provider:
+    vault:
+      server: "https://openbao.openbao.svc:8200"
+      path: "af"        # KV v2 mount
+      version: "v2"
+      # caProvider sweep (plan §B): verify OpenBao's cert-manager TLS cert (openbao-tls, ailab-ca). NOTE: a
+      # NAMESPACED SecretStore resolves caProvider IN ITS OWN namespace (agentforge) — ESO ignores a cross-ns
+      # `namespace:` — so Secret `openbao-tls` (ca.crt) MUST be present in THIS namespace (per-ns cert-manager
+      # Certificate or trust-manager). Until then NotReady (harmless: reaper gated + wait:false).
+      caProvider:
+        type: Secret
+        name: openbao-tls
+        key: ca.crt
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "af-operator-reaper"   # operator-fixed; disjoint from the broker + tenant roles
+          serviceAccountRef:
+            name: af-reaper-eso
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: agentforge-reaper-ledger
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: agentforge-reaper-store
+    kind: SecretStore
+  target:
+    name: agentforge-reaper-ledger
+    creationPolicy: Owner
+  data:
+    # the close-only agentforge_reaper DSN -> AF_REAPER_LEDGER_DSN (carries the password).
+    - secretKey: AF_REAPER_LEDGER_DSN
+      remoteRef:
+        key: operator/reaper/ledger
+        property: AF_REAPER_LEDGER_DSN

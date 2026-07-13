@@ -1,0 +1,185 @@
+# ValidatingAdmissionPolicy — the FAIL-CLOSED pin of the CI-runner POD shape. This is the REAL fence
+# behind the ns's PSA `privileged` (namespace.yaml): the CI runner MUST run a privileged `dind`, so PSA
+# cannot be the control here — this VAP is. Native VAP (admissionregistration.k8s.io/v1, GA on this 1.31
+# cluster; no Kyverno in the estate). failurePolicy: Fail so a CEL/eval error DENIES (fail-closed).
+# Mirrors agentforge-sandbox-guard's CEL style.
+#
+# It pins the EXACT k8s-native CI pod the R-3 ScaledJob renders (scaledjob.yaml): EXACTLY two containers
+# named `runner` (the ephemeral gitea act_runner, Kata-isolated, unprivileged) + `dind` (the privileged
+# docker:dind sidecar), runtimeClassName=kata, a tokenless SA, automountServiceAccountToken=false, no
+# host namespaces, no hostPath, digest-pinned images, bounded resources, and — critically — the
+# reg-token Secret volume mounted ONLY into `runner` (never `dind`). Privileged is allowed ONLY on the
+# `dind` container. Anything else is REJECTED.
+#
+# ⚠ shareProcessNamespace REJECTION (plan §B, codex round-2): the upstream KEDA/Forgejo DinD sample
+# SHARES the PID namespace so dind can watch the runner process exit. But a shared PID namespace exposes
+# `/proc/$pid/root`, so the privileged `dind` could READ the runner-only reg-token file mount — defeating
+# the token isolation this policy enforces. So `spec.shareProcessNamespace: true` is REJECTED (validation
+# 4); the runner signals exit to dind via a NON-secret emptyDir SENTINEL file instead (scaledjob.yaml).
+#
+# ⚠ EPHEMERAL-CONTAINER coverage: matchConstraints ALSO covers the `pods/ephemeralcontainers`
+# subresource, so a privileged ephemeral container (kubectl debug) can't be injected post-admission to
+# bypass the two-container pin — validation 1 rejects any ephemeralContainers on that subresource too.
+#
+# NB (why POD-level only, no separate Job guard): unlike the sandbox (where an orchestrator SA creates
+# Jobs and a -job-guard fails Job admission fast), here the KEDA controller creates the Jobs from THIS
+# repo's operator-authored template; the fence that matters is the POD shape, which this guard pins on
+# EVERY Pod CREATE/UPDATE in agentforge-ci regardless of what created it.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-ci-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # pods CREATE/UPDATE **and** the pods/ephemeralcontainers subresource (anti-kubectl-debug).
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+  matchConditions:
+    # Belt-and-suspenders with the binding namespaceSelector: only ever fire in agentforge-ci (so the
+    # CI-specific privileged-dind allowance can never leak to another namespace).
+    - name: only-agentforge-ci
+      expression: "request.namespace == 'agentforge-ci'"
+  variables:
+    - name: vols
+      expression: "has(object.spec.volumes) ? object.spec.volumes : []"
+    - name: ctrs
+      expression: "object.spec.containers"
+  validations:
+    # (1) EXACTLY two containers named `runner` + `dind`; NO init containers; NO ephemeral containers.
+    #     On the pods/ephemeralcontainers subresource `object` is the full Pod with the injected
+    #     ephemeralContainers populated — so this rejects a post-admission privileged debug container too.
+    - expression: >-
+        size(variables.ctrs) == 2 &&
+        variables.ctrs.exists(c, c.name == 'runner') &&
+        variables.ctrs.exists(c, c.name == 'dind') &&
+        !has(object.spec.initContainers) &&
+        (!has(object.spec.ephemeralContainers) || size(object.spec.ephemeralContainers) == 0)
+      message: "CI pod must have EXACTLY two containers named 'runner' and 'dind', no init containers, and no ephemeral containers (blocks kubectl debug via the pods/ephemeralcontainers subresource)."
+    # (2) Fixed pod-level fields: Never-restart, runtimeClassName=kata (the real microVM boundary), the
+    #     TOKENLESS runner SA, and no auto-mounted token.
+    - expression: >-
+        object.spec.restartPolicy == 'Never' &&
+        has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'kata' &&
+        has(object.spec.serviceAccountName) && object.spec.serviceAccountName == 'agentforge-ci-runner' &&
+        has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false
+      message: "CI pod must set restartPolicy=Never, runtimeClassName=kata, serviceAccountName=agentforge-ci-runner (tokenless), automountServiceAccountToken=false."
+    # (3) Forbidden pod-level host-escape / node-targeting fields (the ns is PSA `privileged`, so PSA does
+    #     NOT block these — this VAP is the only fence).
+    - expression: >-
+        (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
+        (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
+        (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
+        !has(object.spec.nodeName) &&
+        !has(object.spec.hostAliases)
+      message: "CI pod may not set hostNetwork/hostPID/hostIPC/nodeName/hostAliases."
+    # (4) REJECT spec.shareProcessNamespace==true — a shared PID namespace lets the privileged `dind` read
+    #     `/proc/<runner-pid>/root/<reg-token mount>`, defeating the runner-only token isolation. dind
+    #     learns of runner-exit via the emptyDir SENTINEL file instead (scaledjob.yaml). See header.
+    - expression: >-
+        !has(object.spec.shareProcessNamespace) || object.spec.shareProcessNamespace == false
+      message: "CI pod may not set shareProcessNamespace=true (a shared PID namespace would expose the runner-only reg-token mount to the privileged dind via /proc/<pid>/root — use the emptyDir sentinel instead)."
+    # (5) VOLUME ALLOWLIST (codex Phase B BLOCKER) — the EXACT allowed volume set, pinned BY NAME + TYPE.
+    #     A name+type-only restriction is NOT enough: a `projected` volume with a serviceAccountToken/secret
+    #     source would bypass automountServiceAccountToken:false AND the reg-token-only invariant and could
+    #     be mounted into `dind`. So EVERY volume must be `!has(projected)` AND match one of these four:
+    #       - reg-token      : Secret 'ci-runner-registration'      (runner-only, validation 6)
+    #       - data           : emptyDir, sizeLimit <= 64Gi          (runner scratch / act_runner state)
+    #       - sentinel       : emptyDir, sizeLimit <= 16Mi          (the NON-secret exit signal, runner+dind)
+    #       - docker-storage : emptyDir, sizeLimit <= 64Gi          (dind image/layer store)
+    #     Anything else — configMap/csi/hostPath/downwardAPI/persistentVolumeClaim/projected, an extra
+    #     Secret volume, an emptyDir without a sizeLimit, or any unknown name — is REJECTED. The per-branch
+    #     source pin means e.g. a Secret volume named 'data' fails (has(emptyDir) is false), closing the
+    #     "rename a secret to a whitelisted name" gap.
+    - expression: >-
+        variables.vols.all(v,
+          !has(v.projected) &&
+          ((v.name == 'reg-token' && has(v.secret) && v.secret.secretName == 'ci-runner-registration') ||
+           (v.name == 'data' && has(v.emptyDir) && has(v.emptyDir.sizeLimit) &&
+             quantity(v.emptyDir.sizeLimit).compareTo(quantity('64Gi')) <= 0) ||
+           (v.name == 'sentinel' && has(v.emptyDir) && has(v.emptyDir.sizeLimit) &&
+             quantity(v.emptyDir.sizeLimit).compareTo(quantity('16Mi')) <= 0) ||
+           (v.name == 'docker-storage' && has(v.emptyDir) && has(v.emptyDir.sizeLimit) &&
+             quantity(v.emptyDir.sizeLimit).compareTo(quantity('64Gi')) <= 0)))
+      message: "CI pod volumes are an EXACT allowlist: reg-token (Secret ci-runner-registration) + data/sentinel/docker-storage (emptyDir with a bounded sizeLimit). No projected/serviceAccountToken/configMap/csi/hostPath/downwardAPI/PVC/extra-Secret volumes, and every emptyDir must set a sizeLimit."
+    # (6) TOKEN ISOLATION — PER-CONTAINER mount allowlist (codex Phase B BLOCKER). `runner` may mount ONLY
+    #     {reg-token, data, sentinel} and MUST mount reg-token; `dind` may mount ONLY {sentinel,
+    #     docker-storage} — so dind mounts NONE of the secret-bearing volumes (reg-token/data). Combined
+    #     with (5) (reg-token is the only Secret volume + no projected volumes) and (4) (no shared PID
+    #     namespace), the registration token is unreachable from the privileged dind. Containers are
+    #     exactly {runner, dind} by (1), so these two branches are exhaustive.
+    - expression: >-
+        variables.ctrs.all(c,
+          (c.name == 'runner' &&
+            has(c.volumeMounts) && c.volumeMounts.exists(m, m.name == 'reg-token') &&
+            c.volumeMounts.all(m, m.name in ['reg-token', 'data', 'sentinel'])) ||
+          (c.name == 'dind' &&
+            (!has(c.volumeMounts) || c.volumeMounts.all(m, m.name in ['sentinel', 'docker-storage']))))
+      message: "CI pod mounts: 'runner' may mount ONLY {reg-token, data, sentinel} and MUST mount reg-token; 'dind' may mount ONLY {sentinel, docker-storage} (never reg-token/data — no Secret volume reaches dind)."
+    # (7) PRIVILEGE: privileged==true is allowed ONLY on `dind`; the `runner` gets the FULL restricted
+    #     securityContext (codex Phase B #2 — an OMITTED allowPrivilegeEscalation defaults to allowed under
+    #     PSA `privileged`, so it must be present AND false). Runner: runAsNonRoot, not privileged,
+    #     allowPrivilegeEscalation=false (explicit), capabilities.drop==[ALL] with no add, seccomp
+    #     RuntimeDefault. (dind is intentionally exempt — it needs privileged to run the inner daemon.)
+    - expression: >-
+        variables.ctrs.all(c,
+          !has(c.securityContext) || !has(c.securityContext.privileged) ||
+          c.securityContext.privileged == false || c.name == 'dind') &&
+        variables.ctrs.all(c, c.name != 'runner' ||
+          (has(c.securityContext) &&
+           c.securityContext.runAsNonRoot == true &&
+           (!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+           has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false &&
+           has(c.securityContext.capabilities) && c.securityContext.capabilities.drop == ['ALL'] &&
+           !has(c.securityContext.capabilities.add) &&
+           has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'RuntimeDefault'))
+      message: "CI pod: privileged=true is allowed ONLY on 'dind'. The 'runner' securityContext must be runAsNonRoot=true, not privileged, allowPrivilegeEscalation=false (present), capabilities.drop=[ALL] (no add), seccompProfile RuntimeDefault."
+    # (8) DIGEST-PINNED images on BOTH containers (repo@sha256:<64hex> — a tag is rejected so a mutable
+    #     image can't be swapped under the digest).
+    - expression: >-
+        variables.ctrs.all(c, c.image.matches('^[^@]+@sha256:[0-9a-f]{64}$'))
+      message: "CI pod containers must use digest-pinned images (repo@sha256:<64hex>), never a tag."
+    # (9) BOUNDED resources: cpu+memory+EPHEMERAL-STORAGE requests AND limits present on BOTH,
+    #     requests<=limits, within a CI-sized ceiling (node-DoS backstop; codex Phase B #3 — storage was
+    #     previously unbounded). ephemeral-storage is capped at 64Gi so it can cover the container's own
+    #     emptyDir sizeLimits (validation 5). CI is heavier than a sandbox, so the ceilings are larger.
+    - expression: >-
+        variables.ctrs.all(c,
+          has(c.resources) && has(c.resources.requests) && has(c.resources.limits) &&
+          'cpu' in c.resources.requests && 'memory' in c.resources.requests &&
+          'ephemeral-storage' in c.resources.requests &&
+          'cpu' in c.resources.limits && 'memory' in c.resources.limits &&
+          'ephemeral-storage' in c.resources.limits &&
+          quantity(c.resources.requests.cpu).compareTo(quantity(c.resources.limits.cpu)) <= 0 &&
+          quantity(c.resources.limits.cpu).compareTo(quantity('8')) <= 0 &&
+          quantity(c.resources.requests.memory).compareTo(quantity(c.resources.limits.memory)) <= 0 &&
+          quantity(c.resources.limits.memory).compareTo(quantity('16Gi')) <= 0 &&
+          quantity(c.resources.requests['ephemeral-storage']).compareTo(quantity(c.resources.limits['ephemeral-storage'])) <= 0 &&
+          quantity(c.resources.limits['ephemeral-storage']).compareTo(quantity('64Gi')) <= 0)
+      message: "CI pod containers must set cpu+memory+ephemeral-storage requests AND limits, requests<=limits, within [.. 8 cpu, .. 16Gi mem, .. 64Gi ephemeral-storage]."
+    # (10) TOKEN ISOLATION (defense-in-depth): the `dind` container may not pull ANY Secret via env —
+    #      no envFrom.secretRef and no env[].valueFrom.secretKeyRef — so even the kubelet can't inject the
+    #      reg-token (or any other Secret) into the privileged daemon's environment.
+    - expression: >-
+        variables.ctrs.all(c, c.name != 'dind' ||
+          ((!has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef))) &&
+           (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef)))))
+      message: "CI pod: the 'dind' container may not reference any Secret via envFrom.secretRef or env[].valueFrom.secretKeyRef (token isolation)."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-ci-guard
+spec:
+  policyName: agentforge-ci-guard
+  validationActions: ["Deny"]
+  # Scope to the operator-owned CI ns via the always-present name label (no reliance on a user-set
+  # label). Every Pod (and ephemeralcontainers) CREATE/UPDATE in agentforge-ci is validated. The CI
+  # privileged-dind allowance NEVER applies outside this namespace.
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: agentforge-ci

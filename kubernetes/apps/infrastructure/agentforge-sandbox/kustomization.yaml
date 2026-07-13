@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge v2 P2 R-1 — the OPERATOR-OWNED, CP-UNWRITABLE sandbox boundary (ADR 0019, plans/
+# 2026-07-12-p2-sandbox-redesign-v2.md). Its OWN directory + a dedicated Flux Kustomization
+# (clusters/ai/agentforge-sandbox.yaml) rather than a line in a shared aggregator index — the P1
+# agentforge admission lives under apps/agentforge/admission (the `apps` Kustomization) and the P2
+# operators concurrently edit infrastructure/{security,autoscaling}; keeping this self-contained (the
+# runtimeclasses precedent) avoids colliding with either. NO shared aggregator index is edited.
+resources:
+  - openbao-ca-cert.yaml # per-ns openbao-tls ca.crt (ailab-ca) for the ESO caProvider
+  - namespace.yaml # agentforge-sandbox ns (restricted PSA, pinned v1.31) + tokenless SA
+  - sandbox-guard.yaml # VAP: pins the sandbox POD shape (fail-closed) on Pod CREATE/UPDATE
+  - sandbox-job-guard.yaml # VAP: pins Job knobs + MIRRORS the full pod shape (fail-closed) on Job CREATE/UPDATE
+  - orchestrator-rbac.yaml # Jobs-only Role + RoleBinding for the tenant-zero shadow orchestrator SA
+  - networkpolicy.yaml # namespace default-deny (ingress + egress)
+  - cilium-egress.yaml # trust-class=test ZERO egress (R-1) + the R-2 trust-class=agent broker-only egress
+  - resource-limits.yaml # namespace ResourceQuota + LimitRange (node-DoS ceiling)
+  # --- Per-org/ws NFS backing (10.55.0.254:/pve-nfs/agentforge-sandbox/<org>/<ws>), one static PV per consumer ---
+  - workspace-pvc.yaml # SANDBOX ns: af-sbx-ws-tenant-zero-playground static PV + PVC (Jobs mount subPath <job-id>)
+  - tenant-namespace.yaml # TENANT ns: OPERATOR-owned af-tenant-tenant-zero-playground (shadow tenant; CP reconciler doesn't manage it → can't delete the quota)
+  - staging-pv.yaml # TENANT ns: af-sbx-stage-tenant-zero-playground static PV ONLY (operator-owned; CP renders the PVC)
+  - tenant-resourcequota.yaml # TENANT ns: operator-owned ResourceQuota + LimitRange (P3 per-org quota; CP can't self-grant — not in the tenant-guard allowlist)
+  # --- Reaper: TRUSTED `agentforge` ns (moved out of agentforge-sandbox), cross-ns RBAC into the sandbox ns ---
+  - reaper-rbac.yaml # reaper SA (agentforge ns) + Jobs/Pods GC Role + cross-ns RoleBinding (pre-staged, active)
+  - reaper-storage.yaml # af-sbx-reaper-tenant-zero-playground static PV + PVC (agentforge ns) -> same per-org/ws subdir (pre-staged)
+  - reaper-netpol.yaml # reaper egress CiliumNetworkPolicy (agentforge ns): kube-apiserver + DNS + infra-pg
+  - reaper-ledger.yaml # reaper close-only ledger cred (ESO auth SA + SecretStore + ExternalSecret, agentforge ns)
+  # reaper-deployment.yaml is INTENTIONALLY not listed yet — the reaper image is a PLACEHOLDER @sha256
+  # (unpullable). The owner-lease is a coordination.k8s.io Lease gated by reaper-rbac.yaml (already
+  # active) + apiserver resourceVersion CAS — there is NO lease Secret to seed (the earlier SOPS/ESO
+  # af-sbx-lease copy was retired when the worker moved to a k8s Lease). Re-add reaper-deployment.yaml
+  # once the p1-worker digest is pinned (see reaper-deployment.yaml header).
+  - reaper-deployment.yaml

@@ -1,0 +1,240 @@
+# KEDA ScaledJob — one EPHEMERAL Kata CI runner + privileged DinD per queued gitea Actions job (plan §A/§B).
+# Replaces the flaky host-mode act_runner VMs (ansible/roles/gitea_runner) with a k8s-native, single-use
+# runner: it registers, runs EXACTLY ONE job, and exits (the Job is TTL-swept). The pod shape below is the
+# EXACT shape agentforge-ci-guard admits — runner+dind, kata, tokenless SA, reg-token in `runner` only,
+# privileged only on `dind`, NO shared PID namespace.
+#
+# ⚠⚠ DELIBERATELY NOT LISTED in kustomization.yaml (gated) AND annotated `autoscaling.keda.sh/paused:
+# "true"` (belt-and-suspenders) — so even if it were applied, KEDA creates NO Jobs. The runner image is a
+# PLACEHOLDER @sha256:0000… (unpullable). Nothing here flips privilege_hardening. This tranche lands the
+# DORMANT scaffolding; the operator cuts over at activation (the ansible host-mode runners keep running
+# meanwhile — coexistence during migration).
+#
+# TO ENABLE (all three preflights in the plan must pass first):
+#   PREFLIGHT #1 — verify the KEDA `forgejo-runner` scaler against live gitea 1.26 (endpoint + token
+#                  scope); if incompatible, swap the trigger for the commented prometheus fallback below
+#                  (a ci-dispatcher poller emitting gitea_ci_pending{label}).
+#   PREFLIGHT #2 — prove `docker://`+DinD against the platform workflows that require `self-hosted-hv:host`
+#                  (${{ github.workspace }} bind-mount + host Docker + actions/cache), and pin the package
+#                  proxy + DinD registry egress (cilium.yaml).
+#   PREFLIGHT #3 — the reg-token single-use/rotation story (externalsecret-regtoken.yaml header).
+#   Then: 1) build + pin the immutable @sha256 of the ci-runner image (registry.chifor.me/agentforge/
+#   ci-runner) + the docker:dind image; 2) provision OpenBao `af/data/operator/ci/{runner-registration,
+#   scaler-token}` + role `af-operator-ci`; 3) add `- scaledjob.yaml` to kustomization.yaml AND remove the
+#   paused annotation.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: agentforge-ci-runner
+  namespace: agentforge-ci
+  labels:
+    app.kubernetes.io/name: agentforge-ci-runner
+    app.kubernetes.io/component: ci-runner
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+  annotations:
+    # GATE #2 (with the unlisted-in-kustomization gate): PAUSED so no live trigger can ever schedule a Job
+    # around the placeholder image. Remove ONLY at activation (see header).
+    autoscaling.keda.sh/paused: "true"
+spec:
+  # One Job (== one runner == one CI job) per queued job, up to maxReplicaCount concurrent.
+  jobTargetRef:
+    parallelism: 1
+    completions: 1
+    backoffLimit: 0          # a failed CI runner is NOT retried in-place — gitea re-queues the job
+    activeDeadlineSeconds: 10800   # 3h hard cap (== the host-mode gitea_runner_job_timeout)
+    ttlSecondsAfterFinished: 300   # sweep the finished Job (no persistence; `.runner` state is emptyDir)
+    template:
+      metadata:
+        labels:
+          # cilium.yaml keys its endpointSelector on app.kubernetes.io/name; ci-guard keys nothing on
+          # labels (it pins by container/spec shape).
+          app.kubernetes.io/name: agentforge-ci-runner
+          app.kubernetes.io/component: ci-runner
+          app.kubernetes.io/managed-by: agentforge-operator
+          app.kubernetes.io/part-of: agentforge
+      spec:
+        restartPolicy: Never
+        runtimeClassName: kata   # the RuntimeClass scheduling block injects the agent-pool nodeSelector +
+        #                          the dedicated=agent toleration (agentforge-runtimeclasses) — Kata is the
+        #                          real microVM boundary hosting the privileged DinD.
+        serviceAccountName: agentforge-ci-runner
+        automountServiceAccountToken: false
+        enableServiceLinks: false
+        # EXPLICIT false — ci-guard REJECTS shareProcessNamespace:true (it would expose the runner-only
+        # reg-token mount to the privileged dind via /proc/<pid>/root). dind learns of runner-exit via the
+        # emptyDir SENTINEL file instead.
+        shareProcessNamespace: false
+        terminationGracePeriodSeconds: 30
+        # fsGroup 1000 so the reg-token Secret file (0440) is GROUP-readable by the non-root runner
+        # (runAsUser/runAsGroup 1000, ci-guard #2 hardening) — dind is root+privileged so unaffected.
+        securityContext:
+          fsGroup: 1000
+        volumes:
+          # The reg-token — the ONLY Secret volume (ci-guard validation 5). Mounted read-only into the
+          # `runner` container ALONE (validation 6). 0440 + fsGroup 1000 => readable by the non-root runner,
+          # never world-readable.
+          - name: reg-token
+            secret:
+              secretName: ci-runner-registration
+              defaultMode: 0440
+          # act_runner state + workspace — emptyDir so there is NO persistence across Jobs (a fresh
+          # `.runner`/work tree every run, by construction).
+          - name: data
+            emptyDir:
+              sizeLimit: 20Gi
+          # NON-secret exit SENTINEL shared runner<->dind (replaces the shared-PID-namespace exit signal).
+          - name: sentinel
+            emptyDir:
+              sizeLimit: 1Mi
+          # DinD graph storage (image layers/containers). emptyDir, NOT hostPath (ci-guard forbids hostPath).
+          - name: docker-storage
+            emptyDir:
+              sizeLimit: 30Gi
+        containers:
+          # ── runner: the EPHEMERAL gitea act_runner (unprivileged, Kata-isolated) ──────────────────────
+          - name: runner
+            # PLACEHOLDER digest — pin the real ci-runner image @sha256 (see header) before enabling.
+            image: registry.chifor.me/agentforge/ci-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000
+            # A tiny wrapper: register (single-use), run ONE job (--once), and ALWAYS touch the sentinel on
+            # exit so `dind` shuts down. The exact ephemeral flag is pinned at PREFLIGHT #1 (gitea act_runner
+            # 0.6.x `daemon --once` vs forgejo-runner `--one-shot`); expressed here as the intended contract.
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                trap 'touch /sentinel/done' EXIT
+                act_runner register --no-interactive \
+                  --instance "$GITEA_INSTANCE_URL" \
+                  --token "$(cat /etc/ci-runner/reg-token/token)" \
+                  --name "$GITEA_RUNNER_NAME" \
+                  --labels "$GITEA_RUNNER_LABELS"
+                # EPHEMERAL: serve exactly one job then exit (flag pinned at PREFLIGHT #1).
+                GITEA_RUNNER_EPHEMERAL=1 act_runner daemon --once
+            env:
+              - { name: GITEA_INSTANCE_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000" }
+              # UNIQUE runner name per Job via the downward API (the pod name) — avoids orphaned/duplicate
+              # runner registrations in the gitea UI.
+              - name: GITEA_RUNNER_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              # Label NAME matches the existing pool (self-hosted-hv) so platform's `runs-on: ${{
+              # vars.RUNNER_LABEL || 'ubuntu-latest' }}` seam is untouched. The SCHEMA is `docker://<image>`
+              # (NOT the host-mode ansible runners' `self-hosted-hv:host`): act_runner runs each job in a
+              # container on the sidecar DinD daemon, with the pinned default job image. The KEDA scaler
+              # `labels` matches the NAME (self-hosted-hv) only. PREFLIGHT #2 confirms this docker:// contract
+              # against the platform workflows that today require :host (${{ github.workspace }} bind-mount +
+              # host Docker + actions/cache) and pins the real default job image @sha256 below.
+              - { name: GITEA_RUNNER_EPHEMERAL, value: "1" }
+              - { name: GITEA_RUNNER_LABELS, value: "self-hosted-hv:docker://registry.chifor.me/agentforge/ci-job@sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+              # Talk to the sidecar DinD over TCP on the shared pod loopback (NO docker.sock bind-mount, NO
+              # shared PID namespace).
+              - { name: DOCKER_HOST, value: "tcp://127.0.0.1:2375" }
+            volumeMounts:
+              # reg-token — read-only, runner-ONLY (ci-guard validation 6).
+              - { name: reg-token, mountPath: /etc/ci-runner/reg-token, readOnly: true }
+              - { name: data, mountPath: /data }
+              - { name: sentinel, mountPath: /sentinel }
+            resources:
+              # ephemeral-storage limit must cover this container's `data` emptyDir sizeLimit (ci-guard #9).
+              requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 2Gi }
+              limits: { cpu: "4", memory: 8Gi, ephemeral-storage: 24Gi }
+            securityContext:
+              # runner is NON-privileged + non-root (ci-guard validation 7 pins the full restricted set). It
+              # drives dind over TCP; it needs no kernel privilege of its own.
+              runAsNonRoot: true
+              runAsUser: 1000
+              runAsGroup: 1000
+              privileged: false
+              allowPrivilegeEscalation: false
+              capabilities: { drop: ["ALL"] }
+              seccompProfile: { type: RuntimeDefault }
+          # ── dind: the PRIVILEGED docker:dind sidecar (image builds / job containers) ──────────────────
+          - name: dind
+            # PLACEHOLDER digest — pin the real docker:dind image @sha256 (see header) before enabling.
+            image: docker.io/library/docker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+            # Run dockerd, then watch the sentinel and exit when the runner is done (graceful pod teardown
+            # WITHOUT a shared PID namespace). Insecure TCP on loopback only (the pod netns is isolated by
+            # Kata + the CNP); NO TLS dir so the runner can reach tcp://127.0.0.1:2375.
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                dockerd-entrypoint.sh dockerd --host=tcp://127.0.0.1:2375 &
+                DIND_PID=$!
+                while [ ! -f /sentinel/done ]; do sleep 2; done
+                kill "$DIND_PID" 2>/dev/null || true
+                wait "$DIND_PID" 2>/dev/null || true
+            env:
+              - { name: DOCKER_TLS_CERTDIR, value: "" }
+            volumeMounts:
+              # NO reg-token mount (ci-guard validation 6 REJECTS it). NO shared PID namespace.
+              - { name: sentinel, mountPath: /sentinel }
+              - { name: docker-storage, mountPath: /var/lib/docker }
+            resources:
+              # ephemeral-storage limit must cover this container's `docker-storage` emptyDir sizeLimit.
+              requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 4Gi }
+              limits: { cpu: "4", memory: 8Gi, ephemeral-storage: 48Gi }
+            securityContext:
+              # ONLY dind may be privileged (ci-guard validation 7) — docker:dind needs it to run the inner
+              # daemon. Confined to the Kata microVM (the pod), NOT the host kernel.
+              privileged: true
+  # ── autoscaling knobs ──────────────────────────────────────────────────────────────────────────────
+  pollingInterval: 30                  # how often KEDA evaluates the trigger (s)
+  maxReplicaCount: 3                   # HARD concurrent-runner cap (== the current host-mode pool size)
+  successfulJobsHistoryLimit: 5        # keep a few finished Jobs for log/debug, then GC
+  failedJobsHistoryLimit: 5
+  # ACCURATE strategy: a pending-only metric under-scales while runners are busy; `accurate` accounts for
+  # running Jobs so KEDA does not double-count in-flight work (plan §A).
+  scalingStrategy:
+    strategy: "accurate"
+  triggers:
+    # PRIMARY (plan §A) — the KEDA 2.20 built-in `forgejo-runner` scaler: scales on the count of PENDING
+    # jobs matching the runner labels (one-job-per-runner by design, so NO threshold/activationThreshold
+    # knobs — those are NOT part of this scaler's metadata, codex Phase B #6; they apply only to the
+    # prometheus fallback below). Gitea 1.26 ≠ Forgejo, so PREFLIGHT #1 verifies this scaler's API against
+    # the live gitea (the endpoint path + the required token scope) before activation. Documented scaler
+    # metadata (KEDA docs): name/address/labels + one scope of global|owner|repo, token via authenticationRef.
+    - type: forgejo-runner
+      metadata:
+        name: "self-hosted-hv"          # the registered runner name/label the scaler matches
+        address: "http://gitea-http.gitea.svc.cluster.local:3000/"
+        labels: "self-hosted-hv"        # scale on jobs queued for THIS pool label (label NAME only)
+        global: "true"                  # instance-wide scope (an org runner serves all repos); PREFLIGHT #1
+      authenticationRef:
+        # A gitea token with the MINIMUM scope for queued-job visibility (PREFLIGHT #1), ESO-synced from
+        # the operator path `af/data/operator/ci/scaler-token` — DISJOINT from the reg token. The producing
+        # ExternalSecret is externalsecret-scalertoken.yaml (LISTED, so the Secret exists at activation);
+        # this TriggerAuthentication (below) is gated with the ScaledJob (this whole file is unlisted).
+        name: agentforge-ci-scaler-auth
+    # ── FALLBACK (plan §A) — enable ONLY if forgejo-runner fails PREFLIGHT #1 ────────────────────────────
+    # A small ci-dispatcher poller (mirrors af-dispatcher) queries gitea for queued Actions tasks by label
+    # and exports gitea_ci_pending{label}; KEDA then scales on that Prometheus gauge. Same ScaledJob shape;
+    # only the trigger differs.
+    # - type: prometheus
+    #   metadata:
+    #     serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+    #     query: sum(gitea_ci_pending{label="self-hosted-hv"})
+    #     threshold: "1"
+    #     activationThreshold: "0"
+    #     ignoreNullValues: "true"
+---
+# TriggerAuthentication for the forgejo-runner scaler — reads the scaler's gitea token from an
+# ESO-synced Secret. GATED with the ScaledJob (this whole file is unlisted): the Secret
+# `agentforge-ci-scaler-token` is provisioned at activation via an operator ESO path
+# `af/data/operator/ci/scaler-token` (a READ-ONLY, queued-job-visibility-scoped token — PREFLIGHT #1),
+# DISJOINT from the runner-registration token. Until then this TriggerAuthentication references a
+# non-existent Secret — harmless while paused/unlisted.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: agentforge-ci-scaler-auth
+  namespace: agentforge-ci
+  labels:
+    app.kubernetes.io/name: agentforge-ci-runner
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  secretTargetRef:
+    - parameter: token
+      name: agentforge-ci-scaler-token
+      key: token

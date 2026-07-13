@@ -1,0 +1,95 @@
+# Cilium egress boundary for the sandbox trust classes (Cilium is the CNI).
+#
+# R-1 (ACTIVE): trust-class=test/setup gets ZERO egress. The namespace default-deny (networkpolicy.yaml)
+# already denies all egress, but this adds an EXPLICIT high-priority egressDeny to ALL entities so that
+# when the R-2 agent-allow policy lands (which opens egress for trust-class=agent), a mislabeled or
+# hostile pod claiming trust-class=test can NEVER egress — deny always wins over allow in Cilium. This
+# is the property the R-1 boundary proof checks: a test job cannot reach kube-dns, the broker, a
+# direct IP, the metadata service, a cluster service, or the node.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-test-zero-egress
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      agentforge.io/trust-class: test
+  # Explicit deny to every entity (world + cluster + host + remote-node + kube-apiserver + …). Cilium
+  # evaluates *Deny rules with precedence over any allow, so this is an absolute egress cut for test.
+  egressDeny:
+    - toEntities:
+        - all
+---
+# R-2 (design §8) — the agent-profile egress allow-list. trust-class=agent may egress to ONLY (a) the
+# pool broker (its ClusterIP endpoint on 8700) and (b) kube-dns, with DNS L7 restricted to the broker's
+# EXACT name (no arbitrary query names → no DNS tunneling; alternate resolvers denied by omission). A
+# SEPARATE object from the test zero-egress above so it can NEVER widen test's egress; and the
+# egressDeny below (deny wins over any allow in Cilium) makes direct-IP/IPv6/metadata/node-local
+# absolute. The namespace default-deny (networkpolicy.yaml) is the baseline; this union-adds the two
+# agent flows. The broker ingress (agentforge-broker CNP) admits ONLY matching-pool/org/workspace agent
+# pods, so pool-matching is enforced on the broker side; the source-IP TOFU + session binding is the
+# broker's APP-layer anti-replay (Cilium hands no per-job identity).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-agent-egress
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      agentforge.io/trust-class: agent
+  egress:
+    # (a) kube-dns, L7-restricted to the broker's EXACT name — the agent can resolve NOTHING else (no
+    #     DNS tunneling / no alternate name). matchName is exact; a different query name is refused.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchName: "agentforge-broker.agentforge-broker.svc.cluster.local"
+    # (b) the pool broker — allowed to EXACTLY the broker Service's backend endpoints via toServices,
+    #     restricted to the http data port 8700 (NOT metrics 9464). NOTE (codex Phase B): Cilium L3
+    #     policy allows destinations by ENDPOINT IDENTITY — toServices resolves the Service to its READY
+    #     backend pods and allows those, so it does NOT (and cannot) force VIP-only routing; a packet
+    #     addressed to a broker PodIP:8700 is the SAME allowed destination (the broker), not an escape.
+    #     This is sufficient by design: the security property is destination-CONFINEMENT (the agent may
+    #     reach ONLY the broker + kube-dns; everything else is default-deny + egressDeny). The design's
+    #     source-IP TOFU requirement (§3 "DIRECT ClusterIP, no Cilium handoff → the broker sees the peer
+    #     IP") is MET regardless of VIP-vs-PodIP: Cilium does not SNAT pod-to-pod, so the broker sees the
+    #     agent's real pod IP either way; and replica choice is harmless because session state lives in
+    #     the SHARED Postgres ledger (no per-replica affinity). toServices is preferred over a static
+    #     endpoint selector because it tracks the Service's READY endpoints. The broker ingress CNP still
+    #     admits ONLY the matching-pool agent identity.
+    - toServices:
+        - k8sService:
+            serviceName: agentforge-broker
+            namespace: agentforge-broker
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
+  egressDeny:
+    # No direct internet / node-local / metadata-via-node. world = any non-cluster IP (direct-IP);
+    # host/remote-node = the nodes themselves. Pod-to-pod (broker/kube-dns) is identity-based, so these
+    # never block (a). Other cluster services (service-CIDR) are already denied by the namespace
+    # default-deny — only the broker endpoint is allowed.
+    - toEntities:
+        - world
+        - host
+        - remote-node
+    # metadata (169.254.169.254), link-local, and ALL IPv6 — explicit direct-IP belt.
+    - toCIDR:
+        - 169.254.169.254/32
+        - 169.254.0.0/16
+        - ::/0

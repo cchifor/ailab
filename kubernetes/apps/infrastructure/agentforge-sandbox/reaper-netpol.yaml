@@ -1,0 +1,61 @@
+# Reaper egress policy (codex R-1 #5). The reaper lives in `agentforge` (trusted), where the existing
+# agentforge-allow-tunnel-only NetworkPolicy is INGRESS-only (egress there is unrestricted). The reaper
+# needs to reach the kube-apiserver (list/watch/delete sandbox Jobs+Pods), kube-dns, and — P2 R-2 §5 —
+# the infra-pg LEDGER (its close-only session authority); give it exactly that. A CiliumNetworkPolicy
+# (Cilium is the CNI, precedent: cilium-egress.yaml) is used because `toEntities: [kube-apiserver]` is
+# the only clean, environment-agnostic way to name the API server (it is the Talos CP VIP, not an
+# in-cluster pod/CIDR a plain NetworkPolicy could target).
+#
+# P2 R-2 §5 — CLOSE AUTHORITY. The reaper is the session-close authority (it alone has BOTH ledger
+# authority AND Job-lifecycle visibility): at Job-end it stamps closed_at via its close-only DB role
+# (EXECUTE on the pinned close_session SECURITY DEFINER function ONLY — reaper-ledger.yaml), so a copied
+# capability is dead before import/publish. This adds the reaper -> infra-pg egress that role needs.
+# infra-pg FAILOVER POSTURE: infra-pg (CNPG) runs a 2-instance failover topology (databases/infra-pg.yaml
+# primaryUpdateStrategy unsupervised) so a primary loss switches over; if the ledger is nonetheless
+# unreachable, close is fail-closed to the session's short `exp` TTL (an availability risk, never a
+# credential/data-integrity risk — acceptable for tenant-zero; broader HA is a P3 hardening).
+#
+# Selecting the reaper endpoint for egress puts it into egress default-deny (Cilium), so this is the
+# reaper's COMPLETE allowed egress. It selects ONLY the reaper pod (by label), so the CP pod's
+# unrestricted egress is untouched. NFS is mounted by the kubelet in the host netns, not the pod netns,
+# so it is not gated here. Applied ACTIVE (a policy selecting a not-yet-created pod is a no-op) so the
+# reaper is fully wired the moment its Deployment is un-gated.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: agentforge-reaper-egress
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-reaper
+  egress:
+    # (1) kube-apiserver — the Talos control-plane VIP; Cilium resolves the `kube-apiserver` entity.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - { port: "6443", protocol: TCP }
+    # (2) kube-dns (so the in-cluster k8s client can resolve if it ever needs a name; the SA-token API
+    #     path uses KUBERNETES_SERVICE_HOST by IP, but DNS is cheap defense-in-depth). Also resolves the
+    #     infra-pg service name for (3).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+    # (3) infra-pg ledger (P2 R-2 §5) — the reaper's close-only session-close authority. Matched by
+    #     ENDPOINT identity (cnpg.io/cluster: infra-pg) so it is the ONLY DB the reaper can reach.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: databases
+            cnpg.io/cluster: infra-pg
+      toPorts:
+        - ports:
+            - { port: "5432", protocol: TCP }

@@ -1,0 +1,29 @@
+# The tenant-zero/playground namespace — OPERATOR-OWNED (main Flux via this agentforge-sandbox
+# Kustomization), NOT CP-rendered. tenant-zero is the operator's SHADOW tenant: every object in this ns
+# is operator-owned (the af-orch worker + af-dispatcher in agentforge-workers/, the staging PV/PVC + the
+# ResourceQuota/LimitRange here). Owning the NAMESPACE too completes that model and closes the codex
+# governance finding on tenant-resourcequota.yaml: because the CP `agentforge-tenants-reconciler` SA
+# (reconciler-rbac.yaml — cluster-wide `namespaces: delete`) does NOT manage tenant-zero (tenant-zero is
+# absent from the cchifor/agentforge-tenants repo it reconciles), it never creates/deletes THIS ns, so it
+# cannot drop the operator ResourceQuota by deleting+recreating the namespace. The CP self-service flow
+# renders namespaces for OTHER (real) tenants — whose quota tamper-proofness is the P3-live ns-lifecycle
+# concern documented in tenant-resourcequota.yaml.
+#
+# INVARIANT: tenant-zero MUST NOT appear in the CP tenant repo — else dual ownership (this main-Flux
+# Kustomization vs the tenants-reconciler) would fight over the namespace. The operator owns tenant-zero.
+#
+# PSA MIRRORS the CP renderer (agentforge_platform gitops/renderer.py: enforce baseline / warn+audit
+# restricted) so this shadow ns is byte-faithful to what the CP would render for a real tenant; the
+# workloads (worker + dispatcher, fully restricted) satisfy it with headroom.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: af-tenant-tenant-zero-playground
+  labels:
+    app.kubernetes.io/part-of: agentforge
+    app.kubernetes.io/managed-by: agentforge-operator
+    agentforge.io/tenant: tenant-zero
+    agentforge.io/workspace: playground
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

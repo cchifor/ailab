@@ -1,0 +1,26 @@
+# ServiceMonitor for the af-dispatcher scale oracle — MIRRORS monitoring/agentforge.yaml exactly: it lives
+# in the `monitoring` namespace, carries `release: kube-prometheus-stack` (the label kube-prometheus's
+# Prometheus selects ServiceMonitors by), sets an explicit namespaceSelector, targets the named `metrics`
+# port, and scrapes at 30s. The ONLY adaptation: namespaceSelector points at `agentforge` (where the
+# dispatcher Service lives — the mirrored SM's Service is in `monitoring`), and the relabel forces
+# job="agentforge-dispatcher". Without this, kube-prometheus never scrapes forge_pending and the
+# ScaledObject's prometheus trigger has no series.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agentforge-dispatcher
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [agentforge]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-dispatcher
+  endpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: agentforge-dispatcher

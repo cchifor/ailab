@@ -1,0 +1,216 @@
+# ValidatingAdmissionPolicy — the FAIL-CLOSED pin of the untrusted sandbox POD shape. Native VAP
+# (admissionregistration.k8s.io/v1, GA on this 1.31 cluster; no Kyverno in the estate). failurePolicy:
+# Fail so a CEL/eval error DENIES (fail-closed). Fires on EVERY Pod CREATE **and UPDATE** in
+# agentforge-sandbox (the Job controller — not the orchestrator SA — creates these pods; the
+# orchestrator has no pods:create, so a pod can ONLY appear via a Job whose template matched this).
+#
+# It pins, byte-for-byte, the shape the agentforge SandboxExecutor renders
+# (agentforge/src/agentforge/adapters/exec/sandbox.py::build_job_manifest): exactly one container
+# named `sandbox` (no init/ephemeral), the full restricted securityContext (pod + container),
+# runtimeClassName=kata, the tokenless SA, automountServiceAccountToken=false, ONLY the
+# workspace-PVC/home volumes+mounts, the per-job subPath == the pod's job-id label, the
+# digest-pinned image, and no image change on UPDATE. Anything else is REJECTED. No mutating webhook
+# may alter the pod after this runs (VAPs are the last admission stage before persistence).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-sandbox-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: labels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: vols
+      expression: "has(object.spec.volumes) ? object.spec.volumes : []"
+    - name: ctrs
+      expression: "object.spec.containers"
+    - name: psc
+      expression: "has(object.spec.securityContext) ? object.spec.securityContext : {}"
+    - name: workspace
+      expression: "'agentforge.io/workspace' in variables.labels ? variables.labels['agentforge.io/workspace'] : ''"
+    - name: org
+      expression: "'agentforge.io/org' in variables.labels ? variables.labels['agentforge.io/org'] : ''"
+    - name: jobId
+      expression: "'agentforge.io/job-id' in variables.labels ? variables.labels['agentforge.io/job-id'] : ''"
+    # P2 R-2 §C: the STABLE per-pool identity label (a canonical dns-slug). The per-pool broker Cilium
+    # ingress selector keys on it, so it MUST be enforced here (the provisioner already requires pool).
+    - name: pool
+      expression: "'agentforge.io/pool' in variables.labels ? variables.labels['agentforge.io/pool'] : ''"
+  validations:
+    # (1) EXACTLY one container named `sandbox`; NO init/ephemeral containers (an ephemeral debug
+    #     container is the classic post-admission escape — kubectl debug — so it is barred here too).
+    - expression: >-
+        size(variables.ctrs) == 1 && variables.ctrs[0].name == 'sandbox' &&
+        !has(object.spec.initContainers) && !has(object.spec.ephemeralContainers)
+      message: "sandbox pod must have exactly one container named 'sandbox' and no init/ephemeral containers."
+    # (2) Fixed pod-level fields: Never-restart, runtimeClassName=kata (the real microVM boundary),
+    #     the tokenless SA, no auto-mounted token, and a small bounded grace period.
+    - expression: >-
+        object.spec.restartPolicy == 'Never' &&
+        has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'kata' &&
+        has(object.spec.serviceAccountName) && object.spec.serviceAccountName == 'agentforge-sandbox' &&
+        has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false &&
+        has(object.spec.terminationGracePeriodSeconds) &&
+        object.spec.terminationGracePeriodSeconds >= 1 && object.spec.terminationGracePeriodSeconds <= 30
+      message: "sandbox pod must set restartPolicy=Never, runtimeClassName=kata, serviceAccountName=agentforge-sandbox, automountServiceAccountToken=false, terminationGracePeriodSeconds in [1,30]."
+    # (3) Pod securityContext: non-root 65532 + fsGroup 65532 + seccomp RuntimeDefault.
+    - expression: >-
+        variables.psc.runAsNonRoot == true &&
+        variables.psc.runAsUser == 65532 && variables.psc.runAsGroup == 65532 &&
+        variables.psc.fsGroup == 65532 &&
+        has(variables.psc.seccompProfile) && variables.psc.seccompProfile.type == 'RuntimeDefault'
+      message: "sandbox pod securityContext must be runAsNonRoot + runAsUser/runAsGroup/fsGroup 65532 + seccompProfile RuntimeDefault."
+    # (4) Forbidden pod-level fields (host escape / node targeting). PSA restricted already blocks most;
+    #     this is the explicit fail-closed backstop in the operator repo.
+    - expression: >-
+        (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
+        (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
+        (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
+        !has(object.spec.nodeName) &&
+        !has(object.spec.hostAliases) &&
+        (!has(object.spec.shareProcessNamespace) || object.spec.shareProcessNamespace == false)
+      message: "sandbox pod may not set hostNetwork/hostPID/hostIPC/nodeName/hostAliases/shareProcessNamespace."
+    # (5) Cilium/lifecycle identity labels. job-id is the UNGUESSABLE 32-hex handle (also the subPath
+    #     and lease key); trust-class drives the egress profile; org+workspace TOGETHER name the PVC
+    #     (validation 6) — both must be present dns-slugs (P2 R-2 §C multi-tenant keying).
+    - expression: >-
+        'agentforge.io/job-id' in variables.labels &&
+        variables.labels['agentforge.io/job-id'].matches('^[a-z0-9]{32}$') &&
+        'agentforge.io/trust-class' in variables.labels &&
+        variables.labels['agentforge.io/trust-class'] in ['agent', 'test'] &&
+        'app.kubernetes.io/managed-by' in variables.labels &&
+        variables.labels['app.kubernetes.io/managed-by'] == 'agentforge' &&
+        'app.kubernetes.io/component' in variables.labels &&
+        variables.labels['app.kubernetes.io/component'] == 'sandbox' &&
+        variables.org.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
+        variables.workspace.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
+        variables.pool.matches('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+      message: "sandbox pod must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, org (dns-slug), workspace (dns-slug), pool (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
+    # (6) VOLUMES — the EXACT 2-volume set for BOTH trust-classes (P2 R-2 §B): {workspace PVC, home
+    #     emptyDir}. The agent profile no longer carries a broker-cap emptyDir (the per-job capability is
+    #     delivered as a workspace file <workspace>/.af/broker-cap.jwt, not a mounted volume), so test AND
+    #     agent share the SAME shape — exactly 2 volumes. workspace + home are ALWAYS required; the
+    #     claimName == af-sbx-ws-<org label>-<workspace label> (P2 R-2 §C org-keyed) so a pod can never
+    #     mount another org/workspace's PVC. ANY secret/configMap/projected/csi/hostPath/downwardAPI
+    #     volume (or an unknown name) is rejected. The home emptyDir must be DISK-backed (no Memory
+    #     medium) with a BOUNDED sizeLimit (node-DoS).
+    - expression: >-
+        variables.vols.exists(v, v.name == 'workspace') &&
+        variables.vols.exists(v, v.name == 'home') &&
+        size(variables.vols) == 2 &&
+        variables.vols.all(v,
+          (v.name == 'workspace' && has(v.persistentVolumeClaim) &&
+            v.persistentVolumeClaim.claimName == 'af-sbx-ws-' + variables.org + '-' + variables.workspace) ||
+          (v.name == 'home' && has(v.emptyDir) &&
+            (!has(v.emptyDir.medium) || v.emptyDir.medium == '') &&
+            has(v.emptyDir.sizeLimit) &&
+            quantity(v.emptyDir.sizeLimit).isLessThan(quantity('2Gi'))))
+      message: "sandbox pod volumes must be EXACTLY {workspace PVC 'af-sbx-ws-<org>-<workspace>', home emptyDir (disk, sizeLimit <2Gi)} for BOTH trust-class=test and trust-class=agent (2 volumes) — no other, missing, or duplicate volumes; no broker-cap/secret/configMap/projected/csi/hostPath/downwardAPI, no Memory medium."
+    # (8) CONTAINER securityContext — the enumerated restricted set the SandboxExecutor renders.
+    - expression: >-
+        variables.ctrs.all(c,
+          has(c.securityContext) &&
+          c.securityContext.runAsNonRoot == true &&
+          c.securityContext.runAsUser == 65532 && c.securityContext.runAsGroup == 65532 &&
+          c.securityContext.allowPrivilegeEscalation == false &&
+          (!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+          has(c.securityContext.capabilities) && c.securityContext.capabilities.drop == ['ALL'] &&
+          !has(c.securityContext.capabilities.add) &&
+          has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+          c.securityContext.readOnlyRootFilesystem == true &&
+          has(c.securityContext.procMount) && c.securityContext.procMount == 'Default')
+      message: "sandbox container securityContext must be runAsNonRoot 65532/65532, allowPrivilegeEscalation=false, drop:[ALL] (no add), seccomp RuntimeDefault, readOnlyRootFilesystem=true, procMount=Default, not privileged."
+    # (9) Container workingDir=/workspace, DIGEST-PINNED image (repo@sha256:<64hex> — a tag is rejected
+    #     so a mutable image can't be swapped under the digest), and no hostPort.
+    - expression: >-
+        variables.ctrs.all(c,
+          c.workingDir == '/workspace' &&
+          c.image.matches('^[^@]+@sha256:[0-9a-f]{64}$') &&
+          (!has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))
+      message: "sandbox container must set workingDir=/workspace, a digest-pinned image (repo@sha256:<64hex>), and no hostPort."
+    # (10) volumeMounts — the EXACT 2-mount set for BOTH trust-classes (P2 R-2 §B, mirrors (6)): workspace
+    #      + home only (test AND agent = 2 mounts; the broker-cap mount is gone). subPath AUTHORIZATION:
+    #      the workspace mount's subPath must EQUAL the pod's own agentforge.io/job-id label (validated
+    #      32-hex in (5)) — so a pod can never mount another job's subPath. home is at /home/nonroot with
+    #      NO subPath.
+    - expression: >-
+        variables.ctrs.all(c,
+          has(c.volumeMounts) &&
+          size(c.volumeMounts) == 2 &&
+          c.volumeMounts.exists(m, m.name == 'workspace') &&
+          c.volumeMounts.exists(m, m.name == 'home') &&
+          c.volumeMounts.all(m,
+            (m.name == 'workspace' && m.mountPath == '/workspace' &&
+              has(m.subPath) && m.subPath == variables.jobId) ||
+            (m.name == 'home' && m.mountPath == '/home/nonroot' && !has(m.subPath))))
+      message: "sandbox container mounts must be EXACTLY: workspace at /workspace subPath==<job-id label> + home at /home/nonroot (2 mounts) for BOTH trust-class=test and trust-class=agent — both workspace and home are required, no broker-cap or other mounts."
+    # (11) On UPDATE the image may NOT change (both revisions passed (1), so exactly one container).
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        (size(object.spec.containers) == 1 && size(oldObject.spec.containers) == 1 &&
+         object.spec.containers[0].image == oldObject.spec.containers[0].image)
+      message: "sandbox container image may not change on UPDATE."
+    # (12) NO envFrom and NO env[].valueFrom of ANY kind (secretKeyRef/configMapKeyRef/fieldRef/
+    #      resourceFieldRef). Otherwise a deviating Job could secretKeyRef ANY Secret in the ns — the
+    #      kubelet resolves it WITHOUT the sandbox SA having Secret RBAC — and exfiltrate it. R-1 sandbox
+    #      env is plain literal values only (defense-in-depth: the tokenless sandbox has no API access).
+    - expression: >-
+        variables.ctrs.all(c,
+          !has(c.envFrom) &&
+          (!has(c.env) || c.env.all(e, !has(e.valueFrom))))
+      message: "sandbox container may not use envFrom or any env[].valueFrom (secretKeyRef/configMapKeyRef/fieldRef/resourceFieldRef) — only plain-value env is allowed."
+    # (13) EXACT resource requests+limits: cpu/memory/ephemeral-storage all present on BOTH, with
+    #      requests<=limits and each within a bounded range (node-DoS). Uses the CEL quantity() library.
+    - expression: >-
+        variables.ctrs.all(c,
+          has(c.resources) && has(c.resources.requests) && has(c.resources.limits) &&
+          'cpu' in c.resources.requests && 'memory' in c.resources.requests &&
+          'ephemeral-storage' in c.resources.requests &&
+          'cpu' in c.resources.limits && 'memory' in c.resources.limits &&
+          'ephemeral-storage' in c.resources.limits &&
+          quantity(c.resources.requests.cpu).compareTo(quantity('50m')) >= 0 &&
+          quantity(c.resources.requests.cpu).compareTo(quantity(c.resources.limits.cpu)) <= 0 &&
+          quantity(c.resources.limits.cpu).compareTo(quantity('2')) <= 0 &&
+          quantity(c.resources.requests.memory).compareTo(quantity('64Mi')) >= 0 &&
+          quantity(c.resources.requests.memory).compareTo(quantity(c.resources.limits.memory)) <= 0 &&
+          quantity(c.resources.limits.memory).compareTo(quantity('4Gi')) <= 0 &&
+          quantity(c.resources.requests['ephemeral-storage']).compareTo(quantity('64Mi')) >= 0 &&
+          quantity(c.resources.requests['ephemeral-storage']).compareTo(quantity(c.resources.limits['ephemeral-storage'])) <= 0 &&
+          quantity(c.resources.limits['ephemeral-storage']).compareTo(quantity('8Gi')) <= 0)
+      message: "sandbox container must set cpu/memory/ephemeral-storage requests AND limits, requests<=limits, within [50m..2 cpu, 64Mi..4Gi mem, 64Mi..8Gi ephemeral-storage]."
+    # (14) Pin remaining container fields: no lifecycle hooks, no interactive stdin/tty, no raw block
+    #      volumeDevices. (command/args are fixed by the digest-pinned image entrypoint.)
+    - expression: >-
+        variables.ctrs.all(c,
+          !has(c.lifecycle) &&
+          (!has(c.stdin) || c.stdin == false) &&
+          (!has(c.stdinOnce) || c.stdinOnce == false) &&
+          (!has(c.tty) || c.tty == false) &&
+          !has(c.volumeDevices))
+      message: "sandbox container may not set lifecycle, stdin/stdinOnce/tty, or volumeDevices."
+    # (15) Pod-level pins: no imagePullSecrets (the registry is anonymous-pull), and the default
+    #      scheduler only (no custom scheduler that could bypass taints/quota).
+    - expression: >-
+        (!has(object.spec.imagePullSecrets) || size(object.spec.imagePullSecrets) == 0) &&
+        (!has(object.spec.schedulerName) || object.spec.schedulerName == 'default-scheduler')
+      message: "sandbox pod may not set imagePullSecrets and must use the default scheduler."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-sandbox-guard
+spec:
+  policyName: agentforge-sandbox-guard
+  validationActions: ["Deny"]
+  # Scope to the operator-owned sandbox ns via the always-present name label (no reliance on a
+  # user-set label). Every Pod CREATE/UPDATE in agentforge-sandbox is validated.
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: agentforge-sandbox

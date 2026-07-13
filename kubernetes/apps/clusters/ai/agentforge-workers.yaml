@@ -1,0 +1,44 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agentforge-workers
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  # Its OWN path/Kustomization (NOT a line in apps/ or infrastructure/kustomization.yaml) so the
+  # operator-owned worker-autoscaling boundary does not collide with the P1 agentforge admission (apps
+  # layer) or the concurrent P2 operators work under infrastructure/{security,autoscaling}. Mirrors the
+  # agentforge-broker wiring. dependsOn:
+  #   * external-secrets — installs the external-secrets.io/v1 CRDs (SecretStore/ExternalSecret) this tree's
+  #     dispatcher-externalsecret.yaml applies; without it a bootstrap/rebuild could try to apply those CRs
+  #     before the CRDs exist (codex Phase B #3).
+  #   * keda — installs the keda.sh/v1alpha1 ScaledObject CRD.
+  #   * infrastructure — Cilium/ServiceMonitor CRDs + PriorityClasses.
+  # Deliberately NOT `apps`/`databases`, so the SA/ESO/Service/SM/CNP/ScaledObject keep reconciling even if
+  # those layers are unhealthy.
+  dependsOn:
+    - name: infrastructure
+    - name: external-secrets
+    - name: keda
+    # agentforge-sandbox OWNS the tenant-zero namespace (tenant-namespace.yaml) + its ResourceQuota; the
+    # worker/dispatcher/ScaledObject land INTO that ns, so the ns + quota must exist first (else the pods
+    # would admit before the LimitRange defaults/quota apply). Ordering, not health-gating (wait:false below).
+    - name: agentforge-sandbox
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/agentforge-workers
+  prune: true
+  # wait:false so a not-yet-Ready ESO ExternalSecret (dispatcher-forge NotReady until the operator
+  # provisions OpenBao), a not-yet-pinned image (once the Deployments are re-added), or the ScaledObject's
+  # not-yet-present target can never wedge this or any dependent Flux Kustomization; the SA/Service/SM/CNP/
+  # ScaledObject still apply immediately.
+  wait: false
+  # decryption (SOPS) retained for any future SOPS-encrypted operator Secret in this tree — currently none
+  # (dispatcher creds are ESO-synced from OpenBao, not SOPS).
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

@@ -1,0 +1,50 @@
+# STAGING PV for the orchestrator (tenant ns) — the operator half of the cross-namespace share
+# (codex R-1 #1). The orchestrator runs in a CP-rendered TENANT namespace
+# (af-tenant-tenant-zero-playground) and stages each job's cwd into <staging_root>/<job-id>/ before
+# creating the sandbox Job. A PVC is namespace-scoped, so the CP (platform agent) must render the PVC
+# in the tenant ns — but the PV is cluster-scoped and operator-owned, so the OPERATOR provides it here
+# and pre-binds it (claimRef) to the tenant PVC the CP will render.
+#
+# CONTRACT for the platform renderer (must match, byte-for-byte, or the PVC will not bind). P2 R-2 §C
+# org-qualifies the name (org from spec.org_slug, ws from the workspace slug):
+#   PVC  name:            af-sbx-stage-tenant-zero-playground
+#        namespace:       af-tenant-tenant-zero-playground   (the shadow orchestrator's ns)
+#        accessModes:     [ReadWriteMany]
+#        storageClassName: ""            (static bind; NOT the nfs-csi default)
+#        volumeName:      af-sbx-stage-tenant-zero-playground   (binds to THIS PV)
+#        requests.storage: 5Gi
+#   The orchestrator Deployment mounts that PVC at AF_SANDBOX_STAGING_ROOT=/workspace/agentforge/sandbox
+#   so <staging_root>/<job-id>/ resolves to <export>/<job-id> — the SAME NFS bytes the sandbox mounts at
+#   /workspace (subPath <job-id>) and the reaper reclaims. Ownership is a coordination.k8s.io Lease
+#   (RBAC + apiserver CAS), not a file on this NFS.
+#
+# Same shared export + mountOptions as the workspace/reaper PVs.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: af-sbx-stage-tenant-zero-playground
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
+    agentforge.io/workspace: playground
+    agentforge.io/role: sandbox-staging
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4.0
+    - hard
+    - nconnect=4
+  nfs:
+    server: 10.55.0.254
+    path: /pve-nfs/agentforge-sandbox/tenant-zero/playground # SAME per-org/ws subdir as af-sbx-ws-* + af-sbx-reaper-*
+  # Pre-bind to the CP-rendered tenant PVC (name+namespace above). Because this claimRef names a
+  # specific ns/name, only that exact PVC can bind — a different tenant can't hijack the staging PV.
+  claimRef:
+    namespace: af-tenant-tenant-zero-playground
+    name: af-sbx-stage-tenant-zero-playground

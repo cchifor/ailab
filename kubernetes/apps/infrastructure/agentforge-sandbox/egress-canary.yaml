@@ -1,0 +1,121 @@
+# AgentForge v2 P2 R-3 §C — the ADR-0018 EGRESS BOUNDARY CANARY (plans/2026-07-13-r3-ci-scaledjob-plan.md).
+# A boundary ASSERTION rendered as a VALID sandbox Job shape: it passes agentforge-sandbox-job-guard AND
+# agentforge-sandbox-guard byte-for-byte (kata, tokenless agentforge-sandbox SA, the EXACT {workspace,home}
+# 2-volume set, digest-pinned image, the pinned pod + container securityContext, and the required Cilium
+# identity labels), then ATTEMPTS to reach DENIED targets and MUST FAIL to reach every one of them — proving
+# the trust-class=agent egress confinement (sandbox-agent-egress CNP) holds.
+#
+# ⚠⚠ GATED / UNLISTED — DELIBERATELY NOT in kustomization.yaml (mirrors reaper-deployment.yaml + the broker/
+# ci-runner precedent). The image is a PLACEHOLDER @sha256:0000… (unpullable), so even an accidental apply
+# cannot run it. This is an ACTIVATION-TIME verification, run via the REAL SandboxExecutor path (the
+# orchestrator stages it exactly like any agent job), NOT a standing workload and NOT reconciled by Flux.
+# It is trust-class=AGENT on purpose: the agent profile is the interesting boundary (it MAY reach its own
+# pool broker + kube-dns, and NOTHING else), so the canary asserts the four classic escapes are all denied.
+#
+# SEMANTICS: each probe MUST FAIL (the egress is blocked). If ANY probe SUCCEEDS, that is a BOUNDARY BREACH
+# and the canary exits non-zero. Denied targets asserted:
+#   (a) a WORLD IP (1.1.1.1:443)                         — egressDeny world
+#   (b) the METADATA service (169.254.169.254)           — egressDeny toCIDR 169.254.169.254/32
+#   (c) an ALT-DNS name (example.com)                    — kube-dns L7 allows ONLY the broker name; refused
+#   (d) ANOTHER pool's broker (a non-matching svc name)  — DNS L7 refuses the name AND broker ingress admits
+#                                                           only the matching pool/org/workspace agent
+# TO RUN (activation): pin the real sandbox image @sha256, then submit through SandboxExecutor with these
+# exact labels (or keep the probe list as documented `test_cmd`s in the boundary-proof suite).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agentforge-sandbox-egress-canary
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge
+    app.kubernetes.io/component: sandbox
+    app.kubernetes.io/part-of: agentforge
+spec:
+  # (J1) sandbox-job-guard: single, non-retrying, TTL-swept run with a bounded hard deadline.
+  parallelism: 1
+  completions: 1
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 300
+  podReplacementPolicy: Failed
+  template:
+    metadata:
+      # sandbox-guard identity labels: 32-hex job-id (== the workspace subPath), trust-class, org/workspace/
+      # pool dns-slugs, managed-by=agentforge, component=sandbox. job-id here is a DOCUMENTED PLACEHOLDER —
+      # the SandboxExecutor mints the real 32-hex handle per run.
+      labels:
+        agentforge.io/job-id: "canary00000000000000000000000000"
+        agentforge.io/trust-class: agent
+        agentforge.io/org: tenant-zero
+        agentforge.io/workspace: playground
+        agentforge.io/pool: planner
+        app.kubernetes.io/managed-by: agentforge
+        app.kubernetes.io/component: sandbox
+    spec:
+      restartPolicy: Never
+      runtimeClassName: kata
+      serviceAccountName: agentforge-sandbox   # the tokenless sandbox SA (no kube-apiserver access)
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      volumes:
+        # The EXACT 2-volume set sandbox-guard pins: workspace PVC af-sbx-ws-<org>-<workspace> + home emptyDir
+        # (disk-backed, bounded <2Gi). No secret/configMap/broker-cap/hostPath.
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: af-sbx-ws-tenant-zero-playground
+        - name: home
+          emptyDir:
+            sizeLimit: 256Mi
+      containers:
+        - name: sandbox
+          # PLACEHOLDER digest — the real sandbox image @sha256 (AF_SANDBOX_IMAGE) is pinned at activation.
+          image: registry.chifor.me/agentforge/sandbox@sha256:e50dbab89ec40f90d3af49746f50dc5a2a26165708092a93b42ee690b5ec47a8
+          workingDir: /workspace
+          # Boundary probes — each MUST FAIL (egress blocked). Any SUCCESS => BREACH => exit 1. Short
+          # connect timeouts so the whole assertion finishes well within activeDeadlineSeconds. Plain-value
+          # env only (sandbox-guard forbids env[].valueFrom); targets are literal here.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              rc=0
+              probe() { # $1=label $2=curl-target
+                if curl -sS --max-time 5 --connect-timeout 5 -o /dev/null "$2"; then
+                  echo "BREACH: reached $1 ($2)"; rc=1
+                else
+                  echo "ok (blocked): $1 ($2)"
+                fi
+              }
+              probe "world-ip"        "https://1.1.1.1/"
+              probe "metadata"        "http://169.254.169.254/latest/meta-data/"
+              probe "alt-dns"         "https://example.com/"
+              probe "other-pool-broker" "http://agentforge-broker.agentforge-broker-otherpool.svc.cluster.local:8700/"
+              [ "$rc" -eq 0 ] && echo "BOUNDARY OK: all denied targets unreachable"
+              exit "$rc"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+            readOnlyRootFilesystem: true
+            procMount: Default
+          volumeMounts:
+            # The EXACT 2 mounts sandbox-guard pins: workspace at /workspace subPath==<job-id>, home at
+            # /home/nonroot (no subPath).
+            - name: workspace
+              mountPath: /workspace
+              subPath: "canary00000000000000000000000000"
+            - name: home
+              mountPath: /home/nonroot
+          resources:
+            requests: { cpu: 50m, memory: 64Mi, ephemeral-storage: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi, ephemeral-storage: 256Mi }

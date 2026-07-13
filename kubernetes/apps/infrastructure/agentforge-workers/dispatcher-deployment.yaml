@@ -1,0 +1,106 @@
+# af-dispatcher — the always-on KEDA SCALE ORACLE (`agentforge dispatcher`, the SAME p1-worker image as
+# the orchestrator/reaper — the agentforge console script carries every subcommand). A stripped, READ-ONLY
+# sibling of the worker: it polls the forge and exports `forge_pending{account,pool,role,repo}` on the
+# metrics port (main.py: dispatcher()/_dispatch_once). NO webhook API, NO claims, NO Job creation, NO
+# capability minting. It lives in the TRUSTED `agentforge` namespace (baseline PSA) alongside the reaper —
+# NOT a tenant ns, NOT agentforge-sandbox.
+#
+# TRUST SURFACE (design/plan §1): the dispatcher gets a READ-ONLY forge PAT ONLY (dispatcher-externalsecret
+# .yaml) and NOTHING else — explicitly NO AF_CAPABILITY_* signing key/kid, NO AF_SANDBOX_* / broker /
+# litellm material. It never creates a Job or mints a capability, so it needs no kube-apiserver access
+# (automountServiceAccountToken:false) and no sandbox/broker reach (dispatcher-netpol.yaml: forge + DNS only).
+# tenant-zero is FORGE-BACKED (AF_CONFIG_SOURCE=gitea), so there is no control-plane bearer to mount.
+#
+# ⚠ DELIBERATELY NOT LISTED in kustomization.yaml (mirrors reaper-deployment.yaml + the broker
+# deployment.yaml precedent). The image below is a PLACEHOLDER @sha256:0000… — unpullable. Nothing here
+# flips privilege_hardening; the dispatcher stays gated until the operator's manual activation. TO ENABLE:
+#   1. build + pin the immutable @sha256 of the p1-worker image (registry.chifor.me/agentforge/p1-worker,
+#      the SAME digest the CP's AFP_WORKER_IMAGE + the reaper get) from the cchifor/agentforge release CI;
+#   2. provision the OpenBao role `af-operator-dispatcher` (bound to ns agentforge + SA af-dispatcher-eso)
+#      + the KV data at `af/data/operator/dispatcher/forge` (a READ-ONLY issues:read forge PAT) so
+#      dispatcher-forge syncs Ready (dispatcher-externalsecret.yaml);
+#   3. add `- dispatcher-deployment.yaml` to kustomization.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentforge-dispatcher
+  namespace: agentforge # trusted home (baseline PSA); NOT a tenant ns, NOT agentforge-sandbox
+  labels:
+    app.kubernetes.io/name: agentforge-dispatcher
+    app.kubernetes.io/component: dispatcher
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  replicas: 1 # a single read-only poller; the forge_pending gauge is idempotent, but one is enough
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-dispatcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentforge-dispatcher
+        app.kubernetes.io/component: dispatcher
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      serviceAccountName: agentforge-dispatcher
+      automountServiceAccountToken: false # read-only forge poller — NO kube-apiserver access
+      enableServiceLinks: false
+      # Run on the dedicated agent pool alongside the reaper/broker it complements.
+      nodeSelector:
+        ailab.io/agent-pool: "true"
+      tolerations:
+        - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532 # so the 0440 mounted forge-PAT Secret is group-readable by uid 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: dispatcher
+          # PLACEHOLDER digest — pin the real p1-worker @sha256 (see header) before enabling.
+          image: registry.chifor.me/agentforge/p1-worker@sha256:9efafd0a5c7ddacbd7bcfe8dec7695219597c7f394bb05e495074d49eeb4f498
+          # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
+          # dispatcher` (composes to: tini -- agentforge dispatcher). A bare `dispatcher` would crash-loop.
+          args: ["agentforge", "dispatcher"]
+          env:
+            # Settings (env_prefix AF_) REQUIRES worker_name + gitea_url (no defaults). The dispatcher
+            # path ignores roles_for(worker_name); a fixed identity is all it needs.
+            - { name: AF_WORKER_NAME, value: "af-dispatcher" }
+            # Forge-backed config source (tenant-zero is NOT control_plane): the dispatcher fetches the
+            # AgentForgeConfig (repo allowlist + accounts) from the in-cluster Gitea config repo, then
+            # counts open issues per role. AF_CONFIG_REPO/AF_CONFIG_PATH keep their defaults.
+            - { name: AF_CONFIG_SOURCE, value: "gitea" }
+            # In-cluster Gitea (gitea-http.gitea.svc:3000) — reached identity-based so the netpol can
+            # deny world; NOT the public git.chifor.me (which would require world/FQDN egress).
+            - { name: AF_GITEA_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000" }
+          envFrom:
+            # The ONLY credential: a READ-ONLY forge PAT (AF_BOT_TOKEN_*) so GiteaClient can list_issues.
+            # ESO-synced from OpenBao (dispatcher-externalsecret.yaml). Carries NO capability/sandbox/broker
+            # material by construction (a distinct operator KV path, disjoint from the tenant/broker roles).
+            - secretRef:
+                name: agentforge-dispatcher-forge
+          ports:
+            - { name: metrics, containerPort: 9464, protocol: TCP }
+          volumeMounts:
+            # config-lastgood.json (state_dir) + /tmp on a read-only root fs.
+            - { name: state, mountPath: /var/lib/agentforge }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 25m, memory: 64Mi, ephemeral-storage: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi, ephemeral-storage: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: state
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi

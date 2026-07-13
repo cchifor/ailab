@@ -1,0 +1,66 @@
+# Reaper identity + CROSS-NAMESPACE RBAC (codex R-1 #5). The reaper was moved out of agentforge-sandbox
+# (rejected there by the sandbox-guard VAP + the zero-egress default-deny) into the TRUSTED `agentforge`
+# namespace. Its ServiceAccount therefore lives in `agentforge`, while the Jobs/Pods it GCs live in
+# `agentforge-sandbox` — so the Role is in agentforge-sandbox and the RoleBinding (also in
+# agentforge-sandbox) names a cross-namespace subject (the SA in `agentforge`). This is the ONLY grant
+# the reaper SA has in the sandbox ns: read Job status + delete Jobs (foreground -> cascades Pods),
+# read/delete Pods, and CAS-acquire/delete the per-job coordination.k8s.io Lease. It has NO Pod/Job
+# create, NO Secret access, NO exec/attach.
+#
+# ACTIVE (pre-staged) so enabling the reaper is just pinning the image digest + re-adding the
+# Deployment to kustomization.yaml (there is no lease Secret — the owner-lease is a k8s Lease gated by
+# this RBAC + apiserver resourceVersion CAS, not a shared HMAC).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentforge-reaper
+  namespace: agentforge # trusted home; NOT agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/component: reaper
+    app.kubernetes.io/part-of: agentforge
+automountServiceAccountToken: true # the reaper DOES talk to the apiserver (unlike the sandbox SA)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentforge-reaper
+  namespace: agentforge-sandbox # the Jobs/Pods it reaps live here
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Reclaim the owner-lease: GET a candidate job's `af-sbx-<job-id>` Lease, ACQUIRE it via
+  # resourceVersion CAS (update; create for the absent-lease path) — a CAS conflict means the
+  # orchestrator renewed, so the reaper backs off — then delete it after rmtree. NO list/watch
+  # (the reaper discovers orphans by scanning the staging dir, then addresses each Lease by name).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentforge-reaper
+  namespace: agentforge-sandbox # grants the Role here...
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentforge-reaper
+subjects:
+  # ...to the reaper SA that lives in the trusted `agentforge` namespace (cross-namespace subject).
+  - kind: ServiceAccount
+    name: agentforge-reaper
+    namespace: agentforge
