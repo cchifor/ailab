@@ -94,7 +94,7 @@ spec:
         variables.tlabels['app.kubernetes.io/component'] == 'sandbox' &&
         variables.torg.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
         variables.tworkspace.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
-        variables.tpool.matches('^[a-z0-9][a-z0-9-]{0,62}$')
+        variables.tpool.matches('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
       message: "sandbox Job template must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, org (dns-slug), workspace (dns-slug), pool (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
     # (P6) VOLUMES — EXACT 2-volume set for BOTH trust-classes (P2 R-2 §B, mirror of pod-guard (6)):
     #      {workspace PVC, home emptyDir}. The broker-cap emptyDir is gone (the per-job capability is now a
