@@ -1,6 +1,6 @@
 # Implementation review — iac-activation
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Scope
 Cross-repo IaC-activation build for AgentForge v2 (init a LIVE OpenBao vault, no manual ops):
@@ -41,5 +41,21 @@ Cross-repo IaC-activation build for AgentForge v2 (init a LIVE OpenBao vault, no
 - ailab: `kubectl kustomize` builds for openbao + openbao-canary; openbao has ZERO ESO CRs (deadlock gone);
   nested-virt gate passes live.
 
-## Round 2 (codex verify) — PENDING
-<!-- filled on read -->
+## Round 2 → Round 3 (codex verify) — CLOSED
+- Round 2: 5 of 6 round-1 findings CLOSED; 2 blockers remained — (A) run_init two-Secret write not atomic
+  (a hard-kill could lose the unseal key), (B) NEW openbao-state clobber (init+provision both wrote it, full-
+  replace).
+- Fixed by ONE atomic-boot redesign [agentforge 643b65b]: after initialize(), BOTH one-shot materials go
+  into a SINGLE `openbao-boot` Secret before any unseal; unseal; SPLIT to durable openbao-keys{+cluster_id}
+  + openbao-bootstrap-token; delete boot. run_init RESUMES from openbao-boot on a mid-split crash (never
+  re-inits). cluster_id back in openbao-keys; run_init no longer writes openbao-state (provision is sole
+  writer); write_state MERGES. 38 tests (was 34), full suite 992 passed, ruff+mypy clean. Paired init-SA
+  RBAC for openbao-boot [ailab 8e6e9ae].
+- Round 3 (the cap) = A + B CONFIRMED CLOSED. One residual: write_state PATCHes the CM but openbao-provision
+  had only `update` → added `patch` on openbao-state [ailab, this commit]. SSAR precheck covered by the
+  default system:basic-user (fails closed if removed).
+
+**FINALIZED — codex Phase B 3 rounds → the OpenBao auto-init/unseal/provision bring-up is crash-safe +
+least-privilege; Stage 1 is SAFE to execute live.** Documented residual: the sub-second pre-atomic-boot-
+create window loses only an EMPTY vault (recovery = PVC re-init); true crash-safety needs transit/KMS
+auto-unseal (a future hardening, no seal backend in the homelab).

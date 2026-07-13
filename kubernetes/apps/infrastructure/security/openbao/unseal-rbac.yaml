@@ -118,14 +118,16 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
-  # write the provisioned sentinel: create (unscopable) then update/get scoped to openbao-state.
+  # write the provisioned sentinel: create (unscopable) then get/update/PATCH scoped to openbao-state.
+  # `patch` is required because write_state does a strategic-merge PATCH on an existing CM (k8s treats
+  # patch and update as DISTINCT verbs) — codex Phase B round 3.
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["openbao-state"]
-    verbs: ["get", "update"]
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
