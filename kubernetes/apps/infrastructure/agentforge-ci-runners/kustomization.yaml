@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge v2 P2 R-3 — k8s-native CI runners (plans/2026-07-13-r3-ci-scaledjob-plan.md). Its OWN
+# directory + a dedicated Flux Kustomization (clusters/ai/agentforge-ci-runners.yaml), mirroring the
+# agentforge-broker/-sandbox/-workers precedent: self-contained so it never collides with the P1
+# agentforge admission (apps layer) or the concurrent P2 operators editing infrastructure/{security,
+# autoscaling}. NO shared aggregator index is edited.
+#
+# The ScaledJob is DELIBERATELY UNLISTED (gated) — a belt-and-suspenders GATE #1 on top of the
+# `autoscaling.keda.sh/paused: "true"` annotation (GATE #2) inside scaledjob.yaml: the runner image is a
+# PLACEHOLDER @sha256 (unpullable) and nothing here flips privilege_hardening. Re-add `- scaledjob.yaml`
+# (AND remove the paused annotation) only after all three activation preflights pass (see scaledjob.yaml
+# header). The ci-guard VAP applies IMMEDIATELY so the pin exists before any runner pod can ever be created.
+resources:
+  - namespace.yaml               # agentforge-ci ns (PSA privileged — THIS ns only) + default-deny NetworkPolicy
+  - ci-guard.yaml                # VAP: pins the EXACT 2-container Kata CI pod (fail-closed) on Pod CREATE/UPDATE + ephemeralcontainers
+  - serviceaccount.yaml          # the TOKENLESS runner SA (automount off, NO Role)
+  - externalsecret-regtoken.yaml # eso-auth SA + operator SecretStore + reg-token ExternalSecret (runner-only)
+  - cilium.yaml                  # CI egress: forge + package proxy + DinD registry ONLY (deny apiserver/world/metadata/private/IPv6)
+  # scaledjob.yaml is INTENTIONALLY not listed — the ci-runner image is a PLACEHOLDER @sha256 (unpullable),
+  # it is ALSO paused (autoscaling.keda.sh/paused), and nothing here flips privilege_hardening. Re-add it
+  # (and remove the paused annotation) once the digests are pinned + preflights pass (see its header).
+  # - scaledjob.yaml
