@@ -1,5 +1,7 @@
 # Implementation review — r3-ci-scaledjob — round 1
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
+
+**FINALIZED — codex Phase B round 2 = READY TO MERGE onto feat/p2-unlock (dormant scaffolding).** R1 1 blocker+6 important+1 nit -> all fixed -> R2 all CLOSED, no regressions. The 3 activation preflights (forgejo<->gitea compat, docker://<->:host workflows, reg-token single-use) are activation gates, NOT merge blockers.
 ## Summary
 - Dormancy is mostly intact: the ScaledJob is unlisted and paused with placeholder digests, and the canary is unlisted with a sandbox-guard-admissible Job shape.
 - The CI VAP is not yet strong enough for the advertised security boundary; it permits projected Secret/serviceAccountToken volume bypasses and does not actually require runner `allowPrivilegeEscalation: false`.
