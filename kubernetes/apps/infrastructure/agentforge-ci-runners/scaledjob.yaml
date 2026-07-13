@@ -66,13 +66,18 @@ spec:
         # emptyDir SENTINEL file instead.
         shareProcessNamespace: false
         terminationGracePeriodSeconds: 30
+        # fsGroup 1000 so the reg-token Secret file (0440) is GROUP-readable by the non-root runner
+        # (runAsUser/runAsGroup 1000, ci-guard #2 hardening) — dind is root+privileged so unaffected.
+        securityContext:
+          fsGroup: 1000
         volumes:
           # The reg-token — the ONLY Secret volume (ci-guard validation 5). Mounted read-only into the
-          # `runner` container ALONE (validation 6).
+          # `runner` container ALONE (validation 6). 0440 + fsGroup 1000 => readable by the non-root runner,
+          # never world-readable.
           - name: reg-token
             secret:
               secretName: ci-runner-registration
-              defaultMode: 0400
+              defaultMode: 0440
           # act_runner state + workspace — emptyDir so there is NO persistence across Jobs (a fresh
           # `.runner`/work tree every run, by construction).
           - name: data
@@ -127,11 +132,15 @@ spec:
               - { name: data, mountPath: /data }
               - { name: sentinel, mountPath: /sentinel }
             resources:
-              requests: { cpu: 250m, memory: 512Mi }
-              limits: { cpu: "4", memory: 8Gi }
+              # ephemeral-storage limit must cover this container's `data` emptyDir sizeLimit (ci-guard #9).
+              requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 2Gi }
+              limits: { cpu: "4", memory: 8Gi, ephemeral-storage: 24Gi }
             securityContext:
-              # runner is NON-privileged (ci-guard validation 7). It drives dind over TCP; it needs no
-              # kernel privilege of its own.
+              # runner is NON-privileged + non-root (ci-guard validation 7 pins the full restricted set). It
+              # drives dind over TCP; it needs no kernel privilege of its own.
+              runAsNonRoot: true
+              runAsUser: 1000
+              runAsGroup: 1000
               privileged: false
               allowPrivilegeEscalation: false
               capabilities: { drop: ["ALL"] }
@@ -158,8 +167,9 @@ spec:
               - { name: sentinel, mountPath: /sentinel }
               - { name: docker-storage, mountPath: /var/lib/docker }
             resources:
-              requests: { cpu: 250m, memory: 512Mi }
-              limits: { cpu: "4", memory: 8Gi }
+              # ephemeral-storage limit must cover this container's `docker-storage` emptyDir sizeLimit.
+              requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 4Gi }
+              limits: { cpu: "4", memory: 8Gi, ephemeral-storage: 48Gi }
             securityContext:
               # ONLY dind may be privileged (ci-guard validation 7) — docker:dind needs it to run the inner
               # daemon. Confined to the Kata microVM (the pod), NOT the host kernel.
