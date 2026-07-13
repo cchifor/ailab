@@ -45,6 +45,7 @@
   managed-by=agentforge-operator), NO agentforge.io/* labels; the worker CNP retargets those + adds ingress
   default-deny + metrics-from-monitoring. Verified sandbox VAPs pin the pool label on the Job pods, not the orchestrator.
 - [FIXED] Flux Kustomization dependsOn += external-secrets (ESO CRDs before the SecretStore/ExternalSecret apply).
-Cross-repo FOLLOW-UP (documented, not this tranche): the af-dispatcher emits forge_pending{pool=<account>} (P1);
-the KEDA query filters pool="planner" — a small agentforge dispatcher change is needed before activation
-(fail-safe until then: empty -> ignoreNullValues -> 0 + the cron warm-floor).
+Follow-up RESOLVED (no agentforge change needed): the KEDA query now filters account+role only, not the
+never-matching pool="planner" — since pool==account today, filtering account="anthropic/default" already
+uniquely scopes the worker (the real cross-scope guard). A pool filter re-appears when a per-account
+multi-pool distinction lands (P2/P3). Autoscaling now works at activation with the shipped dispatcher.

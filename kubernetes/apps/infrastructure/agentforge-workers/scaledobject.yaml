@@ -30,19 +30,19 @@ spec:
   pollingInterval: 30                 # how often KEDA evaluates the triggers (s)
   cooldownPeriod: 300                 # wait after the last active trigger before scaling back to 0 (s)
   triggers:
-    # (1) Prometheus scale oracle — scale on the pending backlog for THIS account+pool+role(s). The gauge is
-    #     forge_pending{account,pool,role,repo}; filtering account+pool is REQUIRED (role-only would let
-    #     another account/pool's backlog scale this worker). The role matcher covers a multi-role worker.
+    # (1) Prometheus scale oracle — scale on the pending backlog for THIS account's role(s). The gauge is
+    #     forge_pending{account,pool,role,repo}; filtering by ACCOUNT already uniquely scopes this worker
+    #     (prevents another account's backlog from scaling it — the real cross-scope guard), and the role
+    #     matcher covers this worker's multi-role set. We deliberately do NOT filter pool: the shipped
+    #     dispatcher emits pool=<account_name> today (main.py _dispatch_once: "P1 pool == account; the pool
+    #     concept generalizes in P2"), so a pool="planner" selector would never match — account+role is the
+    #     correct, working scope for the single-orchestrator tenant-zero identity. When a per-account MULTI-
+    #     pool distinction lands (P2/P3), re-add a pool filter matching the generalized dispatcher label.
     #     All KEDA trigger metadata values are STRINGS.
-    #     RECONCILIATION (report): the shipped agentforge dispatcher currently emits pool=<account_name>
-    #     (main.py _dispatch_once: "P1 pool == account; the pool concept generalizes in P2"), so the
-    #     pool="planner" selector matches only AFTER the P2 pool generalization lands — an activation
-    #     dependency. Until then the query returns empty -> ignoreNullValues -> 0 (fail-safe; the cron
-    #     warm-floor still keeps 1 in business hours). The query is the codex-finalized plan target.
     - type: prometheus
       metadata:
         serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
-        query: sum(forge_pending{account="anthropic/default",pool="planner",role=~"planner|reviewer"})
+        query: sum(forge_pending{account="anthropic/default",role=~"planner|reviewer"})
         threshold: "1"           # target pending items per replica (scaling math)
         # activationThreshold is a STRICT greater-than gate for waking from 0: value>activationThreshold.
         # "0" means a single pending issue (value 1 > 0) wakes the worker; "1" would require >1 (2 issues)
