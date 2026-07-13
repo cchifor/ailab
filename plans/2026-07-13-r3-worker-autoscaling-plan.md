@@ -1,89 +1,112 @@
-# R-3 — worker autoscaling topology (per-account orchestrator Deployments + af-dispatcher + KEDA + Cilium egress)
+# R-3 — worker autoscaling (tenant-zero orchestrator + af-dispatcher + KEDA scale-to-zero + Cilium egress)
 
 ## Context
 
-The plan's deferred P2 sub-tranche: the compute layer. R-1/R-2 built the sandbox boundary + broker +
-provisioner; this adds the OPERATOR-owned tenant-zero worker fleet that actually claims forge work and
-creates the ephemeral sandbox Jobs. All on ailab `feat/p2-unlock` (the P2-activation umbrella), DORMANT/
-gated (placeholder `@sha256:0000…` images, unlisted Deployments) until the operator builds+pins the
-worker image. NOTE: the R-1 redesign SUPERSEDED the per-pod DinD sidecars — untrusted exec now goes to a
-separate ephemeral Kata Job (the SandboxExecutor), so a worker Deployment is a PURE orchestrator
-(`agentforge serve`, `AF_EXECUTOR=sandbox`); NO DinD.
+The plan's deferred P2 compute layer. R-1/R-2/Wave-B built the sandbox boundary + broker + provisioner +
+the tenant-zero orchestrator RBAC/PVC/tenant-map/broker for EXACTLY ONE identity: SA
+`af-orch-playground-planner` in ns `af-tenant-tenant-zero-playground`, pool `planner`. This tranche adds
+the always-on scale ORACLE + KEDA scale-to-zero over that ONE dormant orchestrator, proving the
+autoscaling mechanism without inventing per-account provisioning. All on ailab `feat/p2-unlock`, DORMANT/
+gated (placeholder `@sha256:0000…` images, unlisted Deployments). The R-1 redesign superseded per-pod
+DinD — a worker Deployment is a PURE orchestrator (`agentforge serve`, `AF_EXECUTOR=sandbox`) that creates
+ephemeral sandbox Jobs; NO DinD.
 
-The scale oracle already exists in agentforge code: `agentforge dispatcher` (always-on, read-only) polls
-the forge and exports `forge_pending{account,pool,role,repo}` on `metrics_port`. The KEDA operator is
-already installed on `feat/p2-unlock`. This tranche wires them.
+**Scope decision (codex Phase A):** the FULL per-OAuth-account fleet (af-claude-max1/max2/codex/tester,
+each a distinct orchestrator identity) requires a NEW per-account SA + cross-ns RoleBinding + staging PVC +
+tenant-map entry + broker ingress/kid policy — none of which exist. That per-account provisioning is a P3
+concern (or a provisioner extension). This tranche is scoped to the SINGLE existing tenant-zero orchestrator
+identity + the dispatcher + one ScaledObject; the per-account fan-out is documented as the P3 expansion.
+
+The scale oracle exists in agentforge code: `agentforge dispatcher` exports `forge_pending{account,pool,
+role,repo}` on `metrics_port`. KEDA is already installed on `feat/p2-unlock` (a prereq CHECK, not an action).
 
 ## Approach — new dir `kubernetes/apps/infrastructure/agentforge-workers/`
 
-### 1. af-dispatcher (the scale oracle)
-- `dispatcher-deployment.yaml` (GATED, placeholder digest): `agentforge dispatcher`, replicas 1,
-  read-only (forge PAT via ESO `af-forge-creds`, no sandbox/broker creds), baseline PSA, exposes the
-  prometheus `metrics_port` (9464). Trusted `agentforge` ns.
-- `dispatcher-service.yaml`: ClusterIP exposing the metrics port.
-- `dispatcher-servicemonitor.yaml`: scrape it into kube-prometheus (so KEDA's Prometheus scaler can
-  query `forge_pending`). Mirror the existing `kubernetes/apps/infrastructure/monitoring/agentforge.yaml`.
-- `dispatcher-netpol.yaml`: egress = forge (Gitea) + DNS only.
+### 1. af-dispatcher (the scale oracle) — trusted `agentforge` ns
+- `dispatcher-deployment.yaml` (GATED, placeholder digest): `agentforge dispatcher`, replicas 1, baseline
+  PSA, exposes prometheus `metrics_port` 9464. Mounts a READ-ONLY forge-PAT ESO Secret ONLY — explicitly
+  EXCLUDES `AF_CAPABILITY_*`, sandbox, and broker material (it never creates Jobs or mints capabilities).
+  Include a config-source credential ONLY if `AF_CONFIG_SOURCE=control_plane` is actually used (tenant-zero
+  is forge-backed → none).
+- `dispatcher-service.yaml`: ClusterIP on the metrics port (named port).
+- `dispatcher-servicemonitor.yaml`: MIRROR the existing `monitoring/agentforge.yaml` details exactly —
+  `namespace: monitoring`, `release: kube-prometheus-stack` label, explicit `namespaceSelector`, the named
+  metrics port, and the scrape interval — so kube-prometheus actually scrapes `forge_pending`.
+- `dispatcher-netpol.yaml`: egress = the FORGE (Gitea) + DNS only. If Gitea is an external hostname, use
+  Cilium FQDN egress; add ingress-allow from kube-prometheus/monitoring for the `/metrics` scrape.
 
-### 2. per-OAuth-account worker Deployments (the scale targets)
-One Deployment per trusted OAuth account (the KEDA cap IS v1's per-account semaphore, so one Deployment
-per account, roles via config): `af-claude-max1` (planner/reviewer), `af-claude-max2` (implementer),
-`af-codex` (cross-reviewer), `af-tester` (litellm). Each (GATED, placeholder digest):
-- `agentforge serve`, `AF_EXECUTOR=sandbox`, distinct `AF_WORKER_NAME` (the Deployment name — the role
-  lookup + claim owner key; single-replica base × KEDA maxReplicas = the semaphore) via the downward API
-  or a fixed env, the sandbox config env (`AF_SANDBOX_NAMESPACE`, `AF_SANDBOX_IMAGE` [gated digest],
-  `AF_SANDBOX_SERVICE_ACCOUNT`, `AF_SANDBOX_WORKSPACE_PVC`, `AF_SANDBOX_ORG`/`WORKSPACE`/`POOL`,
-  `AF_SANDBOX_BROKER_URLS`, `AF_CAPABILITY_SIGNING_KEY` via ESO, `AF_LEASE_DURATION_S`), `AF_CONFIG_SOURCE`.
-- ESO-injected `af-forge-creds` (PATs/HMAC/git-push/litellm/capability signing key) — orchestrator only
-  (the sandbox Job gets NONE of these — R-1/R-2). Restricted-ish securityContext (runc, trusted tier;
-  it creates Jobs so it has the cross-ns RBAC from `agentforge-sandbox/orchestrator-rbac.yaml`).
-- The orchestrator's `AF_SANDBOX_ORG/WORKSPACE/POOL` must match a `agentforge-tenant-map` entry + the VAP
-  (Wave B-ii) — tenant-zero/playground/<pool>.
+### 2. tenant-zero worker Deployment (the scale target) — ns `af-tenant-tenant-zero-playground`
+`worker-deployment.yaml` (GATED, placeholder digest) — runs under the EXISTING orchestrator SA
+`af-orch-playground-planner` in the tenant ns (so it inherits the already-bound cross-ns Job/pod/log/lease
+RBAC [`orchestrator-rbac.yaml`], the tenant staging PVC, the tenant-map entry, and the broker ingress/kid
+policy — NO new RBAC/PVC/SA needed):
+- `agentforge serve`, `AF_EXECUTOR=sandbox`; **fixed** `AF_WORKER_NAME` (a configured Deployment name, NOT
+  the pod name — a per-pod name would break `roles_for(worker_name)`; shared across KEDA replicas is safe,
+  claims are epoch-elected per issue). The full sandbox env matching the Wave B-ii VAP-pinned values:
+  `AF_SANDBOX_NAMESPACE=agentforge-sandbox`, `AF_SANDBOX_IMAGE`=<gated digest>, `AF_SANDBOX_SERVICE_ACCOUNT`,
+  `AF_SANDBOX_WORKSPACE_PVC=af-sbx-ws-tenant-zero-playground`, `AF_SANDBOX_ORG=tenant-zero`,
+  `AF_SANDBOX_WORKSPACE=playground`, `AF_SANDBOX_POOL=planner`, `AF_SANDBOX_BROKER_URLS`, `AF_LEASE_DURATION_S`.
+- ESO `af-forge-creds` (orchestrator-only): the forge PATs/HMAC/git-push token/litellm key from OpenBao
+  `af/data/tenants/tenant-zero/playground/orchestrator`, PLUS templating the ACTIVE private
+  `AF_CAPABILITY_SIGNING_KEY` **and** `AF_CAPABILITY_KID` (both required by the Settings/broker capability
+  contract; the private signing key stays orchestrator-only — NEVER a sandbox Job). Restricted-ish runc
+  (trusted tier; it creates Jobs).
+- Mounts the tenant staging PVC at the staging root (same as the reaper).
 
-### 3. KEDA ScaledObjects (scale-to-zero)
-- `scaledobjects.yaml`: one `ScaledObject` per worker Deployment. `minReplicaCount: 0`,
-  `maxReplicaCount: <account.max_parallel>`, a **Prometheus trigger** on
-  `sum(forge_pending{role="<the deployment's role(s)>"})` against the in-cluster kube-prometheus, plus a
-  **cron trigger** warm-floor (minReplica 1) for interactive roles (planner/reviewer) during business
-  hours. Cooldown so a finished burst returns to 0. The claim-lock dedups across replicas (no new code).
-- (Optional, noted) a pre-pull DaemonSet to hide the fat-image cold start — deferred, cold-start
-  mitigation is a P3 nicety.
+### 3. KEDA ScaledObject (scale-to-zero) — same ns as its target
+`scaledobject.yaml`: `scaleTargetRef` = the worker Deployment (SAME namespace as the ScaledObject),
+`minReplicaCount: 0`, `maxReplicaCount: <account.max_parallel>` (the hard cap — the dispatcher reports
+PENDING work, not in-flight-subtracted, so maxReplicas bounds concurrency; the claim epoch-lock dedups
+duplicate claims). Triggers:
+- **prometheus**: `serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090`;
+  `query: sum(forge_pending{account="anthropic/max1", pool="planner", role=~"planner|reviewer"})` — MUST
+  filter account+pool (the gauge is `{account,pool,role,repo}`; role-only would let another account's
+  backlog scale this one), with a role MATCHER for a multi-role worker; `threshold: "1"`;
+  `activationThreshold`; `ignoreNullValues: true` + an explicit scrape-missing posture (don't flap to 0 on
+  a missing sample). 
+- **cron** warm-floor (interactive planner/reviewer, business hours): `desiredReplicas: "1"` (with the
+  ScaledObject `minReplicaCount: 0`) — NOT a min-replica.
+- cooldownPeriod so a finished burst returns to 0.
 
-### 4. per-Deployment Cilium egress
-- `cilium-egress.yaml`: per worker Deployment, an egress CNP: `agentforge` orchestrator → the FORGE
-  (Gitea) + OpenBao/ESO (for its ESO sync is the controller's job, so orchestrator egress = forge +
-  broker + litellm + kube-apiserver [creates Jobs] + DNS). Each account's worker only needs the broker
-  for ITS aud + the forge; the SANDBOX Job's egress is already locked by the Wave B-ii sandbox CNP. Deny
-  world/metadata/IPv6.
-- ServiceMonitor for the workers' own `/metrics` (the fleet board).
+### 4. per-worker Cilium egress — `cilium-egress.yaml`
+The ORCHESTRATOR process's runtime egress ONLY: the FORGE (Gitea) + the kube-apiserver (entity
+`kube-apiserver`, port 6443 — REQUIRED to create/watch Jobs, read pod logs, and CAS the Lease; safe under
+the narrow cross-ns RBAC) + DNS. **NO OpenBao/ESO** (ESO sync is controller-side, not the app). **NO direct
+broker/litellm** from the orchestrator — the SANDBOX JOBS are the broker/litellm clients (their egress is
+already locked by the Wave B-ii sandbox CNP), the orchestrator only stages the capability + creates the Job.
+Deny world/metadata/IPv6.
 
 ## Critical files
 - NEW `kubernetes/apps/infrastructure/agentforge-workers/**` (dispatcher deploy[gated]/svc/servicemonitor/
-  netpol; per-account worker deploy[gated] ×4; scaledobjects; cilium-egress; kustomization — Deployments
-  UNLISTED/gated).
-- NEW `kubernetes/apps/clusters/ai/agentforge-workers.yaml` (Flux Kustomization, dependsOn infra+the
-  KEDA/ESO CRDs, wait:false — mirrors agentforge-broker).
-- ESO `af-forge-creds` ExternalSecret (if not already present) sourcing the orchestrator creds from
-  OpenBao `af/data/tenants/tenant-zero/playground/orchestrator` (the provisioner's key) — verify vs the
-  existing agentforge apps ESO.
+  netpol; worker deploy[gated] in the tenant ns + its af-forge-creds ESO [if not already present];
+  scaledobject; cilium-egress; kustomization — Deployments UNLISTED/gated).
+- NEW `kubernetes/apps/clusters/ai/agentforge-workers.yaml` (Flux Kustomization, `wait:false`, dependsOn
+  the sandbox/broker/tenant-map/ESO+KEDA CRDs — mirrors `agentforge-broker.yaml`).
+- Verify the existing `af-forge-creds` / orchestrator ESO already renders the capability signing key + kid;
+  if not, add it (orchestrator-only).
 
 ## Verification
 - `kubectl kustomize` builds; all Deployments UNLISTED/gated with placeholder digests; no
   `privilege_hardening` flip.
-- ScaledObject: `scaleTargetRef` names each real worker Deployment; `minReplicaCount:0`; `maxReplicaCount`
-  == the account's `max_parallel`; the Prometheus query is `sum(forge_pending{role=…})` against the right
-  server URL; the cron warm-floor is scoped to interactive roles.
-- dispatcher: read-only (no sandbox/broker/capability creds), ServiceMonitor scrapes `forge_pending`,
-  netpol egress = forge + DNS only.
-- workers: `AF_EXECUTOR=sandbox`, distinct `AF_WORKER_NAME`, the full sandbox env matches the Wave B-ii
-  VAP-pinned values + a `agentforge-tenant-map` entry; `af-forge-creds` orchestrator-only; the cross-ns
-  Job-create RBAC is the existing `orchestrator-rbac.yaml`.
-- Cilium: each worker egress = forge + its broker + litellm + apiserver + DNS; deny world/metadata/IPv6.
+- worker: runs as `af-orch-playground-planner` in `af-tenant-tenant-zero-playground` (inherits RBAC/PVC/
+  tenant-map/broker); `AF_EXECUTOR=sandbox`, fixed `AF_WORKER_NAME`, the sandbox env == the VAP-pinned
+  values; `AF_CAPABILITY_SIGNING_KEY`+`AF_CAPABILITY_KID` orchestrator-only via ESO; staging PVC mounted.
+- ScaledObject: `scaleTargetRef` same-ns; `minReplicaCount:0`; `maxReplicaCount==max_parallel`; the query
+  filters account+pool+role against the kube-prometheus serverAddress; `ignoreNullValues`+activation set;
+  cron warm-floor is `desiredReplicas:"1"`.
+- dispatcher: read-only (NO capability/sandbox/broker creds); ServiceMonitor mirrors the existing SM
+  (monitoring ns, release label, namespaceSelector, port, interval); netpol egress = forge + DNS.
+- Cilium: worker egress = forge + apiserver:6443 + DNS ONLY (no OpenBao/ESO/broker/litellm); metrics
+  ingress from monitoring allowed; deny world/metadata/IPv6.
 
 ## Notes
-- On `feat/p2-unlock` (dormant umbrella), NOT a PR to main. Activation (operator): build+pin the worker
-  + dispatcher image (the SAME agentforge image, `serve`/`dispatcher` subcommands), list the Deployments,
-  seed OpenBao, install KEDA CRDs — then the fleet scales 0→N on forge work.
+- On `feat/p2-unlock` (dormant umbrella), NOT a PR to main. **P3 expansion (documented, not built):** the
+  full per-OAuth-account fleet (max1/max2/codex/tester) = one PROVISIONED orchestrator identity per account
+  (SA + cross-ns RoleBinding subject + staging PVC + tenant-map entry + broker ingress/kid policy + a
+  per-account ScaledObject) — a provisioner/CP concern, not hand-authored here.
+- Activation (operator): build+pin the SAME agentforge image (`serve`/`dispatcher`), list the Deployments,
+  ensure the KEDA CRDs + kube-prometheus + the tenant OpenBao keys are present, then the orchestrator scales
+  0→N on forge work.
 - codex Phase A on this plan, then Phase B on the rendered manifests (cap 3 each).
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
