@@ -16,6 +16,7 @@ resources:
   - ci-guard.yaml                # VAP: pins the EXACT 2-container Kata CI pod (fail-closed) on Pod CREATE/UPDATE + ephemeralcontainers
   - serviceaccount.yaml          # the TOKENLESS runner SA (automount off, NO Role)
   - externalsecret-regtoken.yaml # eso-auth SA + operator SecretStore + reg-token ExternalSecret (runner-only)
+  - externalsecret-scalertoken.yaml # operator ExternalSecret producing the KEDA forgejo-scaler token Secret
   - cilium.yaml                  # CI egress: forge + package proxy + DinD registry ONLY (deny apiserver/world/metadata/private/IPv6)
   # scaledjob.yaml is INTENTIONALLY not listed — the ci-runner image is a PLACEHOLDER @sha256 (unpullable),
   # it is ALSO paused (autoscaling.keda.sh/paused), and nothing here flips privilege_hardening. Re-add it
