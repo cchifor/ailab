@@ -34,10 +34,13 @@ data:
   # OpenBao (externalsecret-kids.yaml) and mounted read-only. Public keys are non-secret, but syncing
   # via ESO matches the operator keypair-controller publish path (design §3/§7).
   AF_BROKER_KID_REGISTRY_PATH: "/var/run/broker/kids/registry.json"
-  # NON-SECRET ledger coordinates (documentation + operational reference). The broker CONNECTS via the
-  # full AF_BROKER_LEDGER_DSN from the broker-ledger Secret; the PASSWORD is NEVER in this ConfigMap. The
-  # DB login is agentforge_broker: open/reserve/reconcile ONLY, NEVER close (the reaper alone holds
-  # close, design §5).
+  # The PATH to the mounted ledger DSN file (design §5/§B) — NON-secret. The DSN itself (with the
+  # agentforge_broker password) is the read-only broker-ledger Secret mounted at this path; the DSN is
+  # NEVER placed in this ConfigMap. (Follow-up: the merged broker/config.py reads AF_BROKER_LEDGER_DSN
+  # from env; it must gain *_FILE reading before activation — see deployment.yaml.)
+  AF_BROKER_LEDGER_DSN_FILE: "/var/run/broker/ledger/AF_BROKER_LEDGER_DSN"
+  # NON-SECRET ledger coordinates (documentation + operational reference). The DB login is
+  # agentforge_broker: open/reserve/reconcile ONLY, NEVER close (the reaper alone holds close, design §5).
   LEDGER_HOST: "infra-pg-rw.databases.svc.cluster.local"
   LEDGER_PORT: "5432"
   LEDGER_DB: "agentforge_broker"

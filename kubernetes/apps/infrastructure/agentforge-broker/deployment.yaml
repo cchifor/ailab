@@ -86,26 +86,27 @@ spec:
           envFrom:
             - configMapRef:
                 name: agentforge-broker-env # AF_BROKER_ non-secret knobs + non-secret ledger coordinates
-          env:
-            # The ledger DSN carries the agentforge_broker password, so it is Secret-sourced (NEVER the
-            # ConfigMap). open/reserve/reconcile ONLY — never close (§5).
-            - name: AF_BROKER_LEDGER_DSN
-              valueFrom:
-                secretKeyRef:
-                  name: broker-ledger
-                  key: AF_BROKER_LEDGER_DSN
+                # (incl. AF_BROKER_LEDGER_DSN_FILE — the PATH to the mounted DSN, not the DSN itself).
           ports:
             - { name: http, containerPort: 8700, protocol: TCP }
             - { name: metrics, containerPort: 9464, protocol: TCP }
           volumeMounts:
-            # ONLY the ESO-written Secrets, read-only files (design §5): the durable OAuth + the kid
-            # public-key registry. The broker READS these mounts (reload-on-change); it never writes and
-            # has NO OpenBao/ESO egress. The ledger cred is env (secretKeyRef above), not a file.
+            # ONLY the ESO-written Secrets, read-only FILE mounts (design §5/§B): the durable OAuth, the
+            # kid public-key registry, AND the ledger DSN. The broker READS these mounts (reload-on-change);
+            # it never writes and has NO OpenBao/ESO egress. A file mount (vs an env secretKeyRef) keeps the
+            # DSN out of /proc/<pid>/environ and lets it be reloaded on rotation.
+            # NB (follow-up): the merged agentforge broker/config.py currently reads AF_BROKER_LEDGER_DSN
+            # from ENV only (no *_FILE / secrets_dir source). This manifest expresses the target
+            # file-mounted shape + passes AF_BROKER_LEDGER_DSN_FILE; agentforge must add file-based DSN
+            # reading (mirroring the oauth/kids reload) BEFORE activation — tracked as a broker code change.
             - name: broker-oauth
               mountPath: /var/run/broker/oauth
               readOnly: true
             - name: broker-kids
               mountPath: /var/run/broker/kids
+              readOnly: true
+            - name: broker-ledger
+              mountPath: /var/run/broker/ledger
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -142,6 +143,10 @@ spec:
           secret:
             secretName: broker-kids
             defaultMode: 0440
+        - name: broker-ledger
+          secret:
+            secretName: broker-ledger
+            defaultMode: 0440 # readable by uid 65532 via fsGroup; NEVER world-readable
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi
