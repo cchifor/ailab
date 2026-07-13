@@ -1,4 +1,4 @@
-# Broker Deployment — `agentforge broker` (the DEDICATED broker image: the `broker` extra ONLY —
+# Broker Deployment — `agentforge broker` (the orchestrator runtime image (CLI-free; has the broker extra) —
 # pyjwt[crypto] + asyncpg, NO OpenBao/k8s client, no CLI/agent surface around the durable OAuth, design
 # §2/§4). The security flow (verify -> reserve -> mark_dispatched -> [gateway] -> reconcile) is enforced
 # around a PREFLIGHT-gated upstream stub (design §4/§10).
@@ -79,7 +79,7 @@ spec:
       containers:
         - name: broker
           # PLACEHOLDER digest — pin the real broker image @sha256 (see header) before enabling.
-          image: registry.chifor.me/agentforge/broker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          image: registry.chifor.me/agentforge/orchestrator@sha256:e7f0197bc5573fbe9f6ddff832440b56d05c0fdf8334f90a160ea5ab27d16670
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # broker` (composes to: tini -- agentforge broker).
           args: ["agentforge", "broker"]

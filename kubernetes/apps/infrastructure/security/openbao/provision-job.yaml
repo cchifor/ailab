@@ -41,7 +41,7 @@ spec:
       containers:
         - name: provision
           # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0).
-          image: registry.chifor.me/agentforge/orchestrator@sha256:PLACEHOLDER_ORCHESTRATOR
+          image: registry.chifor.me/agentforge/orchestrator@sha256:e7f0197bc5573fbe9f6ddff832440b56d05c0fdf8334f90a160ea5ab27d16670
           args: ["agentforge", "openbao-provision"]
           env:
             - { name: AF_OB_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }

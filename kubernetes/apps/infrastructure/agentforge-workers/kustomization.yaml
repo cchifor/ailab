@@ -23,5 +23,5 @@ resources:
   # PLACEHOLDER @sha256 (unpullable) and nothing here flips privilege_hardening. Re-add each once its
   # digest is pinned + prerequisites provisioned (see each Deployment header). The ScaledObject stays
   # Ready:False (no target) until worker-deployment.yaml is re-added — harmless while dormant.
-  # - dispatcher-deployment.yaml
-  # - worker-deployment.yaml
+  - dispatcher-deployment.yaml
+  - worker-deployment.yaml

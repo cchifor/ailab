@@ -1,0 +1,24 @@
+# Distributes the ailab-ca CA (that signed OpenBao's server cert) into the `agentforge-ci` namespace so the operator
+# ESO SecretStore(s) here can caProvider-verify OpenBao's TLS. A NAMESPACED SecretStore resolves caProvider
+# in its OWN namespace, and there is no trust-manager in the estate — so each consuming namespace needs its
+# own `openbao-tls` Secret carrying ca.crt. cert-manager issues a throwaway leaf from ailab-ca; ONLY its
+# ca.crt (== the ailab root CA that also signed openbao-tls in the openbao ns) is consumed. Auto-renews.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-ca
+  namespace: agentforge-ci
+  labels:
+    app.kubernetes.io/part-of: agentforge
+    app.kubernetes.io/component: openbao-ca-ref
+spec:
+  secretName: openbao-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: openbao-ca-ref
+  dnsNames: ["openbao-ca-ref.agentforge-ci.svc"]
+  privateKey: { algorithm: ECDSA, size: 256 }
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

@@ -7,6 +7,7 @@ kind: Kustomization
 # operators concurrently edit infrastructure/{security,autoscaling}; keeping this self-contained (the
 # runtimeclasses precedent) avoids colliding with either. NO shared aggregator index is edited.
 resources:
+  - openbao-ca-cert.yaml # per-ns openbao-tls ca.crt (ailab-ca) for the ESO caProvider
   - namespace.yaml # agentforge-sandbox ns (restricted PSA, pinned v1.31) + tokenless SA
   - sandbox-guard.yaml # VAP: pins the sandbox POD shape (fail-closed) on Pod CREATE/UPDATE
   - sandbox-job-guard.yaml # VAP: pins Job knobs + MIRRORS the full pod shape (fail-closed) on Job CREATE/UPDATE
@@ -29,4 +30,4 @@ resources:
   # active) + apiserver resourceVersion CAS — there is NO lease Secret to seed (the earlier SOPS/ESO
   # af-sbx-lease copy was retired when the worker moved to a k8s Lease). Re-add reaper-deployment.yaml
   # once the p1-worker digest is pinned (see reaper-deployment.yaml header).
-  # - reaper-deployment.yaml
+  - reaper-deployment.yaml

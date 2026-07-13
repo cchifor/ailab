@@ -12,6 +12,7 @@ kind: Kustomization
 # (AND remove the paused annotation) only after all three activation preflights pass (see scaledjob.yaml
 # header). The ci-guard VAP applies IMMEDIATELY so the pin exists before any runner pod can ever be created.
 resources:
+  - openbao-ca-cert.yaml # per-ns openbao-tls ca.crt (ailab-ca) for the ESO caProvider
   - namespace.yaml               # agentforge-ci ns (PSA privileged — THIS ns only) + default-deny NetworkPolicy
   - ci-guard.yaml                # VAP: pins the EXACT 2-container Kata CI pod (fail-closed) on Pod CREATE/UPDATE + ephemeralcontainers
   - serviceaccount.yaml          # the TOKENLESS runner SA (automount off, NO Role)
