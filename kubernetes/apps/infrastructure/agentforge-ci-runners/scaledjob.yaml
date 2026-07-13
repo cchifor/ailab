@@ -189,24 +189,22 @@ spec:
     strategy: "accurate"
   triggers:
     # PRIMARY (plan §A) — the KEDA 2.20 built-in `forgejo-runner` scaler: scales on the count of PENDING
-    # jobs matching the runner labels. Gitea 1.26 ≠ Forgejo, so PREFLIGHT #1 verifies this scaler's API
-    # against the live gitea (the endpoint path + the required token scope) before activation. Documented
-    # scaler metadata (KEDA docs): name/address/labels + one scope of global|owner|repo, token via
-    # authenticationRef. threshold/activationThreshold are included per the plan (target 1 pending job per
-    # runner, wake from 0 on a single pending job); PREFLIGHT #1 confirms which metadata the gitea endpoint
-    # honors (the forgejo scaler is one-job-per-runner by design).
+    # jobs matching the runner labels (one-job-per-runner by design, so NO threshold/activationThreshold
+    # knobs — those are NOT part of this scaler's metadata, codex Phase B #6; they apply only to the
+    # prometheus fallback below). Gitea 1.26 ≠ Forgejo, so PREFLIGHT #1 verifies this scaler's API against
+    # the live gitea (the endpoint path + the required token scope) before activation. Documented scaler
+    # metadata (KEDA docs): name/address/labels + one scope of global|owner|repo, token via authenticationRef.
     - type: forgejo-runner
       metadata:
         name: "self-hosted-hv"          # the registered runner name/label the scaler matches
         address: "http://gitea-http.gitea.svc.cluster.local:3000/"
-        labels: "self-hosted-hv"        # scale on jobs queued for THIS pool label
+        labels: "self-hosted-hv"        # scale on jobs queued for THIS pool label (label NAME only)
         global: "true"                  # instance-wide scope (an org runner serves all repos); PREFLIGHT #1
-        threshold: "1"                  # target pending jobs per runner (scaling math)
-        activationThreshold: "0"        # value>0 wakes from zero (a single pending job activates 0->1)
       authenticationRef:
         # A gitea token with the MINIMUM scope for queued-job visibility (PREFLIGHT #1), ESO-synced from
-        # the operator path `af/data/operator/ci/scaler-token` — DISJOINT from the reg token. Defined below;
-        # this whole file is gated/unlisted, so the TriggerAuthentication is dormant until activation.
+        # the operator path `af/data/operator/ci/scaler-token` — DISJOINT from the reg token. The producing
+        # ExternalSecret is externalsecret-scalertoken.yaml (LISTED, so the Secret exists at activation);
+        # this TriggerAuthentication (below) is gated with the ScaledJob (this whole file is unlisted).
         name: agentforge-ci-scaler-auth
     # ── FALLBACK (plan §A) — enable ONLY if forgejo-runner fails PREFLIGHT #1 ────────────────────────────
     # A small ci-dispatcher poller (mirrors af-dispatcher) queries gitea for queued Actions tasks by label
