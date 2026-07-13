@@ -12,5 +12,13 @@ terraform {
       source  = "siderolabs/talos"
       version = "~> 0.11"
     }
+    # Applies the agent-pool node identity (label + taint) from the privileged CP kubeconfig — the
+    # NodeRestriction admission plugin blocks a WORKER kubelet from self-setting arbitrary ailab.io/*
+    # labels + non-standard taints via machine.nodeLabels/nodeTaints (worker.yaml.tftpl), so those are
+    # silently dropped; the pool identity MUST be applied cluster-side (node-labels.tf).
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.30"
+    }
   }
 }
