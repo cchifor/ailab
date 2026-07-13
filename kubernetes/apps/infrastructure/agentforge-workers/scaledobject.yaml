@@ -1,0 +1,57 @@
+# KEDA scale-to-zero over the tenant-zero orchestrator worker (plan §3). SAME namespace as its target
+# (KEDA patches the target's scale subresource in-namespace). The dispatcher exports forge_pending as the
+# scale oracle; this ScaledObject reads it from kube-prometheus and drives the worker 0 -> N.
+#
+# maxReplicaCount is the HARD concurrency cap: the dispatcher reports PENDING work (not in-flight-
+# subtracted), so maxReplicas bounds concurrency while the per-issue epoch-elected claim-lock dedups
+# duplicate claims across replicas. Set to 2 = the account max_parallel. NB: the anthropic/default
+# account's max_parallel is not visible in THIS repo (it lives in the forge AgentForgeConfig, cchifor/
+# agentforge-config); AccountConfig.max_parallel defaults to 1 — reconcile this value to that config at
+# activation (the tranche report notes the choice).
+#
+# While the worker Deployment is gated/unlisted this ScaledObject has no target and stays Ready:False
+# ("ScaledObject doesn't have a valid target") — harmless in the dormant posture (like the NotReady ESOs);
+# it activates the moment worker-deployment.yaml is un-gated.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: af-orch-playground-planner
+  namespace: af-tenant-tenant-zero-playground
+  labels:
+    app.kubernetes.io/name: agentforge-orchestrator
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  scaleTargetRef:
+    name: af-orch-playground-planner # the worker Deployment (same namespace); default kind apps/v1 Deployment
+  minReplicaCount: 0                  # scale to zero when idle (the cron warm-floor is a trigger, NOT a min)
+  maxReplicaCount: 2                  # == account.max_parallel (hard concurrency cap)
+  pollingInterval: 30                 # how often KEDA evaluates the triggers (s)
+  cooldownPeriod: 300                 # wait after the last active trigger before scaling back to 0 (s)
+  triggers:
+    # (1) Prometheus scale oracle — scale on the pending backlog for THIS account+pool+role(s). The gauge is
+    #     forge_pending{account,pool,role,repo}; filtering account+pool is REQUIRED (role-only would let
+    #     another account/pool's backlog scale this worker). The role matcher covers a multi-role worker.
+    #     All KEDA trigger metadata values are STRINGS.
+    #     RECONCILIATION (report): the shipped agentforge dispatcher currently emits pool=<account_name>
+    #     (main.py _dispatch_once: "P1 pool == account; the pool concept generalizes in P2"), so the
+    #     pool="planner" selector matches only AFTER the P2 pool generalization lands — an activation
+    #     dependency. Until then the query returns empty -> ignoreNullValues -> 0 (fail-safe; the cron
+    #     warm-floor still keeps 1 in business hours). The query is the codex-finalized plan target.
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        query: sum(forge_pending{account="anthropic/default",pool="planner",role=~"planner|reviewer"})
+        threshold: "1"           # target pending items per replica
+        activationThreshold: "1" # scale FROM 0 only once >= 1 item is pending (deactivate below this)
+        ignoreNullValues: "true" # a missing sample -> treated as 0 (fail-safe to idle; warm-floor covers hours)
+    # (2) Cron warm-floor — keep 1 replica warm during business hours (interactive planner/reviewer) so the
+    #     first request of the day doesn't pay a cold 0->1 start. desiredReplicas "1" WITH minReplicaCount 0
+    #     (a trigger, NOT a min): outside the window KEDA still scales to 0. Mon-Fri 08:00-18:00.
+    - type: cron
+      metadata:
+        timezone: Europe/Bucharest
+        start: "0 8 * * 1-5"
+        end: "0 18 * * 1-5"
+        desiredReplicas: "1"
