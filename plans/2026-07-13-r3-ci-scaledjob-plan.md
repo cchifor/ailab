@@ -35,6 +35,12 @@ while runners are busy — the ScaledJob `scalingStrategy: accurate` (or include
   false`, a tokenless SA, NO host namespaces (hostNetwork/PID/IPC), NO hostPath, NO extra containers,
   digest-pinned images, bounded resources, and the reg-token Secret mounted ONLY into the `runner`
   container (never `dind`/job). Privileged is allowed ONLY for the `dind` container of an admitted CI pod.
+  **MUST reject `spec.shareProcessNamespace: true` (codex round-2):** the KEDA Forgejo sample shares the
+  PID namespace so dind can watch the runner exit, but a shared PID namespace exposes `/proc/$pid/root`, so
+  the privileged `dind` could READ the runner-only reg-token mount — defeating the token isolation. Instead,
+  signal runner-exit to dind via a NON-secret emptyDir SENTINEL file (a tiny wrapper touches it on exit).
+  The VAP `matchConstraints` must ALSO cover the `pods/ephemeralcontainers` subresource so a privileged
+  ephemeral container can't be injected post-admission to bypass the two-container pin.
 - `scaledjob.yaml` (GATED, PAUSED — placeholder runner image + `autoscaling.keda.sh/paused: "true"` so no
   live trigger can schedule it): KEDA `ScaledJob`, `jobTargetRef` a Kata Job (label `self-hosted-hv`) with
   act_runner in **EPHEMERAL mode** (`GITEA_RUNNER_EPHEMERAL=1`/`--ephemeral`) + a UNIQUE runner name per
@@ -85,7 +91,8 @@ while runners are busy — the ScaledJob `scalingStrategy: accurate` (or include
 - ci-guard VAP: admits ONLY the exact 2-container Kata CI pod (runner+dind, kata, tokenless, no host-ns/
   hostPath/extra-container, digest-pinned, bounded, reg-token→runner-only); rejects non-Kata privileged,
   hostPath, host namespaces, extra containers, a secret mount into dind, an automounted token, a non-digest
-  image, and privileged on the runner container.
+  image, privileged on the runner container, `shareProcessNamespace: true`, and a privileged ephemeral
+  container injected via the pods/ephemeralcontainers subresource.
 - ScaledJob: ephemeral flag set, unique runner name, emptyDir /data, ttl+history limits, maxReplicaCount,
   the (forgejo-scaler-OR-prometheus) trigger with threshold 1 / activationThreshold 0 / accurate strategy.
 - reg-token: operator ESO path under `operator/ci/*`, mounted ONLY in the runner container, never visible
@@ -102,4 +109,6 @@ while runners are busy — the ScaledJob `scalingStrategy: accurate` (or include
 This tranche does NOT delete the working ansible host-mode runners; the operator cuts over at activation
 (coexist during migration). On `feat/p2-unlock`, NOT a PR to main.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
+
+<!-- Phase A: codex round 1 (23 findings: forgejo scaler, agentforge-ci ns/VAP, ephemeral, reduced egress, retargeted FQDN, preflight-gating) + round 2 (1 residual: ci-guard must reject shareProcessNamespace + cover pods/ephemeralcontainers, emptyDir sentinel not shared PID) — all accepted; no pushback. Finalized. -->
