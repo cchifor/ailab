@@ -59,11 +59,19 @@ spec:
           rules:
             dns:
               - matchName: "agentforge-broker.agentforge-broker.svc.cluster.local"
-    # (b) the pool broker — via its ClusterIP SERVICE ONLY (toServices), NOT a direct broker PodIP. The
-    #     single stable Service VIP is what the broker's source-IP TOFU + single-ingress-point assume; a
-    #     direct-PodIP path would let a sandbox pin one replica and sidestep that. Restricted to the http
-    #     data port 8700 (NOT metrics 9464). Service-resolved, so the metadata/IPv6/private egressDeny
-    #     below never blocks it. The broker ingress CNP still admits ONLY the matching-pool agent identity.
+    # (b) the pool broker — allowed to EXACTLY the broker Service's backend endpoints via toServices,
+    #     restricted to the http data port 8700 (NOT metrics 9464). NOTE (codex Phase B): Cilium L3
+    #     policy allows destinations by ENDPOINT IDENTITY — toServices resolves the Service to its READY
+    #     backend pods and allows those, so it does NOT (and cannot) force VIP-only routing; a packet
+    #     addressed to a broker PodIP:8700 is the SAME allowed destination (the broker), not an escape.
+    #     This is sufficient by design: the security property is destination-CONFINEMENT (the agent may
+    #     reach ONLY the broker + kube-dns; everything else is default-deny + egressDeny). The design's
+    #     source-IP TOFU requirement (§3 "DIRECT ClusterIP, no Cilium handoff → the broker sees the peer
+    #     IP") is MET regardless of VIP-vs-PodIP: Cilium does not SNAT pod-to-pod, so the broker sees the
+    #     agent's real pod IP either way; and replica choice is harmless because session state lives in
+    #     the SHARED Postgres ledger (no per-replica affinity). toServices is preferred over a static
+    #     endpoint selector because it tracks the Service's READY endpoints. The broker ingress CNP still
+    #     admits ONLY the matching-pool agent identity.
     - toServices:
         - k8sService:
             serviceName: agentforge-broker
