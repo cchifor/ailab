@@ -79,7 +79,7 @@ spec:
       containers:
         - name: broker
           # PLACEHOLDER digest — pin the real broker image @sha256 (see header) before enabling.
-          image: registry.chifor.me/agentforge/orchestrator@sha256:e7f0197bc5573fbe9f6ddff832440b56d05c0fdf8334f90a160ea5ab27d16670
+          image: registry.chifor.me/agentforge/orchestrator@sha256:259bf1d68a1c7b31d856aed152c29c8cc405d598a2822fcfc4e29e198892a42f
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # broker` (composes to: tini -- agentforge broker).
           args: ["agentforge", "broker"]
