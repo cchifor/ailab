@@ -1,0 +1,95 @@
+# One-time OpenBao PROVISION Job (plan §B "One-time provision Job openbao-provision"). Runs
+# `agentforge openbao-provision` (orchestrator image) with the bootstrap (root) token. Idempotent via the
+# `openbao-state` sentinel: if already provisioned, exit 0 WITHOUT needing the now-revoked root. Else:
+#   - enable the `af` KV-v2 mount;
+#   - enable + configure the `kubernetes` auth backend. TokenReview plumbing uses the ROBUST design: we do
+#     NOT pass a static token_reviewer_jwt (a run-once Job's projected SA token would EXPIRE and silently
+#     break every future login). Instead token_reviewer_jwt is left empty → OpenBao uses the SERVER pod's
+#     own continuously-refreshed SA token, so the OpenBao SERVER SA (openbao-server) holds
+#     system:auth-delegator (the ClusterRoleBinding below). Without it every ESO SecretStore login is NotReady;
+#   - write base operator policies; MINT a scoped `provisioner` token (NOT root) into
+#     Secret openbao-provisioner-token; seed the canary path (af/data/operator/canary) the canary
+#     SecretStore reads; write the `openbao-state` sentinel {provisioned:"true", cluster_id:<...>};
+#   - then REVOKE the root token + delete Secret openbao-bootstrap-token. Fail-closed.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-provision
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-provision
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      serviceAccountName: openbao-provision
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provision
+          # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0).
+          image: registry.chifor.me/agentforge/orchestrator@sha256:PLACEHOLDER_ORCHESTRATOR
+          args: ["agentforge", "openbao-provision"]
+          env:
+            - { name: AF_OB_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: AF_OB_CACERT, value: "/tls/ca.crt" }
+            - { name: AF_OB_K8S_NAMESPACE, value: "openbao" }
+            - { name: AF_OB_KEYS_SECRET, value: "openbao-keys" }
+            - { name: AF_OB_BOOTSTRAP_SECRET, value: "openbao-bootstrap-token" }
+            - { name: AF_OB_PROVISIONER_SECRET, value: "openbao-provisioner-token" }
+            - { name: AF_OB_KV_MOUNT, value: "af" }
+            - { name: AF_OB_STATE_CM, value: "openbao-state" }
+            # k8s-auth: only the host. token_reviewer_jwt + kubernetes_ca_cert are deliberately UNSET so
+            # OpenBao uses its own SERVER pod SA (auto-refreshed) + local CA for TokenReviews — no static
+            # token to expire. The server SA (openbao-server) carries system:auth-delegator (below).
+            - { name: AF_OB_K8S_HOST, value: "https://kubernetes.default.svc" }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 48Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+---
+# The ONE unavoidable cluster RBAC (plan §B TokenReview plumbing). OpenBao (with token_reviewer_jwt unset)
+# uses its OWN SERVER pod SA to call TokenReview whenever any SecretStore SA logs in; tokenreviews.create is
+# granted ONLY by system:auth-delegator. Bound to the OpenBao SERVER SA (openbao-server, pinned via
+# server.serviceAccount.name in the HelmRelease), NOT the run-once provision Job — a Job's projected token
+# would expire. This grants NO Secret/token read — only the ability to submit TokenReviews.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openbao-server-auth-delegator
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: openbao-server
+    namespace: openbao

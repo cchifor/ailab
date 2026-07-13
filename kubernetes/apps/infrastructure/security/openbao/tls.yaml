@@ -1,0 +1,44 @@
+# OpenBao API-listener TLS (plan §B "TLS — fix the https:// pin mismatch"). The admission/ESO layer pins
+# `https://openbao.openbao.svc[.cluster.local]:8200`, but a freshly-installed chart listener is HTTP — this
+# cert closes that mismatch so every consumer (init/unseal/provision Jobs + ESO SecretStores) talks HTTPS.
+#
+# Issued by the `ailab-ca` ClusterIssuer (cert-manager-config/clusterissuers.yaml — CA = ailab-root-ca, so
+# every consumer verifies against THIS secret's `ca.crt`). The SANs MUST cover every DNS name reached while
+# the pod is SEALED / not-Ready, not just the Service:
+#   - openbao.openbao.svc[.cluster.local]                  -> the ESO/admission-pinned Service name (Ready pods)
+#   - openbao-0.openbao-internal.openbao.svc[.cluster.local] -> the headless per-pod name the init/unseal Jobs
+#         dial while the pod is NOT-Ready/sealed (the `-internal` headless svc publishes not-ready addresses)
+#   - openbao-active.openbao.svc.cluster.local             -> the active-node Service (HA-forward)
+# cert-manager writes tls.crt/tls.key/ca.crt into Secret `openbao-tls`, mounted into the server pod
+# (helmrelease.yaml -> /openbao/tls) and into the Jobs/Deployments as the CA (/tls/ca.crt, ca.crt only).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-tls
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: tls
+    app.kubernetes.io/part-of: agentforge
+spec:
+  secretName: openbao-tls
+  duration: 8760h # 1y
+  renewBefore: 720h # 30d — cert-manager rotates in place; the chart re-reads on pod restart
+  commonName: openbao.openbao.svc.cluster.local
+  dnsNames:
+    - openbao.openbao.svc
+    - openbao.openbao.svc.cluster.local
+    - openbao-0.openbao-internal.openbao.svc
+    - openbao-0.openbao-internal.openbao.svc.cluster.local
+    - openbao-active.openbao.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer

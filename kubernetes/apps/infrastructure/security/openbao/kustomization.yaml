@@ -1,7 +1,16 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # Reconciled by the DEDICATED clusters/ai/openbao.yaml Flux Kustomization (wait:false), NOT the shared
-# `infrastructure` one — a sealed OpenBao is not Ready and must not gate the infra layer.
+# `infrastructure` one — a sealed OpenBao is not Ready and must not gate the infra layer. Activation is
+# fully IaC: the tls/init/unsealer/provision manifests below bring OpenBao up initialised+unsealed+
+# provisioned with NO manual `bao operator` commands (see helmrelease.yaml header).
 resources:
   - namespace.yaml
   - helmrelease.yaml
+  - tls.yaml # cert-manager Certificate (ailab-ca) -> Secret openbao-tls (server + client CA)
+  - unseal-rbac.yaml # 4 split-identity SAs + namespaced Roles/RoleBindings
+  - unseal-job.yaml # `agentforge openbao-init` — init + first unseal (idempotent, fail-closed)
+  - unsealer.yaml # `agentforge openbao-unseal --loop` Deployment + egress CiliumNetworkPolicy
+  - provision-job.yaml # `agentforge openbao-provision` — af mount + k8s auth + policies + scoped token
+  - provisioner-deploy.yaml # `agentforge provisioner` controller Deployment + egress CiliumNetworkPolicy
+  - canary-secretstore.yaml # Stage-1 k8s-auth login canary (Ready = the Stage-1 gate)

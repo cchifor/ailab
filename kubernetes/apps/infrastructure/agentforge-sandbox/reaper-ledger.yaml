@@ -42,6 +42,14 @@ spec:
       server: "https://openbao.openbao.svc:8200"
       path: "af"        # KV v2 mount
       version: "v2"
+      # caProvider sweep (plan §B): verify OpenBao's cert-manager TLS cert (openbao-tls, ailab-ca). NOTE: a
+      # NAMESPACED SecretStore resolves caProvider IN ITS OWN namespace (agentforge) — ESO ignores a cross-ns
+      # `namespace:` — so Secret `openbao-tls` (ca.crt) MUST be present in THIS namespace (per-ns cert-manager
+      # Certificate or trust-manager). Until then NotReady (harmless: reaper gated + wait:false).
+      caProvider:
+        type: Secret
+        name: openbao-tls
+        key: ca.crt
       auth:
         kubernetes:
           mountPath: "kubernetes"

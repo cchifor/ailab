@@ -1,0 +1,161 @@
+# Split RBAC identities for the OpenBao bootstrap (plan §B "Split RBAC identities (4 SAs, exact verbs)").
+# Four single-purpose ServiceAccounts + tiny NAMESPACED Roles so the root/bootstrap token is NEVER readable
+# by the unsealer or the long-running provisioner controller, and no identity can `list` pods (no DNS/HTTP
+# polling side-channel). NO cluster RBAC here (the one unavoidable ClusterRoleBinding — the provision Job's
+# reviewer-JWT SA -> system:auth-delegator — lives in provision-job.yaml, co-located with its consumer).
+#
+# `create` cannot be scoped by resourceName (k8s RBAC limitation), so the create-bearing rules are kept as
+# their own tiny single-purpose rules; every get/delete/update rule IS resourceName-scoped to exactly the
+# Secret/ConfigMap it needs. The `openbao-state` ConfigMap is the durable provisioned-sentinel (plan §B
+# partial-state/sentinel): the provision Job WRITES it, the init Job READS it to distinguish a normal
+# post-provision state (root legitimately revoked) from a partial-write/disaster state.
+---
+# (1) openbao-init — writes the two boot Secrets and reads them back to unseal/verify; reads the sentinel.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao-init
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-init, app.kubernetes.io/part-of: agentforge }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-init
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-init, app.kubernetes.io/part-of: agentforge }
+rules:
+  # create the two boot Secrets (create cannot be resourceName-scoped — tiny single-purpose rule).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  # read them back to unseal + verify (scoped to exactly the two boot Secrets).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["openbao-keys", "openbao-bootstrap-token"]
+    verbs: ["get"]
+  # read the provisioned sentinel to tell "normal post-provision" from "partial-death" (never write it).
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["openbao-state"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-init
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-init, app.kubernetes.io/part-of: agentforge }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: openbao-init }
+subjects:
+  - { kind: ServiceAccount, name: openbao-init, namespace: openbao }
+---
+# (2) openbao-unsealer — the long-running loop: reads the UNSEAL KEY ONLY (never the root/bootstrap token).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao-unsealer
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-unsealer, app.kubernetes.io/part-of: agentforge }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-unsealer
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-unsealer, app.kubernetes.io/part-of: agentforge }
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["openbao-keys"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-unsealer
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-unsealer, app.kubernetes.io/part-of: agentforge }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: openbao-unsealer }
+subjects:
+  - { kind: ServiceAccount, name: openbao-unsealer, namespace: openbao }
+---
+# (3) openbao-provision — consumes the bootstrap (root) token then DELETES it; mints + reads the scoped
+#     provisioner token; writes/updates the provisioned sentinel ConfigMap.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao-provision
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-provision, app.kubernetes.io/part-of: agentforge }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-provision
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-provision, app.kubernetes.io/part-of: agentforge }
+rules:
+  # consume the bootstrap (root) token, then delete it after minting the scoped provisioner token.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["openbao-bootstrap-token"]
+    verbs: ["get", "delete"]
+  # read back the scoped provisioner token it minted (verify).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["openbao-provisioner-token"]
+    verbs: ["get"]
+  # create the provisioner-token Secret (create cannot be resourceName-scoped).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  # write the provisioned sentinel: create (unscopable) then update/get scoped to openbao-state.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["openbao-state"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-provision
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-provision, app.kubernetes.io/part-of: agentforge }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: openbao-provision }
+subjects:
+  - { kind: ServiceAccount, name: openbao-provision, namespace: openbao }
+---
+# (4) agentforge-provisioner — the long-running controller: reads the SCOPED provisioner token ONLY (never
+#     root/bootstrap). It authenticates to OpenBao with that token; it holds no other cluster authority.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentforge-provisioner
+  namespace: openbao
+  labels: { app.kubernetes.io/name: agentforge-provisioner, app.kubernetes.io/part-of: agentforge }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentforge-provisioner
+  namespace: openbao
+  labels: { app.kubernetes.io/name: agentforge-provisioner, app.kubernetes.io/part-of: agentforge }
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["openbao-provisioner-token"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentforge-provisioner
+  namespace: openbao
+  labels: { app.kubernetes.io/name: agentforge-provisioner, app.kubernetes.io/part-of: agentforge }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: agentforge-provisioner }
+subjects:
+  - { kind: ServiceAccount, name: agentforge-provisioner, namespace: openbao }

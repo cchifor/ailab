@@ -1,0 +1,119 @@
+# AgentForge provisioner CONTROLLER (plan §B "Provisioner controller Deployment agentforge-provisioner").
+# The EXISTING `agentforge provisioner` subcommand (orchestrator image): a long-running reconciler that
+# manages per-tenant OpenBao policies / k8s-auth roles bound to the exact ESO SAs + namespaces. It
+# authenticates with the SCOPED provisioner token (openbao-provisioner-token, minted by the provision Job —
+# NOT root), so a controller compromise cannot touch root or paths outside af/data/operator/*.
+# BOOTSTRAP-class: Stage-1 health depends on this controller Running, so its digest is pinned in Stage 0.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentforge-provisioner
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: agentforge-provisioner
+    app.kubernetes.io/component: provisioner
+    app.kubernetes.io/part-of: agentforge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-provisioner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentforge-provisioner
+        app.kubernetes.io/component: provisioner
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      serviceAccountName: agentforge-provisioner
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provisioner
+          # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0; bootstrap-class).
+          image: registry.chifor.me/agentforge/orchestrator@sha256:PLACEHOLDER_ORCHESTRATOR
+          args: ["agentforge", "provisioner"]
+          env:
+            # Same headless pod address the bootstrap Jobs use (= AF_OB_ADDR); the cert covers it.
+            - { name: AF_PROVISIONER_OPENBAO_URL, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - name: AF_PROVISIONER_OPENBAO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openbao-provisioner-token
+                  key: token
+                  optional: false # FAIL-CLOSED: no scoped token -> do not start
+            # CA for TLS verification of the OpenBao server cert. The controller's exact CA env var is not
+            # part of the fixed interface, so the generic Python TLS trust vars are set (honored by
+            # requests/hvac/urllib) alongside the mounted /tls/ca.crt. CHANGEME: confirm the controller reads
+            # one of these (or add AF_PROVISIONER_OPENBAO_CACERT) once the image's config surface is known.
+            - { name: REQUESTS_CA_BUNDLE, value: "/tls/ca.crt" }
+            - { name: SSL_CERT_FILE, value: "/tls/ca.crt" }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 48Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+---
+# Default-deny egress boundary (plan §B: "OpenBao + apiserver + DNS"). Complete allowed reach of the
+# controller endpoint (Cilium egress default-deny once selected).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: agentforge-provisioner
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: agentforge-provisioner
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-provisioner
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - { port: "6443", protocol: TCP }
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+      toPorts:
+        - ports:
+            - { port: "8200", protocol: TCP }
+  egressDeny:
+    - toEntities:
+        - world
+        - host
+        - remote-node
+    - toCIDR:
+        - 169.254.169.254/32
+        - 169.254.0.0/16
+        - ::/0

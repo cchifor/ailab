@@ -1,0 +1,70 @@
+# OpenBao auto-INIT Job (plan §B "Init Job openbao-init"). Runs `agentforge openbao-init` (orchestrator
+# image): dials the headless per-pod address (tolerating NXDOMAIN/refused/not-ready in a retry loop while
+# the pod comes up SEALED), and — idempotently, fail-closed:
+#   - if uninitialised: preflight a k8s write, `operator init -key-shares=1 -key-threshold=1`, then create
+#     Secret openbao-keys (unseal_key ONLY) + Secret openbao-bootstrap-token (root_token, SEPARATE Secret /
+#     RBAC), unseal, and assert sealed==false;
+#   - if initialised: reconcile against the `openbao-state` sentinel — initialised+keys+bootstrap-MISSING is
+#     OK ONLY if the sentinel says provisioned (root legitimately revoked), else FAIL LOUDLY (partial/
+#     disaster). Never re-inits over a stale key, never success-loops on a wrong key.
+# No key/token material is logged. Re-running the Job is a no-op. Idempotency truth = the sentinel, not a
+# lookup on the (possibly-revoked) root token.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-init
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-init
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 6 # modest — the pod may be sealed/not-Ready for a while; the CLI retries internally too
+  ttlSecondsAfterFinished: 86400 # auto-clean a day after Succeeded (keep logs briefly for verification)
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-init
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      serviceAccountName: openbao-init
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # orchestrator image's unified nonroot USER
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: init
+          # CHANGEME digest — pinned by scripts/pin-image-digests.py (`just pin-bootstrap`) BEFORE this Job
+          # merges (plan Stage 0). ENTRYPOINT is ["tini","--"] + console script `agentforge`, so args must
+          # be the full argv.
+          image: registry.chifor.me/agentforge/orchestrator@sha256:PLACEHOLDER_ORCHESTRATOR
+          args: ["agentforge", "openbao-init"]
+          env:
+            - { name: AF_OB_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: AF_OB_CACERT, value: "/tls/ca.crt" }
+            - { name: AF_OB_K8S_NAMESPACE, value: "openbao" }
+            - { name: AF_OB_KEYS_SECRET, value: "openbao-keys" }
+            - { name: AF_OB_BOOTSTRAP_SECRET, value: "openbao-bootstrap-token" }
+            - { name: AF_OB_KV_MOUNT, value: "af" }
+            - { name: AF_OB_STATE_CM, value: "openbao-state" }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 48Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        # CA only — the init pod verifies OpenBao's server cert; it never needs the tls.key private half.
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }

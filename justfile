@@ -90,7 +90,8 @@ ping-dev-workers:
 # Requires the Talos nocloud image staged on each node (scripts/stage-talos-image.sh) FIRST.
 agent-nodes-plan:
     tofu -chdir=kubernetes/infra/agent-nodes plan
-agent-nodes-apply:
+# Depends on nested-virt-verify (Stage-2 gate): never provision the Kata pool against a host lacking nested=Y.
+agent-nodes-apply: nested-virt-verify
     tofu -chdir=kubernetes/infra/agent-nodes apply
 
 # OpenTofu: plan/apply ONLY the Zot registry LXC (separate state from runners/dev-workers/Talos).
@@ -148,3 +149,30 @@ fmt:
 # Show everything Proxmox knows about storage (needs API token in tfvars/env)
 storage-status:
     cd {{ansible_dir}} && ansible pve_nodes -b -m command -a "pvesm status" --one-line
+
+# ============================ AgentForge v2 activation ============================
+# Fully-IaC activation of the dormant v2 stack (docs/runbooks/agentforge-activation.md).
+# Staged: 0 images -> ⛔1 operators/security merge (OpenBao auto-init/unseal/provision) ->
+# ⛔2 Kata pool -> ⛔3 agentforge merge -> ⛔4 un-gate -> ⛔5 boundary tests -> v1.1.
+
+# Stage-2 gate: assert AMD nested virt is live on every Proxmox host (Kata /dev/kvm prereq)
+nested-virt-verify:
+    python scripts/check-nested-virt.py
+
+# Stage-0 pin: bootstrap-class image digests ONLY (orchestrator + platform). Its own commit; MUST NOT
+# un-gate a workload. Usage: just pin-bootstrap sha256:<orch> sha256:<platform>
+pin-bootstrap orchestrator platform:
+    python scripts/pin-image-digests.py "orchestrator={{orchestrator}}" "agentforge-platform={{platform}}"
+
+# Stage-4 pin: workload image digests. Usage: just pin-workloads broker=sha256:.. sandbox=sha256:.. ...
+pin-workloads +pins:
+    python scripts/pin-image-digests.py {{pins}}
+
+# Stage-1 verify: OpenBao init/unseal/provision + the canary SecretStore login (the E2E k8s-auth proof)
+openbao-status:
+    kubectl --context admin@ai -n openbao get pods,jobs,secrets,cm,secretstore,externalsecret 2>/dev/null || true
+    @echo "--- canary ExternalSecret (must be Ready=True after provision) ---"
+    kubectl --context admin@ai -n openbao get externalsecret openbao-canary -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}{"\n"}' 2>/dev/null || true
+
+# NB: `agent-nodes-plan`/`agent-nodes-apply` already exist above; run `just nested-virt-verify` FIRST
+# (Stage-2 gate) before `just agent-nodes-apply` — the Kata pool needs nested=Y on the target hosts.

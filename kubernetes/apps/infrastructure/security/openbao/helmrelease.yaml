@@ -1,29 +1,31 @@
 # OpenBao — the AgentForge v2 P2 secrets vault (ADR 0019). Access keys (forge PATs/HMAC/git-push/
 # config bearers, per-workspace tokens) live here; External Secrets Operator (see ../external-secrets)
-# syncs them into namespaced k8s Secrets. This installs ONLY the operator/server — all secret material
-# and auth-backend wiring is operator-run at bootstrap (like the other manual bootstrap secrets).
+# syncs them into namespaced k8s Secrets. This installs the operator/server + the TLS listener; the
+# init/unseal/provision wiring is done by in-cluster Jobs (kustomization.yaml), NOT by hand.
 #
-# ── OPERATOR BOOTSTRAP (manual, one-time — NOT baked here; sealed until done) ────────────────────────
+# ── ACTIVATION IS FULLY IaC — NO manual `bao operator` commands (plan §B) ─────────────────────────────
 # A freshly-installed OpenBao is SEALED: its pod is NOT Ready until initialised + unsealed. That is why
-# this is reconciled by a DEDICATED Flux Kustomization with `wait: false` (clusters/ai/openbao.yaml) —
-# a sealed pod must never gate/wedge the infrastructure layer.
-#   1. Init (once):   kubectl -n openbao exec -it openbao-0 -- bao operator init -key-shares=1 -key-threshold=1
-#                     → SAVE the unseal key + root token OFFLINE (e.g. Vaultwarden). NEVER commit them.
-#   2. Unseal (each pod, after every restart until auto-unseal is configured):
-#                     kubectl -n openbao exec -it openbao-0 -- bao operator unseal <unseal-key>
-#   3. Enable the Kubernetes auth backend ESO will use (runtime, NOT here):
-#                     bao auth enable kubernetes
-#                     bao write auth/kubernetes/config kubernetes_host="https://kubernetes.default.svc"
-#                     # then a policy granting read on the AgentForge secret paths + a k8s-auth ROLE bound
-#                     # to the ESO ServiceAccount (external-secrets ns). ESO's SecretStore (a DIFFERENT
-#                     # stream) references THIS role. Role/policy content is operator/runtime, not IaC.
-#   4. (Recommended) configure auto-unseal (transit/KMS) so pod restarts don't re-seal — homelab may
-#      keep manual unseal; document the unseal key location in the runbook.
+# this is reconciled by a DEDICATED Flux Kustomization with `wait: false` (clusters/ai/openbao.yaml) — a
+# sealed pod must never gate/wedge the infrastructure layer. Bring-up is codified, no `kubectl exec`:
+#   - tls.yaml            — cert-manager (ailab-ca) issues Secret openbao-tls; the listener below is HTTPS
+#                           (SANs cover the headless per-pod name the Jobs dial while sealed/not-Ready).
+#   - unseal-job.yaml     — `agentforge openbao-init`: init (1-of-1), stores unseal_key + root_token in
+#                           SEPARATE Secrets (openbao-keys / openbao-bootstrap-token), first unseal. Fail-
+#                           closed + idempotent (anchored on the openbao-state sentinel ConfigMap).
+#   - unsealer.yaml       — `agentforge openbao-unseal --loop`: re-unseals after any restart (homelab
+#                           stand-in for transit/KMS auto-unseal; unseal key is an in-cluster Secret).
+#   - provision-job.yaml  — `agentforge openbao-provision`: enable the `af` KV-v2 mount + `kubernetes`
+#                           auth (incl. TokenReview), write operator policies, mint a SCOPED provisioner
+#                           token, seed the canary, then REVOKE root. This is where the ESO auth backend +
+#                           roles/policies come from — runtime, but now codified, not a manual step.
+#   - canary-secretstore.yaml — a k8s-auth login canary; its Ready status is the Stage-1 activation gate.
+# The unseal key lives in an in-cluster Secret (accepted homelab residual — etcd-at-rest encryption is a
+# separate CP-rolling change; see docs/runbooks/agentforge-activation.md).
 #
 # ── HA NOTE ──────────────────────────────────────────────────────────────────────────────────────────
 # This runs single-node raft (replicas: 1) — a real on-disk vault (NOT dev/in-memory), dev-ish sizing
-# for the homelab. To grow to HA: bump server.ha.replicas to 3, then `bao operator raft join` +
-# `bao operator unseal` each new pod (operator step). Integrated-storage raft is the HA path.
+# for the homelab. To grow to HA: bump server.ha.replicas to 3, add retry_join to the raft config below,
+# `bao operator raft join` + unseal each new pod (a per-pod unsealer set). Integrated-storage raft is HA.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -41,24 +43,71 @@ spec:
         name: openbao
         namespace: flux-system
   values:
+    # HTTPS everywhere: flip the chart off its HTTP default so BAO_ADDR + the readiness/liveness probes use
+    # https (the probe is `bao status -tls-skip-verify`, so it tolerates the SAN-mismatched 127.0.0.1 loop-
+    # back). The listener TLS files themselves come from server.ha.raft.config below. VERIFIED against the
+    # openbao-helm 0.28.4 values.yaml: `global.tlsDisable` (default true) exists (vault-helm parity holds).
+    global:
+      tlsDisable: false
     # ESO reads secrets over the API — the Vault Agent injector sidecar is not needed.
     injector:
       enabled: false
     csi:
       enabled: false
     server:
+      # PIN the server SA name so the auth-delegator ClusterRoleBinding (provision-job.yaml) targets a
+      # deterministic identity — OpenBao runs as this SA and uses its (auto-refreshed) token for TokenReview.
+      serviceAccount:
+        create: true
+        name: openbao-server
       # Single-node integrated-storage (raft). standalone(file) is auto-off when ha.enabled.
       standalone:
         enabled: false
+      # Mount the cert-manager-issued openbao-tls Secret so the listener HCL below can reference it. Using
+      # explicit volumes/volumeMounts (NOT server.extraVolumes) to pin the EXACT mountPath /openbao/tls that
+      # the tls_*_file paths reference (extraVolumes forces /openbao/userconfig/<name>). VERIFIED against
+      # openbao-helm 0.28.4 values.yaml: server.volumes/volumeMounts/extraEnvironmentVars/ha.raft.config exist.
+      volumes:
+        - name: openbao-tls
+          secret:
+            secretName: openbao-tls
+      volumeMounts:
+        - name: openbao-tls
+          mountPath: /openbao/tls
+          readOnly: true
+      # CA for any TLS calls the server itself makes; the tls_*_file paths are in the raft config below.
+      extraEnvironmentVars:
+        VAULT_CACERT: /openbao/tls/ca.crt
+        BAO_CACERT: /openbao/tls/ca.crt
       ha:
         enabled: true
         replicas: 1 # homelab dev-ish; HA = 3 + `bao operator raft join` (see header)
         raft:
           enabled: true
           setNodeId: true
-          # Chart ships a working default raft HCL (storage "raft" path=/openbao/data, tcp listener,
-          # service_registration kubernetes, disable_mlock=true) — not overriding it. To expose
-          # Prometheus metrics later, add a telemetry{} stanza + unauthenticated_metrics_access here.
+          # OVERRIDE the chart default raft HCL to add the TLS listener (plan §B — close the https:// pin
+          # mismatch). Reproduces the single-node default (storage raft path=/openbao/data, tcp listener,
+          # service_registration kubernetes, disable_mlock=true) + the tls_*_file paths pointing at the
+          # mounted openbao-tls Secret. To expose Prometheus metrics later, add a telemetry{} stanza +
+          # unauthenticated_metrics_access here.
+          config: |
+            ui = true
+
+            listener "tcp" {
+              address            = "[::]:8200"
+              cluster_address    = "[::]:8201"
+              tls_cert_file      = "/openbao/tls/tls.crt"
+              tls_key_file       = "/openbao/tls/tls.key"
+              tls_client_ca_file = "/openbao/tls/ca.crt"
+            }
+
+            storage "raft" {
+              path = "/openbao/data"
+            }
+
+            service_registration "kubernetes" {}
+
+            disable_mlock = true
       dataStorage:
         enabled: true
         size: 2Gi # a secrets vault raft store is tiny
