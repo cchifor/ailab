@@ -1,5 +1,7 @@
 # Implementation review — r3-worker-autoscaling — round 1
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
+
+**FINALIZED — codex Phase B round 2 = READY TO MERGE onto feat/p2-unlock.** R1 3 important -> all fixed -> R2 all CLOSED, no regressions. Dormant (both Deployments gated/unlisted, no privilege_hardening flip). Cross-repo follow-up (non-blocking): the af-dispatcher must emit forge_pending{pool=<pool>} not {pool=<account>} before activation.
 ## Summary
 - Dormancy discipline is mostly intact: both Deployments are unlisted, gated, and still use placeholder digests; listing the ScaledObject while the target Deployment is gated is explicitly documented as a dormant `Ready=False` state.
 - Reuse is mostly correct: the worker uses the existing `af-orch-playground-planner` ServiceAccount, existing tenant credentials, and the expected pinned `AF_SANDBOX_*` values; capability signing material remains worker-only.
