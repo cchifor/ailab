@@ -24,19 +24,25 @@
 #      via dataFrom.extract, so both surface here automatically once provisioned — orchestrator-only, NEVER
 #      a sandbox Job);
 #   3. add `- worker-deployment.yaml` to kustomization.yaml.
+# ⚠ POD LABELS ARE OPERATOR-ONLY (codex Phase B #2). The worker shares the CP-rendered tenant namespace,
+# whose CP tenant NetworkPolicy (agentforge-platform renderer 40-networkpolicy.yaml) selects
+# podSelector={agentforge.io/pool: <pool>} with `ingress: []` + BROAD egress (53/8080/443). If this
+# operator worker carried `agentforge.io/pool: planner` it would be SHADOWED by that k8s NetworkPolicy:
+# its egress would UNION to any :443/:8080 (defeating the forge+apiserver-only Cilium boundary) and its
+# ingress would be CP-denied. So the worker carries NO agentforge.io/* pod label — only app.kubernetes.io
+# operator labels — and its Cilium policy (cilium-egress.yaml) selects on those. This is SAFE against the
+# sandbox VAPs: sandbox-guard/sandbox-job-guard pin agentforge.io/pool on the SANDBOX JOB pods (trust-class
+# agent/test) the worker CREATES via AF_SANDBOX_POOL, NOT on this orchestrator pod.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: af-orch-playground-planner # == the SA + the KEDA scaleTargetRef name
   namespace: af-tenant-tenant-zero-playground
   labels:
-    app.kubernetes.io/name: agentforge-orchestrator
+    app.kubernetes.io/name: agentforge-worker
     app.kubernetes.io/component: orchestrator
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
-    agentforge.io/org: tenant-zero
-    agentforge.io/workspace: playground
-    agentforge.io/pool: planner
 spec:
   # replicas is OWNED by KEDA (scaledobject.yaml, minReplicaCount 0). Seed at 0 so the gated Deployment is
   # scaled-to-zero at activation and KEDA drives it up on forge backlog.
@@ -47,17 +53,17 @@ spec:
       maxSurge: 0 # AF_WORKER_NAME is the shared claim-lock owner; avoid a second live orchestrator on rollout
   selector:
     matchLabels:
-      app.kubernetes.io/name: agentforge-orchestrator
-      agentforge.io/pool: planner
+      app.kubernetes.io/name: agentforge-worker
+      app.kubernetes.io/managed-by: agentforge-operator
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: agentforge-orchestrator
+        # OPERATOR-ONLY labels (see header) — no agentforge.io/pool, so the CP tenant NetworkPolicy never
+        # selects this pod. cilium-egress.yaml keys its endpointSelector on these.
+        app.kubernetes.io/name: agentforge-worker
         app.kubernetes.io/component: orchestrator
         app.kubernetes.io/part-of: agentforge
-        agentforge.io/org: tenant-zero
-        agentforge.io/workspace: playground
-        agentforge.io/pool: planner # also the cilium-egress.yaml endpoint selector
+        app.kubernetes.io/managed-by: agentforge-operator
     spec:
       serviceAccountName: af-orch-playground-planner # the EXISTING orchestrator SA (do NOT create a new one)
       automountServiceAccountToken: true # REQUIRED: the orchestrator creates/watches Jobs + CAS's the Lease
@@ -81,6 +87,10 @@ spec:
           image: registry.chifor.me/agentforge/p1-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
+          ports:
+            # Prometheus metrics (metrics_port). The webhook API (8700) is NOT declared/exposed: it has no
+            # Service and cilium-egress.yaml puts the worker in ingress default-deny except this metrics port.
+            - { name: metrics, containerPort: 9464, protocol: TCP }
           env:
             # FIXED worker identity — a CONFIGURED constant, NOT the pod name (a per-pod name would break
             # roles_for(worker_name) and the claim-lock owner). Shared across KEDA replicas is safe: claims

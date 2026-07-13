@@ -18,7 +18,7 @@ metadata:
   name: af-orch-playground-planner
   namespace: af-tenant-tenant-zero-playground
   labels:
-    app.kubernetes.io/name: agentforge-orchestrator
+    app.kubernetes.io/name: agentforge-worker
     app.kubernetes.io/component: orchestrator
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
