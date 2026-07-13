@@ -46,9 +46,19 @@ spec:
         - ports:
             - { port: "53", protocol: UDP }
             - { port: "53", protocol: TCP }
+          # DNS L7 restricted to the EXACT service names the CI runner needs (codex Phase B #8). A
+          # `matchPattern: "*"` is an exfil path: arbitrary CI could encode data into external DNS labels
+          # that CoreDNS recurses upstream. So resolution is confined to the in-cluster forge + the
+          # package-proxy + the DinD registry-mirror names ONLY; any other query is refused (no DNS tunneling).
           rules:
             dns:
-              - matchPattern: "*"
+              - matchName: "gitea-http.gitea.svc.cluster.local"
+              # TODO(PREFLIGHT #2): the real package-proxy + DinD registry-mirror service FQDNs (match the
+              # toEndpoints selectors below). RESIDUAL: if a package proxy is EXTERNAL at activation, its DNS
+              # name is added here as a SCOPED, MONITORED entry alongside the matching toFQDNs egress — never
+              # a wildcard.
+              - matchName: "package-proxy-PLACEHOLDER.agentforge-ci-proxy-PLACEHOLDER.svc.cluster.local"
+              - matchName: "dind-registry-mirror-PLACEHOLDER.agentforge-ci-proxy-PLACEHOLDER.svc.cluster.local"
     # (2) the FORGE — in-cluster Gitea (gitea-http.gitea.svc:3000). Matched by ENDPOINT identity
     #     (namespace gitea + the gitea app label), so the private-range/world egressDeny below never blocks
     #     it. The runner registers, polls for jobs, uploads logs/artifacts, and reaches the built-in
