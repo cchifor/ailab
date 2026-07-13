@@ -1,0 +1,50 @@
+# AgentForge v2 P2 R-3 — the OPERATOR-OWNED k8s-native CI-runner namespace (plans/
+# 2026-07-13-r3-ci-scaledjob-plan.md). A SEPARATE namespace from agentforge-sandbox: a CI runner has a
+# HARDER, DIFFERENT threat model (it runs arbitrary repo CI + a PRIVILEGED DinD + needs package egress),
+# which the sandbox's `restricted` PSA + sandbox-guard VAP would (correctly) reject. So this ns — and
+# ONLY this ns — is PSA `privileged`; the CI-specific ValidatingAdmissionPolicy (ci-guard.yaml) is the
+# REAL fence that pins the exact 2-container Kata CI pod. Do NOT widen agentforge-sandbox to match.
+#
+# Created in the CP-UNWRITABLE cchifor/ailab repo (NOT the tenant reconcile path, NOT the CP): a fully
+# compromised control plane can neither relax the PSA level, drop the ci-guard that pins the CI pod
+# shape, nor grant the tokenless runner SA any RBAC.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentforge-ci
+  labels:
+    # PSA `privileged` — REQUIRED because the CI pod runs a privileged `dind` sidecar (which `baseline`/
+    # `restricted` reject). This is SCOPED to agentforge-ci ONLY; the fail-closed fence is ci-guard.yaml
+    # (a VAP that admits ONLY the exact runner+dind Kata pod and rejects everything else) + the
+    # default-deny NetworkPolicy below. enforce-version is PINNED so a newer API server can't silently
+    # change what a level means (the cluster is k8s 1.31 — see admission/tenant-guard.yaml).
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: v1.31
+    # warn/audit at `baseline` so a stray non-conforming pod is still surfaced in audit logs (the CI pod
+    # itself will warn on the privileged dind — expected + acceptable; ci-guard is the enforcement).
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/warn-version: v1.31
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/audit-version: v1.31
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+---
+# Namespace-wide DEFAULT-DENY (k8s NetworkPolicy). Selecting all pods with both policyTypes and NO
+# ingress/egress rules denies ALL traffic in both directions for every pod in agentforge-ci — the
+# baseline. The CI runner's narrow allowances (forge + package proxy + DinD image registry egress, DNS)
+# are a CiliumNetworkPolicy (cilium.yaml). Starting from zero connectivity + opening the minimum is the
+# same posture as agentforge-broker/-sandbox.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: agentforge-ci
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  podSelector: {} # every pod in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  # no ingress: [] / egress: [] rules -> deny all in both directions
