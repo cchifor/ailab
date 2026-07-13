@@ -13,12 +13,31 @@
 # P2 F1a adds the ESO GVKs (external-secrets.io SecretStore/ExternalSecret) to the allowlist + field pins
 # (validations 10-11) so the CP-rendered per-tenant SecretStore/ExternalSecrets are admitted, but ONLY in
 # the OpenBao/vault + creationPolicy=Owner + per-tenant-key shape — nothing else.
+#
+# P2 R-2 §6 TIGHTENS the ESO path further, via an OPERATOR-owned correlation (validations 12-15). The
+# merged 10-11 left UNPINNED the SecretStore metadata.name, the OpenBao kubernetes-auth role, the
+# serviceAccountRef.name VALUE, the ExternalSecret target.name / secretStoreRef.name, and — critically —
+# the source-key <org>/<workspace> segments were only syntactic, NOT correlated to the namespace.
+# Correlation-by-CEL is impossible (ns labels are CP-written/untrusted; af-tenant-<org>-<ws> is not
+# injective), so the VAP now takes a `paramRef` to the OPERATOR-owned `agentforge-tenant-map` ConfigMap
+# (tenant-map.yaml) — the authoritative ns -> "<org>/<workspace>/<allowed-creds>" map. 12-15 look up the
+# entry for the object's namespace (fail-closed if absent), and pin the SecretStore/ExternalSecret
+# names/role/SA + every source key to the ACTUAL CP-rendered per-tenant values for THAT org/workspace
+# (renderer.py: SecretStore/serviceAccountRef/secretStoreRef == `af-eso-<workspace>`; the vault role ==
+# `af-tenant-<org>-<workspace>`; key == `tenants/<org>/<workspace>/…`). Admission is defense-in-depth; the
+# per-workspace OpenBao role ACL (exact ns+SA+audience+TTL) remains the mandatory confinement.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: agentforge-tenant-guard
 spec:
   failurePolicy: Fail
+  # P2 R-2 §6: bind the OPERATOR-owned correlation map (tenant-map.yaml). The binding pins
+  # paramRef.namespace + parameterNotFoundAction:Deny (fail-closed) so a tenant can neither supply its
+  # own map nor bypass correlation by deleting it; every validation also guards `params != null`.
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
   matchConstraints:
     resourceRules:
       - apiGroups: ["*"]
@@ -35,6 +54,49 @@ spec:
       expression: "(namespaceObject != null && has(namespaceObject.metadata) && has(namespaceObject.metadata.labels)) ? namespaceObject.metadata.labels : {}"
     - name: isSandboxNs
       expression: "'ailab.io/agentforge-sandbox' in variables.nsLabels && variables.nsLabels['ailab.io/agentforge-sandbox'] == 'true'"
+    # -- P2 R-2 §6 operator-owned correlation (validations 12-15) --------------------------------
+    # These fire ONLY for the ESO kinds; every ESO validation short-circuits on `!isEsoKind` FIRST,
+    # so a non-ESO kind (Namespace/SA/…) never evaluates the map lookup below.
+    - name: isEsoKind
+      expression: "request.kind.kind in ['SecretStore', 'ExternalSecret']"
+    # The operator map's data (empty if the param is missing/dataless → hasEntry is then false →
+    # validation 12 rejects the ESO object, fail-closed).
+    - name: mapData
+      expression: "(params != null && has(params.data)) ? params.data : {}"
+    # Guarded ns read (a Namespace object has no metadata.namespace → '' → no entry, harmless since
+    # the ESO validations are isEsoKind-gated anyway).
+    - name: esoNs
+      expression: "has(object.metadata.namespace) ? object.metadata.namespace : ''"
+    - name: hasEntry
+      expression: "variables.esoNs in variables.mapData"
+    # "<org>/<workspace>/<creds>" -> [org, ws, credsCSV]. org/ws are canonical DNS slugs and creds
+    # names are DNS-1123 (no '/'), so a well-formed entry splits into EXACTLY 3 parts.
+    - name: entryParts
+      expression: "variables.hasEntry ? variables.mapData[variables.esoNs].split('/') : []"
+    - name: entryOk
+      expression: "size(variables.entryParts) == 3"
+    - name: org
+      expression: "variables.entryOk ? variables.entryParts[0] : ''"
+    - name: ws
+      expression: "variables.entryOk ? variables.entryParts[1] : ''"
+    - name: allowedCreds
+      expression: "variables.entryOk ? variables.entryParts[2].split(',') : []"
+    # The DETERMINISTIC CP-rendered per-tenant names (agentforge-platform renderer.py). NB: the
+    # SecretStore metadata.name, its serviceAccountRef.name AND the ExternalSecret secretStoreRef.name
+    # are ALL `af-eso-<workspace>` (eso_auth_sa_name); ONLY the OpenBao kubernetes-auth role is
+    # `af-tenant-<org>-<workspace>` (openbao_role).
+    - name: esoStoreName
+      expression: "'af-eso-' + variables.ws"
+    - name: vaultRole
+      expression: "'af-tenant-' + variables.org + '-' + variables.ws"
+    # Every ESO source key MUST be under this exact per-tenant prefix (openbao_orchestrator_key =
+    # `tenants/<org>/<workspace>/orchestrator`). The trailing '/' forces a non-empty leaf segment.
+    - name: keyPrefix
+      expression: "'tenants/' + variables.org + '/' + variables.ws + '/'"
+    # The SecretStore's kubernetes-auth block (or {} for non-SecretStore / malformed) so validation 13
+    # can read role/serviceAccountRef without nested has() chains erroring.
+    - name: ssK8sAuth
+      expression: "(request.kind.kind == 'SecretStore' && has(object.spec) && has(object.spec.provider) && has(object.spec.provider.vault) && has(object.spec.provider.vault.auth) && has(object.spec.provider.vault.auth.kubernetes)) ? object.spec.provider.vault.auth.kubernetes : {}"
   validations:
     # (1) GVK allowlist — reject any kind the tenant path is not permitted to create.
     - expression: >-
@@ -146,7 +208,71 @@ spec:
             has(d.remoteRef) && has(d.remoteRef.key) &&
             d.remoteRef.key.matches('^[A-Za-z0-9][A-Za-z0-9/_-]*$') &&
             d.remoteRef.key.contains('/') && !d.remoteRef.key.startsWith('sandbox/'))))
-      message: "agentforge tenant path: an ExternalSecret must set target.creationPolicy=Owner, secretStoreRef.kind=SecretStore, and every source key must be a per-tenant '<org>/<workspace>/…' key (multi-segment, not under 'sandbox/', no traversal)."
+      message: "agentforge tenant path: an ExternalSecret must set target.creationPolicy=Owner, secretStoreRef.kind=SecretStore, and every source key must be a per-tenant '<org>/<workspace>/…' key (multi-segment, not under 'sandbox/', no traversal). (P2 R-2: ALSO correlated + tightened by validations 12-15 below.)"
+    # (12) P2 R-2 §6 — CORRELATION GATE. Every SecretStore/ExternalSecret must have a well-formed
+    #      operator-map entry for its OWN namespace (fail-closed if params is null or the entry is
+    #      absent — an un-onboarded ns gets no ESO). The entry's org/ws are INDEPENDENTLY re-validated
+    #      as canonical DNS slugs and the reserved set {tenants, operator} is rejected — defense-in-depth
+    #      even though the operator wrote the map (the reserved slugs are what keep a tenant key from
+    #      overlapping an operator `af/data/operator/*` path).
+    - expression: >-
+        !variables.isEsoKind ||
+        (params != null && variables.hasEntry && variables.entryOk &&
+         variables.org.matches('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$') &&
+         variables.ws.matches('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$') &&
+         !(variables.org in ['tenants', 'operator']) &&
+         !(variables.ws in ['tenants', 'operator']))
+      message: "agentforge tenant path: a SecretStore/ExternalSecret requires an operator agentforge-tenant-map entry '<org>/<workspace>/<creds>' for its namespace, with a canonical, non-reserved org/workspace (no map entry / missing param map => no ESO, fail-closed)."
+    # (13) P2 R-2 §6 — SecretStore name/role/SA PIN, correlated to the map entry. metadata.name and the
+    #      serviceAccountRef.name are BOTH the CP's `af-eso-<workspace>` (renderer eso_auth_sa_name); the
+    #      OpenBao kubernetes-auth role is `af-tenant-<org>-<workspace>` (renderer openbao_role). If a
+    #      serviceAccountRef.namespace is set it MUST be THIS namespace (no foreign-ns SA token). Leaves
+    #      provider.vault.path=='af' + mountPath=='kubernetes' to validation 10 (NOT tenant-prefixed).
+    - expression: >-
+        request.kind.kind != 'SecretStore' ||
+        (params != null && variables.hasEntry && variables.entryOk &&
+         object.metadata.name == variables.esoStoreName &&
+         'role' in variables.ssK8sAuth && variables.ssK8sAuth.role == variables.vaultRole &&
+         'serviceAccountRef' in variables.ssK8sAuth &&
+         'name' in variables.ssK8sAuth.serviceAccountRef &&
+         variables.ssK8sAuth.serviceAccountRef.name == variables.esoStoreName &&
+         (!('namespace' in variables.ssK8sAuth.serviceAccountRef) ||
+          variables.ssK8sAuth.serviceAccountRef.namespace == variables.esoNs))
+      message: "agentforge tenant path: a SecretStore must be named 'af-eso-<workspace>', use the OpenBao kubernetes-auth role 'af-tenant-<org>-<workspace>', and authenticate as serviceAccountRef 'af-eso-<workspace>' in THIS namespace — all correlated to the operator tenant-map entry for its namespace."
+    # (14) P2 R-2 §6 — ExternalSecret secretStoreRef/target PIN + reject dataFrom.find. secretStoreRef
+    #      must be {name: 'af-eso-<workspace>', kind: SecretStore}; target.name must be one of the
+    #      operator-mapped allowed creds names; and every dataFrom entry must be an `extract` (a
+    #      `dataFrom.find` — a wildcard OpenBao search — is rejected outright).
+    - expression: >-
+        request.kind.kind != 'ExternalSecret' ||
+        (params != null && variables.hasEntry && variables.entryOk &&
+         has(object.spec.secretStoreRef) && has(object.spec.secretStoreRef.name) &&
+         object.spec.secretStoreRef.name == variables.esoStoreName &&
+         has(object.spec.secretStoreRef.kind) &&
+         object.spec.secretStoreRef.kind == 'SecretStore' &&
+         has(object.spec.target) && has(object.spec.target.name) &&
+         variables.allowedCreds.exists(c, c == object.spec.target.name) &&
+         (!has(object.spec.dataFrom) || object.spec.dataFrom.all(d,
+            !has(d.find) && has(d.extract) && has(d.extract.key))))
+      message: "agentforge tenant path: an ExternalSecret must reference secretStoreRef {name:'af-eso-<workspace>', kind:SecretStore}, set target.name to one of the operator-mapped allowed creds, and use extract only (dataFrom.find is forbidden) — all correlated to the operator tenant-map entry."
+    # (15) P2 R-2 §6 — ExternalSecret SOURCE-KEY correlation, SEGMENT-based. Every data[].remoteRef.key
+    #      and dataFrom[].extract.key must startWith the exact per-tenant prefix 'tenants/<org>/<ws>/'
+    #      (so no other tenant, no 'operator/*', no legacy 'af/data/<org>/<ws>'), AND every '/'-split
+    #      SEGMENT must match ^[a-z0-9][a-z0-9._-]*$ — which rejects a '.'/'..' segment (incl. a TERMINAL
+    #      'tenants/o/w/..'), an empty segment ('//', leading '/', trailing '/'), and any non-slug
+    #      segment. A prefix-only startsWith would miss a terminal '..'; the per-segment check closes it.
+    - expression: >-
+        request.kind.kind != 'ExternalSecret' ||
+        (variables.entryOk &&
+         (!has(object.spec.dataFrom) || object.spec.dataFrom.all(d,
+            has(d.extract) && has(d.extract.key) &&
+            d.extract.key.startsWith(variables.keyPrefix) &&
+            d.extract.key.split('/').all(s, s.matches('^[a-z0-9][a-z0-9._-]*$')))) &&
+         (!has(object.spec.data) || object.spec.data.all(d,
+            has(d.remoteRef) && has(d.remoteRef.key) &&
+            d.remoteRef.key.startsWith(variables.keyPrefix) &&
+            d.remoteRef.key.split('/').all(s, s.matches('^[a-z0-9][a-z0-9._-]*$')))))
+      message: "agentforge tenant path: every ExternalSecret source key must be under 'tenants/<org>/<workspace>/…' for THIS namespace's mapped org/workspace, with per-segment rejection of '.'/'..' (incl. terminal '..'), empty segments ('//', leading/trailing '/'), and any legacy 'af/data/<org>/<ws>' key."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -155,3 +281,10 @@ metadata:
 spec:
   policyName: agentforge-tenant-guard
   validationActions: ["Deny"]
+  # P2 R-2 §6: bind the OPERATOR-owned correlation map. `namespace` is REQUIRED (else the apiserver
+  # resolves the param in the REQUEST namespace, letting a tenant supply its own map); Deny on a missing
+  # map is fail-closed (the whole tenant path is blocked until the operator commits the map).
+  paramRef:
+    name: agentforge-tenant-map
+    namespace: agentforge
+    parameterNotFoundAction: Deny

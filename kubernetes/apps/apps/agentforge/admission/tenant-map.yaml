@@ -1,0 +1,39 @@
+# OPERATOR-owned tenant correlation map (P2 R-2 §6) — the AUTHORITATIVE
+# namespace -> (org/workspace/allowed-creds) binding the agentforge-tenant-guard VAP consumes
+# as its `paramRef`. It exists BECAUSE the correlation cannot be a CEL label-derive:
+#
+#   * the tenant reconciler can create/patch Namespaces, so `agentforge.io/org|workspace|pool`
+#     labels are CP-WRITTEN (untrusted); and
+#   * `af-tenant-<org>-<ws>` is NOT injective when both slugs contain hyphens
+#     (`(a-b, c)` vs `(a, b-c)` collide), so a namespace NAME cannot be reversed to a unique
+#     (org, ws) either.
+#
+# So the VAP must NOT trust ns labels/name to decide which org/workspace a namespace legitimately
+# owns. Instead each entry here is authoritative and OPERATOR-committed:
+#
+#   data["<namespace-name>"] = "<org>/<workspace>/<comma-separated allowed creds Secret names>"
+#
+# This ConfigMap lives in the operator-owned `agentforge` namespace, which the tenant repo /
+# tenant-reconciler CANNOT write (a separate tenant-guard validation blocks tenant writes outside
+# af-tenant-* namespaces, and the operator commits this file directly). The VAP binding pins
+# `paramRef.namespace: agentforge` (REQUIRED — without it the apiserver resolves the param in the
+# REQUEST namespace, letting a tenant supply its own map) + `parameterNotFoundAction: Deny` (a
+# missing map fails CLOSED). Each ESO object is correlated against `data[<its namespace>]`; an
+# un-onboarded namespace has no entry, so it gets NO ExternalSecret/SecretStore.
+#
+# P2 holds ONE operator-committed entry (the tenant-zero shadow, org=tenant-zero,
+# workspace=playground, pool=planner). The allowed-creds name is the CP renderer's
+# `creds_secret_name` = `af-creds-<workspace>-<pool>` (agentforge-platform renderer.py;
+# config_bearer_secret unset for the shadow). Multi-tenant P3 populates this from the operator
+# provisioner (CP-untrusted-input-validated), NEVER from CP labels.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentforge-tenant-map
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+data:
+  # af-tenant-<org>-<ws> = "<org>/<workspace>/<allowed creds Secret names, comma-separated>"
+  af-tenant-tenant-zero-playground: "tenant-zero/playground/af-creds-playground-planner"
