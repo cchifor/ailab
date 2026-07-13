@@ -1,0 +1,106 @@
+# CI runner egress boundary (plan §B). Cilium is the CNI; SELECTING the runner endpoint for ingress AND
+# egress puts it into both-direction default-deny (on top of the ns default-deny NetworkPolicy), so these
+# rules are its COMPLETE allowed reach. The endpointSelector matches the CI pod (both `runner` + `dind`
+# share the pod network namespace, so this ONE policy governs the daemon's image pulls AND the runner's
+# forge/cache traffic).
+#
+# CI egress = the FORGE (in-cluster gitea-http.gitea.svc:3000) + a package registry/proxy + the DinD
+# image registry ONLY. Everything else is denied: kube-apiserver, world, host, remote-node, the metadata
+# service (169.254.169.254), all cluster-private ranges, and IPv6.
+#
+# ⚠ RESIDUAL (plan §B — read before activation): CI egress-allowlisting does NOT close exfiltration the
+# way the sandbox's model-only boundary does. A package registry/proxy is itself an EXFIL PATH (it
+# forwards outbound on the CI pod's behalf), so allowlisting it does not stop a hostile PR workflow from
+# tunnelling data out through it. The mitigation is at a different layer: untrusted PR workflows must
+# receive NO sensitive secrets (the per-workflow GITEA_TOKEN is gitea-issued + minimally scoped; the
+# runner-registration token is runner-container-only, never handed to a job), and the operator logs/
+# proxies outbound package traffic. This policy bounds the DESTINATIONS, not the data.
+#
+# ⚠ PREFLIGHT #2 (activation): the package proxy + DinD image registry are expressed here as IN-CLUSTER
+# endpoint-identity PLACEHOLDERS (namespace/labels TBD) so `world` can stay fully denied — the most
+# locked-down posture. If, at activation, the package mirror / DinD registry are NOT in-cluster
+# pull-through caches but external hosts, REPLACE their toEndpoints block with a SCOPED `toFQDNs` allow
+# (like agentforge-broker's upstream egress) and carve those exact FQDNs out of the world-deny — an
+# EXPLICIT, reviewed relaxation, accepting the documented exfil residual above. Also PREFLIGHT #2:
+# `docker://`+DinD vs the platform workflows that today require `self-hosted-hv:host` (they bind-mount
+# ${{ github.workspace }} + drive the host Docker daemon) + actions/cache reachability from job containers.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: agentforge-ci-runner
+  namespace: agentforge-ci
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-ci-runner
+  egress:
+    # (1) DNS -> kube-dns (resolve the in-cluster forge + package-proxy + registry service names).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # (2) the FORGE — in-cluster Gitea (gitea-http.gitea.svc:3000). Matched by ENDPOINT identity
+    #     (namespace gitea + the gitea app label), so the private-range/world egressDeny below never blocks
+    #     it. The runner registers, polls for jobs, uploads logs/artifacts, and reaches the built-in
+    #     actions/cache here.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: gitea
+            app.kubernetes.io/name: gitea
+      toPorts:
+        - ports:
+            - { port: "3000", protocol: TCP }
+    # (3) PACKAGE registry/proxy — PLACEHOLDER in-cluster endpoint identity (PREFLIGHT #2 pins the real
+    #     ns/labels/port, or converts to a scoped toFQDNs if the proxy is external — see header). This is
+    #     the package/dependency fetch path for CI (uv/npm/pip/apt via a pull-through cache).
+    - toEndpoints:
+        - matchLabels:
+            # TODO(PREFLIGHT #2): the real in-cluster package-proxy service identity.
+            k8s:io.kubernetes.pod.namespace: agentforge-ci-proxy-PLACEHOLDER
+            app.kubernetes.io/name: package-proxy-PLACEHOLDER
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }
+            - { port: "8080", protocol: TCP }
+    # (4) DinD IMAGE registry — PLACEHOLDER in-cluster endpoint identity (PREFLIGHT #2 pins the real
+    #     ns/labels/port, or converts to a scoped toFQDNs if docker.io is reached directly — see header).
+    #     The `dind` daemon pulls job-container images through this pull-through mirror ONLY.
+    - toEndpoints:
+        - matchLabels:
+            # TODO(PREFLIGHT #2): the real in-cluster DinD image-registry mirror service identity.
+            k8s:io.kubernetes.pod.namespace: agentforge-ci-proxy-PLACEHOLDER
+            app.kubernetes.io/name: dind-registry-mirror-PLACEHOLDER
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }
+            - { port: "5000", protocol: TCP }
+  egressDeny:
+    # No kube-apiserver, no direct internet, no node-local / metadata-via-node. world = any non-cluster IP
+    # (direct-IP); host/remote-node = the nodes themselves; kube-apiserver = the control-plane API (a
+    # tokenless runner must never reach it). Pod-to-pod (forge/kube-dns/proxy) is identity-based, so these
+    # never block (1)-(4).
+    - toEntities:
+        - kube-apiserver
+        - world
+        - host
+        - remote-node
+    # Cluster-private + link-local (incl. 169.254.169.254 metadata) + loopback + ALL IPv6 — explicit
+    # direct-IP belt. In-cluster allows are identity-based (toEndpoints), so these CIDR denies apply only
+    # to world/CIDR-classified traffic — never to the forge/proxy/registry endpoints above.
+    - toCIDR:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 127.0.0.0/8
+        - ::/0
