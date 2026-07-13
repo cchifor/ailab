@@ -38,6 +38,10 @@ spec:
       expression: "'agentforge.io/org' in variables.labels ? variables.labels['agentforge.io/org'] : ''"
     - name: jobId
       expression: "'agentforge.io/job-id' in variables.labels ? variables.labels['agentforge.io/job-id'] : ''"
+    # P2 R-2 §C: the STABLE per-pool identity label (a canonical dns-slug). The per-pool broker Cilium
+    # ingress selector keys on it, so it MUST be enforced here (the provisioner already requires pool).
+    - name: pool
+      expression: "'agentforge.io/pool' in variables.labels ? variables.labels['agentforge.io/pool'] : ''"
   validations:
     # (1) EXACTLY one container named `sandbox`; NO init/ephemeral containers (an ephemeral debug
     #     container is the classic post-admission escape — kubectl debug — so it is barred here too).
@@ -85,8 +89,9 @@ spec:
         'app.kubernetes.io/component' in variables.labels &&
         variables.labels['app.kubernetes.io/component'] == 'sandbox' &&
         variables.org.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
-        variables.workspace.matches('^[a-z0-9][a-z0-9-]{0,62}$')
-      message: "sandbox pod must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, org (dns-slug), workspace (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
+        variables.workspace.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
+        variables.pool.matches('^[a-z0-9][a-z0-9-]{0,62}$')
+      message: "sandbox pod must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, org (dns-slug), workspace (dns-slug), pool (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
     # (6) VOLUMES — the EXACT 2-volume set for BOTH trust-classes (P2 R-2 §B): {workspace PVC, home
     #     emptyDir}. The agent profile no longer carries a broker-cap emptyDir (the per-job capability is
     #     delivered as a workspace file <workspace>/.af/broker-cap.jwt, not a mounted volume), so test AND

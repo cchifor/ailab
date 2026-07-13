@@ -35,6 +35,10 @@ spec:
       expression: "'agentforge.io/org' in variables.tlabels ? variables.tlabels['agentforge.io/org'] : ''"
     - name: tjobId
       expression: "'agentforge.io/job-id' in variables.tlabels ? variables.tlabels['agentforge.io/job-id'] : ''"
+    # P2 R-2 §C: the STABLE per-pool identity label (canonical dns-slug), mirror of pod-guard's `pool`.
+    # The per-pool broker Cilium ingress selector keys on it, so the Job template must carry it too.
+    - name: tpool
+      expression: "'agentforge.io/pool' in variables.tlabels ? variables.tlabels['agentforge.io/pool'] : ''"
   validations:
     # (J1) Single, non-retrying, non-replacing, TTL-swept run with a bounded hard deadline.
     - expression: >-
@@ -89,8 +93,9 @@ spec:
         'app.kubernetes.io/component' in variables.tlabels &&
         variables.tlabels['app.kubernetes.io/component'] == 'sandbox' &&
         variables.torg.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
-        variables.tworkspace.matches('^[a-z0-9][a-z0-9-]{0,62}$')
-      message: "sandbox Job template must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, org (dns-slug), workspace (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
+        variables.tworkspace.matches('^[a-z0-9][a-z0-9-]{0,62}$') &&
+        variables.tpool.matches('^[a-z0-9][a-z0-9-]{0,62}$')
+      message: "sandbox Job template must carry agentforge.io/job-id (^[a-z0-9]{32}$), trust-class in {agent,test}, org (dns-slug), workspace (dns-slug), pool (dns-slug), app.kubernetes.io/managed-by=agentforge, component=sandbox."
     # (P6) VOLUMES — EXACT 2-volume set for BOTH trust-classes (P2 R-2 §B, mirror of pod-guard (6)):
     #      {workspace PVC, home emptyDir}. The broker-cap emptyDir is gone (the per-job capability is now a
     #      workspace file, not a mounted volume), so test AND agent share the same 2-volume shape. The
