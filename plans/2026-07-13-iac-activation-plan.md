@@ -2,109 +2,143 @@
 
 ## Context
 The entire v2 stack is built but DORMANT on ailab `feat/p2-unlock` (96 commits ahead of `main`; Flux
-reconciles `main`, so nothing is live). Live cluster state (verified 2026-07-13): 3 CPs Ready; NO
-agent-nodes joined; NO openbao/external-secrets/keda/kro pods; only the P1 `agentforge` namespace. The
-agent-nodes tofu has NEVER been applied (no state).
+reconciles `main`, so nothing is live). Live state (verified 2026-07-13): 3 CPs Ready; NO agent-nodes; NO
+openbao/external-secrets/keda/kro pods; only the P1 `agentforge` namespace. agent-nodes tofu never applied.
+**Nested virt is ALREADY active (`nested=1`) on all 3 hosts** (Ansible `pve_base` owns it) — so Kata has NO
+host-reboot gate. A prior status wrongly called activation "physical ops"; it is 100% IaC (`just`/`tofu`/Flux/
+GitOps). User decisions: **build + execute live** (checkpoint each irreversible step); OpenBao =
+**auto-init+unseal Job**, unseal key in an in-cluster Secret.
 
-A prior status update wrongly called activation "physical ops." This is a 100%-IaC lab. Activation must be
-codified: `just` recipes + `tofu` + Flux + a GitOps merge — no ad-hoc SSH/console commands. Three items are
-genuinely not-yet-IaC and are the BUILD scope; the rest is reframing + an execution runbook. User decisions
-(2026-07-13): **build + execute live** (checkpoint before each irreversible step); OpenBao = **auto-init+unseal
-Job** storing keys in an in-cluster Secret.
+Codex Phase A raised the material gaps this revision now folds in: **TLS mismatch** (admission pins
+`https://openbao.openbao.svc:8200` but the chart default listener is HTTP), **root-token custody** (must not
+sit in the unsealer-readable Secret), **split RBAC identities**, **OpenBao provisioning is in-scope** (KV
+mount + k8s auth backend + policies/roles, not just init/unseal), **staged merge** (not one 96-commit
+big-bang), **bootstrap image ordering** (built+pinned before the init Job merges), and several idempotency/
+fail-closed hardenings.
 
 ## Approach
 
-### BUILD (codified gaps) — all on `feat/p2-unlock`, codex Phase B before executing
+### BUILD (codified gaps) — on `feat/p2-unlock`, TDD where code, codex Phase B before executing
 
-**A. Proxmox host nested-virt (`kvm_amd nested=1`) — `scripts/enable-nested-virt.py` + `just nested-virt`.**
-Kata needs `/dev/kvm` in the worker VM → the Proxmox HOSTS need nested AMD-V. Today a runbook step; codify
-it. A paramiko script (mirrors `scripts/node-ssh.py`, reads `.env` `NODE_ROOT_PASSWORD`/`PVE_NODES`) that,
-per host .2/.3/.4, IDEMPOTENTLY: writes `/etc/modprobe.d/kvm.conf` = `options kvm_amd nested=1`, then
-`modprobe -r kvm_amd && modprobe kvm_amd` IF no VM currently uses it (else defer to next reboot — never
-force-reboot a host), and asserts `/sys/module/kvm_amd/parameters/nested` ∈ {Y,1}. Re-runnable, reports
-per-host state. `just nested-virt` recipe. (AMD Strix Halo → `kvm_amd`; guard if `kvm_intel`.)
+**0. Bootstrap image (`openbao-bootstrap`) — FIRST, built+digest-pinned before anything else.**
+First-party image: `FROM ghcr.io/openbao/openbao:<pinned>` (ships the official `bao` CLI — avoids hand-rolled
+HTTP/JSON mistakes) + `COPY --from=bitnami/kubectl` (or registry.k8s.io/kubectl) the `kubectl` binary + a
+minimal shell. Built by the image-CI (C) on the EXISTING act_runner VMs, pushed to `registry.chifor.me/
+agentforge/openbao-bootstrap@sha256:…`. Used by the init/unseal/provision Jobs (B). No runtime `apk`, no
+third-party image holding Secret-write RBAC. (Registry is independent of OpenBao → no circular bootstrap.)
 
-**B. OpenBao auto-init/unseal — `security/openbao/{unseal-rbac,unseal-job,unsealer}.yaml`.**
-Replaces the HelmRelease header's manual `bao operator init`/`unseal`. Design:
-- **SA `openbao-unsealer`** (openbao ns) + **Role** (namespaced): `get/list` pods; `get/create/update` the
-  ONE Secret `openbao-keys` (pin resourceName where the verb allows). NO cluster RBAC.
-- **Init Job `openbao-init`** (Flux-applied into the openbao kustomization; Helm `post-install`-style via a
-  Flux `dependsOn`/health gate is not needed — the Job self-waits). IDEMPOTENT script against
-  `http://openbao-0.openbao-internal.openbao.svc:8200`:
-  1. Poll `GET /v1/sys/seal-status` until reachable.
-  2. If `.initialized == false` → `PUT /v1/sys/init {secret_shares:1, secret_threshold:1}` → capture
-     `unseal_keys_b64[0]` + `root_token` → **create Secret `openbao-keys`** via the k8s API (SA token +
-     in-cluster CA). If `openbao-keys` ALREADY exists but bao is uninitialized (disaster: PV lost) → FAIL
-     LOUDLY (don't re-init over a stale key). If initialized AND the Secret is missing → FAIL (can't unseal).
-  3. If `.sealed == true` → read `openbao-keys` → `PUT /v1/sys/unseal {key}`.
-- **Unsealer `openbao-unsealer` Deployment** (1 replica, tiny): loop every 15s — `GET seal-status`; if
-  `sealed` and initialized → unseal from `openbao-keys`. Covers pod restarts without re-init. (A Deployment,
-  not a CronJob: sub-minute restart coverage; requests/limits tiny; restricted securityContext.)
-- **Image**: a FIRST-PARTY `openbao-bootstrap` (alpine + curl + jq, digest-pinned), built by the image-CI
-  (C) — no `bao`/kubectl/runtime-apk, everything via the OpenBao HTTP API + k8s REST API. Rationale: no
-  third-party image holding Secret-write RBAC; no runtime egress; reproducible. (Registry is independent of
-  OpenBao, so no circular bootstrap.) Until built, the Job image is gated like the other placeholder digests.
-- Wire all three into `security/openbao/kustomization.yaml`. Security note: keys in `openbao-keys` (etcd,
-  encrypted-at-rest if the cluster has it) — accepted single-node homelab posture; the unseal key never
-  leaves the ns; documented.
+**A. Nested-virt — VERIFY only (already Ansible-owned + already active). No new script.**
+`pve_base` (`ansible/roles/pve_base/tasks/main.yml`) writes `/etc/modprobe.d/kvm-nested.conf` (source of
+truth). Do NOT add a second paramiko writer (would duplicate state/path — codex). Add `just nested-virt-verify`:
+a READ-ONLY probe (node-ssh.py) asserting `/sys/module/kvm_amd/parameters/nested == Y` on .2/.3/.4 — a HARD
+activation gate (fail → Kata blocked). It passes today. (If a future host reports N, the fix is re-run the
+Ansible role + a maintenance reboot — documented, not this session's path.)
 
-**C. Image-build Gitea CI + digest-pin — `.gitea/workflows/images.yml` (agentforge, agentforge-platform).**
-Gitea is the master forge; the EXISTING act_runner VMs run CI (the CI ScaledJob is a future replacement, not
-a prereq). Build + push to `registry.chifor.me` (anonymous-pull, no imagePullSecret):
-- agentforge: `worker` (deploy/Dockerfile) + `openbao-bootstrap` (a tiny deploy/bootstrap.Dockerfile) +
-  `broker` + `reaper`/CI-runner as applicable. platform: `agentforge-platform` (Dockerfile).
-- Tag `:<git-sha>` + emit the pushed **digest** as a job output/artifact.
-- **Digest-pin**: `scripts/pin-image-digests.py` reads the pushed `repo@sha256:…` for each and rewrites the
-  ailab manifests' placeholder digests (worker/broker/reaper/dispatcher/CI/bootstrap) in one commit. A
-  `just pin-digests` recipe. (Runs on demand at the un-gate step, not every push.)
+**B. OpenBao TLS + auto-init/unseal + provisioning — `security/openbao/{tls,unseal-rbac,unseal-job,
+unsealer,provision-rbac,provision-job,provisioner-deploy}.yaml` + HelmRelease values.**
+- **TLS (fix the https:// pin mismatch):** issue an internal cert for `openbao.openbao.svc[.cluster.local]`
+  via cert-manager (precedent: cert-manager-config.yaml); mount it; set the chart's listener HCL to
+  `tls_cert_file`/`tls_key_file` (TLS enabled). ESO SecretStore uses `caProvider` → the issuer CA. Keeps
+  HTTPS everywhere (matches the CP-unwritable admission pin — do NOT weaken that to HTTP). All bootstrap
+  Jobs use `https://…:8200` + the CA.
+- **Split RBAC identities:** SA `openbao-init` (Role: `create` the `openbao-keys` + `openbao-bootstrap-token`
+  Secrets — `create` can't be resourceName-scoped, so a dedicated tiny Role) and SA `openbao-unsealer` (Role:
+  `get` ONLY `openbao-keys`). Provisioner SA separate again (below). No `list pods` (HTTP/DNS polling).
+- **Init Job `openbao-init`** (idempotent, negative-tested). Against `https://openbao-0.openbao-internal…`,
+  TOLERATING NXDOMAIN/refused/not-ready (retry loop): (1) `GET seal-status`; (2) if `!initialized`:
+  **preflight a k8s API write** (SelfSubjectAccessReview / dry-run) BEFORE calling init; then `operator init
+  -key-shares=1 -key-threshold=1 -format=json`; **immediately, atomically** create `openbao-keys`
+  (`stringData`, unseal key ONLY) and `openbao-bootstrap-token` (root token, SEPARATE Secret, separate RBAC),
+  retrying the create without logging key material; (3) if `initialized && keys-Secret MISSING` → FAIL
+  (can't unseal / disaster); (4) if `keys-Secret present && !initialized` (stale key over empty PV) → FAIL
+  LOUDLY (never re-init); (5) unseal from `openbao-keys`, then **assert `sealed==false`** (wrong key → fail
+  nonzero, no success-loop). If already-unsealed, verify agreement via `auth/token/lookup-self` on the stored
+  token (or a stored cluster_id sentinel) before declaring OK.
+- **Unsealer `openbao-unsealer` Deployment** (replicas 1, restricted SC, tiny): loop 15s — `GET seal-status`;
+  if `sealed && initialized` → unseal from `openbao-keys`; back off + redact on error. + a default-deny
+  egress NetworkPolicy (OpenBao + kube-apiserver + DNS only). Header notes HA needs per-pod discovery.
+- **One-time provision Job `openbao-provision`** (idempotent): uses `openbao-bootstrap-token`. Enable `af`
+  KV-v2 mount; enable+configure the `kubernetes` auth backend (`kubernetes_host`, CA); write base operator
+  policies; **mint a scoped `provisioner` token** (NOT root: policy limited to `af/data/operator/*` +
+  policy/auth-role write) into Secret `openbao-provisioner-token`; then **REVOKE the root token** and delete
+  `openbao-bootstrap-token`. Fail-closed + idempotent (re-run = no-op via the mount/auth existence checks).
+- **Provisioner controller Deployment `agentforge-provisioner`** (the R-2 controller, `agentforge`
+  image `provisioner` subcommand): env `AF_PROVISIONER_OPENBAO_URL=https://…` + token from
+  `openbao-provisioner-token` (ESO or direct Secret ref); reconciles per-tenant policies/auth-roles bound to
+  exact ESO SAs/namespaces. Restricted SC + egress NetworkPolicy. (Its image is gated on the worker digest.)
+- Wire all into `security/openbao/kustomization.yaml`. **Ordering** via Flux `dependsOn`/health: cert →
+  Helm → init → provision → provisioner; the openbao Flux Kustomization stays `wait:false`.
+
+**C. Image-build Gitea CI + split digest-pin — `.gitea/workflows/images.yml` (agentforge + platform).**
+On the existing act_runner VMs (confirm they need NO OpenBao/ESO). Build+push to registry.chifor.me:
+`openbao-bootstrap` + `worker` (deploy/Dockerfile) + `broker` + `reaper` (agentforge) + `agentforge-platform`.
+Emit each pushed digest. **Two SEPARATE pin paths** (`scripts/pin-image-digests.py` + `just pin-bootstrap` /
+`just pin-workloads`): the BOOTSTRAP pin lands (and merges) BEFORE the OpenBao init Job; the WORKLOAD pin is
+a later, separate commit that MUST NOT re-list any gated Deployment/ScaledJob. Registry-push creds scoped.
 
 **D. Reframe + orchestration — `docs/runbooks/agentforge-activation.md` + `just activate-*` + header fixes.**
-- One runbook documenting the fully-IaC sequence (below) + rollback. Update the OpenBao HelmRelease header
-  and `docs/runbooks/agent-nodes.md` to point at B/A (drop "manual"/"operator step" language).
-- `just` recipes framing the ordered milestones so each is one command (they wrap `tofu`, `flux reconcile`,
-  `kubectl wait`, the scripts) — NOT new logic, just the codified sequence.
+Runbook of the staged sequence + rollback + the accepted residuals (in-cluster key custody; etcd-encryption
+preflight). `just activate-*` recipes wrap the milestones WITH explicit STOP/health predicates (not bare
+command wrappers): block on bootstrap-digest-pinned, nested=Y, HelmRelease Ready, init/provision Job Succeeded,
+SecretStore Ready, zero Flux drift. Fix the OpenBao HelmRelease + agent-nodes runbook headers (drop "manual").
 
-### EXECUTE (live, checkpointed — STOP for confirmation before each ⛔ irreversible gate)
-Ordered so each milestone is verified before the next; every step is a committed/coded action.
-1. **⛔ Merge the operators+security layer to `main`** (or a scoped subset first) → Flux deploys
-   openbao/external-secrets/keda/kro (dormant agentforge workloads stay gated on placeholder digests).
-   Checkpoint: this is the first irreversible GitOps step.
-2. **OpenBao**: auto-init/unseal (B) runs → `GET seal-status` shows initialized+unsealed; `openbao-keys`
-   present. Verify ESO can auth. (Depends on the bootstrap image from C — build it first, step 0.)
-3. **⛔ Kata pool**: `just nested-virt` (A) → `just agent-nodes-apply` (tofu creates .14–.16 with the
-   Kata image) → nodes Ready; `kubectl get runtimeclass kata gvisor`; a probe pod on the pool sees `/dev/kvm`.
-   Checkpoint: creates VMs + (re)loads a host kernel module.
-4. **Images**: `just pin-digests` after CI pushes → the worker/broker/reaper/dispatcher digests are real.
-5. **⛔ Un-gate workloads**: commit un-listing the gated manifests (worker/broker/reaper/dispatcher/CI
-   ScaledJob) + the OpenBao provisioner seeds paths → ESO syncs per-tenant Secrets → the tenant-zero worker
-   scales 0→N on `forge_pending`. Checkpoint: real agent workloads begin running.
-6. **Sandbox boundary tests** (ADR 0018 canary: no cred mounts, `--network none`, Kata guest kernel, egress
-   matrix) all green → **⛔ flip `privilege_hardening: v1.1`** → unlock non-playground repos.
+### PREFLIGHTS (verify before executing)
+- **etcd Secret encryption at rest**: not visible in Talos config → assume the unseal key is recoverable from
+  etcd/backups. Verify Talos `cluster.secretboxEncryptionSecret`/disk encryption; if absent, document the
+  residual (accepted homelab posture) or enable it. A stated preflight, not a silent assumption.
+- Host free memory on .2/.3/.4 for 3 new agent-node VMs (hosts already run CP+runner+dev-worker VMs).
+- act_runner build path has no OpenBao/ESO dependency (so it can build the bootstrap image pre-OpenBao).
+
+### EXECUTE (live, STAGED — ⛔ = STOP for confirmation; each stage verified before the next)
+- **Stage 0 — bootstrap image**: CI builds+pushes `openbao-bootstrap`; `just pin-bootstrap` (its own commit).
+- **⛔ Stage 1 — operators/security merge**: merge the openbao/eso/keda/kro/security subset (incl. TLS +
+  init/unseal/provision, bootstrap digest real) to `main`. THIS MERGE triggers the irreversible `/sys/init`
+  → it IS the OpenBao-init checkpoint. Verify: HelmRelease Ready → init Job Succeeded → seal-status
+  initialized+unsealed → provision Job Succeeded (af mount + k8s auth + policies + scoped token; root
+  revoked) → provisioner controller Running → an ESO SecretStore reports Ready. `flux diff` first.
+- **⛔ Stage 2 — Kata pool**: `just nested-virt-verify` (must be Y) → `just agent-nodes-apply` (tofu creates
+  .14–.16 on the Kata image) → nodes Ready; `kubectl get runtimeclass kata gvisor`; a probe pod on the pool
+  sees `/dev/kvm` + the Kata guest kernel. Checkpoint: creates VMs.
+- **⛔ Stage 3 — agentforge layer merge**: merge the agentforge-broker/sandbox/workers/ci-runners/
+  runtimeclasses/tenants subset to `main` (workloads still gated: unlisted manifests + paused ScaledJob +
+  placeholder digests). Verify Kustomizations reconcile; ESO ExternalSecrets Ready; ledger schema/grants.
+- **⛔ Stage 4 — un-gate workloads**: `just pin-workloads` (separate commit) → commit re-listing the gated
+  worker/broker/reaper/dispatcher/CI manifests (only after: OpenBao roles/policies/KV seeded, ExternalSecrets
+  Ready, KEDA targets present, ledger ready). tenant-zero worker scales 0→N on `forge_pending`.
+- **Stage 5 — boundary tests → ⛔ v1.1 flip**: ADR-0018 canary (no cred mounts, `--network none`, Kata guest
+  kernel, egress matrix) all green → flip `privilege_hardening: v1.1`. **Rollback if canary fails**: pause
+  ScaledObjects/ScaledJobs, re-comment Deployments, confirm no sandbox Jobs remain, do NOT flip.
 
 ## Critical files
-- NEW `scripts/enable-nested-virt.py`, `scripts/pin-image-digests.py`; `justfile` (+recipes).
-- NEW `kubernetes/apps/infrastructure/security/openbao/{unseal-rbac,unseal-job,unsealer}.yaml` +
-  `kustomization.yaml`; edit `helmrelease.yaml` header.
-- NEW `.gitea/workflows/images.yml` in agentforge + agentforge-platform; NEW agentforge
-  `deploy/bootstrap.Dockerfile`.
-- NEW `docs/runbooks/agentforge-activation.md`; edit `docs/runbooks/agent-nodes.md`.
+- NEW `.gitea/workflows/images.yml` (agentforge + platform) + agentforge `deploy/bootstrap.Dockerfile`;
+  NEW `scripts/pin-image-digests.py`; `justfile` recipes.
+- NEW `security/openbao/{tls,unseal-rbac,unseal-job,unsealer,provision-rbac,provision-job,provisioner-deploy}.yaml`
+  + kustomization + HelmRelease TLS values; edit its header.
+- NEW `docs/runbooks/agentforge-activation.md`; edit `docs/runbooks/agent-nodes.md` + OpenBao header.
+- (verify only) `ansible/roles/pve_base` (nested-virt source of truth); `just nested-virt-verify`.
 
-## Verification
-- A: re-run is a no-op; `/sys/module/kvm_amd/parameters/nested` = Y on .2/.3/.4; no host rebooted with running VMs.
-- B: `kubectl -n openbao get secret openbao-keys` exists; `seal-status` initialized+unsealed after a pod
-  delete (unsealer re-seals-recovery); a second Job run is a no-op (no re-init).
-- C: CI pushes `registry.chifor.me/agentforge/worker@sha256:…`; `just pin-digests` yields a clean manifest diff.
-- D+EXEC: `kubectl kustomize` builds everywhere; Flux Kustomizations Ready; the ADR-0018 boundary canary
-  passes; only after that does v1.1 flip.
+## Verification / negative tests
+- B (TDD the bootstrap logic against a fake OpenBao+API): stale-Secret+empty-PV → FAIL; initialized+missing
+  Secret → FAIL; wrong unseal key → FAIL nonzero (no success-loop); init/unseal logs contain NO key/token;
+  re-run init Job = no-op; provision Job re-run = no-op; root token revoked after provision; SecretStore Ready
+  ONLY after mount/auth/role provisioning.
+- A: `nested=Y` on all three hosts (else Kata blocked).
+- C: CI pushes `…@sha256:…`; bootstrap pin ≠ workload pin; neither un-gates a dormant manifest.
+- EXEC: `flux diff`/SSA dry-run (not just `kubectl kustomize`) per stage; wait on specific HelmReleases/Jobs/
+  SecretStores/ExternalSecrets/RuntimeClasses/nodes/KEDA before proceeding; boundary canary before v1.1.
 
-## Risks
-- **Merging 96 commits to main** is the big-bang. Mitigate: verify every `kubectl kustomize` + Flux dry-run
-  first; the agentforge workloads are DIGEST-gated so they can't run until step 4/5 even once merged.
-- **OpenBao key custody**: single unseal share in an in-cluster Secret — acceptable homelab posture (user
-  chose it); documented; rotate/reshard is a follow-up.
-- **Kata host module reload**: never force-reboot a host with running VMs; defer to a maintenance reboot if in use.
-- **Big-bang blast radius**: prefer merging the operators/security subset FIRST (validate OpenBao auto-unseal
-  live), THEN the agentforge layer — reduces the irreversible step size. (Open question for codex: one merge
-  vs. staged.)
+## Risks / accepted residuals
+- **Staged merge is mandatory** (codex): 3 scoped merges, not one 96-commit big-bang. Digest+unlisted+paused
+  gates are defense-in-depth, but a merge still creates CRDs/webhooks/NS/PV/RBAC/NotReady ESO — hence staged.
+- **Key/root custody**: unseal key in `openbao-keys` (in-cluster); root token used only by the one-time
+  provision Job then REVOKED; the long-running unsealer reads unseal-key only; the provisioner uses a scoped
+  token, never root. etcd-encryption residual documented.
+- **Kata**: no reboot gate (nested already Y); if that ever regresses, it becomes a maintenance-reboot (still
+  IaC, but blocking) — probe-gated so we never apply Kata against a non-Y host.
 
 <!-- codex-review-status: pending -->
+
+<!-- Phase A round 1: codex raised TLS mismatch, root-token custody, split RBAC, provisioning-in-scope,
+staged merge, bootstrap ordering, nested-virt Ansible ownership, idempotency/fail-closed hardenings, etcd
+encryption preflight, rollback. ALL folded into this revision. Live finding: nested=1 already active (Kata
+reboot gate removed). -->
