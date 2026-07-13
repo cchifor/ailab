@@ -1,0 +1,22 @@
+# OpenBao Stage-1 readiness canary (ADR 0019 activation). dependsOn external-secrets so the ESO CRDs exist
+# (external-secrets itself dependsOn openbao, so the vault is applied first). wait:false — the canary is a
+# probe, not a gate: it goes Ready only after the openbao-provision Job seeds the af-operator-canary role +
+# af/data/operator/canary, which is the Stage-1 verification signal (`just openbao-status`), NOT a blocker
+# for the infra layer.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: openbao-canary
+  namespace: flux-system
+spec:
+  interval: 1h
+  retryInterval: 2m
+  timeout: 5m
+  dependsOn:
+    - name: external-secrets
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/security/openbao-canary
+  prune: true
+  wait: false

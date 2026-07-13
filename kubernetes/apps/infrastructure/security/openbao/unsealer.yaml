@@ -1,0 +1,114 @@
+# OpenBao auto-UNSEAL loop (plan §B "Unsealer openbao-unsealer Deployment"). Runs
+# `agentforge openbao-unseal --loop --interval 15`: every 15s GET seal-status and, if sealed && initialised,
+# unseal from Secret openbao-keys (unseal_key). This is what makes pod restarts self-heal WITHOUT manual
+# `bao operator unseal` — the homelab's stand-in for transit/KMS auto-unseal (accepted residual: the unseal
+# key sits in an in-cluster Secret; see the activation runbook). Its RBAC reads the UNSEAL KEY ONLY — never
+# the root/bootstrap token. Errors back off + redact. HA (replicas>1) would need per-pod discovery.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openbao-unsealer
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-unsealer
+    app.kubernetes.io/component: unsealer
+    app.kubernetes.io/part-of: agentforge
+spec:
+  replicas: 1 # single-node raft (replicas:1); a per-pod unsealer set is the HA path
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openbao-unsealer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-unsealer
+        app.kubernetes.io/component: unsealer
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      serviceAccountName: openbao-unsealer
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: unsealer
+          # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0).
+          image: registry.chifor.me/agentforge/orchestrator@sha256:56386b983107543635b8e2d00cd50d936f95313b7eb40f5ada816db3067eb597
+          args: ["agentforge", "openbao-unseal", "--loop", "--interval", "15"]
+          env:
+            - { name: AF_OB_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: AF_OB_CACERT, value: "/tls/ca.crt" }
+            - { name: AF_OB_K8S_NAMESPACE, value: "openbao" }
+            - { name: AF_OB_KEYS_SECRET, value: "openbao-keys" }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+---
+# Default-deny egress boundary for the unsealer (plan §B: "OpenBao + kube-apiserver + DNS only"). Cilium is
+# the CNI; selecting the endpoint for egress puts it into egress default-deny, so this allow-list is its
+# COMPLETE reach: (1) DNS, (2) kube-apiserver (read the openbao-keys Secret), (3) OpenBao :8200 (same ns).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: openbao-unsealer
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-unsealer
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: openbao-unsealer
+  egress:
+    # (1) DNS -> kube-dns (resolve openbao-0.openbao-internal + the kubernetes API name).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # (2) kube-apiserver (Talos CP VIP) — read the openbao-keys Secret via the k8s API.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - { port: "6443", protocol: TCP }
+    # (3) OpenBao API — same namespace; the only :8200 listener in the openbao ns is OpenBao itself.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+      toPorts:
+        - ports:
+            - { port: "8200", protocol: TCP }
+  egressDeny:
+    # Node-local + metadata-via-node belt (identity-based allows above are unaffected — codex/house pattern).
+    - toEntities:
+        - world
+        - host
+        - remote-node
+    - toCIDR:
+        - 169.254.169.254/32
+        - 169.254.0.0/16
+        - ::/0

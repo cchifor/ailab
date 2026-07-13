@@ -1,0 +1,23 @@
+# OpenBao secrets vault (AgentForge v2 P2 — ADR 0019). DEDICATED Flux Kustomization, NOT folded into
+# `infrastructure`, with wait:false: a freshly-installed OpenBao is SEALED (pod not Ready until the
+# operator runs `bao operator init` + `bao operator unseal` — see the HelmRelease header), so it must
+# never gate/wedge the infra layer. Same "wait:false so a not-Ready thing can't wedge the layer"
+# pattern as cert-manager-config.yaml / agentforge-tenants.yaml.
+# dependsOn infrastructure for the `openbao` HelmRepository (sources/) + PriorityClasses.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: openbao
+  namespace: flux-system
+spec:
+  interval: 1h
+  retryInterval: 2m
+  timeout: 10m
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/security/openbao
+  prune: true
+  wait: false

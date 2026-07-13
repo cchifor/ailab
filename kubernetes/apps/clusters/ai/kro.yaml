@@ -1,0 +1,19 @@
+# kro / kube-resource-orchestrator (AgentForge v2 P2 — ADR 0019). DEDICATED Flux Kustomization.
+# dependsOn infrastructure for the `kro` (OCI) HelmRepository (sources/) + PriorityClasses.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: kro
+  namespace: flux-system
+spec:
+  interval: 1h
+  retryInterval: 2m
+  timeout: 10m
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/autoscaling/kro
+  prune: true
+  wait: true

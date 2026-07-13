@@ -1,0 +1,9 @@
+# KEDA chart repo (AgentForge v2 P2 — event-driven autoscaling: scale-to-zero workers + ScaledJob CI runners).
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: kedacore
+  namespace: flux-system
+spec:
+  interval: 24h
+  url: https://kedacore.github.io/charts

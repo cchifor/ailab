@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The Stage-1 OpenBao readiness CANARY (SA openbao-canary + ESO SecretStore/ExternalSecret). SEPARATE from
+# the `openbao` Kustomization because these are external-secrets.io CRs whose CRDs are installed by the
+# `external-secrets` HelmRelease — which dependsOn `openbao`. Keeping the canary in `openbao` deadlocked
+# Flux (openbao applied SecretStore/ExternalSecret before their CRDs existed → openbao failed →
+# external-secrets, gated on openbao, never ran). Its own Kustomization dependsOn external-secrets (which
+# transitively gets openbao) so the CRDs exist first; the ExternalSecret then materializes once the
+# openbao-provision Job has seeded the canary role + path (eventually-consistent, ESO retries).
+resources:
+  - canary-secretstore.yaml
