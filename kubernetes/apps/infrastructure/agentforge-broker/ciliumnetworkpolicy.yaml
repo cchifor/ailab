@@ -63,11 +63,22 @@ spec:
       toPorts:
         - ports:
             - { port: "5432", protocol: TCP }
-    # (3) upstream provider API/OAuth host(s) — FQDN L7 (design §4/§8). PREFLIGHT-gated placeholder; the
-    #     exact enumerated hosts land with the preflight. Reconstructed to fixed validated destinations
-    #     only; the redirects-disabled + hostname/SNI-pinned client is the app-layer backstop.
+    # (3) upstream provider API **and OAuth** host(s) — FQDN L7 (design §4/§8; R-3 §C FQDN hardening).
+    #     This is the CORRECT toFQDNs use: a DNS-RESOLVED EXTERNAL destination (unlike the in-cluster
+    #     sandbox-agent->broker path, which stays DNS-L7-exact + toServices — toFQDNs adds nothing there,
+    #     so it is deliberately NOT changed). The broker egresses to the provider API to inject the durable
+    #     subscription OAuth, AND to the provider's OAuth/token host to refresh it. Cilium restricts egress
+    #     to these validated names only; the redirects-disabled + hostname/SNI-pinned client is the
+    #     app-layer backstop, and the egressDeny CIDR belt below catches any FQDN rebound to an internal IP.
+    #     ⚠ PREFLIGHT (activation): the EXACT provider API + OAuth/token hostnames are pinned here at
+    #     activation. api.anthropic.com is the known API host; the OAuth host(s) below are DOCUMENTED
+    #     PLACEHOLDERS for the Claude subscription OAuth authorize/token endpoints — replace with the exact
+    #     enumerated hosts the broker's OAuth client actually dials (do NOT widen to a wildcard).
     - toFQDNs:
-        - matchName: "api.anthropic.com"
+        - matchName: "api.anthropic.com"          # provider API (known)
+        # -- OAuth/token hosts (PLACEHOLDERS — pin the exact hosts at activation/preflight, R-3 §8) --
+        - matchName: "console.anthropic.com"      # TODO(PREFLIGHT): OAuth token/refresh endpoint host
+        - matchName: "claude.ai"                  # TODO(PREFLIGHT): subscription OAuth authorize host
       toPorts:
         - ports:
             - { port: "443", protocol: TCP }
