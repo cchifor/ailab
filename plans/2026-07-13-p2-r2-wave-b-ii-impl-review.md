@@ -1,6 +1,8 @@
 # Implementation review — p2-r2-wave-b-ii — round 1
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
+
+**FINALIZED — codex Phase B round 3 = READY TO MERGE onto feat/p2-unlock.** R1 1 blocker+5 imp+1 nit -> R2 confirmed most, 2 residuals -> R3 BOTH CLOSED (secretRef static-token forbidden; toServices/Cilium reasoning accepted — no VIP-only primitive exists, destination-confinement + source-IP TOFU hold). Activation confirmations still stand: CEL split/matches under k8s 1.31, toServices+toPorts needs Cilium 1.14+, agentforge broker *_FILE DSN reader before activation.
 
 ## Summary
 - Tenant-map correlation is fail-closed: `paramRef.namespace: agentforge`, `parameterNotFoundAction: Deny`, `params != null`, and no-map namespaces are rejected for ESO.
