@@ -34,9 +34,14 @@ and the operator commits this file directly). Each entry is authoritative:
 `data["<namespace-name>"] = "<org>/<workspace>/<comma-sep-allowed-creds-names>"`. For P2 this holds
 ONE operator-committed entry (`af-tenant-tenant-zero-playground` → `tenant-zero/playground/...`);
 multi-tenant P3 populates it from the provisioner (operator-owned, CP-untrusted-input-validated) —
-NOT from CP labels. The VAP correlates every ESO object against the paramRef entry for its namespace:
-- Look up `params.data[object.metadata.namespace]`; **reject if absent** (an un-onboarded namespace
-  gets no ESO). Split it into `(org, ws, allowedCreds)`.
+NOT from CP labels. Wire the paramRef EXPLICITLY fail-closed: `spec.paramKind: {apiVersion: v1, kind: ConfigMap}`; the
+ValidatingAdmissionPolicyBinding `paramRef: {name: agentforge-tenant-map, namespace: agentforge,
+parameterNotFoundAction: Deny}` (the `namespace` is REQUIRED — without it the apiserver resolves the
+param in the REQUEST namespace, letting a tenant supply its own map; `Deny` makes a missing map
+fail-closed), plus a `params != null` guard in every validation. The VAP correlates every ESO object
+against the paramRef entry for its namespace:
+- Look up `params.data[object.metadata.namespace]`; **reject if `params == null` or the entry is
+  absent** (an un-onboarded namespace gets no ESO). Split it into `(org, ws, allowedCreds)`.
 - `SecretStore` (namespaced): pin `metadata.name == 'af-tenant-'+org+'-'+ws`, the vault kubernetes-auth
   `role == 'af-tenant-'+org+'-'+ws`, and `serviceAccountRef.name ==` the CP/provisioner-rendered eso SA
   (VERIFY the exact value from `platform renderer.eso_auth_sa_name` + the provisioner template — do NOT
@@ -45,9 +50,12 @@ NOT from CP labels. The VAP correlates every ESO object against the paramRef ent
   as-is (those are NOT under the tenant prefix — only ESO SOURCE KEYS are).
 - `ExternalSecret`: pin `spec.secretStoreRef.name == 'af-tenant-'+org+'-'+ws`, `secretStoreRef.kind ==
   'SecretStore'`, `target.name ∈ allowedCreds`, and every `data[].remoteRef.key` / `dataFrom[].extract.key`
-  matches a STRICT regex `^tenants/<org>/<ws>/[a-z0-9./_-]+$` for THIS entry's org/ws — and REJECT
-  `dataFrom[].find` entirely, `../`, `//`, a leading `/`, empty segments, and any legacy `af/data/<org>/<ws>`
-  (non-`tenants/`) key. Prefix-only startsWith is NOT sufficient.
+  matches a STRICT regex `^tenants/<org>/<ws>/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$` for THIS
+  entry's org/ws, and additionally rejects any SEGMENT equal to `.` or `..` (split on `/` and check
+  each segment — a substring `../` check misses a TERMINAL `..` like `tenants/o/w/..` and a `./`
+  segment; these must be rejected segment-wise). Also REJECT `dataFrom[].find` entirely, `//`, a
+  leading `/`, empty segments, and any legacy `af/data/<org>/<ws>` (non-`tenants/`) key. Prefix-only
+  startsWith is NOT sufficient.
 - Independently regex-validate the `org`/`ws` from the paramRef entry as canonical slugs and reject the
   reserved set (`tenants`, `operator`) — defense-in-depth even though the operator wrote the map.
 - Enforce on BOTH CREATE and UPDATE (assert matchConstraints include UPDATE; reject an UPDATE that swaps
@@ -77,8 +85,10 @@ NOT from CP labels. The VAP correlates every ESO object against the paramRef ent
 - `externalsecret-oauth.yaml`: a SEPARATE operator-owned `SecretStore` + `ExternalSecret` (reconciled
   by the ESO CONTROLLER, not the broker) syncing `broker-oauth` from
   `af/data/operator/broker/<provider>/<account>/oauth` via an operator auth role that NO `tenants/*`
-  role can read. A separate `externalsecret-ledger.yaml` syncs the narrow ledger credential (close/
-  open scoped DB user) from an operator path.
+  role can read. A separate `externalsecret-ledger.yaml` syncs the broker's ledger credential — a DB
+  user with **open/reserve/reconcile privileges ONLY, NEVER `close`** (§5 disjoint authority: the
+  reaper alone holds close, via its own close-only DB role — so a compromised broker can never close
+  a session out from under the reaper).
 - `externalsecret-kids.yaml`: sync the broker's kid PUBLIC-key registry from
   `af/data/operator/broker/<provider>/<account>/kids/*` (public keys ONLY — matches the provisioner's
   publish path + the `broker.config` KidRegistry schema).
@@ -118,8 +128,9 @@ NOT from CP labels. The VAP correlates every ESO object against the paramRef ent
   SecretStore whose ns has an operator-map entry and whose names/role/SA + `tenants/<org>/<ws>/…` key
   all match that entry. REJECT each of: no map entry for the ns; wrong SecretStore/role/store name;
   foreign or wrong-namespace `serviceAccountRef`; `target.name` outside the entry's allowed creds;
-  `remoteRef.key` under another tenant / under `operator/*` / legacy `af/data/<org>/<ws>` / with `../`
-  / `//` / leading-slash / empty segment; a `dataFrom.find`; a reserved/non-slug org/ws in the entry;
+  `remoteRef.key` under another tenant / under `operator/*` / legacy `af/data/<org>/<ws>` / with a
+  `..` or `.` SEGMENT (incl. TERMINAL `tenants/o/w/..`) / `//` / leading-slash / empty segment; a
+  `dataFrom.find`; a reserved/non-slug org/ws in the entry; a missing/`null` param map (fail-closed);
   and hyphen-collision ns names (two entries can't alias). CREATE and UPDATE (incl. an UPDATE that
   swaps source shape). Also: a sandbox pod/Job WITHOUT a canonical `agentforge.io/pool` label is
   rejected by the tightened sandbox guards.
@@ -142,4 +153,6 @@ NOT from CP labels. The VAP correlates every ESO object against the paramRef ent
 - Codex Phase A on THIS plan (the "how": correlation-by-deterministic-naming vs mapping-ConfigMap,
   broker HA shape, Cilium identity labels), then Phase B on the rendered manifests (cap 3 each).
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: finalized -->
+
+<!-- Phase A: codex round 1 (3 blockers + important) + round 2 (blockers resolved; 3 residuals: segment-based key traversal, disjoint broker/reaper DB privileges, explicit fail-closed VAP paramRef wiring) — all accepted + incorporated; no pushback. Finalized for implementation. -->
