@@ -20,7 +20,8 @@ resources:
   # --- Reaper: TRUSTED `agentforge` ns (moved out of agentforge-sandbox), cross-ns RBAC into the sandbox ns ---
   - reaper-rbac.yaml # reaper SA (agentforge ns) + Jobs/Pods GC Role + cross-ns RoleBinding (pre-staged, active)
   - reaper-storage.yaml # af-sbx-reaper-tenant-zero-playground static PV + PVC (agentforge ns) -> same per-org/ws subdir (pre-staged)
-  - reaper-netpol.yaml # reaper egress CiliumNetworkPolicy (agentforge ns): kube-apiserver + DNS only
+  - reaper-netpol.yaml # reaper egress CiliumNetworkPolicy (agentforge ns): kube-apiserver + DNS + infra-pg
+  - reaper-ledger.yaml # reaper close-only ledger cred (ESO auth SA + SecretStore + ExternalSecret, agentforge ns)
   # reaper-deployment.yaml is INTENTIONALLY not listed yet — the reaper image is a PLACEHOLDER @sha256
   # (unpullable). The owner-lease is a coordination.k8s.io Lease gated by reaper-rbac.yaml (already
   # active) + apiserver resourceVersion CAS — there is NO lease Secret to seed (the earlier SOPS/ESO

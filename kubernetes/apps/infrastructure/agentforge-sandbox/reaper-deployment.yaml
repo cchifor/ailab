@@ -79,6 +79,17 @@ spec:
             # <staging_root>/<job-id> resolves to the shared export for orphan-scan + rmtree.
             - { name: AF_SANDBOX_STAGING_ROOT, value: "/workspace/agentforge/sandbox" }
             - { name: AF_REAPER_INTERVAL_S, value: "60" }
+            # P2 R-2 §5 CLOSE AUTHORITY (forward-looking; activated with the broker/ledger): the reaper's
+            # close-only ledger DSN (agentforge_reaper — EXECUTE close_session only, never any table). From
+            # the ESO-synced Secret (reaper-ledger.yaml); carries a password, so secretKeyRef, never a
+            # ConfigMap. On a Job's terminal state the reaper stamps closed_at (idempotent, fail-closed to
+            # the session `exp`) so a copied capability is dead before import/publish.
+            - name: AF_REAPER_LEDGER_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: agentforge-reaper-ledger
+                  key: AF_REAPER_LEDGER_DSN
+                  optional: true # gated: the Secret is NotReady until OpenBao/ledger are provisioned
           volumeMounts:
             # The af-sbx-reaper-tenant-zero-playground PVC (same per-org/ws NFS subdir) at the staging root: scans for orphan <job-id> dirs
             # and rmtree's reclaimed <root>/<job-id>/ dirs AFTER a successful Lease CAS-acquire.
