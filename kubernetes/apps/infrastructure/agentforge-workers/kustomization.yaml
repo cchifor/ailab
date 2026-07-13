@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge v2 P2 R-3 — worker autoscaling: the always-on af-dispatcher scale ORACLE + KEDA scale-to-zero
+# over the SINGLE existing tenant-zero orchestrator identity. Its OWN directory + a dedicated Flux
+# Kustomization (clusters/ai/agentforge-workers.yaml), mirroring the agentforge-broker/-sandbox precedent:
+# self-contained so it never collides with the P1 agentforge admission (apps layer) or the concurrent P2
+# operators editing infrastructure/{security,autoscaling}. NO shared aggregator index is edited.
+#
+# BOTH Deployments are DELIBERATELY UNLISTED/gated (placeholder @sha256 images, unpullable) — mirrors the
+# reaper/broker precedent. Nothing here flips privilege_hardening. Re-add each Deployment once its digest
+# is pinned + its prerequisites provisioned (see each Deployment header).
+resources:
+  # -- af-dispatcher (scale oracle) — trusted agentforge ns --------------------------------------------
+  - dispatcher-serviceaccount.yaml # runtime SA (automount off, NO Role) — zero kube-apiserver access
+  - dispatcher-externalsecret.yaml # eso-auth SA + operator SecretStore + READ-ONLY forge-PAT ExternalSecret
+  - dispatcher-service.yaml        # ClusterIP over the metrics port (named)
+  - dispatcher-servicemonitor.yaml # kube-prometheus scrape of forge_pending (mirrors monitoring/agentforge.yaml)
+  - dispatcher-netpol.yaml         # ingress: metrics from monitoring; egress: in-cluster Gitea + DNS only
+  # -- tenant-zero worker (scale target) — af-tenant-tenant-zero-playground ns -------------------------
+  - scaledobject.yaml              # KEDA scale-to-zero (prometheus backlog + cron warm-floor) over the worker
+  - cilium-egress.yaml             # worker egress: Gitea + kube-apiserver:6443 + DNS ONLY (deny world/metadata/IPv6)
+  # dispatcher-deployment.yaml + worker-deployment.yaml are INTENTIONALLY not listed — the images are
+  # PLACEHOLDER @sha256 (unpullable) and nothing here flips privilege_hardening. Re-add each once its
+  # digest is pinned + prerequisites provisioned (see each Deployment header). The ScaledObject stays
+  # Ready:False (no target) until worker-deployment.yaml is re-added — harmless while dormant.
+  # - dispatcher-deployment.yaml
+  # - worker-deployment.yaml
