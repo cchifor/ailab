@@ -40,8 +40,8 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: provision
-          # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0).
-          image: registry.chifor.me/agentforge/orchestrator@sha256:e7f0197bc5573fbe9f6ddff832440b56d05c0fdf8334f90a160ea5ab27d16670
+          # digest pinned by `just pin-bootstrap` (agentforge main 7ca6c99: operator roles + seeding).
+          image: registry.chifor.me/agentforge/orchestrator@sha256:259bf1d68a1c7b31d856aed152c29c8cc405d598a2822fcfc4e29e198892a42f
           args: ["agentforge", "openbao-provision"]
           env:
             - { name: AF_OB_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
@@ -56,8 +56,13 @@ spec:
             # OpenBao uses its own SERVER pod SA (auto-refreshed) + local CA for TokenReviews — no static
             # token to expire. The server SA (openbao-server) carries system:auth-delegator (below).
             - { name: AF_OB_K8S_HOST, value: "https://kubernetes.default.svc" }
+            # operator SEED VALUES (dispatcher PAT + reaper ledger DSN): a JSON blob keyed by logical KV
+            # path, SOPS-mounted here and written under each operator subtree while root is available
+            # (there is no admin token after the revoke). See operator-seeds.sops.yaml.
+            - { name: AF_OB_SEEDS_FILE, value: "/etc/openbao-seeds/seeds.json" }
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: seeds, mountPath: /etc/openbao-seeds, readOnly: true }
           resources:
             requests: { cpu: 10m, memory: 48Mi }
             limits: { cpu: 250m, memory: 128Mi }
@@ -72,6 +77,9 @@ spec:
             secretName: openbao-tls
             items:
               - { key: ca.crt, path: ca.crt }
+        - name: seeds
+          secret:
+            secretName: openbao-operator-seeds
 ---
 # The ONE unavoidable cluster RBAC (plan §B TokenReview plumbing). OpenBao (with token_reviewer_jwt unset)
 # uses its OWN SERVER pod SA to call TokenReview whenever any SecretStore SA logs in; tokenreviews.create is

@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: openbao-operator-seeds
+    namespace: openbao
+type: Opaque
+stringData:
+    seeds.json: ENC[AES256_GCM,data:ffd5UTh/RecdPMkma76XM4yWyQBxFOLn4xFqrXGaJNEJq/tAKmunCekRlUby8aLSzWHUZIGEMemiZJijuEPv8qRr8vs0egUcnNiOTEWR32p2ss/xuNPbyOaSMIq+c80bVPPGtFOZK2hRe4T5q+m8NGnJ1GAx6EXADUAXSMd91Cl6PZvOML7uYsUZP2Ubh9Ze+KpCzjEuCa8LiEr/bhtj0HjuVEJysggXb7tZIya9MxHqgBNoXOhCxgJsLQ5VplaI+BCjKOdZpbM76Jmgwjf+cfHejsipv1dFOP9aBOgelyycRD7Du9Z7DQcxeMDbgGZMkp2QNCkSMkytb2TyT8dUloOkrhUCfkZUnDHX+Y2HcsvwSibI5+/RvbgICtRIigUgrtxdTgT2FtgnjiF0pJ+KzKoQIQ8=,iv:Muf0Wu53ZyRatwVChP+m5CvXb0/e93FPL1S5psJVc0M=,tag:bS0TR+98D4G6g2j/TJTDZg==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBzR1pMN2ptOFR4ZkxLZTRD
+            dzdWZHpkaSt3RnZKQ0Z1UDBDeUdRZWJsamxjCmpQMG9HSTBoTTRhdmFzR2FJdlBs
+            a1ZKMjB1SmZoS2xwYVEwU2Q3NmdkancKLS0tICthbkJDQjMybTkzL1hMNTg0MU92
+            K0FHZVQyZEdzS0pPVUFkeU92UHBtUkEKdRbyHXg4bOrbyIWIMpR0DdzRUUq+PrMQ
+            eQDfo7LeW2u7y/ain4l6LbFadsFJmzvmE3u4W9u3ejJyRvv31O1PPQ==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-13T19:08:26Z"
+    mac: ENC[AES256_GCM,data:XNfFkx/wu20ZuYgvyddtq96+QwR+Z+CHFTepmZ7TDNTjHxBDQR61uiFpFTt9M/vL490tiJwcOERTwpA055tDaYnHNcJuLwC6KJQuC3svzy0XVfnRbz4IlNIPfLqN5OW/Xqp+P0Djq9LnZnThfKLqbHRQb8M3IheG+adtra0Vy1s=,iv:0HimidDRDYpypS/MJczWofXexfWwsmvXrBUmuaucWfs=,tag:B75IVzWk5Ihs6MXt4S+Jhg==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

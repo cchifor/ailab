@@ -21,3 +21,9 @@ spec:
   path: ./kubernetes/apps/infrastructure/security/openbao
   prune: true
   wait: false
+  # SOPS: decrypt operator-seeds.sops.yaml (dispatcher PAT + reaper DSN) so the provision Job can
+  # mount the plaintext seed values. Same age key (sops-age) every other Kustomization uses.
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
