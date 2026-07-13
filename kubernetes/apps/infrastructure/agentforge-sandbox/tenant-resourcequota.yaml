@@ -12,6 +12,17 @@
 #
 # The full CP-PLAN-DRIVEN per-org quota (each org's tier → a rendered quota, VAP-pinned to the operator
 # ceiling) is a P3-LIVE concern (multi-tenant); this dormant tenant-zero bound is the single-tenant shape.
+#
+# TAMPER-PROOFNESS (codex): a ResourceQuota lives IN a namespace, so whoever can DELETE the namespace can
+# drop it. The CP `agentforge-tenants-reconciler` SA has cluster-wide `namespaces: delete` (reconciler-rbac.yaml)
+# — so for a CP-MANAGED tenant it could delete+recreate the ns to transiently escape the quota. This is
+# CLOSED for tenant-zero: `tenant-namespace.yaml` makes THIS namespace OPERATOR-owned (main Flux), and
+# tenant-zero is absent from the CP tenant repo the reconciler manages, so that SA never touches this ns.
+# The escape remains a P3-LIVE concern only for the CP self-service tenants the reconciler DOES own — whose
+# robust fix is P3-LIVE ns-lifecycle governance: the operator owns every tenant-ns lifecycle (as here), OR a
+# per-pod-resource ValidatingAdmissionPolicy on af-tenant-* pods (admission-enforced, ns-delete-independent).
+# Defense-in-depth even so: tenant-zero's only workloads (worker + dispatcher) are operator-set + KEDA
+# maxReplicaCount-capped, an un-escapable primary bound beneath this namespace-total backstop.
 apiVersion: v1
 kind: ResourceQuota
 metadata:

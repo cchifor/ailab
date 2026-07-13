@@ -22,6 +22,10 @@ spec:
     - name: infrastructure
     - name: external-secrets
     - name: keda
+    # agentforge-sandbox OWNS the tenant-zero namespace (tenant-namespace.yaml) + its ResourceQuota; the
+    # worker/dispatcher/ScaledObject land INTO that ns, so the ns + quota must exist first (else the pods
+    # would admit before the LimitRange defaults/quota apply). Ordering, not health-gating (wait:false below).
+    - name: agentforge-sandbox
   sourceRef:
     kind: GitRepository
     name: flux-system

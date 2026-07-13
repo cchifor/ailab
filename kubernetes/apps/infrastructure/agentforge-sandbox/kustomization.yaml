@@ -16,6 +16,7 @@ resources:
   - resource-limits.yaml # namespace ResourceQuota + LimitRange (node-DoS ceiling)
   # --- Per-org/ws NFS backing (10.55.0.254:/pve-nfs/agentforge-sandbox/<org>/<ws>), one static PV per consumer ---
   - workspace-pvc.yaml # SANDBOX ns: af-sbx-ws-tenant-zero-playground static PV + PVC (Jobs mount subPath <job-id>)
+  - tenant-namespace.yaml # TENANT ns: OPERATOR-owned af-tenant-tenant-zero-playground (shadow tenant; CP reconciler doesn't manage it → can't delete the quota)
   - staging-pv.yaml # TENANT ns: af-sbx-stage-tenant-zero-playground static PV ONLY (operator-owned; CP renders the PVC)
   - tenant-resourcequota.yaml # TENANT ns: operator-owned ResourceQuota + LimitRange (P3 per-org quota; CP can't self-grant — not in the tenant-guard allowlist)
   # --- Reaper: TRUSTED `agentforge` ns (moved out of agentforge-sandbox), cross-ns RBAC into the sandbox ns ---
