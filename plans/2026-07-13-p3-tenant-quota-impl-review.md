@@ -1,6 +1,6 @@
 # Implementation review — p3-tenant-quota
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Scope
 The LAST preflight-independent buildable item of the AgentForge v2 plan (P3 §"per-org quotas"): a
@@ -33,8 +33,26 @@ per-account concurrency cap; this ResourceQuota is the namespace-total backstop.
   The escape is reframed as a P3-LIVE concern only for CP-managed (self-service) tenants — whose robust fix
   is per-tenant operator-owned ns lifecycle (as here) OR a per-pod-resource VAP on af-tenant-* pods.
 
-### Round 2 (task brcfc8j2r) — VERDICT PENDING
-<!-- filled on read -->
+### Round 2 (task brcfc8j2r) — 1 residual
+- Ordering + PSA confirmed correct (no cycle; `agentforge-workers dependsOn agentforge-sandbox`).
+- **RESIDUAL (closed):** the closure rested on a COMMENT-ONLY invariant — tenant-guard still allowed the
+  reconciler to create/update/delete any af-tenant-* object incl. tenant-zero. If the CP tenant repo ever
+  rendered tenant-zero, dual ownership would return.
+  **FIX (this commit):** enforce the reservation in admission, not a comment —
+  (a) `tenant-guard.yaml` validation **(16)**: on CREATE/UPDATE the reconciler SA is denied when the object
+      IS the tenant-zero Namespace or lives in it;
+  (b) NEW `tenant-reserved-guard.yaml`: a companion VAP+binding matching **DELETE** (all kinds/scopes) for
+      the same SA, denying `request.name`/`request.namespace == af-tenant-tenant-zero-playground` (the main
+      VAP matches only CREATE/UPDATE — its validations deref `object`, null on DELETE — so DELETE needed a
+      separate policy). Together they make tenant-zero a name the CP path cannot create, update, or delete.
+
+### Round 3 (task byx95cmjm, the review cap) — CONFIRMED
+- **CONFIRMED closed + safe.** CREATE/UPDATE/DELETE are structurally denied for the tenant reconciler SA;
+  the DELETE-target CEL (`request.name`/`request.namespace`) is correct; other (real) tenants and the
+  operator's main-Flux identity are unaffected. Sole note: subresources aren't matched by `resources: ["*"]`,
+  but this SA has NO subresource RBAC → no effective gap. No further rounds.
+
+**FINALIZED — the LAST preflight-independent buildable item of the AgentForge v2 plan is complete.**
 
 ## Verification
 - `kubectl kustomize agentforge-sandbox` builds (28 docs); exactly one `af-tenant-tenant-zero-playground`
