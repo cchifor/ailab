@@ -59,12 +59,15 @@ spec:
           rules:
             dns:
               - matchName: "agentforge-broker.agentforge-broker.svc.cluster.local"
-    # (b) the pool broker — reached by ENDPOINT identity (ns agentforge-broker + app name), NOT by the
-    #     ClusterIP, so the metadata/IPv6/private egressDeny below never blocks it. Port 8700.
-    - toEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: agentforge-broker
-            app.kubernetes.io/name: agentforge-broker
+    # (b) the pool broker — via its ClusterIP SERVICE ONLY (toServices), NOT a direct broker PodIP. The
+    #     single stable Service VIP is what the broker's source-IP TOFU + single-ingress-point assume; a
+    #     direct-PodIP path would let a sandbox pin one replica and sidestep that. Restricted to the http
+    #     data port 8700 (NOT metrics 9464). Service-resolved, so the metadata/IPv6/private egressDeny
+    #     below never blocks it. The broker ingress CNP still admits ONLY the matching-pool agent identity.
+    - toServices:
+        - k8sService:
+            serviceName: agentforge-broker
+            namespace: agentforge-broker
       toPorts:
         - ports:
             - { port: "8700", protocol: TCP }
