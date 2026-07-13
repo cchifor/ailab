@@ -118,11 +118,15 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.name
-              # Label matches the existing pool (self-hosted-hv) so platform's `runs-on: ${{ vars.RUNNER_
-              # LABEL || 'ubuntu-latest' }}` seam is untouched. With DinD the schema is docker:// (PREFLIGHT
-              # #2), unlike the host-mode ansible runners' `self-hosted-hv:host`.
+              # Label NAME matches the existing pool (self-hosted-hv) so platform's `runs-on: ${{
+              # vars.RUNNER_LABEL || 'ubuntu-latest' }}` seam is untouched. The SCHEMA is `docker://<image>`
+              # (NOT the host-mode ansible runners' `self-hosted-hv:host`): act_runner runs each job in a
+              # container on the sidecar DinD daemon, with the pinned default job image. The KEDA scaler
+              # `labels` matches the NAME (self-hosted-hv) only. PREFLIGHT #2 confirms this docker:// contract
+              # against the platform workflows that today require :host (${{ github.workspace }} bind-mount +
+              # host Docker + actions/cache) and pins the real default job image @sha256 below.
               - { name: GITEA_RUNNER_EPHEMERAL, value: "1" }
-              - { name: GITEA_RUNNER_LABELS, value: "self-hosted-hv" }
+              - { name: GITEA_RUNNER_LABELS, value: "self-hosted-hv:docker://registry.chifor.me/agentforge/ci-job@sha256:0000000000000000000000000000000000000000000000000000000000000000" }
               # Talk to the sidecar DinD over TCP on the shared pod loopback (NO docker.sock bind-mount, NO
               # shared PID namespace).
               - { name: DOCKER_HOST, value: "tcp://127.0.0.1:2375" }
