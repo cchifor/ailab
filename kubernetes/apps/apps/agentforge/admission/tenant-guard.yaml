@@ -89,10 +89,15 @@ spec:
       expression: "'af-eso-' + variables.ws"
     - name: vaultRole
       expression: "'af-tenant-' + variables.org + '-' + variables.ws"
-    # Every ESO source key MUST be under this exact per-tenant prefix (openbao_orchestrator_key =
-    # `tenants/<org>/<workspace>/orchestrator`). The trailing '/' forces a non-empty leaf segment.
-    - name: keyPrefix
-      expression: "'tenants/' + variables.org + '/' + variables.ws + '/'"
+    # The STRICT per-tenant source-key regex for THIS entry's org/ws (openbao_orchestrator_key =
+    # `tenants/<org>/<workspace>/orchestrator`). ANCHORED + per-segment: after the exact
+    # `tenants/<org>/<workspace>/` prefix, every '/'-segment is `[a-z0-9][a-z0-9._-]*` — each MUST start
+    # alnum, so a '.'/'..'/empty segment is impossible, and the `$` anchor rejects a TERMINAL '..'
+    # (`tenants/o/w/..`), a trailing '/', and '//'. org/ws are canonical slugs ([a-z0-9-]) so they carry
+    # no regex metacharacters. This is the plan's exact segment-safe regex (equivalent to a split-per-
+    # segment check, at validation-11's proven cost profile).
+    - name: keyRegex
+      expression: "'^tenants/' + variables.org + '/' + variables.ws + '/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$'"
     # The SecretStore's kubernetes-auth block (or {} for non-SecretStore / malformed) so validation 13
     # can read role/serviceAccountRef without nested has() chains erroring.
     - name: ssK8sAuth
@@ -255,24 +260,21 @@ spec:
          (!has(object.spec.dataFrom) || object.spec.dataFrom.all(d,
             !has(d.find) && has(d.extract) && has(d.extract.key))))
       message: "agentforge tenant path: an ExternalSecret must reference secretStoreRef {name:'af-eso-<workspace>', kind:SecretStore}, set target.name to one of the operator-mapped allowed creds, and use extract only (dataFrom.find is forbidden) — all correlated to the operator tenant-map entry."
-    # (15) P2 R-2 §6 — ExternalSecret SOURCE-KEY correlation, SEGMENT-based. Every data[].remoteRef.key
-    #      and dataFrom[].extract.key must startWith the exact per-tenant prefix 'tenants/<org>/<ws>/'
-    #      (so no other tenant, no 'operator/*', no legacy 'af/data/<org>/<ws>'), AND every '/'-split
-    #      SEGMENT must match ^[a-z0-9][a-z0-9._-]*$ — which rejects a '.'/'..' segment (incl. a TERMINAL
-    #      'tenants/o/w/..'), an empty segment ('//', leading '/', trailing '/'), and any non-slug
-    #      segment. A prefix-only startsWith would miss a terminal '..'; the per-segment check closes it.
+    # (15) P2 R-2 §6 — ExternalSecret SOURCE-KEY correlation, segment-safe. Every data[].remoteRef.key
+    #      and dataFrom[].extract.key must match the ANCHORED per-tenant regex for THIS namespace's mapped
+    #      org/ws (variables.keyRegex). By construction that rejects any other tenant, 'operator/*', a
+    #      legacy 'af/data/<org>/<ws>' key, a '.'/'..' segment (incl. a TERMINAL 'tenants/o/w/..'), an
+    #      empty segment ('//', leading '/', trailing '/'), and any non-slug segment — each segment must
+    #      START alnum and the `$` anchor forbids trailing junk. Prefix-only startsWith is NOT sufficient
+    #      (it would miss a terminal '..'); this anchored per-segment regex is.
     - expression: >-
         request.kind.kind != 'ExternalSecret' ||
         (variables.entryOk &&
          (!has(object.spec.dataFrom) || object.spec.dataFrom.all(d,
-            has(d.extract) && has(d.extract.key) &&
-            d.extract.key.startsWith(variables.keyPrefix) &&
-            d.extract.key.split('/').all(s, s.matches('^[a-z0-9][a-z0-9._-]*$')))) &&
+            has(d.extract) && has(d.extract.key) && d.extract.key.matches(variables.keyRegex))) &&
          (!has(object.spec.data) || object.spec.data.all(d,
-            has(d.remoteRef) && has(d.remoteRef.key) &&
-            d.remoteRef.key.startsWith(variables.keyPrefix) &&
-            d.remoteRef.key.split('/').all(s, s.matches('^[a-z0-9][a-z0-9._-]*$')))))
-      message: "agentforge tenant path: every ExternalSecret source key must be under 'tenants/<org>/<workspace>/…' for THIS namespace's mapped org/workspace, with per-segment rejection of '.'/'..' (incl. terminal '..'), empty segments ('//', leading/trailing '/'), and any legacy 'af/data/<org>/<ws>' key."
+            has(d.remoteRef) && has(d.remoteRef.key) && d.remoteRef.key.matches(variables.keyRegex))))
+      message: "agentforge tenant path: every ExternalSecret source key must match '^tenants/<org>/<workspace>/…$' (segment-safe) for THIS namespace's mapped org/workspace — rejecting other-tenant/'operator/*'/legacy 'af/data/<org>/<ws>' keys, a '.'/'..' segment (incl. terminal '..'), empty segments ('//', leading/trailing '/'), and non-slug segments."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
