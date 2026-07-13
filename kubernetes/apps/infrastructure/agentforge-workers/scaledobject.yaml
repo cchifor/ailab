@@ -43,8 +43,11 @@ spec:
       metadata:
         serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
         query: sum(forge_pending{account="anthropic/default",pool="planner",role=~"planner|reviewer"})
-        threshold: "1"           # target pending items per replica
-        activationThreshold: "1" # scale FROM 0 only once >= 1 item is pending (deactivate below this)
+        threshold: "1"           # target pending items per replica (scaling math)
+        # activationThreshold is a STRICT greater-than gate for waking from 0: value>activationThreshold.
+        # "0" means a single pending issue (value 1 > 0) wakes the worker; "1" would require >1 (2 issues)
+        # and silently ignore exactly-one-pending. Keep it at "0" so one item activates 0->1.
+        activationThreshold: "0"
         ignoreNullValues: "true" # a missing sample -> treated as 0 (fail-safe to idle; warm-floor covers hours)
     # (2) Cron warm-floor — keep 1 replica warm during business hours (interactive planner/reviewer) so the
     #     first request of the day doesn't pay a cold 0->1 start. desiredReplicas "1" WITH minReplicaCount 0
