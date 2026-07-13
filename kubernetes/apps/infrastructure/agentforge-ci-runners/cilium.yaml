@@ -114,3 +114,13 @@ spec:
         - 169.254.0.0/16
         - 127.0.0.0/8
         - ::/0
+    # EXPLICIT: NO CI runner -> OpenBao / ESO egress (codex Phase B #7, mirrors the broker policy). The
+    # runner has no secret-store credential and no business reaching the vault or the ESO controller;
+    # denying these identities makes the isolation invariant ASSERTABLE (not merely implied by
+    # default-deny) and is defense-in-depth against a future broader egress allow.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: external-secrets
