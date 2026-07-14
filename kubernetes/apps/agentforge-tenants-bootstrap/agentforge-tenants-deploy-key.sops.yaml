@@ -1,36 +1,30 @@
-# Read-only SSH deploy key the agentforge-tenants GitRepository clones cchifor/agentforge-tenants
-# with. Flux SSH auth Secret shape: identity (private key), identity.pub, known_hosts.
-#
-# OPERATOR (real values are a follow-up — these are PLACEHOLDERS):
-#   1. On Gitea, add a READ-ONLY deploy key to the cchifor/agentforge-tenants repo (Settings -> Deploy
-#      Keys; leave "Enable Write Access" OFF). Generate the pair: ssh-keygen -t ed25519 -N '' -f af_tenants
-#   2. Capture the in-cluster gitea-ssh host key for known_hosts, e.g.:
-#      kubectl --context admin@ai -n gitea exec deploy/gitea -- sh -c \
-#        'ssh-keyscan -p 22 gitea-ssh.gitea.svc.cluster.local' 2>/dev/null
-#   3. Put the private key in `identity`, the .pub in `identity.pub`, the keyscan line in `known_hosts`,
-#      then re-encrypt: sops -e -i kubernetes/apps/agentforge-tenants-bootstrap/agentforge-tenants-deploy-key.sops.yaml
 apiVersion: v1
 kind: Secret
+type: Opaque
 metadata:
     name: agentforge-tenants-deploy-key
     namespace: flux-system
-type: Opaque
 stringData:
-    identity: ENC[AES256_GCM,data:mq88HvL1GKvEiNKigCY2lwgdsFBSo8iF7nsUC+MZJOtymjknv+fl/3gZOPvlTuZFbfcxaZfFUxAibZJvHpBnTrt4W3Rm/gROJSxGK8H5MqI=,iv:P5KKq80PQfwShUSy2vIc6PsMLylf9NltjWf/u73ZbTo=,tag:u4XukCXFKzsNOvG3cIl4oA==,type:str]
-    identity.pub: ENC[AES256_GCM,data:6gX1xI/FkBtS1+YvuoqPWHHKGXDtzMHk8yV/IysJ16dZyJ2k,iv:Mv9IcWAyMha5afVdxOTX40w48RgD9+oQvNphtmaqV1Q=,tag:rh7R3QJlUZEbtwQx7Rk6ww==,type:str]
-    known_hosts: ENC[AES256_GCM,data:5Qh6jsXIuI/gKA37UiqFD81OgxN5tnUE2IplZqzXd9qNtnJ1VpWDbBV59JPQ9ZkGBoLyboMSYWwnxSNcF3Tf9NfO+HJG4am1yaykhCh8j+Jz/UXH5w==,iv:Gh4lk2tAfuwvYC13egIlbNWXGIS8rpYIbq0LMIIz1tE=,tag:L0titPDsOV9E/zacrQo6pA==,type:str]
+    identity: ENC[AES256_GCM,data:vAcEfKs9e8xbYGbVG8t7Xg24EOmu8rSzPqnDChGSJEgvuSZJoFO0yI+L3gx/cGU9ZIezonWfPPdmiy8XnvYrZk4719d5iFiT8RO54lNblIvMu802ugpl/qcRj0UiGG35UjHEGf9oFgqY+hFxcKl6cAApTFpwGd9Pg6Yw4QHwwY/xDNu/K5FedMDC5pOOZp0u31U/04s0rNGBHw0aYjkHY09xum67VUg2Awyjyk7jSIBM9k5gZosc3EkCZ/fqEeav1CwgdTOy9hS4giL3CSkCU/Iz6RMd/MZ9+n9igNZx0gLbbQFY4G5Aevj0pVWHOCgu+GzVDIiy3qpjFiUqc9K/kvV3I1AUZtRwF7yKwVYmrds4fVth37fsEF5b3TG/GAU01Kk8cAQ0y7djb+j37UiEVKzTvJTrUUUL7/vlgaLrEQ1Fk95dNDHFCifBkjS1gNZVarGXt8BbnOJhooUNRwkPD7vRJzJV9s3TShPPk0RLfZbhwkJDoOF1LUzwtyp++2Axtd96eDfNgwTjiXCc+vBf7zetAxPYDApyAMQC,iv:mm/gupGtrbk0Wst3RJkzhQvWU4hBr9DOI/bY9w08fU4=,tag:OyW/7swE1YWccd4w4gMvsQ==,type:str]
+    identity.pub: ENC[AES256_GCM,data:6hwUs3D7rZ4LmdjDtvRIUNHUgAHaDexNcvv0N5EiOIGy7hhIm3stOXspPNcybSdfLkkBvvNv3Mks4GlbO5WrL1MceZbwJVlCwUxEVoGP3XuvbQmhsz7qjJOCKABFeDGAIbSU,iv:byvNqM78GbGosrwJrDe+my9A2zEPuAMVi59YKnYI/RI=,tag:fV9rD9zdBrmoRnhIfNur4Q==,type:str]
+    known_hosts: ENC[AES256_GCM,data:hs+2wkv91vXIIMtQwMD3qkfWUM/hrVpFTYlVrNaAl+tHjoXPoPSPakPGEcXkplvL23Nde7z2aQtz5lHxnQwoKr8HjdSyunyGpNw68EDRa4u9jrnJo5nvR2dcgTMoPX4lSlIURUu9hpZV+Dq7Pg1RBRmNuPBgAiZf7P4Y5tCH4ZsxZea9kq2l7tkUJ8ma3bZjfdAcsyt3JbFZ0mNIFtGc1fUMcEMXespzxZJa+f/AhldWnjwB4/C6rGMcplUZzfE8Nd9qIyhFDSRIZ/BJuENxC5kHst48X81M2yVmlAD8tdLI25Bo49j0wsgeMZdldBs3VDAi3SPh+WXtu0l1JJMoOQTSzX+iJK7BbpST15z1BoTBENdmE06QRn2eQfzjsDc1QqD1h+baZeEus28o3ywT34amGO/Zl1IadCSdop7PCsEi8NH4hCaPk8ZcY6xJiSCfr+yr3FR5Q8bPVb9yzqiP8VyF/79W9cybcXYStFnHoFvcn3ySpzQ/MvBLNNx+iJ1QgiaxyTUrcpFZ2ps7m8ChQHUA1Q14XEIHX9pm6Gwe66aJbqf7JH7T7FeOUfslK/YeLHpsbuP1xp+dh3E+WxdbFio6zxJKjx6o/XfvWXGGXMnpBjDhLQN/aLwHKG9Wz+4Wya4/uMEspzdLVnC+nqqfQbBJzBTnE0FTF3MK0Zufj/7iuewTgOwM+ePo2RUN4wagWmXsxl0g62+jvzAi7QMnwQ/+aQl0VaycfBjzqE11W96q+iGt3tMJl3CA1nshgSAC9eYsQEuWtFtNy0B00a60HqogNobXLR899iI/2aZK39ou7vEkLb7n3DMpsAcM54AZfhPSf3uw7qiKc3u2YRdBojdA1OZysJnoBhdZLe6Ul54167oX8BDXfb5uGpR1Il5eyxmZkolT6aq2xE6n56GFkxZ9cNUxLc4/Jn2yTnxlLdiwx/5RkCsdtriz+JjttqSx+j/VprWtK1lIZiv/LZ7uzBhja+AzngZy/lvjQneqCXijXs2AHB0=,iv:qnEQPgzLp2rvD9R80g/T8JMFbu27f6BIGlM117QuyBA=,tag:MCWkO2jWqY7foEDUH2m1Dw==,type:str]
 sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
     age:
-        - enc: |
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBOSlR5N1hzQ2NRcThlank1
-            c0FtN0tBVExCQ1BWZWRreVpvckRyTnRVcG5vCjdkU3Q3RjgxMHlJcFhrNGV4dTQ2
-            YmlyRDF3b0h0L3ZqbWJkYzRBSlB3L1UKLS0tIDEySUVtb0FkWno2M3NnQ3dkRy9o
-            cHNIS2xucERLRmRRZWVhTXpaKzdwN2sKf1BV7MrtiE/NpKgXzrrxsdyEKhR2ybxv
-            bqFwSc8BLxBCnft9moqXkkg0pqpR/3Ixo8tXc34t5UtWHyxBZ0zu1A==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB1K0FVR1hJWGVlK3B6bytv
+            WEpsWS9VZUsxV0MveE9qTDdycWFNRVJHaW5rCnNoZnBsQUptS0JoL2RNUTRzdW1C
+            WUJVbnRTY3BtbFc2dE9wZWgydEtsd1UKLS0tIGx2cTU1elhMZ041Z0ZRNENLbVlE
+            bUhmVndKek0ybUVkKzlhT21zUkxVWVEKtr3CE0gmItTdXylivXyT++eu17XYrau7
+            nQ1/3eQBPnLUA4yYdgyUFoFCpl3s3EbeNxhFhHmvd2YUcYK+4ACitw==
             -----END AGE ENCRYPTED FILE-----
-          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    lastmodified: "2026-07-14T15:27:39Z"
+    mac: ENC[AES256_GCM,data:xUnvzwz237YvRv8GUoodpZu5oUCXASSGc1p6WDR4A0xIymxzgsqpOsrKWGjmzfQAj2u+3XBp5ESM0qx+0tw0+C/leN+U2r1PU0NAkrLTtYg9So6i4vbJPMEehL5Ta4tkN6pqaDviYj3VzdVIAmSWe+MRI36ltRgCjx1CuEqsyOE=,iv:w7hSELc/x7gTbyd3BuPdHP6BPw+NHNRMCHfX8VFfK7g=,tag:C+LZR76oZUVW6ewWOJYwZA==,type:str]
+    pgp: []
     encrypted_regex: ^(data|stringData)$
-    lastmodified: "2026-07-11T13:09:35Z"
-    mac: ENC[AES256_GCM,data:ECIAGWiDmNlrUO1hMlg9SleNiPHWhWajbbO+9w7oGqnalVh20p6gtHuCuqwxSQCCZO/X0+tC0t19pLTSNye3Ri3ZXB83gEIcyPaguVYv2s94Mq+Q8lD7TuPbi1/sbn/runAnlkUKwYiZa7DJSrQ6rgsKU06YcfCgC8iYAHTPS7Q=,iv:/sTJXOoECkxMuhxQb0bbmPbaKS/PtD+JPZlRtO11Jh0=,tag:J2QgWaCikSM4fLDjjzPVSg==,type:str]
-    version: 3.13.1
+    version: 3.9.4
