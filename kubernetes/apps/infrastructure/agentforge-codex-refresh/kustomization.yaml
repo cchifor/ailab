@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge codex-refresh — keeps the openai/codex-pro broker's durable subscription auth.json fresh.
+# The broker's access_token (JWT) expires ~10 days and the OAuth refresh_token is SINGLE-USE/rotated, so a
+# nightly CronJob reads the freshest auth.json from OpenBao, runs the refresh_token grant, and CAS-writes
+# the rotated auth.json back (concurrencyPolicy Forbid + KV check-and-set = no lost/double rotation).
+#
+# The CronJob (ns agentforge-broker) authenticates to OpenBao as SA af-codex-refresher under the
+# kubernetes-auth role af-codex-refresher, which grants read+create+update on exactly
+# `af/data/operator/broker/openai/codex-pro/oauth` (+ read metadata for the CAS version). That role +
+# policy are OPERATOR-privileged (they can WRITE an operator secret) and therefore are NOT reachable by the
+# scoped provisioner token (it only covers the af-tenant-* prefix).
+#
+# WHERE THE ROLE COMES FROM: it is created by the agentforge provisioner bootstrap AT PROVISION TIME,
+# under the root token, before root is revoked — DEFAULT_OPERATOR_ROLES in
+# src/agentforge/provisioner/bootstrap.py (agentforge repo, PR "mint af-codex-refresher write role at
+# provision time"). There is deliberately NO ailab-side role-creation Job: the old root-token stopgap
+# could never run, because `agentforge openbao-provision` revokes+deletes the root token at the end of a
+# provision. ALREADY-PROVISIONED cluster caveat: the role does not exist until the vault is re-provisioned
+# (or an operator creates it once with a privileged token). Until then this CronJob's OpenBao login simply
+# fails and the refresh waits — it is dormant/harmless and blocks nothing else (the broker-openai-codex
+# ExternalSecrets read the SAME KV path read-only and are unaffected).
+#
+# ALL OpenBao interaction here is via python3 hitting the OpenBao REST API (stdlib urllib, no `bao`/`vault`
+# CLI — the orchestrator image ships neither), matching every other OpenBao touchpoint in this codebase.
+resources:
+  - serviceaccount.yaml          # af-codex-refresher SA (ns agentforge-broker) — the CronJob's OpenBao identity
+  - cronjob.yaml                 # the nightly refresh CronJob + its wrapper-script ConfigMap
+  - ciliumnetworkpolicy.yaml     # default-deny egress except kube-dns, openbao:8200, auth.openai.com:443
