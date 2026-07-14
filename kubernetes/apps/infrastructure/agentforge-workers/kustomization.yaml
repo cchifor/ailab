@@ -20,6 +20,8 @@ resources:
   - worker-openbao-ca-cert.yaml    # per-ns openbao-tls (ailab-ca) so the namespaced SecretStore caProvider resolves
   - worker-secretstore.yaml        # eso-auth SA (af-eso-playground) + namespaced OpenBao SecretStore (per-tenant role)
   - worker-externalsecret.yaml     # materializes af-creds-playground-planner from tenants/tenant-zero/playground/orchestrator
+  - worker-serviceaccount.yaml     # the orchestrator SA the worker runs as (was assumed-existing but never rendered → pod never created)
+  - worker-staging-pvc.yaml        # tenant-ns staging PVC bound to the operator NFS PV (was omitted → pod FailedScheduling)
   - scaledobject.yaml              # KEDA scale-to-zero (prometheus backlog + cron warm-floor) over the worker
   - cilium-egress.yaml             # worker egress: Gitea + kube-apiserver:6443 + DNS ONLY (deny world/metadata/IPv6)
   # dispatcher-deployment.yaml + worker-deployment.yaml are INTENTIONALLY not listed — the images are

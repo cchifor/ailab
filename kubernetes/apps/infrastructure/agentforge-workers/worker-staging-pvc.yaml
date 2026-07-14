@@ -1,0 +1,20 @@
+# The tenant-ns staging PVC the orchestrator mounts at AF_SANDBOX_STAGING_ROOT (the shared NFS the
+# sandbox Kata Job also mounts, subPath <job_id>). Statically bound (volumeName + storageClassName "")
+# to the operator-owned NFS PV af-sbx-stage-tenant-zero-playground (Available). Previously omitted, so
+# the worker pod failed scheduling: `persistentvolumeclaim "af-sbx-stage-tenant-zero-playground" not found`.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: af-sbx-stage-tenant-zero-playground
+  namespace: af-tenant-tenant-zero-playground
+  labels:
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
+    agentforge.io/workspace: playground
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: ""
+  volumeName: af-sbx-stage-tenant-zero-playground
+  resources:
+    requests:
+      storage: 5Gi
