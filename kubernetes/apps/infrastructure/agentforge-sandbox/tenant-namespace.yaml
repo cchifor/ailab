@@ -22,8 +22,13 @@ metadata:
   labels:
     app.kubernetes.io/part-of: agentforge
     app.kubernetes.io/managed-by: agentforge-operator
-    agentforge.io/tenant: tenant-zero
+    # MUST match the renderer's _labels() (agentforge.io/org|workspace|pool) AND the provisioner's
+    # namespace selector (controller ORG_LABEL,WS_LABEL,POOL_LABEL) — with the old `agentforge.io/tenant`
+    # key + a missing pool label the provisioner never selected this ns, so its OpenBao tenant role
+    # (af-tenant-tenant-zero-playground) was never provisioned and the worker's ESO creds never synced.
+    agentforge.io/org: tenant-zero
     agentforge.io/workspace: playground
+    agentforge.io/pool: planner
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/audit: restricted
