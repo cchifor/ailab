@@ -102,6 +102,7 @@ spec:
       toPorts:
         - ports:
             - { port: "6443", protocol: TCP }
+            - { port: "443", protocol: TCP }
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: openbao
