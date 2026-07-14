@@ -52,14 +52,19 @@ spec:
           rules:
             dns:
               - matchPattern: "*"
-    # (2) kube-apiserver — the Talos control-plane VIP; Cilium resolves the `kube-apiserver` entity.
+    # (2) kube-apiserver — the Talos control-plane; Cilium resolves the `kube-apiserver` entity.
     #     REQUIRED to create/watch sandbox Jobs, read pod logs, and CAS the coordination.k8s.io Lease
     #     (safe under the narrow cross-ns Jobs-only RBAC in agentforge-sandbox/orchestrator-rbac.yaml).
+    #     BOTH ports: the in-cluster client dials the `kubernetes.default` ClusterIP
+    #     KUBERNETES_SERVICE_HOST:KUBERNETES_SERVICE_PORT = 10.96.0.1:443 (kube-proxy/Cilium DNATs to a
+    #     CP node's apiserver :6443). Without :443 the SandboxExecutor's Lease/Job create failed
+    #     "Cannot connect to host 10.96.0.1:443" and the planner escalated at state 1 before any Job.
     - toEntities:
         - kube-apiserver
       toPorts:
         - ports:
             - { port: "6443", protocol: TCP }
+            - { port: "443", protocol: TCP }
     # (3) the FORGE — in-cluster Gitea (gitea-http.gitea.svc:3000). Matched by ENDPOINT identity so the
     #     world/private-range egressDeny below never blocks it. NO public git.chifor.me / FQDN egress.
     - toEndpoints:
@@ -70,12 +75,16 @@ spec:
         - ports:
             - { port: "3000", protocol: TCP }
   egressDeny:
-    # No direct internet / node-local / metadata-via-node. Pod-to-pod (gitea/kube-dns) + the apiserver
-    # entity are identity-based, so these never block (1)/(2)/(3). Mirrors the sandbox agent egressDeny.
+    # No direct internet. Pod-to-pod (gitea/kube-dns) + the apiserver entity are identity-based, so this
+    # never blocks (1)/(2)/(3). Mirrors the sandbox agent egressDeny.
+    #
+    # NOTE: `host`/`remote-node` were REMOVED (same fix as the OpenBao provisioner CNP): the kube-apiserver
+    # runs ON the control-plane nodes, which carry the host/remote-node identity, and egressDeny OVERRIDES
+    # the kube-apiserver egress allow → the Lease/Job create got "Cannot connect to host 10.96.0.1:443" and
+    # never reached the API. The `egress` allow-list above already default-denies everything not listed, so
+    # the node-entity deny was redundant AND breaking. Keep only the world + link-local/metadata deny.
     - toEntities:
         - world
-        - host
-        - remote-node
     # metadata (169.254.169.254), link-local, and ALL IPv6 — explicit direct-IP belt.
     - toCIDR:
         - 169.254.169.254/32
