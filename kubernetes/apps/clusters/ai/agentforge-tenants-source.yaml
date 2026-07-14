@@ -19,4 +19,4 @@ spec:
     branch: main
   secretRef:
     name: agentforge-tenants-deploy-key
-  url: ssh://git@gitea-ssh.gitea.svc.cluster.local:22/cchifor/agentforge-tenants.git
+  url: ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/agentforge-tenants.git
