@@ -8,6 +8,7 @@ resources:
   - litellm-secret.sops.yaml
   - litellm-cloud-keys.sops.yaml # real OpenAI/Anthropic keys for the cloud models in litellm-config
   - litellm-local-secret.sops.yaml # own master key for litellm-local (LAN gateway — no cloud keys)
+  - litellm-local-db.sops.yaml # DATABASE_URL for litellm-local's virtual-key/budget store (infra-pg litellm DB)
   - open-webui-oauth.sops.yaml # Authelia OIDC client secret for Open WebUI
   - open-webui-db.sops.yaml # Postgres DATABASE_URL for Open WebUI (infra-pg openwebui DB)
   - llm-service.yaml

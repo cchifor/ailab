@@ -1,0 +1,28 @@
+# DATABASE_URL for the litellm-local gateway's DB-backed virtual-key + per-tenant budget store.
+# Points at the `litellm` role/DB on the shared infra-pg CNPG cluster (databases ns, ADR 0016).
+# The password MUST stay in sync with databases/infra-pg-litellm.sops.yaml (the CNPG managed role).
+# NB: local-only gateway — this DB stores KEYS/BUDGETS/SPEND only; STORE_MODEL_IN_DB stays False so no
+# cloud model can ever be added out-of-band.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: litellm-local-db
+    namespace: ai
+type: Opaque
+stringData:
+    DATABASE_URL: ENC[AES256_GCM,data:CcInFadtUkuc5RAJCQl2u8wW8zW8ftK5Dq+Q2WSde9x08KjuSXRCpBnVb49OjcpAkJy/oMQdJOxJYfnk+1EOhXzhXuL1YwlWa5RTZ6C5dPYoowFcOplSiqiehVPgp9MKOLA4D05fnhw/0ymZQSvRbI5L,iv:bm+ReugXJAugtcP2V2QcOtxlPBuwA0/w5pRK4spoeoE=,tag:l08/xpk/EDoslq4aebMqww==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBjN25YcURNR0krR0p2Ukgr
+            VFJhdTBKdStDRENKOFVzNGxORmdzaEUyZVI4Ck1uY1c5M2hHRUczak85OUFqZ3Fu
+            dGExY0hxckIvUmc2aHF0aXVOSnBTVk0KLS0tIFpTcUNoTVErSE5QUThWUm9uNS9i
+            T1NTckVSYUEvajltSnRCdlZVaXJrV1UKJ+UUnamMHwUgS2chRC+fOhl7YudHMA7E
+            J98DBUxm99zy5bcHK57rEPYLvg4lzmx4UUG+r2ujssMi4on8n53aXQ==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-07-14T16:49:28Z"
+    mac: ENC[AES256_GCM,data:0aJShATmRVgAc4XWwsBNmtSw8mnsgjtc5lPng2QRczNiGgQ9uRCMRUQ90XzfZnkSJ31qqeA9aEZhCGVSzfU8TFuFabjgU7slXqLwbyiJHAdXC3LxBdIUVTnNg0PQt7xsBIDne+/R3sikf8UppJMs4m410INZQCoHgMC+FZ3WCiM=,iv:reHO+mQR+ZRSquFl1tqAeuSX65JkJfyvdLt4e70A8Yc=,tag:lYjDYPI0KkHdzvDYvckOIA==,type:str]
+    version: 3.13.1

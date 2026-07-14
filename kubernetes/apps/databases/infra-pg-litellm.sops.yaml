@@ -1,0 +1,27 @@
+# basic-auth creds for the `litellm` managed role/DB (infra-pg). Backs the DB-backed virtual-key +
+# per-tenant budget store on the litellm-local gateway (kubernetes/apps/apps/ai/litellm-local.yaml).
+# The password MUST stay in sync with the DATABASE_URL in apps/ai/litellm-local-db.sops.yaml.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-litellm
+    namespace: databases
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:AjVaHctBng==,iv:c/fG+QDbsU3CaNEnZ6stvdc9ZpVK3X/VByhHNM+f4ZQ=,tag:y5HTE78Y2d/tHI8Ur7MSOw==,type:str]
+    password: ENC[AES256_GCM,data:06jwe+6MWXs31cFC4igl/SEnKB5DFXVW9txERjk++/xxfucBK4KOFg==,iv:z7rooNCywciX/XWZ7g4hRBSFpcEMii9tfzp24IwSPtA=,tag:db/S/EBHWwIvE59yyjdJfA==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBTYlVGOWdDSnIyZVcya2Zp
+            L0h5Wnh5WFBMbU5iT0xmcG1GY2JSeFRjelhjCjRzc3p6U05UWmROdFZxRGxYcEdx
+            WlZZR1g1bFo5Q0l2cXBjcnVIay9JQW8KLS0tIHdqMUhHWTc3ZFFXZ2xobkQyUk4r
+            TEVDVFkrakdFS3BKQkVnT2VsZnJRcGcKRfpBdD0BKYjSIWUDi7igSjYgsL4HiBta
+            O3/qYZY1N6kgVolxSiZsoeoj0NnGjkljGbPynRV/dlegucjK7HWk5g==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-07-14T16:49:28Z"
+    mac: ENC[AES256_GCM,data:hkGzClDUrEAQAYdp7xXTNS/sxQeJ92KZJKZsWlwU5i/I2928CPwbb83oWH9nAPpfKzja9udLy5pFHbWsVUJFsbSW0uFaIwJl6VebryZXITV1YBkbsYYLLZVo1F+EACdNQHLqegrWhEnNvB7CEAv+3kZq7B27kjMs4FrXOGUb5E8=,iv:n6JL2eFhtAQL8noh68mRSADBkvWrJ7zBxYLWybrA+pk=,tag:nnz4vXCgTK+JuBOn2OtFYQ==,type:str]
+    version: 3.13.1
