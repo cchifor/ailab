@@ -4,7 +4,7 @@
 #
 # maxReplicaCount is the HARD concurrency cap: the dispatcher reports PENDING work (not in-flight-
 # subtracted), so maxReplicas bounds concurrency while the per-issue epoch-elected claim-lock dedups
-# duplicate claims across replicas. Set to 2 = the account max_parallel. NB: the anthropic/default
+# duplicate claims across replicas. Set to 2 = the account max_parallel. NB: the claude-max-1
 # account's max_parallel is not visible in THIS repo (it lives in the forge AgentForgeConfig, cchifor/
 # agentforge-config); AccountConfig.max_parallel defaults to 1 — reconcile this value to that config at
 # activation (the tranche report notes the choice).
@@ -42,7 +42,7 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
-        query: sum(forge_pending{account="anthropic/default",role=~"planner|reviewer"})
+        query: sum(forge_pending{account="claude-max-1",role=~"planner|reviewer"})
         threshold: "1"           # target pending items per replica (scaling math)
         # activationThreshold is a STRICT greater-than gate for waking from 0: value>activationThreshold.
         # "0" means a single pending issue (value 1 > 0) wakes the worker; "1" would require >1 (2 issues)
