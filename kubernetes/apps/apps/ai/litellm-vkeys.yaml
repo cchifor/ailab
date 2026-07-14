@@ -8,8 +8,9 @@
 #
 # HOW IT WORKS: orgs.json below is the declarative source of truth (budget + limits + model whitelist per
 # org). The key VALUES live SOPS-encrypted in litellm-vkeys-secret.sops.yaml (env VKEY_<ORG>). The seeding
-# Job UPSERTs each org into LiteLLM's DB-backed key store via the admin API (/key/generate, then
-# /key/update on re-run) using the master key — so this file is idempotent and re-runnable.
+# Job UPSERTs each org into LiteLLM's DB-backed key store via the admin API using the master key: it probes
+# GET /key/info to decide create (/key/generate) vs reconcile (/key/update) — existence is a real read, not
+# a parsed write-error string — so this file is idempotent and re-runnable.
 #
 # BUDGET ENFORCEMENT: LiteLLM meters each key's spend in its Postgres store (litellm-local-db) using the
 # SYNTHETIC per-token costs set in litellm-local.yaml (1e-6/token => 1 budget unit ~= 1M tokens). When a
@@ -22,12 +23,13 @@
 # apps/agentforge/db-migrate.yaml). Run it by hand:
 #
 #   # 0. ONE-TIME: create the `litellm` role+DB (postInitSQL does NOT run on the already-bootstrapped
-#   #    infra-pg). managed.roles (infra-pg.yaml) sets the password from infra-pg-litellm within seconds:
-#   kubectl --context admin@ai -n databases exec -i infra-pg-1 -- psql -v ON_ERROR_STOP=1 <<'SQL'
-#   SELECT 'CREATE ROLE litellm LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname='litellm')\gexec
-#   SELECT 'CREATE DATABASE litellm OWNER litellm' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='litellm')\gexec
-#   SQL
-#   #    (litellm-local then migrates its OWN schema into this DB at boot once DATABASE_URL is wired.)
+#   #    infra-pg). Use the committed bootstrap artifact (idempotent) — see its header for the by-hand
+#   #    peer-auth exec or the superuser-DSN Job. managed.roles (infra-pg.yaml) then sets the password
+#   #    from infra-pg-litellm within seconds:
+#   kubectl --context admin@ai -n databases exec -i infra-pg-1 -- psql -v ON_ERROR_STOP=1 \
+#     < <(kubectl --context admin@ai -n databases get cm litellm-db-bootstrap -o jsonpath='{.data.bootstrap\.sql}')
+#   #    (kubernetes/apps/databases/litellm-db-bootstrap.yaml; litellm-local then migrates its OWN schema
+#   #     into this DB at boot once DATABASE_URL is wired.)
 #   # 1. Define orgs: edit orgs.json (below) + add VKEY_<ORG> to litellm-vkeys-secret.sops.yaml.
 #   # 2. Apply the spec + key values, then run the seeding Job:
 #   kubectl --context admin@ai apply -f kubernetes/apps/apps/ai/litellm-vkeys-secret.sops.yaml   # decrypt via sops first
@@ -61,26 +63,38 @@ data:
 
     Create-or-reconcile each org's key with its budget + rate limits + local-only model whitelist, via the
     LiteLLM admin API using the master key. Re-runnable: a second run reconciles (never duplicates) keys.
+
+    Idempotency is decided by a dedicated READ endpoint (GET /key/info), NOT by parsing a write endpoint's
+    error string: a 200 from /key/info means the key already exists -> reconcile via /key/update; otherwise
+    create via /key/generate. A final self-heal swaps the endpoint if the create/check race loses (key
+    created between our read and write), so the run is robust without brittle message matching.
     """
-    import json, os, sys, urllib.request, urllib.error
+    import json, os, sys, urllib.parse, urllib.request, urllib.error
 
     BASE = os.environ["LITELLM_BASE"].rstrip("/")
     MASTER = os.environ["LITELLM_MASTER_KEY"]
     SPEC = "/spec/orgs.json"
     PLACEHOLDER = "0" * 40  # the template value in litellm-vkeys-secret.sops.yaml - skip, not a real tenant
 
-    def call(path, body):
+    def request(method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
             f"{BASE}{path}",
-            data=json.dumps(body).encode(),
+            data=data,
             headers={"Authorization": f"Bearer {MASTER}", "Content-Type": "application/json"},
-            method="POST",
+            method=method,
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 return r.status, r.read().decode()
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode()
+
+    def key_exists(key):
+        # Existence via the dedicated READ endpoint (/key/info returns 200 for a known key, 4xx otherwise).
+        # This is the robust idempotency signal — we never string-match a create/update error body.
+        status, _ = request("GET", "/key/info?key=" + urllib.parse.quote(key, safe=""))
+        return status == 200
 
     orgs = json.load(open(SPEC))
     failed = False
@@ -100,17 +114,23 @@ data:
             "tpm_limit": o.get("tpm_limit"),
             "metadata": {"org": org, "managed_by": "litellm-vkeys.yaml"},
         }
-        status, body = call("/key/generate", params)
+        if key_exists(key):
+            path, action = "/key/update", "reconciled"  # reconcile budget/limits/models on the existing key
+        else:
+            path, action = "/key/generate", "created"
+        status, body = request("POST", path, params)
+        if status != 200:
+            # Self-heal the check/write race (or a stale read): retry on the OTHER endpoint. Endpoint swap,
+            # not message parsing — /key/generate <-> /key/update. If it still fails, it's a real error.
+            alt = "/key/generate" if path == "/key/update" else "/key/update"
+            alt_action = "created" if alt == "/key/generate" else "reconciled"
+            status, body = request("POST", alt, params)
+            action = alt_action
         if status == 200:
-            print(f"[created] {org}: alias=tenant-{org} budget={o['max_budget']} models={o['models']}")
-            continue
-        if status == 400 and "already exists" in body.lower():
-            status, body = call("/key/update", params)  # reconcile budget/limits/models on the existing key
-            if status == 200:
-                print(f"[reconciled] {org}: budget={o['max_budget']} models={o['models']}")
-                continue
-        print(f"[ERROR] {org}: {status} {body}", file=sys.stderr)
-        failed = True
+            print(f"[{action}] {org}: alias=tenant-{org} budget={o['max_budget']} models={o['models']}")
+        else:
+            print(f"[ERROR] {org}: {status} {body}", file=sys.stderr)
+            failed = True
     sys.exit(1 if failed else 0)
 ---
 apiVersion: batch/v1

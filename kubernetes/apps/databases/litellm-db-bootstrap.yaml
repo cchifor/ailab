@@ -1,0 +1,87 @@
+# litellm virtual-key/budget DB bootstrap — OPERATOR-RUN ONE-SHOT (deliberately NOT listed in
+# kustomization.yaml, so Flux never applies/health-gates it: a failing bootstrap Job under the
+# `databases` Kustomization would wedge that layer and everything that dependsOn it). This is the IaC
+# artifact that CREATES the `litellm` role + database on the ALREADY-BOOTSTRAPPED infra-pg — postInitSQL
+# (infra-pg.yaml) runs ONLY at first cluster bootstrap, so on the live cluster the DB must be created
+# out-of-band before the litellm-local gateway's DATABASE_URL can resolve. Mirrors the sibling pattern in
+# kubernetes/apps/apps/agentforge/db-migrate.yaml (idempotent \gexec SQL + optional superuser-DSN Job).
+#
+# managed.roles (infra-pg.yaml) reconciles the `litellm` role password from infra-pg-litellm within
+# seconds, so the role created here just needs to EXIST; litellm-local then migrates its OWN schema into
+# the DB at boot (it owns the DB). Run it ONCE, either way:
+#
+#   # A) By hand as SUPERUSER (peer-auth inside the CNPG pod — no password, no superuser Secret needed):
+#   kubectl --context admin@ai -n databases exec -i infra-pg-1 -- psql -v ON_ERROR_STOP=1 \
+#     < <(kubectl --context admin@ai -n databases get cm litellm-db-bootstrap -o \
+#        jsonpath='{.data.bootstrap\.sql}')
+#
+#   # B) Or apply this file to run the same SQL as a Job (needs the OPTIONAL superuser DSN Secret
+#   #    infra-pg-superuser/ADMIN_DATABASE_URL pointing at .../postgres; absent -> the Job no-ops with a
+#   #    hint, so applying it is always safe):
+#   kubectl --context admin@ai apply -f kubernetes/apps/databases/litellm-db-bootstrap.yaml
+#   kubectl --context admin@ai -n databases wait --for=condition=complete job/litellm-db-bootstrap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-db-bootstrap
+  namespace: databases
+data:
+  bootstrap.sql: |
+    -- Superuser one-shot: create the `litellm` role + database (idempotent). The role OWNS the DB so the
+    -- litellm proxy can run its own schema migrations at boot. CREATE ROLE/DATABASE cannot run in a DO
+    -- block, so use psql \gexec. The password is set afterward by managed.roles (infra-pg.yaml) from
+    -- infra-pg-litellm — must match the DATABASE_URL in apps/ai/litellm-local-db.sops.yaml.
+    SELECT 'CREATE ROLE litellm LOGIN'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'litellm')\gexec
+    SELECT 'CREATE DATABASE litellm OWNER litellm'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'litellm')\gexec
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-db-bootstrap
+  namespace: databases
+  labels:
+    app.kubernetes.io/name: litellm-local
+    app.kubernetes.io/component: db-bootstrap
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600 # auto-clean an hour after completion
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: litellm-local
+        app.kubernetes.io/component: db-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: bootstrap-role-db
+          image: ghcr.io/cloudnative-pg/postgresql:17.10
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -z "${PGADMIN_URL:-}" ]; then
+                echo "No superuser DSN (Secret infra-pg-superuser); skipping role/DB bootstrap."
+                echo "Run bootstrap.sql once as superuser (see litellm-db-bootstrap.yaml header, option A)."
+                exit 0
+              fi
+              psql "$PGADMIN_URL" -v ON_ERROR_STOP=1 -f /sql/bootstrap.sql
+          env:
+            # OPTIONAL superuser DSN (.../postgres). Absent -> the Job no-ops gracefully (assumes option A
+            # was run by hand). optional:true keeps this file appliable without the Secret existing.
+            - name: PGADMIN_URL
+              valueFrom:
+                secretKeyRef: { name: infra-pg-superuser, key: ADMIN_DATABASE_URL, optional: true }
+          volumeMounts:
+            - { name: bootstrap, mountPath: /sql, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: bootstrap
+          configMap: { name: litellm-db-bootstrap }

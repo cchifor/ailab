@@ -19,31 +19,34 @@ data:
       # max_input_tokens: host CTX=262144 across --parallel 2 slots => per-slot n_ctx = 131072;
       # minus ~16K output headroom = 114688 — LiteLLM fails fast above that instead of forwarding
       # a doomed request.
-      # input/output_cost_per_token here are SYNTHETIC "credit" units, NOT real USD — local llama.cpp
+      # input/output_cost_per_token are SYNTHETIC "credit" units, NOT real USD — local llama.cpp
       # inference costs $0. They exist ONLY so LiteLLM's per-key spend counter increments and each
       # per-tenant virtual key's max_budget enforces a TOKEN quota (1e-6/token => 1M tokens = 1 budget
       # unit). Keep them equal across the local models so a budget maps cleanly to a token count.
-      # See litellm-vkeys.yaml for how per-org keys + budgets are issued against these.
+      # They live under litellm_params (NOT model_info): LiteLLM reads CUSTOM per-token pricing from
+      # litellm_params (per the 'Custom Pricing' proxy docs) — under model_info they are IGNORED and
+      # spend never increments, so budgets would never enforce. See litellm-vkeys.yaml for how per-org
+      # keys + budgets are issued against these.
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000001
         model_info:
           supports_vision: true
           max_input_tokens: 114688
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000001
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000001
         model_info:
           supports_vision: true
           max_input_tokens: 114688
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000001
       # qwen3.5-122b — the sole local heavyweight, llama-swap on node3 (loads on first request;
       # multi-minute cold start covered by request_timeout below, idle-unloads after its ttl).
       - model_name: qwen3.5-122b
@@ -51,10 +54,10 @@ data:
           model: openai/qwen3.5-122b
           api_base: http://llm-qwen35.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info:
-          max_input_tokens: 24576 # host CTX=32768 --parallel 1 (single 32K slot); ~8K output headroom for reasoning
           input_cost_per_token: 0.000001
           output_cost_per_token: 0.000001
+        model_info:
+          max_input_tokens: 24576 # host CTX=32768 --parallel 1 (single 32K slot); ~8K output headroom for reasoning
     litellm_settings:
       drop_params: true
       # 900s to cover a llama-swap COLD START of qwen3.5-122b (~4-5 min over NFS) — matches
@@ -107,7 +110,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "c4a54968fc2b"
+        checksum/config: "cb880b88398a"
     spec:
       containers:
         - name: litellm
