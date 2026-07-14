@@ -58,7 +58,13 @@ spec:
             - { port: "53", protocol: TCP }
           rules:
             dns:
-              - matchName: "agentforge-broker.agentforge-broker.svc.cluster.local"
+              # EXACT names for the real per-account broker Services (no matchPattern → no DNS
+              # tunneling). One broker Deployment per (provider, account); the agent resolves the
+              # ONE whose aud it was minted for. There is no `agentforge-broker` Service — that was
+              # a placeholder that refused every real query and hung the agent before its first call.
+              - matchName: "broker-anthropic-max1.agentforge-broker.svc.cluster.local"
+              - matchName: "broker-anthropic-max2.agentforge-broker.svc.cluster.local"
+              - matchName: "broker-openai-codex.agentforge-broker.svc.cluster.local"
     # (b) the pool broker — allowed to EXACTLY the broker Service's backend endpoints via toServices,
     #     restricted to the http data port 8700 (NOT metrics 9464). NOTE (codex Phase B): Cilium L3
     #     policy allows destinations by ENDPOINT IDENTITY — toServices resolves the Service to its READY
@@ -74,7 +80,13 @@ spec:
     #     admits ONLY the matching-pool agent identity.
     - toServices:
         - k8sService:
-            serviceName: agentforge-broker
+            serviceName: broker-anthropic-max1
+            namespace: agentforge-broker
+        - k8sService:
+            serviceName: broker-anthropic-max2
+            namespace: agentforge-broker
+        - k8sService:
+            serviceName: broker-openai-codex
             namespace: agentforge-broker
       toPorts:
         - ports:
