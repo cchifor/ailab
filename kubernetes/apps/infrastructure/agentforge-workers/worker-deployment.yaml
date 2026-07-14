@@ -113,9 +113,20 @@ spec:
             - { name: AF_SANDBOX_POOL, value: "planner" }          # -> capability pool/role claim
             - { name: AF_SANDBOX_WORKSPACE_PVC, value: "af-sbx-ws-tenant-zero-playground" } # VAP: af-sbx-ws-<org>-<ws>
             # aud (<provider>/<account>) -> broker URL. The worker selects the broker by the SAME aud it
-            # signs; anthropic/default is the tenant-zero planner's Claude subscription broker (aud pinned by
-            # the broker configmap AF_BROKER_AUDIENCE). The DIRECT broker ClusterIP (source-IP TOFU, no proxy).
-            - { name: AF_SANDBOX_BROKER_URLS, value: '{"anthropic/default":"http://agentforge-broker.agentforge-broker.svc.cluster.local:8700"}' }
+            # signs (_broker_audience(spec) = "<provider>/<account>"), so the map MUST key on the REAL
+            # per-account broker audiences (each broker Deployment pins its own aud via AF_BROKER_AUDIENCE):
+            #   planner/reviewer role -> anthropic/claude-max-1 (this tenant-zero worker's Claude account)
+            #   codex cross-review    -> openai/codex-pro       (the same worker runs Codex cross-reviews)
+            #   spare Claude account  -> anthropic/claude-max-2
+            # The prior value keyed on a non-existent aud "anthropic/default" AND a non-existent Service
+            # "agentforge-broker" -> _resolve_broker_url() raised "no broker URL configured for aud
+            # 'anthropic/claude-max-1'" and every sandbox Job failed fast before lease/stage. The three
+            # Services (broker-anthropic-max1/-max2, broker-openai-codex) are DIRECT ClusterIPs :8700.
+            - name: AF_SANDBOX_BROKER_URLS
+              value: >-
+                {"anthropic/claude-max-1":"http://broker-anthropic-max1.agentforge-broker.svc.cluster.local:8700",
+                 "anthropic/claude-max-2":"http://broker-anthropic-max2.agentforge-broker.svc.cluster.local:8700",
+                 "openai/codex-pro":"http://broker-openai-codex.agentforge-broker.svc.cluster.local:8700"}
             # Owner-lease leaseDurationSeconds (coordination.k8s.io Lease af-sbx-<job_id>; apiserver CAS + RBAC).
             - { name: AF_LEASE_DURATION_S, value: "300" }
             # The sandbox pod runs as 65532 on the 0777 NFS export, so the importer must expect that uid.
