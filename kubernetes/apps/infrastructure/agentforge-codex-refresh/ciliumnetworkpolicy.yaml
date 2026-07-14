@@ -1,0 +1,64 @@
+# The codex-refresh CronJob's COMPLETE allowed reach (Cilium egress default-deny once the endpoint is
+# selected). Mirrors the agentforge-provisioner / broker CNP shape. The refresher has NO ingress (nothing
+# dials it) and exactly three egress destinations: kube-dns (resolution), the in-cluster OpenBao svc:8200
+# (read the current auth.json + CAS-write the rotated one), and auth.openai.com:443 (the refresh_token
+# grant). Everything else — including the ChatGPT backend, the ledger, the apiserver, and all node-local /
+# private CIDRs — is denied.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: af-codex-refresher
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: af-codex-refresher
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: af-codex-refresher
+  egress:
+    # (1) DNS -> kube-dns. Broad resolution (in-cluster openbao svc + auth.openai.com); the actual
+    #     destinations are pinned by the openbao endpoint identity + toFQDNs + the egressDeny below.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # (2) OpenBao — read/CAS-write the codex-pro oauth KV. Matched by ENDPOINT identity (the whole openbao ns).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+      toPorts:
+        - ports:
+            - { port: "8200", protocol: TCP }
+    # (3) The OpenAI/ChatGPT OAuth token/refresh host — FQDN L7. ⚠ PREFLIGHT: auth.openai.com is the
+    #     DOCUMENTED PLACEHOLDER for the Codex/ChatGPT OAuth token host (same placeholder the broker CNP
+    #     uses for its refresh egress); pin the exact enumerated host at activation, do NOT widen to a
+    #     wildcard. The refresh_token grant is a POST to /oauth/token on this host.
+    - toFQDNs:
+        - matchName: "auth.openai.com"
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }
+  egressDeny:
+    # Node-local + kubelet + metadata-via-node (host/remote-node entities). Pod-to-pod is identity-based.
+    - toEntities:
+        - host
+        - remote-node
+    # DNS-rebinding / direct-IP belt: deny all private, link-local (incl. 169.254.169.254 metadata),
+    # loopback, and IPv6. In-cluster allows are identity-based (toEndpoints), so these CIDR denies apply
+    # only to world/CIDR-classified traffic (e.g. the OAuth FQDN rebound to an internal IP).
+    - toCIDR:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 127.0.0.0/8
+        - ::/0

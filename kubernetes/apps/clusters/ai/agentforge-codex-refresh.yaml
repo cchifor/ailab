@@ -1,0 +1,36 @@
+# AgentForge codex-refresh — the scheduled OAuth-refresh job that keeps the openai/codex-pro broker's
+# durable subscription auth.json alive. The broker's access_token (a JWT) expires ~10 days; without a
+# scheduled refresh_token grant the broker-openai-codex Deployments start 401ing upstream. This is its
+# OWN Flux Kustomization (NOT folded into infrastructure/), mirroring the agentforge-broker wiring: a
+# self-contained operator-owned boundary in the CP-unwritable cchifor/ailab repo.
+#
+# dependsOn: infrastructure (base layer) + agentforge-broker (owns the agentforge-broker ns + the ns-local
+# openbao-tls ca.crt the CronJob's `bao` client verifies) + openbao (the vault + the one-shot role-provision
+# Job's root-token secret live in ns openbao). wait:false so a not-yet-Ready dependency (e.g. the OpenBao
+# role not yet stood up) can never wedge this or any dependent Flux Kustomization.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agentforge-codex-refresh
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  dependsOn:
+    - name: infrastructure
+    - name: agentforge-broker
+    - name: openbao
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/agentforge-codex-refresh
+  prune: true
+  wait: false
+  # decryption retained for parity with the sibling operator Kustomizations; this tree currently carries
+  # no SOPS-encrypted Secret (the CronJob authenticates to OpenBao via its projected SA token, and the
+  # one-shot role-provision Job reads the existing openbao-bootstrap-token Secret).
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

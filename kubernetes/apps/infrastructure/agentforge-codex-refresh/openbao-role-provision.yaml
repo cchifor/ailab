@@ -1,0 +1,129 @@
+# One-shot PRIVILEGED role provisioner for the codex-refresh CronJob.
+#
+# WHY THIS EXISTS (privileged-bootstrap dependency — see PR notes): the OTHER operator k8s-auth roles
+# (af-operator-broker, af-operator-dispatcher, …) are created in code by `agentforge openbao-provision`
+# (agentforge repo, provisioner/bootstrap.py: DEFAULT_OPERATOR_ROLES). Those are READ-ONLY roles. The
+# codex-refresher role is DIFFERENT: it needs create+update on an operator secret, so `_operator_policy_hcl`
+# (read-only) does NOT cover it, and — critically — the scoped `provisioner` token CANNOT create it: the
+# provisioner policy only grants sys/policies/acl + auth/kubernetes/role on the `af-tenant-*` name prefix
+# (never `af-codex-refresher`). So this role/policy can only be created with a token that can write an
+# arbitrary policy + auth role: the bootstrap ROOT token.
+#
+# CANONICAL HOME: add an OperatorRole("af-codex-refresher", "af-codex-refresher", "agentforge-broker", …)
+# PLUS a read+create+update oauth policy to agentforge provisioner/bootstrap.py so it is stood up at
+# provision time (before root is revoked). A sibling ailab PR cannot reach that repo, so this Job is the
+# ailab-side IaC stopgap: it reproduces exactly that policy + role via the `bao` CLI.
+#
+# ⚠ ACTIVATION: this Job reads the bootstrap ROOT token (Secret openbao-bootstrap-token, key root_token),
+# which `agentforge openbao-provision` REVOKES + DELETES at the end of a full provision. Apply/run this
+# DURING the provision window (root still present) — or fold the role into bootstrap.py per above. `bao
+# policy write` + `bao write auth/kubernetes/role/...` are idempotent upserts, so a re-run while root exists
+# is safe. Until the role exists the CronJob's `bao login` (and the broker-openai-codex ExternalSecrets)
+# are unaffected — only the refresh itself waits.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: af-codex-refresher-role-script
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: af-codex-refresher-role-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+data:
+  provision-role.sh: |
+    #!/bin/sh
+    set -eu
+    export HOME=/work
+    export BAO_ADDR="https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200"
+    export BAO_CACERT="/tls/ca.crt"
+    BAO_TOKEN="$(cat /var/run/openbao-root/root_token)"
+    export BAO_TOKEN
+
+    # Policy: read + create + update on EXACTLY the codex-pro oauth data path, plus read on its metadata
+    # (the KV-v2 check-and-set version the CronJob reads before `bao kv put -cas`). Deliberately NOT the
+    # broker-wide `af/data/operator/broker/*` grant — scoped to the single object the refresher rotates.
+    bao policy write af-codex-refresher - <<'HCL'
+    path "af/data/operator/broker/openai/codex-pro/oauth" {
+      capabilities = ["read", "create", "update"]
+    }
+    path "af/metadata/operator/broker/openai/codex-pro/oauth" {
+      capabilities = ["read"]
+    }
+    HCL
+
+    # kubernetes-auth role bound to EXACTLY the CronJob's SA (af-codex-refresher @ agentforge-broker), short
+    # token TTL (the Job runs for <120s).
+    bao write auth/kubernetes/role/af-codex-refresher \
+      bound_service_account_names=af-codex-refresher \
+      bound_service_account_namespaces=agentforge-broker \
+      token_policies=af-codex-refresher \
+      token_ttl=10m
+
+    echo "af-codex-refresher OpenBao policy + kubernetes-auth role provisioned"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: af-codex-refresher-role-provision
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: af-codex-refresher-role-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: af-codex-refresher-role-provision
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provision-role
+          # SAME orchestrator image the openbao-provision Job uses (carries python3 + the bao client).
+          image: registry.chifor.me/agentforge/orchestrator@sha256:259bf1d68a1c7b31d856aed152c29c8cc405d598a2822fcfc4e29e198892a42f
+          command: ["/bin/sh", "/scripts/provision-role.sh"]
+          volumeMounts:
+            - { name: work, mountPath: /work }
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: root, mountPath: /var/run/openbao-root, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 48Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: work
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+        - name: root
+          secret:
+            secretName: openbao-bootstrap-token   # the bootstrap ROOT token; key root_token (see header)
+            items:
+              - { key: root_token, path: root_token }
+        - name: script
+          configMap:
+            name: af-codex-refresher-role-script
+            defaultMode: 0555

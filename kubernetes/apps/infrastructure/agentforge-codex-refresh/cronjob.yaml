@@ -1,0 +1,143 @@
+# The wrapper the CronJob runs. Kept in a ConfigMap (mounted read-only) so the CronJob container can stay
+# on the orchestrator image with a hardened, readOnlyRootFilesystem securityContext. Flow:
+#   1. bao login (kubernetes method) with the pod's projected af-codex-refresher SA token;
+#   2. read the CURRENT auth.json field + its KV version (for the check-and-set);
+#   3. agentforge-codex-refresh --skew-seconds 172800 (refresh only if <2d to access_token expiry);
+#   4. if a NEW auth.json was emitted, CAS-write it back at the exact version read in (2).
+# refresh_tokens are SINGLE-USE/rotated, so reading the FRESHEST value and CAS-writing (concurrencyPolicy
+# Forbid + `-cas=<ver>`) is what prevents a stale overwrite / a lost rotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: af-codex-refresh-script
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: af-codex-refresher
+    app.kubernetes.io/component: codex-refresh
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+data:
+  refresh.sh: |
+    #!/bin/sh
+    # Fail CLOSED: any step (login, read, refresh, CAS-write) that errors aborts the run non-zero.
+    set -eu
+    export HOME=/work                                   # bao token cache + tmp writes land on the tmpfs
+    export BAO_ADDR="https://openbao.openbao.svc:8200"  # same in-cluster OpenBao svc the ESO SecretStore dials
+    export BAO_CACERT="/tls/ca.crt"                     # ns-local ailab-ca copy (from the agentforge-broker tree)
+    KV_MOUNT="af"
+    KV_KEY="operator/broker/openai/codex-pro/oauth"
+    # NB: the KV field is `auth.json` — it MUST match the broker-openai-codex-oauth ExternalSecret's
+    # remoteRef property (the broker mounts that field verbatim). It appears literally in steps (2) and (4).
+
+    # (1) Authenticate as the projected af-codex-refresher SA token under the af-codex-refresher role.
+    bao login -no-print -method=kubernetes role=af-codex-refresher
+
+    # (2) Read the current auth.json + its KV-v2 version in ONE call, then split it out with python3
+    #     (the orchestrator image ships python3; this avoids a jq dependency).
+    bao kv get -mount="$KV_MOUNT" -format=json "$KV_KEY" > /work/kv.json
+    python3 - <<'PY'
+    import json
+    d = json.load(open("/work/kv.json"))
+    open("/work/in.json", "w").write(d["data"]["data"]["auth.json"])
+    open("/work/ver", "w").write(str(d["data"]["metadata"]["version"]))
+    PY
+    VER="$(cat /work/ver)"
+
+    # (3) Refresh (file-in/file-out, atomic). --skew-seconds 172800 => refresh iff <2 days to expiry; the CLI
+    #     writes /work/out.json ONLY when it actually rotated, so a still-fresh token is a clean no-op.
+    agentforge-codex-refresh --in /work/in.json --out /work/out.json --skew-seconds 172800
+
+    # (4) CAS-write the rotated auth.json back at the exact version read in (2). A racing writer bumps the
+    #     version and `-cas` FAILS the put (fail closed) rather than clobbering a newer rotation.
+    if [ -s /work/out.json ]; then
+      bao kv put -mount="$KV_MOUNT" -cas="$VER" "$KV_KEY" "auth.json=@/work/out.json"
+      echo "codex auth.json rotated + CAS-written (version ${VER} -> $((VER + 1)))"
+    else
+      echo "codex auth.json still fresh (> skew); no refresh performed"
+    fi
+---
+# Nightly codex OAuth refresh. concurrencyPolicy Forbid is LOAD-BEARING: refresh_tokens are single-use, so
+# two overlapping runs could each consume a different generation and desync the stored auth.json — Forbid +
+# the KV check-and-set guarantee a single serialized rotation. startingDeadlineSeconds 300 skips a run that
+# could not start within 5m (rather than piling up missed runs); the tight activeDeadlineSeconds 120 +
+# backoffLimit 2 keep a wedged run from lingering.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: af-codex-refresh
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: af-codex-refresher
+    app.kubernetes.io/component: codex-refresh
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  schedule: "0 3 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: af-codex-refresher
+            app.kubernetes.io/component: codex-refresh
+            app.kubernetes.io/part-of: agentforge
+        spec:
+          serviceAccountName: af-codex-refresher
+          # The token is REQUIRED here (unlike the broker runtime SA): `bao login -method=kubernetes` reads
+          # the projected SA JWT to authenticate to OpenBao.
+          automountServiceAccountToken: true
+          enableServiceLinks: false
+          restartPolicy: Never
+          # Co-schedule on the dedicated agent pool alongside the broker it serves.
+          nodeSelector:
+            ailab.io/agent-pool: "true"
+          tolerations:
+            - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532            # so the mounted openbao-tls ca.crt is group-readable by uid 65532
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: refresh
+              # SAME orchestrator image as the broker (carries agentforge-codex-refresh + python3 + the bao
+              # client). Pinned by digest for parity with broker-openai-codex.yaml / the bootstrap Jobs.
+              image: registry.chifor.me/agentforge/orchestrator@sha256:20e55c5894bf10ea6d17e4d96e872f6313b9257ca35c86e745a767c0aa712df3
+              command: ["/bin/sh", "/scripts/refresh.sh"]
+              volumeMounts:
+                - { name: work, mountPath: /work }
+                - { name: tls, mountPath: /tls, readOnly: true }
+                - { name: script, mountPath: /scripts, readOnly: true }
+              resources:
+                requests: { cpu: 25m, memory: 64Mi, ephemeral-storage: 16Mi }
+                limits: { cpu: 500m, memory: 256Mi, ephemeral-storage: 64Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                seccompProfile: { type: RuntimeDefault }
+          volumes:
+            # in-memory scratch: the plaintext auth.json (in + rotated out) NEVER touches a disk-backed volume.
+            - name: work
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Mi
+            - name: tls
+              secret:
+                secretName: openbao-tls   # ns-local ailab-ca ca.crt, provisioned by the agentforge-broker tree
+                items:
+                  - { key: ca.crt, path: ca.crt }
+            - name: script
+              configMap:
+                name: af-codex-refresh-script
+                defaultMode: 0555

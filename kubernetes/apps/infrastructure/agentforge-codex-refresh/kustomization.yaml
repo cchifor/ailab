@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge codex-refresh — keeps the openai/codex-pro broker's durable subscription auth.json fresh.
+# The broker's access_token (JWT) expires ~10 days and the OAuth refresh_token is SINGLE-USE/rotated, so a
+# nightly CronJob reads the freshest auth.json from OpenBao, runs the refresh_token grant, and CAS-writes
+# the rotated auth.json back (concurrencyPolicy Forbid + KV check-and-set = no lost/double rotation).
+#
+# The CronJob (ns agentforge-broker) authenticates to OpenBao as SA af-codex-refresher under the
+# kubernetes-auth role af-codex-refresher, which grants read+create+update on exactly
+# `af/data/operator/broker/openai/codex-pro/oauth` (+ read metadata for the CAS version). That role +
+# policy are OPERATOR-privileged (they can WRITE an operator secret) and therefore are NOT reachable by the
+# scoped provisioner token — they are stood up by openbao-role-provision.yaml (a one-shot Job that logs in
+# with the bootstrap root token). See that file's header + the PR notes for the canonical bootstrap.py home.
+resources:
+  - serviceaccount.yaml          # af-codex-refresher SA (ns agentforge-broker) — the CronJob's OpenBao identity
+  - openbao-role-provision.yaml  # one-shot: create the af-codex-refresher OpenBao policy + k8s-auth role
+  - cronjob.yaml                 # the nightly refresh CronJob + its wrapper-script ConfigMap
+  - ciliumnetworkpolicy.yaml     # default-deny egress except kube-dns, openbao:8200, auth.openai.com:443
