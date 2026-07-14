@@ -43,6 +43,10 @@ data:
   # NEVER placed in this ConfigMap. (Follow-up: the merged broker/config.py reads AF_BROKER_LEDGER_DSN
   # from env; it must gain *_FILE reading before activation — see deployment.yaml.)
   AF_BROKER_LEDGER_DSN_FILE: "/var/run/broker/ledger/AF_BROKER_LEDGER_DSN"
+  # The mounted broker-oauth DIR (the gateway reads the operator OAuth from here to inject the
+  # upstream Bearer, design §4). The dir holds CLAUDE_CODE_OAUTH_TOKEN (anthropic) or auth.json
+  # (openai); the gateway picks by this instance's provider. Required by the gateway composition root.
+  AF_BROKER_OAUTH_MOUNT_PATH: "/var/run/broker/oauth"
   # NON-SECRET ledger coordinates (documentation + operational reference). The DB login is
   # agentforge_broker: open/reserve/reconcile ONLY, NEVER close (the reaper alone holds close, design §5).
   LEDGER_HOST: "infra-pg-rw.databases.svc.cluster.local"
