@@ -71,6 +71,16 @@ variable "cluster_vip" {
   default     = "192.168.0.40"
 }
 
+# WS2 (Thunderbolt CSI, ADR 0011): the QNAP storage service IP on the TB/storage fabric. Each agent
+# node reaches it via a /32 route through its own Proxmox host (host_ip), which forwards + SNATs over
+# Thunderbolt (node1/2) / USB→2.5GbE (node3). REQUIRED for agent-node pods to mount the QNAP NFS PVs
+# (e.g. the agentforge-sandbox reaper/workspace/staging exports on 10.55.0.254) — without it the mount
+# fails "Connection timed out". Mirrors infra/variables.tf. See docs/decisions/0011 + the runbook.
+variable "storage_service_ip" {
+  type    = string
+  default = "10.55.0.254"
+}
+
 # ---- Agent-node VM sizing ----
 # Dedicated Kata-capable Talos worker pool (AgentForge v2). NO ballooning: the memory floor is fixed
 # because Kata microVMs (P2) want a stable RAM reservation. cpu.type=host (main.tf) is REQUIRED so
@@ -93,20 +103,25 @@ variable "agent_node_disk_gb" {
 
 # ---- Talos agent-worker VMs (one per physical host) ----
 # Extends the CLAUDE.md inventory: vmid band 4301-4303 (free — CPs 4001-4003, runners 4101-4105,
-# dev-workers 4201-4206, AI LXC 5001-5003, registry 5004), IPs .14-.16 (consecutive, inside the
-# .2-.50 static reserve, below the router DHCP pool at .51 — no router change). Placement one-per-node
-# for fault isolation. NOTE: cloud-init/nocloud sets the IP at create and
-# lifecycle.ignore_changes=[initialization] means editing `ip` here is DOCUMENTATION ONLY once booted.
+# dev-workers 4201-4206, AI LXC 5001-5003, registry 5004), IPs .47-.49 (moved off .14-.16 to dodge the
+# GHA-runner range conflict — see CLAUDE.md inventory; consecutive, inside the .2-.50 static reserve,
+# below the router DHCP pool at .51 — no router change). Placement one-per-node for fault isolation.
+# host_ip = that node's Proxmox host vmbr0 IP — the next-hop for the /32 storage-fabric route (WS2/ADR
+# 0011), matching control_planes in infra/variables.tf. NOTE: cloud-init/nocloud sets the IP at create
+# and lifecycle.ignore_changes=[initialization] means editing `ip` here is DOCUMENTATION ONLY for the
+# running VM — but the machine-config route/node_ip templating below DOES consume ip/host_ip, so keep
+# them accurate to the live nodes (.47-.49) so a re-apply converges no-op.
 variable "agent_nodes" {
   type = map(object({
     node_name = string
     vm_id     = number
     ip        = string
+    host_ip   = string # the Proxmox host's vmbr0 IP — next-hop for the TB storage /32 route (WS2/ADR 0011)
     hostname  = string
   }))
   default = {
-    "agent-node-1" = { node_name = "ai-node1", vm_id = 4301, ip = "192.168.0.14", hostname = "agent-node-1" }
-    "agent-node-2" = { node_name = "ai-node2", vm_id = 4302, ip = "192.168.0.15", hostname = "agent-node-2" }
-    "agent-node-3" = { node_name = "ai-node3", vm_id = 4303, ip = "192.168.0.16", hostname = "agent-node-3" }
+    "agent-node-1" = { node_name = "ai-node1", vm_id = 4301, ip = "192.168.0.47", host_ip = "192.168.0.2", hostname = "agent-node-1" }
+    "agent-node-2" = { node_name = "ai-node2", vm_id = 4302, ip = "192.168.0.48", host_ip = "192.168.0.3", hostname = "agent-node-2" }
+    "agent-node-3" = { node_name = "ai-node3", vm_id = 4303, ip = "192.168.0.49", host_ip = "192.168.0.4", hostname = "agent-node-3" }
   }
 }

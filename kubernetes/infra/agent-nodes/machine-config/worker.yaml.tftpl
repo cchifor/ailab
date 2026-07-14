@@ -19,6 +19,15 @@ machine:
         routes:
           - network: 0.0.0.0/0
             gateway: ${gateway}
+          # Thunderbolt CSI (WS2/ADR 0011): reach the QNAP storage service IP via THIS node's Proxmox
+          # host, which forwards + SNATs over the fabric (thunderbolt0 on node1/2, USB→2.5GbE on node3).
+          # WITHOUT this /32 route an agent-node POD (e.g. the agentforge-sandbox reaper/workspace NFS
+          # PVs on 10.55.0.254) has no path to the fabric and the mount fails "Connection timed out" —
+          # the CPs got this route at the 0011 cutover but this worker pool (ADR 0019) was missing it.
+          # Single NIC, default route + node IP untouched; applied no-reboot (talosctl JSON6902 append,
+          # mirroring the CP template controlplane.yaml.tftpl).
+          - network: ${storage_service_ip}/32
+            gateway: ${host_ip}
         # NO vip: workers do not carry the control-plane VIP (that is CP-only, controlplane.yaml.tftpl).
   registries:
     mirrors:
