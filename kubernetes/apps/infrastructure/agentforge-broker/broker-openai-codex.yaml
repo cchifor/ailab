@@ -1,0 +1,368 @@
+# Per-account broker — audience `openai/codex-pro` (upstream OpenAI / ChatGPT). One of the three per-account
+# fan-out Deployments (was a single `anthropic/default` broker). `agentforge broker` = the orchestrator
+# runtime image (CLI-free; broker extra: pyjwt[crypto] + asyncpg, NO OpenBao/k8s client). The security flow
+# (verify -> reserve -> mark_dispatched -> [gateway] -> reconcile) is enforced around a PREFLIGHT-gated
+# upstream stub (design §4/§10).
+#
+# Account-INDEPENDENT knobs come from the SHARED ConfigMap agentforge-broker-env (envFrom); the per-account
+# identity AF_BROKER_AUDIENCE is set inline below (inline env wins over envFrom). Runtime SA
+# (agentforge-broker), ESO SecretStore (agentforge-broker-store), and openbao-ca cert are SHARED (see
+# serviceaccount.yaml / secretstore.yaml / openbao-ca-cert.yaml). This account's OAuth/kids/ledger sync from
+# OpenBao `operator/broker/openai/codex-pro/{oauth,kids,ledger}` into the broker-openai-codex-* Secrets,
+# mounted read-only. NB: the openai oauth Secret carries `auth.json` (not CLAUDE_CODE_OAUTH_TOKEN); the
+# dataFrom.extract below pulls whatever properties the oauth KV holds, so the shape is provider-agnostic.
+#
+# HA (design §5): 2 replicas + a PodDisruptionBudget + pod anti-affinity + topology-spread across nodes so a
+# single node loss never takes out both replicas. The ledger is the SHARED source of truth, so a rolling
+# replica can't double-spend (RollingUpdate is safe).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broker-openai-codex
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: broker-openai-codex
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broker-openai-codex
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broker-openai-codex
+        app.kubernetes.io/component: broker
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      serviceAccountName: agentforge-broker
+      automountServiceAccountToken: false # belt-and-suspenders with the SA (no kube-apiserver access)
+      enableServiceLinks: false
+      # Run on the dedicated agent pool (co-scheduled with the sandbox Jobs it serves; the sandboxes are
+      # Kata microVMs so colocation is safe, and the broker is network-isolated by the default-deny + CNP).
+      nodeSelector:
+        ailab.io/agent-pool: "true"
+      tolerations:
+        - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+      # HA placement (design §5): spread THIS account's 2 replicas across the 3 agent nodes so one node loss
+      # keeps a replica up. Anti-affinity is a hard-preference; topology-spread is the DoNotSchedule backstop.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: broker-openai-codex
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: broker-openai-codex
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532 # so the 0440 mounted ESO Secret files are group-readable by uid 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: broker
+          image: registry.chifor.me/agentforge/orchestrator@sha256:c706280bf4e31e4b0715e123349bd1c072eb47aa02bc873948a0cc5f0c5585d1
+          # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
+          # broker` (composes to: tini -- agentforge broker).
+          args: ["agentforge", "broker"]
+          env:
+            # This broker instance's identity = provider/account (design §3). A capability is accepted only
+            # if its `aud` == this. Overrides (wins over) the account-agnostic envFrom ConfigMap below.
+            - name: AF_BROKER_AUDIENCE
+              value: "openai/codex-pro"
+          envFrom:
+            - configMapRef:
+                name: agentforge-broker-env # SHARED AF_BROKER_ non-secret knobs + non-secret ledger
+                # coordinates (incl. AF_BROKER_LEDGER_DSN_FILE — the PATH to the mounted DSN, not the DSN).
+          ports:
+            - { name: http, containerPort: 8700, protocol: TCP }
+            - { name: metrics, containerPort: 9464, protocol: TCP }
+          volumeMounts:
+            # ONLY the ESO-written Secrets, read-only FILE mounts (design §5/§B): the durable OAuth, the
+            # kid public-key registry, AND the ledger DSN. The broker READS these mounts (reload-on-change);
+            # it never writes and has NO OpenBao/ESO egress. A file mount (vs an env secretKeyRef) keeps the
+            # DSN out of /proc/<pid>/environ and lets it be reloaded on rotation.
+            - name: broker-oauth
+              mountPath: /var/run/broker/oauth
+              readOnly: true
+            - name: broker-kids
+              mountPath: /var/run/broker/kids
+              readOnly: true
+            - name: broker-ledger
+              mountPath: /var/run/broker/ledger
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            # FAIL CLOSED on ledger/credential loss (design §5): /readyz returns 503 when the ledger is
+            # unreachable, so the pod sheds load instead of passing requests through without its
+            # enforcement store.
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi }
+            limits: { cpu: "1", memory: 512Mi, ephemeral-storage: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: broker-oauth
+          secret:
+            secretName: broker-openai-codex-oauth
+            defaultMode: 0440
+        - name: broker-kids
+          secret:
+            secretName: broker-openai-codex-kids
+            defaultMode: 0440
+        - name: broker-ledger
+          secret:
+            secretName: broker-openai-codex-ledger
+            defaultMode: 0440 # readable by uid 65532 via fsGroup; NEVER world-readable
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+# Keep >=1 replica available across voluntary disruptions (drains/rollouts) — design §5 HA.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: broker-openai-codex
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: broker-openai-codex
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broker-openai-codex
+---
+# The DIRECT ClusterIP the sandbox agent reaches (design §3): NO proxy in front, so the broker sees the
+# pod's real source IP at L3 for the TOFU anti-replay binding (the composition root pins
+# proxy_headers=False + empty forwarded_allow_ips — main.py _broker_uvicorn_config).
+apiVersion: v1
+kind: Service
+metadata:
+  name: broker-openai-codex
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: broker-openai-codex
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: broker-openai-codex
+  ports:
+    - name: http
+      port: 8700
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9464
+      targetPort: metrics
+      protocol: TCP
+---
+# broker-openai-codex-oauth (design §6) — the durable subscription OAuth for the openai/codex-pro account
+# (property `auth.json`, NOT CLAUDE_CODE_OAUTH_TOKEN). Operator-owned OpenBao path
+# `af/data/operator/broker/openai/codex-pro/oauth`, synced via the SHARED agentforge-broker-store
+# SecretStore. dataFrom.extract pulls whatever properties the oauth KV holds (provider-agnostic), so this
+# extract shape matches the anthropic brokers exactly. The broker only READS the mounted Secret.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: broker-openai-codex-oauth
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: broker-openai-codex
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: agentforge-broker-store
+    kind: SecretStore
+  target:
+    name: broker-openai-codex-oauth
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: operator/broker/openai/codex-pro/oauth
+---
+# broker-openai-codex-kids (design §3/§7) — PUBLIC verify keys + per-kid ceilings ({"kids": {...}} JSON).
+# Operator keypair-controller publish path `af/data/operator/broker/openai/codex-pro/kids` (property
+# `registry.json`), synced into a single registry.json Secret key, mounted read-only at
+# AF_BROKER_KID_REGISTRY_PATH. The broker holds ONLY public halves — it can VERIFY but never MINT.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: broker-openai-codex-kids
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: broker-openai-codex
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: agentforge-broker-store
+    kind: SecretStore
+  target:
+    name: broker-openai-codex-kids
+    creationPolicy: Owner
+  data:
+    # the single kid-registry JSON document -> Secret key registry.json (mounted at the path above).
+    - secretKey: registry.json
+      remoteRef:
+        key: operator/broker/openai/codex-pro/kids
+        property: registry.json
+---
+# broker-openai-codex-ledger (design §5) — the open/reserve/reconcile-only agentforge_broker DSN (carries
+# the password; NEVER placed in the ConfigMap). Operator path
+# `af/data/operator/broker/openai/codex-pro/ledger` (key AF_BROKER_LEDGER_DSN), delivered as a file-mounted
+# Secret at AF_BROKER_LEDGER_DSN_FILE. The reaper alone holds `close` (disjoint authority, §5).
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: broker-openai-codex-ledger
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: broker-openai-codex
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: agentforge-broker-store
+    kind: SecretStore
+  target:
+    name: broker-openai-codex-ledger
+    creationPolicy: Owner
+  data:
+    - secretKey: AF_BROKER_LEDGER_DSN
+      remoteRef:
+        key: operator/broker/openai/codex-pro/ledger
+        property: AF_BROKER_LEDGER_DSN
+---
+# Per-account broker ingress + egress (design §8) — Cilium default-deny both directions; these rules are this
+# broker's COMPLETE allowed reach. endpointSelector pins THIS account's pods only, so its upstream egress is
+# confined to the OpenAI/ChatGPT hosts (it CANNOT reach api.anthropic.com, and the anthropic brokers cannot
+# reach chatgpt.com).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: broker-openai-codex
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: broker-openai-codex
+  ingress:
+    # (1) ONLY sandbox AGENT pods of the MATCHING pool/tenant, on the STABLE per-pool/org/workspace identity
+    #     labels (NOT the high-cardinality per-job label). Preserved verbatim from the single-broker policy.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: agentforge-sandbox
+            agentforge.io/trust-class: agent
+            agentforge.io/pool: planner
+            agentforge.io/org: tenant-zero
+            agentforge.io/workspace: playground
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
+    # (2) Prometheus metrics scrape — SEPARATE, scoped to the metrics port ONLY.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+      toPorts:
+        - ports:
+            - { port: "9464", protocol: TCP }
+  egress:
+    # (1) DNS -> kube-dns. Broad resolution; the EGRESS DESTINATIONS are enforced by toFQDNs + the egressDeny.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # (2) infra-pg ledger (design §5) — the ONLY cluster-internal dependency. Matched by ENDPOINT identity.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: databases
+            cnpg.io/cluster: infra-pg
+      toPorts:
+        - ports:
+            - { port: "5432", protocol: TCP }
+    # (3) OpenAI/ChatGPT upstream API **and OAuth** host(s) — FQDN L7 (design §4/§8; R-3 §C FQDN hardening).
+    #     The broker egresses to the ChatGPT backend to inject the durable subscription OAuth, AND to the
+    #     OAuth/token host to refresh it. ⚠ PREFLIGHT: chatgpt.com is the ChatGPT backend host; auth.openai.com
+    #     is a DOCUMENTED PLACEHOLDER for the Codex/ChatGPT OAuth token/refresh host — replace with the exact
+    #     enumerated hosts the OAuth client dials at activation (do NOT widen to a wildcard).
+    - toFQDNs:
+        - matchName: "chatgpt.com"                # ChatGPT backend API (subscription upstream)
+        # -- OAuth/token host (PLACEHOLDER — pin the exact host at activation/preflight, R-3 §8) --
+        - matchName: "auth.openai.com"            # TODO(PREFLIGHT): OAuth token/refresh endpoint host
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }
+  egressDeny:
+    # Node-local + kubelet + metadata-via-node (host/remote-node entities). Pod-to-pod is identity-based.
+    - toEntities:
+        - host
+        - remote-node
+    # DNS-rebinding / direct-IP belt (design §4/§8): deny all private, link-local (incl. 169.254.169.254
+    # metadata), loopback, and IPv6. In-cluster allows are identity-based (toEndpoints), so these CIDR denies
+    # apply only to world/CIDR-classified traffic (e.g. an upstream FQDN rebound to an internal IP).
+    - toCIDR:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 127.0.0.0/8
+        - ::/0
+    # EXPLICIT: NO broker -> OpenBao / ESO egress (design §6/§8). The ESO controller (out-of-band) writes the
+    # broker's Secrets; the broker only READS the mounts.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: external-secrets

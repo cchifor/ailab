@@ -5,18 +5,19 @@ kind: Kustomization
 # agentforge-sandbox precedent: self-contained so it never collides with the P1 agentforge admission
 # (apps layer) or the concurrent P2 operators editing infrastructure/{security,autoscaling}. NO shared
 # aggregator index (infrastructure/kustomization.yaml) is edited.
+#
+# FAN-OUT: the single `anthropic/default` broker is superseded by ONE Deployment per (provider, account) —
+# anthropic/claude-max-1, anthropic/claude-max-2, openai/codex-pro — each with its own Service + PDB + 3
+# ExternalSecrets + CiliumNetworkPolicy in a self-contained broker-*.yaml. The namespace, runtime SA,
+# openbao-ca cert, ESO SecretStore/auth-SA, and the account-agnostic env ConfigMap are SHARED below.
 resources:
+  # -- SHARED (account-independent) --
   - openbao-ca-cert.yaml # per-ns openbao-tls ca.crt (ailab-ca) for the ESO caProvider
   - namespace.yaml # agentforge-broker ns (restricted PSA, pinned v1.31) + default-deny NetworkPolicy
-  - serviceaccount.yaml # broker SA (automount off, NO Role) — zero kube-apiserver access
-  - configmap.yaml # non-secret AF_BROKER_ env + non-secret ledger coordinates (NEVER the password)
-  - service.yaml # ClusterIP (the DIRECT broker the sandbox reaches for source-IP TOFU)
-  - externalsecret-oauth.yaml # ESO auth SA + operator SecretStore + broker-oauth ExternalSecret (READ-ONLY)
-  - externalsecret-kids.yaml # broker-kids kid-registry (PUBLIC verify keys + ceilings) ExternalSecret
-  - externalsecret-ledger.yaml # broker-ledger DSN (open/reserve/reconcile ONLY, never close) ExternalSecret
-  - ciliumnetworkpolicy.yaml # broker ingress (matching-pool agent only) + egress (upstream+DNS+infra-pg ONLY)
-  # deployment.yaml is INTENTIONALLY not listed yet — the broker image is a PLACEHOLDER @sha256
-  # (unpullable) and nothing here flips privilege_hardening. Re-add `- deployment.yaml` once the digest
-  # is pinned + OpenBao/ledger provisioned (see deployment.yaml header). The Deployment carries its own
-  # PodDisruptionBudget, so both stay gated together.
-  - deployment.yaml
+  - serviceaccount.yaml # broker runtime SA (automount off, NO Role) — zero kube-apiserver access
+  - secretstore.yaml # ESO auth SA (af-broker-eso) + operator SecretStore (agentforge-broker-store), shared
+  - configmap.yaml # SHARED non-secret AF_BROKER_ env + ledger coordinates (audience is per-Deployment)
+  # -- PER-ACCOUNT fan-out (Deployment + PDB + Service + 3 ExternalSecrets + CiliumNetworkPolicy each) --
+  - broker-anthropic-max1.yaml # audience anthropic/claude-max-1 (upstream Anthropic)
+  - broker-anthropic-max2.yaml # audience anthropic/claude-max-2 (upstream Anthropic)
+  - broker-openai-codex.yaml   # audience openai/codex-pro (upstream OpenAI/ChatGPT)
