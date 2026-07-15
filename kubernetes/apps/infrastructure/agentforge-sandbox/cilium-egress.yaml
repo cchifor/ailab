@@ -25,14 +25,19 @@ spec:
         - all
 ---
 # R-2 (design §8) — the agent-profile egress allow-list. trust-class=agent may egress to ONLY (a) the
-# pool broker (its ClusterIP endpoint on 8700) and (b) kube-dns, with DNS L7 restricted to the broker's
-# EXACT name (no arbitrary query names → no DNS tunneling; alternate resolvers denied by omission). A
-# SEPARATE object from the test zero-egress above so it can NEVER widen test's egress; and the
-# egressDeny below (deny wins over any allow in Cilium) makes direct-IP/IPv6/metadata/node-local
-# absolute. The namespace default-deny (networkpolicy.yaml) is the baseline; this union-adds the two
-# agent flows. The broker ingress (agentforge-broker CNP) admits ONLY matching-pool/org/workspace agent
-# pods, so pool-matching is enforced on the broker side; the source-IP TOFU + session binding is the
-# broker's APP-layer anti-replay (Cilium hands no per-job identity).
+# broker PODS (by endpoint identity: component=broker on 8700 — the orchestrator hands the agent a
+# broker POD IP, not a ClusterIP, since a Kata pod can't reach a ClusterIP) and (b) kube-dns, DNS L7
+# restricted to the broker EXACT names (no arbitrary query names → no DNS tunneling). A SEPARATE object
+# from the test zero-egress above so it can NEVER widen test's egress; and the egressDeny below (deny
+# wins over any allow in Cilium) makes world/direct-IP/IPv6/metadata/node-local absolute. The namespace
+# default-deny (networkpolicy.yaml) is the baseline; this union-adds the two agent flows, confining the
+# agent to {broker pods, kube-dns}.
+#   PER-ACCOUNT scope (codex): this egress admits ALL brokers (component=broker), and the broker ingress
+#   CNPs admit the SAME trust-class/pool/org/workspace — so egress+ingress form a BROKER-TIER boundary,
+#   NOT a per-account one. The per-ACCOUNT discriminator is the capability `aud`: a broker rejects a
+#   capability minted for another provider/account, and the agent is only ever handed ITS aud's broker
+#   pod IP. Cilium hands no per-job identity, so the source-IP TOFU + session binding is the broker's
+#   APP-layer anti-replay.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -48,6 +53,10 @@ spec:
   egress:
     # (a) kube-dns, L7-restricted to the broker's EXACT name — the agent can resolve NOTHING else (no
     #     DNS tunneling / no alternate name). matchName is exact; a different query name is refused.
+    #     RETAINED although the agent is IP-direct (the executor hands it a broker POD IP, so it makes
+    #     zero DNS queries — Hubble-verified): kept as a minimal, L7-locked (broker-names-only) belt so
+    #     an incidental CLI DNS lookup (telemetry/update-check) can't hang the run, and as defense in
+    #     depth. It is NOT arbitrary DNS or internet — only the 3 broker FQDNs resolve.
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: kube-system
