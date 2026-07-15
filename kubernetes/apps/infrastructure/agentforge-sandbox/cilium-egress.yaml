@@ -91,13 +91,33 @@ spec:
       toPorts:
         - ports:
             - { port: "8700", protocol: TCP }
+    # (c) DIRECT broker ClusterIP allow — REQUIRED for Kata sandbox pods. A Kata pod runs inside a
+    #     microVM whose guest kernel is NOT on Cilium's socket-LB (bpf-lb-sock) path, so the broker
+    #     ClusterIP is NOT translated to a backend PodIP BEFORE network policy is evaluated. Cilium
+    #     therefore classifies the service-CIDR ClusterIP as `world`, and the egressDeny `world` belt
+    #     (deny wins over allow) dropped the agent's HTTP at its own veth — the broker saw ZERO inbound
+    #     even though DNS resolved (DNS rides the L7 DNS proxy, which never needs ClusterIP L3 xlate).
+    #     Allowing the EXACT broker ClusterIP /32s here lets policy PASS; the same bpf datapath then
+    #     DNATs ClusterIP->broker PodIP and forwards (the toServices rule above already admits the
+    #     post-DNAT broker identity). The /32s are pinned (the broker Services carry explicit
+    #     spec.clusterIP), port 8700 only. Still DESTINATION-CONFINED: default-deny plus the retained
+    #     host/remote-node + metadata/link-local/IPv6 denies block everything except broker + kube-dns.
+    - toCIDR:
+        - 10.108.137.32/32   # broker-anthropic-max1
+        - 10.109.144.42/32   # broker-anthropic-max2
+        - 10.108.162.59/32   # broker-openai-codex
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
   egressDeny:
-    # No direct internet / node-local / metadata-via-node. world = any non-cluster IP (direct-IP);
-    # host/remote-node = the nodes themselves. Pod-to-pod (broker/kube-dns) is identity-based, so these
-    # never block (a). Other cluster services (service-CIDR) are already denied by the namespace
-    # default-deny — only the broker endpoint is allowed.
+    # No node-local / metadata-via-node. host/remote-node = the nodes themselves. Pod-to-pod
+    # (broker/kube-dns) is identity-based, so these never block (a)/(b). `world` is NOT denied here:
+    # a Kata pod sees the broker ClusterIP as `world` (no pre-policy socket-LB xlate in the microVM),
+    # so a `world` deny would drop the broker HTTP (deny wins over the (c) allow). Confinement is
+    # preserved by DEFAULT-DENY — the `egress` allow-list above is exhaustive (kube-dns L7 + the three
+    # broker ClusterIP /32s), so any other destination (incl. real internet IPs) is already denied by
+    # omission; the metadata/link-local/IPv6 toCIDR belt below stays as an explicit direct-IP cut.
     - toEntities:
-        - world
         - host
         - remote-node
     # metadata (169.254.169.254), link-local, and ALL IPv6 — explicit direct-IP belt.
