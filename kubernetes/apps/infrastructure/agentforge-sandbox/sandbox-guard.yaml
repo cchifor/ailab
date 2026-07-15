@@ -68,14 +68,22 @@ spec:
       message: "sandbox pod securityContext must be runAsNonRoot + runAsUser/runAsGroup/fsGroup 65532 + seccompProfile RuntimeDefault."
     # (4) Forbidden pod-level fields (host escape / node targeting). PSA restricted already blocks most;
     #     this is the explicit fail-closed backstop in the operator repo.
+    #     nodeName: forbidden on CREATE (no attacker-chosen node), but on UPDATE the pod is ALREADY
+    #     scheduler-bound so nodeName is set and IMMUTABLE — a flat `!has(nodeName)` would then FAIL every
+    #     UPDATE (incl. the Job controller / reaper stripping the job-tracking finalizer), deadlocking pod
+    #     GC → jobs stuck Terminating → count/jobs.batch quota exhausted → no new sandbox Job can be
+    #     created. So allow nodeName ONLY when it is present-and-unchanged on UPDATE; still forbid setting
+    #     or changing it (node targeting) on either op.
     - expression: >-
         (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
         (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
         (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
-        !has(object.spec.nodeName) &&
+        (!has(object.spec.nodeName) ||
+          (request.operation == 'UPDATE' && has(oldObject.spec.nodeName) &&
+           object.spec.nodeName == oldObject.spec.nodeName)) &&
         !has(object.spec.hostAliases) &&
         (!has(object.spec.shareProcessNamespace) || object.spec.shareProcessNamespace == false)
-      message: "sandbox pod may not set hostNetwork/hostPID/hostIPC/nodeName/hostAliases/shareProcessNamespace."
+      message: "sandbox pod may not set hostNetwork/hostPID/hostIPC/hostAliases/shareProcessNamespace, and may not set or change nodeName (an unchanged scheduler-bound nodeName is allowed on UPDATE only)."
     # (5) Cilium/lifecycle identity labels. job-id is the UNGUESSABLE 32-hex handle (also the subPath
     #     and lease key); trust-class drives the egress profile; org+workspace TOGETHER name the PVC
     #     (validation 6) — both must be present dns-slugs (P2 R-2 §C multi-tenant keying).
