@@ -181,6 +181,11 @@ metadata:
     app.kubernetes.io/part-of: agentforge
 spec:
   type: ClusterIP
+  # PINNED: the Kata sandbox-agent Cilium egress policy allowlists this exact ClusterIP as a /32
+  # (agentforge-sandbox/cilium-egress.yaml) because Kata pods see the ClusterIP as `world` (off the
+  # socket-LB path). Pinning it keeps that /32 valid across a Service recreate — otherwise the agent
+  # silently loses broker reachability.
+  clusterIP: 10.108.162.59
   selector:
     app.kubernetes.io/name: broker-openai-codex
   ports:
