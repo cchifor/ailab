@@ -17,6 +17,7 @@ resources:
   - serviceaccount.yaml # broker runtime SA (automount off, NO Role) — zero kube-apiserver access
   - secretstore.yaml # ESO auth SA (af-broker-eso) + operator SecretStore (agentforge-broker-store), shared
   - configmap.yaml # SHARED non-secret AF_BROKER_ env + ledger coordinates (audience is per-Deployment)
+  - orchestrator-endpoints-rbac.yaml # orchestrator READ on broker Endpoints (Kata pod-IP resolution)
   # -- PER-ACCOUNT fan-out (Deployment + PDB + Service + 3 ExternalSecrets + CiliumNetworkPolicy each) --
   - broker-anthropic-max1.yaml # audience anthropic/claude-max-1 (upstream Anthropic)
   - broker-anthropic-max2.yaml # audience anthropic/claude-max-2 (upstream Anthropic)

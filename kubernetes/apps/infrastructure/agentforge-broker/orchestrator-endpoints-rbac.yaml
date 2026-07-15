@@ -1,0 +1,43 @@
+# Orchestrator -> broker Endpoints RBAC (READ-ONLY). Kata sandbox agent pods run in a microVM off
+# Cilium's socket-LB path, so they see every ClusterIP as `world` and CANNOT reach a broker by its
+# ClusterIP. The orchestrator (a runc pod that CAN reach the apiserver) therefore resolves the broker
+# Service to a live READY endpoint POD IP at Job creation and hands the agent http://<podIP>:8700 (a
+# broker PodIP carries the broker's Cilium endpoint identity the sandbox egress admits). That lookup
+# needs GET/LIST on core/v1 Endpoints in agentforge-broker — and nothing else. It is a read of a
+# non-secret object; the orchestrator gets no other access to this namespace (no pods, no secrets, no
+# broker mutation), and the tokenless sandbox pod still has zero API access.
+#
+# Subject = the SAME tenant-zero orchestrator SA that holds the sandbox Jobs/Lease grant
+# (agentforge-sandbox/orchestrator-rbac.yaml): `af-orch-playground-planner` in
+# `af-tenant-tenant-zero-playground`. Add a RoleBinding subject per additional workspace/pool.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentforge-orchestrator-broker-endpoints
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+rules:
+  # Resolve a broker Service to its READY backend pod IPs (read_namespaced_endpoints -> GET). LIST is
+  # granted for robustness; NO watch, NO create/update/patch/delete, NO other resource.
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentforge-orchestrator-broker-endpoints
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentforge-orchestrator-broker-endpoints
+subjects:
+  - kind: ServiceAccount
+    name: af-orch-playground-planner
+    namespace: af-tenant-tenant-zero-playground
