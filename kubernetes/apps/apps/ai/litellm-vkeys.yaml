@@ -22,14 +22,11 @@
 # under the wait:true `apps` Kustomization would wedge the whole apps layer; same rationale as
 # apps/agentforge/db-migrate.yaml). Run it by hand:
 #
-#   # 0. ONE-TIME: create the `litellm` role+DB (postInitSQL does NOT run on the already-bootstrapped
-#   #    infra-pg). Use the committed bootstrap artifact (idempotent) — see its header for the by-hand
-#   #    peer-auth exec or the superuser-DSN Job. managed.roles (infra-pg.yaml) then sets the password
-#   #    from infra-pg-litellm within seconds:
-#   kubectl --context admin@ai -n databases exec -i infra-pg-1 -- psql -v ON_ERROR_STOP=1 \
-#     < <(kubectl --context admin@ai -n databases get cm litellm-db-bootstrap -o jsonpath='{.data.bootstrap\.sql}')
-#   #    (kubernetes/apps/databases/litellm-db-bootstrap.yaml; litellm-local then migrates its OWN schema
-#   #     into this DB at boot once DATABASE_URL is wired.)
+#   # 0. The `litellm` role+DB are now created automatically by Flux — managed.roles (infra-pg.yaml)
+#   #    reconciles the ROLE, and the CNPG Database resource (databases/infra-pg-litellm-database.yaml)
+#   #    creates the DATABASE; litellm-local waits on it (its wait-for-db initContainer) then migrates its
+#   #    OWN schema at boot. No manual DB-create step is required. (databases/litellm-db-bootstrap.yaml is
+#   #    retained only as a DR/imperative fallback for a pre-1.24 CNPG operator.)
 #   # 1. Define orgs: edit orgs.json (below) + add VKEY_<ORG> to litellm-vkeys-secret.sops.yaml.
 #   # 2. Apply the spec + key values, then run the seeding Job:
 #   kubectl --context admin@ai apply -f kubernetes/apps/apps/ai/litellm-vkeys-secret.sops.yaml   # decrypt via sops first

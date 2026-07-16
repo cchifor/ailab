@@ -1,10 +1,14 @@
-# litellm virtual-key/budget DB bootstrap — OPERATOR-RUN ONE-SHOT (deliberately NOT listed in
-# kustomization.yaml, so Flux never applies/health-gates it: a failing bootstrap Job under the
-# `databases` Kustomization would wedge that layer and everything that dependsOn it). This is the IaC
-# artifact that CREATES the `litellm` role + database on the ALREADY-BOOTSTRAPPED infra-pg — postInitSQL
-# (infra-pg.yaml) runs ONLY at first cluster bootstrap, so on the live cluster the DB must be created
-# out-of-band before the litellm-local gateway's DATABASE_URL can resolve. Mirrors the sibling pattern in
-# kubernetes/apps/apps/agentforge/db-migrate.yaml (idempotent \gexec SQL + optional superuser-DSN Job).
+# litellm virtual-key/budget DB bootstrap — DR / imperative FALLBACK, OPERATOR-RUN ONE-SHOT (deliberately
+# NOT listed in kustomization.yaml, so Flux never applies/health-gates it: a failing bootstrap Job under
+# the `databases` Kustomization would wedge that layer and everything that dependsOn it).
+#
+# NORMALLY YOU DO NOT NEED THIS: the `litellm` role is reconciled by managed.roles and the DATABASE is
+# created declaratively by the CNPG Database resource (databases/infra-pg-litellm-database.yaml, CNPG
+# >= 1.24). This file remains only as the imperative escape hatch for a pre-1.24 operator or a DR rebuild
+# where the Database CRD isn't available — it CREATES the `litellm` role + database on an ALREADY-
+# BOOTSTRAPPED infra-pg (postInitSQL in infra-pg.yaml runs ONLY at first cluster bootstrap). Mirrors the
+# sibling pattern in kubernetes/apps/apps/agentforge/db-migrate.yaml (idempotent \gexec SQL + optional
+# superuser-DSN Job).
 #
 # managed.roles (infra-pg.yaml) reconciles the `litellm` role password from infra-pg-litellm within
 # seconds, so the role created here just needs to EXIST; litellm-local then migrates its OWN schema into

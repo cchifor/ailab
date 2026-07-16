@@ -15,3 +15,5 @@ resources:
   - infra-pg-afp-admin.sops.yaml # basic-auth creds for afp_admin (DB owner, BYPASSRLS — admin_dsn)
   - infra-pg-afp-app.sops.yaml # basic-auth creds for afp_app (non-owner, NOBYPASSRLS — app_dsn)
   - infra-pg.yaml
+  - infra-pg-litellm-database.yaml # CNPG Database: declaratively creates the `litellm` DB (P3) so the
+                                   # live litellm-local gateway never waits on a manual DB-create step

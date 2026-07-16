@@ -112,6 +112,34 @@ spec:
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
         checksum/config: "cb880b88398a"
     spec:
+      # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
+      # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux
+      # Kustomizations reconcile in parallel (both only dependsOn `infrastructure`), so on a fresh reconcile
+      # this pod can start before the DB exists. LiteLLM runs its schema migrations at boot and hard-EXITS
+      # if DATABASE_URL is unresolvable — under the wait:true `apps` layer that CrashLoop would wedge the
+      # whole apps Kustomization. This init blocks (in Init:, old pod keeps serving) until `SELECT 1`
+      # succeeds, so a not-yet-created DB or a DSN/managed-role password mismatch surfaces as a stuck
+      # initContainer with a clear psql error rather than a cryptic gateway crash.
+      initContainers:
+        - name: wait-for-db
+          image: ghcr.io/cloudnative-pg/postgresql:17.10 # psql-capable; same image as litellm-db-bootstrap
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "waiting for the litellm DB to accept connections (SELECT 1)..."
+              until psql "$DATABASE_URL" -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "  litellm DB not ready (db missing / role password not reconciled yet) — retry in 3s"
+                sleep 3
+              done
+              echo "litellm DB reachable — starting the gateway."
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: litellm-local-db, key: DATABASE_URL }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
       containers:
         - name: litellm
           # SAME digest pin as litellm.yaml (ghcr.io/berriai/litellm:main-stable as of 2026-07-08).
