@@ -55,6 +55,14 @@ spec:
         # openwebui;` as superuser (postInitSQL can't switch DBs). Documented in docs/runbooks (ai-host-setup).
         - CREATE ROLE openwebui LOGIN;
         - CREATE DATABASE openwebui OWNER openwebui;
+        # litellm: DB-backed virtual-key + per-tenant budget store for the litellm-local gateway (P3,
+        # plan Risk 3 — kubernetes/apps/apps/ai/litellm-local.yaml). Own role+DB so the key store is
+        # isolated; the litellm proxy runs its own schema migrations against it at boot (needs to own the
+        # DB). NB: on an already-bootstrapped cluster this block does NOT run — create the role/DB via the
+        # committed one-shot bootstrap artifact (databases/litellm-db-bootstrap.yaml), then managed.roles
+        # below sets the password.
+        - CREATE ROLE litellm LOGIN;
+        - CREATE DATABASE litellm OWNER litellm;
         # AgentForge v2 platform DB (ADR 0019). Two roles on purpose — the RLS boundary the CP relies on
         # (agentforge_platform Settings): afp_admin owns the DB + BYPASSRLS (migrations + audited service
         # paths); afp_app is a NON-owner, NOBYPASSRLS login used for the RLS-enforced request path. NB: on
@@ -96,6 +104,16 @@ spec:
         login: true
         passwordSecret:
           name: infra-pg-openwebui
+      # litellm virtual-key/budget store role — reconciled into existence on the LIVE cluster (postInitSQL
+      # only runs at first bootstrap); password from infra-pg-litellm (must match litellm-local-db's DSN).
+      # The DATABASE itself is created declaratively by the CNPG Database resource
+      # (databases/infra-pg-litellm-database.yaml) — managed.roles makes the ROLE but never a DB.
+      # (databases/litellm-db-bootstrap.yaml remains as a DR/imperative fallback for pre-1.24 operators.)
+      - name: litellm
+        ensure: present
+        login: true
+        passwordSecret:
+          name: infra-pg-litellm
       # AgentForge v2 RLS boundary (ADR 0019): two roles, one password secret each. bypassrls is set
       # explicitly on both — afp_admin BYPASSRLS (owner/migrations), afp_app NOBYPASSRLS (request path).
       - name: afp_admin
