@@ -84,7 +84,7 @@ spec:
       containers:
         - name: orchestrator
           # PLACEHOLDER digest — pin the real p1-worker @sha256 (see header) before enabling.
-          image: registry.chifor.me/agentforge/p1-worker@sha256:053382bcb7af1c25e5af0745f2332b5d60cb7a993dfb98b61f9ec89547a8e540
+          image: registry.chifor.me/agentforge/p1-worker@sha256:119f633e49f2c06ebe1ec61af0d561cc0aa4b34de5548c6b5e2723c559fb70b2
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
