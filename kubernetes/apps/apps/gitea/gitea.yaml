@@ -6,7 +6,7 @@
 #     auth/tokens — an Access login page would break the git CLI). SSH (gitea-ssh) stays in-cluster.
 #   * Actions ENABLED (ADR 0017 forge migration). Artifacts + logs offloaded to versitygw S3 on the
 #     QNAP (gitea-actions-s3 secret: scoped `gitea` user + gitea-actions bucket) so they don't fill the
-#     10Gi PVC; ARTIFACT/LOG_RETENTION_DAYS cap growth. Runners = external act_runner
+#     20Gi PVC; ARTIFACT/LOG_RETENTION_DAYS cap growth. Runners = external act_runner
 #     (ansible/roles/gitea_runner), NOT the chart (12.6.0 ships no bundled runner).
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
@@ -52,7 +52,12 @@ spec:
       enabled: true
       storageClass: qnap-iscsi
       accessModes: ["ReadWriteOnce"]
-      size: 10Gi
+      # 20Gi (was 10Gi). The thin QuTS-hero LUN hit its 90% alert (zvol used 9.0/10 GiB) even though
+      # ext4 was only 53% full: this backend does NOT honour SCSI UNMAP, so `fstrim`/`discard` can't
+      # return freed blocks (verified 2026-07-20 — ~1.1 GB trimmed, zvol released <8 MiB). Expanding
+      # to 20Gi drops usage to ~45% and clears the alert with headroom. The DB itself is ~4.7 GiB of
+      # live rows (only ~150 MiB reclaimable by VACUUM) — track/prune the bloated table separately.
+      size: 20Gi
     service:
       http: { type: ClusterIP, port: 3000 }
       ssh: { type: ClusterIP, port: 22 }
