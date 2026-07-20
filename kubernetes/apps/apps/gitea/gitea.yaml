@@ -55,8 +55,8 @@ spec:
       # 20Gi (was 10Gi). The thin QuTS-hero LUN hit its 90% alert (zvol used 9.0/10 GiB) even though
       # ext4 was only 53% full: this backend does NOT honour SCSI UNMAP, so `fstrim`/`discard` can't
       # return freed blocks (verified 2026-07-20 — ~1.1 GB trimmed, zvol released <8 MiB). Expanding
-      # to 20Gi drops usage to ~45% and clears the alert with headroom. The DB itself is ~4.7 GiB of
-      # live rows (only ~150 MiB reclaimable by VACUUM) — track/prune the bloated table separately.
+      # to 20Gi drops usage to ~45% and clears the alert with headroom. The ~4.9 GiB DB is dominated by
+      # Actions logs stuck in-DB (DBFS) — bounded via LOG_RETENTION_DAYS below, not by VACUUM.
       size: 20Gi
     service:
       http: { type: ClusterIP, port: 3000 }
@@ -163,7 +163,14 @@ spec:
           ENABLED: true
           DEFAULT_ACTIONS_URL: github # `uses: actions/checkout@vN` resolves from github.com
           ARTIFACT_RETENTION_DAYS: 14 # retention applies to the S3 backend too
-          LOG_RETENTION_DAYS: 30 # default is 365; trim storage footprint
+          # 14d (was 30) — aligns with ARTIFACT_RETENTION_DAYS. cron.cleanup_actions (enabled, @midnight)
+          # deletes each task's log + nulls its log_indexes once it passes this age. Most logs offload to
+          # versitygw S3 fine, but large cchifor/platform CI logs (100s of MB compressed) FAIL the DBFS→S3
+          # transfer and pile up in-DB as dbfs_data (2.6k stuck tasks = 3.7 GiB on 2026-07-20). 14d bounds
+          # the .db to ~5-6 GiB so ext4 stays under the ~9 GiB zvol high-water → no LUN re-alert (the thin
+          # QuTS LUN can't UNMAP-reclaim, so bounding growth is what matters). Fixing the S3 transfer of
+          # huge logs is a tracked follow-up. Backlog clears over ~2 weeks as tasks age past 14d.
+          LOG_RETENTION_DAYS: 14
         # Named S3 target for Actions ONLY (artifacts + logs) → versitygw on the QNAP (ADR 0010/0017).
         # A global [storage] STORAGE_TYPE=minio would divert attachments/LFS/avatars/packages too — a
         # named section keeps everything else on the 10Gi PVC. SERVE_DIRECT stays off (default) so
