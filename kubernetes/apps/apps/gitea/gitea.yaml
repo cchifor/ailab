@@ -118,6 +118,18 @@ spec:
           SSH_DOMAIN: git.chifor.me
         database:
           DB_TYPE: sqlite3
+          # SQLite is single-writer. Under the AgentForge polling load (planner/dispatcher/reaper each
+          # running a chatty read loop + claim/plan/state writes), the default 500ms busy-timeout with
+          # rollback-journal mode starves writers behind readers -> Gitea returns 500 "database is locked"
+          # on CreateIssueComment/EditIssueComment, which crashes the orchestrator reconcile so issues
+          # never advance (observed 2026-07-20, tenant-zero planner slice). Two tuning knobs fix it:
+          #   * WAL journal mode: readers no longer block the writer (safe here — /data is an ext4 BLOCK
+          #     PVC on qnap-iscsi, NOT NFS; WAL needs real file locking + mmap, which iSCSI provides).
+          #   * 10s busy-timeout: a writer waits up to 10s for a competing writer instead of erroring at
+          #     500ms. AgentForge writes are tiny/fast, so 10s absorbs contention bursts without hanging.
+          # Follow-up (tracked): the ~4.7 GiB DB bloat, and a Postgres migration if the fleet grows.
+          SQLITE_JOURNAL_MODE: WAL
+          SQLITE_TIMEOUT: 10000
         session:
           PROVIDER: memory
         cache:
