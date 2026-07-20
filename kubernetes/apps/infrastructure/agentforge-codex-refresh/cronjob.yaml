@@ -173,7 +173,7 @@ spec:
             - name: refresh
               # SAME orchestrator image as the broker (carries agentforge-codex-refresh + python3). Pinned
               # by digest for parity with broker-openai-codex.yaml / the bootstrap Jobs.
-              image: registry.chifor.me/agentforge/orchestrator@sha256:20e55c5894bf10ea6d17e4d96e872f6313b9257ca35c86e745a767c0aa712df3
+              image: registry.chifor.me/agentforge/orchestrator@sha256:32a2c290af9c7791eddef5faf9ea3ee12ce56607a2d9815032e52526f0b7085f
               command: ["python3", "/scripts/refresh.py"]
               volumeMounts:
                 - { name: work, mountPath: /work }
