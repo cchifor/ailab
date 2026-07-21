@@ -123,3 +123,190 @@ Claims are issue comments with leases — self-healing by design:
 `agentforge-rules.yaml` alerts: ForgeWorkerDown / ForgeIssueStuck / ForgeNeedsHumanPending /
 ForgeWebhookHMACFailures / ForgeReconcileDriftHigh → ntfy. First diagnostics stop:
 `journalctl -u agentforge` on the worker + the issue's `af:run`/`af:claim` comment ledger.
+
+---
+
+# AgentForge **v2** (Kubernetes / Kata sandbox) — operations & debugging playbook
+
+> This is a **separate deployment** from the v1 dev-worker fleet above. v2 (ADR 0019) runs on the
+> Talos **agent-nodes** (`.14`/`.15`/`.16`, pool label `ailab.io/agent-pool=true`) as a
+> credential-**broker** + ephemeral **Kata microVM sandbox** architecture: the orchestrator never
+> holds the raw provider OAuth — it mints a short-lived capability, and a per-account broker injects
+> the real subscription credential on the agent's behalf. Manifests: `kubernetes/apps/infrastructure/
+> agentforge-{broker,sandbox,workers,codex-refresh}/` + `kubernetes/apps/apps/agentforge/`.
+> **All `kubectl` below uses `--context admin@ai`** (the default context is a DIFFERENT cluster).
+
+## Cluster access & namespace map
+
+| Namespace | What lives there |
+|---|---|
+| `agentforge-broker` | Per-account **broker** Deployments `broker-anthropic-max1`, `broker-anthropic-max2`, `broker-openai-codex` (each **2 replicas** + PDB + a **pinned-ClusterIP** Service on :8700). Also the `af-codex-refresh` CronJob. Brokers run the `…/agentforge/orchestrator` image (CLI-free broker build), NOT p1-worker. |
+| `agentforge-sandbox` | Ephemeral **Kata microVM** Job pods `af-sbx-*` (one per agent run), the reaper's cross-ns RBAC target, the sandbox-guard / sandbox-job-guard VAPs, and the shared NFS staging/workspace PVs. |
+| `af-tenant-tenant-zero-playground` | The planner **orchestrator** Deployment `af-orch-playground-planner` (the KEDA scale **target**, `agentforge serve`, `AF_EXECUTOR=sandbox`) + the KEDA `ScaledObject/af-orch-playground-planner`. Runs as SA `af-orch-playground-planner`. |
+| `agentforge` | Trusted home: `agentforge-dispatcher` (always-on KEDA scale **oracle**, exports `forge_pending`), `agentforge-reaper` (leader-elected GC of leaked Jobs/Pods/dirs), and `agentforge-platform` (the CP webapp/reconciler). |
+
+Quick posture check:
+
+```bash
+kubectl --context admin@ai -n agentforge-broker get deploy,po
+kubectl --context admin@ai -n agentforge-sandbox get pods            # af-sbx-* are ephemeral (see below)
+kubectl --context admin@ai -n af-tenant-tenant-zero-playground get deploy,scaledobject,po
+kubectl --context admin@ai -n agentforge get deploy                  # dispatcher + reaper (+ platform)
+```
+
+## Broker debugging (the credential-injection path)
+
+The broker's decisions live in an **audit log** line. Read it and grep for the JSON marker:
+
+```bash
+kubectl --context admin@ai -n agentforge-broker logs <broker-pod> | grep broker.audit
+```
+
+Each `broker.audit` record carries a **`decision`** (`granted` / `forbidden` / `model-not-allowed` /
+`unauthorized`) plus a `status`. Interpreting them:
+
+- **`granted` + `status:200`** — the broker authorized the request and forwarded it upstream.
+- **`granted 200` but `tokens_used == 0`** — the broker granted, but the **upstream isn't generating**
+  (usually an upstream auth/model problem, not a broker one — see UPSTREAM below).
+- **`model-not-allowed` (403)** — the request model is not in the gateway `model_set` (see policy below).
+- **`forbidden` (403)** — the model is outside the **kid policy** allow-list (see policy below).
+- **`unauthorized`** — capability signature / `iss` / `aud` mismatch (bad or wrong-account capability).
+- On a **rejection the audit `"model"` field is intentionally BLANK** — the raw request model is never
+  logged pre-authz. A blank `"model":""` on a reject is a red herring, NOT the cause.
+
+**IMPORTANT — brokers run 2 replicas.** `kubectl logs deploy/<name>` (or `logs -l …` without care)
+samples **ONE** replica, so the audit line you want may be on the other pod. **Iterate all pods:**
+
+```bash
+for p in $(kubectl --context admin@ai -n agentforge-broker \
+             get pods -l app.kubernetes.io/name=broker-openai-codex -o name); do
+  echo "== $p =="; kubectl --context admin@ai -n agentforge-broker logs "$p" | grep broker.audit
+done
+```
+
+**UPSTREAM errors** — failures returned by the *real provider* AFTER the broker granted appear as
+`broker upstream <status>` **WARNING** lines (NOT audit lines), e.g.
+`broker upstream 401 (model=gpt-5.6): "…authentication token is expired…"`, or an upstream model
+rejection. A `401` here means the **model check PASSED and auth failed** — an expired credential, not a
+model problem (for codex, jump to the token lifecycle section). Bursty traffic caveat: a narrow
+`logs --since=8m` window can show "0 requests" as a **sampling artifact** — don't conclude "idle".
+
+## Capability / policy model (the model is enforced TWICE)
+
+A request is authorized only if the model the CLI **actually SENDS** is present in **both** allow-lists:
+
+1. **Gateway `model_set` check** — built from the job's **capability**, whose model is sourced from
+   `agentforge.json` (`cross_review.model` for a gate cross-reviewer, or the **role model** otherwise,
+   in the `cchifor/agentforge-config` repo). Violation → audit `model-not-allowed` (403).
+2. **Operator KID-POLICY** — Secret **`broker-openai-codex-kids`**, key `registry.json` →
+   `.kids.<kid>.allowed_models`, synced by **ESO** from OpenBao
+   `af/data/operator/broker/openai/codex-pro/kids`. Violation → audit `forbidden` (403,
+   "model(s) outside kid policy"). This is operator-controlled config; changing it needs an OpenBao
+   operator write (gated), so prefer aligning the *sent* model to what's already allowed.
+
+**Worked example (codex):** codex's built-in default model is **`gpt-5.6-sol`**, which is NOT in the
+kid policy. The kid policy allows **`{gpt-5.3-codex, gpt-5.5, gpt-5.6}`**, so codex is **forced** (via
+`-c model=<job.model>` on the CLI) to send **`gpt-5.6`**, and `cross_review.model` in config is set to
+`gpt-5.6` so the gateway `model_set` agrees. Both lists must contain the sent model, or you get a 403.
+
+Inspect the live kid policy (keys/models only — never dump secret values):
+
+```bash
+kubectl --context admin@ai -n agentforge-broker get secret broker-openai-codex-kids \
+  -o jsonpath='{.data.registry\.json}' | base64 -d | jq '.kids | map_values(.allowed_models)'
+```
+
+## Sandbox debugging (catch the log before it's gone)
+
+Sandbox pods (`af-sbx-*`) are **Kata microVMs that PURGE their container logs ~8s after the process
+exits** (the log dies with the VM), and the Job's TTL reaps the pod ~300s later. So a one-shot
+post-mortem `kubectl logs af-sbx-…` after the run almost always returns **empty**. To see an agent's
+real stdout/error you must capture the log **while the pod is `Running` or the instant it completes** —
+a tight poll loop is the tool:
+
+```bash
+# poll for a new af-sbx pod, then stream its log the moment it appears (before Kata purges it)
+while :; do
+  p=$(kubectl --context admin@ai -n agentforge-sandbox get pods \
+        -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' | tr ' ' '\n' | grep '^af-sbx' | head -1)
+  [ -n "$p" ] && { kubectl --context admin@ai -n agentforge-sandbox logs -f "$p"; break; }
+done
+```
+
+The **orchestrator already streams sandbox logs** (`stream_pod_logs(follow=True)`, started at `Running`)
+to work around this purge, so the plan/critique text also surfaces in the orchestrator pod's own log —
+but for a raw agent error the fast poll above is the fallback. (Note: the orchestrator swallows the
+per-handler exception without logging it; the real error is often ONLY in the ephemeral sandbox stdout,
+or surfaces later in the `needs-human` escalation after `_MAX_FAILURES` on the **same** pod.)
+
+## Codex OAuth token lifecycle (~10-day JWT, static in the broker)
+
+The codex OAuth **access token is a ~10-day JWT** and the broker uses it **statically** (no
+self-refresh). When it expires you get `broker upstream 401 … "authentication token is expired"`
+(model passed, auth failed). **Manual refresh + reload:**
+
+```bash
+# 1) mint a fresh 10-day auth.json from this box's live codex creds
+cd ~/work/home/agentforge && uv run python -m agentforge.broker.codex_refresh \
+  --in ~/.codex/auth.json --out <fresh-auth.json> --force
+
+# 2) write it to OpenBao operator path (mount `af`, KV v2), property `auth.json`:
+#      af/operator/broker/openai/codex-pro/oauth
+#    e.g. (token via STDIN, never argv): bao kv patch af/operator/broker/openai/codex-pro/oauth auth.json=@<fresh-auth.json>
+```
+
+Then ESO re-syncs `broker-openai-codex-oauth` and each broker replica **reloads every ~5 min**
+(log line `broker operator credential reloaded`) → upstream 200 again.
+
+**Gotchas:**
+- The write in step 2 needs an **OPERATOR-scoped** OpenBao token. **OpenBao 2.5.5 has DISABLED
+  `generate-root`** (405 "unsupported operation") — there is **no root-recovery** via the unseal key.
+  Use the `agentforge-provisioner`'s k8s-auth access (it can write operator paths) or a **held
+  operator token** — not root.
+- Do **NOT** patch the k8s Secret `broker-openai-codex-oauth` directly: ESO (`creationPolicy=Owner`)
+  **drift-reverts** it within seconds. The fresh token MUST go to OpenBao (the source of truth).
+- The **`af-codex-refresh` CronJob** (ns `agentforge-broker`, schedule `0 3 * * *`, `--skew-seconds
+  172800`) is meant to automate this, but currently **fails `HTTP 400`** because the OpenBao role
+  **`af-codex-refresher` is missing** (a bootstrap-sentinel gap). Until that role exists, refresh is
+  the manual procedure above. Check it with:
+  `kubectl --context admin@ai -n agentforge-broker logs job/<af-codex-refresh-…>`.
+
+## KEDA scaling gotchas (the planner ScaledObject)
+
+`ScaledObject/af-orch-playground-planner` scales the planner on **`forge_pending`** — a
+Prometheus gauge exported by the **`agentforge-dispatcher`** (`sum(forge_pending{account="claude-max-1",
+role=~"planner|reviewer"})`, threshold 1, `ignoreNullValues=true`).
+
+- **Dispatcher can't reach Gitea → plans die.** If the dispatcher can't compute `forge_pending`
+  (e.g. a Gitea outage / SQLite lock storm), the metric goes **null**; with `ignoreNullValues=true`
+  KEDA treats null as 0 and **scales the planner to 0**, killing in-flight plans. Fix the dispatcher's
+  Gitea reachability (the metric is NOT in-flight-subtracted, so a claimed issue keeps it ≥1 and KEDA
+  holds the pods stably once Gitea is healthy).
+- **`maxReplicaCount:2` + a long codex gate → claim-race interruptions.** With 2 planner replicas a
+  long multi-round codex cross-review can be interrupted by claim-racing. Pin to a **single** replica:
+
+  ```bash
+  kubectl --context admin@ai -n af-tenant-tenant-zero-playground \
+    annotate scaledobject/af-orch-playground-planner \
+    autoscaling.keda.sh/paused-replicas=1 --overwrite
+  ```
+
+  This is a **bridge, not durable — Flux/KEDA may revert it.** Remove the annotation to resume normal
+  0→N scaling.
+
+## Image repin cycle (how a code change ships)
+
+AgentForge **code** changes ride the p1-worker image; **config** changes do not:
+
+- **Code change** → PR to `cchifor/agentforge` → **squash-merge** → Gitea CI rebuilds
+  `registry.chifor.me/agentforge/p1-worker` → **repin the 4 ailab digests** (all the same `@sha256`):
+  1. `kubernetes/apps/apps/agentforge/deployment.yaml` (the CP's `AFP_WORKER_IMAGE`)
+  2. `kubernetes/apps/infrastructure/agentforge-sandbox/reaper-deployment.yaml`
+  3. `kubernetes/apps/infrastructure/agentforge-workers/dispatcher-deployment.yaml`
+  4. `kubernetes/apps/infrastructure/agentforge-workers/worker-deployment.yaml`
+
+  → open the ailab PR → merge → **Flux rolls** the pods. (The brokers + `af-codex-refresh` run the
+  separate `…/agentforge/orchestrator` image, repinned independently.)
+- **Config change** (`cchifor/agentforge-config` → `agentforge.json`, e.g. a role/`cross_review` model
+  or budget) is **polled live** by the orchestrator (`config_poll_s≈120s`) — **no image rebuild or
+  repin**, effective ~2 min after merge.

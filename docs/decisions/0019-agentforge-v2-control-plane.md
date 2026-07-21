@@ -8,6 +8,69 @@ host-systemd agents on dev-workers). **Relates to:** ADR 0017 (Gitea master forg
 tiering — infra-pg, cloudflared), 0015 (Headlamp Flux safe-ops — the field-scoping gap this ADR
 closes for the CP path), 0012 (Authelia SSO), 0013 (self-hosted runners).
 
+## Activation status (2026-07-21)
+
+The **P2 unlock is PROVEN LIVE end-to-end on tenant-zero**. Driving the playground repo
+(`cchifor/agentforge-playground`) issues through the autonomous loop exercised the whole v2 thesis —
+the **credential-injecting broker**, the **Kata sandbox executor**, **capability-JWT minting +
+verification**, **KEDA scale-to-zero**, and **ESO + OpenBao credential sync** — with real subscription
+inference, no static keys ever handed to agent code:
+
+- **Credential broker (ns `agentforge-broker`).** Per-account Deployments
+  `broker-anthropic-max1` / `broker-anthropic-max2` (`claude_max`) and `broker-openai-codex`
+  (`codex_pro`) each mount ONE operator OAuth credential (ESO-synced from OpenBao, reloaded every
+  5 min) and inject it only after verifying the caller's capability JWT. Sandbox agents reach the
+  broker by **pod IP** over the model-only Cilium egress; they never see a token.
+- **Kata sandbox executor (ns `agentforge-sandbox`).** Untrusted agent runs execute in ephemeral
+  Kata Job pods (scoped SA, no automounted token, zero Secret RBAC), stream their logs live
+  (the microVM purges the container log ~8 s after exit), and export a validated workspace tree.
+- **PROVEN transactions.** Real **plans** are generated via the anthropic broker (sandbox agent →
+  pod-IP → broker → capability-verify → OAuth-inject → Anthropic `200` → valid `{plan_md,
+  tests_needed}` envelope), and real **codex cross-review critiques** post through
+  `broker-openai-codex` (plan-stage gate → `/v1/responses` → kid-policy PASS → gateway model PASS →
+  forward, audited `decision:granted status:200`, e.g. `🔀 cross-review [plan] round 1`).
+- **KEDA scale-to-zero** over the planner worker (ScaledObject `af-orch-playground-planner`) scales
+  the pool 0↔N on `forge_pending` and holds stably once the forge is healthy (see finding (a)).
+
+### Decisions / findings that emerged during activation
+
+- **(a) Gitea SQLite could not survive the polling load → WAL + busy-timeout (ailab PR #67);
+  Postgres is the durable follow-up.** Gitea runs `DB_TYPE=sqlite3` (single-writer) on a
+  `qnap-iscsi` block PVC. The AgentForge poll loops (planner + dispatcher + reaper reads plus
+  claim/plan/state writes) starved the default 500 ms busy-timeout + rollback journal → Gitea `500`d
+  on issue-comment writes → the orchestrator crashed and issues never advanced (it also masked a
+  KEDA scale-flap: a missing `forge_pending` sample reads as 0 → scale-to-0). Fix = `WAL` journal +
+  `SQLITE_TIMEOUT=10000` (safe on a block PVC), which heals instantly and keeps `forge_pending`
+  steady. The **agreed durable follow-up is a CNPG-Postgres migration** (reversible: keep the sqlite
+  file, `pgloader`, flip `DB_TYPE`).
+- **(b) The codex CLI needs a `/v1` base_url AND a forced, policy-allowed model.** codex uses
+  `wire_api="responses"` and POSTs to `{base_url}/responses` WITHOUT prepending `/v1` (unlike the
+  claude CLI, which appends `/v1/messages` to `ANTHROPIC_BASE_URL` itself). The broker serves the
+  codex route at inbound `/v1/responses`, so the launcher must set `base_url = {broker_url}/v1`
+  (agentforge PR #43) or codex `404`s. Separately, codex's default model `gpt-5.6-sol` is OUTSIDE the
+  operator **kid-policy** allowlist `{gpt-5.3-codex, gpt-5.5, gpt-5.6}` (a second, OpenBao-published
+  model allowlist enforced by the broker on top of the capability `model_set`), so the runner must
+  force codex onto an allowed model via `-c model=<job.model>` (agentforge PR #44) with the config set
+  to `gpt-5.6` (config PR #4). Without both, the broker returns `403 model-not-allowed` /
+  `capability policy rejected`.
+- **(c) OpenBao 2.5.5 has DISABLED the legacy `generate-root` flow.** `bao operator generate-root`
+  and raw `sys/generate-root/attempt` return **`405 "unsupported operation"`** — there is NO
+  root-token recovery from the unseal key on this version. Operator-path writes (the broker OAuth
+  seeds, new operator roles) therefore require an **operator-scoped token**, not root; the running
+  `agentforge-provisioner` (k8s-auth, ns `openbao`) is the sanctioned operator write path.
+
+### Single remaining open item
+
+The **codex OAuth token must be refreshed and written to OpenBao**
+(`af/operator/broker/openai/codex-pro/oauth`, KV v2, mount `af`) to complete the first live
+`state:2` transition — the broker grants + forwards correctly, but chatgpt.com currently returns
+`401 token expired` (a stale credential, NOT a code/model bug). The **durable fix is creating the
+`af-codex-refresher` OpenBao role** so the already-deployed `af-codex-refresh` CronJob
+(ns `agentforge-broker`, SA `af-codex-refresher`) can self-rotate the ~10-day token; it presently
+fails `HTTP 400` because that operator role is missing (a bootstrap-sentinel gap — see finding (c),
+it rides the same operator-token / provisioner re-run path). Everything upstream and downstream of
+this credential is proven.
+
 ## Context
 
 AgentForge v1 (ADR 0018) works but is IaC-manual: agents run as host systemd units on 6 dev-worker
