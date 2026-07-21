@@ -1,0 +1,31 @@
+# Gitea's Postgres DB password (must MATCH infra-pg-gitea in the databases ns). Consumed by the Gitea
+# pod (GITEA__database__PASSWD) and the one-shot pgloader migration Job.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: gitea-db
+    namespace: gitea
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:OKIS1b0=,iv:tBEZ6kiguAbenrfmwI5DA0M1/Zrm6czbF51vNEFQUaY=,tag:wmPHicjuKx3ogqsXSgXhOg==,type:str]
+    password: ENC[AES256_GCM,data:jHvx37gaN58uyUbjUej6llc0Tp61ceHAtlCIymTVqQ==,iv:yN5FpP+x6tWjHGcywSIPrbZjXDyFamF3VQ6hRmyJLvs=,tag:5UPPdCl8dtBtirbxNaNo2w==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBsU1RwdGxwby83cEN0VytJ
+            bmt2VWZWZkFRS3AzNmxMN0V2cTJpTmJrS3owCk9pN2ZIOGFnTllVa21PeGdUejQ2
+            SExmUkhkR05KMjlLbTQvRmV0TXNVV0kKLS0tIEkzeXA4ay92WlBuVEtISFV0cWdo
+            TGNmUDB1akYybWJtUlprQ3dMaVFoL0UKiyvjPJIYxVNmgrMjqM2ppYLaPddN1bVw
+            j5lXOM6YhG+E/EDz8GrILJNttrOgP6akvEbgx4hxnBbfyjXSN6C6XQ==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-21T18:53:29Z"
+    mac: ENC[AES256_GCM,data:wmJl7bQkRJSrkTIlLRI2Yj2YYHkTECdEa+deTBDCqbQe/8BBKrr3KIIrwLl8dsst29on6tzFZRlxcF3wlPzs00yS1zxLsPET5eJlKdE3j0p0tZ7zeg50NWsWrlkq0oPq5l36kIW4RYMb97oSko1wVk5qk44g/uXoSGQH1nB+G38=,iv:4mTOy0Y6T2t613LC2CUbrw4jHVKxanDx1k0kOthyDVc=,tag:VGSKHZfOwYxNZbezqZ1vRQ==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4
