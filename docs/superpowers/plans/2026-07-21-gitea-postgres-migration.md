@@ -265,9 +265,17 @@ kubectl $CTX -n gitea get pods -l app.kubernetes.io/name=gitea    # expect: no r
 
 Run a short read-only hostPath pod (Gitea is stopped, so read the file directly) — reuse the session's pattern: a `python:3.12-slim` pod on the PVC's node, `sqlite3`-free via Python, printing counts for `user`, `repository`, `issue`, `pull_request`, `action_run`, `action_task`, `access_token`. Record the numbers.
 
-- [ ] **Step 3: Run the pgloader Job**
+- [ ] **Step 3: ARM the migration, then run the pgloader Job**
+
+The Job carries a **required** `MIGRATION_ARMED` secretKeyRef naming a Secret that exists only inside
+this window and is never committed. Without it the kubelet fails the pod with
+`CreateContainerConfigError` before the container starts, so a stray `kubectl apply` of that file after
+the cutover cannot drop Gitea's live tables and reload them from a stale SQLite snapshot. Do not remove
+the interlock to "simplify" the run — arming it IS the run. (Verified live 2026-07-21: unarmed →
+`CreateContainerConfigError: secret "gitea-pgloader-arm" not found`; armed → starts normally.)
 
 ```bash
+kubectl $CTX -n gitea create secret generic gitea-pgloader-arm --from-literal=armed=yes
 kubectl $CTX -n gitea delete job gitea-pgloader --ignore-not-found
 kubectl $CTX apply -f kubernetes/apps/apps/gitea/pgloader-migration.yaml
 kubectl $CTX -n gitea wait --for=condition=complete job/gitea-pgloader --timeout=1800s \
@@ -275,6 +283,17 @@ kubectl $CTX -n gitea wait --for=condition=complete job/gitea-pgloader --timeout
 kubectl $CTX -n gitea logs job/gitea-pgloader | tail -40   # pgloader summary: rows read == rows loaded, 0 errors
 ```
 Expected: pgloader summary shows every table `read == imported`, `0` errors, sequences reset.
+
+**Then check the password did not leak into the Job log.** `--verbose` may print the expanded target
+URI, and the password is substituted directly into it; whether v3.6.7 masks it is unconfirmed. If it
+leaks, it sits in the log for the 24h TTL plus anywhere logs are shipped:
+
+```bash
+kubectl $CTX -n gitea logs job/gitea-pgloader \
+  | grep -c "$(kubectl $CTX -n gitea get secret gitea-db -o jsonpath='{.data.password}' | base64 -d)"
+```
+Expected `0`. **If non-zero:** drop `--verbose` from the manifest and rotate the gitea password (both
+SOPS files + the managed role) **before** Task 4 — far cheaper now than once Gitea is live on it.
 
 - [ ] **Step 4: Verify counts match (this is the task's test)**
 
@@ -363,10 +382,30 @@ Expected: `DB_TYPE = postgres` (or `[database] DB_TYPE=postgres`); Gitea Ready; 
 kubectl --context admin@ai -n gitea logs deploy/gitea --since=15m | grep -ci 'database is locked'   # expect 0
 ```
 
-- [ ] **Step 3: Record rollback window + cleanup**
+- [ ] **Step 3: DISARM and retire the migration Job (do this before closing the window)**
+
+This is **part of finishing the migration**, not a deferred errand. Gitea is now live on Postgres while
+`/data/gitea.db` is retained as the rollback — which is exactly the state in which re-applying
+`pgloader-migration.yaml` would drop the live tables and reload them from a stale snapshot. Remove the
+means, not just the intention:
+
+```bash
+# 1. Disarm: without this Secret the Job cannot start at all (required secretKeyRef).
+kubectl $CTX -n gitea delete secret gitea-pgloader-arm --ignore-not-found
+# 2. Remove the completed Job + its ConfigMap from the cluster.
+kubectl $CTX -n gitea delete job gitea-pgloader --ignore-not-found
+kubectl $CTX -n gitea delete configmap gitea-pgloader --ignore-not-found
+# 3. Delete the manifest from the repo and merge that removal.
+git rm kubernetes/apps/apps/gitea/pgloader-migration.yaml
+```
+
+Verify the interlock is genuinely gone: `kubectl $CTX -n gitea get secret gitea-pgloader-arm` must
+return `NotFound`.
+
+- [ ] **Step 4: Record the rollback window**
 
 - Leave `/data/gitea.db` in place for ≥1 week (rollback = `git revert` the Task 4 commit → Gitea back on SQLite).
-- After the grace period (separate follow-up, NOT this plan): delete the SQLite file, shrink/replace `/data`, and remove `pgloader-migration.yaml`.
+- After the grace period (separate follow-up, NOT this plan): delete the SQLite file and shrink/replace `/data`.
 
 ---
 
