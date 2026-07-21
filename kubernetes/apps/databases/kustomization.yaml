@@ -10,6 +10,10 @@ resources:
   - infra-pg-authelia.sops.yaml # basic-auth creds for the authelia DB (managed role)
   - infra-pg-openwebui.sops.yaml # basic-auth creds for the openwebui DB (managed role)
   - infra-pg-litellm.sops.yaml # basic-auth creds for the litellm virtual-key/budget store (managed role)
+  # gitea DB (SQLite->Postgres migration). Password MUST stay in sync with gitea-db in the gitea ns
+  # (apps/gitea/gitea-db.sops.yaml). The DATABASE itself comes from the gitea-db-bootstrap.yaml one-shot,
+  # which is deliberately NOT listed here (see the CNPG >= 1.25 note below).
+  - infra-pg-gitea.sops.yaml # basic-auth creds for the gitea DB (managed role)
   # AgentForge v2 RLS boundary (ADR 0019): two managed roles, one basic-auth secret each. Each password
   # MUST stay in sync with the matching DSN in apps/agentforge/agentforge-db.sops.yaml (see those headers).
   - infra-pg-afp-admin.sops.yaml # basic-auth creds for afp_admin (DB owner, BYPASSRLS — admin_dsn)

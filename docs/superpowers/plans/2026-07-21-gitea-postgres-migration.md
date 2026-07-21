@@ -4,7 +4,7 @@
 
 **Goal:** Migrate Gitea's database from SQLite (on the RWO `/data` LUN) to a `gitea` database on the shared `infra-pg` CNPG Postgres, eliminating the SQLite single-writer "database is locked" contention, with zero data loss and a safe rollback.
 
-**Architecture:** Gitea stays a single replica with git repos on the existing `/data` RWO PVC; only the DB moves. Add `gitea` as an `infra-pg` tenant (managed role + CNPG `Database` CR + matching SOPS password in both `databases` and `gitea` namespaces), migrate the data with a one-shot `pgloader` Job during a short maintenance window, then repoint the Gitea HelmRelease at `infra-pg-rw`.
+**Architecture:** Gitea stays a single replica with git repos on the existing `/data` RWO PVC; only the DB moves. Add `gitea` as an `infra-pg` tenant (managed role + superuser bootstrap one-shot for the DB + matching SOPS password in both `databases` and `gitea` namespaces), migrate the data with a one-shot `pgloader` Job during a short maintenance window, then repoint the Gitea HelmRelease at `infra-pg-rw`.
 
 **Tech Stack:** Kubernetes (Talos), Flux GitOps (reconciles `main` from in-cluster Gitea), CloudNativePG **1.24.1** (operator, `infra-pg` PG17), SOPS+age secrets, Helm (gitea chart 12.6.0), pgloader.
 
@@ -42,13 +42,20 @@
 **Interfaces:**
 - Produces: DB `gitea` owned by role `gitea` on `infra-pg`; Secret `gitea-db` (keys `username`,`password`) in the `gitea` ns for Tasks 3 & 4.
 
-- [ ] **Step 1: Generate one shared password**
+- [x] **Step 1: Generate one shared password**
 
 ```bash
 PW=$(openssl rand -base64 24 | tr -d '/+=' | head -c 32); echo "$PW"   # keep this value for both secrets
 ```
 
-- [ ] **Step 2: Write + encrypt the databases-ns role secret**
+> **Windows/MSYS gotcha (hit on 2026-07-21):** `openssl` here emits CRLF, so `head -c 32` can keep a
+> trailing `\r` that `$( )` does NOT strip (it strips `\n` only) — `${#PW}` then reports 32 for a
+> 31-character password. Writing that into YAML is self-correcting (the `\r` is trailing whitespace and
+> gets stripped on parse, identically in both files), but the same value pasted into a **DSN** or a
+> non-YAML context would carry the `\r` and authenticate against a password nobody typed. Always verify
+> what actually landed by decrypting both files and comparing hashes — do not trust `${#PW}`.
+
+- [x] **Step 2: Write + encrypt the databases-ns role secret**
 
 Create `kubernetes/apps/databases/infra-pg-gitea.sops.yaml` (plaintext first):
 
@@ -76,7 +83,7 @@ export SOPS_AGE_KEY_FILE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)
 sops --encrypt --in-place kubernetes/apps/databases/infra-pg-gitea.sops.yaml
 ```
 
-- [ ] **Step 3: Write + encrypt the gitea-ns copy (same password)**
+- [x] **Step 3: Write + encrypt the gitea-ns copy (same password)**
 
 Create `kubernetes/apps/apps/gitea/gitea-db.sops.yaml`:
 
@@ -97,7 +104,7 @@ stringData:
 sops --encrypt --in-place kubernetes/apps/apps/gitea/gitea-db.sops.yaml
 ```
 
-- [ ] **Step 4: Add the `gitea` managed role to infra-pg**
+- [x] **Step 4: Add the `gitea` managed role to infra-pg**
 
 In `kubernetes/apps/databases/infra-pg.yaml`, append to `spec.managed.roles` (match the existing entries' shape):
 
@@ -111,7 +118,7 @@ In `kubernetes/apps/databases/infra-pg.yaml`, append to `spec.managed.roles` (ma
           name: infra-pg-gitea
 ```
 
-- [ ] **Step 5: Create the `gitea` DB bootstrap one-shot**
+- [x] **Step 5: Create the `gitea` DB bootstrap one-shot**
 
 `managed.roles` (Step 4) creates the **ROLE** but never a **DATABASE**, and `postInitSQL` in
 `infra-pg.yaml` runs ONLY at first cluster bootstrap — so on the already-bootstrapped `infra-pg` the DB
@@ -150,7 +157,7 @@ Apply the ConfigMap (`kubectl apply -f`) and run the SQL as above. Note `infra-p
 exist on this estate, so the Job-based variant in `litellm-db-bootstrap.yaml` would no-op — use the
 peer-auth path.
 
-- [ ] **Step 6: Register in both kustomizations**
+- [x] **Step 6: Register in both kustomizations**
 
 In `kubernetes/apps/databases/kustomization.yaml` `resources:` add **only** the secret:
 ```yaml
@@ -205,66 +212,29 @@ Expected: `1`.
 - Consumes: Secret `gitea-db` (gitea ns), PVC `gitea-shared-storage`.
 - Produces: schema + data loaded into the `gitea` DB.
 
-- [ ] **Step 1: Write the pgloader load file + Job**
+- [x] **Step 1: Write the pgloader load file + Job** — DONE 2026-07-21
 
-Create `kubernetes/apps/apps/gitea/pgloader-migration.yaml`:
+Committed as `kubernetes/apps/apps/gitea/pgloader-migration.yaml`. Read that file rather than a copy
+here; duplicating a 70-line manifest into the plan only invites drift. Three decisions deviate from the
+original draft, each for a reason worth keeping:
 
-```yaml
-# One-shot SQLite->Postgres migration for Gitea. OPERATOR-RUN, deliberately NOT in kustomization.yaml
-# (a failing Job must never wedge the Flux `apps` layer). Run ONLY during the cutover window with Gitea
-# scaled to 0. pgloader reads /data/gitea.db (read-only intent) and loads the gitea DB on infra-pg.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gitea-pgloader
-  namespace: gitea
-data:
-  gitea.load: |
-    LOAD DATABASE
-      FROM sqlite:///data/gitea.db
-      INTO postgresql://gitea@infra-pg-rw.databases.svc.cluster.local:5432/gitea
-    WITH include drop, create tables, create indexes, reset sequences,
-         quote identifiers, batch rows = 5000, prefetch rows = 5000
-    SET work_mem to '128MB', maintenance_work_mem to '512MB'
-    ;
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: gitea-pgloader
-  namespace: gitea
-spec:
-  backoffLimit: 1
-  ttlSecondsAfterFinished: 86400
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: pgloader
-          image: dimitri/pgloader:latest
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -eu
-              export PGPASSWORD="$DB_PASSWORD"
-              pgloader --verbose /cfg/gitea.load
-          env:
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: gitea-db, key: password }
-          volumeMounts:
-            - { name: data, mountPath: /data, readOnly: true }
-            - { name: cfg, mountPath: /cfg, readOnly: true }
-      volumes:
-        - name: data
-          persistentVolumeClaim: { claimName: gitea-shared-storage, readOnly: true }
-        - name: cfg
-          configMap: { name: gitea-pgloader }
-```
+1. **Password goes in the connection URI, not `PGPASSWORD`.** The draft set `PGPASSWORD` and omitted the
+   password from the DSN. pgloader does not reliably honour `PGPASSWORD` for the *target* connection, so
+   the ConfigMap now holds a `gitea.load.tmpl` with a `__PW__` placeholder and the Job substitutes it at
+   runtime into `/tmp/gitea.load`. Safe as a plain `sed` replacement because the generated password is
+   verified alphanumeric-only at creation (Step 1 above).
+2. **Image pinned to a named release by digest** — `dimitri/pgloader:v3.6.7@sha256:d29ea680...` — not
+   `:latest`. `:latest` is a moving master build and resolves to a *different* digest; a data migration
+   should be reproducible and identifiable, and re-resolution should be a deliberate act.
+3. **`?sslmode=disable` on the target URI**, matching what Gitea itself will use (`SSL_MODE: disable`)
+   and the existing litellm DSN convention for in-cluster connections.
 
-Note: pgloader picks up `PGPASSWORD` for the target DSN (the DSN omits the password deliberately). `include drop` makes re-runs idempotent (drops+recreates the target tables).
+Also added: a preflight `test -r /data/gitea.db` so a missing/unreadable source fails immediately with a
+clear message instead of surfacing as an obscure pgloader error mid-run, and a `baseline`-compatible
+`securityContext` (`allowPrivilegeEscalation: false`, drop `ALL` caps). Verified with
+`kubectl apply --dry-run=server`, which exercises PSA admission — the `gitea` ns enforces `baseline`.
 
-- [ ] **Step 2: Commit (do not apply yet)**
+- [x] **Step 2: Commit (do not apply yet)** — DONE 2026-07-21
 
 ```bash
 git add kubernetes/apps/apps/gitea/pgloader-migration.yaml

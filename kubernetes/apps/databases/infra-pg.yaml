@@ -114,6 +114,18 @@ spec:
         login: true
         passwordSecret:
           name: infra-pg-litellm
+      # gitea DB role (SQLite->Postgres migration, 2026-07-21) — reconciled into existence on the LIVE
+      # cluster (postInitSQL only runs at first bootstrap); password from infra-pg-gitea, which MUST stay
+      # byte-identical to gitea-db in the gitea ns (apps/gitea/gitea-db.sops.yaml) — the Gitea pod reads
+      # the latter as GITEA__database__PASSWD. managed.roles makes the ROLE but NEVER a DATABASE: the
+      # `gitea` DB comes from the superuser one-shot (databases/gitea-db-bootstrap.yaml).
+      - name: gitea
+        ensure: present
+        login: true
+        inherit: true
+        connectionLimit: -1
+        passwordSecret:
+          name: infra-pg-gitea
       # AgentForge v2 RLS boundary (ADR 0019): two roles, one password secret each. bypassrls is set
       # explicitly on both — afp_admin BYPASSRLS (owner/migrations), afp_app NOBYPASSRLS (request path).
       - name: afp_admin

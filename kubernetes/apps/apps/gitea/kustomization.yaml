@@ -6,5 +6,8 @@ resources:
   - gitea-oauth.sops.yaml # SOPS: Authelia OIDC client (key/secret)
   - gitea-actions-s3.sops.yaml # SOPS: versitygw S3 creds for Actions artifacts/logs (ADR 0017)
   - gitea-metrics.sops.yaml # SOPS: bearer token protecting /metrics (Prometheus scrape)
+  - gitea-db.sops.yaml # SOPS: infra-pg `gitea` DB password — MUST match infra-pg-gitea in the
+    # databases ns (kubernetes/apps/databases/infra-pg-gitea.sops.yaml). Read by the Gitea pod as
+    # GITEA__database__PASSWD and by the one-shot pgloader migration Job.
   - servicemonitor.yaml # Prometheus scrape of Gitea /metrics (gitea_* app metrics) with bearer auth
   - gitea.yaml # HelmRepository + HelmRelease (SQLite on qnap-iscsi, OIDC login, Actions on S3)

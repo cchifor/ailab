@@ -1,0 +1,33 @@
+# Gitea DB bootstrap (SQLite->Postgres migration, 2026-07-21) — OPERATOR-RUN ONE-SHOT, deliberately
+# NOT listed in kustomization.yaml so Flux never applies or health-gates it: a failing Job under the
+# `databases` Kustomization would wedge that layer and everything that dependsOn it.
+#
+# A declarative `postgresql.cnpg.io/v1 Database` CR is NOT usable here — that CRD ships in CNPG >= 1.25
+# and the estate operator is 1.24.1. Adding one wedged this layer for 5 days (00dd55a, fixed in #73);
+# see the note in kustomization.yaml. managed.roles (infra-pg.yaml) creates the `gitea` ROLE but never
+# a DATABASE, and postInitSQL runs ONLY at first cluster bootstrap — hence this one-shot.
+#
+# Run ONCE as SUPERUSER via peer-auth inside the CNPG pod (no password, no superuser Secret needed):
+#
+#   kubectl --context admin@ai -n databases exec -i infra-pg-1 -c postgres -- \
+#     psql -U postgres -v ON_ERROR_STOP=1 -f - < <(kubectl --context admin@ai -n databases \
+#       get cm gitea-db-bootstrap -o jsonpath='{.data.bootstrap\.sql}')
+#
+# Do NOT copy litellm-db-bootstrap.yaml's Job variant: it reads `infra-pg-superuser` with
+# optional: true, that Secret does not exist on this estate, and the Job therefore exits GREEN having
+# created nothing. Use the peer-auth invocation above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitea-db-bootstrap
+  namespace: databases
+data:
+  bootstrap.sql: |
+    -- Idempotent: CREATE ROLE/DATABASE cannot run inside a DO block, so use psql \gexec.
+    -- The role's PASSWORD is set afterward by managed.roles (infra-pg.yaml) from infra-pg-gitea --
+    -- the role created here only needs to EXIST. Gitea OWNS the DB (it runs its own migrations,
+    -- and pgloader creates the schema into it during the cutover).
+    SELECT 'CREATE ROLE gitea LOGIN'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gitea')\gexec
+    SELECT 'CREATE DATABASE gitea OWNER gitea'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'gitea')\gexec
