@@ -20,7 +20,7 @@
 
 - kubectl context: **`--context admin@ai`** (the ailab cluster) for every cluster command.
 - Forge: push/PR/merge on **Gitea** (`git.chifor.me/cchifor/ailab`), squash-merge; Flux reconciles `main`. Never `gh`.
-- SOPS: k8s Secrets encrypt `data|stringData` to age recipient **`age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g`**; the age private key is at `_out/age.agekey` (gitignored). DB credential Secrets are `type: kubernetes.io/basic-auth`, labeled `cnpg.io/reload: "true"`.
+- SOPS: k8s Secrets encrypt `data|stringData` to age recipient **`age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g`**; the age private key is at **`kubernetes/infra/_out/age.agekey`** (gitignored — so it does NOT exist in a fresh git worktree; reference the main checkout's copy by absolute path). DB credential Secrets are `type: kubernetes.io/basic-auth`, labeled `cnpg.io/reload: "true"`.
 - The **same gitea DB password** must appear in two Secrets: `infra-pg-gitea` (`databases` ns, for the CNPG managed role) and `gitea-db` (`gitea` ns, for the Gitea pod + pgloader).
 - Connection target: **`infra-pg-rw.databases.svc.cluster.local:5432`**, database `gitea`, user `gitea`, `sslmode=disable` (in-cluster).
 - Gitea image: `docker.gitea.com/gitea:1.26.1-rootless`. Gitea `/data` PVC: `gitea-shared-storage` (gitea ns).
@@ -70,7 +70,7 @@ stringData:
 
 Then encrypt in place:
 ```bash
-export SOPS_AGE_KEY_FILE=_out/age.agekey
+export SOPS_AGE_KEY_FILE=/c/Users/chifo/work/home/ailab/kubernetes/infra/_out/age.agekey
 sops --encrypt --in-place kubernetes/apps/databases/infra-pg-gitea.sops.yaml
 ```
 
@@ -400,6 +400,6 @@ kubectl --context admin@ai -n gitea logs deploy/gitea --since=15m | grep -ci 'da
 
 ## Self-Review
 
-- **Spec coverage:** infra-pg tenant (T1) ✓, pgloader migration (T2–T3) ✓, HelmRelease repoint (T4) ✓, cutover sequence (T3–T4) ✓, rollback (Global Constraints + T5) ✓, verification/success criteria (T3 counts + T5 functional) ✓. Gap check: the spec's "gitea-ns password availability" is satisfied by `gitea-db` (T1); "verify Database CRD path" is the T1 Step 8 fallback.
+- **Spec coverage:** infra-pg tenant (T1) ✓, pgloader migration (T2–T3) ✓, HelmRelease repoint (T4) ✓, cutover sequence (T3–T4) ✓, rollback (Global Constraints + T5) ✓, verification/success criteria (T3 counts + T5 functional) ✓. Gap check: the spec's "gitea-ns password availability" is satisfied by `gitea-db` (T1). The spec's former open question — "verify whether the `Database` CRD reconciles here" — was **resolved at implementation time (2026-07-21) and is closed**: the CRD ships in CNPG >= 1.25, the estate operator is 1.24.1, so there is no declarative path and T1 Step 5's bootstrap one-shot is the only one. It is a precondition, not a fallback.
 - **Placeholders:** `REPLACE_WITH_PW` is a deliberate operator substitution (generated in T1 S1), not a plan gap. Row-count baseline (T3 S2) is captured live because the exact numbers aren't knowable pre-run. No TODO/TBD/"handle errors" left.
 - **Consistency:** DB name `gitea`, user `gitea`, host `infra-pg-rw.databases.svc.cluster.local:5432`, secrets `infra-pg-gitea`(databases)/`gitea-db`(gitea) used identically across T1–T4.
