@@ -70,7 +70,9 @@ stringData:
 
 Then encrypt in place:
 ```bash
-export SOPS_AGE_KEY_FILE=/c/Users/chifo/work/home/ailab/kubernetes/infra/_out/age.agekey
+# --git-common-dir resolves to the MAIN checkout's .git even from a linked worktree, so this works
+# from either, on any machine, without hardcoding a checkout location or a shell's path syntax.
+export SOPS_AGE_KEY_FILE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out/age.agekey"
 sops --encrypt --in-place kubernetes/apps/databases/infra-pg-gitea.sops.yaml
 ```
 

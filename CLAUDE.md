@@ -18,7 +18,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 - **VMs/LXCs** (`kubernetes/infra/**`): **OpenTofu**, applied by hand via `just` (Flux does NOT manage these).
   Modules: `infra/` (Talos CPs) · `infra/runners/` · `infra/dev-workers/` · `infra/agent-nodes/` (Talos workers, AgentForge v2) · `infra/ai-lxc/` · `infra/registry-lxc/`.
   Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just agent-nodes-plan/apply` · `just registry` (+ `*-plan/apply`). `just --list` for all.
-- Secrets = **SOPS + age** (`.sops.yaml`, key at `_out/age.agekey`). **Never commit `_out/`** — kubeconfig, talosconfig, age key, and tofu creds all live there (gitignored).
+- Secrets = **SOPS + age** (`.sops.yaml`, key at **`kubernetes/infra/_out/age.agekey`** — matches README; `_out/` is gitignored so it does NOT exist in a git worktree, resolve the main checkout's copy via `"$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)"`). **Never commit `_out/`** — kubeconfig, talosconfig, age key, and tofu creds all live there (gitignored).
 - Run **tofu on Windows** (`~/.tofubin/tofu.exe`): providers are `windows_amd64` and **WSL has no internet**, so Ansible-over-`/mnt/c` and tofu provider downloads fail there. State is **local** (`kubernetes/infra/**/terraform.tfstate`).
 
 ## Reaching the cluster (easy to hit the WRONG one)
