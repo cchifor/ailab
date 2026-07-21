@@ -44,11 +44,18 @@ spec:
             - { name: AF_OB_CACERT, value: "/tls/ca.crt" }
             - { name: AF_OB_K8S_NAMESPACE, value: "openbao" }
             - { name: AF_OB_KEYS_SECRET, value: "openbao-keys" }
+            # Unbuffered stdout: on the incident above the container was SIGKILLed (OOM) and every buffered
+            # log line died with it, leaving `kubectl logs` empty for both current AND previous containers.
+            - { name: PYTHONUNBUFFERED, value: "1" }
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }
           resources:
-            requests: { cpu: 10m, memory: 32Mi }
-            limits: { cpu: 100m, memory: 64Mi }
+            # 64Mi OOMKilled this container (exit 137) — the orchestrator image imports the full agentforge
+            # package + hvac + the k8s client, which sits just above that ceiling. Observed 11 restarts and,
+            # because Python's stdout buffer is lost on SIGKILL, ZERO logs to diagnose from. 128Mi gives real
+            # headroom for a loop that is otherwise idle.
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 100m, memory: 128Mi }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -103,11 +110,19 @@ spec:
         - ports:
             - { port: "8200", protocol: TCP }
   egressDeny:
-    # Node-local + metadata-via-node belt (identity-based allows above are unaffected — codex/house pattern).
+    # NOTE: `host`/`remote-node` were REMOVED — same fix (and same root cause) as provisioner-deploy.yaml.
+    # The kube-apiserver runs ON the control-plane nodes, so its Cilium identity is COMPOSITE:
+    #   ID 1 = reserved:host + reserved:kube-apiserver   ID 7 = reserved:kube-apiserver + reserved:remote-node
+    # egressDeny OVERRIDES egress allow, so denying host/remote-node shadowed the kube-apiserver:6443 allow
+    # above and blackholed the Secret read (socket wedged in SYN_SENT to 192.168.0.41:6443).
+    # This was LATENT for 7 days: run_unseal() only reads the openbao-keys Secret when the vault is SEALED
+    # (bootstrap.py) — while unsealed it returns "already unsealed" and never touches the API. The Path-2
+    # re-bootstrap made the vault sealed, so the unsealer hung on its FIRST pass, emitting zero logs (the
+    # log line comes after run_unseal returns) and leaving the vault sealed → ESO + codex-refresh all failed.
+    # The `egress` allowlist above already default-denies everything not listed, so this deny was redundant
+    # AND breaking. Keep only the link-local/metadata CIDR deny (defence in depth).
     - toEntities:
         - world
-        - host
-        - remote-node
     - toCIDR:
         - 169.254.169.254/32
         - 169.254.0.0/16
