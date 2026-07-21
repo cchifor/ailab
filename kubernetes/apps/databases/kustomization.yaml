@@ -15,5 +15,9 @@ resources:
   - infra-pg-afp-admin.sops.yaml # basic-auth creds for afp_admin (DB owner, BYPASSRLS — admin_dsn)
   - infra-pg-afp-app.sops.yaml # basic-auth creds for afp_app (non-owner, NOBYPASSRLS — app_dsn)
   - infra-pg.yaml
-  - infra-pg-litellm-database.yaml # CNPG Database: declaratively creates the `litellm` DB (P3) so the
-                                   # live litellm-local gateway never waits on a manual DB-create step
+  # NB: do NOT add a `postgresql.cnpg.io/v1 Database` resource here. That CRD ships in CNPG >= 1.25 and
+  # the estate operator is 1.24.1, so it fails dry-run — which fails the apply of this ENTIRE layer, not
+  # just that one resource. That happened (00dd55a, 2026-07-16): `databases` wedged for 5 days, 27
+  # commits unapplied, and the resulting missing litellm DB then wedged the `apps` layer too. Databases
+  # on an already-bootstrapped infra-pg are created by the one-shot bootstrap SQL pattern instead
+  # (litellm-db-bootstrap.yaml / gitea-db-bootstrap.yaml — deliberately NOT listed here).

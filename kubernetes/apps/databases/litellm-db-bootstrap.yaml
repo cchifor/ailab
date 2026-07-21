@@ -2,13 +2,13 @@
 # NOT listed in kustomization.yaml, so Flux never applies/health-gates it: a failing bootstrap Job under
 # the `databases` Kustomization would wedge that layer and everything that dependsOn it).
 #
-# NORMALLY YOU DO NOT NEED THIS: the `litellm` role is reconciled by managed.roles and the DATABASE is
-# created declaratively by the CNPG Database resource (databases/infra-pg-litellm-database.yaml, CNPG
-# >= 1.24). This file remains only as the imperative escape hatch for a pre-1.24 operator or a DR rebuild
-# where the Database CRD isn't available — it CREATES the `litellm` role + database on an ALREADY-
-# BOOTSTRAPPED infra-pg (postInitSQL in infra-pg.yaml runs ONLY at first cluster bootstrap). Mirrors the
-# sibling pattern in kubernetes/apps/apps/agentforge/db-migrate.yaml (idempotent \gexec SQL + optional
-# superuser-DSN Job).
+# THIS IS THE SUPPORTED PATH on the estate operator (CNPG 1.24.1): the `litellm` role is reconciled by
+# managed.roles, but managed.roles NEVER creates a DATABASE and postInitSQL (infra-pg.yaml) runs ONLY at
+# first cluster bootstrap — so on an already-bootstrapped infra-pg the DB must be created by this one-shot.
+# A declarative `postgresql.cnpg.io/v1 Database` CR is NOT usable here: that CRD ships in CNPG >= 1.25 and
+# adding one wedged the whole `databases` layer for 5 days (00dd55a, reverted 2026-07-21 — see the note in
+# kustomization.yaml). Mirrors the sibling pattern in kubernetes/apps/apps/agentforge/db-migrate.yaml
+# (idempotent \gexec SQL + optional superuser-DSN Job).
 #
 # managed.roles (infra-pg.yaml) reconciles the `litellm` role password from infra-pg-litellm within
 # seconds, so the role created here just needs to EXIST; litellm-local then migrates its OWN schema into
