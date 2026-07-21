@@ -75,7 +75,7 @@ spec:
       containers:
         - name: sandbox
           # PLACEHOLDER digest — the real sandbox image @sha256 (AF_SANDBOX_IMAGE) is pinned at activation.
-          image: registry.chifor.me/agentforge/sandbox@sha256:e50dbab89ec40f90d3af49746f50dc5a2a26165708092a93b42ee690b5ec47a8
+          image: registry.chifor.me/agentforge/sandbox@sha256:ccef08b5fe92c988dbf5b4431750ed49a12a6a04b2643dfe2e8f8fc3d74fbacb
           workingDir: /workspace
           # Boundary probes — each MUST FAIL (egress blocked). Any SUCCESS => BREACH => exit 1. Short
           # connect timeouts so the whole assertion finishes well within activeDeadlineSeconds. Plain-value
