@@ -120,7 +120,10 @@ spec:
     # re-bootstrap made the vault sealed, so the unsealer hung on its FIRST pass, emitting zero logs (the
     # log line comes after run_unseal returns) and leaving the vault sealed → ESO + codex-refresh all failed.
     # The `egress` allowlist above already default-denies everything not listed, so this deny was redundant
-    # AND breaking. Keep only the link-local/metadata CIDR deny (defence in depth).
+    # AND breaking. What remains is the `world` + link-local/metadata CIDR deny (defence in depth).
+    # `world` is deliberately KEPT: the apiserver here is in-cluster (192.168.0.41-43 -> host /
+    # remote-node identities, never `world`), so it cannot shadow the allow above — and the
+    # provisioner, which reaches the apiserver successfully in production, keeps the same `world` deny.
     - toEntities:
         - world
     - toCIDR:

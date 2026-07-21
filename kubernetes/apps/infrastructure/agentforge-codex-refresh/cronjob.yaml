@@ -171,8 +171,9 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: refresh
-              # SAME orchestrator image as the broker (carries agentforge-codex-refresh + python3). Pinned
-              # by digest for parity with broker-openai-codex.yaml / the bootstrap Jobs.
+              # SAME digest as broker-openai-codex.yaml; verified to contain agentforge-codex-refresh
+              # and python3. NOT tied to the bootstrap Jobs — those track db5567fa independently, and
+              # claiming parity with both was wrong (they are different digests).
               # 2026-07-21: was 20e55c58, which PREDATES the agentforge-codex-refresh console script — the
               # binary is simply absent from it, so refresh.py's subprocess.run() died with FileNotFoundError
               # on every run (surfaced only as "codex-refresh FAILED: FileNotFoundError" because the wrapper
