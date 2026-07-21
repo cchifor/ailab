@@ -173,7 +173,14 @@ spec:
             - name: refresh
               # SAME orchestrator image as the broker (carries agentforge-codex-refresh + python3). Pinned
               # by digest for parity with broker-openai-codex.yaml / the bootstrap Jobs.
-              image: registry.chifor.me/agentforge/orchestrator@sha256:20e55c5894bf10ea6d17e4d96e872f6313b9257ca35c86e745a767c0aa712df3
+              # 2026-07-21: was 20e55c58, which PREDATES the agentforge-codex-refresh console script — the
+              # binary is simply absent from it, so refresh.py's subprocess.run() died with FileNotFoundError
+              # on every run (surfaced only as "codex-refresh FAILED: FileNotFoundError" because the wrapper
+              # redacts to the exception TYPE). The comment above already claimed broker parity, but the
+              # digest had drifted away from it. Repinned to the broker digest, restoring the stated
+              # invariant. Verified in-cluster: 8c379d6a has /app/.venv/bin/agentforge-codex-refresh AND
+              # python3; 20e55c58 has only agentforge + agentforge-bootstrap.
+              image: registry.chifor.me/agentforge/orchestrator@sha256:8c379d6a79ef358b9705431a732ed4dc33ce09a38b5922a1ee3c54f0efff3b73
               command: ["python3", "/scripts/refresh.py"]
               volumeMounts:
                 - { name: work, mountPath: /work }
