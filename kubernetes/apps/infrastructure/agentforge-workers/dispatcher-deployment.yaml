@@ -61,7 +61,7 @@ spec:
       containers:
         - name: dispatcher
           # PLACEHOLDER digest — pin the real p1-worker @sha256 (see header) before enabling.
-          image: registry.chifor.me/agentforge/p1-worker@sha256:b6abf03e1950233531d6ef6479dddae17623f5464a025b50362d3e02fd38412a
+          image: registry.chifor.me/agentforge/p1-worker@sha256:fe90dc48ce7f361c7a86db2ee75dd062326bcea9fe558b3653cbc313d4b13b97
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # dispatcher` (composes to: tini -- agentforge dispatcher). A bare `dispatcher` would crash-loop.
           args: ["agentforge", "dispatcher"]

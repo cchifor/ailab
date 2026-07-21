@@ -80,7 +80,7 @@ spec:
             # -- server-owned worker image the CP renders into tenant Deployments. Provisioning REFUSES
             #    (503) unless this is a pinned digest (repo@sha256:<64hex>) — the p1-worker release CI
             #    fills it. Placeholder here so the CP can start; provisioning is gated until it's real. --
-            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:b6abf03e1950233531d6ef6479dddae17623f5464a025b50362d3e02fd38412a" }
+            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:fe90dc48ce7f361c7a86db2ee75dd062326bcea9fe558b3653cbc313d4b13b97" }
             # -- workers fetch their config from the CP over this in-cluster URL. The Service exposes
             #    :8080 (== container port, no DNAT port translation — see serviceaccount-service.yaml). --
             - { name: AFP_CONTROL_PLANE_INTERNAL_URL, value: "http://agentforge-platform.agentforge.svc:8080" }
