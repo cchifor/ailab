@@ -41,10 +41,13 @@ Only the database moves. DBFS (Actions live-log buffer) becomes Postgres tables 
 **1. infra-pg gitea tenant** (`kubernetes/apps/databases/`), mirroring the litellm convention:
 - Add `gitea` role to `infra-pg.yaml` `spec.managed.roles` → `passwordSecret: infra-pg-gitea`.
 - `infra-pg-gitea.sops.yaml` — SOPS-encrypted password secret.
-- `infra-pg-gitea-database.yaml` — CNPG `Database` CR (`cluster: infra-pg`, `owner: gitea`,
-  `databaseReclaimPolicy: retain`). Include the idempotent superuser bootstrap-Job fallback (as
-  litellm does) in case the `Database` CRD path isn't serving. **Verify at impl time** whether the
-  `Database` CRD reconciles here (litellm DB is currently absent from infra-pg — confirm the working path).
+- `gitea-db-bootstrap.yaml` — idempotent superuser one-shot (`\gexec` CREATE ROLE/DATABASE) creating
+  the `gitea` DB, **kept out of `kustomization.yaml`** so a failure can never wedge the layer.
+  **Resolved at impl time (2026-07-21):** a declarative CNPG `Database` CR is NOT available here — that
+  CRD ships in CNPG **>= 1.25** and the estate operator is **1.24.1**. The earlier assumption that 1.24
+  served it was wrong, and acting on it (`00dd55a`) wedged the `databases` Kustomization for 5 days and
+  cascaded into `apps` / `agentforge-tenants` / `edge-connector`. The bootstrap one-shot is the
+  supported path, not a fallback.
 
 **2. Data migration** — one-shot **pgloader** Job in the **`gitea` namespace** (PVCs are namespace-scoped,
 so the Job must live where the `/data` PVC is):

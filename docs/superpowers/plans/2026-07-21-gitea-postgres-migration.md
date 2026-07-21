@@ -6,7 +6,15 @@
 
 **Architecture:** Gitea stays a single replica with git repos on the existing `/data` RWO PVC; only the DB moves. Add `gitea` as an `infra-pg` tenant (managed role + CNPG `Database` CR + matching SOPS password in both `databases` and `gitea` namespaces), migrate the data with a one-shot `pgloader` Job during a short maintenance window, then repoint the Gitea HelmRelease at `infra-pg-rw`.
 
-**Tech Stack:** Kubernetes (Talos), Flux GitOps (reconciles `main` from in-cluster Gitea), CloudNativePG 1.24 (operator, `infra-pg` PG17), SOPS+age secrets, Helm (gitea chart 12.6.0), pgloader.
+**Tech Stack:** Kubernetes (Talos), Flux GitOps (reconciles `main` from in-cluster Gitea), CloudNativePG **1.24.1** (operator, `infra-pg` PG17), SOPS+age secrets, Helm (gitea chart 12.6.0), pgloader.
+
+> **CNPG 1.24.1 is < 1.25, so the `postgresql.cnpg.io/v1 Database` CRD DOES NOT EXIST on this estate.**
+> Never add a `kind: Database` resource to `kubernetes/apps/databases/`. It fails server-side dry-run,
+> which fails the apply of the **entire** `databases` Kustomization — not just that one resource. This
+> exact mistake (`00dd55a`, 2026-07-16) wedged `databases` for 5 days (27 commits unapplied) and
+> cascaded into `apps` / `agentforge-tenants` / `edge-connector`. Databases on the already-bootstrapped
+> `infra-pg` are created by a one-shot superuser bootstrap SQL artifact that is deliberately **kept out
+> of `kustomization.yaml`**, so a failure can never wedge the layer.
 
 ## Global Constraints
 
@@ -26,7 +34,7 @@
 **Files:**
 - Create: `kubernetes/apps/databases/infra-pg-gitea.sops.yaml` (databases-ns role password)
 - Create: `kubernetes/apps/apps/gitea/gitea-db.sops.yaml` (gitea-ns copy of the same password)
-- Create: `kubernetes/apps/databases/infra-pg-gitea-database.yaml` (CNPG `Database` CR)
+- Create: `kubernetes/apps/databases/gitea-db-bootstrap.yaml` (superuser one-shot creating the `gitea` DB — **NOT** registered in `kustomization.yaml`)
 - Modify: `kubernetes/apps/databases/infra-pg.yaml` (add `gitea` to `spec.managed.roles`)
 - Modify: `kubernetes/apps/databases/kustomization.yaml` (add the two databases-ns files)
 - Modify: `kubernetes/apps/apps/gitea/kustomization.yaml` (add `gitea-db.sops.yaml`)
@@ -101,35 +109,53 @@ In `kubernetes/apps/databases/infra-pg.yaml`, append to `spec.managed.roles` (ma
           name: infra-pg-gitea
 ```
 
-- [ ] **Step 5: Create the CNPG Database CR**
+- [ ] **Step 5: Create the `gitea` DB bootstrap one-shot**
 
-Create `kubernetes/apps/databases/infra-pg-gitea-database.yaml`:
+`managed.roles` (Step 4) creates the **ROLE** but never a **DATABASE**, and `postInitSQL` in
+`infra-pg.yaml` runs ONLY at first cluster bootstrap — so on the already-bootstrapped `infra-pg` the DB
+must come from a superuser one-shot. Create `kubernetes/apps/databases/gitea-db-bootstrap.yaml`,
+mirroring `litellm-db-bootstrap.yaml` exactly:
 
 ```yaml
-# Declarative CNPG database for Gitea (SQLite->Postgres migration, 2026-07-21). managed.roles creates
-# the `gitea` ROLE; this creates the DB it owns. databaseReclaimPolicy: retain so removing this never
-# drops Gitea's data. Requires CNPG >= 1.24 (estate operator 1.24.1).
-apiVersion: postgresql.cnpg.io/v1
-kind: Database
+# Gitea DB bootstrap (SQLite->Postgres migration, 2026-07-21) — OPERATOR-RUN ONE-SHOT, deliberately
+# NOT listed in kustomization.yaml so Flux never applies or health-gates it: a failing Job under the
+# `databases` Kustomization would wedge that layer and everything that dependsOn it.
+#
+# A declarative `postgresql.cnpg.io/v1 Database` CR is NOT usable here — that CRD ships in CNPG >= 1.25
+# and the estate operator is 1.24.1. See the note in kustomization.yaml.
+#
+# Run ONCE as SUPERUSER via peer-auth inside the CNPG pod (no password, no superuser Secret needed):
+#   kubectl --context admin@ai -n databases exec -i infra-pg-1 -c postgres -- \
+#     psql -U postgres -v ON_ERROR_STOP=1 -f - < <(kubectl --context admin@ai -n databases \
+#       get cm gitea-db-bootstrap -o jsonpath='{.data.bootstrap\.sql}')
+apiVersion: v1
+kind: ConfigMap
 metadata:
-  name: gitea
+  name: gitea-db-bootstrap
   namespace: databases
-spec:
-  cluster:
-    name: infra-pg
-  name: gitea
-  owner: gitea
-  ensure: present
-  databaseReclaimPolicy: retain
+data:
+  bootstrap.sql: |
+    -- Idempotent: CREATE ROLE/DATABASE cannot run inside a DO block, so use psql \gexec.
+    -- The role's PASSWORD is set afterward by managed.roles (infra-pg.yaml) from infra-pg-gitea —
+    -- the role created here only needs to EXIST. Gitea owns the DB (it runs its own migrations).
+    SELECT 'CREATE ROLE gitea LOGIN'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gitea')\gexec
+    SELECT 'CREATE DATABASE gitea OWNER gitea'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'gitea')\gexec
 ```
+
+Apply the ConfigMap (`kubectl apply -f`) and run the SQL as above. Note `infra-pg-superuser` does **not**
+exist on this estate, so the Job-based variant in `litellm-db-bootstrap.yaml` would no-op — use the
+peer-auth path.
 
 - [ ] **Step 6: Register in both kustomizations**
 
-In `kubernetes/apps/databases/kustomization.yaml` `resources:` add:
+In `kubernetes/apps/databases/kustomization.yaml` `resources:` add **only** the secret:
 ```yaml
   - infra-pg-gitea.sops.yaml # basic-auth creds for the gitea DB (managed role)
-  - infra-pg-gitea-database.yaml # CNPG Database: creates the `gitea` DB (SQLite->PG migration)
 ```
+**Do NOT register `gitea-db-bootstrap.yaml`** — it is an operator-run one-shot, kept out of the
+kustomization on purpose (see the CNPG >= 1.25 note already in that file).
 In `kubernetes/apps/apps/gitea/kustomization.yaml` `resources:` add:
 ```yaml
   - gitea-db.sops.yaml # gitea-ns copy of the infra-pg gitea DB password
@@ -138,7 +164,7 @@ In `kubernetes/apps/apps/gitea/kustomization.yaml` `resources:` add:
 - [ ] **Step 7: Commit, push, PR, merge**
 
 ```bash
-git add kubernetes/apps/databases/infra-pg-gitea.sops.yaml kubernetes/apps/databases/infra-pg-gitea-database.yaml \
+git add kubernetes/apps/databases/infra-pg-gitea.sops.yaml kubernetes/apps/databases/gitea-db-bootstrap.yaml \
         kubernetes/apps/databases/infra-pg.yaml kubernetes/apps/databases/kustomization.yaml \
         kubernetes/apps/apps/gitea/gitea-db.sops.yaml kubernetes/apps/apps/gitea/kustomization.yaml
 git commit -m "feat(gitea): provision gitea DB tenant on infra-pg (SQLite->PG migration, part 1)"
@@ -152,7 +178,14 @@ GIT_TERMINAL_PROMPT=0 git push -u gitea feat/gitea-postgres-migration
 kubectl --context admin@ai -n databases exec infra-pg-1 -c postgres -- \
   psql -U postgres -At -c "SELECT datname FROM pg_database WHERE datname='gitea'; SELECT rolname,rolcanlogin FROM pg_roles WHERE rolname='gitea';"
 ```
-Expected: prints `gitea` (database) and `gitea|t` (role, can-login). If the DB is missing (Database CR not reconciling), apply the superuser bootstrap fallback exactly like `litellm-db-bootstrap.yaml` (idempotent `\gexec` CREATE ROLE/DATABASE). Then confirm login:
+Expected: prints `gitea` (database) and `gitea|t` (role, can-login).
+
+**Hard precondition, not a fallback:** the DB exists ONLY because Step 5's bootstrap SQL was run. There
+is no declarative path to it on this operator, and no state in which the DB is merely "missing" while
+everything else is fine — if a `kind: Database` resource were present, the whole `databases`
+Kustomization would have stopped applying and every dependent layer would already be degrading. So if
+this check fails, do **not** proceed: re-run Step 5, and confirm `kubectl -n flux-system get kustomization
+databases` is `Ready=True` before continuing. Then confirm login:
 ```bash
 kubectl --context admin@ai -n databases exec infra-pg-1 -c postgres -- \
   env PGPASSWORD="$PW" psql "host=infra-pg-rw dbname=gitea user=gitea sslmode=disable" -At -c "SELECT 1;"
