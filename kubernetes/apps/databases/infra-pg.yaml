@@ -106,9 +106,9 @@ spec:
           name: infra-pg-openwebui
       # litellm virtual-key/budget store role — reconciled into existence on the LIVE cluster (postInitSQL
       # only runs at first bootstrap); password from infra-pg-litellm (must match litellm-local-db's DSN).
-      # The DATABASE itself is created declaratively by the CNPG Database resource
-      # (databases/infra-pg-litellm-database.yaml) — managed.roles makes the ROLE but never a DB.
-      # (databases/litellm-db-bootstrap.yaml remains as a DR/imperative fallback for pre-1.24 operators.)
+      # managed.roles makes the ROLE but NEVER a DATABASE: create the DB once via the superuser one-shot
+      # (databases/litellm-db-bootstrap.yaml, option A). A `Database` CR is NOT an option on this operator
+      # — see the CNPG >= 1.25 note in kustomization.yaml.
       - name: litellm
         ensure: present
         login: true
