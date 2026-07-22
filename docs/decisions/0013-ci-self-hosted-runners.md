@@ -11,7 +11,7 @@ pinning the **balloon floor to 12 GiB** (`runner_memory_floating_mib`; the 24 Gi
 unchanged) and adding an **8 GiB guest swapfile** (`swappiness=10`) as an OOM reclaim valve. Both are
 now codified (tofu + the `github_runner` role). The `MemoryMax=10G` cgroup cap is unrelated, unchanged.
 **Update (2026-07-01, scale 3→5):** Expanded the pool to **5 runners — two on node1/node2, one on
-node3** (`ci-runner-4/5`, vmid 4104/4105, IPs .33/.34), **identical** sizing + config to 1–3 via the
+node3** (`ci-runner-4/5`, vmid 4104/4105, IPs .33/.34 → renumbered in-guest to .17/.18), **identical** sizing + config to 1–3 via the
 shared `runner_*` vars — additive `runner_nodes` map entries only; no role or secret change.
 **ci-runner-6 (node3, .35 / vmid 4106) is reserved but DEFERRED** — see the measured finding below. Trade-off:
 the original "one per host" fault isolation becomes two-per-host, and GitHub may co-schedule two heavy
@@ -76,7 +76,9 @@ retire the Hyper-V VMs. `cchifor` is a GitHub **User** account → runners are n
 
 ## Decision
 Provision **3 full QEMU VMs** (Ubuntu 24.04 cloud image), one per Proxmox host (`ci-runner-1/2/3`,
-vmid 4101–4103, IPs .47/.48/.49 in the static-reserved `.2–.50` block, 8 vCPU / 24 GiB / 120 GiB), via
+vmid 4101–4103, IPs .47/.48/.49 (renumbered in-guest to .14/.15/.16 — the live pool is **.14–.18**; the
+vacated .47/.48/.49 were later reused by the ADR 0019 agent-nodes, see docs/runbooks/ci-runners.md §8) in
+the static-reserved `.2–.50` block, 8 vCPU / 24 GiB / 120 GiB), via
 a new OpenTofu root module `kubernetes/infra/runners/` (bpg/proxmox, API-token auth + ssh, mirroring
 the Talos `infra/` module). Configure them with the Ansible role **`github_runner`** (`just runners`),
 which **ports the platform runner contract verbatim** — ephemeral wrapper, systemd unit + drop-ins
