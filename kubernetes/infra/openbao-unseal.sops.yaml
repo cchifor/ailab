@@ -1,0 +1,42 @@
+# ============================================================================================
+# DR-ONLY ARTIFACT — DO NOT APPLY VIA FLUX. SOPS+age-encrypted escrow of the OpenBao Shamir seal.
+# The unseal key + cluster_id otherwise live ONLY in the in-cluster Secret openbao-keys (plaintext
+# in etcd) + the raft PV; a cluster rebuild / etcd loss regenerates a NEW cluster_id, orphaning
+# every stored af/* secret (docs/runbooks/agentforge-activation.md). This file + a raft snapshot
+# make DR deterministic: restore this Secret, `bao operator raft snapshot restore`, and the same
+# vault returns with the SAME cluster_id, all secrets intact, ESO re-syncs.
+# NOT in any Flux kustomization → Flux never applies it. git history is its off-machine home; the
+# decrypting age key (kubernetes/infra/_out/age.agekey) MUST be kept OFFLINE, plus a Vaultwarden copy.
+# RESTORE:  sops -d kubernetes/infra/openbao-unseal.sops.yaml | kubectl apply -f -
+# ROTATE after exposure:  bao operator rekey -init -key-shares=1 -key-threshold=1 → update Secret
+#           openbao-keys AND re-run this escrow.
+# ============================================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+    name: openbao-keys
+    namespace: openbao
+type: Opaque
+stringData:
+    cluster_id: ENC[AES256_GCM,data:G3dt0KVOzfpTiIDuSde5yCbLSIvgjE3/lUJ+uZNYek837THP,iv:BBejCcY9+nwwx5AD6P3bMsu5D5h9xm0UFklV0j4ESZg=,tag:A3WJgNL7oqv7fq+liCNdWA==,type:str]
+    unseal_key: ENC[AES256_GCM,data:O7lyyOx00VwwGr0GhhOATE92jB7TYNoBWd0rUoGUqUqn5svBqBUnasMkUPM=,iv:9AHyAJFrbMNs8Aa1d8Y4YvoX8UlcB5DWMlncWWjseJ0=,tag:Hglw+cm25BeaDhftBvKZcg==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBHclorU0JieXU3aVRaZDdU
+            c2QrU3BDTVR5TW1vZEYvQjg1S1N0cVBlUkJ3ClpOYzJDbnNqbnZ2OU40NmJDSEpw
+            UjdBandBNElQTnNsN3oxOGxFYi9iMXMKLS0tIDZ5Ulp2eW9ZT0pGa01PZVN2d3lM
+            MVJ4ZHF5TE5NTmh6MVhBemRZNHkwKzAKcPArEAuZWN9UD/mrSWSQsqm37WYKGmwy
+            ztvWKzXZyWVweGI+6vLhRyFZ/MVTSVZ/HGPFymuWkI8BqVXzNnfOeg==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-22T11:19:51Z"
+    mac: ENC[AES256_GCM,data:2uOQHzMjmnhOybOlsc4SKsXVmNIF+DnJC7QuofdRpFqik27VjmZgLUasN8/ShkJffDoMVFvfTs1hUmUAFCtVLJgUVpvzsZ1k5EQpOZBjY6pybKDgV/fki21z5Zh0q1gbbFIOTRqUkElp9wcDdGlKFBOXUX/vUO6YQCFlu7NFAqE=,iv:+Vm77ho98nt5IpGY5fWIRbvbJJhCsjbXVTP3gu629WM=,tag:dYDJ6NQ2wWqCXhKK7ump7w==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

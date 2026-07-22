@@ -49,7 +49,9 @@ spec:
       containers:
         - name: platform
           # PLACEHOLDER digest — the release CI pins the immutable @sha256 of the built image (see header).
-          image: registry.chifor.me/cchifor/agentforge-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # NB the repo path is `agentforge/agentforge-platform` (matches the platform CI push target +
+          # the sibling `agentforge/p1-worker` convention) — NOT `cchifor/…`, which CI never populates.
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
