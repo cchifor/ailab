@@ -25,6 +25,12 @@ metadata:
 spec:
   interval: 1h
   timeout: 15m
+  # Auto-retry a failed upgrade instead of wedging in UpgradeFailed (which also drags `apps` Ready=False
+  # via its health check). Added after a failed migration cutover left the release stuck until a manual
+  # generation bump (2026-07-22).
+  upgrade:
+    remediation:
+      retries: 3
   chart:
     spec:
       chart: gitea
@@ -111,25 +117,31 @@ spec:
             secretKeyRef:
               name: gitea-metrics
               key: token
+        # [database] PASSWD for the infra-pg `gitea` role (SQLite->Postgres migration, 2026-07-22). Kept
+        # out of the plaintext config: injected as an env override. Same value as infra-pg-gitea (databases ns).
+        - name: GITEA__database__PASSWD
+          valueFrom:
+            secretKeyRef:
+              name: gitea-db
+              key: password
       config:
         server:
           DOMAIN: git.chifor.me
           ROOT_URL: https://git.chifor.me/
           SSH_DOMAIN: git.chifor.me
         database:
-          DB_TYPE: sqlite3
-          # SQLite is single-writer. Under the AgentForge polling load (planner/dispatcher/reaper each
-          # running a chatty read loop + claim/plan/state writes), the default 500ms busy-timeout with
-          # rollback-journal mode starves writers behind readers -> Gitea returns 500 "database is locked"
-          # on CreateIssueComment/EditIssueComment, which crashes the orchestrator reconcile so issues
-          # never advance (observed 2026-07-20, tenant-zero planner slice). Two tuning knobs fix it:
-          #   * WAL journal mode: readers no longer block the writer (safe here — /data is an ext4 BLOCK
-          #     PVC on qnap-iscsi, NOT NFS; WAL needs real file locking + mmap, which iSCSI provides).
-          #   * 10s busy-timeout: a writer waits up to 10s for a competing writer instead of erroring at
-          #     500ms. AgentForge writes are tiny/fast, so 10s absorbs contention bursts without hanging.
-          # Follow-up (tracked): the ~4.7 GiB DB bloat, and a Postgres migration if the fleet grows.
-          SQLITE_JOURNAL_MODE: WAL
-          SQLITE_TIMEOUT: 10000
+          # Migrated SQLite -> Postgres on 2026-07-22 (docs/superpowers/{specs,plans}/
+          # 2026-07-21-gitea-postgres-migration*). SQLite is single-writer: under AgentForge polling load
+          # it returned 500 "database is locked" on comment writes and crashed the orchestrator reconcile.
+          # Postgres (real MVCC) removes that class. Method: Gitea built the schema itself (correct xorm
+          # types), pgloader loaded data-only; validated by an isolated snapshot-clone rehearsal first.
+          # Gitea stays SINGLE-REPLICA on the RWO /data PVC (git repos, LFS, avatars); only the DB moved,
+          # to the shared infra-pg CNPG cluster (ADR 0016).
+          DB_TYPE: postgres
+          HOST: infra-pg-rw.databases.svc.cluster.local:5432
+          NAME: gitea
+          USER: gitea
+          SSL_MODE: disable # in-cluster; PASSWD injected via GITEA__database__PASSWD (see envs above)
         session:
           PROVIDER: memory
         cache:
