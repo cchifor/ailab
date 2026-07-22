@@ -62,7 +62,11 @@ spec:
       # gracefully (assumes step 1 above was run by hand). optional:true keeps this appliable without it.
       initContainers:
         - name: bootstrap-role-db
-          image: ghcr.io/cloudnative-pg/postgresql:17.10
+          # Digest-pinned (was the mutable :17.10 tag) — this is a one-shot operator Job, so pin for
+          # reproducibility. Digest == the image infra-pg runs live. Optional path anyway: it only runs
+          # if the agentforge-db-superuser Secret is present; the sanctioned path is the peer-auth
+          # \gexec one-shot in the header, which skips this container.
+          image: ghcr.io/cloudnative-pg/postgresql:17.10@sha256:916d505d999e6bb85ead15dc2b965b9f968a9eb09e6d9c2e59e50a174f785e71
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -84,10 +88,11 @@ spec:
             capabilities: { drop: ["ALL"] }
       containers:
         - name: migrate
-          # Same image as the CP Deployment (pinned by the platform release CI). Repo path is
-          # `agentforge/agentforge-platform` (matches the CI push target) — NOT `cchifor/…`. Adjust the
-          # argv to the platform's actual migrate entrypoint (e.g. alembic upgrade head) at execution.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # Same image + digest as the CP Deployment (agentforge-platform tag 2776074 / 27760744…).
+          # Repo path `agentforge/agentforge-platform` (CI push target) — NOT `cchifor/…`. The migrate
+          # entrypoint is `agentforge-platform migrate` = alembic upgrade head as admin_dsn (verified in
+          # the image config Entrypoint + main.py CLI). Keep this digest in lockstep with deployment.yaml.
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:85a4a3c7a3599b20834688c8f2ea060341435d7cba07239d94bf5b00afac374e
           command: ["agentforge-platform", "migrate"]
           env:
             # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the

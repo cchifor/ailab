@@ -4,14 +4,15 @@
 # registry.chifor.me by the cchifor/agentforge-platform repo's release CI (anonymous-pull, Talos
 # already trusts the registry — no imagePullSecret; precedent: headlamp/cloudflared).
 #
-# ⚠️ DELIBERATELY NOT LISTED in kustomization.yaml (mirrors db-migrate.yaml). The image below is a
-# PLACEHOLDER @sha256:0000… — unpullable. This Deployment lives under the wait:true `apps` Flux
-# Kustomization, so if Flux applied it now it would ImagePullBackOff, never go Ready, and wedge the
-# ENTIRE apps layer (and everything that dependsOn it, incl. the agentforge-tenants reconciler). The
-# ServiceAccount + Service were split into serviceaccount-service.yaml (which IS listed) so RBAC and
-# the cloudflared/NetworkPolicy references stay satisfied meanwhile. To ship the CP: the platform
-# release CI pins the immutable @sha256 of the built image here, then add `- deployment.yaml` back to
-# kustomization.yaml (or `kubectl apply -f` it by hand once, ahead of the Flux entry).
+# ⚠️ STILL NOT LISTED in kustomization.yaml in this (prerequisites) PR — the image is now a real
+# pinned @sha256 (below), but the `- deployment.yaml` line is deliberately deferred to the SEPARATE
+# go-live PR so activation stays a transactional switch: the DB must be created + migrated first
+# (this Deployment's readiness probe is /readyz — the DB SELECT-1 check — so it will not report
+# Ready under the wait:true `apps` Kustomization until the platform DB is reachable + migrated).
+# The ServiceAccount + Service were split into serviceaccount-service.yaml (which IS listed) so RBAC
+# and the cloudflared/NetworkPolicy references stay satisfied meanwhile. To ship the CP: create +
+# migrate the DB (see db-migrate.yaml header / the operator runbook), THEN add `- deployment.yaml`
+# to kustomization.yaml in the go-live PR.
 #
 # P1: single replica (SSE broadcast state is in-memory; HA is P3). No PDB — a PDB on a singleton
 # blocks node drains (the strive-pg-primary lesson). Structure mirrors auth/authelia.yaml.
@@ -48,10 +49,13 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: platform
-          # PLACEHOLDER digest — the release CI pins the immutable @sha256 of the built image (see header).
-          # NB the repo path is `agentforge/agentforge-platform` (matches the platform CI push target +
-          # the sibling `agentforge/p1-worker` convention) — NOT `cchifor/…`, which CI never populates.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # Pinned to the immutable @sha256 of the built image. Repo path is `agentforge/agentforge-platform`
+          # (matches the platform CI push target + the sibling `agentforge/p1-worker` convention) — NOT
+          # `cchifor/…`, which CI never populates. Digest = OCI index of tag `2776074` (agentforge-platform
+          # origin/main HEAD 27760744…, feat #8); verified tag→digest equality + linux/amd64 + Entrypoint
+          # `[agentforge-platform] serve` + AFP_WEBAPP_DIST set. Re-verify the tag still resolves to this
+          # digest before merging the go-live PR; fail closed if it moved.
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:85a4a3c7a3599b20834688c8f2ea060341435d7cba07239d94bf5b00afac374e
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
@@ -97,10 +101,17 @@ spec:
             - name: AFP_BOOTSTRAP_TOKEN
               valueFrom:
                 secretKeyRef: { name: agentforge-runtime, key: AFP_BOOTSTRAP_TOKEN }
+          # Readiness = /readyz (executes SELECT 1 on the admin DSN) so the pod only joins the Service
+          # endpoints once the platform DB is reachable + migrated — under the wait:true `apps`
+          # Kustomization this also gates the go-live rollout on a usable DB (avoids /healthz false
+          # readiness). Liveness = /healthz (unconditional {"status":"ok"}) so a transient DB blip
+          # removes the pod from endpoints without killing the process. failureThreshold widened so a
+          # slow first DB connect / brief primary switchover doesn't flap-restart the pod.
           readinessProbe:
-            httpGet: { path: /healthz, port: http }
+            httpGet: { path: /readyz, port: http }
             initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 6
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             initialDelaySeconds: 15
