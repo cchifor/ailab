@@ -82,13 +82,14 @@ spec:
       ha:
         enabled: true
         replicas: 1 # homelab dev-ish; HA = 3 + `bao operator raft join` (see header)
-        # At replicas:1 the chart computes the PDB maxUnavailable=0 -> ALLOWED DISRUPTIONS=0, which blocks
-        # every node drain (PodDisruptionBudgetBlockingDrains fires; `kubectl drain` hangs on the openbao
-        # pod). Allow the single pod to be evicted: it reschedules and the unsealer sidecar re-unseals
-        # automatically. Brief unavailability is unavoidable at replicas:1 regardless of the PDB, so 0
-        # disruptions buys nothing but a stuck drain. Revisit when growing to HA (3 replicas).
+        # DISABLE the chart PDB. At replicas:1 the chart's openbao.pdb.maxUnavailable helper HARDCODES 0
+        # (the `eq replicas 1` branch runs BEFORE any maxUnavailable override), giving ALLOWED
+        # DISRUPTIONS=0 -> every node drain hangs on the openbao pod (PodDisruptionBudgetBlockingDrains).
+        # A PDB protects nothing at replicas:1 (you can't evict 1 stateful pod without downtime anyway),
+        # so removing it is correct: a drain evicts the pod, it reschedules, and the unsealer re-unseals.
+        # Re-enable when growing to HA (replicas:3 — the helper then computes a sane maxUnavailable).
         disruptionBudget:
-          maxUnavailable: 1
+          enabled: false
         raft:
           enabled: true
           setNodeId: true
