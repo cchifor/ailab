@@ -1,12 +1,5 @@
 # AgentForge v2 — "Gate 2 / CI runners" host-mode formalization + PREFLIGHT #2
 
-## Codex Review
-- The repo-only scope and host-mode decision are sound, but the AgentForge workflow mismatch must remain an explicit activation blocker, not merely an observation.
-- `AutoAddPolicy` is unsafe and does not handle changed host keys; use verified host fingerprints and strict checking.
-- Probe Docker as the `runner` service account, make capacity a hard gate, and give every remote operation bounded timeouts and independent results.
-- The Gitea API online check must be mandatory for an activation health gate; host files and an active service cannot prove that Gitea considers each runner online.
-- Keep transport, parsing, and evaluation separate, and expand tests around missing fields, sudo failures, timeouts, API failures, and secret-safe diagnostics.
-
 ## Context
 The AgentForge v2 gated activation (`plans/2026-07-13-iac-activation-plan.md`, Stage 0–5) depends on a
 CI-runner pool to build+push the bootstrap-class images (Stage 0) and the workload images (Stage 4) that
@@ -17,7 +10,9 @@ Gitea `act_runner` pool (ADR 0013 VMs, ADR 0017 forge migration) — `ci-runner-
 
 **Live state verified 2026-07-22 (read-only):** all 5 runners `gitea-act-runner.service` active, docker
 29.6.2 up, registered to `git.chifor.me` with label `['self-hosted-hv:host']`, registry.chifor.me/v2/ →
-200, one runner actively serving a live `platform-e2e` job. Pool is **healthy** — no remediation needed.
+200. The Gitea org runners API (`/api/v1/orgs/cchifor/actions/runners`, verified with a short-lived
+read-only token) reports all 5 (`ci-runner-1..5`, ids 9–13) `"status":"online"` (label name
+`self-hosted-hv`). Pool is **healthy** — no remediation needed.
 
 **Why host-mode (not k8s-native ScaledJob/Kata):** the image builds run privileged host docker
 (`deploy/*.Dockerfile` → `docker build`/`push`); a Kata/gVisor sandbox pool deliberately CANNOT host
@@ -44,58 +39,68 @@ Missing / to deliver (all **repo-only, no VM mutation, mergeable**):
 ## Deliverables
 
 ### D1 — `scripts/check-ci-runners.py` + `just ci-runners-preflight` (PREFLIGHT #2) [TDD]
-Read-only SSH probe (paramiko, `ubuntu` user, key `~/.ssh/id_ed25519`, `AutoAddPolicy` — REQUIRED: the
-renumbered VMs present changed host keys), mirroring `check-nested-virt.py` structure/exit-codes. Default
-host list = the 5 runner IPs (.14–.18), overridable via argv. **One combined remote probe per host** emits
-`key=value` lines; a **pure `evaluate_host()`** turns them into pass/fail (unit-testable without SSH).
+Read-only probe mirroring `check-nested-virt.py` structure/exit-codes. Default host list = the 5 runner IPs
+(.14–.18) mapped to their expected runner names (`ci-runner-1..5`), overridable via argv. Code is split
+into clean layers so the decision logic is unit-testable without SSH/network:
+- **transport** — `run_probe(host)` (paramiko SSH) and `query_gitea_runners(token)` (HTTP); the only I/O.
+- **parse** — `parse_probe_output(text) -> dict` (tolerant `key=value` parser).
+- **pure eval** — `evaluate_host(fields) -> HostResult` and `evaluate_api(runners, expected) -> ApiResult`.
+- `if __name__ == "__main__"` guard so importing the module (tests) performs **no I/O**.
+
+**SSH transport.** `ubuntu` user, key `~/.ssh/id_ed25519`, `look_for_keys=False`, `allow_agent=False`, **no
+password fallback**, bounded `connect(timeout=...)` + `exec_command(timeout=...)`. Host-key policy follows
+the repo's established probe convention (`scripts/node-ssh.py`, `scripts/check-nested-virt.py`):
+`AutoAddPolicy` with the system `known_hosts` NOT loaded — so a renumbered VM's changed key never raises
+`BadHostKey`, and the user's `known_hosts` is never mutated (idempotent/read-only local state).
 
 <!-- codex: BLOCKER: AutoAddPolicy accepts previously unknown keys but does not recover from a changed known-host key, and silently trusting new keys permits interception. Use strict verification with a dedicated known_hosts file containing operator-verified fingerprints; report mismatches with manual remediation guidance and never mutate trust state during the gate. -->
+<!-- opus-pushback: Curated operator-verified fingerprints are inconsistent with every SSH probe in this repo (node-ssh.py, check-nested-virt.py, install-ssh-key.py all use AutoAddPolicy) and impractical for VMs that are legitimately rebuilt/renumbered. The residual (trust the presented key on a private IPv4-only mgmt VLAN, key-auth only, read-only) is accepted and matches the repo convention; the design explicitly does NOT load or mutate the user's known_hosts, so there is no stale-key BadHostKey failure and no persistent trust change. This is a read-only health gate on a trusted LAN, not an internet-facing auth path. -->
 
-Per-host asserts (all must pass):
-- `daemon` — `gitea-act-runner.service` is `active`.
-- `docker` — `sudo -n docker version --format {{.Server.Version}}` non-empty (ubuntu isn't in the docker
-  group; only `runner` is → must use sudo).
+**One combined remote probe per host** emits independent `key=value` lines (each subcheck has its own
+`|| echo <key>=FAIL` so one failing command never blanks the others). Per-host asserts (ALL must pass):
+- `daemon` — `gitea-act-runner.service` is `active` (`systemctl is-active`).
+- `docker` — probe as the **`runner` service account** (`sudo -n -u runner docker version --format
+  {{.Server.Version}}`): proves the account that actually runs jobs can reach the socket, not just root.
+  Distinct failure lines for sudo-denied vs socket-permission vs daemon-down.
+- `label`/`registered` — parse `/home/runner/act-runner/.runner` **remotely with `python3 -json`**,
+  emitting ONLY `label=` (must contain `self-hosted-hv:host`) and `address=` (must equal the Gitea
+  instance URL). The token/uuid fields are NEVER read out or printed; invalid JSON / missing fields ⇒
+  `label=FAIL`/`address=FAIL` (fail-closed).
+- `registry` — `curl --connect-timeout N --max-time N -s -o /dev/null -w %{http_code}
+  https://registry.chifor.me/v2/` == 200 (proves the **anonymous pull path + TLS** to the registry the
+  builds push/pull; NOT a push-auth/robot-secret check — worded as such).
+- `gitea` — `curl --connect-timeout N --max-time N ... https://git.chifor.me/api/v1/version`; status
+  policy: reachable = code ∈ {200, 401, 403} (the API requires sign-in → 403 is expected & fine); FAIL on
+  `000` (no TLS/L7) or any `5xx`.
+- `capacity` — read from the **absolute** config path (`sudo -n cat /home/runner/act-runner/config.yaml`);
+  hard-gate that `capacity` parses to the expected integer (`EXPECTED_CAPACITY = 1`, a module constant);
+  unreadable/mismatch ⇒ FAIL.
 
-<!-- codex: Running Docker as root through sudo proves daemon availability but not that the service account can execute builds. Probe `sudo -n -u runner docker version` and fail distinctly on sudo denial or runner socket permission failure. -->
+**Gitea-API online cross-check — DEFAULT-ON (authoritative fitness signal).** A live daemon + a static
+`.runner` file cannot prove Gitea sees a *schedulable* runner. So the gate also queries
+`GET {gitea}/api/v1/orgs/cchifor/actions/runners` (schema verified live:
+`{"runners":[{"name","status","busy","disabled","labels":[{"name"}]}],"total_count"}`) and asserts **every
+expected `ci-runner-1..5` is present with `status=="online"`** (`busy` is fine). Token source: env
+`GITEA_TOKEN` (fallback `AF_GITEA_TOKEN`); scope `read:organization` (org owner/admin). The token is kept
+local — **never** placed in argv, an SSH command, or any log line; all error output is redacted.
+Fail-closed: **missing token, API/HTTP/auth/schema failure, or any expected runner missing/offline ⇒ gate
+FAIL.** Unexpected/stale extra registrations ⇒ WARN only (don't fail on unrelated org runners). An explicit
+`--skip-api` flag (logged loudly as "API online-check SKIPPED — host-side only") is the one documented
+escape hatch for environments without a token; skipping is an explicit operator decision, never silent.
 
-- `label` — `/home/runner/act-runner/.runner` (sudo) `labels` contains `self-hosted-hv:host` AND `address`
-  == the Gitea instance (host-mode + registered).
+Exit 0 = all hosts pass host-side AND (unless `--skip-api`) the API online-check passes; exit 1 = any
+FAIL/unreachable (an unreachable host is a gate FAIL, matching `check-nested-virt.py`). Prints
+`[ OK ]/[FAIL] <name> <ip>: …` per host + `ci-runners preflight: PASS/FAIL` summary. No `.env`
+`NODE_ROOT_PASSWORD` (runner VMs are key-only `ubuntu`); no secrets printed. `just ci-runners-preflight`
+wraps `python scripts/check-ci-runners.py`.
 
-<!-- codex: The .runner file contains registration credentials. Extract only the required fields with a defined JSON parser, suppress raw content and stderr, normalize the address consistently, and fail closed on invalid JSON, missing fields, or duplicate probe keys. -->
-
-- `registry` — `curl -sS -o /dev/null -w %{http_code} https://registry.chifor.me/v2/` == 200 (anon pull /
-  push target reachable — image builds pull+push here).
-
-<!-- codex: A 200 response proves the anonymous registry handshake and network/TLS path, not robot-secret validity or push authorization. Do not describe it as an end-to-end push check unless credentials are validated safely. -->
-
-- `gitea` — `curl ... https://git.chifor.me/` returns a **non-000** HTTP code (TLS+L7 egress; the API
-  `/version` is Authelia-gated → 403, so assert "got an HTTP response", not a specific code).
-
-<!-- codex: Accepting 403 can be correct for a deliberately Authelia-gated endpoint, but accepting every non-000 code also accepts 5xx failures. Define the endpoint and an explicit status policy, add connect and total timeouts, and rely on the mandatory authenticated API check below for actual runner health. -->
-
-- `capacity` — informational: `sudo grep capacity config.yaml` (report value; not a hard gate).
-
-<!-- codex: Capacity is part of the declared runner configuration and affects fitness. Read it from the absolute config path and hard-fail unless it is the expected numeric value 1; a relative grep can inspect the wrong file or silently return nothing. -->
-
-Exit 0 = all hosts pass; exit 1 = any host FAIL/unreachable (an unreachable host is a gate FAIL, not a
-skip — matches `check-nested-virt.py`). Prints `[ OK ]/[FAIL] <ip>: …` per host + `ci-runners preflight:
-PASS/FAIL` summary. `.env` `NODE_ROOT_PASSWORD` is NOT used (runner VMs are key-only `ubuntu`); no secrets
-read/printed.
-
-<!-- codex: Specify bounded connect, authentication, command, and read timeouts and collect each subcheck result even when another command fails. Disable password fallback and interactive prompts, sanitize exceptions, and never log private-key material, authorization headers, environment values, raw .runner content, or unfiltered command output. Document the shared ubuntu key and Paramiko environment as explicit prerequisites. -->
-
-**Optional Gitea-API online cross-check (env-gated):** if `GITEA_TOKEN` is set, GET
-`/api/v1/orgs/cchifor/actions/runners` and warn on any pool runner not `online`. Skipped (not failed) when
-absent, so the gate is self-contained over SSH.
-
-<!-- codex: BLOCKER: Make this check mandatory. An active process and static registration file cannot prove that Gitea sees a schedulable runner. Absence of the token, API/auth/schema failure, or any expected ci-runner-1..5 registration being missing or offline must fail the gate; unrelated stale registrations may warn. Verify the endpoint, inheritance behavior, response schema, and least-privilege token scope against the deployed Gitea version, especially because these appear to be instance-level runners queried through an org endpoint. Keep the token local, out of argv and SSH, and fully redacted. -->
-
-**TDD:** `scripts/tests/test_check_ci_runners.py` (stdlib `unittest`, no new dep; run
-`python -m unittest`). Cases: all-good→OK; daemon inactive→FAIL; docker empty→FAIL; wrong/`docker://`
-label→FAIL; unregistered (no address)→FAIL; registry!=200→FAIL; gitea 000→FAIL; gitea 403→OK; malformed
-probe line tolerated. Write tests first, then the script.
-
-<!-- codex: Separate transport, `parse_probe_output()`, and pure `evaluate_host()` boundaries, with a main guard so importing tests performs no I/O. Add cases for missing and duplicate required keys, invalid .runner data, sudo denial, per-command nonzero status, timeout/unreachable transport, Gitea 5xx, missing token, API 401/403, malformed API data, and expected runner missing/offline. Malformed lines may be ignored only when all required unambiguous fields remain present. Use an explicit unittest discovery command for this test directory. -->
+**TDD** (`scripts/tests/test_check_ci_runners.py`, stdlib `unittest`, no new dep). Write tests first. Cases:
+all-good→OK; daemon inactive→FAIL; docker empty / sudo-denied→FAIL; wrong or `docker://` label→FAIL;
+unregistered (no/other address)→FAIL; invalid `.runner` JSON→FAIL; missing OR duplicate required probe
+keys→FAIL; per-command nonzero surfaced→FAIL; registry≠200→FAIL; gitea `000`/`5xx`→FAIL; gitea 403→OK;
+capacity≠1 / unreadable→FAIL; API: missing token→FAIL, API 401/403→FAIL, malformed API JSON→FAIL, an
+expected runner missing→FAIL, an expected runner `offline`→FAIL, extra stale runner→WARN-not-FAIL,
+all-online→OK. Run: `python -m unittest discover -s scripts/tests -p "test_*.py"`.
 
 ### D2 — Decision record (ADR 0019 addendum + runbook)
 - **ADR 0019** — append an "Update (2026-07-22): CI runners = host-mode (P2 override)" note: the §Phasing
@@ -105,38 +110,45 @@ probe line tolerated. Write tests first, then the script.
 - **`docs/runbooks/ci-runners.md`** — new section "8. AgentForge v2 image-build CI (host-mode) + PREFLIGHT
   #2": host-mode is the chosen path (over `docker://` and over P2 k8s-native); the `images.yml` build path
   runs on this pool; Gitea **org Actions** config it needs (`RUNNER_LABEL=self-hosted-hv` var +
-  `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` robot secrets for registry.chifor.me push); the PREFLIGHT #2
-  procedure (what it checks, exit codes, when to run — before Stage-0/Stage-4 image builds); stale-IP
-  correction note.
-
-<!-- codex: Add the mandatory GITEA_TOKEN prerequisite, required scope, safe storage, and redaction rules. Also document that host-mode Docker access is root-equivalent: only trusted repositories and protected events may target this label, forked or untrusted pull requests must not receive host execution or registry secrets, and workflow logs must never echo credentials. -->
+  `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` robot secrets for registry.chifor.me push). PREFLIGHT #2
+  procedure: what it checks, exit codes, when to run (before Stage-0/Stage-4 image builds), and the
+  **`GITEA_TOKEN` prerequisite** (scope `read:organization`; how to mint via `gitea admin user
+  generate-access-token`; store out-of-repo; never echo). **Security note:** host-mode docker is
+  **root-equivalent on the VM** — only trusted repos / protected events may target `self-hosted-hv:host`;
+  forked/untrusted PRs must NOT receive host execution or the registry secrets; workflow logs must never
+  echo credentials. Plus the stale-IP correction note.
 
 ### D3 — Stale-IP corrections
 - `CLAUDE.md` inventory row → `.14 / .15 / .16 / .17 / .18`.
 - `docs/decisions/0013-ci-self-hosted-runners.md` lines ~14, ~79 → correct to .14–.18 with a renumber note
   (preserve history; annotate, don't silently rewrite the decision).
 - `kubernetes/infra/runners/variables.tf` header comment (lines ~129–140) → .14–.18.
-
-<!-- codex: Add a repository-wide targeted search for every retired address to verification, then classify any remaining match as intentional history or an unresolved stale reference. The three listed files should not be assumed exhaustive without that check. -->
+- **First run a repo-wide `grep` for every retired address** (`\.47|\.48|\.49|\.33|\.34` and the old
+  vmid/IP prose) and classify each remaining hit as intentional history (leave, annotated) vs. unresolved
+  stale ref (fix). The three files above are the known set but not assumed exhaustive.
 
 ## Non-goals / gated items (report to main, do NOT do)
 - **No `tofu apply` / `just gitea-runners`** — the role is complete and the IPs are `ignore_changes`; no VM
   mutation. If a future re-register is ever needed it's a gated apply.
-- **No agentforge-repo change** — `images.yml` already host-mode. (Observation for main: current `main`
-  `images.yml` builds orchestrator/sandbox/p1-worker, not `openbao-bootstrap`/`worker` per activation-plan
-  Stage 0 — that lives on the agentforge `feat/p2-unlock` line, separate PR, out of ailab scope.)
-
-<!-- codex: The scope boundary is appropriate, but this is a blocking cross-repository dependency. Record an owner, expected revision or PR, and an explicit activation prerequisite so Gate 2 cannot be reported ready while the required Stage-0/Stage-4 workflow is absent from AgentForge main. -->
-
+- **BLOCKING cross-repo activation prerequisite (not just an observation):** agentforge `main`
+  `.gitea/workflows/images.yml` builds `orchestrator`/`sandbox`/`p1-worker`, but the activation plan's
+  Stage 0 needs `openbao-bootstrap` + `worker` images built on this pool. **Owner: main loop / agentforge
+  repo (separate PR, out of ailab scope).** Gate 2 (this ailab work) formalizes the RUNNERS; it must NOT be
+  reported as "activation-ready" until the agentforge workflow actually builds the Stage-0/Stage-4 images
+  (or a separate build path is confirmed — recent ailab `pin(openbao): bootstrap image` commits imply one
+  exists on the `feat/p2-unlock` line; **verify during impl** and record the exact source).
 - **No merge** — push branch to `gitea` remote; main loop stages the merge.
 
 ## Verification
-- `python -m unittest` green (D1 logic).
-- `just ci-runners-preflight` run live (read-only) → expect PASS on all 5; capture output for the report.
-- `python scripts/check-ci-runners.py` re-run to confirm idempotent/read-only.
+- `python -m unittest discover -s scripts/tests -p "test_*.py"` green (D1 logic incl. API + host-key +
+  secret-free paths).
+- `just ci-runners-preflight` run live (read-only) → expect PASS on all 5 (with a token) and a clean
+  `--skip-api` run; capture output for the report; confirm the API path maps names→online correctly.
+- Re-run `python scripts/check-ci-runners.py` → confirm idempotent/read-only and that `~/.ssh/known_hosts`
+  is byte-identical before/after (no local trust-state mutation).
+- Confirm captured output contains NO token, key material, `.runner` raw content, or auth headers.
+- Repo-wide `grep` for retired addresses returns only intentional-history hits after D3.
 - `tofu -chdir=kubernetes/infra/runners fmt -check` unaffected (comment-only edit); no `plan` needed
   (comment change is not applied — `ignore_changes`).
-
-<!-- codex: Verification must also prove the mandatory API path, expected runner-name mapping, strict host-key behavior, secret-free captured output, and that repeated runs do not change known_hosts or other local state. Add explicit test discovery and stale-IP search commands. -->
 
 <!-- codex-review-status: complete -->
