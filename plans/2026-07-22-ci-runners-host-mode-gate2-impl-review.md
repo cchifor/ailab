@@ -1,6 +1,13 @@
 # Implementation review — ci-runners-host-mode-gate2 — round 1
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
+<!-- Phase B: 1 round, converged. Codex raised 9 findings (1 blocker, 6 important, 2 nits); ALL accepted
+and fixed — API token containment (no-redirect opener + token validation + fully-sanitized errors),
+gitea status policy {200,401,403}, fail-closed duplicate probe keys + duplicate/non-str API names,
+full-pool API gate, API pagination, +18 mocked transport/main/host-key tests (49 total green), the
+repo-wide agent-node .14-.16→.47-.49 doc reconciliation, the ADR phasing revert, and dead-constant
+removal. No pushbacks. -->
+
 
 ## Findings
 
