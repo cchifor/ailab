@@ -98,7 +98,7 @@ spec:
           # (#49). CORRECTION: the prior pin (14936a26) was a TAG-RACE mispick — that digest was the
           # dbf0a03 build (privilege_hardening only, NO clone-auth). The real :7dde01d / :latest is
           # b14dddbf (verified in-image: 7 _authed_git refs, checkout_branch takes a token).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:b14dddbfddb8c6df9c7a346e08740236fce33715036551b45fd75df91e9fd4ab
+          image: registry.chifor.me/agentforge/p1-worker@sha256:461ad7961a0d7f1855ba7a63db9210e4157c44c63b44d6dac4cb6b4d954cbefb
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
