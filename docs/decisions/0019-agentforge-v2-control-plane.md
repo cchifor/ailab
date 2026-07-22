@@ -152,7 +152,9 @@ analyzer + GiteaClient + reconcilers), running on the hub in ns `agentforge`, wi
 ### Infrastructure decisions specific to this ailab PR (P1)
 
 - **Dedicated Talos agent node pool** — new `kubernetes/infra/agent-nodes/` module: 3 Talos
-  **worker** VMs (`.14–.16`, vmids `4301–4303`) that JOIN the existing `ai` cluster, labelled
+  **worker** VMs (`.47–.49` live — originally planned `.14–.16`, renumbered into the CI-runner-vacated
+  block once the runners moved to `.14–.18`; the `agent-nodes/variables.tf` map is the source of truth —
+  vmids `4301–4303`) that JOIN the existing `ai` cluster, labelled
   `ailab.io/agent-pool` and tainted `dedicated=agent`. **Machine-secrets: chosen Option B over the
   spec's recommended Option A.** A Talos worker MUST reuse the existing cluster `machine_secrets`
   (a fresh `talos_machine_secrets` forks the PKI and never joins). The spec recommends **Option A**
@@ -213,7 +215,7 @@ analyzer + GiteaClient + reconcilers), running on the hub in ns `agentforge`, wi
 ## Consequences
 
 - New `kubernetes/infra/agent-nodes/` module + `just agent-nodes-plan/apply` + two sensitive outputs
-  on `infra/`. New inventory band (.14–.16 / 4301–4303). New host prereq (nested virt, operator).
+  on `infra/`. New inventory band (.47–.49 / 4301–4303, live; planned .14–.16). New host prereq (nested virt, operator).
 - `infra-pg` gains the `agentforge_platform` DB/role + a 10Gi PVC; one Authelia OIDC client + pod
   restart; a new cloudflared route + CNAME.
 - New `agentforge` app (ns/CP/RBAC/NetworkPolicy/admission) + the `agentforge-tenants` Flux source +

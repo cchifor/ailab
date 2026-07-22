@@ -1,7 +1,7 @@
 # Runbook — Talos agent node pool (AgentForge v2 compute)
 
 Dedicated Talos **worker** pool for AgentForge v2 — three VMs (`agent-node-1/2/3`, IPs
-`192.168.0.14–.16`, vmids `4301–4303`, one per Proxmox host) that JOIN the existing `ai` cluster,
+`192.168.0.47–.49`, vmids `4301–4303`, one per Proxmox host) that JOIN the existing `ai` cluster,
 labelled `ailab.io/agent-pool=true` and tainted `dedicated=agent:NoSchedule`. Module:
 `kubernetes/infra/agent-nodes/` (separate local state). ADR 0019.
 
