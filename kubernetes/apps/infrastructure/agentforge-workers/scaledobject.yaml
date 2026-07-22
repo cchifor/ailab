@@ -42,7 +42,7 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
-        query: sum(forge_pending{account="claude-max-1",role=~"planner|reviewer"})
+        query: sum(forge_pending{account="claude-max-1",role=~"planner|reviewer|implementer|tester"})
         threshold: "1"           # target pending items per replica (scaling math)
         # activationThreshold is a STRICT greater-than gate for waking from 0: value>activationThreshold.
         # "0" means a single pending issue (value 1 > 0) wakes the worker; "1" would require >1 (2 issues)
