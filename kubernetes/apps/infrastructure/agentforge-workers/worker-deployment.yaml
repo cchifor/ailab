@@ -91,8 +91,12 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: orchestrator
-          # PLACEHOLDER digest — pin the real p1-worker @sha256 (see header) before enabling.
-          image: registry.chifor.me/agentforge/p1-worker@sha256:c2f10ec6ff74d48532aa01cac34fd5b521f1ea3e5a118af736b316904133c334
+          # p1-worker @ agentforge main 3a4a8f0 (cross-review verdict-channel fix, #47): the
+          # cross-reviewer reads its verdict from codex's --output-last-message result_file, not the
+          # pollutable pod transcript — so plan-stage cross-review actually resolves instead of
+          # deferring "critique engine unavailable". Repin bumps c2f10ec6 -> a0b69e9c (registry tag
+          # :3a4a8f0 / :latest).
+          image: registry.chifor.me/agentforge/p1-worker@sha256:a0b69e9c27b3abf4d4dddef3ecd005ff6161128c682db757fd6ab08d42dde8ba
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
