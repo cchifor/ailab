@@ -32,6 +32,11 @@ spec:
         app.kubernetes.io/name: storage-fabric-probe
     spec:
       priorityClassName: platform-critical # storage observability — survive pressure
+      # Probe from the AgentForge-dedicated agent-nodes too (dedicated=agent:NoSchedule) — per-node
+      # storage-fabric reachability must cover EVERY node, and without this the stale pre-taint pods
+      # there read as KubeDaemonSetMisScheduled.
+      tolerations:
+        - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
       containers:
         - name: blackbox
           image: quay.io/prometheus/blackbox-exporter:v0.28.0 # quay (not Docker Hub)
