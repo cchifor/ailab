@@ -71,6 +71,21 @@ fails `HTTP 400` because that operator role is missing (a bootstrap-sentinel gap
 it rides the same operator-token / provisioner re-run path). Everything upstream and downstream of
 this credential is proven.
 
+## Update (2026-07-22) — CI runners = HOST-MODE (P2 "k8s-native CI runners" override)
+The §Phasing **P2 "k8s-native CI runners"** item (a KEDA `ScaledJob` on the Kata pool) is **RESOLVED by
+reusing the existing host-mode Gitea `act_runner` pool** (ADR 0013 VMs, ADR 0017 forge migration —
+`ci-runner-1..5`, vmid 4101–4105, live IPs .14–.18, label `self-hosted-hv:host`), **not** a new k8s-native
+runner. Rationale: the AgentForge image builds run **privileged host docker** (`agentforge/deploy/*.
+Dockerfile`), and the Kata/gVisor sandbox pool **deliberately cannot host privileged DinD** (this ADR:
+DinD "must fail closed onto Kata nodes … never silently fall back to gVisor, which can't host privileged
+DinD"); a k8s-native runner would duplicate a proven pool and still could not do the one job Stage 0 needs.
+The pool builds `orchestrator` (= the OpenBao init/unseal/provision Jobs + broker + provisioner image),
+`sandbox`, and `p1-worker` via `cchifor/agentforge:.gitea/workflows/images.yml`, which `ailab: just
+pin-bootstrap`/`pin-workloads` then digest-pin. Fitness is gated by **PREFLIGHT #2**
+(`just ci-runners-preflight` → `scripts/check-ci-runners.py`; the runner-pool sibling of
+`just nested-virt-verify`). Full detail + the Gitea org-config/token/security prerequisites:
+`docs/runbooks/ci-runners.md` §8.
+
 ## Context
 
 AgentForge v1 (ADR 0018) works but is IaC-manual: agents run as host systemd units on 6 dev-worker
@@ -219,7 +234,7 @@ analyzer + GiteaClient + reconcilers), running on the hub in ns `agentforge`, wi
 - **P2 (the unlock):** OpenBao + ESO + KEDA + kro; secrets → OpenBao; Kata node extensions +
   RuntimeClasses; the ephemeral sandbox-pod SandboxExecutor + admission-pinned pod shape + per-pod
   Cilium egress + brokered ephemeral inference creds + outbound redaction + the epoch-safe account
-  lease + k8s-native CI runners; kro RGD DRYs the tenant expansion. Boundary tests green → flip
-  `privilege_hardening: v1.1`.
+  lease + k8s-native CI runners (**overridden → host-mode `act_runner` pool; see Update 2026-07-22**); kro
+  RGD DRYs the tenant expansion. Boundary tests green → flip `privilege_hardening: v1.1`.
 - **P3:** external clusters (pull model, read-only deploy keys, hostile-payload handling); per-org
   quotas; per-tenant LiteLLM virtual keys w/ budget caps; dogfood.
