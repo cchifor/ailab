@@ -78,7 +78,9 @@ the repo's established probe convention (`scripts/node-ssh.py`, `scripts/check-n
 `GET {gitea}/api/v1/orgs/cchifor/actions/runners` (schema verified live:
 `{"runners":[{"name","status","busy","disabled","labels":[{"name"}]}],"total_count"}`) and asserts **every
 expected `ci-runner-1..5` is present with `status=="online"`** (`busy` is fine). Token source: env
-`GITEA_TOKEN` (fallback `AF_GITEA_TOKEN`); scope `read:organization` (org owner/admin). The token is kept
+`GITEA_TOKEN` (fallback `AF_GITEA_TOKEN`); scope **`read:admin,read:organization`** — VERIFIED live: the
+org runners endpoint 403s with either scope alone, and needs both, from a site-admin or org-owner account.
+The token is kept
 local — **never** placed in argv, an SSH command, or any log line; all error output is redacted.
 Fail-closed: **missing token, API/HTTP/auth/schema failure, or any expected runner missing/offline ⇒ gate
 FAIL.** Unexpected/stale extra registrations ⇒ WARN only (don't fail on unrelated org runners). An explicit
@@ -109,8 +111,8 @@ all-online→OK. Run: `python -m unittest discover -s scripts/tests -p "test_*.p
   runs on this pool; Gitea **org Actions** config it needs (`RUNNER_LABEL=self-hosted-hv` var +
   `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` robot secrets for registry.chifor.me push). PREFLIGHT #2
   procedure: what it checks, exit codes, when to run (before Stage-0/Stage-4 image builds), and the
-  **`GITEA_TOKEN` prerequisite** (scope `read:organization`; how to mint via `gitea admin user
-  generate-access-token`; store out-of-repo; never echo). **Security note:** host-mode docker is
+  **`GITEA_TOKEN` prerequisite** (scope `read:admin,read:organization` — verified; how to mint via `gitea
+  admin user generate-access-token`; store out-of-repo; never echo). **Security note:** host-mode docker is
   **root-equivalent on the VM** — only trusted repos / protected events may target `self-hosted-hv:host`;
   forked/untrusted PRs must NOT receive host execution or the registry secrets; workflow logs must never
   echo credentials. Plus the stale-IP correction note.
@@ -148,4 +150,13 @@ all-online→OK. Run: `python -m unittest discover -s scripts/tests -p "test_*.p
 - `tofu -chdir=kubernetes/infra/runners fmt -check` unaffected (comment-only edit); no `plan` needed
   (comment change is not applied — `ignore_changes`).
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
+<!-- Phase A: 2 rounds. R1 codex raised 11 issues — 10 accepted+folded (docker-as-runner-account,
+fail-closed .runner parse w/o secret readout, registry-200≠push-auth wording, gitea {200,401,403} status
+policy, capacity hard-gate from absolute path, bounded timeouts + independent subchecks + redaction, Gitea
+API online-check made DEFAULT-ON/mandatory w/ verified schema + --skip-api escape hatch, runbook
+GITEA_TOKEN prereq + host-mode-root-equivalent security note, repo-wide stale-IP grep, cross-repo
+agentforge images.yml gap elevated to a tracked blocking prerequisite). 1 pushback (SSH host-key policy →
+repo-convention AutoAddPolicy) accepted by codex in R2. Live verification refined the token scope to
+read:admin,read:organization (both required). -->
+
