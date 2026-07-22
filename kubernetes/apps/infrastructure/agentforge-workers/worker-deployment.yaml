@@ -91,12 +91,12 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: orchestrator
-          # p1-worker @ agentforge main 3a4a8f0 (cross-review verdict-channel fix, #47): the
-          # cross-reviewer reads its verdict from codex's --output-last-message result_file, not the
-          # pollutable pod transcript — so plan-stage cross-review actually resolves instead of
-          # deferring "critique engine unavailable". Repin bumps c2f10ec6 -> a0b69e9c (registry tag
-          # :3a4a8f0 / :latest).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:a0b69e9c27b3abf4d4dddef3ecd005ff6161128c682db757fd6ab08d42dde8ba
+          # p1-worker @ agentforge main 7dde01d. Adds: authenticated clone/fetch/push for PRIVATE
+          # repos (#50 — the tester/implementer can now `git clone` the private tenant repo; the
+          # credential is injected via git ENV-config, never argv; a real switch failure no longer
+          # silently branches from main) + the ADR-0018 privilege_hardening repo-allowlist gate
+          # (#49). Repin bumps a0b69e9c -> 14936a26 (registry tag :7dde01d / :latest).
+          image: registry.chifor.me/agentforge/p1-worker@sha256:14936a266cbe120cb916ec98fa772d34d5d0475a788e11968bd290c01ded8cc1
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
