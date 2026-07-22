@@ -96,7 +96,7 @@ spec:
           # pollutable pod transcript — so plan-stage cross-review actually resolves instead of
           # deferring "critique engine unavailable". Repin bumps c2f10ec6 -> a0b69e9c (registry tag
           # :3a4a8f0 / :latest).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:a0b69e9c27b3abf4d4dddef3ecd005ff6161128c682db757fd6ab08d42dde8ba
+          image: registry.chifor.me/agentforge/p1-worker@sha256:6ff28d442dfc340552a55e0641933899331c58418899137ad739868810b4ed85
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
