@@ -38,7 +38,7 @@ Verify (`just openbao-status`): init+provision Jobs Succeeded; `openbao-state.pr
 ### ⛔ Stage 2 — Kata agent-node pool
 ```
 just nested-virt-verify        # gate (already passes)
-just agent-nodes-apply         # tofu creates .14–.16 on the Kata image (depends on the gate)
+just agent-nodes-apply         # tofu creates .47–.49 on the Kata image (depends on the gate)
 ```
 Verify: nodes Ready; `kubectl get runtimeclass kata gvisor`; a probe pod on the pool sees `/dev/kvm`.
 (Host RAM headroom: .2/.3 ~24–26G free, agent-node = 16G — reduce `agent_node_memory_mib` if a host is tight.)

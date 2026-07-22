@@ -129,7 +129,7 @@ ForgeWebhookHMACFailures / ForgeReconcileDriftHigh → ntfy. First diagnostics s
 # AgentForge **v2** (Kubernetes / Kata sandbox) — operations & debugging playbook
 
 > This is a **separate deployment** from the v1 dev-worker fleet above. v2 (ADR 0019) runs on the
-> Talos **agent-nodes** (`.14`/`.15`/`.16`, pool label `ailab.io/agent-pool=true`) as a
+> Talos **agent-nodes** (`.47`/`.48`/`.49`, pool label `ailab.io/agent-pool=true`) as a
 > credential-**broker** + ephemeral **Kata microVM sandbox** architecture: the orchestrator never
 > holds the raw provider OAuth — it mints a short-lived capability, and a per-account broker injects
 > the real subscription credential on the agent's behalf. Manifests: `kubernetes/apps/infrastructure/

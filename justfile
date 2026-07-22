@@ -159,6 +159,13 @@ storage-status:
 nested-virt-verify:
     python scripts/check-nested-virt.py
 
+# PREFLIGHT #2: assert the host-mode Gitea act_runner CI pool is fit before the Stage-0/Stage-4 image
+# builds run on it (daemon, docker, host-mode label, egress, capacity + the Gitea-API online check).
+# Needs GITEA_TOKEN (scope read:admin,read:organization); use `--skip-api` for host-side only. See
+# docs/runbooks/ci-runners.md §8.
+ci-runners-preflight *args:
+    python scripts/check-ci-runners.py {{args}}
+
 # Stage-0 pin: bootstrap-class image digests ONLY (orchestrator + platform). Its own commit; MUST NOT
 # un-gate a workload. Usage: just pin-bootstrap sha256:<orch> sha256:<platform>
 pin-bootstrap orchestrator platform:

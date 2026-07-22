@@ -14,8 +14,9 @@ Keep them in sync.
 ### Management LAN `192.168.0.0/24` — static allocations
 
 Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (`.51`–`.254`).
-Free static space: `.5`–`.7`, `.20`–`.35`, `.37`–`.39`, `.47`–`.50` (dev-workers on consecutive
-`.8`–`.13`, GH-runners on `.14`–`.18`, `.19` reserved for the deferred runner-6).
+Free static space: `.5`–`.7`, `.20`–`.35`, `.37`–`.39`, `.50` (dev-workers on consecutive
+`.8`–`.13`, CI runners on `.14`–`.18` with `.19` reserved for the deferred runner-6, ADR 0019
+agent-nodes on `.47`–`.49`).
 
 | Range / IP | Owner | Source of truth |
 |---|---|---|
@@ -23,7 +24,7 @@ Free static space: `.5`–`.7`, `.20`–`.35`, `.37`–`.39`, `.47`–`.50` (dev
 | `.2 / .3 / .4` | Proxmox hosts `ai-node1/2/3` | `inventory/hosts.yml` |
 | `.5 / .6 / .7` | free (static) — vacated by the dev-worker renumber | — |
 | `.8`–`.13` | Dev-worker VMs `dev-worker-1..6` (2 per node) | `kubernetes/infra/dev-workers/variables.tf` |
-| `.14`–`.18` | GitHub runner VMs `ci-runner-1..5` (2 node1/node2, 1 node3) | `kubernetes/infra/runners/variables.tf` |
+| `.14`–`.18` | CI runner VMs `ci-runner-1..5` (GitHub + Gitea Actions; 2 node1/node2, 1 node3) | `kubernetes/infra/runners/variables.tf` |
 | `.19` | GitHub runner VM `ci-runner-6` — reserved, deferred (node3 RAM) | `kubernetes/infra/runners/variables.tf` |
 | `.20`–`.35` | free (static) | — |
 | `.36` | OCI registry LXC `ai-registry` | `kubernetes/infra/registry-lxc/variables.tf` |
@@ -31,7 +32,7 @@ Free static space: `.5`–`.7`, `.20`–`.35`, `.37`–`.39`, `.47`–`.50` (dev
 | `.40` | Talos control-plane VIP | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `ai-cp-1/2/3` | `kubernetes/infra/variables.tf` |
 | `.44 / .45 / .46` | AI LLM LXCs `ai-llm-1/2/3` | `kubernetes/infra/ai-lxc/variables.tf` |
-| `.47 / .48 / .49` | free (static) — vacated by the GH-runner renumber | — |
+| `.47 / .48 / .49` | Talos agent-node VMs `agent-node-1/2/3` (ADR 0019; took the CI-runner-vacated IPs) | `kubernetes/infra/agent-nodes/variables.tf` |
 | `.50` | free (static) | — |
 | `.51`–`.254` | router DHCP pool | router |
 

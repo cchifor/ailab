@@ -130,9 +130,11 @@ variable "runner_ssh_public_key" {
 # See docs/decisions/0013-ci-self-hosted-runners.md (Update 2026-07-01) + the plan
 # plans/2026-07-01-scale-ci-runners-to-6-plan.md. Every runner draws identical sizing from the shared
 # runner_* vars above; only node_name/vm_id/ip/hostname differ (that identity is what proves "same
-# config"). IPs .47/.48/.49 (runners 1-3) + .33/.34 (runners 4-5) sit inside the static-reserved block
-# (.2-.50, outside the router DHCP pool that bit the AI LXCs at .51-.53). vmids 4101-4105 don't collide
-# (Talos 4001-4003, dev-workers 4201-4203, AI LXC 5001-5003, registry 5004).
+# config"). The LIVE runner IPs are .14-.18 (renumbered in-guest — see the runner_nodes default below +
+# docs/runbooks/ci-runners.md). The ORIGINAL allocation .47/.48/.49 (1-3) + .33/.34 (4-5) was later
+# VACATED by that renumber and reused by the ADR 0019 agent-nodes (kubernetes/infra/agent-nodes). All sit
+# inside the static-reserved block (.2-.50, outside the router DHCP pool that bit the AI LXCs at .51-.53).
+# vmids 4101-4105 don't collide (Talos 4001-4003, dev-workers 4201-4203, AI LXC 5001-5003, registry 5004).
 #
 # ci-runner-6 (node3, .35 / vmid 4106) is RESERVED but DEFERRED: measured 2026-07-01, node3 has no room
 # for a second runner while its qwen3.5-122b LLM is loaded (~7.8 GiB non-reclaimable RSS; the LXC runs

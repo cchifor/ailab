@@ -191,6 +191,57 @@ pool is HAND-installed over SSH, mirroring the role):**
   `sudo -u runner act_runner register --no-interactive --instance https://git.chifor.me --token <T> --name
   ci-runner-N --labels self-hosted-hv:host` → install the reclaim/cleanup + daemon units → start.
 
+## 8. AgentForge v2 image-build CI (HOST-MODE) + PREFLIGHT #2
+AgentForge v2's gated activation (`plans/2026-07-13-iac-activation-plan.md`, Stage 0/4) builds+pushes its
+container images ON this **host-mode `act_runner` pool** — this is the user's deliberate override of the
+ADR 0019 §Phasing **"k8s-native CI runners"** proposal (a KEDA `ScaledJob` on the Kata pool). **Host-mode
+is the chosen path** for two reasons: (1) the image builds run **privileged host docker**
+(`agentforge/deploy/*.Dockerfile` → `docker build`/`push`), and the Kata/gVisor sandbox pool
+**deliberately cannot host privileged DinD** (ADR 0019: DinD must "fail closed onto Kata nodes … never
+gVisor"); (2) this pool already exists, is proven, and needs no new operators. A k8s-native runner would
+duplicate it and still can't do the one job Stage 0 needs. See ADR 0019 (Update 2026-07-22).
+
+**What runs here.** `cchifor/agentforge` `.gitea/workflows/images.yml` (`runs-on: ${{ vars.RUNNER_LABEL }}`
+= `self-hosted-hv`, host-mode plain `docker`) builds+pushes to `registry.chifor.me/agentforge/*`:
+`orchestrator` (the `agentforge` CLI image — **also the image the OpenBao init/unseal/provision Jobs, the
+broker, and the provisioner controller run** = the activation plan's "bootstrap-class" image), `sandbox`,
+and `p1-worker`. (The plan's separate `openbao-bootstrap`/`worker` image *names* were consolidated into
+`orchestrator`/`p1-worker` — the Stage-0/Stage-4 build path is present on agentforge `main`, not a gap.)
+`ailab: just pin-bootstrap`/`just pin-workloads` then pin the emitted `@sha256:…` digests.
+
+**Gitea org Actions config this needs** (`git.chifor.me/org/cchifor/settings/actions`):
+- Variables: `RUNNER_LABEL=self-hosted-hv` (+ `STATIC_RUNNER_LABEL=self-hosted-hv`, see §7.4).
+- Secrets: `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` (the `registry.chifor.me` push robot; anonymous pull
+  needs neither).
+
+**PREFLIGHT #2 — `just ci-runners-preflight`** (`scripts/check-ci-runners.py`): a **read-only** activation
+gate — run it before you rely on the pool for a Stage-0/Stage-4 image build (the sibling of
+`just nested-virt-verify` for the Kata pool). Per runner (SSH as `ubuntu`) it asserts: the
+`gitea-act-runner.service` is active; the **`runner` service account** can reach Docker; the runner is
+registered **host-mode** (`.runner` label `self-hosted-hv:host`) to `git.chifor.me`; egress to
+`registry.chifor.me` (anonymous pull path) and `git.chifor.me` is healthy; and `capacity == 1`. Then it
+queries the **Gitea org runners API** (`/api/v1/orgs/cchifor/actions/runners`) and asserts **every
+`ci-runner-1..5` reports `status=online`** — the authoritative "Gitea sees a schedulable runner" signal a
+live daemon + a static `.runner` file cannot prove. Exit 0 = pool fit; exit 1 = any host/API check failed
+(fail-closed; an unreachable host FAILS, it is not skipped).
+- **`GITEA_TOKEN` prerequisite** (for the API check): a token with scope **`read:admin,read:organization`**
+  (BOTH — verified: the endpoint 403s with either alone) from a **site-admin or org-owner** account. Mint
+  one non-interactively in the Gitea pod: `gitea admin user generate-access-token -u <admin>
+  --scopes read:admin,read:organization --raw`. Export it as `GITEA_TOKEN` (or `AF_GITEA_TOKEN`); the
+  script keeps it local (never in argv/SSH/logs) and redacts it from errors. Store it out-of-repo. For a
+  quick host-side-only check without a token, pass **`--skip-api`** (logged loudly; pool schedulability is
+  then NOT verified). Delete/rotate the token in the Gitea UI when done (token endpoints reject token-auth
+  deletes — revoke from the account's PAT list or via the web session).
+- **Security — host-mode docker is root-equivalent on the VM.** Only **trusted repos / protected events**
+  may target the `self-hosted-hv:host` label; a forked / untrusted pull request must **never** receive host
+  execution or the `REGISTRY_*` secrets (Gitea does not expose org secrets to fork PRs by default — keep it
+  that way), and workflow logs must never echo credentials.
+
+**IP note (2026-07 renumber).** The live pool is **.14–.18** (`ci-runner-1..5`); older docs said
+`.47/.48/.49 + .33/.34`. Those addresses were **vacated by an in-guest renumber and reused by the ADR 0019
+agent-nodes** (`kubernetes/infra/agent-nodes`, now live at .47/.48/.49). `infra/runners` IPs are
+`lifecycle.ignore_changes=[initialization]` (cloud-init sets them once), so the map is documentation.
+
 ## Day-2
 - **Runner version bump:** set `github_runner_version` (role defaults) → `just runners` (re-extracts;
   the agent also auto-updates on connect).

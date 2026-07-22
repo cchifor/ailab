@@ -44,7 +44,7 @@ See [`docs/network-plan.md`](docs/network-plan.md) for the authoritative IP plan
 | Proxmox hosts | ai-node1/2/3 = .2 / .3 / .4 | — |
 | Talos control planes (also workers) | .41 / .42 / .43 — API VIP **.40:6443** | 4001–4003 |
 | AI LLM GPU LXCs (privileged, llama.cpp/Vulkan) | .44 / .45 / .46 | 5001–5003 |
-| GitHub Actions runner VMs | .47 / .48 / .49 + .33 / .34 | 4101–4105 |
+| CI runner VMs (GitHub + Gitea Actions) | .14 / .15 / .16 / .17 / .18 | 4101–4105 |
 | Dev-worker VMs (user `c4`) | .37 / .38 / .39 | 4201–4203 |
 | Registry pull-through LXC (node1) | — | 5004 |
 
