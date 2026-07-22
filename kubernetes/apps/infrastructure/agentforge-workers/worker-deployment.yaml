@@ -95,8 +95,10 @@ spec:
           # repos (#50 — the tester/implementer can now `git clone` the private tenant repo; the
           # credential is injected via git ENV-config, never argv; a real switch failure no longer
           # silently branches from main) + the ADR-0018 privilege_hardening repo-allowlist gate
-          # (#49). Repin bumps a0b69e9c -> 14936a26 (registry tag :7dde01d / :latest).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:14936a266cbe120cb916ec98fa772d34d5d0475a788e11968bd290c01ded8cc1
+          # (#49). CORRECTION: the prior pin (14936a26) was a TAG-RACE mispick — that digest was the
+          # dbf0a03 build (privilege_hardening only, NO clone-auth). The real :7dde01d / :latest is
+          # b14dddbf (verified in-image: 7 _authed_git refs, checkout_branch takes a token).
+          image: registry.chifor.me/agentforge/p1-worker@sha256:b14dddbfddb8c6df9c7a346e08740236fce33715036551b45fd75df91e9fd4ab
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
