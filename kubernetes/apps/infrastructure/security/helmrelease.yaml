@@ -34,7 +34,14 @@ spec:
       configAuditScannerEnabled: true
       rbacAssessmentScannerEnabled: true
       exposedSecretScannerEnabled: true
-      infraAssessmentScannerEnabled: true
+      # DISABLED: the infra-assessment node-collector needs hostPID + host hostPath mounts, but the
+      # trivy-system namespace enforces PodSecurity `baseline` (deliberately, so the ordinary scan jobs
+      # are admitted). So every node-collector pod was rejected (`violates PodSecurity baseline`), the
+      # Job retried until DeadlineExceeded, and it became the single largest source of Warning events
+      # cluster-wide — while the infra/CIS report stayed perpetually empty. Vulnerability, config-audit,
+      # rbac, and exposed-secret scanning (the primary value) all work fine under baseline and stay on.
+      # To re-enable infra-assessment, the namespace PSA must be raised to `privileged` (namespace.yaml).
+      infraAssessmentScannerEnabled: false
       clusterComplianceEnabled: false # NSA/CIS compliance reports off (heavy, not needed)
       metricsFindingsEnabled: true
       metricsVulnIdEnabled: false # per-CVE-id labels = Prometheus cardinality bomb
