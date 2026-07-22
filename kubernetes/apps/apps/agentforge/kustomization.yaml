@@ -12,10 +12,15 @@ resources:
   - agentforge-oauth.sops.yaml # OIDC client secret (Authelia client 'agentforge')
   - agentforge-db.sops.yaml # platform Postgres DSNs (AFP_APP_DSN + AFP_ADMIN_DSN, consumer copy)
   - agentforge-runtime.sops.yaml # session secret + tenants/bootstrap tokens (AFP_ runtime secrets)
-  # deployment.yaml is INTENTIONALLY not listed — its image is a placeholder @sha256 until the platform
-  # release CI pins the real digest; under the wait:true `apps` Kustomization it would ImagePullBackOff
-  # and wedge the whole apps layer. Re-add `- deployment.yaml` once the digest lands (see its header).
-  # The SA+Service were split into serviceaccount-service.yaml (above) so RBAC + ingress stay satisfied.
-  # db-migrate.yaml is INTENTIONALLY not listed either — an operator-run one-shot (see its header);
-  # under wait:true a failing migration Job would likewise wedge the apps layer.
+  # GO-LIVE: the CP Deployment. Image is now a real pinned @sha256 (deployment.yaml header) and its
+  # readiness probe is /readyz (DB SELECT-1), so under the wait:true `apps` Kustomization it only
+  # reports Ready once the platform DB is reachable + MIGRATED. ⚠️ PRECONDITIONS before this line is
+  # merged (see docs/runbooks/agentforge-platform-activation.md): (1) the two bot tokens in
+  # agentforge-runtime.sops.yaml are minted+filled (create->commit needs a real tenants token), and
+  # (2) the agentforge_platform DB is created + the migration Job has run. Otherwise the pod never
+  # goes Ready and wedges the apps layer.
+  - deployment.yaml
+  # db-migrate.yaml is INTENTIONALLY not listed — an operator-run one-shot (see its header); under
+  # wait:true a failing migration Job would wedge the apps layer. The SA+Service live in
+  # serviceaccount-service.yaml (above) so RBAC + ingress stay satisfied.
   - admission # ValidatingAdmissionPolicies: tenant-path allowlist + CP Flux-patch field-lock
