@@ -117,8 +117,12 @@ rm -f /tmp/.afp_cp_tok /tmp/.afp_boot_tok /tmp/.afp_rt.yaml
 git diff --stat "$F"     # confirm only this file; values are ENC[...]
 ```
 
-Commit + push that secret change and fold it into PR-B (or a small PR merged with PR-B), so the real
-tokens land via GitOps — a live `kubectl edit` would be reverted by Flux.
+Commit this `agentforge-runtime.sops.yaml` change **onto the PR-B branch itself** (the same PR as the
+`- deployment.yaml` line) so the tokens and the Deployment merge **atomically**. This is required:
+the pod captures `AFP_TENANTS_BOT_TOKEN`/`AFP_BOOTSTRAP_TOKEN` as env at startup, so it must never
+start with placeholders (with placeholders `/readyz` still passes — it only checks the DB — but
+create-workspace→tenants-commit then fails on a bad token). A live `kubectl` edit of the live Secret
+is NOT a substitute — Flux reverts it to the committed ciphertext on the next reconcile.
 
 Negative checks (least privilege): both bots `restricted` + non-admin; `agentforge-cp-bot` is a
 **write** collaborator on **only** `cchifor/agentforge-tenants` (no write to `cchifor/ailab`, no
