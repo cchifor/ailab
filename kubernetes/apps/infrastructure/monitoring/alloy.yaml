@@ -19,8 +19,11 @@ spec:
       priorityClassName: platform-critical # node log collector — survive pressure
     alloy:
       resources:
-        requests: { cpu: 50m, memory: 128Mi }
-        limits: { memory: 256Mi }
+        # 256Mi -> 512Mi: the cp2 replica repeatedly OOMKilled (exit 137) at 256Mi — its working set
+        # (tailing /var/log/pods + Loki WAL/batching) exceeds 256Mi under a chattier log source, dropping
+        # log shipping on each restart. 512Mi gives headroom; request bumped 128->192Mi. (2026-07-22)
+        requests: { cpu: 50m, memory: 192Mi }
+        limits: { memory: 512Mi }
       # mount /var/log so we can read node pod-log files directly (no API-tailing rate limits)
       mounts:
         varlog: true
