@@ -16,9 +16,11 @@ resources:
   # readiness probe is /readyz (DB SELECT-1), so under the wait:true `apps` Kustomization it only
   # reports Ready once the platform DB is reachable + MIGRATED. ⚠️ PRECONDITIONS before this line is
   # merged (see docs/runbooks/agentforge-platform-activation.md): (1) the two bot tokens in
-  # agentforge-runtime.sops.yaml are minted+filled (create->commit needs a real tenants token), and
-  # (2) the agentforge_platform DB is created + the migration Job has run. Otherwise the pod never
-  # goes Ready and wedges the apps layer.
+  # agentforge-runtime.sops.yaml MUST already be minted+filled AS SOPS CIPHERTEXT IN THIS SAME PR —
+  # the pod captures them as env at startup, and a live `kubectl` fill of the Secret is reverted by
+  # Flux; with placeholders /readyz still passes (it only checks the DB) but create-workspace->commit
+  # fails (bad tenants token). (2) the agentforge_platform DB is created + the migration Job has run,
+  # else the pod never goes Ready and wedges the apps layer.
   - deployment.yaml
   # db-migrate.yaml is INTENTIONALLY not listed — an operator-run one-shot (see its header); under
   # wait:true a failing migration Job would wedge the apps layer. The SA+Service live in

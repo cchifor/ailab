@@ -4,15 +4,13 @@
 # registry.chifor.me by the cchifor/agentforge-platform repo's release CI (anonymous-pull, Talos
 # already trusts the registry — no imagePullSecret; precedent: headlamp/cloudflared).
 #
-# ⚠️ STILL NOT LISTED in kustomization.yaml in this (prerequisites) PR — the image is now a real
-# pinned @sha256 (below), but the `- deployment.yaml` line is deliberately deferred to the SEPARATE
-# go-live PR so activation stays a transactional switch: the DB must be created + migrated first
-# (this Deployment's readiness probe is /readyz — the DB SELECT-1 check — so it will not report
-# Ready under the wait:true `apps` Kustomization until the platform DB is reachable + migrated).
-# The ServiceAccount + Service were split into serviceaccount-service.yaml (which IS listed) so RBAC
-# and the cloudflared/NetworkPolicy references stay satisfied meanwhile. To ship the CP: create +
-# migrate the DB (see db-migrate.yaml header / the operator runbook), THEN add `- deployment.yaml`
-# to kustomization.yaml in the go-live PR.
+# GO-LIVE: this Deployment IS now listed in kustomization.yaml (the image is a real pinned @sha256,
+# below). Activation is a transactional switch: the readiness probe is /readyz (the DB SELECT-1
+# check), so under the wait:true `apps` Kustomization the pod only reports Ready once the platform DB
+# is reachable + MIGRATED — do not merge the go-live change until the DB is created + the migration
+# Job has run AND the two bot tokens in agentforge-runtime.sops.yaml are minted+filled (see
+# docs/runbooks/agentforge-platform-activation.md). The ServiceAccount + Service live in
+# serviceaccount-service.yaml so RBAC + the cloudflared/NetworkPolicy references stay satisfied.
 #
 # P1: single replica (SSE broadcast state is in-memory; HA is P3). No PDB — a PDB on a singleton
 # blocks node drains (the strive-pg-primary lesson). Structure mirrors auth/authelia.yaml.
