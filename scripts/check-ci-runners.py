@@ -24,14 +24,11 @@ API check FAILED/unreachable (fail-closed).
 """
 import json
 import os
-import pathlib
 import re
 import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-
-REPO = pathlib.Path(__file__).resolve().parents[1]
 
 # ---- pool definition (single source of truth: inventory/hosts.yml + infra/runners/variables.tf) ----
 DEFAULT_RUNNERS = [
@@ -44,13 +41,15 @@ DEFAULT_RUNNERS = [
 KNOWN_BY_IP = dict(DEFAULT_RUNNERS)
 
 # ---- invariants ----
+# NB: the registry/gitea URLs are also hardcoded inline in PROBE (a static remote shell string that can't
+# safely .format() around the `{{.Server.Version}}` braces); keep the two in sync by hand.
 GITEA_URL = "https://git.chifor.me"
 GITEA_ORG = "cchifor"
-REGISTRY_URL = "https://registry.chifor.me/v2/"
 EXPECTED_LABEL = "self-hosted-hv:host"  # host-execution schema (NOT docker://)
 EXPECTED_CAPACITY = 1
-# git.chifor.me/api/v1/version needs sign-in (403) — any of these proves TLS+L7 egress; 000/5xx = FAIL.
-GITEA_REACHABLE = {"200", "301", "302", "401", "403"}
+# git.chifor.me/api/v1/version needs sign-in (403) — any of these proves TLS+L7 egress; 000/3xx/5xx = FAIL
+# (a 3xx redirect is NOT accepted: the finalized plan's status policy is exactly {200,401,403}).
+GITEA_REACHABLE = {"200", "401", "403"}
 REGISTRY_OK = "200"
 REQUIRED_KEYS = ("daemon", "docker", "label", "address", "registry", "gitea", "capacity")
 
@@ -111,10 +110,8 @@ def parse_probe_output(text: str) -> dict:
         k, v = line.split("=", 1)
         k = k.strip()
         v = v.strip()
-        if k in fields and fields[k] != v:
-            fields[k] = DUP
-        elif k not in fields:
-            fields[k] = v
+        # Any repeat of a key is ambiguous → DUP (fail-closed), even if the value is identical.
+        fields[k] = DUP if k in fields else v
     return fields
 
 
@@ -177,12 +174,16 @@ def evaluate_api(runners, expected_names) -> ApiResult:
 
     by_name = {}
     for r in runners:
-        if not isinstance(r, dict) or "name" not in r or "status" not in r:
-            failures.append(f"api: malformed runner entry {str(r)[:60]!r} (missing name/status)")
+        if not isinstance(r, dict) or not isinstance(r.get("name"), str) or not isinstance(r.get("status"), str):
+            failures.append(f"api: malformed runner entry {str(r)[:60]!r} (name/status not strings)")
             continue
-        by_name[r["name"]] = r.get("status")
+        nm = r["name"]
+        if nm in by_name:  # duplicate name could mask an offline one depending on order → fail-closed
+            failures.append(f"api: duplicate runner name {nm!r} in payload (ambiguous schema)")
+            continue
+        by_name[nm] = r["status"]
 
-    if failures:  # a malformed entry means we cannot trust the payload
+    if failures:  # a malformed/duplicate entry means we cannot trust the payload
         return ApiResult(ok=False, failures=failures, warnings=warnings)
 
     for name in sorted(expected_names):
@@ -225,23 +226,53 @@ def run_probe(host: str) -> str:
         c.close()
 
 
-def query_gitea_runners(token: str) -> list:
-    """GET the Gitea org runners list. Returns the `runners` array. The token rides only in the
-    Authorization header (never argv/logs); errors are re-raised sanitized (no token, no header)."""
-    url = f"{GITEA_URL}/api/v1/orgs/{GITEA_ORG}/actions/runners"
-    req = urllib.request.Request(url, headers={"Authorization": f"token {token}", "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            data = json.load(resp)
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Gitea API HTTP {e.code} (auth/scope?)") from None
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Gitea API unreachable ({e.reason})") from None
-    except json.JSONDecodeError:
-        raise RuntimeError("Gitea API returned non-JSON") from None
-    if not isinstance(data, dict) or "runners" not in data:
-        raise RuntimeError("Gitea API payload missing 'runners' (schema mismatch)")
-    return data["runners"]
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse ALL redirects so the Authorization header is never re-sent to another host."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _validate_token(token: str) -> str:
+    """A PAT is an opaque token; reject empty or whitespace/control-bearing values (they could break the
+    header or smuggle content). The value is NEVER echoed in the error."""
+    t = (token or "").strip()
+    if not t or any(c.isspace() or ord(c) < 32 for c in t):
+        raise RuntimeError("GITEA_TOKEN is empty or malformed")
+    return t
+
+
+def query_gitea_runners(token: str, page_size: int = 50, max_pages: int = 20) -> list:
+    """GET the Gitea org runners list (paginated). Returns the combined `runners` array. The token rides
+    only in the Authorization header (never argv/logs); redirects are refused (no header leak to another
+    host); and EVERY error is re-raised as a fixed, token-free message (nothing verbatim reaches stdout)."""
+    token = _validate_token(token)
+    runners: list = []
+    for page in range(1, max_pages + 1):
+        url = f"{GITEA_URL}/api/v1/orgs/{GITEA_ORG}/actions/runners?page={page}&limit={page_size}"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"token {token}", "Accept": "application/json"})
+        try:
+            with _OPENER.open(req, timeout=HTTP_TIMEOUT) as resp:
+                data = json.load(resp)
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"Gitea API HTTP {e.code} (auth/scope?)") from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Gitea API unreachable ({type(e).__name__})") from None
+        except json.JSONDecodeError:
+            raise RuntimeError("Gitea API returned non-JSON (redirect or error body?)") from None
+        except Exception:  # catch-all: never let a message that might echo the request/header escape
+            raise RuntimeError("Gitea API request failed") from None
+        if not isinstance(data, dict) or not isinstance(data.get("runners"), list):
+            raise RuntimeError("Gitea API payload missing 'runners' (schema mismatch)")
+        batch = data["runners"]
+        runners.extend(batch)
+        if len(batch) < page_size:  # last (short) page
+            break
+    return runners
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +295,10 @@ def main(argv) -> int:
         targets = [(ip, KNOWN_BY_IP.get(ip, ip)) for ip in positional]
     else:
         targets = list(DEFAULT_RUNNERS)
-    expected_names = {name for ip, name in targets if ip in KNOWN_BY_IP}
+    # The API online-check always gates the WHOLE pool (ci-runner-1..5), regardless of which hosts were
+    # SSH-probed: positional IPs only narrow the host-side probe (a debug affordance) and must not be able
+    # to shrink the schedulability gate to a subset — or to a vacuous 0/0 when an unknown IP is passed.
+    expected_names = {name for _ip, name in DEFAULT_RUNNERS}
 
     ok = True
     for ip, name in targets:
