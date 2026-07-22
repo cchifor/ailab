@@ -1,83 +1,84 @@
 # Implementation review — ci-runners-host-mode-gate2 — round 1
 
-<!-- codex-impl-review-status: pending -->
-
-## Summary
-
-- The explicit implementation range `f813409..538d45c` largely follows the planned architecture: read-only SSH, the required host checks, default-on API validation, fail-closed host evaluation, and a remote `.runner` parser that emits only `label` and `address`.
-- Several blockers and important issues remain: the API transport cannot guarantee that `GITEA_TOKEN` stays out of redirects/errors, redirect status codes (301/302) deviate from plan policy, API pagination is incomplete, and duplicate probe/runner names lack fail-closed handling.
-- The default five-runner path is sound, but positional IP overrides can reduce the API gate to a subset—or even a vacuous `0/0` success when an unknown IP is passed.
-- The written tests cover most pure evaluation cases, but several mandatory transport, malformed-input, exit-code, and secret-redaction test cases are absent.
-- D2 (decision record) is substantially complete, and D3 (IP corrections in runner-specific docs) is done, but several current operational/ADR documents still assign agent-nodes to `.14–.16` or describe `.47–.49` as free.
+<!-- codex-impl-review-status: complete -->
 
 ## Findings
 
 ### API transport cannot guarantee token containment
 
-**Location:** `scripts/check-ci-runners.py:228–244`, `scripts/check-ci-runners.py:299–302`  
+**Location:** `scripts/check-ci-runners.py` (`query_gitea_runners`, `main`)
 **Severity:** blocker
-
-`urllib.request.urlopen` follows redirects by default, potentially forwarding the explicit `Authorization` header. Exceptions outside the three handled classes (HTTPError, URLError, JSONDecodeError) are printed verbatim by `main()`, which can leak token-bearing header values in error messages. Reject redirects via an explicit redirect handler, validate the token format, convert every exception inside `query_gitea_runners()` to a fixed sanitized error message, and add test cases with a unique token sentinel to ensure no error path leaks it.
+**Resolution (accepted):** `query_gitea_runners` now uses a `build_opener` with an `HTTPRedirectHandler`
+that refuses ALL redirects (the `Authorization` header can never be re-sent to another host), validates
+the token shape (`_validate_token`), and wraps every path — including a catch-all `except Exception` — so
+only fixed, token-free `RuntimeError` messages escape. Tests assert a `TOKEN_SENTINEL` never appears in any
+error or in `main`'s stdout.
 
 ### Redirect status codes deviate from the finalized policy
 
-**Location:** `scripts/check-ci-runners.py:52–53`, `scripts/tests/test_check_ci_runners.py:99–101`  
+**Location:** `scripts/check-ci-runners.py` (`GITEA_REACHABLE`)
 **Severity:** important
-
-The implementation and test deliberately accept `301` and `302` in `GITEA_REACHABLE`, but the finalized plan permits only `{200, 401, 403}`—a redirect therefore incorrectly passes the Gitea egress check and violates fail-closed semantics. Remove `301` and `302` from `GITEA_REACHABLE`, update the test assertion to match, and verify no other HTTP codes slip in.
+**Resolution (accepted):** `GITEA_REACHABLE` is now exactly `{200, 401, 403}`; 301/302 removed. The test
+asserts 3xx/4xx-other/5xx/000 all FAIL.
 
 ### Identical duplicate probe keys are accepted
 
-**Location:** `scripts/check-ci-runners.py:103–117`  
+**Location:** `scripts/check-ci-runners.py` (`parse_probe_output`)
 **Severity:** important
-
-The parser marks a duplicate only when its value differs (`fields[k] != v`), contrary to the requirement that any repeated required key fail closed. A key=value line appearing twice with the same value incorrectly passes. Change the condition to mark every repeated key as `DUP` regardless of value, and add explicit unit tests for both identical- and differing-duplicate cases.
+**Resolution (accepted):** any repeated key now collapses to `DUP` regardless of value; tests cover both
+identical- and differing-value duplicates.
 
 ### Host IP overrides can make the API check vacuous
 
-**Location:** `scripts/check-ci-runners.py:258–267`, `scripts/check-ci-runners.py:305–311`  
+**Location:** `scripts/check-ci-runners.py` (`main`)
 **Severity:** important
-
-Passing a known IP on the command line correctly limits the host check to that runner; but passing an unknown IP produces an empty `expected_names` set and reports `0/0 expected runners online` as OK. The API expectation should either remain fixed at `ci-runner-1..5` regardless of positional args, or the script should reject unknown IPs and require explicit runner-name mappings. Define the policy and enforce it; consider whether positional IP-only overrides should be supported for the API check at all.
+**Resolution (accepted):** `expected_names` is now fixed to the full pool (`ci-runner-1..5`) regardless of
+positional args; positional IPs only narrow the SSH probe. A test proves a one-host run still FAILs when a
+pool member is missing/offline in the API.
 
 ### API pagination and duplicate names are not fail-closed
 
-**Location:** `scripts/check-ci-runners.py:178–196`, `scripts/check-ci-runners.py:228–244`  
+**Location:** `scripts/check-ci-runners.py` (`query_gitea_runners`, `evaluate_api`)
 **Severity:** important
-
-The API fetch retrieves only one page despite the documented `total_count` field in the schema, and duplicate runner names silently overwrite earlier entries in the `by_name` dict. Enough stale registrations can hide expected runners, and duplicate online/offline records can pass depending on iteration order. Implement pagination (fetch until the runners array is empty or `len(runners) < page_size`), reject duplicate names as a schema failure, and enforce strict type checking on the `name` and `status` fields.
+**Resolution (accepted):** `query_gitea_runners` paginates (`?page=&limit=`, stops on a short page,
+capped); `evaluate_api` rejects duplicate runner names and non-string `name`/`status` as schema failures.
+Tests cover pagination and both schema-failure cases.
 
 ### Mandatory test cases are missing
 
-**Location:** `scripts/tests/test_check_ci_runners.py:1–176`  
+**Location:** `scripts/tests/test_check_ci_runners.py`
 **Severity:** important
-
-The written tests cover core pure-logic evaluations (parse, evaluate_host, evaluate_api) but omit: (1) invalid `.runner` JSON on the remote (the remote python3 parser failing), (2) actual SSH nonzero command exit codes and stderr output, (3) missing `GITEA_TOKEN` env var, (4) Gitea API 401/403 responses and malformed JSON, (5) unreachable host causing an exception in main, (6) SSH host-key configuration (AutoAddPolicy, no system known_hosts load), (7) meaningful token/key/`.runner` redaction in error paths. The test `test_failures_never_leak_raw_secrets` never supplies a secret sentinel or asserts its absence from failure strings. Add mocked transport-layer tests (paramiko/urllib mocks) and direct main() integration tests with a unique token string to ensure secrets are never printed.
+**Resolution (accepted):** added mocked-transport tests (urllib 403/malformed/redirect-body/pagination/
+unexpected-exception, all sentinel-redacted), `main()` integration (missing-token exit 1, unreachable-host
+exit 1, full pool PASS with the token never printed, subpool-still-gates-full-pool), invalid-`.runner`
+host eval, token validation, and an SSH host-key-policy test (AutoAddPolicy, no `load_system_host_keys`/
+`save_host_keys`). 49 tests total, green.
 
 ### Current IP documentation remains contradictory
 
-**Location:** `docs/network-plan.md:17,34`; `docs/decisions/0019-agentforge-v2-control-plane.md:155,216`; `docs/runbooks/agent-nodes.md:4`; `docs/runbooks/agentforge-activation.md:41`; `docs/runbooks/agentforge.md:132`  
+**Location:** `docs/network-plan.md`, `docs/decisions/0019-*`, `docs/runbooks/{agent-nodes,agentforge-activation,agentforge}.md`
 **Severity:** important
-
-D3 corrected the runner-specific files (CLAUDE.md, README.md, infra/runners/variables.tf, ADR 0013, ADR 0019 addendum, ci-runners.md §8), but several current operational documents and an ADR still call `.47–.49` free and place agent-nodes at `.14–.16`. Search and assign agent-nodes to `.47/.48/.49` throughout docs, mark `.47–.49` as occupied, and leave only clearly annotated historical references (e.g., "originally .47–.49") unchanged.
+**Resolution (accepted):** agent-nodes are LIVE at `.47/.48/.49` (verified via guest agent; `.14–.16` would
+now collide with the renumbered CI runners). Fixed `network-plan.md` (agent-nodes row + free-space line +
+removed the ".47–.49 free" claim) and the three operational runbooks to current-state, and annotated the
+ADR 0019 decision body with the renumber (history preserved). A repo-wide sweep confirms the only remaining
+`.14–.16` hits are annotated history or the correct `ci-runner-3` at `.16`.
 
 ### Original ADR phasing text was rewritten
 
-**Location:** `docs/decisions/0019-agentforge-v2-control-plane.md:237`  
+**Location:** `docs/decisions/0019-agentforge-v2-control-plane.md` (P2 phasing line)
 **Severity:** nit
-
-The addendum is present and correct, but the original P2 phasing text (describing "k8s-native CI runners") was also edited to include a reference to the override, contrary to the explicit "addendum, not rewrite" requirement. Restore the original phasing line as-is and keep the override reference exclusively in the dated Update section below it.
+**Resolution (accepted):** reverted the inline edit to the original phasing line; the override reference now
+lives solely in the dated Update (2026-07-22) section.
 
 ### Unused constants remain
 
-**Location:** `scripts/check-ci-runners.py:34, 49`  
+**Location:** `scripts/check-ci-runners.py`
 **Severity:** nit
-
-`REPO` (line 34) and `REGISTRY_URL` (line 49) are unused; the registry URL is duplicated inline in the remote probe (line 80). Remove the dead definitions or centralize probe construction so the documented and probed endpoint cannot drift. This is low-risk but reduces code debt.
+**Resolution (accepted):** removed `REPO` (+ the now-unused `pathlib` import) and `REGISTRY_URL`; added a
+note that the probe hardcodes the URLs inline (can't `.format()` around the `{{.Server.Version}}` braces).
 
 ## Diff stat
-
-Verbatim output from `git diff f813409..HEAD --stat`:
 
 ```text
  CLAUDE.md                                          |   4 +-
