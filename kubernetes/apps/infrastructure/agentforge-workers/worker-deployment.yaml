@@ -44,9 +44,17 @@ metadata:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
-  # replicas is OWNED by KEDA (scaledobject.yaml, minReplicaCount 0). Seed at 0 so the gated Deployment is
-  # scaled-to-zero at activation and KEDA drives it up on forge backlog.
-  replicas: 0
+  # replicas is OWNED by KEDA (scaledobject.yaml) and DELIBERATELY OMITTED here. If it is set in the
+  # manifest, Flux's 10m drift-correcting SSA re-asserts it every reconcile and FIGHTS KEDA: a seeded
+  # `replicas: 0` made Flux scale the KEDA-driven Deployment to 0 on every 10m tick — killing any
+  # in-flight planner/reviewer job — after which KEDA's HPA immediately scaled it back up (observed:
+  # a clean 10-minute "Scaled down ... to 0 from 2" cadence matching this Kustomization's interval,
+  # plus "the object has been modified" rescale conflicts). With the field ABSENT, Flux never claims
+  # f:replicas, so KEDA (via the scale subresource) is its sole owner and the churn stops.
+  # Activation gating is done by LISTING this manifest in kustomization.yaml (a gated tenant omits it
+  # entirely), NOT by the replica count — so nothing regresses. On a fresh create the Deployment
+  # defaults to 1 replica and KEDA reconciles it to 0 (idle) or up to maxReplicaCount (backlog)
+  # within one pollingInterval.
   strategy:
     type: RollingUpdate
     rollingUpdate:
