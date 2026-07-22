@@ -1,5 +1,41 @@
 # Gitea SQLite → Postgres Migration Implementation Plan
 
+> # ✅ DONE 2026-07-22 (ailab PR #79) — read this before the tasks below
+>
+> Gitea is live on Postgres (`infra-pg`). ~26 min downtime. Verified: 1/1 on Postgres, `healthz`
+> `database:ping` pass, `doctor` db-consistency OK (568,427 rows / 0 errors), forge serves migrated
+> repos, all 37 Flux Kustomizations green. `/data/gitea.db` retained ≥1 week for rollback (revert #79).
+>
+> **The method changed from Tasks 2–5 below.** Those describe letting **pgloader create the schema** —
+> that was **attempted 2026-07-21 and FAILED**: SQLite is untyped, so pgloader made `bigint` columns
+> where Gitea's XORM expects `boolean`/`smallint`, and Gitea crashed with
+> `pq: invalid input syntax for type bigint: "false"`. Rolled back, zero data loss. **Task 1 shipped
+> as-planned; Tasks 2–5 are SUPERSEDED by the as-built sequence here:**
+>
+> 1. **[no downtime] Build the schema with Gitea.** `DROP DATABASE gitea; CREATE … OWNER gitea;` then a
+>    throwaway `gitea:1.26.1-rootless` Job runs `gitea migrate` → all ~112 tables with correct XORM types.
+> 2. **[downtime] Load DATA ONLY.** Annotate the HR `kustomize.toolkit.fluxcd.io/reconcile=disabled`
+>    (HR `spec.suspend` does NOT stick — `apps` reverts it), scale Gitea to 0, then a pgloader Job reads
+>    the now-free `/data` PVC read-only: `WITH data only, truncate, prefetch rows = 500, batch rows = 500`
+>    (prefetch 500 avoids the SBCL heap-OOM on the BLOBs). **No CAST rules** (`COPY` coerces `0/1`→bool),
+>    **no create tables**, **no disable triggers** (Gitea has no DB-level FKs). Then a `setval` pass over
+>    every sequence (pgloader's `reset sequences` is unreliable in data-only mode).
+> 3. **[downtime] Repoint.** Edit `gitea.yaml` → `DB_TYPE=postgres` + `GITEA__database__PASSWD` env +
+>    `upgrade.remediation.retries: 3`; `kubectl apply --server-side --force-conflicts -f gitea.yaml`
+>    (HR is reconcile-disabled so `apps` won't fight it) → helm redeploys on Postgres. `gitea admin
+>    regenerate hooks` + `gitea doctor`.
+> 4. **[converge] git catches up.** The forge hosts its OWN Flux GitRepository, so you can't merge while
+>    it's down — the live repoint is a direct apply first. Once Gitea is back up, commit the postgres
+>    `gitea.yaml` + `git rm pgloader-migration.yaml` → PR → merge. Force the flux-system source fetch,
+>    **wait until its artifact revision == the merged commit, THEN remove the reconcile-disabled
+>    annotation** (removing it earlier reverts live back to SQLite). git == live == Postgres.
+> 5. **[finalize]** Delete the cutover Jobs/ConfigMap; keep `/data/gitea.db` ≥1 week.
+>
+> **Validation:** all of the above was proven first in an isolated **CSI-snapshot-clone rehearsal** (the
+> live PVC is RWO and can't be second-mounted, so VolumeSnapshot → clone PVC → load → dry-boot + the
+> literal admin-password-sync that crashed the real cutover), with the live Gitea untouched. Full
+> as-built detail: the `gitea-sqlite-to-postgres-migration` project memory.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Migrate Gitea's database from SQLite (on the RWO `/data` LUN) to a `gitea` database on the shared `infra-pg` CNPG Postgres, eliminating the SQLite single-writer "database is locked" contention, with zero data loss and a safe rollback.
@@ -205,6 +241,11 @@ Expected: `1`.
 
 ### Task 2: Author the one-shot pgloader migration Job
 
+> ⚠️ **SUPERSEDED (see the DONE banner at the top).** This task's pgloader config creates the target
+> schema (`include drop, create tables`), which produced wrong column types and a Gitea boot crash. The
+> shipped approach loads `data only` into a Gitea-built schema. `pgloader-migration.yaml` was deleted in
+> PR #79. Retained below as the original plan record.
+
 **Files:**
 - Create: `kubernetes/apps/apps/gitea/pgloader-migration.yaml` (ConfigMap load-file + Job; **NOT** added to any kustomization — imperative one-shot, mirroring `litellm-db-bootstrap.yaml`)
 
@@ -245,6 +286,11 @@ GIT_TERMINAL_PROMPT=0 git push
 ---
 
 ### Task 3: Cutover — migrate the data (maintenance window starts)
+
+> ⚠️ **SUPERSEDED (see the DONE banner at the top).** The as-built cutover builds the schema with
+> `gitea migrate` first, then runs pgloader `data only, truncate` + a `setval` sequence pass — and holds
+> Gitea down via the `reconcile: disabled` HR annotation (the `spec.suspend` step below does NOT stick;
+> `apps` reverts it). Retained below as the original plan record.
 
 **Interfaces:**
 - Consumes: Task 1 DB/role, Task 2 Job manifest.
@@ -308,6 +354,11 @@ Expected: each count equals the Step 2 SQLite baseline. If any mismatch, STOP �
 ---
 
 ### Task 4: Repoint Gitea at Postgres
+
+> ⚠️ **Partially superseded (see the DONE banner).** The database-block edits below are correct and
+> shipped; but the repoint was applied **directly** (`kubectl apply --server-side` with the HR
+> reconcile-disabled) because the forge hosts its own Flux source and can't be merged while down — git
+> converges afterward. `gitea.yaml` also gained `upgrade.remediation.retries: 3`.
 
 **Files:**
 - Modify: `kubernetes/apps/apps/gitea/gitea.yaml` (database block + password env; remove SQLite tuning)

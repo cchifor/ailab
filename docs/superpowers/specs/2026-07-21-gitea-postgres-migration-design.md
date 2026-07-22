@@ -1,6 +1,32 @@
 # Gitea DB migration: SQLite → CNPG Postgres (infra-pg tenant)
 
-**Date:** 2026-07-21 · **Status:** Approved (design) · **Scope:** ailab repo
+**Date:** 2026-07-21 · **Status:** ✅ DONE 2026-07-22 (ailab PR #79) · **Scope:** ailab repo
+
+> ## Outcome (as-built, 2026-07-22)
+>
+> Gitea is live on Postgres (`infra-pg`). ~26 min downtime. Verified: 1/1 on Postgres, `healthz`
+> `database:ping` pass, `doctor` db-consistency OK, forge serves migrated repos, all Flux green.
+>
+> **The migration method changed from what this design first specified.** The original plan let
+> **pgloader create the target schema**. That was **attempted 2026-07-21 and FAILED**: SQLite is
+> untyped, so pgloader inferred `bigint` for columns Gitea's XORM structs define as `boolean`/`smallint`,
+> and Gitea crashed on startup with `pq: invalid input syntax for type bigint: "false"`. Rolled back with
+> zero data loss (pgloader only *reads* `gitea.db`).
+>
+> **The method that shipped is schema-first + data-only:**
+> 1. **Gitea builds the schema itself** — `gitea migrate` against the empty `gitea` DB creates all ~112
+>    tables with the correct XORM types (`boolean`, `smallint`, `bytea`).
+> 2. **pgloader loads DATA ONLY** — `WITH data only, truncate` into that schema. No type inference, and
+>    **no CAST rules needed** (Postgres `COPY` coerces SQLite `0/1` straight into the real `boolean`
+>    columns). Gitea has no DB-level FKs/triggers, so no `disable triggers`.
+> 3. **Reset sequences** with an explicit `setval` pass (pgloader's `reset sequences` is unreliable in
+>    data-only mode).
+>
+> Proven end-to-end in an **isolated CSI-snapshot-clone rehearsal** (the live Gitea PVC is RWO and can't
+> be second-mounted, so: VolumeSnapshot → clone PVC → load → dry-boot) with the live Gitea untouched,
+> *before* the production window. `docs/…/plans/2026-07-21-gitea-postgres-migration.md` Task 1 shipped
+> as-planned; **Tasks 2–5's pgloader-create-schema details are SUPERSEDED by the above** and retained
+> only as a record of the original plan.
 
 ## Problem
 
@@ -17,8 +43,12 @@ Postgres (real MVCC) eliminates the lock-contention class.
   separate, larger effort — explicitly **out of scope**.
 - **Target: shared `infra-pg`** (CNPG, PG17, `databases` ns) as a new tenant, alongside
   grafana/authelia/openwebui/agentforge. Reuses existing HA/backup/operator; one ailab PR set.
-- **Method: `pgloader`** (standard SQLite→PG tool; Gitea's XORM schema is engine-agnostic).
-- **Cutover: one maintenance window**, ~10–15 min downtime. Default = migrate the whole DB.
+- **Method: `pgloader`** (standard SQLite→PG tool; Gitea's XORM schema is engine-agnostic). **As-built
+  correction (see Outcome):** pgloader must run **`data only`** into a schema **Gitea builds itself**
+  (`gitea migrate`) — letting pgloader create the schema produces wrong column types and Gitea won't boot.
+- **Cutover: one maintenance window**, ~10–15 min downtime. Default = migrate the whole DB. **As-built:**
+  actual downtime was **~26 min** (the ~5 GB DB is mostly `dbfs_data` Actions-log BLOBs; the data-only
+  `COPY` runs ~22 min). Pruning the stuck Actions logs first would shorten a future run.
 
 ## Non-goals
 
