@@ -53,9 +53,6 @@ the repo's established probe convention (`scripts/node-ssh.py`, `scripts/check-n
 `AutoAddPolicy` with the system `known_hosts` NOT loaded — so a renumbered VM's changed key never raises
 `BadHostKey`, and the user's `known_hosts` is never mutated (idempotent/read-only local state).
 
-<!-- codex: BLOCKER: AutoAddPolicy accepts previously unknown keys but does not recover from a changed known-host key, and silently trusting new keys permits interception. Use strict verification with a dedicated known_hosts file containing operator-verified fingerprints; report mismatches with manual remediation guidance and never mutate trust state during the gate. -->
-<!-- opus-pushback: Curated operator-verified fingerprints are inconsistent with every SSH probe in this repo (node-ssh.py, check-nested-virt.py, install-ssh-key.py all use AutoAddPolicy) and impractical for VMs that are legitimately rebuilt/renumbered. The residual (trust the presented key on a private IPv4-only mgmt VLAN, key-auth only, read-only) is accepted and matches the repo convention; the design explicitly does NOT load or mutate the user's known_hosts, so there is no stale-key BadHostKey failure and no persistent trust change. This is a read-only health gate on a trusted LAN, not an internet-facing auth path. -->
-
 **One combined remote probe per host** emits independent `key=value` lines (each subcheck has its own
 `|| echo <key>=FAIL` so one failing command never blanks the others). Per-host asserts (ALL must pass):
 - `daemon` — `gitea-act-runner.service` is `active` (`systemctl is-active`).
