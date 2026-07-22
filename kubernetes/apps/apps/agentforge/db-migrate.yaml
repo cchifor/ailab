@@ -84,9 +84,10 @@ spec:
             capabilities: { drop: ["ALL"] }
       containers:
         - name: migrate
-          # Same image as the CP Deployment (pinned by the platform release CI). Adjust the argv to the
-          # platform's actual migrate entrypoint (e.g. alembic upgrade head) at execution.
-          image: registry.chifor.me/cchifor/agentforge-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # Same image as the CP Deployment (pinned by the platform release CI). Repo path is
+          # `agentforge/agentforge-platform` (matches the CI push target) — NOT `cchifor/…`. Adjust the
+          # argv to the platform's actual migrate entrypoint (e.g. alembic upgrade head) at execution.
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:0000000000000000000000000000000000000000000000000000000000000000
           command: ["agentforge-platform", "migrate"]
           env:
             # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
