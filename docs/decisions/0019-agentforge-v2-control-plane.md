@@ -234,7 +234,7 @@ analyzer + GiteaClient + reconcilers), running on the hub in ns `agentforge`, wi
 - **P2 (the unlock):** OpenBao + ESO + KEDA + kro; secrets → OpenBao; Kata node extensions +
   RuntimeClasses; the ephemeral sandbox-pod SandboxExecutor + admission-pinned pod shape + per-pod
   Cilium egress + brokered ephemeral inference creds + outbound redaction + the epoch-safe account
-  lease + k8s-native CI runners (**overridden → host-mode `act_runner` pool; see Update 2026-07-22**); kro
-  RGD DRYs the tenant expansion. Boundary tests green → flip `privilege_hardening: v1.1`.
+  lease + k8s-native CI runners; kro RGD DRYs the tenant expansion. Boundary tests green → flip
+  `privilege_hardening: v1.1`.
 - **P3:** external clusters (pull model, read-only deploy keys, hostile-payload handling); per-org
   quotas; per-tenant LiteLLM virtual keys w/ budget caps; dogfood.
