@@ -49,7 +49,16 @@ spec:
                   # destination, so a wiped/empty/corrupt local source (e.g. versitygw down -> empty
                   # listing) can't mirror a mass-deletion to the only off-site copy. Tune up if normal
                   # Kopia maintenance churn trips it (failing safe = not deleting is the desired default).
-                  FLAGS="--max-delete 100 --fast-list --transfers 4 --checkers 8 --tpslimit 8 --tpslimit-burst 16 --drive-stop-on-upload-limit --retries 3 --low-level-retries 10 --stats 2m --stats-one-line -v"
+                  # --ignore-existing: velero moved to Kopia (thousands of small, CONTENT-ADDRESSED and
+                  # therefore IMMUTABLE objects); talos-etcd snapshots are likewise write-once. Re-hashing
+                  # every already-uploaded object each run is pure waste that, combined with Drive's
+                  # per-user small-object throttling, pushed the run past activeDeadlineSeconds (22h) ->
+                  # KubeJobFailed nightly. Skipping existing objects lets each run make forward progress
+                  # (upload only NEW objects) so the initial backlog converges over a night or two, then
+                  # every run is a fast incremental. Safe here precisely because these objects never
+                  # change; sync's delete phase (retention/GC propagation) is unaffected, still guarded by
+                  # --max-delete. (2026-07-22)
+                  FLAGS="--ignore-existing --max-delete 100 --fast-list --transfers 4 --checkers 8 --tpslimit 8 --tpslimit-burst 16 --drive-stop-on-upload-limit --retries 3 --low-level-retries 10 --stats 2m --stats-one-line -v"
                   echo "=== sync velero bucket -> Drive (encrypted) ==="
                   rclone sync garage-velero:velero gdrive-crypt:velero $FLAGS
                   echo "=== sync talos-etcd-backups bucket -> Drive (encrypted) ==="

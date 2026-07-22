@@ -31,6 +31,11 @@ spec:
     deployNodeAgent: true
     nodeAgent:
       disableHostPath: true
+      # Cover the AgentForge-dedicated agent-nodes too (dedicated=agent:NoSchedule): the node-agent does
+      # the CSI data movement (Kopia) for any PVC that lands on a node, so it must run on all nodes; the
+      # stale pre-taint pods there also read as KubeDaemonSetMisScheduled without this.
+      tolerations:
+        - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
     snapshotsEnabled: true
     backupsEnabled: true
     credentials:

@@ -17,6 +17,12 @@ spec:
     controller:
       type: daemonset
       priorityClassName: platform-critical # node log collector — survive pressure
+      # Run on the AgentForge-dedicated agent-nodes too (dedicated=agent:NoSchedule) — a node log
+      # collector must cover ALL nodes, else agent-node/Kata-sandbox logs are silently uncollected AND
+      # the stale pre-taint pods there read as KubeDaemonSetMisScheduled. Kata isolation is VM-level, so
+      # a node-level log agent doesn't compromise it. (2026-07-22)
+      tolerations:
+        - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
     alloy:
       resources:
         # 256Mi -> 512Mi: the cp2 replica repeatedly OOMKilled (exit 137) at 256Mi — its working set
