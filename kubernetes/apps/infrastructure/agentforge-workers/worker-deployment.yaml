@@ -117,8 +117,10 @@ spec:
             #    shape byte-for-byte; the agentforge-sandbox-guard / -job-guard reject any deviation) --
             - { name: AF_EXECUTOR, value: "sandbox" }
             - { name: AF_SANDBOX_NAMESPACE, value: "agentforge-sandbox" }
-            # PLACEHOLDER sandbox image digest — pin the real sandbox @sha256 (see header) before enabling.
-            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:e50dbab89ec40f90d3af49746f50dc5a2a26165708092a93b42ee690b5ec47a8" }
+            # sandbox image @ agentforge main aeeb3737 — now carries pytest (system python) so the tester +
+            # implementer roles' zero-egress test_cmd (`python3 -m pytest`) runs hermetically. Bump
+            # e50dbab8 -> c509d447 (registry :latest / :aeeb3737).
+            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:c509d447f4be8c7a7465d30de76a398db9d55fb28c89f8f9eb6797dbea7499b4" }
             - { name: AF_SANDBOX_SERVICE_ACCOUNT, value: "agentforge-sandbox" } # the tokenless sandbox SA
             - { name: AF_SANDBOX_ORG, value: "tenant-zero" }       # -> agentforge.io/org label + capability tenant
             # The capability `iss` claim — the issuer the broker's kid registry binds to
