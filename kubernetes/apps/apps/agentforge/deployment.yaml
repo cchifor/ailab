@@ -53,7 +53,7 @@ spec:
           # origin/main HEAD 27760744…, feat #8); verified tag→digest equality + linux/amd64 + Entrypoint
           # `[agentforge-platform] serve` + AFP_WEBAPP_DIST set. Re-verify the tag still resolves to this
           # digest before merging the go-live PR; fail closed if it moved.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:85a4a3c7a3599b20834688c8f2ea060341435d7cba07239d94bf5b00afac374e
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:dfafb1e5453064a5cdb91363eba4dbff90f18d09017cbc50e7717a4ce31e84d1
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
