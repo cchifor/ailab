@@ -68,6 +68,13 @@ data:
     identity_providers:
       oidc:
         # jwks (RSA issuer key) + the *_secret values are merged from /secrets (SOPS) + *_FILE env.
+        # Authelia 4.39 releases groups/email/name via the USERINFO endpoint by default, NOT the id_token.
+        # The AgentForge CP reads its claims from the id_token (authlib token["userinfo"] = the parsed
+        # id_token), so without this the groups claim is empty on login and no org is provisioned (the CP
+        # fails SHUT). This policy also puts groups+email+name in the id_token for the agentforge client.
+        claims_policies:
+          agentforge_id_token:
+            id_token: ['groups', 'email', 'name', 'preferred_username']
         clients:
           - client_id: 'grafana'
             client_name: 'Grafana'
@@ -162,4 +169,6 @@ data:
               # AND the app's AFP_OIDC_REDIRECT_URL — the app rejects a mismatched redirect_uri.
               - 'https://agentforge.chifor.me/api/auth/callback'
             scopes: ['openid', 'profile', 'groups', 'email']
+            # Put groups+email in the id_token (the CP reads id_token claims, not the userinfo endpoint).
+            claims_policy: 'agentforge_id_token'
             token_endpoint_auth_method: 'client_secret_basic'
