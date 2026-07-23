@@ -31,7 +31,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: valkey
-          image: valkey/valkey:8-alpine
+          image: valkey/valkey:9-alpine
           # Bypass the image entrypoint (it setuid's root->valkey via setpriv, which fails under
           # capabilities.drop:[ALL]) and run valkey-server directly as the non-root uid above. No persistence
           # (--save "" + appendonly no); cap memory + LRU-evict so a socket leak can't OOM the node.
