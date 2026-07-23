@@ -25,3 +25,9 @@ variable "registry_ip" {
   type        = string
   default     = "192.168.0.36"
 }
+
+variable "enable_api_access_gate" {
+  description = "Create the Cloudflare Access service-token gate on api.chifor.me (access.tf). Keep FALSE until the CF-Access-Client-Id/Secret headers are wired into EVERY api.chifor.me caller (the Strive platform + any script) — otherwise they 401 at the edge. Left false so `tofu plan` stays clean; flip to true, `tofu apply`, then read the creds via `tofu output`."
+  type        = bool
+  default     = false
+}

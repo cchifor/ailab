@@ -106,26 +106,31 @@ resource "cloudflare_zero_trust_access_application" "vault_admin" {
 # litellm-config. (See docs/runbooks/cloudflare-access-apps.md and the api.chifor.me spend cap in
 # kubernetes/apps/apps/ai/litellm.yaml `max_budget`.)
 #
-# ⚠️ BEFORE `tofu apply`-ing this: wire the token into EVERY api.chifor.me caller (the Strive platform
-# and any script) as the CF-Access-Client-Id + CF-Access-Client-Secret request headers, or they get a
-# 401 at the edge. Retrieve the values with `tofu output -raw api_access_client_secret` (+ _client_id).
+# ⚠️ Gated behind var.enable_api_access_gate (default FALSE) so `tofu plan` stays clean until you opt
+# in — these resources are prepared but NOT applied. BEFORE flipping the flag to true + `tofu apply`:
+# wire the token into EVERY api.chifor.me caller (the Strive platform and any script) as the
+# CF-Access-Client-Id + CF-Access-Client-Secret request headers, or they get a 401 at the edge. Then
+# retrieve the values with `tofu output -raw api_access_client_secret` (+ _client_id).
 resource "cloudflare_zero_trust_access_service_token" "api" {
+  count      = var.enable_api_access_gate ? 1 : 0
   account_id = var.cloudflare_account_id
   name       = "api-chifor-me"
 }
 
 resource "cloudflare_zero_trust_access_policy" "api_svc" {
+  count      = var.enable_api_access_gate ? 1 : 0
   account_id = var.cloudflare_account_id
   name       = "Allow api service token"
   decision   = "non_identity"
-  include    = [{ service_token = { token_id = cloudflare_zero_trust_access_service_token.api.id } }]
+  include    = [{ service_token = { token_id = cloudflare_zero_trust_access_service_token.api[0].id } }]
 }
 
 resource "cloudflare_zero_trust_access_application" "api" {
+  count            = var.enable_api_access_gate ? 1 : 0
   account_id       = var.cloudflare_account_id
   name             = "api.chifor.me"
   type             = "self_hosted"
   domain           = "api.chifor.me"
   session_duration = "24h"
-  policies         = [{ id = cloudflare_zero_trust_access_policy.api_svc.id, precedence = 1 }]
+  policies         = [{ id = cloudflare_zero_trust_access_policy.api_svc[0].id, precedence = 1 }]
 }
