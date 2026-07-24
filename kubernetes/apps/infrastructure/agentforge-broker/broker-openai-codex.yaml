@@ -296,16 +296,15 @@ spec:
     matchLabels:
       app.kubernetes.io/name: broker-openai-codex
   ingress:
-  - fromEndpoints:
-      # AgentForge control plane (Settings/subscriptions): polls /readyz for the
-      # credential_generation observation (contract C4). Read-only status probe.
-      - matchLabels:
-          k8s:io.kubernetes.pod.namespace: agentforge
-          app.kubernetes.io/name: agentforge-platform
-    toPorts:
-      - ports:
-          - port: "8700"
-            protocol: TCP
+    # (0) AgentForge control plane (Settings/subscriptions): read-only /readyz probe for the
+    #     credential_generation rotation observation (contract C4).
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: agentforge
+            app.kubernetes.io/name: agentforge-platform
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
     # (1) ONLY sandbox AGENT pods of the MATCHING pool/tenant, on the STABLE per-pool/org/workspace identity
     #     labels (NOT the high-cardinality per-job label). Preserved verbatim from the single-broker policy.
     - fromEndpoints:
