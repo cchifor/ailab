@@ -46,6 +46,13 @@ rules:
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The rendered per-workspace Role grants the orchestrator READ on its own namespace's
+  # pods + pod logs (sandbox job log streaming). Kubernetes RBAC escalation-prevention
+  # requires the CREATOR to hold every permission it grants, so the reconciler must hold
+  # these too (read-only; the tenant-guard admission still constrains creatable Role shapes).
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
   # Flux writes events for the objects it applies as this identity.
   - apiGroups: [""]
     resources: ["events"]
