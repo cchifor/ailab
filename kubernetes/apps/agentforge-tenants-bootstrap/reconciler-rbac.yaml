@@ -39,6 +39,15 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # escalate+bind: the rendered tenant Roles legitimately grant verbs the reconciler does not
+  # hold for itself (e.g. pods/log streaming), and a same-batch Role+RoleBinding dry-run cannot
+  # resolve an absent Role — without these verbs the layer deadlocks (proven 2026-07-24: web +
+  # platform-dev Roles unapplyable, whole layer ReconciliationFailed). SAFE here because the
+  # tenant-guard ValidatingAdmissionPolicy is the real shape gate on this path: no wildcard
+  # verbs/apiGroups/resources, fixed GVK allowlist, and af-tenant-* namespace pinning.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    verbs: ["escalate", "bind"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
