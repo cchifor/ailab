@@ -12,15 +12,21 @@
 # It is trust-class=AGENT on purpose: the agent profile is the interesting boundary (it MAY reach its own
 # pool broker + kube-dns, and NOTHING else), so the canary asserts the four classic escapes are all denied.
 #
-# SEMANTICS: each probe MUST FAIL (the egress is blocked). If ANY probe SUCCEEDS, that is a BOUNDARY BREACH
-# and the canary exits non-zero. Denied targets asserted:
+# SEMANTICS: a MATRIX, not just "all blocked". Each DENY probe MUST FAIL (egress blocked) and the POSITIVE
+# broker probe MUST SUCCEED. If any deny probe SUCCEEDS that is a BOUNDARY BREACH; if the positive probe
+# FAILS the run is INCONCLUSIVE (a netless pod must never pass the deny-only checks) — both exit non-zero.
+# Denied targets asserted:
 #   (a) a WORLD IP (1.1.1.1:443)                         — egressDeny world
 #   (b) the METADATA service (169.254.169.254)           — egressDeny toCIDR 169.254.169.254/32
-#   (c) an ALT-DNS name (example.com)                    — kube-dns L7 allows ONLY the broker name; refused
+#   (c) an ALT-DNS name (example.com)                    — kube-dns L7 allows ONLY the broker names; refused
 #   (d) ANOTHER pool's broker (a non-matching svc name)  — DNS L7 refuses the name AND broker ingress admits
 #                                                           only the matching pool/org/workspace agent
-# TO RUN (activation): pin the real sandbox image @sha256, then submit through SandboxExecutor with these
-# exact labels (or keep the probe list as documented `test_cmd`s in the boundary-proof suite).
+#   (e) OpenBao (openbao.openbao.svc:8200 sys/health)    — no egress path to the vault (+ tokenless SA)
+# POSITIVE control (agent tier): the agent's OWN pool broker, reached BY POD IP (a Kata pod can't use the
+# ClusterIP). The ops harness injects a ready broker pod IP via AF_CANARY_BROKER_IP; reaching it (any HTTP
+# response) proves the allow path works and the "BOUNDARY OK" is not a netless false-pass.
+# TO RUN (activation): use scripts/verify-sandbox-boundary.sh (injects the broker IP, submits via the exact
+# admitted shape, asserts the matrix, tears down) — NEVER against a real tenant (playground only).
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -77,25 +83,64 @@ spec:
           # PLACEHOLDER digest — the real sandbox image @sha256 (AF_SANDBOX_IMAGE) is pinned at activation.
           image: registry.chifor.me/agentforge/sandbox@sha256:02711119c79888035519ea27ba71dae4ab387ba6bdfd2c44901545c2b4d4408e
           workingDir: /workspace
-          # Boundary probes — each MUST FAIL (egress blocked). Any SUCCESS => BREACH => exit 1. Short
-          # connect timeouts so the whole assertion finishes well within activeDeadlineSeconds. Plain-value
-          # env only (sandbox-guard forbids env[].valueFrom); targets are literal here.
+          env:
+            # Plain-value ONLY (sandbox-guard forbids env[].valueFrom). The ops harness
+            # (scripts/verify-sandbox-boundary.sh) injects a READY broker POD IP here so the agent
+            # tier can run the POSITIVE control: a Kata pod reaches the broker by pod IP (never by
+            # ClusterIP, which it sees as `world`). Left EMPTY in the standing gated manifest, so the
+            # positive probe is skipped and the manifest stays a pure deny-only assertion.
+            - name: AF_CANARY_BROKER_IP
+              value: ""
+          # Boundary MATRIX — the deny probes MUST FAIL (egress blocked); the POSITIVE broker probe
+          # (when a pod IP is injected) MUST SUCCEED. Any denied SUCCESS => BREACH => exit 1; a
+          # missing positive => INCONCLUSIVE => exit 1 (a netless pod must NOT pass deny-only checks).
+          # Short connect timeouts finish well within activeDeadlineSeconds.
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -u
               rc=0
-              probe() { # $1=label $2=curl-target
-                if curl -sS --max-time 5 --connect-timeout 5 -o /dev/null "$2"; then
+              # -k (insecure): we assert NETWORK reachability, not cert trust — WITHOUT it a reachable
+              # HTTPS target with an untrusted cert exits non-zero (curl 60) and would be MISread as
+              # "blocked", masking a breach. So TLS validity must never gate a deny probe.
+              deny() { # $1=label $2=curl-target — MUST be unreachable
+                if curl -sSk --max-time 5 --connect-timeout 5 -o /dev/null "$2"; then
                   echo "BREACH: reached $1 ($2)"; rc=1
                 else
                   echo "ok (blocked): $1 ($2)"
                 fi
               }
-              probe "world-ip"        "https://1.1.1.1/"
-              probe "metadata"        "http://169.254.169.254/latest/meta-data/"
-              probe "alt-dns"         "https://example.com/"
-              probe "other-pool-broker" "http://agentforge-broker.agentforge-broker-otherpool.svc.cluster.local:8700/"
+              deny "world-ip"          "https://1.1.1.1/"
+              deny "metadata"          "http://169.254.169.254/latest/meta-data/"
+              deny "alt-dns"           "https://example.com/"
+              deny "other-pool-broker" "http://agentforge-broker.agentforge-broker-otherpool.svc.cluster.local:8700/"
+              deny "openbao"           "https://openbao.openbao.svc.cluster.local:8200/v1/sys/health"
+              # POSITIVE control: the agent's OWN pool broker (by pod IP) MUST be reachable. Any HTTP
+              # response (even 401/404 without a capability) proves the allow path — curl exits 0. This
+              # is MANDATORY: a netless pod blocks every deny target AND its broker, so WITHOUT proving
+              # the broker reachable "all blocked" is indistinguishable from a broken sandbox. A missing
+              # broker IP or an unreachable broker is therefore INCONCLUSIVE (rc=1), never a pass.
+              if [ -n "${AF_CANARY_BROKER_IP:-}" ]; then
+                if curl -sSk --max-time 5 --connect-timeout 5 -o /dev/null "http://${AF_CANARY_BROKER_IP}:8700/"; then
+                  echo "BROKER REACHABLE: agent reached its pool broker ($AF_CANARY_BROKER_IP:8700)"
+                else
+                  echo "INCONCLUSIVE: broker $AF_CANARY_BROKER_IP:8700 UNREACHABLE (agent path broken / netless)"
+                  rc=1
+                fi
+              else
+                echo "INCONCLUSIVE: no AF_CANARY_BROKER_IP injected — cannot prove the allow path (netless would false-pass)"
+                rc=1
+              fi
+              # KATA microVM boundary: the guest kernel must differ from the host node's (the harness
+              # compares GUEST_KERNEL to the node's kernelVersion — a shared-kernel runc pod matches).
+              echo "GUEST_KERNEL: $(uname -r)"
+              # PID/mount-namespace isolation: this pod's pid-1 is the sandbox's OWN init (the Kata VM),
+              # never the orchestrator's — so /proc/1/environ can carry none of its credential markers.
+              if grep -aqE 'ANTHROPIC_AUTH_TOKEN|GITEA_BOT_TOKEN|OPENBAO_TOKEN|CLAUDE_CODE_OAUTH|VAULT_TOKEN' /proc/1/environ 2>/dev/null; then
+                echo "BREACH: orchestrator credential visible in the sandbox /proc/1/environ"; rc=1
+              else
+                echo "PROC1 CLEAN: no orchestrator credential in the sandbox pid-1 environ"
+              fi
               [ "$rc" -eq 0 ] && echo "BOUNDARY OK: all denied targets unreachable"
               exit "$rc"
           securityContext:

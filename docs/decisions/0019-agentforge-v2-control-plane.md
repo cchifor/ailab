@@ -240,6 +240,46 @@ analyzer + GiteaClient + reconcilers), running on the hub in ns `agentforge`, wi
 - **Subscription OAuth.** `claude_max` is tenant-zero-only, enforced at API + config + worker +
   admission; external tenants get per-tenant LiteLLM virtual keys with budget caps (P3).
 
+## Verification — the sandbox-boundary CANARY suite (the v1.1 gate proof)
+
+The threat model above is only as good as its proof. A **repeatable, adversarial boundary canary
+suite** is the STANDING evidence that flipping `privilege_hardening: v1.1` (agents on real repos) is
+safe. It has two tiers and a live matrix; a **green suite is the gate**, and **any breach is a P0**
+(stop, do not flip/keep v1.1, escalate with the reproduction).
+
+- **Unit / CI tier (always-on, `cchifor/agentforge`).** `tests/unit/test_sandbox_boundary.py`
+  renders the exact Job the orchestrator submits — for BOTH trust classes, and even with the caller
+  env stuffed with every credential shape — and locks the bytes that reach the apiserver: the
+  three-tier credential split (orchestrator holds the PATs/OpenBao SA/signing key; the **agent** tier
+  carries only the broker ROUTE + the capability **file path** — never a bearer in env/argv; the
+  **test/setup** tier carries NOTHING — no creds, no broker wiring, no capability), `runtimeClassName:
+  kata`, the tokenless SA + `automountServiceAccountToken:false`, only workspace/home volumes (no
+  Secret/projected/hostPath), no host namespaces, and no privileged/added-caps/unmasked-proc surface
+  (the per-pod-DinD sidecar design is **superseded** by ephemeral per-job Kata Jobs — there is no
+  DinD and no cap to nest one, so "privileged DinD escapes the microVM" is unconstructible).
+- **Live tier (activation-time, `admin@ai`).** `scripts/verify-sandbox-boundary.sh` (this repo) runs
+  the matrix against the ACTUAL flipped sandbox on a **disposable** throwaway `tenant-zero/playground`
+  workspace (it HARD-REFUSES `platform-dev`, which drives the real repos) and tears the canaries down.
+  It asserts: (i) the static boundary (kata RuntimeClass, both egress CNPs + default-deny, separate
+  restricted-PSA ns, tokenless SA with no RoleBinding); (ii) **negative admission** — the pinned
+  pod-shape VAPs REJECT `privileged`, `automountServiceAccountToken:true`, `hostNetwork`, a **non-kata
+  runtimeClass**, and a `hostPath` volume (so Kata + the credential-free shape are ENFORCED, not
+  merely what a compliant canary happens to use); (iii) the **egress matrix EXACTLY** via two Kata
+  canaries — the agent tier reaches ONLY its pool broker (a **positive** reachability control, so a
+  netless pod can't false-pass) and is denied world/metadata/alt-DNS/other-pool-broker/**OpenBao**,
+  while the test tier has **zero egress** (even the broker unreachable = the `test_cmd --network none`
+  equivalent); (iv) `uname -r` inside the sandbox = the **Kata guest kernel**, provably different from
+  the host node's kernel; (v) `/proc/1/environ` carries no orchestrator credential (separate PID/mount
+  namespace). The pytest companion `tests/integration/test_sandbox_boundary.py` re-checks the deployed
+  egress policy shape (endpoint-identity broker allow + the three per-account broker DNS names, OpenBao
+  outside the allowlist) and the same live matrix under `AF_BOUNDARY_LIVE=1`.
+
+**Live matrix result (2026-07-24, `admin@ai`, playground):** every vector PASSED = blocked/denied/proven
+(23/23) — the sandbox pod ran `runtimeClassName=kata` with guest kernel `6.12.42` vs host
+`6.12.48-talos` (real microVM isolation), the agent reached ONLY its broker, and the test tier had
+zero egress. See `docs/runbooks/sandbox-boundary-canary.md` for the full matrix, how to run it, and
+the P0 procedure.
+
 ## Rejected / out of scope (P1)
 
 - **OpenBao / ESO / KEDA / kro operators** — P2 (`kubernetes/apps/infrastructure/{security,autoscaling}`).
