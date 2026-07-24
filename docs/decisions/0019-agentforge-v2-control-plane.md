@@ -86,6 +86,45 @@ pin-bootstrap`/`pin-workloads` then digest-pin. Fitness is gated by **PREFLIGHT 
 `just nested-virt-verify`). Full detail + the Gitea org-config/token/security prerequisites:
 `docs/runbooks/ci-runners.md` §8.
 
+## Update (2026-07-24) — self-service CP product layer + subscription lifecycle (SHIPPED)
+
+The P1 control plane grew a full self-service product surface, delivered as four codex-gated
+agentforge-platform PRs (#10 shell/Overview/logout/CSRF · #11 templates/multi-repo/Gitea-PAT/
+onboarding · #12 AG-UI chat wizard · #13 LLM-subscriptions settings) plus Stage-0 companions
+(agentforge #52, ailab #103) — all deployed. Decisions of record:
+
+- **Templates over hand-edited config**: a server-side versioned registry renders the full
+  AgentForgeConfig; subscription-engine templates are entitlement-gated to tenant-zero
+  (`engines_for_org`); every template is contract-tested through `bind_workspace_policy`.
+- **Multi-repo workspaces**: bindings store canonical `(gitea_host, repository_id)` with a GLOBAL
+  one-active-workspace-owner index; config `repos` must be ⊆ the bound set. Runtime access is
+  ENFORCED via per-repo bot collaborator grants made with the user's PAT at onboarding (the PAT is
+  Fernet-encrypted per `(org,user,host)`, used only through a 5-op allowlisted adapter).
+- **Chat wizard = deterministic executor**: AG-UI SSE (pinned client 0.0.51) with HITL option
+  buttons; every mutation option is an opaque server-issued single-use `option_id` (atomic claim,
+  role re-check at execution). The local-LLM free-text path (litellm qwen3.6) has ZERO mutation
+  ability by construction.
+- **Subscription lifecycle (operator creds)**: CP reads STATUS only via OpenBao **metadata**
+  (role `af-cp-sub-status`); rotations CAS-write via `af-cp-sub-rotator` (server-side
+  `cas_required=true`; neither role can list/read-data/delete). Status is generation-consistent
+  (custom_metadata `credential_version` must equal the KV version — else UNKNOWN/PENDING, never
+  ACTIVE). Rotation completion is OBSERVED via each broker's `/readyz` `credential_generation`
+  (sha256[:8] of the mounted cred; broker CNPs admit the CP read-only on :8700 — ailab #108).
+  "Refresh now" (codex) = Job-from-CronJob under a ValidatingAdmissionPolicy that pins the Job
+  shape to the reviewed refresher.
+- **Broker add/remove is PR-GATED GitOps, not CP-writable state**: the CP renders the existing
+  per-account manifest shape and opens an ailab PR via the restricted `agentforge-infra-bot`
+  using **AGit** (`refs/for/main` — READ collaborator, no branch write). ailab `main` is
+  branch-protected (push whitelist {chifor, gitea_admin}, 1 required approval, dismiss-stale);
+  `agentforge-reviewer-bot` (restricted, write collaborator) supplies the non-author approval
+  after the review gate. Async operations carry states
+  `awaiting_review → merged_waiting_flux → waiting_eso → verifying_broker → active`.
+- **OpenBao operational reality** (see `docs/runbooks/openbao-recovery.md`): 2.5.5 disables BOTH
+  `generate-root` and `operator rekey`; the only privileged-recovery/seal-rotation path is the
+  wipe+re-bootstrap ceremony (executed twice on 2026-07-24: once to land the af-cp roles, once to
+  rotate the seal after a brief escrow exposure — leaked objects purged, escrow re-encrypted
+  Secret-shaped).
+
 ## Context
 
 AgentForge v1 (ADR 0018) works but is IaC-manual: agents run as host systemd units on 6 dev-worker
