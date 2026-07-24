@@ -195,3 +195,26 @@ the tenant namespace. Then delete the test workspace + its tenants-repo commit t
 - The CP fails **shut** on an empty OIDC `groups` claim — the `af:tenant-zero:owner` seed (step 1)
   is what lets the owner in. Org rows auto-provision on first login from the groups claim.
 - Access-FREE by design (ADR 0019): the CP does its own Authelia OIDC; no Cloudflare Access app.
+
+## Day-2 — LLM subscriptions operations (WS4, 2026-07-24)
+
+The Settings → Subscriptions page drives these; the CP holds NO delete/read-data privilege, so the
+following stay OPERATOR steps:
+
+- **Rotate (paste a new token/auth.json)**: fully self-service in the UI (CAS write → wait for the
+  ESO sync (≤1h) → broker `credential_generation` match). To force an immediate sync:
+  `kubectl --context admin@ai -n agentforge-broker annotate externalsecret <name> force-sync=$(date +%s) --overwrite`.
+- **Refresh now (codex only)**: UI button creates a Job from CronJob `af-codex-refresh` (VAP-pinned).
+- **Add account**: UI CAS-writes the cred, then opens an ailab PR via `agentforge-infra-bot`
+  (AGit). Review + approve (reviewer-bot) + merge per the protected-main flow; the operation
+  tracker advances to `active` once Flux/ESO/broker all report.
+- **Remove account**: UI blocks while any workspace config or deployed render references the
+  account, then opens the manifest-removal PR. AFTER merge+prune, the KV soft-delete is manual:
+  `bao kv delete -mount=af operator/broker/<provider>/<account>/oauth` (provisioner token cannot
+  and should not do this — deliberate).
+- **Claude expiry**: not derivable in-cluster (opaque ~1yr `claude setup-token`). Keep the
+  operator expiry note in the UI current when you rotate.
+- **Bot/token inventory**: `agentforge-infra-bot` (READ on ailab; token = SOPS
+  `AFP_INFRA_BOT_TOKEN`, ns agentforge) · `agentforge-reviewer-bot` (write collaborator, approvals
+  only) · `agentforge-cp-bot`/`agentforge-bootstrap-bot` (tenants commits / label bootstrap).
+  Rotate any of them with `gitea admin user generate-access-token` in the gitea pod + SOPS update.
