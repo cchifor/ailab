@@ -1,0 +1,25 @@
+# Distributes the ailab-ca CA (that signed OpenBao's server cert) into the `agentforge` namespace so
+# the control plane's WS4 subscriptions clients (roles af-cp-sub-status / af-cp-sub-rotator over
+# k8s-auth) can verify OpenBao's TLS (AFP_OPENBAO_CA_PATH -> the mounted ca.crt). Same per-namespace
+# pattern as agentforge-broker/openbao-ca-cert.yaml: there is no trust-manager in the estate, so each
+# consuming namespace mints its own `openbao-tls` Secret via a throwaway ailab-ca leaf; ONLY its
+# ca.crt (== the ailab root CA that also signed openbao-tls in the openbao ns) is consumed. Auto-renews.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-ca
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/part-of: agentforge
+    app.kubernetes.io/component: openbao-ca-ref
+spec:
+  secretName: openbao-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: openbao-ca-ref
+  dnsNames: ["openbao-ca-ref.agentforge.svc"]
+  privateKey: { algorithm: ECDSA, size: 256 }
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
