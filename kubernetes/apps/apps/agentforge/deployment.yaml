@@ -99,6 +99,40 @@ spec:
             - name: AFP_BOOTSTRAP_TOKEN
               valueFrom:
                 secretKeyRef: { name: agentforge-runtime, key: AFP_BOOTSTRAP_TOKEN }
+            # -- WS4 subscriptions (CP UX Stage 3; contracts C1-C4/C7/C8) ------------------------
+            # OpenBao endpoint for the split status/rotator clients. Scheme/address/auth-mount and
+            # the role names (af-cp-sub-status / af-cp-sub-rotator) are the Settings defaults and
+            # match the Stage-0 provisioner roles; only the CA path needs naming (mounted below).
+            - { name: AFP_OPENBAO_CA_PATH, value: "/etc/openbao-ca/ca.crt" }
+            # Aud -> broker /readyz map (C4 rotation observability). ALSO the account INVENTORY the
+            # Settings surface manages — its keys mirror the live agentforge-broker manifests, which
+            # is how the three pre-existing accounts are detected (managed=pre-existing, no adoption
+            # migration). The CP's PR-gated add/remove flow keeps BOTH maps below in sync with the
+            # broker tree in the SAME PR (R7) — hand-editing one without the other is a drift bug.
+            - name: AFP_BROKER_READYZ_URLS
+              value: >-
+                {"anthropic/claude-max-1":"http://broker-anthropic-max1.agentforge-broker.svc.cluster.local:8700/readyz",
+                 "anthropic/claude-max-2":"http://broker-anthropic-max2.agentforge-broker.svc.cluster.local:8700/readyz",
+                 "openai/codex-pro":"http://broker-openai-codex.agentforge-broker.svc.cluster.local:8700/readyz"}
+            # Aud -> broker URL map the renderer embeds into tenant sandbox renders
+            # (AF_SANDBOX_BROKER_URLS source; P2 provisioning refuses on an empty map).
+            - name: AFP_SANDBOX_BROKER_URLS
+              value: >-
+                {"anthropic/claude-max-1":"http://broker-anthropic-max1.agentforge-broker.svc.cluster.local:8700",
+                 "anthropic/claude-max-2":"http://broker-anthropic-max2.agentforge-broker.svc.cluster.local:8700",
+                 "openai/codex-pro":"http://broker-openai-codex.agentforge-broker.svc.cluster.local:8700"}
+          # WS4 (C1): the restricted agentforge-infra-bot Gitea token (AFP_INFRA_BOT_TOKEN) — the
+          # SOPS Secret has existed since Stage 0 (agentforge-infra-bot.sops.yaml); this wires it.
+          # The bot is a READ-only collaborator on cchifor/ailab: the CP can only OPEN AGit PRs
+          # (push HEAD:refs/for/main), never push branches, approve, or merge.
+          envFrom:
+            - secretRef:
+                name: agentforge-infra-bot
+          volumeMounts:
+            # ailab-ca ca.crt for the OpenBao TLS endpoint (ns-local copy, see openbao-ca-cert.yaml).
+            - name: openbao-ca
+              mountPath: /etc/openbao-ca
+              readOnly: true
           # Readiness = /readyz (executes SELECT 1 on the admin DSN) so the pod only joins the Service
           # endpoints once the platform DB is reachable + migrated — under the wait:true `apps`
           # Kustomization this also gates the go-live rollout on a usable DB (avoids /healthz false
@@ -120,3 +154,10 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
+      volumes:
+        # WS4: the OpenBao CA (ailab-ca root) — same per-ns pattern as agentforge-broker.
+        - name: openbao-ca
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
