@@ -79,6 +79,10 @@ spec:
             - name: AFP_SESSION_SECRET
               valueFrom:
                 secretKeyRef: { name: agentforge-runtime, key: AFP_SESSION_SECRET }
+            # -- per-user Gitea PAT encryption key ring (WS2): PUT /api/gitea/credential 503s without it --
+            - name: AFP_CRED_ENC_KEY
+              valueFrom:
+                secretKeyRef: { name: agentforge-runtime, key: AFP_CRED_ENC_KEY }
             # -- SPA: serve the built Vue webapp bundled at /app/webapp in the image --
             - { name: AFP_WEBAPP_DIST, value: "/app/webapp" }
             # -- server-owned worker image the CP renders into tenant Deployments. Provisioning REFUSES
