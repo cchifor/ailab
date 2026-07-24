@@ -12,6 +12,7 @@ resources:
   - agentforge-oauth.sops.yaml # OIDC client secret (Authelia client 'agentforge')
   - agentforge-db.sops.yaml # platform Postgres DSNs (AFP_APP_DSN + AFP_ADMIN_DSN, consumer copy)
   - agentforge-runtime.sops.yaml # session secret + tenants/bootstrap tokens (AFP_ runtime secrets)
+  - agentforge-infra-bot.sops.yaml # WS4 infra-bot Gitea token (AFP_INFRA_BOT_TOKEN); inert until WS4 wires it
   # GO-LIVE: the CP Deployment. Image is now a real pinned @sha256 (deployment.yaml header) and its
   # readiness probe is /readyz (DB SELECT-1), so under the wait:true `apps` Kustomization it only
   # reports Ready once the platform DB is reachable + MIGRATED. ⚠️ PRECONDITIONS before this line is

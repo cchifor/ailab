@@ -27,3 +27,5 @@ resources:
   - serviceaccount.yaml          # af-codex-refresher SA (ns agentforge-broker) — the CronJob's OpenBao identity
   - cronjob.yaml                 # the nightly refresh CronJob + its wrapper-script ConfigMap
   - ciliumnetworkpolicy.yaml     # default-deny egress except kube-dns, openbao:8200, auth.openai.com:443
+  - rbac.yaml                    # CP "Refresh now": SA agentforge-platform may get THIS CronJob + create/get Jobs
+  - admission.yaml               # VAP: any Job the CP SA creates must be EXACTLY the reviewed refresh shape

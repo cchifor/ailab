@@ -6,7 +6,12 @@
 #   1. k8s-auth login (POST v1/auth/kubernetes/login) with the pod's projected af-codex-refresher SA JWT;
 #   2. read the CURRENT auth.json field + its KV-v2 version (GET v1/af/data/...), for the check-and-set;
 #   3. agentforge-codex-refresh --skew-seconds 172800 (refresh only if <2d to access_token expiry);
-#   4. if a NEW auth.json was emitted, CAS-write it back (POST with options.cas=<ver>).
+#   4. if a NEW auth.json was emitted, CAS-write it back (POST with options.cas=<ver>);
+#   5. stamp the C2 STATUS RECORD as KV custom metadata on the same path:
+#      {credential_version, expires_at, last_refresh, outcome, last_checked} — sanitized (a version
+#      number + timestamps derived from the JWT exp, NEVER token material). The CP status surface
+#      reads METADATA only; it treats record.credential_version != current KV version as
+#      UNKNOWN/PENDING, so the stamp always names the exact version it describes.
 # refresh_tokens are SINGLE-USE/rotated, so reading the FRESHEST value and CAS-writing (concurrencyPolicy
 # Forbid + cas=<ver>) is what prevents a stale overwrite / a lost rotation.
 apiVersion: v1
@@ -24,9 +29,14 @@ data:
     #!/usr/bin/env python3
     """codex-refresh wrapper — pure-stdlib OpenBao REST client (no `bao`/`vault` CLI, no hvac needed).
 
-    Fail CLOSED: any step (login, read, refresh, CAS-write) that errors aborts the run non-zero and
-    NEVER prints token/secret material.
+    Fail CLOSED: any step (login, read, refresh, CAS-write, status stamp) that errors aborts the run
+    non-zero and NEVER prints token/secret material. A failure AFTER a successful CAS write is safe
+    to retry (backoffLimit): the retry run sees the fresh token, takes the no-op path, and re-stamps
+    the status record at the same credential_version — the record self-heals.
     """
+    import base64
+    import binascii
+    import datetime
     import json
     import os
     import ssl
@@ -57,6 +67,79 @@ data:
         with urllib.request.urlopen(req, context=_CTX, timeout=30) as resp:
             raw = resp.read()
         return json.loads(raw) if raw else {}
+
+
+    def _iso_z(dt):
+        return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+    def _jwt_exp_iso(access_token):
+        """ISO-8601 UTC of the access_token JWT `exp` claim (payload decode only, no verify).
+
+        Same decode the refresh CLI's needs_refresh does, so by the time we stamp, a malformed
+        JWT would already have failed the run. Fails CLOSED (ValueError) rather than stamping a
+        blank/undefined expiry — the record's expires_at is what the CP shows operators.
+        """
+        try:
+            seg = access_token.split(".")[1]
+            payload = json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))
+            exp = int(payload["exp"])
+        except (IndexError, KeyError, ValueError, binascii.Error, json.JSONDecodeError):
+            raise ValueError("access_token JWT has no decodable exp claim") from None
+        return _iso_z(datetime.datetime.fromtimestamp(exp, tz=datetime.timezone.utc))
+
+
+    def _norm_ts(value):
+        """Strictly parse a timestamp and RE-EMIT it normalized — never pass a raw string through.
+
+        auth.json is SECRET data; custom metadata is a lower-trust display surface, so nothing may
+        flow between them un-reconstructed (a malformed auth.json must not be able to declassify
+        arbitrary bytes). Absent/unparsable => "" (the record stays honest, the run keeps going).
+        """
+        try:
+            s = str(value).strip()
+            if not s:
+                return ""
+            return _iso_z(datetime.datetime.fromisoformat(s.replace("Z", "+00:00")))
+        except ValueError:
+            return ""
+
+
+    def _status_record(auth_doc, credential_version, outcome):
+        """Build the C2 status record — SANITIZED by construction, and BUILT BEFORE any write.
+
+        Every field is reconstructed, never copied raw: a KV version number, the expiry re-derived
+        from the JWT exp claim (raises ValueError on a non-decodable token — the caller decides
+        what that means per arm), last_refresh strictly re-parsed as a timestamp, an outcome word,
+        and a fresh last_checked stamp. Token material can never reach the record.
+        """
+        return {
+            "credential_version": str(credential_version),
+            "expires_at": _jwt_exp_iso(auth_doc["tokens"]["access_token"]),
+            "last_refresh": _norm_ts(auth_doc.get("last_refresh", "")),
+            "outcome": outcome,
+            "last_checked": _iso_z(datetime.datetime.now(datetime.timezone.utc)),
+        }
+
+
+    def _stamp_status(token, record):
+        """(5) Write the pre-built C2 record as CUSTOM METADATA on the oauth path (fail closed).
+
+        POST v1/af/metadata/... replaces the custom_metadata map wholesale, so the record is
+        always internally consistent; cas_required (a settings field) is untouched because the
+        request carries ONLY custom_metadata. Requires create/update on the metadata path — part
+        of the af-codex-refresher role since the Stage-0 provisioner change.
+        """
+        _api(
+            "POST",
+            f"{KV_MOUNT}/metadata/{KV_KEY}",
+            token=token,
+            body={"custom_metadata": record},
+        )
+        print(
+            f"status record stamped (version {record['credential_version']}, "
+            f"outcome {record['outcome']}, expires_at {record['expires_at']})"
+        )
 
 
     def main():
@@ -92,9 +175,24 @@ data:
 
         # (4) CAS-write the rotated auth.json back at the EXACT version read in (2). A racing writer bumps
         #     the version and the cas put FAILS (fail closed) rather than clobbering a newer rotation.
+        #     (Since Stage 0 the key carries cas_required=true, so a cas-less write is impossible anyway.)
+        # (5) then stamp the C2 status record — ALWAYS, on both arms, so last_checked/outcome move every
+        #     run while credential_version keeps naming the version actually in OpenBao: <ver>+1 after a
+        #     rotation (a successful cas=<ver> put lands exactly there), <ver> untouched on the no-op arm
+        #     (last_refresh likewise stays auth.json's own prior stamp — semantics unchanged by a check).
+        #     The record is BUILT (incl. the JWT exp decode) BEFORE the CAS write, so a malformed rotated
+        #     token is detected pre-persist. It is still persisted: out.json holds the freshly ROTATED
+        #     single-use refresh_token, and dropping it would strand the account into a manual browser
+        #     re-auth — a strictly worse failure than a stored-but-unusable access token. The run then
+        #     exits non-zero WITHOUT stamping, so the record keeps naming the old version and the CP
+        #     status surface shows UNKNOWN/PENDING (version mismatch) until an operator intervenes.
         if os.path.exists("/work/out.json") and os.path.getsize("/work/out.json") > 0:
             with open("/work/out.json", encoding="utf-8") as fh:
                 rotated = fh.read()
+            try:
+                record = _status_record(json.loads(rotated), version + 1, "rotated")
+            except ValueError:
+                record = None  # malformed exp in the ROTATED token — persist anyway, then fail
             _api(
                 "POST",
                 f"{KV_MOUNT}/data/{KV_KEY}",
@@ -102,8 +200,17 @@ data:
                 body={"options": {"cas": version}, "data": {FIELD: rotated}},
             )
             print(f"codex {FIELD} rotated + CAS-written (version {version} -> {version + 1})")
+            if record is None:
+                print(
+                    "codex-refresh FAILED: rotated access_token has no decodable exp; "
+                    "rotation persisted (single-use refresh_token), status NOT stamped",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            _stamp_status(token, record)
         else:
             print(f"codex {FIELD} still fresh (> skew); no refresh performed")
+            _stamp_status(token, _status_record(json.loads(current), version, "fresh"))
 
 
     if __name__ == "__main__":

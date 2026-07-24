@@ -1,0 +1,48 @@
+# CP "Refresh now" RBAC (CP UX Stage 0, contract C4): the control-plane webapp (SA
+# agentforge-platform, ns agentforge) triggers an on-demand codex refresh by creating a Job FROM
+# the af-codex-refresh CronJob (the same pattern as `kubectl create job --from=cronjob/...`), then
+# polls the created Job. That needs EXACTLY: `get` on the ONE named CronJob (to copy its jobTemplate)
+# and `create`/`get` on Jobs in this namespace — nothing else. Deliberately NOT granted: list/watch
+# (the CP names what it reads), delete (Jobs are reaped by ttlSecondsAfterFinished), patch/update,
+# and any pod/log access — the refresh OUTCOME is read from the OpenBao status record (C2 custom
+# metadata via the af-cp-sub-status role), never from pod logs. Note `create` on jobs cannot be
+# resourceName-scoped (names don't exist pre-create; k8s ignores resourceNames for create) NOR can
+# RBAC constrain a Job's TEMPLATE — so admission.yaml (agentforge-cp-refresh-now-guard) pins every
+# Job this SA creates to exactly the reviewed refresh shape (image/command/ConfigMap/volumes).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: af-cp-refresh-now
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: af-codex-refresher
+    app.kubernetes.io/component: codex-refresh
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    resourceNames: ["af-codex-refresh"]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: af-cp-refresh-now
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: af-codex-refresher
+    app.kubernetes.io/component: codex-refresh
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: af-cp-refresh-now
+subjects:
+  - kind: ServiceAccount
+    name: agentforge-platform
+    namespace: agentforge

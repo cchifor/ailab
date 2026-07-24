@@ -1,0 +1,38 @@
+# AgentForge CP infra-bot Gitea token (WS4 subscriptions — broker add/remove via PR-gated GitOps).
+#   * AFP_INFRA_BOT_TOKEN — the restricted `agentforge-infra-bot` Gitea user's access token
+#     (scope: write:repository). Contract C1: the bot is a READ-only collaborator on cchifor/ailab
+#     and opens broker-manifest PRs via the AGit flow (`git push origin HEAD:refs/for/main`) — the
+#     write:repository TOKEN scope is REQUIRED for AGit (a read:repository token is 403), while the
+#     READ repo permission keeps the bot unable to push branches, push main, approve, or merge
+#     (verified live 2026-07-24: direct-branch + main pushes rejected by the pre-receive hook /403;
+#     refs/for/main created a PR as the bot). The reviewer agent merges after its codex gate.
+#   Minted in-pod (mode-600, value never printed). Stored here as ciphertext AHEAD of its WS4
+#   consumer — nothing mounts it yet; wiring into the CP Deployment envFrom lands with WS4.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: agentforge-infra-bot
+    namespace: agentforge
+type: Opaque
+stringData:
+    AFP_INFRA_BOT_TOKEN: ENC[AES256_GCM,data:jsuL26Go6qotV6RFFEMA65Zsd46a3C19+zjQAiMNjhP6IDOA7jbZ1w==,iv:ty1PTpftWK25tNOrVK1K8tJAACZvUMkh9XYeMRWgZgg=,tag:NTyvblB4CuwvlGiT8g+IVQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBGTHZXb3cxb2lHMis2aFBQ
+            OEVtWlA5bTFFbWlIaFAyOFBHeHZnakZwNlVJCnp5cENtbzgrRkVaNnJsYmpvVXZM
+            cG9uVTRqV2ZnRGNnb2hkcy9KKzN4LzgKLS0tIGI0azYyM0daVjVVQVZuaWdFK2l0
+            SW9JQUxYZFFvbUxEQno4dStuNUI1SDAKAwT4UNJy6840kXkq343cxqGsfqqZ9E4X
+            pOMvzZXxVp0J5wdG1GfgrNK1axDRHQqTvqvqQeITpWqXGVKf2IT/kQ==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-07-24T06:40:43Z"
+    mac: ENC[AES256_GCM,data:D/THd2d0E069UmI53YGiKtxcU+Qpo1p9qU1PZm2LwHXRAxoWZkDsX9S0hXvPm2fw5qdtllhpHKuCU/CgY2UeBV7qibks0f2Rf9sLYhEMNWbwpVX8TkVPEVcKoT5C1qLkM1hlVVNlotzF7QHHUzC4YoMCSfVfithJwWehmDZS6kQ=,iv:NCX6okAJfPoCyhfo+dWLXpB+gv9YWZFPrtL7gmbtbbI=,tag:4S8MSam4XUMoJ6LMfmJyuA==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

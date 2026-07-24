@@ -1,0 +1,71 @@
+# ValidatingAdmissionPolicy — pins the SHAPE of any Job the CP creates (codex Stage-0 review
+# finding: RBAC alone cannot express "a Job FROM this CronJob" — `create` on jobs is arbitrary Job
+# creation, so a compromised CP could otherwise run arbitrary code under the write-capable
+# af-codex-refresher SA, spoof the refresher's CNP egress labels, and reach OpenBao). This policy
+# fires for EVERY Job the CP SA creates (no namespace narrowing — defense-in-depth even if the
+# RBAC ever widens) and requires the exact reviewed refresh-now shape: the single container runs
+# the reviewed wrapper (`python3 /scripts/refresh.py`) from the af-codex-refresh-script ConfigMap
+# on an orchestrator image, with no args/env/envFrom to redirect it (BAO_ADDR etc. stay the
+# wrapper's baked-in defaults), no extra containers, no host namespaces, and volumes drawn only
+# from {emptyDir, the openbao-tls CA, the script ConfigMap} — no other Secret can be mounted.
+# The af-codex-refresher SA is REQUIRED (it is the reviewed template's identity; the pinned
+# command/ConfigMap are what make that authority non-abusable). The CronJob controller's own
+# nightly Jobs are untouched (matchConditions gate on the CP SA username only).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-cp-refresh-now-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["jobs"]
+  matchConditions:
+    - name: only-agentforge-cp
+      expression: "request.userInfo.username == 'system:serviceaccount:agentforge:agentforge-platform'"
+  validations:
+    - expression: >-
+        has(object.spec.template.spec.serviceAccountName) &&
+        object.spec.template.spec.serviceAccountName == 'af-codex-refresher'
+      message: "CP refresh-now Jobs must run as the reviewed template's SA (af-codex-refresher)."
+    - expression: >-
+        size(object.spec.template.spec.containers) == 1 &&
+        object.spec.template.spec.containers.all(c,
+          c.image.startsWith('registry.chifor.me/agentforge/orchestrator@sha256:') &&
+          has(c.command) && c.command == ['python3', '/scripts/refresh.py'] &&
+          !has(c.args) && !has(c.env) && !has(c.envFrom))
+      message: "CP refresh-now Jobs must run exactly the reviewed wrapper (pinned orchestrator image, python3 /scripts/refresh.py, no args/env)."
+    - expression: >-
+        !has(object.spec.template.spec.initContainers) &&
+        !has(object.spec.template.spec.ephemeralContainers)
+      message: "CP refresh-now Jobs must not add init/ephemeral containers."
+    # restartPolicy pinned to Never (matches the reviewed CronJob jobTemplate). OnFailure would
+    # let the pinned wrapper RERUN in the same Pod after a failed refresh — replaying a single-use
+    # refresh_token flow past a successful CAS write — so the shape-pin must fix it, not leave it open.
+    - expression: >-
+        has(object.spec.template.spec.restartPolicy) &&
+        object.spec.template.spec.restartPolicy == 'Never'
+      message: "CP refresh-now Jobs must set restartPolicy: Never (no in-Pod rerun of a single-use refresh)."
+    - expression: >-
+        !has(object.spec.template.spec.hostNetwork) &&
+        !has(object.spec.template.spec.hostPID) &&
+        !has(object.spec.template.spec.hostIPC)
+      message: "CP refresh-now Jobs must not request host namespaces."
+    - expression: >-
+        !has(object.spec.template.spec.volumes) ||
+        object.spec.template.spec.volumes.all(v,
+          has(v.emptyDir) ||
+          (has(v.secret) && v.secret.secretName == 'openbao-tls') ||
+          (has(v.configMap) && v.configMap.name == 'af-codex-refresh-script'))
+      message: "CP refresh-now Jobs may mount only emptyDir, the openbao-tls CA, and the af-codex-refresh-script ConfigMap."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-cp-refresh-now-guard
+spec:
+  policyName: agentforge-cp-refresh-now-guard
+  validationActions: ["Deny"]
