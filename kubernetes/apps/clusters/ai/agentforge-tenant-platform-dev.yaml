@@ -16,10 +16,17 @@ spec:
   #   * infrastructure   — cert-manager (the openbao-ca Certificate) + Cilium CRDs.
   #   * agentforge-sandbox — provides the static NFS PVs (platform-dev-staging-pv.yaml /
   #     platform-dev-workspace-pvc.yaml) this tree's tenant-ns staging PVC binds to; ordering only.
+  #   * agentforge-tenants — the CP Kustomization that CREATES the tenant ns
+  #     af-tenant-tenant-zero-platform-dev this tree applies its objects INTO. Ordering only:
+  #     agentforge-tenants is itself wait:false (reports Ready immediately), so this dependsOn is a
+  #     pure sequencing hint (ns-before-objects) and can never health-gate/wedge this tree on tenant
+  #     churn. Without it the SecretStore/ExternalSecret/PVC/Certificate error-retry until the ns
+  #     appears (harmless under wait:false, but this removes the reconcile churn).
   dependsOn:
     - name: infrastructure
     - name: external-secrets
     - name: agentforge-sandbox
+    - name: agentforge-tenants
   sourceRef:
     kind: GitRepository
     name: flux-system
