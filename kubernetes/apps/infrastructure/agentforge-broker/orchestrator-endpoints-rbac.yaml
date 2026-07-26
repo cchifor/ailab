@@ -41,3 +41,9 @@ subjects:
   - kind: ServiceAccount
     name: af-orch-playground-planner
     namespace: af-tenant-tenant-zero-playground
+  # platform-dev/delivery subscription worker (org=tenant-zero, workspace=platform-dev, pool=delivery).
+  # Same af-orch-<workspace>-<pool> SA in af-tenant-<org>-<workspace> shape as the playground subject above;
+  # its orchestrator resolves broker Endpoints -> pod IPs for the Kata sandbox path (additive, read-only).
+  - kind: ServiceAccount
+    name: af-orch-platform-dev-delivery
+    namespace: af-tenant-tenant-zero-platform-dev
