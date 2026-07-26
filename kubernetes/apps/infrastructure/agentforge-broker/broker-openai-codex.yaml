@@ -317,6 +317,19 @@ spec:
       toPorts:
         - ports:
             - { port: "8700", protocol: TCP }
+    # (1b) platform-dev/delivery subscription worker (tenant-zero) — its sandbox AGENT pods, matched on the
+    #      SAME STABLE per-pool/org/workspace identity labels as the playground admission above. Additive:
+    #      mirrors (1) exactly with pool=delivery / workspace=platform-dev; preserves the playground admission.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: agentforge-sandbox
+            agentforge.io/trust-class: agent
+            agentforge.io/pool: delivery
+            agentforge.io/org: tenant-zero
+            agentforge.io/workspace: platform-dev
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
     # (2) Prometheus metrics scrape — SEPARATE, scoped to the metrics port ONLY.
     - fromEndpoints:
         - matchLabels:
