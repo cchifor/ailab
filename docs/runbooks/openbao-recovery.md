@@ -24,8 +24,10 @@ image** — its `provisioner/bootstrap.py` defines every policy/role/seed that r
   `options.cas`**) each entry of the decrypted `openbao-operator-seeds` blob (`operator-seeds.sops.yaml`,
   `kind: Secret`, single encrypted `stringData.seeds.json`, a flat `{ "<path>": { "<field>": "<value>" } }`)
   to `af/data/<logical_path>`. **Hard constraint — seed only NON-CAS paths:** the broker `oauth` paths are
-  `cas_required=true` (contract C3) and a no-CAS seed write would **fail closed**. Never add a `.../oauth`
-  path (nor `.../kids` or `tenants/*`) to `seeds.json` unless `bootstrap.py` is first changed to CAS-write.
+  `cas_required=true` (contract C3) and a no-CAS seed write would **fail closed** (seeding an oauth path
+  would first require `bootstrap.py` to CAS-write). `.../kids` and `tenants/*` must **NEVER** be seeded
+  regardless of CAS — they are lifecycle/owner-managed (broker keypair lifecycle / control plane), not
+  static values.
 
 ### Post-wipe handling, by path class
 
@@ -59,8 +61,11 @@ image** — its `provisioner/bootstrap.py` defines every policy/role/seed that r
    sha-verify pod==source, then in-pod with the durable operator-provisioner token (Secret
    `openbao-operator-provisioner-token`; the pod listens HTTPS so use `BAO_ADDR=https://127.0.0.1:8200
    BAO_SKIP_VERIFY=true` — MSYS `curl` is Schannel and `--cacert` fails exit 60):
-   `bao kv put -cas=<current_version|0> -mount=af operator/broker/<broker>/oauth auth.json=@/tmp/f`
-   then re-stamp `bao kv metadata put -cas-required=true ...`. Verify the read-back sha equals the
+   `bao kv put -cas=<current_version|0> -mount=af operator/broker/<broker>/oauth <field>=@/tmp/f`.
+   **The field name is provider-specific** — `CLAUDE_CODE_OAUTH_TOKEN` for the two anthropic
+   `claude-max-{1,2}` brokers, `auth.json` for `openai/codex-pro` (the ESO extract copies the whole doc, so
+   the wrong key would sync a wrong-shaped Secret). Then re-stamp `bao kv metadata put -cas-required=true
+   ...`. Verify the read-back sha equals the
    broker's `/readyz` `credential_generation` (:8700), force-annotate the matching `broker-*-oauth`
    ExternalSecret (`force-sync="$(date +%s)"`), confirm `SecretSynced=True`, and delete `/tmp/f`.
    **The `bao kv put` is classifier-BLOCKED (shared-infra mutation) — the OPERATOR runs the ready
