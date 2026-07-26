@@ -1,0 +1,103 @@
+# platform-dev sandbox NFS subdir provisioner — IaC replacement for the MANUAL operator
+# `mkdir -m 0777` prerequisite (documented in workspace-pvc.yaml, and in #121's
+# platform-dev-workspace-pvc.yaml header: "OPERATOR PREREQUISITE ... `mkdir -m 0777` the per-org/ws
+# export subdir on the NFS server BEFORE this binds usefully"). The 100%-IaC mandate replaces that
+# hand step with this Flux-reconciled Job.
+#
+# WHY: the tenant-zero/platform-dev static NFS PVs (ailab #121, branch feat/platform-dev-sandbox-eso:
+#   platform-dev-workspace-pvc.yaml + platform-dev-staging-pv.yaml) both bind to the SINGLE per-org/ws
+#   export subdir 10.55.0.254:/pve-nfs/agentforge-sandbox/tenant-zero/platform-dev (NOT a staging/
+#   workspace pair — all consumers share one subdir, per-job <job-id> dirs are carved under it at
+#   runtime by the orchestrator, exactly like playground's tenant-zero/playground). A static NFS PV
+#   binds even when its server path is missing, but the first pod to MOUNT it fails with
+#   "no such file or directory" until the subdir exists. This Job creates it so #121's PVs mount cleanly.
+#
+# GROUND TRUTH (stat via the live reaper mount of the playground subdir):
+#   /pve-nfs/agentforge-sandbox/tenant-zero/playground -> uid=0 gid=0 mode=0777 (drwxrwxrwx)
+#   The manual step created the subdir root:root 0777. mode 0777 (NOT ownership) is what lets uid 65532
+#   — the sandbox securityContext runAsUser/runAsGroup (sandbox-guard.yaml validation 3) — AND the
+#   orchestrator/reaper uids all read+write, and it sidesteps the NFS-ignores-fsGroup caveat
+#   (workspace-pvc.yaml). This Job creates the platform-dev subdir the same way (root:root on a fresh
+#   create) and idempotently enforces its existence + mode 0777 on every re-run (ownership of a
+#   pre-existing dir is left untouched — 0777 is the load-bearing bit, not ownership).
+#
+# WHERE / PSA: runs in the `agentforge` namespace (the reaper's trusted home; baseline PSA — already a
+#   target of this Kustomization via reaper-*.yaml). It CANNOT live in agentforge-sandbox: restricted
+#   PSA forbids inline `nfs:` volumes, and sandbox-guard/sandbox-job-guard reject any non-Kata pod/Job.
+#   It mounts the PARENT export directly (nfs volume) and mkdirs the single per-org/ws leaf.
+#
+# ROOT: the parent `tenant-zero` dir is operator-owned (not sandbox-writable), so creating a child
+#   under it needs root — the same privilege the manual `mkdir` used. no_root_squash is confirmed (the
+#   playground leaf is root:root, i.e. a root-created dir stayed root-owned rather than squashing to
+#   nobody). No privilege beyond that: drop ALL caps, no privilege escalation, read-only rootfs.
+#
+# IDEMPOTENT + SELF-HEALING: `mkdir -p` + `chmod 0777` are safe to re-run. This Kustomization
+#   (clusters/ai/agentforge-sandbox.yaml) is wait:false, so this Job never health-gates anything; the
+#   completed Job is TTL-reaped and Flux may re-apply it on its interval — harmless, and it re-creates
+#   the subdir should the NAS ever lose it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: af-sbx-provision-tenant-zero-platform-dev
+  namespace: agentforge # reaper's trusted home (baseline PSA); NOT agentforge-sandbox (restricted)
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    app.kubernetes.io/component: sandbox-nfs-provisioner
+    agentforge.io/org: tenant-zero
+    agentforge.io/workspace: platform-dev
+    agentforge.io/role: sandbox-provisioner
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 3600 # auto-clean an hour after completion (mirrors litellm-db-bootstrap)
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: agentforge-operator
+        app.kubernetes.io/part-of: agentforge
+        app.kubernetes.io/component: sandbox-nfs-provisioner
+        agentforge.io/org: tenant-zero
+        agentforge.io/workspace: platform-dev
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      automountServiceAccountToken: false # no kube-API access needed
+      securityContext:
+        # root: the export is no_root_squash and the operator-owned parent dir is not sandbox-writable,
+        # so mkdir under it needs root (same as the manual `mkdir`). Baseline PSA permits root.
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: provision
+          image: mirror.gcr.io/library/busybox:1.38 # estate registry-mirror cache (avoids Docker Hub anon 429)
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              DIR=/export/tenant-zero/platform-dev
+              mkdir -p "$DIR"
+              chmod 0777 "$DIR"
+              stat -c 'provisioned %n uid=%u gid=%g mode=%a' "$DIR"
+              echo "platform-dev sandbox NFS subdir ready (idempotent)"
+          volumeMounts:
+            - name: sandbox-export
+              mountPath: /export
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: sandbox-export
+          nfs:
+            server: 10.55.0.254 # QNAP storage-fabric IP (matches the platform-dev PVs)
+            path: /pve-nfs/agentforge-sandbox # PARENT export; the Job mkdirs tenant-zero/platform-dev under it
