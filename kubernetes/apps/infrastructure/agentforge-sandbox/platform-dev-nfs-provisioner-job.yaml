@@ -24,7 +24,8 @@
 # WHERE / PSA: runs in the `agentforge` namespace (the reaper's trusted home; baseline PSA — already a
 #   target of this Kustomization via reaper-*.yaml). It CANNOT live in agentforge-sandbox: restricted
 #   PSA forbids inline `nfs:` volumes, and sandbox-guard/sandbox-job-guard reject any non-Kata pod/Job.
-#   It mounts the PARENT export directly (nfs volume) and mkdirs the single per-org/ws leaf.
+#   It mounts the PARENT export via a dedicated static PV+PVC (platform-dev-nfs-provisioner-storage.yaml,
+#   so the mount carries mountOptions [nfsvers=4.0, hard, nconnect=4]) and mkdirs the per-org/ws leaf.
 #
 # ROOT: the parent `tenant-zero` dir is operator-owned (not sandbox-writable), so creating a child
 #   under it needs root — the same privilege the manual `mkdir` used. no_root_squash is confirmed (the
@@ -71,7 +72,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: provision
-          image: mirror.gcr.io/library/busybox:1.38 # estate registry-mirror cache (avoids Docker Hub anon 429)
+          image: mirror.gcr.io/library/busybox:1.38@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d # estate registry-mirror cache (avoids Docker Hub anon 429); digest-pinned (immutable) per estate convention — tag kept for readability
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -97,7 +98,11 @@ spec:
               cpu: 100m
               memory: 64Mi
       volumes:
+        # Mount the PARENT export via a dedicated static PV+PVC (platform-dev-nfs-provisioner-storage.yaml)
+        # rather than an inline `nfs:` volume, so the mount carries mountOptions [nfsvers=4.0, hard,
+        # nconnect=4] — an inline nfs volume can't set them, and QuTS hero NFS rejects the kernel-default
+        # 4.1 (codex finding, ailab #123). The PVC binds to the parent-export PV; the Job mkdirs
+        # tenant-zero/platform-dev under it.
         - name: sandbox-export
-          nfs:
-            server: 10.55.0.254 # QNAP storage-fabric IP (matches the platform-dev PVs)
-            path: /pve-nfs/agentforge-sandbox # PARENT export; the Job mkdirs tenant-zero/platform-dev under it
+          persistentVolumeClaim:
+            claimName: af-sbx-provision-tenant-zero-platform-dev

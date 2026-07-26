@@ -1,0 +1,65 @@
+# PROVISIONER PV+PVC — the subdir-provisioner Job's view of the shared NFS export, in the reaper's
+# TRUSTED home namespace `agentforge` (same ns the Job runs in; baseline PSA). Mirrors the PV/PVC shape
+# of reaper-storage.yaml / staging-pv.yaml / workspace-pvc.yaml (storageClassName "" static bind,
+# claimRef pre-binding, accessModes RWX, capacity 5Gi, reclaim Retain, mountOptions).
+#
+# WHY a PV/PVC instead of an inline `nfs:` volume (codex finding, ailab #123): an inline `nfs:` volume
+# CANNOT set mountOptions, so the Job negotiated the kernel-default NFS version. Every OTHER consumer of
+# this export pins `nfsvers=4.0` because QuTS hero NFS rejects 4.1 (see workspace-pvc.yaml). Routing the
+# mount through a PV lets it carry the SAME mountOptions and matches the estate's static-NFS convention.
+#
+# DELIBERATE DEVIATION from the sibling PVs: those scope nfs.path to the per-org/ws leaf
+# (…/tenant-zero/<ws>) for tenant isolation. THIS PV must reach the PARENT export
+# 10.55.0.254:/pve-nfs/agentforge-sandbox because its whole job is to CREATE the tenant-zero/platform-dev
+# leaf under it (the operator-owned `tenant-zero` dir is not sandbox-writable, so the Job mkdirs the leaf
+# as root — same privilege the manual `mkdir -m 0777` used). The claimRef (agentforge ns +
+# af-sbx-provision-tenant-zero-platform-dev) still pre-binds it to exactly one PVC, so no other claim can
+# grab this parent-scoped PV. reclaim Retain so the export is never auto-deleted.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: af-sbx-provision-tenant-zero-platform-dev
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
+    agentforge.io/workspace: platform-dev
+    agentforge.io/role: sandbox-provisioner
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  storageClassName: "" # static bind — do NOT let the nfs-csi default class provision this
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4.0 # QuTS hero NFS rejects 4.1; 4.0 is single-port + NAT-friendly (matches storageclass-nfs)
+    - hard
+    - nconnect=4
+  nfs:
+    server: 10.55.0.254 # QNAP storage-fabric IP (matches the platform-dev PVs)
+    path: /pve-nfs/agentforge-sandbox # PARENT export; the Job mkdirs tenant-zero/platform-dev under it
+  # Pre-bind to exactly this PVC so no other claim can grab this parent-scoped PV (cross-consumer safety).
+  claimRef:
+    namespace: agentforge
+    name: af-sbx-provision-tenant-zero-platform-dev
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: af-sbx-provision-tenant-zero-platform-dev
+  namespace: agentforge # the provisioner Job's ns (reaper's trusted home; baseline PSA)
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
+    agentforge.io/workspace: platform-dev
+    agentforge.io/role: sandbox-provisioner
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: "" # bind to the static PV above, not the dynamic default
+  volumeName: af-sbx-provision-tenant-zero-platform-dev
+  resources:
+    requests:
+      storage: 5Gi
