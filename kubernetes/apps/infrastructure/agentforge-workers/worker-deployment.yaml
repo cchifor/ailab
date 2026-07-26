@@ -157,6 +157,7 @@ spec:
               value: >-
                 {"anthropic/claude-max-1":"http://broker-anthropic-max1.agentforge-broker.svc.cluster.local:8700",
                  "anthropic/claude-max-2":"http://broker-anthropic-max2.agentforge-broker.svc.cluster.local:8700",
+                 "anthropic/claude-max-3":"http://broker-anthropic-claude-max-3.agentforge-broker.svc.cluster.local:8700",
                  "openai/codex-pro":"http://broker-openai-codex.agentforge-broker.svc.cluster.local:8700"}
             # Resolve those broker Service FQDNs to a ready endpoint POD IP at Job creation (REQUIRED for
             # Kata; see above). The orchestrator does the lookup via the apiserver; the agent never does DNS.
