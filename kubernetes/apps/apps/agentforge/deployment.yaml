@@ -117,6 +117,7 @@ spec:
               value: >-
                 {"anthropic/claude-max-1":"http://broker-anthropic-max1.agentforge-broker.svc.cluster.local:8700/readyz",
                  "anthropic/claude-max-2":"http://broker-anthropic-max2.agentforge-broker.svc.cluster.local:8700/readyz",
+                 "anthropic/claude-max-3":"http://broker-anthropic-claude-max-3.agentforge-broker.svc.cluster.local:8700/readyz",
                  "openai/codex-pro":"http://broker-openai-codex.agentforge-broker.svc.cluster.local:8700/readyz"}
             # Aud -> broker URL map the renderer embeds into tenant sandbox renders
             # (AF_SANDBOX_BROKER_URLS source; P2 provisioning refuses on an empty map).
@@ -124,6 +125,7 @@ spec:
               value: >-
                 {"anthropic/claude-max-1":"http://broker-anthropic-max1.agentforge-broker.svc.cluster.local:8700",
                  "anthropic/claude-max-2":"http://broker-anthropic-max2.agentforge-broker.svc.cluster.local:8700",
+                 "anthropic/claude-max-3":"http://broker-anthropic-claude-max-3.agentforge-broker.svc.cluster.local:8700",
                  "openai/codex-pro":"http://broker-openai-codex.agentforge-broker.svc.cluster.local:8700"}
           # WS4 (C1): the restricted agentforge-infra-bot Gitea token (AFP_INFRA_BOT_TOKEN) — the
           # SOPS Secret has existed since Stage 0 (agentforge-infra-bot.sops.yaml); this wires it.
