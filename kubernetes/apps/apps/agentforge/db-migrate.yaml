@@ -88,11 +88,11 @@ spec:
             capabilities: { drop: ["ALL"] }
       containers:
         - name: migrate
-          # Same image + digest as the CP Deployment (agentforge-platform tag 2776074 / 27760744…).
+          # Same image + digest as the CP Deployment (agentforge-platform tag 276ccad / 276ccad857…, PR #18).
           # Repo path `agentforge/agentforge-platform` (CI push target) — NOT `cchifor/…`. The migrate
           # entrypoint is `agentforge-platform migrate` = alembic upgrade head as admin_dsn (verified in
           # the image config Entrypoint + main.py CLI). Keep this digest in lockstep with deployment.yaml.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:92f31d12dd949ee610f875b824757e616d3f06c1c110b2a913a7915cf1d17d7e
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:c3b015d5e27aee40c17fa56995c9a73234f964deefc74db5cd404e0ff50fcdd3
           command: ["agentforge-platform", "migrate"]
           env:
             # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
