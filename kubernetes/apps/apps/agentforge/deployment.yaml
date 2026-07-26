@@ -49,11 +49,14 @@ spec:
         - name: platform
           # Pinned to the immutable @sha256 of the built image. Repo path is `agentforge/agentforge-platform`
           # (matches the platform CI push target + the sibling `agentforge/p1-worker` convention) — NOT
-          # `cchifor/…`, which CI never populates. Digest = OCI index of tag `2776074` (agentforge-platform
-          # origin/main HEAD 27760744…, feat #8); verified tag→digest equality + linux/amd64 + Entrypoint
-          # `[agentforge-platform] serve` + AFP_WEBAPP_DIST set. Re-verify the tag still resolves to this
-          # digest before merging the go-live PR; fail closed if it moved.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:92f31d12dd949ee610f875b824757e616d3f06c1c110b2a913a7915cf1d17d7e
+          # `cchifor/…`, which CI never populates. Digest = OCI index of tag `276ccad` (agentforge-platform
+          # origin/main HEAD 276ccad857…, PR #18 "fix(renderer): emit complete broker-auth wiring for sandbox
+          # workspaces" — the renderer now emits AF_CAPABILITY_ISS=af-orch-<org> + AF_SANDBOX_RESOLVE_BROKER_
+          # ENDPOINTS=true for v1.1 subscription workspaces). Built by a verified Images workflow_dispatch run;
+          # verified tag→digest equality (short `276ccad` + full-SHA tags resolve to the SAME digest) +
+          # linux/amd64. Entrypoint unchanged from the Dockerfile (`serve`; migrate variant in db-migrate.yaml).
+          # Re-verify the tag still resolves to this digest before merging the go-live PR; fail closed if it moved.
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:c3b015d5e27aee40c17fa56995c9a73234f964deefc74db5cd404e0ff50fcdd3
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
