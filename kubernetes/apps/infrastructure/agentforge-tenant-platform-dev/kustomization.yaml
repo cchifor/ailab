@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AgentForge v2 — OPERATOR-owned tenant-ns halves for the CP-created tenant-zero/platform-dev v1.1
+# subscription workspace (pool `delivery`). platform-dev's namespace + orchestrator + Role/RoleBinding +
+# ConfigMap + NetworkPolicy + Deployment are CP-rendered from the cchifor/agentforge-tenants repo
+# (Flux Kustomization `agentforge-tenants`); this tree adds the pieces the CP render does NOT/CANNOT
+# provide for THIS (stale, pre-ESO) workspace: the ESO credential path + the openbao-tls CA + the
+# tenant-ns staging PVC. Its OWN directory + Flux Kustomization (clusters/ai/agentforge-tenant-platform-dev.yaml)
+# so it can't collide with the apps layer or the agentforge-sandbox/agentforge-workers trees.
+#
+# The sandbox-boundary halves (the two static NFS PVs + the sandbox-ns workspace PVC + the orchestrator
+# RoleBinding subject) live in agentforge-sandbox/ (platform-dev-*.yaml + orchestrator-rbac.yaml) — same
+# split as playground.
+resources:
+  - openbao-ca-cert.yaml # per-ns openbao-tls ca.crt (ailab-ca) for the ESO caProvider (operator-only; CP never emits it)
+  - eso-secretstore.yaml # eso-auth SA af-eso-platform-dev + namespaced OpenBao SecretStore
+  - externalsecret.yaml # af-creds-platform-dev-delivery ExternalSecret (fills the orchestrator creds from OpenBao)
+  - staging-pvc.yaml # TENANT ns: af-sbx-stage-tenant-zero-platform-dev PVC (binds the operator staging PV)

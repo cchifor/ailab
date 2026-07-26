@@ -60,3 +60,10 @@ subjects:
   - kind: ServiceAccount
     name: af-orch-playground-planner
     namespace: af-tenant-tenant-zero-playground
+  # tenant-zero/platform-dev subscription workspace (pool `delivery`) — the CP renderer names its
+  # orchestrator SA `af-orch-<workspace>-<pool>` = af-orch-platform-dev-delivery in the CP-rendered
+  # tenant ns af-tenant-tenant-zero-platform-dev. It shares this sandbox ns, so it needs the same
+  # Jobs-only grant to create/reap its sandbox Jobs + CAS its owner-lease.
+  - kind: ServiceAccount
+    name: af-orch-platform-dev-delivery
+    namespace: af-tenant-tenant-zero-platform-dev

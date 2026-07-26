@@ -1,0 +1,37 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agentforge-tenant-platform-dev
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  # OPERATOR-owned tenant-ns halves for the CP-created tenant-zero/platform-dev v1.1 subscription
+  # workspace (the ESO credential path + openbao-tls CA + tenant-ns staging PVC). Its OWN
+  # path/Kustomization (mirrors agentforge-workers) so it can't collide with the apps layer, the
+  # agentforge-sandbox tree, or the CP-owned `agentforge-tenants` Kustomization that renders
+  # platform-dev's ns/orchestrator/Deployment. dependsOn:
+  #   * external-secrets — installs the external-secrets.io/v1 CRDs (SecretStore/ExternalSecret).
+  #   * infrastructure   — cert-manager (the openbao-ca Certificate) + Cilium CRDs.
+  #   * agentforge-sandbox — provides the static NFS PVs (platform-dev-staging-pv.yaml /
+  #     platform-dev-workspace-pvc.yaml) this tree's tenant-ns staging PVC binds to; ordering only.
+  dependsOn:
+    - name: infrastructure
+    - name: external-secrets
+    - name: agentforge-sandbox
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/agentforge-tenant-platform-dev
+  prune: true
+  # wait:false so the ExternalSecret staying NotReady (until the OpenBao KV subtree is completed —
+  # Phase-2 step 3) can never wedge this or any dependent Flux Kustomization; the SA/SecretStore/
+  # Certificate/PVC still apply immediately.
+  wait: false
+  # decryption (SOPS) retained for symmetry with the sibling operator trees — currently no SOPS Secret
+  # here (creds are ESO-synced from OpenBao, not SOPS).
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

@@ -1,0 +1,49 @@
+# STAGING PV for the tenant-zero/platform-dev orchestrator (tenant ns) — the operator half of the
+# cross-namespace share. Clone of staging-pv.yaml (playground) for the CP-created workspace
+# `platform-dev` (pool `delivery`). The orchestrator runs in the CP-rendered TENANT namespace
+# (af-tenant-tenant-zero-platform-dev) and stages each job's cwd into <staging_root>/<job-id>/ before
+# creating the sandbox Job. A PVC is namespace-scoped, so the tenant-ns PVC (bound to this PV) is
+# provided in agentforge-tenant-platform-dev/staging-pvc.yaml; the PV itself is cluster-scoped +
+# operator-owned, so the OPERATOR provides it here and pre-binds it (claimRef) to that PVC.
+#
+# CONTRACT (must match the renderer's tenant-ns PVC byte-for-byte, or the PVC will not bind):
+#   PVC  name:            af-sbx-stage-tenant-zero-platform-dev
+#        namespace:       af-tenant-tenant-zero-platform-dev
+#        accessModes:     [ReadWriteMany]
+#        storageClassName: ""            (static bind; NOT the nfs-csi default)
+#        volumeName:      af-sbx-stage-tenant-zero-platform-dev
+#        requests.storage: 5Gi
+#   The orchestrator mounts that PVC at AF_SANDBOX_STAGING_ROOT=/workspace/agentforge/sandbox so
+#   <staging_root>/<job-id>/ resolves to <export>/<job-id> — the SAME NFS bytes the sandbox mounts at
+#   /workspace (subPath <job-id>).
+#
+# Same shared export + mountOptions as the workspace PV (platform-dev-workspace-pvc.yaml).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: af-sbx-stage-tenant-zero-platform-dev
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
+    agentforge.io/workspace: platform-dev
+    agentforge.io/role: sandbox-staging
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4.0
+    - hard
+    - nconnect=4
+  nfs:
+    server: 10.55.0.254
+    path: /pve-nfs/agentforge-sandbox/tenant-zero/platform-dev # SAME per-org/ws subdir as af-sbx-ws-*
+  # Pre-bind to the tenant-ns PVC (name+namespace above). Because this claimRef names a specific
+  # ns/name, only that exact PVC can bind — a different tenant can't hijack the staging PV.
+  claimRef:
+    namespace: af-tenant-tenant-zero-platform-dev
+    name: af-sbx-stage-tenant-zero-platform-dev
