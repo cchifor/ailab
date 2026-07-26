@@ -1,0 +1,47 @@
+# Reconciler-confinement guard for the OPERATOR-owned capability-kid policy ConfigMap (codex [CHANGE]).
+#
+# WHY ADMISSION, NOT RBAC: the CP `agentforge-tenants-reconciler` SA holds CLUSTER-WIDE `configmaps:
+# create/update/patch/delete` (reconciler-rbac.yaml) — it MUST, because it manages arbitrarily-named
+# ConfigMaps (e.g. af-orch-<ws>-<pool>) in DYNAMICALLY-created af-tenant-* namespaces and Flux prunes
+# them. RBAC cannot express "all ConfigMaps EXCEPT openbao/agentforge-capability-kids": `resourceNames`
+# does not scope create/list/watch and cannot enumerate the dynamic tenant ConfigMap names, and RBAC has
+# no deny/exclude. So the confinement is done where the estate already boxes this identity in — admission.
+#
+# The main tenant-guard VAP pins the reconciler's CREATE/UPDATE to af-tenant-* namespaces (so it already
+# cannot CREATE/UPDATE openbao/agentforge-capability-kids), but it dereferences `object` and so matches
+# only CREATE/UPDATE — DELETE slips through (exactly the gap tenant-reserved-guard.yaml closes for the
+# reserved namespace). This VAP denies the reconciler ALL writes (CREATE/UPDATE/DELETE) to that single
+# ConfigMap: request.name/request.namespace are populated for a fixed-name namespaced ConfigMap on every
+# one of those verbs. Every OTHER reconciler ConfigMap write (the real tenant ConfigMaps) is admitted
+# unchanged. The operator's own main-Flux identity is unaffected and remains free to manage this object.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentforge-capability-kids-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["configmaps"]
+        scope: "Namespaced"
+  matchConditions:
+    # Governs ONLY the CP tenant reconciler SA; the operator's main-Flux identity is unaffected.
+    - name: only-tenant-reconciler
+      expression: "request.userInfo.username == 'system:serviceaccount:flux-system:agentforge-tenants-reconciler'"
+  validations:
+    # Admit unless the target is exactly openbao/agentforge-capability-kids. request.name and
+    # request.namespace are set for a namespaced ConfigMap on CREATE/UPDATE/DELETE alike.
+    - expression: >-
+        !(has(request.namespace) && request.namespace == 'openbao' && request.name == 'agentforge-capability-kids')
+      message: "openbao/agentforge-capability-kids is OPERATOR-owned (capability-kid policy) — the CP tenant reconciler may not create, update, or delete it."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentforge-capability-kids-guard
+spec:
+  policyName: agentforge-capability-kids-guard
+  validationActions: ["Deny"]

@@ -1,0 +1,80 @@
+# OPERATOR-OWNED capability-kid policy (AgentForge v2, agentforge #55 @28c2252). The provisioner
+# controller reads this file (AF_PROVISIONER_KID_POLICY_FILE, provisioner-deploy.yaml) and, per tenant
+# entry, mints a per-(tenant,workspace,pool) capability SIGNING kid whose ceilings are EXACTLY the values
+# below — publishing the PUBLIC half to every broker, then committing the private half ONLY after the
+# activation barrier proves every broker replica serves the public kid (fail-closed).
+#
+# SCHEMA (WS1; parsed by agentforge/provisioner/capability_kid.py `load_capability_kid_config`, JSON):
+#   top-level map keyed by the tenant NAMESPACE name `af-tenant-<org>-<ws>` (MUST equal
+#   derive_ns_name(org, ws) — fail-closed if not). Each entry:
+#     { org, workspace, pool, issuer, audiences: [ { audience:"<provider>/<account>",
+#       allowed_models:[...], allowed_routes:[...], allowed_methods:[...],
+#       max_ttl_s, max_token_budget, max_rate_limit, max_concurrency } ] }
+#   Validation (fail-closed): org/workspace/pool are canonical slugs (^[a-z0-9]+(?:-[a-z0-9]+)*$, len
+#   1-63, reserved {tenants,operator}); each `audience` is exactly <provider>/<account> (split on one
+#   `/`, both halves canonical slugs); duplicate audiences rejected; each allowed_* is a NON-EMPTY list
+#   of non-empty strings; each max_* is a non-negative integer. NOTE: allowed_tenants/workspaces/pools
+#   are LOCKED by the provisioner to {org}/{workspace}/{pool} — they are NOT set here.
+#
+# OWNERSHIP: managed-by=agentforge-operator. This ConfigMap is OPERATOR-owned and MUST NOT be writable
+# by the CP tenants-reconciler — enforced in admission by agentforge-capability-kids-guard.yaml (the
+# reconciler holds cluster-wide `configmaps: delete` for dynamic af-tenant-* namespaces; that VAP denies
+# it DELETE of THIS object, closing the gap the CREATE/UPDATE-only tenant-guard leaves open).
+#
+# GROUND TRUTH: the platform-dev/delivery entry MIRRORS the LIVE tenant-zero/playground kid registry
+# (the running broker-*-kids registry.json ceilings on 2026-07-26) per audience — the same three
+# accounts the delivery pool uses (planner/implementer/reviewer -> claude_max on anthropic/claude-max-1,
+# codex cross-review -> openai/codex-pro, with anthropic/claude-max-2 the identically-entitled spare
+# Claude account). Values are the operator ceiling, NOT invented.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentforge-capability-kids
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: agentforge-capability-kids
+    app.kubernetes.io/component: capability-kid-policy
+    app.kubernetes.io/part-of: agentforge
+    app.kubernetes.io/managed-by: agentforge-operator
+data:
+  capability-kids.json: |
+    {
+      "af-tenant-tenant-zero-platform-dev": {
+        "org": "tenant-zero",
+        "workspace": "platform-dev",
+        "pool": "delivery",
+        "issuer": "af-orch-tenant-zero",
+        "audiences": [
+          {
+            "audience": "anthropic/claude-max-1",
+            "allowed_models": ["claude-haiku-4-5", "claude-opus-4-8", "claude-sonnet-5"],
+            "allowed_routes": ["/v1/messages", "/v1/messages/count_tokens"],
+            "allowed_methods": ["POST"],
+            "max_ttl_s": 3600,
+            "max_token_budget": 2000000,
+            "max_rate_limit": 120,
+            "max_concurrency": 4
+          },
+          {
+            "audience": "anthropic/claude-max-2",
+            "allowed_models": ["claude-haiku-4-5", "claude-opus-4-8", "claude-sonnet-5"],
+            "allowed_routes": ["/v1/messages", "/v1/messages/count_tokens"],
+            "allowed_methods": ["POST"],
+            "max_ttl_s": 3600,
+            "max_token_budget": 2000000,
+            "max_rate_limit": 120,
+            "max_concurrency": 4
+          },
+          {
+            "audience": "openai/codex-pro",
+            "allowed_models": ["gpt-5.3-codex", "gpt-5.5", "gpt-5.6"],
+            "allowed_routes": ["/v1/responses", "/v1/responses/compact"],
+            "allowed_methods": ["POST"],
+            "max_ttl_s": 3600,
+            "max_token_budget": 2000000,
+            "max_rate_limit": 120,
+            "max_concurrency": 4
+          }
+        ]
+      }
+    }

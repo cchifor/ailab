@@ -36,10 +36,20 @@
 #   (clusters/ai/agentforge-sandbox.yaml) is wait:false, so this Job never health-gates anything; the
 #   completed Job is TTL-reaped and Flux may re-apply it on its interval — harmless, and it re-creates
 #   the subdir should the NAS ever lose it.
+#
+# CONTENT-ADDRESSED NAME (durable against future spec changes): a Job's `spec.template` is IMMUTABLE, so
+#   editing this Job in place while a prior (often still-TTL-present) Job exists wedges Flux with
+#   "field is immutable". The name therefore carries a 10-hex suffix = sha256(image + "\n---\n" + args
+#   shell-script)[:10]. ANY change to the container image or the script changes the suffix → a NEW Job is
+#   created and the superseded one is Flux-PRUNED (this Kustomization has prune:true) — never a failed
+#   in-place patch. Chosen over Kustomization-wide `spec.force:true` (which would delete+recreate the
+#   BOUND Retain PVs this shared Kustomization also owns — reaper/workspace/staging) and over a per-object
+#   force annotation (not supported by this Flux). ⚠ RECOMPUTE the suffix whenever you edit image/args:
+#     img=<image>; body=<args script>; printf '%s\n---\n%s' "$img" "$body" | sha256sum | cut -c1-10
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: af-sbx-provision-tenant-zero-platform-dev
+  name: af-sbx-provision-tenant-zero-platform-dev-b1ae113c61 # suffix = sha256(image+args)[:10] — recompute on edit (header)
   namespace: agentforge # reaper's trusted home (baseline PSA); NOT agentforge-sandbox (restricted)
   labels:
     app.kubernetes.io/managed-by: agentforge-operator
