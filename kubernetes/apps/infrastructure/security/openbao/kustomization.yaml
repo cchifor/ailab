@@ -13,6 +13,7 @@ resources:
   - unsealer.yaml # `agentforge openbao-unseal --loop` Deployment + egress CiliumNetworkPolicy
   - provision-job.yaml # `agentforge openbao-provision` — af mount + k8s auth + policies + scoped token
   - operator-seeds.sops.yaml # SOPS seed values (dispatcher PAT + reaper DSN) mounted into provision-job
+  - capability-kids-configmap.yaml # OPERATOR-owned capability-kid policy (mounted by provisioner-deploy); CP-unwritable
   - provisioner-deploy.yaml # `agentforge provisioner` controller Deployment + egress CiliumNetworkPolicy
   # NB: the Stage-1 k8s-auth canary (SecretStore/ExternalSecret) lives in ../openbao-canary/ — a SEPARATE
   # Flux Kustomization dependsOn external-secrets, because ESO CRDs don't exist yet when `openbao` applies

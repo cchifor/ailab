@@ -38,6 +38,12 @@ data:
   # OpenBao (externalsecret-kids.yaml) and mounted read-only. Public keys are non-secret, but syncing
   # via ESO matches the operator keypair-controller publish path (design §3/§7).
   AF_BROKER_KID_REGISTRY_PATH: "/var/run/broker/kids/registry.json"
+  # How often the broker re-reads AF_BROKER_KID_REGISTRY_PATH from disk (agentforge #55 @28c2252,
+  # BrokerSettings.kid_reload_interval_s). Bounds how long after ESO writes a newly-provisioned public kid
+  # before this replica serves it — which the provisioner's activation barrier waits on. Kept in step with
+  # the -kids ExternalSecret refreshInterval (~1m, see each broker-*.yaml) so end-to-end kid propagation is
+  # ~2m worst case (ESO fetch + file reload).
+  AF_BROKER_KID_RELOAD_INTERVAL_S: "60"
   # The PATH to the mounted ledger DSN file (design §5/§B) — NON-secret. The DSN itself (with the
   # agentforge_broker password) is the read-only broker-ledger Secret mounted at this path; the DSN is
   # NEVER placed in this ConfigMap. (Follow-up: the merged broker/config.py reads AF_BROKER_LEDGER_DSN

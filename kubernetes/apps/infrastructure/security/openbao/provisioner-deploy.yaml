@@ -22,6 +22,12 @@ spec:
       app.kubernetes.io/name: agentforge-provisioner
   template:
     metadata:
+      annotations:
+        # No reloader is installed, so this sha256 of the agentforge-capability-kids ConfigMap value bumps
+        # the pod template on any policy change → the Recreate strategy rolls the pod and re-reads the
+        # mounted file. RECOMPUTE on every ConfigMap edit: sha256 of the `capability-kids.json` value in
+        # capability-kids-configmap.yaml (kept in this SAME PR so code+config activate atomically).
+        checksum/capability-kids: "691c7ce8cc48dc2930e76656fa2f544f4b24c28c90f6684ab55297fc04b744bf"
       labels:
         app.kubernetes.io/name: agentforge-provisioner
         app.kubernetes.io/component: provisioner
@@ -37,7 +43,7 @@ spec:
       containers:
         - name: provisioner
           # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0; bootstrap-class).
-          image: registry.chifor.me/agentforge/orchestrator@sha256:5bae4ebce351eb08fa1b00435713812b2fd7ff46b11ea5cc816c026ca23a50d8
+          image: registry.chifor.me/agentforge/orchestrator@sha256:b39086f5787e753b3c103c349c53017b43add7b3ba9358892ddc039e2872f0ac
           args: ["agentforge", "provisioner"]
           env:
             # Same headless pod address the bootstrap Jobs use (= AF_OB_ADDR); the cert covers it.
@@ -54,8 +60,28 @@ spec:
             # one of these (or add AF_PROVISIONER_OPENBAO_CACERT) once the image's config surface is known.
             - { name: REQUESTS_CA_BUNDLE, value: "/tls/ca.crt" }
             - { name: SSL_CERT_FILE, value: "/tls/ca.crt" }
+            # OPT-IN capability-kid provisioning (agentforge #55 @28c2252). Setting the policy file turns the
+            # feature ON; the controller then REQUIRES the barrier URLs (SystemExit if empty) and fail-closes
+            # (SystemExit) if the file is missing/unparseable/schema-invalid — it never silent-disables.
+            - { name: AF_PROVISIONER_KID_POLICY_FILE, value: "/etc/agentforge/capability-kids/capability-kids.json" }
+            # Broker base URLs the activation barrier polls (`{base}/internal/kid/<kid>` on EACH,
+            # HttpBrokerAckBarrier). One HEADLESS-service URL per broker (see the *-headless Service in each
+            # broker-*.yaml); base URL only (no path), plain HTTP on 8700.
+            # ⚠ KNOWN LIMITATION (follow-up, codex review A): HttpBrokerAckBarrier hits each listed URL with
+            # ONE httpx GET, which connects to ONE resolved endpoint — so a single headless URL proves the
+            # kid is served by >=1 replica, not provably ALL (brokers are Deployments with no stable per-pod
+            # DNS). Still fail-closed + self-healing: ESO writes the public kid to EVERY replica's mounted
+            # -kids Secret and each reloads within AF_BROKER_KID_RELOAD_INTERVAL_S=60s (an unknown kid is
+            # rejected until then), so activation is safe. The design's "prove EVERY replica before commit"
+            # guarantee needs StatefulSet brokers (stable pod-N.headless DNS, listed per-replica) OR a #55
+            # barrier change to resolve the headless EndpointSlice to all pod IPs — neither an ailab-only
+            # manifest change. Tracked as a follow-up (see PR body / escalation).
+            - { name: AF_PROVISIONER_BROKER_READYZ_URLS, value: "http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700,http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700" }
+            - { name: AF_PROVISIONER_BARRIER_TIMEOUT_S, value: "180" }
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }
+            # Operator kid-policy file (agentforge-capability-kids ConfigMap), read-only.
+            - { name: capability-kids, mountPath: /etc/agentforge/capability-kids, readOnly: true }
           resources:
             requests: { cpu: 10m, memory: 48Mi }
             limits: { cpu: 250m, memory: 128Mi }
@@ -70,6 +96,11 @@ spec:
             secretName: openbao-tls
             items:
               - { key: ca.crt, path: ca.crt }
+        - name: capability-kids
+          configMap:
+            name: agentforge-capability-kids
+            items:
+              - { key: capability-kids.json, path: capability-kids.json }
 ---
 # Default-deny egress boundary (plan §B: "OpenBao + apiserver + DNS"). Complete allowed reach of the
 # controller endpoint (Cilium egress default-deny once selected).
@@ -109,6 +140,17 @@ spec:
       toPorts:
         - ports:
             - { port: "8200", protocol: TCP }
+    # Capability-kid activation barrier (agentforge #55): the controller polls EVERY broker replica's
+    # /internal/kid/<kid> over the broker HEADLESS services before committing a kid's private half.
+    # Identity-based allow to ALL broker pods (component=broker) on the HTTP port — pod-to-pod identity, so
+    # it is NOT shadowed by the world/CIDR egressDeny below.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: agentforge-broker
+            app.kubernetes.io/component: broker
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
   egressDeny:
     # NOTE: `host`/`remote-node` were REMOVED — the kube-apiserver runs ON the control-plane nodes,
     # which carry the host/remote-node identity, and egressDeny OVERRIDES the kube-apiserver egress

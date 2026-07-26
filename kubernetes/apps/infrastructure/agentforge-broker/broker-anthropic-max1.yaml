@@ -76,7 +76,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: broker
-          image: registry.chifor.me/agentforge/orchestrator@sha256:5bae4ebce351eb08fa1b00435713812b2fd7ff46b11ea5cc816c026ca23a50d8
+          image: registry.chifor.me/agentforge/orchestrator@sha256:b39086f5787e753b3c103c349c53017b43add7b3ba9358892ddc039e2872f0ac
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # broker` (composes to: tini -- agentforge broker).
           args: ["agentforge", "broker"]
@@ -165,6 +165,34 @@ spec:
     matchLabels:
       app.kubernetes.io/name: broker-anthropic-max1
 ---
+# HEADLESS service (agentforge #55 activation barrier): resolves to the INDIVIDUAL broker pod IPs so
+# the openbao provisioner can poll EVERY replica's /internal/kid/<kid> before committing a kid's
+# private half (AF_PROVISIONER_BROKER_READYZ_URLS) — a single ClusterIP would only prove one random
+# replica. publishNotReadyAddresses so the barrier also sees a not-yet-ready replica (it probes
+# /internal/kid directly). NO clusterIP: the Kata sandbox path keeps using the pinned ClusterIP
+# Service below; this headless svc is reached ONLY by the provisioner (see its ingress rule (3)).
+apiVersion: v1
+kind: Service
+metadata:
+  name: broker-anthropic-max1-headless
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: broker-anthropic-max1
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: broker-anthropic-max1
+  ports:
+    - name: http
+      port: 8700
+      targetPort: http
+      protocol: TCP
+---
 # The DIRECT ClusterIP the sandbox agent reaches (design §3): NO proxy in front, so the broker sees the
 # pod's real source IP at L3 for the TOFU anti-replay binding (the composition root pins
 # proxy_headers=False + empty forwarded_allow_ips — main.py _broker_uvicorn_config).
@@ -236,7 +264,7 @@ metadata:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
-  refreshInterval: "1h"
+  refreshInterval: "1m" # tightened for capability-kid propagation (agentforge #55): pick up a newly-published public kid within ~1m
   secretStoreRef:
     name: agentforge-broker-store
     kind: SecretStore
@@ -334,6 +362,16 @@ spec:
       toPorts:
         - ports:
             - { port: "9464", protocol: TCP }
+    # (3) Capability-kid activation barrier (agentforge #55): the openbao provisioner polls this
+    #     broker's /internal/kid/<kid> on the HTTP port to prove the public kid is served before
+    #     committing its private half. Scoped to the provisioner endpoint + port 8700 only.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+            app.kubernetes.io/name: agentforge-provisioner
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
   egress:
     # (1) DNS -> kube-dns. Broad resolution; the EGRESS DESTINATIONS are enforced by toFQDNs + the egressDeny.
     - toEndpoints:
