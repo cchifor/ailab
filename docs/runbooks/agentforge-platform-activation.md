@@ -28,6 +28,15 @@ All `kubectl` uses `--context admin@ai` (or `KUBECONFIG=kubernetes/infra/_out/ku
 
 ---
 
+## PR checklist
+
+- [ ] `just af-verify-hashes` passes — confirms the `checksum/capability-kids` pod-template
+      annotation (provisioner-deploy.yaml) and the platform-dev NFS provisioner Job's
+      content-addressed name suffix still match a fresh recompute of their source content (no
+      reloader/controller keeps either honest; see `scripts/check-inline-hashes.py`).
+
+---
+
 ## Ordered activation steps
 
 ### 0. Re-verify the pinned image tag still resolves to the approved digest (fail closed)
