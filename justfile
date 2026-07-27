@@ -183,22 +183,35 @@ openbao-status:
 
 # agentforge-platform-activation.md step 3: create the agentforge_platform DB + afp_admin/afp_app
 # roles via the bootstrap.sql \gexec one-shot (idempotent; resolves the infra-pg primary per run).
+# Kube context defaults to admin@ai here (estate convention — the CURRENT default context is a
+# DIFFERENT cluster, a write-path hazard for anything that touches infra-pg). scripts/af-db.sh itself
+# keeps an empty=current-context contract (see its header); sibling scripts/verify-sandbox-boundary.sh
+# instead defaults its own KUBECTL_CONTEXT to admin@ai internally — this recipe pins the default here
+# at the call site instead, but AF_KUBE_CONTEXT can still be set/overridden by the caller.
+# Bootstrap the agentforge_platform DB (roles + DB, idempotent \gexec)
 af-db-init:
-    bash scripts/af-db.sh init
+    AF_KUBE_CONTEXT="${AF_KUBE_CONTEXT:-admin@ai}" bash scripts/af-db.sh init
 
 # agentforge-platform-activation.md step 4: (re-)run the platform schema/RLS migration Job + verify
-# alembic head + RLS forced.
+# alembic head + RLS forced. Kube context defaults to admin@ai (see af-db-init comment above).
+# Run the platform schema/RLS migration Job and verify alembic head + RLS
 af-db-migrate:
-    bash scripts/af-db.sh migrate
+    AF_KUBE_CONTEXT="${AF_KUBE_CONTEXT:-admin@ai}" bash scripts/af-db.sh migrate
 
 # PR-B go-live verification walk: rollout status, pinned-digest match, in-pod /readyz, external
 # /healthz over the cloudflared tunnel. Run AFTER PR-B (- deployment.yaml) has merged + reconciled.
+# Kube context defaults to admin@ai (see af-db-init comment above).
+# Post-deploy smoke test for the agentforge-platform CP (rollout, digest, readyz, healthz)
 af-cp-smoke:
-    bash scripts/af-cp-smoke.sh
+    AF_KUBE_CONTEXT="${AF_KUBE_CONTEXT:-admin@ai}" bash scripts/af-cp-smoke.sh
 
 # Step-0 pin verify (scripted, replaces the eyeball curl): assert <image>:<tag> still resolves to
-# <digest> before trusting/merging a pin. Usage: just pin-verify agentforge-platform 2776074 sha256:...
-pin-verify image tag digest:
+# <digest> before trusting/merging a pin. digest is OPTIONAL for image=agentforge-platform (self-
+# defaults to whatever's currently pinned in deployment.yaml, so this example can't drift stale). Usage:
+#   just pin-verify agentforge-platform 276ccad                  # self-defaulting, always current
+#   just pin-verify agentforge-platform 276ccad sha256:<64hex>   # explicit override
+# Verify an image:tag still resolves to its approved (or self-defaulted) digest
+pin-verify image tag digest="":
     bash scripts/verify-image-digest.sh {{image}} {{tag}} {{digest}}
 
 # NB: `agent-nodes-plan`/`agent-nodes-apply` already exist above; run `just nested-virt-verify` FIRST

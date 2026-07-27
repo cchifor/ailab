@@ -21,8 +21,10 @@ activation is a transactional switch:
 Kustomization) only reports Ready once the DB is reachable + migrated — the real go-live gate.
 `/healthz` is unconditional and is used for liveness only.
 
-Pinned image: `registry.chifor.me/agentforge/agentforge-platform@sha256:85a4a3c7a3599b20834688c8f2ea060341435d7cba07239d94bf5b00afac374e`
-(tag `2776074` = agentforge-platform `origin/main` HEAD `27760744124eb1a800afe5b4b87d06f009d35d3f`).
+Pinned image: `registry.chifor.me/agentforge/agentforge-platform@sha256:e8cce2ecbf14695796d5cd3f86daf6306f404174e0935187d558366803259094`
+(tag `276ccad` = agentforge-platform `origin/main` HEAD `276ccad857…`, PR #18). This is whatever is
+CURRENTLY pinned in `deployment.yaml` — re-check there if this note has gone stale; step 0 below
+self-defaults off the live manifest so it never needs to be re-verified against a copy-pasted digest.
 
 All `kubectl` uses `--context admin@ai` (or `KUBECONFIG=kubernetes/infra/_out/kubeconfig`).
 
@@ -33,8 +35,11 @@ All `kubectl` uses `--context admin@ai` (or `KUBECONFIG=kubernetes/infra/_out/ku
 ### 0. Re-verify the pinned image tag still resolves to the approved digest (fail closed)
 
 ```sh
-just pin-verify agentforge-platform 2776074 sha256:85a4a3c7a3599b20834688c8f2ea060341435d7cba07239d94bf5b00afac374e
-# scripts/verify-image-digest.sh: HEADs the registry manifest and PASS/FAILs on a digest mismatch.
+just pin-verify agentforge-platform 276ccad
+# scripts/verify-image-digest.sh: HEADs the registry manifest and PASS/FAILs against the digest
+# self-defaulted from the CURRENT deployment.yaml pin (no copy-pasted digest to go stale here — pass
+# an explicit 3rd arg, e.g. `just pin-verify agentforge-platform 276ccad sha256:...`, to check against
+# something other than what's live-pinned).
 # If it moved, re-pin deployment.yaml + db-migrate.yaml to the new digest (re-verify provenance) first.
 ```
 

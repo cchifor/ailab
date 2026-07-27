@@ -8,14 +8,27 @@
 #   scripts/af-cp-smoke.sh --help   # show this usage (no kubectl/curl calls)
 #
 # Env:
-#   AF_KUBE_CONTEXT   kubectl --context override (default: empty = current context)
+#   AF_KUBE_CONTEXT   kubectl --context override (default: empty = current context; the estate
+#                     convention is admin@ai — the sibling scripts/verify-sandbox-boundary.sh defaults
+#                     its own KUBECTL_CONTEXT to admin@ai internally, but af-db.sh/af-cp-smoke.sh keep
+#                     an empty=current-context contract instead and let callers (the justfile recipes)
+#                     pin the default at the call site — see `just af-cp-smoke`)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 AF_NS="agentforge"
 DEPLOY="deploy/agentforge-platform"
 DEPLOY_FILE="kubernetes/apps/apps/agentforge/deployment.yaml"
-LABEL_SELECTOR="app.kubernetes.io/name=agentforge-platform"
+# db-migrate.yaml's Job pods carry the SAME app.kubernetes.io/name=agentforge-platform label (and sort
+# first / live up to ttlSecondsAfterFinished=3600 after a migrate run), so name alone can select a
+# migrate-Job pod instead of the CP Deployment pod. The Job template additionally carries
+# app.kubernetes.io/component=db-migrate (verified in kubernetes/apps/apps/agentforge/db-migrate.yaml);
+# the Deployment template carries NO component label at all, so `component!=db-migrate` correctly
+# matches it (Kubernetes' != selector matches resources missing the label too) while excluding any
+# migrate-Job pod. --field-selector=status.phase=Running is a second, independent belt-and-braces
+# filter (a migrate Job pod could theoretically be re-labeled to slip the component selector, but it
+# can never be Running for the ~1h a completed Job pod lingers).
+LABEL_SELECTOR="app.kubernetes.io/name=agentforge-platform,app.kubernetes.io/component!=db-migrate"
 EXTERNAL_URL="https://agentforge.chifor.me/healthz"
 
 K=(kubectl)
@@ -35,7 +48,8 @@ Post-deploy smoke test for $DEPLOY:
 Prints the deployed image digest + a PASS/FAIL summary; exits non-zero on any failure.
 
 Env:
-  AF_KUBE_CONTEXT   kubectl --context override (default: empty = current context)
+  AF_KUBE_CONTEXT   kubectl --context override (default: empty = current context; see the Env
+                    comment at the top of this file for the admin@ai convention)
 EOF
 }
 
@@ -64,13 +78,18 @@ else
 fi
 
 echo "[2] image digest pin"
-expected_line="$(grep -m1 -E 'image: registry\.chifor\.me/agentforge/agentforge-platform@sha256:[0-9a-f]{64}' "$DEPLOY_FILE" || true)"
+# Anchored to the actual YAML key (not just anywhere the string "image:" appears, e.g. in a comment)
+# so a stray doc/comment line mentioning the same image@digest can never be mistaken for the pin.
+expected_line="$(grep -m1 -E '^[[:space:]]*image:[[:space:]]*registry\.chifor\.me/agentforge/agentforge-platform@sha256:[0-9a-f]{64}' "$DEPLOY_FILE" || true)"
 expected_digest="$(printf '%s' "$expected_line" | grep -oE 'sha256:[0-9a-f]{64}' || true)"
 if [ -z "$expected_digest" ]; then
   bad "could not find the pinned agentforge-platform image digest in $DEPLOY_FILE"
 else
   echo "  pinned:  $expected_digest"
-  running_image_id="$("${K[@]}" -n "$AF_NS" get pod -l "$LABEL_SELECTOR" \
+  # -l excludes db-migrate Job pods (see LABEL_SELECTOR comment above); --field-selector is a second,
+  # independent filter so only a currently-Running pod can ever be picked (.items[0] on a selector that
+  # somehow still matched zero or several pods would otherwise silently grab an unrelated one).
+  running_image_id="$("${K[@]}" -n "$AF_NS" get pod -l "$LABEL_SELECTOR" --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null || true)"
   running_digest="$(printf '%s' "$running_image_id" | grep -oE 'sha256:[0-9a-f]{64}' || true)"
   echo "  running: ${running_digest:-<none>}"
@@ -82,12 +101,17 @@ else
 fi
 
 echo "[3] in-pod readiness (/readyz)"
-readyz_out="$("${K[@]}" -n "$AF_NS" exec "$DEPLOY" -- wget -qO- http://127.0.0.1:8080/readyz 2>&1 || true)"
-echo "  readyz: $readyz_out"
-if printf '%s' "$readyz_out" | grep -qiE '"status"\s*:\s*"ok"|^ok$'; then
-  ok "/readyz reports ok (DB SELECT 1 succeeded)"
+# /readyz's response body shape is undocumented (only /healthz is documented as unconditional
+# {"status":"ok"} — see deployment.yaml); the acceptance criterion here is HTTP 200, which wget's exit
+# status already encodes (wget treats any non-2xx response as an error and exits non-zero). So PASS/FAIL
+# on the exit status and print the body purely informationally, without assuming any particular shape.
+readyz_out=""
+if readyz_out="$("${K[@]}" -n "$AF_NS" exec "$DEPLOY" -- wget -qO- http://127.0.0.1:8080/readyz 2>&1)"; then
+  echo "  readyz (informational): $readyz_out"
+  ok "/readyz returned HTTP 200 (DB SELECT 1 succeeded)"
 else
-  bad "/readyz did not report ok"
+  echo "  readyz (informational): $readyz_out"
+  bad "/readyz did not return HTTP 200"
 fi
 
 echo "[4] external liveness (/healthz, cloudflared tunnel path)"
