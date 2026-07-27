@@ -92,7 +92,7 @@ spec:
           # Repo path `agentforge/agentforge-platform` (CI push target) — NOT `cchifor/…`. The migrate
           # entrypoint is `agentforge-platform migrate` = alembic upgrade head as admin_dsn (verified in
           # the image config Entrypoint + main.py CLI). Keep this digest in lockstep with deployment.yaml.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:0dbc7680ad8bfd371eef294f5d23d961bb82bb8591b340c759e258f23ee58200
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:ab8cb40474371d595c1f298fd40d3489b01bd7e613fdc84305b754c055f88438
           command: ["agentforge-platform", "migrate"]
           env:
             # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
