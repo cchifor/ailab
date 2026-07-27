@@ -14,6 +14,7 @@ data:
     headerStyle: clean
     layout:
       AI: { style: row, columns: 3 }
+      AgentForge: { style: row, columns: 1 }
       Dev Workers: { style: row, columns: 3 }
       Observability: { style: row, columns: 3 }
       Infrastructure: { style: row, columns: 4 }
@@ -69,6 +70,14 @@ data:
             description: OpenAI-compatible router
             icon: mdi-router-network # litellm.png isn't in the icon CDN -> broken image; use a bundled MDI
             siteMonitor: http://litellm.ai.svc.cluster.local:4000/health/liveliness
+    # No siteMonitor: the CP namespace's NetworkPolicy (agentforge-allow-tunnel-only) admits ingress
+    # only from the cloudflared tunnel + CP-managed tenant namespaces, so an in-cluster poll from
+    # homepage would be dropped.
+    - AgentForge:
+        - AgentForge CP:
+            href: https://agentforge.chifor.me
+            description: Agentic dev platform · control plane
+            icon: mdi-robot # agentforge.png isn't in the icon CDN -> broken image; use a bundled MDI
     # Interactive dev-worker web terminals (ttyd). Public via the CF tunnel + Cloudflare Access
     # (kubernetes/infra/cloudflare/access.tf gates each dwN.chifor.me to allow_email). No siteMonitor:
     # the origin is Access-gated, so an in-cluster poll would just see the Access login page.

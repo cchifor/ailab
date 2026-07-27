@@ -85,3 +85,9 @@ data:
         url: tcp://10.55.0.254:3260
         interval: 120s
         conditions: ["[CONNECTED] == true"]
+      # --- AgentForge ---
+      - name: AgentForge CP
+        group: AgentForge
+        url: https://agentforge.chifor.me/healthz
+        interval: 60s
+        conditions: ["[STATUS] == 200"]

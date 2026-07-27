@@ -44,8 +44,11 @@
 #   created and the superseded one is Flux-PRUNED (this Kustomization has prune:true) — never a failed
 #   in-place patch. Chosen over Kustomization-wide `spec.force:true` (which would delete+recreate the
 #   BOUND Retain PVs this shared Kustomization also owns — reaper/workspace/staging) and over a per-object
-#   force annotation (not supported by this Flux). ⚠ RECOMPUTE the suffix whenever you edit image/args:
-#     img=<image>; body=<args script>; printf '%s\n---\n%s' "$img" "$body" | sha256sum | cut -c1-10
+#   force annotation (not supported by this Flux). ⚠ RECOMPUTE the suffix whenever you edit image/args.
+#   PRECISE RECIPE (verified against the current suffix; `just af-verify-hashes` checks it in CI-style):
+#     body = the args block-scalar text EXACTLY AS IT APPEARS IN THIS FILE (raw, still YAML-indented,
+#     only the trailing newline stripped — NOT dedented); then:
+#     printf '%s\n---\n%s' "<image>" "$body" | sha256sum | cut -c1-10
 apiVersion: batch/v1
 kind: Job
 metadata:

@@ -159,6 +159,11 @@ storage-status:
 nested-virt-verify:
     python scripts/check-nested-virt.py
 
+# Verify hand-computed content hashes (checksum/capability-kids annotation, platform-dev NFS
+# provisioner Job name suffix) haven't silently drifted from the content they describe. Static-only.
+af-verify-hashes:
+    python scripts/check-inline-hashes.py
+
 # PREFLIGHT #2: assert the host-mode Gitea act_runner CI pool is fit before the Stage-0/Stage-4 image
 # builds run on it (daemon, docker, host-mode label, egress, capacity + the Gitea-API online check).
 # Needs GITEA_TOKEN (scope read:admin,read:organization); use `--skip-api` for host-side only. See
