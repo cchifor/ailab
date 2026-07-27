@@ -181,5 +181,25 @@ openbao-status:
     @echo "--- canary ExternalSecret (must be Ready=True after provision) ---"
     kubectl --context admin@ai -n openbao get externalsecret openbao-canary -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}{"\n"}' 2>/dev/null || true
 
+# agentforge-platform-activation.md step 3: create the agentforge_platform DB + afp_admin/afp_app
+# roles via the bootstrap.sql \gexec one-shot (idempotent; resolves the infra-pg primary per run).
+af-db-init:
+    bash scripts/af-db.sh init
+
+# agentforge-platform-activation.md step 4: (re-)run the platform schema/RLS migration Job + verify
+# alembic head + RLS forced.
+af-db-migrate:
+    bash scripts/af-db.sh migrate
+
+# PR-B go-live verification walk: rollout status, pinned-digest match, in-pod /readyz, external
+# /healthz over the cloudflared tunnel. Run AFTER PR-B (- deployment.yaml) has merged + reconciled.
+af-cp-smoke:
+    bash scripts/af-cp-smoke.sh
+
+# Step-0 pin verify (scripted, replaces the eyeball curl): assert <image>:<tag> still resolves to
+# <digest> before trusting/merging a pin. Usage: just pin-verify agentforge-platform 2776074 sha256:...
+pin-verify image tag digest:
+    bash scripts/verify-image-digest.sh {{image}} {{tag}} {{digest}}
+
 # NB: `agent-nodes-plan`/`agent-nodes-apply` already exist above; run `just nested-virt-verify` FIRST
 # (Stage-2 gate) before `just agent-nodes-apply` — the Kata pool needs nested=Y on the target hosts.

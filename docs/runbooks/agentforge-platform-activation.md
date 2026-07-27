@@ -33,11 +33,8 @@ All `kubectl` uses `--context admin@ai` (or `KUBECONFIG=kubernetes/infra/_out/ku
 ### 0. Re-verify the pinned image tag still resolves to the approved digest (fail closed)
 
 ```sh
-curl -sS -o /dev/null -D - \
-  -H 'Accept: application/vnd.oci.image.index.v1+json' \
-  https://registry.chifor.me/v2/agentforge/agentforge-platform/manifests/2776074 \
-  | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}'
-# MUST equal sha256:85a4a3c7a3599b20834688c8f2ea060341435d7cba07239d94bf5b00afac374e
+just pin-verify agentforge-platform 2776074 sha256:85a4a3c7a3599b20834688c8f2ea060341435d7cba07239d94bf5b00afac374e
+# scripts/verify-image-digest.sh: HEADs the registry manifest and PASS/FAILs on a digest mismatch.
 # If it moved, re-pin deployment.yaml + db-migrate.yaml to the new digest (re-verify provenance) first.
 ```
 
@@ -132,29 +129,23 @@ grant is added when a workspace repo is connected — bootstrap is off the creat
 ### 3. Create the `agentforge_platform` database (roles already exist)
 
 `postInitSQL` does not run on the already-bootstrapped infra-pg; `managed.roles` already created
-`afp_admin`/`afp_app`. Only the DB is missing. Resolve the **current primary** from cluster status
-(do not assume `infra-pg-1`) and run the idempotent `\gexec` one-shot as the peer-auth superuser:
+`afp_admin`/`afp_app`. Only the DB is missing. `scripts/af-db.sh init` resolves the **current
+primary** from cluster status (never assumes `infra-pg-1`), pipes the `agentforge-db-bootstrap`
+ConfigMap's `bootstrap.sql` through the idempotent `\gexec` one-shot as the peer-auth superuser, then
+verifies the DB exists + `afp_admin` BYPASSRLS + `afp_app` NOBYPASSRLS:
 
 ```sh
-PRIMARY=$(kubectl --context admin@ai -n databases get cluster infra-pg -o jsonpath='{.status.currentPrimary}')
-kubectl --context admin@ai -n agentforge get cm agentforge-db-bootstrap -o jsonpath='{.data.bootstrap\.sql}' \
-| kubectl --context admin@ai -n databases exec -i "$PRIMARY" -- psql -v ON_ERROR_STOP=1
-# verify (expect: agentforge_platform|afp_admin):
-kubectl --context admin@ai -n databases exec "$PRIMARY" -- \
-  psql -tAc "select datname, pg_catalog.pg_get_userbyid(datdba) owner from pg_database where datname='agentforge_platform'"
+just af-db-init
 ```
 
 ### 4. Run the schema/RLS migration (before PR-B, so no post-go-live missing-table errors)
 
+`scripts/af-db.sh migrate` deletes + re-applies `db-migrate.yaml`, waits for completion (dumping the
+last 40 log lines and exiting non-zero on failure), then prints `alembic_version` and verifies
+`pg_class.relforcerowsecurity` is set on every RLS table:
+
 ```sh
-kubectl --context admin@ai -n agentforge delete job agentforge-db-migrate --ignore-not-found
-kubectl --context admin@ai apply -f kubernetes/apps/apps/agentforge/db-migrate.yaml
-kubectl --context admin@ai -n agentforge wait --for=condition=complete --timeout=180s job/agentforge-db-migrate \
-  || kubectl --context admin@ai -n agentforge logs job/agentforge-db-migrate --tail=50
-# verify alembic head (0002_cluster_enrollments) + RLS forced:
-kubectl --context admin@ai -n databases exec "$PRIMARY" -- psql -d agentforge_platform -tAc "select version_num from alembic_version"
-kubectl --context admin@ai -n databases exec "$PRIMARY" -- psql -d agentforge_platform -tAc \
-  "select relname, relrowsecurity, relforcerowsecurity from pg_class where relrowsecurity and relnamespace='public'::regnamespace order by 1"
+just af-db-migrate
 ```
 
 ### 5. Merge PR-B (go-live) and verify
@@ -162,13 +153,13 @@ kubectl --context admin@ai -n databases exec "$PRIMARY" -- psql -d agentforge_pl
 ```sh
 flux --context admin@ai reconcile source git flux-system
 flux --context admin@ai reconcile kustomization apps
-kubectl --context admin@ai -n agentforge rollout status deploy/agentforge-platform
-# assert the running pod is the approved digest:
-kubectl --context admin@ai -n agentforge get pod -l app.kubernetes.io/name=agentforge-platform \
-  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}{"\n"}'
-# in-cluster readiness (DB reachable):
-kubectl --context admin@ai -n agentforge exec deploy/agentforge-platform -- wget -qO- http://localhost:8080/readyz; echo
+just af-cp-smoke
 ```
+
+`scripts/af-cp-smoke.sh` waits for the rollout, asserts the running pod's `imageID` digest matches the
+pin in `deployment.yaml`, hits the in-pod `/readyz`, and hits the external `/healthz` over the
+cloudflared tunnel — one PASS/FAIL summary, non-zero on any failure. (Uses `AF_KUBE_CONTEXT` to
+override `kubectl --context`; empty = current context, i.e. `admin@ai` if that's already selected.)
 
 End-to-end (browser): `https://agentforge.chifor.me` loads → OIDC login (chifor) → `GET /api/me`
 shows `tenant-zero: owner` → create a uniquely-named disposable Workspace → a commit appears under
