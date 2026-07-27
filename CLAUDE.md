@@ -20,6 +20,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
   Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just agent-nodes-plan/apply` · `just registry` (+ `*-plan/apply`). `just --list` for all.
 - Secrets = **SOPS + age** (`.sops.yaml`, key at **`kubernetes/infra/_out/age.agekey`** — matches README; `_out/` is gitignored so it does NOT exist in a git worktree, resolve the main checkout's copy via `"$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)"`). **Never commit `_out/`** — kubeconfig, talosconfig, age key, and tofu creds all live there (gitignored).
 - Run **tofu on Windows** (`~/.tofubin/tofu.exe`): providers are `windows_amd64` and **WSL has no internet**, so Ansible-over-`/mnt/c` and tofu provider downloads fail there. State is **local** (`kubernetes/infra/**/terraform.tfstate`).
+- **Inline content hashes (no reloader in-cluster, so nothing else catches drift)**: `provisioner-deploy.yaml`'s `checksum/capability-kids` annotation, `litellm.yaml` + `litellm-local.yaml`'s `checksum/config` annotations, and the platform-dev NFS provisioner Job's content-addressed name suffix are all hand-computed. Editing any of those four manifests? Run `just af-verify-hashes` (`scripts/check-inline-hashes.py`) before committing.
 
 ## Reaching the cluster (easy to hit the WRONG one)
 - `kubectl` default context is **`home-lab`, a DIFFERENT k3s cluster**. For ailab use **`kubectl --context admin@ai`** (merged into `~/.kube/config`) or `KUBECONFIG=kubernetes/infra/_out/kubeconfig`.

@@ -159,8 +159,10 @@ storage-status:
 nested-virt-verify:
     python scripts/check-nested-virt.py
 
-# Verify hand-computed content hashes (checksum/capability-kids annotation, platform-dev NFS
-# provisioner Job name suffix) haven't silently drifted from the content they describe. Static-only.
+# Verify hand-computed content hashes (checksum/capability-kids annotation, litellm/litellm-local
+# checksum/config annotations, platform-dev NFS provisioner Job name suffix) haven't silently drifted
+# from the content they describe. Static-only.
+# Verify all four inline content-hash sites haven't drifted (static-only)
 af-verify-hashes:
     python scripts/check-inline-hashes.py
 

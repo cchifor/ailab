@@ -90,4 +90,8 @@ data:
         group: AgentForge
         url: https://agentforge.chifor.me/healthz
         interval: 60s
-        conditions: ["[STATUS] == 200"]
+        # The Deployment's readiness probe is /readyz (DB SELECT-1, not this /healthz), so the Service
+        # has zero Ready endpoints — and this check alerts FIRING — until DB creation+migration and the
+        # bot-token secret fill complete (docs/runbooks/agentforge-platform-activation.md); expected
+        # until CP activation finishes.
+        conditions: ["[STATUS] == 200", "[CERTIFICATE_EXPIRATION] > 168h"]

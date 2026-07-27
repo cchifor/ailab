@@ -76,7 +76,22 @@ spec:
             # guarantee needs StatefulSet brokers (stable pod-N.headless DNS, listed per-replica) OR a #55
             # barrier change to resolve the headless EndpointSlice to all pod IPs — neither an ailab-only
             # manifest change. Tracked as a follow-up (see PR body / escalation).
-            # TODO(claude-max-3): re-add after orchestrator >= #56 is pinned + reconcile Job run (see agentforge #56)
+            #
+            # TODO(claude-max-3): re-add the anthropic/claude-max-3 barrier + capability-kid audience,
+            # dropped by ailab #127 to unblock tenant-zero/platform-dev activation. Re-adding needs BOTH:
+            #   1. Here: append
+            #      "http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700"
+            #      to AF_PROVISIONER_BROKER_READYZ_URLS below (the broker Deployment/Service already exist
+            #      — broker-anthropic-claude-max-3.yaml — only the barrier URL was dropped).
+            #   2. capability-kids-configmap.yaml: re-add an
+            #      { "audience": "anthropic/claude-max-3", ... } entry to the platform-dev/delivery pool's
+            #      `audiences` list (mirrors the anthropic/claude-max-1 / claude-max-2 entries there),
+            #      recomputing checksum/capability-kids below in the SAME commit (`just af-verify-hashes`).
+            # PRECONDITION (both must hold before either edit lands): the orchestrator image pinned by
+            # this Deployment is built from a commit at/after agentforge #56's merge (the fix that made
+            # HttpBrokerAckBarrier tolerant of a not-yet-provisioned broker instead of fail-closing the
+            # whole controller), AND one add-only reconcile Job run has completed since that image was
+            # pinned (proves the new digest is live before broker count expands again).
             - { name: AF_PROVISIONER_BROKER_READYZ_URLS, value: "http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700,http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700" }
             - { name: AF_PROVISIONER_BARRIER_TIMEOUT_S, value: "180" }
           volumeMounts:
