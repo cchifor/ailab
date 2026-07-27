@@ -43,7 +43,8 @@ Usage: $(basename "$0") [--help]
 Post-deploy smoke test for $DEPLOY:
   1. wait for the rollout to finish (--timeout=180s)
   2. assert the running pod's imageID digest == the digest pinned in $DEPLOY_FILE
-  3. in-pod readiness probe: kubectl exec ... wget -qO- http://127.0.0.1:8080/readyz
+  3. in-pod readiness probe: kubectl exec INTO THAT SAME POD (never deploy/..., which can resolve to a
+     lingering completed db-migrate Job pod) -- wget -qO- http://127.0.0.1:8080/readyz
   4. external liveness probe over the cloudflared tunnel: curl -fsS $EXTERNAL_URL
 Prints the deployed image digest + a PASS/FAIL summary; exits non-zero on any failure.
 
@@ -88,11 +89,17 @@ else
   echo "  pinned:  $expected_digest"
   # -l excludes db-migrate Job pods (see LABEL_SELECTOR comment above); --field-selector is a second,
   # independent filter so only a currently-Running pod can ever be picked (.items[0] on a selector that
-  # somehow still matched zero or several pods would otherwise silently grab an unrelated one).
+  # somehow still matched zero or several pods would otherwise silently grab an unrelated one). Capture
+  # BOTH the pod name and its imageID from ONE query so step 3 can exec into this EXACT pod instead of
+  # `exec deploy/...` (which kubectl resolves to ANY pod matching the Deployment's selector, INCLUDING a
+  # still-lingering completed db-migrate Job pod — see the LABEL_SELECTOR comment — precisely when the
+  # real CP pod is unhealthy/missing, producing a misleading readyz result against the wrong pod).
+  running_pod="$("${K[@]}" -n "$AF_NS" get pod -l "$LABEL_SELECTOR" --field-selector=status.phase=Running \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   running_image_id="$("${K[@]}" -n "$AF_NS" get pod -l "$LABEL_SELECTOR" --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null || true)"
   running_digest="$(printf '%s' "$running_image_id" | grep -oE 'sha256:[0-9a-f]{64}' || true)"
-  echo "  running: ${running_digest:-<none>}"
+  echo "  running: ${running_digest:-<none>} (pod: ${running_pod:-<none>})"
   if [ -n "$running_digest" ] && [ "$running_digest" = "$expected_digest" ]; then
     ok "running pod imageID matches the pinned digest"
   else
@@ -105,8 +112,17 @@ echo "[3] in-pod readiness (/readyz)"
 # {"status":"ok"} — see deployment.yaml); the acceptance criterion here is HTTP 200, which wget's exit
 # status already encodes (wget treats any non-2xx response as an error and exits non-zero). So PASS/FAIL
 # on the exit status and print the body purely informationally, without assuming any particular shape.
+#
+# Exec into the EXACT pod step 2 selected (running_pod), NOT `exec $DEPLOY` — `kubectl exec deploy/...`
+# resolves to whatever pod matches the Deployment's selector, which (per the LABEL_SELECTOR comment in
+# step 2) can be a still-lingering completed db-migrate Job pod. That misresolution happens exactly when
+# the real CP pod is unhealthy or absent, which is exactly when this check matters most — so falling
+# back to `exec $DEPLOY` here would silently mask the failure instead of surfacing it.
 readyz_out=""
-if readyz_out="$("${K[@]}" -n "$AF_NS" exec "$DEPLOY" -- wget -qO- http://127.0.0.1:8080/readyz 2>&1)"; then
+if [ -z "${running_pod:-}" ]; then
+  echo "  readyz (informational): <no running $DEPLOY pod found in step 2 — cannot exec>"
+  bad "no running $DEPLOY pod to exec /readyz into (step 2 pod selection found none)"
+elif readyz_out="$("${K[@]}" -n "$AF_NS" exec "$running_pod" -- wget -qO- http://127.0.0.1:8080/readyz 2>&1)"; then
   echo "  readyz (informational): $readyz_out"
   ok "/readyz returned HTTP 200 (DB SELECT 1 succeeded)"
 else

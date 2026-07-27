@@ -21,6 +21,7 @@ AF_NS="agentforge"
 CLUSTER="infra-pg"
 DB_NAME="agentforge_platform"
 MIGRATE_MANIFEST="kubernetes/apps/apps/agentforge/db-migrate.yaml"
+DEPLOY_FILE="kubernetes/apps/apps/agentforge/deployment.yaml"
 
 K=(kubectl)
 if [ -n "${AF_KUBE_CONTEXT:-}" ]; then
@@ -33,18 +34,25 @@ Usage: $(basename "$0") <init|migrate>
 
   init     Resolve the infra-pg primary, pipe bootstrap.sql into 'psql -U postgres' inside the primary
            pod (idempotent CREATE ROLE/DATABASE \\gexec), then verify (read-only): ${DB_NAME} exists,
-           afp_admin has BYPASSRLS, afp_app has NOBYPASSRLS. bootstrap.sql comes from the
-           agentforge-db-bootstrap ConfigMap if it exists (fast path), else is extracted straight from
-           the repo copy of $MIGRATE_MANIFEST (that manifest is deliberately un-kustomized, so the CM
-           usually does NOT exist until an operator has applied it or run 'migrate' at least once).
+           afp_admin has BYPASSRLS, afp_app has NOBYPASSRLS. bootstrap.sql is extracted from the repo
+           copy of $MIGRATE_MANIFEST (source of truth; that manifest is deliberately un-kustomized, so
+           Flux never applies it), falling back to the live agentforge-db-bootstrap ConfigMap only if
+           the repo extraction fails (e.g. a hand-applied variant an operator wants honored).
 
-  migrate  Delete + re-apply job/agentforge-db-migrate, wait up to 300s for completion, then verify
-           alembic_version (printed) and pg_class.relforcerowsecurity on every RLS table. On failure,
-           dumps the last 40 lines of the Job log and exits non-zero.
+  migrate  Verify db-migrate.yaml and $DEPLOY_FILE pin the SAME agentforge-platform image digest (FAIL
+           if not — the manifests' own header comments require lockstep), then delete + re-apply
+           job/agentforge-db-migrate, wait up to 300s for completion, then print alembic_version
+           (informational only — see AF_EXPECTED_ALEMBIC_HEAD below) and verify
+           pg_class.relforcerowsecurity on every RLS table. On failure, dumps the last 40 lines of the
+           Job log and exits non-zero.
 
 Env:
-  AF_KUBE_CONTEXT   kubectl --context override (default: empty = current context; see the Env
-                    comment at the top of this file for the admin@ai convention)
+  AF_KUBE_CONTEXT           kubectl --context override (default: empty = current context; see the Env
+                            comment at the top of this file for the admin@ai convention)
+  AF_EXPECTED_ALEMBIC_HEAD  optional, 'migrate' only: if set, assert the post-migration
+                            alembic_version equals this value and FAIL on mismatch (instead of only
+                            printing it informationally, which proves the Job ran but NOT which
+                            revision it landed on).
 EOF
 }
 
@@ -67,32 +75,64 @@ psql_primary() {  # <primary-pod> [psql-args...] — statement/query goes on std
 }
 
 bootstrap_sql() {
-  # agentforge-db-bootstrap is the ConfigMap defined in $MIGRATE_MANIFEST, but that manifest is
-  # DELIBERATELY excluded from kustomization.yaml (an operator-run one-shot — see its header), so
-  # GitOps never creates it. Fast path: use the live ConfigMap if an operator already `kubectl apply
-  # -f`'d the manifest by hand (e.g. a previous `af-db.sh migrate` run, which applies the whole file).
-  # Fallback (repo as source of truth): extract bootstrap.sql straight out of the repo copy of
+  # Repo-first (source of truth): extract bootstrap.sql straight out of the repo copy of
   # $MIGRATE_MANIFEST — works with zero cluster state and can never drift from what `migrate` applies.
+  # $MIGRATE_MANIFEST is deliberately excluded from kustomization.yaml (an operator-run one-shot — see
+  # its header), so Flux never creates the ConfigMap; that live ConfigMap is used only as a FALLBACK,
+  # in case an operator hand-`kubectl apply -f`'d a variant they want honored over the repo copy.
+  #
+  # Extraction is stdlib-only (no PyYAML — mirrors scripts/check-inline-hashes.py's literal-block
+  # technique on the sibling feat/iac-drift-bundle branch): locate the `bootstrap.sql: |` marker line
+  # by regex, collect the following more-indented lines as the raw literal block, then dedent by the
+  # block's own content indentation (YAML `|` clip-chomping semantics) to recover the exact string
+  # value the ConfigMap embeds.
+  local repo_sql
+  repo_sql="$(python -c '
+import re, sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+marker_re = re.compile(r"^[ ]*bootstrap\.sql:\s*\|[-+]?\s*$")
+lines = text.splitlines(keepends=True)
+for i, line in enumerate(lines):
+    if not marker_re.match(line):
+        continue
+    marker_indent = len(line) - len(line.lstrip(" "))
+    raw = []
+    content_indent = None
+    for l in lines[i + 1:]:
+        if l.strip() == "":
+            raw.append(l)
+            continue
+        indent = len(l) - len(l.lstrip(" "))
+        if indent <= marker_indent:
+            break
+        if content_indent is None:
+            content_indent = indent
+        raw.append(l)
+    while raw and raw[-1].strip() == "":
+        raw.pop()
+    if content_indent is None:
+        content_indent = marker_indent + 2
+    dedented = "".join("\n" if l.strip() == "" else l[content_indent:] for l in raw)
+    sys.stdout.write(dedented)
+    sys.exit(0)
+sys.stderr.write("bootstrap.sql literal block not found in " + path + "\n")
+sys.exit(1)
+' "$MIGRATE_MANIFEST" 2>/dev/null || true)"
+  if [ -n "$repo_sql" ]; then
+    printf '%s' "$repo_sql"
+    return 0
+  fi
+  echo "-- could not extract bootstrap.sql from the repo copy of $MIGRATE_MANIFEST -- falling back to" >&2
+  echo "   the live ConfigMap agentforge-db-bootstrap in ns $AF_NS --" >&2
   local cm_sql
   cm_sql="$("${K[@]}" -n "$AF_NS" get cm agentforge-db-bootstrap -o jsonpath='{.data.bootstrap\.sql}' 2>/dev/null || true)"
   if [ -n "$cm_sql" ]; then
     printf '%s' "$cm_sql"
     return 0
   fi
-  echo "-- ConfigMap agentforge-db-bootstrap not found in ns $AF_NS (db-migrate.yaml is deliberately" >&2
-  echo "   excluded from kustomization.yaml, so Flux never creates it) -- falling back to the repo" >&2
-  echo "   copy: extracting bootstrap.sql from $MIGRATE_MANIFEST --" >&2
-  python -c '
-import sys, yaml
-docs = list(yaml.safe_load_all(open(sys.argv[1])))
-for d in docs:
-    if d and d.get("kind") == "ConfigMap" and d.get("metadata", {}).get("name") == "agentforge-db-bootstrap":
-        sys.stdout.write(d["data"]["bootstrap.sql"])
-        sys.exit(0)
-sys.stderr.write("bootstrap.sql ConfigMap doc not found in " + sys.argv[1] + "\n")
-sys.exit(1)
-' "$MIGRATE_MANIFEST" \
-    || die "could not get bootstrap.sql from the ConfigMap OR the repo file. Apply it by hand first: kubectl -n $AF_NS apply -f $MIGRATE_MANIFEST (creates the CM; also applies the migrate Job, which is idempotent/harmless to re-run)"
+  die "could not get bootstrap.sql from the repo file OR the live ConfigMap. Apply it by hand first: kubectl -n $AF_NS apply -f $MIGRATE_MANIFEST (creates the CM; also applies the migrate Job, which is idempotent/harmless to re-run)"
 }
 
 cmd_init() {
@@ -101,7 +141,7 @@ cmd_init() {
   primary="$(resolve_primary)"
   echo "primary=$primary"
 
-  echo "-- applying bootstrap.sql (idempotent \\gexec; ConfigMap fast path, repo-file fallback) --"
+  echo "-- applying bootstrap.sql (idempotent \\gexec; repo-file source of truth, live-ConfigMap fallback) --"
   bootstrap_sql | psql_primary "$primary" -U postgres -v ON_ERROR_STOP=1
 
   echo "-- verifying --"
@@ -129,6 +169,20 @@ cmd_init() {
 
 cmd_migrate() {
   echo "== af-db migrate =="
+
+  echo "-- verifying image digest lockstep between $MIGRATE_MANIFEST and $DEPLOY_FILE --"
+  # Anchored to the actual YAML key (not just anywhere the string "image:" appears, e.g. in a
+  # comment), matching the same regex af-cp-smoke.sh/verify-image-digest.sh use against $DEPLOY_FILE.
+  local deploy_digest migrate_digest
+  deploy_digest="$(grep -m1 -E '^[[:space:]]*image:[[:space:]]*registry\.chifor\.me/agentforge/agentforge-platform@sha256:[0-9a-f]{64}' "$DEPLOY_FILE" | grep -oE 'sha256:[0-9a-f]{64}' || true)"
+  migrate_digest="$(grep -m1 -E '^[[:space:]]*image:[[:space:]]*registry\.chifor\.me/agentforge/agentforge-platform@sha256:[0-9a-f]{64}' "$MIGRATE_MANIFEST" | grep -oE 'sha256:[0-9a-f]{64}' || true)"
+  [ -n "$deploy_digest" ] || die "could not find the pinned agentforge-platform image digest in $DEPLOY_FILE"
+  [ -n "$migrate_digest" ] || die "could not find the pinned agentforge-platform image digest in $MIGRATE_MANIFEST"
+  if [ "$deploy_digest" != "$migrate_digest" ]; then
+    die "image digest lockstep broken: $DEPLOY_FILE pins $deploy_digest but $MIGRATE_MANIFEST pins $migrate_digest -- both manifests' own header comments require them to stay pinned to the SAME digest; re-pin both together before migrating"
+  fi
+  echo "PASS: $MIGRATE_MANIFEST and $DEPLOY_FILE pin the same digest ($deploy_digest)"
+
   echo "-- (re-)running job/agentforge-db-migrate --"
   "${K[@]}" -n "$AF_NS" delete job agentforge-db-migrate --ignore-not-found
   "${K[@]}" apply -f "$MIGRATE_MANIFEST"
@@ -152,7 +206,13 @@ cmd_migrate() {
   version="$("${K[@]}" -n "$DB_NS" exec "$primary" -- psql -U postgres -d "$DB_NAME" -tAc \
     "select version_num from alembic_version" | tr -d '[:space:]')"
   [ -n "$version" ] || die "alembic_version is empty/unreadable"
-  echo "alembic_version=$version"
+  echo "alembic_version (informational; not independently verified unless AF_EXPECTED_ALEMBIC_HEAD is set): $version"
+  if [ -n "${AF_EXPECTED_ALEMBIC_HEAD:-}" ]; then
+    if [ "$version" != "$AF_EXPECTED_ALEMBIC_HEAD" ]; then
+      die "alembic_version '$version' != AF_EXPECTED_ALEMBIC_HEAD '$AF_EXPECTED_ALEMBIC_HEAD'"
+    fi
+    echo "PASS: alembic_version matches AF_EXPECTED_ALEMBIC_HEAD"
+  fi
 
   echo "-- RLS-forced tables (relname | relrowsecurity | relforcerowsecurity) --"
   local rls_rows
@@ -165,7 +225,11 @@ cmd_migrate() {
   fi
   echo "PASS: every RLS table has relforcerowsecurity=t"
 
-  echo "== af-db migrate: OK (alembic_version=$version) =="
+  if [ -n "${AF_EXPECTED_ALEMBIC_HEAD:-}" ]; then
+    echo "== af-db migrate: OK (alembic_version=$version, verified == AF_EXPECTED_ALEMBIC_HEAD) =="
+  else
+    echo "== af-db migrate: done (alembic_version=$version; UNVERIFIED against any expected revision -- set AF_EXPECTED_ALEMBIC_HEAD to assert it) =="
+  fi
 }
 
 if [ $# -eq 0 ]; then

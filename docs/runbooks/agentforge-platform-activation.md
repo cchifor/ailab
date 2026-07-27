@@ -9,6 +9,10 @@ The GitOps scaffolding (DB roles+DSNs, OIDC client, RBAC/SA/Service/NetworkPolic
 cloudflared route) is already merged. This runbook covers what remains, split across **two PRs** so
 activation is a transactional switch:
 
+> **Freshness note:** `- deployment.yaml` is **already merged into `apps/agentforge/kustomization.yaml`
+> on `main`** — the PR-A/PR-B split below describes how the two pending changes were originally staged;
+> re-check the kustomization before assuming PR-B (go-live) is still unmerged.
+
 - **PR-A (prerequisites, safe to merge anytime):** pins the CP image digest in `deployment.yaml` +
   `db-migrate.yaml` (+ the optional CNPG init-container digest), switches the Deployment readiness
   probe to `/readyz`, and seeds `af:tenant-zero:owner` onto the owner in `authelia-secret.sops.yaml`.

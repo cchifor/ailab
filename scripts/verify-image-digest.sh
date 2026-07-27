@@ -7,6 +7,11 @@
 #   scripts/verify-image-digest.sh <image> <tag> [expected-digest]
 #   scripts/verify-image-digest.sh agentforge-platform 276ccad
 #   scripts/verify-image-digest.sh agentforge-platform 276ccad sha256:<64-hex>
+#   scripts/verify-image-digest.sh someorg/other-image 1.2.3 sha256:<64-hex>
+#
+# <image> is either a bare name (defaults to the agentforge/ repo prefix, e.g. 'agentforge-platform'
+# resolves to 'agentforge/agentforge-platform') or a full 'repo/path' image containing a slash, used
+# as-is with NO prefix added.
 #
 # expected-digest is OPTIONAL when image=agentforge-platform: it self-defaults to whatever digest is
 # CURRENTLY pinned in kubernetes/apps/apps/agentforge/deployment.yaml, so the runbook/justfile example
@@ -28,9 +33,13 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") <image> <tag> [expected-digest]
 
-  HEAD ${REGISTRY}/v2/${REPO_PREFIX}/<image>/manifests/<tag> and compare the response's
-  Docker-Content-Digest header to <expected-digest> (sha256:<64 hex>). Exit 0 on match, non-zero on
-  mismatch or an unreachable/malformed response.
+  HEAD ${REGISTRY}/v2/<repo-path>/<tag> and compare the response's Docker-Content-Digest header to
+  <expected-digest> (sha256:<64 hex>). Exit 0 on match, non-zero on mismatch or an
+  unreachable/malformed response.
+
+  <image> is either a bare name, defaulted to the '${REPO_PREFIX}/' repo prefix (e.g.
+  'agentforge-platform' -> repo path '${REPO_PREFIX}/agentforge-platform'), or a full 'repo/path'
+  image containing a slash, used as-is with NO prefix added (e.g. 'someorg/other-image').
 
   expected-digest is optional for image=agentforge-platform: self-defaults to the digest currently
   pinned (anchored 'image:' line) in $DEPLOY_FILE. Any other image requires it explicitly.
@@ -40,6 +49,9 @@ Example (self-defaulting, always current):
 
 Example (explicit override):
   $(basename "$0") agentforge-platform 276ccad sha256:<64-hex>
+
+Example (full repo path, no prefix added):
+  $(basename "$0") someorg/other-image 1.2.3 sha256:<64-hex>
 EOF
 }
 
@@ -75,7 +87,13 @@ if ! [[ "$EXPECTED" =~ $DIGEST_RE ]]; then
   exit 2
 fi
 
-URL="${REGISTRY}/v2/${REPO_PREFIX}/${IMAGE}/manifests/${TAG}"
+# A slash in <image> means it's already a full repo path (used as-is); otherwise default it under
+# the agentforge/ prefix (see usage()).
+case "$IMAGE" in
+  */*) REPO_PATH="$IMAGE" ;;
+  *)   REPO_PATH="${REPO_PREFIX}/${IMAGE}" ;;
+esac
+URL="${REGISTRY}/v2/${REPO_PATH}/manifests/${TAG}"
 echo "== pin-verify: HEAD $URL =="
 
 if ! headers="$(curl -sS --fail --head --max-time 15 -H "Accept: ${ACCEPT}" "$URL")"; then
@@ -99,5 +117,9 @@ if [ "$actual" = "$EXPECTED" ]; then
   exit 0
 fi
 
-echo "FAIL: ${IMAGE}:${TAG} resolves to $actual, expected $EXPECTED — the tag moved; re-verify provenance before re-pinning" >&2
+echo "FAIL: ${IMAGE}:${TAG} resolves to $actual, expected $EXPECTED — either (a) the registry tag was" >&2
+echo "  re-pushed to point at new content (re-verify provenance before re-pinning to the new digest), or" >&2
+echo "  (b) the expected digest supplied here (explicit arg, or self-defaulted from $DEPLOY_FILE) is" >&2
+echo "  stale relative to what's actually pushed under that tag (refresh the expected value). Determine" >&2
+echo "  which by checking whether $DEPLOY_FILE's pin is itself current before assuming the registry moved." >&2
 exit 1
