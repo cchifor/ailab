@@ -39,6 +39,8 @@ REAP_AGE_SEC="${GITEA_CLEANUP_REAP_AGE_SEC:-14400}"     # remove RUNNING contain
 INFRA_EXCLUDE_RE="${GITEA_CLEANUP_INFRA_EXCLUDE_RE:-buildkit|buildx}" # never reap the persistent builder
 ACTCACHE_DIR="${GITEA_CLEANUP_ACTCACHE_DIR:-/home/runner/act-runner/.cache/actcache}"
 ACTCACHE_MAX_MB="${GITEA_CLEANUP_ACTCACHE_MAX_MB:-1536}"
+WORKDIR_PARENT="${GITEA_RUNNER_WORKDIR_PARENT:-/home/runner/act-runner/work}"
+WS_PRUNE_AGE_H="${GITEA_CLEANUP_WS_PRUNE_AGE_H:-48}" # 0 disables the stale-workspace prune
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 
@@ -149,6 +151,33 @@ if [ "$pct" -ge "$CRITICAL_PCT" ]; then
   esac
 fi
 
+# 5. stale act_runner workspaces. act_runner keys work/<repo-hash>/ by REPO and never deletes it;
+#    agentforge's ephemeral per-repo CI mints a fresh repo (=> a fresh workspace dir) continuously, so
+#    the parent grew to ~350-400 dirs/VM by 2026-07-28 — which is exactly what made the reclaim
+#    script's per-workspace /proc scan blow the daemon's start-pre budget and take the whole fleet
+#    offline (see gitea-runner-reclaim.sh + tests/test-reclaim.sh). Prune any workspace whose ENTIRE
+#    tree is older than the age gate. SAFE-BY-CONSTRUCTION like every op above: the gate (48h default)
+#    >> the 3h job timeout and a job freshens its checkout at start, so a live/recent workspace always
+#    trips the -newermt probe (which short-circuits on the first fresh entry). Path-guarded like the
+#    actcache trim; runs even under the busy+pressure override because the age gate is the safety.
+ws_pruned=0; ws_count=0
+if is_num "$WS_PRUNE_AGE_H" && [ "$WS_PRUNE_AGE_H" -gt 0 ] && [ -d "$WORKDIR_PARENT" ]; then
+  case "$WORKDIR_PARENT" in
+    /*/*)
+      cutoff=$(( $(date +%s) - WS_PRUNE_AGE_H * 3600 ))
+      for ws in "$WORKDIR_PARENT"/*/; do
+        ws="${ws%/}"
+        [ -d "$ws" ] || continue
+        ws_count=$(( ws_count + 1 ))
+        if [ -z "$(find "$ws" -newermt "@$cutoff" -print -quit 2>/dev/null)" ]; then
+          log "prune stale workspace $ws (no activity in ${WS_PRUNE_AGE_H}h)"
+          rm -rf -- "$ws" 2>/dev/null && { ws_pruned=$(( ws_pruned + 1 )); ws_count=$(( ws_count - 1 )); }
+        fi
+      done ;;
+    *) log "abort workspace prune: implausible WORKDIR_PARENT='$WORKDIR_PARENT'" ;;
+  esac
+fi
+
 after="$(disk_pct)"; is_num "$after" || after=0
 freed=$(( before - after )); [ "$freed" -lt 0 ] && freed=0
 # Post-cleanup docker resource sizes for the beacon (build cache is the dominant accumulator). Docker's
@@ -156,8 +185,9 @@ freed=$(( before - after )); [ "$freed" -lt 0 ] && freed=0
 dfsize() { docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null | awk -F'|' -v t="$1" '$1==t{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null; }
 bc_bytes="$(dfsize 'Build Cache')"; is_num "$bc_bytes" || bc_bytes=0
 img_bytes="$(dfsize 'Images')"; is_num "$img_bytes" || img_bytes=0
-log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), build-cache ${bc_bytes}B"
+log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), pruned ${ws_pruned} workspace(s) (${ws_count} left), build-cache ${bc_bytes}B"
 write_beacon "busy_skip 0" "last_run_seconds $(date +%s)" "disk_used_percent ${after}" \
   "disk_freed_percent ${freed}" "reaped_containers ${reaped}" \
+  "workspaces ${ws_count}" "workspaces_pruned ${ws_pruned}" \
   "build_cache_bytes ${bc_bytes}" "images_bytes ${img_bytes}"
 exit 0

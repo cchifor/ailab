@@ -81,16 +81,31 @@ collect_busy_mounts() {
       | grep -F "$WORKDIR_PARENT/" || true)"
 }
 
+# ---- PER-RUN /proc snapshot: processes with cwd/root under the workdir parent -----------------
+# ONE readlink invocation resolves every /proc/<pid>/{cwd,root} (one line per resolvable link;
+# vanished/unreadable entries are silently skipped), filtered to targets under WORKDIR_PARENT — the
+# only ones that can ever match a workspace. This MUST stay a single pass: the old code re-scanned
+# /proc per workspace (2 readlink forks x nproc x workspaces). agentforge's ephemeral per-repo CI
+# grows work/ without bound (~350-400 dirs/VM by 2026-07-28), so ExecStartPre burned >90s of fork
+# overhead, systemd's default start timeout killed it, and Restart=always looped — the whole runner
+# fleet offline. Pinned by tests/test-reclaim.sh. (Snapshot-vs-check race is unchanged from the old
+# code; the authoritative guards remain daemon_busy + the container-mount scan.)
+BUSY_PROC_PATHS=""
+collect_busy_proc_paths() {
+  BUSY_PROC_PATHS="$(readlink /proc/[0-9]*/cwd /proc/[0-9]*/root 2>/dev/null \
+      | grep -F "$WORKDIR_PARENT/" || true)"
+}
+
 # A workspace is in-use if a running container bind-mounts it OR a live process has cwd/root under it.
+# Both checks are fork-free string matches against the per-run snapshots collected above.
 ws_in_use() {
-  local ws="$1" p tgt
+  local ws="$1" tgt
   if [ -n "$BUSY_MOUNTS" ] && printf '%s\n' "$BUSY_MOUNTS" | grep -qF -- "$ws"; then
     return 0
   fi
-  for p in /proc/[0-9]*/cwd /proc/[0-9]*/root; do
-    tgt="$(readlink "$p" 2>/dev/null)" || continue
+  while IFS= read -r tgt; do
     case "$tgt" in "$ws"|"$ws"/*) return 0 ;; esac
-  done
+  done <<< "$BUSY_PROC_PATHS"
   return 1
 }
 
@@ -142,6 +157,7 @@ main() {
     log "skip: gitea job in flight (daemon has child processes)"
   else
     collect_busy_mounts
+    collect_busy_proc_paths
     if [ -d "$WORKDIR_PARENT" ]; then
       foreign="$(find "$WORKDIR_PARENT" ! -user "$RUNNER_USER" 2>/dev/null | wc -l | tr -d ' ')"
       for ws in "$WORKDIR_PARENT"/*/hostexecutor; do

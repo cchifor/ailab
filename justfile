@@ -127,9 +127,10 @@ mirror-image src dst:
     echo "--- mirrored; pin THIS index digest in the manifest: ---"
     docker buildx imagetools inspect '{{dst}}'
 
-# Test the gitea-runner cleanup disk-reclaim logic (mocked docker/df; no VM needed)
+# Test the gitea-runner cleanup + workspace-reclaim logic (mocked docker/df/systemctl; no VM needed)
 test-gitea-runner:
     bash {{ansible_dir}}/roles/gitea_runner/tests/test-cleanup.sh
+    bash {{ansible_dir}}/roles/gitea_runner/tests/test-reclaim.sh
 
 # Lint
 lint:
