@@ -60,9 +60,12 @@ EOF
 for stub in logger; do printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/$stub"; done
 chmod +x "$BIN"/*
 
-run_case() { # <busy> <pct>
+run_case() { # <busy> <pct>   (optional globals: WSP = workdir parent fixture, WSAGE = prune age hours)
   : > "$CALLS"
   MOCK_BUSY="$1" MOCK_PCT="$2" PATH="$BIN:$PATH" \
+    GITEA_CLEANUP_ENV_FILE=/nonexistent \
+    GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
+    GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
     GITEA_CLEANUP_BEACON=0 GITEA_CLEANUP_TEXTFILE_DIR=/nonexistent \
     bash "$SCRIPT" >/dev/null 2>&1 || true
 }
@@ -94,6 +97,28 @@ assert_has "buildx prune -f --filter until=6h --builder builder-leaked" "D: per-
 echo "[E] BUSY + low disk (50%) -> routine sweep SKIPPED (busy optimization preserved)"
 run_case 1 50
 assert_none "E: no prune while busy + below pressure"
+
+echo "[F] stale-workspace prune: no-activity dirs removed, fresh + partially-fresh kept"
+# act_runner never deletes work/<repo-hash>; agentforge's ephemeral per-repo CI grew it to ~350-400
+# dirs/VM, which is what made the reclaim script's per-workspace /proc scan blow its start-pre budget
+# (2026-07-28 fleet outage — see test-reclaim.sh). The cleanup timer prunes any workspace whose ENTIRE
+# tree is older than the age gate (48h >> the 3h job timeout, so a live/recent job always trips it).
+WSP="$WORK/wsroot/work"
+mkdir -p "$WSP/oldrepo/hostexecutor/sub" "$WSP/freshrepo/hostexecutor" "$WSP/agedrepo/hostexecutor"
+echo x > "$WSP/oldrepo/hostexecutor/sub/f"; echo x > "$WSP/freshrepo/hostexecutor/f"
+echo x > "$WSP/agedrepo/hostexecutor/stale"; find "$WSP/oldrepo" "$WSP/agedrepo" -exec touch -d '4 days ago' {} +
+echo x > "$WSP/agedrepo/hostexecutor/one-fresh-file" # one recent write anywhere must protect the tree
+run_case 0 50
+[ ! -e "$WSP/oldrepo" ]   && ok "F: fully-stale workspace pruned"        || bad "F: fully-stale workspace pruned"
+[ -e "$WSP/freshrepo" ]   && ok "F: fresh workspace kept"                || bad "F: fresh workspace kept"
+[ -e "$WSP/agedrepo" ]    && ok "F: workspace with one fresh file kept"  || bad "F: workspace with one fresh file kept"
+
+echo "[G] prune age 0 disables the stale-workspace prune"
+mkdir -p "$WSP/oldrepo2/hostexecutor"; echo x > "$WSP/oldrepo2/hostexecutor/f"
+find "$WSP/oldrepo2" -exec touch -d '4 days ago' {} +
+WSAGE=0 run_case 0 50
+[ -e "$WSP/oldrepo2" ] && ok "G: prune disabled at age 0" || bad "G: prune disabled at age 0"
+unset WSP
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

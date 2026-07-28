@@ -129,6 +129,12 @@ gitea_runner_cleanup_pressure_until: 6h
 gitea_runner_cleanup_critical_pct: 92 # disk% >= this: hard *_critical_until window + trim actions cache
 gitea_runner_cleanup_critical_until: 1h # critical window (NEVER 0/`-a` — still protects a <1h live build)
 gitea_runner_cleanup_actcache_max_mb: 1536 # trim the act_runner actions cache above this (critical only)
+# Prune work/<repo-hash> workspaces whose ENTIRE tree is untouched for this many hours (0 disables).
+# act_runner never deletes them and agentforge's ephemeral per-repo CI mints new ones continuously —
+# ~350-400 dirs/VM by 2026-07-28, which made the reclaim script's per-workspace /proc scan blow the
+# daemon's start-pre budget and took ALL 5 runners offline. 48h >> the 3h job timeout, so a live or
+# recent workspace always has a fresh mtime and is never touched.
+gitea_runner_cleanup_ws_prune_age_h: 48
 # Reap RUNNING containers older than this (seconds). MUST exceed the job timeout (gitea_runner_job_timeout
 # 3h) so a live job's containers are never touched — only crashed/timed-out leftovers. 4h default.
 gitea_runner_cleanup_reap_age_sec: 14400

@@ -22,6 +22,12 @@ ExecStartPre=+{{ gitea_runner_reclaim_bin }}
 ExecStart={{ gitea_runner_bin }} daemon --config {{ gitea_runner_config_dir }}/config.yaml
 Restart=always
 RestartSec=10
+# Startup budget (covers ExecStartPre). systemd's default 90s killed the reclaim mid-scan when the
+# workspace count ballooned (2026-07-28: O(workspaces x processes) /proc scan at ~400 workspaces), and
+# Restart=always turned that into a permanent restart loop with the whole fleet offline. The scan is
+# single-pass now (see gitea-runner-reclaim.sh); this headroom keeps a slow disk or a big post-incident
+# chown-heal from ever wedging the daemon the same way again.
+TimeoutStartSec=10min
 KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=5min
