@@ -22,10 +22,17 @@
 # it DELETE of THIS object, closing the gap the CREATE/UPDATE-only tenant-guard leaves open).
 #
 # GROUND TRUTH: the platform-dev/delivery entry MIRRORS the LIVE tenant-zero/playground kid registry
-# (the running broker-*-kids registry.json ceilings on 2026-07-26) per audience — the same three
-# accounts the delivery pool uses (planner/implementer/reviewer -> claude_max on anthropic/claude-max-1,
-# codex cross-review -> openai/codex-pro, with anthropic/claude-max-2 the identically-entitled spare
-# Claude account). Values are the operator ceiling, NOT invented.
+# (the running broker-*-kids registry.json ceilings on 2026-07-26) per audience — the accounts the
+# delivery pool uses (planner/implementer/reviewer -> claude_max on anthropic/claude-max-1, codex
+# cross-review -> openai/codex-pro, with anthropic/claude-max-2 and anthropic/claude-max-3 the
+# identically-entitled spare Claude seats). Values are the operator ceiling, NOT invented.
+#
+# EVERY anthropic seat in the estate MUST appear here. This list is what creates the aggregated
+# `af/data/operator/broker/<provider>/<account>/kids` registry doc a broker's `-kids` ExternalSecret
+# reads: a broker with NO entitled audience never gets its KV path written, so its `-kids` Secret
+# never syncs and every replica wedges in ContainerCreating. claude-max-3 was omitted when the seat
+# was added (ailab #128) and its pods were stuck for ~46h as a result — keep this in lockstep with
+# `ANTHROPIC_BROKER_ACCOUNTS` (agentforge provisioner/bootstrap.py), the code-side source of truth.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -57,6 +64,16 @@ data:
           },
           {
             "audience": "anthropic/claude-max-2",
+            "allowed_models": ["claude-haiku-4-5", "claude-opus-4-8", "claude-sonnet-5"],
+            "allowed_routes": ["/v1/messages", "/v1/messages/count_tokens"],
+            "allowed_methods": ["POST"],
+            "max_ttl_s": 3600,
+            "max_token_budget": 2000000,
+            "max_rate_limit": 120,
+            "max_concurrency": 4
+          },
+          {
+            "audience": "anthropic/claude-max-3",
             "allowed_models": ["claude-haiku-4-5", "claude-opus-4-8", "claude-sonnet-5"],
             "allowed_routes": ["/v1/messages", "/v1/messages/count_tokens"],
             "allowed_methods": ["POST"],
