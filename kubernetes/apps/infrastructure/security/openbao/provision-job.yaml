@@ -68,9 +68,23 @@ spec:
             # OpenBao uses its own SERVER pod SA (auto-refreshed) + local CA for TokenReviews — no static
             # token to expire. The server SA (openbao-server) carries system:auth-delegator (below).
             - { name: AF_OB_K8S_HOST, value: "https://kubernetes.default.svc" }
-            # operator SEED VALUES (dispatcher PAT + reaper ledger DSN): a JSON blob keyed by logical KV
-            # path, SOPS-mounted here and written under each operator subtree while root is available
-            # (there is no admin token after the revoke). See operator-seeds.sops.yaml.
+            # operator SEED VALUES (dispatcher PAT, reaper/broker ledger DSNs, CI tokens): a JSON blob
+            # keyed by logical KV path, SOPS-mounted here and written under each subtree while root is
+            # available (there is no admin token after the revoke). See operator-seeds.sops.yaml.
+            #
+            # ALSO the durable home for a CP-mode TENANT ORCHESTRATOR's credentials
+            # (`tenants/<org>/<ws>/orchestrator`: the AF_BOT_TOKEN_* forge PATs + the
+            # AF_CONTROL_PLANE_TOKEN workspace bearer). The control plane RENDERS the Deployment's
+            # `envFrom: af-creds-<ws>-<pool>` and RECORDS the bearer's SHA-256, but it never writes the
+            # plaintext anywhere — materializing that Secret is the OPERATOR's half of the contract
+            # (agentforge-platform docs/operations.md, "Worker credentials (af-creds) materialization";
+            # the P2/ESO path is "a Vault write, not a hand-built Secret"). Seeding here — rather than a
+            # one-off `bao kv put` — is what makes it survive: `_apply_operator_seeds` re-runs on EVERY
+            # provision Job and MERGE-writes add-only, so the values are re-seeded after an OpenBao wipe
+            # (see docs/runbooks/openbao-recovery.md) while `AF_CAPABILITY_SIGNING_KEY`/`AF_CAPABILITY_KID`,
+            # which the keypair lifecycle mirrors into the SAME doc, are preserved untouched.
+            # A hand `kubectl create secret` is NOT a substitute: the tenant ExternalSecret is
+            # creationPolicy:Owner and overwrites the Secret from OpenBao on its next refresh.
             - { name: AF_OB_SEEDS_FILE, value: "/etc/openbao-seeds/seeds.json" }
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }
