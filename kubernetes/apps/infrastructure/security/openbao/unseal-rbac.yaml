@@ -89,7 +89,9 @@ subjects:
   - { kind: ServiceAccount, name: openbao-unsealer, namespace: openbao }
 ---
 # (3) openbao-provision — consumes the bootstrap (root) token then DELETES it; mints + reads the scoped
-#     provisioner token; writes/updates the provisioned sentinel ConfigMap.
+#     provisioner token; writes/updates the provisioned sentinel ConfigMap. On EVERY subsequent run it
+#     also reads the durable operator-provisioner token to drive the token-only operator reconcile
+#     (operator roles + KV seeds + broker-oauth cas_required) on the already-provisioned vault.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -113,6 +115,20 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: ["openbao-provisioner-token"]
+    verbs: ["get"]
+  # read the DURABLE operator-provisioner token — REQUIRED for the add-only operator reconcile on an
+  # already-provisioned vault (main.py `_run`: it reads this Secret and, only if present, calls
+  # run_operator_reconcile to (re)apply operator roles + KV SEEDS + the broker-oauth cas_required
+  # stamps token-only, i.e. without the long-revoked root).
+  #
+  # ⚠ This grant was MISSING while the Secret itself has existed since the re-bootstrap: the read
+  # 403'd, `read_secret` returned None, and the Job took the "operator token absent — re-bootstrap to
+  # seed it" no-op branch. That message reads like the token does not exist, but the real fault was
+  # RBAC — so EVERY operator seed/role added after bootstrap silently never reconciled (found while
+  # seeding the claude-max-3 broker ledger, #143). Read-only, one named Secret.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["openbao-operator-provisioner-token"]
     verbs: ["get"]
   # create the provisioner-token Secret (create cannot be resourceName-scoped).
   - apiGroups: [""]
