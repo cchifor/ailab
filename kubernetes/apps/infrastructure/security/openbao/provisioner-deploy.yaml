@@ -27,7 +27,7 @@ spec:
         # the pod template on any policy change → the Recreate strategy rolls the pod and re-reads the
         # mounted file. RECOMPUTE on every ConfigMap edit: sha256 of the `capability-kids.json` value in
         # capability-kids-configmap.yaml (kept in this SAME PR so code+config activate atomically).
-        checksum/capability-kids: "691c7ce8cc48dc2930e76656fa2f544f4b24c28c90f6684ab55297fc04b744bf"
+        checksum/capability-kids: "0ed6833e2ea283e758514f9003e06c6efee6fb39e08aa90b23034857272a920a"
       labels:
         app.kubernetes.io/name: agentforge-provisioner
         app.kubernetes.io/component: provisioner
@@ -76,8 +76,16 @@ spec:
             # guarantee needs StatefulSet brokers (stable pod-N.headless DNS, listed per-replica) OR a #55
             # barrier change to resolve the headless EndpointSlice to all pod IPs — neither an ailab-only
             # manifest change. Tracked as a follow-up (see PR body / escalation).
-            # TODO(claude-max-3): re-add after orchestrator >= #56 is pinned + reconcile Job run (see agentforge #56)
-            - { name: AF_PROVISIONER_BROKER_READYZ_URLS, value: "http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700,http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700" }
+            # claude-max-3 RE-ADDED (was dropped in #127 to unblock tenant-zero/platform-dev): the TODO's
+            # gate is met — agentforge #56 (`ANTHROPIC_BROKER_ACCOUNTS`-derived CAS paths, covering
+            # claude-max-3) is contained in the pinned orchestrator digest (agentforge@308dc11, #142).
+            # ⚠ The barrier is ALL-OR-NOTHING per kid (HttpBrokerAckBarrier._all returns False on the FIRST
+            # unreachable URL), so a broker listed here while its replicas are DOWN defers the private-half
+            # commit for EVERY audience — that is exactly what #127 hit during initial activation. It is safe
+            # now only because the tenant-zero kid is already committed (`_already_committed` short-circuits
+            # ahead of the barrier) AND claude-max-3's replicas are restored by this same PR. When adding a
+            # FUTURE broker seat, list it here only AFTER its pods are Running.
+            - { name: AF_PROVISIONER_BROKER_READYZ_URLS, value: "http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700,http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700" }
             - { name: AF_PROVISIONER_BARRIER_TIMEOUT_S, value: "180" }
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }
