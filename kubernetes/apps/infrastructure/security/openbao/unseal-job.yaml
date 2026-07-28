@@ -14,6 +14,30 @@ kind: Job
 metadata:
   name: openbao-init
   namespace: openbao
+  annotations:
+    # WEDGE GUARD (2026-07-28 outage). A Job's `spec.template` is IMMUTABLE, and the orchestrator digest
+    # below is rewritten by every `just pin-bootstrap` — so a routine re-pin is a template change, Flux's
+    # server-side dry-run fails with "field is immutable", and the WHOLE `openbao` Kustomization goes
+    # False. That cascades down the (correct) dependency chain: external-secrets dependsOn openbao, and
+    # agentforge-workers / agentforge-ci-runners / agentforge-tenant-platform-dev dependOn that — four
+    # kustomizations down for hours, broker pods stuck ContainerCreating 21h on ESO secrets that never
+    # materialised, dispatcher frozen on a stale image.
+    #
+    # This per-object annotation makes kustomize-controller DELETE+RECREATE *this object only* when a
+    # patch fails on an immutable field — i.e. it automates the exact manual recovery that cleared the
+    # outage (delete the completed Job, let Flux recreate it at the new pin; both re-completed in 12s).
+    #
+    # Deliberately NOT Kustomization-wide `spec.force: true`: that would apply to everything this layer
+    # owns — the openbao Namespace, the SOPS operator-seeds Secret, the openbao-tls Certificate, the
+    # unsealer/provisioner Deployments — and a force-delete of the namespace or the seed Secret on this,
+    # the estate's most sensitive component, risks exactly the KV loss an OpenBao wipe causes. Flux's own
+    # docs warn spec.force "may cause downtime" and should not be left on long-term.
+    #
+    # Re-running is safe and is ALREADY the steady state: `agentforge openbao-init` is idempotent and
+    # fail-closed (it reconciles against the `openbao-state` sentinel, never re-inits over a stale key),
+    # and ttlSecondsAfterFinished below already reaps this Job daily, after which Flux re-applies it.
+    # So this changes only *when* the re-run happens, never *whether* the bootstrap can run.
+    kustomize.toolkit.fluxcd.io/force: "enabled"
   labels:
     app.kubernetes.io/name: openbao-init
     app.kubernetes.io/component: bootstrap

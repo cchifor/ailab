@@ -31,6 +31,50 @@ REF_RE = re.compile(
     r"(?P<full>" + re.escape(REGISTRY) + r"/(?P<repo>[\w./-]+?)/(?P<image>[\w.-]+)@sha256:(?P<cur>[A-Za-z0-9_]+))"
 )
 
+# ---------------------------------------------------------------- immutable-Job wedge guard
+# A Job's `spec.template` is IMMUTABLE. Re-pinning the image inside a Flux-APPLIED Job is therefore a
+# patch that the kustomize-controller dry-run rejects with "field is immutable", which takes the WHOLE
+# Kustomization False — and, through dependsOn, every layer beneath it. That is the 2026-07-28 outage
+# (openbao -> external-secrets -> agentforge-workers/ci-runners/tenant-platform-dev, hours down).
+#
+# The durable fix is the per-object annotation `kustomize.toolkit.fluxcd.io/force: "enabled"`, which
+# makes Flux delete+recreate just that Job. This guard asserts the invariant so a NEW Flux-managed Job
+# can never re-introduce the wedge: it runs on every pin (the exact path that triggers the failure).
+#
+# Only Jobs that Flux actually applies are in scope — this repo deliberately keeps several one-shot Jobs
+# UNLISTED in their kustomization.yaml (db-migrate, litellm-vkeys, litellm-db-bootstrap, the egress
+# canaries) precisely so Flux never owns them; those cannot wedge anything.
+DOC_SPLIT_RE = re.compile(r"(?m)^---\s*$")
+JOB_KIND_RE = re.compile(r"(?m)^kind:\s*Job\s*(?:#.*)?$")
+FORCE_RE = re.compile(r"kustomize\.toolkit\.fluxcd\.io/force:\s*[\"']?enabled", re.IGNORECASE)
+
+
+def _is_flux_managed(path: pathlib.Path) -> bool:
+    """True if `path` is listed as a resource in its sibling kustomization.yaml (i.e. Flux applies it)."""
+    kfile = path.parent / "kustomization.yaml"
+    if not kfile.is_file():
+        return False
+    entry = re.compile(r"(?m)^\s*-\s*\.?/?" + re.escape(path.name) + r"\s*(?:#.*)?$")
+    return bool(entry.search(kfile.read_text(encoding="utf-8")))
+
+
+def check_job_force_annotations() -> list[str]:
+    """Return a list of violation strings: Flux-managed Jobs missing the force annotation."""
+    violations: list[str] = []
+    for path in sorted(ROOT.rglob("*.yaml")):
+        if path.name == "gotk-components.yaml":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not JOB_KIND_RE.search(text):
+            continue
+        if not _is_flux_managed(path):
+            continue  # operator-run one-shot, deliberately unlisted — Flux never applies it
+        for doc in DOC_SPLIT_RE.split(text):
+            if JOB_KIND_RE.search(doc) and not FORCE_RE.search(doc):
+                name = re.search(r"(?m)^\s*name:\s*(\S+)", doc)
+                violations.append(f"{path.relative_to(REPO).as_posix()} (Job {name.group(1) if name else '?'})")
+    return violations
+
 
 def parse_args(argv: list[str]) -> tuple[dict[str, str], bool]:
     pins: dict[str, str] = {}
@@ -99,6 +143,24 @@ def main(argv: list[str]) -> int:
         print("\n[WARN] placeholder refs still unpinned (not in this pin set):")
         for r in sorted(set(remaining_placeholder)):
             print(f"  {r}")
+
+    # Immutable-Job wedge guard (see header near JOB_KIND_RE). Fail the pin rather than let a
+    # Flux-applied Job without the force annotation reach main and wedge its whole layer.
+    violations = check_job_force_annotations()
+    if violations:
+        print('\n[FAIL] Flux-managed Job(s) missing `kustomize.toolkit.fluxcd.io/force: "enabled"`:')
+        for v in violations:
+            print(f"  {v}")
+        print(
+            "  A Job's spec.template is immutable — re-pinning one of these wedges its ENTIRE\n"
+            "  Kustomization (and everything that dependsOn it) with 'field is immutable'.\n"
+            "  Add the annotation under metadata.annotations, or keep the Job out of\n"
+            "  kustomization.yaml if it is meant to be an operator-run one-shot."
+        )
+        rc = 1
+    else:
+        print("\n[ OK ] all Flux-managed Jobs carry the immutable-field force annotation")
+
     print(f"\n{'DRY-RUN — no writes. ' if dry else ''}{len(changed_files)} file(s) touched.")
     return rc
 

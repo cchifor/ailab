@@ -16,6 +16,18 @@ kind: Job
 metadata:
   name: openbao-provision
   namespace: openbao
+  annotations:
+    # WEDGE GUARD (2026-07-28 outage) — see unseal-job.yaml for the full rationale. A Job's
+    # `spec.template` is IMMUTABLE and the orchestrator digest below is rewritten by every
+    # `just pin-bootstrap`, so an in-place patch fails "field is immutable" and takes the whole
+    # `openbao` Kustomization — plus external-secrets and its three dependents — False.
+    # This annotation scopes delete+recreate to THIS Job (not Kustomization-wide `spec.force`, which
+    # would also force the namespace / SOPS seed Secret / TLS Certificate this layer owns).
+    #
+    # Re-running is safe and already routine: `agentforge openbao-provision` short-circuits on the
+    # `openbao-state` sentinel and exits 0 WITHOUT needing the (by then revoked) root token, and
+    # ttlSecondsAfterFinished already reaps + re-applies this Job daily.
+    kustomize.toolkit.fluxcd.io/force: "enabled"
   labels:
     app.kubernetes.io/name: openbao-provision
     app.kubernetes.io/component: bootstrap

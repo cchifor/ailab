@@ -43,17 +43,32 @@
 #   shell-script)[:10]. ANY change to the container image or the script changes the suffix → a NEW Job is
 #   created and the superseded one is Flux-PRUNED (this Kustomization has prune:true) — never a failed
 #   in-place patch. Chosen over Kustomization-wide `spec.force:true` (which would delete+recreate the
-#   BOUND Retain PVs this shared Kustomization also owns — reaper/workspace/staging) and over a per-object
-#   force annotation (not supported by this Flux). ⚠ RECOMPUTE the suffix whenever you edit image/args.
+#   BOUND Retain PVs this shared Kustomization also owns — reaper/workspace/staging).
+#   ⚠ RECOMPUTE the suffix whenever you edit image/args.
 #   PRECISE RECIPE (verified against the current suffix; `just af-verify-hashes` checks it in CI-style):
 #     body = the args block-scalar text EXACTLY AS IT APPEARS IN THIS FILE (raw, still YAML-indented,
 #     only the trailing newline stripped — NOT dedented); then:
 #     printf '%s\n---\n%s' "<image>" "$body" | sha256sum | cut -c1-10
+#
+# CORRECTION (2026-07-28): this header previously claimed a per-object force annotation was "not
+#   supported by this Flux". That was WRONG — `kustomize.toolkit.fluxcd.io/force` has shipped since Flux
+#   0.39 and this estate runs kustomize-controller v1.8.5. Acting on that stale belief is what left the
+#   openbao Jobs unguarded and wedged the openbao -> external-secrets -> workers/ci-runners/tenant chain
+#   for hours. The annotation is now set below as a BACKSTOP: the content-addressed name remains the
+#   PRIMARY mechanism (deterministic, and verified by `just af-verify-hashes`), but the annotation means
+#   a FORGOTTEN suffix recompute degrades to an automatic delete+recreate instead of wedging the whole
+#   agentforge-sandbox layer. Belt and braces, and scoped to this object only.
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: af-sbx-provision-tenant-zero-platform-dev-b1ae113c61 # suffix = sha256(image+args)[:10] — recompute on edit (header)
   namespace: agentforge # reaper's trusted home (baseline PSA); NOT agentforge-sandbox (restricted)
+  annotations:
+    # Backstop for a forgotten suffix recompute (see CONTENT-ADDRESSED NAME in the header): recreate
+    # THIS Job on an immutable-field change rather than wedging the agentforge-sandbox Kustomization.
+    # Per-object, so the bound Retain PVs this shared Kustomization also owns are never force-replaced.
+    # Idempotent by construction (`mkdir -p` + `chmod 0777`), and already re-applied on TTL reap.
+    kustomize.toolkit.fluxcd.io/force: "enabled"
   labels:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
