@@ -56,7 +56,7 @@ spec:
           # verified tag→digest equality (short `276ccad` + full-SHA tags resolve to the SAME digest) +
           # linux/amd64. Entrypoint unchanged from the Dockerfile (`serve`; migrate variant in db-migrate.yaml).
           # Re-verify the tag still resolves to this digest before merging the go-live PR; fail closed if it moved.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:2333242d455779d6d6f0ee84f6185b7813014a0e6b598a92d462ad60afea6162
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:30748c98155d662dd141d28f7f12efca7bb4023db313f2625f910c1d5792b060
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
