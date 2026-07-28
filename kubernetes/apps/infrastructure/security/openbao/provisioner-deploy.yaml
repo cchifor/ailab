@@ -76,16 +76,25 @@ spec:
             # guarantee needs StatefulSet brokers (stable pod-N.headless DNS, listed per-replica) OR a #55
             # barrier change to resolve the headless EndpointSlice to all pod IPs — neither an ailab-only
             # manifest change. Tracked as a follow-up (see PR body / escalation).
-            # claude-max-3 RE-ADDED (was dropped in #127 to unblock tenant-zero/platform-dev): the TODO's
-            # gate is met — agentforge #56 (`ANTHROPIC_BROKER_ACCOUNTS`-derived CAS paths, covering
-            # claude-max-3) is contained in the pinned orchestrator digest (agentforge@308dc11, #142).
-            # ⚠ The barrier is ALL-OR-NOTHING per kid (HttpBrokerAckBarrier._all returns False on the FIRST
-            # unreachable URL), so a broker listed here while its replicas are DOWN defers the private-half
-            # commit for EVERY audience — that is exactly what #127 hit during initial activation. It is safe
-            # now only because the tenant-zero kid is already committed (`_already_committed` short-circuits
-            # ahead of the barrier) AND claude-max-3's replicas are restored by this same PR. When adding a
-            # FUTURE broker seat, list it here only AFTER its pods are Running.
-            - { name: AF_PROVISIONER_BROKER_READYZ_URLS, value: "http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700,http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700" }
+            # ⚠ RULE: list a broker here ONLY while its replicas are RUNNING. The barrier is
+            # ALL-OR-NOTHING per kid (HttpBrokerAckBarrier._all returns False on the FIRST unreachable
+            # URL), so one down broker defers the private-half commit for EVERY audience — that is the
+            # #127 outage. It does NOT bite an ALREADY-committed kid (`_already_committed` short-circuits
+            # ahead of the barrier), so the symptom only appears on the NEXT first-commit: a newly
+            # onboarded workspace silently never receives its signing key.
+            #
+            # TODO(claude-max-3): re-add
+            # `http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700`
+            # once that broker's pods actually reach Running. The old "orchestrator >= #56 pinned" gate is
+            # already MET (agentforge@308dc11, #142). The REAL remaining blocker is that
+            # `operator/broker/anthropic/claude-max-3/ledger` cannot be seeded: the openbao-provision
+            # operator reconcile 403s on `PUT sys/policy/af-operator-dispatcher` because
+            # `_OPERATOR_PROVISIONER_POLICY_HCL` grants only the `sys/policies/acl/*` alias while hvac's
+            # `create_or_update_policy` calls the LEGACY `sys/policy/*` endpoint (the TENANT policy grants
+            # BOTH aliases — the operator one does not). That HCL is written under root at first provision
+            # and the operator token is deliberately barred from rewriting `agentforge-*` policies, so it
+            # needs an upstream agentforge fix PLUS a root ceremony. See #143/#144 and the report there.
+            - { name: AF_PROVISIONER_BROKER_READYZ_URLS, value: "http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700,http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700" }
             - { name: AF_PROVISIONER_BARRIER_TIMEOUT_S, value: "180" }
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }
