@@ -37,7 +37,7 @@ spec:
       containers:
         - name: unsealer
           # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0).
-          image: registry.chifor.me/agentforge/orchestrator@sha256:3b4923e8939929777eafc9438b7e76a1bdefba06cf135ff820c955a48f324844
+          image: registry.chifor.me/agentforge/orchestrator@sha256:aec0580f3f4ee2ce4121146964ba5ebc29f7066bf63d8cb7567c79396c3fceb4
           args: ["agentforge", "openbao-unseal", "--loop", "--interval", "15"]
           env:
             - { name: AF_OB_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
