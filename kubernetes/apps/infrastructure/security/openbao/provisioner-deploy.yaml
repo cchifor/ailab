@@ -114,7 +114,7 @@ spec:
             - name: AF_PROVISIONER_BROKER_READYZ_MAP
               value: >-
                 {"anthropic/claude-max-1":"http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700",
-                 "anthropic/claude-max-2":"http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700",
+                 "anthropic/claude-max-2":"http://broker-anthropic-WRONG-headless.agentforge-broker.svc.cluster.local:8700",
                  "anthropic/claude-max-3":"http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700",
                  "openai/codex-pro":"http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700"}
             - { name: AF_PROVISIONER_BARRIER_TIMEOUT_S, value: "180" }
