@@ -64,7 +64,14 @@ spec:
           # expects 0012 and /readyz fails closed when the DB is behind the code. db-migrate.yaml was
           # repinned first in #155 so the migration Job ran this same digest. Overlays remain gated
           # shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set here.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:1512e96c087db25680e96cdca13e6751574dc3f7c20cff467d5d7275581e4f36
+          #
+          # 2026-07-29 (later): repinned to tag `385eca0` (agentforge-platform main HEAD, PR #48
+          # "an operation nobody is polling must still be able to finish") = sha256:661c3edf…
+          # NO alembic revision in that PR — head stays 0012, the same schema this cluster is
+          # already on — so the db-migrate-first ordering does not apply and db-migrate.yaml moves
+          # in the same commit. Verified tag->digest equality: short `385eca0` and full-SHA
+          # `385eca07d13cf2a2ad7f4770b905b794070bed52` both resolve to sha256:661c3edf….
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:661c3edf6e83746b4f603c6e57e02916d1c143b596ce5bd28a2af4712edc6974
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain

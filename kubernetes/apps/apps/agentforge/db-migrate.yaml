@@ -100,7 +100,14 @@ spec:
           # `AF_KUBE_CONTEXT=admin@ai bash scripts/af-db.sh migrate` from a checkout at gitea/main (this
           # manifest is excluded from kustomization.yaml, so it is applied from the checkout, not by
           # Flux) -> confirm head 0012 -> only then repin deployment.yaml.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:1512e96c087db25680e96cdca13e6751574dc3f7c20cff467d5d7275581e4f36
+          #
+          # 2026-07-29 (later): repinned to `385eca0` = sha256:661c3edf… alongside deployment.yaml, in
+          # ONE commit. The ordering rule above is about a digest that MOVES the alembic head; PR #48
+          # touches only src/ + tests/ (no alembic/versions/ change), so head stays 0012 — the schema
+          # this cluster is already on — and there is nothing to migrate before the Deployment rolls.
+          # `af-db.sh migrate` against this digest is a no-op that re-reports 0012; the lockstep note
+          # above is why it is repinned at all.
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:661c3edf6e83746b4f603c6e57e02916d1c143b596ce5bd28a2af4712edc6974
           command: ["agentforge-platform", "migrate"]
           env:
             # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
