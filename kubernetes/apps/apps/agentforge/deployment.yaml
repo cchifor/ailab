@@ -57,13 +57,22 @@ spec:
           # linux/amd64. Entrypoint unchanged from the Dockerfile (`serve`; migrate variant in db-migrate.yaml).
           # Re-verify the tag still resolves to this digest before merging the go-live PR; fail closed if it moved.
           #
-          # 2026-07-29: repinned to tag `ebbb584` (agentforge-platform main HEAD, PR #47) =
-          # sha256:1512e96c…, picking up #45 (per-role agent overlays, alembic 0012), #46 (the
-          # Monitoring board never stopped loading on a cold load) and #47 (the Agents editor).
-          # Landed ONLY AFTER `scripts/af-db.sh migrate` reported alembic head 0012 — this image
-          # expects 0012 and /readyz fails closed when the DB is behind the code. db-migrate.yaml was
-          # repinned first in #155 so the migration Job ran this same digest. Overlays remain gated
-          # shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set here.
+          # 2026-07-29: repinned to tag `ebbb584` (PR #47) = sha256:1512e96c…, picking up #45 (per-role
+          # agent overlays, alembic 0012), #46 (the Monitoring board never stopped loading on a cold
+          # load) and #47 (the Agents editor). Landed ONLY AFTER `scripts/af-db.sh migrate` reported
+          # alembic head 0012 — that image expects 0012 and /readyz fails closed when the DB is behind
+          # the code. db-migrate.yaml was repinned first in #155 so the migration Job ran that digest.
+          #
+          # 2026-07-29 (current line below): the pin bot has moved this on three times since, so the
+          # paragraph above no longer describes the digest on the `image:` line — read this instead.
+          # Chain: ebbb584 (=1512e96c) -> 385eca0 (=661c3edf, #48) -> c815e9f (#160, PR #49) ->
+          # `c81afd6` (= sha256:edbc94a0…, agentforge-platform main HEAD, PR #50 "open the schema-v2
+          # gate only for the process that pulls"), verified tag→digest at merge time.
+          # Only the FIRST of those moved the alembic head: `git diff --name-only ebbb584..c81afd6 --
+          # alembic/versions/` is empty, head stays 0012 (what this cluster runs). That is why #157,
+          # #160 and #163 each moved db-migrate.yaml and this file in ONE commit — allowed, not a
+          # violation of the ordering rule; see the ⚠️ note in db-migrate.yaml for when it does bind.
+          # Overlays remain gated shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set here.
           image: registry.chifor.me/agentforge/agentforge-platform@sha256:edbc94a0aa2df9b1a65818f0a8c62c5feb2e932066137c3b7a08647f85493b6d
           ports:
             - { name: http, containerPort: 8080 }
