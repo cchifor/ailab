@@ -41,6 +41,35 @@ agent-nodes on `.47`–`.49`).
 > into the static block (`kubernetes/infra/ai-lxc/variables.tf`). The dev-workers use `.37`–`.39`
 > + `.5`–`.7` (free static space), so no router change is needed.
 
+## Kubernetes cluster networks (Talos + Cilium)
+
+These are **internal to the cluster** and never appear on the LAN. Both are set at Talos cluster
+creation and cannot be changed without rebuilding the cluster.
+
+| Network | Purpose | Source of truth |
+|---|---|---|
+| `10.244.0.0/16` | **Pod** CIDR (`kube-controller-manager --cluster-cidr`) | Talos machine config |
+| `10.96.0.0/12` | **Service / ClusterIP** CIDR (`kube-apiserver --service-cluster-ip-range`) | Talos machine config |
+
+### Reserved broker ClusterIP range
+
+`10.96.0.0/12` spans **`10.96.0.0`–`10.111.255.255`**. Every Service ClusterIP in the cluster —
+including the AgentForge broker Services — is allocated from it by the apiserver.
+
+> **Do not hand out a broker ClusterIP by picking one.** A few broker Services **pin** their
+> ClusterIP (`spec.clusterIP`) so the address survives a Service delete/recreate. A pinned address
+> must (a) fall inside `10.96.0.0/12` — the apiserver rejects anything outside it — and (b) not
+> collide with an address already allocated, which the apiserver also rejects, leaving the Service
+> uncreated and the broker unreachable.
+>
+> The safe procedure is: create the Service **without** `clusterIP`, let the apiserver allocate,
+> then pin the address it chose. Never invent one.
+>
+> Both rules are machine-checked. `scripts/gen-broker-inventory.py` fails if a pinned broker
+> ClusterIP falls outside the CIDR or is pinned twice, and the current allocation is listed in the
+> generated `kubernetes/apps/infrastructure/agentforge-broker/broker-inventory.yaml`. Check that
+> file (and `kubectl -n agentforge-broker get svc`) before pinning a new one.
+
 ## Dedicated storage fabric — `10.55.0.0/24`
 
 > ⚠️ **The /30 design below was the original plan and was NOT realized.** Live reality (verified; source of
