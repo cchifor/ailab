@@ -88,11 +88,19 @@ spec:
             capabilities: { drop: ["ALL"] }
       containers:
         - name: migrate
-          # Same image + digest as the CP Deployment (agentforge-platform tag 276ccad / 276ccad857…, PR #18).
+          # Same image + digest as the CP Deployment (agentforge-platform tag ebbb584, main HEAD, PR #47).
           # Repo path `agentforge/agentforge-platform` (CI push target) — NOT `cchifor/…`. The migrate
           # entrypoint is `agentforge-platform migrate` = alembic upgrade head as admin_dsn (verified in
           # the image config Entrypoint + main.py CLI). Keep this digest in lockstep with deployment.yaml.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:93e35ea33fe872c1ba40b9c471d2fb31f64e3f8aa9d8d244f93a16df0922bf54
+          #
+          # ⚠️ MIGRATION ORDERING: this digest is deliberately moved AHEAD of deployment.yaml and landed
+          # FIRST. PR #45 adds alembic 0012 (role_overlays) and the prod DB is at 0011; /readyz fails
+          # closed on schema skew, so pinning the Deployment before the DB is migrated wedges the CP
+          # (that happened twice on 2026-07-29). Sequence: land THIS pin -> run
+          # `AF_KUBE_CONTEXT=admin@ai bash scripts/af-db.sh migrate` from a checkout at gitea/main (this
+          # manifest is excluded from kustomization.yaml, so it is applied from the checkout, not by
+          # Flux) -> confirm head 0012 -> only then repin deployment.yaml.
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:1512e96c087db25680e96cdca13e6751574dc3f7c20cff467d5d7275581e4f36
           command: ["agentforge-platform", "migrate"]
           env:
             # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
