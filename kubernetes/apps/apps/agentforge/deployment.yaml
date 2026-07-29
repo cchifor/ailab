@@ -56,7 +56,15 @@ spec:
           # verified tag→digest equality (short `276ccad` + full-SHA tags resolve to the SAME digest) +
           # linux/amd64. Entrypoint unchanged from the Dockerfile (`serve`; migrate variant in db-migrate.yaml).
           # Re-verify the tag still resolves to this digest before merging the go-live PR; fail closed if it moved.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:93e35ea33fe872c1ba40b9c471d2fb31f64e3f8aa9d8d244f93a16df0922bf54
+          #
+          # 2026-07-29: repinned to tag `ebbb584` (agentforge-platform main HEAD, PR #47) =
+          # sha256:1512e96c…, picking up #45 (per-role agent overlays, alembic 0012), #46 (the
+          # Monitoring board never stopped loading on a cold load) and #47 (the Agents editor).
+          # Landed ONLY AFTER `scripts/af-db.sh migrate` reported alembic head 0012 — this image
+          # expects 0012 and /readyz fails closed when the DB is behind the code. db-migrate.yaml was
+          # repinned first in #155 so the migration Job ran this same digest. Overlays remain gated
+          # shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set here.
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:1512e96c087db25680e96cdca13e6751574dc3f7c20cff467d5d7275581e4f36
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
