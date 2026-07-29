@@ -83,18 +83,40 @@ spec:
             # ahead of the barrier), so the symptom only appears on the NEXT first-commit: a newly
             # onboarded workspace silently never receives its signing key.
             #
-            # TODO(claude-max-3): re-add
-            # `http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700`
-            # once that broker's pods actually reach Running. The old "orchestrator >= #56 pinned" gate is
-            # already MET (agentforge@308dc11, #142). The REAL remaining blocker is that
-            # `operator/broker/anthropic/claude-max-3/ledger` cannot be seeded: the openbao-provision
-            # operator reconcile 403s on `PUT sys/policy/af-operator-dispatcher` because
-            # `_OPERATOR_PROVISIONER_POLICY_HCL` grants only the `sys/policies/acl/*` alias while hvac's
-            # `create_or_update_policy` calls the LEGACY `sys/policy/*` endpoint (the TENANT policy grants
-            # BOTH aliases — the operator one does not). That HCL is written under root at first provision
-            # and the operator token is deliberately barred from rewriting `agentforge-*` policies, so it
-            # needs an upstream agentforge fix PLUS a root ceremony. See #143/#144 and the report there.
-            - { name: AF_PROVISIONER_BROKER_READYZ_URLS, value: "http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700,http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700" }
+            # ⚙ GENERATED — do NOT hand-edit this value. Membership is derived from the
+            # `agentforge.io/kid-barrier` annotation on each broker Deployment by
+            # scripts/gen-broker-inventory.py, and .gitea/workflows/broker-inventory.yaml fails the
+            # PR when the two disagree. To hold a seat OUT while it is down, flip that annotation to
+            # "false" and re-run the generator — the RULE above is exactly why the knob is
+            # declarative rather than a hand-edit, which history shows gets reverted by hand too.
+            #
+            # claude-max-3 JOINED the barrier on 2026-07-29. The blocker recorded here previously —
+            # `operator/broker/anthropic/claude-max-3/ledger` unseedable behind an operator-reconcile
+            # 403 on `PUT sys/policy/af-operator-dispatcher` — is resolved: agentforge #67 fixed the
+            # reconcile, and that ledger path IS now present in the live openbao-operator-seeds
+            # Secret. The broker is 2/2 with /readyz 200 ready:true. Full evidence lives in
+            # agentforge-broker/broker-anthropic-claude-max-3.yaml next to the annotation itself.
+            - { name: AF_PROVISIONER_BROKER_READYZ_URLS, value: "http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700,http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700,http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700" }
+            # Aud -> broker base-URL MAP for the KV garbage collector (agentforge #69). DISTINCT from
+            # the barrier URL LIST above: that one is a GATE (poll every listed broker, all-or-nothing),
+            # this is an INVENTORY (which audiences the estate serves at all). The collector reads only
+            # the KEYS — membership, never a probe — so no network failure can widen it, and it REFUSES
+            # to run when this is unset/empty rather than reading "I know of no broker" as "every
+            # credential is an orphan". EVERY seat belongs here, including one held out of the barrier:
+            # being temporarily down is not being retired.
+            #
+            # Inert until the collector is switched on, which needs AF_PROVISIONER_KV_GC_SEEDS_FILE —
+            # deliberately NOT set. See agentforge-broker/broker-inventory.yaml `seedCoverage`: the
+            # operator seeds file declares no broker `oauth` path at all today, so the collector would
+            # refuse to start. The drift check fails the PR if that var is ever added while it would.
+            #
+            # ⚙ GENERATED — do NOT hand-edit. See scripts/gen-broker-inventory.py.
+            - name: AF_PROVISIONER_BROKER_READYZ_MAP
+              value: >-
+                {"anthropic/claude-max-1":"http://broker-anthropic-max1-headless.agentforge-broker.svc.cluster.local:8700",
+                 "anthropic/claude-max-2":"http://broker-anthropic-max2-headless.agentforge-broker.svc.cluster.local:8700",
+                 "anthropic/claude-max-3":"http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700",
+                 "openai/codex-pro":"http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700"}
             - { name: AF_PROVISIONER_BARRIER_TIMEOUT_S, value: "180" }
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }

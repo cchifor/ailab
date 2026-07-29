@@ -1,0 +1,55 @@
+# Broker inventory drift check — the FIRST CI in this repo.
+#
+# ailab had zero status checks on every PR until now. This deliberately stays a single check and
+# nothing else: it verifies that every value derived from the broker seat inventory still agrees
+# with the broker manifests that declare it. It is not the seed of a general CI suite.
+#
+# WHY .gitea/ AND NOT .github/: Gitea reads .gitea/workflows and, once that directory exists,
+# ignores .github/workflows entirely. ailab has no .github/workflows, so nothing is masked here.
+#
+# FAIL CLOSED — the point of this file.
+#   * ONE job, ONE step, no `needs:`, no matrix, no aggregator. The estate has already shipped a
+#     gate that could not fail: `ci-gate` in the sibling repos looped over
+#     `join(needs.*.result, ' ')`, which evaluates to an EMPTY STRING on Gitea's act_runner, so the
+#     loop body ran zero times and the gate passed unconditionally for its entire life. There is no
+#     result aggregation here at all, so that failure mode has nowhere to live: the check's exit
+#     status IS the script's exit status.
+#   * No `continue-on-error`, no `if:` conditions, no `|| true`, no soft skips. A missing
+#     interpreter, an unreadable manifest, a source that does not parse — every one of those is a
+#     non-zero exit from the script, which fails the job.
+#   * `set -euo pipefail` so a failure inside a multi-command step cannot be swallowed.
+#
+# Proven red before it was trusted green: hand-editing one derived value (a broker URL in the
+# control plane's AFP_BROKER_READYZ_URLS) makes this exit 1 with a diff; reverting makes it pass.
+name: broker-inventory
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: broker inventory drift
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check derived broker values against the broker manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Resolve an interpreter explicitly and FAIL if there is none — never skip.
+          if command -v python3 >/dev/null 2>&1; then
+            PY=python3
+          elif command -v python >/dev/null 2>&1; then
+            PY=python
+          else
+            echo "no python3/python on the runner — failing closed rather than skipping the gate"
+            exit 1
+          fi
+          "$PY" --version
+          "$PY" scripts/gen-broker-inventory.py --check

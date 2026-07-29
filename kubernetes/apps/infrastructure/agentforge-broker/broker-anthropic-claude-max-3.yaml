@@ -19,6 +19,26 @@ kind: Deployment
 metadata:
   name: broker-anthropic-claude-max-3
   namespace: agentforge-broker
+  annotations:
+    # Capability-kid ACTIVATION BARRIER membership (scripts/gen-broker-inventory.py derives
+    # AF_PROVISIONER_BROKER_READYZ_URLS from this). The barrier is ALL-OR-NOTHING per kid, so a
+    # listed broker that is unreachable defers the signing-key commit for EVERY audience (#127).
+    # Set "false" while a seat is down; there is deliberately NO default.
+    #
+    # FLIPPED "false" -> "true" (2026-07-29). This seat was deliberately OUT while its pods could
+    # not run: an earlier attempt added it mid-outage and re-armed #127. Verified before flipping:
+    #   * `kubectl -n agentforge-broker get deploy` -> 2/2 ready, rollout complete;
+    #   * GET /readyz -> 200 {"ready":true,"credential_generation":"f1a7714e",
+    #     "registry_generation":"c70b3be78f3a"} — and /readyz FAILS CLOSED on ledger or credential
+    #     loss, so a 200 with real generations proves ledger + oauth + kid registry are all loaded;
+    #   * the stated blocker in provisioner-deploy.yaml is gone —
+    #     `operator/broker/anthropic/claude-max-3/ledger` IS present in the live
+    #     openbao-operator-seeds Secret (key names checked, never values), and the operator
+    #     reconcile 403 behind it was fixed upstream by agentforge #67.
+    # Leaving it OUT is not the safe option: the barrier is what proves a broker serves a public
+    # kid before its private half is committed, and an unlisted seat gets that commit unproven —
+    # the exact shape of the 21h stuck-pod incident.
+    agentforge.io/kid-barrier: "true"
   labels:
     app.kubernetes.io/name: broker-anthropic-claude-max-3
     app.kubernetes.io/component: broker
