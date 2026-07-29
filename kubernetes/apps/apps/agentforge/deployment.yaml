@@ -64,7 +64,7 @@ spec:
           # expects 0012 and /readyz fails closed when the DB is behind the code. db-migrate.yaml was
           # repinned first in #155 so the migration Job ran this same digest. Overlays remain gated
           # shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set here.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:57023e00518ae871ae2d4d6410a53fb78dc7a9c6a1b9c76bafe23d73862d47b2
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:edbc94a0aa2df9b1a65818f0a8c62c5feb2e932066137c3b7a08647f85493b6d
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain

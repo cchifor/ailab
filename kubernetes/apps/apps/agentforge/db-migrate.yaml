@@ -100,7 +100,7 @@ spec:
           # `AF_KUBE_CONTEXT=admin@ai bash scripts/af-db.sh migrate` from a checkout at gitea/main (this
           # manifest is excluded from kustomization.yaml, so it is applied from the checkout, not by
           # Flux) -> confirm head 0012 -> only then repin deployment.yaml.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:57023e00518ae871ae2d4d6410a53fb78dc7a9c6a1b9c76bafe23d73862d47b2
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:edbc94a0aa2df9b1a65818f0a8c62c5feb2e932066137c3b7a08647f85493b6d
           command: ["agentforge-platform", "migrate"]
           env:
             # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
