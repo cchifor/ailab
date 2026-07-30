@@ -73,7 +73,8 @@ kubectl --context admin@ai -n auth rollout status  deploy/authelia
 > (the auto-mode classifier blocks in-pod user creation). **PR-B must not merge until this is done.**
 
 Create the users + grant the tenants-repo collaborator (run inside the gitea pod). Emits only
-non-secret status; it mints a transient site-admin token to add the collaborator and revokes it:
+non-secret status; it mints a transient site-admin token (`afp-collab-tmp`, `--scopes all`) to add
+the collaborator. **Its last line does NOT revoke that token** — see the note after the block:
 
 ```sh
 kubectl --context admin@ai -n gitea exec -i deploy/gitea -- sh <<'SH'
@@ -91,42 +92,277 @@ curl -s -o /dev/null -w 'collab-add HTTP %{http_code}\n' -X PUT -H "Authorizatio
 curl -s -H "Authorization: token $ADMTOK" "$API/repos/cchifor/agentforge-tenants/collaborators" \
   | tr ',' '\n' | grep -E '"login"|"permission"'
 curl -s -o /dev/null -w 'adm-token-revoke HTTP %{http_code}\n' -X DELETE \
-  -H "Authorization: token $ADMTOK" "$API/users/gitea_admin/tokens/afp-collab-tmp"
+  -H "Authorization: token $ADMTOK" "$API/users/gitea_admin/tokens/afp-collab-tmp"  # expect 401
 SH
 ```
 
-Mint the two scoped tokens into **mode-600 files outside the repo** (never echo the value / never in
-argv). `--raw` prints only the token:
+> **`adm-token-revoke HTTP 401` is the expected output of that last line, and it means
+> `afp-collab-tmp` — a site-admin PAT with `--scopes all` — is STILL LIVE on the forge.** Gitea's own
+> token routes are registered `}, reqSelfOrAdmin(), reqBasicOrRevProxyAuth())` (v1.24
+> `routers/api/v1/api.go`), so they reject `Authorization: token …`; only BASIC auth works, which
+> this block has no password for. The line is left in place because its status code is the check.
+> Revoke the token with the basic-auth recipe in *"If step 2 fails, the PATs are already live"*
+> below — it already includes `gitea_admin:afp-collab-tmp` — and do it whether or not the rest of
+> step 2 succeeds. This is not new to this branch; the line has never worked.
+
+Now land the two token VALUES. Two routes: **A** drives the CP's own seeding CLI, **B** is the manual
+sequence. Both put a live PAT into a file on the operator host, and this is the step that leans on that
+file's mode — so read the caveat first:
+
+> **Windows caveat — this estate is operated from Windows, where the 0600 is not what protects the
+> file.** Route A's writer says so in its own source: "Windows honours neither the open mode nor
+> `O_NOFOLLOW`, so there the `chmod` below is all the platform offers and a token file is only as
+> private as its **directory**" (`_write_private`, `src/agentforge_platform/forge_bootstrap/cli.py`) —
+> it runs as native Windows CPython, where `os.open`'s mode and `os.chmod` reach little more than the
+> read-only bit. Measured on this host: `_write_private` writes the handoff and Python then reports the
+> mode as `0o666`, and `hasattr(os, "O_NOFOLLOW")` is `False`. (Its *exclusivity* does survive —
+> `O_CREAT|O_EXCL` works on Windows, so a pre-existing path is still refused; only the mode is
+> cosmetic.) Route B's `umask 077` is a POSIX mechanism Git Bash only *emulates*: these paths are
+> `noacl` mounts (`mount` → `C:/Users/<you>/AppData/Local/Temp on /tmp type ntfs
+> (binary,noacl,posix=0,usertemp)`), so a `0600` that `ls -l` reports there is not backed by an NTFS
+> ACL. Either way the **directory** is the whole control: keep the file inside your own profile. Git
+> Bash `/tmp` already is (`cygpath -w /tmp` → `C:\Users\<you>\AppData\Local\Temp`), which is why route
+> B below uses a `mktemp -d` under it instead of fixed, guessable `/tmp/.afp_*` names.
+
+#### Route A — the scripted ceremony (`afp-forge-bootstrap`)
+
+`agentforge-platform` ships this entrypoint (`[project.scripts]` in its `pyproject.toml`; run through
+`uv run`, as its own `justfile` `up` recipe does). It is what removes the durable exposure outright:
+`fill-sops` edits the encrypted Secret **in place** via `sops set`, so no decrypted copy of
+`agentforge-runtime.sops.yaml` is written to disk at all — `sops_fill.py`: "sops re-encrypts in place,
+so no plaintext copy of the secret ever exists on disk (a decrypt-edit-encrypt cycle would leave one)".
 
 ```sh
-umask 077
-kubectl --context admin@ai -n gitea exec deploy/gitea -- \
-  gitea admin user generate-access-token --raw -u agentforge-cp-bot \
-  -t cp-tenants --scopes write:repository > /tmp/.afp_cp_tok
-kubectl --context admin@ai -n gitea exec deploy/gitea -- \
-  gitea admin user generate-access-token --raw -u agentforge-bootstrap-bot \
-  -t bootstrap-labels --scopes write:issue > /tmp/.afp_boot_tok
+AILAB=$(pwd)                                      # run from the ailab checkout
+CP=../agentforge-platform                         # your agentforge-platform checkout
+H="$HOME/.cache/agentforge/forge-bootstrap-handoff.json"   # = fill-sops's own default
+export SOPS_AGE_KEY_FILE="$AILAB/kubernetes/infra/_out/age.agekey"
+cd "$CP"
+uv run afp-forge-bootstrap prod-seed --kubectl-context admin@ai --emit-handoff "$H"
+uv run afp-forge-bootstrap fill-sops --handoff "$H" \
+  --file "$AILAB/kubernetes/apps/apps/agentforge/agentforge-runtime.sops.yaml" \
+  --map AFP_TENANTS_BOT_TOKEN=agentforge-cp-bot,AFP_BOOTSTRAP_TOKEN=agentforge-bootstrap-bot
+uv run afp-forge-bootstrap verify --kubectl --kubectl-context admin@ai
 ```
 
-Fill `kubernetes/apps/apps/agentforge/agentforge-runtime.sops.yaml` WITHOUT putting the token on a
-command line (build a plaintext copy from the token files, then encrypt in place):
+What each guarantees (re-read `forge_bootstrap/cli.py` before trusting this summary):
+
+- `prod-seed` **refuses to mint at all** without `--emit-handoff` (or an explicit `--discard-tokens`),
+  so no run can leave a live PAT nobody holds.
+- the handoff is created `O_WRONLY|O_CREAT|O_EXCL` (plus `O_NOFOLLOW` on platforms that have it — not
+  Windows) at `0600`-intent **before the first byte of content exists**: it never truncates or
+  overwrites, and a pre-existing path (stale handoff, planted symlink, fifo) is a hard error —
+  "refusing to write …: it already exists" — not a target. On Windows read that as exclusivity only;
+  see the caveat above for the mode.
+- if that write fails, `_rollback_tokens` runs — but with `PROD_SPEC` it **cannot revoke anything**,
+  so *assume the tokens are live and revoke them yourself*. `_rollback_tokens` needs a spec admin
+  WITH a password (`if admin is None or not admin.password or not http_base:` → log and return), and
+  `PROD_SPEC` seeds four plain `BotUser(name=…)` — `admin` defaults `False`, `password` defaults
+  `""` — so `PROD_SPEC.admin_user` is `None`. That is unconditional: **no** `prod-seed` invocation can
+  roll back, `--gitea-url` does not help, and no flag supplies an admin password (`_build_parser`
+  gives `prod-seed` only `--kubectl-context`, `--gitea-url`, `--emit-handoff`, `--discard-tokens`).
+  What it does instead is log `could NOT roll back the N token(s) minted this run (no admin
+  credential to revoke with) — delete these token NAMES on the forge by hand: <names>` and exit 1.
+  The same applies to a mint that fails part way through the four, and to `--discard-tokens`. So the
+  guarantee that IS true for the printed command: **the token names are always reported, never the
+  values, and never silently dropped — but the credentials stay live until you revoke them.** Copy
+  the names out of that stderr line and run the revoke below.
+- `fill-sops` **deletes the handoff on success** — and only once every token in it has landed. An
+  unmapped one means exit 1, the file kept, and the unconsumed user named
+  (`tests/unit/test_forge_bootstrap_sops.py::test_fill_sops_deletes_the_handoff_file_on_success`,
+  `::test_fill_sops_keeps_the_handoff_when_it_still_holds_an_unmapped_token`).
+- `verify --kubectl` is strictly zero-write. It mints nothing, so it can strand nothing; with no admin
+  password in `PROD_SPEC` it checks existence only and warns that `is_admin`/`restricted` were not read.
+- the operator host's `sops 3.9.4` has **no** stdin flag for a value (`sops set --help` lists none), so
+  `fill` passes each token as an **argv element** for the length of one `sops set` call, and warns
+  about it. Run it on your own machine only — never a shared or CI host.
+
+What route A does **not** cover — do not skip these:
+
+- **the collaborator grant.** `PROD_SPEC` declares `repos=[]` ("collaborator permissions on the real
+  ailab repo stay a reviewed operator act, not an unattended CLI write" — `spec.py`), so the write
+  grant on `cchifor/agentforge-tenants` still comes from the pod block above. `prod-seed` *does* create
+  the users, with the same `--restricted --random-password --must-change-password=false` flags, so the
+  two run in either order — both are idempotent (`mk` then prints `EXISTS`).
+- **it mints four tokens, not two.** `PROD_SPEC` covers `agentforge-cp-bot`, `agentforge-bootstrap-bot`,
+  `agentforge-infra-bot` and `agentforge-ci-bot`, and no flag narrows it. `AFP_INFRA_BOT_TOKEN` lives in
+  a *different* file (`agentforge-infra-bot.sops.yaml`) and `agentforge-ci-bot` has **no destination in
+  ailab at all** (`git grep agentforge-ci-bot` → no hits). `--file` is one file and the unmapped-token
+  check is per-run, so **no single `fill-sops` run can consume all four**: land the infra token with a
+  second `fill-sops --file …/agentforge-infra-bot.sops.yaml --map
+  AFP_INFRA_BOT_TOKEN=agentforge-infra-bot`, revoke the `afp-ci-*` token on the forge, then `rm "$H"`
+  yourself — by design the last run exits 1 and keeps the file rather than destroying a credential's
+  only copy.
+- **it does not prune what an earlier run minted.** `PROD_SPEC` seeds no admin with a password, so the
+  prune step logs "NOT pruning tokens from earlier runs … revoke it there" and a re-run adds four more
+  live PATs.
+
+So route A is the **day-0, all-four-bots** path. For a two-token top-up on a live estate — what this
+step usually is — route B is the narrower blast radius.
+
+#### Route B — manual, two tokens, trap-guarded
+
+Mint the two scoped tokens into **files outside the repo, under an owner-only temp dir** (never echo
+the value / never in argv; `--raw` prints only the token), then fill the SOPS Secret from them. **Run
+the block as ONE script** (`bash afp-step2.sh`, kept outside the checkout) **from the ailab checkout
+root** — its `sops`/`git` paths are relative — and **never paste it line by line**: the `trap`
+protects only the shell it is set
+in, and it is what deletes the token files and the decrypted Secret on *every* exit path (success, any
+`set -e` failure, `Ctrl-C`, `SIGTERM`) instead of a final `rm` that only the happy path reaches.
+
+```sh
+set -eu
+umask 077
+D=$(mktemp -d)                             # 0700 dir, unguessable name (no pre-planted /tmp symlink)
+trap 'rm -rf "$D" 2>/dev/null || :' EXIT   # fires on success, on set -e, and on both exits below
+trap 'exit 130' INT                        # Ctrl-C  -> exit -> the EXIT trap
+trap 'exit 143' TERM                       # SIGTERM -> exit -> the EXIT trap
+
+kubectl --context admin@ai -n gitea exec deploy/gitea -- \
+  gitea admin user generate-access-token --raw -u agentforge-cp-bot \
+  -t cp-tenants --scopes write:repository > "$D/cp_tok"
+kubectl --context admin@ai -n gitea exec deploy/gitea -- \
+  gitea admin user generate-access-token --raw -u agentforge-bootstrap-bot \
+  -t bootstrap-labels --scopes write:issue > "$D/boot_tok"
+
+# Fill agentforge-runtime.sops.yaml WITHOUT putting a token on a command line: build a plaintext
+# copy INSIDE $D from the token files, encrypt it THERE, and only then copy it over the real file.
+export SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey
+F=kubernetes/apps/apps/agentforge/agentforge-runtime.sops.yaml
+sops --decrypt "$F" > "$D/rt.yaml"
+D="$D" python - <<'PY'
+import os, yaml
+d=os.environ["D"]; p=os.path.join(d,"rt.yaml")
+y=yaml.safe_load(open(p,"rb")); sd=y["stringData"]
+sd["AFP_TENANTS_BOT_TOKEN"]=open(os.path.join(d,"cp_tok")).read().strip()
+sd["AFP_BOOTSTRAP_TOKEN"]=open(os.path.join(d,"boot_tok")).read().strip()
+open(p,"wb").write(yaml.safe_dump(y,sort_keys=False,allow_unicode=True).encode())
+PY
+# Encrypt INSIDE $D and copy only the CIPHERTEXT over the tracked file. --filename-override
+# makes sops resolve .sops.yaml and match its path_regex against $F's path instead of the temp
+# file's (which matches no creation rule at all), so the temp file gets the SAME age recipient
+# and the SAME encrypted_regex as the real one.
+sops --encrypt --filename-override "$F" --in-place "$D/rt.yaml"
+grep -q 'AFP_TENANTS_BOT_TOKEN: ENC\[' "$D/rt.yaml"   # fail closed BEFORE the tracked file
+grep -q 'AFP_BOOTSTRAP_TOKEN: ENC\['  "$D/rt.yaml"    # is touched at all
+cp "$D/rt.yaml" "$F"
+git diff --stat "$F"     # confirm only this file; values are ENC[...]
+```
+
+Why it is shaped that way:
+
+- **the tracked file is never plaintext, at any instant.** This is the one property in the block
+  that a trap could not have delivered. The obvious ordering — `cp` the decrypted YAML over `$F`,
+  then `sops --encrypt --in-place "$F"` — puts fully decrypted credentials into
+  `kubernetes/apps/apps/agentforge/agentforge-runtime.sops.yaml`, a **tracked** file, for the gap
+  between those two commands. `SIGKILL`, a closed terminal, a full disk or an operator who simply
+  stops reading there all leave it that way, one `git add -A` from a commit and a push to the
+  forge. No `trap` can close that: `EXIT`/`INT`/`TERM` handlers do not run on `SIGKILL` or a lost
+  terminal, and even if one did, "restore a tracked file after the fact" is a different and weaker
+  promise than "never write plaintext there". Nothing in the repo would catch it either — checked:
+  `.gitignore` has no bearing on an already-tracked path, and ailab has no pre-commit hook and no
+  CI secret scan (`git ls-tree gitea/main` → the only workflow is `broker-inventory.yaml`; no
+  gitleaks/trufflehog/`sops filestatus` gate anywhere). So the fix is to never create the state:
+  encrypt in `$D`, copy ciphertext. `$F` now only ever holds the OLD ciphertext or the NEW one.
+- the two `ENC[` greps are load-bearing, not decoration, and `sops filestatus` cannot replace them.
+  A `--filename-override` that matches a creation rule with a NARROWER `encrypted_regex` — exactly
+  what this repo's own `.sops.yaml` warns about ("MUST precede the generic ansible/secrets rule …
+  would otherwise leave these keys unencrypted") — makes `sops --encrypt` exit **0** while leaving
+  `stringData` in plaintext. Measured on sops 3.9.4 with an override matching the
+  `ansible/secrets/` rule: exit 0, `AFP_TENANTS_BOT_TOKEN: REPLACE_ME` still plaintext, a `sops:`
+  block appended, and `sops filestatus` reporting `{"encrypted":true}`. Only a per-KEY check
+  catches that, and `set -e` then aborts into the trap with `$F` untouched.
+- `cp` is not atomic, but what it copies is ciphertext: a torn copy leaves `$F` corrupt, never
+  secret. `git checkout -- "$F"` restores it.
+- `set -eu` is load-bearing: without it a failed `kubectl exec` leaves an EMPTY token file and the run
+  marches on to encrypt that empty value into the Secret (`/readyz` would still pass — see below — so
+  it surfaces only as a failed tenants commit). With it, the first failure exits, into the trap.
+- the `INT`/`TERM` traps are not redundant with `EXIT`: not every shell runs an `EXIT` trap when a
+  fatal signal it has no trap for arrives (bash 5.3 does — that is not portable), and `exit 130`/`143`
+  keep the conventional signal status. Both paths fall through to the one `EXIT` trap, so cleanup lives
+  in exactly one place.
+- the trap cannot fail the step: `rm -rf … || :` always succeeds, and the `EXIT` trap does not touch the
+  exit status (a `set -e` abort still exits 1, `Ctrl-C` exits 130).
+- inside `$D` it still bounds rather than removes: route B writes a **fully decrypted** copy of the
+  Secret to `$D/rt.yaml` for the length of the run, and that is what the trap is for. Route A never
+  creates one at all (`sops set` edits the ciphertext in place) — that remains route A's one real
+  advantage here, and it is why route A stays the day-0 path. The trade is argv: `sops set` takes the
+  value as an argv element (sops 3.9.4 has no stdin flag for a value — `sops set --help` lists none),
+  which route B's decrypt-edit-encrypt avoids entirely. Route B also round-trips the file through
+  `yaml.safe_dump`, which carries no YAML comments and so drops the Secret's
+  `# AgentForge CP runtime secrets …` header — restore it in the diff.
+
+#### If step 2 fails, the PATs are already live — revoke them
+
+Both routes mint **before** they store. By the time anything downstream can fail — a decrypt or
+encrypt error, a failed grep, `Ctrl-C`, `SIGTERM`, a refused handoff write — the mints have already
+returned `200` and the credentials exist on the forge. Route B's `trap` deletes files; it does not
+and cannot revoke a PAT, and route A cannot either (see `_rollback_tokens` above). **So on any
+non-zero exit from step 2, treat the tokens as live and revoke them explicitly.** They are usable
+until you do: `write:repository` on every repo `agentforge-cp-bot` can see, including the write
+collaborator grant on `cchifor/agentforge-tenants`.
+
+Which names to revoke:
+
+- **route B** — fixed, from the `-t` flags: `agentforge-cp-bot`/`cp-tenants` and
+  `agentforge-bootstrap-bot`/`bootstrap-labels`.
+- **route A** — `<prefix>-<12 hex>` (`afp-cp-…`, `afp-bootstrap-…`, `afp-infra-…`, `afp-ci-…`).
+  `prod-seed` prints the exact names in its `delete these token NAMES on the forge by hand:` line;
+  the list loop below also enumerates them.
+- **the ceremony's own transient admin PAT** — `gitea_admin`/`afp-collab-tmp`, `--scopes all`. See
+  the note under the first block: the revoke there **401s**, so this one is live after every run of
+  it and must go too.
+
+There is no CLI revoke — `gitea admin user` has `list`, `delete`, `create`, `change-password`,
+`must-change-password`, `generate-access-token` and nothing else (Gitea CLI reference). The API is
+`DELETE /api/v1/users/{username}/tokens/{token}`, which accepts the token NAME when it is not
+numeric ("token to be deleted, identified by ID and if not available by name" — Gitea v1.24
+`routers/api/v1/user/app.go`). It requires **BASIC** auth: that route group is registered
+`}, reqSelfOrAdmin(), reqBasicOrRevProxyAuth())` (Gitea v1.24 `routers/api/v1/api.go`), which is
+why `Authorization: token …` gets a 401 there, and why `agentforge-platform`'s own
+`ceremony.py::revoke_token` says "Gitea rejects token auth on its own token endpoints, so this is
+the one call that needs the admin password".
+
+Run from the ailab checkout root. The break-glass password travels over **stdin**, so it is in no
+argv on the operator host; edit the `pair` list to the names you actually need to kill:
 
 ```sh
 export SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey
-F=kubernetes/apps/apps/agentforge/agentforge-runtime.sops.yaml
-sops --decrypt "$F" > /tmp/.afp_rt.yaml
-python - <<'PY'
-import yaml
-p="/tmp/.afp_rt.yaml"; d=yaml.safe_load(open(p,"rb")); sd=d["stringData"]
-sd["AFP_TENANTS_BOT_TOKEN"]=open("/tmp/.afp_cp_tok").read().strip()
-sd["AFP_BOOTSTRAP_TOKEN"]=open("/tmp/.afp_boot_tok").read().strip()
-open(p,"wb").write(yaml.safe_dump(d,sort_keys=False,allow_unicode=True).encode())
-PY
-cp /tmp/.afp_rt.yaml "$F"
-sops --encrypt --in-place "$F"
-rm -f /tmp/.afp_cp_tok /tmp/.afp_boot_tok /tmp/.afp_rt.yaml
-git diff --stat "$F"     # confirm only this file; values are ENC[...]
+{ printf '%s\n' "$(sops --decrypt --extract '["stringData"]["password"]' \
+    kubernetes/apps/apps/gitea/gitea-admin.sops.yaml)"
+  cat <<'SH'
+set -u
+API=http://localhost:3000/api/v1
+# Fail closed: an empty PW (a failed sops --extract on the host) would 401 every call below and
+# read exactly like the token-auth quirk this recipe exists to avoid.
+[ -n "$PW" ] || { echo 'EMPTY password — the host sops --extract failed; fix that first'; exit 1; }
+for pair in agentforge-cp-bot:cp-tenants \
+            agentforge-bootstrap-bot:bootstrap-labels \
+            gitea_admin:afp-collab-tmp; do
+  U=${pair%%:*}; T=${pair#*:}
+  curl -s -o /dev/null -w "revoke $U/$T HTTP %{http_code}\n" -X DELETE \
+    -u "gitea_admin:$PW" "$API/users/$U/tokens/$T"
+done
+# What is still live (NAMES only — Gitea never returns a value from this endpoint):
+for U in agentforge-cp-bot agentforge-bootstrap-bot agentforge-infra-bot agentforge-ci-bot gitea_admin; do
+  printf '%s: ' "$U"
+  curl -s -u "gitea_admin:$PW" "$API/users/$U/tokens" | tr ',' '\n' | grep '"name"' || echo NONE
+done
+SH
+} | kubectl --context admin@ai -n gitea exec -i deploy/gitea -- \
+      sh -c 'IFS= read -r PW; export PW; exec sh'
 ```
+
+Read the codes: `204`/`200` = revoked, `404` = already gone (both fine), `401` = **not** revoked,
+the token is still live. Then re-run the list loop until it shows only names you meant to keep.
+
+Two honest limits. `sops --decrypt --extract` writes the value to this pipeline's stdin and nowhere
+else — but `curl -u` puts it in the **pod's** argv for the length of each call; that is accepted
+here for the same reason route A accepts it for `sops set`, and anyone who can `kubectl exec` into
+`deploy/gitea` already holds cluster-admin. And this is a *remediation*, not a guarantee: nothing
+documentation can do makes the mint-then-store window atomic. If the tokens must never outlive a
+failure, the fix belongs in `prod-seed` (give `PROD_SPEC` an admin credential so `_rollback_tokens`
+can actually revoke), not in this runbook.
 
 Commit this `agentforge-runtime.sops.yaml` change **onto the PR-B branch itself** (the same PR as the
 `- deployment.yaml` line) so the tokens and the Deployment merge **atomically**. This is required:
@@ -186,9 +422,12 @@ the tenant namespace. Then delete the test workspace + its tenants-repo commit t
 
 - **CP:** revert PR-B (remove `- deployment.yaml`) → Flux prunes the Deployment; SA/Service/RBAC
   remain (harmless).
-- **Tokens:** in the gitea pod, `gitea admin user delete --username agentforge-cp-bot` /
-  `agentforge-bootstrap-bot` (revokes their PATs), or `DELETE /api/v1/users/<user>/tokens/<name>`.
-  Restore the placeholders in the SOPS secret.
+- **Tokens:** use the basic-auth revoke recipe in step 2 (*"If step 2 fails, the PATs are already
+  live"*) — `DELETE /api/v1/users/<user>/tokens/<name>`, which needs the `gitea-admin` password, NOT
+  a PAT. Dropping the identities instead also revokes their PATs
+  (`gitea admin user delete --username agentforge-cp-bot` / `agentforge-bootstrap-bot` in the pod),
+  but that is the heavier hammer: it removes the accounts and the collaborator grant with them, so
+  re-activation replays the whole of step 2. Then restore the placeholders in the SOPS secret.
 - **Authelia group:** revert the `authelia-secret.sops.yaml` change and roll Authelia.
 - **DB:** leave `agentforge_platform` in place unless a reviewed schema teardown exists; the
   `afp_admin`/`afp_app` roles are shared-managed — do not drop.
@@ -222,4 +461,9 @@ following stay OPERATOR steps:
 - **Bot/token inventory**: `agentforge-infra-bot` (READ on ailab; token = SOPS
   `AFP_INFRA_BOT_TOKEN`, ns agentforge) · `agentforge-reviewer-bot` (write collaborator, approvals
   only) · `agentforge-cp-bot`/`agentforge-bootstrap-bot` (tenants commits / label bootstrap).
-  Rotate any of them with `gitea admin user generate-access-token` in the gitea pod + SOPS update.
+  Rotate any of them the same way step 2 mints them: the trap-guarded block (route B) or
+  `afp-forge-bootstrap prod-seed`/`fill-sops` (route A) — do not improvise a `/tmp` token file with no
+  `trap`, and never `cp` a decrypted Secret over the tracked `*.sops.yaml`; those are the two
+  exposures step 2 exists to remove. A rotation is only finished when the OLD PAT is revoked: minting
+  a new one does not retire it (`prod-seed` cannot prune under `PROD_SPEC`, route B does not try), so
+  end every rotation with step 2's revoke recipe and its list loop.
