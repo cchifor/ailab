@@ -77,17 +77,29 @@ spec:
       automountServiceAccountToken: true # REQUIRED: the orchestrator creates/watches Jobs + CAS's the Lease
       enableServiceLinks: false
       # DERIVED from the orchestrator's own shutdown sequence (agentforge `serve`, infra/api.py lifespan),
-      # NOT picked: on SIGTERM the lifespan first waits up to _CANCEL_GRACE_S = 30s
+      # NOT picked: on SIGTERM the lifespan first waits up to CANCEL_GRACE_S = 30s
       # (app/orchestrator.py::cancel_inflight) for in-flight jobs to unwind, and only THEN runs the
-      # composition root's release_all() — up to 3 forge round-trips per held claim (withdraw PATCH,
+      # composition root's release_all() — 3 forge round-trips per released claim (withdraw PATCH,
       # get_issue, remove_label; app/claims.py::release), each bounded by the GiteaClient httpx timeout
-      # of 30s (adapters/gitea/client.py, no retries), with held claims capped by
-      # worker_api.max_concurrent_jobs (= 1, the config default).
-      #   30 (cancel grace) + 1 claim x 3 round-trips x 30s (timeout worst case) = 120s, +30s margin
+      # DEFAULT_TIMEOUT_S = 30s (adapters/gitea/client.py, no retries).
+      #   30 (cancel grace) + 3 round-trips x 30s = 120s, +30s margin
       #   (tini SIGTERM propagation, uvicorn lifespan teardown, events-reporter aclose) = 150s.
-      # The k8s DEFAULT of 30s equals _CANCEL_GRACE_S exactly, so SIGKILL landed the instant the cancel
+      # The k8s DEFAULT of 30s equals CANCEL_GRACE_S exactly, so SIGKILL landed the instant the cancel
       # wait expired and release_all() had ZERO budget — claims could only ever expire by lease TTL.
-      # If worker_api.max_concurrent_jobs is ever raised, re-derive: 30 + N x 90 + 30.
+      #
+      # The 120s is now ENFORCED in the worker, not merely nominal: infra/api.py derives
+      # _SHUTDOWN_DEADLINE_S from these same two constants and bounds BOTH phases against it, so this
+      # 150 is a real ceiling rather than a hope. Two consequences for anyone re-deriving:
+      #   - The 90s release budget is ONE ceiling shared by the whole release_all() walk, NOT a
+      #     per-claim cost, so 150 does NOT scale with worker_api.max_concurrent_jobs. A worker holding
+      #     more claims than the budget covers withdraws what it can and leaves the rest to lease TTL —
+      #     the documented, safe outcome. (An earlier revision of this comment said to re-derive
+      #     30 + N x 90 + 30 when max_concurrent_jobs rises; that is no longer true and would only
+      #     inflate the rollout.)
+      #   - Raising CANCEL_GRACE_S or the round-trip count upstream DOES move it. The CP renderer
+      #     carries the same 150 for its own rendered pools (agentforge-platform renderer.py
+      #     WORKER_TERMINATION_GRACE_S) and pins it against these constants in a contract test; keep
+      #     the two numbers together.
       # (The sandbox-guard VAP's tGPS<=30 pin applies to the SANDBOX JOB pods this worker creates, not
       # to this operator-labeled orchestrator pod.)
       terminationGracePeriodSeconds: 150
