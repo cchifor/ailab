@@ -24,7 +24,9 @@ resources:
   - worker-staging-pvc.yaml        # tenant-ns staging PVC bound to the operator NFS PV (was omitted → pod FailedScheduling)
   - scaledobject.yaml              # KEDA scale-to-zero (prometheus backlog + cron warm-floor) over the worker
   - cilium-egress.yaml             # worker egress: Gitea + kube-apiserver:6443 + DNS ONLY (deny world/metadata/IPv6)
-  - worker-podmonitor.yaml         # kube-prometheus scrape of the worker's forge_* registry (R8; no Service → PodMonitor)
+  - worker-podmonitor.yaml         # kube-prometheus scrape of the worker's forge_* registry (R8; no Service → PodMonitor).
+                                   # OPERATOR-managed pods ONLY — CP-rendered tenant pools stay unscraped until the CP
+                                   # renderer emits a 9464 port + a monitoring ingress rule (see the file's COVERAGE BOUNDARY).
   # dispatcher-deployment.yaml + worker-deployment.yaml are INTENTIONALLY not listed — the images are
   # PLACEHOLDER @sha256 (unpullable) and nothing here flips privilege_hardening. Re-add each once its
   # digest is pinned + prerequisites provisioned (see each Deployment header). The ScaledObject stays

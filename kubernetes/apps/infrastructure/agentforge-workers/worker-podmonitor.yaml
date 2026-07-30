@@ -1,22 +1,70 @@
-# PodMonitor for the tenant-zero orchestrator WORKER (worker-deployment.yaml) — closes the R8
-# observability gap. `agentforge serve` exports the dedicated forge_* registry (claims_total,
-# transitions_total, llm_runs_total, run_duration_seconds, …) via start_http_server on
-# metrics_port 9464 (agentforge main.py serve + infra/settings.py default), the Deployment
-# declares the named `metrics` containerPort, and cilium-egress.yaml ALREADY admits ingress 9464
-# from the monitoring namespace — but nothing SELECTED the pods, so the series never reached
-# Prometheus (live check 2026-07-30: forge_claims_total = empty vector; the only forge_* scrape
-# target was the dispatcher).
+# PodMonitor for the OPERATOR-MANAGED orchestrator worker (worker-deployment.yaml) — closes the R8
+# observability gap for that pod set ONLY. Read the COVERAGE BOUNDARY below before assuming the
+# forge_* series cover the fleet: they do not, and the missing half cannot be fixed from this repo.
+#
+# `agentforge serve` exports the dedicated forge_* registry (forge_claims_total,
+# forge_transitions_total, forge_llm_runs_total, forge_run_duration_seconds, …) via
+# start_http_server on metrics_port 9464 (agentforge main.py `serve` + infra/settings.py default
+# metrics_port: int = 9464), the Deployment declares the named `metrics` containerPort, and
+# cilium-egress.yaml ALREADY admits ingress 9464 from the monitoring namespace — but nothing
+# SELECTED the pods, so the series never reached Prometheus. That gap is structural, not a
+# misconfiguration: before this file the estate held three PodMonitors (monitoring/flux-controllers,
+# databases/infra-pg-metrics, strive-ailab/strive-pg) and one forge_* ServiceMonitor
+# (monitoring/agentforge-dispatcher, namespaceSelector agentforge) — none selected any pod in an
+# af-tenant-* namespace.
 #
 # A PodMonitor, NOT a ServiceMonitor: the worker deliberately has NO Service (its webhook API 8700
 # is unexposed — see the worker-deployment.yaml header), and the estate already scrapes
-# serviceless pods this way (monitoring/flux-controllers, databases/infra-pg-metrics). The shape
-# mirrors the sibling dispatcher-servicemonitor.yaml: it lives in `monitoring`, carries
-# `release: kube-prometheus-stack` (the label the kube-prometheus Prometheus selects monitors by;
-# podMonitorNamespaceSelector is {} so the monitor's own namespace is unconstrained), targets the
-# NAMED port, scrapes at 30s, and pins job=. The selector keys on the worker's OPERATOR-ONLY
-# labels — the same pair cilium-egress.yaml's endpointSelector uses — scoped to the tenant
-# namespace; a future tenant's worker extends matchNames. Scale-to-zero (KEDA) simply drops the
-# target while idle — that is absence of a pod, not a scrape failure.
+# serviceless pods this way. The shape mirrors the sibling dispatcher-servicemonitor.yaml: it lives
+# in `monitoring`, carries `release: kube-prometheus-stack` (the label the kube-prometheus
+# Prometheus selects monitors by; podMonitorNamespaceSelector is {} and neither
+# enforcedNamespaceLabel nor ignoreNamespaceSelectors is set, so a monitor in `monitoring` may
+# name any target namespace), targets the NAMED port, scrapes at 30s, and pins job=. The selector
+# keys on the worker's OPERATOR-ONLY labels — the same pair cilium-egress.yaml's endpointSelector
+# uses. Scale-to-zero (KEDA) simply drops the target while idle — that is absence of a pod, not a
+# scrape failure.
+#
+# -- COVERAGE BOUNDARY (verified against live objects 2026-07-30) --------------------------------
+#
+# COVERED: pods labelled app.kubernetes.io/name=agentforge-worker +
+#   app.kubernetes.io/managed-by=agentforge-operator in the namespaces listed under matchNames.
+#   Live: af-orch-playground-planner-* in af-tenant-tenant-zero-playground carries exactly that
+#   pair and declares {name: metrics, containerPort: 9464}. Another OPERATOR-rendered worker in a
+#   new namespace is covered by extending matchNames.
+#
+# NOT COVERED: every CP-RENDERED tenant pool — live today, af-orch-platform-dev-delivery in
+#   af-tenant-tenant-zero-platform-dev. It runs the same image (default CMD ["agentforge","serve"],
+#   deploy/orchestrator.Dockerfile EXPOSE 8700 9464) with no AF_METRICS_PORT override, so it IS
+#   emitting forge_* on 9464 — and it is unreachable. Extending matchNames does NOT reach it, and
+#   NO manifest added to this repo can. Three independent blockers, all owned by the control plane
+#   (agentforge-platform/src/agentforge_platform/adapters/gitops/renderer.py):
+#
+#   1. LABELS. The CP pod template emits agentforge.io/{org,workspace,pool} +
+#      app.kubernetes.io/managed-by=agentforge-cp (renderer.py _labels()). It carries NO
+#      app.kubernetes.io/name at all, so this selector cannot match it. This divergence is
+#      deliberate, not an oversight — worker-deployment.yaml's header records that the operator
+#      worker omits every agentforge.io/* pod label precisely so the CP NetworkPolicy does not
+#      select it.
+#   2. NO CONTAINER PORT. The live CP pod template declares no ports whatsoever (`ports` absent).
+#      A PodMonitor cannot bind a named port that does not exist, and the v1 CRD's targetPort
+#      escape hatch does not help: "the port must be specified with container port property".
+#      Renderer HEAD has since added ONE named port, `http` 8700 (WORKER_HTTP_PORT) for the forge
+#      webhook — still not 9464. The string "9464" does not appear anywhere in the CP gitops
+#      renderer.
+#   3. INGRESS DENIED. NetworkPolicy af-orch-platform-dev-delivery selects
+#      agentforge.io/pool=delivery with policyTypes [Ingress, Egress] and NO ingress rules —
+#      k8s default-deny for ingress. renderer.py builds that list from _webhook_ingress(), which
+#      returns [] when spec.webhook_source is unset and otherwise admits ONLY WORKER_HTTP_PORT
+#      (8700) from the forge. Prometheus can never open 9464 to that pod.
+#
+#   The fix belongs in the CP renderer so EVERY tenant pool gets it on render, not in a
+#   per-namespace manifest here that would need an ailab commit per tenant and would put an
+#   ailab-owned object inside a namespace the agentforge-tenants Kustomization reconciles.
+#   Required CP change (NOT made here — control-plane repo): add a named metrics containerPort
+#   9464 to the 50-deployment.yaml container, and add one ingress rule to 40-networkpolicy.yaml
+#   admitting TCP 9464 from the monitoring namespace only. Once rendered, cover it from here by
+#   adding a SECOND PodMonitor keyed on the CP labels — do not widen this one's selector, the two
+#   pod sets share no label.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
