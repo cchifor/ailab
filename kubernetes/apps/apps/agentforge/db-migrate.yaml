@@ -88,11 +88,14 @@ spec:
             capabilities: { drop: ["ALL"] }
       containers:
         - name: migrate
-          # Same image + digest as the CP Deployment (currently agentforge-platform tag `c81afd6`,
-          # main HEAD, PR #50). Repo path `agentforge/agentforge-platform` (CI push target) — NOT
-          # `cchifor/…`. The migrate entrypoint is `agentforge-platform migrate` = alembic upgrade head
-          # as admin_dsn (verified in the image config Entrypoint + main.py CLI). Keep this digest in
-          # lockstep with deployment.yaml.
+          # Same image + digest as the CP Deployment — keep the two in lockstep. Repo path
+          # `agentforge/agentforge-platform` (CI push target) — NOT `cchifor/…`. The migrate entrypoint
+          # is `agentforge-platform migrate` = alembic upgrade head as admin_dsn (verified in the image
+          # config Entrypoint + main.py CLI).
+          #
+          # As in deployment.yaml: no prose here naming the current tag, digest or PR. The pin bot
+          # rewrites only the `image:` line, so such a comment is wrong by the next pin — resolve the
+          # digest instead of reading about it.
           #
           # ⚠️ MIGRATION ORDERING — binds ONLY when the new digest MOVES the alembic head.
           # Decide with one command, before merging any CP pin:

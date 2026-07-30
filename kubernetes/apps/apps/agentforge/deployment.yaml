@@ -49,30 +49,36 @@ spec:
         - name: platform
           # Pinned to the immutable @sha256 of the built image. Repo path is `agentforge/agentforge-platform`
           # (matches the platform CI push target + the sibling `agentforge/p1-worker` convention) — NOT
-          # `cchifor/…`, which CI never populates. Digest = OCI index of tag `276ccad` (agentforge-platform
-          # origin/main HEAD 276ccad857…, PR #18 "fix(renderer): emit complete broker-auth wiring for sandbox
-          # workspaces" — the renderer now emits AF_CAPABILITY_ISS=af-orch-<org> + AF_SANDBOX_RESOLVE_BROKER_
-          # ENDPOINTS=true for v1.1 subscription workspaces). Built by a verified Images workflow_dispatch run;
-          # verified tag→digest equality (short `276ccad` + full-SHA tags resolve to the SAME digest) +
-          # linux/amd64. Entrypoint unchanged from the Dockerfile (`serve`; migrate variant in db-migrate.yaml).
-          # Re-verify the tag still resolves to this digest before merging the go-live PR; fail closed if it moved.
+          # `cchifor/…`, which CI never populates. Entrypoint comes from the Dockerfile (`serve`; the
+          # migrate variant lives in db-migrate.yaml).
           #
-          # 2026-07-29: repinned to tag `ebbb584` (PR #47) = sha256:1512e96c…, picking up #45 (per-role
-          # agent overlays, alembic 0012), #46 (the Monitoring board never stopped loading on a cold
-          # load) and #47 (the Agents editor). Landed ONLY AFTER `scripts/af-db.sh migrate` reported
-          # alembic head 0012 — that image expects 0012 and /readyz fails closed when the DB is behind
-          # the code. db-migrate.yaml was repinned first in #155 so the migration Job ran that digest.
+          # ⚠️ DO NOT ADD PROSE HERE NAMING THE CURRENT TAG, DIGEST OR PR.
+          # The pin bot rewrites the `image:` line below and nothing else, so any comment that states
+          # WHICH build is pinned is wrong by the next pin — usually within hours. This block previously
+          # carried three stacked such paragraphs (`276ccad`, then `ebbb584`, then `c81afd6`), each added
+          # to correct the last, and on 2026-07-30 all three disagreed with the line. That is not a
+          # cosmetic problem: a reviewer read them and reported that production was running a CP build
+          # four pins old, with a 308-line diff of "un-deployed" changes attached as evidence. It was
+          # false — the running pod matched this line exactly — but it cost a real investigation.
+          # State RULES here, which stay true; never VALUES, which do not.
           #
-          # 2026-07-29 (current line below): the pin bot has moved this on three times since, so the
-          # paragraph above no longer describes the digest on the `image:` line — read this instead.
-          # Chain: ebbb584 (=1512e96c) -> 385eca0 (=661c3edf, #48) -> c815e9f (#160, PR #49) ->
-          # `c81afd6` (= sha256:edbc94a0…, agentforge-platform main HEAD, PR #50 "open the schema-v2
-          # gate only for the process that pulls"), verified tag→digest at merge time.
-          # Only the FIRST of those moved the alembic head: `git diff --name-only ebbb584..c81afd6 --
-          # alembic/versions/` is empty, head stays 0012 (what this cluster runs). That is why #157,
-          # #160 and #163 each moved db-migrate.yaml and this file in ONE commit — allowed, not a
-          # violation of the ordering rule; see the ⚠️ note in db-migrate.yaml for when it does bind.
-          # Overlays remain gated shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set here.
+          # TO LEARN WHAT IS ACTUALLY PINNED AND RUNNING, resolve it — do not read a comment:
+          #   git show gitea/main:kubernetes/apps/apps/agentforge/deployment.yaml | grep 'image:'
+          #   kubectl -n agentforge get pods -o jsonpath='{..containerStatuses[0].imageID}'
+          #   crane digest registry.chifor.me/agentforge/agentforge-platform:<tag>   # tag → digest
+          # The pin PR's own title and body name the source commit; that record lives in git history,
+          # which cannot go stale, instead of here.
+          #
+          # RULES THAT DO HOLD, and why:
+          # - Verify tag→digest before merging a pin and fail closed if the tag has moved: the tag is
+          #   mutable, the digest is not, and only the digest is deployed.
+          # - Keep this digest in lockstep with db-migrate.yaml, and read the ⚠️ MIGRATION ORDERING
+          #   note there first — it decides whether the two files may move in ONE commit (they may,
+          #   whenever the new build moves no alembic head) or whether db-migrate must land alone first.
+          # - /readyz fails closed on schema skew, so a Deployment pinned ahead of an un-migrated DB
+          #   wedges the CP. That is what the ordering note exists to prevent.
+          # - Overlays stay gated shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set in this file.
+          #   (Verifiable by reading this file, which is why it belongs here.)
           image: registry.chifor.me/agentforge/agentforge-platform@sha256:07462c0ca00d3fa30bec664fd19e8e43024d0fb2c46bf96744500bcc199376c8
           ports:
             - { name: http, containerPort: 8080 }
