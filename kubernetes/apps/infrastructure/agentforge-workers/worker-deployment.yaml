@@ -76,6 +76,21 @@ spec:
       serviceAccountName: af-orch-playground-planner # the EXISTING orchestrator SA (do NOT create a new one)
       automountServiceAccountToken: true # REQUIRED: the orchestrator creates/watches Jobs + CAS's the Lease
       enableServiceLinks: false
+      # DERIVED from the orchestrator's own shutdown sequence (agentforge `serve`, infra/api.py lifespan),
+      # NOT picked: on SIGTERM the lifespan first waits up to _CANCEL_GRACE_S = 30s
+      # (app/orchestrator.py::cancel_inflight) for in-flight jobs to unwind, and only THEN runs the
+      # composition root's release_all() — up to 3 forge round-trips per held claim (withdraw PATCH,
+      # get_issue, remove_label; app/claims.py::release), each bounded by the GiteaClient httpx timeout
+      # of 30s (adapters/gitea/client.py, no retries), with held claims capped by
+      # worker_api.max_concurrent_jobs (= 1, the config default).
+      #   30 (cancel grace) + 1 claim x 3 round-trips x 30s (timeout worst case) = 120s, +30s margin
+      #   (tini SIGTERM propagation, uvicorn lifespan teardown, events-reporter aclose) = 150s.
+      # The k8s DEFAULT of 30s equals _CANCEL_GRACE_S exactly, so SIGKILL landed the instant the cancel
+      # wait expired and release_all() had ZERO budget — claims could only ever expire by lease TTL.
+      # If worker_api.max_concurrent_jobs is ever raised, re-derive: 30 + N x 90 + 30.
+      # (The sandbox-guard VAP's tGPS<=30 pin applies to the SANDBOX JOB pods this worker creates, not
+      # to this operator-labeled orchestrator pod.)
+      terminationGracePeriodSeconds: 150
       nodeSelector:
         ailab.io/agent-pool: "true"
       tolerations:
