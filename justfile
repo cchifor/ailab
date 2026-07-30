@@ -165,6 +165,25 @@ nested-virt-verify:
 af-verify-hashes:
     python scripts/check-inline-hashes.py
 
+# Verify every value derived from the broker seat inventory still agrees with the broker manifests
+# that declare it (the two AFP_* maps, the provisioner barrier list + readyz map, broker-inventory
+# .yaml). Static-only; this is what .gitea/workflows/broker-inventory.yaml runs on every PR.
+af-verify-brokers:
+    python scripts/gen-broker-inventory.py --check
+
+# Regenerate those derived values from the broker manifests after adding/removing a seat.
+af-gen-brokers:
+    python scripts/gen-broker-inventory.py --write
+
+# Re-record which broker oauth KV paths the SOPS operator seeds file actually declares (KEY NAMES
+# ONLY — never a value). Needed after adding a seat: the KV garbage collector (agentforge #69)
+# refuses to start unless the seeds file names every declared broker credential, and the drift
+# check fails on a coverage record taken against a different seat list.
+af-record-seed-coverage:
+    kubectl --context admin@ai get secret openbao-operator-seeds -n openbao \
+      -o jsonpath='{.data.seeds\.json}' | base64 -d \
+      | python scripts/gen-broker-inventory.py --refresh-seed-coverage
+
 # PREFLIGHT #2: assert the host-mode Gitea act_runner CI pool is fit before the Stage-0/Stage-4 image
 # builds run on it (daemon, docker, host-mode label, egress, capacity + the Gitea-API online check).
 # Needs GITEA_TOKEN (scope read:admin,read:organization); use `--skip-api` for host-side only. See

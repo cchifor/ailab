@@ -20,6 +20,12 @@ kind: Deployment
 metadata:
   name: broker-openai-codex
   namespace: agentforge-broker
+  annotations:
+    # Capability-kid ACTIVATION BARRIER membership (scripts/gen-broker-inventory.py derives
+    # AF_PROVISIONER_BROKER_READYZ_URLS from this). The barrier is ALL-OR-NOTHING per kid, so a
+    # listed broker that is unreachable defers the signing-key commit for EVERY audience (#127).
+    # Set "false" while a seat is down; there is deliberately NO default.
+    agentforge.io/kid-barrier: "true"
   labels:
     app.kubernetes.io/name: broker-openai-codex
     app.kubernetes.io/component: broker
