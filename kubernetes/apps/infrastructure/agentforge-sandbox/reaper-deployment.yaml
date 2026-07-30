@@ -51,6 +51,16 @@ spec:
     spec:
       serviceAccountName: agentforge-reaper
       enableServiceLinks: false
+      # NO terminationGracePeriodSeconds override — the k8s default of 30s is correct here, and this
+      # is deliberate rather than an oversight. The 150s the sibling worker-deployment.yaml carries
+      # buys room for the orchestrator's enforced shutdown deadline (cancel grace + release_all()).
+      # The reaper runs `agentforge reaper`, which is main.py::reaper() → Reaper.run_forever: it
+      # builds NO ClaimService, wires NO on_shutdown, and never constructs the FastAPI app whose
+      # lifespan owns that deadline. It holds no forge claims at all. The only lease it takes is the
+      # per-job owner Lease it CAS-acquires immediately before reclaiming, and that is already
+      # crash-safe by construction — it is reclaimed by EXPIRY, so a reaper killed mid-pass simply
+      # loses the race and the next pass (or the orchestrator's renewal) wins. A longer grace would
+      # protect nothing and only slow the rollout.
       # Run on the dedicated agent pool alongside the sandbox jobs it reaps.
       nodeSelector:
         ailab.io/agent-pool: "true"

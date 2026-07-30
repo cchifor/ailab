@@ -47,6 +47,15 @@ spec:
       serviceAccountName: agentforge-dispatcher
       automountServiceAccountToken: false # read-only forge poller — NO kube-apiserver access
       enableServiceLinks: false
+      # NO terminationGracePeriodSeconds override — the k8s default of 30s is correct here, and this
+      # is deliberate rather than an oversight. The 150s the sibling worker-deployment.yaml carries
+      # buys room for the orchestrator's enforced shutdown deadline (cancel grace + release_all()).
+      # The dispatcher runs `agentforge dispatcher`, which is main.py::dispatcher() → _dispatch_loop:
+      # it builds NO ClaimService, wires NO on_shutdown, and never constructs the FastAPI app whose
+      # lifespan owns that deadline. It holds no claims, so there is nothing to withdraw on SIGTERM
+      # and nothing a longer grace could protect — only a slower rollout. Raise this ONLY if the
+      # dispatcher ever starts holding claims (the "subtract valid in-flight claims" follow-up in
+      # main.py::_dispatch_once would be that moment).
       # Run on the dedicated agent pool alongside the reaper/broker it complements.
       nodeSelector:
         ailab.io/agent-pool: "true"
