@@ -1,0 +1,39 @@
+# PodMonitor for the tenant-zero orchestrator WORKER (worker-deployment.yaml) — closes the R8
+# observability gap. `agentforge serve` exports the dedicated forge_* registry (claims_total,
+# transitions_total, llm_runs_total, run_duration_seconds, …) via start_http_server on
+# metrics_port 9464 (agentforge main.py serve + infra/settings.py default), the Deployment
+# declares the named `metrics` containerPort, and cilium-egress.yaml ALREADY admits ingress 9464
+# from the monitoring namespace — but nothing SELECTED the pods, so the series never reached
+# Prometheus (live check 2026-07-30: forge_claims_total = empty vector; the only forge_* scrape
+# target was the dispatcher).
+#
+# A PodMonitor, NOT a ServiceMonitor: the worker deliberately has NO Service (its webhook API 8700
+# is unexposed — see the worker-deployment.yaml header), and the estate already scrapes
+# serviceless pods this way (monitoring/flux-controllers, databases/infra-pg-metrics). The shape
+# mirrors the sibling dispatcher-servicemonitor.yaml: it lives in `monitoring`, carries
+# `release: kube-prometheus-stack` (the label the kube-prometheus Prometheus selects monitors by;
+# podMonitorNamespaceSelector is {} so the monitor's own namespace is unconstrained), targets the
+# NAMED port, scrapes at 30s, and pins job=. The selector keys on the worker's OPERATOR-ONLY
+# labels — the same pair cilium-egress.yaml's endpointSelector uses — scoped to the tenant
+# namespace; a future tenant's worker extends matchNames. Scale-to-zero (KEDA) simply drops the
+# target while idle — that is absence of a pod, not a scrape failure.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: agentforge-worker
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [af-tenant-tenant-zero-playground]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-worker
+      app.kubernetes.io/managed-by: agentforge-operator
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: agentforge-worker
