@@ -36,7 +36,7 @@ jobs:
     name: broker inventory drift
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check derived broker values against the broker manifests
         shell: bash
