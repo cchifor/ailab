@@ -113,7 +113,7 @@ spec:
           # (#49). CORRECTION: the prior pin (14936a26) was a TAG-RACE mispick — that digest was the
           # dbf0a03 build (privilege_hardening only, NO clone-auth). The real :7dde01d / :latest is
           # b14dddbf (verified in-image: 7 _authed_git refs, checkout_branch takes a token).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:0270f37c1293f63ee3fc4091dff585e49e45a3af8a3830eb5a80fb9f8589ed23
+          image: registry.chifor.me/agentforge/p1-worker@sha256:ac80fd27d699ed7540a564d02d7c91be9277fbf6e127e7c9b552c9d9747d3486
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
@@ -137,7 +137,7 @@ spec:
             # sandbox image @ agentforge main aeeb3737 — now carries pytest (system python) so the tester +
             # implementer roles' zero-egress test_cmd (`python3 -m pytest`) runs hermetically. Bump
             # e50dbab8 -> c509d447 (registry :latest / :aeeb3737).
-            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:f211ff42bddf841917ca658940e9f9e49e071d13565fb3e56cb77da6471d3be2" }
+            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:6c3000c1fe60f3b1e1c7d9201eebafa4b35fdf97c26aabd39814e186119f91b6" }
             - { name: AF_SANDBOX_SERVICE_ACCOUNT, value: "agentforge-sandbox" } # the tokenless sandbox SA
             - { name: AF_SANDBOX_ORG, value: "tenant-zero" }       # -> agentforge.io/org label + capability tenant
             # The capability `iss` claim — the issuer the broker's kid registry binds to
