@@ -73,7 +73,7 @@ spec:
           # #160 and #163 each moved db-migrate.yaml and this file in ONE commit — allowed, not a
           # violation of the ordering rule; see the ⚠️ note in db-migrate.yaml for when it does bind.
           # Overlays remain gated shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set here.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:a79712cff78c847ce050afe24739cfb26e30d6a3fe905aea310c9cb307fd1ed9
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:07462c0ca00d3fa30bec664fd19e8e43024d0fb2c46bf96744500bcc199376c8
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
