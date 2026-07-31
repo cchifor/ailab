@@ -83,7 +83,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: broker
-          image: registry.chifor.me/agentforge/orchestrator@sha256:73430f7add5a5e6c443de807836fece0b2b583ea8a8252097269d2f14519ccc0
+          image: registry.chifor.me/agentforge/orchestrator@sha256:11bc95d399842f914be744f6805cab0c1c7a5f17e5ad2d9b510e26726e6b7faa
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # broker` (composes to: tini -- agentforge broker).
           args: ["agentforge", "broker"]
