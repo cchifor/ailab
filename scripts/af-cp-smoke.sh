@@ -43,7 +43,7 @@ Usage: $(basename "$0") [--help]
 Post-deploy smoke test for $DEPLOY:
   1. wait for the rollout to finish (--timeout=180s)
   2. assert the running pod's imageID digest == the digest pinned in $DEPLOY_FILE
-  3. in-pod readiness probe: kubectl exec ... wget -qO- http://127.0.0.1:8080/readyz
+  3. in-pod readiness probe: kubectl exec ... python urllib GET http://127.0.0.1:8080/readyz
   4. external liveness probe over the cloudflared tunnel: curl -fsS $EXTERNAL_URL
 Prints the deployed image digest + a PASS/FAIL summary; exits non-zero on any failure.
 
@@ -102,11 +102,12 @@ fi
 
 echo "[3] in-pod readiness (/readyz)"
 # /readyz's response body shape is undocumented (only /healthz is documented as unconditional
-# {"status":"ok"} — see deployment.yaml); the acceptance criterion here is HTTP 200, which wget's exit
-# status already encodes (wget treats any non-2xx response as an error and exits non-zero). So PASS/FAIL
-# on the exit status and print the body purely informationally, without assuming any particular shape.
+# {"status":"ok"} — see deployment.yaml); the acceptance criterion here is HTTP 200. The CP image
+# ships NO wget/curl (distroless-ish runtime), but it always has the app's own python — so probe with
+# urllib: exit 0 only on HTTP 200 (urlopen raises on any non-2xx), print the body informationally,
+# without assuming any particular shape.
 readyz_out=""
-if readyz_out="$("${K[@]}" -n "$AF_NS" exec "$DEPLOY" -- wget -qO- http://127.0.0.1:8080/readyz 2>&1)"; then
+if readyz_out="$("${K[@]}" -n "$AF_NS" exec "$DEPLOY" -- python -c 'import urllib.request,sys; r=urllib.request.urlopen("http://127.0.0.1:8080/readyz", timeout=10); sys.stdout.write(r.read().decode())' 2>&1)"; then
   echo "  readyz (informational): $readyz_out"
   ok "/readyz returned HTTP 200 (DB SELECT 1 succeeded)"
 else
