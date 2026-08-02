@@ -39,7 +39,14 @@ spec:
   # shares the `kustomize-controller` field manager and does NOT skip an object owned by another
   # Kustomization, so the render stripped caProvider on its 5m interval while the operator copy
   # restored it on its 10m one — observed live, with ESO going SecretSyncedError in between. A patch
-  # makes the RENDER itself complete, leaving exactly one writer.
+  # makes the RENDER itself complete, so the two declarations no longer DISAGREE about this field.
+  #
+  # Be precise about what this does and does not buy: it removes the one disagreement that BREAKS
+  # ESO, not the dual declaration itself. agentforge-tenant-platform-dev/ still declares the same
+  # SecretStore and ExternalSecret, and the ExternalSecret copies still differ on refreshInterval
+  # (render 1m vs operator 1h) plus labels, so benign SSA churn continues on that object. Single-writer
+  # status arrives only when the operator ESO stack is retired — which this patch is the prerequisite
+  # for, since the render must be complete BEFORE the override can safely be removed.
   #
   # Targets every tenant SecretStore, not just platform-dev: every CP-provisioned workspace needs the
   # CA for the same reason. Remove this patch once agentforge-platform#80 ships and the renderer emits
