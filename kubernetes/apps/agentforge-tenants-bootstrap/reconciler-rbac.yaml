@@ -66,6 +66,29 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch", "create", "patch"]
+  # ESO plumbing, required by the P2 R-1 (sandbox) render and by nothing else.
+  # A sandbox-mode tenant render emits a SecretStore + an ExternalSecret beside the
+  # orchestrator (agentforge-platform adapters/gitops/renderer.py), so without these
+  # verbs the ENTIRE agentforge-tenants Kustomization wedges the moment the first
+  # workspace is rolled onto sandbox manifests — observed 2026-08-02:
+  #
+  #   ExternalSecret/.../af-creds-platform-dev-delivery dry-run failed (Forbidden):
+  #   ... cannot patch resource "externalsecrets" in API group "external-secrets.io"
+  #
+  # Flux stops applying rather than deleting, so a running tenant keeps serving; the
+  # cost is that no tenant change lands until this is granted. `secretstores` is
+  # included because it is the same render and would fail next.
+  #
+  # SCOPE, stated rather than glossed: this is a real privilege increase. The
+  # reconciler can already create/patch `secrets` directly, so writing secret DATA is
+  # not new — but an ExternalSecret pulls from OpenBao through the SecretStore's own
+  # auth, which reaches material the reconciler cannot read itself. What bounds it is
+  # unchanged and load-bearing: the tenants repo is CP-written and PR-gated, and the
+  # agentforge-tenant-guard ValidatingAdmissionPolicy pins every object to the
+  # af-tenant-* namespaces and the tenant path.
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets", "secretstores"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
