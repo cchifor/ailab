@@ -113,7 +113,7 @@ spec:
           # #157, #160 and #163 each did this; head has stayed 0012 since #155 and the cluster DB is at
           # 0012. Do not read those commits as violations of the rule above — they are the other branch
           # of it. A bot pin will not make this call for you; the reviewer does, with the diff command.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:8f53f1465b5a27896c39b361383e543f4a8c4d7c0f00f1a53fc637900ebeaa7e
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:07619f2b79fdac56f45cc8595db0f6e37ec45f487d94acbc97264218113f419b
           command: ["agentforge-platform", "migrate"]
           env:
             # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
