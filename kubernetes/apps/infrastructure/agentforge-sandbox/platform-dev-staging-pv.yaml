@@ -12,7 +12,21 @@
 #        accessModes:     [ReadWriteMany]
 #        storageClassName: ""            (static bind; NOT the nfs-csi default)
 #        volumeName:      af-sbx-stage-tenant-zero-platform-dev
-#        requests.storage: 5Gi
+#        requests.storage: 1Gi          (renderer.py::STAGING_PVC_SIZE — the SOURCE OF TRUTH)
+#
+# THIS CONTRACT WAS STALE AND IT DOES NOT FAIL THE WAY THE HEADER PREDICTS. It said 5Gi while the
+# control plane has always rendered 1Gi, and the mismatch stayed invisible because platform-dev was
+# never rendered in sandbox mode until 2026-08-02. The failure is NOT "the PVC will not bind" — a
+# 1Gi claim binds to a 5Gi volume quite happily. It is worse and later: once bound,
+# status.capacity (5Gi) exceeds spec.requests (1Gi), so the API server evaluates EVERY subsequent
+# update as a resize and refuses it —
+#
+#   forbidden: only dynamically provisioned pvc can be resized and the storageclass that
+#   provisions the pvc must support resize
+#
+# — which means Flux can never reconcile the object again and the whole tenant Kustomization stops
+# applying, while the pod itself keeps running. Capacity must EQUAL the rendered request, not merely
+# exceed it.
 #   The orchestrator mounts that PVC at AF_SANDBOX_STAGING_ROOT=/workspace/agentforge/sandbox so
 #   <staging_root>/<job-id>/ resolves to <export>/<job-id> — the SAME NFS bytes the sandbox mounts at
 #   /workspace (subPath <job-id>).
@@ -30,7 +44,7 @@ metadata:
     agentforge.io/role: sandbox-staging
 spec:
   capacity:
-    storage: 5Gi
+    storage: 1Gi
   accessModes:
     - ReadWriteMany
   storageClassName: ""
