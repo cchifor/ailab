@@ -69,7 +69,10 @@ spec:
   # cleanup afterthought (learned the hard way 2026-08-02 — it cost a tenant outage):
   #   1. delete the PVC                     (it will sit Terminating: kubernetes.io/pvc-protection)
   #   2. kubectl -n af-tenant-tenant-zero-platform-dev scale deploy/af-orch-platform-dev-delivery --replicas=0
-  #      — the finalizer is held by the RUNNING POD, so the PVC does not finalise until the pod is gone
+  #      — the kubernetes.io/pvc-protection finalizer is ON THE PVC, and its removal is blocked while
+  #      ANY Pod object still references the claim (a Pod stuck Terminating counts), so the claim does
+  #      not finalise until every such Pod is gone. Either order works (delete-then-scale or
+  #      scale-then-delete); what matters is reaching the three states below in sequence.
   #   3. wait for the PVC to disappear and this PV to report phase=Released
   #   4. kubectl patch pv af-sbx-stage-tenant-zero-platform-dev --type=merge -p '{"spec":{"claimRef":null}}'
   #      — PV must reach phase=Available before the new claim can bind
