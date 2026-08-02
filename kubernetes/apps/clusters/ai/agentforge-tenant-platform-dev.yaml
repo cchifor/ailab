@@ -8,33 +8,38 @@ spec:
   retryInterval: 1m
   timeout: 5m
   # OPERATOR-owned tenant-ns halves for the CP-created tenant-zero/platform-dev v1.1 subscription
-  # workspace (the ESO credential path + openbao-tls CA + tenant-ns staging PVC). Its OWN
-  # path/Kustomization (mirrors agentforge-workers) so it can't collide with the apps layer, the
-  # agentforge-sandbox tree, or the CP-owned `agentforge-tenants` Kustomization that renders
-  # platform-dev's ns/orchestrator/Deployment. dependsOn:
+  # workspace (the ESO credential path + the openbao-tls CA). Its OWN path/Kustomization (mirrors
+  # agentforge-workers) so it can't collide with the apps layer, the agentforge-sandbox tree, or the
+  # CP-owned `agentforge-tenants` Kustomization that renders platform-dev's ns/orchestrator/Deployment.
+  # dependsOn:
   #   * external-secrets — installs the external-secrets.io/v1 CRDs (SecretStore/ExternalSecret).
   #   * infrastructure   — cert-manager (the openbao-ca Certificate) + Cilium CRDs.
   #   * agentforge-sandbox — provides the static NFS PVs (platform-dev-staging-pv.yaml /
-  #     platform-dev-workspace-pvc.yaml) this tree's tenant-ns staging PVC binds to; ordering only.
-  #   * agentforge-tenants — the CP Kustomization that CREATES the tenant ns
-  #     af-tenant-tenant-zero-platform-dev this tree applies its objects INTO. Ordering only:
-  #     agentforge-tenants is itself wait:false (reports Ready immediately), so this dependsOn is a
-  #     pure sequencing hint (ns-before-objects) and can never health-gate/wedge this tree on tenant
-  #     churn. Without it the SecretStore/ExternalSecret/PVC/Certificate error-retry until the ns
-  #     appears (harmless under wait:false, but this removes the reconcile churn).
+  #     platform-dev-workspace-pvc.yaml); ordering only.
+  #
+  # ⚠ `agentforge-tenants` was REMOVED from dependsOn on 2026-08-02, and the reasoning that put it
+  # here was wrong. The old comment claimed that because agentforge-tenants is `wait: false` it
+  # "reports Ready immediately … can never health-gate/wedge this tree". `wait: false` only skips the
+  # HEALTH check of applied workloads — a Kustomization whose APPLY fails still reports
+  # Ready=False ReconciliationFailed, and Flux gates every dependent on that. That turned a
+  # sequencing hint into a hard circular deadlock: a bad object in the tenant render wedges
+  # agentforge-tenants, which blocks THIS tree, which is the only thing that can prune the operator
+  # object causing the wedge. Observed live on 2026-08-02 with the dual-declared staging PVC.
+  # An operator tree whose whole job is to correct/patch the render must never depend on the render.
+  # Cost of removal: this tree's objects error-retry until the CP creates the tenant namespace
+  # (harmless under wait:false — it is retry churn, not failure).
   dependsOn:
     - name: infrastructure
     - name: external-secrets
     - name: agentforge-sandbox
-    - name: agentforge-tenants
   sourceRef:
     kind: GitRepository
     name: flux-system
   path: ./kubernetes/apps/infrastructure/agentforge-tenant-platform-dev
   prune: true
-  # wait:false so the ExternalSecret staying NotReady (until the OpenBao KV subtree is completed —
-  # Phase-2 step 3) can never wedge this or any dependent Flux Kustomization; the SA/SecretStore/
-  # Certificate/PVC still apply immediately.
+  # wait:false so the ExternalSecret staying NotReady can never wedge this or any dependent Flux
+  # Kustomization; the SA/SecretStore/Certificate still apply immediately. NOTE this only covers
+  # HEALTH — an apply/dry-run failure here would still surface as Ready=False (see the dependsOn note).
   wait: false
   # decryption (SOPS) retained for symmetry with the sibling operator trees — currently no SOPS Secret
   # here (creds are ESO-synced from OpenBao, not SOPS).
