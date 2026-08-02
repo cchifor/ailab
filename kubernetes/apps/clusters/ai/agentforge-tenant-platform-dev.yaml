@@ -26,8 +26,10 @@ spec:
   # agentforge-tenants, which blocks THIS tree, which is the only thing that can prune the operator
   # object causing the wedge. Observed live on 2026-08-02 with the dual-declared staging PVC.
   # An operator tree whose whole job is to correct/patch the render must never depend on the render.
-  # Cost of removal: this tree's objects error-retry until the CP creates the tenant namespace
-  # (harmless under wait:false — it is retry churn, not failure).
+  # Cost of removal: on a cold bootstrap this tree's objects fail to apply until the CP creates the
+  # tenant namespace, surfacing as transient Ready=False retry churn. That is acceptable because
+  # NOTHING dependsOn this Kustomization — not because wait:false hides it. wait:false only skips the
+  # health check of applied workloads; it does not make a failed apply look Ready.
   dependsOn:
     - name: infrastructure
     - name: external-secrets
