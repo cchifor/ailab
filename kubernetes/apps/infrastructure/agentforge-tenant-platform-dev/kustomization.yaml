@@ -4,15 +4,30 @@ kind: Kustomization
 # subscription workspace (pool `delivery`). platform-dev's namespace + orchestrator + Role/RoleBinding +
 # ConfigMap + NetworkPolicy + Deployment are CP-rendered from the cchifor/agentforge-tenants repo
 # (Flux Kustomization `agentforge-tenants`); this tree adds the pieces the CP render does NOT/CANNOT
-# provide for THIS (stale, pre-ESO) workspace: the ESO credential path + the openbao-tls CA + the
-# tenant-ns staging PVC. Its OWN directory + Flux Kustomization (clusters/ai/agentforge-tenant-platform-dev.yaml)
-# so it can't collide with the apps layer or the agentforge-sandbox/agentforge-workers trees.
+# provide: the ESO credential path + the openbao-tls CA. Its OWN directory + Flux Kustomization
+# (clusters/ai/agentforge-tenant-platform-dev.yaml) so it can't collide with the apps layer or the
+# agentforge-sandbox/agentforge-workers trees.
 #
 # The sandbox-boundary halves (the two static NFS PVs + the sandbox-ns workspace PVC + the orchestrator
 # RoleBinding subject) live in agentforge-sandbox/ (platform-dev-*.yaml + orchestrator-rbac.yaml) — same
 # split as playground.
+#
+# ⚠ OWNERSHIP after the 2026-08-02 CP re-provision. platform-dev's tenant-repo render is NO LONGER the
+# stale pre-ESO one this tree was written against: the re-provision emitted 11-eso-serviceaccount +
+# 60-secretstore + 61-externalsecret + 70-staging-pvc, so every object here became DUAL-DECLARED. The
+# staging PVC was retired from this tree because the two copies disagreed on SIZE, and a bound
+# statically-provisioned claim can NEVER shrink — the render's smaller request failed dry-run
+# ("field can not be less than previous value") and wedged the WHOLE `agentforge-tenants` layer for
+# every tenant, not just this one. The CP render is now the single owner of that PVC; its size tracks
+# the renderer's STAGING_PVC_SIZE, so the operator PV in agentforge-sandbox/platform-dev-staging-pv.yaml
+# must be sized to whatever the renderer emits (resolve it from the render, never from prose).
+#
+# The ESO stack DELIBERATELY stays here despite being dual-declared: the CP renderer emits a SecretStore
+# with NO `caProvider`, and a namespaced SecretStore resolves caProvider in its own namespace, so the
+# rendered copy alone cannot verify OpenBao's private-CA (ailab-ca) TLS cert. Verified 2026-08-02 that
+# Flux does not strip the field — `agentforge-tenants` applied the render at b4241564 and the live
+# SecretStore kept `caProvider: openbao-tls`. Once the renderer emits caProvider this whole tree can go.
 resources:
   - openbao-ca-cert.yaml # per-ns openbao-tls ca.crt (ailab-ca) for the ESO caProvider (operator-only; CP never emits it)
   - eso-secretstore.yaml # eso-auth SA af-eso-platform-dev + namespaced OpenBao SecretStore
   - externalsecret.yaml # af-creds-platform-dev-delivery ExternalSecret (fills the orchestrator creds from OpenBao)
-  - staging-pvc.yaml # TENANT ns: af-sbx-stage-tenant-zero-platform-dev PVC (binds the operator staging PV)
