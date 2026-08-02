@@ -37,3 +37,10 @@ metadata:
 data:
   # af-tenant-<org>-<ws> = "<org>/<workspace>/<allowed creds Secret names, comma-separated>"
   af-tenant-tenant-zero-playground: "tenant-zero/playground/af-creds-playground-planner"
+  # platform-dev, added when its delivery pool was rolled onto P2 R-1 (sandbox)
+  # manifests. A sandbox render emits a SecretStore + ExternalSecret into the tenant
+  # namespace, and agentforge-tenant-guard refuses BOTH unless this map names the
+  # namespace — deliberately fail-closed, so the control plane can never self-serve
+  # ESO into a namespace an operator has not mapped. Value is
+  # <org>/<workspace>/<creds-secret>, matching the pool's rendered ExternalSecret.
+  af-tenant-tenant-zero-platform-dev: "tenant-zero/platform-dev/af-creds-platform-dev-delivery"
