@@ -3,16 +3,44 @@ kind: Kustomization
 # AgentForge v2 — OPERATOR-owned tenant-ns halves for the CP-created tenant-zero/platform-dev v1.1
 # subscription workspace (pool `delivery`). platform-dev's namespace + orchestrator + Role/RoleBinding +
 # ConfigMap + NetworkPolicy + Deployment are CP-rendered from the cchifor/agentforge-tenants repo
-# (Flux Kustomization `agentforge-tenants`); this tree adds the pieces the CP render does NOT/CANNOT
-# provide for THIS (stale, pre-ESO) workspace: the ESO credential path + the openbao-tls CA + the
-# tenant-ns staging PVC. Its OWN directory + Flux Kustomization (clusters/ai/agentforge-tenant-platform-dev.yaml)
-# so it can't collide with the apps layer or the agentforge-sandbox/agentforge-workers trees.
+# (Flux Kustomization `agentforge-tenants`); this tree supplies the openbao-tls CA the CP never emits,
+# and — until the renderer learns to emit `caProvider` — an overriding copy of the ESO stack. Its OWN
+# directory + Flux Kustomization (clusters/ai/agentforge-tenant-platform-dev.yaml) so it can't collide
+# with the apps layer or the agentforge-sandbox/agentforge-workers trees.
 #
 # The sandbox-boundary halves (the two static NFS PVs + the sandbox-ns workspace PVC + the orchestrator
 # RoleBinding subject) live in agentforge-sandbox/ (platform-dev-*.yaml + orchestrator-rbac.yaml) — same
 # split as playground.
+#
+# ⚠ OWNERSHIP after the 2026-08-02 CP re-provision. platform-dev's tenant-repo render is NO LONGER the
+# stale pre-ESO one this tree was written against: the re-provision emitted 11-eso-serviceaccount +
+# 60-secretstore + 61-externalsecret + 70-staging-pvc, so every object here became DUAL-DECLARED. The
+# staging PVC was retired from this tree because the two copies disagreed on SIZE, and a bound
+# statically-provisioned claim can NEVER shrink — the render's smaller request failed dry-run
+# ("field can not be less than previous value") and wedged the WHOLE `agentforge-tenants` layer for
+# every tenant, not just this one. The CP render is now the single owner of that PVC; its size tracks
+# the renderer's STAGING_PVC_SIZE, so the operator PV in agentforge-sandbox/platform-dev-staging-pv.yaml
+# must be sized to whatever the renderer emits (resolve it from the render, never from prose).
+#
+# The ESO stack DELIBERATELY stays here despite being dual-declared: the CP renderer emits a SecretStore
+# with NO `caProvider`, and a namespaced SecretStore resolves caProvider in its own namespace, so the
+# rendered copy alone cannot verify OpenBao's private-CA (ailab-ca) TLS cert — adopting it wholesale
+# would break credential sync.
+#
+# ⚠ KNOWN, TIME-BOXED RISK — do not read the dual declaration as safe. Flux applies with server-side
+# apply under a shared `kustomize-controller` field manager and does NOT skip an object because a
+# different Kustomization owns it, so once `agentforge-tenants` applies cleanly again it will strip
+# `caProvider` (absent from its manifest) and this tree will restore it on its own 10m interval — a
+# flip-flop. It is survivable rather than fine: ESO retains the existing Secret on a failed refresh
+# (deletionPolicy Retain), so a running orchestrator keeps its creds and only refreshes fail during the
+# stripped windows. The resolution is the renderer emitting caProvider, after which the SA/SecretStore/
+# ExternalSecret are deleted from this tree and only openbao-ca-cert.yaml remains.
+#
+# An earlier revision of this header claimed the live SecretStore keeping `caProvider` after
+# `agentforge-tenants` reached b4241564 PROVED Flux preserves the field. That evidence was confounded:
+# the layer was failing dry-run on the PVC, so it never applied the SecretStore at all. Do not restore
+# that claim without an apply that actually succeeded.
 resources:
   - openbao-ca-cert.yaml # per-ns openbao-tls ca.crt (ailab-ca) for the ESO caProvider (operator-only; CP never emits it)
   - eso-secretstore.yaml # eso-auth SA af-eso-platform-dev + namespaced OpenBao SecretStore
   - externalsecret.yaml # af-creds-platform-dev-delivery ExternalSecret (fills the orchestrator creds from OpenBao)
-  - staging-pvc.yaml # TENANT ns: af-sbx-stage-tenant-zero-platform-dev PVC (binds the operator staging PV)

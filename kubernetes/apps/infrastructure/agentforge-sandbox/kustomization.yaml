@@ -25,7 +25,7 @@ resources:
   - platform-dev-nfs-provisioner-job.yaml # agentforge ns: one-shot Job that mkdirs tenant-zero/platform-dev 0777 so #121's static PVs mount
   # --- tenant-zero/platform-dev (v1.1 subscription workspace, pool `delivery`): sandbox-boundary halves ---
   - platform-dev-workspace-pvc.yaml # SANDBOX ns: af-sbx-ws-tenant-zero-platform-dev static PV + PVC
-  - platform-dev-staging-pv.yaml # TENANT ns: af-sbx-stage-tenant-zero-platform-dev static PV ONLY (tenant-ns PVC in agentforge-tenant-platform-dev/)
+  - platform-dev-staging-pv.yaml # TENANT ns: af-sbx-stage-tenant-zero-platform-dev static PV ONLY (tenant-ns PVC is CP-rendered: 70-staging-pvc.yaml in the tenants repo)
   # --- Reaper: TRUSTED `agentforge` ns (moved out of agentforge-sandbox), cross-ns RBAC into the sandbox ns ---
   - reaper-rbac.yaml # reaper SA (agentforge ns) + Jobs/Pods GC Role + cross-ns RoleBinding (pre-staged, active)
   - reaper-storage.yaml # af-sbx-reaper-tenant-zero-playground static PV + PVC (agentforge ns) -> same per-org/ws subdir (pre-staged)

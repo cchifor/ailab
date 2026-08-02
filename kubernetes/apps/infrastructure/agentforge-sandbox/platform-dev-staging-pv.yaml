@@ -2,9 +2,12 @@
 # cross-namespace share. Clone of staging-pv.yaml (playground) for the CP-created workspace
 # `platform-dev` (pool `delivery`). The orchestrator runs in the CP-rendered TENANT namespace
 # (af-tenant-tenant-zero-platform-dev) and stages each job's cwd into <staging_root>/<job-id>/ before
-# creating the sandbox Job. A PVC is namespace-scoped, so the tenant-ns PVC (bound to this PV) is
-# provided in agentforge-tenant-platform-dev/staging-pvc.yaml; the PV itself is cluster-scoped +
-# operator-owned, so the OPERATOR provides it here and pre-binds it (claimRef) to that PVC.
+# creating the sandbox Job. A PVC is namespace-scoped, so the tenant-ns PVC that binds this PV comes
+# from the CP render (tenants repo, tenants/tenant-zero/platform-dev/70-staging-pvc.yaml, applied by
+# the `agentforge-tenants` Kustomization). The PV itself is cluster-scoped + operator-owned, so the
+# OPERATOR provides it here and pre-binds it (claimRef) to that PVC. An operator copy of the PVC used
+# to live in agentforge-tenant-platform-dev/staging-pvc.yaml; it was retired on 2026-08-02 because two
+# declarations at different sizes wedged the whole tenants layer (a bound static claim cannot shrink).
 #
 # CONTRACT (must match the renderer's tenant-ns PVC byte-for-byte, or the PVC will not bind):
 #   PVC  name:            af-sbx-stage-tenant-zero-platform-dev
@@ -58,6 +61,25 @@ spec:
     path: /pve-nfs/agentforge-sandbox/tenant-zero/platform-dev # SAME per-org/ws subdir as af-sbx-ws-*
   # Pre-bind to the tenant-ns PVC (name+namespace above). Because this claimRef names a specific
   # ns/name, only that exact PVC can bind — a different tenant can't hijack the staging PV.
+  #
+  # ⚠ REBIND PROCEDURE — a claim cannot be resized down, so changing the rendered size means REPLACING
+  # the PVC, and this PV is `Retain`. On PVC deletion the PV goes `Released` and KEEPS a claimRef that
+  # still carries the OLD claim's UID, which silently blocks the replacement claim from binding: it
+  # sits `Pending` forever with no obvious error. Clearing the claimRef is a REQUIRED step, not a
+  # cleanup afterthought (learned the hard way 2026-08-02 — it cost a tenant outage):
+  #   1. delete the PVC                     (it will sit Terminating: kubernetes.io/pvc-protection)
+  #   2. kubectl -n af-tenant-tenant-zero-platform-dev scale deploy/af-orch-platform-dev-delivery --replicas=0
+  #      — the kubernetes.io/pvc-protection finalizer is ON THE PVC, and its removal is blocked while
+  #      ANY Pod object still references the claim (a Pod stuck Terminating counts), so the claim does
+  #      not finalise until every such Pod is gone. Either order works (delete-then-scale or
+  #      scale-then-delete); what matters is reaching the three states below in sequence.
+  #   3. wait for the PVC to disappear and this PV to report phase=Released
+  #   4. kubectl patch pv af-sbx-stage-tenant-zero-platform-dev --type=merge -p '{"spec":{"claimRef":null}}'
+  #      — PV must reach phase=Available before the new claim can bind
+  #   5. flux reconcile the `agentforge-tenants` Kustomization to recreate the claim, then scale back up
+  # Pod selector note: the orchestrator pods carry `agentforge.io/workspace=platform-dev`; there is no
+  # `app.kubernetes.io/name=agentforge-worker` label, and using it returns "No resources found" while
+  # the PVC stays wedged in Terminating.
   claimRef:
     namespace: af-tenant-tenant-zero-platform-dev
     name: af-sbx-stage-tenant-zero-platform-dev

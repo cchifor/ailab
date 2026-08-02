@@ -13,8 +13,10 @@
 #     /workspace with subPath <job-id> (sandbox-guard pins subPath == the pod's job-id label).
 #
 # The sibling PVs af-sbx-stage-tenant-zero-platform-dev (platform-dev-staging-pv.yaml; operator PROVIDES
-# the PV, the tenant-ns PVC lives in agentforge-tenant-platform-dev/staging-pvc.yaml) point at the SAME
-# per-org/ws export subdir. storageClassName:"" + volumeName bind statically; reclaim Retain.
+# the PV, while the tenant-ns PVC that binds it comes from the CP render — tenants repo,
+# tenants/tenant-zero/platform-dev/70-staging-pvc.yaml, since the operator copy was retired 2026-08-02)
+# point at the SAME per-org/ws export subdir. storageClassName:"" + volumeName bind statically;
+# reclaim Retain — see platform-dev-staging-pv.yaml for the REBIND PROCEDURE a Retain PV requires.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
