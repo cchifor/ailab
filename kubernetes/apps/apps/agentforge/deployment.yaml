@@ -145,6 +145,59 @@ spec:
                  "anthropic/claude-max-2":"http://broker-anthropic-max2.agentforge-broker.svc.cluster.local:8700/readyz",
                  "anthropic/claude-max-3":"http://broker-anthropic-claude-max-3.agentforge-broker.svc.cluster.local:8700/readyz",
                  "openai/codex-pro":"http://broker-openai-codex.agentforge-broker.svc.cluster.local:8700/readyz"}
+            # -- P2 R-1: render tenant orchestrators in SANDBOX mode -------------------
+            # Turns on Settings.sandbox_enabled, which makes the tenant renderer emit
+            # AF_EXECUTOR=sandbox plus the SandboxExecutor env and ESO plumbing. Without
+            # it the renderer emits P1 manifests and the orchestrator runs LocalExecutor
+            # — agent CLIs execute IN the orchestrator pod, against credentials mounted
+            # beside them, bypassing the broker entirely.
+            #
+            # This closes a real inconsistency rather than opting into something new: a
+            # workspace with non-playground repos bound already renders
+            # `privilege_hardening: v1.1` INTO ITS CONFIG (domain/templates.py), so the
+            # tenant was declaring hardened isolation while being rendered without it.
+            #
+            # The setting's own default says v1.1 waits on "the live boundary proofs".
+            # Those are recorded in ADR 0019 (live matrix 2026-07-24: every vector
+            # blocked/denied/proven) and the operator-owned half is deployed: the
+            # agentforge-sandbox namespace + tokenless SA, and BOTH admission policies
+            # (agentforge-sandbox-guard, agentforge-sandbox-job-guard).
+            #
+            # SCOPE: this is CP-WIDE. It changes how every future provision renders.
+            # Existing workspaces keep their manifests until something re-renders them —
+            # and that is NOT only an explicit re-provision: the pool ROLLOUT endpoint
+            # (api/workspaces.py) re-renders and commits too. Nothing re-renders on a CP
+            # restart, a Flux reconcile, or a background loop.
+            #
+            # What a re-rendered tenant Deployment actually gains, beyond AF_EXECUTOR:
+            # automountServiceAccountToken flips to TRUE (the orchestrator must create and
+            # reap sandbox Jobs), the pod runs as uid/gid/fsGroup 65532, a staging PVC is
+            # mounted, and three new manifests are emitted alongside it (an ESO
+            # ServiceAccount, a SecretStore and an ExternalSecret). That is a real
+            # privilege change to the orchestrator, traded for agent CLIs no longer
+            # executing in-pod beside the credentials.
+            #
+            # ROLLBACK IS NOT JUST REVERTING THIS. Future renders return to P1, but a
+            # workspace already rolled onto sandbox manifests stays there until another
+            # rollout commits P1 manifests again.
+            - { name: AFP_PRIVILEGE_HARDENING, value: "v1.1" }
+            # Digest-pinned image the runtime sandbox Jobs run. REQUIRED once hardening is
+            # v1.1: the Settings default is a REPLACE_ME placeholder and P2 provisioning
+            # 503s on an unpinned value, so leaving this unset would fail provisioning
+            # closed rather than silently running something unpinned. Same digest the
+            # tenant-zero playground orchestrator already runs.
+            #
+            # ⚠️ DO NOT ADD PROSE HERE NAMING THE TAG OR BUILD — the digest is what is
+            # deployed and any comment stating WHICH build it is goes stale. To learn what
+            # is running: kubectl -n <tenant-ns> get deploy -o jsonpath='{..env}' | grep SANDBOX_IMAGE
+            #
+            # ⚠️ THIS PIN MAY BE HAND-MAINTAINED. scripts/pin-image-digests.py demonstrably
+            # rewrites env-embedded digests (it moved AFP_WORKER_IMAGE in #201), but it has
+            # never touched a SANDBOX_IMAGE line. If it does not track the `sandbox` repo,
+            # this value will not follow new builds — check after the next sandbox release
+            # rather than assuming the bot owns it.
+            - name: AFP_SANDBOX_IMAGE
+              value: "registry.chifor.me/agentforge/sandbox@sha256:67ff2448454608f516ef40d99f2aa50784358d6ff526802274fcc22aabf4fed3"
             # Aud -> broker URL map the renderer embeds into tenant sandbox renders
             # (AF_SANDBOX_BROKER_URLS source; P2 provisioning refuses on an empty map).
             - name: AFP_SANDBOX_BROKER_URLS
