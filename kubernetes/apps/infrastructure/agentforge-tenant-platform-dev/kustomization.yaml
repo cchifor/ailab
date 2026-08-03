@@ -44,3 +44,4 @@ resources:
   - openbao-ca-cert.yaml # per-ns openbao-tls ca.crt (ailab-ca) for the ESO caProvider (operator-only; CP never emits it)
   - eso-secretstore.yaml # eso-auth SA af-eso-platform-dev + namespaced OpenBao SecretStore
   - externalsecret.yaml # af-creds-platform-dev-delivery ExternalSecret (fills the orchestrator creds from OpenBao)
+  - orchestrator-apiserver-netpol.yaml # CiliumNetworkPolicy: orchestrator -> kube-apiserver (v1.1 sandbox Job/Lease creation)
