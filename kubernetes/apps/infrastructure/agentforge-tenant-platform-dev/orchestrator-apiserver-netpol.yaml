@@ -1,0 +1,60 @@
+# Orchestrator -> kube-apiserver egress for the tenant-zero/platform-dev delivery pool.
+#
+# WHY THIS EXISTS. Under privilege_hardening v1.1 the orchestrator runs AF_EXECUTOR=sandbox, so it
+# must reach the kube-apiserver to create/watch each sandbox Job and to hold the sandbox owner Lease.
+# Under v1.0/LocalExecutor no Job is ever created, so no apiserver access was needed and the gap was
+# invisible — it only appeared on the first real sandbox rollout (2026-08-03), as
+#   Cannot connect to host 10.96.0.1:443 ssl:default [Connect call failed ('10.96.0.1', 443)]
+# with the planner failing 2x and escalating to needs-human.
+#
+# WHY THE CP-RENDERED NetworkPolicy IS NOT ENOUGH. The render (40-networkpolicy.yaml) already allows
+# egress on 443 with no `to:` selector, i.e. "all destinations" in plain Kubernetes semantics. That
+# does NOT cover the apiserver here: it is backed by host-network node IPs (192.168.0.41-43 behind the
+# Talos CP VIP), and under Cilium those carry host/remote-node identity which an all-destinations
+# rule does not admit. Same shape as the OpenBao unsealer incident (2026-07-21).
+#
+# WHY A CiliumNetworkPolicy. `toEntities: [kube-apiserver]` is the only clean, environment-agnostic
+# way to name the API server — it is the Talos CP VIP, not an in-cluster pod or a stable CIDR a plain
+# NetworkPolicy could target. Precedent and wording: agentforge-sandbox/reaper-netpol.yaml.
+#
+# ADDITIVE, NOT A REPLACEMENT. The orchestrator is already in egress default-deny via the CP-rendered
+# NetworkPolicy's Egress policyType; Cilium unions the allows, so this only ADDS the apiserver leg and
+# leaves the rendered DNS/8080/443/4000 egress untouched. It deliberately does not restate those: the
+# CP owns them, and duplicating them here would recreate the dual-declaration problem that wedged the
+# tenants layer on 2026-08-02 (see kustomization.yaml).
+#
+# OPERATOR-OWNED ON PURPOSE. Granting a tenant workload apiserver reach is exactly the authority the
+# CP must not be able to give itself, which is why this lives in the CP-unwritable ailab repo next to
+# the other sandbox-boundary halves rather than in the render.
+#
+# PORTS. The client dials the in-cluster ClusterIP 10.96.0.1:443; Cilium's socket-LB rewrites that to
+# the backend :6443 before policy is evaluated, so 6443 is the one that actually matters (the reaper
+# allows only that). 443 is kept alongside it so the rule still holds if socket-LB is ever disabled
+# for this endpoint — both are scoped to the kube-apiserver ENTITY, which is the real boundary.
+#
+# VERIFIED LIVE before this file was written: in-pod curl to https://10.96.0.1:443/version went from
+# "connection timed out after 8001ms" to HTTP 401 (anonymous auth rejected == the connection works),
+# and the next run produced planner outcome=ok followed by a cross-reviewer turn outcome=ok.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: af-orch-platform-dev-apiserver
+  namespace: af-tenant-tenant-zero-platform-dev
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
+    agentforge.io/workspace: platform-dev
+spec:
+  # The CP-rendered orchestrator Deployment labels its pods with the pool; this selects exactly that
+  # one workload in this tenant namespace.
+  endpointSelector:
+    matchLabels:
+      agentforge.io/pool: delivery
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - { port: "6443", protocol: TCP }
+            - { port: "443", protocol: TCP }
