@@ -74,7 +74,7 @@ spec:
         # removes this marker. Post-9915aec worker images REJECT the currently-served v2 config
         # and REQUIRE AF_BOT_TOKENS (fleet outage 2026-08-04, dispatcher CrashLoop ~5.5h).
         # Cutover order lives in the program plan (agentforge plans/2026-08-03-user-workflows-program-plan.md).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:9966d3555c084d787b8b660f7acca3448defa06e2ef0280ff50a2f432fe789ec
+          image: registry.chifor.me/agentforge/p1-worker@sha256:49168dcaf9eb6be0f20b2f717eaaa7574f3650a655b2ae87bec82686e2eeaaba
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # dispatcher` (composes to: tini -- agentforge dispatcher). A bare `dispatcher` would crash-loop.
           args: ["agentforge", "dispatcher"]
