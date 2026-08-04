@@ -118,18 +118,19 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: orchestrator
-          # p1-worker @ agentforge main 7dde01d. Adds: authenticated clone/fetch/push for PRIVATE
-          # repos (#50 — the tester/implementer can now `git clone` the private tenant repo; the
-          # credential is injected via git ENV-config, never argv; a real switch failure no longer
-          # silently branches from main) + the ADR-0018 privilege_hardening repo-allowlist gate
-          # (#49). CORRECTION: the prior pin (14936a26) was a TAG-RACE mispick — that digest was the
-          # dbf0a03 build (privilege_hardening only, NO clone-auth). The real :7dde01d / :latest is
-          # b14dddbf (verified in-image: 7 _authed_git refs, checkout_branch takes a token).
+          # v3-CUTOVER PLACEHOLDER digest (unpullable by design). The REAL v3 p1-worker digest lands
+          # on the cutover branch via the normal pin flow (`just pin-workloads p1-worker=sha256:…`)
+          # once the release CI has built it — never hand-edit a digest here, and never state WHICH
+          # build is pinned in prose (resolve it: git show gitea/main:<this file> | grep image:).
+          # Operator procedure: docs/runbooks/agentforge-v3-cutover.md.
         # PIN FREEZE (2026-08-04): do NOT merge agentforge pin PRs until the v3 cutover PR
         # removes this marker. Post-9915aec worker images REJECT the currently-served v2 config
         # and REQUIRE AF_BOT_TOKENS (fleet outage 2026-08-04, dispatcher CrashLoop ~5.5h).
         # Cutover order lives in the program plan (agentforge plans/2026-08-03-user-workflows-program-plan.md).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:9966d3555c084d787b8b660f7acca3448defa06e2ef0280ff50a2f432fe789ec
+        # REMOVED BY THIS PR AT CUTOVER MERGE (feat/agentforge-v3-cutover): the freeze comes off in
+        # the same commit that replaces the placeholder below with the real v3 digest — the ONLY
+        # sanctioned removal path (docs/runbooks/agentforge-v3-cutover.md §6).
+          image: registry.chifor.me/agentforge/p1-worker@sha256:REPLACE_ME_V3_CUTOVER
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
@@ -150,10 +151,10 @@ spec:
             #    shape byte-for-byte; the agentforge-sandbox-guard / -job-guard reject any deviation) --
             - { name: AF_EXECUTOR, value: "sandbox" }
             - { name: AF_SANDBOX_NAMESPACE, value: "agentforge-sandbox" }
-            # sandbox image @ agentforge main aeeb3737 — now carries pytest (system python) so the tester +
-            # implementer roles' zero-egress test_cmd (`python3 -m pytest`) runs hermetically. Bump
-            # e50dbab8 -> c509d447 (registry :latest / :aeeb3737).
-            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:67ff2448454608f516ef40d99f2aa50784358d6ff526802274fcc22aabf4fed3" }
+            # v3-CUTOVER PLACEHOLDER (unpullable). Real sandbox digest lands via the pin flow
+            # (`just pin-workloads sandbox=sha256:…`) in the same run as the p1-worker pin — the
+            # script also aligns the agentforge-sandbox egress-canary refs to the same digest.
+            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:REPLACE_ME_V3_CUTOVER" }
             - { name: AF_SANDBOX_SERVICE_ACCOUNT, value: "agentforge-sandbox" } # the tokenless sandbox SA
             - { name: AF_SANDBOX_ORG, value: "tenant-zero" }       # -> agentforge.io/org label + capability tenant
             # The capability `iss` claim — the issuer the broker's kid registry binds to
@@ -204,7 +205,9 @@ spec:
             # The EXISTING CP-rendered orchestrator credential Secret (creds_secret_name = af-creds-<ws>-<pool>;
             # tenant-map: af-tenant-tenant-zero-playground -> tenant-zero/playground/af-creds-playground-planner).
             # Its ExternalSecret dataFrom.extract's the WHOLE OpenBao orchestrator subtree, so it injects the
-            # forge PATs/HMAC/git-push token/litellm key PLUS the orchestrator-only AF_CAPABILITY_SIGNING_KEY
+            # v3 AF_BOT_TOKENS map (ONE JSON bot-username→PAT key, minted by agentforge-bootstrap — the
+            # retired per-bot AF_BOT_TOKEN_* keys are dead to v3 workers)/HMAC/litellm key PLUS the
+            # orchestrator-only AF_CAPABILITY_SIGNING_KEY
             # + AF_CAPABILITY_KID (the private signing key stays orchestrator-side — NEVER a sandbox Job).
             - secretRef:
                 name: af-creds-playground-planner

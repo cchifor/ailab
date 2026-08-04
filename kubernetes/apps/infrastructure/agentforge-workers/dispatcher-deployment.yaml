@@ -69,12 +69,17 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: dispatcher
-          # PLACEHOLDER digest — pin the real p1-worker @sha256 (see header) before enabling.
+          # v3-CUTOVER PLACEHOLDER digest (unpullable by design). The REAL v3 p1-worker digest lands
+          # on the cutover branch via the normal pin flow (`just pin-workloads p1-worker=sha256:…`).
+          # Operator procedure: docs/runbooks/agentforge-v3-cutover.md.
         # PIN FREEZE (2026-08-04): do NOT merge agentforge pin PRs until the v3 cutover PR
         # removes this marker. Post-9915aec worker images REJECT the currently-served v2 config
         # and REQUIRE AF_BOT_TOKENS (fleet outage 2026-08-04, dispatcher CrashLoop ~5.5h).
         # Cutover order lives in the program plan (agentforge plans/2026-08-03-user-workflows-program-plan.md).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:9966d3555c084d787b8b660f7acca3448defa06e2ef0280ff50a2f432fe789ec
+        # REMOVED BY THIS PR AT CUTOVER MERGE (feat/agentforge-v3-cutover): the freeze comes off in
+        # the same commit that replaces the placeholder below with the real v3 digest — the ONLY
+        # sanctioned removal path (docs/runbooks/agentforge-v3-cutover.md §6).
+          image: registry.chifor.me/agentforge/p1-worker@sha256:REPLACE_ME_V3_CUTOVER
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # dispatcher` (composes to: tini -- agentforge dispatcher). A bare `dispatcher` would crash-loop.
           args: ["agentforge", "dispatcher"]
@@ -90,7 +95,12 @@ spec:
             # deny world; NOT the public git.chifor.me (which would require world/FQDN egress).
             - { name: AF_GITEA_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000" }
           envFrom:
-            # The ONLY credential: a READ-ONLY forge PAT (AF_BOT_TOKEN_*) so GiteaClient can list_issues.
+            # The ONLY credential surface: the agentforge-dispatcher-forge Secret. Through the cutover
+            # soak it carries BOTH AF_BOT_TOKENS (v3 — the JSON bot-username→PAT map GiteaClient reads
+            # for list_issues) AND the legacy AF_BOT_TOKEN_PLANNER (rollback bridge; #226 projects both
+            # ON PURPOSE — the legacy mapping drops post-soak, see the runbook). A v3 image reads only
+            # the map and exits hard when it is empty/missing (2026-08-04 crashloop); a v2 image reads
+            # only the legacy var and ignores the map — either image starts off this one Secret.
             # ESO-synced from OpenBao (dispatcher-externalsecret.yaml). Carries NO capability/sandbox/broker
             # material by construction (a distinct operator KV path, disjoint from the tenant/broker roles).
             - secretRef:

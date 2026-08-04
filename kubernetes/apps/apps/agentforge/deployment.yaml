@@ -111,7 +111,16 @@ spec:
           # Both halves move together in #223 or not at all. The credential half is already staged:
           # af/operator/dispatcher/forge carries AF_BOT_TOKENS and the dispatcher Secret projects it
           # alongside the legacy key (#226). The TENANT subtree does not yet — that needs a mint.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:a615d29a671bcbb2921a7c96503f8cb34558ec624a47c6060b08a97fb7b66904
+          #
+          # REMOVED BY THIS PR AT CUTOVER MERGE (feat/agentforge-v3-cutover): the freeze block above
+          # comes off in the same commit that replaces the placeholder below with the real v3 digest —
+          # the ONLY sanctioned removal path (docs/runbooks/agentforge-v3-cutover.md §6).
+          # v3-CUTOVER PLACEHOLDER (unpullable). Real digest via `just pin-workloads
+          # agentforge-platform=sha256:…` on the cutover branch; the alembic head MOVES for v3
+          # (PR1's four definition tables), so run `scripts/af-db.sh migrate` from the branch
+          # checkout BEFORE merging — the OLD CP stays Ready under ahead_or_unknown, the NEW CP
+          # wedges NotReady against an un-migrated DB. docs/runbooks/agentforge-v3-cutover.md §6.
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:REPLACE_ME_V3_CUTOVER
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
@@ -146,7 +155,11 @@ spec:
             # -- server-owned worker image the CP renders into tenant Deployments. Provisioning REFUSES
             #    (503) unless this is a pinned digest (repo@sha256:<64hex>) — the p1-worker release CI
             #    fills it. Placeholder here so the CP can start; provisioning is gated until it's real. --
-            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:9966d3555c084d787b8b660f7acca3448defa06e2ef0280ff50a2f432fe789ec" }
+            # v3-CUTOVER PLACEHOLDER (unpullable) — same `just pin-workloads p1-worker=…` run as the
+            # worker/dispatcher/reaper pins. Post-merge, trigger the CP pool ROLLOUT so the
+            # CP-rendered platform-dev orchestrator re-renders onto this digest (renders are not
+            # re-committed by a CP restart or Flux reconcile alone).
+            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:REPLACE_ME_V3_CUTOVER" }
             # -- workers fetch their config from the CP over this in-cluster URL. The Service exposes
             #    :8080 (== container port, no DNAT port translation — see serviceaccount-service.yaml). --
             - { name: AFP_CONTROL_PLANE_INTERNAL_URL, value: "http://agentforge-platform.agentforge.svc:8080" }
@@ -228,8 +241,11 @@ spec:
             # never touched a SANDBOX_IMAGE line. If it does not track the `sandbox` repo,
             # this value will not follow new builds — check after the next sandbox release
             # rather than assuming the bot owns it.
+            # v3-CUTOVER PLACEHOLDER (unpullable) — same `just pin-workloads sandbox=…` run as the
+            # worker's AF_SANDBOX_IMAGE (the script rewrites every `sandbox` ref in one diff, so
+            # the hand-maintained-pin caveat above is moot for THIS bump).
             - name: AFP_SANDBOX_IMAGE
-              value: "registry.chifor.me/agentforge/sandbox@sha256:67ff2448454608f516ef40d99f2aa50784358d6ff526802274fcc22aabf4fed3"
+              value: "registry.chifor.me/agentforge/sandbox@sha256:REPLACE_ME_V3_CUTOVER"
             # Aud -> broker URL map the renderer embeds into tenant sandbox renders
             # (AF_SANDBOX_BROKER_URLS source; P2 provisioning refuses on an empty map).
             - name: AFP_SANDBOX_BROKER_URLS
