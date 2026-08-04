@@ -70,7 +70,11 @@ spec:
       containers:
         - name: dispatcher
           # PLACEHOLDER digest — pin the real p1-worker @sha256 (see header) before enabling.
-          image: registry.chifor.me/agentforge/p1-worker@sha256:a1a659080e39f324d35c3932c050563159a72c0644956d5bec52bfa4225aea8f
+        # PIN FREEZE (2026-08-04): do NOT merge agentforge pin PRs until the v3 cutover PR
+        # removes this marker. Post-9915aec worker images REJECT the currently-served v2 config
+        # and REQUIRE AF_BOT_TOKENS (fleet outage 2026-08-04, dispatcher CrashLoop ~5.5h).
+        # Cutover order lives in the program plan (agentforge plans/2026-08-03-user-workflows-program-plan.md).
+          image: registry.chifor.me/agentforge/p1-worker@sha256:9966d3555c084d787b8b660f7acca3448defa06e2ef0280ff50a2f432fe789ec
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # dispatcher` (composes to: tini -- agentforge dispatcher). A bare `dispatcher` would crash-loop.
           args: ["agentforge", "dispatcher"]
