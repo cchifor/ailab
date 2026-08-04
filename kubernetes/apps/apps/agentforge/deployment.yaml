@@ -97,8 +97,16 @@ spec:
           # orchestrators are still v2 images (af-orch-playground-planner,
           # af-orch-platform-dev-delivery — BOTH RUNNING, they are not dormant), and a v2 worker
           # rejects a v3 document through its own newer-than-supported check. So pinning a CP build
-          # >= bcbdd4b while the workers are v2 fails the fleet closed at config pull — the same
-          # class of outage as 2026-08-04, arriving from the opposite direction.
+          # >= bcbdd4b while the workers are v2 fails EVERY worker closed at its next config pull —
+          # not a partial-fleet edge case, because all deployed workers are v2.
+          #
+          # Precisely how bad, since the distinction decides how you recover. This fails GRACEFULLY:
+          # workers reject cleanly, keep serving from config-lastgood.json, and go degraded (readyz
+          # fails, no new claims, in-flight drains). No data loss and no corruption — the fix is a CP
+          # rollback. That is NOT the same mechanism as the 2026-08-04 hazard this marker originally
+          # described, which was a serving-correctness bug against legacy stored docs. Same SYMPTOM
+          # class — fleet-wide no-new-claims — reached from the opposite version-skew direction, and
+          # recoverable. Still an outage of new work; just do not go looking for a data incident.
           #
           # Both halves move together in #223 or not at all. The credential half is already staged:
           # af/operator/dispatcher/forge carries AF_BOT_TOKENS and the dispatcher Secret projects it
