@@ -129,7 +129,7 @@ spec:
         # removes this marker. Post-9915aec worker images REJECT the currently-served v2 config
         # and REQUIRE AF_BOT_TOKENS (fleet outage 2026-08-04, dispatcher CrashLoop ~5.5h).
         # Cutover order lives in the program plan (agentforge plans/2026-08-03-user-workflows-program-plan.md).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:49168dcaf9eb6be0f20b2f717eaaa7574f3650a655b2ae87bec82686e2eeaaba
+          image: registry.chifor.me/agentforge/p1-worker@sha256:9966d3555c084d787b8b660f7acca3448defa06e2ef0280ff50a2f432fe789ec
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
@@ -153,7 +153,7 @@ spec:
             # sandbox image @ agentforge main aeeb3737 — now carries pytest (system python) so the tester +
             # implementer roles' zero-egress test_cmd (`python3 -m pytest`) runs hermetically. Bump
             # e50dbab8 -> c509d447 (registry :latest / :aeeb3737).
-            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:41f76c061b951f8c6d1af76149d2b6693870a341f9bf445819d9772bb6654e73" }
+            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:67ff2448454608f516ef40d99f2aa50784358d6ff526802274fcc22aabf4fed3" }
             - { name: AF_SANDBOX_SERVICE_ACCOUNT, value: "agentforge-sandbox" } # the tokenless sandbox SA
             - { name: AF_SANDBOX_ORG, value: "tenant-zero" }       # -> agentforge.io/org label + capability tenant
             # The capability `iss` claim — the issuer the broker's kid registry binds to
