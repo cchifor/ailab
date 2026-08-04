@@ -79,6 +79,10 @@ spec:
           #   wedges the CP. That is what the ordering note exists to prevent.
           # - Overlays stay gated shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set in this file.
           #   (Verifiable by reading this file, which is why it belongs here.)
+          # PIN FREEZE (2026-08-04): do NOT merge agentforge-platform pin PRs until the v3
+          # cutover PR (ailab #223) removes this marker. Builds after PR #90 carry the vendored v3
+          # schema WITHOUT the PR2 serve rewrite - deploying this window breaks config serving for
+          # legacy stored docs (see agentforge-platform domain/config_schema.py header).
           image: registry.chifor.me/agentforge/agentforge-platform@sha256:a615d29a671bcbb2921a7c96503f8cb34558ec624a47c6060b08a97fb7b66904
           ports:
             - { name: http, containerPort: 8080 }
