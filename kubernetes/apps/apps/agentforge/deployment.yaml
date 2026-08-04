@@ -114,7 +114,7 @@ spec:
             # -- server-owned worker image the CP renders into tenant Deployments. Provisioning REFUSES
             #    (503) unless this is a pinned digest (repo@sha256:<64hex>) — the p1-worker release CI
             #    fills it. Placeholder here so the CP can start; provisioning is gated until it's real. --
-            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:4d37513c912bd456ab487875eb8f435e205d477ce41d6dbb9e1e4bdc2454de34" }
+            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:a1a659080e39f324d35c3932c050563159a72c0644956d5bec52bfa4225aea8f" }
             # -- workers fetch their config from the CP over this in-cluster URL. The Service exposes
             #    :8080 (== container port, no DNAT port translation — see serviceaccount-service.yaml). --
             - { name: AFP_CONTROL_PLANE_INTERNAL_URL, value: "http://agentforge-platform.agentforge.svc:8080" }
@@ -197,7 +197,7 @@ spec:
             # this value will not follow new builds — check after the next sandbox release
             # rather than assuming the bot owns it.
             - name: AFP_SANDBOX_IMAGE
-              value: "registry.chifor.me/agentforge/sandbox@sha256:825628fb93f010d1ad072be07671d96ec0d25ec6ede8a545f6303b8c57e6ac9e"
+              value: "registry.chifor.me/agentforge/sandbox@sha256:e14ec0b85bfd421dc611c43f026f90829939d485df8ee20694892b0fbbf7cef6"
             # Aud -> broker URL map the renderer embeds into tenant sandbox renders
             # (AF_SANDBOX_BROKER_URLS source; P2 provisioning refuses on an empty map).
             - name: AFP_SANDBOX_BROKER_URLS
