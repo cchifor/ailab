@@ -125,22 +125,11 @@ spec:
           # (#49). CORRECTION: the prior pin (14936a26) was a TAG-RACE mispick — that digest was the
           # dbf0a03 build (privilege_hardening only, NO clone-auth). The real :7dde01d / :latest is
           # b14dddbf (verified in-image: 7 _authed_git refs, checkout_branch takes a token).
-        # PIN FREEZE — STILL IN FORCE FOR THE TENANT PATH (2026-08-04, narrowed).
-        # The v3 cutover is done for the DISPATCHER: the control plane serves v3
-        # (agentforge-platform #92) and AF_BOT_TOKENS is wired from the OPERATOR path
-        # (dispatcher-externalsecret.yaml). None of that reaches this Deployment.
-        #
-        # This worker takes its credentials from af-creds-<ws>-<pool>, whose ExternalSecret
-        # dataFrom.extract's the TENANT orchestrator subtree (af/tenants/<org>/<ws>/orchestrator) —
-        # a DIFFERENT OpenBao path, which does NOT yet carry AF_BOT_TOKENS. A v3 image here would
-        # fail closed exactly as the dispatcher did, so this Deployment is not cutover-ready.
-        #
-        # TO LIFT: run `agentforge.bootstrap --write-openbao --tenant-org <org> --tenant-workspace <ws>`
-        # (it writes the canonical map into that subtree; extract then projects it automatically),
-        # confirm af-creds-<ws>-<pool> carries AF_BOT_TOKENS, then delete this marker.
-        # Harmless while dormant: no agentforge worker Deployment exists in-cluster today.
+        # PIN FREEZE (2026-08-04): do NOT merge agentforge pin PRs until the v3 cutover PR
+        # removes this marker. Post-9915aec worker images REJECT the currently-served v2 config
+        # and REQUIRE AF_BOT_TOKENS (fleet outage 2026-08-04, dispatcher CrashLoop ~5.5h).
         # Cutover order lives in the program plan (agentforge plans/2026-08-03-user-workflows-program-plan.md).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:49168dcaf9eb6be0f20b2f717eaaa7574f3650a655b2ae87bec82686e2eeaaba
+          image: registry.chifor.me/agentforge/p1-worker@sha256:9966d3555c084d787b8b660f7acca3448defa06e2ef0280ff50a2f432fe789ec
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
@@ -164,7 +153,7 @@ spec:
             # sandbox image @ agentforge main aeeb3737 — now carries pytest (system python) so the tester +
             # implementer roles' zero-egress test_cmd (`python3 -m pytest`) runs hermetically. Bump
             # e50dbab8 -> c509d447 (registry :latest / :aeeb3737).
-            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:41f76c061b951f8c6d1af76149d2b6693870a341f9bf445819d9772bb6654e73" }
+            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:67ff2448454608f516ef40d99f2aa50784358d6ff526802274fcc22aabf4fed3" }
             - { name: AF_SANDBOX_SERVICE_ACCOUNT, value: "agentforge-sandbox" } # the tokenless sandbox SA
             - { name: AF_SANDBOX_ORG, value: "tenant-zero" }       # -> agentforge.io/org label + capability tenant
             # The capability `iss` claim — the issuer the broker's kid registry binds to
