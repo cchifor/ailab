@@ -75,7 +75,7 @@ spec:
       containers:
         - name: reaper
           # PLACEHOLDER digest — pin the real p1-worker @sha256 (see header) before enabling.
-          image: registry.chifor.me/agentforge/p1-worker@sha256:9966d3555c084d787b8b660f7acca3448defa06e2ef0280ff50a2f432fe789ec
+          image: registry.chifor.me/agentforge/p1-worker@sha256:a0742f8f4862e0aef8e7bd681ab20448cae3a420c32805b0f3927a436b0774ff
           # ENTRYPOINT is ["tini","--"] and the console script is `agentforge`, so
           # the args must be the full argv `agentforge reaper` (not a bare `reaper`,
           # which has no executable → tini crash-loops). Composes to: tini -- agentforge reaper.
