@@ -49,6 +49,12 @@ spec:
       shared_buffers: 512MB
       max_wal_size: 4GB
       wal_compression: zstd
+      # NOT declared here: the `gitea` role runs with `synchronous_commit = off` (ALTER ROLE,
+      # 2026-08-05) — CNPG has no per-role GUCs, so this lives only in the DB. Rationale: the
+      # Actions-log path commits fsync-bound WAL over iSCSI and Gitea tolerates losing <1s of acked
+      # DB metadata on a crash (repo data lives on the gitea PVC, not here); scoped to the role so
+      # grafana/authelia/openwebui keep full durability. MUST be re-applied after any wipe or
+      # re-bootstrap; verify with `SELECT rolconfig FROM pg_roles WHERE rolname='gitea'`.
   affinity:
     enablePodAntiAffinity: true
     topologyKey: kubernetes.io/hostname
