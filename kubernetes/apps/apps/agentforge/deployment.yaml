@@ -79,48 +79,7 @@ spec:
           #   wedges the CP. That is what the ordering note exists to prevent.
           # - Overlays stay gated shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set in this file.
           #   (Verifiable by reading this file, which is why it belongs here.)
-          # PIN FREEZE (2026-08-04): do NOT merge agentforge-platform pin PRs until the v3
-          # cutover PR (ailab #223) removes this marker.
-          #
-          # THE ORIGINAL REASON HAS EXPIRED; THE FREEZE HAS NOT. Read this before concluding the
-          # marker is stale and deleting it.
-          #
-          # As first written, the hazard was the window AFTER PR #90 and BEFORE the PR2 serve
-          # rewrite: those builds carry the vendored v3 schema with no composer, and deploying one
-          # breaks config serving for legacy stored docs (agentforge-platform
-          # domain/config_schema.py header). That window is now CLOSED — PR2 merged as
-          # agentforge-platform bcbdd4b — and the digest pinned below (build 4d0a97e) is the last
-          # one inside it.
-          #
-          # What replaces it is stronger, not weaker. From bcbdd4b onward the serve path is v3
-          # ONLY: compose_into_doc emits schema_version 3 and there is no dual serving. The live
-          # orchestrators are still v2 images (af-orch-playground-planner,
-          # af-orch-platform-dev-delivery — BOTH RUNNING, they are not dormant), and a v2 worker
-          # rejects a v3 document through its own newer-than-supported check. So pinning a CP build
-          # >= bcbdd4b while the workers are v2 fails EVERY worker closed at its next config pull —
-          # not a partial-fleet edge case, because all deployed workers are v2.
-          #
-          # Precisely how bad, since the distinction decides how you recover. This fails GRACEFULLY:
-          # workers reject cleanly, keep serving from config-lastgood.json, and go degraded (readyz
-          # fails, no new claims, in-flight drains). No data loss and no corruption — the fix is a CP
-          # rollback. That is NOT the same mechanism as the 2026-08-04 hazard this marker originally
-          # described, which was a serving-correctness bug against legacy stored docs. Same SYMPTOM
-          # class — fleet-wide no-new-claims — reached from the opposite version-skew direction, and
-          # recoverable. Still an outage of new work; just do not go looking for a data incident.
-          #
-          # Both halves move together in #223 or not at all. The credential half is already staged:
-          # af/operator/dispatcher/forge carries AF_BOT_TOKENS and the dispatcher Secret projects it
-          # alongside the legacy key (#226). The TENANT subtree does not yet — that needs a mint.
-          #
-          # REMOVED BY THIS PR AT CUTOVER MERGE (feat/agentforge-v3-cutover): the freeze block above
-          # comes off in the same commit that replaces the placeholder below with the real v3 digest —
-          # the ONLY sanctioned removal path (docs/runbooks/agentforge-v3-cutover.md §6).
-          # v3-CUTOVER PLACEHOLDER (unpullable). Real digest via `just pin-workloads
-          # agentforge-platform=sha256:…` on the cutover branch; the alembic head MOVES for v3
-          # (PR1's four definition tables), so run `scripts/af-db.sh migrate` from the branch
-          # checkout BEFORE merging — the OLD CP stays Ready under ahead_or_unknown, the NEW CP
-          # wedges NotReady against an un-migrated DB. docs/runbooks/agentforge-v3-cutover.md §6.
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:REPLACE_ME_V3_CUTOVER
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:b1bb9642ed261b423dc74eb5b4812fb6d8e4bfeabab8cfc279f9b4d6bce66563
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
@@ -159,7 +118,7 @@ spec:
             # worker/dispatcher/reaper pins. Post-merge, trigger the CP pool ROLLOUT so the
             # CP-rendered platform-dev orchestrator re-renders onto this digest (renders are not
             # re-committed by a CP restart or Flux reconcile alone).
-            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:REPLACE_ME_V3_CUTOVER" }
+            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:a0742f8f4862e0aef8e7bd681ab20448cae3a420c32805b0f3927a436b0774ff" }
             # -- workers fetch their config from the CP over this in-cluster URL. The Service exposes
             #    :8080 (== container port, no DNAT port translation — see serviceaccount-service.yaml). --
             - { name: AFP_CONTROL_PLANE_INTERNAL_URL, value: "http://agentforge-platform.agentforge.svc:8080" }
@@ -245,7 +204,7 @@ spec:
             # worker's AF_SANDBOX_IMAGE (the script rewrites every `sandbox` ref in one diff, so
             # the hand-maintained-pin caveat above is moot for THIS bump).
             - name: AFP_SANDBOX_IMAGE
-              value: "registry.chifor.me/agentforge/sandbox@sha256:REPLACE_ME_V3_CUTOVER"
+              value: "registry.chifor.me/agentforge/sandbox@sha256:7e9590beda70a5fcaeaa3cbf47862d5b9fb1b5840e4b6d7bf90420ef9931f9fe"
             # Aud -> broker URL map the renderer embeds into tenant sandbox renders
             # (AF_SANDBOX_BROKER_URLS source; P2 provisioning refuses on an empty map).
             - name: AFP_SANDBOX_BROKER_URLS

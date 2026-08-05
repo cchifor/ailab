@@ -123,14 +123,7 @@ spec:
           # once the release CI has built it — never hand-edit a digest here, and never state WHICH
           # build is pinned in prose (resolve it: git show gitea/main:<this file> | grep image:).
           # Operator procedure: docs/runbooks/agentforge-v3-cutover.md.
-        # PIN FREEZE (2026-08-04): do NOT merge agentforge pin PRs until the v3 cutover PR
-        # removes this marker. Post-9915aec worker images REJECT the currently-served v2 config
-        # and REQUIRE AF_BOT_TOKENS (fleet outage 2026-08-04, dispatcher CrashLoop ~5.5h).
-        # Cutover order lives in the program plan (agentforge plans/2026-08-03-user-workflows-program-plan.md).
-        # REMOVED BY THIS PR AT CUTOVER MERGE (feat/agentforge-v3-cutover): the freeze comes off in
-        # the same commit that replaces the placeholder below with the real v3 digest — the ONLY
-        # sanctioned removal path (docs/runbooks/agentforge-v3-cutover.md §6).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:REPLACE_ME_V3_CUTOVER
+          image: registry.chifor.me/agentforge/p1-worker@sha256:a0742f8f4862e0aef8e7bd681ab20448cae3a420c32805b0f3927a436b0774ff
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
@@ -154,7 +147,7 @@ spec:
             # v3-CUTOVER PLACEHOLDER (unpullable). Real sandbox digest lands via the pin flow
             # (`just pin-workloads sandbox=sha256:…`) in the same run as the p1-worker pin — the
             # script also aligns the agentforge-sandbox egress-canary refs to the same digest.
-            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:REPLACE_ME_V3_CUTOVER" }
+            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:7e9590beda70a5fcaeaa3cbf47862d5b9fb1b5840e4b6d7bf90420ef9931f9fe" }
             - { name: AF_SANDBOX_SERVICE_ACCOUNT, value: "agentforge-sandbox" } # the tokenless sandbox SA
             - { name: AF_SANDBOX_ORG, value: "tenant-zero" }       # -> agentforge.io/org label + capability tenant
             # The capability `iss` claim — the issuer the broker's kid registry binds to
