@@ -105,7 +105,13 @@ spec:
             # The floor is defence in depth, NOT the compatibility gate: a worker handed a config
             # newer than it supports refuses it at its own `compatibility()` ceiling and stays on
             # last-good, which is fail-closed with or without this value.
-            - { name: AFP_MIN_WORKER_VERSION, value: "0.3.0" }
+            #
+            # PARKED AT 0.1.0. #234 raised this to "0.3.0" without the matching pin — the RAISED
+            # EARLY case above — so the CP rejected the running fleet again. AFP_WORKER_IMAGE below
+            # is still a0742f8f, built 2026-08-05T15:53Z, ~2h BEFORE agentforge 11a8388d bumped the
+            # package to 0.3.0 at 17:45Z; that image reports 0.1.0. Raise this only in the same
+            # commit that repins AFP_WORKER_IMAGE to an image built from 11a8388d or later.
+            - { name: AFP_MIN_WORKER_VERSION, value: "0.1.0" }
             # -- OIDC RP against Authelia (client block in auth/authelia-config.yaml) --
             - { name: AFP_OIDC_ISSUER, value: "https://sso.chifor.me" }
             - { name: AFP_OIDC_CLIENT_ID, value: "agentforge" }

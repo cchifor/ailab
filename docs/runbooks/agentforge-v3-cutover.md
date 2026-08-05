@@ -474,12 +474,16 @@ Order matters here too (the mirror image of the window):
    # verify the OLD image goes Ready (readyz green) against the restored DB FIRST, then:
    flux --context admin@ai resume kustomization apps
    ```
-4. Credentials: nothing to do — **no mint ran** (§4), so nothing was ever revoked: the legacy
-   `AF_BOT_TOKEN_*` keys still hold WORKING PATs (and `operator/dispatcher/forge` carries the
-   `AF_BOT_TOKEN_PLANNER` bridge patched to the current planner-bot PAT), while `AF_BOT_TOKENS`
-   is an unknown env var to v2 (ignored). Only if a §4 re-mint ever runs without its bridge
-   re-patch is the v2 fleet fail-closed on revoked PATs — then re-mint per-bot PATs and patch the
-   legacy keys by hand.
+4. Credentials: nothing to do **unless the post-soak cleanup has landed** — check
+   `dispatcher-externalsecret.yaml` FIRST. As of #234 (`a172e85`) it no longer maps
+   `AF_BOT_TOKEN_PLANNER`, so a reverted v2 dispatcher would start against a Secret missing the
+   only key it reads and exit. The vault key itself survives (`operator/dispatcher/forge` is
+   add-only), so **restore that mapping in the same change as the pin revert** — re-adding the
+   four-line `secretKey`/`remoteRef` block is sufficient, no re-mint needed.
+   Otherwise nothing to do: **no mint ran** (§4), so nothing was ever revoked — the legacy
+   `AF_BOT_TOKEN_*` keys still hold WORKING PATs, while `AF_BOT_TOKENS` is an unknown env var to
+   v2 (ignored). Only if a §4 re-mint ever runs without its bridge re-patch is the v2 fleet
+   fail-closed on revoked PATs — then re-mint per-bot PATs and patch the legacy keys by hand.
 5. `role_overlays` is untouched by any of this: its **drop migration ships separately** (CP PR2
    follow-up) and applies only after the cutover has soaked — which is exactly what keeps the
    backfill additive and this rollback a restore + revert rather than a reconstruction.
