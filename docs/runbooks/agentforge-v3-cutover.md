@@ -115,8 +115,17 @@ checklist below is ordered so that cannot happen.
 
 CNPG `infra-pg`, ns `databases`, db `agentforge_platform`. **Taken INSIDE the window, immediately
 after the step-2 drain/KEDA pause and before anything merges**, so the dump is *current*, not
-merely intact: with intake paused and mid-flight work drained there is no unbounded live delta
-between the backup and the cutover. (An earlier draft took this dump "any time before the
+merely intact. Precisely what step 2 establishes: **playground intake is paused** (its
+ScaledObject annotation) — but `af-orch-platform-dev-delivery` is CP-rendered, fixed-replica,
+and stays a live 1/1 workload through the window, so it can still drive CP writes after the
+dump. The delta is therefore *bounded by platform-dev's in-flight work*, not zero (small on a
+~10 MB DB, and Rollback states what a restore discards). To make the delta genuinely zero,
+take the OPTIONAL stronger quiesce before dumping: `flux suspend kustomization
+agentforge-tenant-platform-dev` then `kubectl -n agentforge scale deploy/af-orch-platform-dev-delivery
+--replicas=0` (suspend first — the Kustomization heals replicas on its 10m prune interval,
+same reasoning as the Rollback wrap). Scale back up and `flux resume` at the step-6 restart —
+which this pod needs ANYWAY to pick up `AF_BOT_TOKENS` from its Secret (envFrom is read at pod
+start), so the quiesce doubles as the required credential-pickup restart rather than adding one. (An earlier draft took this dump "any time before the
 window" — that proved the dump restorable but left everything written between dump and window
 unprotected.) **This dump is the only pre-v3 copy of the DB in a restorable form** — `infra-pg`
 has **no** CNPG `ScheduledBackup` and an empty `.spec.backup` (no WAL archiving, no PITR);
