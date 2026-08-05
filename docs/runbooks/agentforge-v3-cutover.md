@@ -33,8 +33,8 @@ KV key of the OpenBao doc becomes a Secret key, so **the KV key name IS the env 
 
 | Consumer | Manifest (ns) | Delivery | OpenBao path | Legacy v2 keys | v3 change |
 |---|---|---|---|---|---|
-| tenant-zero **playground** orchestrator (`af-orch-playground-planner`, `AF_CONFIG_SOURCE=gitea`) | `agentforge-workers/worker-deployment.yaml` + `worker-externalsecret.yaml` (`af-tenant-tenant-zero-playground`) | `envFrom` Secret `af-creds-playground-planner` ← ESO **extract** | `af/data/tenants/tenant-zero/playground/orchestrator` | `AF_BOT_TOKEN_{PLANNER,TESTER,IMPL,REVIEWER}` (+ HMAC, litellm, `AF_CAPABILITY_SIGNING_KEY`/`KID`) | vault doc gains one `AF_BOT_TOKENS` key (bootstrap mint, below — **doc still legacy-only today**); legacy keys become harmless-but-dead env vars (v3 never reads them). **LIVE workload** (`af-orch-playground-planner` 2/2) — needs a restart after the mint to project the new key (§4) |
-| tenant-zero **platform-dev** orchestrator (`af-orch-platform-dev-delivery`, CP-mode) | `agentforge-tenant-platform-dev/externalsecret.yaml` (+ CP-rendered Deployment in `cchifor/agentforge-tenants`) | `envFrom` Secret `af-creds-platform-dev-delivery` ← ESO **extract** | `af/data/tenants/tenant-zero/platform-dev/orchestrator` | same four + `AF_CONTROL_PLANE_TOKEN` | same as playground (**doc still legacy-only today**; **LIVE workload**, `af-orch-platform-dev-delivery` 1/1 — restart after the mint, §4); **plus** its seeds fragment must be refreshed (see the seeds trap below) |
+| tenant-zero **playground** orchestrator (`af-orch-playground-planner`, `AF_CONFIG_SOURCE=gitea`) | `agentforge-workers/worker-deployment.yaml` + `worker-externalsecret.yaml` (`af-tenant-tenant-zero-playground`) | `envFrom` Secret `af-creds-playground-planner` ← ESO **extract** | `af/data/tenants/tenant-zero/playground/orchestrator` | `AF_BOT_TOKEN_{PLANNER,TESTER,IMPL,REVIEWER}` (+ HMAC, litellm, `AF_CAPABILITY_SIGNING_KEY`/`KID`) | **DONE 2026-08-05 (out-of-band)**: the vault doc carries `AF_BOT_TOKENS` (KV **v2**) beside the intact legacy keys — §4 **verifies**, nothing to mint; legacy keys stay valid (no rotation ran) and become harmless-but-dead env vars to v3. **LIVE workload** (`af-orch-playground-planner` 2/2) — **no restart needed**: the ESO-synced Secret already carries the key, and the v3 pods project it when the pin rollout replaces them |
+| tenant-zero **platform-dev** orchestrator (`af-orch-platform-dev-delivery`, CP-mode) | `agentforge-tenant-platform-dev/externalsecret.yaml` (+ CP-rendered Deployment in `cchifor/agentforge-tenants`) | `envFrom` Secret `af-creds-platform-dev-delivery` ← ESO **extract** | `af/data/tenants/tenant-zero/platform-dev/orchestrator` | same four + `AF_CONTROL_PLANE_TOKEN` | same as playground — **DONE 2026-08-05 (out-of-band)**: doc carries `AF_BOT_TOKENS` (KV **v30**), §4 verifies (**LIVE workload**, `af-orch-platform-dev-delivery` 1/1 — **no restart needed**); its seeds fragment is already refreshed on main (**#230**) |
 | **dispatcher** (`agentforge-dispatcher`, scale oracle) | `agentforge-workers/dispatcher-deployment.yaml` + `dispatcher-externalsecret.yaml` (`agentforge`) | `envFrom` Secret `agentforge-dispatcher-forge` ← ESO **explicit `data` mapping** | `af/data/operator/dispatcher/forge` | `AF_BOT_TOKEN_PLANNER` (READ-ONLY issues:read PAT) | **DONE on main (#226)**: the ES projects **BOTH** `AF_BOT_TOKENS` **and** the legacy `AF_BOT_TOKEN_PLANNER` (deliberate — either image starts off the one Secret); the vault doc already carries the map (§4). The legacy **mapping** drops **post-soak**, not in this PR |
 | **reaper** (`agentforge-reaper`) | `agentforge-sandbox/reaper-deployment.yaml` (`agentforge`) | — | — | **none** — `reaper()` builds no forge client and no config source | env unchanged; only its `p1-worker` digest moves with the fleet |
 | **control plane** (`agentforge-platform`) | `apps/agentforge/deployment.yaml` (`agentforge`) | `secretKeyRef`s from SOPS Secrets (`agentforge-runtime`, `agentforge-db`, `agentforge-oauth`) + `envFrom agentforge-infra-bot` | — (SOPS, not OpenBao) | none of the `AF_BOT_TOKEN_*` family (CP bots are `AFP_*`) | image + `AFP_WORKER_IMAGE`/`AFP_SANDBOX_IMAGE` pins only |
@@ -44,18 +44,22 @@ Durability layer (NOT a delivery path): `kubernetes/apps/infrastructure/security
 `operator-seeds.sops.yaml` → `seeds.json`, applied by `_apply_operator_seeds` on **every** provision
 Job run, **merge-writes with seed keys winning over the live vault**. Current relevant fragments:
 `operator/dispatcher/forge` (**since #226**: `AF_BOT_TOKENS` — the canonical five-principal map —
-**plus** the legacy `AF_BOT_TOKEN_PLANNER` bridge) and `tenants/tenant-zero/platform-dev/orchestrator`
-(**still legacy-only**: four `AF_BOT_TOKEN_*` + `AF_CONTROL_PLANE_TOKEN`).
+**plus** the legacy `AF_BOT_TOKEN_PLANNER` bridge) and **both** tenant orchestrator paths
+(**since #230**: the platform-dev fragment gained `AF_BOT_TOKENS`, a playground fragment was
+added) — so a wipe + re-provision restores the map v3 actually reads.
 
-> **The seeds trap (why this PR does NOT pre-stage an `AF_BOT_TOKENS` placeholder in seeds.json):**
-> seed keys are authoritative over the vault. A placeholder `AF_BOT_TOKENS` committed now would be
-> merge-written **over** the real minted map on the next provision run and fail-close the fleet — the
-> same end state as the 2026-08-04 incident, delivered by our own durability machinery. The seeds
-> refresh therefore happens **at cutover, with the real values**, via `agentforge-bootstrap
-> --seeds-out` + SOPS re-encrypt (step 4). Conversely, NOT refreshing seeds is also an outage, just a
-> deferred one: today's platform-dev fragment holds only legacy keys, so a post-cutover OpenBao
-> wipe + re-provision would restore names v3 never reads and no `AF_BOT_TOKENS` → worker fail-closed.
-> The refresh is mandatory, not hygiene.
+> **The seeds trap (why this PR never pre-staged an `AF_BOT_TOKENS` placeholder in seeds.json):**
+> seed keys are authoritative over the vault — **KEY-level: for a key present in both, the seed
+> value WINS; DOCUMENT-level is what "add-only" names** (unmentioned keys survive). Both halves are
+> pinned in the #229 comment on `security/openbao/provision-job.yaml`. A placeholder
+> `AF_BOT_TOKENS` committed ahead of the real values would have been merge-written **over** the
+> minted map on the next provision run and fail-closed the fleet — the same end state as the
+> 2026-08-04 incident, delivered by our own durability machinery. The refresh therefore happened
+> **with the real values, out of band**: #226 (dispatcher) and #230 (both tenant paths) landed on
+> main, so the vault state now survives a wipe. The standing rule: the provision Job re-applies
+> seeds on every run (daily), so **any future rotation has a ~24 h deadline** to re-encrypt
+> `operator-seeds.sops.yaml` in the same change (`--seeds-out`; requires `--write-openbao`) — see
+> the re-mint subsection of §4. A vault-only rotation is silently reverted to REVOKED values.
 
 The ops-bot "provisioning surface" in this repo is exactly the above: there are **no per-bot ESO
 entries** to add (delivery is the single `AF_BOT_TOKENS` key), no per-bot k8s Secrets, and the Gitea
@@ -101,151 +105,173 @@ checklist below is ordered so that cannot happen.
    kubectl --context admin@ai -n af-tenant-tenant-zero-playground annotate scaledobject \
      af-orch-playground-planner autoscaling.keda.sh/paused-replicas="0" --overwrite
    ```
-   (Remove the annotation post-verify.)
-3. **CP DB backup** (CNPG `infra-pg`, ns `databases`, db `agentforge_platform`). **This dump is the
-   only pre-cutover copy of the DB in a restorable form** — `infra-pg` has **no** CNPG
-   `ScheduledBackup` and an empty `.spec.backup` (no WAL archiving, no PITR); Velero's nightly CSI
-   snapshot data movement covers the instance PVC crash-consistently, which is a rebuild path, not a
-   point-in-time DB restore (standing gap — flagged as an out-of-scope follow-up below). So the dump
-   step is deliberately paranoid: dump **in-pod** (custom format), verify **in-pod**, copy off the
-   pod, then copy **off-cluster to the estate's durable backup target** — the versitygw S3 store on
-   the QNAP (ADR 0010 copy #2, bucket `velero`), from which the 04:00 `backup-offsite` rclone leg
-   mirrors it to the encrypted Drive remote (copy #3) automatically on the next run.
-
-   Resolve the primary fresh — never assume `infra-pg-1`. Exec-redirect only, in the OUT direction
-   (NEVER `kubectl cp`, and never pipe INTO an exec — MSYS mangling/stdin-reads have produced 0-byte
-   "backups" before):
-   ```bash
-   STAMP=$(date +%Y%m%d-%H%M%S); DUMP="agentforge_platform.pre-v3.${STAMP}.dump"
-   PRIMARY=$(kubectl --context admin@ai -n databases get cluster infra-pg \
-     -o jsonpath='{.status.currentPrimary}')
-   # 1) dump INSIDE the pod, custom format (-Fc: compressed + pg_restore-verifiable). The instance
-   #    PVC has gigabytes free vs a ~10 MB DB (the df line proves it before writing); the in-pod
-   #    copy is KEPT until post-soak — it is the no-stdin rollback path.
-   kubectl --context admin@ai -n databases exec "$PRIMARY" -c postgres -- sh -c \
-     "df -h /var/lib/postgresql/data | tail -1 \
-      && pg_dump -U postgres -Fc -d agentforge_platform -f /var/lib/postgresql/data/$DUMP \
-      && pg_restore --list /var/lib/postgresql/data/$DUMP >/dev/null \
-      && echo TOC-OK && ls -l /var/lib/postgresql/data/$DUMP"
-   # 2) copy OFF the pod (exec-redirect OUT — the safe direction on MSYS):
-   kubectl --context admin@ai -n databases exec "$PRIMARY" -c postgres -- \
-     cat "/var/lib/postgresql/data/$DUMP" > "$DUMP"
-   ls -l "$DUMP"   # byte size MUST equal the in-pod ls -l size from step 1
-   # 3) copy OFF-CLUSTER to versitygw (bucket-owner key from velero/secret.sops.yaml; -k matches the
-   #    BSL's insecureSkipTLSVerify — self-signed cert, and MSYS curl is Schannel so --cacert PEM
-   #    fails exit 60). curl >= 7.75 signs S3 requests natively:
-   eval "$(SOPS_AGE_KEY_FILE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out/age.agekey" \
-     sops -d --extract '["stringData"]["cloud"]' \
-       kubernetes/apps/infrastructure/storage/velero/secret.sops.yaml \
-     | awk -F' *= *' '/aws_access_key_id/{print "AK="$2} /aws_secret_access_key/{print "SK="$2}')"
-   curl -k --fail --aws-sigv4 "aws:amz:us-east-1:s3" --user "$AK:$SK" \
-     -T "$DUMP" "https://192.168.1.225:7070/velero/manual-dumps/$DUMP"
-   # 4) verify the durable copy landed at full size:
-   curl -k --fail -sI --aws-sigv4 "aws:amz:us-east-1:s3" --user "$AK:$SK" \
-     "https://192.168.1.225:7070/velero/manual-dumps/$DUMP" | grep -i content-length
-   ```
-   **Pre-flight gate — do NOT enter the window until all three agree:** `pg_restore --list`
-   succeeded (`TOC-OK` — the TOC listing is the integrity check; a truncated/empty custom-format
-   dump fails it), the workstation file size equals the in-pod size, and the versitygw
-   `Content-Length` equals both. Three copies then exist (in-pod on the instance PVC, workstation,
-   QNAP S3 → Drive overnight). Keep all of them until the soak (and the later `role_overlays` drop
-   migration) completes.
-
-   > **Standing gap (out of scope here, do not lose it):** `infra-pg` has no scheduled logical
-   > backup at all — this runbook's manual dump is a one-off. Follow-up: give `infra-pg` a real
-   > mechanism (CNPG `barmanObjectStore` + `ScheduledBackup` to versitygw, or a pg_dump CronJob into
-   > the same bucket).
+   (Remove the annotation post-verify.) The pause is the **drain point**: from here the CP takes
+   no new intake, which is what makes the window's first act — the DB dump, step 3 — a backup of
+   the exact state a rollback would want back.
 
 ## The window — ordered steps
 
-### 4. Mint credentials (before any manifest merges)
+### 3. CP DB backup — first act of the window (after the drain, before ANY merge)
 
-**Scope check first — TWO tenant orchestrators are LIVE, and both are covered by this step.** The
-`af-orch-*` names are easy to miss when scanning for "worker": `af-orch-playground-planner` (2/2, ns
-`af-tenant-tenant-zero-playground`) and `af-orch-platform-dev-delivery` (1/1, ns
-`af-tenant-tenant-zero-platform-dev`). Their OpenBao docs
-(`tenants/tenant-zero/{playground,platform-dev}/orchestrator`) **still carry ONLY the legacy
-`AF_BOT_TOKEN_*` vars today** — the tenant mint below writes the five-principal `AF_BOT_TOKENS` map
-(incl. `ops-bot`) into **both** workspaces. And because `envFrom` is read at pod start, the running
-pods do NOT pick the new key up on their own: each orchestrator **needs a restart** after its mint +
-ESO sync (the restart sub-step below). Sequencing caveat (same as the operator-doc caveat below):
-**every mint ROTATES**, so run each workspace's mint **immediately before** its restart — a long gap
-leaves the live v2 pods holding revoked PATs.
+CNPG `infra-pg`, ns `databases`, db `agentforge_platform`. **Taken INSIDE the window, immediately
+after the step-2 drain/KEDA pause and before anything merges**, so the dump is *current*, not
+merely intact: with intake paused and mid-flight work drained there is no unbounded live delta
+between the backup and the cutover. (An earlier draft took this dump "any time before the
+window" — that proved the dump restorable but left everything written between dump and window
+unprotected.) **This dump is the only pre-v3 copy of the DB in a restorable form** — `infra-pg`
+has **no** CNPG `ScheduledBackup` and an empty `.spec.backup` (no WAL archiving, no PITR);
+Velero's nightly CSI snapshot data movement covers the instance PVC crash-consistently, which is
+a rebuild path, not a point-in-time DB restore (standing gap — flagged as an out-of-scope
+follow-up below). So the dump step is deliberately paranoid: dump **in-pod** (custom format),
+verify **in-pod**, copy off the pod, then copy **off-cluster to the estate's durable backup
+target** — the versitygw S3 store on the QNAP (ADR 0010 copy #2, bucket `velero`), from which the
+04:00 `backup-offsite` rclone leg mirrors it to the encrypted Drive remote (copy #3)
+automatically on the next run.
 
-Run `agentforge-bootstrap` (worker repo ≥ 9da00b3, full contract in its
-`docs/runbooks/orchestrator-credentials.md` — exit codes, rotation semantics, CAS behavior) once per
-tenant workspace. It creates/updates the five bot users **including `ops-bot`**, mints the five PATs
-with per-principal scopes, validates every value, and writes them add-only as ONE `AF_BOT_TOKENS`
-key into `af/data/tenants/<org>/<ws>/orchestrator`, preserving `AF_CAPABILITY_SIGNING_KEY`/`KID`
-byte-for-byte:
+Resolve the primary fresh — never assume `infra-pg-1`. Exec-redirect only, in the OUT direction
+(NEVER `kubectl cp`, and never pipe INTO an exec — MSYS mangling/stdin-reads have produced 0-byte
+"backups" before):
+```bash
+STAMP=$(date +%Y%m%d-%H%M%S); DUMP="agentforge_platform.pre-v3.${STAMP}.dump"
+PRIMARY=$(kubectl --context admin@ai -n databases get cluster infra-pg \
+  -o jsonpath='{.status.currentPrimary}')
+# 1) dump INSIDE the pod, custom format (-Fc: compressed + pg_restore-verifiable). The instance
+#    PVC has gigabytes free vs a ~10 MB DB (the df line proves it before writing); the in-pod
+#    copy is KEPT until post-soak — it is the no-stdin rollback path.
+kubectl --context admin@ai -n databases exec "$PRIMARY" -c postgres -- sh -c \
+  "df -h /var/lib/postgresql/data | tail -1 \
+   && pg_dump -U postgres -Fc -d agentforge_platform -f /var/lib/postgresql/data/$DUMP \
+   && pg_restore --list /var/lib/postgresql/data/$DUMP >/dev/null \
+   && echo TOC-OK && ls -l /var/lib/postgresql/data/$DUMP"
+# 2) copy OFF the pod (exec-redirect OUT — the safe direction on MSYS):
+kubectl --context admin@ai -n databases exec "$PRIMARY" -c postgres -- \
+  cat "/var/lib/postgresql/data/$DUMP" > "$DUMP"
+ls -l "$DUMP"   # byte size MUST equal the in-pod ls -l size from step 1
+# 3) copy OFF-CLUSTER to versitygw (bucket-owner key from velero/secret.sops.yaml; -k matches the
+#    BSL's insecureSkipTLSVerify — self-signed cert, and MSYS curl is Schannel so --cacert PEM
+#    fails exit 60). curl >= 7.75 signs S3 requests natively:
+eval "$(SOPS_AGE_KEY_FILE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out/age.agekey" \
+  sops -d --extract '["stringData"]["cloud"]' \
+    kubernetes/apps/infrastructure/storage/velero/secret.sops.yaml \
+  | awk -F' *= *' '/aws_access_key_id/{print "AK="$2} /aws_secret_access_key/{print "SK="$2}')"
+curl -k --fail --aws-sigv4 "aws:amz:us-east-1:s3" --user "$AK:$SK" \
+  -T "$DUMP" "https://192.168.1.225:7070/velero/manual-dumps/$DUMP"
+# 4) verify the durable copy landed at full size:
+curl -k --fail -sI --aws-sigv4 "aws:amz:us-east-1:s3" --user "$AK:$SK" \
+  "https://192.168.1.225:7070/velero/manual-dumps/$DUMP" | grep -i content-length
+```
+**Gate — do NOT proceed to step 4 until all three agree:** `pg_restore --list`
+succeeded (`TOC-OK` — the TOC listing is the integrity check; a truncated/empty custom-format
+dump fails it), the workstation file size equals the in-pod size, and the versitygw
+`Content-Length` equals both. Three copies then exist (in-pod on the instance PVC, workstation,
+QNAP S3 → Drive overnight). Keep all of them until the soak (and the later `role_overlays` drop
+migration) completes.
+
+> **Standing gap (out of scope here, do not lose it):** `infra-pg` has no scheduled logical
+> backup at all — this runbook's manual dump is a one-off. Follow-up: give `infra-pg` a real
+> mechanism (CNPG `barmanObjectStore` + `ScheduledBackup` to versitygw, or a pg_dump CronJob into
+> the same bucket).
+
+### 4. Verify credentials (the mint is DONE — out of band, 2026-08-05; nothing to mint here)
+
+**All three OpenBao docs already carry the canonical five-principal `AF_BOT_TOKENS` map (incl.
+`ops-bot`), delivered out of band on 2026-08-05 and verified end to end** — both tenant
+ExternalSecrets `Ready=True`, every pre-existing key preserved (`AF_CAPABILITY_SIGNING_KEY`/`KID`,
+all four legacy `AF_BOT_TOKEN_*`, platform-dev's `AF_CONTROL_PLANE_TOKEN`). Critically, **no mint
+was run**: bot PATs are per-**principal**, not per-workspace, so the already-valid map was copied
+verbatim to the tenant paths — **zero rotation**. The legacy keys the two LIVE v2 orchestrators
+(`af-orch-playground-planner` 2/2, `af-orch-platform-dev-delivery` 1/1) read were never revoked
+and still work, so the old mint→force-sync→restart choreography is GONE from this window: no
+restarts needed (the v3 pods project `AF_BOT_TOKENS` from the already-synced Secrets when the pin
+rollout replaces them). This step is **verify-only**:
+
+| OpenBao path (mount `af`) | expected state |
+|---|---|
+| `operator/dispatcher/forge` | `AF_BOT_TOKENS` (KV **v29**) **plus** `AF_BOT_TOKEN_PLANNER` patched to the *current* planner-bot PAT (the rollback bridge) |
+| `tenants/tenant-zero/playground/orchestrator` | `AF_BOT_TOKENS` (KV **v2**), legacy `AF_BOT_TOKEN_*` intact |
+| `tenants/tenant-zero/platform-dev/orchestrator` | `AF_BOT_TOKENS` (KV **v30**), legacy keys + `AF_CONTROL_PLANE_TOKEN` intact |
+
+(The KV versions are floors, not exact-match gates — any later legitimate patch bumps them; the
+gate is the KEY SET and the map's coverage. Seeds durability for all three paths: #226 + #230.)
+
+**Verify the vault docs** — read each path in-pod (loopback; `openbao.ailab.chifor.me` does NOT
+resolve and OpenBao deliberately has no ingress, so a workstation `--openbao-addr`/`BAO_ADDR` is
+never the answer), token on stdin, printing key NAMES only, never values. The token comes from
+Secret **`openbao-operator-provisioner-token`** (ns `openbao`, key `token`):
 
 ```bash
-# playground, then platform-dev (append --cp-bearer-file only if rotating the CP bearer)
-agentforge-bootstrap \
-  --url https://git.chifor.me --admin forge-admin --password-file <0600-file> \
-  --org cchifor --repo agentforge-playground \
-  --write-openbao \
-  --tenant-org tenant-zero --tenant-workspace playground \
-  --openbao-addr https://openbao.ailab.chifor.me \
-  --openbao-token-file <openbao-operator-provisioner-token, from Secret \
-    openbao-operator-provisioner-token in ns openbao> \
-  --seeds-out /path/to/seeds-fragment.json     # MANDATORY choice on every run — see Rotation
+umask 077; TOK=<out-of-repo scratch file>
+kubectl --context admin@ai -n openbao get secret openbao-operator-provisioner-token \
+  -o jsonpath='{.data.token}' | base64 -d > "$TOK"
+for P in operator/dispatcher/forge \
+         tenants/tenant-zero/playground/orchestrator \
+         tenants/tenant-zero/platform-dev/orchestrator; do
+  kubectl --context admin@ai -n openbao exec -i openbao-0 -- sh -c \
+    "read T; BAO_TOKEN=\$T BAO_ADDR=https://127.0.0.1:8200 BAO_SKIP_VERIFY=true \
+     bao kv get -format=json -mount=af $P" < "$TOK" \
+  | python -c "import sys,json; d=json.load(sys.stdin)['data']['data']; \
+m=json.loads(d['AF_BOT_TOKENS']); print(sorted(d), sorted(m)); \
+assert set(m) == {'planner-bot','tester-bot','impl-bot','reviewer-bot','ops-bot'}, sorted(m)"
+done
 ```
 
-- **Every run rotates** (old PATs are revoked on the forge). Re-run with the same args until exit 0.
-- The seeds preflight **refuses to carry the retired `AF_BOT_TOKEN_*` names forward** — that is the
-  designed forcing function for the platform-dev fragment refresh.
-- **Rollback bridge (do not skip):** the mint revoked the PATs the legacy keys point at. So that a
-  pin revert to v2 images stays a working rollback, patch the NEW PAT values under the LEGACY key
-  names too (harmless-but-dead to v3; the bootstrap tool itself refuses retired names, so do it with
-  the operator-provisioner token — stage the payload as a file in the pod, MSYS stdin dies silently):
-  `bao kv patch -mount=af tenants/tenant-zero/<ws>/orchestrator AF_BOT_TOKEN_PLANNER=<planner-bot PAT>
-  AF_BOT_TOKEN_TESTER=<tester-bot> AF_BOT_TOKEN_IMPL=<impl-bot> AF_BOT_TOKEN_REVIEWER=<reviewer-bot>`.
-  Delete these keys post-soak.
-- **Dispatcher doc — DONE (2026-08-04), verify rather than redo:** `af/operator/dispatcher/forge`
-  is at KV **version 29** carrying the **canonical `AF_BOT_TOKENS` map over all five principals
-  (incl. `ops-bot`)** plus `AF_BOT_TOKEN_PLANNER` as the rollback bridge, and
-  `operator-seeds.sops.yaml` on main (#226) carries the **same** map, so a provision-Job run
-  preserves it. Nothing to mint here at cutover — just confirm the doc still holds both keys.
-  **Caveat that makes "DONE" conditional:** `mint_bot_tokens` **ROTATES on every run** — any further
-  `agentforge-bootstrap` invocation (including the tenant mints above) supersedes these values: the
-  five PATs in the v29 map are revoked and re-minted, so after the tenant mints, re-patch
-  `operator/dispatcher/forge` with the fresh map (and re-encrypt the seeds fragment to match) or the
-  dispatcher doc + seeds hold dead tokens. The same rotation is why a tenant mint invalidates what
-  the LIVE tenant workers hold in env — sequence each tenant mint immediately before its restart.
-- **Seeds re-encrypt:** merge the tenant `--seeds-out` fragments into `operator-seeds.sops.yaml`
-  and commit ON THIS PR BRANCH (the dispatcher fragment already carries `AF_BOT_TOKENS` since #226 —
-  it only needs a refresh here if the tenant mints rotated the map, per the caveat above).
-  Decrypt→edit→re-encrypt with
-  `SOPS_AGE_KEY_FILE` pointing at `kubernetes/infra/_out/age.agekey` (in a worktree resolve the main
-  checkout: `"$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out/age.agekey"`).
-  **The tracked file must never hold plaintext** — verify ciphertext with `git diff` before staging,
-  and `sops -d` round-trip after. Remove the legacy `AF_BOT_TOKEN_*` keys from the seeds fragments
-  (the vault keeps its bridge copies; seeds must describe the v3 end state).
-- Force-sync the ESO objects rather than waiting the 1 h refresh:
-  ```bash
-  kubectl --context admin@ai -n agentforge annotate externalsecret agentforge-dispatcher-forge \
-    force-sync=$(date +%s) --overwrite
-  kubectl --context admin@ai -n af-tenant-tenant-zero-playground annotate externalsecret \
-    af-creds-playground-planner force-sync=$(date +%s) --overwrite
-  kubectl --context admin@ai -n af-tenant-tenant-zero-platform-dev annotate externalsecret \
-    af-creds-platform-dev-delivery force-sync=$(date +%s) --overwrite
-  ```
-  Verify each target Secret now carries an `AF_BOT_TOKENS` key (key NAMES only — never print values):
-  `kubectl … get secret <name> -o jsonpath='{.data}' | python -c "import sys,json;print(sorted(json.load(sys.stdin)))"`.
-- **Restart the LIVE tenant orchestrators** so the running pods project the refreshed Secret
-  (`envFrom` is read at pod start — without this the v2 pods keep the pre-mint, now-REVOKED PATs in
-  env). Immediately after each workspace's mint + force-sync:
-  ```bash
-  kubectl --context admin@ai -n af-tenant-tenant-zero-playground rollout restart \
-    deploy/af-orch-playground-planner    # no-op while KEDA holds paused-replicas=0 — still run it
-  kubectl --context admin@ai -n af-tenant-tenant-zero-platform-dev rollout restart \
-    deploy/af-orch-platform-dev-delivery
-  ```
-  The dispatcher is the same story one level up: a tenant mint rotates the PATs behind the operator
-  doc's map/bridge values, so after re-patching `operator/dispatcher/forge` (caveat above) either
-  restart `deploy/agentforge-dispatcher` or accept a degraded scale oracle until the pin rollout
-  replaces the pod minutes later in the same window.
+Gate: on **all three** paths `AF_BOT_TOKENS` parses as JSON and covers all five principals'
+bot users **including `ops-bot`** (the map is a bot-username→PAT object — worker
+`infra/settings.py::bot_tokens`); `operator/dispatcher/forge` additionally still lists the
+`AF_BOT_TOKEN_PLANNER` bridge key. (MSYS caveat: stdin into `kubectl exec` has died silently
+under MSYS before — the `< file` redirect above is the form proven working on 2026-08-05; if
+`read` comes back empty, run from WSL/Linux or stage the token via `exec -i -- sh -c 'cat >/tmp/t'`.)
+
+**Verify the delivered Secrets** — both tenant `af-creds-*` Secrets carry `AF_BOT_TOKENS`, the
+dispatcher Secret carries BOTH keys (key names only):
+
+```bash
+kubectl --context admin@ai -n af-tenant-tenant-zero-playground get secret \
+  af-creds-playground-planner -o jsonpath='{.data}' \
+  | python -c "import sys,json;ks=sorted(json.load(sys.stdin));print(ks);assert 'AF_BOT_TOKENS' in ks"
+kubectl --context admin@ai -n af-tenant-tenant-zero-platform-dev get secret \
+  af-creds-platform-dev-delivery -o jsonpath='{.data}' \
+  | python -c "import sys,json;ks=sorted(json.load(sys.stdin));print(ks);assert 'AF_BOT_TOKENS' in ks"
+kubectl --context admin@ai -n agentforge get secret agentforge-dispatcher-forge \
+  -o jsonpath='{.data}' \
+  | python -c "import sys,json;ks=sorted(json.load(sys.stdin));print(ks);\
+assert {'AF_BOT_TOKENS','AF_BOT_TOKEN_PLANNER'} <= set(ks)"
+```
+
+Do not proceed to step 5 until all six checks are green.
+
+#### Re-mint procedure (if ever needed — NOT part of the window)
+
+If a credential is ever compromised/expired and a real re-mint is unavoidable, do NOT reach for a
+workstation `--openbao-addr` (no ingress exists). The proven pattern is exec-in-pod with loopback
+and the token **and** payload on stdin as one token-then-payload file — never argv (argv is
+visible estate-wide via `ps`/audit logs; this is the same reasoning `--password-file` and
+`--openbao-token-file` already encode):
+
+```bash
+kubectl --context admin@ai -n openbao exec -i openbao-0 -- sh -c \
+  'read T; BAO_TOKEN=$T BAO_ADDR=https://127.0.0.1:8200 BAO_SKIP_VERIFY=true \
+   bao kv patch -mount=af <path> @/dev/stdin' < <file: line 1 = token, then the JSON payload>
+```
+
+Two pins:
+
+- the token is **`openbao-operator-provisioner-token`** — NOT `openbao-provisioner-token`, which
+  **403s on operator paths by design**;
+- token + payload arrive on **stdin, never argv**.
+
+And the **seeds contract (mandatory, same change)**: any re-mint MUST re-encrypt
+`operator-seeds.sops.yaml` with the new values in the same change — `agentforge-bootstrap
+--seeds-out` emits the fragment (it requires `--write-openbao`) — because **seed keys WIN over
+the live vault on every provision run** (KEY-level precedence; DOCUMENT-level is what "add-only"
+names — the #229 comment on `security/openbao/provision-job.yaml` has both halves). The provision
+Job re-applies seeds daily, so a vault-only rotation is silently reverted to REVOKED values
+within ~24 h — the durability machinery delivering the outage itself. Remember also that
+`agentforge-bootstrap` ROTATES on every run and writes ONLY `AF_BOT_TOKENS` (never the legacy
+bridge keys): after any mint, copy the fresh map to all three paths, re-patch the legacy
+`AF_BOT_TOKEN_*` bridge keys with the matching new per-bot PATs (keeps the v2 pin-revert path
+alive), re-encrypt seeds, and restart the live consumers immediately (`envFrom` is read at pod
+start — a gap leaves live pods holding revoked PATs).
 
 ### 5. Config repo to v3 (gitea-source consumers)
 
@@ -285,11 +311,39 @@ labels worn in any of the four repos that still define them (playground, ailab, 
 primes-lab; the other five org repos define neither vocabulary). 5b is expected to be a ~30 s
 `--apply`-for-the-record per repo; only `--apply`'s `verified: no legacy lifecycle label remains`
 line + exit 0 is the gate (dry-run exit 0 proves nothing — it exits 0 even with hundreds of
-pending relabels).** Auth: `AF_GITEA_URL` + `AF_GITEA_TOKEN` (the script's own env; the
-~/.git-credentials chifor PAT works for the current zero-write state). Two traps: (1) a STALE
-`oauth2@git.chifor.me` entry in GCM causes a forge-wide ~5-7 min auth lockout if any tooling
-retries it — purge it before the window; (2) optionally delete the unworn `state:` label
-DEFINITIONS afterwards so the retired vocabulary cannot be hand-reattached.
+pending relabels).** The census is point-in-time, though — any hand-applied `state:` label between
+rehearsal and window puts the drift back, which is why the definition deletion below is part of
+5b proper, not optional cleanup.
+
+**Auth — `--apply` is a WRITE and requires `write:issue` on every managed repo** (via
+`AF_GITEA_URL` + `AF_GITEA_TOKEN`, the script's own env). Do not define the credential by the
+zero-write census: if the estate has drifted by window time, the gate fails AND an under-scoped
+token fails with it, mid-run. The `~/.git-credentials` chifor PAT carries the scope today; Gitea
+PAT scopes are immutable, so the fallback is a fresh scoped token minted in-pod
+(`write:issue` ⊇ read:issue; store it out-of-repo, never in argv/echo):
+```bash
+kubectl --context admin@ai -n gitea exec deploy/gitea -- \
+  gitea admin user generate-access-token --raw -u chifor -t relabel-<stamp> --scopes write:issue
+```
+
+**Then convert the census into an invariant — delete the five `state: N-*` label DEFINITIONS** in
+the four repos that still define them (`agentforge-playground`, `ailab`, `platform`,
+`primes-lab`), immediately AFTER each repo's `--apply` verification: a label nobody can select is
+a label nobody can re-attach. (After, never instead — deleting a definition silently STRIPS it
+from any wearer without migrating it to `stage:`, so on a drifted estate deletion-first loses
+lifecycle state that `--apply` would have translated.) Label ids are per-repo int64s — list, then
+delete:
+```bash
+# per R in agentforge-playground ailab platform primes-lab:
+curl -sf -u "chifor:$PAT" "https://git.chifor.me/api/v1/repos/cchifor/$R/labels?limit=50" \
+  | python -c "import sys,json;[print(l['id'],l['name']) for l in json.load(sys.stdin) \
+if l['name'].startswith('state: ')]"
+curl -sf -X DELETE -u "chifor:$PAT" "https://git.chifor.me/api/v1/repos/cchifor/$R/labels/<id>"
+# re-list: zero 'state: ' definitions may remain in any of the four repos
+```
+
+Remaining trap: a STALE `oauth2@git.chifor.me` entry in GCM causes a forge-wide ~5-7 min auth
+lockout if any tooling retries it — purge it before the window.
 
 ### 6. Land the real pins on this branch, drop the freeze, merge
 
@@ -301,14 +355,17 @@ DEFINITIONS afterwards so the retired vocabulary cannot be hand-reattached.
    block) — explicit checklist item; this PR is the only sanctioned removal path. Also drop this
    PR's "removed by this PR at cutover merge" annotation lines with them.
 3. Re-validate: `kubectl kustomize` over `agentforge-workers/`, `agentforge-sandbox/`,
-   `apps/agentforge/`; `sops -d` round-trip on the updated seeds file.
+   `apps/agentforge/`. (No seeds change ships on this branch — the #226/#230 refresh already
+   landed on main; only a §4 re-mint would ever put a seeds commit here, and then `sops -d`
+   round-trip it.)
 4. **Migrate the CP DB ahead of the rollout** (the alembic head moves — PR1's four tables). From
    THIS branch checkout: `AF_KUBE_CONTEXT=admin@ai bash scripts/af-db.sh migrate` (db-migrate.yaml
    is excluded from kustomization, so it applies from the checkout, not Flux). The OLD CP stays
    Ready under an ahead-of-expected head (`ahead_or_unknown`) — verified behavior; the NEW CP would
    wedge NotReady against an un-migrated DB, which is why migrate precedes merge.
-5. Merge (squash) on Gitea → Flux applies: new CP + worker/dispatcher/reaper images and the seeds
-   Secret (the dispatcher ES dual mapping is already live from #226 — nothing to apply there).
+5. Merge (squash) on Gitea → Flux applies: new CP + worker/dispatcher/reaper images (the
+   dispatcher ES dual mapping and the seeds refresh are already live from #226/#230 — nothing to
+   apply there).
 
 ### 7. Post-apply
 
@@ -358,25 +415,52 @@ Order matters here too (the mirror image of the window):
 2. **Revert the config repo commit** (`agentforge.json` back to v2) — v2 images reject a v3 config
    (newer-than-supported) and would otherwise run indefinitely on lastgood.
 3. **Restore the CP DB** — required, not optional: the migrated head makes the OLD CP image's
-   readyz fail on skew. The pre-cutover dump was deliberately LEFT IN-POD (custom format) so the
-   restore needs **no stdin into an exec** (the MSYS silent-death trap). Scale the CP down, restore,
-   scale up:
+   readyz fail on skew. The window dump was deliberately LEFT IN-POD (custom format) so the
+   restore needs **no stdin into an exec** (the MSYS silent-death trap). Be plain about what a
+   restore discards: **everything written after the drain point is gone** — and that loss is
+   bounded, because the dump is taken as the window's first act AFTER the drain (step 3) and the
+   CP is quiesced from the drain onward, so what vanishes is quiesced-window churn, not user work.
+
+   **Suspend Flux first, resume only after verification:** the `apps` Kustomization (ns
+   `flux-system`, path `./kubernetes/apps/apps`, `prune: true`) reconciles on a **10m interval** —
+   left running, it re-applies the manifest's `replicas: 1` mid-restore and the CP writes into a
+   half-restored database:
    ```bash
+   flux --context admin@ai suspend kustomization apps    # ns flux-system; 10m interval + prune
    kubectl --context admin@ai -n agentforge scale deploy/agentforge-platform --replicas=0
    PRIMARY=$(kubectl --context admin@ai -n databases get cluster infra-pg \
      -o jsonpath='{.status.currentPrimary}')
-   # The dump lives on the volume of the pod that WAS primary at pre-cutover step 3. If the primary
+   # The dump lives on the volume of the pod that WAS primary at window step 3. If the primary
    # has moved since, exec into the instance that holds the file instead (ls both); if neither has
    # it, pull manual-dumps/<dump> back from versitygw and restore from a Linux/WSL shell (stdin
    # into kubectl exec is only unsafe from MSYS).
+   #
+   # Pre-drop what the pre-PR1 dump cannot: --clean only drops objects that are IN the dump, and
+   # PR1's four definitions tables (alembic 0016) are not — they would survive the restore, and
+   # their composite FKs into workspaces would make --clean's DROP of workspaces fail (which
+   # --exit-on-error below rightly turns into an abort). 0016 creates NO sequences (UUID pks
+   # throughout — its own docstring), so the four tables are the complete pre-drop list; CASCADE
+   # takes their FKs/indexes/policies, and the uq_workspace_id_org constraint 0016 added to
+   # workspaces disappears when --clean recreates workspaces from the dump. role_overlays needs
+   # nothing here — its drop migration ships post-soak, so it is still in the dump.
    kubectl --context admin@ai -n databases exec "$PRIMARY" -c postgres -- \
-     pg_restore -U postgres --clean --if-exists -d agentforge_platform \
+     psql -U postgres -d agentforge_platform -v ON_ERROR_STOP=1 -c \
+     'DROP TABLE IF EXISTS agent_definition_versions, workflow_definition_versions, agent_definitions, workflow_definitions CASCADE'
+   # --exit-on-error: pg_restore otherwise exits 0 over per-object failures — a rollback that
+   # reports success over a partial restore is the one outcome this section exists to prevent.
+   kubectl --context admin@ai -n databases exec "$PRIMARY" -c postgres -- \
+     pg_restore -U postgres --clean --if-exists --exit-on-error -d agentforge_platform \
      /var/lib/postgresql/data/agentforge_platform.pre-v3.<stamp>.dump
    kubectl --context admin@ai -n agentforge scale deploy/agentforge-platform --replicas=1
+   kubectl --context admin@ai -n agentforge rollout status deploy/agentforge-platform
+   # verify the OLD image goes Ready (readyz green) against the restored DB FIRST, then:
+   flux --context admin@ai resume kustomization apps
    ```
-4. Credentials: nothing to do — the rollback bridge (step 4 of the window) left WORKING PATs under
-   the legacy key names, and `AF_BOT_TOKENS` is an unknown env var to v2 (ignored). If the bridge
-   was skipped, the v2 fleet is fail-closed on revoked PATs: re-mint per-bot PATs and patch the
+4. Credentials: nothing to do — **no mint ran** (§4), so nothing was ever revoked: the legacy
+   `AF_BOT_TOKEN_*` keys still hold WORKING PATs (and `operator/dispatcher/forge` carries the
+   `AF_BOT_TOKEN_PLANNER` bridge patched to the current planner-bot PAT), while `AF_BOT_TOKENS`
+   is an unknown env var to v2 (ignored). Only if a §4 re-mint ever runs without its bridge
+   re-patch is the v2 fleet fail-closed on revoked PATs — then re-mint per-bot PATs and patch the
    legacy keys by hand.
 5. `role_overlays` is untouched by any of this: its **drop migration ships separately** (CP PR2
    follow-up) and applies only after the cutover has soaked — which is exactly what keeps the
