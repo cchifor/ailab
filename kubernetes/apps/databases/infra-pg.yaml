@@ -1,6 +1,9 @@
 # infra-pg — shared 2-instance CloudNativePG cluster for the platform's own stateful apps
-# (ADR 0016 Tier A). Hosts the `grafana`, `authelia`, and `openwebui` databases so those apps can shed
-# their SQLite singletons and run 2 replicas. (open-webui also uses pgvector here for RAG.)
+# (ADR 0016 Tier A). Hosts the `grafana`, `authelia`, `openwebui`, and `gitea` databases so those apps
+# can shed their SQLite singletons and run 2 replicas. (open-webui also uses pgvector here for RAG.)
+# NB: gitea (since 2026-07-22) dominates the workload — a ~3.5GiB database whose Actions job logs are
+# staged through Postgres (dbfs), sustaining ~2.3MiB/s of WAL under CI load. Sizing below reflects that,
+# not the original MB-scale grafana/authelia footprint.
 #
 # Operator: cnpg-system (v1.24.x), installed by the external cchifor/platform repo — consumed
 # dependency, documented in ADR 0016. Notes pinned to operator 1.24:
@@ -28,11 +31,24 @@ spec:
     size: 10Gi
     storageClass: qnap-iscsi
   resources:
-    requests: { cpu: 250m, memory: 512Mi }
+    requests: { cpu: 500m, memory: 2Gi }
     # req=lim on memory (predictable QoS). No cpu limit — and the databases LimitRange deliberately
     # sets no default cpu LIMIT either (LimitRange defaulting is per-resource: it would silently
     # inject one into any container omitting it, as strive-ailab's LimitRange does to strive-pg today).
-    limits: { memory: 512Mi }
+    # 512Mi -> 2Gi (2026-08-05 RCA): the cgroup limit caps the page cache too, so at 512Mi the 3.5GiB
+    # gitea DB was effectively uncached and every read hit qnap-iscsi (a 98MB-table count(*) took 8.2s
+    # under CI load; Gitea itself OOMed from the resulting request pileup).
+    limits: { memory: 2Gi }
+  postgresql:
+    parameters:
+      # Defaults (128MB/1GB) were sized for MB-scale DBs. shared_buffers 512MB keeps the gitea hot set
+      # (action_task/dbfs_data) resident; max_wal_size 4GB spaces checkpoints out so the Actions-log
+      # write path (~2.3MiB/s WAL, fsync-heavy) stops re-triggering full-page writes every few minutes;
+      # wal_compression shrinks those FPIs before they cross the iSCSI wire. All three verified against
+      # the 2026-08-05 forge-slowness RCA; changing shared_buffers costs one automated rolling restart.
+      shared_buffers: 512MB
+      max_wal_size: 4GB
+      wal_compression: zstd
   affinity:
     enablePodAntiAffinity: true
     topologyKey: kubernetes.io/hostname
