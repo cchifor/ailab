@@ -164,8 +164,14 @@ spec:
           ACCOUNT_LINKING: auto # link an OIDC login to a pre-existing account by email (site-admin bootstrap)
         # Gitea refuses webhook delivery to private IPs by default; "external" PRESERVES that default
         # for public targets, the CIDR enables the LAN agentforge receivers (dw1-6 :8700 — ADR 0018).
+        # 10.96.0.0/12 = the Talos service subnet: AgentForge v2 receivers are in-cluster Services
+        # (af-orch-*-delivery.af-tenant-*.svc:8700) and Gitea was denying every delivery to them —
+        # the hostmatcher checks the RESOLVED ClusterIP, and a CIDR entry is the only form that
+        # matches multi-label svc DNS names reliably (glob `*` does not cross dots). Scope note:
+        # this permits webhook targets on any ClusterIP; webhook config is repo-admin-only
+        # (cchifor + the orchestrator), same trust as the LAN CIDR above.
         webhook:
-          ALLOWED_HOST_LIST: "external, 192.168.0.0/24"
+          ALLOWED_HOST_LIST: "external, 192.168.0.0/24, 10.96.0.0/12"
         # ── Gitea Actions (forge migration, ADR 0017) ──────────────────────────────────────────────
         repository:
           # Adds repo.actions to the default unit set — NEW repos only. Existing repos (platform,
