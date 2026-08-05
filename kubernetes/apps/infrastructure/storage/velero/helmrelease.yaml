@@ -84,4 +84,7 @@ spec:
           excludedNamespaces: [kube-system, velero, trivy-system] # trivy DB cache is rebuildable — keep it out of the off-site chain
     resources:
       requests: { cpu: 50m, memory: 256Mi }
-      limits: { memory: 1Gi }
+      # 1Gi -> 2Gi (2026-08-05 storage audit): the server was OOMKilled at 02:00:31 on 2026-08-03
+      # mid-backup (26 lifetime restarts), failing that night's daily ("found a backup with status
+      # InProgress during the server starting"); 1Gi is not enough headroom at backup start.
+      limits: { memory: 2Gi }
