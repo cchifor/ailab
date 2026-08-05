@@ -121,9 +121,17 @@ and stays a live 1/1 workload through the window, so it can still drive CP write
 dump. The delta is therefore *bounded by platform-dev's in-flight work*, not zero (small on a
 ~10 MB DB, and Rollback states what a restore discards). To make the delta genuinely zero,
 take the OPTIONAL stronger quiesce before dumping: `flux suspend kustomization
-agentforge-tenant-platform-dev` then `kubectl -n agentforge scale deploy/af-orch-platform-dev-delivery
---replicas=0` (suspend first — the Kustomization heals replicas on its 10m prune interval,
-same reasoning as the Rollback wrap). Scale back up and `flux resume` at the step-6 restart —
+agentforge-tenants` (ns `flux-system` — this is the Kustomization that reconciles the
+CP-rendered tenant objects from `cchifor/agentforge-tenants`, `prune: true`, **5m** interval;
+`agentforge-tenant-platform-dev` owns only the ESO/netpol/CA stack and never touches
+`replicas`, so suspending it would let the scale-down be healed within ≤5m — a live CP
+writer back mid-dump, silently restoring the delta this option promises to remove), then
+`kubectl -n af-tenant-tenant-zero-platform-dev scale deploy/af-orch-platform-dev-delivery
+--replicas=0` (the tenant namespace — `agentforge` holds only the dispatcher/reaper; the same
+command with the correct ns already appears in `agentforge-sandbox/platform-dev-staging-pv.yaml`).
+Cost, stated plainly: suspending `agentforge-tenants` pauses reconciliation for EVERY
+CP-rendered tenant estate-wide, not just platform-dev — acceptable inside a quiesced window,
+but it is the whole tenant plane, and the resume below is what ends that pause. Scale back up and `flux resume kustomization agentforge-tenants` at the step-6 restart —
 which this pod needs ANYWAY to pick up `AF_BOT_TOKENS` from its Secret (envFrom is read at pod
 start), so the quiesce doubles as the required credential-pickup restart rather than adding one. (An earlier draft took this dump "any time before the
 window" — that proved the dump restorable but left everything written between dump and window
