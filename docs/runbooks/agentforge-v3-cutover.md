@@ -259,6 +259,27 @@ Ordering note: doing this BEFORE the image pins is safe by design — running v2
 config as newer-than-supported and keep operating on `config-lastgood.json`; running v3 images
 against a v2 config is the crashloop. Config first, images second, never the reverse.
 
+### 5b. Relabel the estate — MANDATORY before the worker pins (worker #99 merged early)
+
+Worker PR #99 (retire the legacy `state: N-*` vocabulary, dual-read deleted) was merged to
+`cchifor/agentforge` main on 2026-08-05 — ahead of its own gate. Undeployed it is harmless (the
+pin freeze holds), but the image this window ships reads ONLY the `stage: N-*` vocabulary: any
+issue still wearing a legacy label becomes invisible to discovery and unprotected from ops triage
+the moment the new workers start.
+
+So, between the config bump (step 5) and the pins (step 6), for EVERY workflow-managed repo
+(the config's `repos` allowlist — today `cchifor/agentforge-playground` plus any tenant repos):
+
+```
+# in the worker repo checkout @ the release commit, per target repo:
+uv run python scripts/migrate_state_vocabulary.py --repo <owner>/<repo> --apply
+# MUST end exit 0 with its re-read verification clean; --dry-run exit 0 alone proves nothing
+# (the script's dry-run exits 0 without relabeling — a known footgun, see PR #99).
+```
+
+Gate: zero open OR closed issues wearing a `state: N-*` label in any managed repo
+(the script's re-read verification is the check). Do not proceed to step 6 until this holds.
+
 ### 6. Land the real pins on this branch, drop the freeze, merge
 
 1. `just pin-workloads p1-worker=sha256:<…> sandbox=sha256:<…> agentforge-platform=sha256:<…>`
