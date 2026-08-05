@@ -28,7 +28,11 @@ spec:
     # 5Gi -> 10Gi for the AgentForge v2 platform DB (ADR 0019). Live expansion is safe: qnap-iscsi
     # has allowVolumeExpansion=true (verified live 2026-07-11). CNPG expands the instance PVCs in
     # place; shrinking is impossible.
-    size: 10Gi
+    # 10Gi -> 20Gi (2026-08-05 storage audit): data+WAL share this volume (walStorage can't be added
+    # to an existing cluster) and worst case is DB ~5GiB + max_wal_size 4GB + slot retention on a
+    # 9.76GiB usable volume — ~20-30 min of stalled-replica churn from volume-full. Thin LUN, so the
+    # NAS only pays for actual writes.
+    size: 20Gi
     storageClass: qnap-iscsi
   resources:
     requests: { cpu: 500m, memory: 2Gi }
@@ -49,6 +53,12 @@ spec:
       shared_buffers: 512MB
       max_wal_size: 4GB
       wal_compression: zstd
+      # Default is -1 (unlimited): a stalled/diverged replica slot pins WAL until the volume fills —
+      # the exact strive-pg 2026-07-21 near-crash, which got this cap in platform#120 while infra-pg
+      # got nothing. 1GB (not strive-pg's 2GB) because data+WAL still share one volume here. Cost of
+      # hitting the cap: the lagging replica's slot is invalidated and CNPG re-clones it — strictly
+      # better than the primary running out of disk. Reload-only, no restart.
+      max_slot_wal_keep_size: 1GB
       # NOT declared here: the `gitea` role runs with `synchronous_commit = off` (ALTER ROLE,
       # 2026-08-05) — CNPG has no per-role GUCs, so this lives only in the DB. Rationale: the
       # Actions-log path commits fsync-bound WAL over iSCSI and Gitea tolerates losing <1s of acked
