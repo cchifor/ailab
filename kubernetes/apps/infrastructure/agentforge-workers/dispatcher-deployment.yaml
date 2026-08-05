@@ -88,12 +88,13 @@ spec:
             # deny world; NOT the public git.chifor.me (which would require world/FQDN egress).
             - { name: AF_GITEA_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000" }
           envFrom:
-            # The ONLY credential surface: the agentforge-dispatcher-forge Secret. Through the cutover
-            # soak it carries BOTH AF_BOT_TOKENS (v3 — the JSON bot-username→PAT map GiteaClient reads
-            # for list_issues) AND the legacy AF_BOT_TOKEN_PLANNER (rollback bridge; #226 projects both
-            # ON PURPOSE — the legacy mapping drops post-soak, see the runbook). A v3 image reads only
-            # the map and exits hard when it is empty/missing (2026-08-04 crashloop); a v2 image reads
-            # only the legacy var and ignores the map — either image starts off this one Secret.
+            # The ONLY credential surface: the agentforge-dispatcher-forge Secret, which since the
+            # post-soak cleanup carries AF_BOT_TOKENS ALONE — the JSON bot-username→PAT map
+            # GiteaClient reads for list_issues. This image reads only that map and exits hard when
+            # it is empty/missing (2026-08-04 crashloop). The legacy AF_BOT_TOKEN_PLANNER projection
+            # (#226's pin-revert bridge, which a v2 image reads instead) came off with the soak, so
+            # reverting the pin to a v2 digest now means restoring that mapping in
+            # dispatcher-externalsecret.yaml in the SAME change.
             # ESO-synced from OpenBao (dispatcher-externalsecret.yaml). Carries NO capability/sandbox/broker
             # material by construction (a distinct operator KV path, disjoint from the tenant/broker roles).
             - secretRef:
