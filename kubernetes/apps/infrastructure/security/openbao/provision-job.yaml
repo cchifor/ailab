@@ -83,6 +83,26 @@ spec:
             # provision Job and MERGE-writes add-only, so the values are re-seeded after an OpenBao wipe
             # (see docs/runbooks/openbao-recovery.md) while `AF_CAPABILITY_SIGNING_KEY`/`AF_CAPABILITY_KID`,
             # which the keypair lifecycle mirrors into the SAME doc, are preserved untouched.
+            #
+            # "ADD-ONLY" IS ABOUT THE DOCUMENT, NOT ABOUT PRECEDENCE — and reading it as precedence is
+            # how a rotated credential gets silently reverted. The implementation is one line
+            # (agentforge provisioner/bootstrap.py::_apply_operator_seeds):
+            #
+            #     merged = {**existing, **dict(values)}   # add-only: seed keys win, all others preserved
+            #
+            # Two separate guarantees, and only the first is what "add-only" names:
+            #   * DOCUMENT level — this is a read-modify-write, never a KV-v2 full replace, so every key
+            #     the seed does NOT mention survives. That is the guarantee protecting the capability
+            #     signing key above.
+            #   * KEY level — for a key present in BOTH, THE SEED VALUE WINS and overwrites the vault.
+            #     The seeds document is authoritative over live KV for the keys it carries.
+            #
+            # So a seeded credential is not merely a backup; it is the source of truth on every
+            # provision. Rotating a seeded PAT in the vault WITHOUT refreshing this document means the
+            # next provision Job quietly restores the pre-rotation value — a revoked credential,
+            # delivered by the durability machinery, with the vault looking healthy. Any run that
+            # rotates (`agentforge-bootstrap` rotates on EVERY invocation) must re-encrypt and commit
+            # `operator-seeds.sops.yaml` in the same change, which is what `--seeds-out` is for.
             # A hand `kubectl create secret` is NOT a substitute: the tenant ExternalSecret is
             # creationPolicy:Owner and overwrites the Secret from OpenBao on its next refresh.
             - { name: AF_OB_SEEDS_FILE, value: "/etc/openbao-seeds/seeds.json" }
