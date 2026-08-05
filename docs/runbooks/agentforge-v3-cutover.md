@@ -280,6 +280,17 @@ uv run python scripts/migrate_state_vocabulary.py --repo <owner>/<repo> --apply
 Gate: zero open OR closed issues wearing a `state: N-*` label in any managed repo
 (the script's re-read verification is the check). Do not proceed to step 6 until this holds.
 
+**Rehearsed 2026-08-05 (live census + dry-runs): the estate is ALREADY CONVERGED — zero legacy
+labels worn in any of the four repos that still define them (playground, ailab, platform,
+primes-lab; the other five org repos define neither vocabulary). 5b is expected to be a ~30 s
+`--apply`-for-the-record per repo; only `--apply`'s `verified: no legacy lifecycle label remains`
+line + exit 0 is the gate (dry-run exit 0 proves nothing — it exits 0 even with hundreds of
+pending relabels).** Auth: `AF_GITEA_URL` + `AF_GITEA_TOKEN` (the script's own env; the
+~/.git-credentials chifor PAT works for the current zero-write state). Two traps: (1) a STALE
+`oauth2@git.chifor.me` entry in GCM causes a forge-wide ~5-7 min auth lockout if any tooling
+retries it — purge it before the window; (2) optionally delete the unworn `state:` label
+DEFINITIONS afterwards so the retired vocabulary cannot be hand-reattached.
+
 ### 6. Land the real pins on this branch, drop the freeze, merge
 
 1. `just pin-workloads p1-worker=sha256:<…> sandbox=sha256:<…> agentforge-platform=sha256:<…>`
