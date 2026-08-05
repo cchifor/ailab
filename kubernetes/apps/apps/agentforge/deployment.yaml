@@ -85,6 +85,17 @@ spec:
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
           # values here; secrets come from SOPS Secrets via secretKeyRef.
           env:
+            # -- v3 serve floor --
+            # The CP serves composed schema-v3 configs only; `min_worker_version` defaults to
+            # "0.3.0" in code. The worker package version was never bumped for v3 — BOTH the v2
+            # and v3 images report 0.1.0 — so the default floor rejects every worker, v3 included
+            # (observed at the 2026-08-05 cutover: tenant orchestrators got 409 "below
+            # AFP_MIN_WORKER_VERSION 0.3.0"). Set to the version workers actually report. The floor
+            # is defence in depth, NOT the gate: a v2 worker handed a v3 config refuses it as
+            # newer-than-supported (worker `compatibility()` ceiling) and stays on last-good, which
+            # is fail-closed. FOLLOW-UP: bump the worker package version on the next release and
+            # raise this to it, which restores the floor's ability to discriminate.
+            - { name: AFP_MIN_WORKER_VERSION, value: "0.1.0" }
             # -- OIDC RP against Authelia (client block in auth/authelia-config.yaml) --
             - { name: AFP_OIDC_ISSUER, value: "https://sso.chifor.me" }
             - { name: AFP_OIDC_CLIENT_ID, value: "agentforge" }
