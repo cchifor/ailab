@@ -287,7 +287,7 @@ spec:
               # digest had drifted away from it. Repinned to the broker digest, restoring the stated
               # invariant. Verified in-cluster: 8c379d6a has /app/.venv/bin/agentforge-codex-refresh AND
               # python3; 20e55c58 has only agentforge + agentforge-bootstrap.
-              image: registry.chifor.me/agentforge/orchestrator@sha256:e36e5b5fd9f90c9dcba7d190d15a1e1ac13e3c1bca5c07eda893ebd490b4856f
+              image: registry.chifor.me/agentforge/orchestrator@sha256:731496f3e0e0e273d184e183686f75f9d4c5bb17505fb72427cfafce77b12b0e
               command: ["python3", "/scripts/refresh.py"]
               volumeMounts:
                 - { name: work, mountPath: /work }
