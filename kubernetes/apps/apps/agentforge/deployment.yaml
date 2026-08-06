@@ -145,7 +145,7 @@ spec:
             # worker/dispatcher/reaper pins. Post-merge, trigger the CP pool ROLLOUT so the
             # CP-rendered platform-dev orchestrator re-renders onto this digest (renders are not
             # re-committed by a CP restart or Flux reconcile alone).
-            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:9967ce3fd3f0f720841beeede47ba6c3b46a8289fa994eb4499f54b4c74e10e6" }
+            - { name: AFP_WORKER_IMAGE, value: "registry.chifor.me/agentforge/p1-worker@sha256:2ee1335e97754b50b5ad285a1f5d5d3383af7f8cf59ecd095b465afec39b3e33" }
             # -- workers fetch their config from the CP over this in-cluster URL. The Service exposes
             #    :8080 (== container port, no DNAT port translation — see serviceaccount-service.yaml). --
             - { name: AFP_CONTROL_PLANE_INTERNAL_URL, value: "http://agentforge-platform.agentforge.svc:8080" }
@@ -231,7 +231,7 @@ spec:
             # worker's AF_SANDBOX_IMAGE (the script rewrites every `sandbox` ref in one diff, so
             # the hand-maintained-pin caveat above is moot for THIS bump).
             - name: AFP_SANDBOX_IMAGE
-              value: "registry.chifor.me/agentforge/sandbox@sha256:c279bde37141f83ebf0b63a127bd59cb28dca5d18cfa954b5fd8754f047b9553"
+              value: "registry.chifor.me/agentforge/sandbox@sha256:f5e67dce44d42e9511ed5ec1fbe6cc69bbd12bdc9caf0b4fd1a5eab990f92326"
             # Aud -> broker URL map the renderer embeds into tenant sandbox renders
             # (AF_SANDBOX_BROKER_URLS source; P2 provisioning refuses on an empty map).
             - name: AFP_SANDBOX_BROKER_URLS
