@@ -123,7 +123,7 @@ spec:
           # once the release CI has built it — never hand-edit a digest here, and never state WHICH
           # build is pinned in prose (resolve it: git show gitea/main:<this file> | grep image:).
           # Operator procedure: docs/runbooks/agentforge-v3-cutover.md.
-          image: registry.chifor.me/agentforge/p1-worker@sha256:9967ce3fd3f0f720841beeede47ba6c3b46a8289fa994eb4499f54b4c74e10e6
+          image: registry.chifor.me/agentforge/p1-worker@sha256:2ee1335e97754b50b5ad285a1f5d5d3383af7f8cf59ecd095b465afec39b3e33
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
