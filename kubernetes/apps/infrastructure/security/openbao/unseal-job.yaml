@@ -65,7 +65,7 @@ spec:
           # CHANGEME digest — pinned by scripts/pin-image-digests.py (`just pin-bootstrap`) BEFORE this Job
           # merges (plan Stage 0). ENTRYPOINT is ["tini","--"] + console script `agentforge`, so args must
           # be the full argv.
-          image: registry.chifor.me/agentforge/orchestrator@sha256:e9cec78e43c76e7c263e38d990f4ef7fd86417e2886b969c7038039eea5c8f5f
+          image: registry.chifor.me/agentforge/orchestrator@sha256:35bfe1460b906c227aad1435d21b1314b0977b8ffdbcb1ef5137e173672ea01a
           args: ["agentforge", "openbao-init"]
           env:
             - { name: AF_OB_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
