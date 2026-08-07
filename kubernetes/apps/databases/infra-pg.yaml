@@ -59,6 +59,13 @@ spec:
       # hitting the cap: the lagging replica's slot is invalidated and CNPG re-clones it — strictly
       # better than the primary running out of disk. Reload-only, no restart.
       max_slot_wal_keep_size: 1GB
+      # Default 100 was hit live 2026-08-07 ~17:45Z: the v3 broker rolling update's surge pods
+      # (4 deployments × pools, old+new replicas concurrently) spiked past the cap and the last
+      # pods to connect crashlooped on TooManyConnectionsError; steady state is only ~45 conns,
+      # but every estate rollout re-risks the spike, and the consumer count only grows. 200 is
+      # comfortable inside the 2Gi limit with mostly-idle app pools. Postmaster param — this
+      # change costs one automated rolling restart (replica-first + switchover blip).
+      max_connections: "200"
       # NOT declared here: the `gitea` role runs with `synchronous_commit = off` (ALTER ROLE,
       # 2026-08-05) — CNPG has no per-role GUCs, so this lives only in the DB. Rationale: the
       # Actions-log path commits fsync-bound WAL over iSCSI and Gitea tolerates losing <1s of acked
