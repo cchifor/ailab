@@ -30,7 +30,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: rclone
-              image: rclone/rclone:1.74.3
+              image: rclone/rclone:1.74.4
               command: ["/bin/sh", "-c"]
               args:
                 - |
