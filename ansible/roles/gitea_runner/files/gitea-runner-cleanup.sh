@@ -153,7 +153,7 @@ if [ "$busy" -eq 1 ]; then
 fi
 
 # 1. stopped containers — always safe (never touches running).
-docker container prune -f >/dev/null 2>&1 || true
+timeout 120 docker container prune -f >/dev/null 2>&1 || true
 
 # 2. reap LEAKED running containers: older than REAP_AGE (a live job's are younger than its timeout) AND
 #    not the persistent buildx/buildkit builder. This is the ONLY op that removes a running container,
@@ -171,7 +171,7 @@ for cid in $(docker ps -q 2>/dev/null || true); do
     docker rm -f "$cid" >/dev/null 2>&1 && reaped=$(( reaped + 1 ))
   fi
 done
-docker container prune -f >/dev/null 2>&1 || true
+timeout 120 docker container prune -f >/dev/null 2>&1 || true
 
 # 3. window-safe prunes: images / build cache / orphaned networks OLDER than the retention window. Never
 #    removes anything in use or recently used, so it is safe regardless of the idle read. Tighten under
@@ -240,9 +240,9 @@ fi
 pct="$(disk_pct)"; is_num "$pct" || pct=0
 if [ "$pct" -ge "$CRITICAL_PCT" ]; then
   log "critical disk ${pct}% -> ${CRITICAL_UNTIL} window + actcache trim"
-  docker builder prune -f --filter "until=$CRITICAL_UNTIL" >/dev/null 2>&1 || true
+  timeout 600 docker builder prune -f --filter "until=$CRITICAL_UNTIL" >/dev/null 2>&1 || true
   prune_extra_builders "$CRITICAL_UNTIL"
-  docker image prune -af --filter "until=$CRITICAL_UNTIL" >/dev/null 2>&1 || true
+  timeout 600 docker image prune -af --filter "until=$CRITICAL_UNTIL" >/dev/null 2>&1 || true
   case "$ACTCACHE_DIR" in
     /*/*) # require an absolute path with >=2 components so we can never rm '/' or a top-level dir
       if [ -d "$ACTCACHE_DIR" ]; then

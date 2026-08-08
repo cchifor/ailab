@@ -70,10 +70,18 @@ EOF
 #                              vacuously. Phases are markers the docker mock drops:
 #                                image   -> the section-3 windowed image prune has run
 #                                afprune -> the cap's default-builder `prune -af` has run
+#   MOCK_BUSY_UNTIL=<phase>  : busy UNTIL the sweep reaches <phase>, idle after. The inverse of
+#                              MOCK_BUSY_FROM, and the only way to reach the size cap with
+#                              midjob=1 AND an idle re-check — i.e. to test the midjob gate
+#                              itself rather than the re-check that shadows it.
 cat >"$BIN/pgrep" <<EOF
 #!/usr/bin/env bash
 if [ -n "\${MOCK_BUSY_FROM:-}" ]; then
   [ -f "$WORK/phase.\$MOCK_BUSY_FROM" ] && echo 4243
+  exit 0
+fi
+if [ -n "\${MOCK_BUSY_UNTIL:-}" ]; then
+  [ -f "$WORK/phase.\$MOCK_BUSY_UNTIL" ] || echo 4243
   exit 0
 fi
 [ "\${MOCK_BUSY:-0}" = 1 ] || exit 0
@@ -96,7 +104,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
   : > "$CALLS"; rm -f "$WORK/pgrep.count" "$WORK"/phase.*
   MOCK_BUSY="$1" MOCK_PCT="$2" PATH="$BIN:$PATH" \
     MOCK_CACHE="${MOCK_CACHE:-0}" MOCK_BUSY_DROP_AFTER="${MOCK_BUSY_DROP_AFTER:-}" \
-    MOCK_BUSY_FROM="${MOCK_BUSY_FROM:-}" \
+    MOCK_BUSY_FROM="${MOCK_BUSY_FROM:-}" MOCK_BUSY_UNTIL="${MOCK_BUSY_UNTIL:-}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
@@ -177,6 +185,18 @@ if ! grep -q 'builder prune -af' "$CALLS"; then bad "H8: the default-builder pru
 elif grep -q 'buildx prune -af' "$CALLS"; then bad "H8: a job arriving after the default prune must abort the per-builder prunes"
 else ok "H8: job arriving after the default prune aborts the per-builder prunes"; fi
 unset MOCK_BUSY_FROM MOCK_CACHE
+
+echo "[H9] the midjob GATE itself (not the re-check that shadows it)"
+# The #254 review mutation-tested the `[ "$midjob" -eq 0 ]` gate and the suite stayed ALL PASS: H4
+# names the mid-job path but its mock is busy for the WHOLE sweep, so the busy re-check satisfies the
+# assertion and the gate could be deleted unnoticed. The gate is load-bearing precisely where the
+# re-check is weakest — the file documents that pgrep reads false between a job's steps, which is
+# exactly a job that looks idle at cap time while a critical mid-job sweep is in flight.
+# Busy at the gate (-> wait -> still busy -> critical -> midjob=1), then idle from the image prune on,
+# so the re-check would say "go". Only the midjob gate stops the unwindowed prune here.
+MOCK_CACHE=26 MOCK_BUSY_UNTIL=image run_case 1 95
+if grep -q 'builder prune -af' "$CALLS"; then bad "H9: the midjob gate must block the full prune even when the re-check reads idle"; else ok "H9: midjob gate blocks the full prune when the re-check reads idle"; fi
+unset MOCK_BUSY_UNTIL MOCK_CACHE
 
 echo "[F] stale-workspace prune: no-activity dirs removed, fresh + partially-fresh kept"
 # act_runner never deletes work/<repo-hash>; agentforge's ephemeral per-repo CI grew it to ~350-400
