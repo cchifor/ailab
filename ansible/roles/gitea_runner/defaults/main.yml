@@ -140,8 +140,10 @@ gitea_runner_cleanup_idle_poll_sec: 10
 # Hard size cap for the docker build cache (bytes, 0 disables). The retention windows above CANNOT bound
 # it — the cache is actively reused so its last-used stamps keep refreshing (measured: `--filter until=1h`
 # reclaimed 1.7GB of 26GB; the CLI size-target flags and the daemon builder.gc knobs do nothing on 29.x).
-# Over this cap, an IDLE sweep runs a full `builder prune -af`: 18.12GB reclaimed on ci-runner-3, disk
-# 74% -> 62%. Destructive to warm cache, so keep the cap well above a normal working set (~14GB observed).
+# Over this cap AND at/over *_pressure_pct, an idle sweep runs a full `builder prune -af`: 18.12GB
+# reclaimed on ci-runner-3, disk 74% -> 62%. Destructive to warm cache (and the co-located GitHub
+# runner shares this daemon, so it loses its warm cache too), hence the disk gate and a cap well above
+# the ~14GB observed working set.
 gitea_runner_cleanup_cache_max_bytes: 20000000000
 gitea_runner_cleanup_actcache_max_mb: 1536 # trim the act_runner actions cache above this (critical only)
 # Prune work/<repo-hash> workspaces whose ENTIRE tree is untouched for this many hours (0 disables).

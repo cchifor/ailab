@@ -48,8 +48,9 @@ WS_PRUNE_AGE_H="${GITEA_CLEANUP_WS_PRUNE_AGE_H:-48}" # 0 disables the stale-work
 # MUST stay below the unit's TimeoutStartSec minus the worst-case prune time.
 IDLE_WAIT_SEC="${GITEA_CLEANUP_IDLE_WAIT_SEC:-600}"
 IDLE_POLL_SEC="${GITEA_CLEANUP_IDLE_POLL_SEC:-10}"
-# Hard SIZE cap for the docker build cache (bytes; 0 disables). Enforced ONLY on an idle runner, with a
-# full `builder prune -af` — see section 3b for why nothing cheaper bounds a continuously-reused cache.
+# Hard SIZE cap for the docker build cache (bytes; 0 disables). Enforced with a full `builder prune -af`
+# on the idle path only, re-checking the busy signal first and only once disk is at/over PRESSURE_PCT —
+# see section 3b for why nothing cheaper bounds a continuously-reused cache, and for the residual race.
 CACHE_MAX_BYTES="${GITEA_CLEANUP_CACHE_MAX_BYTES:-20000000000}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
@@ -186,15 +187,34 @@ docker image prune -af --filter "until=$win" >/dev/null 2>&1 || true
 #     So: an ALL-unused prune, which is the lever that does move it (same host, same day: 18.12 GB
 #     reclaimed, disk 74% -> 62%, cache -> 0 B). It is destructive to warm cache — the next build has
 #     nothing to reuse — so it is deliberately rare: only when the cache is over CACHE_MAX_BYTES, and
-#     NEVER on the mid-job path (a full prune through a live job is exactly the GC race we removed).
-if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ]; then
-  bc_now="$(docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null \
+#     never from the mid-job critical path (a full prune through a live job is the GC race we removed).
+#     CONCURRENCY, stated honestly: `midjob` records the DECISION taken at the busy gate, not the
+#     daemon's state right now — the window prunes above can take minutes, and a job may well have
+#     started meanwhile. So the busy signal is RE-READ immediately before the destructive prune. That
+#     narrows the exposure to the moments between that read and exec; it does NOT close it, because
+#     act_runner offers no admission lock and the pgrep signal reads false between a job's steps.
+#     Closing it properly needs a lock held for a whole job's lifetime by BOTH co-located runners
+#     (gitea + the GitHub agent share this daemon) — deliberately not attempted here.
+#     Gating on disk too means that residual risk is only taken when the disk actually needs the
+#     space, rather than on every cache overshoot on a healthy runner.
+pct_cap="$(disk_pct)"; is_num "$pct_cap" || pct_cap=0
+if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge "$PRESSURE_PCT" ]; then
+  bc_now="$(timeout 60 docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null \
     | awk -F'|' '$1=="Build Cache"{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null)"
   if is_num "$bc_now" && [ "$bc_now" -gt "$CACHE_MAX_BYTES" ]; then
-    log "build cache ${bc_now}B > cap ${CACHE_MAX_BYTES}B on an idle runner -> full builder prune"
-    docker builder prune -af >/dev/null 2>&1 || true
-    docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -vE '^$|^default$' | sort -u \
-      | while read -r b; do docker buildx prune -af --builder "$b" >/dev/null 2>&1 || true; done
+    if any_job_running; then
+      log "build cache ${bc_now}B over cap but a job started during the sweep -> skipping full prune"
+    else
+      log "build cache ${bc_now}B > cap ${CACHE_MAX_BYTES}B at disk ${pct_cap}%, idle -> full builder prune"
+      timeout 900 docker builder prune -af >/dev/null 2>&1 || true
+      # Collect first (a `grep` that matches nothing returns 1 and would poison a piped `while` under
+      # `set -o pipefail`), then iterate. `|| true` keeps a missing/hung buildx from failing the sweep.
+      extra_builders="$(timeout 30 docker buildx ls --format '{{.Name}}' 2>/dev/null \
+        | grep -vE '^$|^default$' | sort -u || true)"
+      for xb in $extra_builders; do
+        timeout 300 docker buildx prune -af --builder "$xb" >/dev/null 2>&1 || true
+      done
+    fi
   fi
 fi
 
