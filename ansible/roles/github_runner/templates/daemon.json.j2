@@ -1,6 +1,13 @@
 {
   "log-driver": "json-file",
   "log-opts": { "max-size": "10m", "max-file": "3" },
-  "builder": { "gc": { "enabled": true, "defaultKeepStorage": "10GB" } },
+  "builder": {
+    "gc": {
+      "enabled": true,
+      "reservedSpace": "{{ github_runner_builder_gc_reserved_space }}",
+      "maxUsedSpace": "{{ github_runner_builder_gc_max_used_space }}",
+      "minFreeSpace": "{{ github_runner_builder_gc_min_free_space }}"
+    }
+  },
   "registry-mirrors": ["https://registry.chifor.me"]
 }
