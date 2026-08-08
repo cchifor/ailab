@@ -21,6 +21,11 @@
 #     The prune's containerd GC pass can reap an in-flight pull's lease regardless of the filter, so
 #     concurrency is governed by the busy gate below, never by the window. (2026-08-08 RCA.)
 #   * NO `docker volume prune` (a job's data volumes are irreplaceable — reclaimed only via image/cache).
+# ONE OPERATION IS DELIBERATELY NOT SAFE-BY-CONSTRUCTION: the build-cache SIZE cap in section 3b runs
+# `builder prune -af`, which has NO retention window and removes every unused cache record. Nothing
+# about the window argument above covers it. Its safety rests entirely on (a) never running from the
+# mid-job critical path, (b) a fresh busy re-read immediately before each destructive call, and (c) a
+# disk gate — a narrower guarantee than the rest of this script, spelled out at section 3b.
 # The idle check below is therefore only a cheap "skip the work while obviously busy" optimization, not
 # the safety mechanism. Best-effort; ALWAYS exits 0.
 set -uo pipefail
@@ -88,7 +93,7 @@ any_job_running() {
 prune_extra_builders() {
   local win="$1" b
   docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -vE '^$|^default$' | sort -u | while read -r b; do
-    docker buildx prune -f --filter "until=$win" --builder "$b" >/dev/null 2>&1 || true
+    timeout 300 docker buildx prune -f --filter "until=$win" --builder "$b" >/dev/null 2>&1 || true
   done
 }
 
@@ -173,10 +178,12 @@ docker container prune -f >/dev/null 2>&1 || true
 #    disk pressure. (Build cache is the big one — 10-33 GB/runner.)
 pct="$(disk_pct)"; is_num "$pct" || pct=0
 win="$ROUTINE_UNTIL"; [ "$pct" -ge "$PRESSURE_PCT" ] && win="$PRESSURE_UNTIL"
-docker network prune -f --filter "until=$win" >/dev/null 2>&1 || true
-docker builder prune -f --filter "until=$win" >/dev/null 2>&1 || true
+# `timeout` on each: a wedged daemon otherwise blocks the unit to TimeoutStartSec (the sweep would
+# hang here rather than at the size cap, which is where the timeouts used to start).
+timeout 120 docker network prune -f --filter "until=$win" >/dev/null 2>&1 || true
+timeout 600 docker builder prune -f --filter "until=$win" >/dev/null 2>&1 || true
 prune_extra_builders "$win"
-docker image prune -af --filter "until=$win" >/dev/null 2>&1 || true
+timeout 600 docker image prune -af --filter "until=$win" >/dev/null 2>&1 || true
 
 # 3b. SIZE cap for the build cache — the only thing that actually bounds it. The `until=` windows above
 #     cannot: the cache is actively REUSED, so its last-used stamps keep refreshing. Measured 2026-08-08
@@ -207,13 +214,23 @@ if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge 
     else
       log "build cache ${bc_now}B > cap ${CACHE_MAX_BYTES}B at disk ${pct_cap}%, idle -> full builder prune"
       timeout 900 docker builder prune -af >/dev/null 2>&1 || true
-      # Collect first (a `grep` that matches nothing returns 1 and would poison a piped `while` under
-      # `set -o pipefail`), then iterate. `|| true` keeps a missing/hung buildx from failing the sweep.
+      # Collect first, then iterate: a `grep` matching nothing exits 1, which would poison a piped
+      # `while` if this script ever gained `set -e`. (`set -o pipefail` is already on at the top and
+      # is inert here without `set -e` — the hazard is future-proofing, not current behaviour.)
+      # `|| true` keeps a missing or hung buildx from failing the sweep.
       extra_builders="$(timeout 30 docker buildx ls --format '{{.Name}}' 2>/dev/null \
         | grep -vE '^$|^default$' | sort -u || true)"
-      for xb in $extra_builders; do
-        timeout 300 docker buildx prune -af --builder "$xb" >/dev/null 2>&1 || true
-      done
+      # The default-builder prune above can take MINUTES, so the read that authorised it is stale by
+      # now. Re-read before the per-builder prunes rather than letting one check cover N+1 destructive
+      # calls. (These hit each builder's own buildkitd rather than the host containerd store, so the
+      # blast radius differs — but it is the same class of race, and a second read costs nothing.)
+      if [ -n "$extra_builders" ] && any_job_running; then
+        log "job arrived during the default-builder prune -> skipping the per-builder prunes"
+      else
+        for xb in $extra_builders; do
+          timeout 300 docker buildx prune -af --builder "$xb" >/dev/null 2>&1 || true
+        done
+      fi
     fi
   fi
 fi

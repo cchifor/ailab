@@ -21,7 +21,12 @@ cat >"$BIN/docker" <<EOF
 #!/usr/bin/env bash
 echo "docker \$*" >> "$CALLS"
 case "\$1 \$2" in
-  "container prune"|"network prune"|"builder prune"|"image prune") exit 0 ;;
+  "image prune") : > "$WORK/phase.image"; exit 0 ;;
+  "builder prune")
+    # the UNWINDOWED cap prune (-af) is the phase the per-builder re-check must follow
+    printf '%s' "\$*" | grep -q -- '-af' && : > "$WORK/phase.afprune"
+    exit 0 ;;
+  "container prune"|"network prune") exit 0 ;;
   "buildx prune") exit 0 ;;
   "buildx ls")
     # honour --format '{{.Name}}' (buildx >=0.13): one builder name per line.
@@ -47,23 +52,30 @@ cat >"$BIN/df" <<EOF
 echo "Use%"; echo " \${MOCK_PCT:-0}%"
 EOF
 
-# systemctl show -p MainPID --value <svc> -> a pid iff MOCK_BUSY=1
+# systemctl show -p MainPID --value <svc> -> ALWAYS a live pid: the runner daemon is always
+# running; what varies is whether it has job children. Keeping this constant makes pgrep the
+# single source of "busy", which is what lets a case flip idle->busy partway through a sweep.
 cat >"$BIN/systemctl" <<EOF
 #!/usr/bin/env bash
-if [ "\${MOCK_BUSY:-0}" = 1 ]; then echo 4242; else echo 0; fi
+echo 4242
 EOF
 
-# MOCK_BUSY_DROP_AFTER=<n>: report busy for the first n pgrep calls, then idle — simulates a job
-# finishing DURING the sweep, which is the path the busy gate is supposed to wait for.
-cat >"$BIN/busystate" <<EOF
-#!/usr/bin/env bash
-exit 0
-EOF
-
-# pgrep -P <pid> -> a child iff still "busy". With MOCK_BUSY_DROP_AFTER=n the mock reports busy for
-# the first n calls and idle afterwards (a job that ends mid-sweep).
+# pgrep -P <pid> -> a child iff the runner is "busy" right now.
+#   MOCK_BUSY=1              : busy for the whole sweep
+#   MOCK_BUSY_DROP_AFTER=<n> : busy for the first n calls, then idle (a job ENDING mid-sweep)
+#   MOCK_BUSY_FROM=<phase>   : idle until the sweep reaches <phase>, busy after (a job STARTING
+#                              mid-sweep). Phase-driven rather than call-counted: counting pgrep
+#                              calls silently mis-aims (any_job_running short-circuits on the
+#                              first busy service, so the budget shifts) and the case then passes
+#                              vacuously. Phases are markers the docker mock drops:
+#                                image   -> the section-3 windowed image prune has run
+#                                afprune -> the cap's default-builder `prune -af` has run
 cat >"$BIN/pgrep" <<EOF
 #!/usr/bin/env bash
+if [ -n "\${MOCK_BUSY_FROM:-}" ]; then
+  [ -f "$WORK/phase.\$MOCK_BUSY_FROM" ] && echo 4243
+  exit 0
+fi
 [ "\${MOCK_BUSY:-0}" = 1 ] || exit 0
 if [ -n "\${MOCK_BUSY_DROP_AFTER:-}" ]; then
   n=0; [ -f "$WORK/pgrep.count" ] && n="\$(cat "$WORK/pgrep.count")"
@@ -81,9 +93,10 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
   # IDLE_WAIT_SEC is forced tiny here: the real default is 600s, because under pressure the busy gate
   # WAITS for the between-jobs gap instead of pruning through a live job. Left at its default, every
   # busy+pressure case below would stall this suite for 10 minutes.
-  : > "$CALLS"; rm -f "$WORK/pgrep.count"
+  : > "$CALLS"; rm -f "$WORK/pgrep.count" "$WORK"/phase.*
   MOCK_BUSY="$1" MOCK_PCT="$2" PATH="$BIN:$PATH" \
     MOCK_CACHE="${MOCK_CACHE:-0}" MOCK_BUSY_DROP_AFTER="${MOCK_BUSY_DROP_AFTER:-}" \
+    MOCK_BUSY_FROM="${MOCK_BUSY_FROM:-}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
@@ -151,6 +164,19 @@ if grep -q 'builder prune -af' "$CALLS"; then bad "H5: unreadable cache size mus
 CACHECAP=0 MOCK_CACHE=26 run_case 0 85
 if grep -q 'builder prune -af' "$CALLS"; then bad "H6: cap=0 must disable the size cap"; else ok "H6: cap=0 disables the size cap"; fi
 unset MOCK_CACHE CACHECAP
+
+echo "[H7/H8] the size cap's busy RE-CHECKS (mutation-proven, not merely present)"
+# The #253 review mutation-tested the first re-check and found the suite stayed green without it —
+# H4 short-circuits on midjob=1 long before the re-check runs, so nothing covered it. Both cases here
+# start IDLE (the busy gate lets the sweep proceed) and a job appears at a named phase afterwards.
+MOCK_CACHE=26 MOCK_BUSY_FROM=image run_case 0 85
+if grep -q 'builder prune -af' "$CALLS"; then bad "H7: a job arriving before the cap must abort the full prune"; else ok "H7: job arriving mid-sweep aborts the full prune"; fi
+
+MOCK_CACHE=26 MOCK_BUSY_FROM=afprune run_case 0 85
+if ! grep -q 'builder prune -af' "$CALLS"; then bad "H8: the default-builder prune should still have run"
+elif grep -q 'buildx prune -af' "$CALLS"; then bad "H8: a job arriving after the default prune must abort the per-builder prunes"
+else ok "H8: job arriving after the default prune aborts the per-builder prunes"; fi
+unset MOCK_BUSY_FROM MOCK_CACHE
 
 echo "[F] stale-workspace prune: no-activity dirs removed, fresh + partially-fresh kept"
 # act_runner never deletes work/<repo-hash>; agentforge's ephemeral per-repo CI grew it to ~350-400
