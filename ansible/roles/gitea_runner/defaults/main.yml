@@ -137,6 +137,12 @@ gitea_runner_cleanup_critical_until: 1h # critical window (NEVER 0/`-a` — stil
 # finds one. MUST stay below the unit's TimeoutStartSec minus worst-case prune time.
 gitea_runner_cleanup_idle_wait_sec: 600
 gitea_runner_cleanup_idle_poll_sec: 10
+# Hard size cap for the docker build cache (bytes, 0 disables). The retention windows above CANNOT bound
+# it — the cache is actively reused so its last-used stamps keep refreshing (measured: `--filter until=1h`
+# reclaimed 1.7GB of 26GB; the CLI size-target flags and the daemon builder.gc knobs do nothing on 29.x).
+# Over this cap, an IDLE sweep runs a full `builder prune -af`: 18.12GB reclaimed on ci-runner-3, disk
+# 74% -> 62%. Destructive to warm cache, so keep the cap well above a normal working set (~14GB observed).
+gitea_runner_cleanup_cache_max_bytes: 20000000000
 gitea_runner_cleanup_actcache_max_mb: 1536 # trim the act_runner actions cache above this (critical only)
 # Prune work/<repo-hash> workspaces whose ENTIRE tree is untouched for this many hours (0 disables).
 # act_runner never deletes them and agentforge's ephemeral per-repo CI mints new ones continuously —

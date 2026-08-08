@@ -48,6 +48,9 @@ WS_PRUNE_AGE_H="${GITEA_CLEANUP_WS_PRUNE_AGE_H:-48}" # 0 disables the stale-work
 # MUST stay below the unit's TimeoutStartSec minus the worst-case prune time.
 IDLE_WAIT_SEC="${GITEA_CLEANUP_IDLE_WAIT_SEC:-600}"
 IDLE_POLL_SEC="${GITEA_CLEANUP_IDLE_POLL_SEC:-10}"
+# Hard SIZE cap for the docker build cache (bytes; 0 disables). Enforced ONLY on an idle runner, with a
+# full `builder prune -af` — see section 3b for why nothing cheaper bounds a continuously-reused cache.
+CACHE_MAX_BYTES="${GITEA_CLEANUP_CACHE_MAX_BYTES:-20000000000}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 
@@ -173,6 +176,27 @@ docker network prune -f --filter "until=$win" >/dev/null 2>&1 || true
 docker builder prune -f --filter "until=$win" >/dev/null 2>&1 || true
 prune_extra_builders "$win"
 docker image prune -af --filter "until=$win" >/dev/null 2>&1 || true
+
+# 3b. SIZE cap for the build cache — the only thing that actually bounds it. The `until=` windows above
+#     cannot: the cache is actively REUSED, so its last-used stamps keep refreshing. Measured 2026-08-08
+#     on ci-runner-3 with a 26 GB cache: `builder prune --filter until=1h` reclaimed 1.7 GB, and the CLI
+#     size-target flags (`--reserved-space` / `--max-used-space`) reclaimed 0 B. Bounding it at the daemon
+#     does not work either on Docker 29.x (builder.gc top-level knobs are silently inert; a multi-value
+#     policy filter kills dockerd at startup — see github_runner/defaults/main.yml).
+#     So: an ALL-unused prune, which is the lever that does move it (same host, same day: 18.12 GB
+#     reclaimed, disk 74% -> 62%, cache -> 0 B). It is destructive to warm cache — the next build has
+#     nothing to reuse — so it is deliberately rare: only when the cache is over CACHE_MAX_BYTES, and
+#     NEVER on the mid-job path (a full prune through a live job is exactly the GC race we removed).
+if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ]; then
+  bc_now="$(docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null \
+    | awk -F'|' '$1=="Build Cache"{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null)"
+  if is_num "$bc_now" && [ "$bc_now" -gt "$CACHE_MAX_BYTES" ]; then
+    log "build cache ${bc_now}B > cap ${CACHE_MAX_BYTES}B on an idle runner -> full builder prune"
+    docker builder prune -af >/dev/null 2>&1 || true
+    docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -vE '^$|^default$' | sort -u \
+      | while read -r b; do docker buildx prune -af --builder "$b" >/dev/null 2>&1 || true; done
+  fi
+fi
 
 # 4. critical: still very high -> hard 1h window (NOT `-af`: a <1h running build is still protected) +
 #    trim the actions cache (act_runner re-fills it). Path-guarded so we can never rm the wrong tree.
