@@ -136,7 +136,12 @@ gitea_runner_cleanup_critical_until: 1h # critical window (NEVER 0/`-a` — stil
 # Jobs average ~1.5min with frequent gaps (~74 idle sweeps/day/runner observed), so 10min nearly always
 # finds one. MUST stay below the unit's TimeoutStartSec minus worst-case prune time.
 gitea_runner_cleanup_idle_wait_sec: 600
-gitea_runner_cleanup_idle_poll_sec: 10
+gitea_runner_cleanup_idle_poll_sec: 1 # was 10; ~96% of real inter-job gaps are <=10s, so a 10s
+#   poll missed nearly all of them and pressure sweeps deferred indefinitely while disk climbed.
+# Consecutive idle reads required before believing the gap. Polling at 1s alone would sample the
+# between-steps false idle constantly; requiring ~3s of continuous quiet separates a real
+# inter-job gap from a step boundary without a signal act_runner doesn't provide.
+gitea_runner_cleanup_idle_confirm_polls: 3
 # Hard size cap for the docker build cache (bytes, 0 disables). The retention windows above CANNOT bound
 # it — the cache is actively reused so its last-used stamps keep refreshing (measured: `--filter until=1h`
 # reclaimed 1.7GB of 26GB; the CLI size-target flags and the daemon builder.gc knobs do nothing on 29.x).

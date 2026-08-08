@@ -52,7 +52,17 @@ WS_PRUNE_AGE_H="${GITEA_CLEANUP_WS_PRUNE_AGE_H:-48}" # 0 disables the stale-work
 # Busy+pressure: how long to wait for the between-jobs gap before giving up (see the busy gate below).
 # MUST stay below the unit's TimeoutStartSec minus the worst-case prune time.
 IDLE_WAIT_SEC="${GITEA_CLEANUP_IDLE_WAIT_SEC:-600}"
-IDLE_POLL_SEC="${GITEA_CLEANUP_IDLE_POLL_SEC:-10}"
+# 1s, not 10s. Measured 2026-08-08 over 6h of real CI: ~96% of the gaps between consecutive
+# jobs on a runner are <=10s (ci-runner-4: 272 of 283), so a 10s poll missed almost every one
+# and every pressure sweep deferred forever while the disk climbed. The reclaim timer in this
+# same role learned this already (30s -> 5s, for the same reason).
+IDLE_POLL_SEC="${GITEA_CLEANUP_IDLE_POLL_SEC:-1}"
+# ...but polling fast alone would make the OTHER failure worse: the busy signal reads false
+# BETWEEN a live job's steps, and a 1s poll samples those sub-second blips constantly. So idle
+# must be CONFIRMED across this many consecutive reads (~IDLE_CONFIRM_POLLS seconds of
+# continuous quiet). An inter-step blip is far shorter than an inter-job gap; requiring
+# persistence separates them without needing a signal act_runner does not offer.
+IDLE_CONFIRM_POLLS="${GITEA_CLEANUP_IDLE_CONFIRM_POLLS:-3}"
 # Hard SIZE cap for the docker build cache (bytes; 0 disables). Enforced with a full `builder prune -af`
 # on the idle path only, re-checking the busy signal first and only once disk is at/over PRESSURE_PCT —
 # see section 3b for why nothing cheaper bounds a continuously-reused cache, and for the residual race.
@@ -83,6 +93,19 @@ any_job_running() {
     if is_num "$mp" && [ "$mp" -gt 0 ] && [ -n "$(pgrep -P "$mp" 2>/dev/null || true)" ]; then return 0; fi
   done
   return 1
+}
+
+# Idle CONFIRMED: not merely "one read said no children", but quiet across IDLE_CONFIRM_POLLS
+# consecutive reads. Returns 0 (idle) only if every read is idle. Used for the wait loop's exit and
+# for the re-check before the destructive cap prune, so both reject the between-steps false idle.
+idle_confirmed() {
+  local i=0
+  while [ "$i" -lt "$IDLE_CONFIRM_POLLS" ]; do
+    any_job_running && return 1
+    i=$(( i + 1 ))
+    [ "$i" -lt "$IDLE_CONFIRM_POLLS" ] && sleep "$IDLE_POLL_SEC"
+  done
+  return 0
 }
 
 # Prune the build cache of every NON-default buildx builder. `docker builder prune` only reaches the
@@ -135,7 +158,10 @@ if [ "$busy" -eq 1 ]; then
   while [ "$waited" -lt "$IDLE_WAIT_SEC" ]; do
     sleep "$IDLE_POLL_SEC"
     waited=$(( waited + IDLE_POLL_SEC ))
-    if ! any_job_running; then busy=0; break; fi
+    # idle_confirmed() consumes IDLE_CONFIRM_POLLS-1 extra sleeps when it starts idle; count them so
+    # a long confirm cannot overrun IDLE_WAIT_SEC (and thus the unit's TimeoutStartSec).
+    if idle_confirmed; then busy=0; break; fi
+    waited=$(( waited + (IDLE_CONFIRM_POLLS - 1) * IDLE_POLL_SEC ))
   done
   if [ "$busy" -eq 0 ]; then
     log "pressure sweep waited ${waited}s for the job gap -> sweeping race-free (disk ${before}%)"
@@ -209,8 +235,8 @@ if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge 
   bc_now="$(timeout 60 docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null \
     | awk -F'|' '$1=="Build Cache"{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null)"
   if is_num "$bc_now" && [ "$bc_now" -gt "$CACHE_MAX_BYTES" ]; then
-    if any_job_running; then
-      log "build cache ${bc_now}B over cap but a job started during the sweep -> skipping full prune"
+    if ! idle_confirmed; then
+      log "build cache ${bc_now}B over cap but a job is running -> skipping full prune"
     else
       log "build cache ${bc_now}B > cap ${CACHE_MAX_BYTES}B at disk ${pct_cap}%, idle -> full builder prune"
       timeout 900 docker builder prune -af >/dev/null 2>&1 || true
@@ -224,7 +250,7 @@ if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge 
       # now. Re-read before the per-builder prunes rather than letting one check cover N+1 destructive
       # calls. (These hit each builder's own buildkitd rather than the host containerd store, so the
       # blast radius differs — but it is the same class of race, and a second read costs nothing.)
-      if [ -n "$extra_builders" ] && any_job_running; then
+      if [ -n "$extra_builders" ] && ! idle_confirmed; then
         log "job arrived during the default-builder prune -> skipping the per-builder prunes"
       else
         for xb in $extra_builders; do
