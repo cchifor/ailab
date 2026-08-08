@@ -11,8 +11,9 @@ After={{ gitea_runner_service }}
 [Service]
 Type=oneshot
 ExecStart={{ gitea_runner_cleanup_bin }}
-# Pruning tens of GB of build cache/images can take a while — don't kill it mid-prune.
-TimeoutStartSec=900
+# Pruning tens of GB of build cache/images can take a while — don't kill it mid-prune. Must also cover
+# the busy-gate's idle wait (gitea_runner_cleanup_idle_wait_sec, default 600s) that precedes the prune.
+TimeoutStartSec=1800
 # Lowest priority: cleanup must never starve a job that arrives; nice + idle I/O.
 Nice=15
 IOSchedulingClass=best-effort

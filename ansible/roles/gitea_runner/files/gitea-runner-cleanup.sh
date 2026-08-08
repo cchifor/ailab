@@ -17,6 +17,9 @@
 #     live job's containers are younger than its timeout, so they are never touched.
 #   * images / build-cache / networks: pruned only with a retention WINDOW (`--filter until=`), so
 #     in-use and recently-used entries are always kept (a fresh build reuses recent cache/images).
+#     NB the window bounds WHAT IS DELETED — it does NOT make a prune safe to run alongside a job.
+#     The prune's containerd GC pass can reap an in-flight pull's lease regardless of the filter, so
+#     concurrency is governed by the busy gate below, never by the window. (2026-08-08 RCA.)
 #   * NO `docker volume prune` (a job's data volumes are irreplaceable — reclaimed only via image/cache).
 # The idle check below is therefore only a cheap "skip the work while obviously busy" optimization, not
 # the safety mechanism. Best-effort; ALWAYS exits 0.
@@ -41,6 +44,10 @@ ACTCACHE_DIR="${GITEA_CLEANUP_ACTCACHE_DIR:-/home/runner/act-runner/.cache/actca
 ACTCACHE_MAX_MB="${GITEA_CLEANUP_ACTCACHE_MAX_MB:-1536}"
 WORKDIR_PARENT="${GITEA_RUNNER_WORKDIR_PARENT:-/home/runner/act-runner/work}"
 WS_PRUNE_AGE_H="${GITEA_CLEANUP_WS_PRUNE_AGE_H:-48}" # 0 disables the stale-workspace prune
+# Busy+pressure: how long to wait for the between-jobs gap before giving up (see the busy gate below).
+# MUST stay below the unit's TimeoutStartSec minus the worst-case prune time.
+IDLE_WAIT_SEC="${GITEA_CLEANUP_IDLE_WAIT_SEC:-600}"
+IDLE_POLL_SEC="${GITEA_CLEANUP_IDLE_POLL_SEC:-10}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 
@@ -84,20 +91,57 @@ prune_extra_builders() {
 before="$(disk_pct)"; is_num "$before" || before=0
 busy=0; any_job_running && busy=1 || true # `|| true`: keep the compound exit 0 (robust if `set -e` is ever added)
 
-# Pressure-aware busy gate (fix for the ENOSPC starvation death spiral). Every prune below is
-# safe-by-construction: it uses a retention window (`--filter until=`) LONGER than a job's max wall-clock
-# (the pressure window 6h > the 3h job timeout, mirroring REAP_AGE 4h > 3h), so it can never remove a
-# resource a live/recent build is using. The busy check is therefore ONLY an optimisation that suppresses
-# the ROUTINE (non-pressure) sweep — it must NEVER suppress the pressure/critical reclaim. The old code
-# exited unconditionally when busy, so on a runner kept continuously busy by back-to-back jobs the
-# pressure reclaim NEVER ran and the disk climbed to 100% (ci-runner-2). See the cchifor/platform CI
-# ENOSPC incident.
+# ---- busy gate: two failure modes to avoid AT ONCE --------------------------------------------
+# (a) ENOSPC starvation. A runner kept busy by back-to-back jobs never gets swept and climbs to 100%,
+#     after which EVERY job dies at actions/checkout (ci-runner-2; the platform ENOSPC incident). That
+#     is why the original unconditional busy-exit was replaced by an override that pruned anyway once
+#     disk >= PRESSURE_PCT.
+# (b) Mid-job prune damage — what that override then caused. ANY docker prune triggers a containerd
+#     content-store GC pass, and that pass reaps the leases protecting an IN-FLIGHT `docker pull`. The
+#     job dies with `lease does not exist: not found`, a manifest 404, or a daemon API timeout,
+#     depending on where it was when the GC landed (which is why the symptom appeared to move between
+#     subsystems). Crucially this happens even when the prune frees NOTHING, so the `--filter until=`
+#     retention window does NOT prevent it: the window governs what is SELECTED for deletion, not the
+#     GC pass itself. Measured 2026-08-08: 472 mid-job prunes in 7d across the fleet, and a job with a
+#     prune inside its window failed ~3x more often than one without (5-15min jobs: 52.6% vs 19.0%) —
+#     roughly 10 avoidable red CI jobs a day.
+# Resolution: disk pressure no longer buys the right to prune THROUGH a job. It buys the right to WAIT
+# for the gap between jobs (capacity=1, so gaps are frequent — ~74 idle sweeps/day observed per runner)
+# and sweep there, race-free. Only a genuinely CRITICAL disk with no gap available still prunes through
+# a live job: one red job beats ENOSPC reding every job. The disk should rarely get there at all now
+# that the build cache is capped at the daemon (builder.gc maxUsedSpace, github_runner/daemon.json.j2)
+# instead of being chased by this timer.
 if [ "$busy" -eq 1 ] && [ "$before" -lt "$PRESSURE_PCT" ]; then
   log "skip routine sweep: co-located runner busy and disk ${before}% < ${PRESSURE_PCT}% pressure"
-  write_beacon "busy_skip 1" "last_run_seconds $(date +%s)" "disk_used_percent ${before}"
+  write_beacon "busy_skip 1" "midjob_prune 0" "last_run_seconds $(date +%s)" "disk_used_percent ${before}"
   exit 0
 fi
-[ "$busy" -eq 1 ] && log "pressure override: disk ${before}% >= ${PRESSURE_PCT}% -> window-safe reclaim despite busy runner"
+
+midjob=0
+if [ "$busy" -eq 1 ]; then
+  # Under pressure AND busy: wait for the between-jobs gap instead of racing the daemon. The unit's
+  # TimeoutStartSec must exceed IDLE_WAIT_SEC + the prune itself; the timer is OnUnitInactiveSec (from
+  # FINISH), so waiting here just spaces the next tick — it can never overlap this run.
+  waited=0
+  while [ "$waited" -lt "$IDLE_WAIT_SEC" ]; do
+    sleep "$IDLE_POLL_SEC"
+    waited=$(( waited + IDLE_POLL_SEC ))
+    if ! any_job_running; then busy=0; break; fi
+  done
+  if [ "$busy" -eq 0 ]; then
+    log "pressure sweep waited ${waited}s for the job gap -> sweeping race-free (disk ${before}%)"
+  else
+    pct_now="$(disk_pct)"; is_num "$pct_now" || pct_now="$before"
+    if [ "$pct_now" -ge "$CRITICAL_PCT" ]; then
+      midjob=1
+      log "CRITICAL disk ${pct_now}% and no job gap in ${IDLE_WAIT_SEC}s -> pruning THROUGH a live job (ENOSPC would red every job)"
+    else
+      log "defer: disk ${pct_now}% >= ${PRESSURE_PCT}% but < ${CRITICAL_PCT}% and busy for ${IDLE_WAIT_SEC}s -> skip; next tick retries"
+      write_beacon "busy_skip 1" "midjob_prune 0" "last_run_seconds $(date +%s)" "disk_used_percent ${pct_now}"
+      exit 0
+    fi
+  fi
+fi
 
 # 1. stopped containers — always safe (never touches running).
 docker container prune -f >/dev/null 2>&1 || true
@@ -159,7 +203,7 @@ fi
 #    tree is older than the age gate. SAFE-BY-CONSTRUCTION like every op above: the gate (48h default)
 #    >> the 3h job timeout and a job freshens its checkout at start, so a live/recent workspace always
 #    trips the -newermt probe (which short-circuits on the first fresh entry). Path-guarded like the
-#    actcache trim; runs even under the busy+pressure override because the age gate is the safety.
+#    actcache trim. Reached only from an idle sweep, or from the critical last-resort path above.
 ws_pruned=0; ws_count=0
 if is_num "$WS_PRUNE_AGE_H" && [ "$WS_PRUNE_AGE_H" -gt 0 ] && [ -d "$WORKDIR_PARENT" ]; then
   case "$WORKDIR_PARENT" in
@@ -186,7 +230,7 @@ dfsize() { docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null | awk -F'
 bc_bytes="$(dfsize 'Build Cache')"; is_num "$bc_bytes" || bc_bytes=0
 img_bytes="$(dfsize 'Images')"; is_num "$img_bytes" || img_bytes=0
 log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), pruned ${ws_pruned} workspace(s) (${ws_count} left), build-cache ${bc_bytes}B"
-write_beacon "busy_skip 0" "last_run_seconds $(date +%s)" "disk_used_percent ${after}" \
+write_beacon "busy_skip 0" "midjob_prune ${midjob}" "last_run_seconds $(date +%s)" "disk_used_percent ${after}" \
   "disk_freed_percent ${freed}" "reaped_containers ${reaped}" \
   "workspaces ${ws_count}" "workspaces_pruned ${ws_pruned}" \
   "build_cache_bytes ${bc_bytes}" "images_bytes ${img_bytes}"

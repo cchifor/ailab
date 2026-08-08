@@ -43,6 +43,21 @@ github_runner_memory_high: "9G"
 github_runner_cpu_quota: "760%" # ~8 vCPU, leaving headroom for dockerd + OS
 github_runner_tasks_max: 16384
 
+# ---- docker build-cache GC (/etc/docker/daemon.json) ----
+# BuildKit's OWN GC, which is the only thing that bounds the build cache continuously and without
+# racing a running job. This replaces `defaultKeepStorage`, which is DEPRECATED on Docker 28+ and was
+# in any case a FLOOR (space to keep), not a cap: the runners sat at 14-27.5 GB of build cache under a
+# nominal "10GB" setting, which pinned root-fs use in the 60-82% band, permanently arming the cleanup
+# timer's disk-pressure path (2026-08-08 RCA — that pressure path is what reded ~10 CI jobs/day).
+#   reservedSpace — never GC below this much cache (keeps warm layers so builds stay fast)
+#   maxUsedSpace  — the actual CAP; GC prunes back down whenever the cache exceeds it
+#   minFreeSpace  — additionally GC whenever the filesystem has less than this free
+# Schema verified against the live daemon with `dockerd --validate --config-file` (Docker 29.6.2, OK).
+# Changing these RESTARTS docker (role handler) — roll one runner at a time, and only while idle.
+github_runner_builder_gc_reserved_space: "4GB"
+github_runner_builder_gc_max_used_space: "10GB"
+github_runner_builder_gc_min_free_space: "20GB"
+
 # ---- toolchain ----
 # Docker Compose pinned to the exact version platform's CI pins (e2e-preflight: "Pin Docker Compose
 # v2.31.0"). Installed as a CLI plugin binary for determinism (independent of the apt repo's churn).

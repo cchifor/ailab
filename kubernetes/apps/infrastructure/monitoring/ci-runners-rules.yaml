@@ -54,14 +54,14 @@ spec:
               The 6h trend for runner {{ $labels.instance }} projects the root filesystem reaching 0
               free within 4h — early warning before jobs fail on ENOSPC. Check `docker system df` and
               whether gitea-runner-cleanup.sh is keeping up (its escalation tightens the retention
-              window to 6h at 75% disk and to a 1h window + actcache trim at 92%, and now runs even
-              while a job is in flight).
+              window to 6h at 75% disk and to a 1h window + actcache trim at 92%; when a job is in
+              flight it waits for the between-jobs gap rather than pruning through it).
         # A runner this close to full is about to fail EVERY job at actions/checkout with ENOSPC
         # (`copy_file_range: no space left on device`) and become a job-blackhole reding whole runs —
         # the exact fleet-wide outage of 2026-07-11. CRITICAL (paging), unlike the 12% warning above,
-        # with a short window so it escalates before the runner starts eating jobs. Since
-        # gitea-runner-cleanup now runs its window-safe pressure/critical prune EVEN WHILE BUSY, a
-        # runner reaching 5% means the cleanup is genuinely out-run or wedged — act, don't wait.
+        # with a short window so it escalates before the runner starts eating jobs. gitea-runner-cleanup
+        # will prune through a live job once disk >= 92% (its last-resort path), so a runner still
+        # reaching 5% means the cleanup is genuinely out-run or wedged — act, don't wait.
         - alert: CIRunnerDiskCritical
           expr: |
             node_filesystem_avail_bytes{job="ci-runner-node",mountpoint="/"}
@@ -149,15 +149,48 @@ spec:
         # CIRunnerDiskFilling. Post-cleanup (not a mid-run peak) so a spike that was immediately pruned
         # can't false-fire. Migrated off the (now-absent) GitHub runner_docker_build_cache_bytes.
         - alert: CIRunnerBuildCacheHigh
-          expr: gitea_runner_cleanup_build_cache_bytes{job="ci-runner-node"} > 25e9
+          expr: gitea_runner_cleanup_build_cache_bytes{job="ci-runner-node"} > 14e9
           for: 30m
           labels: { severity: warning }
           annotations:
-            summary: "CI runner {{ $labels.instance }} docker build cache >25 GB after cleanup"
+            summary: "CI runner {{ $labels.instance }} docker build cache >14 GB after cleanup"
             description: >-
-              Runner {{ $labels.instance }} build cache is >25 GB even after gitea-runner-cleanup.sh
-              (post-cleanup value from its beacon) — the dominant disk accumulator isn't being cleared:
-              CI is out-running the 24h retention (the pressure escalation should tighten it at 75% disk,
-              even while busy) or the cleanup is wedged. Inspect `docker system df`, `docker builder du`, and
-              `journalctl -t gitea-runner-cleanup`. CIRunnerDiskFilling/WillFillSoon backstop actual
-              disk exhaustion.
+              Runner {{ $labels.instance }} build cache is >14 GB even after gitea-runner-cleanup.sh
+              (post-cleanup value from its beacon). The cache is capped at the daemon by BuildKit's own
+              GC (builder.gc maxUsedSpace 10GB, github_runner/daemon.json.j2), so a sustained value above
+              it means that GC is not in effect — daemon.json not applied, docker not restarted since the
+              change, or the schema silently ignored. Check `docker info`, `docker buildx du`, and
+              /etc/docker/daemon.json. Threshold was 25 GB while the timer chased the cache by hand.
+        # ---- the 2026-08-08 mid-job-prune RCA: the two signals that were missing ----
+        # 1. Did the cleanup prune THROUGH a live job? Post-fix this is a last-resort action taken only at
+        # CRITICAL disk after a failed idle wait, so ANY occurrence is worth a look: a prune's containerd
+        # GC pass can kill an in-flight `docker pull` (`lease does not exist: not found`), which is what
+        # reded ~10 CI jobs/day when this ran routinely at 75%.
+        - alert: CIRunnerMidJobPrune
+          expr: gitea_runner_cleanup_midjob_prune{job="ci-runner-node"} == 1
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} pruned docker THROUGH a running job"
+            description: >-
+              gitea-runner-cleanup.sh on {{ $labels.instance }} hit CRITICAL disk with no between-jobs gap
+              within its idle wait, so it pruned while a job was in flight — the lesser evil vs ENOSPC, but
+              it can red that job with a lease/manifest/daemon-timeout error. The disk should not be
+              reaching critical now that the build cache is capped: check `docker system df`,
+              `journalctl -t gitea-runner-cleanup`, and whether something new is filling the disk.
+        # 2. The leading indicator that was absent entirely: disk parked in the pressure band. It never
+        # trips CIRunnerDiskFilling (<12% free), so runners sat at 75-82% for weeks with the cleanup's
+        # pressure path permanently armed and nothing paging. This is the signal that the cache cap has
+        # stopped holding, well before ENOSPC is in play.
+        - alert: CIRunnerDiskPressureSustained
+          expr: gitea_runner_cleanup_disk_used_percent{job="ci-runner-node"} >= 75
+          for: 2h
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} root fs >=75% for 2h (cleanup pressure path armed)"
+            description: >-
+              Runner {{ $labels.instance }} has been at or above the cleanup's pressure threshold for 2h.
+              Every sweep now has to wait for a job gap, and at 92% it will prune through a live job.
+              Expected resting state is ~60-65% with the BuildKit cache cap in place, so this means
+              something is growing that the cap does not cover (images, actcache, workspaces, or logs):
+              `docker system df`, `du -sh /var/lib/containerd /home/runner/act-runner`.
