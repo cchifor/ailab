@@ -1,0 +1,58 @@
+# gitea_runner script tests — the check that would have caught two silent regressions.
+#
+# WHY THIS EXISTS: ansible/roles/gitea_runner/tests/test-cleanup.sh has existed for a while and
+# `just test-gitea-runner` runs it, but NOTHING ran it on a PR. It therefore rotted unnoticed through
+# two changes: #249 removed the "prune even while busy" behaviour that case B pinned, and the suite
+# did not go red — it HUNG, ten minutes per busy case, because the new busy gate waits for the
+# between-jobs gap and the harness never overrode the 600s default. A suite nobody runs is not a
+# safety net, and this repo's scripts drive `docker prune` as root on five shared CI runners.
+#
+# WHY .gitea/ AND NOT .github/: Gitea reads .gitea/workflows and, once that directory exists, ignores
+# .github/workflows entirely. This repo already has .gitea/workflows/broker-inventory.yaml, so the
+# convention is set.
+#
+# FAIL CLOSED, following broker-inventory.yaml:
+#   * ONE job, no `needs:`, no matrix, no aggregator — the estate has already shipped a gate that
+#     could not fail (`join(needs.*.result)` is an EMPTY STRING on act_runner, so the loop body never
+#     ran and the gate passed unconditionally). There is no result aggregation here to get wrong: the
+#     check's exit status IS the scripts' exit status.
+#   * No `continue-on-error`, no `|| true`, no soft skips.
+#   * A timeout, because the failure mode these tests actually had was a HANG, not a failure. A hung
+#     job that eventually gets cancelled is a red check; a hung job with no timeout is a runner slot
+#     held hostage.
+name: runner-scripts
+
+on:
+  pull_request:
+    paths:
+      - "ansible/roles/gitea_runner/files/**"
+      - "ansible/roles/gitea_runner/tests/**"
+      - "ansible/roles/gitea_runner/templates/**"
+      - "ansible/roles/gitea_runner/defaults/**"
+      - ".gitea/workflows/runner-scripts.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "ansible/roles/gitea_runner/**"
+
+jobs:
+  runner-scripts:
+    name: runner-scripts
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    # Both suites are mocked (no docker, no VM) and finish in ~1-2 minutes. 10 is generous headroom
+    # that still fails fast if a case regresses into the hang these tests are meant to prevent.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: cleanup-script behaviour (mocked docker/df/systemctl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ansible/roles/gitea_runner/tests/test-cleanup.sh
+
+      - name: workspace-reclaim behaviour (mocked)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ansible/roles/gitea_runner/tests/test-reclaim.sh
