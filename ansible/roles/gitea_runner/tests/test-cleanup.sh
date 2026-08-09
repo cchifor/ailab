@@ -52,43 +52,45 @@ cat >"$BIN/df" <<EOF
 echo "Use%"; echo " \${MOCK_PCT:-0}%"
 EOF
 
-# systemctl show -p MainPID --value <svc> -> ALWAYS a live pid: the runner daemon is always
-# running; what varies is whether it has job children. Keeping this constant makes pgrep the
-# single source of "busy", which is what lets a case flip idle->busy partway through a sweep.
+# systemctl: `show -p MainPID` -> always a live pid (the daemon is always running; what varies is
+# whether it has job children). `is-active --quiet <svc>` -> success, i.e. the co-located peer unit
+# exists, which is what the peer branch gates on before probing for its per-job worker.
 cat >"$BIN/systemctl" <<EOF
 #!/usr/bin/env bash
-echo 4242
+case "\$*" in
+  *is-active*) exit 0 ;;
+  *) echo 4242 ;;
+esac
 EOF
 
-# pgrep -P <pid> -> a child iff the runner is "busy" right now.
-#   MOCK_BUSY=1              : busy for the whole sweep
-#   MOCK_BUSY_DROP_AFTER=<n> : busy for the first n calls, then idle (a job ENDING mid-sweep)
-#   MOCK_BUSY_FROM=<phase>   : idle until the sweep reaches <phase>, busy after (a job STARTING
-#                              mid-sweep). Phase-driven rather than call-counted: counting pgrep
-#                              calls silently mis-aims (any_job_running short-circuits on the
-#                              first busy service, so the budget shifts) and the case then passes
-#                              vacuously. Phases are markers the docker mock drops:
-#                                image   -> the section-3 windowed image prune has run
-#                                afprune -> the cap's default-builder `prune -af` has run
-#   MOCK_BUSY_UNTIL=<phase>  : busy UNTIL the sweep reaches <phase>, idle after. The inverse of
-#                              MOCK_BUSY_FROM, and the only way to reach the size cap with
-#                              midjob=1 AND an idle re-check — i.e. to test the midjob gate
-#                              itself rather than the re-check that shadows it.
+# pgrep. Two DISTINCT uses in the script, and the mock must honour both, including exit codes —
+# real pgrep exits 1 when nothing matches, and the peer branch tests the EXIT STATUS rather than
+# the output. An earlier version of this mock always exited 0, which made every peer probe read
+# "busy" and silently broke five cases.
+#   pgrep -P <pid>  -> OUR act_runner's job children. Honours MOCK_BUSY / _DROP_AFTER / _FROM / _UNTIL.
+#   pgrep -f <re>   -> the PEER GitHub agent's per-job worker (Runner.Worker). Honours MOCK_PEER_JOB
+#                      only: its supervisor always has a helper child, so "has children" is NOT a
+#                      valid busy signal for it and the script must not use one.
 cat >"$BIN/pgrep" <<EOF
 #!/usr/bin/env bash
+case "\$*" in
+  *-f*)
+    [ "\${MOCK_PEER_JOB:-0}" = 1 ] && { echo 5150; exit 0; }
+    exit 1 ;;
+esac
 if [ -n "\${MOCK_BUSY_FROM:-}" ]; then
-  [ -f "$WORK/phase.\$MOCK_BUSY_FROM" ] && echo 4243
-  exit 0
+  [ -f "$WORK/phase.\$MOCK_BUSY_FROM" ] && { echo 4243; exit 0; }
+  exit 1
 fi
 if [ -n "\${MOCK_BUSY_UNTIL:-}" ]; then
-  [ -f "$WORK/phase.\$MOCK_BUSY_UNTIL" ] || echo 4243
-  exit 0
+  [ -f "$WORK/phase.\$MOCK_BUSY_UNTIL" ] && exit 1
+  echo 4243; exit 0
 fi
-[ "\${MOCK_BUSY:-0}" = 1 ] || exit 0
+[ "\${MOCK_BUSY:-0}" = 1 ] || exit 1
 if [ -n "\${MOCK_BUSY_DROP_AFTER:-}" ]; then
   n=0; [ -f "$WORK/pgrep.count" ] && n="\$(cat "$WORK/pgrep.count")"
   n=\$((n+1)); echo "\$n" > "$WORK/pgrep.count"
-  [ "\$n" -gt "\$MOCK_BUSY_DROP_AFTER" ] && exit 0
+  [ "\$n" -gt "\$MOCK_BUSY_DROP_AFTER" ] && exit 1
 fi
 echo 4243
 exit 0
@@ -105,6 +107,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
   MOCK_BUSY="$1" MOCK_PCT="$2" PATH="$BIN:$PATH" \
     MOCK_CACHE="${MOCK_CACHE:-0}" MOCK_BUSY_DROP_AFTER="${MOCK_BUSY_DROP_AFTER:-}" \
     MOCK_BUSY_FROM="${MOCK_BUSY_FROM:-}" MOCK_BUSY_UNTIL="${MOCK_BUSY_UNTIL:-}" \
+    MOCK_PEER_JOB="${MOCK_PEER_JOB:-0}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
@@ -197,6 +200,18 @@ echo "[H9] the midjob GATE itself (not the re-check that shadows it)"
 MOCK_CACHE=26 MOCK_BUSY_UNTIL=image run_case 1 95
 if grep -q 'builder prune -af' "$CALLS"; then bad "H9: the midjob gate must block the full prune even when the re-check reads idle"; else ok "H9: midjob gate blocks the full prune when the re-check reads idle"; fi
 unset MOCK_BUSY_UNTIL MOCK_CACHE
+
+echo "[I] the PEER runner's busy signal is its per-job worker, not its supervisor's child"
+# The co-located GitHub agent runs a supervisor (run.sh) that ALWAYS has a run-helper.sh child. Using
+# "MainPID has children" for it made the peer read BUSY permanently, so no idle window ever existed
+# and this timer starved while disks climbed to 93% (measured 2026-08-08, zero gap-catches fleet-wide).
+# The mock reflects that shape: pgrep -f matches ONLY when a peer job is actually running.
+MOCK_PEER_JOB=0 run_case 0 50
+assert_has "image prune -af --filter until=48h" "I1: peer idle (supervisor child only) -> sweep runs"
+
+MOCK_PEER_JOB=1 run_case 0 50
+assert_none "I2: peer running a real job -> sweep skipped (shared daemon)"
+unset MOCK_PEER_JOB
 
 echo "[F] stale-workspace prune: no-activity dirs removed, fresh + partially-fresh kept"
 # act_runner never deletes work/<repo-hash>; agentforge's ephemeral per-repo CI grew it to ~350-400

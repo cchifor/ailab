@@ -166,4 +166,9 @@ gitea_runner_cleanup_infra_exclude_re: "buildkit|buildx"
 # Co-located runner services that ALSO share this Docker daemon — treated as "busy" so cleanup skips work
 # while EITHER pool runs a job (the GitHub self-hosted agent during the forge-migration bake-in).
 gitea_runner_cleanup_peer_services: "actions.runner.cchifor-platform.service"
+# The peer is busy iff its per-job worker process exists. The GitHub agent's unit runs a supervisor
+# (run.sh) that ALWAYS has a run-helper.sh child, so the "MainPID has children" test read BUSY
+# permanently and starved this timer of idle windows entirely (measured 2026-08-08: zero gap-catches
+# fleet-wide in 90 minutes while disks climbed to 93%). Runner.Worker exists only during a job.
+gitea_runner_cleanup_peer_job_process_re: "Runner\\.Worker"
 gitea_runner_cleanup_beacon: true # node_exporter textfile beacon (gitea_runner_cleanup_*.prom)

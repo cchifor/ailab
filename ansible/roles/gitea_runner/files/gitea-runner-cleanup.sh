@@ -84,13 +84,31 @@ write_beacon() {
   mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
 }
 
-# Best-effort "obviously busy" check across ALL co-located runners (shared daemon). NOT the safety
-# mechanism (see header) — just avoids doing work mid-job. A runner is busy iff its daemon has children.
+# Busy check across the co-located runners sharing this Docker daemon. The two runners need DIFFERENT
+# signals, and using one for both is what starved this timer:
+#
+#   * act_runner (ours) spawns the job's step processes directly under its MainPID, so "MainPID has
+#     children" really does mean "a job is running". (It reads false briefly BETWEEN steps — hence
+#     idle_confirmed() below, which requires the quiet to persist.)
+#   * The GitHub agent does NOT work that way. Its unit runs a supervisor, `run.sh`, which ALWAYS has
+#     a `run-helper.sh` child whether or not a job is running. Applying the children test to it made
+#     the peer read BUSY permanently, so the sweep could never see an idle window: measured
+#     2026-08-08 on ci-runner-2/4/5 — gitea children 0 (idle), peer children 1 (its helper), and
+#     ZERO gap-catches fleet-wide in 90 minutes while disks climbed to 93%. The agent's real per-job
+#     process is Runner.Worker, which exists only while a job runs, so match that instead.
+#
+# This is deliberately narrow: a wrong answer here either starves reclamation (what happened) or
+# prunes through a live job (the containerd-GC race). Fail toward "busy" — an unreadable signal must
+# not be read as idle.
+PEER_JOB_PROCESS_RE="${GITEA_CLEANUP_PEER_JOB_PROCESS_RE:-Runner\.Worker}"
+
 any_job_running() {
   local svc mp
-  for svc in "$SERVICE" $PEER_SERVICES; do
-    mp="$(systemctl show -p MainPID --value "$svc" 2>/dev/null || echo 0)"
-    if is_num "$mp" && [ "$mp" -gt 0 ] && [ -n "$(pgrep -P "$mp" 2>/dev/null || true)" ]; then return 0; fi
+  mp="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)"
+  if is_num "$mp" && [ "$mp" -gt 0 ] && [ -n "$(pgrep -P "$mp" 2>/dev/null || true)" ]; then return 0; fi
+  for svc in $PEER_SERVICES; do
+    systemctl is-active --quiet "$svc" 2>/dev/null || continue
+    if pgrep -f "$PEER_JOB_PROCESS_RE" >/dev/null 2>&1; then return 0; fi
   done
   return 1
 }
