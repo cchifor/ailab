@@ -65,7 +65,7 @@ case "\$*" in
     echo "\$st"; [ "\$st" = active ] && exit 0 || exit 3 ;;
   *MainPID*)
     [ "\${MOCK_SYSTEMCTL_FAIL:-0}" = 1 ] && exit 1
-    echo 4242 ;;
+    echo "\${MOCK_MAINPID:-4242}" ;;
   *) : ;;
 esac
 EOF
@@ -118,6 +118,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_BUSY_FROM="${MOCK_BUSY_FROM:-}" MOCK_BUSY_UNTIL="${MOCK_BUSY_UNTIL:-}" \
     MOCK_PEER_JOB="${MOCK_PEER_JOB:-0}" MOCK_PEER_STATE="${MOCK_PEER_STATE:-active}" \
     MOCK_PEER_PROBE_RC="${MOCK_PEER_PROBE_RC:-}" MOCK_SYSTEMCTL_FAIL="${MOCK_SYSTEMCTL_FAIL:-0}" \
+    MOCK_MAINPID="${MOCK_MAINPID:-4242}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
@@ -243,8 +244,17 @@ assert_none "J4: peer probe ERROR (pgrep rc=2, not 'no match') -> BUSY, no prune
 MOCK_SYSTEMCTL_FAIL=1 run_case 0 50
 assert_none "J5: our own MainPID unreadable -> BUSY, no prune"
 
-MOCK_PEER_STATE=inactive run_case 0 50
-assert_has "image prune -af --filter until=48h" "J6: peer CONFIRMED inactive -> idle, sweep runs"
+# MOCK_PEER_JOB=1 is what makes this bite: with no peer job the probe returns "no match" and the sweep
+# would run whether or not the `inactive` branch fires, so the case passed vacuously and a deleted
+# `continue` went unnoticed. With a worker present, ONLY the inactive skip can let the sweep proceed.
+MOCK_PEER_STATE=inactive MOCK_PEER_JOB=1 run_case 0 50
+assert_has "image prune -af --filter until=48h" "J6: peer CONFIRMED inactive -> idle even with a stray worker match"
+
+# The own-arm has TWO fail-safe modes and J5 only covers one: a read that FAILS. A read that succeeds
+# but returns junk is caught further on by is_num, and nothing exercised it.
+MOCK_MAINPID=notanumber run_case 0 50
+assert_none "J8: non-numeric MainPID -> BUSY, no prune"
+unset MOCK_MAINPID
 unset MOCK_PEER_STATE MOCK_PEER_JOB MOCK_PEER_PROBE_RC MOCK_SYSTEMCTL_FAIL
 
 echo "[F] stale-workspace prune: no-activity dirs removed, fresh + partially-fresh kept"

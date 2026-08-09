@@ -123,7 +123,11 @@ any_job_running() {
     # Only a CONFIRMED `inactive` proves the peer has no job. active/activating/deactivating/failed
     # can all coexist with a live worker, and a systemctl/DBus failure tells us nothing at all — so
     # everything except `inactive` falls through to the worker probe rather than being skipped.
-    state="$(systemctl is-active "$svc" 2>/dev/null)" || state="unreadable"
+    # NB `systemctl is-active` PRINTS the state and EXITS NONZERO for anything but active — 3 for
+    # `inactive`. A `cmd || fallback` assignment therefore clobbers the very value we want, making the
+    # `inactive` test below unreachable and turning this into a host-global probe on every tick.
+    # Capture first, and only fall back when nothing was printed at all (systemctl/DBus truly failed).
+    state="$(systemctl is-active "$svc" 2>/dev/null)"; [ -n "$state" ] || state="unreadable"
     [ "$state" = "inactive" ] && continue
     # pgrep: 0 = matched (busy), 1 = definitively no match (idle). ANY other rc is an error — a bad
     # regex override, a /proc read failure — and must NOT be read as "no job", because idle_confirmed()
