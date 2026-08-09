@@ -172,6 +172,22 @@ spec:
         # (cchifor + the orchestrator), same trust as the LAN CIDR above.
         webhook:
           ALLOWED_HOST_LIST: "external, 192.168.0.0/24, 10.96.0.0/12"
+        # Periodic `git gc` on every repository. OFF by default in Gitea, and the cost of leaving it
+        # off is paid on every clone: CI fetches this forge constantly (5 runners, many jobs each), and
+        # each fetch runs git-upload-pack, which must search every pack and loose object in the repo.
+        # Measured 2026-08-09, cchifor/platform: 47 packs + 7,639 loose objects in 98 MB, and every
+        # upload-pack slow-logged at ~3.5s (15 of them inside 10 minutes). A single `git gc` took 5s
+        # and left 2 packs + 1 loose object at 38 MB. The other active repos were the same shape
+        # (agentforge-platform 43M->6M, ailab 22M->5M, agentforge 28M->4M).
+        # SCHEDULE is deliberately off-hours and infrequent: gc rewrites packs, so it is I/O-heavy on
+        # the shared qnap-iscsi volume this repo store lives on, and there is no reason to contend
+        # with the CI peak for it. TIMEOUT is generous — the largest repo here finishes in seconds,
+        # but a repo that has never been packed can take far longer than the 60s default.
+        "cron.git_gc_repos":
+          ENABLED: true
+          RUN_AT_START: false
+          SCHEDULE: "@midnight"
+          TIMEOUT: 10m
         # ── Gitea Actions (forge migration, ADR 0017) ──────────────────────────────────────────────
         repository:
           # Adds repo.actions to the default unit set — NEW repos only. Existing repos (platform,
