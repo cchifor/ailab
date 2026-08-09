@@ -98,17 +98,42 @@ write_beacon() {
 #     process is Runner.Worker, which exists only while a job runs, so match that instead.
 #
 # This is deliberately narrow: a wrong answer here either starves reclamation (what happened) or
-# prunes through a live job (the containerd-GC race). Fail toward "busy" — an unreadable signal must
-# not be read as idle.
+# prunes through a live job (the containerd-GC race). Every uncertain read below therefore returns
+# BUSY — see the per-branch notes in any_job_running(), which implement that rather than assert it.
 PEER_JOB_PROCESS_RE="${GITEA_CLEANUP_PEER_JOB_PROCESS_RE:-Runner\.Worker}"
 
+# EVERY uncertain answer below returns BUSY. That is not decoration: an unreadable signal misread as
+# idle is how a prune reaches a live job, which is the failure this entire gate exists to prevent.
+# Costs of the two directions are asymmetric — a false BUSY delays reclamation by one tick (~15min),
+# a false IDLE can red a running job and, at worst, corrupt an in-flight pull.
 any_job_running() {
-  local svc mp
-  mp="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0)"
-  if is_num "$mp" && [ "$mp" -gt 0 ] && [ -n "$(pgrep -P "$mp" 2>/dev/null || true)" ]; then return 0; fi
+  local svc mp state rc
+  # OURS: children of MainPID. `systemctl show` failing, or returning something non-numeric, means we
+  # do not know what the daemon is doing — so assume it is working.
+  if ! mp="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)"; then
+    log "cannot read $SERVICE MainPID -> assuming BUSY"; return 0
+  fi
+  if ! is_num "$mp"; then
+    log "unreadable $SERVICE MainPID '$mp' -> assuming BUSY"; return 0
+  fi
+  # MainPID 0 is a definite answer: the daemon is not running, so it has no job.
+  if [ "$mp" -gt 0 ] && [ -n "$(pgrep -P "$mp" 2>/dev/null || true)" ]; then return 0; fi
+
   for svc in $PEER_SERVICES; do
-    systemctl is-active --quiet "$svc" 2>/dev/null || continue
-    if pgrep -f "$PEER_JOB_PROCESS_RE" >/dev/null 2>&1; then return 0; fi
+    # Only a CONFIRMED `inactive` proves the peer has no job. active/activating/deactivating/failed
+    # can all coexist with a live worker, and a systemctl/DBus failure tells us nothing at all — so
+    # everything except `inactive` falls through to the worker probe rather than being skipped.
+    state="$(systemctl is-active "$svc" 2>/dev/null)" || state="unreadable"
+    [ "$state" = "inactive" ] && continue
+    # pgrep: 0 = matched (busy), 1 = definitively no match (idle). ANY other rc is an error — a bad
+    # regex override, a /proc read failure — and must NOT be read as "no job", because idle_confirmed()
+    # calls this repeatedly and a persistent error would otherwise look like stable quiet.
+    pgrep -f "$PEER_JOB_PROCESS_RE" >/dev/null 2>&1; rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      1) : ;;
+      *) log "peer job probe failed for $svc (pgrep rc=$rc) -> assuming BUSY"; return 0 ;;
+    esac
   done
   return 1
 }
