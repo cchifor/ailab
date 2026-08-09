@@ -61,6 +61,16 @@ ADR-0018 canary (no cred mounts, `--network none`, Kata guest kernel, egress mat
 Deployments, confirm no sandbox Jobs remain, do NOT flip.
 
 ## Activation outcome — tenant-zero playground (as of 2026-07-21)
+
+> **The account topology below is a 2026-07-21 snapshot and is NO LONGER CURRENT.** It is kept as the
+> dated activation record, not as a description of today's estate. As of 2026-08-09 the playground
+> planner, reviewer, implementer and tester all run on **`claude-max-2`** (`cchifor/agentforge-config`
+> #6 then #7 moved them off `claude-max-1`, which was sustained-rate-limited); `claude-max-1` remains
+> declared with no workers. The live binding is `accounts.<name>.workers` in `cchifor/agentforge-config`
+> — read it there, never from this file. Note also that the KEDA trigger query duplicates that account
+> name, so the two must move together (see the "KEDA scaling gotchas" section of
+> `docs/runbooks/agentforge.md`, and ailab #264).
+
 Live-driven on the seeded playground repo **`cchifor/agentforge-playground`** (uv/pytest scaffold on `main`),
 pushing issues through the state machine. Accounts (all `max_parallel: 1`): `claude-max-1` = planner/reviewer,
 `claude-max-2` = implementer, `codex-pro` = cross-reviewer, `qwen-local` = tester.
