@@ -52,14 +52,21 @@ cat >"$BIN/df" <<EOF
 echo "Use%"; echo " \${MOCK_PCT:-0}%"
 EOF
 
-# systemctl: `show -p MainPID` -> always a live pid (the daemon is always running; what varies is
-# whether it has job children). `is-active --quiet <svc>` -> success, i.e. the co-located peer unit
-# exists, which is what the peer branch gates on before probing for its per-job worker.
+# systemctl mock.
+#   show -p MainPID  -> a live pid, unless MOCK_SYSTEMCTL_FAIL=1 (then rc!=0, an unreadable signal)
+#   is-active <svc>  -> MOCK_PEER_STATE (default "active"); "unreadable" makes it exit nonzero,
+#                       which is what a systemctl/DBus failure looks like to the script
 cat >"$BIN/systemctl" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
-  *is-active*) exit 0 ;;
-  *) echo 4242 ;;
+  *is-active*)
+    st="\${MOCK_PEER_STATE:-active}"
+    [ "\$st" = unreadable ] && exit 3
+    echo "\$st"; [ "\$st" = active ] && exit 0 || exit 3 ;;
+  *MainPID*)
+    [ "\${MOCK_SYSTEMCTL_FAIL:-0}" = 1 ] && exit 1
+    echo "\${MOCK_MAINPID:-4242}" ;;
+  *) : ;;
 esac
 EOF
 
@@ -75,6 +82,8 @@ cat >"$BIN/pgrep" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
   *-f*)
+    # rc 2 models a pgrep ERROR (bad regex, /proc failure) — distinct from rc 1 "no match".
+    [ "\${MOCK_PEER_PROBE_RC:-}" = 2 ] && exit 2
     [ "\${MOCK_PEER_JOB:-0}" = 1 ] && { echo 5150; exit 0; }
     exit 1 ;;
 esac
@@ -107,7 +116,9 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
   MOCK_BUSY="$1" MOCK_PCT="$2" PATH="$BIN:$PATH" \
     MOCK_CACHE="${MOCK_CACHE:-0}" MOCK_BUSY_DROP_AFTER="${MOCK_BUSY_DROP_AFTER:-}" \
     MOCK_BUSY_FROM="${MOCK_BUSY_FROM:-}" MOCK_BUSY_UNTIL="${MOCK_BUSY_UNTIL:-}" \
-    MOCK_PEER_JOB="${MOCK_PEER_JOB:-0}" \
+    MOCK_PEER_JOB="${MOCK_PEER_JOB:-0}" MOCK_PEER_STATE="${MOCK_PEER_STATE:-active}" \
+    MOCK_PEER_PROBE_RC="${MOCK_PEER_PROBE_RC:-}" MOCK_SYSTEMCTL_FAIL="${MOCK_SYSTEMCTL_FAIL:-0}" \
+    MOCK_MAINPID="${MOCK_MAINPID:-4242}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
@@ -212,6 +223,39 @@ assert_has "image prune -af --filter until=48h" "I1: peer idle (supervisor child
 MOCK_PEER_JOB=1 run_case 0 50
 assert_none "I2: peer running a real job -> sweep skipped (shared daemon)"
 unset MOCK_PEER_JOB
+
+echo "[J] every UNCERTAIN busy signal must read BUSY, never idle"
+# Codex review of the peer-signal change: the comment promised "fail toward busy" while three
+# branches failed toward IDLE. A signal we cannot read, misread as idle, is exactly how a prune
+# reaches a live job — the failure this whole gate exists to prevent. Cost is asymmetric: a false
+# BUSY delays reclamation one tick; a false IDLE can red a running job.
+MOCK_PEER_STATE=failed MOCK_PEER_JOB=1 run_case 0 50
+assert_none "J1: peer unit 'failed' with a live worker -> BUSY, no prune"
+
+MOCK_PEER_STATE=activating MOCK_PEER_JOB=1 run_case 0 50
+assert_none "J2: peer unit 'activating' with a live worker -> BUSY, no prune"
+
+MOCK_PEER_STATE=unreadable MOCK_PEER_JOB=1 run_case 0 50
+assert_none "J3: peer state unreadable (systemctl/DBus failure) -> BUSY, no prune"
+
+MOCK_PEER_PROBE_RC=2 run_case 0 50
+assert_none "J4: peer probe ERROR (pgrep rc=2, not 'no match') -> BUSY, no prune"
+
+MOCK_SYSTEMCTL_FAIL=1 run_case 0 50
+assert_none "J5: our own MainPID unreadable -> BUSY, no prune"
+
+# MOCK_PEER_JOB=1 is what makes this bite: with no peer job the probe returns "no match" and the sweep
+# would run whether or not the `inactive` branch fires, so the case passed vacuously and a deleted
+# `continue` went unnoticed. With a worker present, ONLY the inactive skip can let the sweep proceed.
+MOCK_PEER_STATE=inactive MOCK_PEER_JOB=1 run_case 0 50
+assert_has "image prune -af --filter until=48h" "J6: peer CONFIRMED inactive -> idle even with a stray worker match"
+
+# The own-arm has TWO fail-safe modes and J5 only covers one: a read that FAILS. A read that succeeds
+# but returns junk is caught further on by is_num, and nothing exercised it.
+MOCK_MAINPID=notanumber run_case 0 50
+assert_none "J8: non-numeric MainPID -> BUSY, no prune"
+unset MOCK_MAINPID
+unset MOCK_PEER_STATE MOCK_PEER_JOB MOCK_PEER_PROBE_RC MOCK_SYSTEMCTL_FAIL
 
 echo "[F] stale-workspace prune: no-activity dirs removed, fresh + partially-fresh kept"
 # act_runner never deletes work/<repo-hash>; agentforge's ephemeral per-repo CI grew it to ~350-400
