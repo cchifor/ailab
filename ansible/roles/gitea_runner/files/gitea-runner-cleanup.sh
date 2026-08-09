@@ -67,6 +67,12 @@ IDLE_CONFIRM_POLLS="${GITEA_CLEANUP_IDLE_CONFIRM_POLLS:-3}"
 # on the idle path only, re-checking the busy signal first and only once disk is at/over PRESSURE_PCT —
 # see section 3b for why nothing cheaper bounds a continuously-reused cache, and for the residual race.
 CACHE_MAX_BYTES="${GITEA_CLEANUP_CACHE_MAX_BYTES:-20000000000}"
+# Hard SIZE cap for docker IMAGES (bytes; 0 disables). Same shape and reasoning as the build cache
+# above, for the accumulator that overtook it: 2026-08-09 on ci-runner-4, images 35 GB (24.4 GB
+# reclaimable) against 28.6 GB of cache. The `--filter until=` windows cannot bound it either — the
+# age histogram was 35 images at 2h, 21 at 7h, 8 at 1h, i.e. almost everything younger than the 6h
+# pressure window, because CI pulls and builds faster than any age rule retires them.
+IMAGE_MAX_BYTES="${GITEA_CLEANUP_IMAGE_MAX_BYTES:-20000000000}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 
@@ -246,18 +252,13 @@ for cid in $(docker ps -q 2>/dev/null || true); do
 done
 timeout 120 docker container prune -f >/dev/null 2>&1 || true
 
-# 3. window-safe prunes: images / build cache / orphaned networks OLDER than the retention window. Never
-#    removes anything in use or recently used, so it is safe regardless of the idle read. Tighten under
-#    disk pressure. (Build cache is the big one — 10-33 GB/runner.)
-pct="$(disk_pct)"; is_num "$pct" || pct=0
-win="$ROUTINE_UNTIL"; [ "$pct" -ge "$PRESSURE_PCT" ] && win="$PRESSURE_UNTIL"
-# `timeout` on each: a wedged daemon otherwise blocks the unit to TimeoutStartSec (the sweep would
-# hang here rather than at the size cap, which is where the timeouts used to start).
-timeout 120 docker network prune -f --filter "until=$win" >/dev/null 2>&1 || true
-timeout 600 docker builder prune -f --filter "until=$win" >/dev/null 2>&1 || true
-prune_extra_builders "$win"
-timeout 600 docker image prune -af --filter "until=$win" >/dev/null 2>&1 || true
-
+# ORDER NOTE: the two SIZE caps below run BEFORE section 3's window prunes, and that ordering is
+# load-bearing rather than cosmetic. They are the only steps that can reclaim a continuously-churned
+# cache or image store, they are the only ones gated on a CONFIRMED idle window, and they were
+# previously last — so on a busy runner the window prunes burned the idle window first and both caps
+# then logged "over cap but a job is running" every single sweep. Measured 2026-08-09 on
+# ci-runner-2: cache 28 GB and images 36.6 GB, both over cap, both skipped, disk parked at 88-92%.
+# Running them first spends the freshly-confirmed idle window on the work that actually reclaims.
 # 3b. SIZE cap for the build cache — the only thing that actually bounds it. The `until=` windows above
 #     cannot: the cache is actively REUSED, so its last-used stamps keep refreshing. Measured 2026-08-08
 #     on ci-runner-3 with a 26 GB cache: `builder prune --filter until=1h` reclaimed 1.7 GB, and the CLI
@@ -307,6 +308,38 @@ if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge 
     fi
   fi
 fi
+
+# 3c. SIZE cap for IMAGES — the same problem as 3b, for the accumulator that overtook it. Images are
+#     now the larger consumer (2026-08-09, ci-runner-4: 35 GB images vs 28.6 GB cache, 24.4 GB of the
+#     images reclaimable) and the retention window cannot retire them: most are younger than the 6h
+#     pressure window because CI pulls and builds faster than any age rule.
+#     Identical safety shape to 3b, deliberately: idle path only, NEVER from the mid-job critical path,
+#     gated on disk pressure, and the busy signal re-read immediately before the destructive call.
+#     `image prune -af` removes every image no container is using, so the next job re-pulls — which is
+#     why it fires only over the cap rather than routinely. An unreadable size fails CLOSED (is_num).
+if [ "$midjob" -eq 0 ] && [ "${IMAGE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge "$PRESSURE_PCT" ]; then
+  img_now="$(timeout 60 docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null     | awk -F'|' '$1=="Images"{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null)"
+  if is_num "$img_now" && [ "$img_now" -gt "$IMAGE_MAX_BYTES" ]; then
+    if ! idle_confirmed; then
+      log "images ${img_now}B over cap but a job is running -> skipping the full image prune"
+    else
+      log "images ${img_now}B > cap ${IMAGE_MAX_BYTES}B at disk ${pct_cap}%, idle -> full image prune"
+      timeout 900 docker image prune -af >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
+# 3. window-safe prunes: images / build cache / orphaned networks OLDER than the retention window. Never
+#    removes anything in use or recently used, so it is safe regardless of the idle read. Tighten under
+#    disk pressure. (Build cache is the big one — 10-33 GB/runner.)
+pct="$(disk_pct)"; is_num "$pct" || pct=0
+win="$ROUTINE_UNTIL"; [ "$pct" -ge "$PRESSURE_PCT" ] && win="$PRESSURE_UNTIL"
+# `timeout` on each: a wedged daemon otherwise blocks the unit to TimeoutStartSec (the sweep would
+# hang here rather than at the size cap, which is where the timeouts used to start).
+timeout 120 docker network prune -f --filter "until=$win" >/dev/null 2>&1 || true
+timeout 600 docker builder prune -f --filter "until=$win" >/dev/null 2>&1 || true
+prune_extra_builders "$win"
+timeout 600 docker image prune -af --filter "until=$win" >/dev/null 2>&1 || true
 
 # 4. critical: still very high -> hard 1h window (NOT `-af`: a <1h running build is still protected) +
 #    trim the actions cache (act_runner re-fills it). Path-guarded so we can never rm the wrong tree.

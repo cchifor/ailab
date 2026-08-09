@@ -26,7 +26,8 @@ case "\$1 \$2" in
     # the UNWINDOWED cap prune (-af) is the phase the per-builder re-check must follow
     printf '%s' "\$*" | grep -q -- '-af' && : > "$WORK/phase.afprune"
     exit 0 ;;
-  "container prune"|"network prune") exit 0 ;;
+  "container prune") : > "$WORK/phase.container"; exit 0 ;;
+  "network prune") exit 0 ;;
   "buildx prune") exit 0 ;;
   "buildx ls")
     # honour --format '{{.Name}}' (buildx >=0.13): one builder name per line.
@@ -37,9 +38,10 @@ case "\$1 \$2" in
                     "default* docker" "builder-leaked docker-container running v0.12 linux/amd64"
     fi ;;
   "system df")
-    # MOCK_CACHE=<n> reports n GB of build cache so the size cap can be exercised; 0 (default) prints
-    # nothing, which is also the "docker wedged / unparseable" case the cap must fail CLOSED on.
-    if [ "\${MOCK_CACHE:-0}" != 0 ]; then printf 'Build Cache|%sGB\n' "\$MOCK_CACHE"; fi ;;
+    # MOCK_CACHE / MOCK_IMAGES = size in GB for that row; 0 (default) prints nothing for it, which is
+    # also the "docker wedged / unparseable" case each cap must fail CLOSED on.
+    if [ "\${MOCK_CACHE:-0}" != 0 ]; then printf 'Build Cache|%sGB\n' "\$MOCK_CACHE"; fi
+    if [ "\${MOCK_IMAGES:-0}" != 0 ]; then printf 'Images|%sGB\n' "\$MOCK_IMAGES"; fi ;;
   "ps") : ;;          # 'docker ps -q' -> no containers
   *) : ;;
 esac
@@ -114,7 +116,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
   # busy+pressure case below would stall this suite for 10 minutes.
   : > "$CALLS"; rm -f "$WORK/pgrep.count" "$WORK"/phase.*
   MOCK_BUSY="$1" MOCK_PCT="$2" PATH="$BIN:$PATH" \
-    MOCK_CACHE="${MOCK_CACHE:-0}" MOCK_BUSY_DROP_AFTER="${MOCK_BUSY_DROP_AFTER:-}" \
+    MOCK_CACHE="${MOCK_CACHE:-0}" MOCK_IMAGES="${MOCK_IMAGES:-0}" MOCK_BUSY_DROP_AFTER="${MOCK_BUSY_DROP_AFTER:-}" \
     MOCK_BUSY_FROM="${MOCK_BUSY_FROM:-}" MOCK_BUSY_UNTIL="${MOCK_BUSY_UNTIL:-}" \
     MOCK_PEER_JOB="${MOCK_PEER_JOB:-0}" MOCK_PEER_STATE="${MOCK_PEER_STATE:-active}" \
     MOCK_PEER_PROBE_RC="${MOCK_PEER_PROBE_RC:-}" MOCK_SYSTEMCTL_FAIL="${MOCK_SYSTEMCTL_FAIL:-0}" \
@@ -191,7 +193,7 @@ echo "[H7/H8] the size cap's busy RE-CHECKS (mutation-proven, not merely present
 # The #253 review mutation-tested the first re-check and found the suite stayed green without it —
 # H4 short-circuits on midjob=1 long before the re-check runs, so nothing covered it. Both cases here
 # start IDLE (the busy gate lets the sweep proceed) and a job appears at a named phase afterwards.
-MOCK_CACHE=26 MOCK_BUSY_FROM=image run_case 0 85
+MOCK_CACHE=26 MOCK_BUSY_FROM=container run_case 0 85
 if grep -q 'builder prune -af' "$CALLS"; then bad "H7: a job arriving before the cap must abort the full prune"; else ok "H7: job arriving mid-sweep aborts the full prune"; fi
 
 MOCK_CACHE=26 MOCK_BUSY_FROM=afprune run_case 0 85
@@ -208,7 +210,7 @@ echo "[H9] the midjob GATE itself (not the re-check that shadows it)"
 # exactly a job that looks idle at cap time while a critical mid-job sweep is in flight.
 # Busy at the gate (-> wait -> still busy -> critical -> midjob=1), then idle from the image prune on,
 # so the re-check would say "go". Only the midjob gate stops the unwindowed prune here.
-MOCK_CACHE=26 MOCK_BUSY_UNTIL=image run_case 1 95
+MOCK_CACHE=26 MOCK_BUSY_UNTIL=container run_case 1 95
 if grep -q 'builder prune -af' "$CALLS"; then bad "H9: the midjob gate must block the full prune even when the re-check reads idle"; else ok "H9: midjob gate blocks the full prune when the re-check reads idle"; fi
 unset MOCK_BUSY_UNTIL MOCK_CACHE
 
@@ -256,6 +258,40 @@ MOCK_MAINPID=notanumber run_case 0 50
 assert_none "J8: non-numeric MainPID -> BUSY, no prune"
 unset MOCK_MAINPID
 unset MOCK_PEER_STATE MOCK_PEER_JOB MOCK_PEER_PROBE_RC MOCK_SYSTEMCTL_FAIL
+
+echo "[K] image SIZE cap — same shape as the cache cap, for the accumulator that overtook it"
+# Images became the dominant consumer (2026-08-09, ci-runner-4: 35 GB images vs 28.6 GB cache) and the
+# `until=` windows cannot retire them: most images are younger than the 6h pressure window because CI
+# pulls and builds faster than any age rule. So an over-cap idle sweep escalates to `image prune -af`,
+# under the same guards as 3b: never mid-job, only at pressure, busy re-read immediately before.
+# NOTE these assert on `image prune -af` with NO `--filter`, which is what distinguishes the cap from
+# the routine windowed prune that every sweep already runs.
+capfired() { grep -qE 'docker image prune -af *$' "$CALLS"; }
+
+MOCK_IMAGES=26 run_case 0 85
+if capfired; then ok "K1: over cap + idle + pressure -> full image prune"; else bad "K1: over cap + idle + pressure -> full image prune"; fi
+
+MOCK_IMAGES=12 run_case 0 85
+if capfired; then bad "K2: under cap must NOT full-prune images"; else ok "K2: under cap leaves images alone"; fi
+
+MOCK_IMAGES=26 run_case 0 50
+if capfired; then bad "K3: healthy disk must NOT full-prune images"; else ok "K3: over cap but disk healthy -> no full image prune"; fi
+
+# K4 as first written was VACUOUS — mutation proved it: dropping the midjob gate left the suite green,
+# because with the runner busy for the whole sweep the BUSY RE-CHECK answers first and the gate it
+# names is never reached. Same shadowing that made H4/J6 decorative. MOCK_BUSY_UNTIL makes the runner
+# busy at the gate (so the sweep takes the critical path with midjob=1) and IDLE by the time the cap
+# is reached, so the re-check would say "go" and only the midjob gate can stop the prune.
+MOCK_IMAGES=26 MOCK_BUSY_UNTIL=container run_case 1 95
+if capfired; then bad "K4: the midjob gate must block the full image prune even when the re-check reads idle"; else ok "K4: midjob gate blocks the full image prune when the re-check reads idle"; fi
+unset MOCK_BUSY_UNTIL
+
+MOCK_IMAGES=0 run_case 0 85
+if capfired; then bad "K5: unparseable image size must fail closed"; else ok "K5: unparseable image size -> no full prune (fails closed)"; fi
+
+MOCK_IMAGES=26 MOCK_BUSY_FROM=container run_case 0 85
+if capfired; then bad "K6: a job arriving mid-sweep must abort the full image prune"; else ok "K6: job arriving mid-sweep aborts the full image prune"; fi
+unset MOCK_IMAGES
 
 echo "[F] stale-workspace prune: no-activity dirs removed, fresh + partially-fresh kept"
 # act_runner never deletes work/<repo-hash>; agentforge's ephemeral per-repo CI grew it to ~350-400

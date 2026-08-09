@@ -150,6 +150,12 @@ gitea_runner_cleanup_idle_confirm_polls: 3
 # runner shares this daemon, so it loses its warm cache too), hence the disk gate and a cap well above
 # the ~14GB observed working set.
 gitea_runner_cleanup_cache_max_bytes: 20000000000
+# Hard size cap for docker IMAGES. Images overtook the build cache as the dominant consumer
+# (2026-08-09, ci-runner-4: 35 GB images / 24.4 GB reclaimable vs 28.6 GB cache) and the `until=`
+# windows cannot retire them — most images are younger than the 6h pressure window because CI pulls
+# and builds faster than any age rule. Over this cap an idle sweep runs a full `image prune -af`.
+# Destructive to warm images (the next job re-pulls), so keep it well above a working set.
+gitea_runner_cleanup_image_max_bytes: 20000000000
 gitea_runner_cleanup_actcache_max_mb: 1536 # trim the act_runner actions cache above this (critical only)
 # Prune work/<repo-hash> workspaces whose ENTIRE tree is untouched for this many hours (0 disables).
 # act_runner never deletes them and agentforge's ephemeral per-repo CI mints new ones continuously —
