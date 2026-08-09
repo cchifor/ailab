@@ -79,7 +79,7 @@ spec:
           #   wedges the CP. That is what the ordering note exists to prevent.
           # - Overlays stay gated shut: AFP_SCHEMA_V2_MIN_WORKER is deliberately NOT set in this file.
           #   (Verifiable by reading this file, which is why it belongs here.)
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:471e2b46708e9e467e46e3c95fa35f1f828d205712f2064e652cfe8f9a15ee78
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:2b3df90baeb2909e867842887ab36a67e62a8a415aacdd1422e2dac24a70e17d
           ports:
             - { name: http, containerPort: 8080 }
           # ALL config is env_prefix AFP_ (agentforge_platform.settings.Settings). Non-secrets are plain
