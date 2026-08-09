@@ -4,10 +4,23 @@
 #
 # maxReplicaCount is the HARD concurrency cap: the dispatcher reports PENDING work (not in-flight-
 # subtracted), so maxReplicas bounds concurrency while the per-issue epoch-elected claim-lock dedups
-# duplicate claims across replicas. Set to 2 = the account max_parallel. NB: the claude-max-1
-# account's max_parallel is not visible in THIS repo (it lives in the forge AgentForgeConfig, cchifor/
+# duplicate claims across replicas. Set to 2 = the account max_parallel. NB: the account's
+# max_parallel is not visible in THIS repo (it lives in the forge AgentForgeConfig, cchifor/
 # agentforge-config); AccountConfig.max_parallel defaults to 1 — reconcile this value to that config at
-# activation (the tranche report notes the choice).
+# activation (the tranche report notes the choice). As of 2026-08-09 that field is in fact INERT in the
+# engine (declared on AccountConfig, read by no dispatcher or semaphore), so the enforced concurrency
+# bound is maxReplicaCount here plus the broker kid's max_concurrency — not this number.
+#
+# !! THE ACCOUNT NAME IN THE PROMETHEUS QUERY BELOW IS A CROSS-REPO BINDING, NOT A CONSTANT. !!
+# It duplicates `accounts.<name>.workers` in cchifor/agentforge-config, and it MUST be moved in the
+# same change that re-points a worker to a different subscription seat. This is not hypothetical: on
+# 2026-08-09 the playground planner was moved claude-max-1 -> claude-max-2 (agentforge-config #6/#7,
+# to escape a rate-limited seat) and this query was left naming claude-max-1. The dispatcher then
+# emitted forge_pending{account="claude-max-2",...} only, the query matched nothing, ignoreNullValues
+# treated that as 0, the trigger went Active=False, and the pool sat at 0 replicas with FOUR pending
+# planner issues invisible to it. Nothing logged an error at any layer — the ScaledObject stayed
+# Ready=True and the HPA simply showed TARGETS <unknown>. It was a Sunday, so the cron warm-floor
+# (Mon-Fri) did not mask it either.
 #
 # While the worker Deployment is gated/unlisted this ScaledObject has no target and stays Ready:False
 # ("ScaledObject doesn't have a valid target") — harmless in the dormant posture (like the NotReady ESOs);
@@ -42,7 +55,7 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
-        query: sum(forge_pending{account="claude-max-1",role=~"planner|reviewer|implementer|tester"})
+        query: sum(forge_pending{account="claude-max-2",role=~"planner|reviewer|implementer|tester"})
         threshold: "1"           # target pending items per replica (scaling math)
         # activationThreshold is a STRICT greater-than gate for waking from 0: value>activationThreshold.
         # "0" means a single pending issue (value 1 > 0) wakes the worker; "1" would require >1 (2 issues)
