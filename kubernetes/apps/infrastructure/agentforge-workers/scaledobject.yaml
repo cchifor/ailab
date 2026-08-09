@@ -8,8 +8,10 @@
 # max_parallel is not visible in THIS repo (it lives in the forge AgentForgeConfig, cchifor/
 # agentforge-config); AccountConfig.max_parallel defaults to 1 — reconcile this value to that config at
 # activation (the tranche report notes the choice). As of 2026-08-09 that field is in fact INERT in the
-# engine (declared on AccountConfig, read by no dispatcher or semaphore), so the enforced concurrency
-# bound is maxReplicaCount here plus the broker kid's max_concurrency — not this number.
+# engine (declared on AccountConfig, read by no dispatcher or semaphore), so it bounds nothing. The
+# bounds that ARE enforced: maxReplicaCount here (replicas), worker_api.max_concurrent_jobs
+# (domain/config.py -> app/orchestrator.py, concurrent jobs WITHIN one replica), and the broker kid's
+# max_concurrency (requests within one job session). None of them is a per-account run cap.
 #
 # !! THE ACCOUNT NAME IN THE PROMETHEUS QUERY BELOW IS A CROSS-REPO BINDING, NOT A CONSTANT. !!
 # It duplicates `accounts.<name>.workers` in cchifor/agentforge-config, and it MUST be moved in the

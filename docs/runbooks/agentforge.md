@@ -274,8 +274,18 @@ Then ESO re-syncs `broker-openai-codex-oauth` and each broker replica **reloads 
 ## KEDA scaling gotchas (the planner ScaledObject)
 
 `ScaledObject/af-orch-playground-planner` scales the planner on **`forge_pending`** — a
-Prometheus gauge exported by the **`agentforge-dispatcher`** (`sum(forge_pending{account="claude-max-1",
-role=~"planner|reviewer"})`, threshold 1, `ignoreNullValues=true`).
+Prometheus gauge exported by the **`agentforge-dispatcher`** (`sum(forge_pending{account="claude-max-2",
+role=~"planner|reviewer|implementer|tester"})`, threshold 1, `ignoreNullValues=true`).
+
+- **The `account` in that query is a CROSS-REPO BINDING and it has silently broken once.** The
+  account name duplicates `accounts.<name>.workers` in `cchifor/agentforge-config`. On 2026-08-09 the
+  planner was re-pointed `claude-max-1` -> `claude-max-2` there and this query was left naming
+  `claude-max-1`; the dispatcher then emitted only `account="claude-max-2"`, the query matched no
+  series, `ignoreNullValues=true` turned that into a real `0` (the external-metrics API served
+  `s0-prometheus = "0"`), the trigger went `Active=False`, and the pool sat at **0 replicas with 4
+  pending planner issues**. Nothing raised: the ScaledObject stayed `Ready=True` and the generated
+  HPA showed only `TARGETS <unknown>/1`. **Triage:** compare the query's `account` against the live
+  label — `forge_pending` label sets are authoritative, the manifest is not. Re-point both together.
 
 - **Dispatcher can't reach Gitea → plans die.** If the dispatcher can't compute `forge_pending`
   (e.g. a Gitea outage / SQLite lock storm), the metric goes **null**; with `ignoreNullValues=true`

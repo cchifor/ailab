@@ -162,9 +162,14 @@ spec:
             # aud (<provider>/<account>) -> broker URL. The worker selects the broker by the SAME aud it
             # signs (_broker_audience(spec) = "<provider>/<account>"), so the map MUST key on the REAL
             # per-account broker audiences (each broker Deployment pins its own aud via AF_BROKER_AUDIENCE):
-            #   planner/reviewer role -> anthropic/claude-max-1 (this tenant-zero worker's Claude account)
+            #   planner/reviewer role -> anthropic/claude-max-2 (this tenant-zero worker's Claude account
+            #                                                    since 2026-08-09; see below)
             #   codex cross-review    -> openai/codex-pro       (the same worker runs Codex cross-reviews)
-            #   spare Claude account  -> anthropic/claude-max-2
+            #   throttled seat        -> anthropic/claude-max-1 (was this worker's account until
+            #                                                    2026-08-09, moved off after sustained
+            #                                                    rate_limit_error; still authorized)
+            # Which account this worker ACTUALLY uses is decided in cchifor/agentforge-config, not here.
+            # The map must simply contain every audience, so it is correct as written regardless.
             # The prior value keyed on a non-existent aud "anthropic/default" AND a non-existent Service
             # "agentforge-broker" -> _resolve_broker_url() raised "no broker URL configured for aud
             # 'anthropic/claude-max-1'" and every sandbox Job failed fast before lease/stage.

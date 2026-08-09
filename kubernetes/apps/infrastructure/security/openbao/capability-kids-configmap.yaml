@@ -24,8 +24,24 @@
 # GROUND TRUTH: the platform-dev/delivery entry MIRRORS the LIVE tenant-zero/playground kid registry
 # (the running broker-*-kids registry.json ceilings on 2026-07-26) per audience — the accounts the
 # delivery pool uses (planner/implementer/reviewer -> claude_max on anthropic/claude-max-1, codex
-# cross-review -> openai/codex-pro, with anthropic/claude-max-2 and anthropic/claude-max-3 the
-# identically-entitled spare Claude seats). Values are the operator ceiling, NOT invented.
+# cross-review -> openai/codex-pro, with anthropic/claude-max-2 and anthropic/claude-max-3 the spare
+# Claude seats). Values are the operator ceiling, NOT invented.
+#
+# CAUTION: the spare seats are NOT interchangeable, despite this file entitling them identically.
+# Entitlement here is the per-audience CEILING; whether a seat serves a given POOL depends on that
+# seat's LIVE kid registry containing a kid scoped to that pool's workspace. Verified 2026-08-09:
+#   broker-anthropic-max1-kids         -> cap-b5663179..., tz-213512e80fde7c84
+#   broker-anthropic-max2-kids         -> cap-b5663179..., tz-213512e80fde7c84
+#   broker-anthropic-claude-max-3-kids -> cap-b5663179...   <-- no PLAYGROUND-workspace kid
+# Read that last line precisely: cap-b5663179... IS a tenant-zero kid, but it is scoped to workspace
+# platform-dev / pool delivery, so claude-max-3 legitimately serves platform-dev while rejecting
+# every tenant-zero PLAYGROUND token with `401 {"detail":"unauthorized"}` — and it does so BEFORE
+# opening a ledger session, so the seat looks idle rather than broken. (An earlier draft of this
+# comment said "no tenant-zero kid" and "rejects every tenant-zero token"; both are wrong in the
+# opposite direction and would misdirect anyone debugging delivery on max3.)
+# Failing over to a seat because this file entitles it identically is exactly the mistake that cost a
+# diagnostic cycle. Decode the kid registry and check the WORKSPACE scope first; existence and
+# ExternalSecret sync are not authorization. Tracked as cchifor/agentforge#123.
 #
 # EVERY anthropic seat in the estate MUST appear here. This list is what creates the aggregated
 # `af/data/operator/broker/<provider>/<account>/kids` registry doc a broker's `-kids` ExternalSecret
