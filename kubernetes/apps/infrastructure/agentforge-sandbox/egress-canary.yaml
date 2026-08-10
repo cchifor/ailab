@@ -81,7 +81,7 @@ spec:
       containers:
         - name: sandbox
           # PLACEHOLDER digest — the real sandbox image @sha256 (AF_SANDBOX_IMAGE) is pinned at activation.
-          image: registry.chifor.me/agentforge/sandbox@sha256:b009434202509c696adef1f7e0cad4c59d0213228858c06997776938ea71e003
+          image: registry.chifor.me/agentforge/sandbox@sha256:cbbc322ed0f67215a1e9449b8068a8f61845d16dc41c04e3ebc48fb14ce9cdd8
           workingDir: /workspace
           env:
             # Plain-value ONLY (sandbox-guard forbids env[].valueFrom). The ops harness
