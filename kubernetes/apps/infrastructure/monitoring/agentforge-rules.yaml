@@ -1,8 +1,111 @@
-# Alerts for the agentforge autonomous dev-agent fleet (ADR 0018; metrics via agentforge.yaml,
-# job=agentforge). The system is designed to degrade loudly rather than act wrongly — a stopped
-# worker, a stuck issue, a needs-human escalation, HMAC probes, or reconciler drift must reach the
-# operator (ntfy via Alertmanager), because agents merge code autonomously on allowlisted repos.
-# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+# Alerts for the AgentForge fleet (ADR 0019 — Talos-worker topology; NOT the ADR 0018 host-systemd
+# topology this file was originally written for). `release: kube-prometheus-stack` so the operator's
+# ruleSelector picks it up. This file IS listed in kustomization.yaml — a rule file Flux never applies
+# is the same defect as a rule that cannot fire, and this file was BOTH until 2026-08-10.
+#
+# -- WHY EVERY RULE IN HERE WAS REWRITTEN (measured 2026-08-10) ---------------------------------------
+#
+# The five rules this file used to hold ALL pinned `job="agentforge"`. That job has ZERO targets and
+# ZERO series: it was a static Service/Endpoints/ServiceMonitor (monitoring/agentforge.yaml) for
+# agentforge running as a host systemd unit on the dev-worker VMs, a topology ADR 0019 superseded, and
+# both manifests were commented out of kustomization.yaml so neither was ever applied. Every one of
+# the five `expr`s therefore evaluated to an EMPTY VECTOR and none could ever fire — alerting that
+# presents as coverage while watching nothing. Re-verified 2026-08-10: `up{job="agentforge"}` and
+# `forge_*{job="agentforge"}` both return 0 series.
+#
+# The live jobs are `agentforge-worker` (the operator-managed orchestrator pods, via
+# agentforge-workers/worker-podmonitor.yaml) and `agentforge-dispatcher` (the read-only KEDA scale
+# oracle, via agentforge-workers/dispatcher-servicemonitor.yaml).
+#
+# ROLE ASYMMETRY — the reason these rules are not a find-and-replace of the job label. The dispatcher
+# is a stripped READ-ONLY scale oracle: "NO webhook API, NO claims, NO Job creation" per
+# dispatcher-deployment.yaml. Mechanically (agentforge @ v0.4.0), `dispatcher()` builds the same
+# forge_* registry but never constructs an Orchestrator and never calls build_app, so every gauge the
+# reconcile/claim loop owns is a STRUCTURAL CONSTANT 0 on it — an unlabelled Prometheus gauge is
+# exported at 0 from construction whether or not anything ever writes it. Measured:
+#   forge_last_reconcile_timestamp = 0  -> `time() - ts > 900` is 1.79e9 there, i.e. TRUE FOREVER.
+#   forge_worker_up                = 0  -> a `== 0` rule would fire permanently.
+#   forge_auth_degraded            = 0  -> never written; the latch lives in the worker's claim loop.
+# So a rule reading any of those MUST be pinned to job="agentforge-worker". Only `up` (synthesised by
+# Prometheus per target) is uniform across both jobs, which is why ForgeTargetDown spans them.
+# Conversely `forge_pending` is dispatcher-EXCLUSIVE (only `_dispatch_once` writes it), so it is
+# absent from worker pods entirely — no rule here reads it.
+#
+# -- COVERAGE BOUNDARY: THESE RULES SEE ONLY HALF THE FLEET (ailab#284) -------------------------------
+#
+# Every forge_*-reading rule below is BLIND to:
+#   * every CP-RENDERED tenant pool — live today af-orch-platform-dev-delivery in
+#     af-tenant-tenant-zero-platform-dev. Measured 2026-08-10: forge_* series exist in exactly two
+#     (namespace, job) pairs — agentforge/agentforge-dispatcher (19 series) and
+#     af-tenant-tenant-zero-playground/agentforge-worker (78). The CP pool has NONE, because the
+#     worker PodMonitor's selector keys on operator-only labels the CP renderer does not emit.
+#   * the reaper — `agentforge-reaper` declares no containerPorts (re-confirmed live 2026-08-10,
+#     command ["agentforge","reaper"]) AND its entrypoint never constructs the metrics registry or
+#     calls start_http_server at all, so it is metrics-invisible by construction, not just unselected.
+#     Giving it a port would not help until the entrypoint changes; observe it via logs only.
+# The CP-rendered pools are the half doing the real delivery work; the covered half is the playground
+# planner. Until ailab#284 is resolved these rules are a genuine but PARTIAL signal — treat a silent
+# fleet as unproven, not healthy. ailab#286's ForgeOrchestratorUnscraped
+# (agentforge-coverage-rules.yaml) is the complementary rule that detects the unscraped pods
+# themselves by joining against kube-state-metrics; it is deliberately NOT duplicated here.
+#
+# -- RETIRED: ForgeWebhookHMACFailures ----------------------------------------------------------------
+#
+# RETIRED because it cannot be shown to fire — but NOT for the reason it looks like. Correcting a
+# plausible misreading, because the distinction decides who can fix it:
+#
+#   `forge_webhooks_total` HAS NOT BEEN REMOVED. It is live in the pinned v0.4.0 image, declared
+#   Counter("forge_webhooks_total", ..., ["result"]) in infra/metrics.py and incremented at four sites
+#   in infra/api.py (:422 too_large, :437 bad_signature, :450 bad_payload, :457 ok). HMAC verification
+#   is fully live in the worker. `git log -S forge_webhooks_total --all` returns exactly ONE commit —
+#   the one that ADDED it. It has zero series for a different reason: it is a LABELLED counter, and a
+#   labelled Prometheus instrument with no children emits HELP/TYPE but no samples, so it does not
+#   exist as a series until the first delivery of each result.
+#
+#   No delivery can ever reach a pod we scrape. The worker's webhook API (8700) has NO Service and
+#   cilium-egress.yaml puts the worker in ingress default-deny EXCEPT the metrics port
+#   (worker-deployment.yaml). The dispatcher process has no /webhook route at all. The only pod class
+#   that DOES receive webhooks is the CP-rendered tenant pool — which is exactly the class ailab#284
+#   says is unscrapeable. The pods that can fail HMAC and the pods we can see are disjoint sets.
+#
+# So the expression is not wrong, it is UNFALSIFIABLE on the current scrape surface: it would return an
+# empty vector forever, which is precisely the defect this rewrite removes. Shipping it re-pointed at
+# job="agentforge-worker" would have been the same lie in a new spelling. It becomes worth restoring
+# the moment ailab#284 is resolved and a webhook-receiving pool is scraped. Webhook HMAC failures are
+# meanwhile observable ONLY in the worker log ("webhook HMAC rejected", with the source IP) and in
+# Gitea's per-hook delivery history — neither is a Prometheus series, so a log-pipeline alert is the
+# alternative if this signal is wanted before #284.
+# The operationally important half of its intent — "a credential failed and delivery silently stopped"
+# — is preserved by ForgeEngineAuthDegraded below. Its "webhooks are not arriving" half is carried by
+# ForgeReconcileDriftHigh, which is the counter the reconciler backstop actually moves.
+#
+# -- EVIDENCE THAT EACH RULE BELOW CAN FIRE (live, 2026-08-10) ---------------------------------------
+# Healthy-case rules are proven NON-EMPTY and evaluable, with a counterfactual that trips the
+# comparison. An empty vector is not a passing alert; it is the defect this file just removed.
+#   ForgeTargetDown          up{job=~"agentforge-worker|agentforge-dispatcher"} -> 3 series, all 1.
+#                            Counterfactual `== 1` -> 3 series fire. Historical: up==0 occurred on 4
+#                            targets in 24h, ONE 30s sample each — never near the 5m hold, so `for: 5m`
+#                            is sized off measurement (worker terminationGracePeriodSeconds=150).
+#   ForgeReconcileStalled    time() - (ts > 0) -> 52.7s and 61.8s (2 series). 24h range -0.02s..89.6s,
+#                            far under 900. Counterfactual `> 10` -> both series fire.
+#   ForgeNeedsHuman...       -> +1.017 RIGHT NOW, i.e. already over threshold; it will fire ~30m after
+#                            Flux applies it. That is a true positive, not a teething alert — see its
+#                            own note. 7d max +1.06, duty cycle 4.6%.
+#   ForgeEngineAuthDegraded  forge_auth_degraded{job="agentforge-worker"} -> 2 series, both 0; 7d max 0.
+#                            Counterfactual `== 0` -> 2 series fire. The set site is real, not a
+#                            declared-but-never-written gauge: app/orchestrator.py:1684
+#                            `emit(lambda m: m.auth_degraded.set(1))` (agentforge @ v0.4.0).
+#   ForgeReconcileDriftHigh  sum by (namespace)(increase(...[30m])) -> 1 series, value 0 (drift has been
+#                            0 for 24h — the healthy case). The expression SHAPE is proven to trip by
+#                            evaluating the identical shape over a counter that does move:
+#                            sum by (namespace)(increase(forge_claims_total{job="agentforge-worker"}
+#                            [30m])) -> 5.09, and `> 0.5` fires.
+#
+# monitoring/agentforge.yaml (the dead ServiceMonitor) stays commented out and is now depended on by
+# NOTHING — ailab#286 asks the operator whether to retire the whole ADR 0018 host-service surface; that
+# decision is not taken here. Re-measure any claim above with: kubectl --context admin@ai -n monitoring
+# port-forward svc/kube-prometheus-stack-prometheus 9090:9090 (the Prometheus pod is distroless — no
+# shell, so port-forward and curl the HTTP API, or exec from Grafana).
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -14,66 +117,128 @@ spec:
   groups:
     - name: agentforge
       rules:
-        - alert: ForgeWorkerDown
-          expr: up{job="agentforge"} == 0
+        # RE-POINTED from `up{job="agentforge"} == 0` (renamed from ForgeWorkerDown: the semantics
+        # changed from "a host systemd unit stopped" to "a pod target exists but will not scrape").
+        # Spans BOTH jobs deliberately — `up` is synthesised per target so it is uniform across them,
+        # unlike forge_worker_up which is a constant 0 on the dispatcher.
+        - alert: ForgeTargetDown
+          expr: up{job=~"agentforge-worker|agentforge-dispatcher"} == 0
           for: 5m
           labels: { severity: critical }
           annotations:
-            summary: "AgentForge worker {{ $labels.instance }} is down (no metrics scrape)"
+            summary: "AgentForge target {{ $labels.job }}/{{ $labels.pod }} is failing to scrape"
             description: >-
-              The agentforge exporter on {{ $labels.instance }} has been unscrapeable for >5m — the
-              service is stopped/crash-looping (or the VM is down; cross-check DevWorkerNode via
-              job=dev-worker-node). Its held claims release on SIGTERM or expire with the lease TTL,
-              so work recovers — but fleet capacity is cut and its Gitea webhooks pile into retries.
-              Check `systemctl status agentforge` on the worker and
-              `journalctl -u agentforge -t agentforge-update` (a failed release update beacons there).
-        # Every reconcile pass stamps forge_last_reconcile_timestamp; a stalled
-        # loop (Gitea unreachable, orchestrator wedged) stops the stamp and —
-        # since reconciliation is the delivery guarantee — strands issues.
+              The metrics endpoint on {{ $labels.pod }} ({{ $labels.namespace }}) has been unscrapeable
+              for >5m while the pod still exists — a crash-loop, a wedged event loop, or a
+              NetworkPolicy change, NOT a scale-down (KEDA scale-to-zero removes the target entirely
+              and this rule correctly stays silent). If this is the DISPATCHER, the KEDA scale oracle
+              is blind and no worker will scale up on backlog — a silent full stop on delivery. If it
+              is a WORKER, its held claims release on SIGTERM or expire with the lease TTL so work
+              recovers, but fleet capacity is cut. Check `kubectl --context admin@ai -n
+              {{ $labels.namespace }} describe pod {{ $labels.pod }}` and the container log. Blind to
+              CP-rendered pools and the reaper (ailab#284) — those have no target at all, which is
+              ailab#286's rule, not this one.
+        # RE-POINTED to job=agentforge-worker. The `> 0` inner filter is load-bearing twice over: it
+        # drops the dispatcher (which never reconciles, so its ts is a structural 0 and `time() - 0`
+        # would breach forever) and it drops a freshly-started worker before its first stamp — which
+        # can be up to 600s, since the discovery loop backs off 60s->600s while the forge is
+        # unreachable and _stamp_reconcile only runs after a FULLY SUCCESSFUL pass.
         - alert: ForgeReconcileStalled
-          expr: time() - forge_last_reconcile_timestamp{job="agentforge"} > 900
+          expr: time() - (forge_last_reconcile_timestamp{job="agentforge-worker"} > 0) > 900
           for: 10m
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge on {{ $labels.instance }} has not reconciled for >15m"
+            summary: "AgentForge worker {{ $labels.pod }} has not reconciled for >15m"
             description: >-
-              The reconcile loop is the webhook backstop; when it stalls, dropped
-              webhooks strand issues in place. Check Gitea reachability from the
-              worker and `journalctl -u agentforge` for reconcile backoff errors.
-        - alert: ForgeNeedsHumanPending
-          expr: forge_needs_human_pending{job="agentforge"} > 0
+              The reconcile loop is the delivery guarantee — webhooks are only hints, the poll is what
+              actually picks work up — so when it stalls, issues strand in place silently. Observed
+              healthy staleness is 30-90s against a 900s threshold, so this is a wide margin: a breach
+              means the loop is genuinely wedged (Gitea unreachable from the tenant namespace, or the
+              orchestrator task died without killing the process). Note the gauge only advances on a
+              fully successful pass, so a partial failure freezes it rather than zeroing it. Check the
+              orchestrator container log for reconcile backoff and Gitea reachability from
+              {{ $labels.namespace }}.
+        # REDESIGNED from ForgeNeedsHumanPending (`forge_needs_human_pending{job="agentforge"} > 0`).
+        # A level test is useless here: the playground carries a PERMANENT parked backlog — measured
+        # 6..9 continuously over 7 days — so `> 0` would fire immediately and never clear, which is
+        # ignored-by-default alerting rather than coverage (duty cycle 100% vs 4.6% for the form
+        # below). The delta form preserves the ORIGINAL INTENT ("an escalation appeared and nobody
+        # picked it up") while being immune to the baseline: a new escalation pushes the count up, and
+        # a human clearing the label inside the window nets the delta back to <=0 so the alert never
+        # completes its 30m hold.
+        # Three shape decisions, all mechanism-driven (agentforge @ v0.4.0):
+        #  * AGGREGATE FIRST, then delta. The gauge is unlabelled and recomputed per pass as the sum of
+        #    open needs-human issues across this process's repos, so EVERY pod in a pool reports the
+        #    same number. `max by (namespace)` is therefore correct and `sum` would double-count
+        #    (2 pods x 9 = 18). It also survives the KEDA pod churn (~25 generations in 24h) that would
+        #    make a per-pod delta pure noise.
+        #  * GATED ON `forge_last_reconcile_timestamp > 0`. Both gauges are written by the same
+        #    _stamp_reconcile() call, so a non-zero timestamp is proof this pod has completed a pass
+        #    and its needs-human count is real. Without the gate, a pod that is up but pre-first-pass
+        #    reports a genuine 0, and a pool that rolled all its replicas at once would read 0 -> 9 as
+        #    a +9 delta and false-fire. Not observed in 7d (max delta +1.06, i.e. the 2-replica rolling
+        #    update always kept one pod reporting) but it is a real hazard for a single-replica pool.
+        #  * THRESHOLD 0.5, not 0, because delta() extrapolates at the window edges and returns ~1.017
+        #    for a clean +1.
+        - alert: ForgeNeedsHumanEscalationUnattended
+          expr: |
+            delta(
+              max by (namespace) (
+                forge_needs_human_pending{job="agentforge-worker"}
+                  and on(namespace, pod) (forge_last_reconcile_timestamp{job="agentforge-worker"} > 0)
+              ) [1h:1m]
+            ) > 0.5
           for: 30m
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge has {{ $value }} needs-human issue(s) unattended >30m"
+            summary: "AgentForge {{ $labels.namespace }}: a new needs-human escalation is unattended >30m"
             description: >-
-              One or more issues carry the needs-human label (budget breach, protected-path diff,
-              repeated gate disagreement, or auth failure) and nobody has picked them up in 30m.
-              needs-human is a GLOBAL STOP for the issue — no agent will touch it until the label is
-              cleared. Review the disagreement-summary comment on the issue and resume or close
-              (docs/runbooks/agentforge.md).
-        - alert: ForgeWebhookHMACFailures
-          expr: increase(forge_webhooks_total{job="agentforge", result="bad_signature"}[10m]) > 3
-          for: 1m
-          labels: { severity: warning }
+              The needs-human count for this tenant rose in the last hour and has not come back down.
+              needs-human is a GLOBAL STOP for that issue — no agent will touch it until the label is
+              cleared — so each new one is a halted piece of work (budget breach, protected-path diff,
+              repeated gate disagreement, or an auth failure). Find it with the needs-human label in
+              the tenant's repo, read the disagreement-summary comment, then resume or close it
+              (docs/runbooks/agentforge.md). NOTE: this watches only the PLAYGROUND tenant today —
+              CP-rendered delivery pools export nothing (ailab#284), so a quiet fleet is not proof.
+        # NEW, and the reason ForgeWebhookHMACFailures could be retired without losing what mattered:
+        # it carries that rule's inferred intent, "a credential failed and delivery silently stopped".
+        # forge_auth_degraded is the current surface for exactly that — a ONE-WAY latch set after
+        # _MAX_AUTH_FAILURES=2 consecutive LLM-engine auth refusals, after which the worker STOPS
+        # CLAIMING entirely and /readyz fails. Nothing in the source ever clears it (recovery is a
+        # human re-login plus a worker restart), so no `for:` is needed to debounce and the alert is
+        # intentionally sticky until the pod is replaced — note it therefore self-clears on RESTART
+        # rather than on repair, so correlate with /readyz before believing a resolve.
+        # Worker-pinned: the dispatcher never runs the claim loop, so its 0 is structural.
+        - alert: ForgeEngineAuthDegraded
+          expr: forge_auth_degraded{job="agentforge-worker"} > 0
+          for: 5m
+          labels: { severity: critical }
           annotations:
-            summary: "AgentForge worker {{ $labels.instance }}: repeated webhook HMAC failures"
+            summary: "AgentForge worker {{ $labels.pod }} has latched engine-auth degraded (claiming stopped)"
             description: >-
-              >3 webhook deliveries with a bad HMAC signature in 10m on {{ $labels.instance }}.
-              Either the shared webhook secret has drifted (Gitea org webhook vs
-              dev_worker_agentforge_webhook_secret in SOPS — re-run bootstrap_gitea.py + `just
-              dev-workers` to reconverge) or something on the LAN is probing the receiver — the
-              port is LAN-open by design (ufw, mgmt LAN single-operator), so drift is the likely
-              cause; probing warrants a look at the source IPs in the worker's journal.
+              Two consecutive LLM-engine auth refusals latched auth_degraded on {{ $labels.pod }}: this
+              worker has stopped claiming ALL work and will not resume on its own — the latch is
+              one-way, so recovery is a human re-login for the engine credential plus a worker restart.
+              This is the silent-wedge class the latch exists to make visible (a latched worker keeps
+              polling and heartbeating with no other trace). A revoked or expired subscription login is
+              the usual cause. Check the orchestrator log for "auth_degraded latched" and the engine
+              credential in the tenant's ExternalSecret.
+        # RE-POINTED to job=agentforge-worker (the dispatcher never reconciles, so it can never drift).
+        # Summed by namespace rather than per-pod: drift is a fleet-level rate and the pod set churns.
+        # "Drift" is specifically state-label <-> af:run marker divergence healed by the reconciler —
+        # despite the metric's own help string, it is no longer a count of webhook-missed work items.
         - alert: ForgeReconcileDriftHigh
-          expr: increase(forge_reconcile_drift_total{job="agentforge"}[30m]) > 5
-          for: 1m
+          expr: sum by (namespace) (increase(forge_reconcile_drift_total{job="agentforge-worker"}[30m])) > 5
+          for: 5m
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge worker {{ $labels.instance }}: reconciler fixing >5 drifts/30m"
+            summary: "AgentForge {{ $labels.namespace }}: reconciler healing >5 state drifts/30m"
             description: >-
-              The 60s reconciler on {{ $labels.instance }} keeps re-discovering work the webhook
-              path should have delivered (or healing marker↔label divergence). Occasional drift is
-              the design working (webhooks are hints, the poll is the guarantee); a sustained rate
-              means webhooks are not arriving (Gitea webhook ALLOWED_HOST_LIST / delivery failures
-              under git.chifor.me org settings) or a worker keeps crashing between writes.
+              The reconciler keeps converging issue state labels onto their authoritative af:run
+              markers. Occasional healing is the design working; a sustained rate means labels are
+              being lost or rewritten faster than they are being healed — a worker crashing between
+              writes, or webhook deliveries not arriving so the poll is now the only delivery path.
+              Check the Gitea org webhook delivery log for this tenant's repo and ALLOWED_HOST_LIST,
+              and the orchestrator log for _heal_state_label. This is also the surviving proxy for the
+              retired ForgeWebhookHMACFailures: a drifted webhook secret shows up here as work that
+              only ever arrives via the poll.

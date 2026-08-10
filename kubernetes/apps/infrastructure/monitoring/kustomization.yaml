@@ -12,9 +12,11 @@ resources:
   - proxmox-node.yaml # host node_exporter on the 3 Proxmox hosts (scrape target)
   - ci-runners-node.yaml # host node_exporter on the CI runner VMs (Gitea Actions; scrape target)
   - dev-workers-node.yaml # host node_exporter on the 6 dev-worker VMs (scrape target)
-  # agentforge scrape target + rules stay DISABLED until rollout Phase 0 flips
-  # dev_worker_enable_agentforge (docs/runbooks/agentforge.md) — applying them
-  # earlier pages ForgeWorkerDown for six closed ports (codex impl-review).
+  # agentforge.yaml stays DISABLED and is now dead: it scraped agentforge as a host systemd unit on
+  # the dev-worker VMs (ADR 0018), a topology ADR 0019 superseded — 0 unit files on all 6 hosts,
+  # nothing on :9464, and job="agentforge" has 0 targets / 0 series (measured 2026-08-10). Nothing
+  # depends on it any more: agentforge-rules.yaml no longer references that job. Retiring the whole
+  # ADR 0018 host-service surface is one coherent decision open with the operator in ailab#286.
   # - agentforge.yaml # agentforge forge_* exporter on the 6 dev-worker VMs :9464 (ADR 0018)
   - kube-prometheus-stack.yaml
   - prometheus-lan.yaml # LAN NodePort :30090 — nightly k6 remote-write + baseline queries from the CI runner VMs (exposure trade-off in file header)
@@ -35,6 +37,6 @@ resources:
   - storage-fabric-probe.yaml # per-node QNAP-fabric reachability (blackbox DaemonSet)
   - storage-fabric-rules.yaml # alerts on the probes
   - ci-runners-rules.yaml # alerts on the runner VMs (down / disk / memory / buildx self-heal beacon)
-  # - agentforge-rules.yaml # alerts on the agentforge fleet (enable with agentforge.yaml above)
+  - agentforge-rules.yaml # alerts on the agentforge fleet, re-pointed at the LIVE jobs (agentforge-worker / -dispatcher). Was commented out AND pinned to the dead job=agentforge, so all 5 rules were doubly inert; see the file header for the per-rule decision and the ailab#284 coverage boundary
   - gitea-rules.yaml # alerts on the Gitea forge (down / memory / restart) — critical master forge
   - ha-rules.yaml # ADR 0016 guardrails: Tier-A replica loss, PDB drain-blockers, unaccepted-singleton inventory
