@@ -79,7 +79,7 @@ spec:
           # reaper moves with the fleet for digest consistency ONLY: `reaper()` builds no forge
           # client and no config source, so it needs neither AF_BOT_TOKENS nor the v3 config and its
           # env is UNCHANGED by the cutover (docs/runbooks/agentforge-v3-cutover.md).
-          image: registry.chifor.me/agentforge/p1-worker@sha256:c73c6ccaeb7f1677d3822b64cd4466fedac61502a8dad9c0834293dc89086252
+          image: registry.chifor.me/agentforge/p1-worker@sha256:d602ad6a65ba972d2f13607f5e1521d93c7c2e5c580f2a1d2555f3a21039ae5a
           # ENTRYPOINT is ["tini","--"] and the console script is `agentforge`, so
           # the args must be the full argv `agentforge reaper` (not a bare `reaper`,
           # which has no executable → tini crash-loops). Composes to: tini -- agentforge reaper.
