@@ -67,3 +67,25 @@ permanently undecryptable in a real site loss.
 - One more small controller in `kube-system` (snapshot-controller, 2 replicas).
 - Snapshot/restore is k8s-native; validated by a round-trip test (snapshot a PVC, restore into a new PVC,
   confirm data).
+
+## Incident 2026-08-10 — both copies dead at once, silently
+
+Found while auditing Drive usage: copy #2 AND copy #3 were simultaneously non-productive, neither alerting.
+
+- **Copy #2 (Velero), broken 5 days.** A one-off `manual-dumps/agentforge_platform.pre-v3.*.dump` written
+  into the `velero` bucket during the v3 cutover made the BSL fail validation — Velero rejects *any*
+  unexpected top-level directory in a backup store — so every backup after 2026-08-05 failed. **Never put
+  anything in the `velero` bucket by hand.** Only 3 restore points survived.
+- **Copy #3 (rclone off-site), broken 41 days.** `--max-delete 100` was a count-denominated guard on a
+  Kopia repo whose GC legitimately expires thousands of blobs. Once the backlog passed 100, every run
+  aborted before deleting, which grew the backlog, which guaranteed the next abort — a ratchet that could
+  not self-heal. It also ran under `set -e` with the legs in sequence, so the velero leg's abort starved
+  the talos leg too.
+- **Neither was monitored.** No rule referenced the CronJob, and Velero's own metrics were never scraped
+  (the chart ships its ServiceMonitor off by default), so no `velero_*` series existed to alert on.
+
+Fixes: the mass-deletion guard is now a *source floor* (assert the source still holds a plausible byte
+count before mirroring) which tests the actual threat — a wiped/unreachable source — instead of proxying
+it by delete count; the legs run independently and the exit code is aggregated; the Velero ServiceMonitor
+is enabled; and `backup-rules.yaml` alerts on **last-success staleness** for all three producers, since
+both failures presented as "running but not producing" rather than as an error rate.

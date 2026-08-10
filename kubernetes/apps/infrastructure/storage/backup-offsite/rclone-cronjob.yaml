@@ -34,8 +34,15 @@ spec:
               command: ["/bin/sh", "-c"]
               args:
                 - |
-                  set -eu
-                  export RCLONE_CONFIG=/config/rclone.conf
+                  # NOT `set -e`: the two legs are independent and each must be allowed to fail without
+                  # starving the other. Under `set -e` the velero leg's abort killed the script before the
+                  # talos leg ever ran, so one wedged leg silently took BOTH off-site copies down with it.
+                  set -u
+                  # rclone rewrites the config to persist a refreshed Drive OAuth token, but the Secret
+                  # mount is read-only, so every run logged a "Failed to save config" ERROR. Copy to a
+                  # writable path: the refresh sticks for the run and the log loses a standing red herring.
+                  cp /config/rclone.conf /tmp/rclone.conf
+                  export RCLONE_CONFIG=/tmp/rclone.conf
                   # rclone's s3 backend has no per-remote TLS-skip, and --ca-cert REPLACES the CA pool —
                   # so combine the system CAs (for Google Drive) + the versitygw self-signed CA (for the
                   # garage remotes) into one bundle; both legs then verify properly.
@@ -45,10 +52,11 @@ spec:
                   # Throttled for Drive's per-USER quota on many small objects (own client_id raises only
                   # the per-PROJECT quota, NOT this one): tpslimit + modest transfers/checkers, and a hard
                   # stop at the 750 GiB/day volume cap.
-                  # Safety guard: abort the run if more than --max-delete files would be removed on the
-                  # destination, so a wiped/empty/corrupt local source (e.g. versitygw down -> empty
-                  # listing) can't mirror a mass-deletion to the only off-site copy. Tune up if normal
-                  # Kopia maintenance churn trips it (failing safe = not deleting is the desired default).
+                  # --drive-use-trash=false: every deletion here is of a blob Kopia/Velero already expired
+                  # locally, and Drive charges trashed files against the shared 5 TB quota for 30 days.
+                  # The mass-deletion safety guard is now sync_leg's source floor below, NOT --max-delete.
+                  # --max-delete-size stays only as a byte-denominated catastrophe backstop, sized above
+                  # any legitimate Kopia GC so it should never bind in normal operation.
                   # --ignore-existing: velero moved to Kopia (thousands of small, CONTENT-ADDRESSED and
                   # therefore IMMUTABLE objects); talos-etcd snapshots are likewise write-once. Re-hashing
                   # every already-uploaded object each run is pure waste that, combined with Drive's
@@ -58,13 +66,39 @@ spec:
                   # every run is a fast incremental. Safe here precisely because these objects never
                   # change; sync's delete phase (retention/GC propagation) is unaffected, still guarded by
                   # --max-delete. (2026-07-22)
-                  FLAGS="--ignore-existing --max-delete 100 --fast-list --transfers 4 --checkers 8 --tpslimit 8 --tpslimit-burst 16 --drive-stop-on-upload-limit --retries 3 --low-level-retries 10 --stats 2m --stats-one-line -v"
-                  echo "=== sync velero bucket -> Drive (encrypted) ==="
-                  rclone sync garage-velero:velero gdrive-crypt:velero $FLAGS
-                  echo "=== sync talos-etcd-backups bucket -> Drive (encrypted) ==="
-                  rclone sync garage-talos:talos-etcd-backups gdrive-crypt:talos-etcd-backups $FLAGS
+                  FLAGS="--ignore-existing --max-delete-size 100Gi --fast-list --transfers 4 --checkers 8 --tpslimit 8 --tpslimit-burst 16 --drive-stop-on-upload-limit --drive-use-trash=false --retries 3 --low-level-retries 10 --stats 2m --stats-one-line -v"
+                  RC=0
+                  # PRIMARY SAFETY GUARD. The threat being defended against is "the local source got wiped
+                  # or versitygw is down, so an empty listing mirrors a mass deletion to the last off-site
+                  # copy". This asserts that precondition directly — the source must still hold a plausible
+                  # amount of data — before any destructive mirror runs.
+                  #
+                  # It replaces `--max-delete 100`, which aimed at the same threat by counting deletions
+                  # and wedged permanently as a result: Kopia GC legitimately expires thousands of blobs,
+                  # so once the backlog passed 100, EVERY run aborted before deleting anything, which grew
+                  # the backlog, which guaranteed the next abort. That ratchet ran 41 days (7446 pending
+                  # deletes against a limit of 100) and by construction could never self-heal.
+                  sync_leg() {
+                    src="$1"; dst="$2"; floor="$3"
+                    echo "=== sync $src -> $dst (encrypted) ==="
+                    j=$(rclone size "$src" --json) || { echo "FATAL: cannot size $src — treating as unreachable"; return 1; }
+                    b=$(echo "$j" | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')
+                    c=$(echo "$j" | sed -n 's/.*"count":\([0-9]*\).*/\1/p')
+                    echo "source holds ${c:-?} objects / ${b:-?} bytes (floor ${floor})"
+                    if [ -z "$b" ] || [ "$b" -lt "$floor" ]; then
+                      echo "ABORT: source below floor — refusing to mirror a possible mass deletion"
+                      return 1
+                    fi
+                    rclone sync "$src" "$dst" $FLAGS
+                  }
+                  # Floors are roughly 10% of each bucket's steady-state size: low enough that ordinary
+                  # shrinkage never trips them, high enough that an empty or unreachable source always does.
+                  sync_leg garage-velero:velero gdrive-crypt:velero 5000000000 || RC=1
+                  sync_leg garage-talos:talos-etcd-backups gdrive-crypt:talos-etcd-backups 1000000000 || RC=1
                   echo "=== off-site quota (alert if near 5TB shared with Photos/Gmail) ==="
                   rclone about gdrive: --json || true
+                  echo "=== exit rc=$RC ==="
+                  exit $RC
               env:
                 - { name: HOME, value: /tmp }
               volumeMounts:

@@ -43,3 +43,4 @@ resources:
   - agentforge-coverage-rules.yaml # ailab#284, complement to the file above: those rules read forge_* and so are blind to a pod that is never scraped; this one joins against kube-state-metrics to catch exactly that (absent() cannot see an unselected target)
   - gitea-rules.yaml # alerts on the Gitea forge (down / memory / restart) — critical master forge
   - ha-rules.yaml # ADR 0016 guardrails: Tier-A replica loss, PDB drain-blockers, unaccepted-singleton inventory
+  - backup-rules.yaml # ADR 0010 chain: staleness of the off-site sync, Velero, and the Talos etcd snapshot — all three were unmonitored, and two were silently dead for 41d/5d

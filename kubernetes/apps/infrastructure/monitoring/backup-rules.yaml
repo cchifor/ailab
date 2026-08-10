@@ -1,0 +1,91 @@
+# Alerts over the 3-2-1 backup chain (ADR 0010). Written after an incident in which BOTH the
+# authoritative local copy and the off-site copy were dead simultaneously and nothing said so:
+#
+#   * Velero (copy #2) — a stray `manual-dumps/` directory written into the `velero` bucket on
+#     2026-08-05 made the BackupStorageLocation fail validation, so EVERY backup failed from that
+#     day on. Velero's own metrics were never scraped (the chart ships its ServiceMonitor off), so
+#     there was no series to alert on. Found only by reading BSL status by hand, 5 days later.
+#   * rclone-offsite (copy #3) — `--max-delete 100` against a Kopia GC backlog of 7446 aborted every
+#     run, for 41 consecutive days. No rule referenced the job.
+#
+# Both failure modes are STALENESS, not error-rate: the jobs were running and visibly "there", they
+# just stopped producing. Every rule below is therefore anchored on a last-success timestamp rather
+# than on a failure counter, so a silently unproductive backup is loud by default.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up (same convention as
+# k6-load-rules.yaml / soak-leak-rules.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: backup-chain
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: backup-chain
+      rules:
+        # Copy #3 (off-site). Threshold 48h against a daily 04:00 schedule: one missed night is
+        # tolerated (Drive rate-limits can legitimately push a run long), two is a real fault.
+        - alert: BackupOffsiteSyncStale
+          expr: |
+            (time() - kube_cronjob_status_last_successful_time{namespace="backup-offsite", cronjob="rclone-offsite"}) > 172800
+            or absent(kube_cronjob_status_last_successful_time{namespace="backup-offsite", cronjob="rclone-offsite"})
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Off-site backup sync has not succeeded in >48h"
+            description: >-
+              rclone-offsite last completed successfully
+              {{ with query "time() - kube_cronjob_status_last_successful_time{namespace='backup-offsite', cronjob='rclone-offsite'}" }}{{ . | first | value | humanizeDuration }}{{ end }}
+              ago. Google Drive is copy #3 of the 3-2-1; the local versitygw copy is unaffected.
+              Check `kubectl -n backup-offsite logs job/rclone-offsite-<id>` for an ABORT line from
+              the source-floor guard, or an rclone exit code.
+
+        # Copy #2 (local, authoritative) — the one that actually matters for restores.
+        # 36h against a 02:00 daily schedule. `absent()` is load-bearing: if Velero has NEVER
+        # produced a successful backup the timestamp series does not exist at all, and a bare
+        # staleness comparison would silently evaluate to nothing instead of firing.
+        - alert: VeleroBackupStale
+          expr: |
+            (time() - max(velero_backup_last_successful_timestamp{schedule!=""})) > 129600
+            or absent(velero_backup_last_successful_timestamp{schedule!=""})
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No successful Velero backup in >36h"
+            description: >-
+              The authoritative local backup copy is not being produced. Check the
+              BackupStorageLocation first — `kubectl -n velero get backupstoragelocation default
+              -o jsonpath='{.status.message}'`. An `Unavailable` BSL fails every backup, and the
+              usual cause is an unexpected top-level directory written into the `velero` bucket.
+
+        # Catches a BSL that fails validation while an older success keeps the staleness rule quiet.
+        - alert: VeleroBackupValidationFailing
+          expr: increase(velero_backup_validation_failure_total[6h]) > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Velero backups are failing validation"
+            description: >-
+              Velero rejected a backup before it ran. Almost always a BackupStorageLocation problem
+              rather than a workload problem; see `.status.message` on the BSL.
+
+        # Copy #2's other producer — the age-encrypted etcd snapshot (talos-backup, 01:00 daily).
+        # This is the total-cluster-loss path, so it is held to the same 36h bar as Velero.
+        - alert: TalosEtcdBackupStale
+          expr: |
+            (time() - kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="talos-backup"}) > 129600
+            or absent(kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="talos-backup"})
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: "No successful Talos etcd snapshot in >36h"
+            description: >-
+              Without a recent etcd snapshot, a total cluster loss is only recoverable to the last
+              good snapshot. The SOPS-encrypted Talos secrets bundle in git is a separate artifact
+              and is unaffected.
