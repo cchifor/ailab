@@ -40,3 +40,4 @@ resources:
   - agentforge-rules.yaml # alerts on the agentforge fleet, re-pointed at the LIVE jobs (agentforge-worker / -dispatcher). Was commented out AND pinned to the dead job=agentforge, so all 5 rules were doubly inert; see the file header for the per-rule decision and the ailab#284 coverage boundary
   - gitea-rules.yaml # alerts on the Gitea forge (down / memory / restart) — critical master forge
   - ha-rules.yaml # ADR 0016 guardrails: Tier-A replica loss, PDB drain-blockers, unaccepted-singleton inventory
+  - backup-rules.yaml # ADR 0010 chain: staleness of the off-site sync, Velero, and the Talos etcd snapshot — all three were unmonitored, and two were silently dead for 41d/5d

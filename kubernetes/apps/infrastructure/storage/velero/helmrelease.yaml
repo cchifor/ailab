@@ -38,6 +38,17 @@ spec:
         - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
     snapshotsEnabled: true
     backupsEnabled: true
+    # The chart already exposes /metrics on the velero Service (:8085), but ships the ServiceMonitor
+    # OFF by default — so nothing scraped it and every velero_* series was absent from Prometheus.
+    # That blind spot is why a BackupStorageLocation stuck in `Unavailable` (an unexpected top-level
+    # directory in the bucket) silently failed EVERY backup from 2026-08-05 until it was found by hand.
+    # Scraping this is what makes the VeleroBackupStale / VeleroBackupFailing rules able to fire at all.
+    metrics:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+        additionalLabels:
+          release: kube-prometheus-stack # operator's ruleSelector/serviceMonitorSelector
     credentials:
       useSecret: true
       # SOPS secret.sops.yaml — must contain key `cloud` (aws shared-credentials file format).
