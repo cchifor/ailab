@@ -119,7 +119,22 @@ Claims are issue comments with leases — self-healing by design:
 
 ## Monitoring
 
-`monitoring/agentforge.yaml` scrapes :9464 on all 6 workers (job=agentforge);
+`monitoring/agentforge.yaml` is a static Service+Endpoints+ServiceMonitor for the **dev-worker VMs**
+running agentforge as a host systemd service (ansible role `dev_worker`), relabelled to
+`job=agentforge`. ⚠️ **Measured 2026-08-10: `job=agentforge` has ZERO active targets and ZERO
+`forge_*` series** — that host-service topology is not what serves the estate any more. The live
+`forge_*` series come from the in-cluster pods instead, under two different job labels:
+
+| job | source | series |
+|---|---|---|
+| `agentforge-worker` | `agentforge-workers/worker-podmonitor.yaml` → operator-managed pool pods | 20 |
+| `agentforge-dispatcher` | `monitoring/agentforge-dispatcher` ServiceMonitor | 19 |
+
+So do **not** reach for `job=agentforge` when diagnosing; and note CP-rendered tenant pools are
+scraped by neither — see `worker-podmonitor.yaml`'s COVERAGE BOUNDARY and ailab#284. Whether the
+dev-worker static target should be removed or repaired is part of that open question, not settled
+here.
+
 `agentforge-rules.yaml` alerts: ForgeWorkerDown / ForgeIssueStuck / ForgeNeedsHumanPending /
 ForgeWebhookHMACFailures / ForgeReconcileDriftHigh → ntfy. First diagnostics stop:
 `journalctl -u agentforge` on the worker + the issue's `af:run`/`af:claim` comment ledger.
