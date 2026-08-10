@@ -48,6 +48,12 @@
 # fleet as unproven, not healthy. ailab#286's ForgeOrchestratorUnscraped
 # (agentforge-coverage-rules.yaml) is the complementary rule that detects the unscraped pods
 # themselves by joining against kube-state-metrics; it is deliberately NOT duplicated here.
+#   * a THIRD blind spot, tracked separately as ailab#293: the whole `af_*` metric namespace has no
+#     scrape target either. The provisioner really does export it — confirmed live 2026-08-10 by
+#     port-forwarding the pod, HTTP 200 on :9465/metrics with af_provisioner_alerts_total present —
+#     but it has NO Service at all, so #293's remedy is a PodMonitor, not a ServiceMonitor. Nothing in
+#     this file reads af_*; the two namespaces are disjoint and no rule here should be read as
+#     covering provisioner or seat-entitlement failures.
 #
 # -- RETIRED: ForgeWebhookHMACFailures ----------------------------------------------------------------
 #
@@ -82,16 +88,30 @@
 # -- EVIDENCE THAT EACH RULE BELOW CAN FIRE (live, 2026-08-10) ---------------------------------------
 # Healthy-case rules are proven NON-EMPTY and evaluable, with a counterfactual that trips the
 # comparison. An empty vector is not a passing alert; it is the defect this file just removed.
+#
+# HOW FAR BACK "MEASURED" CAN POSSIBLY MEAN HERE — this bounds every claim below, and an earlier
+# revision of this header overstated it as 7d. prometheusSpec sets `retention: 15d` AND
+# `retentionSize: 8GB`, and the SIZE cap is the one that binds: measured 2026-08-10,
+# prometheus_tsdb_size_retentions_total = 29 vs prometheus_tsdb_time_retentions_total = 0, and
+# prometheus_tsdb_lowest_timestamp_seconds resolves to 08-07 06:00Z. EVERY metric in this TSDB starts
+# there — prometheus_build_info and up{job="apiserver"} included — while the Prometheus pod itself has
+# been up since 2026-07-06 and the agentforge-worker PodMonitor since 2026-07-30. So the usable
+# history is ~3.1 DAYS, not 15 and not 7: no 7-day window exists to measure against, and any claim in
+# this file quoting one is unverifiable by construction. Figures below say "3.12d" where they mean it.
 #   ForgeTargetDown          up{job=~"agentforge-worker|agentforge-dispatcher"} -> 3 series, all 1.
 #                            Counterfactual `== 1` -> 3 series fire. Historical: up==0 occurred on 4
 #                            targets in 24h, ONE 30s sample each — never near the 5m hold, so `for: 5m`
 #                            is sized off measurement (worker terminationGracePeriodSeconds=150).
 #   ForgeReconcileStalled    time() - (ts > 0) -> 52.7s and 61.8s (2 series). 24h range -0.02s..89.6s,
 #                            far under 900. Counterfactual `> 10` -> both series fire.
-#   ForgeNeedsHuman...       -> +1.017 RIGHT NOW, i.e. already over threshold; it will fire ~30m after
-#                            Flux applies it. That is a true positive, not a teething alert — see its
-#                            own note. 7d max +1.06, duty cycle 4.6%.
-#   ForgeEngineAuthDegraded  forge_auth_degraded{job="agentforge-worker"} -> 2 series, both 0; 7d max 0.
+#   ForgeNeedsHuman...       REDESIGNED AGAIN 2026-08-10 (see its own note): the delta() form shipped
+#                            earlier the same day could not fire on a STANDING backlog, which is the
+#                            condition of interest. Measured at the moment of the rewrite: the delta
+#                            expr = 0 and `> 0.5` -> EMPTY, while the replacement = 1 and FIRES.
+#                            Counterfactual 08-10 05:00 (backlog flat at 8 for 11.7h, i.e. no
+#                            un-cleared increment) -> 0, EMPTY, correctly silent.
+#   ForgeEngineAuthDegraded  forge_auth_degraded{job="agentforge-worker"} -> 2 series, both 0; max 0
+#                            over all 3.12d of retained history (was written up as "7d max 0").
 #                            Counterfactual `== 0` -> 2 series fire. The set site is real, not a
 #                            declared-but-never-written gauge: app/orchestrator.py:1684
 #                            `emit(lambda m: m.auth_degraded.set(1))` (agentforge @ v0.4.0).
@@ -158,48 +178,118 @@ spec:
               fully successful pass, so a partial failure freezes it rather than zeroing it. Check the
               orchestrator container log for reconcile backoff and Gitea reachability from
               {{ $labels.namespace }}.
-        # REDESIGNED from ForgeNeedsHumanPending (`forge_needs_human_pending{job="agentforge"} > 0`).
-        # A level test is useless here: the playground carries a PERMANENT parked backlog — measured
-        # 6..9 continuously over 7 days — so `> 0` would fire immediately and never clear, which is
-        # ignored-by-default alerting rather than coverage (duty cycle 100% vs 4.6% for the form
-        # below). The delta form preserves the ORIGINAL INTENT ("an escalation appeared and nobody
-        # picked it up") while being immune to the baseline: a new escalation pushes the count up, and
-        # a human clearing the label inside the window nets the delta back to <=0 so the alert never
-        # completes its 30m hold.
-        # Three shape decisions, all mechanism-driven (agentforge @ v0.4.0):
-        #  * AGGREGATE FIRST, then delta. The gauge is unlabelled and recomputed per pass as the sum of
-        #    open needs-human issues across this process's repos, so EVERY pod in a pool reports the
-        #    same number. `max by (namespace)` is therefore correct and `sum` would double-count
-        #    (2 pods x 9 = 18). It also survives the KEDA pod churn (~25 generations in 24h) that would
-        #    make a per-pod delta pure noise.
-        #  * GATED ON `forge_last_reconcile_timestamp > 0`. Both gauges are written by the same
-        #    _stamp_reconcile() call, so a non-zero timestamp is proof this pod has completed a pass
-        #    and its needs-human count is real. Without the gate, a pod that is up but pre-first-pass
-        #    reports a genuine 0, and a pool that rolled all its replicas at once would read 0 -> 9 as
-        #    a +9 delta and false-fire. Not observed in 7d (max delta +1.06, i.e. the 2-replica rolling
-        #    update always kept one pod reporting) but it is a real hazard for a single-replica pool.
-        #  * THRESHOLD 0.5, not 0, because delta() extrapolates at the window edges and returns ~1.017
-        #    for a clean +1.
-        - alert: ForgeNeedsHumanEscalationUnattended
+        # REDESIGNED TWICE. History matters here because the second form failed in the SAME class as
+        # the first, and the reason is a PromQL semantics trap worth writing down.
+        #
+        #  1. `forge_needs_human_pending > 0` (original). Fires immediately and never clears, because
+        #     the playground carries a permanently parked backlog. Duty cycle 100% = ignored-by-default.
+        #  2. `delta(max by (namespace)(...)[1h:1m]) > 0.5` (shipped 2026-08-10 06:47Z, THIS rule's
+        #     predecessor). Wrong for a subtler reason: **delta() measures CHANGE, not PERSISTENCE.** A
+        #     standing backlog is FLAT, so its delta is 0 — the rule was structurally unable to fire on
+        #     the only condition anyone cares about. Measured, at the moment of this rewrite: backlog =
+        #     9 (a real standing backlog), delta expr = 0, `> 0.5` -> EMPTY VECTOR.
+        #     It was not merely mis-tuned, it was mis-shaped. The lifecycle that proves it (all UTC):
+        #       06:03:31 backlog steps 8 -> 9; delta goes 0 -> ~1.017 (extrapolated)
+        #       06:47:24 the PrometheusRule is created — 44 min into the only 60-min window it had
+        #       06:48:23 pending (ALERTS_FOR_STATE activeAt), accumulating against `for: 30m`
+        #       07:02    delta falls back under 0.5 as the step ages out of the [1h] subquery -> RESET
+        #     ~14 of the required 30 min accumulated; zero Forge alerts ever reached Alertmanager.
+        #     A clean +1 step gives a 60-min window of which `for: 30m` eats half, so the BEST case was
+        #     ~28 min of firing, and only if the rule happened to be live before the step. Over the
+        #     full 3.12d of retained history the delta form exceeded 0.5 for 218 of 4481 min (4.9%) in
+        #     8 runs, longest 58 min — so "can fire in principle, cannot fire on a standing backlog".
+        #
+        # THE TRADE-OFF THIS FORM TAKES, stated explicitly because it is a judgement call, not a fix.
+        # Two honest rules were available:
+        #   (a) PERSISTENCE: `min_over_time(backlog[6h]) > 0` — "a backlog exists and has never been
+        #       empty". Fires once and stays firing. Arguably the most honest representation of a real
+        #       standing condition. REJECTED, on a measured routing fact rather than on taste:
+        #       Alertmanager here routes EVERY alert to the ntfy receiver with NO severity-based route
+        #       (only `alertname="Watchdog"` is dropped) and `repeat_interval: 4h`. A permanently-firing
+        #       rule is therefore a phone push every 4h forever — `severity: info` would NOT de-page it
+        #       — and the predictable end state is a muted ntfy topic, which loses EVERY ailab alert.
+        #       That is a worse failure than the one being fixed. Making (a) safe needs an Alertmanager
+        #       route + inhibition change; that is a real piece of work and is deliberately NOT smuggled
+        #       into a rule-file PR. Named as the residual gap in the PR body.
+        #   (b) WHAT SHIPPED: persistence of an UN-DRAINED INCREMENT. Compare the level against its own
+        #       6h low-water mark: "escalations arrived and the backlog has not been worked back down to
+        #       where it was". This is a persistence test, not a change test — it stays true for as long
+        #       as the elevated level persists, which is exactly what delta() could not do — while
+        #       staying silent on the parked baseline that made form 1 useless.
+        # Consequence to be clear-eyed about: a backlog that is parked and NEVER drained goes quiet
+        # after 6h. That is intentional (it is an operator-created known state), but it means this rule
+        # is a "new halted work" detector, NOT a backlog-size SLO. The size belongs on a dashboard.
+        #
+        # Shape decisions, each measured over the full 3.12d of retained history (2026-08-10):
+        #  * AGGREGATE AWAY `pod` FIRST. The gauge is unlabelled and recomputed per pass as a pool-wide
+        #    total, so every pod in a pool reports the same number: `max by (namespace)` is correct and
+        #    `sum` would double-count (2 pods x 9 = 18). This — NOT the join — is what makes the rule
+        #    churn-proof: 46 pod generations in 3.12d (~15/day, median lifetime ~115 min, 11 of them
+        #    under 45 min) collapse into ONE continuous per-namespace series. `max` also absorbs the
+        #    brief inter-pod skew that does occur (max-minus-min across pods was observed in {0,1}), and
+        #    it absorbs it in the SAFE direction: a skew dip cannot drag the low-water mark down and
+        #    suppress a real alert.
+        #  * KEEP THE `forge_last_reconcile_timestamp > 0` GATE, and note it is now MORE load-bearing
+        #    than it was under delta(), not less. Both gauges are written by the same _stamp_reconcile()
+        #    call, so a non-zero stamp proves the pod has completed a pass and its count is real. The
+        #    worker Deployment declares NO readinessProbe, so a pod becomes a scrape target as soon as
+        #    it is Running and "first scrape beats first reconcile" is an OPEN RACE. Under delta() a
+        #    spurious 0 polluted a 1h window; under min_over_time it would pin the low-water mark to 0
+        #    for a full 6h and page at the full backlog value. Never observed (no worker pod has EVER
+        #    reported ts == 0 across all 46 generations, including recovery from KEDA scale-to-zero,
+        #    which returned samples of 7 and 8 directly) — but it is a race, not a guarantee, so the
+        #    gate stays. It is free: gated and ungated aggregates have IDENTICAL sample counts (4433 of
+        #    4433) over 3.12d, i.e. the gate has never dropped a worker sample. NB the job pin already
+        #    excludes the dispatcher (whose ts is a structural 0 forever), so fresh-pod validity is the
+        #    gate's only remaining job.
+        #  * WINDOW 6h, chosen against the measured alternatives (duty cycle / longest run over 3.12d):
+        #    2h 11.4%/1.9h · 4h 17.9%/3.9h · 6h 23.4%/5.9h · 12h 39.6%/11.9h · 24h 54.4%/21.3h. 6h is
+        #    the knee: a ~5.5h firing window after the 30m hold (vs the delta form's ~28 min best case,
+        #    ~12x) at a duty cycle still well clear of the 100% that made form 1 useless. It is also
+        #    sized off the measured failure modes — the one observed scrape gap was 53 min (KEDA
+        #    scale-to-zero, `minReplicaCount: 0`), and a gap restarts the 30m hold, so the window must
+        #    exceed gap + hold = ~83 min with margin. 2h would not.
+        #  * THRESHOLD `>= 1`, exact. min_over_time and max return real samples, so — unlike delta() and
+        #    increase(), which extrapolate at window edges and forced the old 0.5 fudge — there is no
+        #    extrapolation artefact to fudge around. The gauge is an integer count of open issues.
+        #  * `for: 30m` KEPT, and now genuinely satisfiable: it is 8% of the firing window rather than
+        #    50% of it. It preserves the original SLA ("nobody picked it up in 30m") and debounces a
+        #    label that is added and removed by hand.
+        - alert: ForgeNeedsHumanBacklogNotDraining
           expr: |
-            delta(
+            (
               max by (namespace) (
                 forge_needs_human_pending{job="agentforge-worker"}
                   and on(namespace, pod) (forge_last_reconcile_timestamp{job="agentforge-worker"} > 0)
-              ) [1h:1m]
-            ) > 0.5
+              )
+              -
+              min_over_time(
+                max by (namespace) (
+                  forge_needs_human_pending{job="agentforge-worker"}
+                    and on(namespace, pod) (forge_last_reconcile_timestamp{job="agentforge-worker"} > 0)
+                ) [6h:5m]
+              )
+            ) >= 1
           for: 30m
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge {{ $labels.namespace }}: a new needs-human escalation is unattended >30m"
+            summary: "AgentForge {{ $labels.namespace }}: {{ $value }} needs-human escalation(s) added in the last 6h and not cleared"
             description: >-
-              The needs-human count for this tenant rose in the last hour and has not come back down.
-              needs-human is a GLOBAL STOP for that issue — no agent will touch it until the label is
-              cleared — so each new one is a halted piece of work (budget breach, protected-path diff,
-              repeated gate disagreement, or an auth failure). Find it with the needs-human label in
-              the tenant's repo, read the disagreement-summary comment, then resume or close it
-              (docs/runbooks/agentforge.md). NOTE: this watches only the PLAYGROUND tenant today —
-              CP-rendered delivery pools export nothing (ailab#284), so a quiet fleet is not proof.
+              The needs-human backlog for this tenant is {{ $value }} above its own 6h low-water mark —
+              escalations arrived and nobody has worked the backlog back down. needs-human is a GLOBAL
+              STOP for an issue: no agent will touch it until the label is cleared, so each un-cleared
+              one is a permanently halted piece of work (budget breach, protected-path diff, repeated
+              gate disagreement, or an engine auth failure). DO THIS: list the tenant's open issues
+              carrying the needs-human label, newest first, and for each read the disagreement-summary
+              comment the agent left, then either fix the cause and REMOVE the label to resume the run,
+              or close the issue — the runbook has the per-cause procedure
+              (docs/runbooks/agentforge.md). Removing the label is what resolves this alert; it clears
+              once the count returns to its prior floor, so working the NEWEST escalations is what
+              silences it. This is deliberately NOT a backlog-size alert: a parked backlog that is
+              never drained goes quiet after 6h (see the note above the rule), so use the dashboard,
+              not this alert, to judge total backlog. NOTE: it watches only the PLAYGROUND tenant
+              today — CP-rendered delivery pools export nothing (ailab#284) and KEDA scale-to-zero
+              blinds it while the pool is idle, so a quiet fleet is not proof of a quiet backlog.
         # NEW, and the reason ForgeWebhookHMACFailures could be retired without losing what mattered:
         # it carries that rule's inferred intent, "a credential failed and delivery silently stopped".
         # forge_auth_degraded is the current surface for exactly that — a ONE-WAY latch set after
