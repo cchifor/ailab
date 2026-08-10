@@ -25,7 +25,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: pve-exporter
-          image: prompve/prometheus-pve-exporter:3.9.0
+          image: prompve/prometheus-pve-exporter:3.10.0
           envFrom:
             - secretRef: { name: pve-exporter-auth } # PVE_USER / PVE_TOKEN_NAME / PVE_TOKEN_VALUE
           env:
