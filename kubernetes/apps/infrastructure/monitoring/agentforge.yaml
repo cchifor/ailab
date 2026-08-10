@@ -1,9 +1,40 @@
-# AgentForge worker metrics (ADR 0018): the 6 dev-worker VMs (.8–.13) run the agentforge
+# NOT APPLIED — DEAD TARGET, KEPT ON PURPOSE. Read this before using it as evidence for anything.
+#
+# What it is: the ADR 0018 v1 design had the 6 dev-worker VMs (.8–.13) run the agentforge
 # orchestrator as a host systemd service (ansible role dev_worker, tasks/agentforge.yml), exporting
-# forge_* metrics on :9464 (ufw-opened to the LAN by the role). Gives per-worker health, webhook
-# HMAC failures, reconcile drift, needs-human backlog, and forge_build_info{version} for release
-# skew during pin bumps. relabel forces job="agentforge". Mirror of dev-workers-node.yaml; alerts
-# in agentforge-rules.yaml.
+# forge_* metrics on :9464 (ufw-opened to the LAN by the role); the relabel forces job="agentforge".
+# Mirror of dev-workers-node.yaml.
+#
+# What is actually true (measured 2026-08-10, ailab#284):
+#   - This file is COMMENTED OUT of monitoring/kustomization.yaml and always has been, so the
+#     Service / Endpoints / ServiceMonitor below DO NOT EXIST in the cluster (`kubectl -n monitoring
+#     get svc,endpoints,servicemonitor agentforge` → NotFound ×3).
+#   - job="agentforge" therefore has ZERO active targets and ZERO forge_* series. Do NOT cite
+#     job="agentforge" as the estate's worker job — the live jobs are `agentforge-worker` (the
+#     operator-managed pool, via agentforge-workers/worker-podmonitor.yaml) and
+#     `agentforge-dispatcher` (via agentforge-workers/dispatcher-servicemonitor.yaml).
+#   - No `agentforge` systemd unit exists on ANY of the 6 dev-worker VMs (`systemctl list-unit-files
+#     'agentforge*'` → 0 unit files on .8–.13; nothing listening on 9464). The gate
+#     dev_worker_enable_agentforge is still `false` and ADR 0019 supersedes this topology entirely.
+#
+# Why it is still here rather than deleted: the ADR 0018 host-service surface it belongs to is
+# still in the tree (the ansible role task, the dev_worker_agentforge_* SOPS keys, the group_vars
+# note), so removing only the scrape half would leave an inconsistent tree. Retiring it is one
+# coherent ADR-0018 retirement decision for the operator, tracked in ailab#284 — not an
+# observability edit. If you enable it, enable the ansible gate in the SAME change: six closed ports
+# would otherwise become six permanently-down targets. Be clear about what would NOT catch that —
+# ailab#288 renamed ForgeWorkerDown to ForgeTargetDown and scoped it to
+# job=~"agentforge-worker|agentforge-dispatcher", and Prometheus anchors regex matchers, so the
+# job="agentforge" this file relabels to does NOT match it. Nothing in agentforge-rules.yaml would
+# page. The only rule that would notice is the kube-prometheus-stack chart's own generic TargetDown
+# (verified loaded 2026-08-10: `100 * (count by (cluster,job,namespace,service) (up == 0) / count by
+# (...) (up)) > 10`, for 10m), which would name the job but not this design mistake.
+#
+# HOW THIS BLOCK ROTS: every claim above is a DATED MEASUREMENT covered by no test, no CI check and
+# no alert. Re-derive, do not trust: `grep -n agentforge kubernetes/apps/infrastructure/monitoring/
+# kustomization.yaml`; `kubectl --context admin@ai -n monitoring get servicemonitor agentforge`;
+# `up{job="agentforge"}` via port-forward svc/kube-prometheus-stack-prometheus or a curl from the
+# Grafana pod (the Prometheus pod is distroless — no shell to exec into).
 apiVersion: v1
 kind: Service
 metadata:
