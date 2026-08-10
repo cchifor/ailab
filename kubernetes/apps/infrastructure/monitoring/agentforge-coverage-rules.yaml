@@ -1,0 +1,90 @@
+# Scrape-COVERAGE alert for the AgentForge orchestrator fleet (ADR 0019; ailab#284).
+#
+# WHY THIS IS A SEPARATE FILE FROM agentforge-rules.yaml
+# NOT because that file is inert. It was — commented out of kustomization.yaml with all of its rules
+# pinned to the dead job="agentforge" — but ailab#288 fixed both: it is now listed in
+# kustomization.yaml and each of the five rules it carries is scoped to a live job
+# (`agentforge-worker`, plus `agentforge-dispatcher` in ForgeTargetDown's regex).
+#
+# The split is by DATA SOURCE, and it is the whole point of this rule. Every rule in that file reads a
+# forge_* series, and a forge_*-reading rule is structurally blind to a pod that is never scraped (see
+# the next block). This file holds the complement: the left-hand side comes from kube-state-metrics, so
+# it can see a pod that produces no forge_* series at all. agentforge-rules.yaml records the same
+# boundary from its own side and deliberately does not duplicate this rule.
+#
+# WHY absent() CANNOT DO THIS JOB
+# The gap ailab#284 records is an UNSELECTED TARGET, not a missing metric. A pod that no PodMonitor
+# selects is never scraped, so it produces no series at all — there is nothing for absent(forge_*) to
+# be absent of, and any rule that reads only the forge_* series is structurally blind to exactly the
+# pods that are invisible. "The feature is inert" and "the target was never scraped" both look like
+# silence. So this rule compares two independent sources: the orchestrator pods Kubernetes says exist
+# (kube-state-metrics, already scraped estate-wide, no new exporter and no cross-repo coupling) minus
+# the pods forge metrics actually arrive from.
+#
+# WHY `unless` AND NOT A COUNT SUBTRACTION
+# `count(pods) > count(forge_worker_up)` has the same disease it is meant to cure: if the right side
+# is empty the comparison is empty and the alert stays silent — the total-blackout case fails open.
+# A per-pod anti-join keeps every left-hand pod when the right side is empty, and it names the pod
+# instead of reporting an arithmetic difference. It also cannot be fooled by count offsets (the
+# dispatcher in ns `agentforge` also exports forge_worker_up and would have inflated a bare count to
+# exactly the pod count — a false all-clear).
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentforge-coverage
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: agentforge-coverage
+      rules:
+        # LEFT: every Ready container named `orchestrator` in a tenant namespace. That container name
+        # is hard-coded in BOTH renderers — the CP GitOps renderer (agentforge-platform
+        # adapters/gitops/renderer.py) and the operator-managed pool (agentforge-workers/
+        # worker-deployment.yaml) — so the selector covers CP- and operator-rendered pools alike. The
+        # `af-tenant-.*` namespace regex is deliberate: it needs no per-tenant edit when a workspace
+        # is provisioned, which is the growth problem the PodMonitor's namespaceSelector has.
+        # RIGHT: forge_worker_up is exported by the orchestrator process itself, so its presence is
+        # proof a scrape is landing, whichever monitor or job label selected the pod. Deliberately
+        # NOT pinned to job="agentforge-worker": a future second PodMonitor with its own job label
+        # must be able to SATISFY this rule rather than defeat it.
+        # NOISE: `== 1` excludes a pod that is not yet Ready (legitimately not scraped yet), and
+        # `for: 20m` rides out a Ready-but-not-yet-scraped pod, a rollout with an image pull on a
+        # cold agent node, and a Prometheus restart. Measured over the 3h spanning a live pool
+        # rollout at 30s resolution, this expression did not move once.
+        - alert: ForgeOrchestratorUnscraped
+          expr: |-
+            max by (namespace, pod) (
+              kube_pod_container_status_ready{namespace=~"af-tenant-.*", container="orchestrator"} == 1
+            )
+            unless on (namespace, pod) forge_worker_up
+          for: 20m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge orchestrator {{ $labels.namespace }}/{{ $labels.pod }} is unscraped (no forge_* metrics)"
+            description: >-
+              This orchestrator pod has been Ready for >20m and Prometheus has received no
+              forge_worker_up from it, so EVERY forge_* series for that pool is missing — 21 metric
+              names including forge_claims_total, forge_transitions_total, forge_llm_runs_total,
+              forge_needs_human_pending and forge_run_duration_seconds. While this fires you cannot
+              tell an inert feature from an unmeasured one for this pool (ailab#284). KNOWN CAUSE:
+              a label mismatch. CP-rendered tenant pods carry `agentforge.io/{org,workspace,pool}` +
+              `app.kubernetes.io/managed-by=agentforge-cp`, while the only worker PodMonitor
+              (infrastructure/agentforge-workers/worker-podmonitor.yaml) requires BOTH
+              `app.kubernetes.io/name=agentforge-worker` AND
+              `app.kubernetes.io/managed-by=agentforge-operator`, and its namespaceSelector enumerates
+              namespaces explicitly (today exactly one, af-tenant-tenant-zero-playground) — so a
+              CP-rendered pool fails the managed-by match AND is out of namespace scope, and a newly
+              provisioned workspace is invisible from birth. TRIAGE: compare
+              `kubectl --context admin@ai -n {{ $labels.namespace }} get pod {{ $labels.pod }} --show-labels`
+              against `kubectl --context admin@ai -n monitoring get podmonitor -o yaml`, then check
+              whether the pod IP appears in Prometheus /api/v1/targets (the Prometheus pod is
+              distroless — port-forward svc/kube-prometheus-stack-prometheus or curl from the Grafana
+              pod, do NOT try to exec a shell). If the pod IS an active target but unhealthy, this is
+              a NetworkPolicy or exporter fault instead, not a selection gap — check that the tenant
+              NetworkPolicy still admits 9464 from ns `monitoring`. Remedy options and their
+              trade-offs (ailab-side PodMonitor vs. the CP renderer emitting the expected labels) are
+              recorded in ailab#284; do not silence this without picking one.
