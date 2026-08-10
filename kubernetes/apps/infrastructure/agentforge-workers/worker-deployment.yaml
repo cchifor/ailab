@@ -123,7 +123,7 @@ spec:
           # once the release CI has built it — never hand-edit a digest here, and never state WHICH
           # build is pinned in prose (resolve it: git show gitea/main:<this file> | grep image:).
           # Operator procedure: docs/runbooks/agentforge-v3-cutover.md.
-          image: registry.chifor.me/agentforge/p1-worker@sha256:3c62dbcf4a33d815edc44e0e11a94ff2d7fabebb1653d91b6ed9f13045b87964
+          image: registry.chifor.me/agentforge/p1-worker@sha256:c73c6ccaeb7f1677d3822b64cd4466fedac61502a8dad9c0834293dc89086252
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge serve`.
           args: ["agentforge", "serve"]
           ports:
@@ -147,7 +147,7 @@ spec:
             # v3-CUTOVER PLACEHOLDER (unpullable). Real sandbox digest lands via the pin flow
             # (`just pin-workloads sandbox=sha256:…`) in the same run as the p1-worker pin — the
             # script also aligns the agentforge-sandbox egress-canary refs to the same digest.
-            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:b009434202509c696adef1f7e0cad4c59d0213228858c06997776938ea71e003" }
+            - { name: AF_SANDBOX_IMAGE, value: "registry.chifor.me/agentforge/sandbox@sha256:cbbc322ed0f67215a1e9449b8068a8f61845d16dc41c04e3ebc48fb14ce9cdd8" }
             - { name: AF_SANDBOX_SERVICE_ACCOUNT, value: "agentforge-sandbox" } # the tokenless sandbox SA
             - { name: AF_SANDBOX_ORG, value: "tenant-zero" }       # -> agentforge.io/org label + capability tenant
             # The capability `iss` claim — the issuer the broker's kid registry binds to
