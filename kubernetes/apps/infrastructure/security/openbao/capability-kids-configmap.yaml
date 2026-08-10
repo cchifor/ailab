@@ -43,6 +43,41 @@
 # diagnostic cycle. Decode the kid registry and check the WORKSPACE scope first; existence and
 # ExternalSecret sync are not authorization. Tracked as cchifor/agentforge#123.
 #
+# ── OPEN OPERATOR DECISION (agentforge#123): the PLAYGROUND workspace is not declared here ──
+# Re-derived live 2026-08-10 while adding the seat-entitlement audit (agentforge#152). Three facts
+# that change what "fix claude-max-3" means, and none of which follow from the asymmetry above:
+#
+# (1) THIS FILE DECLARES ONE WORKSPACE: af-tenant-tenant-zero-platform-dev. `playground` has NO entry.
+#     The kid the provisioner mints is DERIVED, `cap-<sha256(org/ws)[:32]>`:
+#       tenant-zero/platform-dev -> cap-b5663179affeeaba5366c3ffd232681d   (live, all four seats)
+#       tenant-zero/playground   -> cap-3af99bfad18296aded42ce8596a9b889   (exists NOWHERE, live)
+#     The live playground kid is `tz-213512e80fde7c84` — not the `cap-` shape, so it was NOT minted by
+#     this mechanism. It is a legacy hand-seed, and the playground orchestrator signs with it today
+#     (af-creds-playground-planner/AF_CAPABILITY_KID = tz-213512e80fde7c84). Adding a `playground`
+#     entry here therefore does NOT legitimize `tz-…`; it mints a SECOND, different kid and the
+#     orchestrator must rotate onto it. It is not a one-line grant.
+#
+# (2) THE SCHEMA CANNOT EXPRESS THE LIVE PLAYGROUND GRANT. An entry is keyed by
+#     derive_ns_name(org, ws) and carries exactly ONE `pool`, which the provisioner LOCKS into
+#     allowed_pools (capability_kid._policy_for). The live `tz-…` kid grants FIVE:
+#     cross-reviewer, implementer, planner, reviewer, tester. Declaring playground with
+#     `pool: planner` would authorize the planner pool ONLY and 401 the other four.
+#
+# (3) THE ASYMMETRY RUNS THE OTHER WAY TOO. `tz-…` is present on max-1, max-2 AND openai/codex-pro
+#     with no declaration in this file entitling it to ANY of them — an undeclared standing signing
+#     grant on three seats. Measured against what this file declares, claude-max-3 is the only seat
+#     whose registry matches exactly. "max-1 and max-2 have it, so max-3 should" is a hypothesis
+#     about intent, not authorization — and an unauthorized claude-max-3 registry entry has already
+#     been found and removed once in this programme.
+#
+# Also note: cchifor/agentforge-config `accounts` does not list claude-max-3 at all (playground
+# workers bind to claude-max-2 + codex-pro; claude-max-1's worker list is empty). So the seat is not
+# a configured failover target today — a kid alone would not make it usable.
+#
+# Do NOT resolve this by hand-editing a `-kids` Secret (ESO reverts it) or by inferring parity. The
+# two candidate resolutions and their consequences are written up in the ailab PR that added this
+# block; pick one deliberately.
+#
 # EVERY anthropic seat in the estate MUST appear here. This list is what creates the aggregated
 # `af/data/operator/broker/<provider>/<account>/kids` registry doc a broker's `-kids` ExternalSecret
 # reads: a broker with NO entitled audience never gets its KV path written, so its `-kids` Secret
