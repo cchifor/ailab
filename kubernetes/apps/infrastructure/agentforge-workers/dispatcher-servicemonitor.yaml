@@ -1,10 +1,13 @@
-# ServiceMonitor for the af-dispatcher scale oracle — MIRRORS monitoring/agentforge.yaml exactly: it lives
+# ServiceMonitor for the af-dispatcher scale oracle — MIRRORS monitoring/agentforge.yaml's shape: it lives
 # in the `monitoring` namespace, carries `release: kube-prometheus-stack` (the label kube-prometheus's
-# Prometheus selects ServiceMonitors by), sets an explicit namespaceSelector, targets the named `metrics`
-# port, and scrapes at 30s. The ONLY adaptation: namespaceSelector points at `agentforge` (where the
-# dispatcher Service lives — the mirrored SM's Service is in `monitoring`), and the relabel forces
-# job="agentforge-dispatcher". Without this, kube-prometheus never scrapes forge_pending and the
-# ScaledObject's prometheus trigger has no series.
+# Prometheus selects ServiceMonitors by), sets an explicit namespaceSelector, and targets the named
+# `metrics` port. TWO adaptations: namespaceSelector points at `agentforge` (where the dispatcher Service
+# lives — the mirrored SM's Service is in `monitoring`) with the relabel forcing job="agentforge-dispatcher";
+# and the interval is 15s, NOT the mirrored 30s — since the webhook fast-path the dispatcher re-computes
+# forge_pending within seconds of the Gitea event, so this scrape and the KEDA pollingInterval
+# (scaledobject.yaml, also 15s) are the dominant FIXED delays left on the cold 0->1 path; a 30s scrape
+# would sit stale in Prometheus and cancel the webhook's freshness win. Without this SM, kube-prometheus
+# never scrapes forge_pending and the ScaledObject's prometheus trigger has no series.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -20,7 +23,7 @@ spec:
       app.kubernetes.io/name: agentforge-dispatcher
   endpoints:
     - port: metrics
-      interval: 30s
+      interval: 15s # NOT the mirrored 30s — see header (webhook fast-path; scrape is now a dominant fixed delay)
       relabelings:
         - targetLabel: job
           replacement: agentforge-dispatcher

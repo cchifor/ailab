@@ -22,6 +22,7 @@ resources:
   - worker-externalsecret.yaml     # materializes af-creds-playground-planner from tenants/tenant-zero/playground/orchestrator
   - worker-serviceaccount.yaml     # the orchestrator SA the worker runs as (was assumed-existing but never rendered → pod never created)
   - worker-staging-pvc.yaml        # tenant-ns staging PVC bound to the operator NFS PV (was omitted → pod FailedScheduling)
+  - worker-webhook-service.yaml    # ClusterIP over the worker's webhook receiver (8700) — the dispatcher's fan-out target
   - scaledobject.yaml              # KEDA scale-to-zero (prometheus backlog + cron warm-floor) over the worker
   - cilium-egress.yaml             # worker egress: Gitea + kube-apiserver:6443 + DNS ONLY (deny world/metadata/IPv6)
   - worker-podmonitor.yaml         # kube-prometheus scrape of the worker's forge_* registry (R8; no Service → PodMonitor).
