@@ -100,16 +100,26 @@ is_num() { case "${1:-}" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 # duration like `14400s`). Fails SAFE in both directions: anything unparseable becomes the floor rather
 # than being passed through, so a typo'd override can never widen the deletion set.
 clamp_win() {
-  local w="${1:-}" n u s
+  local w="${1:-}" n u s floor
+  # The FLOOR itself must be validated before it is used as one. An empty or non-numeric override
+  # otherwise propagates straight into the filter: `MIN_UNTIL_SEC='' clamp_win garbage` emitted the
+  # bare string `s`, docker rejected `--filter until=s`, and every prune call site swallows its own
+  # errors (`|| true`) — so a single typo'd override would have silently disabled ALL window prunes
+  # while the sweep still reported success. Fall back to the built-in 4h rather than trusting it.
+  floor="$MIN_UNTIL_SEC"
+  if ! is_num "$floor" || [ "$floor" -le 0 ]; then
+    log "MIN_UNTIL_SEC='${MIN_UNTIL_SEC}' is not a positive integer -> using the built-in 14400s floor"
+    floor=14400
+  fi
   n="${w%[smhd]}"; u="${w#"$n"}"
-  if ! is_num "$n"; then printf '%ss' "$MIN_UNTIL_SEC"; return 0; fi
+  if ! is_num "$n"; then printf '%ss' "$floor"; return 0; fi
   case "$u" in
     s) s=$(( n )) ;; m) s=$(( n * 60 )) ;; h) s=$(( n * 3600 )) ;; d) s=$(( n * 86400 )) ;;
-    *) printf '%ss' "$MIN_UNTIL_SEC"; return 0 ;;
+    *) printf '%ss' "$floor"; return 0 ;;
   esac
-  if [ "$s" -lt "$MIN_UNTIL_SEC" ]; then
-    log "window ${w} is below the ${MIN_UNTIL_SEC}s job-timeout floor -> clamped"
-    s="$MIN_UNTIL_SEC"
+  if [ "$s" -lt "$floor" ]; then
+    log "window ${w} is below the ${floor}s job-timeout floor -> clamped"
+    s="$floor"
   fi
   printf '%ss' "$s"
 }

@@ -127,6 +127,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_IDLE_WAIT_SEC="${IDLEWAIT:-2}" GITEA_CLEANUP_IDLE_POLL_SEC=1 \
     GITEA_CLEANUP_CACHE_MAX_BYTES="${CACHECAP:-20000000000}" \
     GITEA_CLEANUP_CRITICAL_UNTIL="${CRITUNTIL:-4h}" \
+    GITEA_CLEANUP_MIN_UNTIL_SEC="${MINUNTIL-14400}" \
     GITEA_CLEANUP_BEACON=0 GITEA_CLEANUP_TEXTFILE_DIR=/nonexistent \
     bash "$SCRIPT" >/dev/null 2>&1 || true
 }
@@ -348,6 +349,25 @@ unset CRITUNTIL
 CRITUNTIL=garbage run_case 1 95
 assert_has "image prune -af --filter until=14400s" "L3: an unparseable window falls back to the floor, not to no filter"
 unset CRITUNTIL
+
+# L4/L5 (codex cross-review): the FLOOR is an override too, so it must be validated before being used
+# as one. NOTE an EMPTY override is NOT the reachable case — `${GITEA_CLEANUP_MIN_UNTIL_SEC:-14400}`
+# already substitutes on empty, so it never reaches clamp_win. Asserting on empty passed with the
+# guard deliberately removed, i.e. it was a vacuous test. The two reachable shapes are non-empty:
+#   abc -> `--filter until=abcs`, which docker rejects; every prune call site swallows its own errors
+#          with `|| true`, so one typo would silently disable ALL window prunes while the sweep still
+#          logged success — the same silent-no-op class this whole PR exists to remove.
+#   0   -> `--filter until=0s` (delete EVERYTHING) AND it disables the clamp itself, so a 1h critical
+#          window passes through untouched onto the MID-JOB path. That is the dangerous one.
+MINUNTIL=abc CRITUNTIL=garbage run_case 1 95
+assert_has "image prune -af --filter until=14400s" "L4: a non-numeric MIN_UNTIL_SEC falls back to the built-in floor"
+if grep -qE 'until=abcs' "$CALLS"; then bad "L4b: a malformed floor must never reach docker"; else ok "L4b: malformed floor never reaches docker"; fi
+unset MINUNTIL CRITUNTIL
+
+MINUNTIL=0 CRITUNTIL=1h run_case 1 95
+assert_has "image prune -af --filter until=14400s" "L5: a zero floor cannot disable the clamp (1h must still be raised)"
+if grep -qE 'until=(0s|3600s)' "$CALLS"; then bad "L5b: a zero floor must not let a sub-timeout window through mid-job"; else ok "L5b: zero floor cannot leak a sub-timeout window"; fi
+unset MINUNTIL CRITUNTIL
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi
