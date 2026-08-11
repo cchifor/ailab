@@ -131,7 +131,18 @@ gitea_runner_cleanup_pressure_until: 6h
 gitea_runner_cleanup_critical_pct: 92 # disk% >= this: hard *_critical_until window + trim actions cache;
 #   ALSO the only threshold that still prunes through a live job — and only after the idle wait failed,
 #   because at that point ENOSPC would red every job, not one (the ci-runner-2 starvation incident).
-gitea_runner_cleanup_critical_until: 1h # critical window (NEVER 0/`-a` — still protects a <1h live build)
+# Critical window. Was 1h with the claim that it "still protects a <1h live build" — it did not: under
+# the containerd image store `until=` compares the LOCAL record time (when this host pulled/tagged the
+# image), and a host-mode job creates no container, so nothing else protects an image a live job pulled.
+# With a 3h job timeout, any window under 3h can delete an image out from under a running job, and this
+# is the one block that also runs on the MID-JOB path. The script now clamps every window up to
+# GITEA_CLEANUP_MIN_UNTIL_SEC (4h) — the same "MUST exceed the job timeout" rule reap_age_sec already
+# states — so setting anything below that here is silently raised to the floor rather than honoured.
+gitea_runner_cleanup_critical_until: 4h
+# Hard floor for EVERY `--filter until=` window, in seconds. Must exceed gitea_runner_job_timeout (3h).
+# The script clamps routine/pressure/critical windows up to this and fails safe (an unparseable window
+# becomes the floor), so no override can widen the deletion set below the job timeout by accident.
+gitea_runner_cleanup_min_until_sec: 14400 # 4h
 # Busy + pressure: how long to wait for the job gap before deferring (or, at critical, pruning anyway).
 # Jobs average ~1.5min with frequent gaps (~74 idle sweeps/day/runner observed), so 10min nearly always
 # finds one. MUST stay below the unit's TimeoutStartSec minus worst-case prune time.
@@ -150,12 +161,15 @@ gitea_runner_cleanup_idle_confirm_polls: 3
 # runner shares this daemon, so it loses its warm cache too), hence the disk gate and a cap well above
 # the ~14GB observed working set.
 gitea_runner_cleanup_cache_max_bytes: 20000000000
-# Hard size cap for docker IMAGES. Images overtook the build cache as the dominant consumer
-# (2026-08-09, ci-runner-4: 35 GB images / 24.4 GB reclaimable vs 28.6 GB cache) and the `until=`
-# windows cannot retire them — most images are younger than the 6h pressure window because CI pulls
-# and builds faster than any age rule. Over this cap an idle sweep runs a full `image prune -af`.
-# Destructive to warm images (the next job re-pulls), so keep it well above a working set.
-gitea_runner_cleanup_image_max_bytes: 20000000000
+# Disk% at which an idle sweep may run a full `image prune -af`. REPLACES the old image byte cap
+# (gitea_runner_cleanup_image_max_bytes), which was removed because an absolute cap cannot bound the
+# filesystem: with cache and images each capped at 20 GB, "every cap satisfied" and "disk at 88%" were
+# both true at once, leaving the sweep no lever between pressure (75) and critical (92). Measured on
+# ci-runner-4 2026-08-11: the cap fired correctly at 04:22 (75% -> 63%), then by 10:26 images were back
+# under cap and the sweep logged `done: disk 88% -> 88%` — nothing left to pull. Gating on df(1) fixes
+# that, and also removes the dependence on `docker system df`, whose failure mode was a silent no-op.
+# Destructive to warm images (the next job re-pulls), so it sits above the windowed prunes.
+gitea_runner_cleanup_full_prune_pct: 88
 gitea_runner_cleanup_actcache_max_mb: 1536 # trim the act_runner actions cache above this (critical only)
 # Prune work/<repo-hash> workspaces whose ENTIRE tree is untouched for this many hours (0 disables).
 # act_runner never deletes them and agentforge's ephemeral per-repo CI mints new ones continuously —

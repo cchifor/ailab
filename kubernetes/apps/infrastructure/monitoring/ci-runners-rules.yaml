@@ -194,3 +194,25 @@ spec:
               Expected resting state is ~60-65% with the BuildKit cache cap in place, so this means
               something is growing that the cap does not cover (images, actcache, workspaces, or logs):
               `docker system df`, `du -sh /var/lib/containerd /home/runner/act-runner`.
+        # 3. The gap the 2026-08-11 investigation exposed: the sweep can run every 15 min for days and
+        # never once reach the part that reclaims. Measured over 72h on ci-runner-1/4, a timer that
+        # fires ~288 times completed 2-3 sweeps; the rest exited early via the busy gate. Disk-percent
+        # alerts cannot see this — they say the disk is full, not that the mechanism meant to empty it
+        # is never running — so both symptoms looked identical to "the disk is just busy".
+        # busy_skip is deliberately the signal here rather than disk_freed_percent: the early-exit
+        # paths write a REDUCED beacon, so disk_freed_percent only exists on runners that completed a
+        # sweep recently (2 of 5 when this was written) and a rule on it is blind exactly where it
+        # matters most. busy_skip is written on every path, so it is present on all five.
+        - alert: CIRunnerCleanupStarved
+          expr: gitea_runner_cleanup_busy_skip{job="ci-runner-node"} == 1
+          for: 3h
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} cleanup has not completed a sweep in 3h"
+            description: >-
+              Every gitea-runner-cleanup run on {{ $labels.instance }} has exited early via the busy
+              gate for 3h, so no reclamation has happened regardless of disk level. Either the runner is
+              genuinely saturated (check for a stuck job) or the idle gate is not finding the gaps it
+              should: `journalctl -t gitea-runner-cleanup | grep -E 'skip routine|defer:|done:'`.
+              Sustained together with CIRunnerDiskPressureSustained, this is the signature of the disk
+              climbing with no working lever, which ends at the mid-job prune path.
