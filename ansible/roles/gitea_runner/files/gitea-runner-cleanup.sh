@@ -41,9 +41,20 @@ DISK_PATH="${GITEA_CLEANUP_DISK_PATH:-/}"
 ROUTINE_UNTIL="${GITEA_CLEANUP_ROUTINE_UNTIL:-48h}"     # steady state: keep images/cache used within 48h
 PRESSURE_PCT="${GITEA_CLEANUP_PRESSURE_PCT:-80}"        # disk% >= this -> tighten the window
 PRESSURE_UNTIL="${GITEA_CLEANUP_PRESSURE_UNTIL:-6h}"
-CRITICAL_PCT="${GITEA_CLEANUP_CRITICAL_PCT:-92}"        # disk% >= this -> hard 1h window + actcache trim
-CRITICAL_UNTIL="${GITEA_CLEANUP_CRITICAL_UNTIL:-1h}"    # never 0/`-a`: still protects a <1h running build
+CRITICAL_PCT="${GITEA_CLEANUP_CRITICAL_PCT:-92}"        # disk% >= this -> hard window + actcache trim
+CRITICAL_UNTIL="${GITEA_CLEANUP_CRITICAL_UNTIL:-4h}"    # clamped up to MIN_UNTIL_SEC — see clamp_win()
 REAP_AGE_SEC="${GITEA_CLEANUP_REAP_AGE_SEC:-14400}"     # remove RUNNING containers older than this (4h)
+# HARD FLOOR for every `--filter until=` window, in seconds. Under the containerd image store `until`
+# compares c8dimages.Image.CreatedAt — the LOCAL record time, i.e. when THIS host pulled or tagged the
+# image, NOT the image's build date. And in HOST mode an act_runner job creates no container, so
+# filterImagesUsedByContainers() protects nothing: the window is the ONLY thing standing between a live
+# job and an image it pulled at minute 0 to run at minute 50. Any window shorter than the job timeout
+# (gitea_runner_job_timeout, 3h) can therefore delete an image out from under a running job.
+# CRITICAL_UNTIL was 1h — below the job timeout — and section 4 applies it on the mid-job path, so the
+# old comment there ("still protects a <1h running build") asserted a guarantee the code did not have.
+# This is the same invariant REAP_AGE_SEC already documents for containers ("MUST exceed the job
+# timeout"); the prune windows simply never had it applied.
+MIN_UNTIL_SEC="${GITEA_CLEANUP_MIN_UNTIL_SEC:-14400}"   # 4h > 3h job timeout
 INFRA_EXCLUDE_RE="${GITEA_CLEANUP_INFRA_EXCLUDE_RE:-buildkit|buildx}" # never reap the persistent builder
 ACTCACHE_DIR="${GITEA_CLEANUP_ACTCACHE_DIR:-/home/runner/act-runner/.cache/actcache}"
 ACTCACHE_MAX_MB="${GITEA_CLEANUP_ACTCACHE_MAX_MB:-1536}"
@@ -67,12 +78,16 @@ IDLE_CONFIRM_POLLS="${GITEA_CLEANUP_IDLE_CONFIRM_POLLS:-3}"
 # on the idle path only, re-checking the busy signal first and only once disk is at/over PRESSURE_PCT —
 # see section 3b for why nothing cheaper bounds a continuously-reused cache, and for the residual race.
 CACHE_MAX_BYTES="${GITEA_CLEANUP_CACHE_MAX_BYTES:-20000000000}"
-# Hard SIZE cap for docker IMAGES (bytes; 0 disables). Same shape and reasoning as the build cache
-# above, for the accumulator that overtook it: 2026-08-09 on ci-runner-4, images 35 GB (24.4 GB
-# reclaimable) against 28.6 GB of cache. The `--filter until=` windows cannot bound it either — the
-# age histogram was 35 images at 2h, 21 at 7h, 8 at 1h, i.e. almost everything younger than the 6h
-# pressure window, because CI pulls and builds faster than any age rule retires them.
-IMAGE_MAX_BYTES="${GITEA_CLEANUP_IMAGE_MAX_BYTES:-20000000000}"
+# Disk% at which the full (unwindowed) image prune becomes available, on the idle path only. This
+# REPLACES the old IMAGE_MAX_BYTES cap, which could not bound the disk: an absolute byte cap and the
+# filesystem are independent quantities, so "images under cap" and "disk at 88%" were simultaneously
+# true and the sweep had no lever at all between PRESSURE_PCT and CRITICAL_PCT (see section 3c).
+# Sits between the two so the cheap windowed prunes always get first refusal.
+# The `--filter until=` windows cannot retire images on their own — the measured age histogram was
+# 35 images at 2h, 21 at 7h, 8 at 1h, i.e. almost everything younger than the pressure window, because
+# CI pulls and builds faster than any age rule. So an unwindowed prune has to exist somewhere; keeping
+# it idle-only and above this threshold is what makes it affordable.
+FULL_PRUNE_PCT="${GITEA_CLEANUP_FULL_PRUNE_PCT:-88}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 
@@ -80,6 +95,34 @@ command -v docker >/dev/null 2>&1 || exit 0
 log() { logger -t gitea-runner-cleanup -- "$*" 2>/dev/null || true; }
 disk_pct() { df --output=pcent "$DISK_PATH" 2>/dev/null | tail -1 | tr -dc '0-9'; }
 is_num() { case "${1:-}" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# Clamp a `--filter until=` window UP to MIN_UNTIL_SEC and emit it in seconds (docker accepts a bare
+# duration like `14400s`). Fails SAFE in both directions: anything unparseable becomes the floor rather
+# than being passed through, so a typo'd override can never widen the deletion set.
+clamp_win() {
+  local w="${1:-}" n u s floor
+  # The FLOOR itself must be validated before it is used as one. An empty or non-numeric override
+  # otherwise propagates straight into the filter: `MIN_UNTIL_SEC='' clamp_win garbage` emitted the
+  # bare string `s`, docker rejected `--filter until=s`, and every prune call site swallows its own
+  # errors (`|| true`) — so a single typo'd override would have silently disabled ALL window prunes
+  # while the sweep still reported success. Fall back to the built-in 4h rather than trusting it.
+  floor="$MIN_UNTIL_SEC"
+  if ! is_num "$floor" || [ "$floor" -le 0 ]; then
+    log "MIN_UNTIL_SEC='${MIN_UNTIL_SEC}' is not a positive integer -> using the built-in 14400s floor"
+    floor=14400
+  fi
+  n="${w%[smhd]}"; u="${w#"$n"}"
+  if ! is_num "$n"; then printf '%ss' "$floor"; return 0; fi
+  case "$u" in
+    s) s=$(( n )) ;; m) s=$(( n * 60 )) ;; h) s=$(( n * 3600 )) ;; d) s=$(( n * 86400 )) ;;
+    *) printf '%ss' "$floor"; return 0 ;;
+  esac
+  if [ "$s" -lt "$floor" ]; then
+    log "window ${w} is below the ${floor}s job-timeout floor -> clamped"
+    s="$floor"
+  fi
+  printf '%ss' "$s"
+}
 
 write_beacon() {
   [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
@@ -309,22 +352,42 @@ if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge 
   fi
 fi
 
-# 3c. SIZE cap for IMAGES — the same problem as 3b, for the accumulator that overtook it. Images are
-#     now the larger consumer (2026-08-09, ci-runner-4: 35 GB images vs 28.6 GB cache, 24.4 GB of the
-#     images reclaimable) and the retention window cannot retire them: most are younger than the 6h
-#     pressure window because CI pulls and builds faster than any age rule.
-#     Identical safety shape to 3b, deliberately: idle path only, NEVER from the mid-job critical path,
-#     gated on disk pressure, and the busy signal re-read immediately before the destructive call.
+# 3c. DISK-GATED full image prune — the last-resort lever for the accumulator that overtook the cache
+#     (2026-08-09, ci-runner-4: 35 GB images vs 28.6 GB cache). The retention window cannot retire
+#     images: most are younger than the pressure window because CI pulls and builds faster than any age
+#     rule. Same safety shape as 3b, deliberately: idle path only, NEVER from the mid-job critical path,
+#     and the busy signal re-read immediately before the destructive call.
 #     `image prune -af` removes every image no container is using, so the next job re-pulls — which is
-#     why it fires only over the cap rather than routinely. An unreadable size fails CLOSED (is_num).
-if [ "$midjob" -eq 0 ] && [ "${IMAGE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge "$PRESSURE_PCT" ]; then
-  img_now="$(timeout 60 docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null     | awk -F'|' '$1=="Images"{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null)"
-  if is_num "$img_now" && [ "$img_now" -gt "$IMAGE_MAX_BYTES" ]; then
-    if ! idle_confirmed; then
-      log "images ${img_now}B over cap but a job is running -> skipping the full image prune"
-    else
-      log "images ${img_now}B > cap ${IMAGE_MAX_BYTES}B at disk ${pct_cap}%, idle -> full image prune"
-      timeout 900 docker image prune -af >/dev/null 2>&1 || true
+#     why it fires only above FULL_PRUNE_PCT rather than routinely. Note that under HOST mode no job
+#     ever holds a container, so "no container is using it" is true of EVERY image here; the idle gate,
+#     not a container reference, is what keeps this from landing on a live job.
+#
+#     GATED ON THE FILESYSTEM, NOT ON A BYTE CAP. An absolute cap does not compose with the disk: with
+#     cache and image caps both at 20 GB, "every cap satisfied" and "disk at 88%" are simultaneously
+#     true, and then this sweep completes having done nothing while the disk stays full. Measured on
+#     ci-runner-4 2026-08-11 — 04:22 the cap fired correctly (images 30.6 GB > 20 GB) and took the disk
+#     75% -> 63%; by 10:26 images were back under the cap, so the sweep logged `done: disk 88% -> 88%`
+#     with no lever left to pull. Between "caps satisfied" and CRITICAL_PCT the script had nothing at
+#     all, which is precisely the band the disks then oscillated in for weeks.
+#     disk_pct() is a df(1) read and cannot fail the way `docker system df` can (slow metadata walk of
+#     the whole snapshot tree on the containerd store, and an unreadable result fails CLOSED with no
+#     log — indistinguishable from "nothing to do"). The size read is kept for the LOG LINE only, so a
+#     failure to read it can no longer suppress the prune.
+if [ "$midjob" -eq 0 ] && [ "$pct_cap" -ge "$FULL_PRUNE_PCT" ]; then
+  img_now="$(timeout 60 docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null | awk -F'|' '$1=="Images"{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null)"
+  if is_num "$img_now"; then img_desc="images ${img_now}B"; else
+    img_desc="images unreadable"
+    log "docker system df unreadable -> pruning on disk% anyway (it no longer gates this)"
+  fi
+  if ! idle_confirmed; then
+    log "disk ${pct_cap}% >= ${FULL_PRUNE_PCT}% (${img_desc}) but a job is running -> skipping the full image prune"
+  else
+    log "disk ${pct_cap}% >= ${FULL_PRUNE_PCT}% (${img_desc}), idle -> full image prune"
+    timeout 900 docker image prune -af >/dev/null 2>&1 || true
+    after_fp="$(disk_pct)"; is_num "$after_fp" || after_fp="$pct_cap"
+    log "full image prune done: disk ${pct_cap}% -> ${after_fp}%"
+    if [ $(( pct_cap - after_fp )) -lt 2 ]; then
+      log "WARNING: full image prune freed <2% — bytes are in containerd state docker cannot reach (moby_history leases, orphaned snapshots)"
     fi
   fi
 fi
@@ -333,7 +396,8 @@ fi
 #    removes anything in use or recently used, so it is safe regardless of the idle read. Tighten under
 #    disk pressure. (Build cache is the big one — 10-33 GB/runner.)
 pct="$(disk_pct)"; is_num "$pct" || pct=0
-win="$ROUTINE_UNTIL"; [ "$pct" -ge "$PRESSURE_PCT" ] && win="$PRESSURE_UNTIL"
+win="$(clamp_win "$ROUTINE_UNTIL")"
+[ "$pct" -ge "$PRESSURE_PCT" ] && win="$(clamp_win "$PRESSURE_UNTIL")"
 # `timeout` on each: a wedged daemon otherwise blocks the unit to TimeoutStartSec (the sweep would
 # hang here rather than at the size cap, which is where the timeouts used to start).
 timeout 120 docker network prune -f --filter "until=$win" >/dev/null 2>&1 || true
@@ -341,14 +405,17 @@ timeout 600 docker builder prune -f --filter "until=$win" >/dev/null 2>&1 || tru
 prune_extra_builders "$win"
 timeout 600 docker image prune -af --filter "until=$win" >/dev/null 2>&1 || true
 
-# 4. critical: still very high -> hard 1h window (NOT `-af`: a <1h running build is still protected) +
-#    trim the actions cache (act_runner re-fills it). Path-guarded so we can never rm the wrong tree.
+# 4. critical: still very high -> tightest ALLOWED window + trim the actions cache (act_runner re-fills
+#    it). Path-guarded so we can never rm the wrong tree. The window is clamped to MIN_UNTIL_SEC like
+#    every other one: this block runs on the MID-JOB path too, so it is the single most dangerous place
+#    to go below the job timeout, not a place to make an exception.
 pct="$(disk_pct)"; is_num "$pct" || pct=0
 if [ "$pct" -ge "$CRITICAL_PCT" ]; then
-  log "critical disk ${pct}% -> ${CRITICAL_UNTIL} window + actcache trim"
-  timeout 600 docker builder prune -f --filter "until=$CRITICAL_UNTIL" >/dev/null 2>&1 || true
-  prune_extra_builders "$CRITICAL_UNTIL"
-  timeout 600 docker image prune -af --filter "until=$CRITICAL_UNTIL" >/dev/null 2>&1 || true
+  cwin="$(clamp_win "$CRITICAL_UNTIL")"
+  log "critical disk ${pct}% -> ${cwin} window + actcache trim"
+  timeout 600 docker builder prune -f --filter "until=$cwin" >/dev/null 2>&1 || true
+  prune_extra_builders "$cwin"
+  timeout 600 docker image prune -af --filter "until=$cwin" >/dev/null 2>&1 || true
   case "$ACTCACHE_DIR" in
     /*/*) # require an absolute path with >=2 components so we can never rm '/' or a top-level dir
       if [ -d "$ACTCACHE_DIR" ]; then

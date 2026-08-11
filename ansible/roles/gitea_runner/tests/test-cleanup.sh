@@ -126,6 +126,8 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
     GITEA_CLEANUP_IDLE_WAIT_SEC="${IDLEWAIT:-2}" GITEA_CLEANUP_IDLE_POLL_SEC=1 \
     GITEA_CLEANUP_CACHE_MAX_BYTES="${CACHECAP:-20000000000}" \
+    GITEA_CLEANUP_CRITICAL_UNTIL="${CRITUNTIL:-4h}" \
+    GITEA_CLEANUP_MIN_UNTIL_SEC="${MINUNTIL-14400}" \
     GITEA_CLEANUP_BEACON=0 GITEA_CLEANUP_TEXTFILE_DIR=/nonexistent \
     bash "$SCRIPT" >/dev/null 2>&1 || true
 }
@@ -137,9 +139,9 @@ bad()  { echo "  FAIL: $1"; fails=$((fails+1)); echo "    --- calls ---"; sed 's
 assert_has()  { if calls_has "$1"; then ok "$2"; else bad "$2 (expected call: $1)"; fi; }
 assert_none() { if [ -s "$CALLS" ] && grep -q 'prune' "$CALLS"; then bad "$1 (unexpected prune ran)"; else ok "$1"; fi; }
 
-echo "[A] idle + low disk (50%) -> routine window prune (until=48h) runs"
+echo "[A] idle + low disk (50%) -> routine window prune (48h -> 172800s) runs"
 run_case 0 50
-assert_has "image prune -af --filter until=48h" "A: routine image prune @48h"
+assert_has "image prune -af --filter until=172800s" "A: routine image prune @48h (emitted in seconds)"
 
 # 2026-08-08: this case USED to assert the opposite — that the pressure reclaim runs THROUGH a live
 # job. That behaviour was the mid-job containerd-GC race (it reaps in-flight `docker pull` leases and
@@ -151,16 +153,16 @@ assert_none "B: no prune while busy at pressure (waits for the gap, then defers)
 
 echo "[B2] BUSY + PRESSURE (85%), job ends during the wait -> sweeps race-free"
 MOCK_BUSY_DROP_AFTER=1 run_case 1 85
-assert_has "image prune -af --filter until=6h" "B2: pressure sweep runs once the gap appears"
+assert_has "image prune -af --filter until=21600s" "B2: pressure sweep runs once the gap appears"
 unset MOCK_BUSY_DROP_AFTER
 
-echo "[C] BUSY + CRITICAL (95%) -> critical 1h-window reclaim runs"
+echo "[C] BUSY + CRITICAL (95%) -> critical window reclaim runs, CLAMPED to the job-timeout floor"
 run_case 1 95
-assert_has "image prune -af --filter until=1h"  "C: critical image prune @1h while busy"
+assert_has "image prune -af --filter until=14400s" "C: critical window CLAMPED up to the 4h job-timeout floor"
 
 echo "[D] non-default buildx builders are pruned too (docker buildx prune --builder)"
 run_case 0 85
-assert_has "buildx prune -f --filter until=6h --builder builder-leaked" "D: per-builder buildx prune"
+assert_has "buildx prune -f --filter until=21600s --builder builder-leaked" "D: per-builder buildx prune"
 
 echo "[E] BUSY + low disk (50%) -> routine sweep SKIPPED (busy optimization preserved)"
 run_case 1 50
@@ -220,7 +222,7 @@ echo "[I] the PEER runner's busy signal is its per-job worker, not its superviso
 # and this timer starved while disks climbed to 93% (measured 2026-08-08, zero gap-catches fleet-wide).
 # The mock reflects that shape: pgrep -f matches ONLY when a peer job is actually running.
 MOCK_PEER_JOB=0 run_case 0 50
-assert_has "image prune -af --filter until=48h" "I1: peer idle (supervisor child only) -> sweep runs"
+assert_has "image prune -af --filter until=172800s" "I1: peer idle (supervisor child only) -> sweep runs"
 
 MOCK_PEER_JOB=1 run_case 0 50
 assert_none "I2: peer running a real job -> sweep skipped (shared daemon)"
@@ -250,7 +252,7 @@ assert_none "J5: our own MainPID unreadable -> BUSY, no prune"
 # would run whether or not the `inactive` branch fires, so the case passed vacuously and a deleted
 # `continue` went unnoticed. With a worker present, ONLY the inactive skip can let the sweep proceed.
 MOCK_PEER_STATE=inactive MOCK_PEER_JOB=1 run_case 0 50
-assert_has "image prune -af --filter until=48h" "J6: peer CONFIRMED inactive -> idle even with a stray worker match"
+assert_has "image prune -af --filter until=172800s" "J6: peer CONFIRMED inactive -> idle even with a stray worker match"
 
 # The own-arm has TWO fail-safe modes and J5 only covers one: a read that FAILS. A read that succeeds
 # but returns junk is caught further on by is_num, and nothing exercised it.
@@ -259,23 +261,32 @@ assert_none "J8: non-numeric MainPID -> BUSY, no prune"
 unset MOCK_MAINPID
 unset MOCK_PEER_STATE MOCK_PEER_JOB MOCK_PEER_PROBE_RC MOCK_SYSTEMCTL_FAIL
 
-echo "[K] image SIZE cap — same shape as the cache cap, for the accumulator that overtook it"
+echo "[K] full image prune — gated on DISK%, not on a byte cap"
 # Images became the dominant consumer (2026-08-09, ci-runner-4: 35 GB images vs 28.6 GB cache) and the
-# `until=` windows cannot retire them: most images are younger than the 6h pressure window because CI
-# pulls and builds faster than any age rule. So an over-cap idle sweep escalates to `image prune -af`,
-# under the same guards as 3b: never mid-job, only at pressure, busy re-read immediately before.
-# NOTE these assert on `image prune -af` with NO `--filter`, which is what distinguishes the cap from
-# the routine windowed prune that every sweep already runs.
+# `until=` windows cannot retire them: most images are younger than the pressure window because CI
+# pulls and builds faster than any age rule. So an idle sweep escalates to `image prune -af`, under the
+# same guards as 3b: never mid-job, and the busy signal re-read immediately before.
+#
+# The TRIGGER changed from `images > IMAGE_MAX_BYTES` to `disk% >= FULL_PRUNE_PCT`. An absolute byte
+# cap and the filesystem are independent quantities, so "every cap satisfied" and "disk at 88%" were
+# simultaneously true and the sweep had NO lever between PRESSURE_PCT and CRITICAL_PCT. Measured on
+# ci-runner-4 2026-08-11: the cap fired correctly at 04:22 (disk 75% -> 63%), then by 10:26 images were
+# back under cap and the sweep logged `done: disk 88% -> 88%` with nothing left to pull. K1/K2 below
+# encode exactly that: the byte size no longer decides, the disk does.
+# NOTE these assert on `image prune -af` with NO `--filter`, which is what distinguishes this from the
+# routine windowed prune that every sweep already runs.
 capfired() { grep -qE 'docker image prune -af *$' "$CALLS"; }
 
+MOCK_IMAGES=26 run_case 0 90
+if capfired; then ok "K1: disk >= FULL_PRUNE_PCT + idle -> full image prune"; else bad "K1: disk >= FULL_PRUNE_PCT + idle -> full image prune"; fi
+
+# The case the byte cap could not express: images comfortably UNDER any cap while the disk is full.
+# This is the exact steady state the runners were stuck in, and it must now prune.
+MOCK_IMAGES=12 run_case 0 90
+if capfired; then ok "K2: disk full but images under the old cap -> STILL prunes (the byte cap could not)"; else bad "K2: disk full but images under the old cap -> STILL prunes (the byte cap could not)"; fi
+
 MOCK_IMAGES=26 run_case 0 85
-if capfired; then ok "K1: over cap + idle + pressure -> full image prune"; else bad "K1: over cap + idle + pressure -> full image prune"; fi
-
-MOCK_IMAGES=12 run_case 0 85
-if capfired; then bad "K2: under cap must NOT full-prune images"; else ok "K2: under cap leaves images alone"; fi
-
-MOCK_IMAGES=26 run_case 0 50
-if capfired; then bad "K3: healthy disk must NOT full-prune images"; else ok "K3: over cap but disk healthy -> no full image prune"; fi
+if capfired; then bad "K3: below FULL_PRUNE_PCT must NOT full-prune images"; else ok "K3: pressure but below FULL_PRUNE_PCT -> no full image prune"; fi
 
 # K4 as first written was VACUOUS — mutation proved it: dropping the midjob gate left the suite green,
 # because with the runner busy for the whole sweep the BUSY RE-CHECK answers first and the gate it
@@ -286,10 +297,16 @@ MOCK_IMAGES=26 MOCK_BUSY_UNTIL=container run_case 1 95
 if capfired; then bad "K4: the midjob gate must block the full image prune even when the re-check reads idle"; else ok "K4: midjob gate blocks the full image prune when the re-check reads idle"; fi
 unset MOCK_BUSY_UNTIL
 
-MOCK_IMAGES=0 run_case 0 85
-if capfired; then bad "K5: unparseable image size must fail closed"; else ok "K5: unparseable image size -> no full prune (fails closed)"; fi
+# K5 INVERTED DELIBERATELY. It used to assert that an unreadable size fails CLOSED (no prune). That
+# was correct when the size WAS the trigger, but it is exactly how the lever went silent for weeks:
+# `docker system df` on the containerd snapshotter walks the whole snapshot tree, is slow enough to hit
+# its own timeout, and an empty read then skipped the prune with no log and no metric — indistinguish-
+# able from "nothing to do". The size is now used for the LOG LINE only, so an unreadable one must NOT
+# be able to suppress reclamation on a disk that df(1) says is full.
+MOCK_IMAGES=0 run_case 0 90
+if capfired; then ok "K5: unreadable image size still prunes (df decides, not docker system df)"; else bad "K5: unreadable image size still prunes (df decides, not docker system df)"; fi
 
-MOCK_IMAGES=26 MOCK_BUSY_FROM=container run_case 0 85
+MOCK_IMAGES=26 MOCK_BUSY_FROM=container run_case 0 90
 if capfired; then bad "K6: a job arriving mid-sweep must abort the full image prune"; else ok "K6: job arriving mid-sweep aborts the full image prune"; fi
 unset MOCK_IMAGES
 
@@ -314,6 +331,43 @@ find "$WSP/oldrepo2" -exec touch -d '4 days ago' {} +
 WSAGE=0 run_case 0 50
 [ -e "$WSP/oldrepo2" ] && ok "G: prune disabled at age 0" || bad "G: prune disabled at age 0"
 unset WSP
+
+echo "[L] every --filter until= window is clamped to at least the job timeout"
+# Under the containerd image store `until=` compares the LOCAL record time (when THIS host pulled or
+# tagged the image), and a host-mode job holds no container, so filterImagesUsedByContainers() protects
+# nothing. With a 3h job timeout, ANY window under 3h can delete an image out from under a running job.
+# CRITICAL_UNTIL shipped at 1h and section 4 applies it on the MID-JOB path, so this was the single
+# most dangerous window in the script. The clamp is what makes the old comment's promise ("still
+# protects a running build") actually true. L1 is the mutation guard: remove clamp_win from the
+# critical call site and this goes red, because the raw 5m would reach docker.
+CRITUNTIL=5m run_case 1 95
+assert_has "image prune -af --filter until=14400s" "L1: a dangerously short critical override is clamped UP to the floor"
+if grep -q 'until=5m' "$CALLS"; then bad "L2: the raw sub-timeout window must never reach docker"; else ok "L2: raw sub-timeout window never reaches docker"; fi
+unset CRITUNTIL
+
+# An unparseable window must not silently pass through as-is either: it becomes the floor.
+CRITUNTIL=garbage run_case 1 95
+assert_has "image prune -af --filter until=14400s" "L3: an unparseable window falls back to the floor, not to no filter"
+unset CRITUNTIL
+
+# L4/L5 (codex cross-review): the FLOOR is an override too, so it must be validated before being used
+# as one. NOTE an EMPTY override is NOT the reachable case — `${GITEA_CLEANUP_MIN_UNTIL_SEC:-14400}`
+# already substitutes on empty, so it never reaches clamp_win. Asserting on empty passed with the
+# guard deliberately removed, i.e. it was a vacuous test. The two reachable shapes are non-empty:
+#   abc -> `--filter until=abcs`, which docker rejects; every prune call site swallows its own errors
+#          with `|| true`, so one typo would silently disable ALL window prunes while the sweep still
+#          logged success — the same silent-no-op class this whole PR exists to remove.
+#   0   -> `--filter until=0s` (delete EVERYTHING) AND it disables the clamp itself, so a 1h critical
+#          window passes through untouched onto the MID-JOB path. That is the dangerous one.
+MINUNTIL=abc CRITUNTIL=garbage run_case 1 95
+assert_has "image prune -af --filter until=14400s" "L4: a non-numeric MIN_UNTIL_SEC falls back to the built-in floor"
+if grep -qE 'until=abcs' "$CALLS"; then bad "L4b: a malformed floor must never reach docker"; else ok "L4b: malformed floor never reaches docker"; fi
+unset MINUNTIL CRITUNTIL
+
+MINUNTIL=0 CRITUNTIL=1h run_case 1 95
+assert_has "image prune -af --filter until=14400s" "L5: a zero floor cannot disable the clamp (1h must still be raised)"
+if grep -qE 'until=(0s|3600s)' "$CALLS"; then bad "L5b: a zero floor must not let a sub-timeout window through mid-job"; else ok "L5b: zero floor cannot leak a sub-timeout window"; fi
+unset MINUNTIL CRITUNTIL
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi
