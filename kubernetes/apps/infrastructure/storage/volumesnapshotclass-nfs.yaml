@@ -1,0 +1,25 @@
+# VolumeSnapshotClass for the nfs-csi StorageClass (provisioner nfs.csi.k8s.io).
+#
+# Without this, every PVC on nfs-csi failed its backup with "failed to get VolumeSnapshotClass for
+# provisioner nfs.csi.k8s.io", which made EVERY scheduled Velero backup PartiallyFailed — the
+# Kubernetes objects were captured but the volume DATA was not. Five volumes were affected
+# (ai/open-webui-data, monitoring/storage-loki-0, and three strive-ailab volumes; 63 GiB).
+# Only a qnap-iscsi class existed, so the gap was invisible until backups were audited.
+#
+# The csi-nfs-controller Deployment already runs a csi-snapshotter sidecar (verified live), so no
+# driver change was needed — the class itself was the whole missing piece.
+#
+# csi-driver-nfs implements a snapshot as a tarball written into a snapshot directory on the SAME
+# NFS share, so on its own this is NOT disaster recovery — same failure domain as the source volume
+# (the same caveat as the qnap-iscsi class). It is DR here only because Velero runs with
+# snapshotMoveData: true: the snapshot is transient, Kopia streams its contents to the versitygw
+# object store, and Velero removes the snapshot afterwards. The durable copy is the one in the
+# bucket, which the nightly rclone leg then mirrors off-site (ADR 0010).
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: nfs-csi
+  labels:
+    velero.io/csi-volumesnapshot-class: "true" # Velero matches driver->StorageClass provisioner; no ambiguity with qnap-iscsi
+driver: nfs.csi.k8s.io
+deletionPolicy: Delete
