@@ -32,6 +32,17 @@ kind: ScaledObject
 metadata:
   name: af-orch-playground-planner
   namespace: af-tenant-tenant-zero-playground
+  annotations:
+    # engine#186 claim-storm mitigation (2026-08-11): hold this pool at ONE replica.
+    # Multi-replica worker + dispatcher-relayed self issue_comment events = unbounded
+    # af:claim election loop (playground#13, ~498 comments in ~2.5 min); single-replica
+    # pools are immune (the claim holder skips re-claiming). The operator's hand-applied
+    # annotation did not survive: kustomize-controller's SSA apply owns
+    # metadata.annotations on this object and stripped it on the next reconcile
+    # (observed 2026-08-11 19:41Z; KEDA then re-created the HPA and scaled back to 2).
+    # So the pause lives HERE, in git, until the engine#186 dispatcher/claim fix ships —
+    # that issue owns removing this annotation, nothing else should.
+    autoscaling.keda.sh/paused-replicas: "1"
   labels:
     app.kubernetes.io/name: agentforge-worker
     app.kubernetes.io/component: orchestrator
