@@ -42,7 +42,15 @@ spec:
     name: af-orch-playground-planner # the worker Deployment (same namespace); default kind apps/v1 Deployment
   minReplicaCount: 0                  # scale to zero when idle (the cron warm-floor is a trigger, NOT a min)
   maxReplicaCount: 2                  # == account.max_parallel (hard concurrency cap)
-  pollingInterval: 30                 # how often KEDA evaluates the triggers (s)
+  # 15 (was 30): the webhook fast-path makes the scale oracle fresh in SECONDS — Gitea POSTs each issue
+  # event to the dispatcher's :8710 listener, which re-computes forge_pending immediately instead of
+  # waiting out its own poll loop. That flips where the cold-path (0->1) latency lives: it is no longer
+  # the gauge going stale but the two FIXED sampling delays between the gauge and the HPA — the
+  # Prometheus scrape (dispatcher-servicemonitor.yaml, 15s to match) and THIS pollingInterval. At 30 the
+  # poll alone kept event->wake at ~60s worst-case no matter how fast the gauge moved; 15+15 bounds it
+  # at ~30s. Do not chase this lower: KEDA polls Prometheus per trigger per interval, and sub-scrape
+  # polling just re-reads the same sample.
+  pollingInterval: 15                 # how often KEDA evaluates the triggers (s)
   cooldownPeriod: 300                 # wait after the last active trigger before scaling back to 0 (s)
   triggers:
     # (1) Prometheus scale oracle — scale on the pending backlog for THIS account's role(s). The gauge is

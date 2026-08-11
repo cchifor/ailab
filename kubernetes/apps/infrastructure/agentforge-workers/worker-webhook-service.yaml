@@ -1,0 +1,38 @@
+# ClusterIP over the operator worker's FastAPI webhook receiver (8700) — the fan-out target the
+# af-dispatcher's AF_WEBHOOK_FORWARD_URLS names (dispatcher-deployment.yaml). Until the webhook fast-path
+# the worker deliberately had NO Service (its 8700 was ingress-denied outright — see the pre-fast-path
+# cilium-egress.yaml header); this Service exists so the dispatcher has a stable DNS name across KEDA
+# churn, and cilium-egress.yaml ingress (2) still narrows who can actually reach the port to the
+# dispatcher identity alone. NOT a metrics Service: 9464 is deliberately not listed here, so
+# worker-podmonitor.yaml (a PodMonitor) remains the scrape path.
+#
+# NAME: matches the Deployment/SA/ScaledObject (af-orch-playground-planner) — the same name-reuse the CP
+# renderer applies to its own pools' Services (af-orch-<ws>-<pool>, the `af-orch-*-delivery.af-tenant-*
+# .svc:8700` receivers the gitea.yaml ALLOWED_HOST_LIST note documents). SELECTOR: the worker's
+# OPERATOR-ONLY label pair (worker-deployment.yaml spec.selector) — the CP-rendered pods in future shared
+# namespaces carry agentforge.io/* labels and no app.kubernetes.io/name, so this can never capture them.
+#
+# SCALE-TO-ZERO: while KEDA holds the pool at 0 this Service simply has no endpoints and a dispatcher
+# forward fails fast — expected. The webhook is the warm-pool EDGE optimization; the 0->1 wake stays on
+# the KEDA cold path (scaledobject.yaml pollingInterval + the 15s scrape), and the poll loop remains the
+# correctness path for anything a failed forward drops.
+apiVersion: v1
+kind: Service
+metadata:
+  name: af-orch-playground-planner
+  namespace: af-tenant-tenant-zero-playground
+  labels:
+    app.kubernetes.io/name: agentforge-worker
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agentforge-worker
+    app.kubernetes.io/managed-by: agentforge-operator
+  ports:
+    - name: webhook
+      port: 8700
+      targetPort: webhook
+      protocol: TCP

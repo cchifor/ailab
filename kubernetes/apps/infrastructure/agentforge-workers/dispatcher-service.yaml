@@ -1,6 +1,14 @@
-# ClusterIP over the dispatcher's Prometheus metrics port ONLY (the dispatcher has no data/API port — it
-# is a read-only poller). The dispatcher-servicemonitor.yaml selects this Service so kube-prometheus
-# scrapes forge_pending (the KEDA scale oracle the ScaledObject queries).
+# ClusterIP over the dispatcher's TWO ports. `metrics` (9464): dispatcher-servicemonitor.yaml selects
+# this Service so kube-prometheus scrapes forge_pending (the KEDA scale oracle the ScaledObject queries).
+# `webhook` (8710, AF_WEBHOOK_PORT): the webhook fast-path listener — this file's earlier claim that the
+# dispatcher has no data/API port is RETIRED. Gitea POSTs issue-event webhooks here; the dispatcher
+# verifies the HMAC (AF_WEBHOOK_SECRET), re-computes forge_pending immediately, and fans the event out to
+# the worker pools' own receivers (AF_WEBHOOK_FORWARD_URLS -> worker-webhook-service.yaml:8700). The
+# dispatcher stays a READ-ONLY forge client — no claims, no Job creation, no capability minting — the
+# listener only ingests events; it exposes no query/command API. Gitea's hostmatcher checks the RESOLVED
+# ClusterIP, and this Service draws from the Talos service subnet 10.96.0.0/12 already permitted by
+# gitea.yaml webhook.ALLOWED_HOST_LIST; who may actually REACH 8710 is narrowed to ns gitea by
+# dispatcher-netpol.yaml.
 apiVersion: v1
 kind: Service
 metadata:
@@ -19,4 +27,8 @@ spec:
     - name: metrics
       port: 9464
       targetPort: metrics
+      protocol: TCP
+    - name: webhook
+      port: 8710
+      targetPort: webhook
       protocol: TCP

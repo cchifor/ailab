@@ -15,9 +15,10 @@
 # (monitoring/agentforge-dispatcher, namespaceSelector agentforge) — none selected any pod in an
 # af-tenant-* namespace.
 #
-# A PodMonitor, NOT a ServiceMonitor: the worker deliberately has NO Service (its webhook API 8700
-# is unexposed — see the worker-deployment.yaml header), and the estate already scrapes
-# serviceless pods this way. The shape mirrors the sibling dispatcher-servicemonitor.yaml: it lives
+# A PodMonitor, NOT a ServiceMonitor: the worker has NO metrics Service. (Since the webhook
+# fast-path it DOES have a Service — worker-webhook-service.yaml — but that fronts the 8700 webhook
+# receiver only and deliberately lists no 9464 port, so there is still nothing here for a
+# ServiceMonitor to select), and the estate already scrapes serviceless ports this way. The shape mirrors the sibling dispatcher-servicemonitor.yaml: it lives
 # in `monitoring`, carries `release: kube-prometheus-stack` (the label the kube-prometheus
 # Prometheus selects monitors by; podMonitorNamespaceSelector is {} and neither
 # enforcedNamespaceLabel nor ignoreNamespaceSelectors is set, so a monitor in `monitoring` may

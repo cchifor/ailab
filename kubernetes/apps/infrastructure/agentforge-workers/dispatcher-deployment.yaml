@@ -1,14 +1,18 @@
 # af-dispatcher — the always-on KEDA SCALE ORACLE (`agentforge dispatcher`, the SAME p1-worker image as
 # the orchestrator/reaper — the agentforge console script carries every subcommand). A stripped, READ-ONLY
 # sibling of the worker: it polls the forge and exports `forge_pending{account,pool,role,repo}` on the
-# metrics port (main.py: dispatcher()/_dispatch_once). NO webhook API, NO claims, NO Job creation, NO
-# capability minting. It lives in the TRUSTED `agentforge` namespace (baseline PSA) alongside the reaper —
-# NOT a tenant ns, NOT agentforge-sandbox.
+# metrics port (main.py: dispatcher()/_dispatch_once), and — webhook fast-path — listens on :8710
+# (AF_WEBHOOK_PORT) for Gitea issue-event webhooks, verifies the HMAC (AF_WEBHOOK_SECRET), refreshes the
+# gauge immediately, and fans the event out to the worker receivers (AF_WEBHOOK_FORWARD_URLS). The
+# listener INGESTS events only — still NO claims, NO Job creation, NO capability minting. It lives in the
+# TRUSTED `agentforge` namespace (baseline PSA) alongside the reaper — NOT a tenant ns, NOT
+# agentforge-sandbox.
 #
-# TRUST SURFACE (design/plan §1): the dispatcher gets a READ-ONLY forge PAT ONLY (dispatcher-externalsecret
-# .yaml) and NOTHING else — explicitly NO AF_CAPABILITY_* signing key/kid, NO AF_SANDBOX_* / broker /
-# litellm material. It never creates a Job or mints a capability, so it needs no kube-apiserver access
-# (automountServiceAccountToken:false) and no sandbox/broker reach (dispatcher-netpol.yaml: forge + DNS only).
+# TRUST SURFACE (design/plan §1): the dispatcher gets a READ-ONLY forge PAT + the webhook HMAC secret
+# (both dispatcher-externalsecret.yaml) and NOTHING else — explicitly NO AF_CAPABILITY_* signing key/kid,
+# NO AF_SANDBOX_* / broker / litellm material. It never creates a Job or mints a capability, so it needs
+# no kube-apiserver access (automountServiceAccountToken:false) and no sandbox/broker reach
+# (dispatcher-netpol.yaml: forge + the worker webhook fan-out + DNS only).
 # tenant-zero is FORGE-BACKED (AF_CONFIG_SOURCE=gitea), so there is no control-plane bearer to mount.
 #
 # ⚠ DELIBERATELY NOT LISTED in kustomization.yaml (mirrors reaper-deployment.yaml + the broker
@@ -31,7 +35,10 @@ metadata:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
-  replicas: 1 # a single read-only poller; the forge_pending gauge is idempotent, but one is enough
+  replicas: 1 # a single read-only poller; the forge_pending gauge is idempotent, but one is enough. Also
+              # the single webhook endpoint — acceptable because the webhook is an EDGE optimization, not
+              # the correctness path: a delivery missed during a restart is re-covered by the next poll
+              # loop pass (and Gitea keeps redelivery history). Do not scale this up for "webhook HA".
   strategy:
     type: Recreate
   selector:
@@ -87,20 +94,49 @@ spec:
             # In-cluster Gitea (gitea-http.gitea.svc:3000) — reached identity-based so the netpol can
             # deny world; NOT the public git.chifor.me (which would require world/FQDN egress).
             - { name: AF_GITEA_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000" }
+            # -- webhook fast-path (edge trigger for the scale oracle) ------------------------------
+            # The listener Gitea POSTs issue events to (dispatcher-service.yaml `webhook` port; ingress
+            # narrowed to ns gitea by dispatcher-netpol.yaml). HMAC-verified with AF_WEBHOOK_SECRET
+            # (envFrom the agentforge-dispatcher-webhook Secret below; AF_WEBHOOK_SECRET_PREVIOUS is
+            # mapped there only during a rotation window).
+            - { name: AF_WEBHOOK_PORT, value: "8710" }
+            # Fan-out targets: the worker pools' own FastAPI :8700 receivers, comma-separated. ONE entry
+            # today — the operator-managed tenant-zero worker via its ClusterIP Service
+            # (worker-webhook-service.yaml). While KEDA holds that pool at 0 the Service has no
+            # endpoints and the forward fails fast — expected and harmless: the 0->1 wake is the KEDA
+            # cold path (scaledobject.yaml), not the fan-out. Add one URL per pool as pools grow; the
+            # CP-rendered delivery pools keep their DIRECT Gitea webhooks (gitea.yaml ALLOWED_HOST_LIST
+            # note) and are deliberately NOT re-routed through this dispatcher here.
+            - name: AF_WEBHOOK_FORWARD_URLS
+              value: "http://af-orch-playground-planner.af-tenant-tenant-zero-playground.svc.cluster.local:8700/webhook"
           envFrom:
-            # The ONLY credential surface: the agentforge-dispatcher-forge Secret, which since the
-            # post-soak cleanup carries AF_BOT_TOKENS ALONE — the JSON bot-username→PAT map
-            # GiteaClient reads for list_issues. This image reads only that map and exits hard when
-            # it is empty/missing (2026-08-04 crashloop). The legacy AF_BOT_TOKEN_PLANNER projection
-            # (#226's pin-revert bridge, which a v2 image reads instead) came off with the soak, so
-            # reverting the pin to a v2 digest now means restoring that mapping in
-            # dispatcher-externalsecret.yaml in the SAME change.
-            # ESO-synced from OpenBao (dispatcher-externalsecret.yaml). Carries NO capability/sandbox/broker
-            # material by construction (a distinct operator KV path, disjoint from the tenant/broker roles).
+            # The credential surface (the whole of it): the two ESO-synced Secrets below — the forge PATs
+            # and the webhook HMAC secret, both from the same disjoint operator KV subtree
+            # (dispatcher-externalsecret.yaml), which by construction carries NO capability/sandbox/broker
+            # material.
+            #
+            # (1) agentforge-dispatcher-forge — since the post-soak cleanup carries AF_BOT_TOKENS ALONE:
+            # the JSON bot-username→PAT map GiteaClient reads for list_issues. This image reads only that
+            # map and exits hard when it is empty/missing (2026-08-04 crashloop). The legacy
+            # AF_BOT_TOKEN_PLANNER projection (#226's pin-revert bridge, which a v2 image reads instead)
+            # came off with the soak, so reverting the pin to a v2 digest now means restoring that mapping
+            # in dispatcher-externalsecret.yaml in the SAME change.
             - secretRef:
                 name: agentforge-dispatcher-forge
+            # (2) agentforge-dispatcher-webhook — AF_WEBHOOK_SECRET (+ AF_WEBHOOK_SECRET_PREVIOUS during a
+            # rotation window). `optional: true` is DELIBERATE and inverts the 2026-08-04 ordering lesson:
+            # a REQUIRED ref on a Secret whose OpenBao path is not yet provisioned blocks pod CREATION
+            # itself and takes the live scale oracle down; optional lets this manifest land ahead of both
+            # the KV mint and the webhook-capable image pin, gating only the webhook path. The
+            # listener contract is HMAC-required (AF_WEBHOOK_SECRET), so absence is expected to fail
+            # toward the status quo (poll-only) — VERIFY at the cutover pin that the engine does refuse
+            # to serve the listener unauthenticated rather than open it; flip this ref to required then.
+            - secretRef:
+                name: agentforge-dispatcher-webhook
+                optional: true
           ports:
             - { name: metrics, containerPort: 9464, protocol: TCP }
+            - { name: webhook, containerPort: 8710, protocol: TCP }
           volumeMounts:
             # config-lastgood.json (state_dir) + /tmp on a read-only root fs.
             - { name: state, mountPath: /var/lib/agentforge }

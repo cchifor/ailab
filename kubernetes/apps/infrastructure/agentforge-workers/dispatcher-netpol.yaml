@@ -1,9 +1,12 @@
-# af-dispatcher network boundary (plan §1). Cilium is the CNI; SELECTING the dispatcher endpoint for
-# ingress AND egress puts it into both-direction default-deny, so these rules are its COMPLETE allowed
-# reach. It selects ONLY the dispatcher pod (by label), so the CP's / reaper's own policies in this ns are
-# untouched. A CiliumNetworkPolicy (not a plain NetworkPolicy) is used so egress can be expressed by
-# ENDPOINT identity (in-cluster Gitea) with a world/metadata egressDeny belt — the reaper-netpol.yaml
-# precedent in this same namespace.
+# af-dispatcher network boundary (plan §1 + webhook fast-path). Cilium is the CNI; SELECTING the
+# dispatcher endpoint for ingress AND egress puts it into both-direction default-deny, so these rules are
+# its COMPLETE allowed reach:
+#   ingress — metrics 9464 from monitoring; webhook 8710 from ns gitea (the fast-path deliveries).
+#   egress  — DNS; the forge (gitea:3000); the worker webhook receivers (:8700, the fan-out).
+# It selects ONLY the dispatcher pod (by label), so the CP's / reaper's own policies in this ns are
+# untouched. A CiliumNetworkPolicy (not a plain NetworkPolicy) is used so both directions can be expressed
+# by ENDPOINT identity (in-cluster Gitea, the operator worker) with a world/metadata egressDeny belt — the
+# reaper-netpol.yaml precedent in this same namespace.
 #
 # The dispatcher reaches the forge in-cluster (gitea-http.gitea.svc:3000), so world is DENIED (no public
 # git.chifor.me / FQDN egress needed). It needs NO kube-apiserver (read-only poller, token-automount off),
@@ -21,14 +24,27 @@ spec:
     matchLabels:
       app.kubernetes.io/name: agentforge-dispatcher
   ingress:
-    # Prometheus metrics scrape — scoped to the metrics port ONLY, from the monitoring namespace. No
-    # security decision depends on it; the dispatcher has no data/API port.
+    # (1) Prometheus metrics scrape — scoped to the metrics port ONLY, from the monitoring namespace. No
+    #     security decision depends on it.
     - fromEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: monitoring
       toPorts:
         - ports:
             - { port: "9464", protocol: TCP }
+    # (2) Gitea webhook deliveries -> the :8710 listener (AF_WEBHOOK_PORT) — the ONE data port the
+    #     dispatcher now has. Matched by ENDPOINT identity (namespace gitea + the gitea app label), the
+    #     same pair the forge egress rule below uses, so ONLY the in-cluster forge can even open the
+    #     port; authenticity of the payload itself rests on the HMAC (AF_WEBHOOK_SECRET), not on this
+    #     rule. Gitea dials the Service ClusterIP (dispatcher-service.yaml) — socket-LB translates that
+    #     to the pod before policy, so the identity match holds.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: gitea
+            app.kubernetes.io/name: gitea
+      toPorts:
+        - ports:
+            - { port: "8710", protocol: TCP }
   egress:
     # (1) DNS -> kube-dns (resolve the in-cluster Gitea service name).
     - toEndpoints:
@@ -52,9 +68,24 @@ spec:
       toPorts:
         - ports:
             - { port: "3000", protocol: TCP }
+    # (3) webhook fan-out -> the operator worker's FastAPI receiver (:8700, AF_WEBHOOK_FORWARD_URLS via
+    #     worker-webhook-service.yaml). Matched by ENDPOINT identity — the worker's OPERATOR-ONLY label
+    #     pair, the same one cilium-egress.yaml selects on — so this admits exactly the pods whose CNP
+    #     admits the dispatcher back in (its ingress rule (2)); the CP-rendered tenant pools carry
+    #     different labels and stay unreachable. Scoped to the one live worker namespace; add the pair
+    #     per namespace as operator pools grow (same growth rule as worker-podmonitor.yaml matchNames).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: af-tenant-tenant-zero-playground
+            app.kubernetes.io/name: agentforge-worker
+            app.kubernetes.io/managed-by: agentforge-operator
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
   egressDeny:
     # No direct internet / node-local / metadata-via-node. world = any non-cluster IP; host/remote-node =
-    # the nodes themselves. Pod-to-pod (gitea/kube-dns) is identity-based, so these never block (1)/(2).
+    # the nodes themselves. Pod-to-pod (gitea/kube-dns/the worker) is identity-based, so these never block
+    # (1)/(2)/(3).
     - toEntities:
         - world
         - host
