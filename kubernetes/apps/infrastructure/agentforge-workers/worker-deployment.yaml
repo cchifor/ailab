@@ -143,6 +143,16 @@ spec:
             # Gitea; AF_CONFIG_REPO/AF_CONFIG_PATH keep their defaults.
             - { name: AF_CONFIG_SOURCE, value: "gitea" }
             - { name: AF_GITEA_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000" }
+            # E-3 transcript relay opt-in (engine main.py::_build_transcript_reporter). STAGED here,
+            # INERT on this pool by engine design: the relay additionally requires config_source=
+            # control_plane + AF_CONTROL_PLANE_URL/bearer, and this worker is gitea-mode (above), so
+            # the builder returns None regardless of this flag. Set now so the tenant-zero flip is
+            # recorded in GitOps and this pool streams the moment it ever moves to CP mode; the pool
+            # where the flag is LIVE today is platform-dev delivery (CP-rendered; its copy rides the
+            # vault doc af/data/tenants/tenant-zero/platform-dev/orchestrator -> ESO extract -> env).
+            # Rollback lever: flip to "false" (or drop) — claude runs return to the plain json
+            # envelope, nothing streams.
+            - { name: AF_TRANSCRIPT_ENABLED, value: "true" }
             # -- SandboxExecutor selection + the sandbox Job knobs (must match the Wave B-ii VAP-pinned
             #    shape byte-for-byte; the agentforge-sandbox-guard / -job-guard reject any deviation) --
             - { name: AF_EXECUTOR, value: "sandbox" }
