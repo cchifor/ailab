@@ -335,3 +335,23 @@ AgentForge **code** changes ride the p1-worker image; **config** changes do not:
 - **Config change** (`cchifor/agentforge-config` → `agentforge.json`, e.g. a role/`cross_review` model
   or budget) is **polled live** by the orchestrator (`config_poll_s≈120s`) — **no image rebuild or
   repin**, effective ~2 min after merge.
+
+## Webhook secret durability (2026-08-11 program follow-up)
+
+`AF_WEBHOOK_SECRET` (dispatcher listener HMAC; minted 2026-08-11) lives in OpenBao at
+`af/data/operator/dispatcher/webhook` and — worker copy — inside
+`af/data/tenants/tenant-zero/playground/orchestrator`. It is **not** in
+`operator-seeds.sops.yaml`, so it will not survive an OpenBao wipe+recovery
+(day-to-day it is safe: `_apply_operator_seeds` never visits the dispatcher
+sibling doc). To make it durable, the age-key holder runs:
+
+```sh
+# 1. read the live value (exec-in-pod loopback, operator token on stdin — see the v3-cutover runbook §vault access)
+kubectl -n openbao exec -i openbao-0 -- sh -c 'BAO_TOKEN=$(cat) bao kv get -field=AF_WEBHOOK_SECRET af/operator/dispatcher/webhook' <<<"$OPERATOR_TOKEN"
+# 2. add it to the seeds document (needs the age private key)
+sops edit kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml
+#    -> add under a new logical path entry: af/operator/dispatcher/webhook: {AF_WEBHOOK_SECRET: <value>}
+#       (seed keys WIN over the live vault on the next provision — the value MUST match the live one,
+#        and the Gitea org hook must be re-pointed if it is ever rotated: engine `--webhook-rotate-secret`)
+# 3. commit + PR as usual; no cluster action needed (the seeds file is read at provision time only)
+```
