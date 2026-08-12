@@ -43,7 +43,7 @@ spec:
       containers:
         - name: provisioner
           # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0; bootstrap-class).
-          image: registry.chifor.me/agentforge/orchestrator@sha256:0c364adc0c3c13c0d97201d61d4078444226c55c708799621775c03441768d8a
+          image: registry.chifor.me/agentforge/orchestrator@sha256:ed2f6b88adb914ccff7027f5bc3704078d36670190e2a69b3613fea329c66034
           args: ["agentforge", "provisioner"]
           env:
             # Same headless pod address the bootstrap Jobs use (= AF_OB_ADDR); the cert covers it.
