@@ -105,7 +105,16 @@ spec:
                   matchExpressions:
                     - { key: ailab.io/storage-tier, operator: In, values: ["thunderbolt"] }
         retention: 15d
-        retentionSize: "8GB" # size cap (whichever hits first); ~80% of the 10Gi PVC
+        # SIZE IS THE CAP THAT ACTUALLY BINDS — `retention: 15d` above has never once been reached.
+        # At 8GB this held ~2.2 DAYS, not 15, and that is a capacity-planning and post-incident blind
+        # spot rather than a cosmetic one: on 2026-08-12 a fleet capacity review could not answer "last
+        # week's usage" for either the CI runners or the dev workers, and the dev-worker-1 kernel panic
+        # (2026-08-11) fell out of retention within a day of being investigated.
+        # Measured then: TSDB blocks 5.94 GB for 2.2 days => ~2.7 GB/day. 24GB therefore buys ~8.9 days,
+        # which clears a 7-day question with margin. Keep this at ~70% of the PVC below: compaction
+        # needs transient headroom above the block total, and the WAL is not counted in retentionSize.
+        # RAISE THE PVC FIRST, THEN THIS — the reverse lets Prometheus fill the volume and crashloop.
+        retentionSize: "24GB"
         # Durable, migratable TSDB on QNAP iSCSI block (csi.trident.qnap.io) — survives pod restarts
         # AND node loss (the LUN re-attaches wherever Prometheus reschedules). NFS is unsafe for the
         # TSDB (mmap/file-locks); local-path was the interim node-local backing before the iSCSI CSI.
@@ -116,7 +125,14 @@ spec:
               accessModes: ["ReadWriteOnce"]
               resources:
                 requests:
-                  storage: 10Gi
+                  # 32Gi, was 10Gi — see the retentionSize note above; 24GB of blocks at ~70% of this.
+                  # qnap-iscsi has allowVolumeExpansion=true, so this is an expansion, not a re-provision.
+                  # A StatefulSet's volumeClaimTemplates are IMMUTABLE, so raising this in git does not
+                  # by itself resize anything: the operator patches the live PVC, and the StatefulSet
+                  # may need `kubectl delete sts --cascade=orphan` to re-render (pods keep running).
+                  # The live PVC was expanded by hand on 2026-08-12 so the volume was ready before the
+                  # new retentionSize could act on it; this makes git agree with that.
+                  storage: 32Gi
         # Block volumes honour fsGroup (kubelet chowns the ext4 LUN to gid 2000), so this init is
         # belt-and-suspenders — it also chmods the operator's subPath=prometheus-db data dir.
         initContainers:
