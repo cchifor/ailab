@@ -114,8 +114,33 @@ variable "runner_memory_floating_mib" {
   default     = 10240 # 10 GiB balloon floor = runner-service MemoryMax cap; was 12288 — see cchifor/platform#620
 }
 variable "runner_rootfs_gb" {
-  type    = number
-  default = 120
+  description = <<-EOT
+    Runner root disk (GB). 200, was 120 — 120 was not enough and the shortfall was reding CI jobs.
+
+    Measured 2026-08-12 over the ~2.2d Prometheus retains: root-fs peaks of 91/93/92/97/91% across
+    ci-runner-1..5. gitea-runner-cleanup.sh treats >=92% as CRITICAL and will then prune THROUGH a
+    live job — the containerd-GC race that reds ~10 CI jobs/day and that ailab#249 + #314 exist to
+    avoid. THREE of five runners crossed that line, so the disk size was quietly re-opening a bug two
+    changes had already fixed. ci-runner-4 reached 97%; ENOSPC at actions/checkout starts near 100%.
+
+    The steady contents are ~95-105 GB and most of it is irreducible working set, not garbage:
+    images 20-39, build cache 14-20 (capped), ~/.cache 8-10 (buildx+uv, unmanaged), node-compile-cache
+    4-5 (bounded by systemd-tmpfiles 30d), work/ 3-4, actions-runner/_work 1.8, swapfile 8, plus OS.
+    Pruning harder is the wrong lever: the cheap windowed prunes already run every 15 min, and the
+    unwindowed ones cost a full re-pull on the next job.
+
+    200 GB takes the sawtooth peak from ~97% to ~58%, which puts CRITICAL_PCT (92) out of reach in
+    normal operation. It is close to free: local-lvm is LVM-thin and allocate-on-write, measured at
+    39.26% used on ai-node1 and 19.93% on ai-node3 with >1 TB free on each, so a larger declared size
+    consumes nothing until written.
+
+    NB increasing this is an IN-PLACE resize for bpg/proxmox (only a DECREASE forces replacement), and
+    the guest still needs `growpart /dev/sda 1 && resize2fs /dev/sda1` — cloud-init only grows the
+    root fs on first boot. Live runners were grown that way on 2026-08-12; a rebuilt runner picks the
+    size up from cloud-init instead.
+  EOT
+  type        = number
+  default     = 200
 }
 
 # ---- SSH public key seeded into the cloud-init `ubuntu` user, so Ansible can reach the guest ----
