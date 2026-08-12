@@ -33,6 +33,32 @@ spec:
       endpoints: ["192.168.0.41", "192.168.0.42", "192.168.0.43"]
       service: { enabled: true, port: 10259, targetPort: 10259 }
       serviceMonitor: { https: true, insecureSkipVerify: true }
+    # The chart's apiserver error-budget SLO ruleset is OFF here (ailab#330). Both keys must stay
+    # false together — they are producer and sole consumer:
+    #   kubeApiserverBurnrate -> the 14 `apiserver_request:burnrate{5m,30m,1h,2h,6h,1d,3d}` recording
+    #     rules (7 windows x read/write). This group evaluated for ~750s on a 30s interval (25x
+    #     overrun) because 5 of the 14 rules hit the 120s query timeout every iteration: a [6h] range
+    #     over ~9,976 `apiserver_request_sli_duration_seconds_bucket` series takes ~57s here, chunk-
+    #     faulting off the qnap-iscsi TSDB with only ~263MiB of page cache inside the 2Gi cgroup.
+    #     It was the estate's only group above 1x and its only source of evaluation failures, kept
+    #     `PrometheusRuleFailures` critical-firing, and starved unrelated 30s groups (agentforge,
+    #     agentforge-coverage, backup-chain) of iterations — which makes their `for:` durations lie.
+    #   kubeApiserverSlos -> the 4 `KubeAPIErrorBudgetBurn` alerts, the only reader of those records.
+    #     Disabling burnrate alone would be WORSE than doing nothing: the alerts would evaluate
+    #     against absent series, return no data, and so never fire and never error — silently green.
+    # Not tunable instead of disabled: `defaultRules` exposes no per-group `interval` in chart 86.2.3,
+    # and interval would not clear the failures anyway (those are query timeouts). Not fixable by
+    # retention either: `retentionSize: "8GB"` binds before `retention: 15d`, leaving ~2.13 days, so
+    # the two [3d] rules query a window longer than any sample that exists, and the two [1d] rules
+    # cover under half of retention — the long-window half of the group cannot be right here.
+    # Consumers checked before removal: 0 of the 33 grafana_dashboard=1 ConfigMaps reference
+    # burnrate, and no PrometheusRule outside kube-apiserver-slos does. The apiserver dashboard's one
+    # `apiserver_request:availability30d` reference comes from kube-apiserver-availability.rules — a
+    # different group, left enabled: it evaluates well inside its 3m interval with zero failures.
+    defaultRules:
+      rules:
+        kubeApiserverBurnrate: false
+        kubeApiserverSlos: false
     alertmanager:
       alertmanagerSpec:
         priorityClassName: platform-critical
