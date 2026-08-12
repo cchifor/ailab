@@ -110,11 +110,23 @@ spec:
         # spot rather than a cosmetic one: on 2026-08-12 a fleet capacity review could not answer "last
         # week's usage" for either the CI runners or the dev workers, and the dev-worker-1 kernel panic
         # (2026-08-11) fell out of retention within a day of being investigated.
-        # Measured then: TSDB blocks 5.94 GB for 2.2 days => ~2.7 GB/day. 24GB therefore buys ~8.9 days,
-        # which clears a 7-day question with margin. Keep this at ~70% of the PVC below: compaction
-        # needs transient headroom above the block total, and the WAL is not counted in retentionSize.
+        # THE WAL AND m-mapped HEAD CHUNKS COUNT TOWARD THIS CAP. Upstream is explicit: "Only the
+        # persistent blocks are deleted to honor this retention although WAL and m-mapped chunks are
+        # counted in the total size." So the usable block budget is (cap - WAL), and the WAL is roughly
+        # constant (it peaks every 2h) rather than scaling with retention. Sizing this as if the cap
+        # were all blocks overestimates the retained window — an earlier revision of this comment did
+        # exactly that and claimed 8.9 days for a 24GB cap when the real figure was 7.8.
+        #
+        # Measured 2026-08-12: blocks 5.94 GB over 2.2 days => 2.70 GB/day; total on disk 8.9 GB, so
+        # WAL+head ~= 2.96 GB. Therefore 36GB => (36 - 2.96) / 2.70 =~ 12.2 days.
+        #
+        # 12 days, not 8, deliberately. The whole point of raising this was to make "last week" an
+        # answerable question, and 24GB only bought 7.8 days — an 11% margin that a single new scrape
+        # target would erase. Series growth shortens this, so leave real headroom.
+        # 36GB is ~70% of the 48Gi PVC below, comfortably inside upstream's "at most 80-85% of your
+        # allocated disk" guidance, which exists so eviction happens before the volume fills.
         # RAISE THE PVC FIRST, THEN THIS — the reverse lets Prometheus fill the volume and crashloop.
-        retentionSize: "24GB"
+        retentionSize: "36GB"
         # Durable, migratable TSDB on QNAP iSCSI block (csi.trident.qnap.io) — survives pod restarts
         # AND node loss (the LUN re-attaches wherever Prometheus reschedules). NFS is unsafe for the
         # TSDB (mmap/file-locks); local-path was the interim node-local backing before the iSCSI CSI.
@@ -125,14 +137,14 @@ spec:
               accessModes: ["ReadWriteOnce"]
               resources:
                 requests:
-                  # 32Gi, was 10Gi — see the retentionSize note above; 24GB of blocks at ~70% of this.
+                  # 48Gi, was 10Gi — see the retentionSize note above; the 36GB cap is ~70% of this.
                   # qnap-iscsi has allowVolumeExpansion=true, so this is an expansion, not a re-provision.
                   # A StatefulSet's volumeClaimTemplates are IMMUTABLE, so raising this in git does not
                   # by itself resize anything: the operator patches the live PVC, and the StatefulSet
                   # may need `kubectl delete sts --cascade=orphan` to re-render (pods keep running).
                   # The live PVC was expanded by hand on 2026-08-12 so the volume was ready before the
                   # new retentionSize could act on it; this makes git agree with that.
-                  storage: 32Gi
+                  storage: 48Gi
         # Block volumes honour fsGroup (kubelet chowns the ext4 LUN to gid 2000), so this init is
         # belt-and-suspenders — it also chmods the operator's subPath=prometheus-db data dir.
         initContainers:
