@@ -74,11 +74,17 @@ dev_worker_swappiness: 10
 # recovered in place, so waiting buys nothing; the only actions are reboot or a human noticing. 10s is
 # long enough for the panic to reach the serial console (which is where the ONLY record of that one
 # survives — journald had flushed nothing) and short enough that the box comes back on its own.
-# panic_on_oops promotes an oops to a panic so this timeout applies to it too: an oops leaves the
-# kernel in an undefined state and, on these workers, that has meant a wedged VM rather than a clean
-# failure. Set to 0 to restore the stock never-reboot behaviour.
 dev_worker_kernel_panic_timeout: 10
-dev_worker_kernel_panic_on_oops: 1
+# OFF by default, deliberately. panic_on_oops promotes a kernel OOPS — which is often survivable — into
+# a hard panic, and therefore (with the timeout above) into an unattended reboot. These are interactive
+# boxes with live tmux sessions, so that trades a possibly-recoverable fault for guaranteed lost work,
+# and an oops that recurs on boot or on workload start becomes a reboot loop.
+# An earlier revision of this file defaulted it to 1 and justified it by claiming an oops "has meant a
+# wedged VM rather than a clean failure" on these workers. There is NO evidence for that: the observed
+# failure was a PANIC, not an oops, and no oops has been recorded on any dev worker. Flip this to 1 only
+# once DevWorkerNodeDown has actually caught a worker wedged after an oops (`journalctl -k -b -1 |
+# grep -i oops`) — i.e. once the trade is paid for by evidence rather than symmetry.
+dev_worker_kernel_panic_on_oops: 0
 dev_worker_job_memory_high: "2G"
 dev_worker_job_memory_max: "2560M"
 dev_worker_job_memory_swap_max: "2G"
