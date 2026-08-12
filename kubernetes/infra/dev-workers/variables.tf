@@ -138,18 +138,46 @@ variable "dev_worker_ssh_public_key" {
 # lifecycle.ignore_changes=[initialization] means editing `ip` here is DOCUMENTATION ONLY — the live IP
 # was changed in-guest (netplan), see docs/runbooks/dev-workers.md. The 2nd worker per node fits because
 # the rarely-used heavyweight LLMs on node2/node3 are idle-unloaded (llama-swap) — see ai-model-swap.md.
+#
+# memory_floating_mib is an OPTIONAL per-worker override of the uniform floor. It exists for exactly
+# one reason and should shrink back to nothing once that reason is gone:
+#
+# The uniform 4 GiB floor above assumes ballooning WORKS — that a busy worker inflates toward the
+# 16 GiB ceiling. On ai-node1 it does not. node1 carries 6 VMs plus the ai-llm-1 LXC (96 GiB limit)
+# plus the registry LXC on 125 GiB of RAM and sits at ~88% used, which is above PVE's 80% auto-balloon
+# threshold, so every balloonable guest there is pinned at its floor permanently. Measured 2026-08-12,
+# /proc/vmstat across the fleet:
+#
+#   worker         node   floor    pswpout        pgmajfault
+#   dev-worker-1   node1  12 GiB   ~40M / 13d     230.1M     <- panicked 2026-08-11 22:32
+#   dev-worker-4   node1  12 GiB   3.1M / 10d       2.0M
+#   dev-worker-2   node2  (float)  70k / 21d      150k
+#   dev-worker-3   node3  16 GiB   0               11k
+#
+# So somebody had already raised node1's two workers to a 12 GiB floor BY HAND, live, to keep them off
+# the swap cliff — and because `memory` was not in lifecycle.ignore_changes, the next plain
+# `tofu apply` would have silently pulled both back down to 4 GiB on the one node that cannot afford
+# it. Codifying the override makes that impossible and makes the mitigation reviewable, which
+# ignore_changes would not: ignoring the block would stop tofu managing memory at all and hide the
+# next divergence too.
+#
+# THIS IS A MITIGATION, NOT THE FIX. The fix is node1 capacity — cap ai-llm-1's 96 GiB limit or move a
+# guest to node3 (a rebuild, not a live migration: per-node local-lvm and cpu: host). When that lands,
+# delete these two overrides and let all six share the uniform floor again.
 variable "dev_worker_nodes" {
   type = map(object({
     node_name = string
     vm_id     = number
     ip        = string
     hostname  = string
+    # null => use the uniform dev_worker_memory_floating_mib.
+    memory_floating_mib = optional(number)
   }))
   default = {
-    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.8", hostname = "dev-worker-1" }
+    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.8", hostname = "dev-worker-1", memory_floating_mib = 12288 }
     "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.9", hostname = "dev-worker-2" }
     "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.10", hostname = "dev-worker-3" }
-    "dev-worker-4" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.11", hostname = "dev-worker-4" }
+    "dev-worker-4" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.11", hostname = "dev-worker-4", memory_floating_mib = 12288 }
     "dev-worker-5" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.12", hostname = "dev-worker-5" }
     "dev-worker-6" = { node_name = "ai-node3", vm_id = 4206, ip = "192.168.0.13", hostname = "dev-worker-6" }
   }

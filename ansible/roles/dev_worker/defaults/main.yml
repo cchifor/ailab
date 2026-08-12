@@ -67,6 +67,18 @@ dev_worker_dockerd_memory_high: "1700M"
 dev_worker_swapfile_path: /swapfile
 dev_worker_swapfile_size: "4G"
 dev_worker_swappiness: 10
+# Seconds the kernel waits after a panic before rebooting itself; 0 = wait forever. The stock default
+# is 0, and on 2026-08-11 22:32 that meant dev-worker-1's kernel panicked ("Attempted to kill the idle
+# task!") and the VM then sat dead for ~12h — PVE still reported it `running`, so it looked like a
+# network fault rather than a dead guest, and nothing rebooted it. A panicked kernel cannot be
+# recovered in place, so waiting buys nothing; the only actions are reboot or a human noticing. 10s is
+# long enough for the panic to reach the serial console (which is where the ONLY record of that one
+# survives — journald had flushed nothing) and short enough that the box comes back on its own.
+# panic_on_oops promotes an oops to a panic so this timeout applies to it too: an oops leaves the
+# kernel in an undefined state and, on these workers, that has meant a wedged VM rather than a clean
+# failure. Set to 0 to restore the stock never-reboot behaviour.
+dev_worker_kernel_panic_timeout: 10
+dev_worker_kernel_panic_on_oops: 1
 dev_worker_job_memory_high: "2G"
 dev_worker_job_memory_max: "2560M"
 dev_worker_job_memory_swap_max: "2G"

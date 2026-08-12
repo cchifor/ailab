@@ -1,0 +1,98 @@
+# Alerts for the 6 dev-worker VMs (metrics via dev-workers-node.yaml, job=dev-worker-node).
+#
+# WHY THIS EXISTS: dev-workers had a scrape target and NO rules referencing job="dev-worker-node" at
+# all, while the CI runners — an identical fleet shape on the same hypervisors — had eight. On
+# 2026-08-11 22:32 dev-worker-1's kernel panicked and the VM sat dead for ~12h. The only thing that
+# fired was the stack's generic `TargetDown`, at severity warning, which says "a target is down"
+# rather than "a dev box is gone"; PVE still reported the guest `running`, so nothing else contradicted
+# it either. The equivalent CI-runner alert, CIRunnerNodeDown, is severity CRITICAL.
+#
+# Deliberately node-level only. The dev workers run no beacon of their own (that is the gitea_runner
+# role's mechanism, and these are not runners), so every rule here reads node_exporter series that
+# exist today — nothing below is waiting on a script to be deployed first.
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: dev-workers
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: dev-workers
+      rules:
+        # CRITICAL, matching CIRunnerNodeDown. A dev worker is where the user's interactive sessions
+        # and agentforge work live; losing one silently costs hours. 10m rides over a reboot (these now
+        # auto-reboot on panic — kernel.panic=10, dev_worker role — so a self-healing panic should NOT
+        # page, but one that does not come back must).
+        - alert: DevWorkerNodeDown
+          expr: up{job="dev-worker-node"} == 0
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }} is down (no node_exporter scrape)"
+            description: >-
+              node_exporter on dev worker {{ $labels.instance }} has been unscrapeable for >10m.
+              NOTE the guest can be dead while Proxmox still reports the VM `running` — that is exactly
+              what a kernel panic looks like from outside (dev-worker-1, 2026-08-11). Do not trust
+              `qm status`; check the console (`qm monitor <vmid>` then `screendump /tmp/x.ppm`) and
+              whether disk/network counters are moving (`qm monitor` -> `info blockstats`). Recovery
+              from a panic is `qm reset <vmid>` — ACPI shutdown cannot work on a panicked kernel.
+        # The condition that preceded the panic, and the one that is actionable BEFORE it. Threshold is
+        # 1.5 GiB to match CIRunnerLowMemory; dev-worker-1 sat at ~1 GiB free for weeks.
+        - alert: DevWorkerLowMemory
+          expr: node_memory_MemAvailable_bytes{job="dev-worker-node"} < 1.5e9
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }} low available memory (<1.5 GiB)"
+            description: >-
+              {{ $labels.instance }} has <1.5 GiB MemAvailable for >10m. On an oversubscribed
+              hypervisor the balloon cannot inflate and the guest is pinned at its floor — check host
+              RAM on the owning Proxmox node and the balloon (`qm config <vmid>` -> balloon vs memory).
+              ai-node1 runs at ~88% and is the known-bad case; see kubernetes/infra/dev-workers.
+        # Swap is the 4 GiB safety valve (dev_worker role, swappiness 10). Sustained use means the
+        # guest is reclaiming constantly rather than absorbing a spike. dev-worker-1 had pushed 165 GB
+        # through that 4 GiB file with 230M major page faults before it died.
+        - alert: DevWorkerSwapPressure
+          expr: |
+            node_memory_SwapTotal_bytes{job="dev-worker-node"} > 0
+              and (node_memory_SwapTotal_bytes{job="dev-worker-node"} - node_memory_SwapFree_bytes{job="dev-worker-node"})
+                  / node_memory_SwapTotal_bytes{job="dev-worker-node"} > 0.5
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }} using >50% of its swap"
+            description: >-
+              {{ $labels.instance }} is >50% into its 4 GiB safety-valve swap for >30m. Swappiness is
+              10, so this is not casual paging — the working set no longer fits. Same remedy as
+              DevWorkerLowMemory: host RAM headroom on the owning node.
+        # SUSTAINED PAGING, which is the signal the two thresholds above both miss. A guest can sit
+        # just under every threshold while thrashing — dev-worker-1 averaged ~35 major faults/s for
+        # WEEKS against dev-worker-3's near-zero, and no absolute gauge would have flagged it.
+        # A major fault is a page fetched from DISK, so a sustained rate is by definition a working set
+        # that does not fit. 5m avg over 1h so a big rebuild does not page anyone.
+        - alert: DevWorkerThrashing
+          expr: rate(node_vmstat_pgmajfault{job="dev-worker-node"}[5m]) > 20
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }} sustained major page faults (>20/s for 1h)"
+            description: >-
+              {{ $labels.instance }} has been fetching >20 pages/s from disk for an hour — its working
+              set does not fit in the RAM it is actually being given. This is the condition that
+              preceded the dev-worker-1 kernel panic on 2026-08-11 (230M cumulative major faults,
+              165 GB swapped out), and it is invisible to threshold alerts because the guest sits
+              *stably* starved rather than spiking. Check the balloon floor vs the host's free RAM.
+        - alert: DevWorkerDiskFilling
+          expr: |
+            node_filesystem_avail_bytes{job="dev-worker-node",mountpoint="/"}
+              / node_filesystem_size_bytes{job="dev-worker-node",mountpoint="/"} < 0.12
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }} root filesystem <12% free"
+            description: >-
+              {{ $labels.instance }} root fs is under 12% free for >15m. Unlike the CI runners there is
+              no cleanup timer here — check /workspace, the docker data-root, and ~/.cache by hand.

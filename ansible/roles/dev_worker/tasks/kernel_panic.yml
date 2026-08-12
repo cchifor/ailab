@@ -1,0 +1,41 @@
+---
+# Auto-reboot on a kernel panic. This exists because of a measured 12-hour silent outage, not on
+# principle.
+#
+# 2026-08-11 22:32:33 EEST, dev-worker-1: the guest kernel panicked with "Kernel panic - not syncing:
+# Attempted to kill the idle task!" and the VM stayed dead until a human power-cycled it ~12h later.
+# Two things made it invisible for that long:
+#   * PVE still reported the guest `running` (QEMU was alive; the kernel inside was not), so every
+#     surface said "up" and the symptom presented as an SSH/network fault;
+#   * kernel.panic was the stock 0 = wait forever, so nothing rebooted it.
+# journald had flushed nothing — the last entry is routine timer activity two minutes before death —
+# so the ONLY record of the panic was the serial console. Do not expect `journalctl -b -1` to explain
+# the next one either.
+#
+# A panicked kernel cannot be recovered in place, so waiting forever buys nothing that a reboot does
+# not: the machine is already gone, and the choice is only between coming back by itself and waiting
+# for someone to notice. These are dev workers with tmux-continuum session restore, so an unattended
+# reboot is far cheaper than hours of downtime.
+#
+# NB this is a guest-level mitigation, NOT the root cause. dev-worker-1 had swapped 165 GB through a
+# 4 GiB swapfile with 230M major page faults, pinned at its balloon floor on an ai-node1 running at
+# 88% memory — see docs/runbooks/dev-workers.md and the capacity note in kubernetes/infra/dev-workers.
+# This makes the failure loud and self-healing; it does not make it stop happening.
+
+- name: Auto-reboot after a kernel panic
+  ansible.posix.sysctl:
+    name: kernel.panic
+    value: "{{ dev_worker_kernel_panic_timeout | string }}"
+    sysctl_file: /etc/sysctl.d/99-kernel-panic.conf
+    state: present
+    reload: true
+
+# An oops is not a panic by default: the kernel limps on in an undefined state, which on these workers
+# has meant a wedged VM rather than a clean failure. Promoting it means the timeout above applies.
+- name: Promote a kernel oops to a panic (so the reboot timeout applies)
+  ansible.posix.sysctl:
+    name: kernel.panic_on_oops
+    value: "{{ dev_worker_kernel_panic_on_oops | string }}"
+    sysctl_file: /etc/sysctl.d/99-kernel-panic.conf
+    state: present
+    reload: true

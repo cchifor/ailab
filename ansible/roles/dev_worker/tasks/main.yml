@@ -39,6 +39,12 @@
 - name: Guest swapfile (OOM cushion)
   ansible.builtin.import_tasks: swap.yml
 
+# Deliberately next to the swapfile: both are last-ditch behaviour for a worker that has run out of
+# memory headroom. The swapfile keeps a spike from reaching the OOM-killer; this one makes sure that
+# when the kernel dies anyway, the VM comes back instead of sitting dead and looking `running` to PVE.
+- name: Reboot on kernel panic (after the dev-worker-1 12h silent outage, 2026-08-11)
+  ansible.builtin.import_tasks: kernel_panic.yml
+
 - name: Node.js (for Claude Code + Codex)
   ansible.builtin.import_tasks: node.yml
 
