@@ -293,20 +293,32 @@ if [ "$busy" -eq 1 ]; then
       # prune triggers the containerd GC pass that reaps an in-flight pull's lease (52.6% vs 19.0% job
       # failure, measured above). So widening this path buys nothing measurable and spends it in the
       # one place where a wrong answer reds live CI jobs. Revisit only if stale workspaces reappear.
-      log "defer: disk ${pct_now}% >= ${PRESSURE_PCT}% but < ${CRITICAL_PCT}% and busy for ${IDLE_WAIT_SEC}s -> skip; next tick retries"
-      # pressure_defer 1: THE starvation signal, and the only beacon field that means it. This branch
-      # is the one worth paging on — the disk needs the space and the sweep could not get a gap.
-      # It exists because the alert cannot be reconstructed from the other fields after the fact:
-      # busy_skip is 1 on the healthy exit too, and inferring the difference from a disk THRESHOLD in
-      # PromQL failed twice. Instantaneously, the `for` clock reset on every dip (these disks swing up
-      # to 23 points an hour once the caches fire), so the rule could not sustain. Averaged over 3h, a
-      # trailing mean under `for: 3h` stacks two windows and lags 5.5-6h behind a real jump, and never
-      # fires at all for a slow climb. Both are statistics standing in for a branch the script already
-      # knows it took — so it records the branch instead, and the rule needs no threshold at all.
+      # pressure_defer: THE starvation signal, and the only beacon field that means it. It exists
+      # because the alert cannot be reconstructed from the other fields after the fact: busy_skip is 1
+      # on the healthy exit too, and inferring the difference from a disk THRESHOLD in PromQL failed
+      # twice. Instantaneously, the `for` clock reset on every dip (these disks swing up to 23 points
+      # an hour once the caches fire), so the rule could not sustain. Averaged over 3h, a trailing mean
+      # under `for: 3h` stacks two windows and lags 5.5-6h behind a real jump, and never fires at all
+      # for a slow climb. Both are statistics standing in for a branch the script already knows it
+      # took — so it records the branch instead, and the rule needs no threshold at all.
       # NB the alert on this metric is silent until this script is DEPLOYED (the series does not exist
-      # before then); CIRunnerCleanupStale still covers a beacon that stops updating entirely.
-      write_beacon "busy_skip 1" "pressure_defer 1" "midjob_prune 0" "last_run_seconds $(date +%s)" \
-        "disk_used_percent ${pct_now}"
+      # before then); CIRunnerCleanupBeaconStale covers a runner still writing the OLD field set.
+      #
+      # PRESSURE IS RE-TESTED HERE, not assumed from the gate. `before` was at/over PRESSURE_PCT to
+      # reach this block, but `pct_now` is read up to IDLE_WAIT_SEC (600s) later and the reclaim timer
+      # and finishing jobs both free space in that window — on these disks a few points in ten minutes
+      # is ordinary. Without this test every "pressure cleared while we waited" exit would be recorded
+      # as starvation and page. (The old single log line asserted "disk X% >= PRESSURE_PCT%" on this
+      # path unconditionally, which was simply false whenever the pressure had cleared.)
+      if [ "$pct_now" -ge "$PRESSURE_PCT" ]; then
+        log "defer: disk ${pct_now}% >= ${PRESSURE_PCT}% but < ${CRITICAL_PCT}% and busy for ${IDLE_WAIT_SEC}s -> skip; next tick retries"
+        write_beacon "busy_skip 1" "pressure_defer 1" "midjob_prune 0" "last_run_seconds $(date +%s)" \
+          "disk_used_percent ${pct_now}"
+      else
+        log "defer: pressure cleared while waiting (disk ${before}% -> ${pct_now}% < ${PRESSURE_PCT}%) and still busy -> skip; NOT starved"
+        write_beacon "busy_skip 1" "pressure_defer 0" "midjob_prune 0" "last_run_seconds $(date +%s)" \
+          "disk_used_percent ${pct_now}"
+      fi
       exit 0
     fi
   fi
