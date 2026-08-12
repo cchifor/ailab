@@ -134,10 +134,19 @@ variable "runner_rootfs_gb" {
     39.26% used on ai-node1 and 19.93% on ai-node3 with >1 TB free on each, so a larger declared size
     consumes nothing until written.
 
-    NB increasing this is an IN-PLACE resize for bpg/proxmox (only a DECREASE forces replacement), and
-    the guest still needs `growpart /dev/sda 1 && resize2fs /dev/sda1` — cloud-init only grows the
-    root fs on first boot. Live runners were grown that way on 2026-08-12; a rebuilt runner picks the
-    size up from cloud-init instead.
+    RESIZE SEMANTICS, checked against the bpg provider docs rather than assumed. Increasing this is an
+    IN-PLACE resize — it does NOT replace the VM. But it is not free either: the provider applies a
+    live resize only when `disk` is in the VM's `hotplug` list, and this module sets no `hotplug` at
+    all, so a `tofu apply` that changes this value WILL REBOOT THE RUNNERS. That is survivable but not
+    something to trigger unaware mid-CI. (An earlier revision of this comment also claimed a DECREASE
+    forces replacement; the docs do not say that, so the claim is withdrawn rather than restated —
+    shrinking is untested here and should be treated as unsupported.)
+
+    The guest also needs `growpart /dev/sda 1 && resize2fs /dev/sda1` — cloud-init only grows the root
+    fs on FIRST boot. The live runners were grown exactly that way on 2026-08-12 (qm disk resize, then
+    growpart + resize2fs online, ext4 grows mounted), so declared and actual already agree at 200G and
+    a plan is a no-op — no reboot is pending from this change. A rebuilt runner picks the size up from
+    cloud-init instead and needs neither step.
   EOT
   type        = number
   default     = 200
