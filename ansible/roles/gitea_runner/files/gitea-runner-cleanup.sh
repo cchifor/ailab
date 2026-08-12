@@ -302,7 +302,7 @@ if [ "$busy" -eq 1 ]; then
       # for a slow climb. Both are statistics standing in for a branch the script already knows it
       # took — so it records the branch instead, and the rule needs no threshold at all.
       # NB the alert on this metric is silent until this script is DEPLOYED (the series does not exist
-      # before then); CIRunnerCleanupBeaconStale covers a runner still writing the OLD field set.
+      # before then); CIRunnerCleanupBeaconFieldMissing covers a runner still writing the OLD field set.
       #
       # PRESSURE IS RE-TESTED HERE, not assumed from the gate. `before` was at/over PRESSURE_PCT to
       # reach this block, but `pct_now` is read up to IDLE_WAIT_SEC (600s) later and the reclaim timer
