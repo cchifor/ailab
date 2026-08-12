@@ -381,14 +381,23 @@ echo "[M] the script's built-in defaults must equal the role defaults that actua
 #
 # The knob -> var mapping is DERIVED FROM THE TEMPLATE rather than restated here, so a knob added later
 # is checked automatically instead of needing a hand-kept list updated — a hand-kept list is precisely
-# how the drift got in. Lines carrying a Jinja filter are skipped: their rendered value is not the raw
-# variable (BEACON's `| bool | ternary` is the only one today).
+# how the drift got in.
+#
+# NOTHING IS SKIPPED. The first draft skipped any template line carrying a Jinja filter, which quietly
+# excluded BEACON (`| bool | ternary('1','0')`) from the only section that exists to catch drift — a
+# false PASS in the guard against false PASSes (codex cross-review of #320). A filter this section
+# cannot evaluate is now a FAILURE telling you to teach it that filter, not a silent pass.
 DEFAULTS_YML="$HERE/../defaults/main.yml"
 ENV_TMPL="$HERE/../templates/gitea-runner-cleanup.env.j2"
 
-# Value of an ansible var from the flat defaults file. Handles the three shapes present: bare scalar
-# with an optional trailing ` # comment`, single-quoted, and double-quoted (where YAML turns `\\` into
-# one literal backslash — peer_job_process_re is "Runner\\.Worker" and must compare as Runner\.Worker).
+# Value of an ansible var from the flat defaults file. The parser understands bare scalars (with an
+# optional trailing ` # comment`), single-quoted and double-quoted scalars. Only bare and double-quoted
+# occur among the mapped vars today — the single-quote branch is there so adding one is not a trap, not
+# because one exists. Double-quoted YAML turns `\\` into one literal backslash, which is why
+# peer_job_process_re is written "Runner\\.Worker" and must compare as Runner\.Worker.
+# A shape the parser does NOT model (a `|`/`>` block scalar, say) yields a value that cannot match the
+# script fallback, so it surfaces as a loud mismatch rather than a false pass.
+role_def_count() { grep -c -E "^$1:[[:space:]]" "$DEFAULTS_YML"; }
 role_default() {
   local line v
   line="$(grep -m1 -E "^$1:[[:space:]]" "$DEFAULTS_YML")" || return 1
@@ -405,17 +414,37 @@ script_default() { sed -n "s/.*\${$1:-\([^}]*\)}.*/\1/p" "$SCRIPT" | head -1; }
 checked=0
 while IFS= read -r ln; do
   case "$ln" in \#* | '') continue ;; esac
-  case "$ln" in *'|'*) continue ;; esac
   env_name="$(printf '%s' "$ln" | sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p')"
-  var_name="$(printf '%s' "$ln" | sed -n 's/.*{{[[:space:]]*\([a-z0-9_]*\)[[:space:]]*}}.*/\1/p')"
-  [ -n "$env_name" ] && [ -n "$var_name" ] || continue
+  [ -n "$env_name" ] || continue
+  var_name="$(printf '%s' "$ln" | sed -n 's/.*{{[[:space:]]*\([a-z0-9_]*\).*/\1/p')"
   checked=$((checked + 1))
+  if [ -z "$var_name" ]; then
+    bad "M: $env_name is rendered from something [M] cannot parse: $ln"
+    continue
+  fi
   # A knob the template sets but the script never reads is silently inert — worth catching on its own.
   if ! grep -qF "\${$env_name:-" "$SCRIPT"; then
     bad "M: $env_name is rendered into the env file but the script never reads it"
     continue
   fi
-  rv="$(role_default "$var_name")" || { bad "M: $env_name -> $var_name is not defined in defaults/main.yml"; continue; }
+  n="$(role_def_count "$var_name")"
+  if [ "$n" -ne 1 ]; then
+    # 0 = the template references a var with no default; >1 = a duplicate key, where YAML's last-wins
+    # and this parser's first-wins disagree and the comparison would be against a value that never ships.
+    bad "M: $env_name -> $var_name is defined $n times in defaults/main.yml (want exactly 1)"
+    continue
+  fi
+  rv="$(role_default "$var_name")"
+  # A Jinja filter means the rendered value is NOT the raw variable, so compare against the rendering.
+  case "$ln" in
+    *'{{'*'|'*'}}'*)
+      tern="$(printf '%s' "$ln" | sed -n "s/.*ternary([[:space:]]*'\([^']*\)'[[:space:]]*,[[:space:]]*'\([^']*\)'[[:space:]]*).*/\1 \2/p")"
+      if [ -z "$tern" ]; then
+        bad "M: $env_name goes through a Jinja filter [M] cannot evaluate — teach it that filter instead of leaving the knob unchecked: $ln"
+        continue
+      fi
+      case "$rv" in true | True | yes | 'on' | 1) rv="${tern%% *}" ;; *) rv="${tern##* }" ;; esac ;;
+  esac
   sv="$(script_default "$env_name")"
   if [ "$rv" = "$sv" ]; then
     ok "M: $env_name default agrees with $var_name ($sv)"
@@ -423,10 +452,17 @@ while IFS= read -r ln; do
     bad "M: $env_name DRIFT — script default '$sv' but the role ships '$rv' (from $var_name)"
   fi
 done < "$ENV_TMPL"
-# The loop must actually have found knobs: a template reformat that broke the match would otherwise
-# turn this whole section into a silent all-clear, the same failure shape as the caps it replaced.
-if [ "$checked" -ge 15 ]; then ok "M: mapping derived from the template covered $checked knobs"
-else bad "M: only $checked knob(s) parsed from $ENV_TMPL — the mapping regex stopped matching"; fi
+# Two independent floors, because "how many were checked" is the number this section can be silently
+# wrong about. The equality catches a knob being SKIPPED (what the Jinja-filter `continue` used to do
+# to BEACON); the >=15 catches the mapping matching nothing at all after a template reformat, which the
+# equality alone would call a pass with both sides at zero — the same silent-all-clear shape as the
+# byte caps #314 removed.
+tmpl_knobs="$(grep -c -E '^[A-Z][A-Z0-9_]*=' "$ENV_TMPL")"
+if [ "$checked" -eq "$tmpl_knobs" ] && [ "$checked" -ge 15 ]; then
+  ok "M: every one of the $checked knobs the template renders was checked (none skipped)"
+else
+  bad "M: checked $checked of $tmpl_knobs knob(s) in $ENV_TMPL — one was skipped, or the mapping stopped matching"
+fi
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi
