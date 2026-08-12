@@ -1,7 +1,9 @@
 # Alerts for the 6 dev-worker VMs (metrics via dev-workers-node.yaml, job=dev-worker-node).
 #
 # WHY THIS EXISTS: dev-workers had a scrape target and NO rules referencing job="dev-worker-node" at
-# all, while the CI runners — an identical fleet shape on the same hypervisors — had eight. On
+# all, while the CI runners — Ubuntu VMs on the same three hypervisors, scraped the same way by the
+# same node_exporter — had eight. (Not an identical fleet: 6 dev workers, 2 per node, vs 5 runners with
+# only one on node3. The point is that the monitoring surface is the same, not the topology.) On
 # 2026-08-11 22:32 dev-worker-1's kernel panicked and the VM sat dead for ~12h. The only thing that
 # fired was the stack's generic `TargetDown`, at severity warning, which says "a target is down"
 # rather than "a dev box is gone"; PVE still reported the guest `running`, so nothing else contradicted
@@ -69,22 +71,38 @@ spec:
               10, so this is not casual paging — the working set no longer fits. Same remedy as
               DevWorkerLowMemory: host RAM headroom on the owning node.
         # SUSTAINED PAGING, which is the signal the two thresholds above both miss. A guest can sit
-        # just under every threshold while thrashing — dev-worker-1 averaged ~35 major faults/s for
-        # WEEKS against dev-worker-3's near-zero, and no absolute gauge would have flagged it.
-        # A major fault is a page fetched from DISK, so a sustained rate is by definition a working set
-        # that does not fit. 5m avg over 1h so a big rebuild does not page anyone.
+        # just under every threshold while thrashing: dev-worker-1 averaged ~205 major faults/s for the
+        # WHOLE 13-day uptime before it panicked (230.1M cumulative / 13.02d) against dev-worker-3's
+        # near-zero, and no absolute gauge would have flagged it.
+        #
+        # CONJOINED WITH ACTUAL SWAP-IN, and that is the load-bearing part. A major fault is a page
+        # fetched from DISK — which a cold-cache docker build or a first-run e2e does constantly while
+        # having plenty of free memory. On its own this rule would page on exactly that. `pswpin` is
+        # narrower and unambiguous: pages read back FROM SWAP, which only happens if the kernel had
+        # already evicted them, i.e. the working set genuinely did not fit. A build faults; only a
+        # starved guest swaps back in.
+        # Thresholds, measured 2026-08-12: the healthy fleet runs at 0.00-0.80 major faults/s, so 20 is
+        # ~25x above the healthy maximum and ~10x below what the failing worker sustained. pswpin > 1/s
+        # rather than > 0 so a single stray page cannot arm it.
         - alert: DevWorkerThrashing
-          expr: rate(node_vmstat_pgmajfault{job="dev-worker-node"}[5m]) > 20
+          expr: >-
+            (rate(node_vmstat_pgmajfault{job="dev-worker-node"}[5m]) > 20)
+            and on (instance)
+            (rate(node_vmstat_pswpin{job="dev-worker-node"}[5m]) > 1)
           for: 1h
           labels: { severity: warning }
           annotations:
-            summary: "Dev worker {{ $labels.instance }} sustained major page faults (>20/s for 1h)"
+            summary: "Dev worker {{ $labels.instance }} thrashing: >20 major faults/s AND swapping in, for 1h"
             description: >-
-              {{ $labels.instance }} has been fetching >20 pages/s from disk for an hour — its working
-              set does not fit in the RAM it is actually being given. This is the condition that
-              preceded the dev-worker-1 kernel panic on 2026-08-11 (230M cumulative major faults,
-              165 GB swapped out), and it is invisible to threshold alerts because the guest sits
-              *stably* starved rather than spiking. Check the balloon floor vs the host's free RAM.
+              {{ $labels.instance }} has been faulting >20 pages/s from disk AND reading pages back from
+              swap for an hour — its working set does not fit in the RAM it is actually being given.
+              This is the condition that preceded the dev-worker-1 kernel panic on 2026-08-11 (230.1M
+              cumulative major faults over 13d, ~165 GB pushed through a 4 GiB swapfile), and it is
+              invisible to threshold alerts because the guest sits *stably* starved rather than spiking.
+              Check the balloon floor against the host's free RAM (`qm config <vmid>`, then `free -g` on
+              the Proxmox node) — a guest on a node above ~80% used cannot inflate and is stuck at its
+              floor. A cold-cache build faults heavily but does NOT swap in, which is why both halves
+              have to be true here.
         - alert: DevWorkerDiskFilling
           expr: |
             node_filesystem_avail_bytes{job="dev-worker-node",mountpoint="/"}

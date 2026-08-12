@@ -17,6 +17,9 @@
 # for someone to notice. These are dev workers with tmux-continuum session restore, so an unattended
 # reboot is far cheaper than hours of downtime.
 #
+# NOTE THE ASYMMETRY WITH panic_on_oops BELOW, which is deliberate. This one is free: the box is
+# already dead when it fires. That one is not: it fires on faults the kernel might have survived.
+#
 # NB this is a guest-level mitigation, NOT the root cause. dev-worker-1 had swapped 165 GB through a
 # 4 GiB swapfile with 230M major page faults, pinned at its balloon floor on an ai-node1 running at
 # 88% memory — see docs/runbooks/dev-workers.md and the capacity note in kubernetes/infra/dev-workers.
@@ -30,9 +33,12 @@
     state: present
     reload: true
 
-# An oops is not a panic by default: the kernel limps on in an undefined state, which on these workers
-# has meant a wedged VM rather than a clean failure. Promoting it means the timeout above applies.
-- name: Promote a kernel oops to a panic (so the reboot timeout applies)
+# DEFAULTS TO 0 — see the long note in defaults/main.yml. An oops is often survivable, and promoting it
+# to a panic on an interactive box with live tmux sessions trades a recoverable fault for guaranteed
+# lost work (and risks a reboot loop if the oops recurs at boot). The task is here so the knob is one
+# variable away, not because symmetry with kernel.panic makes it right: no oops has been recorded on
+# any dev worker, and the failure this file exists for was a panic.
+- name: Set kernel.panic_on_oops (0 by default — see defaults/main.yml)
   ansible.posix.sysctl:
     name: kernel.panic_on_oops
     value: "{{ dev_worker_kernel_panic_on_oops | string }}"
