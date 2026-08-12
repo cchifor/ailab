@@ -203,16 +203,34 @@ spec:
         # paths write a REDUCED beacon, so disk_freed_percent only exists on runners that completed a
         # sweep recently (2 of 5 when this was written) and a rule on it is blind exactly where it
         # matters most. busy_skip is written on every path, so it is present on all five.
+        #
+        # IT MUST BE CONJOINED WITH DISK PRESSURE, and originally was not. busy_skip=1 is written by
+        # TWO different early exits, and only one of them is a problem:
+        #   * "skip routine sweep: busy and disk < PRESSURE_PCT" — the HEALTHY path. The runner is busy
+        #     and the disk is fine, so there is nothing to reclaim and nothing to page about.
+        #   * "defer: disk >= PRESSURE_PCT but < CRITICAL_PCT and busy" — the real starvation signal.
+        # Measured over 7d across all five runners (2026-08-12): 952 of the 1087 busy_skip writes were
+        # the healthy kind — 88%. Unqualified, this rule went `pending` on FOUR runners sitting at
+        # 62-74% while the sweep was working exactly as designed, and alertmanager has no severity
+        # route (everything reaches ntfy, repeat_interval 4h), so that was a real page. Adding the
+        # pressure conjunction reduced the same instant's matches from 4 to 1 — the one runner at 76%,
+        # which is the case the rule was written for. The annotation already said "sustained together
+        # with CIRunnerDiskPressureSustained"; this puts that in the expression instead of the prose.
+        # 75 is gitea_runner_cleanup_pressure_pct (ansible/roles/gitea_runner/defaults/main.yml) —
+        # the same literal CIRunnerDiskPressureSustained above uses. Change both together.
         - alert: CIRunnerCleanupStarved
-          expr: gitea_runner_cleanup_busy_skip{job="ci-runner-node"} == 1
+          expr: >-
+            (gitea_runner_cleanup_busy_skip{job="ci-runner-node"} == 1)
+            and on (instance)
+            (gitea_runner_cleanup_disk_used_percent{job="ci-runner-node"} >= 75)
           for: 3h
           labels: { severity: warning }
           annotations:
-            summary: "CI runner {{ $labels.instance }} cleanup has not completed a sweep in 3h"
+            summary: "CI runner {{ $labels.instance }} cleanup starved: no sweep completed in 3h at >=75% disk"
             description: >-
               Every gitea-runner-cleanup run on {{ $labels.instance }} has exited early via the busy
-              gate for 3h, so no reclamation has happened regardless of disk level. Either the runner is
+              gate for 3h WHILE the disk sat at or above the pressure threshold, so the disk is climbing
+              with no working lever — the path that ends at the mid-job prune. Either the runner is
               genuinely saturated (check for a stuck job) or the idle gate is not finding the gaps it
               should: `journalctl -t gitea-runner-cleanup | grep -E 'skip routine|defer:|done:'`.
-              Sustained together with CIRunnerDiskPressureSustained, this is the signature of the disk
-              climbing with no working lever, which ends at the mid-job prune path.
+              A busy runner below 75% is the healthy case and deliberately does NOT alert.
