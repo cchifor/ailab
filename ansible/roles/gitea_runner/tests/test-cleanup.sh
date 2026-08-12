@@ -139,9 +139,12 @@ bad()  { echo "  FAIL: $1"; fails=$((fails+1)); echo "    --- calls ---"; sed 's
 assert_has()  { if calls_has "$1"; then ok "$2"; else bad "$2 (expected call: $1)"; fi; }
 assert_none() { if [ -s "$CALLS" ] && grep -q 'prune' "$CALLS"; then bad "$1 (unexpected prune ran)"; else ok "$1"; fi; }
 
-echo "[A] idle + low disk (50%) -> routine window prune (48h -> 172800s) runs"
+echo "[A] idle + low disk (50%) -> routine window prune (24h -> 86400s) runs"
+# 24h, not 48h: run_case sources no env file, so the SCRIPT defaults are what this suite exercises —
+# and those had drifted from the role defaults that actually ship (48h/80 vs the deployed 24h/75), so
+# the deployed values were tested by nothing. Section [M] below now pins them together.
 run_case 0 50
-assert_has "image prune -af --filter until=172800s" "A: routine image prune @48h (emitted in seconds)"
+assert_has "image prune -af --filter until=86400s" "A: routine image prune @24h (emitted in seconds)"
 
 # 2026-08-08: this case USED to assert the opposite — that the pressure reclaim runs THROUGH a live
 # job. That behaviour was the mid-job containerd-GC race (it reaps in-flight `docker pull` leases and
@@ -222,7 +225,7 @@ echo "[I] the PEER runner's busy signal is its per-job worker, not its superviso
 # and this timer starved while disks climbed to 93% (measured 2026-08-08, zero gap-catches fleet-wide).
 # The mock reflects that shape: pgrep -f matches ONLY when a peer job is actually running.
 MOCK_PEER_JOB=0 run_case 0 50
-assert_has "image prune -af --filter until=172800s" "I1: peer idle (supervisor child only) -> sweep runs"
+assert_has "image prune -af --filter until=86400s" "I1: peer idle (supervisor child only) -> sweep runs"
 
 MOCK_PEER_JOB=1 run_case 0 50
 assert_none "I2: peer running a real job -> sweep skipped (shared daemon)"
@@ -252,7 +255,7 @@ assert_none "J5: our own MainPID unreadable -> BUSY, no prune"
 # would run whether or not the `inactive` branch fires, so the case passed vacuously and a deleted
 # `continue` went unnoticed. With a worker present, ONLY the inactive skip can let the sweep proceed.
 MOCK_PEER_STATE=inactive MOCK_PEER_JOB=1 run_case 0 50
-assert_has "image prune -af --filter until=172800s" "J6: peer CONFIRMED inactive -> idle even with a stray worker match"
+assert_has "image prune -af --filter until=86400s" "J6: peer CONFIRMED inactive -> idle even with a stray worker match"
 
 # The own-arm has TWO fail-safe modes and J5 only covers one: a read that FAILS. A read that succeeds
 # but returns junk is caught further on by is_num, and nothing exercised it.
@@ -368,6 +371,62 @@ MINUNTIL=0 CRITUNTIL=1h run_case 1 95
 assert_has "image prune -af --filter until=14400s" "L5: a zero floor cannot disable the clamp (1h must still be raised)"
 if grep -qE 'until=(0s|3600s)' "$CALLS"; then bad "L5b: a zero floor must not let a sub-timeout window through mid-job"; else ok "L5b: zero floor cannot leak a sub-timeout window"; fi
 unset MINUNTIL CRITUNTIL
+
+echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
+# Every case above runs with GITEA_CLEANUP_ENV_FILE=/nonexistent, so the ${VAR:-default} fallbacks in
+# the script ARE the values this suite exercises. In production the env file always exists, rendered
+# from defaults/main.yml. When the two disagree the suite is green about values no runner uses and the
+# deployed ones are covered by nothing — which is exactly what had happened: the script said 48h/80
+# while every runner ran 24h/75, so [A]/[I1]/[J6] asserted a retention window that has never shipped.
+#
+# The knob -> var mapping is DERIVED FROM THE TEMPLATE rather than restated here, so a knob added later
+# is checked automatically instead of needing a hand-kept list updated — a hand-kept list is precisely
+# how the drift got in. Lines carrying a Jinja filter are skipped: their rendered value is not the raw
+# variable (BEACON's `| bool | ternary` is the only one today).
+DEFAULTS_YML="$HERE/../defaults/main.yml"
+ENV_TMPL="$HERE/../templates/gitea-runner-cleanup.env.j2"
+
+# Value of an ansible var from the flat defaults file. Handles the three shapes present: bare scalar
+# with an optional trailing ` # comment`, single-quoted, and double-quoted (where YAML turns `\\` into
+# one literal backslash — peer_job_process_re is "Runner\\.Worker" and must compare as Runner\.Worker).
+role_default() {
+  local line v
+  line="$(grep -m1 -E "^$1:[[:space:]]" "$DEFAULTS_YML")" || return 1
+  v="${line#*:}"; v="${v#"${v%%[![:space:]]*}"}"
+  case "$v" in
+    '"'*) v="${v#\"}"; v="${v%%\"*}"; printf '%s' "$v" | sed 's/\\\\/\\/g' ;;
+    "'"*) v="${v#\'}"; v="${v%%\'*}"; printf '%s' "$v" ;;
+    *)    v="${v%%[[:space:]]#*}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v" ;;
+  esac
+}
+# The `${NAME:-default}` fallback the script uses for that env knob.
+script_default() { sed -n "s/.*\${$1:-\([^}]*\)}.*/\1/p" "$SCRIPT" | head -1; }
+
+checked=0
+while IFS= read -r ln; do
+  case "$ln" in \#* | '') continue ;; esac
+  case "$ln" in *'|'*) continue ;; esac
+  env_name="$(printf '%s' "$ln" | sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p')"
+  var_name="$(printf '%s' "$ln" | sed -n 's/.*{{[[:space:]]*\([a-z0-9_]*\)[[:space:]]*}}.*/\1/p')"
+  [ -n "$env_name" ] && [ -n "$var_name" ] || continue
+  checked=$((checked + 1))
+  # A knob the template sets but the script never reads is silently inert — worth catching on its own.
+  if ! grep -qF "\${$env_name:-" "$SCRIPT"; then
+    bad "M: $env_name is rendered into the env file but the script never reads it"
+    continue
+  fi
+  rv="$(role_default "$var_name")" || { bad "M: $env_name -> $var_name is not defined in defaults/main.yml"; continue; }
+  sv="$(script_default "$env_name")"
+  if [ "$rv" = "$sv" ]; then
+    ok "M: $env_name default agrees with $var_name ($sv)"
+  else
+    bad "M: $env_name DRIFT — script default '$sv' but the role ships '$rv' (from $var_name)"
+  fi
+done < "$ENV_TMPL"
+# The loop must actually have found knobs: a template reformat that broke the match would otherwise
+# turn this whole section into a silent all-clear, the same failure shape as the caps it replaced.
+if [ "$checked" -ge 15 ]; then ok "M: mapping derived from the template covered $checked knobs"
+else bad "M: only $checked knob(s) parsed from $ENV_TMPL — the mapping regex stopped matching"; fi
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

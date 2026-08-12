@@ -38,8 +38,14 @@ SERVICE="${GITEA_RUNNER_SERVICE:-gitea-act-runner.service}"
 # Co-located runner services to ALSO treat as "busy" (shared Docker daemon). Space-separated.
 PEER_SERVICES="${GITEA_CLEANUP_PEER_SERVICES:-actions.runner.cchifor-platform.service}"
 DISK_PATH="${GITEA_CLEANUP_DISK_PATH:-/}"
-ROUTINE_UNTIL="${GITEA_CLEANUP_ROUTINE_UNTIL:-48h}"     # steady state: keep images/cache used within 48h
-PRESSURE_PCT="${GITEA_CLEANUP_PRESSURE_PCT:-80}"        # disk% >= this -> tighten the window
+# EVERY default below must equal the role default that renders the env file (defaults/main.yml ->
+# templates/gitea-runner-cleanup.env.j2). They are not decoration: the test suite runs this script with
+# GITEA_CLEANUP_ENV_FILE=/nonexistent, so these ARE the values under test, and where they disagreed
+# with the role the deployed values were exercised by nothing at all. ROUTINE_UNTIL (48h vs the shipped
+# 24h) and PRESSURE_PCT (80 vs the shipped 75) had both drifted that way. Section [M] of the test suite
+# now derives the mapping from the env template and fails on any future divergence.
+ROUTINE_UNTIL="${GITEA_CLEANUP_ROUTINE_UNTIL:-24h}"     # steady state: keep images/cache used within 24h
+PRESSURE_PCT="${GITEA_CLEANUP_PRESSURE_PCT:-75}"        # disk% >= this -> tighten the window
 PRESSURE_UNTIL="${GITEA_CLEANUP_PRESSURE_UNTIL:-6h}"
 CRITICAL_PCT="${GITEA_CLEANUP_CRITICAL_PCT:-92}"        # disk% >= this -> hard window + actcache trim
 CRITICAL_UNTIL="${GITEA_CLEANUP_CRITICAL_UNTIL:-4h}"    # clamped up to MIN_UNTIL_SEC — see clamp_win()
@@ -267,6 +273,21 @@ if [ "$busy" -eq 1 ]; then
       midjob=1
       log "CRITICAL disk ${pct_now}% and no job gap in ${IDLE_WAIT_SEC}s -> pruning THROUGH a live job (ENOSPC would red every job)"
     else
+      # THIS `exit 0` SKIPS THE WHOLE SWEEP, including the docker-free stale-workspace prune (section
+      # 5) and the age-gated container reap (section 2), both of which are safe under load. That is a
+      # deliberate keep, not an oversight — a codex cross-review raised it, and it was measured before
+      # being closed (7d journal + `du`, all five runners, 2026-08-12):
+      #   * this branch fires ~19x/day fleet-wide (42/15/16/51/11 over 7d on ci-runner-1..5), so it is
+      #     real, not theoretical;
+      #   * but STALE WORKSPACES ARE ZERO on every runner (work/ 2.6-4.0 GB across 27-33 dirs, none
+      #     untouched for 48h) and `reaped` has been 0 on every sweep, so the reclaim this branch
+      #     withholds would free exactly 0 bytes. The ~74 idle sweeps/day already keep both current —
+      #     the workspace count is stable at ~30/VM, down from the 350-400 that caused the 2026-07-28
+      #     fleet outage.
+      # Everything else it withholds is a docker prune, which is precisely what must not run here: any
+      # prune triggers the containerd GC pass that reaps an in-flight pull's lease (52.6% vs 19.0% job
+      # failure, measured above). So widening this path buys nothing measurable and spends it in the
+      # one place where a wrong answer reds live CI jobs. Revisit only if stale workspaces reappear.
       log "defer: disk ${pct_now}% >= ${PRESSURE_PCT}% but < ${CRITICAL_PCT}% and busy for ${IDLE_WAIT_SEC}s -> skip; next tick retries"
       write_beacon "busy_skip 1" "midjob_prune 0" "last_run_seconds $(date +%s)" "disk_used_percent ${pct_now}"
       exit 0
