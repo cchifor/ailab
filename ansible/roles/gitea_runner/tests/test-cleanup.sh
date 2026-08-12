@@ -139,9 +139,12 @@ bad()  { echo "  FAIL: $1"; fails=$((fails+1)); echo "    --- calls ---"; sed 's
 assert_has()  { if calls_has "$1"; then ok "$2"; else bad "$2 (expected call: $1)"; fi; }
 assert_none() { if [ -s "$CALLS" ] && grep -q 'prune' "$CALLS"; then bad "$1 (unexpected prune ran)"; else ok "$1"; fi; }
 
-echo "[A] idle + low disk (50%) -> routine window prune (48h -> 172800s) runs"
+echo "[A] idle + low disk (50%) -> routine window prune (24h -> 86400s) runs"
+# 24h, not 48h: run_case sources no env file, so the SCRIPT defaults are what this suite exercises —
+# and those had drifted from the role defaults that actually ship (48h/80 vs the deployed 24h/75), so
+# the deployed values were tested by nothing. Section [M] below now pins them together.
 run_case 0 50
-assert_has "image prune -af --filter until=172800s" "A: routine image prune @48h (emitted in seconds)"
+assert_has "image prune -af --filter until=86400s" "A: routine image prune @24h (emitted in seconds)"
 
 # 2026-08-08: this case USED to assert the opposite — that the pressure reclaim runs THROUGH a live
 # job. That behaviour was the mid-job containerd-GC race (it reaps in-flight `docker pull` leases and
@@ -222,7 +225,7 @@ echo "[I] the PEER runner's busy signal is its per-job worker, not its superviso
 # and this timer starved while disks climbed to 93% (measured 2026-08-08, zero gap-catches fleet-wide).
 # The mock reflects that shape: pgrep -f matches ONLY when a peer job is actually running.
 MOCK_PEER_JOB=0 run_case 0 50
-assert_has "image prune -af --filter until=172800s" "I1: peer idle (supervisor child only) -> sweep runs"
+assert_has "image prune -af --filter until=86400s" "I1: peer idle (supervisor child only) -> sweep runs"
 
 MOCK_PEER_JOB=1 run_case 0 50
 assert_none "I2: peer running a real job -> sweep skipped (shared daemon)"
@@ -252,7 +255,7 @@ assert_none "J5: our own MainPID unreadable -> BUSY, no prune"
 # would run whether or not the `inactive` branch fires, so the case passed vacuously and a deleted
 # `continue` went unnoticed. With a worker present, ONLY the inactive skip can let the sweep proceed.
 MOCK_PEER_STATE=inactive MOCK_PEER_JOB=1 run_case 0 50
-assert_has "image prune -af --filter until=172800s" "J6: peer CONFIRMED inactive -> idle even with a stray worker match"
+assert_has "image prune -af --filter until=86400s" "J6: peer CONFIRMED inactive -> idle even with a stray worker match"
 
 # The own-arm has TWO fail-safe modes and J5 only covers one: a read that FAILS. A read that succeeds
 # but returns junk is caught further on by is_num, and nothing exercised it.
@@ -368,6 +371,156 @@ MINUNTIL=0 CRITUNTIL=1h run_case 1 95
 assert_has "image prune -af --filter until=14400s" "L5: a zero floor cannot disable the clamp (1h must still be raised)"
 if grep -qE 'until=(0s|3600s)' "$CALLS"; then bad "L5b: a zero floor must not let a sub-timeout window through mid-job"; else ok "L5b: zero floor cannot leak a sub-timeout window"; fi
 unset MINUNTIL CRITUNTIL
+
+echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
+# Every case above runs with GITEA_CLEANUP_ENV_FILE=/nonexistent, so the ${VAR:-default} fallbacks in
+# the script ARE the values this suite exercises. In production the env file always exists, rendered
+# from defaults/main.yml. When the two disagree the suite is green about values no runner uses and the
+# deployed ones are covered by nothing — which is exactly what had happened: the script said 48h/80
+# while every runner ran 24h/75, so [A]/[I1]/[J6] asserted a retention window that has never shipped.
+#
+# The knob -> var mapping is DERIVED FROM THE TEMPLATE rather than restated here, so a knob added later
+# is checked automatically instead of needing a hand-kept list updated — a hand-kept list is precisely
+# how the drift got in.
+#
+# NOTHING IS SKIPPED. The first draft skipped any template line carrying a Jinja filter, which quietly
+# excluded BEACON (`| bool | ternary('1','0')`) from the only section that exists to catch drift — a
+# false PASS in the guard against false PASSes (codex cross-review of #320). A filter this section
+# cannot evaluate is now a FAILURE telling you to teach it that filter, not a silent pass.
+# The env file's own path is checked separately after the loop: it is the one knob that cannot appear
+# inside the file it names, so no template-derived mapping can ever see it.
+DEFAULTS_YML="$HERE/../defaults/main.yml"
+ENV_TMPL="$HERE/../templates/gitea-runner-cleanup.env.j2"
+
+# Value of an ansible var from the flat defaults file. The parser understands bare scalars (with an
+# optional trailing ` # comment`), single-quoted and double-quoted scalars. Only bare and double-quoted
+# occur among the mapped vars today — the single-quote branch is there so adding one is not a trap, not
+# because one exists. Double-quoted YAML turns `\\` into one literal backslash, which is why
+# peer_job_process_re is written "Runner\\.Worker" and must compare as Runner\.Worker.
+# A shape the parser does NOT model (a `|`/`>` block scalar, say) yields a value that cannot match the
+# script fallback, so it surfaces as a loud mismatch rather than a false pass.
+role_def_count() { grep -c -E "^$1:[[:space:]]" "$DEFAULTS_YML"; }
+role_default() {
+  local line v
+  line="$(grep -m1 -E "^$1:[[:space:]]" "$DEFAULTS_YML")" || return 1
+  v="${line#*:}"; v="${v#"${v%%[![:space:]]*}"}"
+  case "$v" in
+    '"'*) v="${v#\"}"; v="${v%%\"*}"; printf '%s' "$v" | sed 's/\\\\/\\/g' ;;
+    "'"*) v="${v#\'}"; v="${v%%\'*}"; printf '%s' "$v" ;;
+    *)    v="${v%%[[:space:]]#*}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v" ;;
+  esac
+}
+# The `${NAME:-default}` fallback the script uses for that env knob.
+script_default() { sed -n "s/.*\${$1:-\([^}]*\)}.*/\1/p" "$SCRIPT" | head -1; }
+
+# THE PARSER REFUSES TO GUESS. Every template shape below is either one [M] fully models, or a
+# FAILURE naming what to teach it. That is not pedantry: the first two drafts each shipped a false
+# PASS (a filtered line skipped outright; then a regex loose enough to accept `{{ a }}-{{ b }}` and
+# silently compare against `b`). In a section whose entire job is catching drift, "parsed something
+# plausible" is the dangerous outcome — a loud "I cannot evaluate this" costs one edit, a false PASS
+# costs the next drift going unnoticed for as long as the last one did.
+checked=0
+while IFS= read -r ln; do
+  ln="${ln#"${ln%%[![:space:]]*}"}" # leading whitespace is legal in a sourced env file; strip it so
+  #                                   an indented knob cannot slip past BOTH the loop and tmpl_knobs
+  case "$ln" in \#* | '') continue ;; esac
+  env_name="$(printf '%s' "$ln" | sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p')"
+  [ -n "$env_name" ] || continue
+  checked=$((checked + 1))
+
+  # The value must be EXACTLY one `{{ ... }}`, optionally wrapped in double quotes. Concatenation
+  # (`{{ a }}-{{ b }}`), two expressions, or a literal are all rejected rather than approximated.
+  raw="${ln#*=}"
+  val="$raw"
+  case "$val" in '"'*'"') val="${val#\"}"; val="${val%\"}" ;; esac
+  inner=""
+  case "$val" in
+    '{{'*'}}') inner="${val#\{\{}"; inner="${inner%\}\}}" ;;
+  esac
+  case "$inner" in *'{{'* | *'}}'* | '') inner="" ;; esac
+  if [ -z "$inner" ]; then
+    bad "M: $env_name renders '$raw', which [M] does not model — it expects exactly one {{ ... }}"
+    continue
+  fi
+  expr_norm="$(printf '%s' "$inner" | tr -s '[:space:]' ' ')"
+  expr_norm="${expr_norm# }"; expr_norm="${expr_norm% }"
+
+  # A knob the template sets but the script never reads is silently inert — worth catching on its own.
+  if ! grep -qF "\${$env_name:-" "$SCRIPT"; then
+    bad "M: $env_name is rendered into the env file but the script never reads it"
+    continue
+  fi
+
+  # Split into the variable and, if present, the filter chain — which must be the ONE chain [M] can
+  # evaluate, spelled out in full. Matching a bare `ternary(...)` anywhere in the line (the previous
+  # attempt) would have accepted `foo | upper | ternary('1','0')` and evaluated it as if the filters
+  # before the ternary did not exist.
+  tern=""
+  case "$expr_norm" in
+    *'|'*)
+      var_name="${expr_norm%% *}"
+      tern="$(printf '%s' "$expr_norm" | sed -n "s/^[a-z0-9_]* | bool | ternary('\([^']*\)', *'\([^']*\)')$/\1 \2/p")"
+      if [ -z "$tern" ]; then
+        bad "M: $env_name goes through a filter chain [M] cannot evaluate ({{ $expr_norm }}) — teach it that chain rather than leaving the knob unchecked"
+        continue
+      fi ;;
+    *) var_name="$expr_norm" ;;
+  esac
+  case "$var_name" in '' | *[!a-z0-9_]*) bad "M: $env_name -> '$var_name' is not a plain variable name"; continue ;; esac
+
+  n="$(role_def_count "$var_name")"
+  if [ "$n" -ne 1 ]; then
+    # 0 = the template references a var with no default; >1 = a duplicate key, where YAML's last-wins
+    # and this parser's first-wins disagree and the comparison would be against a value that never ships.
+    bad "M: $env_name -> $var_name is defined $n times in defaults/main.yml (want exactly 1)"
+    continue
+  fi
+  rv="$(role_default "$var_name")"
+
+  if [ -n "$tern" ]; then
+    # Ansible's `bool` filter accepts more spellings than the obvious two, and case-insensitively, so
+    # compare lowercased. A value that is not clearly boolean is a FAILURE, not a silent fall to the
+    # false branch — guessing here would invert the expected value and report a PASS for the wrong arm.
+    case "$(printf '%s' "$rv" | tr 'A-Z' 'a-z')" in
+      true | yes | 'on' | y | 1) rv="${tern%% *}" ;;
+      false | no | 'off' | n | 0) rv="${tern##* }" ;;
+      *) bad "M: $env_name -> $var_name is '$rv', which ansible's bool filter does not clearly resolve — [M] will not guess which ternary arm ships"; continue ;;
+    esac
+  fi
+
+  sv="$(script_default "$env_name")"
+  if [ "$rv" = "$sv" ]; then
+    ok "M: $env_name default agrees with $var_name ($sv)"
+  else
+    bad "M: $env_name DRIFT — script default '$sv' but the role ships '$rv' (from $var_name)"
+  fi
+done < "$ENV_TMPL"
+
+# Two independent floors, because "how many were checked" is the number this section can be silently
+# wrong about. The equality catches a knob being SKIPPED (what the Jinja-filter `continue` used to do
+# to BEACON); the >=15 catches the mapping matching nothing at all after a template reformat, which the
+# equality alone would call a pass with both sides at zero — the same silent-all-clear shape as the
+# byte caps #314 removed. Both tolerate leading whitespace, exactly as the loop above does, so the two
+# counts cannot disagree about what a knob line is.
+tmpl_knobs="$(grep -c -E '^[[:space:]]*[A-Z][A-Z0-9_]*=' "$ENV_TMPL")"
+if [ "$checked" -eq "$tmpl_knobs" ] && [ "$checked" -ge 15 ]; then
+  ok "M: every one of the $checked knobs the template renders was checked (none skipped)"
+else
+  bad "M: checked $checked of $tmpl_knobs knob(s) in $ENV_TMPL — one was skipped, or the mapping stopped matching"
+fi
+
+# The env file's own PATH is the one knob that cannot possibly appear in the env file, so the loop
+# above is structurally blind to it — and it is the most consequential drift of all: point the role at
+# a new path without updating the script's fallback and the script reads a file ansible no longer
+# writes, silently reverting EVERY knob to its built-in default while every other check here still
+# passes. Checked explicitly for that reason.
+role_envfile="$(role_default gitea_runner_cleanup_env)"
+script_envfile="$(script_default GITEA_CLEANUP_ENV_FILE)"
+if [ -n "$role_envfile" ] && [ "$role_envfile" = "$script_envfile" ]; then
+  ok "M: the env file's own path agrees ($script_envfile)"
+else
+  bad "M: env-file path DRIFT — the script reads '$script_envfile' but the role writes '$role_envfile'; every knob would silently fall back to its built-in default"
+fi
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi
