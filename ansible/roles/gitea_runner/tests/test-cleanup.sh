@@ -48,10 +48,18 @@ esac
 exit 0
 EOF
 
-# df --output=pcent -> controlled MOCK_PCT
+# df --output=pcent -> controlled MOCK_PCT.
+# MOCK_PCT_AFTER makes the disk CHANGE mid-run: reads after the first one return it instead. The script
+# re-reads the disk after waiting up to IDLE_WAIT_SEC for a job gap, and in 600s the reclaim timer or a
+# finishing job really can free space — so "pressure cleared while we waited" is a reachable state that
+# a single fixed value cannot express at all. Case P5 depends on this.
 cat >"$BIN/df" <<EOF
 #!/usr/bin/env bash
-echo "Use%"; echo " \${MOCK_PCT:-0}%"
+echo "Use%"
+n=0; [ -f "$WORK/df.count" ] && n="\$(cat "$WORK/df.count" 2>/dev/null)"
+case "\$n" in '' | *[!0-9]*) n=0 ;; esac
+n=\$(( n + 1 )); echo "\$n" > "$WORK/df.count"
+if [ -n "\${MOCK_PCT_AFTER:-}" ] && [ "\$n" -gt 1 ]; then echo " \${MOCK_PCT_AFTER}%"; else echo " \${MOCK_PCT:-0}%"; fi
 EOF
 
 # systemctl mock.
@@ -114,8 +122,8 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
   # IDLE_WAIT_SEC is forced tiny here: the real default is 600s, because under pressure the busy gate
   # WAITS for the between-jobs gap instead of pruning through a live job. Left at its default, every
   # busy+pressure case below would stall this suite for 10 minutes.
-  : > "$CALLS"; rm -f "$WORK/pgrep.count" "$WORK"/phase.*
-  MOCK_BUSY="$1" MOCK_PCT="$2" PATH="$BIN:$PATH" \
+  : > "$CALLS"; rm -f "$WORK/pgrep.count" "$WORK/df.count" "$WORK"/phase.*
+  MOCK_BUSY="$1" MOCK_PCT="$2" MOCK_PCT_AFTER="${MOCK_PCT_AFTER:-}" PATH="$BIN:$PATH" \
     MOCK_CACHE="${MOCK_CACHE:-0}" MOCK_IMAGES="${MOCK_IMAGES:-0}" MOCK_BUSY_DROP_AFTER="${MOCK_BUSY_DROP_AFTER:-}" \
     MOCK_BUSY_FROM="${MOCK_BUSY_FROM:-}" MOCK_BUSY_UNTIL="${MOCK_BUSY_UNTIL:-}" \
     MOCK_PEER_JOB="${MOCK_PEER_JOB:-0}" MOCK_PEER_STATE="${MOCK_PEER_STATE:-active}" \
@@ -405,7 +413,17 @@ run_beacon 0 50
 run_beacon 1 95
 [ "$(beacon_field pressure_defer)" = 0 ] && ok "P4: the mid-job critical sweep is not 'starved'" || bad "P4: mid-job sweep must set pressure_defer=0 (got '$(beacon_field pressure_defer)')"
 [ "$(beacon_field midjob_prune)" = 1 ] && ok "P4: ...and is still recorded as midjob_prune=1" || bad "P4: mid-job sweep must set midjob_prune=1 (got '$(beacon_field midjob_prune)')"
-unset IDLEWAIT
+
+# P5 (codex review of #324): PRESSURE CLEARED DURING THE WAIT. The gate is entered on `before` >=
+# PRESSURE_PCT, but the deferral branch acts on a disk re-read up to IDLE_WAIT_SEC (600s) later, and
+# the reclaim timer and finishing jobs both free space in that window. The first version of this fix
+# wrote pressure_defer=1 for ANY non-critical value, so every "the disk recovered while we waited"
+# exit would have paged — reintroducing the false positive the whole metric exists to remove, on a
+# path no fixed-disk test case can reach.
+MOCK_PCT_AFTER=60 IDLEWAIT=2 run_beacon 1 85
+[ "$(beacon_field pressure_defer)" = 0 ] && ok "P5: pressure cleared during the wait -> NOT starved" || bad "P5: pressure cleared during the wait must set pressure_defer=0 (got '$(beacon_field pressure_defer)')"
+[ "$(beacon_field busy_skip)" = 1 ] && ok "P5: ...but it is still a busy skip" || bad "P5: pressure-cleared exit must still set busy_skip=1 (got '$(beacon_field busy_skip)')"
+unset MOCK_PCT_AFTER IDLEWAIT
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
 # Every case above runs with GITEA_CLEANUP_ENV_FILE=/nonexistent, so the ${VAR:-default} fallbacks in

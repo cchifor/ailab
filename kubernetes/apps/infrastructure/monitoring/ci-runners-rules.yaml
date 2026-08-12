@@ -227,9 +227,10 @@ spec:
         # own value decides, whatever it is set to).
         #
         # DEPLOYMENT ORDER: this series does not exist until the updated gitea-runner-cleanup.sh is on
-        # the runners, and an alert on an absent series is silent. Deploy the role, then confirm
-        # `gitea_runner_cleanup_pressure_defer` has 5 series before trusting this rule. A beacon that
-        # stops updating altogether is still covered by CIRunnerCleanupStale above.
+        # the runners, and an alert on an absent series is silent — the exact silent-no-op shape #314
+        # spent its diff removing, so it gets its own rule rather than a note asking someone to
+        # remember. See CIRunnerCleanupBeaconFieldMissing below. A beacon that stops updating
+        # altogether is separately covered by CIRunnerCleanupStale above.
         #
         # (busy_skip remains in the beacon: it is what CIRunnerCleanupStarved's runbook grep looks for,
         # and it is still the right field for "did this sweep do anything at all".)
@@ -248,3 +249,30 @@ spec:
               `journalctl -t gitea-runner-cleanup | grep -E 'skip routine|defer:|done:'`.
               A busy runner BELOW the pressure threshold takes a different branch and deliberately does
               NOT alert — that is the healthy majority (88% of early exits, measured over 7d).
+        # 4. The rule above is keyed on a beacon field that only a CURRENT gitea-runner-cleanup.sh
+        # writes. On a runner still carrying an older script the field is simply absent, and an alert
+        # on an absent series says nothing at all — indistinguishable from "healthy". That is how the
+        # byte caps went silent for weeks, so it is worth its own rule rather than a deploy checklist.
+        #
+        # `unless on (instance)` is load-bearing and is NOT interchangeable with comparing counts.
+        # `count(beacons) > count(fields)` collapses both sides to a single number, so it reports a
+        # clean all-clear whenever the totals happen to match and it can never say WHICH runner is
+        # stale. This form yields one series per runner that is writing a beacon but not this field —
+        # which is both the correct condition and the actionable one.
+        # last_run_seconds is the left-hand side because every write_beacon call site sets it, so it is
+        # the closest thing to "this runner is running the cleanup at all".
+        - alert: CIRunnerCleanupBeaconFieldMissing
+          expr: >-
+            gitea_runner_cleanup_last_run_seconds{job="ci-runner-node"}
+            unless on (instance)
+            gitea_runner_cleanup_pressure_defer{job="ci-runner-node"}
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} runs an outdated gitea-runner-cleanup.sh (no pressure_defer)"
+            description: >-
+              {{ $labels.instance }} is writing a cleanup beacon but not the `pressure_defer` field, so
+              CIRunnerCleanupStarved is BLIND on this runner — it can never fire, which looks exactly
+              like healthy. The runner is carrying a gitea-runner-cleanup.sh older than the alert rules.
+              Fix by deploying the role (`just gitea-runners`) and confirming
+              `gitea_runner_cleanup_pressure_defer` then has one series per runner.
