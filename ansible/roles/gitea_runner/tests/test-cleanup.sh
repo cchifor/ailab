@@ -128,7 +128,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_CACHE_MAX_BYTES="${CACHECAP:-20000000000}" \
     GITEA_CLEANUP_CRITICAL_UNTIL="${CRITUNTIL:-4h}" \
     GITEA_CLEANUP_MIN_UNTIL_SEC="${MINUNTIL-14400}" \
-    GITEA_CLEANUP_BEACON=0 GITEA_CLEANUP_TEXTFILE_DIR=/nonexistent \
+    GITEA_CLEANUP_BEACON="${BEACON:-0}" GITEA_CLEANUP_TEXTFILE_DIR="${TEXTDIR:-/nonexistent}" \
     bash "$SCRIPT" >/dev/null 2>&1 || true
 }
 calls_has() { grep -qF "$1" "$CALLS"; }
@@ -371,6 +371,41 @@ MINUNTIL=0 CRITUNTIL=1h run_case 1 95
 assert_has "image prune -af --filter until=14400s" "L5: a zero floor cannot disable the clamp (1h must still be raised)"
 if grep -qE 'until=(0s|3600s)' "$CALLS"; then bad "L5b: a zero floor must not let a sub-timeout window through mid-job"; else ok "L5b: zero floor cannot leak a sub-timeout window"; fi
 unset MINUNTIL CRITUNTIL
+
+echo "[P] the beacon must distinguish the STARVATION exit from the HEALTHY one"
+# CIRunnerCleanupStarved alerts on gitea_runner_cleanup_pressure_defer == 1. That metric exists because
+# busy_skip cannot carry the meaning: it is 1 on BOTH early exits, and 88% of its writes are the
+# healthy one (952 of 1087 over 7d/5 runners), so a rule on it paged four healthy runners. Two attempts
+# to recover the distinction in PromQL from a disk THRESHOLD both failed — instantaneous could not
+# sustain `for: 3h` against 23-point hourly swings, and a 3h average lagged 5.5-6h. The script knows
+# which branch it took, so it records it, and these cases are what make that trustworthy.
+# Nothing else in this suite runs with the beacon enabled, so without them the field could be dropped,
+# inverted, or written on the wrong branch and every other check would stay green.
+BEACONDIR="$WORK/textfile"; mkdir -p "$BEACONDIR"
+beacon_field() { # <field> -> value written by the last run, or the empty string
+  sed -n "s/^gitea_runner_cleanup_$1 \(.*\)$/\1/p" "$BEACONDIR/gitea_runner_cleanup.prom" 2>/dev/null
+}
+run_beacon() { rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BEACON=1 TEXTDIR="$BEACONDIR" run_case "$@"; }
+
+# P1: busy + BELOW pressure -> the healthy skip. busy_skip 1 (it did nothing) but NOT a starvation.
+run_beacon 1 50
+[ "$(beacon_field busy_skip)" = 1 ] && ok "P1: healthy skip still sets busy_skip=1" || bad "P1: healthy skip sets busy_skip=1 (got '$(beacon_field busy_skip)')"
+[ "$(beacon_field pressure_defer)" = 0 ] && ok "P1: healthy skip sets pressure_defer=0 (must NOT alert)" || bad "P1: healthy skip must set pressure_defer=0 (got '$(beacon_field pressure_defer)')"
+
+# P2: busy + AT pressure + no gap ever appears -> the deferral branch. This is the one worth paging on.
+IDLEWAIT=2 run_beacon 1 85
+[ "$(beacon_field pressure_defer)" = 1 ] && ok "P2: pressure deferral sets pressure_defer=1" || bad "P2: pressure deferral must set pressure_defer=1 (got '$(beacon_field pressure_defer)')"
+
+# P3: a sweep that actually RAN is not starved, however it got there.
+run_beacon 0 50
+[ "$(beacon_field pressure_defer)" = 0 ] && ok "P3: a completed sweep sets pressure_defer=0" || bad "P3: completed sweep must set pressure_defer=0 (got '$(beacon_field pressure_defer)')"
+
+# P4: the mid-job critical path SWEPT — riskily, but it swept. midjob_prune records that separately;
+# starved must mean "could not sweep", never "swept in a way we would rather it had not".
+run_beacon 1 95
+[ "$(beacon_field pressure_defer)" = 0 ] && ok "P4: the mid-job critical sweep is not 'starved'" || bad "P4: mid-job sweep must set pressure_defer=0 (got '$(beacon_field pressure_defer)')"
+[ "$(beacon_field midjob_prune)" = 1 ] && ok "P4: ...and is still recorded as midjob_prune=1" || bad "P4: mid-job sweep must set midjob_prune=1 (got '$(beacon_field midjob_prune)')"
+unset IDLEWAIT
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
 # Every case above runs with GITEA_CLEANUP_ENV_FILE=/nonexistent, so the ${VAR:-default} fallbacks in
