@@ -216,21 +216,40 @@ spec:
         # pressure conjunction reduced the same instant's matches from 4 to 1 — the one runner at 76%,
         # which is the case the rule was written for. The annotation already said "sustained together
         # with CIRunnerDiskPressureSustained"; this puts that in the expression instead of the prose.
+        #
+        # THE DISK TERM IS AVERAGED OVER THE SAME 3h THE `for` USES, not read instantaneously. With an
+        # instantaneous `>= 75`, the `for` clock restarts every time the disk dips below the threshold —
+        # and these disks do not sit still: measured max-min over a single hour was 3, 7, 11, 14 and 23
+        # percentage points across the five runners (2026-08-12), because #314's cache and image prunes
+        # reclaim in one step when they fire. A fixed instantaneous threshold under `for: 3h` would
+        # therefore almost never sustain, replacing a rule that pages on healthy runners with one that
+        # cannot fire at all — the worse of the two failures, since a dead alert looks exactly like a
+        # quiet one. Averaging over 3h makes both halves of the conjunction reason about the same window:
+        # busy_skip must be 1 across it AND the disk must have genuinely sat at pressure across it, so
+        # neither a post-prune trough nor a single spike moves the answer. Current 3h averages are
+        # 59-70%, i.e. correctly zero alerts on a healthy fleet.
+        # CIRunnerDiskPressureSustained above deliberately does NOT average, and that is not an
+        # oversight: there the threshold IS the primary signal and "sustained" means exactly "never
+        # dipped", so a dip resetting its clock is the correct answer. Here the primary signal is
+        # busy_skip and the disk is only a qualifier on it, which is why it reads the window rather
+        # than the instant.
         # 75 is gitea_runner_cleanup_pressure_pct (ansible/roles/gitea_runner/defaults/main.yml) —
         # the same literal CIRunnerDiskPressureSustained above uses. Change both together.
         - alert: CIRunnerCleanupStarved
           expr: >-
             (gitea_runner_cleanup_busy_skip{job="ci-runner-node"} == 1)
             and on (instance)
-            (gitea_runner_cleanup_disk_used_percent{job="ci-runner-node"} >= 75)
+            (avg_over_time(gitea_runner_cleanup_disk_used_percent{job="ci-runner-node"}[3h]) >= 75)
           for: 3h
           labels: { severity: warning }
           annotations:
             summary: "CI runner {{ $labels.instance }} cleanup starved: no sweep completed in 3h at >=75% disk"
             description: >-
               Every gitea-runner-cleanup run on {{ $labels.instance }} has exited early via the busy
-              gate for 3h WHILE the disk sat at or above the pressure threshold, so the disk is climbing
-              with no working lever — the path that ends at the mid-job prune. Either the runner is
-              genuinely saturated (check for a stuck job) or the idle gate is not finding the gaps it
-              should: `journalctl -t gitea-runner-cleanup | grep -E 'skip routine|defer:|done:'`.
-              A busy runner below 75% is the healthy case and deliberately does NOT alert.
+              gate for 3h WHILE the disk AVERAGED at or above the pressure threshold over those same 3h,
+              so the disk is holding at pressure with no working lever — the path that ends at the
+              mid-job prune. Either the runner is genuinely saturated (check for a stuck job) or the
+              idle gate is not finding the gaps it should:
+              `journalctl -t gitea-runner-cleanup | grep -E 'skip routine|defer:|done:'`.
+              A busy runner averaging below 75% is the healthy case and deliberately does NOT alert;
+              so is one that merely spikes above 75% between successful prunes.
