@@ -247,7 +247,12 @@ busy=0; any_job_running && busy=1 || true # `|| true`: keep the compound exit 0 
 # instead of being chased by this timer.
 if [ "$busy" -eq 1 ] && [ "$before" -lt "$PRESSURE_PCT" ]; then
   log "skip routine sweep: co-located runner busy and disk ${before}% < ${PRESSURE_PCT}% pressure"
-  write_beacon "busy_skip 1" "midjob_prune 0" "last_run_seconds $(date +%s)" "disk_used_percent ${before}"
+  # pressure_defer 0: this is the HEALTHY early exit — busy, but the disk does not need the space.
+  # busy_skip alone cannot distinguish it from the starvation exit below, and 88% of busy_skip writes
+  # are THIS one (952 of 1087 over 7d/5 runners), which is why alerting on busy_skip paged four
+  # healthy runners. See the pressure_defer note at the deferral branch.
+  write_beacon "busy_skip 1" "pressure_defer 0" "midjob_prune 0" "last_run_seconds $(date +%s)" \
+    "disk_used_percent ${before}"
   exit 0
 fi
 
@@ -289,7 +294,19 @@ if [ "$busy" -eq 1 ]; then
       # failure, measured above). So widening this path buys nothing measurable and spends it in the
       # one place where a wrong answer reds live CI jobs. Revisit only if stale workspaces reappear.
       log "defer: disk ${pct_now}% >= ${PRESSURE_PCT}% but < ${CRITICAL_PCT}% and busy for ${IDLE_WAIT_SEC}s -> skip; next tick retries"
-      write_beacon "busy_skip 1" "midjob_prune 0" "last_run_seconds $(date +%s)" "disk_used_percent ${pct_now}"
+      # pressure_defer 1: THE starvation signal, and the only beacon field that means it. This branch
+      # is the one worth paging on — the disk needs the space and the sweep could not get a gap.
+      # It exists because the alert cannot be reconstructed from the other fields after the fact:
+      # busy_skip is 1 on the healthy exit too, and inferring the difference from a disk THRESHOLD in
+      # PromQL failed twice. Instantaneously, the `for` clock reset on every dip (these disks swing up
+      # to 23 points an hour once the caches fire), so the rule could not sustain. Averaged over 3h, a
+      # trailing mean under `for: 3h` stacks two windows and lags 5.5-6h behind a real jump, and never
+      # fires at all for a slow climb. Both are statistics standing in for a branch the script already
+      # knows it took — so it records the branch instead, and the rule needs no threshold at all.
+      # NB the alert on this metric is silent until this script is DEPLOYED (the series does not exist
+      # before then); CIRunnerCleanupStale still covers a beacon that stops updating entirely.
+      write_beacon "busy_skip 1" "pressure_defer 1" "midjob_prune 0" "last_run_seconds $(date +%s)" \
+        "disk_used_percent ${pct_now}"
       exit 0
     fi
   fi
@@ -485,7 +502,9 @@ dfsize() { docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null | awk -F'
 bc_bytes="$(dfsize 'Build Cache')"; is_num "$bc_bytes" || bc_bytes=0
 img_bytes="$(dfsize 'Images')"; is_num "$img_bytes" || img_bytes=0
 log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), pruned ${ws_pruned} workspace(s) (${ws_count} left), build-cache ${bc_bytes}B"
-write_beacon "busy_skip 0" "midjob_prune ${midjob}" "last_run_seconds $(date +%s)" "disk_used_percent ${after}" \
+# pressure_defer 0: reaching here means the sweep RAN. That includes the mid-job critical path, which
+# is recorded separately by midjob_prune — starved means "could not sweep", not "swept riskily".
+write_beacon "busy_skip 0" "pressure_defer 0" "midjob_prune ${midjob}" "last_run_seconds $(date +%s)" "disk_used_percent ${after}" \
   "disk_freed_percent ${freed}" "reaped_containers ${reaped}" \
   "workspaces ${ws_count}" "workspaces_pruned ${ws_pruned}" \
   "build_cache_bytes ${bc_bytes}" "images_bytes ${img_bytes}"
