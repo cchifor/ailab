@@ -64,7 +64,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: bootstrap-role-db
-          image: ghcr.io/cloudnative-pg/postgresql:17.10
+          image: ghcr.io/cloudnative-pg/postgresql:17.11
           command: ["/bin/sh", "-c"]
           args:
             - |

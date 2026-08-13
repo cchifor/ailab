@@ -122,7 +122,7 @@ spec:
       # initContainer with a clear psql error rather than a cryptic gateway crash.
       initContainers:
         - name: wait-for-db
-          image: ghcr.io/cloudnative-pg/postgresql:17.10 # psql-capable; same image as litellm-db-bootstrap
+          image: ghcr.io/cloudnative-pg/postgresql:17.11 # psql-capable; same image as litellm-db-bootstrap
           command: ["/bin/sh", "-c"]
           args:
             - |

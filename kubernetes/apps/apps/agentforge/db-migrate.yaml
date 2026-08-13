@@ -66,7 +66,7 @@ spec:
           # reproducibility. Digest == the image infra-pg runs live. Optional path anyway: it only runs
           # if the agentforge-db-superuser Secret is present; the sanctioned path is the peer-auth
           # \gexec one-shot in the header, which skips this container.
-          image: ghcr.io/cloudnative-pg/postgresql:17.10@sha256:916d505d999e6bb85ead15dc2b965b9f968a9eb09e6d9c2e59e50a174f785e71
+          image: ghcr.io/cloudnative-pg/postgresql:17.11@sha256:26ca47f8c5ebe5dad7d7818474681f8c5fc8d1fcaa136c8a8d8f716904d683a1
           command: ["/bin/sh", "-c"]
           args:
             - |
