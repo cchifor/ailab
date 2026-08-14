@@ -80,9 +80,65 @@ RADV_ICD="$(ls /usr/share/vulkan/icd.d/radeon_icd*.json 2>/dev/null | head -1 ||
 
 UNIT="llama-server.service"
 [ "$INSTANCE" != "default" ] && UNIT="llama-server-${INSTANCE}.service"
-[ -n "$SWAP" ] && UNIT="llama-swap.service" # llama-swap owns PORT; the model is a child it spawns/kills
+# llama-swap owns PORT; the model is a child it spawns/kills. Unit AND config dir are per-instance so a
+# node can run a swap instance on one port while another instance (direct or swap) serves a different
+# port — node1 pins qwen3.6 on :8080 and swaps qwen3.8-27b on :8082 in the SAME container.
+SWAP_CONF_DIR="/etc/llama-swap"
+if [ -n "$SWAP" ]; then
+  UNIT="llama-swap.service"
+  if [ "$INSTANCE" != "default" ]; then
+    UNIT="llama-swap-${INSTANCE}.service"
+    SWAP_CONF_DIR="/etc/llama-swap-${INSTANCE}"
+  fi
+fi
 
 export DEBIAN_FRONTEND=noninteractive
+
+# ---- llama.cpp build install (EVERY instance, not just the default one) ----
+# $BIN is already per-build ("$INSTALL_DIR/llama-$LLAMA_BUILD"), so builds coexist on disk —
+# /opt/llama.cpp has carried llama-b9631 + llama-b9672 side by side since 2026-06. That lets a
+# SECOND instance pin a NEWER LLAMA_BUILD (a model whose arch the running build predates) without
+# touching the build the default instance is serving: node1 runs qwen3.6 on b9672 :8080 while
+# qwen3.8-27b needs b10430 on :8082. Idempotency keys off $BIN itself — the old single
+# "$INSTALL_DIR/.build" marker could not express more than one installed build, and gating on it
+# would re-extract build A every time build B was provisioned. The marker is still written (it
+# records the most recently installed build) but is no longer a freshness test.
+ensure_llama_build() {
+  echo "== llama.cpp Vulkan prebuilt ${LLAMA_BUILD} =="
+  mkdir -p "$INSTALL_DIR"
+  if [ ! -x "$BIN/llama-server" ]; then
+    curl -fSL --retry 5 --retry-delay 5 "$URL" -o "/tmp/${ASSET}"
+    rm -rf "$BIN"
+    tar -xzf "/tmp/${ASSET}" -C "$INSTALL_DIR"
+    echo "$LLAMA_BUILD" > "$INSTALL_DIR/.build"
+    rm -f "/tmp/${ASSET}"
+  fi
+  test -x "$BIN/llama-server" || { echo "FATAL: llama-server not present after extract (asset ${ASSET})" >&2; exit 1; }
+}
+
+# ---- llama-swap binary install (any instance that sets SWAP) ----
+# Shared by every swap instance in the container: one binary at $SWAP_BIN, but each instance gets its
+# own unit + $SWAP_CONF_DIR, so node1 can run a direct default instance AND a swap extra instance.
+ensure_llama_swap() {
+  echo "== llama-swap ${LLAMA_SWAP_VERSION} (on-demand model load + idle-unload) =="
+  SWAP_VER_NUM="${LLAMA_SWAP_VERSION#v}" # release tag is vNNN; the asset filename drops the leading v
+  SWAP_ASSET="llama-swap_${SWAP_VER_NUM}_linux_amd64.tar.gz"
+  SWAP_URL="https://github.com/mostlygeek/llama-swap/releases/download/${LLAMA_SWAP_VERSION}/${SWAP_ASSET}"
+  if [ ! -x "$SWAP_BIN" ] || [ "$(cat "$SWAP_DIR/.version" 2>/dev/null || true)" != "$LLAMA_SWAP_VERSION" ]; then
+    curl -fSL --retry 5 --retry-delay 5 "$SWAP_URL" -o "/tmp/${SWAP_ASSET}"
+    rm -rf "$SWAP_DIR"; mkdir -p "$SWAP_DIR"
+    tar -xzf "/tmp/${SWAP_ASSET}" -C "$SWAP_DIR"
+    # the binary may be at the archive root or one dir deep — normalize to $SWAP_BIN
+    if [ ! -x "$SWAP_BIN" ]; then
+      found="$(find "$SWAP_DIR" -maxdepth 2 -type f -name llama-swap | head -1)"
+      [ -n "$found" ] && mv "$found" "$SWAP_BIN"
+    fi
+    chmod 0755 "$SWAP_BIN" 2>/dev/null || true
+    echo "$LLAMA_SWAP_VERSION" > "$SWAP_DIR/.version"
+    rm -f "/tmp/${SWAP_ASSET}"
+  fi
+  test -x "$SWAP_BIN" || { echo "FATAL: llama-swap missing after extract — check LLAMA_SWAP_VERSION / asset name" >&2; exit 1; }
+}
 
 if [ "$INSTANCE" = "default" ]; then
   echo "== [1/7] apt: RADV Vulkan userspace + tooling + node_exporter (NO amdvlk) =="
@@ -100,16 +156,8 @@ if [ "$INSTANCE" = "default" ]; then
   id llama >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin llama
   usermod -aG "${RGRP},${VGRP}" llama
 
-  echo "== [3/7] llama.cpp Vulkan prebuilt ${LLAMA_BUILD} =="
-  mkdir -p "$INSTALL_DIR"
-  if [ ! -x "$BIN/llama-server" ] || [ "$(cat "$INSTALL_DIR/.build" 2>/dev/null || true)" != "$LLAMA_BUILD" ]; then
-    curl -fSL --retry 5 --retry-delay 5 "$URL" -o "/tmp/${ASSET}"
-    rm -rf "$BIN"
-    tar -xzf "/tmp/${ASSET}" -C "$INSTALL_DIR"
-    echo "$LLAMA_BUILD" > "$INSTALL_DIR/.build"
-    rm -f "/tmp/${ASSET}"
-  fi
-  test -x "$BIN/llama-server" || { echo "FATAL: llama-server not present after extract" >&2; exit 1; }
+  echo "== [3/7] llama.cpp build =="
+  ensure_llama_build
 
   echo "== [4/7] verify the Vulkan backend sees the iGPU (authoritative: llama.cpp's own list) =="
   if LD_LIBRARY_PATH="$BIN" "$BIN/llama-cli" --list-devices 2>/dev/null | grep -Eqi "RADV|Radeon|GFX1151"; then
@@ -123,28 +171,20 @@ if [ "$INSTANCE" = "default" ]; then
   install -m 0755 "$HERE/amdgpu-textfile.sh" /usr/local/bin/amdgpu-textfile.sh
 
   if [ -n "$SWAP" ]; then
-    echo "== [5b/7] llama-swap ${LLAMA_SWAP_VERSION} (on-demand model load + idle-unload) =="
-    SWAP_VER_NUM="${LLAMA_SWAP_VERSION#v}" # release tag is vNNN; the asset filename drops the leading v
-    SWAP_ASSET="llama-swap_${SWAP_VER_NUM}_linux_amd64.tar.gz"
-    SWAP_URL="https://github.com/mostlygeek/llama-swap/releases/download/${LLAMA_SWAP_VERSION}/${SWAP_ASSET}"
-    if [ ! -x "$SWAP_BIN" ] || [ "$(cat "$SWAP_DIR/.version" 2>/dev/null || true)" != "$LLAMA_SWAP_VERSION" ]; then
-      curl -fSL --retry 5 --retry-delay 5 "$SWAP_URL" -o "/tmp/${SWAP_ASSET}"
-      rm -rf "$SWAP_DIR"; mkdir -p "$SWAP_DIR"
-      tar -xzf "/tmp/${SWAP_ASSET}" -C "$SWAP_DIR"
-      # the binary may be at the archive root or one dir deep — normalize to $SWAP_BIN
-      if [ ! -x "$SWAP_BIN" ]; then
-        found="$(find "$SWAP_DIR" -maxdepth 2 -type f -name llama-swap | head -1)"
-        [ -n "$found" ] && mv "$found" "$SWAP_BIN"
-      fi
-      chmod 0755 "$SWAP_BIN" 2>/dev/null || true
-      echo "$LLAMA_SWAP_VERSION" > "$SWAP_DIR/.version"
-      rm -f "/tmp/${SWAP_ASSET}"
-    fi
-    test -x "$SWAP_BIN" || { echo "FATAL: llama-swap missing after extract — check LLAMA_SWAP_VERSION / asset name" >&2; exit 1; }
+    ensure_llama_swap
   fi
 else
   echo "== additional instance '${INSTANCE}' (port ${PORT}) — base setup skipped =="
-  test -x "$BIN/llama-server" || { echo "FATAL: run the default instance first (binary missing)" >&2; exit 1; }
+  # The base setup (apt, service user, helper scripts) is the default instance's job and is skipped
+  # here, but the BUILD is not: this instance may pin a different LLAMA_BUILD than the default one.
+  ensure_llama_build
+  # Likewise the llama-swap binary: a non-default instance can be swap-managed even when the default
+  # instance is direct-mode (node1: qwen3.6 pinned on :8080, qwen3.8-27b on-demand on :8082).
+  # NOTE: an `if`, not `[ -n "$SWAP" ] && ...` — under `set -e` a trailing false test would make the
+  # whole branch exit non-zero and abort the script for every direct-mode extra instance.
+  if [ -n "$SWAP" ]; then
+    ensure_llama_swap
+  fi
 fi
 
 # ---- Stage the model(s) onto local NVMe (/models-local) for fast cold (re)loads ----
@@ -215,10 +255,10 @@ if [ -n "$SWAP" ]; then
   # llama-swap owns the listen port and spawns llama-server (on its \${PORT} macro) on first request,
   # then idle-unloads it after ttl seconds — returning the model's GTT to the host. The model cmd is the
   # SAME llama-server invocation as direct mode; no warm-up (on-demand loading is the whole point).
-  install -d -o llama -g llama /etc/llama-swap
+  install -d -o llama -g llama "${SWAP_CONF_DIR}"
   # NOTE: \${PORT} below is a llama-swap MACRO (auto-assigned upstream port) — it must reach the config
   # literally, so it is backslash-escaped here to survive this (unquoted) heredoc. ttl=0 => never unload.
-  cat >/etc/llama-swap/config.yaml <<HDR
+  cat >${SWAP_CONF_DIR}/config.yaml <<HDR
 # Rendered by provision.sh (SWAP=true). Intent/source-of-truth: kubernetes/infra/ai-lxc/models.yaml.
 # llama-swap loads ONE model at a time on this node's iGPU, switching on request. ttl 0 = pin.
 healthCheckTimeout: 900   # seconds to wait for a cold model to become healthy (a 120-122B load is minutes)
@@ -235,7 +275,7 @@ HDR
       _mm="$(printf '%s' "$_m" | jq -r '.mmproj // empty')"; _mmf=""; [ -n "$_mm" ] && _mmf="--mmproj ${_mm}"
       _ck="$(printf '%s' "$_m" | jq -r '.cache_k // empty')"; _cv="$(printf '%s' "$_m" | jq -r '.cache_v // empty')"
       _kv=""; [ -n "$_ck" ] && _kv="--cache-type-k ${_ck}"; [ -n "$_cv" ] && _kv="${_kv} --cache-type-v ${_cv}"
-      cat >>/etc/llama-swap/config.yaml <<ENTRY
+      cat >>${SWAP_CONF_DIR}/config.yaml <<ENTRY
   "${_a}":
     cmd: >
       ${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
@@ -248,7 +288,7 @@ HDR
 ENTRY
     done < <(printf '%s' "$MODELS_JSON" | jq -c '.[]')
   else
-    cat >>/etc/llama-swap/config.yaml <<ENTRY
+    cat >>${SWAP_CONF_DIR}/config.yaml <<ENTRY
   "${MODEL_ALIAS}":
     cmd: >
       ${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
@@ -260,7 +300,7 @@ ENTRY
     ttl: ${TTL}
 ENTRY
   fi
-  chown -R llama:llama /etc/llama-swap
+  chown -R llama:llama "${SWAP_CONF_DIR}"
   cat >"/etc/systemd/system/${UNIT}" <<EOF
 [Unit]
 Description=llama-swap (on-demand llama.cpp model load/idle-unload) — ai-llm [${MODEL_ALIAS:-multi-model}]
@@ -271,7 +311,7 @@ Wants=network-online.target
 User=llama
 Environment=LD_LIBRARY_PATH=${BIN}
 ${ICD_LINE}
-ExecStart=${SWAP_BIN} --listen 0.0.0.0:${PORT} --config /etc/llama-swap/config.yaml
+ExecStart=${SWAP_BIN} --listen 0.0.0.0:${PORT} --config ${SWAP_CONF_DIR}/config.yaml
 Restart=on-failure
 RestartSec=5
 
@@ -279,7 +319,13 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
   # Free :${PORT}: if this node previously ran the fixed direct-mode unit, stop+disable it.
-  systemctl disable --now llama-server.service 2>/dev/null || true
+  # ONLY for the default instance — llama-server.service is the :8080 unit, so a non-default swap
+  # instance (its own PORT) must NOT disable it or it would kill an unrelated, running model.
+  if [ "$INSTANCE" = "default" ]; then
+    systemctl disable --now llama-server.service 2>/dev/null || true
+  else
+    systemctl disable --now "llama-server-${INSTANCE}.service" 2>/dev/null || true
+  fi
 else
   echo "== systemd unit ${UNIT} (port ${PORT}, model ${MODEL_ALIAS}) with warm-up =="
   cat >"/etc/systemd/system/${UNIT}" <<EOF
@@ -307,8 +353,14 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-  # Free :${PORT}: if this node previously ran llama-swap, stop+disable it (switching swap -> pinned).
-  systemctl disable --now llama-swap.service 2>/dev/null || true
+  # Free :${PORT}: if this node previously ran llama-swap on THIS instance, stop+disable it (switching
+  # swap -> pinned). Only the matching unit name — disabling the bare llama-swap.service from a
+  # non-default instance would kill a swap instance that owns a different port.
+  if [ "$INSTANCE" = "default" ]; then
+    systemctl disable --now llama-swap.service 2>/dev/null || true
+  else
+    systemctl disable --now "llama-swap-${INSTANCE}.service" 2>/dev/null || true
+  fi
 fi
 
 if [ "$INSTANCE" = "default" ]; then

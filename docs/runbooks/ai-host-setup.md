@@ -41,7 +41,7 @@ python scripts/lxc-exec.py 192.168.0.4 5003
 | iGPU | Radeon 8060S = **gfx1151**, Mesa **RADV** (Mesa 25.0.7 in Debian 13 supports it) |
 | BIOS VRAM carve | **64 GiB** (`amdgpu: VRAM 65536M`); GTT ~31 GiB ⇒ **~95 GiB GPU-addressable** |
 | System RAM (after carve) | ~62 GiB |
-| Engine | llama.cpp `llama-server`, **Vulkan backend**, pinned build **b9672** (qwen35moe + gemma4 arches) |
+| Engine | llama.cpp `llama-server`, **Vulkan backend**, pinned **per instance**: **b9672** (qwen35moe + gemma4 arches) for the daily driver, **b10430** for Qwen3.8-27B on node1 `:8082` |
 | Daily driver | **Qwen3.6-35B-A3B** Q4_K_M (~21 GB), node1 :8080, 256K ctx → **~60 tok/s decode** (replaced qwen3-30b-a3b 2026-07-01) |
 
 ### Where memory actually lives (important)
@@ -322,7 +322,37 @@ Key facts (measured; see ADR 0015 for the table):
   is **245760** (256K − ~16K output headroom). Tool-calling verified through `--jinja`.
 - **Revert:** re-run with `--env CTX=32768` and drop the `CACHE_TYPE_*` envs. To restore qwen3-30b-a3b as a
   separate model (GGUF kept on NFS): re-provision it as an `INSTANCE=<name> PORT=8081` instance + re-add its
-  LiteLLM entry and the `llm-qwen36` Service. Re-enable Gemma-4 with `systemctl enable --now llama-server-gemma4`.
+  LiteLLM entry and the `llm-qwen36` Service. **Gemma-4 can no longer be re-enabled on `:8082`** — that
+  port now serves Qwen3.8-27B (below); it would need another free port/node.
+
+## Qwen3.8-27B quality tier on node1 `:8082` (2026-08-14)
+
+A **second, ON-DEMAND instance** in CT 5001 (`llama-swap-qwen38.service`), in the slot Gemma-4
+vacated — running beside the *pinned* daily driver on `:8080` in the same container.
+
+- **Not pinned, and this is load-bearing.** node1 is past the carve→GTT conversion (VRAM carve
+  **512 MiB**), so weights land in GTT, which **is** charged to host RAM. Loading this model moves
+  node1's GTT **24.2 → 55.6 GiB (31.4 GiB of host RAM)**. With only ~25-35 GiB available, pinning it
+  drove node1 to **3 GiB available, swap 100 % full** — the 2026-07-08 pre-OOM state. On-demand costs
+  **zero** idle, ~12 GiB headroom while loaded, for a **~74 s** cold start.
+- **27B DENSE**, so every token reads all 27B params: a measured **9.3 tok/s vs Qwen3.6's ~50**
+  (prefill ~58 tok/s). Inherent to a dense model on bandwidth-bound hardware. Route here for hard
+  reasoning, not chat latency.
+- **Hybrid Gated-DeltaNet + Gated Attention**, 64 layers, only 16 full-attention ⇒ the 256K KV is cheap.
+- **Own llama.cpp build.** Needs **b10430**; the daily driver stays on **b9672**. `provision.sh` keeps
+  the build, the swap unit name and the swap config dir **per instance**, so both coexist in the CT and
+  re-provisioning `:8082` never touches `:8080`.
+- **`PRESENCE_PENALTY=0.0` is required.** `provision.sh` defaults to `1.5`, which is Qwen3.8's
+  *instruct* profile; in thinking mode its card specifies `0.0`. Other sampling defaults already match.
+
+```bash
+ssh root@192.168.0.2 'bash -s' < scripts/fetch-models.sh qwen3.8   # ~22.9G + 884M mmproj -> NFS
+```
+Then the `INSTANCE=qwen38 SWAP=true` provision call in `docs/runbooks/ai-model-swap.md`.
+
+**Revert:** `pct exec 5001 -- systemctl disable --now llama-swap-qwen38.service`, then drop the
+`qwen3.8-27b` entries from `litellm.yaml` + `litellm-local.yaml` and the `llm-qwen38` Service. The
+daily driver is untouched throughout.
 
 ## Verify
 ```bash

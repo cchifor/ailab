@@ -4,7 +4,7 @@
 # which has /mnt/pve/qnap-nfs mounted + internet). Resumable (curl -C -),
 # idempotent, no huggingface-cli dependency. All URLs/sizes verified 2026-06-14.
 #
-#   scripts/fetch-models.sh [daily|coder|gpt-oss|qwen3.5|vision|qwen3.6|gemma4|all]   (default: daily)
+#   scripts/fetch-models.sh [daily|coder|gpt-oss|qwen3.5|vision|qwen3.6|qwen3.8|gemma4|all]  (default: daily)
 #
 # Sizes: daily 18.6G · coder 18.6G · gpt-oss-120b 63.4G (3 shards) ·
 #        qwen3.5-122b 76.5G (3 shards) · vision 6.4G · qwen3.6 ~22G · gemma4 ~15.6G.
@@ -72,6 +72,18 @@ fetch_qwen36() {
      "qwen3.6-35b-a3b/mmproj-F16.gguf"
 }
 
+fetch_qwen38() {
+  # Qwen3.8-27B: hybrid (Gated-DeltaNet + Gated Attention) DENSE 27B, 64 layers, native vision
+  # (image+video), 262144 native ctx. The quality tier on node1 :8082 (took gemma-4's slot).
+  # Needs llama.cpp b10430 — b9672 predates the arch. Q6_K (not Q4) was chosen deliberately: the
+  # node had headroom and this is the "think hard" model, so quality beats the ~1 tok/s it costs.
+  echo "== Qwen3.8-27B (dense quality tier, vision, Q6_K ~22.9G + mmproj ~1.2G) =="
+  dl "$HF/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q6_K.gguf" \
+     "qwen3.8-27b/Qwen3.8-27B-Q6_K.gguf"
+  dl "$HF/unsloth/Qwen3.8-27B-GGUF/resolve/main/mmproj-F16.gguf" \
+     "qwen3.8-27b/mmproj-F16.gguf"
+}
+
 fetch_gemma4() {
   # Gemma-4-26B-A4B (Google QAT q4_0): vision (image+video) MoE, ~25B/3.8B-active. Replaces the
   # qwen3-vl-8b vision slot (node1 :8082). NOT audio. Needs llama.cpp gemma4 arch (b9672 pin).
@@ -90,9 +102,10 @@ case "$SEL" in
   qwen3.5)  fetch_qwen35 ;;
   vision)   fetch_vision ;;
   qwen3.6)  fetch_qwen36 ;;
+  qwen3.8)  fetch_qwen38 ;;
   gemma4)   fetch_gemma4 ;;
-  all)      fetch_daily; fetch_coder; fetch_gpt_oss; fetch_qwen35; fetch_vision; fetch_qwen36; fetch_gemma4 ;;
-  *) echo "usage: fetch-models.sh [daily|coder|gpt-oss|qwen3.5|vision|qwen3.6|gemma4|all]" >&2; exit 2 ;;
+  all)      fetch_daily; fetch_coder; fetch_gpt_oss; fetch_qwen35; fetch_vision; fetch_qwen36; fetch_qwen38; fetch_gemma4 ;;
+  *) echo "usage: fetch-models.sh [daily|coder|gpt-oss|qwen3.5|vision|qwen3.6|qwen3.8|gemma4|all]" >&2; exit 2 ;;
 esac
 echo "Done. Store: $MODELS"
 ls -la "$MODELS"/*/ 2>/dev/null || true

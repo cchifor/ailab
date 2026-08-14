@@ -58,6 +58,22 @@ data:
           output_cost_per_token: 0.000001
         model_info:
           max_input_tokens: 24576 # host CTX=32768 --parallel 1 (single 32K slot); ~8K output headroom for reasoning
+      # qwen3.8-27b — the quality tier, ON-DEMAND on node1 (.44) :8082 via its own llama-swap instance
+      # (loads on first request, idle-unloads after 1800 s; ~74 s cold start covered by request_timeout
+      # below). 27B DENSE, so a measured 9.3 tok/s vs qwen3.6's ~50: route here for hard reasoning,
+      # not chat latency. Hybrid Gated-DeltaNet keeps the 256K KV cheap. host CTX=262144 --parallel 1;
+      # max_input_tokens = 262144 - 16K reasoning/output headroom. See litellm.yaml for the full
+      # rationale, including why it is not pinned.
+      - model_name: qwen3.8-27b
+        litellm_params:
+          model: openai/qwen3.8-27b
+          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1
+          api_key: "sk-noauth"
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000001
+        model_info:
+          supports_vision: true
+          max_input_tokens: 245760
     litellm_settings:
       drop_params: true
       # 900s to cover a llama-swap COLD START of qwen3.5-122b (~4-5 min over NFS) — matches
@@ -110,7 +126,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "cb880b88398a"
+        checksum/config: "de60c3f16308"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux

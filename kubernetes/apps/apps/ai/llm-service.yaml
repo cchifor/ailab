@@ -9,7 +9,9 @@
 # model_name is shimmed to qwen3.6 (litellm.yaml), so no `llm-gptoss` Service is needed. LiteLLM fronts
 # these as one OpenAI endpoint. Label app.kubernetes.io/component=llama-server selects the ServiceMonitor
 # scrape set (the per-node `llm-node*` are intentionally unlabelled to avoid double-scraping .44/.45).
-# Services have no selector → manual Endpoints below. gemma-4 (node1 :8082) is on-demand — see litellm.yaml.
+# Services have no selector → manual Endpoints below. node1 also runs a SECOND instance, qwen3.8-27b
+# on :8082 (`llm-qwen38` → .44:8082) — the dense quality tier, ON-DEMAND via its own llama-swap unit,
+# in the slot gemma-4 used to hold; gemma-4 is retired locally (see litellm.yaml).
 ---
 apiVersion: v1
 kind: Service
@@ -104,13 +106,17 @@ subsets:
   - addresses: [{ ip: 192.168.0.46, hostname: ai-llm-3 }]
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
-# Gemma-4-26B-A4B (vision, image+video) — 3rd instance on node1 :8082 (replaced qwen3-vl-8b, 2026-06).
+# Qwen3.8-27B (dense quality tier, image+video) — 2nd instance on node1 :8082, ON-DEMAND via its own
+# llama-swap unit. Took over the slot gemma-4 held (which replaced qwen3-vl-8b, 2026-06). Labelled
+# component=llama-server so the ServiceMonitor scrapes it: that scrapes .44:8082, distinct from `llm`'s
+# .44:8080, so no double-scrape. As on node3, the port always answers but the `llamacpp:*` series
+# disappear while the model is idle-unloaded — expected, not an outage.
 apiVersion: v1
 kind: Service
 metadata:
-  name: llm-gemma4
+  name: llm-qwen38
   namespace: ai
-  labels: { app.kubernetes.io/name: llm-gemma4, app.kubernetes.io/component: llama-server }
+  labels: { app.kubernetes.io/name: llm-qwen38, app.kubernetes.io/component: llama-server }
 spec:
   type: ClusterIP
   ports:
@@ -119,9 +125,9 @@ spec:
 apiVersion: v1
 kind: Endpoints
 metadata:
-  name: llm-gemma4
+  name: llm-qwen38
   namespace: ai
-  labels: { app.kubernetes.io/name: llm-gemma4 }
+  labels: { app.kubernetes.io/name: llm-qwen38 }
 subsets:
   - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
     ports: [{ name: http, port: 8082, protocol: TCP }]
