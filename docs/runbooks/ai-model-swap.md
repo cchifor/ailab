@@ -26,9 +26,28 @@ node3's GTT is free the rest of the time.
 
 | Node | ctid | LXC IP | Model(s) | Mode |
 |---|---|---|---|---|
-| ai-node1 | 5001 | .44 | Qwen3.6-35B (daily driver) | **pinned** (direct, from NFS) |
+| ai-node1 | 5001 | .44 | Qwen3.6-35B (daily driver), `:8080` | **pinned** (direct, from NFS) |
+| ai-node1 | 5001 | .44 | Qwen3.8-27B (quality tier), `:8082` | **llama-swap** ttl 1800 s, from NFS, own build b10430 |
 | ai-node2 | 5002 | .45 | Qwen3.6-35B (daily driver) | **pinned** (direct, from local NVMe) |
 | ai-node3 | 5003 | .46 | Qwen3.5-122B (gpt-oss-120B retired) | **llama-swap** single-model, ttl 1800 s, local NVMe |
+
+> **Two instances on node1 (2026-08-14) — one pinned, one on-demand.** node1 runs a direct
+> `llama-server.service` on `:8080` *and* its own `llama-swap-qwen38.service` on `:8082`, in the same
+> container. `provision.sh` makes the build, the swap unit name and the swap config dir all
+> **per-instance** (`/opt/llama.cpp/llama-b10430`, `llama-swap-qwen38.service`,
+> `/etc/llama-swap-qwen38/`), so re-provisioning `:8082` never touches the daily driver on `:8080`.
+>
+> **Why Qwen3.8-27B is NOT pinned — measured, do not "promote" it.** node1 is past the carve→GTT
+> conversion: its VRAM carve is **512 MiB**, so weights land in GTT, which **is** charged to host RAM.
+> Loading this model moves node1's GTT **24.2 → 55.6 GiB — a 31.4 GiB host-RAM cost**. node1 has only
+> ~25-35 GiB available with the daily driver resident (it varies with dev-worker ballooning), so
+> pinning it drove the host to **3 GiB available with swap 100 % full** — the pre-OOM state that
+> OOM-killed cp2+cp3 and dropped etcd below quorum on 2026-07-08. On-demand costs **zero** at steady
+> state, leaves ~12 GiB headroom while loaded, and unloads after the ttl. The tax is only a **~74 s**
+> cold start (22.9 GB over NFS) vs the 122B's 4-5 min.
+>
+> Qwen3.8-27B is 27B **dense**: a measured **9.3 tok/s** decode (prefill ~58 tok/s) vs Qwen3.6's ~50.
+> It is the "think hard" model, not a daily driver.
 
 ## Deploy (per managed node)
 
@@ -70,6 +89,21 @@ python scripts/lxc-exec.py 192.168.0.4 5003 --env SWAP=true --env LLAMA_BUILD=b9
   --env MODEL_STAGE_SRC=/models/qwen3.5-122b-a10b `
   --env MODEL_ALIAS=qwen3.5-122b --env CTX=32768 --env PARALLEL=1 --env EXTRA_ARGS=--no-mmap --env TTL=1800 `
   --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0   # q8_0 K/V (needs FA, engaged by --flash-attn auto): near-lossless, matches qwen3.6
+
+# node1 -> Qwen3.8-27B ON-DEMAND as a SECOND instance on :8082 (quality tier). INSTANCE=qwen38 + SWAP
+# creates llama-swap-qwen38.service with its own /etc/llama-swap-qwen38/config.yaml and leaves the
+# daily driver on :8080 alone. LLAMA_BUILD=b10430 is installed ALONGSIDE the daily driver's b9672
+# (per-instance build) — it does NOT upgrade :8080. TTL=1800 idle-unloads it, which is REQUIRED here:
+# pinned, it costs 31.4 GiB of host RAM and drives node1 to the pre-OOM state (see the note above).
+# PRESENCE_PENALTY=0.0 is REQUIRED: provision.sh defaults to 1.5, which is Qwen3.8's INSTRUCT profile,
+# but this runs in thinking mode where its card specifies 0.0. The other sampling defaults already match.
+python scripts/lxc-exec.py 192.168.0.2 5001 --env INSTANCE=qwen38 --env PORT=8082 `
+  --env SWAP=true --env TTL=1800 --env LLAMA_BUILD=b10430 `
+  --env MODEL=/models/qwen3.8-27b/Qwen3.8-27B-Q6_K.gguf `
+  --env MMPROJ=/models/qwen3.8-27b/mmproj-F16.gguf `
+  --env MODEL_ALIAS=qwen3.8-27b --env CTX=262144 --env PARALLEL=1 `
+  --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0 `
+  --env PRESENCE_PENALTY=0.0 --env REASONING_BUDGET=3000
 ```
 
 `MODELS_JSON` (a jq array) overrides the single `MODEL` and lets one node's llama-swap serve several
