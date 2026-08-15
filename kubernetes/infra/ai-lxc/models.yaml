@@ -85,7 +85,17 @@ models:
     alias: qwen3.8-27b
     llama_build: b10430         # NOT the b9672 default — this arch needs it
     port: 8082
-    gguf: /models/qwen3.8-27b/Qwen3.8-27B-Q6_K.gguf   # served from NFS (node1 has no /models-local mount)
+    # Q6_K -> UD-Q4_K_XL (2026-08-15). Dense decode here is MEMORY-BANDWIDTH-bound, so tok/s is set by
+    # how many bytes each token must read, and nothing else: measured 9.3 tok/s x 22.9 GB of Q6_K weights
+    # = ~213 GB/s, i.e. ~95% of this node's ~215-230 GB/s effective bandwidth. The config was already
+    # optimal — the WEIGHTS were the ceiling. UD-Q4_K_XL is 17.9 GB => ~11.9 tok/s (+28%), and frees
+    # ~5 GB of GTT on node1 (which OOM-killed two guests on 2026-08-14). This also directly raises the
+    # longest answer that fits inside a timeout, which is what truncated the chat-27f19393 HTML artifact.
+    # UD (Unsloth Dynamic V3.0, imatrix) not flat Q4_K_M: same estate convention as qwen3.6's UD-Q4_K_M.
+    # NOT IQ4_XS (15.7 GB): I-quants cost ~5-10% extra decode compute, which cancels much of the size win
+    # on a bandwidth-bound part. Q5/Q6/Q8 are on the AVOID list for exactly this reason — see
+    # docs/runbooks (2026-07-09 perf analysis): ~20-45% slower decode for <0.5% PPL.
+    gguf: /models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf   # served from NFS (node1 has no /models-local mount)
     mmproj: /models/qwen3.8-27b/mmproj-F16.gguf       # native vision-language: image + video (verified)
     ctx: 262144               # native n_ctx_train, no YaRN needed
     parallel: 1               # ONE slot at full decode speed. A 2nd slot would halve an already-slow
