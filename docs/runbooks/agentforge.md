@@ -319,6 +319,106 @@ role=~"planner|reviewer|implementer|tester"})`, threshold 1, `ignoreNullValues=t
   This is a **bridge, not durable — Flux/KEDA may revert it.** Remove the annotation to resume normal
   0→N scaling.
 
+## Resizing a tenant worker pool (FU-B)
+
+A pool's replica count is set through the control plane —
+`PATCH /api/workspaces/{workspace_id}/pools/{pool}` with `{"max_replicas": N}` — or from
+**Settings › Clusters › Capacity** in the web app. Operator role, and the **bootstrap org
+(`tenant-zero`) only**.
+
+### FIRST: is this pool even control-plane-managed?
+
+**Not every `af-orch-*` Deployment in an `af-tenant-*` namespace belongs to the control
+plane, and the CP can only resize the ones that do.** This estate runs both kinds, they
+look nearly identical, and mistaking one for the other wastes real time (it did on
+2026-08-15, and produced a wrong hand-off comment on engine#186 before it was caught):
+
+```bash
+kubectl --context admin@ai get deploy -A -o custom-columns=\
+'NS:.metadata.namespace,NAME:.metadata.name,POOL:.metadata.labels.agentforge\.io/pool,\
+FLUX:.metadata.labels.kustomize\.toolkit\.fluxcd\.io/name' | grep af-tenant
+```
+
+| Signal | CP-rendered pool | Estate-managed pool |
+|---|---|---|
+| `agentforge.io/pool` label | **present** (the renderer stamps it) | absent |
+| `kustomize.toolkit.fluxcd.io/name` | not `agentforge-workers` | **`agentforge-workers`** |
+| Manifest source | the **agentforge-tenants** repo, committed by the CP | **this repo**, `kubernetes/apps/infrastructure/agentforge-workers/` |
+| Resizable by the CP | **yes** | **no** — a CP resize commits to a tenant path nothing here reconciles |
+
+As of 2026-08-15: `af-orch-platform-dev-delivery` is CP-rendered (resizable);
+`af-orch-playground-planner` is estate-managed (**not** resizable, and it keeps its own
+KEDA `ScaledObject` — see *KEDA scaling gotchas* above).
+
+Resizing an estate-managed pool means editing its manifest here, not calling the CP.
+
+### Arming the estate (nothing resizes until you do)
+
+Two independent knobs, and raising the ceiling alone does nothing:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `AFP_MAX_WORKER_REPLICAS` | `2` (bounded at 8) | The ceiling a request may not exceed. A request above it is a `422`. |
+| `AFP_INSTANCE_AWARE_WORKER_IMAGES` | **empty** | JSON array of digest-pinned worker images the operator asserts read `AF_WORKER_INSTANCE`. **This is the arming switch.** |
+
+Empty allowlist ⇒ every commit of `replicas > 1` is refused. That is why deploying the
+resize surface changed nothing: check with
+
+```bash
+kubectl --context admin@ai -n agentforge get deploy agentforge-platform \
+  -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}{"\n"}{end}' \
+  | grep -E 'INSTANCE_AWARE|MAX_WORKER'      # no output == un-armed == nothing can grow
+```
+
+**Only add a digest you have actually verified reads the env.** It must be the same
+reference `AFP_WORKER_IMAGE` carries (compared as an exact string — a tag can never
+match). Confirm the running pool has the downward-API env before asserting anything:
+
+```bash
+kubectl --context admin@ai -n af-tenant-tenant-zero-platform-dev \
+  get deploy af-orch-platform-dev-delivery \
+  -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -o AF_WORKER_INSTANCE
+```
+
+### Doing the resize, and reading the answer
+
+The route writes the pool row **and** re-commits that pool's whole tenant manifest set in
+one request. Two consequences worth knowing before you click:
+
+- **A refusal is total.** The row rolls back with the commit, so a refused resize leaves
+  nothing behind.
+- **A `502` means STATE UNKNOWN — go look.** The git write is not inside the database
+  transaction and the committer writes one file per request, so a mid-batch or post-push
+  failure leaves git at the requested count and the row at the old one. Scaling up, the
+  manifest is ahead; scaling down, it is behind. Neither is silent, and the next resize or
+  rollout re-renders the full set from the row and reconciles it.
+
+Refusals you may meet, all of which name their own remedy:
+
+| Answer | Meaning |
+|---|---|
+| `403` | Not an operator, or not the bootstrap org. |
+| `422 … AFP_MAX_WORKER_REPLICAS` | Above the ceiling. |
+| `422 … AFP_INSTANCE_AWARE_WORKER_IMAGES` (G-1) | The image is not declared instance-aware. |
+| `422 … AF_WORKER_INSTANCE … roll this pool` (G-2) | The pod template lacks the downward-API env. The remedy is a **re-render**, not a retry: `POST /api/workspaces/{id}/pools/{pool}/rollout`, then resize. |
+
+**Carry `creds_revision` through** if the pool has an `agentforge.io/creds-revision`
+annotation from a release-gate rollout — the re-commit strips it otherwise. The CP stores
+only its checksum and cannot recover or even detect the token, so this is on the caller.
+
+A successful answer reports what was **committed** — not that Flux applied it, not that
+pods are Ready. Confirm the rollout separately:
+
+```bash
+kubectl --context admin@ai -n af-tenant-tenant-zero-platform-dev \
+  rollout status deploy/af-orch-platform-dev-delivery
+kubectl --context admin@ai -n af-tenant-tenant-zero-platform-dev get pods -o wide
+```
+
+Per-replica liveness is in `GET /api/workers`, keyed per instance: each pod reports its own
+`AF_WORKER_INSTANCE` (its pod name), so `instances`/`instances_online` show the replicas
+individually while the row stays one-per-pool.
+
 ## Image repin cycle (how a code change ships)
 
 AgentForge **code** changes ride the p1-worker image; **config** changes do not:

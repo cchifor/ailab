@@ -28,9 +28,16 @@ resources:
   - worker-podmonitor.yaml         # kube-prometheus scrape of the worker's forge_* registry (R8; no Service → PodMonitor).
                                    # OPERATOR-managed pods ONLY — CP-rendered tenant pools stay unscraped until the CP
                                    # renderer emits a 9464 port + a monitoring ingress rule (see the file's COVERAGE BOUNDARY).
-  # dispatcher-deployment.yaml + worker-deployment.yaml are INTENTIONALLY not listed — the images are
-  # PLACEHOLDER @sha256 (unpullable) and nothing here flips privilege_hardening. Re-add each once its
-  # digest is pinned + prerequisites provisioned (see each Deployment header). The ScaledObject stays
-  # Ready:False (no target) until worker-deployment.yaml is re-added — harmless while dormant.
+  # BOTH Deployments ARE listed and live (the gating described below was lifted when their
+  # digests were pinned; the comment outlived it and is corrected here 2026-08-15 — it read
+  # as "intentionally not listed" directly above the two lines listing them, which is how a
+  # reader concludes this pool is dormant when it is running).
+  #
+  # NOTE FOR THE RESIZE PROGRAM: worker-deployment.yaml means af-orch-playground-planner is
+  # an ESTATE-MANAGED pool, not a control-plane-rendered one — it carries no
+  # `agentforge.io/pool` label and the CP cannot resize it. Its ScaledObject therefore stays
+  # (it conflicts with nothing) and the paused-replicas annotation remains engine#186's to
+  # remove. See docs/runbooks/agentforge.md "Resizing a tenant worker pool" for how to tell
+  # the two kinds apart.
   - dispatcher-deployment.yaml
   - worker-deployment.yaml
