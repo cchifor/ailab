@@ -59,11 +59,23 @@ data:
         model_info:
           max_input_tokens: 24576 # host CTX=32768 --parallel 1 (single 32K slot); ~8K output headroom for reasoning
       # qwen3.8-27b — the quality tier, ON-DEMAND on node1 (.44) :8082 via its own llama-swap instance
-      # (loads on first request, idle-unloads after 1800 s; ~74 s cold start covered by request_timeout
-      # below). 27B DENSE, so a measured 9.3 tok/s vs qwen3.6's ~50: route here for hard reasoning,
-      # not chat latency. Hybrid Gated-DeltaNet keeps the 256K KV cheap. host CTX=262144 --parallel 1;
-      # max_input_tokens = 262144 - 16K reasoning/output headroom. See litellm.yaml for the full
-      # rationale, including why it is not pinned.
+      # (loads on first request, idle-unloads after 1800 s; ~24 s cold start since the 4-bit quant).
+      # 27B DENSE, so a measured 11.5 tok/s vs qwen3.6's ~50: route here for hard reasoning, not chat
+      # latency. Hybrid Gated-DeltaNet keeps the 256K KV cheap.
+      #
+      # host CTX=262144 --parallel 2 => per-slot n_ctx 131072, so max_input_tokens is 114688
+      # (131072 - 16K reasoning/output headroom), NOT the old 245760. Leaving it at 245760 would let
+      # LiteLLM forward a request that overflows a slot instead of failing fast with a clean
+      # ContextWindowExceededError. KEEP IN SYNC with kubernetes/infra/ai-lxc/models.yaml.
+      #
+      # This gateway is TENANT-FACING (agentforge, ADR 0018), so unlike litellm.yaml — where the
+      # qwen3.8 deployment was removed outright because Open WebUI was its only caller — the model stays
+      # registered here: removing it would silently withdraw a capability from tenants.
+      # But the LiteLLM hop still cannot propagate a client disconnect, so an abandoned tenant request
+      # cannot be stopped by the caller. The bounded timeout below is therefore the ONLY thing that
+      # releases the slot, and it is deliberately finite (the Open WebUI path is unbounded precisely
+      # because cancellation works there). --parallel 2 also means such a request now blocks one of two
+      # slots rather than the whole model.
       - model_name: qwen3.8-27b
         litellm_params:
           model: openai/qwen3.8-27b
@@ -71,9 +83,16 @@ data:
           api_key: "sk-noauth"
           input_cost_per_token: 0.000001
           output_cost_per_token: 0.000001
+          # Overrides router_settings.num_retries (2): a retry cannot pick a healthier node on a
+          # SINGLE-deployment backend, it only re-queues another multi-minute generation behind a slot.
+          num_retries: 0
+          # Overrides litellm_settings.request_timeout (900). 900 s is only ~10k tokens at 11.5 tok/s,
+          # which truncates real agent output; 1800 s (~20k tokens) is workable while still bounding an
+          # un-cancellable wedge. Do NOT make this unbounded — nothing else here can free the slot.
+          timeout: 1800
         model_info:
           supports_vision: true
-          max_input_tokens: 245760
+          max_input_tokens: 114688
     litellm_settings:
       drop_params: true
       # 900s to cover a llama-swap COLD START of qwen3.5-122b (~4-5 min over NFS) — matches
@@ -126,7 +145,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "de60c3f16308"
+        checksum/config: "31e15fbfa17c"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux

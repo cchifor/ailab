@@ -98,9 +98,24 @@ models:
     gguf: /models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf   # served from NFS (node1 has no /models-local mount)
     mmproj: /models/qwen3.8-27b/mmproj-F16.gguf       # native vision-language: image + video (verified)
     ctx: 262144               # native n_ctx_train, no YaRN needed
-    parallel: 1               # ONE slot at full decode speed. A 2nd slot would halve an already-slow
-                              # dense decode; keep litellm max_input_tokens (245760 = 262144 - 16K
-                              # reasoning/output headroom) in sync.
+    parallel: 2               # 2 slots => per-slot n_ctx = ctx/parallel = 131072. Keep any consumer's
+                              # max_input_tokens (114688 = 131072 - 16K reasoning/output headroom) in
+                              # sync — litellm-local.yaml is the remaining one.
+                              #
+                              # WAS 1, on the reasoning that "a 2nd slot would halve an already-slow
+                              # dense decode". MEASURED 2026-08-15 — that is FALSE. Decode here is
+                              # memory-bandwidth-bound, so batching two sequences amortises the ONE
+                              # weight read across both instead of doubling it:
+                              #   single request              10.95 tok/s
+                              #   2 concurrent   A 9.89 / B 10.04 tok/s  (90-92% of single, NOT 50%)
+                              #   aggregate                   18.91 tok/s  (173% of one slot)
+                              # So the second slot costs ~10% per-request under contention and ~5% on a
+                              # lone request, and buys +73% throughput plus ISOLATION: with one slot, a
+                              # single stuck or long generation blocked every other request (2026-08-15:
+                              # an orphaned generation wedged the model until the service was restarted).
+                              # The real price is context per conversation, 262144 -> 131072, which is
+                              # still ~100k words; revert to 1 only if a single request genuinely needs
+                              # the full 256K window.
     cache_type: q8_0          # K + V (needs flash-attn, engaged by --flash-attn auto)
     swap: true                # MANAGED on node1's own llama-swap instance (see the memory note above)
     ttl: 1800                 # 30 min idle before unload, matching the 122B's convention
