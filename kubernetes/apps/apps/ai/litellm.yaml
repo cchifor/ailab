@@ -18,21 +18,38 @@ data:
       # forwarding a doomed request; the deepagent codes it as a friendly
       # context_window_exceeded (platform PR #636). KEEP IN SYNC with the host
       # launch args in docs/runbooks/ai-host-setup.md.
-      # qwen3.6-35b-a3b — the daily driver, PINNED on node1 (.44) AND node2 (.45). Registered as TWO
-      # deployments (llm-node1 / llm-node2) so the LiteLLM router health-aware load-balances the pair:
-      # on failure it retries the OTHER node and parks the bad one (router_settings below), instead of
-      # kube-proxy's readiness-blind round-robin over the `llm` Service. Replaced qwen3-30b-a3b (2026-07-01).
+      # qwen3.6-35b-a3b — the daily driver. Normally PINNED on node1 (.44) AND node2 (.45) and registered
+      # as TWO deployments so the router can balance the pair, instead of kube-proxy's readiness-blind
+      # round-robin over the `llm` Service. Replaced qwen3-30b-a3b (2026-07-01).
       # host CTX=262144 (native n_ctx_train) split across --parallel 2 slots on BOTH nodes => per-slot
       # n_ctx = 131072. max_input_tokens = 131072 - ~16K output headroom = 114688; a request above that
       # overflows one slot, so LiteLLM fails fast here instead of forwarding a doomed request. --parallel 2
       # lets each node serve 2 concurrent chats. Qwen3.6 is a REASONING model (<think> in reasoning_content).
       # supports_vision: multimodal (image + video); also replaced gemma-4 for vision.
-      - model_name: qwen3.6-35b-a3b
-        litellm_params:
-          model: openai/qwen3.6-35b-a3b
-          api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
-          api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 114688 }
+      #
+      # node1 DEPLOYMENT DISABLED 2026-08-15 — node1's llama-server (:8080) is intentionally stopped:
+      # node1 cannot hold qwen3.6 (24.2 GiB) AND the qwen3.8 quality tier (26.7 GiB) on top of 86 GiB of
+      # guest floors (124.9 GiB usable), which is what OOM-killed dev-worker-4 + ci-runner-4 on 2026-08-14.
+      #
+      # It is REMOVED here, not merely left to fail, because the "retries the OTHER node" behaviour this
+      # block used to claim is NOT what the router does. Observed 2026-08-15 with node1 down:
+      #     10:21:05 Selected deployment: api_base: http://llm-node1... -> Connection error
+      #     10:21:08 Selected deployment: api_base: http://llm-node1... -> Connection error   (SAME node)
+      # The retry re-selects the same dead deployment, so a stopped backend surfaces to users as
+      # "litellm.InternalServerError ... Connection error" on roughly half of all qwen3.6 requests.
+      # allowed_fails/cooldown_time only park it for cooldown_time, after which it is re-probed and
+      # fails again. A registered-but-down deployment is therefore never harmless here.
+      #
+      # TO RESTORE: start node1's model (`pct exec 5001 -- systemctl start llama-server`) and un-comment
+      # the block below IN THE SAME CHANGE — and only once node1 has the headroom (see
+      # kubernetes/infra/ai-lxc/models.yaml). Restoring one without the other re-creates either the OOM
+      # or this outage.
+      # - model_name: qwen3.6-35b-a3b
+      #   litellm_params:
+      #     model: openai/qwen3.6-35b-a3b
+      #     api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
+      #     api_key: "sk-noauth"
+      #   model_info: { supports_vision: true, max_input_tokens: 114688 }
       - model_name: qwen3.6-35b-a3b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
@@ -48,13 +65,16 @@ data:
       # existing callers that request "gpt-oss-120b" keep working (the chosen "falls back to qwen3.6"
       # path). To serve a real gpt-oss-class model instead, point model/api_key at gpt-5.4 (mind the
       # global max_budget) — or delete this entry to hard-retire the name. See docs/runbooks/ai-model-swap.md.
-      # Shimmed to qwen3.6, and (like qwen3.6) registered on BOTH nodes so the shim path is load-balanced too.
-      - model_name: gpt-oss-120b
-        litellm_params:
-          model: openai/qwen3.6-35b-a3b
-          api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
-          api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 114688 }
+      # Shimmed to qwen3.6, and normally registered on BOTH nodes so the shim path is balanced too.
+      # node1 deployment DISABLED 2026-08-15 for the same reason as qwen3.6 above — it shims to the SAME
+      # stopped node1 llama-server, so leaving it registered would keep failing gpt-oss-120b callers even
+      # though qwen3.6 itself had been fixed. Un-comment together with the qwen3.6 node1 block.
+      # - model_name: gpt-oss-120b
+      #   litellm_params:
+      #     model: openai/qwen3.6-35b-a3b
+      #     api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
+      #     api_key: "sk-noauth"
+      #   model_info: { supports_vision: true, max_input_tokens: 114688 }
       - model_name: gpt-oss-120b
         litellm_params:
           model: openai/qwen3.6-35b-a3b
@@ -221,7 +241,14 @@ spec:
         # NOTE (2026-08-14): the previous value was the sha256 of the MOUNTED file, which the yq
         # recipe above does not reproduce (yq appends a trailing newline). Standardised on the
         # documented recipe so the value is reproducible from the command as written.
-        checksum/config: "51af76d9c8d6"
+        # WARNING (2026-08-15): the previous value "51af76d9c8d6" did NOT reproduce from the recipe above
+        # for the config it was supposed to describe — verified against four readings of the yq output
+        # (as-is / +newline / rstrip / rstrip+newline), none of which matched. So the annotation had
+        # ALREADY drifted, which is why editing config.yaml did not roll the pods and the 2026-08-15
+        # num_retries/timeout change needed a manual `kubectl rollout restart deploy/litellm`.
+        # This value IS the recipe applied to the current config.yaml, so bumping should work from here;
+        # re-verify with the exact yq command on the next edit and fix the recipe if it disagrees again.
+        checksum/config: "f12416f39920"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
