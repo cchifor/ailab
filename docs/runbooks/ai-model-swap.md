@@ -97,9 +97,15 @@ python scripts/lxc-exec.py 192.168.0.4 5003 --env SWAP=true --env LLAMA_BUILD=b9
 # pinned, it costs 31.4 GiB of host RAM and drives node1 to the pre-OOM state (see the note above).
 # PRESENCE_PENALTY=0.0 is REQUIRED: provision.sh defaults to 1.5, which is Qwen3.8's INSTRUCT profile,
 # but this runs in thinking mode where its card specifies 0.0. The other sampling defaults already match.
+# QUANT is UD-Q4_K_XL, not Q6_K (2026-08-15) — do NOT "restore" the Q6_K path. Dense decode here is
+# memory-bandwidth-bound, so tok/s is set by bytes-read-per-token: Q6_K (22.9 GB) measured 9.3 tok/s,
+# UD-Q4_K_XL (17.9 GB) measured 11.49 tok/s (+23.5%), and cold start fell ~74s -> ~24s. It also frees
+# ~4.7 GiB of GTT on node1 (32115 -> 27288 MiB loaded). Q5/Q6/Q8 are on the AVOID list for this
+# hardware (2026-07-09 perf analysis: ~20-45% slower decode for <0.5% PPL). The Q6_K GGUF is retained
+# on the NFS share, so reverting is a MODEL= path change plus a re-run of this command.
 python scripts/lxc-exec.py 192.168.0.2 5001 --env INSTANCE=qwen38 --env PORT=8082 `
   --env SWAP=true --env TTL=1800 --env LLAMA_BUILD=b10430 `
-  --env MODEL=/models/qwen3.8-27b/Qwen3.8-27B-Q6_K.gguf `
+  --env MODEL=/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf `
   --env MMPROJ=/models/qwen3.8-27b/mmproj-F16.gguf `
   --env MODEL_ALIAS=qwen3.8-27b --env CTX=262144 --env PARALLEL=1 `
   --env CACHE_TYPE_K=q8_0 --env CACHE_TYPE_V=q8_0 `
