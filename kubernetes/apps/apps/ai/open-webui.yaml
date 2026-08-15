@@ -83,11 +83,22 @@ spec:
             # `error: {'content': ''}` with done=false, so the streamed text the user watched arrive is
             # NEVER saved. A following "continue" then sees an EMPTY assistant turn and restarts the task
             # (re-reasoning from scratch) instead of resuming — which is what it looks like to the user.
-            # 2400s @ ~9.3 tok/s ~= 22k tokens (~28k once the model moves to a 4-bit quant).
-            # SAFE ONLY WITH the direct llama-swap connection above: before it, a cancelled request stayed
-            # alive until this timeout expired, so raising it would have EXTENDED the single-slot wedge
-            # rather than fixing anything. Do not raise this while OWUI routes qwen3.8 via LiteLLM.
-            - { name: AIOHTTP_CLIENT_TIMEOUT, value: "2400" }
+            # REMOVED ENTIRELY (2026-08-15) rather than raised: any finite value is still a cap on answer
+            # length, and complex single-file artifacts must be able to run to completion. An EMPTY value
+            # means no timeout — env.py does `int(raw) if raw else None` and passes that to
+            # aiohttp.ClientTimeout(total=...), and total=None is unlimited.
+            # KEEP IT EMPTY, NOT "0"/"none"/"unlimited": that same parse falls back to **300s** on any
+            # non-integer string, which would be far WORSE than the 900s we started from.
+            # Blast radius is limited to streamed chat: backend /models probes use a SEPARATE
+            # AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST (10s), so a dead backend is still detected quickly.
+            # SAFE ONLY WITH the direct llama-swap connection above, and this is now load-bearing rather
+            # than merely advisable: with no timeout, the client abort is the ONLY thing that can end a
+            # runaway generation. Via LiteLLM (which does not propagate disconnects) an abandoned request
+            # would hold qwen3.8's single slot until the process is restarted. Do NOT ship this env change
+            # without the OPENAI_API_BASE_URLS change above.
+            # What still bounds a generation: EOS, --reasoning-budget, n_ctx exhaustion (262144 tokens is
+            # ~7.8 h at 9.3 tok/s, ~5.5 h at 4-bit speeds), and the user pressing stop.
+            - { name: AIOHTTP_CLIENT_TIMEOUT, value: "" }
             - { name: WEBUI_NAME, value: "ailab AI" }
             # SSO via Authelia OIDC (ADR 0012). Local login stays as break-glass; OAuth sign-up on.
             - { name: WEBUI_URL, value: "https://chat.chifor.me" }

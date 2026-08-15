@@ -97,10 +97,19 @@ data:
           num_retries: 0
           # Per-deployment override of litellm_settings.request_timeout (900). At ~9.3 tok/s the global
           # 900s is a hard CEILING ON ANSWER LENGTH (~8.4k tokens, of which --reasoning-budget 3000 can
-          # take 3k), so any large single-file artifact is truncated mid-stream and lost. Kept in step
-          # with open-webui.yaml AIOHTTP_CLIENT_TIMEOUT (2400) so the two ends agree; the global 900 is
-          # unchanged for every other model, which decodes 2-6x faster and does not need it.
-          timeout: 2400
+          # take 3k), so any large single-file artifact is truncated mid-stream and lost. The global 900
+          # is unchanged for every other model, which decodes 2-6x faster and does not need it.
+          #
+          # Large-but-FINITE on purpose, unlike open-webui.yaml which now sets no timeout at all. The two
+          # paths have different safety properties and must NOT be made symmetric:
+          #   - OWUI -> llama-swap DIRECT: the client abort propagates, so a user pressing stop really
+          #     ends the generation. Unbounded is recoverable there.
+          #   - anything -> LiteLLM: LiteLLM 1.91.0 does NOT propagate client disconnects, so this
+          #     timeout is the ONLY thing that can release qwen3.8's single slot for an API caller that
+          #     goes away. Unbounded here would mean a wedge that only a process restart clears.
+          # 86400s is ~800k tokens at this model's decode rate — far beyond n_ctx (262144), so it can
+          # never truncate a legitimate answer; it exists purely as a leak guard.
+          timeout: 86400
         model_info: { supports_vision: true, max_input_tokens: 245760 }
       # gemma-4-26b-a4b is RETIRED locally. It was stopped on node1 :8082 to free ~15 GiB VRAM for
       # Qwen3.6's extended context, and that port now belongs to qwen3.8-27b's llama-swap instance —
