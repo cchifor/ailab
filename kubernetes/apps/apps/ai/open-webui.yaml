@@ -52,11 +52,17 @@ spec:
             # an abandoned request owns the model for up to 15 min and every later message queues behind
             # it. Measured 2026-08-15: four requests each terminated at exactly 900s, 1:1 with
             # llama-swap "recovered from upstream disconnection". llama-swap is a Go reverse proxy that
-            # DOES propagate context cancellation, and llama.cpp frees the slot ~20s after the peer
-            # goes away — so talking to it directly makes "stop"/delete actually stop the generation.
-            # NOTE: qwen3.8-27b is intentionally ALSO still registered in LiteLLM (other API consumers
-            # may use it); OPENAI_API_CONFIGS below prefixes this one so the two are distinguishable in
-            # the model picker — use the "direct." entry for interactive chat.
+            # DOES propagate context cancellation — PROVEN 2026-08-15 by aborting a streaming client
+            # mid-generation: the llama.cpp slot went is_processing=False within 6s. Via LiteLLM the same
+            # abort orphaned the generation for 7+ minutes (it kept decoding with no client attached,
+            # 13k -> 15.7k tokens) until the service was restarted, wedging the single slot.
+            # qwen3.8-27b is served ONLY by this connection — its LiteLLM deployment was REMOVED, and the
+            # "direct." prefix_id dropped, so exactly ONE model of that name exists and it is the one that
+            # can be stopped. It was previously registered in BOTH with a prefix, which left the BROKEN
+            # LiteLLM-routed entry as the obvious pick in the model list: measured over 6h, 20/20 requests
+            # took the LiteLLM path and none used the direct one. Do NOT re-add it to litellm.yaml.
+            # (kubernetes/apps/apps/ai/litellm-local.yaml keeps its own qwen3.8 entry for the platform's
+            # cost-tracked tenant routing; it has the same no-cancel property and is a separate decision.)
             - name: OPENAI_API_KEY # the LiteLLM master key (LiteLLM now requires it)
               valueFrom:
                 secretKeyRef: { name: litellm-secret, key: master-key }
@@ -66,7 +72,10 @@ spec:
             - { name: OPENAI_API_KEYS, value: "$(OPENAI_API_KEY);sk-noauth" }
             # Keyed by connection INDEX as a string (openai.py: api_configs.get(str(idx), ...)).
             # model_ids restricts connection [1] to just qwen3.8 so llama-swap does not add duplicates.
-            - { name: OPENAI_API_CONFIGS, value: '{"1":{"enable":true,"prefix_id":"direct","model_ids":["qwen3.8-27b"]}}' }
+            # NO prefix_id: the model must surface under its real id "qwen3.8-27b" so existing chats
+            # (which store models: ['qwen3.8-27b']) keep resolving — now to the direct, cancellable path.
+            # A prefix here would strand every prior conversation on a name nothing serves.
+            - { name: OPENAI_API_CONFIGS, value: '{"1":{"enable":true,"model_ids":["qwen3.8-27b"]}}' }
             - { name: ENABLE_OLLAMA_API, value: "False" } # we only use the OpenAI endpoint
             # Was 900s to match LiteLLM request_timeout + llama-swap healthCheckTimeout. A qwen3.5-122b
             # cold-load + long reasoning turn can run minutes; OWUI's aiohttp client would otherwise abort

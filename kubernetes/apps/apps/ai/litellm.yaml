@@ -103,34 +103,30 @@ data:
       # max_input_tokens = 262144 - 16K output/reasoning headroom = 245760 (it is a reasoning model:
       # under-budgeting max_tokens yields empty content + finish_reason "length").
       # Needs llama.cpp b10430 (b9672 predates the arch) — node1 runs both builds side by side.
-      - model_name: qwen3.8-27b
-        litellm_params:
-          model: openai/qwen3.8-27b
-          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1
-          api_key: "sk-noauth"
-          # Per-deployment override of router_settings.num_retries (2). Retrying is WRONG for this
-          # model: it is a SINGLE-deployment backend (a retry cannot pick a healthier node, unlike the
-          # 2-node qwen3.6), it decodes at ~9.3 tok/s, and it serves ONE slot (--parallel 1). A retry
-          # therefore re-queues another multi-minute generation behind the only slot, so one abandoned
-          # request can wedge the model for 3x request_timeout. Measured 2026-08-15: four requests that
-          # day each ran to exactly 900s (request_timeout) after the user cancelled in Open WebUI.
-          num_retries: 0
-          # Per-deployment override of litellm_settings.request_timeout (900). At ~9.3 tok/s the global
-          # 900s is a hard CEILING ON ANSWER LENGTH (~8.4k tokens, of which --reasoning-budget 3000 can
-          # take 3k), so any large single-file artifact is truncated mid-stream and lost. The global 900
-          # is unchanged for every other model, which decodes 2-6x faster and does not need it.
-          #
-          # Large-but-FINITE on purpose, unlike open-webui.yaml which now sets no timeout at all. The two
-          # paths have different safety properties and must NOT be made symmetric:
-          #   - OWUI -> llama-swap DIRECT: the client abort propagates, so a user pressing stop really
-          #     ends the generation. Unbounded is recoverable there.
-          #   - anything -> LiteLLM: LiteLLM 1.91.0 does NOT propagate client disconnects, so this
-          #     timeout is the ONLY thing that can release qwen3.8's single slot for an API caller that
-          #     goes away. Unbounded here would mean a wedge that only a process restart clears.
-          # 86400s is ~800k tokens at this model's decode rate — far beyond n_ctx (262144), so it can
-          # never truncate a legitimate answer; it exists purely as a leak guard.
-          timeout: 86400
-        model_info: { supports_vision: true, max_input_tokens: 245760 }
+      # DEPLOYMENT REMOVED 2026-08-15 — qwen3.8-27b is served to Open WebUI ONLY, as a direct connection
+      # to its llama-swap (open-webui.yaml OPENAI_API_BASE_URLS[1]). It must not be routed through here.
+      #
+      # LiteLLM 1.91.0 does not propagate a client disconnect upstream, and for THIS model that is not a
+      # latency annoyance but a wedge: it serves ONE slot (--parallel 1), so an abandoned request keeps
+      # decoding with no client attached and every later request queues behind it. Measured 2026-08-15:
+      # a cancelled chat orphaned a generation that ran 7+ minutes after its client vanished (13k ->
+      # 15.7k tokens, still climbing) and only a `systemctl restart llama-swap-qwen38` released the slot.
+      # The same abort against llama-swap DIRECTLY freed the slot in 6 s (llama.cpp sees the peer go
+      # away), so the direct path is the one where "stop" actually stops.
+      #
+      # It was briefly registered in BOTH — here, and directly in OWUI under a "direct." prefix_id — on
+      # the assumption that unknown API consumers might need the LiteLLM name. They do not: no code in
+      # this repo calls it, and over 6 h ALL 20 requests carried LiteLLM's AsyncOpenAI user-agent while
+      # the direct connection saw zero. Keeping both only left the BROKEN entry as the obvious pick in
+      # the model list. The prefix is now dropped too, so "qwen3.8-27b" resolves to the direct path and
+      # pre-existing chats (which store that exact id) keep working.
+      #
+      # Consequence: num_retries/timeout overrides for it are gone with the deployment, and the global
+      # litellm_settings.request_timeout no longer applies to qwen3.8 at all — OWUI has no timeout, and
+      # cancellation is what bounds a run. Do NOT re-add this entry without also removing the direct
+      # connection, or the broken path becomes reachable again.
+      # litellm-local.yaml keeps its own qwen3.8 entry for the platform's cost-tracked tenant routing;
+      # it inherits the same no-cancel behaviour and is a separate decision, deliberately untouched here.
       # gemma-4-26b-a4b is RETIRED locally. It was stopped on node1 :8082 to free ~15 GiB VRAM for
       # Qwen3.6's extended context, and that port now belongs to qwen3.8-27b's llama-swap instance —
       # so gemma-4 can NOT be brought back by re-provisioning :8082 any more. Qwen3.6 and Qwen3.8 both
@@ -248,7 +244,7 @@ spec:
         # num_retries/timeout change needed a manual `kubectl rollout restart deploy/litellm`.
         # This value IS the recipe applied to the current config.yaml, so bumping should work from here;
         # re-verify with the exact yq command on the next edit and fix the recipe if it disagrees again.
-        checksum/config: "f12416f39920"
+        checksum/config: "c5e7de0a28c0"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
