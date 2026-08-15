@@ -42,11 +42,31 @@ spec:
           ports:
             - { name: http, containerPort: 8080 }
           env:
-            # Point at the LiteLLM router; key is ignored (LiteLLM runs open internally).
-            - { name: OPENAI_API_BASE_URL, value: "http://litellm.ai.svc.cluster.local:4000/v1" }
+            # TWO OpenAI connections (';'-separated — OPENAI_API_BASE_URLS takes precedence over the
+            # singular OPENAI_API_BASE_URL, which is now unset):
+            #   [0] LiteLLM router — everything (cloud + qwen3.6 + qwen3.5-122b).
+            #   [1] qwen3.8-27b DIRECT to its llama-swap, deliberately BYPASSING LiteLLM.
+            # Why the bypass: cancelling/deleting a message in OWUI aborts the browser request, but
+            # LiteLLM (1.91.0) does NOT propagate that disconnect upstream — it holds the connection to
+            # llama-swap open until request_timeout (900s). qwen3.8 serves ONE slot (--parallel 1), so
+            # an abandoned request owns the model for up to 15 min and every later message queues behind
+            # it. Measured 2026-08-15: four requests each terminated at exactly 900s, 1:1 with
+            # llama-swap "recovered from upstream disconnection". llama-swap is a Go reverse proxy that
+            # DOES propagate context cancellation, and llama.cpp frees the slot ~20s after the peer
+            # goes away — so talking to it directly makes "stop"/delete actually stop the generation.
+            # NOTE: qwen3.8-27b is intentionally ALSO still registered in LiteLLM (other API consumers
+            # may use it); OPENAI_API_CONFIGS below prefixes this one so the two are distinguishable in
+            # the model picker — use the "direct." entry for interactive chat.
             - name: OPENAI_API_KEY # the LiteLLM master key (LiteLLM now requires it)
               valueFrom:
                 secretKeyRef: { name: litellm-secret, key: master-key }
+            - { name: OPENAI_API_BASE_URLS, value: "http://litellm.ai.svc.cluster.local:4000/v1;http://llm-qwen38.ai.svc.cluster.local:8082/v1" }
+            # $(OPENAI_API_KEY) is expanded by kubelet from the env var declared ABOVE (declaration order
+            # matters); llama-swap ignores the bearer token, so connection [1] uses a placeholder.
+            - { name: OPENAI_API_KEYS, value: "$(OPENAI_API_KEY);sk-noauth" }
+            # Keyed by connection INDEX as a string (openai.py: api_configs.get(str(idx), ...)).
+            # model_ids restricts connection [1] to just qwen3.8 so llama-swap does not add duplicates.
+            - { name: OPENAI_API_CONFIGS, value: '{"1":{"enable":true,"prefix_id":"direct","model_ids":["qwen3.8-27b"]}}' }
             - { name: ENABLE_OLLAMA_API, value: "False" } # we only use the OpenAI endpoint
             # Match LiteLLM request_timeout (900s) + llama-swap healthCheckTimeout (900s). A qwen3.5-122b
             # cold-load + long reasoning turn can run minutes; OWUI's aiohttp client would otherwise abort
