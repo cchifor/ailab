@@ -42,17 +42,63 @@ spec:
           ports:
             - { name: http, containerPort: 8080 }
           env:
-            # Point at the LiteLLM router; key is ignored (LiteLLM runs open internally).
-            - { name: OPENAI_API_BASE_URL, value: "http://litellm.ai.svc.cluster.local:4000/v1" }
+            # TWO OpenAI connections (';'-separated — OPENAI_API_BASE_URLS takes precedence over the
+            # singular OPENAI_API_BASE_URL, which is now unset):
+            #   [0] LiteLLM router — everything (cloud + qwen3.6 + qwen3.5-122b).
+            #   [1] qwen3.8-27b DIRECT to its llama-swap, deliberately BYPASSING LiteLLM.
+            # Why the bypass: cancelling/deleting a message in OWUI aborts the browser request, but
+            # LiteLLM (1.91.0) does NOT propagate that disconnect upstream — it holds the connection to
+            # llama-swap open until request_timeout (900s). qwen3.8 serves ONE slot (--parallel 1), so
+            # an abandoned request owns the model for up to 15 min and every later message queues behind
+            # it. Measured 2026-08-15: four requests each terminated at exactly 900s, 1:1 with
+            # llama-swap "recovered from upstream disconnection". llama-swap is a Go reverse proxy that
+            # DOES propagate context cancellation, and llama.cpp frees the slot ~20s after the peer
+            # goes away — so talking to it directly makes "stop"/delete actually stop the generation.
+            # NOTE: qwen3.8-27b is intentionally ALSO still registered in LiteLLM (other API consumers
+            # may use it); OPENAI_API_CONFIGS below prefixes this one so the two are distinguishable in
+            # the model picker — use the "direct." entry for interactive chat.
             - name: OPENAI_API_KEY # the LiteLLM master key (LiteLLM now requires it)
               valueFrom:
                 secretKeyRef: { name: litellm-secret, key: master-key }
+            - { name: OPENAI_API_BASE_URLS, value: "http://litellm.ai.svc.cluster.local:4000/v1;http://llm-qwen38.ai.svc.cluster.local:8082/v1" }
+            # $(OPENAI_API_KEY) is expanded by kubelet from the env var declared ABOVE (declaration order
+            # matters); llama-swap ignores the bearer token, so connection [1] uses a placeholder.
+            - { name: OPENAI_API_KEYS, value: "$(OPENAI_API_KEY);sk-noauth" }
+            # Keyed by connection INDEX as a string (openai.py: api_configs.get(str(idx), ...)).
+            # model_ids restricts connection [1] to just qwen3.8 so llama-swap does not add duplicates.
+            - { name: OPENAI_API_CONFIGS, value: '{"1":{"enable":true,"prefix_id":"direct","model_ids":["qwen3.8-27b"]}}' }
             - { name: ENABLE_OLLAMA_API, value: "False" } # we only use the OpenAI endpoint
-            # Match LiteLLM request_timeout (900s) + llama-swap healthCheckTimeout (900s). A qwen3.5-122b
+            # Was 900s to match LiteLLM request_timeout + llama-swap healthCheckTimeout. A qwen3.5-122b
             # cold-load + long reasoning turn can run minutes; OWUI's aiohttp client would otherwise abort
             # the streamed response at its ~300s default and surface as "loading failed" in the browser
             # while the backend is still generating. See docs/runbooks/ai-model-swap.md.
-            - { name: AIOHTTP_CLIENT_TIMEOUT, value: "900" }
+            #
+            # RAISED to 2400s (2026-08-15) because 900s was a hard CEILING ON RESPONSE LENGTH, not just a
+            # safety net. qwen3.8-27b decodes at ~9.3 tok/s, so 900s caps ANY answer at ~8.4k tokens no
+            # matter what the model wants to emit — and --reasoning-budget 3000 spends up to 3k of those
+            # before a single output token, leaving ~5.4k. A large single-file artifact (chat
+            # 27f19393: full-page canvas animation) is 10-25k tokens, so it could never finish: measured
+            # 1,767,361 B of SSE (~8.4k tokens) cut at exactly 15m0.488s.
+            # The failure is silent AND lossy: OWUI persists the aborted turn as
+            # `error: {'content': ''}` with done=false, so the streamed text the user watched arrive is
+            # NEVER saved. A following "continue" then sees an EMPTY assistant turn and restarts the task
+            # (re-reasoning from scratch) instead of resuming — which is what it looks like to the user.
+            # REMOVED ENTIRELY (2026-08-15) rather than raised: any finite value is still a cap on answer
+            # length, and complex single-file artifacts must be able to run to completion. An EMPTY value
+            # means no timeout — env.py does `int(raw) if raw else None` and passes that to
+            # aiohttp.ClientTimeout(total=...), and total=None is unlimited.
+            # KEEP IT EMPTY, NOT "0"/"none"/"unlimited": that same parse falls back to **300s** on any
+            # non-integer string, which would be far WORSE than the 900s we started from.
+            # Blast radius is limited to streamed chat: backend /models probes use a SEPARATE
+            # AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST (10s), so a dead backend is still detected quickly.
+            # SAFE ONLY WITH the direct llama-swap connection above, and this is now load-bearing rather
+            # than merely advisable: with no timeout, the client abort is the ONLY thing that can end a
+            # runaway generation. Via LiteLLM (which does not propagate disconnects) an abandoned request
+            # would hold qwen3.8's single slot until the process is restarted. Do NOT ship this env change
+            # without the OPENAI_API_BASE_URLS change above.
+            # What still bounds a generation: EOS, --reasoning-budget, n_ctx exhaustion (262144 tokens is
+            # ~7.8 h at 9.3 tok/s, ~5.5 h at 4-bit speeds), and the user pressing stop.
+            - { name: AIOHTTP_CLIENT_TIMEOUT, value: "" }
             - { name: WEBUI_NAME, value: "ailab AI" }
             # SSO via Authelia OIDC (ADR 0012). Local login stays as break-glass; OAuth sign-up on.
             - { name: WEBUI_URL, value: "https://chat.chifor.me" }

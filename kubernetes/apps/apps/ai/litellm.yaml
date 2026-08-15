@@ -88,6 +88,28 @@ data:
           model: openai/qwen3.8-27b
           api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1
           api_key: "sk-noauth"
+          # Per-deployment override of router_settings.num_retries (2). Retrying is WRONG for this
+          # model: it is a SINGLE-deployment backend (a retry cannot pick a healthier node, unlike the
+          # 2-node qwen3.6), it decodes at ~9.3 tok/s, and it serves ONE slot (--parallel 1). A retry
+          # therefore re-queues another multi-minute generation behind the only slot, so one abandoned
+          # request can wedge the model for 3x request_timeout. Measured 2026-08-15: four requests that
+          # day each ran to exactly 900s (request_timeout) after the user cancelled in Open WebUI.
+          num_retries: 0
+          # Per-deployment override of litellm_settings.request_timeout (900). At ~9.3 tok/s the global
+          # 900s is a hard CEILING ON ANSWER LENGTH (~8.4k tokens, of which --reasoning-budget 3000 can
+          # take 3k), so any large single-file artifact is truncated mid-stream and lost. The global 900
+          # is unchanged for every other model, which decodes 2-6x faster and does not need it.
+          #
+          # Large-but-FINITE on purpose, unlike open-webui.yaml which now sets no timeout at all. The two
+          # paths have different safety properties and must NOT be made symmetric:
+          #   - OWUI -> llama-swap DIRECT: the client abort propagates, so a user pressing stop really
+          #     ends the generation. Unbounded is recoverable there.
+          #   - anything -> LiteLLM: LiteLLM 1.91.0 does NOT propagate client disconnects, so this
+          #     timeout is the ONLY thing that can release qwen3.8's single slot for an API caller that
+          #     goes away. Unbounded here would mean a wedge that only a process restart clears.
+          # 86400s is ~800k tokens at this model's decode rate — far beyond n_ctx (262144), so it can
+          # never truncate a legitimate answer; it exists purely as a leak guard.
+          timeout: 86400
         model_info: { supports_vision: true, max_input_tokens: 245760 }
       # gemma-4-26b-a4b is RETIRED locally. It was stopped on node1 :8082 to free ~15 GiB VRAM for
       # Qwen3.6's extended context, and that port now belongs to qwen3.8-27b's llama-swap instance —
