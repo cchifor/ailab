@@ -121,28 +121,47 @@ python scripts/qnap-ssh.py 'getcfg SNMP "Service Enable"'    # TRUE
 kubectl --context admin@ai -n monitoring logs deploy/qnap-snmp-exporter
 ```
 
-## 6. Thin-LUN reclaim — `discard`
+## 6. Thin-LUN reclaim — UNRESOLVED, and why
 
-The `qnap-iscsi` LUNs are thin zvols (`refreservation=none`). ext4 was mounted without `discard` and
-nothing ran `fstrim` inside the (distroless) pods, so freed blocks were never returned and allocation
-only ratcheted up: **103.5 GB allocated on the NAS against 55.4 GiB actually used** inside the
-filesystems. Worst case was the Prometheus LUN at 43.1 G of a 48 G volsize (90%) holding 17.2 GiB —
-the source of the recurring `LUN has reached the threshold (90%)` events (275 since June, on several
-LUNs, seen by no one).
+The `qnap-iscsi` LUNs are thin zvols (`refreservation=none`). Nothing ever tells the array which
+blocks the guest freed, so allocation only ratchets up: **103.5 GB allocated on the NAS against
+55.4 GiB actually used** inside the filesystems (~48 GB stale). Worst case is the Prometheus LUN at
+43.1 G of a 48 G volsize (90%) while holding 17.2 GiB — the source of the recurring `LUN has reached
+the threshold (90%)` events (275 since June, across several LUNs, seen by no one until the audit).
 
-Fixed in two places, because they have different scopes:
-- **New volumes** — `mountOptions: [discard]` on the StorageClass (`kubernetes/apps/qnap-storage/`).
-  StorageClass is immutable, so its Flux Kustomization carries `force: true` to allow recreate.
-- **Existing volumes** — `spec.mountOptions` patched on each PV (that field *is* mutable). Takes
-  effect at each volume's **next mount**, so reclaim begins as workloads restart, not immediately.
+**`mountOptions: [discard]` does not work on this backend.** It was implemented, measured, and
+reverted. The Kubernetes half is fine — kubelet passes the option down faithfully:
 
-Also set `compression=lz4` on all 15 LUN zvols (they were `compression=off` while the parent share had
-it on). Affects newly written blocks only.
+```
+volume_capability:<mount:<fs_type:"ext4" mount_flags:"discard" > >    # NodeStageVolume request
+```
 
-Note that online discard only returns blocks **as they are freed from now on** — it does not
-retroactively trim the ~48 GB already allocated. That drains gradually through normal churn
-(Prometheus TSDB compaction dominates). A one-shot reclaim would need `fstrim` inside each mount
-namespace, which these images cannot do.
+but `csi.trident.qnap.io` drops it. Its `NodeStageVolume` performs no mount at all (`target=` empty);
+the real mount happens during publish and logs as:
+
+```
+mount_linux.MountDevice device=/dev/sdf mountpoint=/var/lib/kubelet/... options=
+```
+
+`options=` is empty. The driver mounts using its own `publish_context.mountOptions`, which is `""`,
+and there is no knob for it in either the StorageClass parameters or the TridentBackendConfig — the
+`qnap_config` storage pools expose only `serviceLevel` / `labels` / `features`, with no `defaults`
+block. Confirm for yourself with:
+
+```bash
+kubectl --context admin@ai -n trident logs trident-node-linux-<pod> -c trident-main \
+  | grep -E "MountDevice|mount_flags"
+```
+
+**What is left.** Reclaim on this backend needs a periodic `fstrim` against the kubelet mount paths,
+which requires a **privileged pod with hostPath** — a real security-posture decision on a cluster
+that runs `baseline` PSA and deliberately set `nodeAgent.disableHostPath` on Velero. That trade-off
+is the operator's to make, so nothing was built. Weigh it against the actual impact: this is wasted
+capacity and alert noise on a pool with 5.62 TB free, not a availability risk — ZFS is copy-on-write,
+so a thin LUN that reaches its volsize keeps serving writes normally.
+
+**What was done here:** set `compression=lz4` on all 15 LUN zvols (they were `compression=off` while
+the parent share had it on). Applies to newly written blocks only.
 
 ## Open items this audit did NOT close
 
@@ -151,3 +170,4 @@ namespace, which these images cannot do.
 | **No UPS** | Needs hardware. All 5 SSDs already report `unsafe_shutdowns: 2`. ZFS tolerates power loss; the exposure is the ext4 filesystems inside the iSCSI LUNs (Postgres, Gitea, Prometheus). |
 | **No QNAP-native notification** | Needs SMTP credentials, or a decision to point Notification Center at the in-cluster ntfy. Matters because it is the only alert path that still works when the *cluster* is what is down — Prometheus alerting cannot report its own storage dying. |
 | **`/mnt/ext` at 93%** | 29 MB free on the 417 MB QTS app partition (`/dev/md13`). All QNAP system files — nothing safe to prune by hand. Firmware updates and app installs write here, so it is a known wedge point. Not exposed over SNMP; check by hand. |
+| **Thin-LUN reclaim** | See §6. Needs a privileged `fstrim` DaemonSet; deliberately not built without an operator decision on the PSA/hostPath trade-off. |
