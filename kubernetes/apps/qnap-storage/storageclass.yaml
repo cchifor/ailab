@@ -1,5 +1,23 @@
 # Network block storage (RWO, iSCSI) from the QNAP ZFS pool. nfs-csi stays the RWX default;
 # local-path is node-local. Use qnap-iscsi for migratable single-attach block volumes.
+#
+# mountOptions: discard — the QNAP LUNs behind this class are THIN zvols (refreservation=none), so
+# allocation only grows unless the guest filesystem tells the array which blocks it has freed.
+# Without discard (and with no fstrim running inside these distroless pods) nothing ever did: the
+# 2026-08-16 storage audit measured 103.5 GB allocated on the NAS against 55.4 GiB actually in use
+# inside the filesystems — ~48 GB of stale blocks. The Prometheus LUN was the worst, 43.1 G
+# allocated of a 48 G volsize (90%) while its ext4 held 17.2 GiB, which is what generated the
+# recurring QNAP "LUN has reached the threshold (90%)" events (275 of them since June, on several
+# LUNs, none of which reached anyone — see monitoring/qnap-rules.yaml).
+#
+# Continuous discard is chosen over periodic fstrim deliberately: fstrim would have to run INSIDE
+# each workload's mount namespace, and these are distroless images with no fstrim binary. The cost
+# is an UNMAP per delete, which is acceptable against an all-NVMe ZFS pool at this IO volume.
+#
+# StorageClass fields other than allowVolumeExpansion are IMMUTABLE — changing this file requires
+# the object to be recreated (delete + re-apply), not updated. Existing PVs are unaffected by that
+# and were patched separately (spec.mountOptions is mutable on a PV); each picks the option up at
+# its next mount, so reclaim starts as workloads restart rather than immediately.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -8,5 +26,7 @@ provisioner: csi.trident.qnap.io
 parameters:
   selector: "performance=performance1"
   fsType: "ext4"
+mountOptions:
+  - discard
 allowVolumeExpansion: true
 reclaimPolicy: Retain

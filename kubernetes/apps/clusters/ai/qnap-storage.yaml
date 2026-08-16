@@ -17,6 +17,12 @@ spec:
   path: ./kubernetes/apps/qnap-storage
   prune: true
   wait: true
+  # StorageClass is immutable except for allowVolumeExpansion, so an edit to storageclass.yaml
+  # (e.g. adding mountOptions) fails a plain server-side apply forever. force lets Flux delete and
+  # recreate it. Safe for this path: deleting a StorageClass does not touch already-bound PVs or
+  # PVCs, and reclaimPolicy here is Retain — the only exposure is that a NEW PVC naming the class
+  # during the brief recreate window would stay Pending until it reappears.
+  force: true
   decryption:
     provider: sops
     secretRef:

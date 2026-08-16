@@ -38,6 +38,9 @@ resources:
   - ntfy.yaml # self-hosted push notifications; Alertmanager routes all alerts here
   - storage-fabric-probe.yaml # per-node QNAP-fabric reachability (blackbox DaemonSet)
   - storage-fabric-rules.yaml # alerts on the probes
+  - qnap-snmp-auth.sops.yaml # SOPS: read-only SNMP community for the NAS (source-restricted on the QNAP side)
+  - qnap-snmp-exporter.yaml # the NAS itself — disks/SMART, temps, fans. It was the one major component with NO scrape at all; a failed drive in the RAID-Z1 would have alerted nobody (2026-08-16 storage audit)
+  - qnap-rules.yaml # alerts on the above; QnapDiskSmartNotGood is the load-bearing one
   - ci-runners-rules.yaml # alerts on the runner VMs (down / disk / memory / buildx self-heal beacon)
   - dev-workers-rules.yaml # alerts on the 6 dev-worker VMs. The scrape target existed with ZERO rules against it, so dev-worker-1's kernel panic (2026-08-11) was covered only by the generic TargetDown at severity warning while the VM sat dead 12h and PVE still called it `running`
   - agentforge-rules.yaml # alerts on the agentforge fleet, re-pointed at the LIVE jobs (agentforge-worker / -dispatcher). Was commented out AND pinned to the dead job=agentforge, so all 5 rules were doubly inert; see the file header for the per-rule decision and the ailab#284 coverage boundary

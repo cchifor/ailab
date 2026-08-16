@@ -64,3 +64,90 @@ python scripts/node-ssh.py 192.168.0.2 'mount -t nfs -o vers=4.0 10.55.0.254:/pv
   dd if=/dev/zero of=/mnt/t/x bs=1M count=3072 conv=fdatasync; rm /mnt/t/x; umount /mnt/t'
 # expect ~1.1 GB/s write over Thunderbolt
 ```
+
+---
+
+# Ongoing operation (added by the 2026-08-16 storage audit)
+
+The build steps above leave a working NAS but an **unmaintained and unwatched** one. These four items
+are what the audit added; all are on the box itself, so a factory reset or a firmware update that
+resets config can silently undo them — re-check them after either.
+
+## 4. Pool scrubbing — monthly
+
+The pool had **never been scrubbed** in the 68 days since `zpool create` (`zpool status` read
+`scan: none requested`; `zpool history` held only the create line). Note that `auto_data_scrubbing = 1`
+*was* set in `uLinux.conf` and meant nothing — do not trust that flag as evidence a scrub runs.
+
+On RAID-Z1 a scrub is the only thing that finds latent corruption before a second fault makes it
+unrecoverable. Now scheduled in the persistent QNAP crontab:
+
+```
+0 5 1 * * /sbin/zpool scrub zpool1     # /etc/config/crontab, 05:00 on the 1st
+```
+
+Added idempotently and reloaded with `crontab /etc/config/crontab`. Original saved as
+`/etc/config/crontab.bak.audit`. First run took **3m43s** on this pool (985 G allocated, all NVMe) and
+repaired 0 with 0 errors — cheap enough that monthly is not worth debating.
+
+```bash
+python scripts/qnap-ssh.py "zpool status zpool1 | head -4"   # check scan: line
+```
+
+## 5. SNMP — the NAS's only Prometheus scrape
+
+The NAS was the one major component with **no metrics scrape at all** (only a blackbox TCP probe to
+2049/3260), and it has no SMTP either, so a failed drive in the RAID-Z1 would have alerted **nobody**.
+
+SNMP is now enabled, and `kubernetes/apps/infrastructure/monitoring/qnap-snmp-exporter.yaml` scrapes
+it. Security matters here: the factory `/etc/config/snmpd.conf` ships **`rwcommunity public`** — a
+writable agent — so it was rewritten before the service was started:
+
+- `rwcommunity` removed entirely; a single random read-only community
+- source-restricted to `192.168.0.0/23` + `10.55.0.0/24` + `10.55.1.0/24`
+- community lives in the SOPS secret `qnap-snmp-auth` (monitoring ns); original config saved as
+  `/etc/config/snmpd.conf.bak.audit`
+
+**If you ever re-enable SNMP from the QNAP UI, re-check that `rwcommunity` did not come back.**
+
+Covered: per-disk SMART verdict + temperature, disk model/capacity, fan RPM, system + CPU temperature,
+RAM. **Not covered** — the QNAP MIB does not expose ZFS pool state or capacity at all; the only
+"volume" table it serves describes the 1 GB system volume. Pool DEGRADED is caught indirectly via the
+per-disk SMART metric. Verify with:
+
+```bash
+python scripts/qnap-ssh.py 'getcfg SNMP "Service Enable"'    # TRUE
+# then, in-cluster:
+kubectl --context admin@ai -n monitoring logs deploy/qnap-snmp-exporter
+```
+
+## 6. Thin-LUN reclaim — `discard`
+
+The `qnap-iscsi` LUNs are thin zvols (`refreservation=none`). ext4 was mounted without `discard` and
+nothing ran `fstrim` inside the (distroless) pods, so freed blocks were never returned and allocation
+only ratcheted up: **103.5 GB allocated on the NAS against 55.4 GiB actually used** inside the
+filesystems. Worst case was the Prometheus LUN at 43.1 G of a 48 G volsize (90%) holding 17.2 GiB —
+the source of the recurring `LUN has reached the threshold (90%)` events (275 since June, on several
+LUNs, seen by no one).
+
+Fixed in two places, because they have different scopes:
+- **New volumes** — `mountOptions: [discard]` on the StorageClass (`kubernetes/apps/qnap-storage/`).
+  StorageClass is immutable, so its Flux Kustomization carries `force: true` to allow recreate.
+- **Existing volumes** — `spec.mountOptions` patched on each PV (that field *is* mutable). Takes
+  effect at each volume's **next mount**, so reclaim begins as workloads restart, not immediately.
+
+Also set `compression=lz4` on all 15 LUN zvols (they were `compression=off` while the parent share had
+it on). Affects newly written blocks only.
+
+Note that online discard only returns blocks **as they are freed from now on** — it does not
+retroactively trim the ~48 GB already allocated. That drains gradually through normal churn
+(Prometheus TSDB compaction dominates). A one-shot reclaim would need `fstrim` inside each mount
+namespace, which these images cannot do.
+
+## Open items this audit did NOT close
+
+| Gap | Why it is still open |
+|---|---|
+| **No UPS** | Needs hardware. All 5 SSDs already report `unsafe_shutdowns: 2`. ZFS tolerates power loss; the exposure is the ext4 filesystems inside the iSCSI LUNs (Postgres, Gitea, Prometheus). |
+| **No QNAP-native notification** | Needs SMTP credentials, or a decision to point Notification Center at the in-cluster ntfy. Matters because it is the only alert path that still works when the *cluster* is what is down — Prometheus alerting cannot report its own storage dying. |
+| **`/mnt/ext` at 93%** | 29 MB free on the 417 MB QTS app partition (`/dev/md13`). All QNAP system files — nothing safe to prune by hand. Firmware updates and app installs write here, so it is a known wedge point. Not exposed over SNMP; check by hand. |

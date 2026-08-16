@@ -62,6 +62,30 @@ spec:
               -o jsonpath='{.status.message}'`. An `Unavailable` BSL fails every backup, and the
               usual cause is an unexpected top-level directory written into the `velero` bucket.
 
+        # A PartiallyFailed backup does NOT advance velero_backup_last_successful_timestamp, so ONE
+        # bad volume blanks the success signal for the whole chain and presents identically to "the
+        # backup system is dead" — 36h later VeleroBackupStale fires critical and says nothing about
+        # which volume. That is what happened on 2026-08-16: csi-driver-nfs implements a snapshot by
+        # tar-ing the volume directory, Valkey's AOF grew while tar was reading it
+        # ("archive/tar: write too long"), and that single 19 MB cache volume made both the daily and
+        # the weekly read as total failures. This rule names the condition early, at warning, while
+        # the rest of the backup is in fact fine — the staleness rule above stays as the backstop.
+        - alert: VeleroBackupPartiallyFailing
+          expr: increase(velero_backup_partial_failure_total{schedule!=""}[24h]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A scheduled Velero backup completed with errors in the last 24h"
+            description: >-
+              At least one scheduled backup finished PartiallyFailed, so its volume data is
+              incomplete AND the chain's last-success timestamp did not advance. Find the failing
+              item with `kubectl -n velero exec deploy/velero -- /velero backup logs <name>
+              --insecure-skip-tls-verify | grep level=error` (the flag is needed because versitygw
+              serves a self-signed cert). A volume that legitimately cannot be snapshotted should be
+              labelled velero.io/exclude-from-backup and recorded in ADR 0010, not left to fail
+              nightly.
+
         # Catches a BSL that fails validation while an older success keeps the staleness rule quiet.
         - alert: VeleroBackupValidationFailing
           expr: increase(velero_backup_validation_failure_total[6h]) > 0
