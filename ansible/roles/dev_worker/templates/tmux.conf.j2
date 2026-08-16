@@ -58,6 +58,12 @@ set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
 set -g @resurrect-capture-pane-contents 'on'
 set -g @continuum-restore 'on'
+# Keep the claude-dashboard session OUT of every snapshot. It is rebuilt from code at each boot, and
+# resurrect's restore renames windows by INDEX — so a snapshot whose window list has drifted relabels
+# the launcher's freshly-built dashboard, permanently (dev-worker-4 lost `home` this way for two
+# weeks). post-save-layout is the only hook handed the snapshot path AND run before `last` is
+# repointed at it. See files/tmux-resurrect-filter.sh; pinned by tests/test-tmux-persistence.sh.
+set -g @resurrect-hook-post-save-layout '/usr/local/bin/tmux-resurrect-filter'
 set -g @continuum-save-interval '{{ dev_worker_tmux_continuum_save_interval }}'
 run '~/.tmux/plugins/tpm/tpm'
 {% endif %}

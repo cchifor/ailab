@@ -130,6 +130,8 @@ git add ansible/secrets/dev-worker.sops.yaml
 - agents (both `c4` + `claude-agent`): `which claude codex` resolve under `~/.npm-global/bin`;
   `claude --version`, `codex --version`; `getfacl ~/.claude ~/.codex` shows c4 `rx`
 - persistence: start a tmux pane, reboot the VM, confirm tmux-continuum restored the session
+- dashboard layout: `tmux list-windows -t sessions -F '#{window_name}'` must be exactly
+  `home system jobs github docker cluster cheats` — see the dashboard/resurrect note below
 - **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The uniform 4 GiB
   balloon floor guarantees each guest's idle working set; a busy worker inflates toward 16 GiB when
   the node's LLM is idle-unloaded. If a host shows sustained pressure, the first lever is its
@@ -173,3 +175,26 @@ second factor at the edge.
   intentionally not ported (gated by `dev_worker_tmp_hygiene_full`, a follow-up if ever needed).
 - Scoped kubeconfig fan-out into `~/.kube/config` is operator/tofu work (out of scope for the role);
   the dashboard's k9s window degrades gracefully without one.
+- **The `sessions` dashboard is deliberately excluded from tmux-resurrect snapshots.** It is code
+  (`claude-dashboard`) rebuilt at every boot, whereas resurrect's restore renames windows **by index**
+  and does not check that the window at that index is the one it saved. Since the launcher builds the
+  dashboard exactly as the tmux server starts — which is when continuum fires its restore — both write
+  the same session, and a snapshot whose window list has drifted wins. `@resurrect-hook-post-save-layout`
+  (`/usr/local/bin/tmux-resurrect-filter`) strips the dashboard from each snapshot before resurrect
+  repoints `last` at it. **`main` and ad-hoc sessions are still saved and restored** — this is not a
+  persistence opt-out. Renaming `$SESSION` in `claude-dashboard.sh` without renaming
+  `DASHBOARD_SESSION` in the filter silently re-arms the bug; `just test-dev-worker` pins them together.
+  - How it presented (dev-worker-4, 2026-08-02 → 2026-08-16): `home` is the one window left as a plain
+    shell, so exiting it closed it for good; `renumber-windows on` slid the rest into indices 1–6 and
+    the next snapshot recorded those six. At the following boot the launcher rebuilt all seven windows
+    correctly and the restore then relabelled 1–6 from that stale snapshot, sliding every name one
+    window left (the `home` shell became "system", htop became "jobs", …) while index 7 kept its own
+    name, so `cheats` appeared twice. The mislabelled result was saved again 15 minutes later, which is
+    what made it survive three reboots. Nothing goes red in this state — the unit is `active`, no log
+    line is written, and there are still seven windows — so `tmux list-windows` is the only check.
+  - Repairing a worker already in that state: the windows are in the right order and only the *names*
+    are wrong, so rename in place (`tmux rename-window -t sessions:<i> <name>`) rather than killing the
+    session — window 1 is `home` and usually has a live `claude` in it. Also kill any pane whose
+    `pane_start_command` mentions `resurrect/restore/pane_contents` (restore debris), and run the
+    filter once over `$(readlink -f ~/.local/share/tmux/resurrect/last)` so a reboot before the next
+    save cannot restore the corruption.

@@ -132,6 +132,11 @@ test-gitea-runner:
     bash {{ansible_dir}}/roles/gitea_runner/tests/test-cleanup.sh
     bash {{ansible_dir}}/roles/gitea_runner/tests/test-reclaim.sh
 
+# Test the dev-worker tmux persistence wiring (drives a private tmux server; no VM needed).
+# On Windows/Git Bash there is no tmux, so section [A] reports NOT RUN — CI sets REQUIRE_TMUX=1.
+test-dev-worker:
+    bash {{ansible_dir}}/roles/dev_worker/tests/test-tmux-persistence.sh
+
 # Lint
 lint:
     cd {{ansible_dir}} && ansible-lint || true
