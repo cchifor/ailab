@@ -1,0 +1,57 @@
+# dev_worker script tests — the check that pins the claude-dashboard/tmux-resurrect collision.
+#
+# WHY THIS EXISTS: the dashboard layout is code that a plugin can silently overwrite. tmux-resurrect
+# restores window names BY INDEX, so a snapshot whose window list has drifted relabels the launcher's
+# freshly-built windows — and the relabelled result is what gets saved 15 minutes later, which makes it
+# permanent. dev-worker-4 lost its `home` window to exactly that on 2026-08-02 and nobody noticed for
+# two weeks, because nothing fails: no unit goes red, no log line is written, the window count is even
+# still 7. Three of the four couplings that keep the fix working (session name, hook name, install
+# path) break just as quietly, so a test is the only thing that can notice.
+#
+# WHY .gitea/ AND NOT .github/: Gitea reads .gitea/workflows and, once that directory exists, ignores
+# .github/workflows entirely — the convention this repo already set (broker-inventory.yaml).
+#
+# FAIL CLOSED, following runner-scripts.yaml: ONE job, no `needs:`, no matrix, no aggregator, no
+# `continue-on-error`, no `|| true`, and a timeout. REQUIRE_TMUX=1 is the load-bearing bit: without it
+# the suite tolerates a missing tmux(1) and reports the real-tmux section as NOT RUN, which is right on
+# a developer's Windows box and would be a silently hollow gate here.
+name: dev-worker-scripts
+
+on:
+  pull_request:
+    paths:
+      - "ansible/roles/dev_worker/files/**"
+      - "ansible/roles/dev_worker/tests/**"
+      - "ansible/roles/dev_worker/templates/**"
+      - "ansible/roles/dev_worker/tasks/**"
+      - ".gitea/workflows/dev-worker-scripts.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "ansible/roles/dev_worker/**"
+
+jobs:
+  dev-worker-scripts:
+    name: dev-worker-scripts
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    # The suite spawns a private tmux server and a handful of `sleep` panes; it finishes in seconds.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      # Asserted rather than installed: the runner images already carry tmux (3.4), and an apt install
+      # here would turn "the tool this gate needs is gone" into a slow, network-dependent pass.
+      - name: assert tmux is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v tmux
+          tmux -V
+
+      - name: tmux-persistence wiring (real tmux server)
+        shell: bash
+        env:
+          REQUIRE_TMUX: "1"
+        run: |
+          set -euo pipefail
+          bash ansible/roles/dev_worker/tests/test-tmux-persistence.sh

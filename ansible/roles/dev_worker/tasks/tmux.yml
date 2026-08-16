@@ -40,6 +40,15 @@
     mode: "0755"
 
 # ---- tmux persistence (resurrect + continuum via TPM) ----
+# The snapshot filter must exist before the plugins do: @resurrect-hook-post-save-layout is invoked on
+# every save, and a hook pointing at a missing file silently saves the dashboard it is there to exclude.
+- name: Install the tmux-resurrect snapshot filter (keeps the code-generated dashboard out of snapshots)
+  ansible.builtin.copy:
+    src: tmux-resurrect-filter.sh
+    dest: /usr/local/bin/tmux-resurrect-filter
+    mode: "0755"
+  when: dev_worker_tmux_persistence | bool
+
 - name: Clone TPM {{ dev_worker_tpm_version }} per user
   become: true
   become_user: "{{ item.name }}"

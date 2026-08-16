@@ -24,6 +24,12 @@ fi
 # `home` is a plain shell (typing exit closes it). Every other long-lived window is wrapped in
 # `while true; do CMD; sleep 0.5; done` so a quit rebuilds the view instead of killing the window.
 # Order matters — windows are created in the order presented to the user.
+#
+# This layout is code, not state: it is rebuilt from scratch at every boot, so closing `home` costs it
+# only until the next one. That holds ONLY because tmux-resurrect is stopped from snapshotting this
+# session (files/tmux-resurrect-filter.sh) — its restore renames windows by index, and a stale snapshot
+# would otherwise relabel these windows permanently. Renaming $SESSION here without renaming it there
+# re-arms that bug; tests/test-tmux-persistence.sh pins the two together.
 tmux new-session  -d -s "$SESSION" -n home -c "/workspace/$USER"
 tmux new-window   -t "$SESSION:" -n system  'while true; do htop; sleep 0.5; done'
 tmux new-window   -t "$SESSION:" -n jobs    'while true; do journalctl -u "claude-job@*.service" -f --no-pager 2>/dev/null || sudo journalctl -f; sleep 0.5; done'
