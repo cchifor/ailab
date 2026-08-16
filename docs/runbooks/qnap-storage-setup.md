@@ -163,11 +163,73 @@ so a thin LUN that reaches its volsize keeps serving writes normally.
 **What was done here:** set `compression=lz4` on all 15 LUN zvols (they were `compression=off` while
 the parent share had it on). Applies to newly written blocks only.
 
+## 7. QNAP-native notifications — cluster side DONE, NAS side is a UI step
+
+Prometheus can tell you the NAS is sick; it cannot tell you anything when the *cluster* is down.
+That is why the NAS needs its own outbound alerting, independent of Kubernetes. Two channels, doing
+different jobs — set up **both**:
+
+### 7a. ntfy (rich, self-hosted, open source — but shares the cluster's fate)
+
+Everything on the cluster side is built and verified:
+
+- ntfy user **`qnap`**, **write-only** on topic **`qnap-alerts`** — seeded declaratively by the
+  `postStart` hook in `monitoring/ntfy.yaml`, password in `ntfy-qnap-auth.sops.yaml`. Write-only is
+  load-bearing: the credential necessarily rides in a URL query string (below), so it must not be
+  able to read alerts back. Verified: publish `200`, read `403`.
+- Verified reachable **from the NAS itself** (`curl` → `200`), so DNS, egress, Cloudflare TLS and
+  the credential are all proven from the box that will actually send.
+
+The remaining step is UI-only. QuTS hero exposes **no CLI and no usable API** for Notification
+Center: there is no `qcli_notification`, `qsh nc.*` is undocumented and silent, and `nc.cgi` returns
+403 for CGI-derived sessions (`authLogin.cgi` yields `authPassed=1` but the sid then fails with
+`authPassed=0`). Its config lives in a multi-table MyISAM schema under `/etc/config/nc/db/nc/`
+(`event_channel`, `event_receiver`, `policy`, `policy_apps`, …) — hand-writing rows there is how you
+get notification config that looks correct and never fires, so don't.
+
+**Notification Center → Service Account and Device Pairing → SMS → Add SMSC Service → provider
+`custom`**, then paste the URL below. Leave the provider's own Username/Password fields blank — ntfy
+needs its credential inside the `auth` query parameter, and QNAP cannot send an `Authorization`
+header.
+
+```
+https://ntfy.chifor.me/qnap-alerts/publish?message=@@Text@@&title=ai-storage%20@@SEVERITY@@&priority=high&tags=floppy_disk&auth=<AUTH>
+```
+
+`<AUTH>` = `base64url("Basic " + base64("qnap:<password>"))`, `=` padding stripped. Regenerate after
+any password rotation:
+
+```bash
+python - <<'EOF'
+import base64
+pw = "<the ntfy-qnap-auth password>"
+print(base64.urlsafe_b64encode(b"Basic " + base64.b64encode(f"qnap:{pw}".encode())).decode().rstrip("="))
+EOF
+```
+
+Then a notification rule (**Notification Center → Notification Rules → Alert Notifications**) scoped
+to Storage & Snapshots / Hardware at severity Warning+, delivering to that SMS service.
+
+Available placeholders: `@@Text@@`, `@@SEVERITY@@`, `@@SERVER_NAME@@`, `@@DATE@@`, `@@TIME@@`,
+`@@APP@@`, `@@MODEL@@`. Check with the test-send button that `@@Text@@` arrives URL-encoded — if the
+NAS does not encode it, spaces and newlines will truncate the URL.
+
+Subscribe on the phone to `qnap-alerts` on the ntfy.chifor.me server you already use, as `ailab`.
+
+### 7b. myQNAPcloud push (the one that survives the cluster being down)
+
+Free with the QNAP ID this NAS is already registered under (`ai-storage`). This is the channel that
+still works when Kubernetes is the thing that has failed — ntfy cannot cover that case, because it
+runs in the cluster on a PVC backed by this very NAS. Enable **Notification Center → Service Account
+and Device Pairing → Push Service**, pair the Qmanager mobile app, and route the same
+Storage/Hardware rules to it. Not open source and event metadata transits QNAP's cloud, which is the
+price of the independence.
+
 ## Open items this audit did NOT close
 
 | Gap | Why it is still open |
 |---|---|
 | **No UPS** | Needs hardware. All 5 SSDs already report `unsafe_shutdowns: 2`. ZFS tolerates power loss; the exposure is the ext4 filesystems inside the iSCSI LUNs (Postgres, Gitea, Prometheus). |
-| **No QNAP-native notification** | Needs SMTP credentials, or a decision to point Notification Center at the in-cluster ntfy. Matters because it is the only alert path that still works when the *cluster* is what is down — Prometheus alerting cannot report its own storage dying. |
+| **QNAP-native notification** | Cluster side is built and verified (§7); the last mile is two UI steps in Notification Center, because QuTS hero exposes no CLI and no usable API for it. |
 | **`/mnt/ext` at 93%** | 29 MB free on the 417 MB QTS app partition (`/dev/md13`). All QNAP system files — nothing safe to prune by hand. Firmware updates and app installs write here, so it is a known wedge point. Not exposed over SNMP; check by hand. |
 | **Thin-LUN reclaim** | See §6. Needs a privileged `fstrim` DaemonSet; deliberately not built without an operator decision on the PSA/hostPath trade-off. |

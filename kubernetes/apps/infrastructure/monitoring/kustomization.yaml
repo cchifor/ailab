@@ -35,6 +35,7 @@ resources:
   - k6-load-rules.yaml # k6:* recording rules by (scenario, env) — the 7d baseline for the platform's nightly regression gate
   - soak-leak-rules.yaml # weekly-soak alerts: soak running (info), error rate >5%, container RSS-leak detection gated on an active soak
   - ntfy-auth.sops.yaml # SOPS: ntfy admin password (server seeding + Alertmanager receiver)
+  - ntfy-qnap-auth.sops.yaml # SOPS: write-only publisher the QNAP itself authenticates as (its Notification Center can only do a GET webhook, so the credential rides in a query string — hence write-only)
   - ntfy.yaml # self-hosted push notifications; Alertmanager routes all alerts here
   - storage-fabric-probe.yaml # per-node QNAP-fabric reachability (blackbox DaemonSet)
   - storage-fabric-rules.yaml # alerts on the probes
