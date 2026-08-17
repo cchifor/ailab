@@ -135,3 +135,24 @@ through 08-15 passed, 08-16 failed twice (daily + weekly).
 support data movement` — a fallback that captures nothing. They are per-job scratch that the reaper
 reclaims, so they are now explicitly labelled `velero.io/exclude-from-backup`. Nothing changed about
 what is protected; what changed is that it is now *stated* rather than discovered by reading warnings.
+
+**A PVC and its PV are separate resources to Velero**, so both halves need the label — excluding only
+the PV leaves the claim in the backup, and a restore would recreate a PVC whose volume was
+deliberately never captured. Five of the six pairs are now symmetric in this repo. The sixth cannot
+be: PV `af-sbx-stage-tenant-zero-platform-dev` is excluded here, but its claim lives in the
+**`agentforge-tenants`** repo (Flux Kustomization `agentforge-tenants`, `path ./tenants`, labelled
+`app.kubernetes.io/managed-by: agentforge-cp`) and carries no label.
+
+### Exclusions this repo cannot express
+
+Both of these are live-state-only and will silently revert if the object is re-provisioned. They
+belong together because they share one failure mode — *the label is not where the object is defined*:
+
+| Object | Defined in | Consequence if re-provisioned |
+|---|---|---|
+| PVC `strive-ailab/valkey-data-valkey-master-0` | `cchifor/platform` (StatefulSet volumeClaimTemplate) | nightly partial failure re-arms |
+| PVC `af-tenant-tenant-zero-platform-dev/af-sbx-stage-tenant-zero-platform-dev` | `agentforge-tenants` (`./tenants`) | claim silently re-enters the backup |
+
+`VeleroBackupPartiallyFailing` is the compensating control for the first. The second is benign today
+(the claim is captured, its data is not, and the data is scratch) but it is an inconsistency that
+should be closed in the owning repo rather than carried here.

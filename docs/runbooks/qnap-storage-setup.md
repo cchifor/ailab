@@ -196,8 +196,17 @@ header.
 https://ntfy.chifor.me/qnap-alerts/publish?message=@@Text@@&title=ai-storage%20@@SEVERITY@@&priority=high&tags=floppy_disk&auth=<AUTH>
 ```
 
-`<AUTH>` = `base64url("Basic " + base64("qnap:<password>"))`, `=` padding stripped. Regenerate after
-any password rotation:
+`<AUTH>` = `base64url("Basic " + base64("qnap:<password>"))`, `=` padding stripped.
+
+> **Rotating `ntfy-qnap-auth` is a TWO-SIDED operation.** The postStart hook reconciles ntfy to the
+> Secret on every pod start, so changing the Secret alone re-points ntfy and leaves the NAS holding
+> the old credential — its publishes then 401. The NAS's `?auth=` value is entered by hand in
+> Notification Center and exists nowhere in git, so nothing will reconcile it for you. Rotate the
+> Secret **and** re-paste the URL below, or don't rotate. This is deliberate: before the hook
+> reconciled, a rotation would have left the two silently diverged instead, which is worse — but it
+> is a coupling that did not exist when the hook only created users.
+
+Regenerate `<AUTH>` after any password rotation:
 
 ```bash
 python - <<'EOF'
