@@ -54,6 +54,24 @@ spec:
               running on the NAS (`getcfg SNMP "Service Enable"`; it is not enabled by default and a
               firmware update can reset it).
 
+        # absent() above only fires when ALL disk series vanish, so it is blind to the more likely
+        # case: ONE bay stops being reported (pulled disk, dropped row in the SNMP disk table, a
+        # truncated walk). The surviving four keep absent() false AND give QnapDiskSmartNotGood
+        # nothing to match, so a disappeared disk would be silent on every rule here — the same
+        # class of silence this file exists to remove. zpool1 is a 5-wide RAID-Z1 and the exporter
+        # walks a 5-row table, so anything other than 5 is wrong.
+        - alert: QnapDiskMetricsIncomplete
+          expr: count(qnap_disk_smart_status) != 5
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "QNAP is reporting {{ $value }} disks, expected 5"
+            description: >-
+              The SNMP disk table is not returning all five bays, so a missing disk would not be
+              caught by the SMART alert — it can only match rows that exist. Compare
+              `zpool status -v zpool1` on the NAS against the bays in Prometheus. If a disk really
+              was removed, this rule (not QnapDiskSmartNotGood) is the one that noticed.
+
         # Thresholds are set from MEASURED range, not from an idle sample. Over the first 20h of
         # scraping (which included a full pool scrub — the heaviest sustained IO this box sees, and
         # now a monthly cron) the observed bands were:

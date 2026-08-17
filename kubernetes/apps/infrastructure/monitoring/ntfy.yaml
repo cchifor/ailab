@@ -88,23 +88,40 @@ spec:
                   - |
                     for i in $(seq 1 60); do
                       if ntfy user list >/dev/null 2>&1; then
-                        # --ignore-exists rather than a `user list | grep` guard. grep -w is the
-                        # wrong tool here: `-` is not word-constituent, so an ACL line like
-                        # "- write-only access to topic qnap-alerts" satisfies `grep -w qnap` on its
-                        # own. A guard that matches a TOPIC name would skip the add, and the next
-                        # command would fail the hook — and a failing postStart kills the container,
-                        # so that is a crashloop of the thing that delivers every alert.
+                        # RECONCILE, don't just create. Each user is add-if-missing followed by an
+                        # unconditional change-pass/change-role/access, so the db is driven to match
+                        # the Secrets on every start.
+                        #
+                        # `add --ignore-exists` alone is NOT enough: it succeeds without touching an
+                        # existing user, so rotating either Secret would leave the old password in
+                        # user.db while the pod came up healthy — Alertmanager and the QNAP would
+                        # both start getting 401s with nothing saying so. Same for a role that
+                        # drifted: an existing `qnap` left at admin would silently defeat the
+                        # write-only restriction.
+                        #
+                        # `add --ignore-exists` also replaces an earlier `user list | grep -qw`
+                        # guard, which was wrong for a second reason: `-` is not word-constituent,
+                        # so the ACL line "- write-only access to topic qnap-alerts" satisfies
+                        # `grep -w qnap` by itself. A guard matching a TOPIC name would skip the add
+                        # and the next command would fail the hook — and a failing postStart kills
+                        # the container, crashlooping the thing that delivers every alert.
                         NTFY_PASSWORD="$NTFY_ADMIN_PASSWORD" \
                           ntfy user add --ignore-exists --role=admin ailab \
                           || { echo 'ntfy postStart: ailab user add failed' >&2; exit 1; }
+                        NTFY_PASSWORD="$NTFY_ADMIN_PASSWORD" ntfy user change-pass ailab \
+                          || { echo 'ntfy postStart: ailab change-pass failed' >&2; exit 1; }
+                        ntfy user change-role ailab admin \
+                          || { echo 'ntfy postStart: ailab change-role failed' >&2; exit 1; }
                         # The QNAP publisher. Seeded here for the same reason as ailab: the auth db
                         # lives on the PVC, so a volume rebuild would otherwise silently drop this
                         # user and the NAS's alerts would 401 into the void with nothing saying so.
                         NTFY_PASSWORD="$NTFY_QNAP_PASSWORD" \
                           ntfy user add --ignore-exists --role=user qnap \
                           || { echo 'ntfy postStart: qnap user add failed' >&2; exit 1; }
-                        # Re-asserted every start: a no-op when already granted, and it repairs the
-                        # ACL if the user survived but the grant did not.
+                        NTFY_PASSWORD="$NTFY_QNAP_PASSWORD" ntfy user change-pass qnap \
+                          || { echo 'ntfy postStart: qnap change-pass failed' >&2; exit 1; }
+                        ntfy user change-role qnap user \
+                          || { echo 'ntfy postStart: qnap change-role failed' >&2; exit 1; }
                         ntfy access qnap qnap-alerts write-only \
                           || { echo 'ntfy postStart: qnap ACL grant failed' >&2; exit 1; }
                         exit 0
