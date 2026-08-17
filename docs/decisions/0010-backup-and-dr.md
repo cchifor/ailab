@@ -89,3 +89,70 @@ count before mirroring) which tests the actual threat — a wiped/unreachable so
 it by delete count; the legs run independently and the exit code is aggregated; the Velero ServiceMonitor
 is enabled; and `backup-rules.yaml` alerts on **last-success staleness** for all three producers, since
 both failures presented as "running but not producing" rather than as an error rate.
+
+## Incident 2026-08-16 — one 19 MB cache volume read as "the backup chain is dead"
+
+`VeleroBackupStale` (critical) fired with the last fully-successful scheduled backup 41 h old. Nothing
+about the backup system was actually broken.
+
+**Root cause.** `csi-driver-nfs` implements a VolumeSnapshot by **tar-ing the volume directory** into
+the snapshot dir on the same share. `strive-ailab/valkey-data-valkey-master-0` holds Valkey's
+append-only file, which grows *while tar is reading it*, so the file outruns the size tar already wrote
+into the header and the snapshot dies with `archive/tar: write too long`. 119 of that backup's 131
+warnings and all 3 of its errors were this single volume. It is race-dependent — 08-11 failed, 08-12
+through 08-15 passed, 08-16 failed twice (daily + weekly).
+
+**Two distinct defects, both fixed:**
+
+1. *A tar-based snapshotter cannot be safe for an actively-appended file.* This is structural to
+   csi-driver-nfs, not a misconfiguration, and it applies to **every** nfs-csi volume with an open
+   writer (Loki's WAL is the other obvious candidate). Valkey here is a shared cache / rate-limit
+   store for ~15 Strive services whose system of record is Postgres, and the volume is 19 MB — so it
+   is now labelled `velero.io/exclude-from-backup: "true"` on both the PVC and the PV.
+   **That label is LIVE STATE ONLY, and that is a known fragility.** The PVC is created from a
+   StatefulSet `volumeClaimTemplate` in the `cchifor/platform` repo, so no manifest in this repo can
+   carry it; a re-provision of that PVC brings it back unlabelled and silently re-arms the nightly
+   partial failure. `VeleroBackupPartiallyFailing` (below) is what makes that recurrence loud
+   instead of silent — it is the compensating control for this gap, not just a nicety. Pin the label
+   in the platform repo alongside the `qnap-iscsi` move. That is a
+   deliberate, documented "we do not back this up", chosen over the alternatives: moving it to
+   `qnap-iscsi` (atomic ZFS block snapshot — the real structural fix, but it lives in the
+   `cchifor/platform` repo and needs a data migration) or switching it to Velero fs-backup (needs
+   `nodeAgent.disableHostPath: false`, reverting a deliberate Talos PSA decision, *and* a pod
+   annotation in that same foreign repo). **The `qnap-iscsi` move remains the right long-term
+   answer** and is the follow-up to open against the platform repo.
+2. *One volume could blank the whole chain's success signal.* `velero_backup_last_successful_timestamp`
+   only advances on a fully `Completed` backup, so a `PartiallyFailed` run is indistinguishable from a
+   dead backup system, 36 h later, at severity critical, naming no volume. `backup-rules.yaml` now also
+   carries **`VeleroBackupPartiallyFailing`** (`velero_backup_partial_failure_total`, warning, 24 h
+   window) so the partial case is named early and specifically while the staleness rule stays as the
+   backstop. Verified against live data before merge: the expression matched both of 2026-08-16's
+   partial failures.
+
+**Also found: 6 PVCs were never backed up at all, silently.** The AgentForge sandbox volumes
+(`af-sbx-{ws,stage,reaper,provision}-*`) are raw `nfs:` PVs with no CSI driver, so Velero logged
+`Cannot use CSI data mover ... Fall back to Velero native snapshot` + `VolumeSnapshotter plugin doesn't
+support data movement` — a fallback that captures nothing. They are per-job scratch that the reaper
+reclaims, so they are now explicitly labelled `velero.io/exclude-from-backup`. Nothing changed about
+what is protected; what changed is that it is now *stated* rather than discovered by reading warnings.
+
+**A PVC and its PV are separate resources to Velero**, so both halves need the label — excluding only
+the PV leaves the claim in the backup, and a restore would recreate a PVC whose volume was
+deliberately never captured. Five of the six pairs are now symmetric in this repo. The sixth cannot
+be: PV `af-sbx-stage-tenant-zero-platform-dev` is excluded here, but its claim lives in the
+**`agentforge-tenants`** repo (Flux Kustomization `agentforge-tenants`, `path ./tenants`, labelled
+`app.kubernetes.io/managed-by: agentforge-cp`) and carries no label.
+
+### Exclusions this repo cannot express
+
+Both of these are live-state-only and will silently revert if the object is re-provisioned. They
+belong together because they share one failure mode — *the label is not where the object is defined*:
+
+| Object | Defined in | Consequence if re-provisioned |
+|---|---|---|
+| PVC `strive-ailab/valkey-data-valkey-master-0` | `cchifor/platform` (StatefulSet volumeClaimTemplate) | nightly partial failure re-arms |
+| PVC `af-tenant-tenant-zero-platform-dev/af-sbx-stage-tenant-zero-platform-dev` | `agentforge-tenants` (`./tenants`) | claim silently re-enters the backup |
+
+`VeleroBackupPartiallyFailing` is the compensating control for the first. The second is benign today
+(the claim is captured, its data is not, and the data is scratch) but it is an inconsistency that
+should be closed in the owning repo rather than carried here.

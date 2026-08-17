@@ -17,6 +17,11 @@ spec:
   path: ./kubernetes/apps/qnap-storage
   prune: true
   wait: true
+  # NOTE: StorageClass is immutable except for allowVolumeExpansion, so any future edit to
+  # storageclass.yaml that touches another field will fail a server-side apply until `force: true`
+  # is set here (Flux then deletes and recreates the object). That is safe on this path — deleting a
+  # StorageClass does not touch already-bound PVs/PVCs and reclaimPolicy is Retain — but it is left
+  # OFF by default so an accidental edit fails loudly instead of silently recreating a class.
   decryption:
     provider: sops
     secretRef:

@@ -40,6 +40,7 @@ kind: PersistentVolume
 metadata:
   name: af-sbx-stage-tenant-zero-platform-dev
   labels:
+    velero.io/exclude-from-backup: "true" # raw nfs: PV (no CSI driver) -> Velero skips the data mover and the native-snapshot fallback is a NO-OP, so this was never actually backed up; contents are per-job scratch the reaper reclaims. Explicit beats silent (ADR 0010)
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
     agentforge.io/org: tenant-zero

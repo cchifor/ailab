@@ -64,3 +64,181 @@ python scripts/node-ssh.py 192.168.0.2 'mount -t nfs -o vers=4.0 10.55.0.254:/pv
   dd if=/dev/zero of=/mnt/t/x bs=1M count=3072 conv=fdatasync; rm /mnt/t/x; umount /mnt/t'
 # expect ~1.1 GB/s write over Thunderbolt
 ```
+
+---
+
+# Ongoing operation (added by the 2026-08-16 storage audit)
+
+The build steps above leave a working NAS but an **unmaintained and unwatched** one. These four items
+are what the audit added; all are on the box itself, so a factory reset or a firmware update that
+resets config can silently undo them — re-check them after either.
+
+## 4. Pool scrubbing — monthly
+
+The pool had **never been scrubbed** in the 68 days since `zpool create` (`zpool status` read
+`scan: none requested`; `zpool history` held only the create line). Note that `auto_data_scrubbing = 1`
+*was* set in `uLinux.conf` and meant nothing — do not trust that flag as evidence a scrub runs.
+
+On RAID-Z1 a scrub is the only thing that finds latent corruption before a second fault makes it
+unrecoverable. Now scheduled in the persistent QNAP crontab:
+
+```
+0 5 1 * * /sbin/zpool scrub zpool1     # /etc/config/crontab, 05:00 on the 1st
+```
+
+Added idempotently and reloaded with `crontab /etc/config/crontab`. Original saved as
+`/etc/config/crontab.bak.audit`. First run took **3m43s** on this pool (985 G allocated, all NVMe) and
+repaired 0 with 0 errors — cheap enough that monthly is not worth debating.
+
+```bash
+python scripts/qnap-ssh.py "zpool status zpool1 | head -4"   # check scan: line
+```
+
+## 5. SNMP — the NAS's only Prometheus scrape
+
+The NAS was the one major component with **no metrics scrape at all** (only a blackbox TCP probe to
+2049/3260), and it has no SMTP either, so a failed drive in the RAID-Z1 would have alerted **nobody**.
+
+SNMP is now enabled, and `kubernetes/apps/infrastructure/monitoring/qnap-snmp-exporter.yaml` scrapes
+it. Security matters here: the factory `/etc/config/snmpd.conf` ships **`rwcommunity public`** — a
+writable agent — so it was rewritten before the service was started:
+
+- `rwcommunity` removed entirely; a single random read-only community
+- source-restricted to `192.168.0.0/23` + `10.55.0.0/24` + `10.55.1.0/24`
+- community lives in the SOPS secret `qnap-snmp-auth` (monitoring ns); original config saved as
+  `/etc/config/snmpd.conf.bak.audit`
+
+**If you ever re-enable SNMP from the QNAP UI, re-check that `rwcommunity` did not come back.**
+
+Covered: per-disk SMART verdict + temperature, disk model/capacity, fan RPM, system + CPU temperature,
+RAM. **Not covered** — the QNAP MIB does not expose ZFS pool state or capacity at all; the only
+"volume" table it serves describes the 1 GB system volume. Pool DEGRADED is caught indirectly via the
+per-disk SMART metric. Verify with:
+
+```bash
+python scripts/qnap-ssh.py 'getcfg SNMP "Service Enable"'    # TRUE
+# then, in-cluster:
+kubectl --context admin@ai -n monitoring logs deploy/qnap-snmp-exporter
+```
+
+## 6. Thin-LUN reclaim — UNRESOLVED, and why
+
+The `qnap-iscsi` LUNs are thin zvols (`refreservation=none`). Nothing ever tells the array which
+blocks the guest freed, so allocation only ratchets up: **103.5 GB allocated on the NAS against
+55.4 GiB actually used** inside the filesystems (~48 GB stale). Worst case is the Prometheus LUN at
+43.1 G of a 48 G volsize (90%) while holding 17.2 GiB — the source of the recurring `LUN has reached
+the threshold (90%)` events (275 since June, across several LUNs, seen by no one until the audit).
+
+**`mountOptions: [discard]` does not work on this backend.** It was implemented, measured, and
+reverted. The Kubernetes half is fine — kubelet passes the option down faithfully:
+
+```
+volume_capability:<mount:<fs_type:"ext4" mount_flags:"discard" > >    # NodeStageVolume request
+```
+
+but `csi.trident.qnap.io` drops it. Its `NodeStageVolume` performs no mount at all (`target=` empty);
+the real mount happens during publish and logs as:
+
+```
+mount_linux.MountDevice device=/dev/sdf mountpoint=/var/lib/kubelet/... options=
+```
+
+`options=` is empty. The driver mounts using its own `publish_context.mountOptions`, which is `""`,
+and there is no knob for it in either the StorageClass parameters or the TridentBackendConfig — the
+`qnap_config` storage pools expose only `serviceLevel` / `labels` / `features`, with no `defaults`
+block. Confirm for yourself with:
+
+```bash
+kubectl --context admin@ai -n trident logs trident-node-linux-<pod> -c trident-main \
+  | grep -E "MountDevice|mount_flags"
+```
+
+**What is left.** Reclaim on this backend needs a periodic `fstrim` against the kubelet mount paths,
+which requires a **privileged pod with hostPath** — a real security-posture decision on a cluster
+that runs `baseline` PSA and deliberately set `nodeAgent.disableHostPath` on Velero. That trade-off
+is the operator's to make, so nothing was built. Weigh it against the actual impact: this is wasted
+capacity and alert noise on a pool with 5.62 TB free, not a availability risk — ZFS is copy-on-write,
+so a thin LUN that reaches its volsize keeps serving writes normally.
+
+**What was done here:** set `compression=lz4` on all 15 LUN zvols (they were `compression=off` while
+the parent share had it on). Applies to newly written blocks only.
+
+## 7. QNAP-native notifications — cluster side DONE, NAS side is a UI step
+
+Prometheus can tell you the NAS is sick; it cannot tell you anything when the *cluster* is down.
+That is why the NAS needs its own outbound alerting, independent of Kubernetes. Two channels, doing
+different jobs — set up **both**:
+
+### 7a. ntfy (rich, self-hosted, open source — but shares the cluster's fate)
+
+Everything on the cluster side is built and verified:
+
+- ntfy user **`qnap`**, **write-only** on topic **`qnap-alerts`** — seeded declaratively by the
+  `postStart` hook in `monitoring/ntfy.yaml`, password in `ntfy-qnap-auth.sops.yaml`. Write-only is
+  load-bearing: the credential necessarily rides in a URL query string (below), so it must not be
+  able to read alerts back. Verified: publish `200`, read `403`.
+- Verified reachable **from the NAS itself** (`curl` → `200`), so DNS, egress, Cloudflare TLS and
+  the credential are all proven from the box that will actually send.
+
+The remaining step is UI-only. QuTS hero exposes **no CLI and no usable API** for Notification
+Center: there is no `qcli_notification`, `qsh nc.*` is undocumented and silent, and `nc.cgi` returns
+403 for CGI-derived sessions (`authLogin.cgi` yields `authPassed=1` but the sid then fails with
+`authPassed=0`). Its config lives in a multi-table MyISAM schema under `/etc/config/nc/db/nc/`
+(`event_channel`, `event_receiver`, `policy`, `policy_apps`, …) — hand-writing rows there is how you
+get notification config that looks correct and never fires, so don't.
+
+**Notification Center → Service Account and Device Pairing → SMS → Add SMSC Service → provider
+`custom`**, then paste the URL below. Leave the provider's own Username/Password fields blank — ntfy
+needs its credential inside the `auth` query parameter, and QNAP cannot send an `Authorization`
+header.
+
+```
+https://ntfy.chifor.me/qnap-alerts/publish?message=@@Text@@&title=ai-storage%20@@SEVERITY@@&priority=high&tags=floppy_disk&auth=<AUTH>
+```
+
+`<AUTH>` = `base64url("Basic " + base64("qnap:<password>"))`, `=` padding stripped.
+
+> **Rotating `ntfy-qnap-auth` is a TWO-SIDED operation.** The postStart hook reconciles ntfy to the
+> Secret on every pod start, so changing the Secret alone re-points ntfy and leaves the NAS holding
+> the old credential — its publishes then 401. The NAS's `?auth=` value is entered by hand in
+> Notification Center and exists nowhere in git, so nothing will reconcile it for you. Rotate the
+> Secret **and** re-paste the URL below, or don't rotate. This is deliberate: before the hook
+> reconciled, a rotation would have left the two silently diverged instead, which is worse — but it
+> is a coupling that did not exist when the hook only created users.
+
+Regenerate `<AUTH>` after any password rotation:
+
+```bash
+python - <<'EOF'
+import base64
+pw = "<the ntfy-qnap-auth password>"
+print(base64.urlsafe_b64encode(b"Basic " + base64.b64encode(f"qnap:{pw}".encode())).decode().rstrip("="))
+EOF
+```
+
+Then a notification rule (**Notification Center → Notification Rules → Alert Notifications**) scoped
+to Storage & Snapshots / Hardware at severity Warning+, delivering to that SMS service.
+
+Available placeholders: `@@Text@@`, `@@SEVERITY@@`, `@@SERVER_NAME@@`, `@@DATE@@`, `@@TIME@@`,
+`@@APP@@`, `@@MODEL@@`. Check with the test-send button that `@@Text@@` arrives URL-encoded — if the
+NAS does not encode it, spaces and newlines will truncate the URL.
+
+Subscribe on the phone to `qnap-alerts` on the ntfy.chifor.me server you already use, as `ailab`.
+
+### 7b. myQNAPcloud push (the one that survives the cluster being down)
+
+Free with the QNAP ID this NAS is already registered under (`ai-storage`). This is the channel that
+still works when Kubernetes is the thing that has failed — ntfy cannot cover that case, because it
+runs in the cluster on a PVC backed by this very NAS. Enable **Notification Center → Service Account
+and Device Pairing → Push Service**, pair the Qmanager mobile app, and route the same
+Storage/Hardware rules to it. Not open source and event metadata transits QNAP's cloud, which is the
+price of the independence.
+
+## Open items this audit did NOT close
+
+| Gap | Why it is still open |
+|---|---|
+| **No UPS** | Needs hardware. All 5 SSDs already report `unsafe_shutdowns: 2`. ZFS tolerates power loss; the exposure is the ext4 filesystems inside the iSCSI LUNs (Postgres, Gitea, Prometheus). |
+| **QNAP-native notification** | Cluster side is built and verified (§7); the last mile is two UI steps in Notification Center, because QuTS hero exposes no CLI and no usable API for it. |
+| **`/mnt/ext` at 93%** | 29 MB free on the 417 MB QTS app partition (`/dev/md13`). All QNAP system files — nothing safe to prune by hand. Firmware updates and app installs write here, so it is a known wedge point. Not exposed over SNMP; check by hand. |
+| **Thin-LUN reclaim** | See §6. Needs a privileged `fstrim` DaemonSet; deliberately not built without an operator decision on the PSA/hostPath trade-off. |

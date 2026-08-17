@@ -1,0 +1,123 @@
+# Alerts on the QNAP itself (ai-storage), scraped via qnap-snmp-exporter.yaml.
+#
+# Context from the 2026-08-16 storage audit: the NAS is the single failure domain for all cluster
+# storage AND for the authoritative local backup copy (versitygw), and it had zero alerting of any
+# kind. Two independent notification paths were both absent:
+#   * Prometheus — no scrape job existed for the NAS at all (only a blackbox TCP probe).
+#   * The NAS itself — no SMTP and no admin e-mail are configured, so QuTS hero's own event
+#     notifications go nowhere. It had logged 275 LUN-threshold warnings since June, unseen.
+# This file closes the first path. The second is still open and needs operator input (SMTP
+# credentials, or a decision to point QuLog/Notification Center at the in-cluster ntfy) — it matters
+# because it is the only path that still works when the CLUSTER is the thing that is down.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up (same convention as
+# storage-fabric-rules.yaml / backup-rules.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: qnap
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: qnap
+      rules:
+        # THE load-bearing rule. zpool1 is a 5-wide RAID-Z1: it survives one drive, and a second
+        # loss while degraded is total data loss. Before this rule a failed drive was silent on
+        # every channel. snmp_exporter renders the DisplayString OID as a label, so the match is on
+        # the label rather than the sample value.
+        - alert: QnapDiskSmartNotGood
+          expr: qnap_disk_smart_status{qnap_disk_smart_status!="GOOD"} == 1
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "QNAP disk {{ $labels.disk }} SMART is {{ $labels.qnap_disk_smart_status }} (not GOOD)"
+            description: >-
+              Bay {{ $labels.disk }} on ai-storage reports SMART "{{ $labels.qnap_disk_smart_status }}".
+              zpool1 is RAID-Z1 — it tolerates exactly one failed device, so treat this as a
+              replace-now event, not a watch-item. Confirm with `zpool status -v zpool1` on the NAS
+              and check the remaining four disks before pulling anything.
+
+        # Catches the monitoring going blind — the exact condition this whole subsystem was added to
+        # remove. absent() is load-bearing: if the exporter stops returning series, a threshold rule
+        # evaluates to nothing rather than firing.
+        - alert: QnapMetricsAbsent
+          expr: absent(qnap_disk_smart_status)
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "No SNMP metrics from the QNAP for >15m"
+            description: >-
+              qnap-snmp-exporter is returning no disk series for ai-storage, so NAS health is
+              unmonitored again. Check the exporter pod in `monitoring`, then that snmpd is still
+              running on the NAS (`getcfg SNMP "Service Enable"`; it is not enabled by default and a
+              firmware update can reset it).
+
+        # absent() above only fires when ALL disk series vanish, so it is blind to the more likely
+        # case: ONE bay stops being reported (pulled disk, dropped row in the SNMP disk table, a
+        # truncated walk). The surviving four keep absent() false AND give QnapDiskSmartNotGood
+        # nothing to match, so a disappeared disk would be silent on every rule here — the same
+        # class of silence this file exists to remove. zpool1 is a 5-wide RAID-Z1 and the exporter
+        # walks a 5-row table, so anything other than 5 is wrong.
+        - alert: QnapDiskMetricsIncomplete
+          expr: count(qnap_disk_smart_status) != 5
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "QNAP is reporting {{ $value }} disks, expected 5"
+            description: >-
+              The SNMP disk table is not returning all five bays, so a missing disk would not be
+              caught by the SMART alert — it can only match rows that exist. Compare
+              `zpool status -v zpool1` on the NAS against the bays in Prometheus. If a disk really
+              was removed, this rule (not QnapDiskSmartNotGood) is the one that noticed.
+
+        # Thresholds set from MEASURED distribution, over 13.6h of history (2026-08-16T16:57Z
+        # onward, 818 samples at a 60s scrape):
+        #   disk   54-64 C  (p99 57, zero samples above 70)
+        #   system 44-72 C  (median 45, p95 51, p99 61)
+        #   cpu    35-42 C        fans 4261-6115 RPM
+        #
+        # These were briefly raised to 75/75 and are now back at 70/65. That raise was an
+        # OVERCORRECTION and the reasoning behind it was wrong, so it is worth recording why rather
+        # than silently flipping the numbers back:
+        #
+        # The claim was that system temp "spent 4 minutes above 65, so a longer scrub would have
+        # held it past `for: 15m` and paged". Four samples above 65 is true; four consecutive
+        # minutes is not. They fall in two clusters nine hours apart —
+        #   17:06 (66)  17:11 (72)   |   02:11 (68)  02:12 (66)
+        # — so the LONGEST CONTIGUOUS RUN above 65 is 2 minutes, and every sample in between resets
+        # the pending state. `for: 15m` is 7.5x longer than the longest excursion; it was never
+        # close to firing. Sample count is not run length, and only run length matters to `for:`.
+        #
+        # With that corrected, raising the threshold only LOSES coverage: it gives up detection of a
+        # sustained 66-74 C condition — degraded cooling, which is precisely what these alerts are
+        # for — while removing no false page, because there was never one to remove. A threshold
+        # sitting below an observed maximum is fine when the maximum is a 2-minute transient and a
+        # 15-minute `for:` sits behind it. That is exactly this shape.
+        - alert: QnapDiskTemperatureHigh
+          expr: qnap_disk_temperature_celsius > 70
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "QNAP disk {{ $labels.disk }} at {{ $value }} C"
+            description: "Bay {{ $labels.disk }} on ai-storage has been above 70 C for 15m. Measured range is 54-64 C (p99 57); no sample has ever exceeded 70. Check fans and intake airflow."
+
+        - alert: QnapSystemTemperatureHigh
+          expr: qnap_system_temperature_celsius > 65
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "QNAP system temperature {{ $value }} C"
+            description: "ai-storage chassis temperature has been above 65 C for 15m CONTINUOUSLY. Measured range is 44-72 C but median is 45 and the longest run above 65 is 2 minutes, so sustaining it for 15m means cooling has genuinely degraded."
+
+        # A dead fan in a 5-NVMe chassis becomes a thermal problem quickly, and the NAS will not
+        # tell anyone on its own. `== 0` needs no threshold tuning; only the annotation quotes a
+        # range, and it quotes the measured one.
+        - alert: QnapFanStopped
+          expr: qnap_fan_rpm == 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "QNAP fan {{ $labels.fan }} reads 0 RPM"
+            description: "{{ $labels.fan }} on ai-storage has read 0 RPM for 5m. Both system fans normally run 4261-6115 RPM, scaling with load."

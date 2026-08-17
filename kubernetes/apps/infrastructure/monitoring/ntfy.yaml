@@ -67,6 +67,16 @@ spec:
                 secretKeyRef:
                   name: ntfy-auth
                   key: password
+            # Publisher identity for the QNAP (ai-storage). QuTS hero's Notification Center can only
+            # reach a webhook through its "custom SMS service provider", which does a plain HTTP GET
+            # and cannot set an Authorization header — so the NAS authenticates via ntfy's ?auth=
+            # query parameter, and this user is deliberately write-only on one topic so a URL that
+            # necessarily carries its credential in a query string cannot be used to READ alerts.
+            - name: NTFY_QNAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ntfy-qnap-auth
+                  key: password
           # The auth db only exists AFTER the server's first start, so seed the `ailab` admin user via
           # a postStart hook that waits for the db (idempotent), not an initContainer.
           lifecycle:
@@ -78,11 +88,42 @@ spec:
                   - |
                     for i in $(seq 1 60); do
                       if ntfy user list >/dev/null 2>&1; then
-                        if ! ntfy user list 2>/dev/null | grep -qw ailab; then
-                          printf '%s\n%s\n' "$NTFY_ADMIN_PASSWORD" "$NTFY_ADMIN_PASSWORD" \
-                            | ntfy user add --role=admin ailab \
-                            || { echo 'ntfy postStart: user add failed' >&2; exit 1; }
-                        fi
+                        # RECONCILE, don't just create. Each user is add-if-missing followed by an
+                        # unconditional change-pass/change-role/access, so the db is driven to match
+                        # the Secrets on every start.
+                        #
+                        # `add --ignore-exists` alone is NOT enough: it succeeds without touching an
+                        # existing user, so rotating either Secret would leave the old password in
+                        # user.db while the pod came up healthy — Alertmanager and the QNAP would
+                        # both start getting 401s with nothing saying so. Same for a role that
+                        # drifted: an existing `qnap` left at admin would silently defeat the
+                        # write-only restriction.
+                        #
+                        # `add --ignore-exists` also replaces an earlier `user list | grep -qw`
+                        # guard, which was wrong for a second reason: `-` is not word-constituent,
+                        # so the ACL line "- write-only access to topic qnap-alerts" satisfies
+                        # `grep -w qnap` by itself. A guard matching a TOPIC name would skip the add
+                        # and the next command would fail the hook — and a failing postStart kills
+                        # the container, crashlooping the thing that delivers every alert.
+                        NTFY_PASSWORD="$NTFY_ADMIN_PASSWORD" \
+                          ntfy user add --ignore-exists --role=admin ailab \
+                          || { echo 'ntfy postStart: ailab user add failed' >&2; exit 1; }
+                        NTFY_PASSWORD="$NTFY_ADMIN_PASSWORD" ntfy user change-pass ailab \
+                          || { echo 'ntfy postStart: ailab change-pass failed' >&2; exit 1; }
+                        ntfy user change-role ailab admin \
+                          || { echo 'ntfy postStart: ailab change-role failed' >&2; exit 1; }
+                        # The QNAP publisher. Seeded here for the same reason as ailab: the auth db
+                        # lives on the PVC, so a volume rebuild would otherwise silently drop this
+                        # user and the NAS's alerts would 401 into the void with nothing saying so.
+                        NTFY_PASSWORD="$NTFY_QNAP_PASSWORD" \
+                          ntfy user add --ignore-exists --role=user qnap \
+                          || { echo 'ntfy postStart: qnap user add failed' >&2; exit 1; }
+                        NTFY_PASSWORD="$NTFY_QNAP_PASSWORD" ntfy user change-pass qnap \
+                          || { echo 'ntfy postStart: qnap change-pass failed' >&2; exit 1; }
+                        ntfy user change-role qnap user \
+                          || { echo 'ntfy postStart: qnap change-role failed' >&2; exit 1; }
+                        ntfy access qnap qnap-alerts write-only \
+                          || { echo 'ntfy postStart: qnap ACL grant failed' >&2; exit 1; }
                         exit 0
                       fi
                       sleep 1

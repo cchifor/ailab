@@ -1,0 +1,249 @@
+# snmp_exporter pointed at the QNAP (ai-storage, TBS-h574TX / QuTS hero h5.2.9).
+#
+# WHY THIS EXISTS: the QNAP is the single failure domain for ALL cluster storage (nfs-csi +
+# qnap-iscsi + the versitygw backup bucket — ADR 0010 says so explicitly), and until this file it
+# was the ONLY major component with no Prometheus scrape at all. The 2026-08-16 storage audit found
+# 48 scrape jobs covering Proxmox hosts, CI runners, dev-workers and the LLM nodes — and nothing on
+# the NAS. Its sole coverage was storage-fabric-probe.yaml, a blackbox TCP connect to 2049/3260,
+# which answers "can I open a socket" and nothing else.
+#
+# What that blind spot meant in practice: the NAS had generated 275 LUN-threshold warnings since
+# June that nobody ever saw, and — the load-bearing case — a FAILED DRIVE in the 5-wide RAID-Z1
+# would have notified no one, because the box also has no SMTP configured (see qnap-rules.yaml).
+#
+# WHY SNMP AND NOT THE HTTP API: the QNAP enterprise MIB (1.3.6.1.4.1.24681) exposes per-disk SMART
+# verdict + temperature, system/CPU temperature, fan RPM and RAM directly, with a stock upstream
+# exporter image and no custom code to maintain. The OIDs below were each verified live against this
+# box on 2026-08-16 (not copied from a generic QNAP MIB — several published OID lists are for QTS,
+# not QuTS hero, and do not resolve here).
+#
+# KNOWN GAP: the MIB does NOT expose the ZFS pool (zpool1) state or capacity — the only "volume"
+# table it serves (1.3.6.1.4.1.24681.1.3.17) describes the 1 GB system volume, not the pool. Pool
+# DEGRADED is therefore covered indirectly: it is caused by a disk failing, and the per-disk SMART
+# metric below catches that. Direct pool-state scraping would need an SSH/HTTP-API exporter; that is
+# deliberately not built here (extra custom component + NAS admin credentials in-cluster).
+#
+# The community string is read-only and source-restricted on the NAS side (rocommunity <secret>
+# 192.168.0.0/23 + the two 10.55 fabric subnets, and the factory `rwcommunity public` was REMOVED
+# before SNMP was enabled). It lives in the SOPS secret qnap-snmp-auth, mounted as a second config
+# file so the OID definitions below stay readable in git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qnap-snmp-modules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: qnap-snmp-exporter
+data:
+  modules.yml: |
+    modules:
+      qnap:
+        # Tables are walked; scalars are fetched individually.
+        walk:
+          - 1.3.6.1.4.1.24681.1.3.11   # disk table  (name / temp / model / capacity / SMART)
+          - 1.3.6.1.4.1.24681.1.3.15   # fan table   (name / RPM)
+        get:
+          - 1.3.6.1.2.1.1.3.0          # sysUpTime (TimeTicks, 1/100 s)
+          - 1.3.6.1.4.1.24681.1.3.1.0  # CPU usage %
+          - 1.3.6.1.4.1.24681.1.3.2.0  # total RAM, bytes
+          - 1.3.6.1.4.1.24681.1.3.3.0  # free RAM, bytes
+          - 1.3.6.1.4.1.24681.1.3.5.0  # system temperature, C
+          - 1.3.6.1.4.1.24681.1.3.6.0  # CPU temperature, C
+        metrics:
+          # ---- per-disk (indexed 1..5, labelled with the bay name HDD1..HDD5) ----
+          # A DisplayString metric renders as qnap_disk_smart_status{qnap_disk_smart_status="GOOD"} 1,
+          # so the alert matches on the label, not the value. This is the drive-failure signal.
+          - name: qnap_disk_smart_status
+            oid: 1.3.6.1.4.1.24681.1.3.11.1.7
+            type: DisplayString
+            help: QNAP per-disk SMART verdict - 1.3.6.1.4.1.24681.1.3.11.1.7
+            indexes:
+              - labelname: disk_index
+                type: gauge
+            lookups:
+              - labels: [disk_index]
+                labelname: disk
+                oid: 1.3.6.1.4.1.24681.1.3.11.1.2
+                type: DisplayString
+          - name: qnap_disk_temperature_celsius
+            oid: 1.3.6.1.4.1.24681.1.3.11.1.3
+            type: gauge
+            help: QNAP per-disk temperature in Celsius - 1.3.6.1.4.1.24681.1.3.11.1.3
+            indexes:
+              - labelname: disk_index
+                type: gauge
+            lookups:
+              - labels: [disk_index]
+                labelname: disk
+                oid: 1.3.6.1.4.1.24681.1.3.11.1.2
+                type: DisplayString
+          - name: qnap_disk_capacity_bytes
+            oid: 1.3.6.1.4.1.24681.1.3.11.1.6
+            type: gauge
+            help: QNAP per-disk raw capacity in bytes - 1.3.6.1.4.1.24681.1.3.11.1.6
+            indexes:
+              - labelname: disk_index
+                type: gauge
+            lookups:
+              - labels: [disk_index]
+                labelname: disk
+                oid: 1.3.6.1.4.1.24681.1.3.11.1.2
+                type: DisplayString
+          - name: qnap_disk_model
+            oid: 1.3.6.1.4.1.24681.1.3.11.1.5
+            type: DisplayString
+            help: QNAP per-disk model string - 1.3.6.1.4.1.24681.1.3.11.1.5
+            indexes:
+              - labelname: disk_index
+                type: gauge
+            lookups:
+              - labels: [disk_index]
+                labelname: disk
+                oid: 1.3.6.1.4.1.24681.1.3.11.1.2
+                type: DisplayString
+          # ---- chassis fans ----
+          - name: qnap_fan_rpm
+            oid: 1.3.6.1.4.1.24681.1.3.15.1.3
+            type: gauge
+            help: QNAP chassis fan speed in RPM - 1.3.6.1.4.1.24681.1.3.15.1.3
+            indexes:
+              - labelname: fan_index
+                type: gauge
+            lookups:
+              - labels: [fan_index]
+                labelname: fan
+                oid: 1.3.6.1.4.1.24681.1.3.15.1.2
+                type: DisplayString
+          # ---- chassis / system scalars ----
+          - name: qnap_system_temperature_celsius
+            oid: 1.3.6.1.4.1.24681.1.3.5.0
+            type: gauge
+            help: QNAP system temperature in Celsius - 1.3.6.1.4.1.24681.1.3.5.0
+          - name: qnap_cpu_temperature_celsius
+            oid: 1.3.6.1.4.1.24681.1.3.6.0
+            type: gauge
+            help: QNAP CPU temperature in Celsius - 1.3.6.1.4.1.24681.1.3.6.0
+          - name: qnap_cpu_usage_percent
+            oid: 1.3.6.1.4.1.24681.1.3.1.0
+            type: gauge
+            help: QNAP CPU usage percent - 1.3.6.1.4.1.24681.1.3.1.0
+          - name: qnap_memory_total_bytes
+            oid: 1.3.6.1.4.1.24681.1.3.2.0
+            type: gauge
+            help: QNAP total system memory in bytes - 1.3.6.1.4.1.24681.1.3.2.0
+          - name: qnap_memory_free_bytes
+            oid: 1.3.6.1.4.1.24681.1.3.3.0
+            type: gauge
+            help: QNAP free system memory in bytes - 1.3.6.1.4.1.24681.1.3.3.0
+          # sysUpTime is the SNMP AGENT's uptime, not the NAS's — it resets when snmpd restarts,
+          # which is not the same thing as a reboot. Kept as a "did snmpd restart" signal; do not
+          # read it as NAS uptime.
+          - name: qnap_snmp_agent_uptime_timeticks
+            oid: 1.3.6.1.2.1.1.3.0
+            type: gauge
+            help: SNMP agent uptime in hundredths of a second (NOT NAS uptime) - 1.3.6.1.2.1.1.3.0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qnap-snmp-exporter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: qnap-snmp-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qnap-snmp-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qnap-snmp-exporter
+      annotations:
+        # MANUAL roll lever — bump this string by hand after editing modules.yml or the auths
+        # secret. It is not a checksum and nothing computes it, so it does NOT make the pod roll
+        # "when the config changes"; an edit without a bump leaves the old map running, because
+        # snmp_exporter reads config at start and on SIGHUP only. A kustomize configMapGenerator
+        # hash would automate the ConfigMap half, but the auths half is a SOPS secret that cannot be
+        # generated, so this stays deliberate-and-manual rather than half-automated and trusted.
+        # QnapMetricsAbsent catches a fully empty scrape but NOT a partially stale module map.
+        config-revision: "2026-08-17-1"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: snmp-exporter
+          image: prom/snmp-exporter:v0.28.0
+          args:
+            # --config.file is repeatable: the readable OID map from the ConfigMap plus the
+            # SOPS-encrypted auths block. Keeping them separate is what lets the OID definitions
+            # (and the reasoning above them) stay reviewable in git.
+            - --config.file=/etc/snmp_exporter/modules.yml
+            - --config.file=/etc/snmp_exporter/auths.yml
+            - --web.listen-address=:9116
+          ports:
+            - { name: metrics, containerPort: 9116 }
+          readinessProbe:
+            # snmp_exporter serves /-/healthy only — it has no /-/ready (that path 404s, which reads
+            # as a permanently-unready pod).
+            httpGet: { path: /-/healthy, port: metrics }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: modules, mountPath: /etc/snmp_exporter/modules.yml, subPath: modules.yml, readOnly: true }
+            - { name: auths, mountPath: /etc/snmp_exporter/auths.yml, subPath: auths.yml, readOnly: true }
+      volumes:
+        - name: modules
+          configMap: { name: qnap-snmp-modules }
+        - name: auths
+          secret: { secretName: qnap-snmp-auth }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qnap-snmp-exporter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: qnap-snmp-exporter
+spec:
+  selector:
+    app.kubernetes.io/name: qnap-snmp-exporter
+  ports:
+    - { name: metrics, port: 9116, targetPort: metrics }
+---
+# Multi-target exporter: scrape /snmp?target=<nas>&module=qnap&auth=qnap_v2. One target.
+# `instance` is relabelled to ai-storage so alerts name the box, not the exporter pod.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: qnap-snmp-exporter
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [monitoring]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qnap-snmp-exporter
+  endpoints:
+    - port: metrics
+      path: /snmp
+      params:
+        target: ["192.168.1.225"] # QNAP eth0 (mgmt); the 10.55 fabric IPs are not routable from pods
+        module: ["qnap"]
+        auth: ["qnap_v2"]
+      interval: 60s
+      scrapeTimeout: 30s
+      relabelings:
+        - targetLabel: instance
+          replacement: ai-storage

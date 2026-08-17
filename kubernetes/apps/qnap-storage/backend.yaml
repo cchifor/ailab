@@ -1,9 +1,16 @@
-# QNAP backend: qnap-nas iSCSI driver talking to the NAS HTTP API at 192.168.1.225 (eth0,
-# the mgmt NIC — reachable from the Talos VMs; the 10.55 TB fabric is not). networkInterfaces is
-# left empty so the iSCSI data portal defaults to storageAddress (192.168.1.225) — the named QTS
-# adapters ("Adapter1" etc.) didn't match what the HTTP API reports, and storageAddress is the only
-# IP the VMs can route to anyway. One virtual pool -> the qnap-iscsi StorageClass selects it via
-# labels. Creds in the SOPS secret backend-qts-secret.
+# QNAP backend: qnap-nas iSCSI driver talking to the NAS HTTP API. networkInterfaces is left empty
+# so the iSCSI data portal defaults to whatever storageAddress the credentials secret carries — the
+# named QTS adapters ("Adapter1" etc.) didn't match what the HTTP API reports.
+#
+# NOTE (corrected 2026-08-16): storageAddress is NOT the mgmt IP. It lives in the SOPS secret
+# backend-qts-secret and is currently 10.55.0.254 — the Thunderbolt storage fabric — which the Talos
+# VMs DO reach, via each Proxmox host's router/SNAT (storage-router.timer; see
+# monitoring/storage-fabric-rules.yaml). The QNAP event log confirms it: every Trident target is
+# created bound to "Thunderbolt Bridge (System Default)". An earlier version of this comment claimed
+# the portal was 192.168.1.225 because the fabric was unreachable from the VMs; that has not been
+# true since the host SNAT went in, and 192.168.1.225 is now only the documented FALLBACK (it is
+# still what the Velero BSL uses for versitygw). One virtual pool -> the qnap-iscsi StorageClass
+# selects it via labels. Creds also in backend-qts-secret.
 apiVersion: trident.qnap.io/v1
 kind: TridentBackendConfig
 metadata:

@@ -62,9 +62,77 @@ spec:
               -o jsonpath='{.status.message}'`. An `Unavailable` BSL fails every backup, and the
               usual cause is an unexpected top-level directory written into the `velero` bucket.
 
+        # The rule above aggregates with max() ACROSS schedules on purpose — it answers "is the
+        # chain producing anything at all", and the daily is what makes that question answerable
+        # every 24h. The cost is that a healthy daily masks a weekly that has stopped succeeding
+        # forever, and the weekly is the only 30-day restore point.
+        #
+        # The obvious fix — `max by (schedule)` on the rule above — is WRONG: the weekly
+        # legitimately goes 168h between successes, so a 36h threshold would fire against it
+        # permanently. It needs its own rule with its own threshold instead.
+        #
+        # 8 days = the 7-day cadence plus 24h of OVERRUN tolerance. It does NOT tolerate a missed
+        # Sunday: from a last success at Sun 03:00Z, a miss on the next Sunday puts age past 8d on
+        # the MONDAY after that first miss, and it fires then. (Tolerating one full miss and firing
+        # only on the second would need >14d.) An earlier revision of this comment claimed the
+        # opposite — "tolerates one missed Sunday but not two" — which was simply wrong arithmetic.
+        #
+        # Firing after the FIRST miss is the intended policy, not a side effect: this is the only
+        # 30-day restore point, and waiting a fortnight to learn it has stopped is the same
+        # "silently not producing" failure this whole rule group exists to catch. A healthy week
+        # peaks at 7d + runtime (~40min), so there is ~23h of margin against a false page.
+        #
+        # Note the two branches have different tolerances by nature: `> 691200` waits 8 days, while
+        # `absent()` + `for: 1h` fires within the hour. That is deliberate — an absent series means
+        # the rule can no longer see its target at all (a renamed or mistyped `schedule` label, the
+        # schedule deleted), which should be loud immediately rather than after a week of silence.
+        - alert: VeleroWeeklyBackupStale
+          expr: |
+            (time() - max(velero_backup_last_successful_timestamp{schedule="velero-weekly"})) > 691200
+            or absent(velero_backup_last_successful_timestamp{schedule="velero-weekly"})
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "No successful WEEKLY Velero backup in >8 days"
+            description: >-
+              The 30-day restore point is not being produced, even though the daily may look
+              healthy — VeleroBackupStale aggregates across schedules and cannot see this. Check
+              `kubectl -n velero get backups.velero.io -l velero.io/schedule-name=velero-weekly`
+              for the most recent attempt and its phase.
+
+        # A PartiallyFailed backup does NOT advance velero_backup_last_successful_timestamp, so ONE
+        # bad volume blanks the success signal for the whole chain and presents identically to "the
+        # backup system is dead" — 36h later VeleroBackupStale fires critical and says nothing about
+        # which volume. That is what happened on 2026-08-16: csi-driver-nfs implements a snapshot by
+        # tar-ing the volume directory, Valkey's AOF grew while tar was reading it
+        # ("archive/tar: write too long"), and that single 19 MB cache volume made both the daily and
+        # the weekly read as total failures. This rule names the condition early, at warning, while
+        # the rest of the backup is in fact fine — the staleness rule above stays as the backstop.
+        - alert: VeleroBackupPartiallyFailing
+          expr: increase(velero_backup_partial_failure_total{schedule!=""}[24h]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A scheduled Velero backup completed with errors in the last 24h"
+            description: >-
+              At least one scheduled backup finished PartiallyFailed, so its volume data is
+              incomplete AND the chain's last-success timestamp did not advance. Find the failing
+              item with `kubectl -n velero exec deploy/velero -- /velero backup logs <name>
+              --insecure-skip-tls-verify | grep level=error` (the flag is needed because versitygw
+              serves a self-signed cert). A volume that legitimately cannot be snapshotted should be
+              labelled velero.io/exclude-from-backup and recorded in ADR 0010, not left to fail
+              nightly.
+
         # Catches a BSL that fails validation while an older success keeps the staleness rule quiet.
+        # {schedule!=""} matches the other rules in this group: the metric also carries a series
+        # with an EMPTY schedule label for ad-hoc backups, so without the filter a hand-run
+        # `velero backup create` that fails validation pages critical for 6h as though a scheduled
+        # producer had died. Verified live — the empty-schedule series exists alongside the
+        # per-schedule ones.
         - alert: VeleroBackupValidationFailing
-          expr: increase(velero_backup_validation_failure_total[6h]) > 0
+          expr: increase(velero_backup_validation_failure_total{schedule!=""}[6h]) > 0
           for: 15m
           labels:
             severity: critical

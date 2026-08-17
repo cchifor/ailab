@@ -8,6 +8,12 @@ metadata:
   name: af-sbx-stage-tenant-zero-playground
   namespace: af-tenant-tenant-zero-playground
   labels:
+    # Must match the exclusion on its PV (agentforge-sandbox/staging-pv.yaml). Velero treats a PVC
+    # and its PV as SEPARATE resources: excluding only the PV leaves the claim in the backup, which
+    # would restore a PVC whose PV was deliberately never captured. Raw nfs: PV -> the data mover
+    # skips it and the native-snapshot fallback is a no-op, so this was never actually backed up;
+    # contents are per-job scratch the reaper reclaims (ADR 0010).
+    velero.io/exclude-from-backup: "true"
     app.kubernetes.io/part-of: agentforge
     agentforge.io/org: tenant-zero
     agentforge.io/workspace: playground
