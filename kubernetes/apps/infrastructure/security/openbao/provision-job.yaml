@@ -53,7 +53,7 @@ spec:
       containers:
         - name: provision
           # digest pinned by `just pin-bootstrap` (agentforge main 7ca6c99: operator roles + seeding).
-          image: registry.chifor.me/agentforge/orchestrator@sha256:602c3f7184bb14818aa5821dd4a234e9bd66406e76bcbe179c37a5debe72d0db
+          image: registry.chifor.me/agentforge/orchestrator@sha256:dde675de2532ba945198bc6b11d117a15f2663d9b70a65d0969574d1f3559d7e
           args: ["agentforge", "openbao-provision"]
           env:
             - { name: AF_OB_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
