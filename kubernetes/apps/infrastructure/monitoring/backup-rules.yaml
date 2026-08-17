@@ -69,8 +69,23 @@ spec:
         #
         # The obvious fix — `max by (schedule)` on the rule above — is WRONG: the weekly
         # legitimately goes 168h between successes, so a 36h threshold would fire against it
-        # permanently. It needs its own rule with its own threshold instead. 8 days tolerates one
-        # missed Sunday (a long run, a transient BSL blip) but not two.
+        # permanently. It needs its own rule with its own threshold instead.
+        #
+        # 8 days = the 7-day cadence plus 24h of OVERRUN tolerance. It does NOT tolerate a missed
+        # Sunday: from a last success at Sun 03:00Z, a miss on the next Sunday puts age past 8d on
+        # the MONDAY after that first miss, and it fires then. (Tolerating one full miss and firing
+        # only on the second would need >14d.) An earlier revision of this comment claimed the
+        # opposite — "tolerates one missed Sunday but not two" — which was simply wrong arithmetic.
+        #
+        # Firing after the FIRST miss is the intended policy, not a side effect: this is the only
+        # 30-day restore point, and waiting a fortnight to learn it has stopped is the same
+        # "silently not producing" failure this whole rule group exists to catch. A healthy week
+        # peaks at 7d + runtime (~40min), so there is ~23h of margin against a false page.
+        #
+        # Note the two branches have different tolerances by nature: `> 691200` waits 8 days, while
+        # `absent()` + `for: 1h` fires within the hour. That is deliberate — an absent series means
+        # the rule can no longer see its target at all (a renamed or mistyped `schedule` label, the
+        # schedule deleted), which should be loud immediately rather than after a week of silence.
         - alert: VeleroWeeklyBackupStale
           expr: |
             (time() - max(velero_backup_last_successful_timestamp{schedule="velero-weekly"})) > 691200
