@@ -160,10 +160,14 @@ spec:
       labels:
         app.kubernetes.io/name: qnap-snmp-exporter
       annotations:
-        # Roll the pod when either config changes — snmp_exporter reads its config at start and on
-        # SIGHUP only, and a stale module map fails open (empty scrape), which is exactly the silent
-        # non-coverage this whole file exists to remove.
-        checksum/config-version: "2026-08-16-1"
+        # MANUAL roll lever — bump this string by hand after editing modules.yml or the auths
+        # secret. It is not a checksum and nothing computes it, so it does NOT make the pod roll
+        # "when the config changes"; an edit without a bump leaves the old map running, because
+        # snmp_exporter reads config at start and on SIGHUP only. A kustomize configMapGenerator
+        # hash would automate the ConfigMap half, but the auths half is a SOPS secret that cannot be
+        # generated, so this stays deliberate-and-manual rather than half-automated and trusted.
+        # QnapMetricsAbsent catches a fully empty scrape but NOT a partially stale module map.
+        config-revision: "2026-08-17-1"
     spec:
       securityContext:
         runAsNonRoot: true

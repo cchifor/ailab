@@ -54,31 +54,38 @@ spec:
               running on the NAS (`getcfg SNMP "Service Enable"`; it is not enabled by default and a
               firmware update can reset it).
 
-        # KC3000 E1.S drives idle around 56-58 C in this chassis. 70 C is well clear of normal but
-        # still below the drive's own warning threshold, so this is an early signal (usually a fan
-        # or an airflow problem) rather than a thermal-throttle report.
+        # Thresholds are set from MEASURED range, not from an idle sample. Over the first 20h of
+        # scraping (which included a full pool scrub — the heaviest sustained IO this box sees, and
+        # now a monthly cron) the observed bands were:
+        #   disk   54-64 C   system 44-72 C   cpu 35-42 C   fans 4261-6115 RPM
+        # An earlier revision used 70/65, taken from a quiet-period reading. That was wrong: system
+        # temp touched 72 C during the scrub and spent 4 minutes above 65, and p99 was 61 — close
+        # enough to 65 that a longer scrub would have held it there past `for: 15m` and paged. These
+        # alerts exist to catch a dead fan or blocked intake, which drives temperatures far past
+        # these numbers, so trading a little sensitivity for not crying wolf every month is correct.
         - alert: QnapDiskTemperatureHigh
-          expr: qnap_disk_temperature_celsius > 70
+          expr: qnap_disk_temperature_celsius > 75
           for: 15m
           labels: { severity: warning }
           annotations:
             summary: "QNAP disk {{ $labels.disk }} at {{ $value }} C"
-            description: "Bay {{ $labels.disk }} on ai-storage has been above 70 C for 15m (normal is 56-58 C). Check fans and intake airflow."
+            description: "Bay {{ $labels.disk }} on ai-storage has been above 75 C for 15m. Measured range is 54-64 C, the upper end under scrub load. Check fans and intake airflow."
 
         - alert: QnapSystemTemperatureHigh
-          expr: qnap_system_temperature_celsius > 65
+          expr: qnap_system_temperature_celsius > 75
           for: 15m
           labels: { severity: warning }
           annotations:
             summary: "QNAP system temperature {{ $value }} C"
-            description: "ai-storage chassis temperature has been above 65 C for 15m (normal is ~48-51 C)."
+            description: "ai-storage chassis temperature has been above 75 C for 15m. Measured range is 44-72 C, the upper end during a pool scrub."
 
         # A dead fan in a 5-NVMe chassis becomes a thermal problem quickly, and the NAS will not
-        # tell anyone on its own.
+        # tell anyone on its own. `== 0` needs no threshold tuning; only the annotation quotes a
+        # range, and it quotes the measured one.
         - alert: QnapFanStopped
           expr: qnap_fan_rpm == 0
           for: 5m
           labels: { severity: critical }
           annotations:
             summary: "QNAP fan {{ $labels.fan }} reads 0 RPM"
-            description: "{{ $labels.fan }} on ai-storage has read 0 RPM for 5m. Both system fans normally run ~4300-4500 RPM."
+            description: "{{ $labels.fan }} on ai-storage has read 0 RPM for 5m. Both system fans normally run 4261-6115 RPM, scaling with load."

@@ -8,6 +8,8 @@
 # audit measured 103.5 GB allocated on the NAS against 55.4 GiB actually in use inside the
 # filesystems (~48 GB stale), with the Prometheus LUN at 43.1 G of a 48 G volsize (90%) while its
 # ext4 held 17.2 GiB — the source of the recurring "LUN has reached the threshold (90%)" events.
+# (Those byte figures are point-in-time from that audit and will drift; the mechanism below is the
+# durable part.)
 #
 # `mountOptions: [discard]` was tried here and REVERTED after measuring what actually happens. The
 # Kubernetes half works fine — kubelet faithfully passes the option down:

@@ -108,7 +108,13 @@ through 08-15 passed, 08-16 failed twice (daily + weekly).
    csi-driver-nfs, not a misconfiguration, and it applies to **every** nfs-csi volume with an open
    writer (Loki's WAL is the other obvious candidate). Valkey here is a shared cache / rate-limit
    store for ~15 Strive services whose system of record is Postgres, and the volume is 19 MB — so it
-   is now labelled `velero.io/exclude-from-backup: "true"` on both the PVC and the PV. That is a
+   is now labelled `velero.io/exclude-from-backup: "true"` on both the PVC and the PV.
+   **That label is LIVE STATE ONLY, and that is a known fragility.** The PVC is created from a
+   StatefulSet `volumeClaimTemplate` in the `cchifor/platform` repo, so no manifest in this repo can
+   carry it; a re-provision of that PVC brings it back unlabelled and silently re-arms the nightly
+   partial failure. `VeleroBackupPartiallyFailing` (below) is what makes that recurrence loud
+   instead of silent — it is the compensating control for this gap, not just a nicety. Pin the label
+   in the platform repo alongside the `qnap-iscsi` move. That is a
    deliberate, documented "we do not back this up", chosen over the alternatives: moving it to
    `qnap-iscsi` (atomic ZFS block snapshot — the real structural fix, but it lives in the
    `cchifor/platform` repo and needs a data migration) or switching it to Velero fs-backup (needs

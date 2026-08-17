@@ -88,21 +88,23 @@ spec:
                   - |
                     for i in $(seq 1 60); do
                       if ntfy user list >/dev/null 2>&1; then
-                        if ! ntfy user list 2>/dev/null | grep -qw ailab; then
-                          printf '%s\n%s\n' "$NTFY_ADMIN_PASSWORD" "$NTFY_ADMIN_PASSWORD" \
-                            | ntfy user add --role=admin ailab \
-                            || { echo 'ntfy postStart: user add failed' >&2; exit 1; }
-                        fi
+                        # --ignore-exists rather than a `user list | grep` guard. grep -w is the
+                        # wrong tool here: `-` is not word-constituent, so an ACL line like
+                        # "- write-only access to topic qnap-alerts" satisfies `grep -w qnap` on its
+                        # own. A guard that matches a TOPIC name would skip the add, and the next
+                        # command would fail the hook — and a failing postStart kills the container,
+                        # so that is a crashloop of the thing that delivers every alert.
+                        NTFY_PASSWORD="$NTFY_ADMIN_PASSWORD" \
+                          ntfy user add --ignore-exists --role=admin ailab \
+                          || { echo 'ntfy postStart: ailab user add failed' >&2; exit 1; }
                         # The QNAP publisher. Seeded here for the same reason as ailab: the auth db
                         # lives on the PVC, so a volume rebuild would otherwise silently drop this
                         # user and the NAS's alerts would 401 into the void with nothing saying so.
-                        # NTFY_PASSWORD is the non-interactive form (`ntfy user add` prompts on a TTY).
-                        if ! ntfy user list 2>/dev/null | grep -qw qnap; then
-                          NTFY_PASSWORD="$NTFY_QNAP_PASSWORD" ntfy user add --role=user qnap \
-                            || { echo 'ntfy postStart: qnap user add failed' >&2; exit 1; }
-                        fi
-                        # Idempotent: re-asserting the same grant is a no-op, and it repairs the ACL
-                        # if the user survived but the grant did not.
+                        NTFY_PASSWORD="$NTFY_QNAP_PASSWORD" \
+                          ntfy user add --ignore-exists --role=user qnap \
+                          || { echo 'ntfy postStart: qnap user add failed' >&2; exit 1; }
+                        # Re-asserted every start: a no-op when already granted, and it repairs the
+                        # ACL if the user survived but the grant did not.
                         ntfy access qnap qnap-alerts write-only \
                           || { echo 'ntfy postStart: qnap ACL grant failed' >&2; exit 1; }
                         exit 0
