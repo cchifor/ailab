@@ -72,30 +72,44 @@ spec:
               `zpool status -v zpool1` on the NAS against the bays in Prometheus. If a disk really
               was removed, this rule (not QnapDiskSmartNotGood) is the one that noticed.
 
-        # Thresholds are set from MEASURED range, not from an idle sample. Over the first 20h of
-        # scraping (which included a full pool scrub — the heaviest sustained IO this box sees, and
-        # now a monthly cron) the observed bands were:
-        #   disk   54-64 C   system 44-72 C   cpu 35-42 C   fans 4261-6115 RPM
-        # An earlier revision used 70/65, taken from a quiet-period reading. That was wrong: system
-        # temp touched 72 C during the scrub and spent 4 minutes above 65, and p99 was 61 — close
-        # enough to 65 that a longer scrub would have held it there past `for: 15m` and paged. These
-        # alerts exist to catch a dead fan or blocked intake, which drives temperatures far past
-        # these numbers, so trading a little sensitivity for not crying wolf every month is correct.
+        # Thresholds set from MEASURED distribution, over 13.6h of history (2026-08-16T16:57Z
+        # onward, 818 samples at a 60s scrape):
+        #   disk   54-64 C  (p99 57, zero samples above 70)
+        #   system 44-72 C  (median 45, p95 51, p99 61)
+        #   cpu    35-42 C        fans 4261-6115 RPM
+        #
+        # These were briefly raised to 75/75 and are now back at 70/65. That raise was an
+        # OVERCORRECTION and the reasoning behind it was wrong, so it is worth recording why rather
+        # than silently flipping the numbers back:
+        #
+        # The claim was that system temp "spent 4 minutes above 65, so a longer scrub would have
+        # held it past `for: 15m` and paged". Four samples above 65 is true; four consecutive
+        # minutes is not. They fall in two clusters nine hours apart —
+        #   17:06 (66)  17:11 (72)   |   02:11 (68)  02:12 (66)
+        # — so the LONGEST CONTIGUOUS RUN above 65 is 2 minutes, and every sample in between resets
+        # the pending state. `for: 15m` is 7.5x longer than the longest excursion; it was never
+        # close to firing. Sample count is not run length, and only run length matters to `for:`.
+        #
+        # With that corrected, raising the threshold only LOSES coverage: it gives up detection of a
+        # sustained 66-74 C condition — degraded cooling, which is precisely what these alerts are
+        # for — while removing no false page, because there was never one to remove. A threshold
+        # sitting below an observed maximum is fine when the maximum is a 2-minute transient and a
+        # 15-minute `for:` sits behind it. That is exactly this shape.
         - alert: QnapDiskTemperatureHigh
-          expr: qnap_disk_temperature_celsius > 75
+          expr: qnap_disk_temperature_celsius > 70
           for: 15m
           labels: { severity: warning }
           annotations:
             summary: "QNAP disk {{ $labels.disk }} at {{ $value }} C"
-            description: "Bay {{ $labels.disk }} on ai-storage has been above 75 C for 15m. Measured range is 54-64 C, the upper end under scrub load. Check fans and intake airflow."
+            description: "Bay {{ $labels.disk }} on ai-storage has been above 70 C for 15m. Measured range is 54-64 C (p99 57); no sample has ever exceeded 70. Check fans and intake airflow."
 
         - alert: QnapSystemTemperatureHigh
-          expr: qnap_system_temperature_celsius > 75
+          expr: qnap_system_temperature_celsius > 65
           for: 15m
           labels: { severity: warning }
           annotations:
             summary: "QNAP system temperature {{ $value }} C"
-            description: "ai-storage chassis temperature has been above 75 C for 15m. Measured range is 44-72 C, the upper end during a pool scrub."
+            description: "ai-storage chassis temperature has been above 65 C for 15m CONTINUOUSLY. Measured range is 44-72 C but median is 45 and the longest run above 65 is 2 minutes, so sustaining it for 15m means cooling has genuinely degraded."
 
         # A dead fan in a 5-NVMe chassis becomes a thermal problem quickly, and the NAS will not
         # tell anyone on its own. `== 0` needs no threshold tuning; only the annotation quotes a
