@@ -198,7 +198,23 @@ spec:
             - { port: "53", protocol: TCP }
           rules:
             dns:
+              # musl (Alpine) getaddrinfo expands the bare uplink name against the pod's k8s
+              # search domains FIRST (ndots:5 — registry.npmjs.org has 2 dots < 5), querying the
+              # three qualified variants below before the bare name. The Cilium DNS proxy REFUSES
+              # any query not listed here → SERVFAIL → musl aborts with EAI_AGAIN before it ever
+              # tries the real name, so Verdaccio marks the uplink offline and 404s every uncached
+              # package. Admit the exact qualified variants (NOT a glob: Cilium's matchPattern `*`
+              # does not cross `.`, and musl's honoring of a dnsConfig ndots override is unreliable
+              # — exact matchNames are deterministic) so CoreDNS, authoritative for cluster.local,
+              # answers them NXDOMAIN locally (never forwarded upstream → no exfil channel) and
+              # musl falls through to the real name. The names are fixed by this pod's namespace +
+              # the cluster domain (confirmed from the live /etc/resolv.conf search list). toFQDNs
+              # below is the UNCHANGED L3 egress gate: the cache can still only CONNECT to
+              # registry.npmjs.org.
               - matchName: "registry.npmjs.org"
+              - matchName: "registry.npmjs.org.agentforge-pkgcache.svc.cluster.local"
+              - matchName: "registry.npmjs.org.svc.cluster.local"
+              - matchName: "registry.npmjs.org.cluster.local"
     - toFQDNs:
         - matchName: "registry.npmjs.org"
       toPorts:
