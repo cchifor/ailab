@@ -161,6 +161,11 @@ spec:
           # (the cluster's Zot; VAP forbids imagePullSecrets). Bump the digest via the standard
           # pin scripts.
           image: registry.chifor.me/verdaccio/verdaccio:6@sha256:fcd45478bff37ec37100eb328fcb4d034cff3e904868d4f30e10a3db14a80ab9
+          env:
+            # The image bakes VERDACCIO_PORT=4873, which OVERRIDES the config's `listen:` — so
+            # without this verdaccio binds 4873 and collides with the sidecar (EADDRINUSE,
+            # CrashLoopBackOff). Pin it to the pod-internal upstream port to match `listen:`.
+            - { name: VERDACCIO_PORT, value: "4874" }
           ports:
             # pod-internal upstream only; the sidecar owns the externally-reachable :4873.
             - { name: upstream, containerPort: 4874, protocol: TCP }
