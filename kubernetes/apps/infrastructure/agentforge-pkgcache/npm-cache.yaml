@@ -43,9 +43,61 @@ data:
         proxy: npmjs
     server:
       keepAliveTimeout: 60
-    listen: 0.0.0.0:4873
+    # Verdaccio listens on the POD-INTERNAL upstream port; the nginx sidecar (below) owns the
+    # externally-reachable :4873 and strips the /npm/ path prefix before forwarding here.
+    listen: 0.0.0.0:4874
     log: { type: stdout, format: pretty, level: warn }
+    # url_prefix makes Verdaccio GENERATE /npm/-prefixed tarball URLs (its npm API is served at
+    # root); the sidecar strips the prefix on the way in, so a client configured with
+    # registry=http://<pod>:4873/npm/ round-trips metadata AND tarballs correctly.
     url_prefix: /npm/
+---
+# The prefix-stripping reverse proxy the /npm/ contract requires. Verdaccio serves the npm API
+# at root but generates /npm/-prefixed URLs (url_prefix), so a client hitting :4873/npm/* needs
+# something to map /npm/* -> Verdaccio /* — that is this sidecar. It adds NO egress (it only
+# proxies to 127.0.0.1; the cache's egress boundary is unchanged) and keeps the engine's single
+# package_proxy_url abstraction intact.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: npm-cache-proxy
+  namespace: agentforge-pkgcache
+  labels:
+    app.kubernetes.io/name: npm-cache
+    app.kubernetes.io/component: pkgcache
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+data:
+  nginx.conf: |
+    worker_processes 1;
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr warn;
+    events { worker_connections 256; }
+    http {
+      access_log off;
+      # every writable path under /tmp so readOnlyRootFilesystem holds
+      client_body_temp_path /tmp/nginx-client;
+      proxy_temp_path /tmp/nginx-proxy;
+      fastcgi_temp_path /tmp/nginx-fastcgi;
+      uwsgi_temp_path /tmp/nginx-uwsgi;
+      scgi_temp_path /tmp/nginx-scgi;
+      server {
+        listen 4873;
+        server_name _;
+        # k8s probe target — deliberately independent of the Verdaccio upstream so the sidecar
+        # reports Ready on its own liveness, not the uplink's.
+        location = /healthz { return 200 "ok\n"; add_header Content-Type text/plain; }
+        # strip /npm/ and forward to Verdaccio's root API; Host is preserved so url_prefix builds
+        # correct absolute (/npm/-prefixed) tarball URLs pointing back at this sidecar.
+        location /npm/ {
+          proxy_pass http://127.0.0.1:4874/;
+          proxy_set_header Host $http_host;
+          proxy_http_version 1.1;
+          proxy_read_timeout 60s;
+        }
+        location / { return 404; }
+      }
+    }
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -110,7 +162,8 @@ spec:
           # pin scripts.
           image: registry.chifor.me/verdaccio/verdaccio:6@sha256:fcd45478bff37ec37100eb328fcb4d034cff3e904868d4f30e10a3db14a80ab9
           ports:
-            - { name: http, containerPort: 4873, protocol: TCP }
+            # pod-internal upstream only; the sidecar owns the externally-reachable :4873.
+            - { name: upstream, containerPort: 4874, protocol: TCP }
           volumeMounts:
             - name: config
               mountPath: /verdaccio/conf
@@ -118,13 +171,13 @@ spec:
             - name: data
               mountPath: /verdaccio/storage
           readinessProbe:
-            httpGet: { path: /-/ping, port: http }
+            httpGet: { path: /-/ping, port: upstream }
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
-            httpGet: { path: /-/ping, port: http }
+            httpGet: { path: /-/ping, port: upstream }
             initialDelaySeconds: 10
             periodSeconds: 20
             timeoutSeconds: 3
@@ -138,6 +191,42 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             seccompProfile: { type: RuntimeDefault }
+        - name: proxy
+          # nginx-unprivileged: strips the /npm/ prefix and forwards to Verdaccio. Run nginx
+          # directly (not the templating entrypoint) so readOnlyRootFilesystem holds. Pinned by
+          # digest, pulled anonymously through registry.chifor.me like the cache image.
+          image: registry.chifor.me/nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+          command: ["nginx", "-c", "/etc/nginx-proxy/nginx.conf", "-g", "daemon off;"]
+          ports:
+            # THE externally-reachable port (the Service + CNP ingress target this).
+            - { name: http, containerPort: 4873, protocol: TCP }
+          volumeMounts:
+            - name: proxy-config
+              mountPath: /etc/nginx-proxy
+              readOnly: true
+            - name: nginx-tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 25m, memory: 32Mi, ephemeral-storage: 16Mi }
+            limits: { cpu: 500m, memory: 128Mi, ephemeral-storage: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
       volumes:
         - name: config
           configMap:
@@ -145,6 +234,11 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: npm-cache-data
+        - name: proxy-config
+          configMap:
+            name: npm-cache-proxy
+        - name: nginx-tmp
+          emptyDir: { sizeLimit: 64Mi }
 ---
 apiVersion: v1
 kind: Service
