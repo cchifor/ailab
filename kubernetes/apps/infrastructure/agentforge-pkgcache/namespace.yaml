@@ -1,0 +1,41 @@
+# AgentForge #209 dependency proxy — the OPERATOR-OWNED package-cache namespace.
+#
+# A TRUSTED-BUT-ISOLATED tier (same posture as agentforge-broker): the caches proxy the public
+# npm + PyPI registries so an untrusted PREPARE sandbox job can install declared dependencies
+# without any direct internet egress of its own. It lives in the CP-unwritable cchifor/ailab repo,
+# so a compromised control plane can neither relax its PSA level nor grant its SAs RBAC. It is a
+# SEPARATE namespace from agentforge-sandbox on purpose: the sandbox-guard VAP rejects any pod in
+# agentforge-sandbox that is not the single Kata `sandbox` container, so a long-running cache
+# Deployment cannot live there.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentforge-pkgcache
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.31
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.31
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.31
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+---
+# Namespace-wide DEFAULT-DENY. The caches' narrow allowances (prepare-job ingress on 4873/3141,
+# kube-dns + upstream-registry egress) are a per-cache CiliumNetworkPolicy (npm-cache.yaml). The
+# caches hold no durable secret, but they DO egress to the public internet (the pull-through), so
+# they start from zero connectivity and open the minimum — an untrusted setup_cmd's blast radius
+# ends at the cache, which itself reaches only the two upstream registries.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: agentforge-pkgcache
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

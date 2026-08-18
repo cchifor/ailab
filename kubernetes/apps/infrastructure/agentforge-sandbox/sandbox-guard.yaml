@@ -91,7 +91,7 @@ spec:
         'agentforge.io/job-id' in variables.labels &&
         variables.labels['agentforge.io/job-id'].matches('^[a-z0-9]{32}$') &&
         'agentforge.io/trust-class' in variables.labels &&
-        variables.labels['agentforge.io/trust-class'] in ['agent', 'test'] &&
+        variables.labels['agentforge.io/trust-class'] in ['agent', 'prepare', 'test'] &&
         'app.kubernetes.io/managed-by' in variables.labels &&
         variables.labels['app.kubernetes.io/managed-by'] == 'agentforge' &&
         'app.kubernetes.io/component' in variables.labels &&
