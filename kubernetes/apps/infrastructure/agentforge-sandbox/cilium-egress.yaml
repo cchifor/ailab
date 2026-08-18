@@ -111,3 +111,67 @@ spec:
         - 169.254.169.254/32
         - 169.254.0.0/16
         - ::/0
+---
+# E1 (#209 dependency proxy) — the prepare-profile egress allow-list. trust-class=prepare may
+# egress to ONLY (a) the package-cache PODS (by endpoint identity: component=pkgcache on
+# 4873/3141 — the orchestrator hands the setup job a cache POD IP, not a ClusterIP, exactly like
+# the broker) and (b) kube-dns, DNS L7 restricted to the TWO cache EXACT names (no arbitrary
+# query names → no DNS tunneling, and a hostile setup_cmd cannot even resolve the public
+# registry). A SEPARATE object from the test zero-egress and agent policies so it can widen
+# NEITHER; the egressDeny below (deny wins) makes world/direct-IP/IPv6/metadata absolute. The
+# prepare class deliberately gets NO broker access — a setup job holds no capability. This is what
+# lets a dependency_proxy repo's setup_cmd run `npm ci`/`uv sync` against the internal read-only
+# cache while test_cmd (trust-class=test) stays air-gapped.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-prepare-egress
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      agentforge.io/trust-class: prepare
+  egress:
+    # (a) kube-dns, L7-restricted to the TWO cache names ONLY — the prepare job can resolve
+    #     NOTHING else (not registry.npmjs.org, not pypi.org, not a broker). matchName is exact.
+    #     RETAINED although the job is IP-direct (the executor hands it a cache POD IP, so it makes
+    #     zero DNS queries): a minimal L7-locked belt so an incidental installer lookup can't hang
+    #     the run, and — load-bearing here — proof the job cannot even NAME the upstream registry.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchName: "npm-cache.agentforge-pkgcache.svc.cluster.local"
+              - matchName: "pypi-cache.agentforge-pkgcache.svc.cluster.local"
+    # (b) the package caches — allowed by ENDPOINT IDENTITY (toEndpoints matchLabels), the only
+    #     policy form that works for a Kata sandbox pod (it reaches the cache by resolved POD IP;
+    #     a ClusterIP is `world` to a Kata microVM). Restricted to component=pkgcache in
+    #     agentforge-pkgcache on the two cache ports — so a prepare job may reach ONLY the caches.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: agentforge-pkgcache
+            app.kubernetes.io/component: pkgcache
+      toPorts:
+        - ports:
+            - { port: "4873", protocol: TCP }  # verdaccio (npm)
+            - { port: "3141", protocol: TCP }  # devpi (pypi)
+  egressDeny:
+    # Verbatim the agent policy's belt: no direct internet / node-local / metadata. Both allows
+    # above are endpoint identity (pod-to-pod), so `world` never blocks them.
+    - toEntities:
+        - world
+        - host
+        - remote-node
+    - toCIDR:
+        - 169.254.169.254/32
+        - 169.254.0.0/16
+        - ::/0

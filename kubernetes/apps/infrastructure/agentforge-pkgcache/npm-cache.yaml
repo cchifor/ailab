@@ -1,0 +1,217 @@
+# npm-cache — a Verdaccio pull-through cache for registry.npmjs.org (#209 dependency proxy, E1).
+#
+# A PREPARE sandbox job reaches this by resolved POD IP on :4873 (a Kata microVM sees a ClusterIP
+# as `world`). Publishing is structurally impossible: no users are provisioned and the uplink is
+# read-only, so `npm publish` has no credential and 403s. The cache egresses ONLY to
+# registry.npmjs.org (its CNP below); an untrusted setup_cmd cannot reach anything else through it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: npm-cache-config
+  namespace: agentforge-pkgcache
+  labels:
+    app.kubernetes.io/name: npm-cache
+    app.kubernetes.io/component: pkgcache
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+data:
+  config.yaml: |
+    # Verdaccio serves the pull-through under a `/npm/` prefix so the engine's injected
+    # npm_config_registry (http://<podIP>:4873/npm/) is stable across a future path split.
+    storage: /verdaccio/storage
+    web:
+      enable: false
+    auth:
+      # No htpasswd file and no user provisioning: `adduser`/`login` cannot succeed, so
+      # `access: $authenticated` on publish can never be satisfied — publishing is impossible.
+      htpasswd:
+        file: /verdaccio/storage/htpasswd
+        max_users: -1
+    uplinks:
+      npmjs:
+        url: https://registry.npmjs.org/
+        cache: true
+        maxage: 30m
+    packages:
+      '@*/*':
+        access: $all
+        publish: $authenticated
+        proxy: npmjs
+      '**':
+        access: $all
+        publish: $authenticated
+        proxy: npmjs
+    server:
+      keepAliveTimeout: 60
+    listen: 0.0.0.0:4873
+    log: { type: stdout, format: pretty, level: warn }
+    url_prefix: /npm/
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: npm-cache-data
+  namespace: agentforge-pkgcache
+  labels:
+    app.kubernetes.io/name: npm-cache
+    app.kubernetes.io/component: pkgcache
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  # qnap-iscsi (RWO, ext4) — chosen over the default nfs-csi because the latter does not honour
+  # fsGroup and Verdaccio (uid 10001) chown-free-writes its storage dir under restricted PSA. RWO
+  # single-attach is why the Deployment is replicas:1 + Recreate.
+  accessModes: [ReadWriteOnce]
+  storageClassName: qnap-iscsi
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: npm-cache
+  namespace: agentforge-pkgcache
+  labels:
+    app.kubernetes.io/name: npm-cache
+    app.kubernetes.io/component: pkgcache
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # RWO iscsi volume — never two pods attached at once
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: npm-cache
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: npm-cache
+        app.kubernetes.io/component: pkgcache
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        ailab.io/agent-pool: "true"  # co-scheduled with the sandbox Jobs it serves
+      tolerations:
+        - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: npm-cache
+          # Verdaccio 6, pinned by digest and pulled anonymously through registry.chifor.me
+          # (the cluster's Zot; VAP forbids imagePullSecrets). Bump the digest via the standard
+          # pin scripts.
+          image: registry.chifor.me/verdaccio/verdaccio:6@sha256:fcd45478bff37ec37100eb328fcb4d034cff3e904868d4f30e10a3db14a80ab9
+          ports:
+            - { name: http, containerPort: 4873, protocol: TCP }
+          volumeMounts:
+            - name: config
+              mountPath: /verdaccio/conf
+              readOnly: true
+            - name: data
+              mountPath: /verdaccio/storage
+          readinessProbe:
+            httpGet: { path: /-/ping, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /-/ping, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 64Mi }
+            limits: { cpu: "2", memory: 1Gi, ephemeral-storage: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: config
+          configMap:
+            name: npm-cache-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: npm-cache-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: npm-cache
+  namespace: agentforge-pkgcache
+  labels:
+    app.kubernetes.io/name: npm-cache
+    app.kubernetes.io/component: pkgcache
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  selector:
+    app.kubernetes.io/name: npm-cache
+  ports:
+    - { name: http, port: 4873, targetPort: http, protocol: TCP }
+---
+# The npm-cache's OWN egress boundary: prepare-job ingress on 4873, and egress to ONLY kube-dns +
+# registry.npmjs.org (the pull-through upstream). Everything else — other cluster services, the
+# metadata endpoint, node-local — is denied, so an untrusted setup_cmd's reach ends here.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: npm-cache
+  namespace: agentforge-pkgcache
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: npm-cache
+  ingress:
+    # ONLY a PREPARE sandbox pod may reach the cache (pod-to-pod endpoint identity, so a Kata pod's
+    # POD IP is admitted; the sandbox pod resolves this Service to a ready endpoint IP).
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: agentforge-sandbox
+            agentforge.io/trust-class: prepare
+      toPorts:
+        - ports:
+            - { port: "4873", protocol: TCP }
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchName: "registry.npmjs.org"
+    - toFQDNs:
+        - matchName: "registry.npmjs.org"
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }
+  egressDeny:
+    - toEntities:
+        - host
+        - remote-node
+    - toCIDR:
+        - 169.254.169.254/32
+        - 169.254.0.0/16
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - ::/0

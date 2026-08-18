@@ -1,0 +1,25 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: agentforge-pkgcache
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  # Its OWN path/Kustomization, mirroring agentforge-sandbox: the operator-owned #209 package-cache
+  # tier does not collide with the P1 agentforge admission (apps layer). dependsOn ONLY
+  # infrastructure so it keeps reconciling even if the apps layer is unhealthy. wait:false so a
+  # not-yet-pinned cache image can never wedge this or a dependent Flux Kustomization.
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/agentforge-pkgcache
+  prune: true
+  wait: false
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
