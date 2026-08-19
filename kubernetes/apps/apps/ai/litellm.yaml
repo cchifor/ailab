@@ -88,6 +88,61 @@ data:
           api_key: "sk-noauth"
         model_info:
           max_input_tokens: 24576 # host CTX=32768 --parallel 1 (single 32K slot); ~8K output headroom for reasoning
+      # ---- CLOUD GPU CLUSTER (cloud3, 3x RTX 3090 = 72 GiB VRAM) -------------------------------
+      # Served by llama-swap in LXC 5101 on cloud3 at 192.168.0.26:8080 — a plain LAN address, not a
+      # k8s Service: the `pve` cloud cluster is a SEPARATE Proxmox cluster and these are not cluster
+      # workloads. Serving side: git.chifor.me/cchifor/cloudlab (host/llama-swap.yaml).
+      #
+      # ⚠️ DAY-ONLY. cloud1/2/3 power off nightly to save energy, so these backends VANISH overnight
+      # and return in the morning (RTC alarm, with WoL for on-demand wake). Do NOT make them the sole
+      # backend for anything that must work 24/7.
+      #
+      # NO-CANCEL CONSTRAINT (see the qwen3.8-27b block below): LiteLLM 1.91.0 does not propagate a
+      # client disconnect upstream, so an abandoned request keeps decoding. On a --parallel 1 model
+      # that wedges the only slot — measured at 7+ minutes on node1. Every cloud model below therefore
+      # runs **--parallel 2 or more**, so an orphan costs capacity instead of blocking the model. The
+      # 122B was moved from --parallel 1 to 2 (with -c doubled so each slot keeps its 32K) specifically
+      # because of that finding. This is a mitigation, not a fix: the fix is upstream cancel support.
+      # The per-model --parallel values live in cchifor/cloudlab host/llama-swap.yaml — pinned at
+      # commit 9907877, which is the change that moved the 122B off a single slot. Verify there, not here.
+      #
+      # The three models total ~145 GiB against 72 GiB of VRAM, so llama-swap holds ONE at a time and
+      # unloads on TTL — a model switch costs a cold load from local NVMe. llama-swap always answers
+      # :8080, so the router never sees a down backend while the cluster is awake.
+      #
+      # Qwen3.8-27B is the cloud default, kept warm (ttl 7200), Q6_K on 3x RTX 3090.
+      # NAME IS DELIBERATELY `-cloud`: Open WebUI already gets a `qwen3.8-27b` from its SECOND
+      # upstream (the direct llama-swap connection on node1, OPENAI_API_BASE_URLS[1]) and merges both
+      # lists into one picker. A shared display name would be ambiguous, and these are NOT
+      # interchangeable — different hardware, different quant, and this one disappears at night.
+      # host -c 131072 across --parallel 2 => 65536/slot; minus ~8K output headroom = 57344.
+      # Reasoning model: under-budgeting max_tokens yields empty content + finish_reason "length".
+      - model_name: qwen3.8-27b-cloud
+        litellm_params:
+          model: openai/qwen3.8-27b
+          api_base: http://192.168.0.26:8080/v1
+          api_key: "sk-noauth"
+        model_info: { max_input_tokens: 57344 }
+      # Qwen3-Coder-Next: 80B MoE with only 3B ACTIVE, so decode stays fast — which is what agentic
+      # loops need. Intended dev-agent model for agentforge workflows.
+      # host -c 131072 across --parallel 2 => 65536/slot; minus ~8K output headroom = 57344 (same
+      # host settings as the 27B above — stated explicitly so the number is checkable, not inferred).
+      - model_name: qwen3-coder-next
+        litellm_params:
+          model: openai/qwen3-coder-next
+          api_base: http://192.168.0.26:8080/v1
+          api_key: "sk-noauth"
+        model_info: { max_input_tokens: 57344 }
+      # qwen3.5-122b-a10b on CUDA. Distinct model_name from the iGPU-hosted `qwen3.5-122b` above so
+      # the two never merge into one round-robin pool — very different latency. ~76 GiB at Q4_K_M
+      # EXCEEDS 72 GiB VRAM, so MoE experts spill to system RAM (--n-cpu-moe 34); only ~10B params
+      # are active per token. host -c 65536 --parallel 2 => 32768/slot; minus headroom = 24576.
+      - model_name: qwen3.5-122b-a10b
+        litellm_params:
+          model: openai/qwen3.5-122b-a10b
+          api_base: http://192.168.0.26:8080/v1
+          api_key: "sk-noauth"
+        model_info: { max_input_tokens: 24576 }
       # qwen3.8-27b — the quality tier, ON-DEMAND on node1 (.44) :8082 via its own llama-swap
       # instance, in the slot gemma-4 used to hold. 27B DENSE (not MoE), so every token reads all 27B
       # params: a MEASURED 9.3 tok/s vs qwen3.6's ~50. That is inherent to a dense model on a
@@ -125,6 +180,15 @@ data:
       # litellm_settings.request_timeout no longer applies to qwen3.8 at all — OWUI has no timeout, and
       # cancellation is what bounds a run. Do NOT re-add this entry without also removing the direct
       # connection, or the broken path becomes reachable again.
+      #
+      # SCOPE (2026-08-19): everything above applies to THIS backend — node1 `.44:8082`, reachable
+      # under the client-facing name `qwen3.8-27b`. It is NOT a ban on the Qwen3.8-27B *model*.
+      # The cloud3 backend is registered above as `qwen3.8-27b-cloud` and does route through here;
+      # that is deliberate and does not reopen this path, because (a) it is a different llama-swap on
+      # different hardware, (b) it runs --parallel 2 so an orphaned request cannot wedge its only slot,
+      # and (c) the bare name `qwen3.8-27b` still resolves ONLY to the direct OWUI connection, so
+      # pre-existing chats storing that id are unaffected. Do not "fix" the apparent contradiction by
+      # deleting the -cloud entry.
       # litellm-local.yaml keeps its own qwen3.8 entry for the platform's cost-tracked tenant routing;
       # it inherits the same no-cancel behaviour and is a separate decision, deliberately untouched here.
       # gemma-4-26b-a4b is RETIRED locally. It was stopped on node1 :8082 to free ~15 GiB VRAM for
@@ -242,9 +306,22 @@ spec:
         # (as-is / +newline / rstrip / rstrip+newline), none of which matched. So the annotation had
         # ALREADY drifted, which is why editing config.yaml did not roll the pods and the 2026-08-15
         # num_retries/timeout change needed a manual `kubectl rollout restart deploy/litellm`.
-        # This value IS the recipe applied to the current config.yaml, so bumping should work from here;
-        # re-verify with the exact yq command on the next edit and fix the recipe if it disagrees again.
-        checksum/config: "c5e7de0a28c0"
+        #
+        # RESOLVED (2026-08-19): the drift was real and is now closed. The 2026-08-15 value
+        # "c5e7de0a28c0" was NOT the documented recipe either — measured three ways:
+        #     yq recipe on that config            -> 11ce87388a0e
+        #     PyYAML scalar, no trailing newline  -> c5e7de0a28c0   <- what was committed
+        # i.e. the committed value came from an extraction that omits the trailing newline yq appends,
+        # so the recipe as written could never reproduce it. THIS value is the documented recipe
+        # applied to the current config.yaml (yq v4.53.3), so command and annotation finally agree.
+        # Keep using the recipe verbatim; if it ever disagrees again, fix whichever is wrong rather
+        # than committing a value from a different extraction.
+        #
+        # This bump matters: the ConfigMap is mounted as a volume and there is NO reloader controller
+        # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
+        # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
+        # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
+        checksum/config: "e54e049a9ec9"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
