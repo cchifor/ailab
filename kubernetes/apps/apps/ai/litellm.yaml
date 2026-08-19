@@ -176,6 +176,15 @@ data:
       # litellm_settings.request_timeout no longer applies to qwen3.8 at all — OWUI has no timeout, and
       # cancellation is what bounds a run. Do NOT re-add this entry without also removing the direct
       # connection, or the broken path becomes reachable again.
+      #
+      # SCOPE (2026-08-19): everything above applies to THIS backend — node1 `.44:8082`, reachable
+      # under the client-facing name `qwen3.8-27b`. It is NOT a ban on the Qwen3.8-27B *model*.
+      # The cloud3 backend is registered above as `qwen3.8-27b-cloud` and does route through here;
+      # that is deliberate and does not reopen this path, because (a) it is a different llama-swap on
+      # different hardware, (b) it runs --parallel 2 so an orphaned request cannot wedge its only slot,
+      # and (c) the bare name `qwen3.8-27b` still resolves ONLY to the direct OWUI connection, so
+      # pre-existing chats storing that id are unaffected. Do not "fix" the apparent contradiction by
+      # deleting the -cloud entry.
       # litellm-local.yaml keeps its own qwen3.8 entry for the platform's cost-tracked tenant routing;
       # it inherits the same no-cancel behaviour and is a separate decision, deliberately untouched here.
       # gemma-4-26b-a4b is RETIRED locally. It was stopped on node1 :8082 to free ~15 GiB VRAM for
