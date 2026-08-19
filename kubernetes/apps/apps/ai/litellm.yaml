@@ -110,21 +110,44 @@ data:
       # unloads on TTL — a model switch costs a cold load from local NVMe. llama-swap always answers
       # :8080, so the router never sees a down backend while the cluster is awake.
       #
-      # Qwen3.8-27B is the cloud default, kept warm (ttl 7200), Q6_K on 3x RTX 3090.
-      # NAME IS DELIBERATELY `-cloud`: Open WebUI already gets a `qwen3.8-27b` from its SECOND
-      # upstream (the direct llama-swap connection on node1, OPENAI_API_BASE_URLS[1]) and merges both
-      # lists into one picker. A shared display name would be ambiguous, and these are NOT
-      # interchangeable — different hardware, different quant, and this one disappears at night.
-      # host -c 131072 across --parallel 2 => 65536/slot; minus ~8K output headroom = 57344.
-      # Reasoning model: under-budgeting max_tokens yields empty content + finish_reason "length".
+      # ---- EXECUTOR TIER: cloud2, one instance PINNED PER GPU (3 deployments of one model_name) --
+      # Registered three times on purpose so the router load-balances least-busy across three
+      # physically separate GPUs — the same pattern the qwen3.6 pair uses above.
+      #
+      # NOT split across GPUs: llama.cpp's default --split-mode layer walks layers sequentially, so a
+      # pooled model leaves every card ~30% utilised. MEASURED on cloud3: 32.4 tok/s at 636 W pooled,
+      # versus 18.6 / 25.7 / 19.6 tok/s on three separate cards here — ~3x the aggregate throughput.
+      #
+      # UD-Q4_K_XL (17.9 GiB), not the Q6_K used on cloud3: Q6_K is 22.9 GiB and cannot fit a 24 GiB
+      # card alongside a usable KV cache. host -c 65536 --parallel 1 => the whole 64K window goes to
+      # one request; minus ~8K output headroom = 57344. 64K is the practical ceiling on 24 GiB.
+      #
+      # cloud1's three GPUs are deliberately NOT registered: that host showed ~10x degraded
+      # throughput (2.0 / 1.9 / 1.3 tok/s) traced to a faulty GPU riser, and is under investigation.
       - model_name: qwen3.8-27b-cloud
         litellm_params:
           model: openai/qwen3.8-27b
-          api_base: http://192.168.0.26:8080/v1
+          api_base: http://192.168.0.28:8081/v1
           api_key: "sk-noauth"
         model_info: { max_input_tokens: 57344 }
-      # Qwen3-Coder-Next: 80B MoE with only 3B ACTIVE, so decode stays fast — which is what agentic
-      # loops need. Intended dev-agent model for agentforge workflows.
+      - model_name: qwen3.8-27b-cloud
+        litellm_params:
+          model: openai/qwen3.8-27b
+          api_base: http://192.168.0.28:8082/v1
+          api_key: "sk-noauth"
+        model_info: { max_input_tokens: 57344 }
+      - model_name: qwen3.8-27b-cloud
+        litellm_params:
+          model: openai/qwen3.8-27b
+          api_base: http://192.168.0.28:8083/v1
+          api_key: "sk-noauth"
+        model_info: { max_input_tokens: 57344 }
+      # ---- COGNITIVE TIER: cloud3, three GPUs pooled ------------------------------------------
+      # Qwen3-Coder-Next: 80B MoE with only 3B ACTIVE. MEASURED 102.3 tok/s at 493 W here, versus
+      # 32.4 tok/s at 636 W for the 27B dense and 16.6 tok/s for the 122B — decode speed tracks
+      # ACTIVE parameters, not total, which is what makes long-context planning usable. This is the
+      # repo-ingestion / planner model; route ordinary coding to the executors above.
+      # Pooling three GPUs is right HERE (and only here) because 46 GiB of weights cannot fit one card.
       # host -c 131072 across --parallel 2 => 65536/slot; minus ~8K output headroom = 57344 (same
       # host settings as the 27B above — stated explicitly so the number is checkable, not inferred).
       - model_name: qwen3-coder-next
@@ -133,16 +156,6 @@ data:
           api_base: http://192.168.0.26:8080/v1
           api_key: "sk-noauth"
         model_info: { max_input_tokens: 57344 }
-      # qwen3.5-122b-a10b on CUDA. Distinct model_name from the iGPU-hosted `qwen3.5-122b` above so
-      # the two never merge into one round-robin pool — very different latency. ~76 GiB at Q4_K_M
-      # EXCEEDS 72 GiB VRAM, so MoE experts spill to system RAM (--n-cpu-moe 34); only ~10B params
-      # are active per token. host -c 65536 --parallel 2 => 32768/slot; minus headroom = 24576.
-      - model_name: qwen3.5-122b-a10b
-        litellm_params:
-          model: openai/qwen3.5-122b-a10b
-          api_base: http://192.168.0.26:8080/v1
-          api_key: "sk-noauth"
-        model_info: { max_input_tokens: 24576 }
       # qwen3.8-27b — the quality tier, ON-DEMAND on node1 (.44) :8082 via its own llama-swap
       # instance, in the slot gemma-4 used to hold. 27B DENSE (not MoE), so every token reads all 27B
       # params: a MEASURED 9.3 tok/s vs qwen3.6's ~50. That is inherent to a dense model on a
@@ -321,7 +334,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "e54e049a9ec9"
+        checksum/config: "96907167bab3"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
