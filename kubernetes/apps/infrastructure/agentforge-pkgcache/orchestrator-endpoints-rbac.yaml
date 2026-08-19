@@ -1,0 +1,50 @@
+# Orchestrator -> npm-cache Endpoints RBAC (READ-ONLY). The SAME mechanism as the broker endpoints
+# RBAC (agentforge-broker/orchestrator-endpoints-rbac.yaml): a Kata PREPARE sandbox job runs in a
+# microVM off Cilium's socket-LB path, so it sees the npm-cache ClusterIP as `world` and CANNOT reach
+# it by ClusterIP. The orchestrator (a runc pod that CAN reach the apiserver) therefore resolves the
+# npm-cache Service to a live READY endpoint POD IP at Job creation (E1c,
+# AF_SANDBOX_RESOLVE_PKGCACHE_ENDPOINTS=true) and injects http://<podIP>:4873/npm/ as the registry.
+# That lookup needs GET/LIST on core/v1 Endpoints in agentforge-pkgcache — and nothing else. Read of
+# a non-secret object; the orchestrator gets no other access here (no pods, no secrets, no cache
+# mutation), and the tokenless sandbox pod still has zero API access.
+#
+# Subjects = the SAME tenant orchestrator SAs the broker endpoints RoleBinding lists. Add a subject
+# per additional workspace/pool that opts a repo into dependency_proxy.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentforge-orchestrator-pkgcache-endpoints
+  namespace: agentforge-pkgcache
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+rules:
+  # Resolve the npm-cache Service to its READY backend pod IPs (read_namespaced_endpoints -> GET).
+  # LIST for robustness; NO watch, NO create/update/patch/delete, NO other resource.
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentforge-orchestrator-pkgcache-endpoints
+  namespace: agentforge-pkgcache
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentforge-orchestrator-pkgcache-endpoints
+subjects:
+  # playground/planner (org=tenant-zero, workspace=playground, pool=planner) — for the #209 epic
+  # acceptance runs, which also exercise dependency_proxy repos.
+  - kind: ServiceAccount
+    name: af-orch-playground-planner
+    namespace: af-tenant-tenant-zero-playground
+  # platform-dev/delivery (org=tenant-zero, workspace=platform-dev, pool=delivery) — the canary pool;
+  # its orchestrator resolves the npm-cache Endpoints -> pod IP for the Kata PREPARE path.
+  - kind: ServiceAccount
+    name: af-orch-platform-dev-delivery
+    namespace: af-tenant-tenant-zero-platform-dev

@@ -3,6 +3,7 @@ kind: Kustomization
 resources:
   - namespace.yaml     # agentforge-pkgcache ns + default-deny (isolated tier)
   - npm-cache.yaml      # verdaccio pull-through cache + PVC + Service + its egress CNP
+  - orchestrator-endpoints-rbac.yaml  # tenant orchestrator SAs: read npm-cache Endpoints (E1c)
   # pypi-cache.yaml     # devpi (E2) — pip/uv pull-through; the prepare-egress CNP already admits it
   # prepare-egress-canary.yaml is DELIBERATELY UNLISTED (GATED), mirroring egress-canary.yaml — it
   # is run by hand via scripts/verify-sandbox-boundary.sh, never reconciled.
