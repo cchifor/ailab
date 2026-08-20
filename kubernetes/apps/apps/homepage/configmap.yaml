@@ -157,17 +157,21 @@ data:
       function mount() {
         if (document.getElementById(ID)) return;
         var card = build();
-        /* Attach to document.body, OUTSIDE React's tree, as a fixed overlay.
+        /* IN FLOW at the top of the page, but still OUTSIDE React's tree.
          *
-         * The first version inserted the card next to #information-widgets, i.e. as a foreign child of
-         * a React-managed container. That element does exist, so the branch was taken - and the card
-         * never appeared, because React reconciliation owns that subtree and drops nodes it did not
-         * create. Homepage is a Next.js app we do not control, so the only placement that reliably
-         * survives a re-render is one React never manages. Next.js mounts into a div inside <body>;
-         * a sibling of that div is untouched by reconciliation. */
-        card.style.cssText += ';position:fixed;right:1rem;bottom:1rem;z-index:2147483000;' +
-          'min-width:14rem;box-shadow:0 10px 30px rgba(0,0,0,.5)';
-        document.body.appendChild(card);
+         * The first version inserted next to #information-widgets - a foreign child of a
+         * React-managed container - and reconciliation dropped it, so nothing ever showed. The fix
+         * after that pinned it as a fixed overlay, which survived but read as a permanent popup.
+         *
+         * Next.js renders into <div id="__next"> inside <body>, and React only reconciles inside that
+         * root. So a SIBLING placed before it is in normal document flow, sits above the dashboard,
+         * and is never touched by a re-render. That gets both properties at once.
+         *
+         * Width is matched to Homepage's centred Tailwind `container` so it lines up with the cards
+         * below instead of spanning the full viewport. */
+        card.style.cssText += ';margin:1rem auto 0;max-width:1152px;width:calc(100% - 2rem)';
+        var root = document.getElementById('__next') || document.body.firstChild;
+        document.body.insertBefore(card, root);
         refresh();
       }
 
