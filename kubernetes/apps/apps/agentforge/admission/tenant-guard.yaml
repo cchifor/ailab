@@ -26,6 +26,19 @@
 # (renderer.py: SecretStore/serviceAccountRef/secretStoreRef == `af-eso-<workspace>`; the vault role ==
 # `af-tenant-<org>-<workspace>`; key == `tenants/<org>/<workspace>/…`). Admission is defense-in-depth; the
 # per-workspace OpenBao role ACL (exact ns+SA+audience+TTL) remains the mandatory confinement.
+#
+# R8 OBSERVABILITY adds monitoring.coreos.com/PodMonitor to the allowlist (validation 1) plus a shape
+# pin (validation 17). Admitting this GVK is safe in a way most are not: a PodMonitor is namespaced and
+# grants NO capability to anything — it only tells Prometheus which pods to scrape. What it CAN do
+# wrong is reach OUTSIDE the tenant, which is what 17 forecloses. The live Prometheus runs
+# `podMonitorSelector: {matchLabels: {release: kube-prometheus-stack}}` with
+# `podMonitorNamespaceSelector: {}` and neither `enforcedNamespaceLabel` nor
+# `ignoreNamespaceSelectors` set (re-measured 2026-08-20 against
+# monitoring/kube-prometheus-stack-prometheus), so a monitor committed into tenant A may legally name
+# tenant B's namespace — or, via `namespaceSelector.any: true`, EVERY namespace — and Prometheus will
+# honour it. The CP's renderer already refuses to commit such a monitor, but a CP-side gate is not
+# evidence here: this tree exists precisely so a compromised CP cannot disable its own constraints
+# (admission/kustomization.yaml header, ADR 0019).
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -107,6 +120,15 @@ spec:
     # can read role/serviceAccountRef without nested has() chains erroring.
     - name: ssK8sAuth
       expression: "(request.kind.kind == 'SecretStore' && has(object.spec) && has(object.spec.provider) && has(object.spec.provider.vault) && has(object.spec.provider.vault.auth) && has(object.spec.provider.vault.auth.kubernetes)) ? object.spec.provider.vault.auth.kubernetes : {}"
+    # -- R8 observability (validation 17) ---------------------------------------------------------
+    # Guarded reads of the two PodMonitor sub-objects, same shape as the ssVaultAuth/ssK8sAuth pair
+    # above: `{}` / `[]` for a non-PodMonitor or a malformed one, so validation 17 can index them
+    # without nested has() chains. `namespaceSelector` and `podMetricsEndpoints` are BOTH optional in
+    # the CRD (only `selector` is required), so neither read may assume presence.
+    - name: pmNsSelector
+      expression: "(request.kind.kind == 'PodMonitor' && has(object.spec) && has(object.spec.namespaceSelector)) ? object.spec.namespaceSelector : {}"
+    - name: pmEndpoints
+      expression: "(request.kind.kind == 'PodMonitor' && has(object.spec) && has(object.spec.podMetricsEndpoints)) ? object.spec.podMetricsEndpoints : []"
   validations:
     # (1) GVK allowlist — reject any kind the tenant path is not permitted to create.
     - expression: >-
@@ -115,8 +137,9 @@ spec:
         (request.kind.group == 'rbac.authorization.k8s.io' && request.kind.kind in ['Role', 'RoleBinding']) ||
         (request.kind.group == 'networking.k8s.io' && request.kind.kind == 'NetworkPolicy') ||
         (request.kind.group == 'cilium.io' && request.kind.kind == 'CiliumNetworkPolicy') ||
-        (request.kind.group == 'external-secrets.io' && request.kind.kind in ['SecretStore', 'ExternalSecret'])
-      message: "agentforge tenant path: this GVK is not in the tenant allowlist (no cluster RBAC, no ClusterSecretStore, no Flux source/Kustomization, no arbitrary kinds)."
+        (request.kind.group == 'external-secrets.io' && request.kind.kind in ['SecretStore', 'ExternalSecret']) ||
+        (request.kind.group == 'monitoring.coreos.com' && request.kind.kind == 'PodMonitor')
+      message: "agentforge tenant path: this GVK is not in the tenant allowlist (no cluster RBAC, no ClusterSecretStore, no Flux source/Kustomization, no PrometheusRule/ServiceMonitor/Probe/ScrapeConfig, no arbitrary kinds)."
     # (2) Explicitly bar cluster-scoped RBAC (clearer message than the allowlist miss).
     - expression: "!(request.kind.group == 'rbac.authorization.k8s.io' && request.kind.kind in ['ClusterRole', 'ClusterRoleBinding'])"
       message: "agentforge tenant path: ClusterRole/ClusterRoleBinding are forbidden (namespaced Role/RoleBinding only)."
@@ -301,6 +324,55 @@ spec:
           ? object.metadata.name != 'af-tenant-tenant-zero-playground'
           : (!has(object.metadata.namespace) || object.metadata.namespace != 'af-tenant-tenant-zero-playground')
       message: "agentforge tenant path: af-tenant-tenant-zero-playground is RESERVED for the operator (shadow tenant) — the CP tenant path may not create/update it or any object within it."
+    # (17) R8 — PodMonitor SHAPE PIN. Validation (1) admits the GVK; this decides what a monitor on
+    #      this path may say. The CP renderer pins all of it at COMMIT time
+    #      (agentforge-platform `_assert_podmonitor_allowlisted`), which is the wrong place for the
+    #      estate to rely on — this tree exists so a compromised CP cannot disable its own gates.
+    #      None of the failures below produce an error at apply time; each is silent.
+    #
+    #      CROSS-TENANT / CLUSTER-WIDE REACH is the one that matters. The live Prometheus honours a
+    #      monitor's own namespaceSelector (podMonitorNamespaceSelector is {}, ignoreNamespaceSelectors
+    #      unset), so tenant A could name tenant B's namespace and scrape it. `matchNames` must be
+    #      EXACTLY this object's own namespace — and `any: true` must be absent, because it OVERRIDES
+    #      matchNames and selects every namespace in the cluster. Pinning matchNames alone would leave
+    #      that door open, which is why both halves are here.
+    #
+    #      SECRET EXFIL. A podMetricsEndpoint may carry basicAuth / bearerTokenSecret / authorization /
+    #      oauth2 / tlsConfig — every one of them a SecretKeySelector read from the TENANT's namespace —
+    #      and proxyUrl / proxyFromEnvironment / proxyConnectHeader decide who Prometheus dials and what
+    #      headers it sends. Together that is "hand a tenant-namespace Secret to an attacker-controlled
+    #      endpoint", performed by the cluster's Prometheus. The CP renders NONE of them, so they are
+    #      forbidden outright rather than shape-checked.
+    #
+    #      INERT MONITOR. Without `release: kube-prometheus-stack` the Prometheus podMonitorSelector
+    #      never adopts the object: it applies cleanly, reports nothing, and is never read. Requiring
+    #      the label turns that silent no-op into a loud rejection. Same reason `podMetricsEndpoints`
+    #      must be non-empty — a monitor with no endpoint scrapes nothing while looking healthy.
+    #
+    #      LEFT UNPINNED, stated rather than glossed. (a) `relabelings`: the CP legitimately writes one
+    #      (job=agentforge-worker) and pinning its exact contents would wedge the whole tenant layer on
+    #      the next renderer change — so a malicious relabeling could still rewrite this pool's series
+    #      labels. That is a metric-integrity problem confined to the fleet's own job, not a
+    #      credential or cross-tenant one. (b) `path`/`scheme`/`params`/`targetPort`/`portNumber`:
+    #      they redirect the scrape, but only ever at THIS tenant's own pods in THIS tenant's own
+    #      namespace, which the CP already controls end to end. (c) `spec.selector`: an over-broad
+    #      selector reaches sibling pools inside the same namespace only. All three are pinned by the
+    #      CP's commit gate; only the two classes above need holding from outside it.
+    - expression: >-
+        request.kind.kind != 'PodMonitor' ||
+        (has(object.metadata.labels) &&
+         'release' in object.metadata.labels &&
+         object.metadata.labels['release'] == 'kube-prometheus-stack' &&
+         (!('any' in variables.pmNsSelector) || variables.pmNsSelector.any != true) &&
+         'matchNames' in variables.pmNsSelector &&
+         has(object.metadata.namespace) &&
+         variables.pmNsSelector.matchNames == [object.metadata.namespace] &&
+         size(variables.pmEndpoints) > 0 &&
+         variables.pmEndpoints.all(e,
+           !has(e.proxyUrl) && !has(e.proxyConnectHeader) && !has(e.proxyFromEnvironment) &&
+           !has(e.basicAuth) && !has(e.bearerTokenSecret) && !has(e.authorization) &&
+           !has(e.oauth2) && !has(e.tlsConfig) && !has(e.metricRelabelings)))
+      message: "agentforge tenant path: a PodMonitor must carry release=kube-prometheus-stack, scope namespaceSelector.matchNames to EXACTLY its OWN namespace with no 'any: true', declare at least one podMetricsEndpoint, and set no proxyUrl/proxyConnectHeader/proxyFromEnvironment/basicAuth/bearerTokenSecret/authorization/oauth2/tlsConfig/metricRelabelings on any endpoint."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
