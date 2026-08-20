@@ -89,6 +89,33 @@ rules:
   - apiGroups: ["external-secrets.io"]
     resources: ["externalsecrets", "secretstores"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # R8 observability. The CP renders ONE PodMonitor per pool into that pool's own tenant namespace
+  # (agentforge-platform adapters/gitops/renderer.py `_podmonitor`, file 55-podmonitor.yaml) once the
+  # operator flips AFP_METRICS_PODMONITOR_ENABLED on the CP Deployment. Same wedge shape as the ESO
+  # grant above, and it was measured, not assumed — before this rule,
+  #
+  #   kubectl auth can-i create podmonitors.monitoring.coreos.com \
+  #     --as=system:serviceaccount:flux-system:agentforge-tenants-reconciler \
+  #     -n af-tenant-tenant-zero-platform-dev   =>   no
+  #
+  # so the FIRST pool re-rendered after the flip would commit a manifest this identity cannot apply,
+  # and Flux stops applying the whole agentforge-tenants Kustomization rather than skipping the file —
+  # stalling EVERY tenant's manifests, not just the one that was re-rendered.
+  #
+  # ORDERING, and it is the reason this rule lands ALONE and FIRST: this file reconciles through the
+  # `agentforge-tenants-git-auth` Kustomization (10m interval), while the tenant-guard VAP that must
+  # ALSO admit the GVK and the CP env flag that turns rendering on both reconcile through `apps`.
+  # There is no dependsOn between those two Kustomizations, so shipping them together buys no
+  # atomicity — it just makes the wedge window a coin flip. Grant first, verify, then admit, then flip.
+  #
+  # PODMONITOR ONLY, deliberately. No servicemonitors/probes/scrapeconfigs (nothing on this path
+  # renders them) and above all NO prometheusrules: a tenant-writable PrometheusRule would let the
+  # tenant path define cluster-wide recording rules and alerts, which is a far larger grant than
+  # "tell Prometheus which of my own pods to scrape". `delete` because the Kustomization is
+  # prune: true; `update`/`patch` because Flux server-side-applies on every interval.
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["podmonitors"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
