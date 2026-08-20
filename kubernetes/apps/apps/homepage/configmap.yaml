@@ -18,6 +18,7 @@ data:
       Dev Workers: { style: row, columns: 3 }
       Observability: { style: row, columns: 3 }
       Infrastructure: { style: row, columns: 4 }
+      Cloud GPU: { style: row, columns: 1 }
 
   kubernetes.yaml: |
     mode: cluster
@@ -27,31 +28,7 @@ data:
   # Homepage copies skeleton custom.css/custom.js into /app/config on first page render; with the
   # config mounted read-only (ConfigMap) that copy hits EROFS and crashes the app. Provide them empty.
   custom.css: ""
-  custom.js: |
-    /* cloud-power loader.
-     *
-     * Deliberately tiny and FROZEN: this file should never need to change again, because it is the one
-     * piece Cloudflare will cache. home.chifor.me sits behind Cloudflare, which caches by file
-     * extension; Homepage serves this at /api/config/custom.js and sends no Cache-Control, so
-     * Cloudflare applied its own max-age=14400 and kept serving a stale copy for hours after a change
-     * (observed: cf-cache-status HIT, Age 7167, while the origin/ConfigMap/pod all had the new bytes).
-     * The lab's Cloudflare token is scoped to DNS + Access only, so neither a purge nor a cache rule
-     * can be automated.
-     *
-     * The actual control lives at /cloud-power/ui.js, served by the cloud-power service, which sets
-     * Cache-Control: no-store on every response - Cloudflare honours that and will not cache it. The
-     * cache-busting query is belt and braces.
-     *
-     * Side benefit: UI changes now ship by editing cloud-power's ui.js, whose ConfigMap content hash
-     * rolls that pod automatically. No Homepage rollout restart, no Cloudflare purge.
-     */
-    (function () {
-      var s = document.createElement('script');
-      s.src = '/cloud-power/ui.js?v=' + Date.now();
-      s.async = true;
-      s.onerror = function () { console.warn('[cloud-power] ui.js unavailable - control not loaded'); };
-      (document.head || document.documentElement).appendChild(s);
-    })();
+  custom.js: ""
   bookmarks.yaml: |
     - Lab:
         - Repo:
@@ -217,3 +194,20 @@ data:
             description: Password manager · own auth
             icon: vaultwarden.png
             siteMonitor: http://vaultwarden.vaultwarden.svc.cluster.local:80/alive
+    # Native Homepage iframe widget, NOT an injected script. The earlier custom.js approach
+    # fought React for placement and, worse, was served from /api/config/custom.js - which
+    # Cloudflare caches by file extension (Homepage sends no Cache-Control), so edits stayed
+    # invisible behind a stale edge copy for hours and the lab's CF token cannot purge.
+    # services.yaml is rendered server-side into the HTML page, which Cloudflare does not cache,
+    # so this renders in-flow, aligned with every other section, and updates on a pod restart.
+    - Cloud GPU:
+        - Power:
+            description: cloud1/2/3 · Wake-on-LAN + Proxmox shutdown
+            icon: mdi-server-network
+            widget:
+              type: iframe
+              name: cloudpower
+              src: /cloud-power/
+              classes: h-32 sm:h-32 md:h-32 lg:h-32 xl:h-32 2xl:h-32
+              allowScrolling: "yes"
+              referrerPolicy: same-origin
