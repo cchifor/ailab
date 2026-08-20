@@ -16,3 +16,4 @@ configMapGenerator:
   - name: cloud-power-app
     files:
       - app.py
+      - ui.js # the dashboard control, served at /cloud-power/ui.js with no-store

@@ -345,6 +345,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "forbidden: caller outside the cluster"})
         if MODE == "wol":
             return self._send(404, {"error": "wol sender exposes only POST /api/wake"})
+        if r == "/ui.js":
+            # The dashboard control itself. Served from here rather than from Homepage's
+            # /api/config/custom.js because Cloudflare caches by extension and Homepage sends no
+            # Cache-Control, so a UI change stayed invisible for hours behind a stale edge copy.
+            # _send always sets Cache-Control: no-store, which Cloudflare honours.
+            try:
+                with open("/app/ui.js", "rb") as f:
+                    return self._send(200, f.read(), "application/javascript; charset=utf-8")
+            except OSError as e:
+                log("ui.js unreadable: %s" % e)
+                return self._send(404, {"error": "ui.js not available"})
         if r == "/api/status":
             return self._send(200, status())
         if r in ("", "/", "/index.html"):
