@@ -27,7 +27,158 @@ data:
   # Homepage copies skeleton custom.css/custom.js into /app/config on first page render; with the
   # config mounted read-only (ConfigMap) that copy hits EROFS and crashes the app. Provide them empty.
   custom.css: ""
-  custom.js: ""
+  custom.js: |
+    /* cloud-power - ON/OFF for the separate `pve` GPU cluster (cloud1/2/3).
+     *
+     * Homepage has no action-button widget, so the control is injected here. It talks to
+     * /cloud-power/ on THIS origin, which oauth2-proxy peels off to the cloud-power service, so the
+     * Authelia session cookie authenticates every call and there is no CORS and no second login.
+     *
+     * Placement is deliberately defensive: Homepage is a React app and its DOM changes between
+     * releases, so we try a few containers and fall back to a fixed-position card. A MutationObserver
+     * re-injects if a re-render drops the node. Worst case the card floats; it never disappears.
+     */
+    (function () {
+      var BASE = '/cloud-power';
+      var ID = 'cloud-power-card';
+      var pending = null, pendingTimer = null;
+
+      function el(tag, css, txt) {
+        var e = document.createElement(tag);
+        if (css) e.style.cssText = css;
+        if (txt != null) e.textContent = txt;
+        return e;
+      }
+
+      function btnCss(bg) {
+        return 'font:inherit;font-weight:700;font-size:.75rem;letter-spacing:.04em;border:0;' +
+          'border-radius:.4rem;padding:.35rem 1.1rem;cursor:pointer;color:#fff;background:' + bg;
+      }
+
+      function show(msg, text) { msg.style.display = 'block'; msg.textContent = text; }
+
+      function build() {
+        var card = el('div', 'background:#1e293bcc;border:1px solid #33415588;border-radius:.75rem;' +
+          'padding:.9rem 1.1rem;margin:0 0 1rem 0;backdrop-filter:blur(6px);font-size:.85rem;color:#e2e8f0');
+        card.id = ID;
+
+        var head = el('div', 'display:flex;align-items:center;gap:.6rem;margin-bottom:.6rem');
+        head.appendChild(el('span', 'font-weight:600;letter-spacing:.02em', 'Cloud GPU'));
+        var sum = el('span', 'color:#94a3b8;font-size:.78rem', 'checking...');
+        head.appendChild(sum);
+        card.appendChild(head);
+
+        var dots = el('div', 'display:flex;gap:1rem;margin-bottom:.7rem;font-family:ui-monospace,monospace;font-size:.78rem');
+        card.appendChild(dots);
+
+        var row = el('div', 'display:flex;gap:.6rem;align-items:center');
+        var bon = el('button', btnCss('#16a34a'), 'ON');
+        var boff = el('button', btnCss('#dc2626'), 'OFF');
+        row.appendChild(bon); row.appendChild(boff);
+        card.appendChild(row);
+
+        var msg = el('div', 'margin-top:.6rem;color:#94a3b8;font-size:.75rem;white-space:pre-wrap;display:none');
+        card.appendChild(msg);
+
+        bon.onclick = function () { wake(msg, sum); };
+        boff.onclick = function () { off(msg, boff); };
+
+        card._parts = { sum: sum, dots: dots, msg: msg, boff: boff };
+        return card;
+      }
+
+      function refresh() {
+        var card = document.getElementById(ID); if (!card) return;
+        var p = card._parts;
+        fetch(BASE + '/api/status', { credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(function (s) {
+            p.sum.textContent = s.up + '/' + s.total + ' up';
+            p.dots.innerHTML = '';
+            s.nodes.forEach(function (n) {
+              var w = el('span', 'display:flex;align-items:center;gap:.3rem');
+              w.appendChild(el('span', 'width:.55rem;height:.55rem;border-radius:50%;background:' +
+                (n.up ? '#22c55e' : '#64748b')));
+              w.appendChild(el('span', n.up ? 'color:#e2e8f0' : 'color:#64748b', n.name));
+              p.dots.appendChild(w);
+            });
+          })
+          .catch(function () { p.sum.textContent = 'unreachable'; });
+      }
+
+      function wake(msg, sum) {
+        show(msg, 'sending wake packets...');
+        fetch(BASE + '/api/wake', { method: 'POST', credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(function () {
+            show(msg, 'Magic packets sent. Nodes take several minutes to POST.');
+            sum.textContent = 'waking...';
+          })
+          .catch(function (e) { show(msg, 'wake failed: ' + e); });
+      }
+
+      /* Two-step: the first click only REPORTS what would be stopped and arms a single-use,
+       * time-boxed token issued by the server. A stray tap cannot power off a cluster mid-inference. */
+      function off(msg, boff) {
+        if (!pending) {
+          show(msg, 'checking what is running...');
+          fetch(BASE + '/api/shutdown/preflight', { method: 'POST', credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (p) {
+              pending = p.confirm;
+              var list = p.guests.length
+                ? p.guests.map(function (g) { return '  ' + g.node + '  ' + g.type + ' ' + g.vmid + ' ' + g.name; }).join('\n')
+                : '  (no running guests)';
+              show(msg, 'WILL STOP:\n' + list + '\n\nClick OFF again within ' + p.expires_in + 's to confirm.');
+              boff.textContent = 'CONFIRM';
+              clearTimeout(pendingTimer);
+              pendingTimer = setTimeout(function () {
+                pending = null; boff.textContent = 'OFF'; show(msg, 'confirmation expired');
+              }, (p.expires_in || 30) * 1000);
+            })
+            .catch(function (e) { show(msg, 'preflight failed: ' + e); });
+          return;
+        }
+        clearTimeout(pendingTimer);
+        var tok = pending; pending = null; boff.textContent = 'OFF';
+        show(msg, 'shutting down...');
+        fetch(BASE + '/api/shutdown', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ confirm: tok })
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            show(msg, (d.results || []).map(function (x) { return x.node + ': ' + x.result; }).join('\n') || JSON.stringify(d));
+          })
+          .catch(function (e) { show(msg, 'shutdown failed: ' + e); });
+      }
+
+      function mount() {
+        if (document.getElementById(ID)) return;
+        var card = build();
+        /* Preferred: inline above the dashboard content. Selectors are tried in order and any miss is
+         * harmless - the last branch pins the card so it is always reachable. */
+        var host = document.querySelector('#information-widgets') || document.querySelector('main') ||
+                   document.querySelector('#page_container');
+        if (host && host.parentNode) {
+          host.parentNode.insertBefore(card, host.nextSibling);
+        } else {
+          card.style.cssText += ';position:fixed;right:1rem;bottom:1rem;z-index:9999;min-width:15rem';
+          document.body.appendChild(card);
+        }
+        refresh();
+      }
+
+      function start() {
+        mount();
+        setInterval(refresh, 15000);
+        new MutationObserver(function () { mount(); }).observe(document.body, { childList: true, subtree: true });
+      }
+
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+      else start();
+    })();
 
   bookmarks.yaml: |
     - Lab:

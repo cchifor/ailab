@@ -33,7 +33,16 @@ spec:
             - --oidc-issuer-url=https://sso.chifor.me
             - --client-id=homepage
             - --redirect-url=https://home.chifor.me/oauth2/callback
+            # Multiple upstreams, matched by path prefix (longest first). The bare-host entry is
+            # the catch-all for Homepage; /cloud-power/ is peeled off to the power-button service in
+            # its own namespace. Same origin, so the dashboard's custom.js can fetch() it with the
+            # session cookie already attached — no second login, no new tunnel route, no CORS.
+            - --upstream=http://cloud-power.cloud-power.svc.cluster.local:8127/cloud-power/
             - --upstream=http://homepage.homepage.svc.cluster.local:8080
+            # Forward the authenticated identity so cloud-power can log WHO pressed OFF. This is
+            # attribution only — the real access boundary is cloud-power's own caller allowlist,
+            # because its hostNetwork listener is reachable on the LAN without passing through here.
+            - --pass-user-headers=true
             - --http-address=0.0.0.0:4180
             - --email-domain=* # single-user lab: any Authelia-authenticated user
             - --scope=openid profile email groups

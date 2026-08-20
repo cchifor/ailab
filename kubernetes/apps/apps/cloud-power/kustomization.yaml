@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# cloud-power — power control for the separate `pve` GPU cluster, surfaced on home.chifor.me.
+namespace: cloud-power
+resources:
+  - namespace.yaml
+  - secret.sops.yaml # SOPS: PVE API token (cloudpower@pve!ailab, Sys.PowerMgmt + audit only)
+  - deployment.yaml
+
+configMapGenerator:
+  # Generated (not a hand-written ConfigMap) so the name carries a content hash: editing app.py
+  # renames the ConfigMap, which rewrites the Deployment's volume reference and rolls the pod
+  # automatically. A static ConfigMap would update in place and leave the OLD code running until
+  # someone remembered to restart it — the exact trap that made a LiteLLM config change inert.
+  - name: cloud-power-app
+    files:
+      - app.py
