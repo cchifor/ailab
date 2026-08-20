@@ -1,0 +1,38 @@
+# The real access boundary for the destructive half.
+#
+# cloud-power (MODE=api) can power OFF the GPU cluster. It sits behind oauth2-proxy for browsers,
+# but a Service is reachable by any pod that can egress — verified during the initial rollout, where
+# a throwaway pod in `default` called cloud-power.cloud-power.svc directly and got a valid response,
+# bypassing Authelia entirely. This admits ingress ONLY from the oauth2-proxy that fronts Homepage.
+#
+# Scope note: this selects the API pod by label, NOT the whole namespace, because cloud-power-wol
+# runs with hostNetwork and pod-level ingress rules do not govern host-network traffic anyway. That
+# is acceptable: the wol pod holds no token and exposes only POST /api/wake, so the worst an
+# unauthenticated caller achieves there is turning the cluster ON.
+#
+# Egress is deliberately unrestricted: the API pod must reach the three Proxmox nodes on
+# 192.168.0.2x:8006 and the wol Service, and pinning those here would duplicate NODES.
+#
+# VALIDATE after applying:
+#   * the cloud-power pod must stay Ready — kubelet probes have to reach it. Default Cilium allows
+#     host->pod; if the host firewall is ever restricted, add a CiliumNetworkPolicy with
+#     `fromEntities: [host]` (same caveat as headlamp/networkpolicy.yaml).
+#   * https://home.chifor.me/cloud-power/api/status must still answer through the dashboard.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloud-power-allow-oauth2-proxy-only
+  namespace: cloud-power
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloud-power
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: homepage
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: oauth2-proxy

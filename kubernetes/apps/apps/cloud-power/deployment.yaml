@@ -3,17 +3,26 @@
 # oauth2-proxy (an extra --upstream there), so it inherits the existing Authelia session and needs
 # no new hostname, tunnel route or OIDC client.
 #
-# Stock python:3-slim + stdlib only — no custom image, so nothing here depends on a build pipeline
-# that this repo does not have.
+# TWO DEPLOYMENTS, ONE IMAGE, SPLIT BY BLAST RADIUS
+#   cloud-power      MODE=api  normal pod networking. Status + shutdown. Holds the PVE token.
+#                              Fenced by networkpolicy.yaml: only oauth2-proxy may reach it.
+#   cloud-power-wol  MODE=wol  hostNetwork. Sends magic packets. Nothing else, no token.
+#
+# The split exists because hostNetwork binds the NODE's LAN address, so anything on
+# 192.168.0.0/24 — and any pod that can egress — can reach that port WITHOUT passing oauth2-proxy.
+# Verified during rollout: a throwaway pod in `default` called the service directly. Rather than
+# try to authenticate a LAN-exposed port, only the harmless half lives there — the worst an
+# unauthenticated caller can do to MODE=wol is turn the cluster ON.
+#
+# Stock python:3-slim + stdlib only — no custom image, so nothing depends on a build pipeline this
+# repo does not have.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cloud-power
   namespace: cloud-power
 spec:
-  replicas: 1 # hostNetwork: a second replica on the same node would fail to bind the port
-  strategy:
-    type: Recreate # ...and a rolling update would transiently double-bind it
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: cloud-power
@@ -22,12 +31,6 @@ spec:
       labels:
         app.kubernetes.io/name: cloud-power
     spec:
-      # REQUIRED, not a convenience: Cilium will not carry 255.255.255.255 off the node and Linux
-      # does not forward directed broadcasts, so a magic packet from a normal pod never reaches the
-      # LAN. Consequence: the listener is bound to the NODE's LAN address, so the app enforces its
-      # own caller allowlist (ALLOW_FROM) — oauth2-proxy guards the browser path only.
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -39,13 +42,86 @@ spec:
           image: mirror.gcr.io/library/python:3.13-slim
           command: ["python3", "-u", "/app/app.py"]
           env:
+            - { name: MODE, value: "api" }
             - { name: PORT, value: "8127" }
             - { name: BASE_PATH, value: "/cloud-power" }
             - { name: PYTHONDONTWRITEBYTECODE, value: "1" } # rootfs is read-only
+            - { name: WOL_URL, value: "http://cloud-power-wol.cloud-power.svc.cluster.local:8127" }
+            # Pinned PVE cert fingerprints. NOT secret — these are public certificate digests, and
+            # keeping them in plain YAML makes a mismatch diagnosable. Values are exactly what
+            # `GET /api2/json/nodes` reports as ssl_fingerprint; confirmed identical to the live
+            # TLS handshake on cloud3:8006. Pinning FAILS CLOSED, so RE-PIN after `pvecm
+            # updatecerts` or any cert regeneration or the OFF button will refuse to act.
+            - name: PVE_FINGERPRINTS
+              value: >-
+                cloud1=16:C5:4B:0D:6D:32:B2:20:13:11:80:10:E8:13:00:36:CF:E5:BA:6B:03:8C:0E:B8:9E:01:A1:1A:8D:EF:43:C3,
+                cloud2=0A:6B:18:C8:5E:AD:70:31:F0:BC:4A:3D:DC:0E:64:D2:29:7D:14:48:7D:C6:22:52:4D:41:F4:0A:05:EA:7A:02,
+                cloud3=AE:88:E9:08:C8:42:48:BB:41:83:F6:15:37:96:29:49:81:48:CC:91:67:A5:7E:7A:0D:AE:19:75:6B:91:B5:56
             - name: PVE_TOKEN_ID
               valueFrom: { secretKeyRef: { name: cloud-power-pve, key: token_id } }
             - name: PVE_TOKEN_SECRET
               valueFrom: { secretKeyRef: { name: cloud-power-pve, key: token_secret } }
+          ports:
+            - { name: http, containerPort: 8127, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /cloud-power/healthz, port: 8127 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /cloud-power/healthz, port: 8127 }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: app, mountPath: /app, readOnly: true }
+      volumes:
+        - name: app
+          configMap: { name: cloud-power-app }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloud-power-wol
+  namespace: cloud-power
+spec:
+  replicas: 1 # hostNetwork: a second replica on the same node would fail to bind the port
+  strategy:
+    type: Recreate # ...and a rolling update would transiently double-bind it
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloud-power-wol
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloud-power-wol
+    spec:
+      # REQUIRED, not a convenience: a magic packet must reach the LAN as a real layer-2 broadcast.
+      # Cilium will not carry 255.255.255.255 off the node, Linux does not forward directed
+      # broadcasts, and unicast WoL is impossible because a powered-off host has no ARP entry.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: cloud-power-wol
+          image: mirror.gcr.io/library/python:3.13-slim
+          command: ["python3", "-u", "/app/app.py"]
+          env:
+            - { name: MODE, value: "wol" } # exposes ONLY POST /api/wake; no PVE token is mounted
+            - { name: PORT, value: "8127" }
+            - { name: BASE_PATH, value: "/cloud-power" }
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
           ports:
             - { name: http, containerPort: 8127, protocol: TCP }
           readinessProbe:
@@ -79,5 +155,17 @@ spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/name: cloud-power
+  ports:
+    - { name: http, port: 8127, targetPort: 8127, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloud-power-wol
+  namespace: cloud-power
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cloud-power-wol
   ports:
     - { name: http, port: 8127, targetPort: 8127, protocol: TCP }
