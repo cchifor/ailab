@@ -157,29 +157,32 @@ data:
       function mount() {
         if (document.getElementById(ID)) return;
         var card = build();
-        /* Preferred: inline above the dashboard content. Selectors are tried in order and any miss is
-         * harmless - the last branch pins the card so it is always reachable. */
-        var host = document.querySelector('#information-widgets') || document.querySelector('main') ||
-                   document.querySelector('#page_container');
-        if (host && host.parentNode) {
-          host.parentNode.insertBefore(card, host.nextSibling);
-        } else {
-          card.style.cssText += ';position:fixed;right:1rem;bottom:1rem;z-index:9999;min-width:15rem';
-          document.body.appendChild(card);
-        }
+        /* Attach to document.body, OUTSIDE React's tree, as a fixed overlay.
+         *
+         * The first version inserted the card next to #information-widgets, i.e. as a foreign child of
+         * a React-managed container. That element does exist, so the branch was taken - and the card
+         * never appeared, because React reconciliation owns that subtree and drops nodes it did not
+         * create. Homepage is a Next.js app we do not control, so the only placement that reliably
+         * survives a re-render is one React never manages. Next.js mounts into a div inside <body>;
+         * a sibling of that div is untouched by reconciliation. */
+        card.style.cssText += ';position:fixed;right:1rem;bottom:1rem;z-index:2147483000;' +
+          'min-width:14rem;box-shadow:0 10px 30px rgba(0,0,0,.5)';
+        document.body.appendChild(card);
         refresh();
       }
 
       function start() {
         mount();
+        console.info('[cloud-power] control mounted');
         setInterval(refresh, 15000);
-        new MutationObserver(function () { mount(); }).observe(document.body, { childList: true, subtree: true });
+        /* Safety net only. The card now lives outside React's tree so nothing should remove it; the
+         * id check makes each callback a no-op, so this cannot loop on its own mutations. */
+        new MutationObserver(function () { mount(); }).observe(document.body, { childList: true });
       }
 
       if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
       else start();
     })();
-
   bookmarks.yaml: |
     - Lab:
         - Repo:
