@@ -4,12 +4,15 @@ metadata:
   name: cloud-power
   labels:
     app.kubernetes.io/part-of: cloud-power
-    # `privileged` ONLY because the pod needs hostNetwork: a Wake-on-LAN magic packet has to
-    # reach the LAN as a real layer-2 broadcast, which pod networking cannot do (see app.py).
+    # `privileged` ONLY because cloud-power-wol needs hostNetwork: a Wake-on-LAN magic packet has
+    # to reach the LAN as a real layer-2 broadcast, which pod networking cannot do (see app.py).
     # This is exactly why cloud-power does not live in the `homepage` namespace - that one stays
     # `restricted`, and the one pod in the estate that needs host access is fenced off here alone.
-    # The pod itself still runs non-root, drops ALL capabilities and uses a read-only rootfs;
-    # hostNetwork is the single exception, so `warn`/`audit` stay at baseline to keep the signal.
+    #
+    # The label is a namespace-wide CEILING, not a grant: BOTH pods still run non-root, drop ALL
+    # capabilities and use a read-only rootfs, and only the wol pod sets hostNetwork. The API pod
+    # (which holds the PVE token) uses ordinary pod networking and would satisfy `restricted`.
+    # `warn`/`audit` stay at baseline so anything that drifts past that still surfaces.
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/warn: baseline
     pod-security.kubernetes.io/audit: baseline
