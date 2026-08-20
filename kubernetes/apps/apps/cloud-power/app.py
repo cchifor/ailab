@@ -269,42 +269,66 @@ def take_confirm(tok):
 PAGE = """<!doctype html><meta charset=utf-8><title>Cloud GPU power</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <style>
- body{background:#0f172a;color:#e2e8f0;font:15px/1.5 system-ui,sans-serif;margin:0;padding:2rem}
- .card{max-width:34rem;margin:0 auto;background:#1e293b;border:1px solid #334155;border-radius:.75rem;padding:1.5rem}
- h1{font-size:1.1rem;margin:0 0 1rem}
- .n{display:flex;gap:.5rem;align-items:center;padding:.35rem 0;font-family:ui-monospace,monospace}
- .dot{width:.65rem;height:.65rem;border-radius:50%;background:#64748b}
- button{font:inherit;font-weight:600;border:0;border-radius:.5rem;padding:.6rem 1.4rem;cursor:pointer;color:#fff}
- .row{display:flex;gap:.75rem;margin-top:1rem}
- pre{white-space:pre-wrap;background:#0f172a;border-radius:.5rem;padding:.75rem;font-size:.8rem;color:#94a3b8}
+ /* Rendered INSIDE Homepage's iframe widget, so the page must be chrome-less and transparent:
+    the widget container supplies the card background, rounding and spacing. */
+ html,body{margin:0;padding:0;background:transparent;color:#e2e8f0;
+   font:13px/1.45 ui-sans-serif,system-ui,sans-serif;overflow:hidden}
+ .wrap{padding:.55rem .7rem;display:flex;flex-direction:column;gap:.5rem;height:100%;box-sizing:border-box}
+ .nodes{display:flex;gap:1rem;flex-wrap:wrap;font-family:ui-monospace,monospace;font-size:.78rem}
+ .n{display:flex;align-items:center;gap:.35rem}
+ .dot{width:.55rem;height:.55rem;border-radius:50%;background:#64748b;flex:none}
+ .row{display:flex;gap:.5rem;align-items:center}
+ button{font:inherit;font-weight:700;font-size:.72rem;letter-spacing:.04em;border:0;border-radius:.35rem;
+   padding:.34rem 1.15rem;cursor:pointer;color:#fff}
+ button:disabled{opacity:.5;cursor:not-allowed}
+ #sum{color:#94a3b8;font-size:.75rem}
+ #out{color:#94a3b8;font-size:.7rem;white-space:pre-wrap;overflow:auto;flex:1;min-height:0}
 </style>
-<div class=card>
- <h1>Cloud GPU cluster</h1><div id=nodes></div>
- <div class=row><button style=background:#16a34a id=bon>Turn ON</button>
- <button style=background:#dc2626 id=boff>Turn OFF</button></div>
- <pre id=out>loading...</pre>
+<div class=wrap>
+ <div class=row><span id=sum>checking...</span></div>
+ <div class=nodes id=nodes></div>
+ <div class=row>
+  <button style=background:#16a34a id=bon>ON</button>
+  <button style=background:#dc2626 id=boff>OFF</button>
+ </div>
+ <div id=out></div>
 </div>
 <script>
-const B=location.pathname.replace(/\\/$/,''),out=document.getElementById('out');
-async function refresh(){try{const s=await(await fetch(B+'/api/status',{credentials:'same-origin'})).json();
- document.getElementById('nodes').innerHTML=s.nodes.map(n=>'<div class=n><span class=dot style=background:'+
- (n.up?'#22c55e':'#64748b')+'></span>'+n.name+' <span style=color:#64748b>'+n.ip+'</span></div>').join('');
- out.textContent=s.up+'/'+s.total+' nodes up ('+s.state+')';}catch(e){out.textContent='status failed: '+e}}
-document.getElementById('bon').onclick=async()=>{out.textContent='sending wake packets...';
- const r=await fetch(B+'/api/wake',{method:'POST',credentials:'same-origin'});
- out.textContent=JSON.stringify(await r.json(),null,1)+'\\n\\nNodes take several minutes to POST.';};
-let pending=null;
-document.getElementById('boff').onclick=async()=>{const b=document.getElementById('boff');
- if(!pending){const r=await fetch(B+'/api/shutdown/preflight',{method:'POST',credentials:'same-origin'});
-  const p=await r.json(); if(!r.ok){out.textContent='preflight refused:\\n'+JSON.stringify(p,null,1);return;}
-  pending=p.confirm; out.textContent='WILL STOP:\\n'+(p.guests.length?p.guests.map(g=>'  '+g.node+' '+g.type+' '+g.vmid+' '+g.name).join('\\n'):'  (no running guests)')
-   +'\\n\\nClick OFF again within '+p.expires_in+'s to confirm.'; b.textContent='CONFIRM OFF';
-  setTimeout(()=>{if(pending){pending=null;b.textContent='Turn OFF';out.textContent='confirmation expired'}},(p.expires_in||30)*1000);
+/* Same-origin: the iframe inherits the Authelia cookie, so these calls are authenticated. */
+const B='/cloud-power',out=document.getElementById('out'),sum=document.getElementById('sum');
+async function refresh(){
+ try{const s=await(await fetch(B+'/api/status',{credentials:'same-origin'})).json();
+  sum.textContent=s.up+'/'+s.total+' up';
+  document.getElementById('nodes').innerHTML=s.nodes.map(n=>
+   '<span class=n><span class=dot style=background:'+(n.up?'#22c55e':'#64748b')+'></span><span style=color:'+
+   (n.up?'#e2e8f0':'#64748b')+'>'+n.name+'</span></span>').join('');
+ }catch(e){sum.textContent='unreachable'}}
+document.getElementById('bon').onclick=async()=>{
+ out.textContent='sending wake packets...';
+ try{await fetch(B+'/api/wake',{method:'POST',credentials:'same-origin'});
+  out.textContent='Magic packets sent. Nodes take about a minute to POST.';sum.textContent='waking...';
+ }catch(e){out.textContent='wake failed: '+e}};
+let pending=null,timer=null;
+document.getElementById('boff').onclick=async()=>{
+ const b=document.getElementById('boff');
+ if(!pending){
+  out.textContent='checking what is running...';
+  const r=await fetch(B+'/api/shutdown/preflight',{method:'POST',credentials:'same-origin'});
+  const p=await r.json();
+  if(!r.ok){out.textContent='preflight refused: '+(p.error||'')+'\\n'+(p.errors||[]).join('\\n');return;}
+  pending=p.confirm;
+  out.textContent='WILL STOP:\\n'+(p.guests.length?p.guests.map(g=>'  '+g.node+' '+g.type+' '+g.vmid+' '+g.name).join('\\n'):'  (no running guests)')
+   +'\\nClick OFF again within '+p.expires_in+'s to confirm.';
+  b.textContent='CONFIRM';
+  clearTimeout(timer);
+  timer=setTimeout(()=>{if(pending){pending=null;b.textContent='OFF';out.textContent='confirmation expired'}},(p.expires_in||30)*1000);
   return;}
- const tok=pending; pending=null; b.textContent='Turn OFF';
+ clearTimeout(timer);const tok=pending;pending=null;b.textContent='OFF';
+ out.textContent='shutting down...';
  const r=await fetch(B+'/api/shutdown',{method:'POST',credentials:'same-origin',
   headers:{'content-type':'application/json'},body:JSON.stringify({confirm:tok})});
- out.textContent=JSON.stringify(await r.json(),null,1);};
+ const d=await r.json();
+ out.textContent=(d.results||[]).map(x=>x.node+': '+x.result).join('\\n')||(d.error||JSON.stringify(d));};
 refresh();setInterval(refresh,15000);
 </script>
 """
@@ -345,20 +369,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "forbidden: caller outside the cluster"})
         if MODE == "wol":
             return self._send(404, {"error": "wol sender exposes only POST /api/wake"})
-        if r == "/ui.js":
-            # The dashboard control itself. Served from here rather than from Homepage's
-            # /api/config/custom.js because Cloudflare caches by extension and Homepage sends no
-            # Cache-Control, so a UI change stayed invisible for hours behind a stale edge copy.
-            # _send always sets Cache-Control: no-store, which Cloudflare honours.
-            try:
-                with open("/app/ui.js", "rb") as f:
-                    return self._send(200, f.read(), "application/javascript; charset=utf-8")
-            except OSError as e:
-                log("ui.js unreadable: %s" % e)
-                return self._send(404, {"error": "ui.js not available"})
         if r == "/api/status":
             return self._send(200, status())
         if r in ("", "/", "/index.html"):
+            # Embedded by Homepage's native iframe widget (services.yaml). Also usable
+            # standalone. No X-Frame-Options is set, deliberately, so same-origin framing works.
             return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
         self._send(404, {"error": "not found"})
 
