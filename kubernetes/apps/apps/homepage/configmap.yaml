@@ -28,164 +28,29 @@ data:
   # config mounted read-only (ConfigMap) that copy hits EROFS and crashes the app. Provide them empty.
   custom.css: ""
   custom.js: |
-    /* cloud-power - ON/OFF for the separate `pve` GPU cluster (cloud1/2/3).
+    /* cloud-power loader.
      *
-     * Homepage has no action-button widget, so the control is injected here. It talks to
-     * /cloud-power/ on THIS origin, which oauth2-proxy peels off to the cloud-power service, so the
-     * Authelia session cookie authenticates every call and there is no CORS and no second login.
+     * Deliberately tiny and FROZEN: this file should never need to change again, because it is the one
+     * piece Cloudflare will cache. home.chifor.me sits behind Cloudflare, which caches by file
+     * extension; Homepage serves this at /api/config/custom.js and sends no Cache-Control, so
+     * Cloudflare applied its own max-age=14400 and kept serving a stale copy for hours after a change
+     * (observed: cf-cache-status HIT, Age 7167, while the origin/ConfigMap/pod all had the new bytes).
+     * The lab's Cloudflare token is scoped to DNS + Access only, so neither a purge nor a cache rule
+     * can be automated.
      *
-     * Placement is deliberately defensive: Homepage is a React app and its DOM changes between
-     * releases, so we try a few containers and fall back to a fixed-position card. A MutationObserver
-     * re-injects if a re-render drops the node. Worst case the card floats; it never disappears.
+     * The actual control lives at /cloud-power/ui.js, served by the cloud-power service, which sets
+     * Cache-Control: no-store on every response - Cloudflare honours that and will not cache it. The
+     * cache-busting query is belt and braces.
+     *
+     * Side benefit: UI changes now ship by editing cloud-power's ui.js, whose ConfigMap content hash
+     * rolls that pod automatically. No Homepage rollout restart, no Cloudflare purge.
      */
     (function () {
-      var BASE = '/cloud-power';
-      var ID = 'cloud-power-card';
-      var pending = null, pendingTimer = null;
-
-      function el(tag, css, txt) {
-        var e = document.createElement(tag);
-        if (css) e.style.cssText = css;
-        if (txt != null) e.textContent = txt;
-        return e;
-      }
-
-      function btnCss(bg) {
-        return 'font:inherit;font-weight:700;font-size:.75rem;letter-spacing:.04em;border:0;' +
-          'border-radius:.4rem;padding:.35rem 1.1rem;cursor:pointer;color:#fff;background:' + bg;
-      }
-
-      function show(msg, text) { msg.style.display = 'block'; msg.textContent = text; }
-
-      function build() {
-        var card = el('div', 'background:#1e293bcc;border:1px solid #33415588;border-radius:.75rem;' +
-          'padding:.9rem 1.1rem;margin:0 0 1rem 0;backdrop-filter:blur(6px);font-size:.85rem;color:#e2e8f0');
-        card.id = ID;
-
-        var head = el('div', 'display:flex;align-items:center;gap:.6rem;margin-bottom:.6rem');
-        head.appendChild(el('span', 'font-weight:600;letter-spacing:.02em', 'Cloud GPU'));
-        var sum = el('span', 'color:#94a3b8;font-size:.78rem', 'checking...');
-        head.appendChild(sum);
-        card.appendChild(head);
-
-        var dots = el('div', 'display:flex;gap:1rem;margin-bottom:.7rem;font-family:ui-monospace,monospace;font-size:.78rem');
-        card.appendChild(dots);
-
-        var row = el('div', 'display:flex;gap:.6rem;align-items:center');
-        var bon = el('button', btnCss('#16a34a'), 'ON');
-        var boff = el('button', btnCss('#dc2626'), 'OFF');
-        row.appendChild(bon); row.appendChild(boff);
-        card.appendChild(row);
-
-        var msg = el('div', 'margin-top:.6rem;color:#94a3b8;font-size:.75rem;white-space:pre-wrap;display:none');
-        card.appendChild(msg);
-
-        bon.onclick = function () { wake(msg, sum); };
-        boff.onclick = function () { off(msg, boff); };
-
-        card._parts = { sum: sum, dots: dots, msg: msg, boff: boff };
-        return card;
-      }
-
-      function refresh() {
-        var card = document.getElementById(ID); if (!card) return;
-        var p = card._parts;
-        fetch(BASE + '/api/status', { credentials: 'same-origin' })
-          .then(function (r) { return r.json(); })
-          .then(function (s) {
-            p.sum.textContent = s.up + '/' + s.total + ' up';
-            p.dots.innerHTML = '';
-            s.nodes.forEach(function (n) {
-              var w = el('span', 'display:flex;align-items:center;gap:.3rem');
-              w.appendChild(el('span', 'width:.55rem;height:.55rem;border-radius:50%;background:' +
-                (n.up ? '#22c55e' : '#64748b')));
-              w.appendChild(el('span', n.up ? 'color:#e2e8f0' : 'color:#64748b', n.name));
-              p.dots.appendChild(w);
-            });
-          })
-          .catch(function () { p.sum.textContent = 'unreachable'; });
-      }
-
-      function wake(msg, sum) {
-        show(msg, 'sending wake packets...');
-        fetch(BASE + '/api/wake', { method: 'POST', credentials: 'same-origin' })
-          .then(function (r) { return r.json(); })
-          .then(function () {
-            show(msg, 'Magic packets sent. Nodes take several minutes to POST.');
-            sum.textContent = 'waking...';
-          })
-          .catch(function (e) { show(msg, 'wake failed: ' + e); });
-      }
-
-      /* Two-step: the first click only REPORTS what would be stopped and arms a single-use,
-       * time-boxed token issued by the server. A stray tap cannot power off a cluster mid-inference. */
-      function off(msg, boff) {
-        if (!pending) {
-          show(msg, 'checking what is running...');
-          fetch(BASE + '/api/shutdown/preflight', { method: 'POST', credentials: 'same-origin' })
-            .then(function (r) { return r.json(); })
-            .then(function (p) {
-              pending = p.confirm;
-              var list = p.guests.length
-                ? p.guests.map(function (g) { return '  ' + g.node + '  ' + g.type + ' ' + g.vmid + ' ' + g.name; }).join('\n')
-                : '  (no running guests)';
-              show(msg, 'WILL STOP:\n' + list + '\n\nClick OFF again within ' + p.expires_in + 's to confirm.');
-              boff.textContent = 'CONFIRM';
-              clearTimeout(pendingTimer);
-              pendingTimer = setTimeout(function () {
-                pending = null; boff.textContent = 'OFF'; show(msg, 'confirmation expired');
-              }, (p.expires_in || 30) * 1000);
-            })
-            .catch(function (e) { show(msg, 'preflight failed: ' + e); });
-          return;
-        }
-        clearTimeout(pendingTimer);
-        var tok = pending; pending = null; boff.textContent = 'OFF';
-        show(msg, 'shutting down...');
-        fetch(BASE + '/api/shutdown', {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ confirm: tok })
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (d) {
-            show(msg, (d.results || []).map(function (x) { return x.node + ': ' + x.result; }).join('\n') || JSON.stringify(d));
-          })
-          .catch(function (e) { show(msg, 'shutdown failed: ' + e); });
-      }
-
-      function mount() {
-        if (document.getElementById(ID)) return;
-        var card = build();
-        /* IN FLOW at the top of the page, but still OUTSIDE React's tree.
-         *
-         * The first version inserted next to #information-widgets - a foreign child of a
-         * React-managed container - and reconciliation dropped it, so nothing ever showed. The fix
-         * after that pinned it as a fixed overlay, which survived but read as a permanent popup.
-         *
-         * Next.js renders into <div id="__next"> inside <body>, and React only reconciles inside that
-         * root. So a SIBLING placed before it is in normal document flow, sits above the dashboard,
-         * and is never touched by a re-render. That gets both properties at once.
-         *
-         * Width is matched to Homepage's centred Tailwind `container` so it lines up with the cards
-         * below instead of spanning the full viewport. */
-        card.style.cssText += ';margin:1rem auto 0;max-width:1152px;width:calc(100% - 2rem)';
-        var root = document.getElementById('__next') || document.body.firstChild;
-        document.body.insertBefore(card, root);
-        refresh();
-      }
-
-      function start() {
-        mount();
-        console.info('[cloud-power] control mounted');
-        setInterval(refresh, 15000);
-        /* Safety net only. The card now lives outside React's tree so nothing should remove it; the
-         * id check makes each callback a no-op, so this cannot loop on its own mutations. */
-        new MutationObserver(function () { mount(); }).observe(document.body, { childList: true });
-      }
-
-      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
-      else start();
+      var s = document.createElement('script');
+      s.src = '/cloud-power/ui.js?v=' + Date.now();
+      s.async = true;
+      s.onerror = function () { console.warn('[cloud-power] ui.js unavailable - control not loaded'); };
+      (document.head || document.documentElement).appendChild(s);
     })();
   bookmarks.yaml: |
     - Lab:
