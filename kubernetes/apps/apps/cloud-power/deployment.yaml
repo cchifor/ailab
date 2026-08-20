@@ -1,0 +1,83 @@
+# cloud-power — ON/OFF for the separate `pve` GPU cluster (cloud1/2/3), surfaced as buttons on
+# home.chifor.me. Reached at https://home.chifor.me/cloud-power/ via the homepage namespace's
+# oauth2-proxy (an extra --upstream there), so it inherits the existing Authelia session and needs
+# no new hostname, tunnel route or OIDC client.
+#
+# Stock python:3-slim + stdlib only — no custom image, so nothing here depends on a build pipeline
+# that this repo does not have.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloud-power
+  namespace: cloud-power
+spec:
+  replicas: 1 # hostNetwork: a second replica on the same node would fail to bind the port
+  strategy:
+    type: Recreate # ...and a rolling update would transiently double-bind it
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloud-power
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloud-power
+    spec:
+      # REQUIRED, not a convenience: Cilium will not carry 255.255.255.255 off the node and Linux
+      # does not forward directed broadcasts, so a magic packet from a normal pod never reaches the
+      # LAN. Consequence: the listener is bound to the NODE's LAN address, so the app enforces its
+      # own caller allowlist (ALLOW_FROM) — oauth2-proxy guards the browser path only.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: cloud-power
+          image: mirror.gcr.io/library/python:3.13-slim
+          command: ["python3", "-u", "/app/app.py"]
+          env:
+            - { name: PORT, value: "8127" }
+            - { name: BASE_PATH, value: "/cloud-power" }
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" } # rootfs is read-only
+            - name: PVE_TOKEN_ID
+              valueFrom: { secretKeyRef: { name: cloud-power-pve, key: token_id } }
+            - name: PVE_TOKEN_SECRET
+              valueFrom: { secretKeyRef: { name: cloud-power-pve, key: token_secret } }
+          ports:
+            - { name: http, containerPort: 8127, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /cloud-power/healthz, port: 8127 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /cloud-power/healthz, port: 8127 }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] } # UDP broadcast on a >1024 port needs no capability
+          volumeMounts:
+            - { name: app, mountPath: /app, readOnly: true }
+      volumes:
+        - name: app
+          configMap: { name: cloud-power-app }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloud-power
+  namespace: cloud-power
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cloud-power
+  ports:
+    - { name: http, port: 8127, targetPort: 8127, protocol: TCP }

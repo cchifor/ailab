@@ -6,6 +6,7 @@ resources:
   - auth # Authelia SSO (OIDC provider) — Grafana/Open WebUI clients reference it
   - edge
   - homepage # app dashboard at home.chifor.me
+  - cloud-power # ON/OFF buttons on home.chifor.me for the separate `pve` GPU cluster
   - gatus # uptime monitoring + status page at status.chifor.me
   - headlamp # live k8s cluster explorer (read-only) at k8s.chifor.me
   - agentforge # AgentForge v2 self-service control plane at agentforge.chifor.me (ADR 0019)
