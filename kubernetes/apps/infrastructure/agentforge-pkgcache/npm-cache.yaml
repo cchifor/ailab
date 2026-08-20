@@ -75,6 +75,10 @@ data:
     events { worker_connections 256; }
     http {
       access_log off;
+      # kube-dns, for LAZY (request-time) resolution of the pypi upstreams via variable
+      # proxy_pass below — so a pypi-DNS hiccup can never stop nginx from starting and
+      # serving the npm side (a static upstream name would resolve at config load).
+      resolver 10.96.0.10 valid=30s ipv6=off;
       # every writable path under /tmp so readOnlyRootFilesystem holds
       client_body_temp_path /tmp/nginx-client;
       proxy_temp_path /tmp/nginx-proxy;
@@ -94,6 +98,36 @@ data:
           proxy_set_header Host $http_host;
           proxy_http_version 1.1;
           proxy_read_timeout 60s;
+        }
+        # -- pypi pull-through (#209 E2) --------------------------------------------------
+        # The engine injects UV_INDEX_URL=http://<podIP>:4873/pypi/simple/ for a PREPARE job.
+        # We proxy the PEP 503/691 simple index from pypi.org, then sub_filter rewrites the
+        # absolute files.pythonhosted.org wheel URLs it returns to route back through THIS
+        # proxy (/pypi/files/). So an untrusted setup_cmd egresses ONLY to this cache — never
+        # to the CDN directly — keeping the same cache-only invariant the npm side has.
+        # regex + variable upstream ⇒ nginx resolves these at REQUEST time (via resolver),
+        # never at startup, so the npm side is isolated from any pypi-DNS issue.
+        location ~ ^/pypi/simple/(?<pkgpath>.*)$ {
+          set $pypi_up "pypi.org";
+          proxy_pass https://$pypi_up/simple/$pkgpath$is_args$args;
+          proxy_set_header Host pypi.org;
+          proxy_ssl_server_name on;
+          proxy_ssl_name pypi.org;
+          proxy_set_header Accept-Encoding "";   # plaintext so sub_filter can rewrite the body
+          sub_filter_once off;
+          sub_filter_types application/vnd.pypi.simple.v1+json application/vnd.pypi.simple.v1+html text/html;
+          sub_filter "https://files.pythonhosted.org/" "http://$http_host/pypi/files/";
+          proxy_read_timeout 60s;
+          proxy_http_version 1.1;
+        }
+        location ~ ^/pypi/files/(?<filepath>.*)$ {
+          set $files_up "files.pythonhosted.org";
+          proxy_pass https://$files_up/$filepath$is_args$args;
+          proxy_set_header Host files.pythonhosted.org;
+          proxy_ssl_server_name on;
+          proxy_ssl_name files.pythonhosted.org;
+          proxy_read_timeout 120s;
+          proxy_http_version 1.1;
         }
         location / { return 404; }
       }
@@ -314,8 +348,19 @@ spec:
               - matchName: "registry.npmjs.org.agentforge-pkgcache.svc.cluster.local"
               - matchName: "registry.npmjs.org.svc.cluster.local"
               - matchName: "registry.npmjs.org.cluster.local"
+              # pypi pull-through (#209 E2): same musl/ndots qualified-variant treatment.
+              - matchName: "pypi.org"
+              - matchName: "pypi.org.agentforge-pkgcache.svc.cluster.local"
+              - matchName: "pypi.org.svc.cluster.local"
+              - matchName: "pypi.org.cluster.local"
+              - matchName: "files.pythonhosted.org"
+              - matchName: "files.pythonhosted.org.agentforge-pkgcache.svc.cluster.local"
+              - matchName: "files.pythonhosted.org.svc.cluster.local"
+              - matchName: "files.pythonhosted.org.cluster.local"
     - toFQDNs:
         - matchName: "registry.npmjs.org"
+        - matchName: "pypi.org"          # pypi simple index upstream (#209 E2)
+        - matchName: "files.pythonhosted.org"  # wheel/sdist CDN, proxied via /pypi/files/
       toPorts:
         - ports:
             - { port: "443", protocol: TCP }
