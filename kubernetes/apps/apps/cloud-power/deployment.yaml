@@ -36,7 +36,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: cloud-power
-          image: mirror.gcr.io/library/python:3.13-slim
+          image: mirror.gcr.io/library/python:3.14-slim
           command: ["python3", "-u", "/app/app.py"]
           env:
             - { name: PORT, value: "8127" }
