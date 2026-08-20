@@ -253,6 +253,56 @@ spec:
                  "anthropic/claude-max-2":"http://broker-anthropic-max2.agentforge-broker.svc.cluster.local:8700",
                  "anthropic/claude-max-3":"http://broker-anthropic-claude-max-3.agentforge-broker.svc.cluster.local:8700",
                  "openai/codex-pro":"http://broker-openai-codex.agentforge-broker.svc.cluster.local:8700"}
+            # -- R8 observability: commit a tenant-ns PodMonitor per pool -----------------
+            # Turns on Settings.metrics_podmonitor_enabled, which makes the tenant renderer
+            # emit 55-podmonitor.yaml beside each pool's Deployment. Until it is on, a
+            # CP-rendered pool exports forge_* on 9464 that NOTHING reads — the port is
+            # declared and the tenant NetworkPolicy already admits ns `monitoring`; the only
+            # missing piece was an object telling Prometheus to look. That gap is what the
+            # standing ForgeOrchestratorUnscraped alert fires on
+            # (infrastructure/monitoring/agentforge-coverage-rules.yaml).
+            #
+            # ⚠️ ORDERING RULE — THIS VALUE IS AN ASSERTION ABOUT THE ESTATE, NOT A FEATURE
+            # TOGGLE. The CP's own commit gate reads it as the operator's claim that BOTH
+            # prerequisites are already reconciled IN-CLUSTER:
+            #   1. admission/tenant-guard.yaml validation (1) admits
+            #      monitoring.coreos.com/PodMonitor (and (17) accepts the rendered shape);
+            #   2. agentforge-tenants-bootstrap/reconciler-rbac.yaml grants `podmonitors`
+            #      to the agentforge-tenants-reconciler ClusterRole.
+            # Flip this before either is LIVE and the first pool re-rendered afterwards
+            # commits a manifest the reconciler cannot apply — Flux then stops applying the
+            # whole agentforge-tenants Kustomization rather than skipping the file, stalling
+            # EVERY tenant's manifests. (2) is the one that bites: it reconciles through the
+            # separate agentforge-tenants-git-auth Kustomization (10m interval) with no
+            # dependsOn to `apps`, so merging it alongside this line buys no atomicity.
+            # Verify, do not infer:
+            #   kubectl --context admin@ai auth can-i create podmonitors.monitoring.coreos.com \
+            #     --as=system:serviceaccount:flux-system:agentforge-tenants-reconciler \
+            #     -n af-tenant-tenant-zero-platform-dev            # => yes
+            #   kubectl --context admin@ai --as=system:serviceaccount:flux-system:agentforge-tenants-reconciler \
+            #     -n af-tenant-tenant-zero-platform-dev apply --server-side --dry-run=server -f <a rendered monitor>
+            # `auth can-i` alone is NOT sufficient — it exercises RBAC and never runs the
+            # ValidatingAdmissionPolicy, so it says yes while an unadmitted GVK still Denies.
+            #
+            # SCOPE: CP-WIDE, not one pool. metrics_podmonitor has no per-pool surface;
+            # api/workspaces.py sets it from this setting for every pool it provisions
+            # ("server-owned, never caller-supplied"). Every future workspace create, pool
+            # resize and creds rollout emits a monitor, so budget N new scrape targets
+            # against the Prometheus retention headroom documented in
+            # infrastructure/monitoring/kube-prometheus-stack.yaml, not one.
+            #
+            # NOTHING RE-RENDERS ON A CP RESTART, A FLUX RECONCILE OR A BACKGROUND LOOP —
+            # same rule as AFP_PRIVILEGE_HARDENING above. An EXISTING pool gains its monitor
+            # only when something re-renders it; the idempotent handle is the pool rollout
+            # route (POST /api/workspaces/<id>/pools/<pool>/rollout with the live creds
+            # Secret's resourceVersion).
+            #
+            # ROLLBACK IS ASYMMETRIC. Reverting this line does not delete the
+            # 55-podmonitor.yaml files already committed to cchifor/agentforge-tenants; they
+            # keep being applied. To unwind the estate side, revert this FIRST and re-render
+            # every affected pool (the CP gate rejects a PodMonitor while the flag is off, so
+            # the re-render drops the file), and only then revert the VAP and the RBAC.
+            - { name: AFP_METRICS_PODMONITOR_ENABLED, value: "true" }
           # WS4 (C1): the restricted agentforge-infra-bot Gitea token (AFP_INFRA_BOT_TOKEN) — the
           # SOPS Secret has existed since Stage 0 (agentforge-infra-bot.sops.yaml); this wires it.
           # The bot is a READ-only collaborator on cchifor/ailab: the CP can only OPEN AGit PRs
