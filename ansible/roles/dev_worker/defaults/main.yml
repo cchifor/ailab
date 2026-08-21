@@ -58,8 +58,14 @@ dev_worker_enable_jobs: true
 dev_worker_enable_cloudflared: false
 dev_worker_enable_restic: false
 dev_worker_enable_password_auth: false
+dev_worker_enable_statusline: true
 dev_worker_tmux_persistence: true
 dev_worker_tmp_hygiene_full: false # simple tmpfiles.d aging is always on; the homelab loopback+evictor is not
+
+# ---- Claude Code status line ----
+# Re-run the status line command every N seconds on top of Claude Code's own event-driven updates, so
+# the 5h/7d rate-limit reset countdowns keep ticking while a session sits idle between turns.
+dev_worker_statusline_refresh_interval: 10
 
 # ---- resource caps (homelab values) ----
 dev_worker_dockerd_memory_max: "2000M"
