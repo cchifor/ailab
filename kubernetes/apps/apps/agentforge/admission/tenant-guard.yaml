@@ -344,20 +344,66 @@ spec:
     #      endpoint", performed by the cluster's Prometheus. The CP renders NONE of them, so they are
     #      forbidden outright rather than shape-checked.
     #
+    #      LABEL FORGERY is the SAME cross-tenant class as the namespaceSelector above, reached from
+    #      the other end — and this block MIS-FILED it until 2026-08-21. The earlier version banned
+    #      `metricRelabelings` under "secret exfil" (it carries no secret; it belongs here) while
+    #      excusing the strictly MORE capable `relabelings` as "a metric-integrity problem confined to
+    #      the fleet's own job, not a credential or cross-tenant one". That sentence was false in both
+    #      halves. prometheus-operator appends an endpoint's USER relabelings AFTER its own
+    #      namespace/pod/container/job targetLabel relabelings, so a tenant `replace` onto one of those
+    #      WINS — and this Prometheus has `enforcedNamespaceLabel` UNSET (re-measured 2026-08-20), the
+    #      one field that exists to stop exactly this. Two consequences, both cross-tenant:
+    #        * IDENTITY. `{targetLabel: namespace, replacement: af-tenant-victim}` (plus `pod`) stores
+    #          THIS pool's forge_worker_up under the VICTIM's (namespace, pod) — the exact join key of
+    #          the ForgeOrchestratorUnscraped rule (infrastructure/monitoring/agentforge-coverage-
+    #          rules.yaml: `unless on (namespace, pod) forge_worker_up`). The victim's genuinely
+    #          unscraped pool is then silenced permanently, and every namespace-keyed dashboard and
+    #          alert attributes this tenant's work to the victim.
+    #        * REACH. `__address__` / `__scheme__` / `__metrics_path__` / `__param_*` are writable the
+    #          same way and decide WHO PROMETHEUS DIALS — the identical property proxyUrl is forbidden
+    #          for one paragraph up. The CP renders the "admit TCP 9464 from ns monitoring" rule
+    #          UNCONDITIONALLY into every tenant NetworkPolicy, so a redirected `__address__` reaches
+    #          any other tenant's exporter from Prometheus's network position, unauthenticated.
+    #      `honorLabels: true` reaches the same forgery through the exposition body rather than the
+    #      config, and `labelmap`/`labeldrop`/`labelkeep` reach it with NO targetLabel at all (labelmap
+    #      can mint a `namespace` label out of a tenant-controlled pod label), which is why the ACTION
+    #      is pinned as well as the target. Both spellings of each action are listed because the
+    #      PodMonitor CRD's own enum accepts `labelmap` and `LabelMap` alike.
+    #
+    #      The pin is by TARGET, not by CONTENTS, and that is deliberate: any non-reserved label stays
+    #      writable, so the CP keeps writing job=agentforge-worker and the next renderer change cannot
+    #      wedge the tenant layer. Preserving that was the real concern behind leaving the field open —
+    #      it did not require leaving the cross-tenant half open too.
+    #
     #      INERT MONITOR. Without `release: kube-prometheus-stack` the Prometheus podMonitorSelector
     #      never adopts the object: it applies cleanly, reports nothing, and is never read. Requiring
     #      the label turns that silent no-op into a loud rejection. Same reason `podMetricsEndpoints`
     #      must be non-empty — a monitor with no endpoint scrapes nothing while looking healthy.
     #
-    #      LEFT UNPINNED, stated rather than glossed. (a) `relabelings`: the CP legitimately writes one
-    #      (job=agentforge-worker) and pinning its exact contents would wedge the whole tenant layer on
-    #      the next renderer change — so a malicious relabeling could still rewrite this pool's series
-    #      labels. That is a metric-integrity problem confined to the fleet's own job, not a
-    #      credential or cross-tenant one. (b) `path`/`scheme`/`params`/`targetPort`/`portNumber`:
-    #      they redirect the scrape, but only ever at THIS tenant's own pods in THIS tenant's own
-    #      namespace, which the CP already controls end to end. (c) `spec.selector`: an over-broad
-    #      selector reaches sibling pools inside the same namespace only. All three are pinned by the
-    #      CP's commit gate; only the two classes above need holding from outside it.
+    #      LEFT UNPINNED, stated rather than glossed — and this list is endpoint/spec-shape only, not
+    #      an inventory of every field the CRD has. (a) `path`/`scheme`/`params`/`targetPort`/
+    #      `portNumber`: they redirect the scrape, but only ever at THIS tenant's own pods in THIS
+    #      tenant's own namespace, which the CP already controls end to end. (b) `spec.selector`: an
+    #      over-broad selector reaches sibling pools inside the same namespace only. (c) `interval` /
+    #      `scrapeTimeout`: resolution and scrape cost, this pool's own series only. (a)-(c) are all
+    #      pinned by the CP's commit gate — `_assert_podmonitor_allowlisted` compares the whole
+    #      endpoint dict by EQUALITY and the selector/namespaceSelector field by field — so only the
+    #      classes above need holding from OUTSIDE it. (d) is the one exception worth naming because
+    #      NOTHING pins it on either side: the spec-level limits (`sampleLimit`/`targetLimit`/
+    #      `labelLimit`/`labelNameLengthLimit`/`labelValueLengthLimit`, absent == unlimited) plus
+    #      `spec.attachMetadata`/`spec.scrapeClass`. The CP renders a three-key `spec` and none of
+    #      them, so today they cannot appear; the exposure is a cardinality/retention cost against
+    #      the SHARED Prometheus rather than a cross-tenant one, which is why it is recorded here
+    #      instead of closed with a `size(object.spec) == 3` pin that the next renderer change would
+    #      trip over.
+    #
+    #      COUPLED PIN — this clause and the CP's `_podmonitor_endpoints()` (agentforge-platform
+    #      adapters/gitops/renderer.py, which `_assert_podmonitor_allowlisted` pins by EQUALITY) move
+    #      TOGETHER. They are two copies of one allowlist with no shared source, and the drift
+    #      direction is a fleet-wide wedge: a renderer change adding a field forbidden below passes the
+    #      CP gate, lands in the un-PR-gated tenants repo, and is then Denied here — which stops the
+    #      whole agentforge-tenants Kustomization, not just that file. Widen here FIRST, confirm it is
+    #      reconciled, then ship the render.
     - expression: >-
         request.kind.kind != 'PodMonitor' ||
         (has(object.metadata.labels) &&
@@ -371,8 +417,15 @@ spec:
          variables.pmEndpoints.all(e,
            !has(e.proxyUrl) && !has(e.proxyConnectHeader) && !has(e.proxyFromEnvironment) &&
            !has(e.basicAuth) && !has(e.bearerTokenSecret) && !has(e.authorization) &&
-           !has(e.oauth2) && !has(e.tlsConfig) && !has(e.metricRelabelings)))
-      message: "agentforge tenant path: a PodMonitor must carry release=kube-prometheus-stack, scope namespaceSelector.matchNames to EXACTLY its OWN namespace with no 'any: true', declare at least one podMetricsEndpoint, and set no proxyUrl/proxyConnectHeader/proxyFromEnvironment/basicAuth/bearerTokenSecret/authorization/oauth2/tlsConfig/metricRelabelings on any endpoint."
+           !has(e.oauth2) && !has(e.tlsConfig) && !has(e.metricRelabelings) &&
+           (!has(e.honorLabels) || e.honorLabels != true) &&
+           (!has(e.relabelings) || e.relabelings.all(r,
+             (!has(r.action) ||
+              !(r.action in ['labelmap', 'LabelMap', 'labeldrop', 'LabelDrop', 'labelkeep', 'LabelKeep'])) &&
+             (!has(r.targetLabel) ||
+              (!r.targetLabel.startsWith('__') &&
+               !(r.targetLabel in ['namespace', 'pod', 'container', 'endpoint', 'instance', 'node'])))))))
+      message: "agentforge tenant path: a PodMonitor must carry release=kube-prometheus-stack, scope namespaceSelector.matchNames to EXACTLY its OWN namespace with no 'any: true', declare at least one podMetricsEndpoint, and on every endpoint set no proxyUrl/proxyConnectHeader/proxyFromEnvironment/basicAuth/bearerTokenSecret/authorization/oauth2/tlsConfig/metricRelabelings and no honorLabels:true. A relabeling may not use the labelmap/labeldrop/labelkeep actions, nor target a reserved label (namespace/pod/container/endpoint/instance/node, or any '__'-prefixed target such as __address__/__scheme__/__metrics_path__) — those forge another tenant's series identity or redirect who Prometheus dials. Any OTHER targetLabel (e.g. job) is permitted."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

@@ -170,6 +170,15 @@ nested-virt-verify:
 af-verify-hashes:
     python scripts/check-inline-hashes.py
 
+# Evaluate the agentforge-tenant-guard VAP's CEL against a fixture table of admission requests:
+# the CP's live PodMonitor render must stay ADMITTED and each shape the policy exists to stop must
+# be DENIED by the expected clause. Nothing else in this estate evaluates that CEL — a client
+# dry-run parses the YAML and a server dry-run only proves it COMPILES — so run this after EVERY
+# edit to admission/tenant-guard.yaml. Static-only; needs cel-python + PyYAML.
+# Evaluate the agentforge-tenant-guard VAP's CEL against its admit/deny fixture table
+af-verify-tenant-guard *args:
+    python scripts/check-tenant-guard-cel.py {{args}}
+
 # Verify every value derived from the broker seat inventory still agrees with the broker manifests
 # that declare it (the two AFP_* maps, the provisioner barrier list + readyz map, broker-inventory
 # .yaml). Static-only; this is what .gitea/workflows/broker-inventory.yaml runs on every PR.
