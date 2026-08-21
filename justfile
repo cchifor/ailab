@@ -174,8 +174,8 @@ af-verify-hashes:
 # the CP's live PodMonitor render must stay ADMITTED and each shape the policy exists to stop must
 # be DENIED by the expected clause. Nothing else in this estate evaluates that CEL — a client
 # dry-run parses the YAML and a server dry-run only proves it COMPILES — so run this after EVERY
-# edit to admission/tenant-guard.yaml. Static-only; needs cel-python + PyYAML.
-# Evaluate the agentforge-tenant-guard VAP's CEL against its admit/deny fixture table
+# edit to admission/tenant-guard.yaml. Static-only; needs cel-python (PyYAML comes with it). This
+# is what .gitea/workflows/tenant-guard-cel.yaml runs on every PR that touches admission/.
 af-verify-tenant-guard *args:
     python scripts/check-tenant-guard-cel.py {{args}}
 

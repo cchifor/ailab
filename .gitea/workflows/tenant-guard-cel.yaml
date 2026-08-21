@@ -1,0 +1,67 @@
+# tenant-guard CEL evaluation — the only thing anywhere that EVALUATES the tenant guard's CEL.
+#
+# WHY THIS EXISTS: kubernetes/apps/apps/agentforge/admission/tenant-guard.yaml is the estate-side
+# boundary on what the CP bot may write into the un-PR-gated cchifor/agentforge-tenants repo, and
+# every one of its rules is a CEL expression the apiserver compiles at admission time and nowhere
+# else. `kubectl apply --dry-run=client` parses the YAML without evaluating anything and a server
+# dry-run only proves the expressions COMPILE, so neither answers "does clause N still deny what it
+# was written to deny?". scripts/check-tenant-guard-cel.py does, and the justfile has asked for it to
+# be run "after EVERY edit" ever since. This estate has already watched exactly that ritual rot:
+# .gitea/workflows/runner-scripts.yaml's own header records `just test-gitea-runner` existing while
+# "NOTHING ran it on a PR. It therefore rotted unnoticed" through two changes. A silently-weakened
+# VAP clause is worse than a rotted test suite — it produces no apply-time error and no runtime
+# error, just a tenant path that quietly admits what it used to refuse.
+#
+# WHY .gitea/ AND NOT .github/: Gitea reads .gitea/workflows and, once that directory exists, ignores
+# .github/workflows entirely. This repo already has three workflows here; the convention is set.
+#
+# FAIL CLOSED, following broker-inventory.yaml: ONE job, ONE step, no `needs:`, no matrix, no
+# aggregator (the estate has already shipped a gate that could not fail — `join(needs.*.result)` is
+# an EMPTY STRING on act_runner, so its loop body never ran), no `continue-on-error`, no `if:`, no
+# `|| true`, no soft skips. `set -euo pipefail`, and a missing interpreter, an uninstallable
+# dependency or a single mismatched case is a non-zero exit and a red check.
+name: tenant-guard-cel
+
+on:
+  pull_request:
+    paths:
+      - "kubernetes/apps/apps/agentforge/admission/**"
+      - "scripts/check-tenant-guard-cel.py"
+      - ".gitea/workflows/tenant-guard-cel.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "kubernetes/apps/apps/agentforge/admission/**"
+      - "scripts/check-tenant-guard-cel.py"
+
+jobs:
+  tenant-guard-cel:
+    name: tenant-guard CEL admit/deny table
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    # The table is ~35 in-process CEL evaluations; it finishes in seconds. The minutes are for the
+    # dependency install, and the cap is here so a wedged install cannot hold a runner slot.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Evaluate tenant-guard.yaml against its admit/deny fixture table
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Resolve an interpreter explicitly and FAIL if there is none — never skip.
+          if command -v python3 >/dev/null 2>&1; then
+            PY=python3
+          elif command -v python >/dev/null 2>&1; then
+            PY=python
+          else
+            echo "no python3/python on the runner — failing closed rather than skipping the gate"
+            exit 1
+          fi
+          "$PY" --version
+          # cel-python is the harness's one dependency (PyYAML comes with it — cel-python requires
+          # pyyaml>=6.0.2). PINNED, because the harness re-supplies overloads that this version is
+          # missing and a newer one may supply differently. The second arm is for a PEP 668
+          # "externally-managed-environment" runner; if BOTH arms fail, so does the step.
+          "$PY" -m pip install --quiet --disable-pip-version-check 'cel-python==0.5.0' \
+            || "$PY" -m pip install --quiet --disable-pip-version-check --break-system-packages 'cel-python==0.5.0'
+          "$PY" scripts/check-tenant-guard-cel.py
