@@ -1,0 +1,17 @@
+---
+# ---- host clock ----
+# Local wall-clock time for the interactive/CI host classes. The dev-workers are used by a human in
+# Romania and the runner logs are read by the same human, so UTC timestamps meant constant mental
+# arithmetic. Europe/Bucharest is EET (UTC+2) in winter and EEST (UTC+3) in summer; tzdata handles
+# the switch, which is exactly why this is a zone name and not a fixed offset.
+host_time_timezone: Europe/Bucharest
+
+# Network time sync.
+#
+# systemd-timesyncd, NOT chrony — deliberately different from pve_base on the hypervisors. These are
+# Ubuntu VMs where timesyncd is the shipped default, is already enabled, and is already synchronised
+# against ntp.ubuntu.com. Swapping 11 live hosts onto chrony to match the Proxmox hosts would mean a
+# window with no time source and a second implementation to maintain, for no behaviour the lab needs.
+# The hypervisors run chrony because pve_base installs it; that is a different host class.
+host_time_ntp_enabled: true
+host_time_ntp_service: systemd-timesyncd

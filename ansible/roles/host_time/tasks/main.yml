@@ -1,0 +1,54 @@
+---
+# Host clock: local timezone + network time sync. Shared by the dev-worker and CI-runner playbooks
+# so the two host classes cannot drift apart in configuration.
+#
+# ⚠️ TIMEZONE APPLIES TO NEW PROCESSES ONLY. glibc reads /etc/localtime the first time a process
+# needs it and caches it, so a daemon that was already running keeps emitting UTC until it restarts.
+# That is deliberate: this role does NOT restart docker, act_runner, the GitHub agent or agentforge,
+# because that would kill live CI jobs and interactive tmux sessions. New logins and newly started
+# jobs are correct immediately; long-running daemons follow on their next ordinary restart.
+
+- name: Set the system timezone
+  community.general.timezone:
+    name: "{{ host_time_timezone }}"
+  register: host_time_tz
+
+# Enabling network time sync = making sure timesyncd is enabled and running. `timedatectl set-ntp`
+# is just a wrapper around this unit, so managing the unit directly is the idempotent form.
+- name: Enable and start network time synchronisation
+  ansible.builtin.systemd_service:
+    name: "{{ host_time_ntp_service }}"
+    enabled: true
+    state: started
+  when: host_time_ntp_enabled | bool
+
+# Report, don't assume. After a timezone change timesyncd is untouched and stays synchronised, but
+# read it back rather than trusting that — an unsynchronised CI runner produces confusing job
+# timestamps and breaks anything that compares times across hosts.
+- name: Read back the clock state
+  ansible.builtin.command: timedatectl show -p Timezone -p NTP -p NTPSynchronized --value
+  register: host_time_state
+  changed_when: false
+  # Read-only, so run it in --check too. Without this the command is skipped in check mode,
+  # stdout_lines is empty, and the assert below dies on 'list has no attribute 1' rather than
+  # telling you anything about the clock.
+  check_mode: false
+
+- name: Fail if network time synchronisation is not active
+  ansible.builtin.assert:
+    that:
+      - host_time_state.stdout_lines[1] == 'yes'
+    fail_msg: >-
+      {{ inventory_hostname }}: NTP is not enabled after configuring {{ host_time_ntp_service }}.
+      Check `systemctl status {{ host_time_ntp_service }}` and egress to UDP/123.
+    success_msg: "{{ inventory_hostname }}: network time synchronisation is enabled"
+  when: host_time_ntp_enabled | bool
+
+- name: Show the resulting clock state
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: tz={{ host_time_state.stdout_lines[0] }}
+      ntp={{ host_time_state.stdout_lines[1] }}
+      synced={{ host_time_state.stdout_lines[2] }}
+      {{ '— timezone CHANGED; long-running daemons keep UTC in their logs until they restart'
+         if host_time_tz.changed else '' }}
