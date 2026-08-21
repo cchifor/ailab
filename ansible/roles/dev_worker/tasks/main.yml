@@ -58,6 +58,13 @@
 - name: Shared Claude/Codex credential ACLs
   ansible.builtin.import_tasks: credentials.yml
 
+# Needs ~/.claude (credentials.yml, above) and node (node.yml). Carries its own tag so the status
+# line can be rolled out on its own: --tags statusline.
+- name: Claude Code status line (usage + context readout under the prompt)
+  ansible.builtin.import_tasks: claude_statusline.yml
+  when: dev_worker_enable_statusline | bool
+  tags: [statusline]
+
 - name: Gitea (git.chifor.me) forge git credentials — Gitea is master (ADR 0017)
   ansible.builtin.import_tasks: git_forge.yml
 

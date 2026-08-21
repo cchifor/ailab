@@ -1,0 +1,64 @@
+---
+# Claude Code status line — one flowing line under the prompt: model + effort, context-window use,
+# the 5h and 7d subscription limits with reset countdowns, session spend, then repo@branch. Segments
+# pack onto a line until the next no longer fits, then wrap; Claude Code exports COLUMNS into the
+# status-line command's environment and renders it with paddingX 0, so the full width is usable.
+#
+# Ordered after credentials.yml in main.yml — that is what creates each ~/.claude with the right
+# owner and mode. Node comes from node.yml (NodeSource, /usr/bin/node); the absolute path is
+# deliberate, because the status-line command inherits Claude Code's environment, not a login PATH.
+
+# main.yml tags this file `statusline` so the status line can be rolled out on its own, without a
+# full role re-run. users.yml is not in that tag set, so its dev_worker_users fact is absent on a
+# tag-limited run — derive the same list here when that happens.
+- name: Resolve the dev-worker user(s) when running tag-limited (users.yml was skipped)
+  ansible.builtin.set_fact:
+    dev_worker_users: >-
+      {{ [{'name': dev_worker_admin_user, 'home': '/home/' + dev_worker_admin_user}] +
+         ([{'name': dev_worker_agent_user, 'home': '/home/' + dev_worker_agent_user}]
+          if dev_worker_agent_user != dev_worker_admin_user else []) }}
+  when: dev_worker_users is not defined
+
+- name: Install the Claude Code status line script
+  ansible.builtin.copy:
+    src: claude-statusline.js
+    dest: "{{ item.home }}/.claude/statusline.js"
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0755"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# settings.json belongs to the USER (model, theme, permissions, plugins, MCP approvals). Read it,
+# add our one key, write it back — a template here would silently discard whatever they had. A
+# missing file is the normal case on a worker nobody has configured yet, hence failed_when: false.
+- name: Read each user's existing Claude settings.json
+  ansible.builtin.slurp:
+    src: "{{ item.home }}/.claude/settings.json"
+  register: dev_worker_claude_settings
+  failed_when: false
+  changed_when: false
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# First run rewrites the file as sorted, 4-space JSON (to_nice_json); every run after is a no-op. A
+# settings.json that exists but does not parse fails the task on purpose — better a loud stop than
+# silently replacing a config we could not read.
+- name: Merge the statusLine key into each user's Claude settings.json
+  ansible.builtin.copy:
+    content: >-
+      {{ ((item.1.content | b64decode | from_json) if item.1.content is defined else {})
+         | combine({'statusLine': {
+             'type': 'command',
+             'command': '/usr/bin/node ' ~ item.0.home ~ '/.claude/statusline.js',
+             'refreshInterval': dev_worker_statusline_refresh_interval }})
+         | to_nice_json }}
+    dest: "{{ item.0.home }}/.claude/settings.json"
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0644"
+  loop: "{{ dev_worker_users | zip(dev_worker_claude_settings.results) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}"
