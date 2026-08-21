@@ -60,8 +60,21 @@ jobs:
           "$PY" --version
           # cel-python is the harness's one dependency (PyYAML comes with it — cel-python requires
           # pyyaml>=6.0.2). PINNED, because the harness re-supplies overloads that this version is
-          # missing and a newer one may supply differently. The second arm is for a PEP 668
-          # "externally-managed-environment" runner; if BOTH arms fail, so does the step.
-          "$PY" -m pip install --quiet --disable-pip-version-check 'cel-python==0.5.0' \
-            || "$PY" -m pip install --quiet --disable-pip-version-check --break-system-packages 'cel-python==0.5.0'
-          "$PY" scripts/check-tenant-guard-cel.py
+          # missing and a newer one may supply differently.
+          #
+          # uv FIRST, and it is not a preference: this fleet's runner image ships a python3 with NO
+          # pip module at all (`/usr/bin/python3: No module named pip` — measured, it is what failed
+          # this workflow's first run), so both pip arms below are dead on it. `uv run --no-project`
+          # builds a throwaway env for the one dependency, needs no pip and no venv package, and
+          # leaves nothing behind on a runner that other jobs share. The pip arms are kept as the
+          # fallback for a runner that has pip but not uv — the second of them for a PEP 668
+          # "externally-managed-environment" host. If EVERY arm fails, so does the step: there is no
+          # skip path, per this file's fail-closed header.
+          if command -v uv >/dev/null 2>&1; then
+            uv run --no-project --with 'cel-python==0.5.0' \
+              "$PY" scripts/check-tenant-guard-cel.py
+          else
+            "$PY" -m pip install --quiet --disable-pip-version-check 'cel-python==0.5.0' \
+              || "$PY" -m pip install --quiet --disable-pip-version-check --break-system-packages 'cel-python==0.5.0'
+            "$PY" scripts/check-tenant-guard-cel.py
+          fi
