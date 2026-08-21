@@ -17,6 +17,12 @@
       tags: [runners]
       when: github_runner_enabled | default(false)
   roles:
+    # Local wall-clock time + NTP. Own `time` tag so the clock can be set without a full role re-run,
+    # which would reconfigure Docker and the runner agents on hosts that may be mid-job.
+    - role: host_time
+      tags: [runners, time]
+      when: github_runner_enabled | default(false)
+
     # Fleet observability — the same node_exporter the hypervisors run (the lab scrapes everything).
     - role: node_exporter
       tags: [runners, monitoring]

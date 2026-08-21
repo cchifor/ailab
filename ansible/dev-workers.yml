@@ -35,6 +35,13 @@
         - dev_worker_enabled | default(false)
         - dev_worker_secrets_stat.stat.exists
   roles:
+    # Local wall-clock time + NTP. Carries its own `time` tag so the clock can be set without a full
+    # role re-run, which on a live box would touch docker, toolchains and the firewall and restart
+    # agentforge under running tmux sessions.
+    - role: host_time
+      tags: [dev_workers, time]
+      when: dev_worker_enabled | default(false)
+
     # Fleet observability — the same node_exporter the hypervisors + runners emit (scraped at :9100).
     - role: node_exporter
       tags: [dev_workers, monitoring]
