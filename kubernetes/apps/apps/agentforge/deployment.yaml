@@ -297,11 +297,46 @@ spec:
             # route (POST /api/workspaces/<id>/pools/<pool>/rollout with the live creds
             # Secret's resourceVersion).
             #
-            # ROLLBACK IS ASYMMETRIC. Reverting this line does not delete the
-            # 55-podmonitor.yaml files already committed to cchifor/agentforge-tenants; they
-            # keep being applied. To unwind the estate side, revert this FIRST and re-render
-            # every affected pool (the CP gate rejects a PodMonitor while the flag is off, so
-            # the re-render drops the file), and only then revert the VAP and the RBAC.
+            # ROLLBACK IS ASYMMETRIC, AND THE VAP/RBAC REVERT IS THE LAST STEP, NEVER AN
+            # EARLY ONE. Reverting this line does not delete the 55-podmonitor.yaml files
+            # already committed to cchifor/agentforge-tenants, and NO re-render will:
+            # with the flag off the renderer simply does not EMIT the file (renderer.py
+            # `if spec.metrics_podmonitor`), and the committer is create-or-update over the
+            # rendered set — adapters/gitops/gitea.py `commit()` PUTs the files it is handed
+            # and never lists or deletes a repo path that is absent from the render. The one
+            # code path that deletes, `delete_tree()`, is whole-workspace TEARDOWN and takes
+            # every other manifest with it. So a committed monitor keeps being applied until
+            # something removes it FROM THE REPO.
+            #
+            # An earlier version of this comment said to revert this line, re-render every
+            # pool ("the CP gate rejects a PodMonitor while the flag is off, so the re-render
+            # drops the file"), and only then revert the VAP and the RBAC. That premise is
+            # false — the gate only rejects a monitor that is PRESENT in the render, which
+            # with the flag off never happens, and dropping a file from a render does not
+            # drop it from the repo — and following it wedges the fleet: while a committed
+            # 55-podmonitor.yaml remains, the next 5m reconcile of the agentforge-tenants
+            # Kustomization hits Denied (admission) / Forbidden (RBAC) on that file, and Flux
+            # stops applying the WHOLE layer rather than skipping it, stalling EVERY tenant's
+            # manifests. Same fleet-wide wedge the ORDERING RULE above exists to prevent,
+            # reached from the other direction.
+            #
+            # THE UNWIND, in order:
+            #   1. Set this to "false" (or drop the line). That stops the NEXT provision /
+            #      resize / pool rollout re-committing a monitor. It deletes nothing.
+            #   2. Delete tenants/<org>/<workspace>/55-podmonitor.yaml from
+            #      cchifor/agentforge-tenants OUT OF BAND — a plain git commit against that
+            #      repo, for every affected workspace. The CP exposes no per-file delete.
+            #   3. Let the agentforge-tenants Kustomization (5m, prune: true) prune the
+            #      PodMonitor objects. That prune is a DELETE performed by the reconciler SA,
+            #      so the RBAC grant must STILL BE LIVE at this point; the VAP matches
+            #      CREATE/UPDATE only, so admission never sees the delete. Confirm both
+            #      before moving on:
+            #        flux get ks agentforge-tenants                        # => Ready
+            #        kubectl --context admin@ai get podmonitors -A \
+            #          -l app.kubernetes.io/managed-by=agentforge-cp       # => nothing
+            #   4. ONLY THEN revert admission/tenant-guard.yaml validations (1)/(17) and the
+            #      reconciler ClusterRole rule — and they need not be reverted at all: with no
+            #      PodMonitor left on the tenant path, both are inert.
             - { name: AFP_METRICS_PODMONITOR_ENABLED, value: "true" }
           # WS4 (C1): the restricted agentforge-infra-bot Gitea token (AFP_INFRA_BOT_TOKEN) — the
           # SOPS Secret has existed since Stage 0 (agentforge-infra-bot.sops.yaml); this wires it.
