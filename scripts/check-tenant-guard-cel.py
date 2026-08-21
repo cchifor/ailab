@@ -15,10 +15,17 @@ declaration order (no hand-substituted values; that was the weakness of the thro
 this replaces) and then every `spec.validations` expression -- against a table of admission
 requests, and asserts the admit/deny verdict AND which clause produced it.
 
-WHAT IT IS NOT. It is a fidelity approximation, not the apiserver: it uses cel-python, the object
-is a fixture rather than a decoded+defaulted CRD instance, and CRD structural-schema validation
-(which runs BEFORE validating admission and rejects e.g. an out-of-enum relabeling `action`) is
-not modelled. It therefore proves the CEL's own logic, which is the half that lives in this repo.
+WHAT IT IS NOT. It is a fidelity approximation, not the apiserver, in three named ways.
+  * It evaluates with cel-python (written against 0.5.0), not the apiserver's Go CEL -- see the
+    re-supplied `_==_`/`_!=_`/`split` overloads below for the gaps that turned up in practice.
+  * CRD structural-schema validation, which runs BEFORE validating admission and rejects e.g. an
+    out-of-enum relabeling `action`, is not modelled.
+  * CRD DEFAULTING is not modelled either, and that one changes which BRANCH of a clause runs. The
+    live PodMonitor CRD declares `action: {default: "replace"}`, so at real admission EVERY
+    relabeling arrives carrying an action and validation 17's `!has(r.action)` branch is dead code
+    in production; a fixture that omits the key exercises it here anyway. Cases that must hold in
+    production therefore spell the defaulted value out (`relabel-explicit-replace-action-admitted`).
+It therefore proves the CEL's own logic, which is the half that lives in this repo.
 
 USAGE:  python scripts/check-tenant-guard-cel.py        (or: just af-verify-tenant-guard)
         python scripts/check-tenant-guard-cel.py -v     list every case + its verdict
@@ -34,9 +41,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import celpy
 import yaml
-from celpy import celtypes
+
+# cel-python is this repo's only non-stdlib/non-PyYAML dependency and nothing here declares it (no
+# pyproject/requirements in ailab). A bare ModuleNotFoundError on a runner reads as a broken script;
+# say what is missing and how to get it instead.
+try:
+    import celpy
+    from celpy import celtypes
+except ImportError as exc:  # pragma: no cover
+    raise SystemExit(
+        "check-tenant-guard-cel.py needs cel-python (written against 0.5.0): "
+        "pip install 'cel-python==0.5.0'"
+    ) from exc
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 POLICY = REPO_ROOT / "kubernetes/apps/apps/agentforge/admission/tenant-guard.yaml"
@@ -268,6 +285,63 @@ CASES: list[tuple[str, dict[str, Any], int | None]] = [
         ),
         17,
     ),
+    # A targetLabel is NOT used literally. Prometheus expands the regex capture groups INTO the
+    # label NAME (`relabel.go`: `target := model.LabelName(cfg.Regex.ExpandString([]byte{},
+    # cfg.TargetLabel, val, indexes))`; the CRD's own targetLabel description says "Regex capture
+    # groups are available"), so a reserved-NAME check on the string is bypassed by a payload that
+    # never spells the reserved name: step 1 parks it in an ordinary label -- the same static-label
+    # idiom the CP uses for `job` -- and step 2 expands it into the target.
+    (
+        "relabel-templated-targetlabel-forges-namespace",
+        pm(
+            lambda o: _endpoint(o)["relabelings"].extend(
+                [
+                    {"targetLabel": "af_tmp", "replacement": "namespace"},
+                    {
+                        "sourceLabels": ["af_tmp"],
+                        "regex": "(.*)",
+                        "targetLabel": "$1",
+                        "replacement": "af-tenant-victim-ws",
+                    },
+                ]
+            )
+        ),
+        17,
+    ),
+    # The same two steps with `__address__` parked in step 1 restore the reach half.
+    (
+        "relabel-templated-targetlabel-redirects-address",
+        pm(
+            lambda o: _endpoint(o)["relabelings"].extend(
+                [
+                    {"targetLabel": "af_tmp", "replacement": "__address__"},
+                    {
+                        "sourceLabels": ["af_tmp"],
+                        "regex": "(.*)",
+                        "targetLabel": "${1}",
+                        "replacement": "10.42.7.9:9464",
+                    },
+                ]
+            )
+        ),
+        17,
+    ),
+    # One step is enough when the value is already on the target: a tenant-controlled POD label
+    # arrives as __meta_kubernetes_pod_label_* and expands into the target the same way.
+    (
+        "relabel-templated-targetlabel-from-pod-label",
+        pm(
+            lambda o: _endpoint(o)["relabelings"].append(
+                {
+                    "sourceLabels": ["__meta_kubernetes_pod_label_af_target"],
+                    "regex": "(.*)",
+                    "targetLabel": "$1",
+                    "replacement": "af-tenant-victim-ws",
+                }
+            )
+        ),
+        17,
+    ),
     # labelmap/labeldrop/labelkeep carry NO targetLabel, so a targetLabel-only pin misses them:
     # labelmap can MINT `namespace` out of a tenant-controlled pod label.
     (
@@ -302,8 +376,60 @@ CASES: list[tuple[str, dict[str, Any], int | None]] = [
         ),
         17,
     ),
+    # The action is an ALLOWLIST (replace/keep/drop), so an action nobody thought to enumerate is
+    # out by default -- hashmod/lowercase/uppercase/keepequal/dropequal are all already in the CRD
+    # enum, and a future Prometheus release's actions are unknown to this policy.
+    (
+        "relabel-uppercase-action",
+        pm(
+            lambda o: _endpoint(o)["relabelings"].append(
+                {
+                    "action": "uppercase",
+                    "sourceLabels": ["__meta_kubernetes_pod_name"],
+                    "targetLabel": "forge_pod_upper",
+                }
+            )
+        ),
+        17,
+    ),
+    # `keep`/`drop` write NO label at all -- they can only narrow THIS monitor's own target set --
+    # so they stay admitted...
+    (
+        "relabel-drop-action-admitted",
+        pm(
+            lambda o: _endpoint(o)["relabelings"].append(
+                {
+                    "action": "drop",
+                    "sourceLabels": ["__meta_kubernetes_pod_phase"],
+                    "regex": "Pending",
+                }
+            )
+        ),
+        None,
+    ),
+    # ...and so does the explicit `replace` the CRD DEFAULTS every relabeling to (see the fidelity
+    # note above: at real admission the CP's own relabeling arrives carrying it).
+    (
+        "relabel-explicit-replace-action-admitted",
+        pm(lambda o: _endpoint(o)["relabelings"][0].update(action="replace")),
+        None,
+    ),
     # honorLabels reaches the same forgery through the exposition body instead of the config.
     ("endpoint-honor-labels", pm(lambda o: _endpoint(o).update(honorLabels=True)), 17),
+    # spec.podTargetLabels needs NO relabeling at all: the operator turns each entry into a
+    # `__meta_kubernetes_pod_label_<l>` -> `<l>` replace and appends that loop AFTER its own
+    # namespace/container/pod relabelings, so a `namespace` entry plus a `namespace` label on the
+    # tenant's OWN pods (rendered by the same CP) forges the identity a second way.
+    (
+        "podtargetlabels-forges-namespace",
+        pm(lambda o: o["spec"].update(podTargetLabels=["namespace"])),
+        17,
+    ),
+    (
+        "podtargetlabels-nonreserved-admitted",
+        pm(lambda o: o["spec"].update(podTargetLabels=["forge_pool_tier"])),
+        None,
+    ),
     # A relabeling onto a NON-reserved label stays admitted: the CP legitimately writes
     # job=agentforge-worker, and pinning relabelings by equality would wedge the tenant layer on
     # the next renderer change.

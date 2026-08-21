@@ -33,7 +33,7 @@
 # wrong is reach OUTSIDE the tenant, which is what 17 forecloses. The live Prometheus runs
 # `podMonitorSelector: {matchLabels: {release: kube-prometheus-stack}}` with
 # `podMonitorNamespaceSelector: {}` and neither `enforcedNamespaceLabel` nor
-# `ignoreNamespaceSelectors` set (re-measured 2026-08-20 against
+# `ignoreNamespaceSelectors` set (re-measured 2026-08-21 against
 # monitoring/kube-prometheus-stack-prometheus), so a monitor committed into tenant A may legally name
 # tenant B's namespace — or, via `namespaceSelector.any: true`, EVERY namespace — and Prometheus will
 # honour it. The CP's renderer already refuses to commit such a monitor, but a CP-side gate is not
@@ -121,14 +121,21 @@ spec:
     - name: ssK8sAuth
       expression: "(request.kind.kind == 'SecretStore' && has(object.spec) && has(object.spec.provider) && has(object.spec.provider.vault) && has(object.spec.provider.vault.auth) && has(object.spec.provider.vault.auth.kubernetes)) ? object.spec.provider.vault.auth.kubernetes : {}"
     # -- R8 observability (validation 17) ---------------------------------------------------------
-    # Guarded reads of the two PodMonitor sub-objects, same shape as the ssVaultAuth/ssK8sAuth pair
+    # The identity labels a tenant may not write, in ONE place: validation 17 checks them against
+    # both a relabeling `targetLabel` and every `spec.podTargetLabels` entry, and two hand-copied
+    # lists would drift. `namespace`+`pod` are the ForgeOrchestratorUnscraped join key.
+    - name: pmReservedLabels
+      expression: "['namespace', 'pod', 'container', 'endpoint', 'instance', 'node']"
+    # Guarded reads of the three PodMonitor sub-objects, same shape as the ssVaultAuth/ssK8sAuth pair
     # above: `{}` / `[]` for a non-PodMonitor or a malformed one, so validation 17 can index them
-    # without nested has() chains. `namespaceSelector` and `podMetricsEndpoints` are BOTH optional in
-    # the CRD (only `selector` is required), so neither read may assume presence.
+    # without nested has() chains. `namespaceSelector`, `podMetricsEndpoints` and `podTargetLabels`
+    # are ALL optional in the CRD (only `selector` is required), so no read may assume presence.
     - name: pmNsSelector
       expression: "(request.kind.kind == 'PodMonitor' && has(object.spec) && has(object.spec.namespaceSelector)) ? object.spec.namespaceSelector : {}"
     - name: pmEndpoints
       expression: "(request.kind.kind == 'PodMonitor' && has(object.spec) && has(object.spec.podMetricsEndpoints)) ? object.spec.podMetricsEndpoints : []"
+    - name: pmTargetLabels
+      expression: "(request.kind.kind == 'PodMonitor' && has(object.spec) && has(object.spec.podTargetLabels)) ? object.spec.podTargetLabels : []"
   validations:
     # (1) GVK allowlist — reject any kind the tenant path is not permitted to create.
     - expression: >-
@@ -351,8 +358,12 @@ spec:
     #      the fleet's own job, not a credential or cross-tenant one". That sentence was false in both
     #      halves. prometheus-operator appends an endpoint's USER relabelings AFTER its own
     #      namespace/pod/container/job targetLabel relabelings, so a tenant `replace` onto one of those
-    #      WINS — and this Prometheus has `enforcedNamespaceLabel` UNSET (re-measured 2026-08-20), the
-    #      one field that exists to stop exactly this. Two consequences, both cross-tenant:
+    #      WINS — read it in the generated config itself: the `prometheus.yaml.gz` in secret
+    #      monitoring/prometheus-kube-prometheus-stack-prometheus, job
+    #      `podMonitor/monitoring/agentforge-worker/0`, lists the operator's namespace/container/pod
+    #      pairs and THEN that monitor's own `job` replace. And this Prometheus has
+    #      `enforcedNamespaceLabel` UNSET (re-measured 2026-08-21), the one field that exists to stop
+    #      exactly this. Two consequences, both cross-tenant:
     #        * IDENTITY. `{targetLabel: namespace, replacement: af-tenant-victim}` (plus `pod`) stores
     #          THIS pool's forge_worker_up under the VICTIM's (namespace, pod) — the exact join key of
     #          the ForgeOrchestratorUnscraped rule (infrastructure/monitoring/agentforge-coverage-
@@ -367,13 +378,44 @@ spec:
     #      `honorLabels: true` reaches the same forgery through the exposition body rather than the
     #      config, and `labelmap`/`labeldrop`/`labelkeep` reach it with NO targetLabel at all (labelmap
     #      can mint a `namespace` label out of a tenant-controlled pod label), which is why the ACTION
-    #      is pinned as well as the target. Both spellings of each action are listed because the
-    #      PodMonitor CRD's own enum accepts `labelmap` and `LabelMap` alike.
+    #      is pinned as well as the target — and pinned as an ALLOWLIST: `replace`, `keep`, `drop`, in
+    #      both spellings (the CRD's own enum accepts `labelmap` and `LabelMap` alike), nothing else.
+    #      A denylist would have to name every action Prometheus has ever shipped: `hashmod`,
+    #      `lowercase`, `uppercase`, `keepequal` and `dropequal` are already in that enum, and the next
+    #      release's are unknown to a policy written today. `keep`/`drop` are IN because they write no
+    #      label at all — they can only narrow THIS monitor's own target set.
     #
-    #      The pin is by TARGET, not by CONTENTS, and that is deliberate: any non-reserved label stays
-    #      writable, so the CP keeps writing job=agentforge-worker and the next renderer change cannot
-    #      wedge the tenant layer. Preserving that was the real concern behind leaving the field open —
-    #      it did not require leaving the cross-tenant half open too.
+    #      The TARGET is pinned to a LITERAL label name, and the first cut of this pin got that wrong:
+    #      it compared the targetLabel STRING against the reserved set, but Prometheus never uses that
+    #      string literally. It expands the regex capture groups INTO the label NAME (`relabel.go`:
+    #      `target := model.LabelName(cfg.Regex.ExpandString([]byte{}, cfg.TargetLabel, val, indexes))`)
+    #      — the CRD says so in its own field description, "Regex capture groups are available". Two
+    #      unremarkable relabelings therefore wrote `namespace` without ever spelling it:
+    #      `{targetLabel: af_tmp, replacement: namespace}` (the static-label idiom the CP itself uses
+    #      for `job`), then `{sourceLabels: [af_tmp], regex: (.*), targetLabel: $1, replacement:
+    #      af-tenant-victim}` — and the same pair with `__address__` parked in step 1 reopened REACH.
+    #      Hence `matches('^[a-zA-Z_][a-zA-Z0-9_]*$')`, anchored both ends: a `$1`/`${1}` target is not
+    #      a label name and is refused, while a literal one still faces the `__` and reserved-set
+    #      checks. prometheus-operator's own `relabelTarget` regex deliberately ADMITS `$1` — capture
+    #      expansion is a feature there, so nothing upstream of this clause will refuse it.
+    #
+    #      Everything ELSE about a relabeling stays open, deliberately: `regex`, `separator`,
+    #      `replacement`, `modulus` and `sourceLabels` decide only the VALUE written into a literal,
+    #      non-reserved label this tenant already owns — or which of its OWN targets survive a
+    #      keep/drop. None of them can name a label or move the scrape. So the CP keeps writing
+    #      job=agentforge-worker and the next renderer change cannot wedge the tenant layer.
+    #
+    #      `spec.podTargetLabels` reaches IDENTITY with no relabelings at all, so it faces the same
+    #      reserved-set check. The operator turns every entry into
+    #      `{source_labels: [__meta_kubernetes_pod_label_<l>], target_label: <l>, regex: (.+),
+    #      replacement: ${1}}` and appends that loop AFTER its own namespace/container/pod relabelings
+    #      (promcfg.go `generatePodMonitorConfig`, v0.91.0 — the operator this estate runs), so
+    #      `podTargetLabels: [namespace]` plus a `namespace: af-tenant-victim` label on the tenant's
+    #      OWN pods (rendered by the same CP, out of reach of every endpoint-level check above) forges
+    #      the join key a second way. Entry names are sanitized `[^a-zA-Z0-9_] -> _`, a substitution
+    #      that cannot MAKE a reserved name out of anything but that name, so checking the raw entry is
+    #      sufficient. `spec.jobLabel` is the same mechanism aimed at `job` alone, and is left open for
+    #      the same reason a `targetLabel: job` relabeling is.
     #
     #      INERT MONITOR. Without `release: kube-prometheus-stack` the Prometheus podMonitorSelector
     #      never adopts the object: it applies cleanly, reports nothing, and is never read. Requiring
@@ -385,17 +427,40 @@ spec:
     #      `portNumber`: they redirect the scrape, but only ever at THIS tenant's own pods in THIS
     #      tenant's own namespace, which the CP already controls end to end. (b) `spec.selector`: an
     #      over-broad selector reaches sibling pools inside the same namespace only. (c) `interval` /
-    #      `scrapeTimeout`: resolution and scrape cost, this pool's own series only. (a)-(c) are all
-    #      pinned by the CP's commit gate — `_assert_podmonitor_allowlisted` compares the whole
-    #      endpoint dict by EQUALITY and the selector/namespaceSelector field by field — so only the
-    #      classes above need holding from OUTSIDE it. (d) is the one exception worth naming because
-    #      NOTHING pins it on either side: the spec-level limits (`sampleLimit`/`targetLimit`/
-    #      `labelLimit`/`labelNameLengthLimit`/`labelValueLengthLimit`, absent == unlimited) plus
-    #      `spec.attachMetadata`/`spec.scrapeClass`. The CP renders a three-key `spec` and none of
-    #      them, so today they cannot appear; the exposure is a cardinality/retention cost against
-    #      the SHARED Prometheus rather than a cross-tenant one, which is why it is recorded here
-    #      instead of closed with a `size(object.spec) == 3` pin that the next renderer change would
-    #      trip over.
+    #      `scrapeTimeout` / `enableHttp2` / `filterRunning`: resolution, transport, and whether a
+    #      Failed/Succeeded pod is still discovered — this pool's own series only. `noProxy` joins
+    #      them: it only exempts hosts from a proxy, and `proxyUrl`/`proxyFromEnvironment` are already
+    #      forbidden above. (a)-(c) are all pinned by the CP's commit gate —
+    #      `_assert_podmonitor_allowlisted` compares the whole `podMetricsEndpoints` LIST, the
+    #      `selector` and the `namespaceSelector` by whole-value EQUALITY (renderer.py) — so only the
+    #      classes above need holding from OUTSIDE it. Two more are worth naming, for two different
+    #      reasons.
+    #      (d) NOTHING pins these on EITHER side — the CP's gate reads five fields and ignores every
+    #      other spec key: the spec-level limits (`sampleLimit`/`targetLimit`/`labelLimit`/
+    #      `labelNameLengthLimit`/`labelValueLengthLimit`, absent == unlimited) plus
+    #      `spec.attachMetadata` and `spec.scrapeClass`.
+    #      The CP renders a three-key `spec` and none of them, so today they cannot appear; the
+    #      exposure is a cardinality/retention cost against the SHARED Prometheus rather than a
+    #      cross-tenant one, which is why it is recorded here instead of closed with a
+    #      `size(object.spec) == 3` pin that the next renderer change would trip over. `scrapeClass`
+    #      is cost-only only while it is INERT: a ScrapeClass carries authorization/tlsConfig/
+    #      relabelings from the Prometheus CR, so the day that CR defines its first one, naming it
+    #      here becomes a credential vector and this clause must pin `scrapeClass` in the same change.
+    #      The tripwire is `kubectl -n monitoring get prometheus kube-prometheus-stack-prometheus
+    #      -o jsonpath='{.spec.scrapeClasses}'` — empty, re-measured 2026-08-21.
+    #      (e) `followRedirects` is pinned by the CP's endpoint equality like (a)-(c), but it is named
+    #      separately because its residual risk is NOT confined to this tenant — and the CP is the half
+    #      this tree does not trust. The tenant's own pod can answer the scrape with a 302 to another
+    #      tenant's 10.x:9464/metrics; Prometheus follows it from its own network position and files
+    #      the body under THIS tenant's target labels — the REACH class again, through the response
+    #      instead of the config. A `followRedirects != true` pin would be theatre: the CRD declares
+    #      no default (measured against the live CRD), the operator emits `follow_redirects` only when
+    #      the field is present, and Prometheus's own default is TRUE — so forbidding the explicit
+    #      `true` forbids nothing that the absent field does not already do. The only pin that bites
+    #      demands an explicit `followRedirects: false`, which the CP does not render, so adding it
+    #      today would DENY the live monitor. Closing it therefore runs the COUPLED PIN below in
+    #      REVERSE: ship `followRedirects: false` from `_podmonitor_endpoints()` first, confirm it is
+    #      reconciled, then require it here.
     #
     #      COUPLED PIN — this clause and the CP's `_podmonitor_endpoints()` (agentforge-platform
     #      adapters/gitops/renderer.py, which `_assert_podmonitor_allowlisted` pins by EQUALITY) move
@@ -413,6 +478,8 @@ spec:
          'matchNames' in variables.pmNsSelector &&
          has(object.metadata.namespace) &&
          variables.pmNsSelector.matchNames == [object.metadata.namespace] &&
+         variables.pmTargetLabels.all(l,
+           !l.startsWith('__') && !(l in variables.pmReservedLabels)) &&
          size(variables.pmEndpoints) > 0 &&
          variables.pmEndpoints.all(e,
            !has(e.proxyUrl) && !has(e.proxyConnectHeader) && !has(e.proxyFromEnvironment) &&
@@ -421,11 +488,12 @@ spec:
            (!has(e.honorLabels) || e.honorLabels != true) &&
            (!has(e.relabelings) || e.relabelings.all(r,
              (!has(r.action) ||
-              !(r.action in ['labelmap', 'LabelMap', 'labeldrop', 'LabelDrop', 'labelkeep', 'LabelKeep'])) &&
+              r.action in ['replace', 'Replace', 'keep', 'Keep', 'drop', 'Drop']) &&
              (!has(r.targetLabel) ||
-              (!r.targetLabel.startsWith('__') &&
-               !(r.targetLabel in ['namespace', 'pod', 'container', 'endpoint', 'instance', 'node'])))))))
-      message: "agentforge tenant path: a PodMonitor must carry release=kube-prometheus-stack, scope namespaceSelector.matchNames to EXACTLY its OWN namespace with no 'any: true', declare at least one podMetricsEndpoint, and on every endpoint set no proxyUrl/proxyConnectHeader/proxyFromEnvironment/basicAuth/bearerTokenSecret/authorization/oauth2/tlsConfig/metricRelabelings and no honorLabels:true. A relabeling may not use the labelmap/labeldrop/labelkeep actions, nor target a reserved label (namespace/pod/container/endpoint/instance/node, or any '__'-prefixed target such as __address__/__scheme__/__metrics_path__) — those forge another tenant's series identity or redirect who Prometheus dials. Any OTHER targetLabel (e.g. job) is permitted."
+              (r.targetLabel.matches('^[a-zA-Z_][a-zA-Z0-9_]*$') &&
+               !r.targetLabel.startsWith('__') &&
+               !(r.targetLabel in variables.pmReservedLabels)))))))
+      message: "agentforge tenant path: a PodMonitor must carry release=kube-prometheus-stack, scope namespaceSelector.matchNames to EXACTLY its OWN namespace with no 'any: true', name no reserved label in spec.podTargetLabels, declare at least one podMetricsEndpoint, and on every endpoint set no proxyUrl/proxyConnectHeader/proxyFromEnvironment/basicAuth/bearerTokenSecret/authorization/oauth2/tlsConfig/metricRelabelings and no honorLabels:true. A relabeling is limited to the replace/keep/drop actions and to a LITERAL targetLabel matching '^[a-zA-Z_][a-zA-Z0-9_]*$' — Prometheus expands regex capture groups INTO the label NAME, so a templated '$1'/'${1}' target is refused — which may be neither '__'-prefixed (__address__/__scheme__/__metrics_path__) nor reserved (namespace/pod/container/endpoint/instance/node), and spec.podTargetLabels may name neither: those forge another tenant's series identity or redirect who Prometheus dials. Any OTHER literal targetLabel (e.g. job) is permitted."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
