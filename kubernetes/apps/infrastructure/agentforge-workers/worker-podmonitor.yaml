@@ -1,8 +1,9 @@
-# PodMonitor for the OPERATOR-MANAGED orchestrator worker (worker-deployment.yaml) — closes the R8
-# observability gap for that pod set ONLY. Read the COVERAGE BOUNDARY below before assuming the
-# forge_* series cover the fleet: they do not. The uncovered half is every CP-RENDERED tenant pool,
-# and as of 2026-08-10 covering it needs only a selector this repo can write — see the boundary for
-# why that is a CHANGE from what this header said until then, and ailab#284 for the open decision.
+# PodMonitor for the OPERATOR-MANAGED orchestrator worker (worker-deployment.yaml) — ONE HALF of the
+# R8 fleet coverage, and only that half. Read the COVERAGE BOUNDARY below before assuming the forge_*
+# series cover the fleet. The other half is every CP-RENDERED tenant pool, and as of 2026-08-20 it is
+# covered by a SECOND monitor that the CP renders into each pool's own tenant namespace — on the
+# precondition stated below, and NOT by widening this one. That settles ailab#284; the boundary says
+# which monitor owns what, on what precondition, and what still has no owner at all.
 #
 # `agentforge serve` exports the dedicated forge_* registry (forge_claims_total,
 # forge_transitions_total, forge_llm_runs_total, forge_run_duration_seconds, …) via
@@ -36,62 +37,57 @@
 #   already rotted once — the 2026-07-30 revision of this header listed THREE blockers, and by
 #   2026-08-10 two of them were false because the CP had shipped the very change the header
 #   described as "NOT made here". That stale text then propagated a wrong premise into downstream
-#   work twice in one cycle, which is what ailab#284 was filed about. So: treat every dated claim
-#   below as a SNAPSHOT, and re-measure before relying on it. The measurement commands are given
+#   work twice in one cycle, which is what ailab#284 was filed about. This 2026-08-20 revision
+#   settles ailab#284 rather than restating it as open, and so carries its own rot risk in the
+#   OPPOSITE direction: it describes an object that exists per pool only under the PRECONDITION
+#   spelled out below, so check that precondition before reading the object's absence as a fault.
+#   Treat every dated claim here as a SNAPSHOT and re-measure. The measurement commands are given
 #   inline precisely so the next reader can re-derive rather than trust.
 #
-# COVERED (measured 2026-08-10): pods labelled app.kubernetes.io/name=agentforge-worker +
+# THIS MONITOR COVERS (measured 2026-08-10): pods labelled app.kubernetes.io/name=agentforge-worker +
 #   app.kubernetes.io/managed-by=agentforge-operator in the namespaces under matchNames.
 #   Live: af-orch-playground-planner-* in af-tenant-tenant-zero-playground carries exactly that
 #   pair and declares {name: metrics, containerPort: 9464}; both pods are scraped, health=up, and
 #   their series land under job=agentforge-worker. Another OPERATOR-rendered worker in a new
 #   namespace is covered by extending matchNames.
 #
-# NOT COVERED (measured 2026-08-10): every CP-RENDERED tenant pool — live today,
-#   af-orch-platform-dev-delivery in af-tenant-tenant-zero-platform-dev. It runs the same image
-#   with no AF_METRICS_PORT override and IS emitting forge_* on 9464. Prometheus holds ZERO forge_*
-#   series for it. ONE blocker remains, and it is NOT the port and NOT the network:
+# THE CP-RENDERED POOLS ARE COVERED BY A DIFFERENT MONITOR — ailab#284 is SETTLED, and it settled
+#   on the CP side moving. The control plane renders its OWN PodMonitor per pool, into that pool's
+#   own tenant namespace, keyed on its own labels (agentforge-platform adapters/gitops/renderer.py
+#   `_podmonitor`, committed as tenants/<org>/<workspace>/55-podmonitor.yaml):
 #
-#   1. LABELS — STILL TRUE. The CP pod template emits agentforge.io/{org,workspace,pool} +
-#      app.kubernetes.io/managed-by=agentforge-cp (renderer.py _labels()) and carries NO
-#      app.kubernetes.io/name at all, so THIS monitor's selector cannot match it. The divergence
-#      is deliberate — worker-deployment.yaml's header records that the operator worker omits
-#      every agentforge.io/* pod label precisely so the CP NetworkPolicy does not select it, and
-#      that separation has to be respected by whatever closes this.
+#     name       the pool's Deployment name, e.g. af-orch-platform-dev-delivery
+#     namespace  af-tenant-<org>-<workspace>   — NOT `monitoring`, where this file lives
+#     selector   app.kubernetes.io/managed-by=agentforge-cp + agentforge.io/{org,workspace,pool}
+#     labels     that same CP set, PLUS release: kube-prometheus-stack (the adoption label)
+#     endpoint   port `metrics`, interval 30s, relabel job=agentforge-worker — identical to below
 #
-#   The other two blockers this header used to list are NO LONGER TRUE. The CP renderer has since
-#   shipped exactly the change described below as "required", so they are resolved upstream:
+#   PRECONDITION, and it is the thing to check first when a CP pool looks unscraped: that file is
+#   emitted only when AFP_METRICS_PODMONITOR_ENABLED is set on the CP Deployment
+#   (apps/apps/agentforge/deployment.yaml) AND the pool has been RE-RENDERED since. Nothing
+#   re-renders on a CP restart, a Flux reconcile or a background loop, so a pool provisioned before
+#   the flip keeps no monitor until a pool rollout. Confirm per pool, do not infer:
+#     kubectl --context admin@ai -n af-tenant-<org>-<workspace> get podmonitor
 #
-#   2. CONTAINER PORT — WAS "declares no ports whatsoever". FALSE as of 2026-08-10. The renderer's
-#      committed output tenants/tenant-zero/platform-dev/50-deployment.yaml declares BOTH
-#      {name: http, containerPort: 8700} and {name: metrics, containerPort: 9464}. Read from the
-#      GitOps source, not the live object, so this is Flux-durable and not a hand-edit that would
-#      be reconciled away. Re-check:
-#        kubectl --context admin@ai -n af-tenant-tenant-zero-platform-dev get deploy \
-#          af-orch-platform-dev-delivery -o jsonpath='{.spec.template.spec.containers[0].ports}'
-#   3. INGRESS — WAS "no ingress rules, k8s default-deny, 9464 appears nowhere". FALSE as of
-#      2026-08-10. tenants/.../40-networkpolicy.yaml now carries a SECOND ingress rule admitting
-#      TCP 9464 from namespaceSelector kubernetes.io/metadata.name=monitoring (the first still
-#      admits 8700 from gitea only). PROVEN LIVE, not merely read: curl from a pod in the
-#      monitoring namespace to the tenant pod's 9464 returned HTTP 200 / 2753 bytes with 12
-#      distinct forge_* names, including `forge_auto_replans_total 0.0` and `forge_worker_up 1.0`.
-#      Re-check (grafana has a shell; the Prometheus pod is distroless and does not):
-#        IP=$(kubectl --context admin@ai -n af-tenant-tenant-zero-platform-dev \
-#               get pod -l agentforge.io/pool=delivery -o jsonpath='{.items[0].status.podIP}')
-#        kubectl --context admin@ai -n monitoring exec deploy/kube-prometheus-stack-grafana \
-#          -c grafana -- curl -s -m 8 -o /dev/null -w '%{http_code}\n' http://$IP:9464/metrics
+#   THE ESTATE PREREQUISITES ARE BOTH IN THIS REPO. The CP cannot emit the object until
+#   apps/apps/agentforge/admission/tenant-guard.yaml admits monitoring.coreos.com/PodMonitor
+#   (validation 1) and pins its shape (validation 17), AND
+#   apps/agentforge-tenants-bootstrap/reconciler-rbac.yaml grants `podmonitors` to the
+#   agentforge-tenants-reconciler ClusterRole. Those two reconcile through DIFFERENT Flux
+#   Kustomizations with no dependsOn between them, which is why they land before the flag.
 #
-#   CONSEQUENCE: the headline claim this header carried until 2026-08-10 — that the missing half
-#   "cannot be fixed from this repo" — is WRONG NOW. With the port declared and ingress open, a
-#   SECOND PodMonitor keyed on the CP labels (e.g. app.kubernetes.io/managed-by=agentforge-cp)
-#   would scrape those pods today, entirely from ailab. Do NOT widen THIS monitor's selector: the
-#   two pod sets still share no label.
+#   WHY TWO MONITORS RATHER THAN ONE WIDER SELECTOR — the durable reason, not a preference. The two
+#   pod sets share ZERO labels, deliberately: worker-deployment.yaml's header records that the
+#   operator worker omits every agentforge.io/* pod label precisely so the CP NetworkPolicy does not
+#   select it. So do NOT widen THIS monitor's selector, and do NOT extend its matchNames to the
+#   CP-rendered namespaces — it cannot match those pods either way, and a matchNames list covering
+#   them would need an edit on every provision, which is exactly the growth problem a per-pool
+#   CP-rendered monitor avoids.
 #
-#   WHICH SIDE SHOULD MOVE IS AN OPEN DECISION — see ailab#284, and do not settle it here. The
-#   ailab-side monitor works now but needs matchNames extended per tenant namespace; having the CP
-#   renderer emit the labels this monitor already expects covers every future pool on render, but
-#   is a control-plane change and pushes against the deliberate label separation in (1), so it
-#   needs checking against the CP NetworkPolicy and the sandbox VAPs first.
+#   THE TWO HALVES SHARE ONE JOB LABEL ON PURPOSE (both pin job=agentforge-worker) so a fleet query
+#   spans them, and no pod is double-scraped only while the label sets stay disjoint. Re-check that
+#   disjointness before adding app.kubernetes.io/name to the CP renderer's _labels(), or af-tenant-*
+#   to the matchNames below — either one turns one job label into two scrapes of the same pod.
 #
 # ALSO NOT COVERED — THE REAPER, and it never has been. agentforge-reaper declares NO
 #   containerPorts at all, so no monitor can bind a named port and no forge_* series has ever
@@ -100,13 +96,16 @@
 #   not, adding a port + monitor yields a permanently-down target, which is a WORSE state than a
 #   known absence. Establish that first.
 #
-# WHY THE GAP MATTERS beyond any single metric: there are no metricRelabelings and no allowlists
-#   anywhere in ailab, so new forge_* series are ingested implicitly ONCE A TARGET IS SELECTED —
-#   this is a SELECTION gap, not a metrics gap. It therefore hides ALL forge_* series (21 names
-#   live) for the CP-rendered pools, which are the ones doing the actual delivery work. Counters
-#   like forge_auto_replans_total are deliberately UNLABELLED so they are observable at zero,
-#   which is what makes "the feature is inert" distinguishable from "the metric never shipped";
-#   for a CP-rendered pool that distinction is unavailable without exec'ing into the pod.
+# WHY SELECTION IS THE WHOLE GAME, whichever monitor is in question: there are no metricRelabelings
+#   and no allowlists anywhere in ailab, so new forge_* series are ingested implicitly ONCE A TARGET
+#   IS SELECTED. An unselected pod is therefore never a missing METRIC — it is all 21 forge_* names
+#   missing at once, which is what makes the failure look like silence rather than an error.
+#   Counters like forge_auto_replans_total are deliberately UNLABELLED so they are observable at
+#   zero, which is what makes "the feature is inert" distinguishable from "the metric never
+#   shipped"; for an unscraped pod that distinction is unavailable without exec'ing into it. The
+#   standing cross-check on all of this is the ForgeOrchestratorUnscraped alert in
+#   infrastructure/monitoring/agentforge-coverage-rules.yaml, which reads kube-state-metrics rather
+#   than forge_* and so can see a pod no monitor has selected.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

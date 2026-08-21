@@ -70,21 +70,32 @@ spec:
               forge_worker_up from it, so EVERY forge_* series for that pool is missing — 21 metric
               names including forge_claims_total, forge_transitions_total, forge_llm_runs_total,
               forge_needs_human_pending and forge_run_duration_seconds. While this fires you cannot
-              tell an inert feature from an unmeasured one for this pool (ailab#284). KNOWN CAUSE:
-              a label mismatch. CP-rendered tenant pods carry `agentforge.io/{org,workspace,pool}` +
-              `app.kubernetes.io/managed-by=agentforge-cp`, while the only worker PodMonitor
-              (infrastructure/agentforge-workers/worker-podmonitor.yaml) requires BOTH
-              `app.kubernetes.io/name=agentforge-worker` AND
-              `app.kubernetes.io/managed-by=agentforge-operator`, and its namespaceSelector enumerates
-              namespaces explicitly (today exactly one, af-tenant-tenant-zero-playground) — so a
-              CP-rendered pool fails the managed-by match AND is out of namespace scope, and a newly
-              provisioned workspace is invisible from birth. TRIAGE: compare
+              tell an inert feature from an unmeasured one for this pool (ailab#284). WHICH MONITOR
+              SHOULD HAVE SELECTED THIS POD depends on who rendered it, and the two are separate
+              objects in separate namespaces — check the right one. A CP-rendered pool
+              (`app.kubernetes.io/managed-by=agentforge-cp` + `agentforge.io/{org,workspace,pool}`)
+              is selected by a PodMonitor the CP commits into the pool's OWN namespace; an
+              operator-rendered worker (`app.kubernetes.io/name=agentforge-worker` +
+              `managed-by=agentforge-operator`) is selected by
+              infrastructure/agentforge-workers/worker-podmonitor.yaml in ns `monitoring`. The two
+              label sets are disjoint by design, so neither monitor can cover the other's pods.
+              MOST LIKELY CAUSE for a CP-rendered pool: no monitor was ever committed for it. That
+              file is emitted only when AFP_METRICS_PODMONITOR_ENABLED is set on the CP Deployment
+              AND the pool has been re-rendered since — nothing re-renders on a CP restart or a Flux
+              reconcile, so a pool provisioned before the flip stays unscraped until a pool rollout.
+              For an operator-rendered worker the likely cause is instead a namespace missing from
+              that monitor's explicitly enumerated matchNames. TRIAGE, in order:
+              `kubectl --context admin@ai -n {{ $labels.namespace }} get podmonitor` (empty for a
+              CP-rendered pool means it has not been re-rendered — that is the fix, not a selector
+              edit), then compare
               `kubectl --context admin@ai -n {{ $labels.namespace }} get pod {{ $labels.pod }} --show-labels`
-              against `kubectl --context admin@ai -n monitoring get podmonitor -o yaml`, then check
-              whether the pod IP appears in Prometheus /api/v1/targets (the Prometheus pod is
-              distroless — port-forward svc/kube-prometheus-stack-prometheus or curl from the Grafana
-              pod, do NOT try to exec a shell). If the pod IS an active target but unhealthy, this is
-              a NetworkPolicy or exporter fault instead, not a selection gap — check that the tenant
-              NetworkPolicy still admits 9464 from ns `monitoring`. Remedy options and their
-              trade-offs (ailab-side PodMonitor vs. the CP renderer emitting the expected labels) are
-              recorded in ailab#284; do not silence this without picking one.
+              against that monitor's selector and
+              `kubectl --context admin@ai -n monitoring get podmonitor -o yaml`, then check whether
+              the pod IP appears in Prometheus /api/v1/targets (the Prometheus pod is distroless —
+              port-forward svc/kube-prometheus-stack-prometheus or curl from the Grafana pod, do NOT
+              try to exec a shell). A monitor that exists but is never read has lost its
+              `release: kube-prometheus-stack` label, which is what podMonitorSelector matches on;
+              it applies cleanly and reports nothing. If the pod IS an active target but unhealthy,
+              this is a NetworkPolicy or exporter fault instead, not a selection gap — check that
+              the tenant NetworkPolicy still admits 9464 from ns `monitoring`. Do not silence this
+              without establishing which of those it is.
