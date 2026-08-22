@@ -66,7 +66,7 @@ spec:
       containers:
         - name: sandbox
           # The real sandbox image @sha256 (AF_SANDBOX_IMAGE); the harness re-pins the live digest.
-          image: registry.chifor.me/agentforge/sandbox@sha256:59fc18bacedfdb387c4127ffe79356676926dca5acd9f0d1912d97469107dbb8
+          image: registry.chifor.me/agentforge/sandbox@sha256:17b7a6171cc7a497168f971936c533263252cce6653b6cee581e161a9b76fd78
           workingDir: /workspace
           env:
             # Plain-value ONLY. The harness injects a ready broker pod IP so the broker probe is a
