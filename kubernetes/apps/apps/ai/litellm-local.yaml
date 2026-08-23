@@ -179,7 +179,7 @@ spec:
         - name: litellm
           # SAME digest pin as litellm.yaml (ghcr.io/berriai/litellm:main-stable as of 2026-07-08).
           # Bump BOTH files together — see the pin-bump procedure comment in litellm.yaml.
-          image: ghcr.io/berriai/litellm@sha256:078f96272f0c84da383e6a1f197478390b5204a86dcf00a181bcfe02a00e5dfa
+          image: ghcr.io/berriai/litellm@sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:
