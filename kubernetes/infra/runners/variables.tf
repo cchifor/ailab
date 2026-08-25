@@ -182,7 +182,7 @@ variable "runner_nodes" {
     hostname  = string
   }))
   default = {
-    # Consecutive IPs .14-.18; .19-.20 = ci-runner-6/-7 (both node3, commissioned 2026-08-25). cloud-init sets the IP at create
+    # Consecutive IPs .14-.18; .19-.20 = ci-runner-6/-7 (node3); .21-.23 = ci-runner-8/-9/-10. cloud-init sets the IP at create
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
     "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1" }
@@ -199,5 +199,17 @@ variable "runner_nodes" {
     # RESERVATION, not live RAM (the model is idle-unloaded), so it does not change node1's free bytes.
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
     "ci-runner-7" = { node_name = "ai-node3", vm_id = 4107, ip = "192.168.0.20", hostname = "ci-runner-7" }
+
+    # ci-runner-8/-9/-10 (2026-08-25). Placement follows a floor-budget measurement, not free RAM:
+    # what bounds a node is the sum of guest balloon FLOORS (which ballooning can never reclaim below)
+    # plus its LLM when loaded, against 124.9 GiB physical less ~5 GiB host.
+    #   node1: floors 84.0 + qwen3.6-35b 24 (measured on node2 as 24 GiB GTT) = 108 -> 12 GiB spare
+    #   node2: floors 68.0 + qwen3.6-35b 24 (LOADED today)                    =  92 -> 28 GiB spare
+    #   node3: floors 82.0 + qwen3.5-122b 71                                  = 153 -> OVERSUBSCRIBED
+    # So node2 takes two and node1 one. node3 takes none: it already carries three runners and is the
+    # tightest on live free RAM. See the note on node3 below.
+    "ci-runner-8"  = { node_name = "ai-node1", vm_id = 4108, ip = "192.168.0.21", hostname = "ci-runner-8" }
+    "ci-runner-9"  = { node_name = "ai-node2", vm_id = 4109, ip = "192.168.0.22", hostname = "ci-runner-9" }
+    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10" }
   }
 }

@@ -31,6 +31,9 @@ subsets:
       - { ip: 192.168.0.18 } # ci-runner-5 (ai-node2)
       - { ip: 192.168.0.19 }  # ci-runner-6 (node3, 2026-08-25)
       - { ip: 192.168.0.20 }  # ci-runner-7 (node3, 2026-08-25)
+      - { ip: 192.168.0.21 }  # ci-runner-8 (node1, 2026-08-25)
+      - { ip: 192.168.0.22 }  # ci-runner-9 (node2, 2026-08-25)
+      - { ip: 192.168.0.23 }  # ci-runner-10 (node2, 2026-08-25)
     ports:
       - { name: metrics, port: 9100, protocol: TCP }
 ---
