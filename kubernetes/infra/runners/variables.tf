@@ -170,10 +170,10 @@ variable "runner_ssh_public_key" {
 # inside the static-reserved block (.2-.50, outside the router DHCP pool that bit the AI LXCs at .51-.53).
 # vmids 4101-4105 don't collide (Talos 4001-4003, dev-workers 4201-4203, AI LXC 5001-5003, registry 5004).
 #
-# ci-runner-6 (node3, .35 / vmid 4106) is RESERVED but DEFERRED: measured 2026-07-01, node3 has no room
-# for a second runner while its qwen3.5-122b LLM is loaded (~7.8 GiB non-reclaimable RSS; the LXC runs
-# swap=0). Uncomment to deploy after reducing node3's iGPU VRAM carve (or the Talos CP allocation) — the
-# .19 IP + vmid 4106 stay reserved for it. See ADR 0013.
+# ci-runner-6 (node3, .19 / vmid 4106) was RESERVED but DEFERRED per ADR 0013: measured 2026-07-01,
+# node3 had no room while its qwen3.5-122b LLM was loaded. RE-MEASURED 2026-08-25: node3 reports
+# 37.5 GiB free — the most of the three nodes — so the deferral is lifted and 4106 is deployed along
+# with 4107. At the 10 GiB balloon floor the pair leaves node3 ~17.5 GiB headroom.
 variable "runner_nodes" {
   type = map(object({
     node_name = string
@@ -182,7 +182,7 @@ variable "runner_nodes" {
     hostname  = string
   }))
   default = {
-    # Consecutive IPs .14-.18 (.19 reserved for the deferred runner-6). cloud-init sets the IP at create
+    # Consecutive IPs .14-.18; .19-.20 = ci-runner-6/-7 (both node3, commissioned 2026-08-25). cloud-init sets the IP at create
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
     "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1" }
@@ -190,7 +190,14 @@ variable "runner_nodes" {
     "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
     "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4" }
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
-    # DEFERRED — node3's second runner; uncomment after freeing node3 RAM (see header + ADR 0013):
-    # "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
+    # ci-runner-6/-7 (2026-08-25): node3's 2nd and 3rd runners. ci-runner-6 was the slot ADR 0013
+    # reserved here ("once node3 has RAM"); node3 now measures 37.5 GiB free — the most of the three —
+    # so it takes that slot plus one more. Placed on node3 rather than node1 because node1 has only
+    # 24.9 GiB free and two runners at the 10 GiB balloon floor would leave ~4.9 GiB (~96% allocated),
+    # which is the cchifor/platform#620 condition that ballooned idle runners to 1-2 GiB and OOM-killed
+    # CI jobs. node3 lands at ~17.5 GiB headroom instead. NOTE: retiring node1's qwen3.8-27b frees a
+    # RESERVATION, not live RAM (the model is idle-unloaded), so it does not change node1's free bytes.
+    "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
+    "ci-runner-7" = { node_name = "ai-node3", vm_id = 4107, ip = "192.168.0.20", hostname = "ci-runner-7" }
   }
 }

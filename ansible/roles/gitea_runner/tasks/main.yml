@@ -187,6 +187,20 @@
   when: gitea_runner_cleanup_enabled | bool
 
 # ── 4d. resilient DNS (act_runner clones actions/* from github.com every job) ─
+# The drop-in dir is NOT present on a fresh Ubuntu 24.04 cloud image — systemd-resolved
+# ships /etc/systemd/resolved.conf but creates resolved.conf.d only when something writes
+# one. The older fleet had it from an earlier provisioning path, so this role worked there
+# and failed on the first genuinely new host (ci-runner-6/-7, 2026-08-25): "Destination
+# directory /etc/systemd/resolved.conf.d does not exist". Create it explicitly.
+- name: Ensure the systemd-resolved drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: gitea_runner_enabled | bool
+
 - name: Install resilient DNS drop-in for CI runners
   ansible.builtin.copy:
     src: 20-ci-resilient-dns.conf
