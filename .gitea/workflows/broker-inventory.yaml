@@ -24,17 +24,44 @@
 name: broker-inventory
 
 on:
+  # PUSH ON EVERY BRANCH, not just main. The pull_request run is the gate we
+  # want, but on this forge it is the run least likely to be served (see the
+  # concurrency note below), and a drift caught only after merge is a drift
+  # caught too late. A feature-branch push uses the SAME event type that is
+  # demonstrably served here, so it gives a pre-merge signal even when the
+  # pull_request run never starts.
   push:
-    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
+# Supersede our own queued runs. This does NOT fix pool contention — it stops
+# this workflow ADDING to it: without a group, every push to a branch leaves
+# its predecessor queued behind the newer one, and on a saturated pool those
+# stale runs sit until a sweep cancels them (21 of 28 pull_request runs were
+# swept that way, `started_at` still at the epoch — they never ran at all).
+concurrency:
+  group: broker-inventory-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   drift:
     name: broker inventory drift
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    # GITEA, NOT GITHUB: there are no hosted runners on this forge. Every
+    # registered runner (ci-runner-1..5, org-scoped) carries exactly one
+    # label, `self-hosted-hv`, and NOTHING answers `ubuntu-latest` — a job
+    # asking for it queues forever rather than failing (the platform #722
+    # orphaned-push-guard sat unserved for its entire life that way).
+    # So the fallback must be a label that exists: if `vars.RUNNER_LABEL`
+    # is ever unset or renamed, this degrades to the real pool instead of
+    # to a label no runner offers.
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    # Starvation must be LOUD. Without this a job that is never assigned a
+    # runner lingers until a bulk sweep marks it `cancelled`, which reads as
+    # benign in the run list; the check's own header promises it fails
+    # closed, and a silent cancel is the one outcome that breaks that promise.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
