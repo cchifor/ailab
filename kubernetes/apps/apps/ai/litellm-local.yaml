@@ -58,70 +58,11 @@ data:
           output_cost_per_token: 0.000001
         model_info:
           max_input_tokens: 24576 # host CTX=32768 --parallel 1 (single 32K slot); ~8K output headroom for reasoning
-      # qwen3.8-27b — the quality tier, ON-DEMAND on node1 (.44) :8082 via its own llama-swap instance
-      # (loads on first request, idle-unloads after 1800 s; ~24 s cold start since the 4-bit quant).
-      # 27B DENSE, so a measured 11.5 tok/s vs qwen3.6's ~50: route here for hard reasoning, not chat
-      # latency. Hybrid Gated-DeltaNet keeps the 256K KV cheap.
-      #
-      # host CTX=262144 --parallel 2 => per-slot n_ctx 131072, so max_input_tokens is 114688
-      # (131072 - 16K reasoning/output headroom), NOT the old 245760. Leaving it at 245760 would let
-      # LiteLLM forward a request that overflows a slot instead of failing fast with a clean
-      # ContextWindowExceededError. KEEP IN SYNC with kubernetes/infra/ai-lxc/models.yaml.
-      #
-      # This gateway is TENANT-FACING (agentforge, ADR 0018), so unlike litellm.yaml — where the
-      # qwen3.8 deployment was removed outright because Open WebUI was its only caller — the model stays
-      # registered here: removing it would silently withdraw a capability from tenants.
-      # But the LiteLLM hop still cannot propagate a client disconnect, so an abandoned tenant request
-      # cannot be stopped by the caller. The bounded timeout below is therefore the ONLY thing that
-      # releases the slot, and it is deliberately finite (the Open WebUI path is unbounded precisely
-      # because cancellation works there). --parallel 2 also means such a request now blocks one of two
-      # slots rather than the whole model.
-      - model_name: qwen3.8-27b
-        litellm_params:
-          model: openai/qwen3.8-27b
-          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1
-          api_key: "sk-noauth"
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000001
-          # Overrides router_settings.num_retries (2): a retry cannot pick a healthier node on a
-          # SINGLE-deployment backend, it only re-queues another multi-minute generation behind a slot.
-          num_retries: 0
-          # Overrides litellm_settings.request_timeout (900). 900 s is only ~10k tokens at 11.5 tok/s,
-          # which truncates real agent output; 1800 s (~20k tokens) is workable while still bounding an
-          # un-cancellable wedge. Do NOT make this unbounded — nothing else here can free the slot.
-          timeout: 1800
-        model_info:
-          supports_vision: true
-          max_input_tokens: 114688
-    litellm_settings:
-      drop_params: true
-      # 900s to cover a llama-swap COLD START of qwen3.5-122b (~4-5 min over NFS) — matches
-      # litellm.yaml. No global max_budget/budget_duration: those guard CLOUD spend, and this
-      # deployment physically has no cloud keys. Per-TENANT caps are enforced per virtual key instead
-      # (max_budget set at /key/generate time — see general_settings + litellm-vkeys.yaml).
-      request_timeout: 900
-    general_settings:
-      # Virtual-key / per-tenant-budget control plane (P3, plan Risk 3). Enabling database_url turns on
-      # LiteLLM's DB-backed key store so external tenants get per-org virtual keys with per-org budget
-      # caps (subscription OAuth stays tenant-zero-only on the cloud `litellm` gateway — this local-only
-      # gateway is what external tenants consume). master_key authenticates the /key/* admin API and is
-      # itself the parent key under which every tenant vkey is minted.
-      master_key: os.environ/LITELLM_MASTER_KEY
-      # DB-backed key+budget store = infra-pg `litellm` database (postgresql://litellm@infra-pg-rw).
-      # Single source of truth for spend ACROSS restarts and (if ever scaled) replicas — the fix for the
-      # in-memory-per-replica budget drift documented in litellm.yaml. LiteLLM runs its own schema
-      # migrations against this DB at boot. STORE_MODEL_IN_DB stays False: the local-only model_list above
-      # remains the ONLY routable set, so a tenant vkey can NEVER be pointed at a cloud model — local-only
-      # is enforced BOTH structurally (no cloud creds/models here) AND per-key (models: whitelist, below).
-      database_url: os.environ/DATABASE_URL
-    # Same health-aware router as litellm.yaml: least-busy across the qwen3.6 node1/node2 pair,
-    # retry the OTHER node on failure, park a failing deployment for cooldown_time.
-    router_settings:
-      routing_strategy: least-busy
-      num_retries: 2
-      allowed_fails: 2
-      cooldown_time: 30
----
+      # qwen3.8-27b REMOVED 2026-08-25 — the node1 on-demand instance it pointed at
+      # (llm-qwen38:8082) is retired to release its 31.4 GiB reservation for ci-runner-7/-8.
+      # This DOES withdraw the capability from tenants: the cloud2 tier registered in
+      # litellm.yaml as `qwen3.8-27b-cloud` (192.168.0.28) is an ON-DEMAND host and was down
+      # at the time of removal, so it is not a substitute backend for tenant routing.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

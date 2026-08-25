@@ -182,7 +182,7 @@ variable "runner_nodes" {
     hostname  = string
   }))
   default = {
-    # Consecutive IPs .14-.18 (.19 reserved for the deferred runner-6). cloud-init sets the IP at create
+    # Consecutive IPs .14-.18 (.19 reserved for the deferred runner-6; .20-.21 = runner-7/-8). cloud-init sets the IP at create
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
     "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1" }
@@ -190,6 +190,14 @@ variable "runner_nodes" {
     "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
     "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4" }
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
+    # ci-runner-7/-8 (2026-08-25): node1's 3rd/4th runners, commissioned by RETIRING the node1
+    # qwen3.8-27b on-demand instance. That model reserved 31.4 GiB on a node with only 24.9 GiB
+    # free — it could no longer load — so retiring it converts a reservation that could never be
+    # satisfied into two runners at the 10 GiB balloon floor, leaving ~11 GiB slack. IPs .20/.21
+    # (.19 stays reserved for the deferred ci-runner-6 on node3, which this does NOT unblock —
+    # that one is gated on node3 RAM, a different host).
+    "ci-runner-7" = { node_name = "ai-node1", vm_id = 4107, ip = "192.168.0.20", hostname = "ci-runner-7" }
+    "ci-runner-8" = { node_name = "ai-node1", vm_id = 4108, ip = "192.168.0.21", hostname = "ci-runner-8" }
     # DEFERRED — node3's second runner; uncomment after freeing node3 RAM (see header + ADR 0013):
     # "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
   }

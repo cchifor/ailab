@@ -66,7 +66,7 @@ spec:
             - name: OPENAI_API_KEY # the LiteLLM master key (LiteLLM now requires it)
               valueFrom:
                 secretKeyRef: { name: litellm-secret, key: master-key }
-            - { name: OPENAI_API_BASE_URLS, value: "http://litellm.ai.svc.cluster.local:4000/v1;http://llm-qwen38.ai.svc.cluster.local:8082/v1" }
+            - { name: OPENAI_API_BASE_URLS, value: "http://litellm.ai.svc.cluster.local:4000/v1" }
             # $(OPENAI_API_KEY) is expanded by kubelet from the env var declared ABOVE (declaration order
             # matters); llama-swap ignores the bearer token, so connection [1] uses a placeholder.
             - { name: OPENAI_API_KEYS, value: "$(OPENAI_API_KEY);sk-noauth" }
@@ -75,7 +75,6 @@ spec:
             # NO prefix_id: the model must surface under its real id "qwen3.8-27b" so existing chats
             # (which store models: ['qwen3.8-27b']) keep resolving — now to the direct, cancellable path.
             # A prefix here would strand every prior conversation on a name nothing serves.
-            - { name: OPENAI_API_CONFIGS, value: '{"1":{"enable":true,"model_ids":["qwen3.8-27b"]}}' }
             - { name: ENABLE_OLLAMA_API, value: "False" } # we only use the OpenAI endpoint
             # Was 900s to match LiteLLM request_timeout + llama-swap healthCheckTimeout. A qwen3.5-122b
             # cold-load + long reasoning turn can run minutes; OWUI's aiohttp client would otherwise abort

@@ -60,70 +60,14 @@ models:
     # exists only to bound a future pathological loop. Raise/clear REASONING_BUDGET if a hard task gets clipped.
 
   # ---- Quality tier: ON-DEMAND (llama-swap) as a SECOND instance on node1 :8082 (ctid 5001 / .44) ----
-  # 27B DENSE (not MoE): every token reads all 27B params, so decode is a MEASURED 9.3 tok/s vs
-  # qwen3.6's ~50 on the same iGPU (prefill ~58 tok/s). Inherent to a dense model on bandwidth-bound
-  # hardware — this is the "think hard" model, not a daily driver.
-  # Architecture: hybrid 16 x (3 x (Gated DeltaNet -> FFN) -> 1 x (Gated Attention -> FFN)), 64 layers.
-  # Only the 16 full-attention layers carry a growing KV cache, so the 256K window is cheap.
-  #
-  # WHY ON-DEMAND AND NOT PINNED (measured 2026-08-14 — do not "promote" this to pinned):
-  # node1 has been through the carve->GTT conversion, so its VRAM carve is only 512 MiB and model
-  # weights land in GTT, which IS charged to host RAM. Loading this model moves node1's GTT
-  # 24.2 -> 55.6 GiB, i.e. it costs 31.4 GiB of HOST RAM. node1 has only ~25-35 GiB available with
-  # the daily driver resident (it varies with dev-worker ballooning), so pinning it drove the host to
-  # 3 GiB available with swap 100% FULL — the pre-OOM state that OOM-killed cp2+cp3 and dropped etcd
-  # below quorum on 2026-07-08. On-demand costs ZERO at steady state and ~12 GiB headroom while
-  # loaded, and the model idle-unloads after ttl. Cold start is only ~74 s (a 22.9 GB read over NFS),
-  # vs the 122B's 4-5 min, so the on-demand tax is small.
-  # BUILD: needs llama.cpp b10430 — the daily driver's b9672 predates this arch. provision.sh installs
-  # a build PER INSTANCE ($BIN = /opt/llama.cpp/llama-$LLAMA_BUILD), so b9672 and b10430 coexist in the
-  # CT and re-provisioning this instance never touches the one qwen3.6 is serving. Likewise the
-  # llama-swap unit + config dir are per-instance (llama-swap-qwen38.service,
-  # /etc/llama-swap-qwen38/), so this swap instance and the pinned :8080 unit coexist in ONE container.
-  qwen3.8-27b:
-    node: ai-node1              # ctid 5001 / .44, port 8082 (INSTANCE=qwen38 => llama-swap-qwen38.service)
-    alias: qwen3.8-27b
-    llama_build: b10430         # NOT the b9672 default — this arch needs it
-    port: 8082
-    # Q6_K -> UD-Q4_K_XL (2026-08-15). Dense decode here is MEMORY-BANDWIDTH-bound, so tok/s is set by
-    # how many bytes each token must read, and nothing else: measured 9.3 tok/s x 22.9 GB of Q6_K weights
-    # = ~213 GB/s, i.e. ~95% of this node's ~215-230 GB/s effective bandwidth. The config was already
-    # optimal — the WEIGHTS were the ceiling. UD-Q4_K_XL is 17.9 GB => ~11.9 tok/s (+28%), and frees
-    # ~5 GB of GTT on node1 (which OOM-killed two guests on 2026-08-14). This also directly raises the
-    # longest answer that fits inside a timeout, which is what truncated the chat-27f19393 HTML artifact.
-    # UD (Unsloth Dynamic V3.0, imatrix) not flat Q4_K_M: same estate convention as qwen3.6's UD-Q4_K_M.
-    # NOT IQ4_XS (15.7 GB): I-quants cost ~5-10% extra decode compute, which cancels much of the size win
-    # on a bandwidth-bound part. Q5/Q6/Q8 are on the AVOID list for exactly this reason — see
-    # docs/runbooks (2026-07-09 perf analysis): ~20-45% slower decode for <0.5% PPL.
-    gguf: /models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf   # served from NFS (node1 has no /models-local mount)
-    mmproj: /models/qwen3.8-27b/mmproj-F16.gguf       # native vision-language: image + video (verified)
-    ctx: 262144               # native n_ctx_train, no YaRN needed
-    parallel: 2               # 2 slots => per-slot n_ctx = ctx/parallel = 131072. Keep any consumer's
-                              # max_input_tokens (114688 = 131072 - 16K reasoning/output headroom) in
-                              # sync — litellm-local.yaml is the remaining one.
-                              #
-                              # WAS 1, on the reasoning that "a 2nd slot would halve an already-slow
-                              # dense decode". MEASURED 2026-08-15 — that is FALSE. Decode here is
-                              # memory-bandwidth-bound, so batching two sequences amortises the ONE
-                              # weight read across both instead of doubling it:
-                              #   single request              10.95 tok/s
-                              #   2 concurrent   A 9.89 / B 10.04 tok/s  (90-92% of single, NOT 50%)
-                              #   aggregate                   18.91 tok/s  (173% of one slot)
-                              # So the second slot costs ~10% per-request under contention and ~5% on a
-                              # lone request, and buys +73% throughput plus ISOLATION: with one slot, a
-                              # single stuck or long generation blocked every other request (2026-08-15:
-                              # an orphaned generation wedged the model until the service was restarted).
-                              # The real price is context per conversation, 262144 -> 131072, which is
-                              # still ~100k words; revert to 1 only if a single request genuinely needs
-                              # the full 256K window.
-    cache_type: q8_0          # K + V (needs flash-attn, engaged by --flash-attn auto)
-    swap: true                # MANAGED on node1's own llama-swap instance (see the memory note above)
-    ttl: 1800                 # 30 min idle before unload, matching the 122B's convention
-    # Sampling: Qwen3.8's card gives a DIFFERENT thinking profile than Qwen3.6 — presence_penalty 0.0,
-    # not the provision.sh default of 1.5 (1.5 is Qwen3.8's INSTRUCT/non-thinking profile). Provision
-    # with PRESENCE_PENALTY=0.0; temp 1.0 / top-p 0.95 / top-k 20 / min-p 0.0 / repeat 1.0 match the
-    # defaults already. REASONING_BUDGET=3000 kept as the runaway-thinking backstop (estate convention).
-
+  # RETIRED 2026-08-25 — qwen3.8-27b (the node1 dense quality tier, INSTANCE=qwen38, :8082).
+  # Removed to release its 31.4 GiB on-demand reservation on node1 for two additional CI runners
+  # (ci-runner-7/-8): node1 was sitting at 24.9 GiB free, i.e. BELOW this model's own load cost, so
+  # the on-demand slot could no longer be satisfied anyway. The cloud2 executor tier registered in
+  # litellm.yaml as `qwen3.8-27b-cloud` (192.168.0.28, one instance per GPU) is UNAFFECTED and still
+  # serves the model — only the node1 local instance is gone. Its llama-swap unit
+  # (llama-swap-qwen38.service) and config dir (/etc/llama-swap-qwen38/) are removed on the host by
+  # the retire step in docs/runbooks/ai-model-swap.md; :8082 on node1 is now free.
   # ---- node3 llama-swap SINGLE-MODEL — qwen3.5-122b on demand (ctid 5003 / .46) ----
   # Deploy via a single-MODEL provision call (SWAP=true, no MODELS_JSON) — see docs/runbooks/ai-model-swap.md.
   qwen3.5-122b:
