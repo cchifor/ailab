@@ -27,11 +27,18 @@ node3's GTT is free the rest of the time.
 | Node | ctid | LXC IP | Model(s) | Mode |
 |---|---|---|---|---|
 | ai-node1 | 5001 | .44 | Qwen3.6-35B (daily driver), `:8080` | **pinned** (direct, from NFS) |
-| ai-node1 | 5001 | .44 | Qwen3.8-27B (quality tier), `:8082` | **llama-swap** ttl 1800 s, from NFS, own build b10430 |
 | ai-node2 | 5002 | .45 | Qwen3.6-35B (daily driver) | **pinned** (direct, from local NVMe) |
 | ai-node3 | 5003 | .46 | Qwen3.5-122B (gpt-oss-120B retired) | **llama-swap** single-model, ttl 1800 s, local NVMe |
 
-> **Two instances on node1 (2026-08-14) — one pinned, one on-demand.** node1 runs a direct
+> **Qwen3.8-27B was RETIRED from node1 on 2026-08-25.** Its `llm-qwen38` Service/Endpoints, its
+> LiteLLM registration and its Open-WebUI direct connection are gone, so the `:8082` quality tier is
+> no longer a tenant-facing capability. The provisioning recipe below is kept as history — it still
+> works if the tier is ever restored — but nothing in `kubernetes/` points at `:8082` today.
+>
+> Note the retirement freed **no live RAM**: the model was idle-unloaded, so it held a reservation
+> policy rather than bytes, and node1 measured 24.9 GiB free both before and after.
+>
+> **Two instances on node1 (2026-08-14, historical) — one pinned, one on-demand.** node1 ran a direct
 > `llama-server.service` on `:8080` *and* its own `llama-swap-qwen38.service` on `:8082`, in the same
 > container. `provision.sh` makes the build, the swap unit name and the swap config dir all
 > **per-instance** (`/opt/llama.cpp/llama-b10430`, `llama-swap-qwen38.service`,
