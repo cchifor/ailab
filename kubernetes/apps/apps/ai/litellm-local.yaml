@@ -63,6 +63,7 @@ data:
       # This DOES withdraw the capability from tenants: the cloud2 tier registered in
       # litellm.yaml as `qwen3.8-27b-cloud` (192.168.0.28) is an ON-DEMAND host and was down
       # at the time of removal, so it is not a substitute backend for tenant routing.
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
