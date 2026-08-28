@@ -220,6 +220,17 @@ data:
         litellm_params:
           model: openai/gpt-4.1-mini
           api_key: os.environ/OPENAI_API_KEY
+      # Embeddings for the platform's knowledge service. Until this entry the
+      # gateway served NO embedding model, so knowledge's OpenAIEmbedder
+      # (pointed here) could never come up with a working /v1/embeddings and
+      # every estate deploy silently fell back to NoopEmbedder ZERO-vectors —
+      # cosine KNN over zero vectors returns nothing, so app vector search
+      # (pdf-insights propose/chat retrieval) always came back empty. Routed
+      # to the real OpenAI upstream; 1536 dims = knowledge's vector(1536).
+      - model_name: text-embedding-3-small
+        litellm_params:
+          model: openai/text-embedding-3-small
+          api_key: os.environ/OPENAI_API_KEY
       - model_name: claude-sonnet-4-6
         litellm_params:
           model: anthropic/claude-sonnet-4-6
@@ -334,7 +345,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "96907167bab3"
+        checksum/config: "923cdbdd5584"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
