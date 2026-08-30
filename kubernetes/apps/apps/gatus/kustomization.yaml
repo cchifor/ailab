@@ -3,7 +3,14 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - limitrange.yaml
+  # ntfy access token for the NATIVE alert path. Listed before deployment.yaml because the pod
+  # hard-requires it (secretKeyRef, not optional) — kustomize does not order by this list, but
+  # keeping them adjacent makes the coupling obvious.
+  - ntfy-gatus-auth.sops.yaml
   - configmap.yaml
   - deployment.yaml
   - servicemonitor.yaml # scrape gatus_results_* metrics
-  - prometheusrule.yaml # GatusEndpointDown alert -> ntfy
+  # DERIVED path: GatusEndpointDown -> Alertmanager -> ntfy. Broad (watches every endpoint) but it
+  # is evaluated BY Prometheus, so it cannot report a Prometheus outage. That gap is covered by the
+  # native `alerting:` block in configmap.yaml; keep both.
+  - prometheusrule.yaml

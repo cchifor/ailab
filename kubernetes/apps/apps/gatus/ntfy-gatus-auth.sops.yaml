@@ -1,0 +1,57 @@
+#
+# ############################################################################################
+# ##  THIS FILE IS PLAINTEXT. SOPS-ENCRYPT IT BEFORE COMMITTING.                             ##
+# ##      sops --encrypt --in-place kubernetes/apps/apps/gatus/ntfy-gatus-auth.sops.yaml     ##
+# ##  The repo .sops.yaml already matches `.*\.sops\.ya?ml$` with                            ##
+# ##  encrypted_regex ^(data|stringData)$ and the estate age recipient, so no flags are      ##
+# ##  needed. Flux decrypts it: the `apps` Kustomization (clusters/ai/apps.yaml) sets        ##
+# ##  decryption.provider=sops, secretRef=sops-age.                                          ##
+# ############################################################################################
+#
+# ntfy ACCESS TOKEN for Gatus's native alerting path (apps/gatus/configmap.yaml, `alerting.ntfy`).
+#
+# WHY A TOKEN AND NOT THE EXISTING ntfy-auth PASSWORD: Gatus's ntfy provider only ever sends
+# `Authorization: Bearer <token>`, and it refuses at startup any value not prefixed `tk_`. It has
+# no basic-auth option, so it cannot reuse the username/password in
+# infrastructure/monitoring/ntfy-auth.sops.yaml the way Alertmanager's basic_auth webhook does.
+#
+# PROVENANCE: minted 2026-08-30 for a dedicated least-privilege `gatus` ntfy user, mirroring the
+# existing `qnap` publisher. Verified at mint time: publishing to ailab-alerts returns 200, and
+# publishing to qnap-alerts returns 403 — so this credential can write one topic and cannot read
+# the alert history. Rotate with `ntfy token remove gatus <id>` + `ntfy token add gatus`.
+#
+# DURABILITY GAP — KNOWN, DELIBERATELY NOT FIXED HERE: ntfy's user.db lives on the
+# ntfy-data-iscsi PVC, and the `gatus` user above is created BY HAND, so unlike `ailab` and `qnap`
+# it is NOT reconciled by the postStart hook in infrastructure/monitoring/ntfy.yaml. A PVC rebuild
+# silently drops both the user and this token and Gatus's alerts start 401-ing — the same
+# failure-shape that hook's comments already warn about for `qnap`. Codifying a `gatus` user in
+# that postStart block is the proper fix and is follow-up work, because it edits a monitoring
+# workload.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: ntfy-gatus-auth
+    namespace: gatus
+type: Opaque
+stringData:
+    token: ENC[AES256_GCM,data:6lf1SUvvjbxR4GFb+NPk4F359vHzCPCVnFhzUP6kOlY=,iv:FQr3QmdEKja8DHKa77/iTZXKr+gjJW3G2ChCBskzJDY=,tag:V+r8uqYWTnxAHyol3lbFHw==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBEUkxKTW9vWlhEOVpSblVY
+            V2ZWdFNDV3hMV2JXQWpwTTY5ZFZmK2dkNVVnCnJ2WEVieW9VVlBEb01UTUlJQVUv
+            R1FCK2MxOHErV3VNd1cvL2hlVTZWV3MKLS0tIHF4MTdnbzFBcEljNCtiQklVZGo2
+            ZkIzR2FxL3JSZStobWJjeTQ0OHc5alUKwD+P4peLdXs+N303Kpeluz6dRf163zop
+            /nJ0Ksho2urkr6wU9x80MZcc0v5pSfIzop/rrI/uCdfvBdEw8zU/KA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-08-30T14:08:21Z"
+    mac: ENC[AES256_GCM,data:ASRwx1a/qEtghjAO0PeU2qffyWeu0RKBV9gCX4nZj2MftR5nl5E7ivAwv2e/AZQLs/gsgWbTB4/td4aeugPWbHkHnH/N1lPbkvzK9JaHYnm8N52HLVTTuwRzEYkHsdpQbX1CEKxHBmHfhFPs7B3iS5DMUHmqlf0PtFRZRLFXgcU=,iv:KoPMVfn+c0+ML4LI8CzhYBsvZOtxnHYwmicQqAz7mZc=,tag:w+XVHeWQpg2l5P7ZK5nkuQ==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

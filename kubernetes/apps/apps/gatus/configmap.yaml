@@ -1,6 +1,14 @@
 # Gatus uptime monitoring — config-as-code (the whole point vs Uptime Kuma's UI/DB config).
 # Probes in-cluster health endpoints + the QNAP storage-fabric TCP ports + the mgmt UIs.
 # Memory storage = stateless/restart-safe (history resets on restart; fine for a lab).
+#
+# Failures alert on TWO INDEPENDENT PATHS, deliberately:
+#   1. NATIVE  — Gatus POSTs straight to ntfy itself (`alerting:` below, plus an `alerts:` block on
+#                each monitoring-plane endpoint). Shares nothing with the Prometheus stack.
+#   2. DERIVED — Prometheus scrapes gatus_results_* and evaluates GatusEndpointDown
+#                (servicemonitor.yaml + prometheusrule.yaml); Alertmanager pushes that to ntfy.
+#                Broad coverage — it watches EVERY endpoint here, not just the critical four.
+# Path 2 structurally cannot report a failure of path 2. See the `alerting:` comment below.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,12 +22,77 @@ data:
     # alertable signal (see servicemonitor.yaml + prometheusrule.yaml) instead of log-scraping.
     # This lets us quiet the per-check success logs (GATUS_LOG_LEVEL=WARN in deployment.yaml).
     metrics: true
+    # Gatus re-reads THIS FILE every 30s and hot-reloads on change. By default a config that fails
+    # to parse or validate makes it PANIC on reload — so a typo in this ConfigMap would kill the
+    # very process meant to notice outages, and it would die minutes after the commit rather than
+    # at rollout, when nobody is watching. With this set, an invalid update is logged as an error
+    # and the last-known-good config keeps running.
+    skip-invalid-config-update: true
     storage:
       type: memory
     ui:
       title: ailab · status
       header: ailab
       description: Service health for the home AI lab
+    # --- Native alerting: the leg that does NOT run through Prometheus ---------------------------
+    # WHY THIS EXISTS when prometheusrule.yaml already alerts on gatus_results_endpoint_success:
+    # that rule is EVALUATED BY PROMETHEUS. The whole chain — scrape Gatus, evaluate the rule, hand
+    # it to Alertmanager, push to ntfy — runs inside the monitoring stack, so it can only report
+    # failures of things OUTSIDE itself. When Prometheus is the thing that is down, nothing scrapes
+    # Gatus, nothing evaluates the rule, and "Prometheus is down" is structurally unalertable.
+    # Gatus was ALREADY probing Prometheus every 60s and correctly seeing it fail — it simply had
+    # no way to tell anyone. Not theoretical: Prometheus was hard-down ~10h with no page, and
+    # tempo-0 crashlooped ~2390 times over 12 days unnoticed, both through this same hole.
+    #
+    # This block closes it by giving Gatus its own delivery path, sharing NOTHING with the derived
+    # path except ntfy. Gatus is a separate Deployment in a separate namespace with in-memory
+    # storage and no dependency on the monitoring stack, so it stays up through the outages it now
+    # reports. ntfy itself remains a single point of failure common to BOTH paths — an ntfy outage
+    # is still silent, and closing that needs an off-cluster check (deliberately out of scope).
+    alerting:
+      ntfy:
+        # Same ntfy Service and same topic Alertmanager already publishes to (kube-prometheus-stack
+        # receiver `ntfy` -> http://ntfy.monitoring.svc.cluster.local/ailab-alerts). Reusing the
+        # topic is deliberate: the phone is ALREADY subscribed to ailab-alerts, and a notification
+        # sent to a topic nobody subscribed to is the same blind spot in a new costume. Gatus titles
+        # its messages "Gatus: <endpoint>", so they stay distinguishable from Alertmanager's.
+        #
+        # NOTE the URL carries NO topic path. This provider POSTs to the URL ROOT and names the
+        # topic in the JSON body ({"topic": ...}) — unlike Alertmanager's webhook, which puts the
+        # topic in the path. Appending /ailab-alerts here would POST to /ailab-alerts and 404.
+        url: http://ntfy.monitoring.svc.cluster.local
+        topic: ailab-alerts
+        # Gatus's ntfy provider only ever sends `Authorization: Bearer <token>`, and it REJECTS at
+        # startup any token not prefixed `tk_`. It cannot do HTTP basic auth, so it cannot reuse the
+        # ntfy-auth username/password that Alertmanager uses (basic_auth + password_file) — it needs
+        # a real ntfy ACCESS TOKEN, minted with `ntfy token add`.
+        #
+        # The token arrives as NTFY_TOKEN from the ntfy-gatus-auth Secret (deployment.yaml +
+        # ntfy-gatus-auth.sops.yaml). Gatus runs os.ExpandEnv over this file BEFORE parsing it, so
+        # ${NTFY_TOKEN} is substituted at load time and no credential is ever stored in this
+        # ConfigMap. Never inline a token here — ConfigMaps are not encrypted at rest in git.
+        token: ${NTFY_TOKEN}
+        # 4 = "high", one above Alertmanager's default (3): everything routed here is a failure of
+        # the monitoring plane itself, i.e. exactly the alerts you cannot afford to swipe past.
+        # 5 is left unused on purpose — it bypasses the phone's do-not-disturb.
+        priority: 4
+        # Tapping the notification opens the status page (cloudflared: status.chifor.me -> this pod).
+        click: https://status.chifor.me
+        # Merged into every endpoint alert of type `ntfy` that does not set the field itself, so the
+        # per-endpoint blocks below stay to the point.
+        default-alert:
+          enabled: true
+          # 3 consecutive failures at the 60s interval => notify in ~3 minutes, vs the 5m `for:` on
+          # the Prometheus rule. Faster on purpose: this is the path that has to work when the
+          # slower one is dead. Still >1, so a single blip during a rollout does not page.
+          failure-threshold: 3
+          success-threshold: 2
+          send-on-resolved: true
+          # Re-notify every 4h while still failing, mirroring Alertmanager's repeat_interval: 4h.
+          # Without this Gatus notifies exactly ONCE per incident, and a single notification swiped
+          # away at 03:00 reproduces the original failure mode: an outage nobody noticed for 10
+          # hours. Gatus rejects any value below 5m.
+          minimum-reminder-interval: 4h
     endpoints:
       # --- AI ---
       - name: Open WebUI
@@ -33,26 +106,49 @@ data:
         interval: 60s
         conditions: ["[STATUS] == 200"]
       # --- Observability ---
+      # These four ARE the alerting pipeline, so each carries a native `alerts:` block that reaches
+      # ntfy without Prometheus in the loop. Every other endpoint on this page relies on the derived
+      # GatusEndpointDown path, which is fine — that path only fails when the pipeline itself does,
+      # which is precisely what these four watch.
+      #
+      # Prometheus and Alertmanager are the genuinely circular cases: when either is down the
+      # derived path is dead and the native alert is the ONLY notification. Grafana and Loki will
+      # double-notify (native + GatusEndpointDown) when they fail while Prometheus is healthy. That
+      # duplicate is accepted deliberately: two pages for a real outage beat a silent one, and
+      # suppressing it would mean making the native path conditional on the derived path being
+      # alive — reintroducing the exact dependency this block exists to break.
       - name: Grafana
         group: Observability
         url: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80/api/health
         interval: 60s
         conditions: ["[STATUS] == 200"]
+        alerts:
+          - type: ntfy
+            description: Grafana is down - dashboards and alert visualisation are unavailable
       - name: Prometheus
         group: Observability
         url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/-/healthy
         interval: 60s
         conditions: ["[STATUS] == 200"]
+        alerts:
+          - type: ntfy
+            description: Prometheus is down - rule evaluation has stopped, so NO Prometheus-derived alert can fire. This notification came from Gatus directly.
       - name: Alertmanager
         group: Observability
         url: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093/-/healthy
         interval: 60s
         conditions: ["[STATUS] == 200"]
+        alerts:
+          - type: ntfy
+            description: Alertmanager is down - Prometheus may still be evaluating rules but nothing can be delivered. This notification came from Gatus directly.
       - name: Loki
         group: Observability
         url: http://loki.monitoring.svc.cluster.local:3100/ready
         interval: 60s
         conditions: ["[STATUS] == 200"]
+        alerts:
+          - type: ntfy
+            description: Loki is down - log ingestion and log-based investigation are unavailable
       # --- Infrastructure ---
       - name: Authelia (SSO)
         group: Infrastructure

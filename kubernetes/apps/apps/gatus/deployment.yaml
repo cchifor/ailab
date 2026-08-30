@@ -28,9 +28,30 @@ spec:
           env:
             - { name: GATUS_CONFIG_PATH, value: /config/config.yaml }
             # WARN silences the per-check "[watchdog] Monitored ... success=true; errors=0" spam
-            # (~12 lines/min, 0 real failures) that floods error/warn log views. Failures are now
-            # tracked via Prometheus metrics + the GatusEndpointDown alert, not logs.
+            # (~12 lines/min, 0 real failures) that floods error/warn log views. Failures are
+            # tracked via Prometheus metrics + the GatusEndpointDown alert, and now also via the
+            # native ntfy alerting path in configmap.yaml — not via logs.
+            #
+            # WARN still surfaces the one startup line that matters if the ntfy provider is
+            # misconfigured: "[config.ValidateAlertingConfig] Ignoring provider=ntfy due to
+            # error=..." is logged at WARN, and Gatus then runs on with alerting silently
+            # DISABLED. The matching success line (configuredProviders=[ntfy]) is INFO, so set
+            # this to INFO temporarily when verifying an alerting change.
             - { name: GATUS_LOG_LEVEL, value: WARN }
+            # ntfy ACCESS TOKEN for the native alerting path. configmap.yaml references it as
+            # ${NTFY_TOKEN}; Gatus expands environment variables in its config file before parsing,
+            # which is what keeps the credential out of the ConfigMap.
+            #
+            # Deliberately NOT `optional: true`. A missing Secret must stop the pod loudly
+            # (CreateContainerConfigError, and a failed `apps` Flux Kustomization since it has
+            # wait: true) rather than let Gatus come up healthy with an empty token, no
+            # Authorization header, and an alert path that 401s into the void — which is exactly
+            # the class of silent-monitoring-failure this whole change exists to remove.
+            - name: NTFY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ntfy-gatus-auth
+                  key: token
           ports:
             - { name: http, containerPort: 8080 }
           readinessProbe:
