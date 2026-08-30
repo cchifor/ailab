@@ -34,6 +34,23 @@ spec:
       configAuditScannerEnabled: true
       rbacAssessmentScannerEnabled: true
       exposedSecretScannerEnabled: true
+      # DISABLED: SBOM generation was by far the largest single consumer of etcd on this cluster.
+      # Measured 2026-08-30: 706 SBOMReports serialize to 151.6 MiB, against 4.1 MiB for all 195
+      # VulnerabilityReports, 1.0 MiB of ConfigAuditReports and 0.6 MiB of ExposedSecretReports — i.e.
+      # ~96% of all aquasecurity CR bytes — while etcd's entire live (in-use) keyspace is only ~221 MB.
+      # Nothing in this cluster reads them: SBOMReports export no Prometheus metric, and the Grafana
+      # dashboard (monitoring/trivy-dashboard.yaml) plots only trivy_image_vulnerabilities,
+      # trivy_image_exposedsecrets, trivy_resource_configaudits and the two rbacassessment series.
+      # They are also effectively immortal, so this flag — not the TTL — is the only lever that bounds
+      # them: scannerReportTTL above stamps VulnerabilityReports with report-ttl=24h (none observed
+      # older than 23h), but SBOMReports are stamped report-ttl=0s or left unannotated entirely, and
+      # accumulate from install day onward — the oldest here dated 2026-06-18, 72 days. Do NOT try to
+      # fix this by shortening scannerReportTTL: it does not apply to SBOMReports at all, and a shorter
+      # TTL only forces more rescans (already ~67 scan Jobs/53min), adding etcd *write* churn.
+      # Cost of turning this off: ClusterVulnerabilityReports stop being refreshed (the chart notes SBOM
+      # generation is required for them). Acceptable — the cluster's only one is a stale 2026-07-06
+      # snapshot whose summary is all zeroes, and no dashboard or alert consumes it.
+      sbomGenerationEnabled: false
       # DISABLED: the infra-assessment node-collector needs hostPID + host hostPath mounts, but the
       # trivy-system namespace enforces PodSecurity `baseline` (deliberately, so the ordinary scan jobs
       # are admitted). So every node-collector pod was rejected (`violates PodSecurity baseline`), the

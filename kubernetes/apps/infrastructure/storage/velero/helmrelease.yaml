@@ -1,6 +1,37 @@
-# Velero — cluster-state + PV-data backup via CSI snapshot DATA MOVEMENT (Kopia) into the local
-# versitygw S3 store on the QNAP (ADR 0010). Captures all k8s API objects AND streams PV bytes.
+# Velero — cluster-state + PV-data backup via FILESYSTEM BACKUP (Kopia) into the local versitygw S3
+# store on the QNAP (ADR 0010). Captures all k8s API objects AND streams PV bytes.
 # CSI is built into Velero v1.18 core (no separate csi plugin); only the AWS object-store plugin is added.
+#
+# 2026-08-30 — SWITCHED OFF CSI SNAPSHOT DATA MOVEMENT. It is a data-destroying path on this NAS.
+# The `csi.trident.qnap.io` data mover cannot just read a snapshot: for EVERY volume, every night, it
+# must materialise a real backupPVC cloned from the VolumeSnapshot ("Velero built-in data mover creates
+# a volume from the CSI snapshot ... waits for Kubernetes to provision the volume"). On QTS that clone
+# is a brand-new thin LUN mapped into an iSCSI target — the 2026-08-30 daily raised 19 DataUploads and
+# the weekly 18, so ~19 clone LUNs were being created and torn down on the NAS every single night.
+# On the 2026-08-30 weekly the clone/unmap flow broke and took a live LUN with it:
+#   03:08:03  "QTS CLONE Failed : backOff stopped retrying with, cloned volume
+#              (trident-pvc-de79ab3b-975c-4ea6-b4f9-72be2bb7e22d) not exist"
+#   03:09:44  ProvisioningFailed ... StorageClass "qnap-iscsi": snapshot velero-weekly-...-lpdqd not Ready
+#   03:10-11  DeleteSnapshot / "Snapshot not found" against pvc-c61ddeac (Prometheus)
+#   03:12:45  the Prometheus LUN went dead
+# The failure mode is UNRECOVERABLE, not merely a failed backup: the clone/delete path leaves the LUN
+# UNMAPPED from its iSCSI target on the NAS (LUNAttachedTarget=-1, bMap=0). An unmapped LUN is both
+# unusable AND undeletable by Trident, whose delete path unmaps first and dies with
+# "Unmap IscsiTarget fail ... Error Code : -19". Two LUNs are orphaned that way, both left behind as
+# Released PVs with reclaimPolicy=Delete: pvc-c61ddeac (the live Prometheus volume) and pvc-de79ab3b,
+# whose claimRef is velero/velero-weekly-20260830030007-lpdqd — i.e. the data mover's OWN backupPVC.
+# That claimRef is the proof the clone path, not any workload, created it.
+# Because includedNamespaces is ["*"], that dice roll was being made nightly against gitea,
+# openbao and both CNPG Postgres clusters. Not an acceptable risk for a backup system.
+#
+# The replacement keeps EVERYTHING that made data movement attractive — the same node-agent, the same
+# Kopia uploader, the same per-namespace BackupRepository, the same versitygw bucket, the same
+# incremental/dedup/encryption properties — and changes only WHERE Kopia reads from: the pod's already
+# mounted filesystem instead of a snapshot clone. No VolumeSnapshot, no VolumeSnapshotContent, no
+# backupPVC, no LUN is created on the NAS by a backup ever again.
+# Trade-off accepted: fs-backup is crash-consistent, not point-in-time ("It backs up data from the live
+# file system, in which way the data is not captured at the same point in time"). For this estate that
+# is the right trade — see the per-workload note on the schedules below.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -25,17 +56,29 @@ spec:
         volumeMounts:
           - mountPath: /target
             name: plugins
-    # Node-agent + Kopia = the data mover for CSI snapshot data movement. disableHostPath: the data
-    # mover provisions a backupPVC and does NOT need the /host_pods hostPath (we don't use fs-backup) —
-    # cleaner PSA posture on Talos (Velero v1.18 docs confirm it doesn't break data movement).
+    # Node-agent + Kopia = the data mover. Unchanged by the 2026-08-30 switch — fs-backup uses the very
+    # same daemonset and the same Kopia repos; only the read source changes.
     deployNodeAgent: true
     nodeAgent:
-      disableHostPath: true
+      # true -> false (2026-08-30). THIS LINE IS LOAD-BEARING FOR THE WHOLE FIX. The chart gates both
+      # `host-pods` (/var/lib/kubelet/pods -> /host_pods) and `host-plugins` on `not disableHostPath`,
+      # and fs-backup reads pod volume data through exactly that mount: the node-agent "has a hostPath
+      # volume mount of /var/lib/kubelet/pods to access the pod volume data" and then "finds the pod
+      # volume's subdirectory within the above volume". Upstream is explicit that disabling it is only
+      # safe for the snapshot-data-movement case we just abandoned. Leaving this `true` while turning on
+      # defaultVolumesToFsBackup would silently produce zero-volume backups — the trap to avoid.
+      # /var/lib/kubelet/pods is correct for Talos here: csi-nfs-node and trident-node-linux both mount
+      # that exact path, so the chart default podVolumePath needs no override.
+      # PSA cost is nil: ns/velero is already pod-security.kubernetes.io/enforce=privileged.
+      disableHostPath: false
       # Cover the AgentForge-dedicated agent-nodes too (dedicated=agent:NoSchedule): the node-agent does
-      # the CSI data movement (Kopia) for any PVC that lands on a node, so it must run on all nodes; the
-      # stale pre-taint pods there also read as KubeDaemonSetMisScheduled without this.
+      # the Kopia upload for any PVC that lands on a node, so it must run on all nodes; the stale
+      # pre-taint pods there also read as KubeDaemonSetMisScheduled without this.
       tolerations:
         - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+    # NB: `snapshotsEnabled` only gates whether the chart renders VolumeSnapshotLocation objects — it is
+    # NOT the CSI-snapshot switch. With configuration.volumeSnapshotLocation empty it renders nothing
+    # either way, so it is left alone. The real snapshot suppression is snapshotVolumes/fs-backup below.
     snapshotsEnabled: true
     backupsEnabled: true
     # The chart already exposes /metrics on the velero Service (:8085), but ships the ServiceMonitor
@@ -54,11 +97,22 @@ spec:
       # SOPS secret.sops.yaml — must contain key `cloud` (aws shared-credentials file format).
       existingSecret: velero-garage-credentials
     configuration:
-      # CSI is built into Velero v1.18 core but is NOT default-on — the EnableCSI feature flag is
-      # still required, else PVC backups skip the csi-pvc-backupper and no data moves.
+      # KEPT deliberately after the 2026-08-30 switch, even though fs-backup does not need it. The
+      # backup catalog already in the bucket (weeklies out to the 720h TTL) was written by CSI snapshot
+      # data movement, and RESTORING those needs the CSI restore-item-action that this flag registers.
+      # Dropping EnableCSI would cost us the ability to restore ~30 days of existing backups while
+      # buying nothing: the snapshot path is already closed twice over, below.
       features: EnableCSI
-      # Every backup defaults to CSI snapshot data movement (Kopia streams to the object store).
-      defaultSnapshotMoveData: true
+      # Every backup defaults to filesystem backup (Kopia reads the mounted pod volume and streams to
+      # the object store). This is also the primary snapshot suppressor, and it is why ad-hoc
+      # `velero backup create` runs are safe too: Velero's ShouldPerformSnapshot consults the
+      # pod-volume-backup decision BEFORE it looks at snapshotVolumes, and bails with "Skipping snapshot
+      # of pv %s because it is backed up with PodVolumeBackup." So no clone LUN is requested even if
+      # someone passes --snapshot-move-data by hand.
+      # Opt a volume OUT with the pod annotation backup.velero.io/backup-volumes-excludes.
+      defaultVolumesToFsBackup: true
+      # (`defaultSnapshotMoveData: true` removed here on 2026-08-30 — it is what armed the QTS clone
+      # path on every schedule. The chart renders that arg with `with`, so absent == false == off.)
       backupStorageLocation:
         - name: default
           provider: aws
@@ -74,15 +128,33 @@ spec:
             # versitygw uses a self-signed cert. Swap for `caCert:` (base64 CA) under this BSL once the
             # cert exists; data is already encrypted at the Kopia layer so skip-verify is acceptable here.
             insecureSkipTLSVerify: "true"
-      # CSI snapshot data movement uses the labelled VolumeSnapshotClass (qnap-iscsi), NOT a VSL.
+      # Still empty: fs-backup streams straight to the BSL and takes no volume snapshot at all, so there
+      # is nothing for a VolumeSnapshotLocation to point at. (Before 2026-08-30 this was empty for a
+      # different reason — CSI data movement used the labelled VolumeSnapshotClass instead of a VSL.)
       volumeSnapshotLocation: []
     schedules:
+      # Both schedules carry the same two-key pairing, and both keys are deliberate:
+      #   defaultVolumesToFsBackup: true  — route every pod-mounted volume through Kopia fs-backup.
+      #   snapshotVolumes: false          — belt-and-braces. This is the SECOND, independent gate in
+      #     ShouldPerformSnapshot ("skipping snapshot action for pv %s ... snapshotVolumes is false"),
+      #     so any volume that somehow falls out of the fs-backup set still cannot trigger a QTS clone.
+      #     Given the failure mode destroys LUNs rather than merely failing, one gate is not enough.
+      # Consistency note, so nobody is surprised at restore time: fs-backup is crash-consistent. Both
+      # CNPG clusters (databases/infra-pg, strive-ailab/strive-pg) currently have NO native backup —
+      # `.spec.backup` is empty and there are zero ScheduledBackup/Backup CRs — so Velero is their only
+      # copy. Postgres is crash-safe by design and recovers from WAL exactly as it would after a power
+      # cut, so a live-filesystem copy is a valid restore source. strive-pg splits data and WAL across
+      # two PVCs that are read at slightly different instants; that skew is NOT a regression from the
+      # switch — the old CSI path also snapshotted them as two independent VolumeSnapshots (no
+      # VolumeGroupSnapshot CRD is installed on this cluster). Closing it properly means giving CNPG a
+      # real barman/plugin backup target, which is the tracked follow-up, not something Velero can fix.
       daily:
         disabled: false
         schedule: "0 2 * * *"
         template:
           ttl: "168h" # 7 days
-          snapshotMoveData: true
+          defaultVolumesToFsBackup: true
+          snapshotVolumes: false
           includedNamespaces: ["*"]
           excludedNamespaces: [kube-system, velero, trivy-system] # trivy DB cache is rebuildable — keep it out of the off-site chain
       weekly:
@@ -90,7 +162,8 @@ spec:
         schedule: "0 3 * * 0"
         template:
           ttl: "720h" # 30 days
-          snapshotMoveData: true
+          defaultVolumesToFsBackup: true
+          snapshotVolumes: false
           includedNamespaces: ["*"]
           excludedNamespaces: [kube-system, velero, trivy-system] # trivy DB cache is rebuildable — keep it out of the off-site chain
     resources:

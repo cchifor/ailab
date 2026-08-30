@@ -1,0 +1,100 @@
+# AND ADD "  - iscsi-recovery-tmo.yaml" to kubernetes/apps/infrastructure/storage/kustomization.yaml
+#
+# iSCSI session recovery_tmo reconciler — WORKAROUND for a unit bug in the QNAP Trident CSI driver.
+#
+# THE BUG: at every NodeStageVolume the driver runs
+#     iscsiadm -m node -T <iqn> -p <portal> -o update -n node.session.timeo.replacement_timeout -v 2m0s
+# It passes a Go duration STRING ("2m0s") where open-iscsi expects a plain integer number of seconds.
+# iscsiadm does not validate the value — it stores it and exits 0 (observed: error="<nil>", empty
+# output) — and the kernel then parses it with atoi(), which stops at the first non-digit and yields 2.
+# Verified on talos-cp1 2026-08-30: all six live sessions reported
+#     /sys/class/iscsi_session/session*/recovery_tmo = 2
+# So the INTENDED 120 s replacement timeout is actually 2 s on every iSCSI volume in the estate.
+#
+# WHY IT MATTERS: replacement_timeout is how long the kernel waits for a dropped session to come back
+# before it gives up, marks the SCSI device transport-offline and fails all I/O. At 2 s, any blip
+# longer than a couple of seconds — a switch reload, NAS failover, a firmware update, transient load on
+# the storage VLAN — permanently kills the volume. ext4 stays mounted rw over a dead device (it cannot
+# even write the superblock to remount-ro), every read returns EIO, and recovery needs a manual pod
+# delete plus an iscsiadm logout. open-iscsi's own default is 120.
+#
+# SCOPE — read this before assuming it fixes the 2026-08-30 Prometheus outage. IT DOES NOT. That
+# outage was caused server-side: Velero's CSI snapshot/clone flow left the LUN UNMAPPED from its iSCSI
+# target on the NAS (LUNAttachedTarget=-1, bMap=0), which no client-side timeout can survive. See the
+# Velero helmrelease for that fix. This file addresses a SEPARATE latent fault found while diagnosing
+# it — one that has bitten before (a qnap-iscsi session drop silently freezing Prometheus).
+#
+# WHY A DAEMONSET AND NOT iscsid.conf: setting node.session.timeo.replacement_timeout in
+# /etc/iscsi/iscsid.conf does not hold, because the driver rewrites the per-target node record on every
+# stage, and the session inherits from that record at login. The live session attribute in sysfs is
+# therefore the only place a correction sticks. New sessions start at 2 and are corrected within one
+# poll interval; that residual window is unavoidable without a driver fix.
+#
+# REMOVE THIS once QNAP ships a Trident build that writes an integer. Re-check by staging any
+# qnap-iscsi volume and reading recovery_tmo on the new session: if it is already 120, this is obsolete.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: iscsi-recovery-tmo
+  namespace: trident
+  labels:
+    app.kubernetes.io/name: iscsi-recovery-tmo
+    app.kubernetes.io/part-of: qnap-storage
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iscsi-recovery-tmo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iscsi-recovery-tmo
+    spec:
+      # Every node can host an iSCSI volume, control-plane included — Prometheus, Gitea, OpenBao and
+      # the CNPG clusters all schedule onto the control-plane nodes here.
+      tolerations:
+        - operator: Exists
+      priorityClassName: system-node-critical
+      containers:
+        - name: reconciler
+          image: mirror.gcr.io/library/busybox:1.38
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              WANT=120
+              while true; do
+                for s in /host/sys/class/iscsi_session/session*; do
+                  [ -e "$s/recovery_tmo" ] || continue
+                  cur=$(cat "$s/recovery_tmo" 2>/dev/null || echo "")
+                  case "$cur" in ''|*[!0-9]*) continue ;; esac
+                  if [ "$cur" -lt "$WANT" ]; then
+                    if echo "$WANT" > "$s/recovery_tmo" 2>/dev/null; then
+                      echo "$(date -u +%FT%TZ) raised $(basename "$s") recovery_tmo ${cur} -> ${WANT}"
+                    else
+                      echo "$(date -u +%FT%TZ) FAILED to write $(basename "$s")/recovery_tmo (cur=${cur})"
+                    fi
+                  fi
+                done
+                sleep 30
+              done
+          securityContext:
+            # Writing a sysfs transport-class attribute needs root and a writable /sys bind mount.
+            # Deliberately NOT privileged and no added capabilities — this only ever writes one
+            # integer to one attribute path, so it does not need the rest of the privileged surface.
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 1m, memory: 8Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - name: host-sys
+              mountPath: /host/sys
+      volumes:
+        - name: host-sys
+          hostPath:
+            path: /sys
+            type: Directory
