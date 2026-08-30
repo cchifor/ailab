@@ -194,6 +194,19 @@ data:
             description: Password manager · own auth
             icon: vaultwarden.png
             siteMonitor: http://vaultwarden.vaultwarden.svc.cluster.local:80/alive
+        # OpenBao — the estate's secret store (ESO SecretStores + agentforge read from it in-cluster).
+        # Plain link, no widget: Homepage ships NO widget type for OpenBao or HashiCorp Vault (checked
+        # against gethomepage.dev/widgets), so there is no credential to wire and none was invented.
+        # icon: openbao.png is NOT in the dashboard-icons CDN -> broken image; vault.png is HashiCorp's
+        # logo and would read as a duplicate of Vaultwarden directly above it, so use a bundled MDI.
+        # No siteMonitor, for two independent reasons: (1) the listener is HTTPS with an ailab-ca cert
+        # and the homepage pod has no ailab CA in its trust store (no trust-manager in the estate), so
+        # every poll would fail TLS and show a permanently red dot; (2) /v1/sys/health answers non-200
+        # by design when the node is sealed or standby, so even over plain HTTP the dot would misreport.
+        - OpenBao:
+            href: https://openbao.chifor.me
+            description: Secrets manager · CF Access + own token
+            icon: mdi-shield-key
     # Native Homepage iframe widget, NOT an injected script. The earlier custom.js approach
     # fought React for placement and, worse, was served from /api/config/custom.js - which
     # Cloudflare caches by file extension (Homepage sends no Cache-Control), so edits stayed

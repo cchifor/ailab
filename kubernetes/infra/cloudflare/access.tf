@@ -99,6 +99,32 @@ resource "cloudflare_zero_trust_access_application" "vault_admin" {
   policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
 }
 
+# openbao.chifor.me — the OpenBao UI (kubernetes/apps/infrastructure/security/openbao). This is the
+# root of the estate's secret trust: every ExternalSecrets SecretStore and every agentforge workload
+# reads from this instance, and a UI session carries an OpenBao token.
+#
+# Gated to allow_me at the FULL apex (no path scoping). Unlike Vaultwarden and Gitea there is nothing
+# to break by gating everything: the only machine clients of OpenBao are IN-CLUSTER and reach it over
+# the ClusterIP Service, which never traverses Cloudflare — so no non-browser caller can be affected by
+# this application. The hostname serves a browser UI and nothing else.
+#
+# DOUBLE LOGIN IS EXPECTED: Access authenticates the human at the CF edge, then OpenBao's own UI asks
+# for a token. That is deliberate defense-in-depth for a secret store — do NOT "fix" it by removing
+# this app. It also departs from the Access-free convention used for own-auth apps (Gitea, Vaultwarden
+# apex, AgentForge CP); the departure is justified by the blast radius of this particular UI.
+#
+# 30m session — the same tight window given to the no-native-auth UIs above. OpenBao's own token login
+# is the second factor, but an Access session on this hostname is the outer door to every secret in the
+# estate, so it is not left open for 8h/24h.
+resource "cloudflare_zero_trust_access_application" "openbao" {
+  account_id       = var.cloudflare_account_id
+  name             = "OpenBao (secrets manager)"
+  type             = "self_hosted"
+  domain           = "openbao.chifor.me"
+  session_duration = "30m"
+  policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
+}
+
 # api.chifor.me — the LiteLLM OpenAI-compatible proxy. It is a MACHINE API (the Strive platform +
 # programmatic clients), so it gets a SERVICE TOKEN / non_identity policy — an interactive email/IdP
 # gate would break non-browser callers. The LITELLM_MASTER_KEY stays the app-level auth; this adds a

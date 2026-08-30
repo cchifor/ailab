@@ -92,6 +92,37 @@ data:
       # access.tf path-gates only /admin*.
       - hostname: vault.chifor.me
         service: http://vaultwarden.vaultwarden.svc.cluster.local:80
+      # OpenBao UI — the estate's secret store (ESO SecretStores + every agentforge workload read from it).
+      # GATED by Cloudflare Access (access.tf `openbao`, 30m session). This DEPARTS from the own-auth
+      # convention used for Gitea/Vaultwarden/AgentForge above, and deliberately so: this is the root of
+      # the estate's secret trust, the UI is browser-only (no native client to break), and Access adds an
+      # identity check the CF edge enforces before the request ever enters the tunnel. Users therefore
+      # authenticate TWICE — once to Cloudflare Access, then again with an OpenBao token at the UI's own
+      # login screen. That is intended defense-in-depth, not a misconfiguration.
+      #
+      # Scope: this rule gates only the PUBLIC hostname. The in-cluster ClusterIP path
+      # (https://openbao.openbao.svc.cluster.local:8200) that ESO and the agentforge workloads use never
+      # touches cloudflared or Cloudflare, so secret delivery is untouched by anything in this block.
+      #
+      # HTTPS origin: the listener sets tls_cert_file/tls_key_file (openbao-config), so :8200 speaks TLS,
+      # NOT plaintext — an http:// service here would fail immediately.
+      # originServerName is REQUIRED, not cosmetic: the openbao-tls cert's SANs are
+      #   openbao.openbao.svc[.cluster.local], openbao-0.openbao-internal.openbao.svc[.cluster.local],
+      #   openbao-active.openbao.svc.cluster.local
+      # — there is NO `openbao-ui` SAN, so verification of the dialled name would fail on a hostname
+      # mismatch. originServerName overrides the name cloudflared verifies (and the SNI it sends).
+      # caPool pins the ailab root CA mounted from Secret `openbao-tls` in ns edge (openbao-ca-cert.yaml)
+      # rather than using noTLSVerify — see that file for why a secret store must not accept any cert.
+      # FALLBACK if the CA mount ever blocks a rollout: replace the originRequest block with
+      # `{ noTLSVerify: true }` and drop the openbao-ca volume/volumeMount below. Weaker; last resort.
+      # Service choice: `openbao-ui` is the chart's purpose-built UI Service, which keeps the browser path
+      # off the `openbao` Service that ESO/admission pin. Both Services set publishNotReadyAddresses: true,
+      # so either one stays routable while the pod is SEALED — which is when you most need the UI.
+      - hostname: openbao.chifor.me
+        service: https://openbao-ui.openbao.svc.cluster.local:8200
+        originRequest:
+          caPool: /etc/cloudflared/openbao-ca/ca.crt
+          originServerName: openbao.openbao.svc.cluster.local
       # Strive platform (strive.place) -> in-cluster Traefik (path-routes /api/*,
       # /agent, /auth + the gatekeeper ForwardAuth chain). id.strive.place -> Keycloak.
       # Requires the strive.place zone + these CNAMEs on the tunnel (see RUNBOOK).
@@ -147,6 +178,8 @@ spec:
           volumeMounts:
             - { name: config, mountPath: /etc/cloudflared/config, readOnly: true }
             - { name: creds, mountPath: /etc/cloudflared/creds, readOnly: true }
+            # ailab root CA used by the openbao.chifor.me rule's originRequest.caPool (above).
+            - { name: openbao-ca, mountPath: /etc/cloudflared/openbao-ca, readOnly: true }
           resources:
             requests: { cpu: 50m, memory: 64Mi }
             limits: { memory: 256Mi }
@@ -160,6 +193,14 @@ spec:
           configMap: { name: cloudflared-config }
         - name: creds
           secret: { secretName: cloudflared-creds } # SOPS: key credentials.json
+        # cert-manager issues Secret `openbao-tls` in ns edge (openbao-ca-cert.yaml). Only ca.crt is
+        # projected — the throwaway leaf's tls.crt/tls.key are never needed by the tunnel. Same
+        # ca.crt-only projection the openbao unsealer/provisioner use.
+        - name: openbao-ca
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
 ---
 # ADR 0016: allow exactly one connector to be evicted at a time — a drain proceeds while the other
 # keeps the tunnel up. PDB only because replicas>=2 (a PDB on a singleton blocks drains — the

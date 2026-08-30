@@ -15,9 +15,9 @@ variable "tunnel_id" {
 }
 
 variable "tunnel_hostnames" {
-  description = "Subdomains under chifor.me published by the tunnel; each gets a proxied CNAME -> <tunnel>.cfargotunnel.com. Existing records are adopted via imports.tf; NEW ones (status, dw1-dw6, agentforge) are created. The dw* hosts are the dev-worker ttyd terminals (2 per node) and are gated by access.tf. agentforge is Access-FREE (own Authelia OIDC, ADR 0019)."
+  description = "Subdomains under chifor.me published by the tunnel; each gets a proxied CNAME -> <tunnel>.cfargotunnel.com. Existing records are adopted via imports.tf; NEW ones (status, dw1-dw6, agentforge, openbao) are created. The dw* hosts are the dev-worker ttyd terminals (2 per node) and are gated by access.tf. agentforge is Access-FREE (own Authelia OIDC, ADR 0019). openbao is the secret-store UI and IS Access-gated (access.tf `openbao`) despite having its own token login — see that resource for why."
   type        = list(string)
-  default     = ["home", "sso", "status", "chat", "grafana", "api", "dw1", "dw2", "dw3", "dw4", "dw5", "dw6", "k8s", "hubble", "proxmox", "qnap", "prometheus", "alertmanager", "ntfy", "git", "vault", "agentforge"]
+  default     = ["home", "sso", "status", "chat", "grafana", "api", "dw1", "dw2", "dw3", "dw4", "dw5", "dw6", "k8s", "hubble", "proxmox", "qnap", "prometheus", "alertmanager", "ntfy", "git", "vault", "agentforge", "openbao"]
 }
 
 variable "registry_ip" {

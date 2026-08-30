@@ -1,0 +1,38 @@
+# Distributes the ailab-ca CA (that signed OpenBao's server cert) into the `edge` namespace so the
+# cloudflared tunnel can VERIFY OpenBao's TLS instead of blindly trusting it. Same pattern (and same
+# reasoning) as the openbao-ca-cert.yaml files in agentforge / agentforge-broker / agentforge-ci-runners
+# / agentforge-sandbox / agentforge-tenant-platform-dev: a namespaced consumer resolves the CA in its OWN
+# namespace and there is no trust-manager in the estate, so each consuming namespace needs its own
+# `openbao-tls` Secret carrying ca.crt. cert-manager issues a throwaway leaf from ailab-ca; ONLY its
+# ca.crt (== the ailab root CA that also signed openbao-tls in the openbao ns) is consumed. Auto-renews.
+#
+# WHY CA-pinning here and not the `noTLSVerify: true` used for proxmox/qnap: those are LAN hosts whose
+# self-signed CA is not in the cluster. OpenBao's IS (ailab-root-ca), and OpenBao is the estate's SECRET
+# STORE — a UI session carries an admin/root token, so accepting any certificate would let anything on the
+# pod network MITM that token. This is exactly the "pin the CA via originRequest.caPool + originServerName"
+# hardening that ADR 0007 leaves open for the other origins; OpenBao gets it from day one.
+#
+# ORDERING / BLAST RADIUS: cloudflared mounts this Secret, so a cloudflared pod cannot start until
+# cert-manager has issued it. Both objects land in the same Flux Kustomization (edge), and issuance from a
+# CA issuer is near-instant. If issuance is delayed, the ROLLOUT stalls with the new pod pending — the two
+# existing connectors keep serving and the tunnel stays UP (RollingUpdate + the PDB below it). Verify with:
+#   kubectl -n edge get certificate openbao-ca
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-ca
+  namespace: edge
+  labels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/component: openbao-ca-ref
+spec:
+  secretName: openbao-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: openbao-ca-ref
+  dnsNames: ["openbao-ca-ref.edge.svc"]
+  privateKey: { algorithm: ECDSA, size: 256 }
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

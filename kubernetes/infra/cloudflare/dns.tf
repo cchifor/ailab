@@ -29,5 +29,9 @@ resource "cloudflare_dns_record" "tunnel" {
     cloudflare_zero_trust_access_application.k8s_tools,
     cloudflare_zero_trust_access_application.admin_uis,
     cloudflare_zero_trust_access_application.vault_admin, # /admin gated before vault.chifor.me resolves
+    # Same fail-safe for the secret store: openbao.chifor.me is a NEW record, so without this the apply
+    # could publish the OpenBao UI to the internet before its Access app exists. With it, a partial or
+    # failed apply simply leaves the CNAME absent.
+    cloudflare_zero_trust_access_application.openbao,
   ]
 }

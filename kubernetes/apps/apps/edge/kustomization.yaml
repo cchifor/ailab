@@ -6,6 +6,10 @@ resources:
   - namespace.yaml
   - limitrange.yaml
   - cloudflared-creds.sops.yaml
+  # Must precede cloudflared.yaml conceptually: cloudflared mounts the Secret this Certificate issues
+  # (ailab root CA) to CA-pin the openbao.chifor.me origin. Kustomize does not order applies, but Flux
+  # applies both in one reconcile and a pending mount only stalls the rollout — it never drops the tunnel.
+  - openbao-ca-cert.yaml
   - cloudflared.yaml
   - tailscale-oauth.sops.yaml
   - tailscale.yaml
