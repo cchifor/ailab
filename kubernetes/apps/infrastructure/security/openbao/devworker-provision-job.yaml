@@ -1,0 +1,188 @@
+# Dev-worker AppRole provisioning (ADR 0020) — the declarative half of giving each dev-worker VM its
+# own OpenBao identity. Enables the `approle` auth mount, writes one read-only policy + one AppRole
+# role per worker (PERIODIC tokens, so a renewing agent never hits the max-TTL cliff that locked the
+# estate out on 2026-08-25), and seed-patches the af/dev-workers/* KV paths from the
+# openbao-devworker-seeds Secret (seed-wins contract — see devworker-seeds.sops.yaml).
+#
+# AUTH: the openbao-breakglass-token Secret (the never-expiring root minted during the 2026-08-30
+# re-bootstrap; deliberately NOT in git — docs/runbooks/openbao-recovery.md). Root is required
+# because provision-job.yaml revokes its own root token on the way out and the scoped provisioner
+# token cannot enable auth mounts or write policies. `optional: false` so an absent breakglass Secret
+# turns this Job red instead of silently skipping — fail-closed like the other openbao bootstrap Jobs.
+#
+# What this Job does NOT do: mint per-worker secret-ids. Issuance is an operator ceremony
+# (docs/runbooks/openbao-dev-workers.md) so the only places a login credential ever exists are the
+# operator's SOPS file and the worker's /etc/openbao-agent — never a k8s Secret.
+#
+# The openbao namespace has no default-deny CiliumNetworkPolicy (the two policies here are
+# endpoint-scoped to the unsealer and the provisioner), so this Job needs no egress policy of its own,
+# same as provision-job.yaml.
+#
+# ORDERING: this needs the `af` KV mount that provision-job.yaml creates, and nothing sequences the
+# two — on a first-ever bring-up this Job can lose that race, exhaust its backoff and land Failed.
+# That is self-healing, not a manual step: ttlSecondsAfterFinished reaps Failed Jobs as well as
+# Complete ones, and Flux re-creates this one on the next reconcile.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-devworker-provision-script
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-devworker-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+data:
+  provision.sh: |
+    #!/bin/sh
+    # Idempotent: every write is an upsert, so the daily re-run just re-converges. Fail-closed:
+    # `set -eu` and no `|| true` — a half-provisioned vault must surface as a red Job.
+    # NEVER echo credential material. BAO_TOKEN arrives via env from the breakglass Secret, the seed
+    # JSON is handed to `bao` by FILE PATH (never as an argv word), and the one command that would
+    # print a value (`bao kv get`, used as an existence probe) is redirected to /dev/null.
+    set -eu
+
+    SEED_DIR=/etc/openbao-devworker-seeds
+
+    bao token lookup >/dev/null || {
+      echo "openbao unreachable/sealed or the breakglass token was rejected; aborting" >&2
+      exit 1
+    }
+
+    # `bao auth enable` fails when the mount already exists, so probe the mount list first.
+    if ! bao auth list -format=json | grep -q '"approle/"'; then
+      bao auth enable approle
+    fi
+
+    # The six dev workers (inventory/hosts.yml, group dev_workers). Role and policy are both named
+    # after the ansible inventory_hostname, so an audit entry names the machine. Adding a worker is
+    # one word here plus the mint ceremony in docs/runbooks/openbao-dev-workers.md.
+    for host in dev-worker-1 dev-worker-2 dev-worker-3 dev-worker-4 dev-worker-5 dev-worker-6; do
+      # Read-only, scoped to this worker's own subtree plus the shared one. The metadata `list`
+      # grants are what make `cred list` work; nothing here can create, update or delete, so a
+      # compromised worker cannot rewrite another worker's credentials.
+      bao policy write "$host" - <<EOF
+    path "af/data/dev-workers/common"        { capabilities = ["read"] }
+    path "af/data/dev-workers/common/*"      { capabilities = ["read"] }
+    path "af/data/dev-workers/${host}"       { capabilities = ["read"] }
+    path "af/data/dev-workers/${host}/*"     { capabilities = ["read"] }
+    path "af/metadata/dev-workers"           { capabilities = ["list"] }
+    path "af/metadata/dev-workers/"          { capabilities = ["list"] }
+    path "af/metadata/dev-workers/common"    { capabilities = ["read", "list"] }
+    path "af/metadata/dev-workers/common/*"  { capabilities = ["read", "list"] }
+    path "af/metadata/dev-workers/${host}"   { capabilities = ["read", "list"] }
+    path "af/metadata/dev-workers/${host}/*" { capabilities = ["read", "list"] }
+    EOF
+      # PERIODIC token (token_period): the TTL resets on every renewal and there is no max-TTL to
+      # run into — the antidote to the 2026-08-25 768h expiry lockout, which is what a long-lived
+      # `bao agent` would otherwise walk straight into. secret_id_ttl=0 + secret_id_num_uses=0 keep
+      # the secret-id a DURABLE per-VM bootstrap credential: the worker has to re-login after every
+      # reboot and nothing re-delivers it. No *_bound_cidrs: the LAN NodePort SNATs the client away
+      # before OpenBao sees it (openbao-lan.yaml), so the per-worker blast radius is the scoped
+      # policy above plus revoking that worker's secret-id.
+      bao write "auth/approle/role/${host}" \
+        token_policies="${host}" \
+        token_period=72h \
+        secret_id_ttl=0 \
+        secret_id_num_uses=0
+    done
+
+    # Seed the KV subtree: one file per path, `<name>.json` -> af/dev-workers/<name>. `kv patch` is
+    # the read-modify-write that gives the seed-wins-others-survive contract; it needs an existing
+    # version, so a never-written path is created with `kv put` of the same file.
+    seeded=0
+    for seed in "$SEED_DIR"/*.json; do
+      [ -f "$seed" ] || continue
+      name="$(basename "$seed" .json)"
+      if bao kv get -mount=af "dev-workers/${name}" >/dev/null 2>&1; then
+        bao kv patch -mount=af "dev-workers/${name}" "@${seed}"
+      else
+        bao kv put -mount=af "dev-workers/${name}" "@${seed}"
+      fi
+      seeded=$((seeded + 1))
+    done
+    [ "$seeded" -gt 0 ] || { echo "no *.json under $SEED_DIR; aborting" >&2; exit 1; }
+
+    echo "devworker provision complete"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-devworker-provision
+  namespace: openbao
+  annotations:
+    # WEDGE GUARD — same rationale as provision-job.yaml (2026-07-28 immutable-Job outage): a Job's
+    # `spec.template` is immutable, so editing the script's ConfigMap name, the image or the security
+    # context would otherwise fail "field is immutable" and take the whole `openbao` Kustomization
+    # False. This annotation scopes delete+recreate to THIS Job, not Kustomization-wide `spec.force`
+    # (which would also force the namespace / TLS Certificate / SOPS seed Secrets this layer owns).
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: openbao-devworker-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 6
+  # Reaped after a day, which is also how this re-runs: Flux re-applies the reaped Job, so a seed
+  # rotation or a script change converges within a day without anyone running `bao` by hand.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-devworker-provision
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      automountServiceAccountToken: false # talks only to the OpenBao API, never to kube-apiserver
+      securityContext:
+        # uid 100 / gid 1000 is the `openbao` user baked into the image (the image itself sets no
+        # USER, so this must be explicit) — the same identity the server StatefulSet runs under,
+        # there via the chart's own default rather than anything helmrelease.yaml sets.
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provision
+          # The official OpenBao image (bao CLI + busybox sh), pinned to the SERVER's version so the
+          # CLI and the API can never drift; quay.io is where the chart pulls the server from too.
+          image: quay.io/openbao/openbao:2.5.5
+          command: ["/bin/sh", "/scripts/provision.sh"]
+          env:
+            - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: BAO_CACERT, value: "/tls/ca.crt" }
+            # The headless per-pod name above is dialled rather than the `openbao` Service because it
+            # publishes not-ready addresses: this Job can then reach a pod that is up but sealed and
+            # fail with a real error instead of a DNS miss.
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openbao-breakglass-token
+                  key: root_token # verified against the live Secret; it carries no `token` key
+                  optional: false
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+            - { name: seeds, mountPath: /etc/openbao-devworker-seeds, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+        - name: script
+          configMap:
+            name: openbao-devworker-provision-script
+            defaultMode: 0555
+        - name: seeds
+          secret:
+            secretName: openbao-devworker-seeds

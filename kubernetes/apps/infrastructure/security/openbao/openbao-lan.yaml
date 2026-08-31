@@ -1,0 +1,50 @@
+# LAN-only NodePort in front of the OpenBao API — the dev-worker VMs' path to their credentials
+# (ADR 0020). The six dev workers (192.168.0.8-.13, inventory/hosts.yml) sit on the flat mgmt LAN
+# OUTSIDE the cluster; each one's `bao agent` (AppRole auto-auth) and its `cred` helper dial this
+# Service at https://openbao.lan.chifor.me:30820 — /etc/hosts pins that name to .41/.42/.43 and the
+# name is a SAN on the openbao-tls Certificate (tls.yaml).
+#
+# Exposure trade-off (deliberate, same shape as monitoring/prometheus-lan.yaml): a NodePort cannot
+# path-scope, so the whole OpenBao API is reachable from the LAN. Accepted because (a) the mgmt LAN is
+# single-operator/private and node IPs have no WAN route (public ingress stays cloudflared/tailscale-
+# only, see apps/edge); (b) every request still needs TLS plus a valid token, and the dev-worker
+# AppRoles get read-only policies scoped to their own KV subtree (devworker-provision-job.yaml);
+# (c) the alternative exposure — a Cloudflare tunnel — would route vault traffic through a third
+# party, rejected in ADR 0020. If LAN trust ever changes, put an authenticating proxy in front of
+# this and repoint the workers; they only know a URL (dev_worker_openbao_addr).
+#
+# NO SOURCE-IP SCOPING, HERE OR AT THE VAULT. Cilium runs its default SNAT load-balancer mode
+# (cilium-config has kube-proxy-replacement=true and leaves bpf-lb-mode unset), so under the default
+# externalTrafficPolicy: Cluster the server sees the ingress NODE as the client, never .8-.13: a
+# per-worker `secret_id_bound_cidrs`/`token_bound_cidrs` would reject every dev-worker login.
+# externalTrafficPolicy: Local WOULD preserve the client IP, but only the node currently running
+# openbao-0 (a single replica) has a local endpoint, and a NodePort dial to any other node is dropped
+# — not refused — so each /etc/hosts row pointing elsewhere costs a full TCP connect timeout. Hence
+# the AppRole roles are written without CIDR bindings and per-worker isolation rests on the
+# per-worker policy plus a per-worker, independently revocable secret-id. prometheus-lan.yaml defers
+# source-IP scoping for the same externalTrafficPolicy reason.
+#
+# The selector copies the chart's own openbao-active Service (that label is set on the pod by the
+# server at runtime), so while the vault is SEALED the label is absent and this Service has NO
+# endpoints — a sealed vault is unreachable from the LAN instead of answering 503s.
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao-lan
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-lan
+    app.kubernetes.io/part-of: agentforge
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/instance: openbao
+    app.kubernetes.io/name: openbao
+    component: server
+    openbao-active: "true"
+  ports:
+    - name: https-api
+      port: 8200
+      targetPort: 8200
+      nodePort: 30820
+      protocol: TCP
