@@ -1,8 +1,11 @@
 # Runbook: estate credentials in OpenBao (`af/estate/*`)
 
 The operator-plane infrastructure credentials — Proxmox, QNAP, Cloudflare, the zot registry, Gitea
-runner registration, the GitHub App key — escrowed in OpenBao with the same seed-wins durability
-contract as the AgentForge operator paths. Backfilled 2026-08-31 from the full credential audit.
+runner registration, the GitHub App key — escrowed in OpenBao under a **seed-wins** durability
+contract: the same one the dev-worker subtree uses, and **not** the one the AgentForge `operator/*`
+paths use (those are create-if-absent — the live vault wins there; canonical side-by-side in
+`docs/runbooks/openbao-recovery.md` § "The seed-ownership contract").
+Backfilled 2026-08-31 from the full credential audit.
 The vault itself: `docs/runbooks/openbao-recovery.md`. The dev-worker consumption plane (which does
 NOT read these paths): `docs/runbooks/openbao-dev-workers.md`.
 
@@ -48,8 +51,12 @@ The daily **`openbao-estate-provision`** Job (`kubernetes/apps/infrastructure/se
 authenticates with the breakglass token and `bao kv patch`es each `af/estate/<name>` from the
 `<name>.json` keys of Secret `openbao-estate-seeds` (`estate-seeds.sops.yaml`, SOPS in git).
 
-**Seed wins.** A key present in the seed overwrites live KV on every run; a key absent from the seed
-survives. So:
+**Seed wins** — literally, on every run, because this Job is a shell `bao kv patch` loop. (Do not
+generalise from the AgentForge `operator/*` seed, which is create-if-absent and lets the live vault
+win; `docs/runbooks/openbao-recovery.md` § "The seed-ownership contract" has the three seeders
+side by side. The header comment inside `estate-seeds.sops.yaml` still claims parity with all of
+them and cannot be corrected without re-encrypting that file.) A key present in the seed overwrites
+live KV on every run; a key absent from the seed survives. So:
 
 - **Rotating a credential** = change it at the real system, update **every** home in the table
   above, and re-encrypt `estate-seeds.sops.yaml` in the same change — otherwise the vault silently
