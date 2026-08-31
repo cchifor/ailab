@@ -1,0 +1,5 @@
+---
+# dev-worker-5 is the herdr pilot host — the only one. The toggle defaults off in the role, so
+# enabling it here leaves the other five workers untouched. What/why/rollback:
+# docs/runbooks/dev-workers.md § "herdr pilot".
+dev_worker_enable_herdr: true

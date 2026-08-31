@@ -1,0 +1,33 @@
+[Unit]
+Description=herdr agent-multiplexer server for {{ dev_worker_admin_user }} (pilot)
+Documentation=https://herdr.dev/docs/
+# On boot the server restores session shape and (herdr >= 0.8.0) resumes integrated agents headlessly
+# via their native session ids — those respawned CLIs need the network up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ dev_worker_admin_user }}
+Group={{ dev_worker_admin_user }}
+Environment=HOME=/home/{{ dev_worker_admin_user }}
+Environment=USER={{ dev_worker_admin_user }}
+Environment=XDG_RUNTIME_DIR=/run/user/{{ dev_worker_admin_uid }}
+# Agents respawned by the server are its direct children, not children of an interactive shell, so
+# the .bashrc npm-global PATH line that tmux/ttyd panes rely on never fires here — claude/codex must
+# already be on the unit's PATH.
+Environment=PATH=/home/{{ dev_worker_admin_user }}/{{ dev_worker_npm_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory={{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }}
+ExecStart=/usr/local/bin/herdr server
+Restart=on-failure
+RestartSec=5
+# One cgroup holds the server and every pane process it spawns (agents included), same idea as the
+# agentforge caps: a server-side leak (upstream #1273/#2178 grew it to gigabytes) is throttled, then
+# OOM-killed inside the unit instead of starving the VM; Restart + resume_agents_on_restore then
+# brings the agent conversations back.
+MemoryHigh={{ dev_worker_herdr_memory_high }}
+MemoryMax={{ dev_worker_herdr_memory_max }}
+MemorySwapMax={{ dev_worker_herdr_memory_swap_max }}
+
+[Install]
+WantedBy=multi-user.target

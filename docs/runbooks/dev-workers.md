@@ -110,6 +110,7 @@ Enable in `ansible/group_vars/dev_workers.yml`, add the secret, re-run `just dev
 | `dev_worker_enable_restic` | `dev_worker_restic_password` | Targets a restic REST server on the QNAP by default (`dev_worker_restic_backend: rest`); QNAP-side rest-server setup is out of scope. `nfs` and `none` backends also supported. |
 | `dev_worker_enable_cloudflared` | `dev_worker_cf_tunnel_token` | Public access via CF tunnel + CF Access. |
 | `dev_worker_enable_password_auth` | `dev_worker_admin_password` | Enables sshd PasswordAuthentication for c4. |
+| `dev_worker_enable_herdr` | — (no secret) | PILOT — per-host in `host_vars/dev-worker-5.yml`, not group_vars. See § "herdr pilot" below. |
 
 Create the encrypted secrets file:
 
@@ -119,6 +120,45 @@ cp ansible/secrets/dev-worker.sops.yaml.example ansible/secrets/dev-worker.sops.
 sops --encrypt --in-place ansible/secrets/dev-worker.sops.yaml
 git add ansible/secrets/dev-worker.sops.yaml
 ```
+
+## herdr pilot (dev-worker-5 only)
+
+[Herdr](https://herdr.dev/) — an agent-native terminal multiplexer — runs on dev-worker-5
+**beside** tmux. This is an evaluation, not a migration: tmux keeps everything load-bearing (the
+shared `main` session, ttyd/SSH parity, the `sessions` dashboard, resurrect/continuum reboot
+persistence). Herdr adds the two things tmux cannot express: an attention queue over agent panes
+(working / blocked / done / idle) and native conversation resume (`claude --resume <id>`) after a
+server restart. The 2026-08-31 evaluation that led here concluded **keep tmux**: herdr's reboot
+restore is shape-only (non-agent panes return as fresh shells), it has no selective-restore control
+(the same collision class as the dev-worker-4 dashboard incident), and it is pre-1.0 from a
+one-person company — so it gets one host, a memory cap, and a kill switch.
+
+- **Enable/disable:** `dev_worker_enable_herdr` (default off; flipped only in
+  `host_vars/dev-worker-5.yml`). Deploy with `just dev-workers`, or targeted:
+  `ansible-playbook dev-workers.yml -l dev-worker-5 -t herdr`.
+- **What it installs:** pinned static binary `/usr/local/bin/herdr-<version>` + `herdr` symlink
+  (sha256-pinned in the role defaults — upstream ships no checksum file, so a version bump must
+  recompute the hash), an ansible-managed `~c4/.config/herdr/config.toml` (pane-history off:
+  secrets; agent-resume on: the point of the pilot), the `herdr.service` system unit (runs
+  `herdr server` headless as c4, memory-capped like agentforge), and the `herdr-pilot-reset` hatch.
+- **Attach:** SSH in (you land in tmux `main` via the auto-attach) and run `herdr` in a pane — or
+  bypass tmux entirely with `ssh -t c4@192.168.0.12 herdr` (a remote *command* skips the
+  auto-attach hook, which only fires for interactive shells). **Prefix collision:** tmux and herdr
+  both use `ctrl+b`; inside a tmux pane, `ctrl+b ctrl+b <key>` reaches herdr.
+- **What to evaluate:** does the attention queue change how many parallel agents are comfortable;
+  does `claude --resume` actually survive `systemctl restart herdr` and a VM reboot; how the TUI
+  behaves inside tmux/ttyd; server memory over weeks (`systemctl status herdr` shows the cgroup).
+- **Reset:** `sudo herdr-pilot-reset` — stops the server, wipes session state (`session.json`,
+  `session-history.json`, `sessions/`), restarts clean, keeps `config.toml`. For the bad-restore
+  modes still open upstream (panes restored without terminals, agents resumed in the wrong cwd,
+  restore wedged on git discovery).
+- **Upgrade:** bump `dev_worker_herdr_version` + `dev_worker_herdr_sha256` together. A herdr server
+  restart kills every pane process (pre-1.0, no compatibility guarantee across versions), so treat
+  a bump as a maintenance action on the pilot host, not a background refresh.
+- **Rollback:** flip the toggle off (or delete `host_vars/dev-worker-5.yml`), then on the VM:
+  `systemctl disable --now herdr`, remove `/usr/local/bin/herdr*`, `/usr/local/bin/herdr-pilot-reset`,
+  `/etc/systemd/system/herdr.service`, and `~c4/.config/herdr/`. The role installs but — like the
+  other optional features — never uninstalls.
 
 ## Verify
 

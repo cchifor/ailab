@@ -137,6 +137,22 @@ dev_worker_agentforge_memory_high: "6G"
 dev_worker_agentforge_memory_max: "8G"
 dev_worker_agentforge_memory_swap_max: "2G"
 
+# ---- herdr pilot (enabled ONLY on dev-worker-5 via host_vars, NOT in group_vars) ----
+# Agent-native terminal multiplexer (herdr.dev) trialled BESIDE tmux — tmux keeps the 'main'
+# session, ttyd parity, the dashboard, and reboot persistence; herdr adds the agent attention queue
+# and native `claude --resume` after a server restart. Evaluation criteria + rollback:
+# docs/runbooks/dev-workers.md § "herdr pilot".
+dev_worker_enable_herdr: false
+dev_worker_herdr_version: "0.8.2"
+# Upstream releases ship no checksum file; this is the sha256 of herdr-linux-x86_64 as hashed at
+# pin time (2026-08-31). Recompute whenever the version bumps.
+dev_worker_herdr_sha256: "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4"
+# Same idea as dev_worker_agentforge_memory_* above: one cgroup for the server + the pane processes
+# it spawns, so a leak is contained inside the unit instead of starving the VM.
+dev_worker_herdr_memory_high: "6G"
+dev_worker_herdr_memory_max: "8G"
+dev_worker_herdr_memory_swap_max: "2G"
+
 # ---- secrets (provided by SOPS via the playbook pre_task; "" so asserts can detect "unset") ----
 dev_worker_restic_password: ""
 dev_worker_cf_tunnel_token: ""

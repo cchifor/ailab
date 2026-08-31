@@ -1,0 +1,88 @@
+---
+# herdr pilot — agent-native terminal multiplexer (herdr.dev) running BESIDE tmux, not replacing it:
+# tmux keeps the shared 'main' session, ttyd parity, the dashboard, and resurrect/continuum reboot
+# persistence. Herdr adds what tmux cannot express — an attention queue over agent panes
+# (working/blocked/done/idle) and native conversation resume (`claude --resume <id>`) after a server
+# restart. Enabled per-host (host_vars/dev-worker-5.yml); evaluation criteria + rollback in
+# docs/runbooks/dev-workers.md § "herdr pilot". Own tag (--tags herdr) like statusline, so the pilot
+# deploys without a full role run — which is why linger/getent are repeated here instead of leaning
+# on dashboard.yml's copies.
+- name: Install herdr {{ dev_worker_herdr_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/herdrdev/herdr/releases/download/v{{ dev_worker_herdr_version }}/herdr-linux-x86_64"
+    dest: "/usr/local/bin/herdr-{{ dev_worker_herdr_version }}"
+    checksum: "sha256:{{ dev_worker_herdr_sha256 }}"
+    mode: "0755"
+
+# force so a check-mode run works (get_url downloads nothing there, so the link src doesn't exist
+# yet) and so a hand-installed /usr/local/bin/herdr file gets converged to the pinned link.
+- name: Link /usr/local/bin/herdr -> herdr-{{ dev_worker_herdr_version }}
+  ansible.builtin.file:
+    src: "/usr/local/bin/herdr-{{ dev_worker_herdr_version }}"
+    dest: /usr/local/bin/herdr
+    state: link
+    force: true
+  notify: Restart herdr
+
+# Pre-created so ~/.config can't end up root-owned as an implicitly-created parent of the herdr dir.
+- name: Ensure ~/.config exists for {{ dev_worker_admin_user }}
+  ansible.builtin.file:
+    path: "/home/{{ dev_worker_admin_user }}/.config"
+    state: directory
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0755"
+
+# 0700: this directory holds herdr's control socket, whose only auth IS the filesystem permission.
+- name: Ensure ~/.config/herdr exists for {{ dev_worker_admin_user }}
+  ansible.builtin.file:
+    path: "/home/{{ dev_worker_admin_user }}/.config/herdr"
+    state: directory
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0700"
+
+- name: Lay down the ansible-managed herdr config
+  ansible.builtin.template:
+    src: herdr-config.toml.j2
+    dest: "/home/{{ dev_worker_admin_user }}/.config/herdr/config.toml"
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0644"
+  notify: Restart herdr
+
+- name: Install the herdr-pilot-reset recovery hatch
+  ansible.builtin.template:
+    src: herdr-pilot-reset.sh.j2
+    dest: /usr/local/bin/herdr-pilot-reset
+    mode: "0755"
+
+# Linger keeps /run/user/<uid> present with no login session, so the unit's XDG_RUNTIME_DIR points
+# at a directory that exists at boot. Same creates= guard as dashboard.yml; duplicated for --tags.
+- name: Enable lingering for {{ dev_worker_admin_user }}
+  ansible.builtin.command: "loginctl enable-linger {{ dev_worker_admin_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ dev_worker_admin_user }}"
+
+- name: Look up the admin user's uid (for XDG_RUNTIME_DIR)
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ dev_worker_admin_user }}"
+
+- name: Install the herdr systemd unit
+  ansible.builtin.template:
+    src: herdr.service.j2
+    dest: /etc/systemd/system/herdr.service
+    mode: "0644"
+  vars:
+    dev_worker_admin_uid: "{{ getent_passwd[dev_worker_admin_user][1] }}"
+  notify:
+    - Reload systemd
+    - Restart herdr
+
+- name: Enable + start herdr
+  ansible.builtin.systemd:
+    name: herdr.service
+    enabled: true
+    state: started
+    daemon_reload: true
