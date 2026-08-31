@@ -1,0 +1,44 @@
+# Seed values for the estate operator-credential escrow (af/estate/*) — mounted into
+# openbao-estate-provision (estate-provision-job.yaml). SAME CONTRACT as the other two seed files:
+# the Job patches each path with `<name>.json` on every run, so keys present here OVERWRITE live KV
+# (seed wins) and keys absent survive. Rotate = the real system AND this file in the same change —
+# and note the OTHER homes each credential has (docs/runbooks/openbao-estate-credentials.md, the
+# multi-home table): the vault is the durable escrow, but consumers still read .env / tfvars /
+# ansible SOPS until they are migrated.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: openbao-estate-seeds
+    namespace: openbao
+    labels:
+        app.kubernetes.io/name: openbao-estate-seeds
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: agentforge
+type: Opaque
+stringData:
+    cloudflare.json: ENC[AES256_GCM,data:8Bc7Xf/XoUrHIcr58p0cJJVyrzjOF86OKxoXjgf4qfNs6g0QWK9JaY7qoHXTtB5FojBlj5wjjnOicqLrvouTesMgpLnT3a4FBNRF,iv:Pf3X8XYDOZtJ+mkda+9aabP/YqEVwT4WWJuP4p6aDFY=,tag:0VI2OJmKc7wrN0RfAJ1vzQ==,type:str]
+    gitea.json: ENC[AES256_GCM,data:P0KbdeHe1hd02Ve6ILBA4a3LrNTEhxZL8xlahjbhvy8NKqnVTdTA61gSWjfh1uBTr9IN4kHGopdsfvw0tHB5diSHdLpqb9uC1L1wld4W,iv:UT5XlyOqlOcYq/iNKA68kvDeonDWWpJDrVgrCxhMGx8=,tag:fwH1vljTTSW81N2RxHeUlw==,type:str]
+    github.json: ENC[AES256_GCM,data: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,iv:LYbLAEIu8PVxA+DGpWIE7sz6NERzt6AXYckTLBrN7uo=,tag:7n3KvFpewKAAFrjuOq3w8g==,type:str]
+    proxmox.json: ENC[AES256_GCM,data:Pvy/L+gfVpLIl0dKmn+LDbtaxjGP2SlGUXGkSmCReHyahgvAv0B/O7mYRgikfyJv3zB4taOwQwkjKzI78CdJCR8mQXkVWYEtOi0g7YijF0svhkyjyAAC0lQ3kMlrtD4M7NuS64Xsk6zji+A=,iv:2yNmZjbOAajNsXmno5xnlDFRcbrqohaL3iyhX/kTt2E=,tag:wReKOZG3qK4UEokjjNBYnA==,type:str]
+    qnap.json: ENC[AES256_GCM,data:ijEDRXU4ukP/W384XdsW5+BsDZ+0jiZTMg7Wb35NHNvUuyz96tnxqGDs4vzuO+tCA2pS7Ng9J0K48bG4jWFZ,iv:UFsVkeLgFj9pCN/RdjXqh8oI34SaDnXYrwCJCoNpDqs=,tag:M8S9UdkydaIWl/7bZEaYNg==,type:str]
+    registry.json: ENC[AES256_GCM,data:7f8O3aQpK7RGmzyTKlwwTl0mwyQQRAIAE2vIQDkKb644sRc15qWPZ7DNmWNWGLRsU536Smq4FNGGb/eJCKiTAFMrJa/XmiAKI059wnWWMAdaK+QXK0xyI71GWt6Wb1o7EwpoF7qF10qwM0JgdI3vALW/kBo5NKz42k1yXijcs/QYqv7b,iv:jKEaYYOK+qRPhCkPKhp0NLyTSWe+wR9rNSGEaF2tHJA=,tag:WkBH1qBQmYxZRFeoGeU7JQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBHUGFRVXprWVFUNEdnZllR
+            SVFxeWpVTm01bUV6aklUeHQzZk5jVzRwVmtjClhWdHFXWGlPbERkclVpUFRLS1Zs
+            d3ZWQVp2V3E5cmovbGVaMUM5WnRyamsKLS0tIHg0U1Y3VC9Tb1NSTE1XN0oxNlh3
+            QzZvSnRreUlWeVlJK2hnN1pJTHdWN2cKeIrlvee2C/cXJIeOTvmq/eSGoxAflo1W
+            DYwlT2InBVoMXY1W5dG8OXT4a3q9jz5PgBXQ3We2daaxdmED03Vm6g==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-08-31T14:19:08Z"
+    mac: ENC[AES256_GCM,data:Wf/Hf7T5l9l8OLvYVSOsJuK6M62banVuiq7X7eRIYUmhqu3f1GFqu6Q2HuX3+FGOFe+rmlCMauQkMsK1JNkGvpjJq6vbBRZ6Nm4xqX5XLdAyO88fvLQPtZrca94IA+5aPi8Uu0mtXslgFmyF7F1Am+Y7JsxIJeELFriN52ZeEjY=,iv:Aq2lvPTZmHsB5BNhJuRXQt7soaHzkEo7st+l6X4hK24=,tag:vGO59F2QxZE6akTOCLwm8w==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4
