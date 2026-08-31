@@ -72,7 +72,13 @@ just dev-workers           # run twice — the 2nd run should report near-zero c
 
 ## One-time manual steps (per worker)
 
-Auth is **subscription OAuth** — provisioning injects no keys. By default **everything runs as `c4`**
+Auth is **subscription OAuth** — provisioning injects no keys, and these three logins stay manual
+**by design**: they are interactive browser flows against personal accounts, not distributable
+secrets, so there is nothing a vault could hold on their behalf. The credentials that *are*
+distributable (the Gitea forge PAT, and anything added later) move out of Ansible and into OpenBao
+once `dev_worker_enable_openbao` is on — see § "Credentials via OpenBao (ADR 0020)" below.
+
+By default **everything runs as `c4`**
 (the SSH console, the ttyd web UI, the dashboard, and any agent jobs are all the one `c4` identity),
 so you log in **once as `c4`** and both the console and the web UI are authenticated:
 
@@ -101,6 +107,31 @@ in as `claude-agent` (`sudo -iu claude-agent`) and re-login when they expire (or
 `auth.json`). The unified default avoids this entirely; only opt in if you specifically need the
 sandbox.
 
+## Credentials via OpenBao (ADR 0020)
+
+Off by default (`dev_worker_enable_openbao: false`). When it is on, the worker stops carrying a
+hand-distributed copy of the shared forge PAT and instead gets its **own AppRole identity** in
+OpenBao, held by a root-owned `bao agent`. Three things change on the box:
+
+- **`~/.git-credentials` becomes agent-rendered**, from `af/dev-workers/common` in the vault, instead
+  of being written by `git_forge.yml` (that task yields ownership of the file — two writers of one
+  path would flap). Rotation becomes a vault + seeds change, not a playbook run against all six hosts.
+- **`/usr/local/bin/cred` appears** for everything else: `cred list`, `cred get <name> <field>`, and
+  `cred exec <name> <field> <ENV_VAR> -- <cmd>` — the last of which hands a secret to a child process
+  without it ever appearing in the terminal, which is the form agents are told to prefer. It reads
+  the agent's group-readable sink token, so users must be in the `openbao-agent` group (the role adds
+  them; group membership needs a fresh login to take effect).
+- **A managed block lands in each user's `~/.claude/CLAUDE.md`** documenting the above and stating the
+  rule: never print credential values into the conversation, logs, or files — names and lengths only.
+
+The vault is reached over the LAN at `https://openbao.lan.chifor.me:30820` (a NodePort on the Talos
+node IPs, pinned in `/etc/hosts`), not over the Cloudflare tunnel. The tokens are **periodic**, so
+they renew indefinitely with no max-TTL cliff.
+
+Activation is not just a toggle: the cluster side (Service, cert SAN, provision Job, KV seeds) has to
+land first, and each worker's secret-id is minted by hand once. Full ceremony, rotation, and failure
+modes: **`docs/runbooks/openbao-dev-workers.md`**.
+
 ## Optional features (off by default)
 
 Enable in `ansible/group_vars/dev_workers.yml`, add the secret, re-run `just dev-workers`:
@@ -111,6 +142,7 @@ Enable in `ansible/group_vars/dev_workers.yml`, add the secret, re-run `just dev
 | `dev_worker_enable_cloudflared` | `dev_worker_cf_tunnel_token` | Public access via CF tunnel + CF Access. |
 | `dev_worker_enable_password_auth` | `dev_worker_admin_password` | Enables sshd PasswordAuthentication for c4. |
 | `dev_worker_enable_herdr` | — (no secret) | PILOT — per-host in `host_vars/dev-worker-5.yml`, not group_vars. See § "herdr pilot" below. |
+| `dev_worker_enable_openbao` | `dev_worker_openbao_credentials` (per-host `role_id`/`secret_id` map) | Per-VM OpenBao AppRole + `bao agent` + `cred` helper (ADR 0020). Not a pure toggle: the cluster side must be live and each worker's secret-id minted first — `docs/runbooks/openbao-dev-workers.md`. |
 
 Create the encrypted secrets file:
 
