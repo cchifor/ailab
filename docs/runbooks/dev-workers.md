@@ -134,24 +134,38 @@ restore is shape-only (non-agent panes return as fresh shells), it has no select
 one-person company — so it gets one host, a memory cap, and a kill switch.
 
 - **Enable/disable:** `dev_worker_enable_herdr` (default off; flipped only in
-  `host_vars/dev-worker-5.yml`). Deploy with `just dev-workers`, or targeted:
-  `ansible-playbook dev-workers.yml -l dev-worker-5 -t herdr`.
+  `host_vars/dev-worker-5.yml`). Deploy with `just dev-workers`, or targeted (the explicit
+  `ANSIBLE_CONFIG` matters — on WSL the world-writable `/mnt/c` CWD makes an implicit
+  `ansible.cfg` silently ignored, which drops the inventory and "deploys" to zero hosts; same
+  trap as the ci-runners runbook):
+  `cd ansible && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible-playbook dev-workers.yml -l dev-worker-5 -t herdr`.
+  A `-t herdr` run needs an already-provisioned worker (it asserts `/workspace/c4` rather than
+  creating it).
 - **What it installs:** pinned static binary `/usr/local/bin/herdr-<version>` + `herdr` symlink
   (sha256-pinned in the role defaults — upstream ships no checksum file, so a version bump must
   recompute the hash), an ansible-managed `~c4/.config/herdr/config.toml` (pane-history off:
   secrets; agent-resume on: the point of the pilot), the `herdr.service` system unit (runs
   `herdr server` headless as c4, memory-capped like agentforge), and the `herdr-pilot-reset` hatch.
 - **Attach:** SSH in (you land in tmux `main` via the auto-attach) and run `herdr` in a pane — or
-  bypass tmux entirely with `ssh -t c4@192.168.0.12 herdr` (a remote *command* skips the
-  auto-attach hook, which only fires for interactive shells). **Prefix collision:** tmux and herdr
-  both use `ctrl+b`; inside a tmux pane, `ctrl+b ctrl+b <key>` reaches herdr.
+  bypass tmux entirely with `ssh -t c4@192.168.0.12 herdr` (a remote command runs a non-login
+  shell, so the `/etc/profile.d` hook is never sourced; the hook itself fires for login shells
+  with an SSH tty). **Prefix collision:** tmux and herdr both use `ctrl+b`; inside a tmux pane,
+  `ctrl+b ctrl+b <key>` reaches herdr.
 - **What to evaluate:** does the attention queue change how many parallel agents are comfortable;
   does `claude --resume` actually survive `systemctl restart herdr` and a VM reboot; how the TUI
   behaves inside tmux/ttyd; server memory over weeks (`systemctl status herdr` shows the cgroup).
 - **Reset:** `sudo herdr-pilot-reset` — stops the server, wipes session state (`session.json`,
-  `session-history.json`, `sessions/`), restarts clean, keeps `config.toml`. For the bad-restore
-  modes still open upstream (panes restored without terminals, agents resumed in the wrong cwd,
-  restore wedged on git discovery).
+  `session-history.json`, `sessions/`), restarts clean, keeps `config.toml`. For when a restore
+  goes bad (agents resumed in the wrong cwd and restores wedged on git discovery are both known
+  upstream at 0.8.x).
+- **Threat model:** herdr's control socket (`~c4/.config/herdr/herdr.sock`) accepts any process
+  running as c4 — under the unified single-user model that is root-equivalent (c4 is a
+  passwordless sudoer), the same trust boundary as the tmux server socket in `/tmp/tmux-*`. The
+  0700 config dir keeps other Unix users out; it does not sandbox c4's own agents, which can
+  drive panes and other agents through it.
+- **Config is ansible-managed:** settings changed in herdr's TUI are written to `config.toml` and
+  will be reverted — with a pane-killing server restart — on the next ansible run. Persist
+  changes by editing `templates/herdr-config.toml.j2` instead.
 - **Upgrade:** bump `dev_worker_herdr_version` + `dev_worker_herdr_sha256` together. A herdr server
   restart kills every pane process (pre-1.0, no compatibility guarantee across versions), so treat
   a bump as a maintenance action on the pilot host, not a background refresh.

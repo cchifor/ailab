@@ -5,6 +5,9 @@ Documentation=https://herdr.dev/docs/
 # via their native session ids — those respawned CLIs need the network up.
 After=network-online.target
 Wants=network-online.target
+# Fail the start cleanly when the /workspace data disk is absent, instead of chdir-crash-looping
+# on the WorkingDirectory below.
+RequiresMountsFor={{ dev_worker_workspace_mount }}
 
 [Service]
 Type=simple

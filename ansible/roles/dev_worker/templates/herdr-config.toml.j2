@@ -2,6 +2,12 @@
 # on the next run. Everything not pinned here rides the upstream defaults on purpose: herdr is
 # pre-1.0 and chasing its config surface across releases is not worth it for a pilot.
 
+# Herdr shows first-run setup when this key is missing or true, then WRITES `onboarding = false`
+# back into this file — which would make every subsequent ansible run see a template diff and
+# restart the server (killing its panes). Pinned false so the file stays converged. Top-level on
+# purpose: TOML keys after a [table] header belong to that table.
+onboarding = false
+
 [experimental]
 # Off is the upstream default, pinned deliberately: persisted pane history writes agent scrollback —
 # which can carry tokens and secrets — to disk as session-history.json.
