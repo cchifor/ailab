@@ -174,6 +174,34 @@ one-person company — so it gets one host, a memory cap, and a kill switch.
   `/etc/systemd/system/herdr.service`, and `~c4/.config/herdr/`. The role installs but — like the
   other optional features — never uninstalls.
 
+## Pasting images from Windows (remote agents)
+
+Claude Code's native `Ctrl+V` image paste cannot work over plain SSH: on Linux it shells out to
+xclip/wl-paste, which need a display server, and the common Windows X servers forward text only
+(Anthropic closed the OSC-based proposals as not-planned). Everything below therefore works by
+materializing the image as a **remote file** and handing the agent its **path** — a bracketed
+paste of an image path auto-attaches as `[Image #N]` in Claude Code; Codex also attaches pasted
+paths, or takes `codex -i <path>`.
+
+**Path 1 — herdr remote attach (dev-worker-5).** Install herdr ≥ 0.8.2 on the workstation
+(`powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"` — 0.8.2 is the
+first stable with Windows `--remote`), then attach with `herdr --remote ssh://c4@192.168.0.12`.
+Copy a screenshot, focus the pane running the agent, press `ctrl+v`: herdr ships the PNG over the
+existing SSH connection (16 MiB cap), stages it on the worker under
+`/tmp/herdr-clipboard-images-<uid>/` (0600; deleted when the client disconnects and after 24h — so
+have the agent read it before detaching), and bracket-pastes the path into the pane. No
+server-side config. If the terminal swallows `ctrl+v`, rebind `keys.remote_image_paste` in the
+**local** `%APPDATA%\herdr\config.toml` (e.g. `"ctrl+alt+v"`).
+
+**Path 2 — plain tmux, any worker: `scripts/dw-paste.ps1`.** Copy a screenshot (or copy an image
+file in Explorer), run `powershell -File scripts\dw-paste.ps1` (defaults to dev-worker-5; override
+with `-SshTarget c4@192.168.0.N`). It saves the clipboard image as PNG (a copied image file is
+uploaded as-is, original extension kept), scp's it to
+`/workspace/c4/pastes/` (created by the role, 0700, aged out after 14 days via tmpfiles.d),
+preloads the remote tmux paste buffer, and puts the same path on the local clipboard. In the
+remote tmux, `prefix+]` pastes the path into the agent prompt (tmux ≥ 3.2 pastes bracketed, which
+triggers Claude Code's auto-attach).
+
 ## Verify
 
 - `/workspace` mounted: `mountpoint -q /workspace && echo ok`

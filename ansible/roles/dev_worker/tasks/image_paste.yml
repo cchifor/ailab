@@ -1,0 +1,38 @@
+---
+# Landing zone for images pasted from the Windows workstation into remote agent sessions:
+# scripts/dw-paste.ps1 scp's clipboard screenshots here and preloads the tmux paste buffer with the
+# path (herdr --remote stages its own files under /tmp and needs nothing from the role).
+# Unconditional — a directory plus an aging rule, useful on every worker. Docs:
+# docs/runbooks/dev-workers.md § "Pasting images from Windows".
+- name: Probe the workspace user dir
+  ansible.builtin.stat:
+    path: "{{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }}"
+  register: image_paste_workdir
+
+# Guard against a missing /workspace mount: the file task below would otherwise materialize the
+# whole path on the root fs and mask it. Check mode passes the guard — a fresh-host full-role
+# preview predicts the dir's creation in workspace.yml without performing it; real runs enforce.
+- name: Assert the workspace user dir exists
+  ansible.builtin.assert:
+    that: (image_paste_workdir.stat.isdir | default(false)) or ansible_check_mode
+    fail_msg: >-
+      {{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }} is missing — run the full role
+      (just dev-workers) before a `-t image-paste` run.
+
+# 0700: pasted screenshots regularly contain credentials, tokens, and internal UIs.
+- name: Ensure the pastes landing dir exists
+  ansible.builtin.file:
+    path: "{{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }}/pastes"
+    state: directory
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0700"
+
+# 'e' ages existing contents and never creates the dir, so creation stays owned by the guarded
+# task above.
+- name: Age out old pastes (tmpfiles.d, 14d)
+  ansible.builtin.copy:
+    content: |
+      e {{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }}/pastes - - - 14d
+    dest: /etc/tmpfiles.d/dev-worker-pastes.conf
+    mode: "0644"
