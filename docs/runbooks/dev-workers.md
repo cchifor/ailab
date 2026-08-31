@@ -146,9 +146,10 @@ one-person company — so it gets one host, a memory cap, and a kill switch.
   recompute the hash), an ansible-managed `~c4/.config/herdr/config.toml` (pane-history off:
   secrets; agent-resume on: the point of the pilot), the `herdr.service` system unit (runs
   `herdr server` headless as c4, memory-capped like agentforge), and the `herdr-pilot-reset` hatch.
-- **Attach:** the `sessions` dashboard carries a `herdr` window on this host (built at boot by
-  claude-dashboard where the binary exists — switch sessions via the status-bar click menu or
-  `tmux a -t sessions`), or SSH in and run `herdr` in any pane, or bypass tmux entirely with
+- **Attach:** on this host the `sessions` dashboard's first window (`home`) IS the herdr TUI
+  (built at boot by claude-dashboard where the binary exists — switch sessions via the status-bar
+  click menu or `tmux a -t sessions`; the dashboard's plain shell lives in the `main` session
+  instead). Or SSH in and run `herdr` in any pane, or bypass tmux entirely with
   `ssh -t c4@192.168.0.12 herdr` (a remote command runs a non-login shell, so the
   `/etc/profile.d` hook is never sourced; the hook itself fires for login shells with an SSH
   tty). **Prefix collision:** tmux and herdr both use `ctrl+b`; inside a tmux pane,
@@ -215,8 +216,8 @@ triggers Claude Code's auto-attach).
   `claude --version`, `codex --version`; `getfacl ~/.claude ~/.codex` shows c4 `rx`
 - persistence: start a tmux pane, reboot the VM, confirm tmux-continuum restored the session
 - dashboard layout: `tmux list-windows -t sessions -F '#{window_name}'` must be exactly
-  `home system jobs github docker cluster cheats` — on the herdr pilot host (dev-worker-5) with
-  `herdr` second: `home herdr system jobs github docker cluster cheats` — see the
+  `home system jobs github docker cluster cheats` — on the herdr pilot host (dev-worker-5) the
+  names are the same but `home` runs the herdr TUI instead of a plain shell — see the
   dashboard/resurrect note below
 - **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The uniform 4 GiB
   balloon floor guarantees each guest's idle working set; a busy worker inflates toward 16 GiB when
