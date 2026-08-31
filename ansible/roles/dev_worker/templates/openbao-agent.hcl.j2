@@ -46,5 +46,10 @@ template {
   destination = "{{ user.home }}/.git-credentials"
   perms       = "0600"
   command     = "chown {{ user.name }}:{{ user.name }} {{ user.home }}/.git-credentials"
+  // Fail-closed for a missing FIELD, not just a missing path: without this a KV write that drops
+  // gitea_pat renders "<no value>" into the credential line and git starts failing auth with
+  // nothing red anywhere. With it the render errors, exit_on_retry_failure exits the agent, and
+  // systemd's restart loop makes the failure visible in journalctl.
+  error_on_missing_key = true
 }
 {% endfor %}

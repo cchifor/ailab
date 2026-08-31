@@ -24,13 +24,16 @@
       become: false
       run_once: true
       register: dev_worker_secrets_stat
-      tags: [dev_workers]
+      tags: [dev_workers, openbao] # `openbao` for the same reason as the load task below
 
     - name: Load dev-worker secrets (SOPS)
       community.sops.load_vars:
         file: "{{ playbook_dir }}/secrets/dev-worker.sops.yaml"
       no_log: true
-      tags: [dev_workers]
+      # `openbao` too: the runbook's targeted rollout (`-t openbao`) needs the SOPS-held AppRole
+      # credentials, and a tag-limited run skips any pre_task whose tags don't match — which would
+      # leave dev_worker_openbao_credentials at {} and fail the role's assert instead of deploying.
+      tags: [dev_workers, openbao]
       when:
         - dev_worker_enabled | default(false)
         - dev_worker_secrets_stat.stat.exists
