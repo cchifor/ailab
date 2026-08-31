@@ -55,9 +55,11 @@ survives. So:
   above, and re-encrypt `estate-seeds.sops.yaml` in the same change — otherwise the vault silently
   reverts to the old value within a day and the table's other homes drift.
 - **Adding a field/path** = `sops` edit the seeds file (add a field to a `<name>.json`, or a new
-  `<name>.json` for a new `af/estate/<name>`), merge; the Job needs no change. To make it converge
-  immediately: `kubectl --context admin@ai -n openbao delete job openbao-estate-provision` then
-  reconcile the `openbao` Kustomization.
+  `<name>.json` for a new `af/estate/<name>`) AND add the pair to the provision script's
+  completeness matrix in `estate-provision-job.yaml` — the Job fails closed on any matrix entry a
+  seed did not restore, so the two must move together. Merge; to make it converge immediately:
+  `kubectl --context admin@ai -n openbao delete job openbao-estate-provision` then reconcile the
+  `openbao` Kustomization.
 - **After a wipe**: nothing to do — the Job re-seeds the whole subtree (path class in
   `openbao-recovery.md`); there are no logins against these paths, so nothing needs re-minting.
 

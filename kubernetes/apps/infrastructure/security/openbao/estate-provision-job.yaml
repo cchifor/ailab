@@ -45,7 +45,6 @@ data:
     # Seed-wins contract (same as operator-seeds and devworker-seeds): keys absent from a seed
     # survive untouched, keys present OVERWRITE live KV — rotating a value only in the vault is
     # silently reverted within a day. Rotate = vault AND the seeds file in the same change.
-    seeded=0
     for seed in "$SEED_DIR"/*.json; do
       [ -f "$seed" ] || continue
       name="$(basename "$seed" .json)"
@@ -54,9 +53,28 @@ data:
       else
         bao kv put -mount=af "estate/${name}" "@${seed}"
       fi
-      seeded=$((seeded + 1))
     done
-    [ "$seeded" -gt 0 ] || { echo "no *.json under $SEED_DIR; aborting" >&2; exit 1; }
+
+    # Fail-closed completeness check — the runbook's path/field matrix, hard-coded. Without it a
+    # dropped or typoed seed file (or a seed missing one field) still prints the success line while
+    # leaving af/estate/* PARTIALLY restored after a wipe, which is exactly the silent gap the
+    # "after a wipe, nothing to do" claim depends on not having. Adding a path/field means adding
+    # it HERE as well as to the seeds file (and the runbook table). Stdout goes to /dev/null — the
+    # probe must never print a value.
+    for pair in \
+      "proxmox:root_password" "proxmox:api_token" \
+      "qnap:admin_user" "qnap:admin_password" \
+      "cloudflare:api_token" \
+      "registry:ci_password" "registry:oidc_client_secret" \
+      "gitea:runner_registration_token" \
+      "github:app_private_key"; do
+      path="${pair%%:*}"
+      field="${pair##*:}"
+      bao kv get -mount=af -field="$field" "estate/${path}" >/dev/null || {
+        echo "af/estate/${path} is missing field '${field}' after seeding; aborting" >&2
+        exit 1
+      }
+    done
 
     echo "estate provision complete"
 ---
