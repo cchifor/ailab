@@ -31,6 +31,12 @@ fi
 # would otherwise relabel these windows permanently. Renaming $SESSION here without renaming it there
 # re-arms that bug; tests/test-tmux-persistence.sh pins the two together.
 tmux new-session  -d -s "$SESSION" -n home -c "/workspace/$USER"
+# herdr pilot: present only where the pilot installed the binary (dev-worker-5 — see the runbook's
+# "herdr pilot" section). The client attaches to the systemd-run herdr server; the retry loop rides
+# out server restarts. Inside tmux, herdr's prefix is reached with ctrl+b ctrl+b.
+if command -v herdr >/dev/null 2>&1; then
+  tmux new-window -t "$SESSION:" -n herdr 'while true; do clear; herdr || echo "herdr client exited (server down? retrying)"; sleep 2; done'
+fi
 tmux new-window   -t "$SESSION:" -n system  'while true; do htop; sleep 0.5; done'
 tmux new-window   -t "$SESSION:" -n jobs    'while true; do journalctl -u "claude-job@*.service" -f --no-pager 2>/dev/null || sudo journalctl -f; sleep 0.5; done'
 tmux new-window   -t "$SESSION:" -n github -c "/workspace/$USER" 'while true; do gh-dash; sleep 0.5; done'

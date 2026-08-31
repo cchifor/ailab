@@ -107,9 +107,13 @@
   ansible.builtin.import_tasks: sshd.yml
   when: dev_worker_enable_password_auth | bool
 
+# Own tag like statusline/herdr, so launcher/cheatsheet updates can roll out without a full role
+# run: --tags dashboard. Note the running 'sessions' session is NOT rebuilt by a re-run (the
+# launcher attaches-or-exits when it exists); new windows appear at the next boot or manual rebuild.
 - name: claude-dashboard session
   ansible.builtin.import_tasks: dashboard.yml
   when: dev_worker_enable_dashboard | bool
+  tags: [dashboard]
 
 # Pilot, dev-worker-5 only (host_vars): herdr beside tmux. Own tag like statusline, so the pilot can
 # be (re)deployed without a full role run: --tags herdr.
