@@ -46,6 +46,14 @@ share a precedence — check which one owns a path before reasoning about it:
 - *dev-worker / estate seeds*: unchanged and literal — a vault-only rotation is overwritten back to
   the old value within a day.
 
+> **Open gap — "reported as drift" has no consumer in this repo yet.** Nothing in `kubernetes/` or
+> `.gitea/` alerts on, counts, or gates a seed/vault divergence: `ForgeReconcileDriftHigh` is issue
+> state-label drift (unrelated), and `scripts/gen-broker-inventory.py`'s `DRIFT seed-coverage` checks
+> only which broker paths the seeds file *declares*, never whether a seeded value still matches the
+> vault. So today the report lands in the `openbao-provision` Job's own log, which nobody reads on a
+> green Job. Until an alert or CI check consumes it, **treat the same-change seeds refresh as the
+> only control** — create-if-absent removed the silent *revert*, not the silent *staleness*.
+
 **What this means for the path taxonomy below.** The classes answer *"what restores this path after a
 wipe"* — **not** *"who may write it while the estate is running"*. A path can be both **seeded** (so
 it comes back) and **owner-managed** (so the seed can never overwrite the owner's value);
