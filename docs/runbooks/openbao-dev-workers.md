@@ -96,9 +96,11 @@ on process start, so the pod must be restarted before the new SAN is actually se
 kubectl --context admin@ai -n openbao get certificate openbao-tls \
   -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}{" "}{.status.notBefore}{"\n"}'
 
-# 2. restart the server (the unsealer Deployment re-unseals it automatically — watch it come Ready)
+# 2. restart the server (the unsealer Deployment re-unseals it automatically — watch it come Ready).
+#    NOT `rollout status`: the chart's StatefulSet uses the OnDelete update strategy, which that
+#    command refuses. Ready implies unsealed — the readiness probe fails on a sealed vault.
 kubectl --context admin@ai -n openbao delete pod openbao-0
-kubectl --context admin@ai -n openbao rollout status sts/openbao --timeout=5m
+kubectl --context admin@ai -n openbao wait --for=condition=Ready pod/openbao-0 --timeout=5m
 
 # 3. prove the SAN is actually served on the NodePort
 openssl s_client -connect 192.168.0.41:30820 -servername openbao.lan.chifor.me </dev/null 2>/dev/null \
