@@ -3,7 +3,13 @@ creation_rules:
   # path-matching rule, and that rule's encrypted_regex (github_app_private_key only) would otherwise
   # leave these keys unencrypted. This specific path matches only dev-worker.sops.yaml.
   - path_regex: ansible[/\\]secrets[/\\]dev-worker\.sops\.ya?ml$ # [/\\] = WSL (/) + Windows (\) paths
-    encrypted_regex: ^(dev_worker_restic_password|dev_worker_cf_tunnel_token|dev_worker_admin_password|dev_worker_gitea_token|dev_worker_agentforge_.*|dev_worker_openbao_.*)$
+    # role_id|secret_id: belt-and-braces for the nested AppRole map (dev_worker_openbao_credentials).
+    # A matching ancestor key already encrypts its whole subtree, but on 2026-08-31 the nested
+    # secret-ids were encrypted from a checkout whose .sops.yaml predated the dev_worker_openbao_.*
+    # entry (sops silently resolved THAT config) and every leaf landed in PLAINTEXT. Matching the
+    # leaf key names too means a stale rule that has this line still encrypts the credential values
+    # — and always pass `sops --config` from the intended checkout when scripting.
+    encrypted_regex: ^(dev_worker_restic_password|dev_worker_cf_tunnel_token|dev_worker_admin_password|dev_worker_gitea_token|dev_worker_agentforge_.*|dev_worker_openbao_.*|role_id|secret_id)$
     age: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
   # Registry secrets. Same reason as dev-worker above — MUST precede the generic ansible/secrets rule
   # (which would otherwise encrypt only github_app_private_key and leave these two keys plaintext).

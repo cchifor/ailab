@@ -81,7 +81,24 @@ exec)
   field="$3"
   var="$4"
   shift 5
+  # Validate the variable name BEFORE fetching. An invalid name would make the export below fail
+  # with a shell diagnostic that echoes the attempted assignment — secret value included — and a
+  # caller must not be able to hijack the child's loader/startup (LD_PRELOAD, ENV, ...) or shadow
+  # cred's own knobs through the name.
+  case "$var" in
+  '' | [0-9]* | *[!A-Za-z0-9_]*)
+    echo "cred: '$var' is not a valid environment variable name" >&2
+    exit 2
+    ;;
+  PATH | IFS | ENV | BASH_ENV | SHELL | HOME | LD_PRELOAD | LD_LIBRARY_PATH | BAO_TOKEN | BAO_ADDR | CRED_TOKEN_FILE | CRED_AGENT_CONFIG)
+    echo "cred: refusing to inject into reserved variable '$var'" >&2
+    exit 2
+    ;;
+  esac
   value="$(fetch "$name" "$field")"
+  # The child gets ONE field, never the vault token — with BAO_TOKEN still exported, every
+  # `cred exec`'d process could read everything this worker's policy allows.
+  unset BAO_TOKEN
   # Exported into this shell and inherited, rather than handed to env(1): an argv word is visible in
   # /proc to every user on the box, while /proc/<pid>/environ is readable only by this uid and root
   # — the audience that can already read the sink token. exec so the child owns the terminal and its

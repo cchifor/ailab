@@ -96,9 +96,11 @@ on process start, so the pod must be restarted before the new SAN is actually se
 kubectl --context admin@ai -n openbao get certificate openbao-tls \
   -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}{" "}{.status.notBefore}{"\n"}'
 
-# 2. restart the server (the unsealer Deployment re-unseals it automatically — watch it come Ready)
+# 2. restart the server (the unsealer Deployment re-unseals it automatically — watch it come Ready).
+#    NOT `rollout status`: the chart's StatefulSet uses the OnDelete update strategy, which that
+#    command refuses. Ready implies unsealed — the readiness probe fails on a sealed vault.
 kubectl --context admin@ai -n openbao delete pod openbao-0
-kubectl --context admin@ai -n openbao rollout status sts/openbao --timeout=5m
+kubectl --context admin@ai -n openbao wait --for=condition=Ready pod/openbao-0 --timeout=5m
 
 # 3. prove the SAN is actually served on the NodePort
 openssl s_client -connect 192.168.0.41:30820 -servername openbao.lan.chifor.me </dev/null 2>/dev/null \
@@ -110,9 +112,22 @@ If step 3 shows the old SAN set, the pod restarted before cert-manager finished 
 
 ### (c) Fill the seed with the live Gitea PAT
 
-The committed `devworker-seeds.sops.yaml` ships with a placeholder. The value to put in it is the PAT
-the workers already use (`dev_worker_gitea_token` in `ansible/secrets/dev-worker.sops.yaml`), so copy
-it across **programmatically** — never through the terminal, never through a shell argument.
+**The initial PR (#431) already shipped this step done** — `devworker-seeds.sops.yaml` landed
+SOPS-encrypted with the live PAT, so on first activation just confirm
+`sops filestatus` says `{"encrypted": true}` and move on to (d). The rest of this section is the
+ceremony for the placeholder/re-seed case (e.g. after the seed file is ever reset or a new path is
+added): the value to put in is the PAT the workers already use (`dev_worker_gitea_token` in
+`ansible/secrets/dev-worker.sops.yaml`), copied across **programmatically** — never through the
+terminal, never through a shell argument.
+
+**Timing trap:** the provision Job is a run-once-per-day converger. If it already `succeeded` before
+your seed change merged, the new value sits unapplied until the daily reap/re-apply — force it
+instead (same as *Rotation* step 4):
+
+```bash
+kubectl --context admin@ai -n openbao delete job openbao-devworker-provision
+flux --context admin@ai reconcile kustomization openbao -n flux-system
+```
 
 ```bash
 export SOPS_AGE_KEY_FILE="$(pwd)/kubernetes/infra/_out/age.agekey"   # main checkout; _out/ is gitignored
@@ -346,8 +361,11 @@ broken.
 **A role or policy** (capabilities, `token_period`, adding a bound-CIDR once source IPs survive the
 hop — ADR 0020 follow-up). Edit the provision script in
 `devworker-provision-job.yaml`, merge; the Job converges within a day, or force it as in Rotation
-step 4. Policy changes take effect on the **next token issuance** — a running agent keeps renewing
-its existing token, so restart `openbao-agent` on the workers to pick up a widened/narrowed policy.
+step 4. When it takes effect differs by what changed: a **policy body** edit (the path/capability
+lines) applies **immediately** — tokens carry the policy by *name* and it is evaluated on every
+request, so no agent restart is needed. A **role** change (`token_period`, the `token_policies`
+*list*) is stamped into tokens at issuance — a running agent keeps renewing its existing token, so
+restart `openbao-agent` on the workers to force a fresh login that picks it up.
 
 ## Failure modes
 
@@ -373,6 +391,13 @@ deleted, so git keeps working on the old PAT until that is rotated too).
 
 1. Decide the scope: shared → `af/dev-workers/common`; single worker → `af/dev-workers/<hostname>`.
    No policy change is needed for either — the per-worker policy already covers both subtrees.
+   How `cred` reaches each shape (it probes `dev-workers/<hostname>/<name>` first, then
+   `dev-workers/<name>`): a shared field is `cred get common <field>`; a field seeded at
+   `af/dev-workers/<hostname>` is `cred get <hostname> <field>` (the host-first probe misses and the
+   second probe is exactly that path); a deeper ad-hoc write to `af/dev-workers/<hostname>/<name>`
+   is `cred get <name> <field>` and shadows any shared secret of the same name on that host.
+   Note `cred list` shows sibling workers' path **names** (the policy's metadata `list` is
+   subtree-wide); their values stay denied — don't put anything secret in a path name.
 2. Write it. Ad-hoc (does **not** survive a wipe):
    `bao kv patch -mount=af dev-workers/common <field>=@/path/to/file` with the breakglass token, using
    the port-forward setup from (e). Prefer `@file` over an inline `field=value` so the value never

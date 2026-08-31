@@ -170,6 +170,27 @@ assert_eq "$RC" "7" "B3: the child's exit status is cred's (exec, not a wrapper)
 run_cred exec common gitea_pat GITEA_PAT sh -c 'true'
 assert_eq "$RC" "2" "B4: a missing '--' separator is a usage error"
 
+# The child gets ONE field, never the vault token — an exec'd process holding BAO_TOKEN could read
+# everything the worker's policy allows, which is exactly the boundary cred exists to draw.
+# shellcheck disable=SC2016 # the CHILD shell must expand it — that is the property under test
+run_cred exec common gitea_pat GITEA_PAT -- sh -c 'printf %s "${BAO_TOKEN:-absent}"'
+assert_eq "$OUT" "absent" "B5: the vault token does not cross into the child's environment"
+
+# Name validation must run BEFORE the fetch: an invalid name makes `export` print the attempted
+# assignment (value included) as a shell diagnostic, so by then it is already too late.
+run_cred exec common gitea_pat 1BAD -- sh -c 'true'
+assert_eq "$RC" "2" "B6a: an invalid env var name is a usage error"
+assert_eq "$(grep -c 'kv get' "$CALLS")" "0" "B6b: ...and the secret was never fetched"
+case "$OUT$ERR" in
+*"$SHARED_VALUE"*) bad "B6c: the value leaked on the invalid-name path" ;;
+*) ok "B6c: no value appears on the invalid-name path" ;;
+esac
+
+run_cred exec common gitea_pat LD_PRELOAD -- sh -c 'true'
+assert_eq "$RC" "2" "B7a: a reserved/loader variable name is refused"
+run_cred exec common gitea_pat BAO_TOKEN -- sh -c 'true'
+assert_eq "$RC" "2" "B7b: ...including BAO_TOKEN itself"
+
 # ---- [C] failure modes -----------------------------------------------------------------------------
 echo "[C] failure modes"
 TOKEN_FILE_CUR="$WORK/no-such-token"
