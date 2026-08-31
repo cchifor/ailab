@@ -1,0 +1,115 @@
+---
+# herdr pilot — agent-native terminal multiplexer (herdr.dev) running BESIDE tmux, not replacing it:
+# tmux keeps the shared 'main' session, ttyd parity, the dashboard, and resurrect/continuum reboot
+# persistence. Herdr adds what tmux cannot express — an attention queue over agent panes
+# (working/blocked/done/idle) and native conversation resume (`claude --resume <id>`) after a server
+# restart. Enabled per-host (host_vars/dev-worker-5.yml); evaluation criteria + rollback in
+# docs/runbooks/dev-workers.md § "herdr pilot". Own tag (--tags herdr) like statusline, so the pilot
+# deploys without a full role run — which is why linger/getent are repeated here instead of leaning
+# on dashboard.yml's copies.
+# notify: unlike the role's checksum-less binaries, this task can CHANGE an existing file (a sha
+# re-pin at the same version, or checksum-triggered repair of a corrupted file) — without a restart
+# the server would keep running the deleted old inode while the play reports the new binary live.
+- name: Install herdr {{ dev_worker_herdr_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/herdrdev/herdr/releases/download/v{{ dev_worker_herdr_version }}/herdr-linux-x86_64"
+    dest: "/usr/local/bin/herdr-{{ dev_worker_herdr_version }}"
+    checksum: "sha256:{{ dev_worker_herdr_sha256 }}"
+    mode: "0755"
+  notify: Restart herdr
+
+# force so a check-mode run works (get_url downloads nothing there, so the link src doesn't exist
+# yet) and so a hand-installed /usr/local/bin/herdr file gets converged to the pinned link.
+- name: Link /usr/local/bin/herdr -> herdr-{{ dev_worker_herdr_version }}
+  ansible.builtin.file:
+    src: "/usr/local/bin/herdr-{{ dev_worker_herdr_version }}"
+    dest: /usr/local/bin/herdr
+    state: link
+    force: true
+  notify: Restart herdr
+
+# Pre-created so ~/.config can't end up root-owned as an implicitly-created parent of the herdr dir.
+- name: Ensure ~/.config exists for {{ dev_worker_admin_user }}
+  ansible.builtin.file:
+    path: "/home/{{ dev_worker_admin_user }}/.config"
+    state: directory
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0755"
+
+# 0700: this directory holds herdr's control socket, whose only auth IS the filesystem permission.
+- name: Ensure ~/.config/herdr exists for {{ dev_worker_admin_user }}
+  ansible.builtin.file:
+    path: "/home/{{ dev_worker_admin_user }}/.config/herdr"
+    state: directory
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0700"
+
+- name: Lay down the ansible-managed herdr config
+  ansible.builtin.template:
+    src: herdr-config.toml.j2
+    dest: "/home/{{ dev_worker_admin_user }}/.config/herdr/config.toml"
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0644"
+  notify: Restart herdr
+
+# Root-only by design (it drives systemctl and rm -rf's user state), so owned and executable by
+# root alone rather than relying on the script's own EUID check.
+- name: Install the herdr-pilot-reset recovery hatch
+  ansible.builtin.template:
+    src: herdr-pilot-reset.sh.j2
+    dest: /usr/local/bin/herdr-pilot-reset
+    owner: root
+    group: root
+    mode: "0750"
+
+# Linger keeps /run/user/<uid> present with no login session, so the unit's XDG_RUNTIME_DIR points
+# at a directory that exists at boot. Same creates= guard as dashboard.yml; duplicated for --tags.
+- name: Enable lingering for {{ dev_worker_admin_user }}
+  ansible.builtin.command: "loginctl enable-linger {{ dev_worker_admin_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ dev_worker_admin_user }}"
+
+- name: Look up the admin user's uid (for XDG_RUNTIME_DIR)
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ dev_worker_admin_user }}"
+
+# The unit's WorkingDirectory comes from workspace.yml, which a `-t herdr` run skips — probe it
+# rather than create it here, so a fresh host fails with instructions instead of masking a missing
+# /workspace mount with a root-fs directory.
+- name: Probe the unit's working directory
+  ansible.builtin.stat:
+    path: "{{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }}"
+  register: herdr_workdir
+
+- name: Assert the working directory exists
+  ansible.builtin.assert:
+    that: herdr_workdir.stat.isdir | default(false)
+    fail_msg: >-
+      {{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }} is missing — herdr.service uses
+      it as WorkingDirectory. Run the full role once (just dev-workers) before a `-t herdr` run.
+
+- name: Install the herdr systemd unit
+  ansible.builtin.template:
+    src: herdr.service.j2
+    dest: /etc/systemd/system/herdr.service
+    mode: "0644"
+  vars:
+    dev_worker_admin_uid: "{{ getent_passwd[dev_worker_admin_user][1] }}"
+  notify:
+    - Reload systemd
+    - Restart herdr
+
+# Skipped in check mode: with state set, the systemd module fails on a unit whose file was never
+# really written (template tasks write nothing in a check run), which would break the first-run
+# `--check` preview this file is otherwise built to survive.
+- name: Enable + start herdr
+  ansible.builtin.systemd:
+    name: herdr.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode

@@ -37,6 +37,15 @@
   changed_when: true
   when: dev_worker_enable_agentforge | default(false) | bool
 
+# Same shape as Restart agentforge above, for the same class of reason: the command module is
+# skipped in check mode, so a first-run `--check` preview (where the unit file was never really
+# written) doesn't die in the handler flush the way a systemd-module restart of a not-found unit
+# does. try-restart is also a no-op on a stopped unit.
+- name: Restart herdr
+  ansible.builtin.command: systemctl try-restart herdr.service
+  changed_when: true
+  when: dev_worker_enable_herdr | default(false) | bool
+
 - name: Apply sysctl
   ansible.builtin.command: sysctl --system
   changed_when: false

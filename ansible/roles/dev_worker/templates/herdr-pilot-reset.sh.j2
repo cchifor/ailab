@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# herdr-pilot-reset — wipe herdr's persisted session STATE and restart the server, leaving the
+# ansible-managed config.toml in place. Escape hatch for when a restore goes bad (e.g. agents
+# resumed in the wrong cwd, or restore wedged on git discovery — both seen upstream at 0.8.x):
+# stop, drop the snapshots, start clean. Stopping the server kills the processes in its panes;
+# integrated agents can be resumed by hand afterwards (`claude --resume`).
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "must run as root: sudo herdr-pilot-reset" >&2
+  exit 1
+fi
+
+state_dir="/home/{{ dev_worker_admin_user }}/.config/herdr"
+
+systemctl stop herdr.service
+rm -f "$state_dir/session.json" "$state_dir/session-history.json"
+rm -rf "$state_dir/sessions"
+systemctl start herdr.service
+echo "herdr session state wiped; server restarted (config.toml untouched)"
