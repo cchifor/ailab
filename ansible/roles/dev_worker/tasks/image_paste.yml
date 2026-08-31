@@ -10,10 +10,11 @@
   register: image_paste_workdir
 
 # Guard against a missing /workspace mount: the file task below would otherwise materialize the
-# whole path on the root fs and mask it.
+# whole path on the root fs and mask it. Check mode passes the guard — a fresh-host full-role
+# preview predicts the dir's creation in workspace.yml without performing it; real runs enforce.
 - name: Assert the workspace user dir exists
   ansible.builtin.assert:
-    that: image_paste_workdir.stat.isdir | default(false)
+    that: (image_paste_workdir.stat.isdir | default(false)) or ansible_check_mode
     fail_msg: >-
       {{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }} is missing — run the full role
       (just dev-workers) before a `-t image-paste` run.

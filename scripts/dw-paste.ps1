@@ -1,9 +1,10 @@
 <#
 dw-paste — paste the Windows clipboard image into a remote dev-worker agent session.
 
-Saves the clipboard image (or a copied image FILE from Explorer) locally, scp's it to the worker's
-/workspace/<user>/pastes/ landing dir (created by the dev_worker role, aged out after 14 days),
-preloads the remote tmux paste buffer with the path, and puts the same path on the local clipboard.
+Saves the clipboard image locally (screenshots as PNG; a copied image FILE from Explorer is
+uploaded as-is), scp's it to the worker's /workspace/<user>/pastes/ landing dir (created by the
+dev_worker role, aged out after 14 days), preloads the remote tmux paste buffer with the path, and
+puts the same path on the local clipboard.
 
 In the remote session:
   - Claude Code: press prefix+] in tmux — the bracketed-pasted image path auto-attaches as
@@ -20,10 +21,20 @@ param(
     [string]$RemoteDir = '/workspace/c4/pastes'
 )
 $ErrorActionPreference = 'Stop'
+# Pin the pwsh 7.3+ native-command preference so a caller profile can't make ssh/scp exits
+# terminating before the intended handling below (a no-op assignment on Windows PowerShell 5.1).
+$PSNativeCommandUseErrorActionPreference = $false
+
+# RemoteDir is interpolated into remote shell commands; the stamped basename is safe by
+# construction, so this validation is what keeps the whole remote path quote- and injection-safe.
+if ($RemoteDir -notmatch '^[A-Za-z0-9/._-]+$') {
+    Write-Error "RemoteDir may only contain [A-Za-z0-9/._-] (it is used inside remote shell commands)"
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
 $local = $null
 
 $img = [System.Windows.Forms.Clipboard]::GetImage()
@@ -41,9 +52,14 @@ if ($img) {
 }
 
 $remotePath = "$RemoteDir/" + [IO.Path]::GetFileName($local)
-scp -q $local "${SshTarget}:$remotePath"
-if ($LASTEXITCODE -ne 0) { Write-Error "scp to ${SshTarget}:$RemoteDir failed" }
-Remove-Item $local
+try {
+    scp -q $local "${SshTarget}:$remotePath"
+    if ($LASTEXITCODE -ne 0) { Write-Error "scp to ${SshTarget}:$RemoteDir failed" }
+} finally {
+    # Screenshots regularly hold credentials and internal UIs — never leave the staging copy
+    # in %TEMP%, including on scp failure.
+    Remove-Item $local -ErrorAction SilentlyContinue
+}
 
 # Automatic (unnamed) buffer lands on top of the buffer stack, which is what prefix+] pastes.
 ssh $SshTarget "tmux set-buffer '$remotePath'"

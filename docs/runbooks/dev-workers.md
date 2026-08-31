@@ -195,7 +195,8 @@ server-side config. If the terminal swallows `ctrl+v`, rebind `keys.remote_image
 
 **Path 2 — plain tmux, any worker: `scripts/dw-paste.ps1`.** Copy a screenshot (or copy an image
 file in Explorer), run `powershell -File scripts\dw-paste.ps1` (defaults to dev-worker-5; override
-with `-SshTarget c4@192.168.0.N`). It saves the clipboard as PNG, scp's it to
+with `-SshTarget c4@192.168.0.N`). It saves the clipboard image as PNG (a copied image file is
+uploaded as-is, original extension kept), scp's it to
 `/workspace/c4/pastes/` (created by the role, 0700, aged out after 14 days via tmpfiles.d),
 preloads the remote tmux paste buffer, and puts the same path on the local clipboard. In the
 remote tmux, `prefix+]` pastes the path into the agent prompt (tmux ≥ 3.2 pastes bracketed, which

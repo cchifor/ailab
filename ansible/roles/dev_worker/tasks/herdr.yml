@@ -79,7 +79,8 @@
 
 # The unit's WorkingDirectory comes from workspace.yml, which a `-t herdr` run skips — probe it
 # rather than create it here, so a fresh host fails with instructions instead of masking a missing
-# /workspace mount with a root-fs directory.
+# /workspace mount with a root-fs directory. Check mode passes the guard — a fresh-host full-role
+# preview predicts the dir's creation without performing it; real runs enforce.
 - name: Probe the unit's working directory
   ansible.builtin.stat:
     path: "{{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }}"
@@ -87,7 +88,7 @@
 
 - name: Assert the working directory exists
   ansible.builtin.assert:
-    that: herdr_workdir.stat.isdir | default(false)
+    that: (herdr_workdir.stat.isdir | default(false)) or ansible_check_mode
     fail_msg: >-
       {{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }} is missing — herdr.service uses
       it as WorkingDirectory. Run the full role once (just dev-workers) before a `-t herdr` run.
