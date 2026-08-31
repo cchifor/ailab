@@ -1,0 +1,47 @@
+# Seed values for the dev-worker KV subtree (af/dev-workers/*) — mounted into the
+# openbao-devworker-provision Job (devworker-provision-job.yaml). SAME CONTRACT as
+# operator-seeds.sops.yaml: the Job `bao kv patch`es each path with this JSON on every run, so
+# (a) keys absent from the seed survive untouched, but (b) keys PRESENT here overwrite live KV — the
+# seed is authoritative, and rotating a seeded credential only in the vault gets silently reverted on
+# the next daily run. Rotate = write the vault AND re-encrypt this file in the same change.
+# After an OpenBao wipe (docs/runbooks/openbao-recovery.md) this is what restores the subtree; the
+# per-worker AppRole secret-ids do NOT come back with it (re-mint, docs/runbooks/openbao-dev-workers.md).
+#
+# One stringData key per KV path: `<name>.json` seeds `af/dev-workers/<name>`. `common.json` is the
+# shared subtree every worker's policy can read; a per-worker path is added by dropping in e.g.
+# `dev-worker-3.json` — no change to the provision script.
+#
+# gitea_pat = the shared `chifor` read/write forge PAT the workers use today (ansible
+# dev_worker_gitea_token, rendered by git_forge.yml). Per-worker bot PATs are the planned follow-up.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: openbao-devworker-seeds
+    namespace: openbao
+    labels:
+        app.kubernetes.io/name: openbao-devworker-seeds
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: agentforge
+type: Opaque
+stringData:
+    common.json: ENC[AES256_GCM,data:jnImRvCXGw4pOgDZYC+yb6hbyaCMYao6zXz3+ql6cYRwHKQl372HLmAlk+bfgrMYIsNDJqVNAPBA+g==,iv:o/9Z6sZXpV3MutsoTh1lNjlmCvrtKglTPmGYOlLNlPM=,tag:cZoq7dqGuOMjZ8ywQwxJQw==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBoajhxSXc5MW02UXNURThj
+            TWIvSlkyd2RQZEVYSW56ZTE4N1lQbVdlUVUwCkJXS3k1ODFaUGRjNVh5VHAyYnNB
+            VGhGeS8xeEtUOE1ZeGhJRURFeEV0bFUKLS0tIGs2cHIvaXlyaWdURkQ5ZzR2Q0tJ
+            WXBRWnRCSFZQc0RBbkRFVFdlRjFlYzAKwS+rnDHbwq0MzsUMFnEvEbhokXJdhEdj
+            NmAB41VLgtsDKAqnDO7hGSzFZObOseIQbVxDUE2aHIfmQKjFMUgd5A==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-08-31T12:15:58Z"
+    mac: ENC[AES256_GCM,data:jsmMzMisTW6zCznkW4n3JUgKYQJBs10zFhKLMZ5yzRy6YbNPG8IXKMYAVIe4/9TlpZXgtGluAoyoVra71uiUH+s2jdB5M+H9fpqFdkm7mpVY8Vswti4SNWnqGf6Ls6YlAKJG0Otp8ZnThWh4awJ9RffvlmiPHzRB4QigGIPlPSU=,iv:3hVoXP7Tquw52aRzWVbK35n/r7prVf1LxGeU9e4vBnw=,tag:8uGhlVSeoNDqSnEwyrNgbw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

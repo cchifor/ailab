@@ -49,3 +49,19 @@
 - name: Apply sysctl
   ansible.builtin.command: sysctl --system
   changed_when: false
+
+# Dropping a certificate into /usr/local/share/ca-certificates does nothing until the bundle is
+# rebuilt; there is no module for it (openbao.yml installs the ailab root CA).
+- name: Update CA trust
+  ansible.builtin.command: update-ca-certificates
+  changed_when: true
+
+# The check-mode guard is the same concern the agentforge/herdr handlers above solve implicitly (the
+# command module is skipped in check mode): a first-run --check preview never really writes the unit
+# file, and the systemd module fails on a unit it cannot find. Spelled out here because this handler
+# uses the module.
+- name: Restart openbao-agent
+  ansible.builtin.systemd:
+    name: openbao-agent.service
+    state: restarted
+  when: not ansible_check_mode

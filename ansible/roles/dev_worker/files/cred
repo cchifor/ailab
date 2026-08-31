@@ -1,0 +1,95 @@
+#!/bin/sh
+# Managed by ansible (role: dev_worker, ADR 0020). Credential helper for the interactive agents on a
+# dev worker: it reads secrets out of OpenBao using the local bao agent's sink token, so a Claude or
+# Codex session never handles the vault token itself and never has to paste a value into its
+# transcript — `cred exec` hands the secret to a child process's environment instead.
+#
+#   cred list                                     names this worker may read under af/dev-workers/
+#   cred get <name> <field>                       print ONE field, no trailing newline (pipe it)
+#   cred exec <name> <field> <ENV_VAR> -- cmd...  run cmd with the field as ENV_VAR (preferred)
+#
+# <name> is resolved against this host's own subtree first and the shared one second:
+# af/dev-workers/<hostname>/<name>, then af/dev-workers/<name> ("common" is the seeded shared path,
+# so `cred get common gitea_pat` reaches the shared PAT). The per-worker AppRole policy grants read
+# on exactly those two subtrees; anything else comes back as a permission error from bao, not from
+# here. The hostname is load-bearing: cloud-init sets it from the tofu dev-workers map, so it equals
+# the ansible inventory_hostname the KV paths and AppRole roles are named after.
+#
+# Reading the sink token requires membership of the openbao-agent group. Group membership is
+# established at login, so a shell that was already open when ansible added the user to the group
+# still cannot read the token — that is the most common cause of the error below.
+set -eu
+
+# Both paths are env-overridable so tests/test-cred-helper.sh can drive the real script against a
+# fixture directory instead of /run and /etc.
+TOKEN_FILE="${CRED_TOKEN_FILE:-/run/openbao-agent/token}"
+AGENT_CONFIG="${CRED_AGENT_CONFIG:-/etc/openbao-agent/agent.hcl}"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: cred list
+       cred get <name> <field>
+       cred exec <name> <field> <ENV_VAR> -- <command> [args...]
+EOF
+  exit 2
+}
+
+if [ ! -r "$TOKEN_FILE" ]; then
+  echo "cred: cannot read $TOKEN_FILE — check that openbao-agent.service is running, and that you" >&2
+  echo "cred: are in the openbao-agent group (log out and back in after being added)." >&2
+  exit 1
+fi
+
+# The agent's own config is the single source of truth for the address, so a repointed vault needs
+# no second edit here.
+BAO_ADDR="${BAO_ADDR:-$(sed -n 's/^[[:space:]]*address[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$AGENT_CONFIG" 2>/dev/null | head -n1)}"
+if [ -z "$BAO_ADDR" ]; then
+  echo "cred: no OpenBao address — set BAO_ADDR, or check the vault stanza in $AGENT_CONFIG." >&2
+  exit 1
+fi
+BAO_TOKEN="$(cat "$TOKEN_FILE")"
+export BAO_ADDR BAO_TOKEN
+
+# Prints one field on stdout. `bao kv get` answers "No value found" for a missing path AND for a
+# missing field, so its stderr is dropped and this reports both candidate paths itself.
+fetch() { # <name> <field>
+  fetch_host_path="dev-workers/$(hostname -s)/$1"
+  fetch_shared_path="dev-workers/$1"
+  bao kv get -mount=af -field="$2" "$fetch_host_path" 2>/dev/null && return 0
+  bao kv get -mount=af -field="$2" "$fetch_shared_path" 2>/dev/null && return 0
+  echo "cred: no field '$2' at af/$fetch_host_path or af/$fetch_shared_path" >&2
+  return 1
+}
+
+case "${1:-}" in
+list)
+  [ $# -eq 1 ] || usage
+  bao kv list -mount=af dev-workers
+  # The per-host subtree only exists once a worker-specific secret has been written, so a missing
+  # path here is normal. A broken token or an unreachable vault has already failed the shared list
+  # above, under set -e.
+  bao kv list -mount=af "dev-workers/$(hostname -s)" 2>/dev/null || true
+  ;;
+get)
+  [ $# -eq 3 ] || usage
+  fetch "$2" "$3"
+  ;;
+exec)
+  [ $# -ge 6 ] || usage
+  [ "$5" = "--" ] || usage
+  name="$2"
+  field="$3"
+  var="$4"
+  shift 5
+  value="$(fetch "$name" "$field")"
+  # Exported into this shell and inherited, rather than handed to env(1): an argv word is visible in
+  # /proc to every user on the box, while /proc/<pid>/environ is readable only by this uid and root
+  # — the audience that can already read the sink token. exec so the child owns the terminal and its
+  # exit status is cred's.
+  export "$var=$value"
+  exec "$@"
+  ;;
+*)
+  usage
+  ;;
+esac

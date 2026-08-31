@@ -12,7 +12,10 @@ image** — its `provisioner/bootstrap.py` defines every policy/role/seed that r
 ## What survives a wipe (the corrected invariant)
 
 > **A wipe restores ONLY the KV paths the SOPS `seeds.json` blob declares**, plus the structure the
-> provision Job rebuilds (mounts, policies, roles, the `operator/canary` sentinel). The old belief that
+> provision Job rebuilds (mounts, policies, roles, the `operator/canary` sentinel) — and, since ADR
+> 0020, whatever the SEPARATE `openbao-devworker-provision` Job rebuilds from its own
+> `devworker-seeds.sops.yaml` (see the dev-worker row below; that Job is on its own daily schedule,
+> so its half of the restore can lag by up to a day unless you force it). The old belief that
 > *"all operator KV re-seeds from SOPS except the codex `auth.json`"* was **FALSE** and cost a ~2-day
 > outage on 2026-07-24 (9 ExternalSecrets `SecretSyncedError`, KV returning 404). Everything not in
 > `seeds.json` survives **only** because ESO's default `deletionPolicy: Retain` keeps the last-good target
@@ -36,6 +39,27 @@ image** — its `provisioner/bootstrap.py` defines every policy/role/seed that r
 | **SEED** — self-heals from `seeds.json` | `operator/dispatcher/forge` (`AF_BOT_TOKEN_PLANNER`), `operator/reaper/ledger` (`AF_REAPER_LEDGER_DSN`), `operator/broker/{anthropic/claude-max-1,anthropic/claude-max-2,openai/codex-pro}/ledger` (all three `AF_BROKER_LEDGER_DSN`, one shared `agentforge_broker` DB on infra-pg), `operator/ci/runner-registration` (`token`), `operator/ci/scaler-token` (`token`) | **Nothing** — re-provision restores them. (The 5 broker-ledger + ci paths were added to `seeds.json` on 2026-07-26; before that they were RESCUE.) |
 | **RESCUE** — from the Retain'd Secret | `operator/broker/{anthropic/claude-max-1,anthropic/claude-max-2,openai/codex-pro}/oauth` | Re-seed from the Retain'd k8s Secret via the recipe in step 5. **Cannot be seeded** (`cas_required=true`) unless `bootstrap.py` is changed to CAS-write. Codex (`codex-pro/oauth`) **also rotates nightly** (single-use refresh token) so it stays a rescue regardless. |
 | **RE-PROVISION** — by owner | `operator/broker/*/kids` (registry.json — public key registry), `tenants/<org>/<ws>/orchestrator` (bot PATs + capability signing key) | `kids` via the broker **keypair lifecycle**; `tenants/*` via the **control plane** — not by re-seeding. Expect a short worker-401 window. |
+| **SEED (dev-worker subtree)** — a SECOND, independent seed path | `dev-workers/common`, `dev-workers/<hostname>` (ADR 0020) | **Nothing for the KV** — the daily `openbao-devworker-provision` Job re-creates the `approle` mount, the six `dev-worker-*` policies/roles, and seed-patches these paths from `devworker-seeds.sops.yaml`. **But every AppRole secret-id is invalidated by the wipe** → re-run the mint ceremony for all six workers (`docs/runbooks/openbao-dev-workers.md` §Activation (e)) or the workers' `bao agent`s log `invalid role or secret ID` forever. |
+
+### Privileged consumers to account for before a wipe
+
+The bootstrap Jobs listed in the ceremony below (`openbao-init`, `openbao-provision`,
+`provisioner-deploy`) all run the orchestrator image and are covered by the repin in step 1. There is
+one more privileged consumer, and it does **not** ride that image:
+
+- **`openbao-devworker-provision`** (ns `openbao`, `kubernetes/apps/infrastructure/security/openbao/
+  devworker-provision-job.yaml`, ADR 0020) — the daily dev-worker AppRole/KV converger. It runs the
+  official `openbao/openbao` image with an inline script ConfigMap and consumes **two** cluster
+  objects: Secret `openbao-devworker-seeds` (in git, SOPS — `devworker-seeds.sops.yaml`) and Secret
+  **`openbao-breakglass-token`** (**not in git**; data key `root_token`). The secret reference is
+  `optional: false`, so a missing breakglass Secret makes the Job go red rather than silently skip.
+- **The breakglass token is scoped to the CURRENT vault state — a wipe kills it.** After a fresh
+  `openbao-init` the old root token is meaningless, and there is no way to make a new one later:
+  2.5.5 disables `generate-root`, `openbao-keys` carries only `cluster_id` + `unseal_key` (no root
+  token), and the init Job revokes its own root token when it finishes. So the **only** moment a
+  replacement breakglass token can be captured is during the re-bootstrap, while that fresh root
+  token still exists — capture it then and rewrite the `openbao-breakglass-token` Secret, or the
+  dev-worker subtree stops converging with no privileged path left to fix it.
 
 ## Ceremony
 1. **Repin FIRST** (or the gap you're fixing reproduces): the three bootstrap refs in
@@ -81,6 +105,11 @@ image** — its `provisioner/bootstrap.py` defines every policy/role/seed that r
    `af-codex-refresh` Job succeeds and stamps the status custom-metadata.
 
 ## Adding a SEED path (making a static value self-heal)
+
+This section is about the **operator** seed blob (`operator-seeds.sops.yaml` → `bootstrap.py`). The
+`dev-workers/*` subtree has its own file and its own Job — add fields there instead
+(`docs/runbooks/openbao-dev-workers.md` § "Adding a secret"); a dev-worker path added to `seeds.json`
+would be written by the wrong owner with the wrong (add-only, non-patch) semantics.
 
 Only static, **non-CAS** infra values qualify (never `.../oauth`, `.../kids`, or `tenants/*` — see the
 hard constraint above). Never hand-edit ciphertext:

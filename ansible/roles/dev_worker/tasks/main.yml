@@ -68,6 +68,12 @@
 - name: Gitea (git.chifor.me) forge git credentials — Gitea is master (ADR 0017)
   ansible.builtin.import_tasks: git_forge.yml
 
+# Needs users (users.yml). Owns ~/.git-credentials when enabled — git_forge.yml yields (see there).
+- name: OpenBao credential plumbing (bao agent + cred helper — ADR 0020)
+  ansible.builtin.import_tasks: openbao.yml
+  when: dev_worker_enable_openbao | bool
+  tags: [openbao]
+
 - name: Language toolchains (python/go/rust)
   ansible.builtin.import_tasks: toolchains.yml
   when: dev_worker_install_toolchains | bool

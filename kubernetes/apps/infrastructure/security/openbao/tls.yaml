@@ -9,6 +9,10 @@
 #   - openbao-0.openbao-internal.openbao.svc[.cluster.local] -> the headless per-pod name the init/unseal Jobs
 #         dial while the pod is NOT-Ready/sealed (the `-internal` headless svc publishes not-ready addresses)
 #   - openbao-active.openbao.svc.cluster.local             -> the active-node Service (HA-forward)
+#   - openbao.lan.chifor.me                                -> the LAN NodePort name the dev-worker VMs
+#         dial from outside the cluster (openbao-lan.yaml, ADR 0020). cert-manager re-issues on this
+#         spec change, but the SERVER only re-reads the cert when its pod restarts — that restart is
+#         an explicit step in docs/runbooks/openbao-dev-workers.md, not something Flux does for you.
 # cert-manager writes tls.crt/tls.key/ca.crt into Secret `openbao-tls`, mounted into the server pod
 # (helmrelease.yaml -> /openbao/tls) and into the Jobs/Deployments as the CA (/tls/ca.crt, ca.crt only).
 apiVersion: cert-manager.io/v1
@@ -31,6 +35,7 @@ spec:
     - openbao-0.openbao-internal.openbao.svc
     - openbao-0.openbao-internal.openbao.svc.cluster.local
     - openbao-active.openbao.svc.cluster.local
+    - openbao.lan.chifor.me
   privateKey:
     algorithm: ECDSA
     size: 256
