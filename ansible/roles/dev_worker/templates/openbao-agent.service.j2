@@ -1,0 +1,32 @@
+# Managed by ansible (role: dev_worker, ADR 0020). Keeps this worker's OpenBao periodic token alive
+# and renders the file-shaped credentials described in agent.hcl.
+#
+# Runs as root (it writes into user homes and reads the root-only secret-id) but with
+# Group=openbao-agent, which is what makes the sink usable: systemd chowns the RuntimeDirectory to
+# User:Group, and the agent creates the sink file with that egid, so /run/openbao-agent/token lands
+# root:openbao-agent 0640 and a member of that group can read it through the cred helper. That is the
+# whole reason the group exists — no ExecStartPost chgrp is needed.
+[Unit]
+Description=OpenBao agent (dev-worker credential plumbing)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# /usr/local/bin/bao — the tarball install in openbao.yml (the .deb ships a server package with its
+# own user and unit, which a worker does not want). tests/test-cred-helper.sh pins the two together.
+ExecStart=/usr/local/bin/bao agent -config=/etc/openbao-agent/agent.hcl
+Group=openbao-agent
+# Belt-and-braces for anything the agent creates without an explicit mode: group-readable, never
+# world-readable.
+UMask=0027
+RuntimeDirectory=openbao-agent
+RuntimeDirectoryMode=0750
+# always, not on-failure: any exit of this agent means the worker stops renewing its token and its
+# rendered credentials go stale, and template_config.exit_on_retry_failure turns an unreachable or
+# sealed vault into exactly such an exit. Restarting unconditionally makes that a retry loop instead
+# of a silently dead credential path.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

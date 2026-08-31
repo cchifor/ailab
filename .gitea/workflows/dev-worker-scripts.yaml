@@ -1,4 +1,5 @@
-# dev_worker script tests — the check that pins the claude-dashboard/tmux-resurrect collision.
+# dev_worker script tests — the checks that pin the claude-dashboard/tmux-resurrect collision and
+# the cred helper's contract with the openbao-agent sink (ADR 0020).
 #
 # WHY THIS EXISTS: the dashboard layout is code that a plugin can silently overwrite. tmux-resurrect
 # restores window names BY INDEX, so a snapshot whose window list has drifted relabels the launcher's
@@ -55,3 +56,12 @@ jobs:
         run: |
           set -euo pipefail
           bash ansible/roles/dev_worker/tests/test-tmux-persistence.sh
+
+      # Named explicitly rather than globbed over tests/*.sh: a glob would run a new file silently
+      # and, worse, would still pass on the day someone renames one away. This suite needs no tool
+      # beyond a shell, so it has no REQUIRE_* switch and no section that can quietly not run.
+      - name: cred helper + openbao-agent wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ansible/roles/dev_worker/tests/test-cred-helper.sh

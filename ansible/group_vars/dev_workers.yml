@@ -10,5 +10,6 @@ dev_worker_enabled: true
 # dev_worker_enable_cloudflared: true     # needs dev_worker_cf_tunnel_token
 # dev_worker_enable_password_auth: true   # needs dev_worker_admin_password
 # dev_worker_enable_agentforge: true      # needs ALL dev_worker_agentforge_* secrets (ADR 0018 go-live)
+# dev_worker_enable_openbao: true         # needs dev_worker_openbao_credentials (mint ceremony: docs/runbooks/openbao-dev-workers.md)
 # dev_worker_enable_herdr — PILOT, deliberately NOT flipped here: it is per-host in
 # host_vars/dev-worker-5.yml so only that worker runs it (runbook § "herdr pilot").

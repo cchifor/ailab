@@ -153,6 +153,25 @@ dev_worker_herdr_memory_high: "6G"
 dev_worker_herdr_memory_max: "8G"
 dev_worker_herdr_memory_swap_max: "2G"
 
+# ---- OpenBao credential plumbing (ADR 0020; opt-in until the cluster side is active) ----
+# Per-worker AppRole identity: a root-owned bao agent keeps a PERIODIC token renewed (the 768h
+# max-TTL expiry that locked the estate out on 2026-08-25 cannot hit a periodic token) and renders
+# credential files; interactive agents fetch ad-hoc secrets via /usr/local/bin/cred, which reads
+# the group-readable sink token. Activation ceremony: docs/runbooks/openbao-dev-workers.md.
+dev_worker_enable_openbao: false
+dev_worker_openbao_addr: "https://openbao.lan.chifor.me:30820" # openbao-lan NodePort (SAN on openbao-tls)
+# /etc/hosts rows for the LAN name — the workers resolve via the LAN resolver cloud-init gave them
+# and the name has no public record, so it is pinned host-side. All three node IPs: the Go dialer
+# walks the resolved addresses in turn, so a drained node is a retry, not an outage.
+dev_worker_openbao_hosts_entries:
+  - "192.168.0.41 openbao.lan.chifor.me"
+  - "192.168.0.42 openbao.lan.chifor.me"
+  - "192.168.0.43 openbao.lan.chifor.me"
+# Pinned like herdr, but upstream DOES publish per-release checksums: this is the sha256 of
+# bao_<version>_Linux_x86_64.tar.gz from the release's checksums-linux.txt. Re-read it on a bump.
+dev_worker_openbao_version: "2.5.5"
+dev_worker_openbao_sha256: "2c5577707e97fc95c2086950f39880ead5e45b356c94388e5cb606f5a5c2b697"
+
 # ---- secrets (provided by SOPS via the playbook pre_task; "" so asserts can detect "unset") ----
 dev_worker_restic_password: ""
 dev_worker_cf_tunnel_token: ""
@@ -166,3 +185,7 @@ dev_worker_agentforge_planner_token: ""
 dev_worker_agentforge_tester_token: ""
 dev_worker_agentforge_impl_token: ""
 dev_worker_agentforge_reviewer_token: ""
+# openbao AppRole login (per-host map keyed by inventory_hostname; minted by the ceremony in
+# docs/runbooks/openbao-dev-workers.md and stored ONLY in the local SOPS file + the worker).
+# Shape: { dev-worker-1: { role_id: "...", secret_id: "..." }, ... }
+dev_worker_openbao_credentials: {}

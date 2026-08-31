@@ -1,0 +1,266 @@
+---
+# OpenBao credential plumbing (ADR 0020). Gives this worker its own AppRole identity: a root-owned
+# `bao agent` logs in with the per-VM secret-id, keeps a PERIODIC token renewed (a token with a
+# period has no max-TTL, so the 768h expiry that locked the estate out of OpenBao on 2026-08-25
+# cannot repeat here), renders ~/.git-credentials from the shared KV path, and drops a
+# group-readable sink token that /usr/local/bin/cred uses for ad-hoc reads. Interactive agents
+# therefore fetch secrets on demand and never hold the vault token.
+#
+# Opt-in: main.yml imports this only when dev_worker_enable_openbao. The cluster side (the
+# openbao-lan NodePort, the AppRole roles/policies, the af/dev-workers/* KV) and the per-worker
+# secret-id mint are an operator ceremony — docs/runbooks/openbao-dev-workers.md.
+
+# main.yml tags this file `openbao` so the credential plumbing can be rolled out on its own. users.yml
+# is not in that tag set, so its dev_worker_users fact is absent on a tag-limited run — derive the
+# same list here when that happens (identical to claude_statusline.yml's opening task).
+- name: Resolve the dev-worker user(s) when running tag-limited (users.yml was skipped)
+  ansible.builtin.set_fact:
+    dev_worker_users: >-
+      {{ [{'name': dev_worker_admin_user, 'home': '/home/' + dev_worker_admin_user}] +
+         ([{'name': dev_worker_agent_user, 'home': '/home/' + dev_worker_agent_user}]
+          if dev_worker_agent_user != dev_worker_admin_user else []) }}
+  when: dev_worker_users is not defined
+
+# Fails the play rather than deploying an agent that cannot log in: an empty secret-id would leave
+# openbao-agent crash-looping and ~/.git-credentials unwritten, which reads as "git broke".
+# no_log is deliberately NOT set — assert reports the expressions, never the values.
+- name: Assert this worker has AppRole credentials and a pinned bao checksum
+  ansible.builtin.assert:
+    that:
+      - dev_worker_openbao_cred.role_id | default('') | length > 0
+      - dev_worker_openbao_cred.secret_id | default('') | length > 0
+      - dev_worker_openbao_sha256 | length == 64
+    fail_msg: >-
+      dev_worker_openbao_credentials['{{ inventory_hostname }}'] needs non-empty role_id + secret_id
+      (mint them: docs/runbooks/openbao-dev-workers.md) and dev_worker_openbao_sha256 must be the
+      64-hex-char sha256 of the pinned bao release.
+  vars:
+    dev_worker_openbao_cred: "{{ dev_worker_openbao_credentials[inventory_hostname] | default({}) }}"
+
+# The estate's private CA (CN=ailab-root-ca) signs openbao-tls. Installed into the system store so
+# `bao`, curl and anything else on the box trust the LAN endpoint; the agent also pins this exact
+# file (agent.hcl ca_cert).
+- name: Install the ailab root CA
+  ansible.builtin.copy:
+    src: ailab-root-ca.crt
+    dest: /usr/local/share/ca-certificates/ailab-root-ca.crt
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Update CA trust
+    - Restart openbao-agent
+
+# openbao.lan.chifor.me is a cluster-internal name with no public DNS record, and the workers resolve
+# through the LAN resolver cloud-init gave them, so it is pinned host-side. All three control-plane
+# node IPs: the Go dialer walks the resolved addresses in turn, so a node that is down or drained
+# costs a connect retry instead of the credential path.
+- name: Pin the openbao-lan NodePort name in /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED - openbao-lan"
+    block: |
+      {% for row in dev_worker_openbao_hosts_entries %}
+      {{ row }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"
+
+# Tarball, not the .deb: the release's openbao_*.deb is the SERVER package (its own openbao user,
+# config dir and unit), and a worker needs only the CLI/agent binary. Same shape as helm/k9s in
+# k8s_tools.yml, with the checksum verification those two lack — the download is kept under
+# /usr/local/src so get_url re-verifies the local file instead of re-fetching ~70 MB every run.
+- name: Fetch the pinned bao release tarball
+  ansible.builtin.get_url:
+    url: "https://github.com/openbao/openbao/releases/download/v{{ dev_worker_openbao_version }}/bao_{{ dev_worker_openbao_version }}_Linux_x86_64.tar.gz"
+    dest: "/usr/local/src/bao_{{ dev_worker_openbao_version }}_Linux_x86_64.tar.gz"
+    checksum: "sha256:{{ dev_worker_openbao_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+# extra_opts selects the one member worth installing — the tarball also carries CHANGELOG.md,
+# LICENSE and README.md, which do not belong in /usr/local/bin.
+- name: Install the bao CLI to /usr/local/bin
+  ansible.builtin.unarchive:
+    src: "/usr/local/src/bao_{{ dev_worker_openbao_version }}_Linux_x86_64.tar.gz"
+    dest: /usr/local/bin
+    remote_src: true
+    extra_opts: [bao]
+    owner: root
+    group: root
+    mode: "0755"
+    creates: "/usr/local/bin/.bao-{{ dev_worker_openbao_version }}"
+  notify: Restart openbao-agent
+
+- name: Mark the installed bao version
+  ansible.builtin.copy:
+    content: "{{ dev_worker_openbao_version }}\n"
+    dest: "/usr/local/bin/.bao-{{ dev_worker_openbao_version }}"
+    mode: "0644"
+    force: false
+
+# The group is the access boundary for the sink token: the agent runs with it as its egid
+# (openbao-agent.service Group=), and the cred helper needs a reader on the other side.
+- name: Create the openbao-agent group
+  ansible.builtin.group:
+    name: openbao-agent
+    system: true
+
+- name: Create the openbao-agent system user
+  ansible.builtin.user:
+    name: openbao-agent
+    group: openbao-agent
+    system: true
+    home: /etc/openbao-agent
+    create_home: false
+    shell: /usr/sbin/nologin
+
+# A process inherits its group set at login, so a shell (or tmux session) that was already open when
+# this ran still cannot read the sink — the cred helper's error says so, and a re-login fixes it.
+- name: Add the dev-worker users to the openbao-agent group
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: openbao-agent
+    append: true
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# 0750 root:openbao-agent — the agent (root) writes it, nothing else needs to look inside. The sink
+# directory /run/openbao-agent is NOT created here: systemd owns it via RuntimeDirectory= (tmpfs,
+# recreated on every start), which is also what gives it the right group.
+- name: Ensure /etc/openbao-agent exists
+  ansible.builtin.file:
+    path: /etc/openbao-agent
+    state: directory
+    owner: root
+    group: openbao-agent
+    mode: "0750"
+
+# The role-id is an identifier, not a credential (a login needs the secret-id too), so it may be
+# group-readable; the secret-id is root-only. Both are durable per-VM files: the agent has to be
+# able to log in again after a reboot with nothing re-delivering them (ADR 0020).
+- name: Install the AppRole role-id
+  ansible.builtin.copy:
+    content: "{{ dev_worker_openbao_credentials[inventory_hostname].role_id }}\n"
+    dest: /etc/openbao-agent/role-id
+    owner: root
+    group: openbao-agent
+    mode: "0640"
+  no_log: true
+  notify: Restart openbao-agent
+
+- name: Install the AppRole secret-id
+  ansible.builtin.copy:
+    content: "{{ dev_worker_openbao_credentials[inventory_hostname].secret_id }}\n"
+    dest: /etc/openbao-agent/secret-id
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart openbao-agent
+
+- name: Lay down the bao agent config
+  ansible.builtin.template:
+    src: openbao-agent.hcl.j2
+    dest: /etc/openbao-agent/agent.hcl
+    owner: root
+    group: openbao-agent
+    mode: "0640"
+  notify: Restart openbao-agent
+
+- name: Lay down the git-credentials render template
+  ansible.builtin.template:
+    src: git-credentials.ctmpl.j2
+    dest: /etc/openbao-agent/git-credentials.ctmpl
+    owner: root
+    group: openbao-agent
+    mode: "0640"
+  notify: Restart openbao-agent
+
+- name: Install the cred helper
+  ansible.builtin.copy:
+    src: cred
+    dest: /usr/local/bin/cred
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the openbao-agent systemd unit
+  ansible.builtin.template:
+    src: openbao-agent.service.j2
+    dest: /etc/systemd/system/openbao-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart openbao-agent
+
+# Skipped in check mode for the same reason as herdr.yml's start task: with state set, the systemd
+# module fails on a unit whose file a check run never actually wrote.
+- name: Enable + start openbao-agent
+  ansible.builtin.systemd:
+    name: openbao-agent.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode
+
+# Duplicated from git_forge.yml on purpose: that file yields ~/.git-credentials to the agent when
+# this plumbing is on (and skips itself entirely), but the file is useless without the store helper
+# configured, so whichever path writes the credential must also set this.
+- name: Enable the per-user git credential store
+  become: true
+  become_user: "{{ item.name }}"
+  ansible.builtin.command:
+    cmd: git config --global credential.helper store
+  changed_when: false
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# credentials.yml already owns this directory; repeated here (like herdr.yml repeats linger/getent)
+# so a `-t openbao` run does not depend on a task file its tag excludes. blockinfile creates the
+# file below but not its parent.
+- name: Ensure each user's ~/.claude exists
+  ansible.builtin.file:
+    path: "{{ item.home }}/.claude"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0700"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Agents read ~/.claude/CLAUDE.md at session start; this is how they learn that secrets come from
+# `cred` and that values must never be printed. A managed block rather than a whole file, so the
+# operator's own notes in the same file survive. HTML-comment markers because the file is markdown —
+# blockinfile's default `#` marker would render as an H1 heading in the agent's context.
+- name: Publish the credential instructions to each user's CLAUDE.md
+  ansible.builtin.blockinfile:
+    path: "{{ item.home }}/.claude/CLAUDE.md"
+    marker: "<!-- {mark} ANSIBLE MANAGED - openbao credentials -->"
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+    block: |
+      ## Credentials (OpenBao)
+
+      Secrets for this worker live in OpenBao, not in files or env vars. Fetch them with the `cred`
+      helper (it wraps the local bao agent's token):
+
+      - `cred list` — names available to this worker
+      - `cred get <name> <field>` — print one field (pipe it straight into the consumer)
+      - `cred exec <name> <field> <ENV_VAR> -- <command...>` — run a command with the secret injected
+        as an env var, without it ever appearing in your transcript (PREFER this)
+
+      NEVER print credential values into the conversation, logs, or files — use names/lengths when
+      discussing them. Git credentials for git.chifor.me are already provisioned; just use git.
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"

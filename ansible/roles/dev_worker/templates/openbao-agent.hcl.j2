@@ -1,0 +1,50 @@
+// Managed by ansible (role: dev_worker, ADR 0020). bao agent: AppRole auto-auth -> PERIODIC token
+// (the role sets token_period, so every renewal resets the TTL and there is no max-TTL cliff — the
+// 768h expiry that locked the estate out of OpenBao on 2026-08-25 cannot happen to this token), a
+// group-readable sink for /usr/local/bin/cred, and template rendering for file-shaped credentials.
+vault {
+  address = "{{ dev_worker_openbao_addr }}"
+  // The CA is in the system store too (openbao.yml installs it via update-ca-certificates); pinned
+  // here as well so the agent keeps working if the system bundle is ever rebuilt without it.
+  ca_cert = "/usr/local/share/ca-certificates/ailab-root-ca.crt"
+}
+
+auto_auth {
+  method "approle" {
+    config = {
+      role_id_file_path   = "/etc/openbao-agent/role-id"
+      secret_id_file_path = "/etc/openbao-agent/secret-id"
+      // The secret-id has to survive reboots — nothing re-delivers it — so the file stays; one-use
+      // wrapped delivery was rejected in ADR 0020 for exactly that reason. It is NOT machine-bound:
+      // the roles carry no *_bound_cidrs because Cilium's SNAT hides the worker's source IP (ADR
+      // 0020 §Decision 1), so this file is a live credential and its 0600 root-only mode is the
+      // protection.
+      remove_secret_id_file_after_reading = false
+    }
+  }
+  // Read by the cred helper. The unit runs with Group=openbao-agent, so the agent's egid owns this
+  // file and 0640 makes it readable by the dev-worker users openbao.yml puts in that group.
+  sink "file" {
+    config = {
+      path = "/run/openbao-agent/token"
+      mode = 0640
+    }
+  }
+}
+
+template_config {
+  // An unreachable or sealed vault makes the agent EXIT rather than leave a half-rendered or stale
+  // credential file in place; systemd (Restart=always) then retries until the vault answers.
+  exit_on_retry_failure = true
+}
+
+{% for user in dev_worker_users %}
+// Rendered as root with the agent's umask, then chowned to the consumer — git only reads
+// ~/.git-credentials as the user itself.
+template {
+  source      = "/etc/openbao-agent/git-credentials.ctmpl"
+  destination = "{{ user.home }}/.git-credentials"
+  perms       = "0600"
+  command     = "chown {{ user.name }}:{{ user.name }} {{ user.home }}/.git-credentials"
+}
+{% endfor %}

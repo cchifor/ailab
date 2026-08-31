@@ -4,8 +4,16 @@
 # per-user credential.helper=store + a ~/.git-credentials line using a `chifor` read/write-repository
 # Gitea token (dev_worker_gitea_token, SOPS). No-op when the token isn't provided. Gitea SSH is
 # in-cluster only (not tunnelled), so HTTPS+token is the access path.
+#
+# YIELDS TO OPENBAO: when dev_worker_enable_openbao is on, the bao agent renders ~/.git-credentials
+# from af/dev-workers/common instead (ADR 0020), so this whole block stands down rather than fight
+# it — two writers of one file would flip it back and forth on every run, and a PAT rotated in
+# OpenBao would be silently reverted here to whatever the SOPS file still holds. openbao.yml carries
+# its own copy of the credential.helper git-config task, since both paths need it.
 - name: Configure Gitea git credentials (per dev-worker user)
-  when: dev_worker_gitea_token | default('') | length > 0
+  when:
+    - dev_worker_gitea_token | default('') | length > 0
+    - not (dev_worker_enable_openbao | bool)
   block:
     - name: Enable the per-user git credential store
       become: true
