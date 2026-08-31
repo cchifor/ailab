@@ -40,12 +40,13 @@ image** — its `provisioner/bootstrap.py` defines every policy/role/seed that r
 | **RESCUE** — from the Retain'd Secret | `operator/broker/{anthropic/claude-max-1,anthropic/claude-max-2,openai/codex-pro}/oauth` | Re-seed from the Retain'd k8s Secret via the recipe in step 5. **Cannot be seeded** (`cas_required=true`) unless `bootstrap.py` is changed to CAS-write. Codex (`codex-pro/oauth`) **also rotates nightly** (single-use refresh token) so it stays a rescue regardless. |
 | **RE-PROVISION** — by owner | `operator/broker/*/kids` (registry.json — public key registry), `tenants/<org>/<ws>/orchestrator` (bot PATs + capability signing key) | `kids` via the broker **keypair lifecycle**; `tenants/*` via the **control plane** — not by re-seeding. Expect a short worker-401 window. |
 | **SEED (dev-worker subtree)** — a SECOND, independent seed path | `dev-workers/common`, `dev-workers/<hostname>` (ADR 0020) | **Nothing for the KV** — the daily `openbao-devworker-provision` Job re-creates the `approle` mount, the six `dev-worker-*` policies/roles, and seed-patches these paths from `devworker-seeds.sops.yaml`. **But every AppRole secret-id is invalidated by the wipe** → re-run the mint ceremony for all six workers (`docs/runbooks/openbao-dev-workers.md` §Activation (e)) or the workers' `bao agent`s log `invalid role or secret ID` forever. |
+| **SEED (estate subtree)** — a THIRD, independent seed path | `estate/{proxmox,qnap,cloudflare,registry,gitea,github}` (`docs/runbooks/openbao-estate-credentials.md`) | **Nothing** — the daily `openbao-estate-provision` Job seed-patches these from `estate-seeds.sops.yaml`. Nothing logs in against them (escrow, no policy grants), so there is no credential to re-mint. |
 
 ### Privileged consumers to account for before a wipe
 
 The bootstrap Jobs listed in the ceremony below (`openbao-init`, `openbao-provision`,
-`provisioner-deploy`) all run the orchestrator image and are covered by the repin in step 1. There is
-one more privileged consumer, and it does **not** ride that image:
+`provisioner-deploy`) all run the orchestrator image and are covered by the repin in step 1. Two
+more privileged consumers do **not** ride that image:
 
 - **`openbao-devworker-provision`** (ns `openbao`, `kubernetes/apps/infrastructure/security/openbao/
   devworker-provision-job.yaml`, ADR 0020) — the daily dev-worker AppRole/KV converger. It runs the
@@ -53,6 +54,9 @@ one more privileged consumer, and it does **not** ride that image:
   objects: Secret `openbao-devworker-seeds` (in git, SOPS — `devworker-seeds.sops.yaml`) and Secret
   **`openbao-breakglass-token`** (**not in git**; data key `root_token`). The secret reference is
   `optional: false`, so a missing breakglass Secret makes the Job go red rather than silently skip.
+- **`openbao-estate-provision`** (same directory, `estate-provision-job.yaml`) — the daily
+  `af/estate/*` escrow seeder. Identical shape and identical dependencies: the SOPS seeds Secret
+  (`openbao-estate-seeds`) plus the breakglass token, `optional: false`.
 - **The breakglass token is scoped to the CURRENT vault state — a wipe kills it.** After a fresh
   `openbao-init` the old root token is meaningless, and there is no way to make a new one later:
   2.5.5 disables `generate-root`, `openbao-keys` carries only `cluster_id` + `unseal_key` (no root

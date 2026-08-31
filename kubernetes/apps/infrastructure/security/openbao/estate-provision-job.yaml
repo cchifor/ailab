@@ -1,0 +1,156 @@
+# Estate infrastructure credentials in OpenBao (docs/runbooks/openbao-estate-credentials.md) — the
+# vault half of "every operator credential has a durable, single home". Seeds the af/estate/* KV
+# subtree from openbao-estate-seeds: one `<name>.json` stringData key per path, af/estate/<name>.
+#
+# SCOPE: af/estate/* holds the OPERATOR-plane infrastructure credentials that otherwise live only in
+# gitignored plaintext on the operator workstation (.env, terraform.tfvars) or in ansible SOPS —
+# Proxmox, QNAP, Cloudflare, registry, Gitea runner registration, the GitHub App key. It is the
+# durable escrow + rotation source of truth for those systems. Kubernetes-native secrets (Flux SOPS
+# Secrets under kubernetes/apps/**) deliberately do NOT get mirrored here — Flux+SOPS is their
+# system of record and a second home would add rotation split-brains, not remove them.
+#
+# ACCESS: nothing is granted read on af/estate/* — not the dev-worker AppRoles, not any ESO
+# SecretStore. The only readers are root-level tokens (breakglass) via the operator ceremonies in
+# the runbook. Widening access is a deliberate future decision, not a default.
+#
+# AUTH + shape: identical to devworker-provision-job.yaml — breakglass root (Secret
+# openbao-breakglass-token, data key root_token, optional:false so absence turns the Job red),
+# `bao kv patch` seed-wins contract, daily re-run via ttlSecondsAfterFinished + Flux re-apply,
+# per-object force annotation (2026-07-28 immutable-Job wedge guard).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-estate-provision-script
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-estate-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+data:
+  provision.sh: |
+    #!/bin/sh
+    # Idempotent: kv patch/put are upserts, so the daily re-run just re-converges. Fail-closed:
+    # `set -eu`, no `|| true`. NEVER echo credential material — BAO_TOKEN arrives via env from the
+    # breakglass Secret and seed JSON is handed to bao by FILE PATH, never as an argv word; the
+    # existence probe's output goes to /dev/null.
+    set -eu
+
+    SEED_DIR=/etc/openbao-estate-seeds
+
+    bao token lookup >/dev/null || {
+      echo "openbao unreachable/sealed or the breakglass token was rejected; aborting" >&2
+      exit 1
+    }
+
+    # Seed-wins contract (same as operator-seeds and devworker-seeds): keys absent from a seed
+    # survive untouched, keys present OVERWRITE live KV — rotating a value only in the vault is
+    # silently reverted within a day. Rotate = vault AND the seeds file in the same change.
+    for seed in "$SEED_DIR"/*.json; do
+      [ -f "$seed" ] || continue
+      name="$(basename "$seed" .json)"
+      if bao kv get -mount=af "estate/${name}" >/dev/null 2>&1; then
+        bao kv patch -mount=af "estate/${name}" "@${seed}"
+      else
+        bao kv put -mount=af "estate/${name}" "@${seed}"
+      fi
+    done
+
+    # Fail-closed completeness check — the runbook's path/field matrix, hard-coded. Without it a
+    # dropped or typoed seed file (or a seed missing one field) still prints the success line while
+    # leaving af/estate/* PARTIALLY restored after a wipe, which is exactly the silent gap the
+    # "after a wipe, nothing to do" claim depends on not having. Adding a path/field means adding
+    # it HERE as well as to the seeds file (and the runbook table). Stdout goes to /dev/null — the
+    # probe must never print a value.
+    for pair in \
+      "proxmox:root_password" "proxmox:api_token" \
+      "qnap:admin_user" "qnap:admin_password" \
+      "cloudflare:api_token" \
+      "registry:ci_password" "registry:oidc_client_secret" \
+      "gitea:runner_registration_token" \
+      "github:app_private_key"; do
+      path="${pair%%:*}"
+      field="${pair##*:}"
+      bao kv get -mount=af -field="$field" "estate/${path}" >/dev/null || {
+        echo "af/estate/${path} is missing field '${field}' after seeding; aborting" >&2
+        exit 1
+      }
+    done
+
+    echo "estate provision complete"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-estate-provision
+  namespace: openbao
+  annotations:
+    # WEDGE GUARD — same rationale as provision-job.yaml (2026-07-28 immutable-Job outage): scope
+    # delete+recreate to THIS Job so a template change never wedges the openbao Kustomization.
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: openbao-estate-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 6
+  # Reaped after a day, which is also how this re-runs: Flux re-applies the reaped Job, so a seed
+  # change converges within a day (or force it: delete the Job, reconcile the openbao Kustomization).
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-estate-provision
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      automountServiceAccountToken: false # talks only to the OpenBao API, never to kube-apiserver
+      securityContext:
+        # uid 100 / gid 1000 is the `openbao` user baked into the image (no USER directive, so this
+        # must be explicit) — same identity the server StatefulSet runs under.
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provision
+          # Official OpenBao image (bao CLI + busybox sh), pinned to the server's version.
+          image: quay.io/openbao/openbao:2.5.5
+          command: ["/bin/sh", "/scripts/provision.sh"]
+          env:
+            # The headless per-pod name publishes not-ready addresses: a sealed-but-up pod yields a
+            # real error instead of a DNS miss.
+            - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: BAO_CACERT, value: "/tls/ca.crt" }
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openbao-breakglass-token
+                  key: root_token
+                  optional: false
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+            - { name: seeds, mountPath: /etc/openbao-estate-seeds, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+        - name: script
+          configMap:
+            name: openbao-estate-provision-script
+            defaultMode: 0555
+        - name: seeds
+          secret:
+            secretName: openbao-estate-seeds
