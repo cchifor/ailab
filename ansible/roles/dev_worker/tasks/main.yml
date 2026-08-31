@@ -117,3 +117,9 @@
   ansible.builtin.import_tasks: herdr.yml
   when: dev_worker_enable_herdr | bool
   tags: [herdr]
+
+# Landing dir for scripts/dw-paste.ps1 (image paste from the Windows workstation). Needs the
+# /workspace mount (workspace.yml), which the file itself asserts for targeted runs.
+- name: Image-paste landing dir
+  ansible.builtin.import_tasks: image_paste.yml
+  tags: [image-paste]
