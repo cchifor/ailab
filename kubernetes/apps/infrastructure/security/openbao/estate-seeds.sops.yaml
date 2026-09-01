@@ -1,7 +1,12 @@
 # Seed values for the estate operator-credential escrow (af/estate/*) — mounted into
-# openbao-estate-provision (estate-provision-job.yaml). SAME CONTRACT as the other two seed files:
-# the Job patches each path with `<name>.json` on every run, so keys present here OVERWRITE live KV
-# (seed wins) and keys absent survive. Rotate = the real system AND this file in the same change —
+# openbao-estate-provision (estate-provision-job.yaml). The Job patches each path with
+# `<name>.json` on every run, so keys present here OVERWRITE live KV (seed wins) and keys absent
+# survive. Same contract as devworker-seeds.sops.yaml — but NOT as operator-seeds.sops.yaml, which
+# since agentforge #276 is CREATE-IF-ABSENT (the live vault wins; a disagreeing seed is reported as
+# drift rather than applied). Both of these files are shell `bao kv patch` loops and still
+# overwrite. The old "same contract as the other two" claim is what let a revoked credential be
+# silently restored over a corrected one; see docs/runbooks/openbao-recovery.md, "The
+# seed-ownership contract". Rotate = the real system AND this file in the same change —
 # and note the OTHER homes each credential has (docs/runbooks/openbao-estate-credentials.md, the
 # multi-home table): the vault is the durable escrow, but consumers still read .env / tfvars /
 # ansible SOPS until they are migrated.
