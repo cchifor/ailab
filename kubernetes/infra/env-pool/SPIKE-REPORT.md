@@ -87,10 +87,48 @@ pools pay this at fill time, invisibly.
   was deleted (namespace, RuntimeClass, snapshot, PVs); only `talos-env-node-1`
   remains, plus this module.
 
+## Spike 2 — agent-sandbox v1.0 lease layer ✅ (same day)
+
+Installed the pinned release manifest (`agent-sandbox-controller:v1.0.0`, 4 CRDs,
+own namespace; PSA-restricted audit warning on the controller pod — production
+hardening item). `SandboxTemplate` carries the full two-container env-pod shape +
+a `volumeClaimTemplates` entry restoring from `golden-spike-v2` on the NEW
+`testpool-spike-iscsi` StorageClass (`reclaimPolicy: Delete` — the F7 fix).
+Readiness authority = the control container's tcp ready-port (opens only after
+dockerd answers `/_ping`; no exec probes — F5).
+
+| Measurement | Result |
+|---|---|
+| Warm-pool fill (all cold stages, off-path) | **86 s** to member Ready (n≈3 consistent) |
+| **Warm adoption (claim → bound+Ready)** | **0.355 s / 0.334 s / 0.98 s / 0.23 s** (n=4, incl. one from a dev-worker via the scoped SA) |
+| Adopted env functional | warm cache present; `docker run postgres:16-alpine` from cache works |
+| Replenishment | starts immediately after adoption, off the claim path; active env + refilling member coexist on the one 16 GiB node |
+| Burst on a 1-member pool | first claim adopts (0.98 s); second **cold-creates** — Ready in **142.8 s** (v1.0's documented empty-pool behavior; confirms tep's queue-instead-of-cold-create gate) |
+| Claim delete cascade | sandbox 0.3 s → pod 3.4 s → PVC 3.5 s → **PV deleted array-side ~2 min** (Delete class works; no Released leak) |
+| **TTL enforcement** | `shutdownTime` fired **to the second** (teardown observed at the exact configured 11:16:43Z) |
+
+## Spike 4 — tep end-to-end from dev-worker-6 ✅ (same day)
+
+Standing namespace-scoped credential per the plan (SA + Role with exec/attach/
+portforward `create`+`get`, long-lived token Secret → kubeconfig). `tep-mini.sh`
+(in `spike/`) run **on dev-worker-6**: `lease` → **Ready in 0.23 s** → `sync`
+(tar-over-exec, 116 KB in 0.23 s; rsync lands in the production image) → `run`:
+file visible in `/work/src`, and **`docker run -v /work/src:/mnt` inside the env
+served the same file** — the worker → control → dind → container same-path
+bind-mount fidelity proof — → `release` (claim deleted, sandbox GC'd, pool
+refilled). Node total with a warm env + churn running: **~1.1 GiB / 7%**.
+
+## Spike 3 — clone-churn soak ▶ running
+
+50 cycles of ephemeral PVC-from-snapshot → runc-pod attach → delete on the
+Delete-class SC (`spike/churn_soak.py`), running detached (~1.5–3 min/cycle,
+dominated by the same scheduler-retry quanta). Results (failure counts, leftover
+PVs/LUNs, cycle p50/p95) land in the operator's scratchpad `churn_soak.out`;
+orphan verdict to be appended here before production rollout.
+
 ## Next (per the plan)
 
-Spike 2: agent-sandbox v1.0 install (Flux-pinned) — warm-pool adoption latency,
-template-VCT prefill, `shutdownPolicy: Delete`. Spike 3: clone-churn soak +
-orphan sweep. Spike 4: `tep` end-to-end. Then the production manifests
-(SandboxTemplates with the two-container shape + `testpool-iscsi` Delete-policy
-StorageClass + pre-pull DaemonSet).
+Production manifests (SandboxTemplates + `testpool-iscsi` Delete-policy
+StorageClass + pre-pull DaemonSet + Flux-pinned agent-sandbox), full `tep`
+(supervisor + extend-on-submit + drained-pool queueing), spike 5 (XL in `big`)
+once host RAM is freed for the 24 GiB node.

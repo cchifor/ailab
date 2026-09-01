@@ -1,0 +1,41 @@
+# Spike 2 base: namespace + RuntimeClass (as spike 1) + the pool-owned StorageClass (finding F7:
+# qnap-iscsi is reclaimPolicy Retain -> every ephemeral env volume leaks a Released PV; the pool
+# class is identical but Delete, and WaitForFirstConsumer per the plan's ephemeral-volume guidance).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: testpool-spike
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-env-spike
+handler: kata
+overhead:
+  podFixed:
+    cpu: 250m
+    memory: 160Mi
+scheduling:
+  nodeSelector:
+    ailab.io/env-pool: "true"
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: env
+      effect: NoSchedule
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: testpool-spike-iscsi
+provisioner: csi.trident.qnap.io
+parameters:
+  fsType: ext4
+  selector: performance=performance1
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
