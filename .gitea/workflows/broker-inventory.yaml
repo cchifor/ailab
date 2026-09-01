@@ -8,12 +8,15 @@
 # ignores .github/workflows entirely. ailab has no .github/workflows, so nothing is masked here.
 #
 # FAIL CLOSED — the point of this file.
-#   * ONE job, ONE step, no `needs:`, no matrix, no aggregator. The estate has already shipped a
+#   * ONE job, no `needs:`, no matrix, no aggregator. The estate has already shipped a
 #     gate that could not fail: `ci-gate` in the sibling repos looped over
 #     `join(needs.*.result, ' ')`, which evaluates to an EMPTY STRING on Gitea's act_runner, so the
 #     loop body ran zero times and the gate passed unconditionally for its entire life. There is no
 #     result aggregation here at all, so that failure mode has nowhere to live: the check's exit
-#     status IS the script's exit status.
+#     status IS the script's exit status. The steps below are sequential within that one job, so
+#     each still fails the job directly — the invariant is "no cross-job result aggregation", not a
+#     step count. (This said "ONE step" until the generator grew unit tests; a second step in the
+#     same job cannot reintroduce the aggregation bug, while tests that CI never runs guard nothing.)
 #   * No `continue-on-error`, no `if:` conditions, no `|| true`, no soft skips. A missing
 #     interpreter, an unreadable manifest, a source that does not parse — every one of those is a
 #     non-zero exit from the script, which fails the job.
@@ -80,3 +83,22 @@ jobs:
           fi
           "$PY" --version
           "$PY" scripts/gen-broker-inventory.py --check
+
+      # The generator's own unit tests. These existed before this step did and ran NOWHERE, which
+      # made them documentation rather than a guard — the seed-coverage record's parsing in
+      # particular has already regressed once (a file-wide regex swept missingOauthPaths back in as
+      # declared, and the record oscillated between two states on successive runs). Stdlib
+      # unittest only; no dependency to install.
+      - name: Script unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            PY=python3
+          elif command -v python >/dev/null 2>&1; then
+            PY=python
+          else
+            echo "no python3/python on the runner — failing closed rather than skipping the tests"
+            exit 1
+          fi
+          "$PY" -m unittest discover -s scripts/tests -p "test_*.py" -v
