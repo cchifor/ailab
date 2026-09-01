@@ -1,0 +1,120 @@
+# Standing per-worker access (the plan's v1 credential design, spike-4-proven shape).
+# One ServiceAccount + long-lived token Secret per dev-worker; one Role; one binding.
+# Honest posture (plan, "Trust model"): namespace-granular — any worker credential reaches every
+# pod in testpool; guardrails for one operator's agents, not a security boundary. Per-lease bound
+# tokens via a broker are the later hardening step. Token DISTRIBUTION to the workers is
+# ansible/roles/dev_worker work (operator/tofu step, out of Flux's scope).
+# exec/attach/portforward carry create+get for the 1.31->1.37 SPDY/WebSocket RBAC-verb transition.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tep-worker
+  namespace: testpool
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxwarmpools", "sandboxtemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/attach", "pods/portforward"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tep-workers
+  namespace: testpool
+subjects:
+  - { kind: ServiceAccount, name: tep-dw1, namespace: testpool }
+  - { kind: ServiceAccount, name: tep-dw2, namespace: testpool }
+  - { kind: ServiceAccount, name: tep-dw3, namespace: testpool }
+  - { kind: ServiceAccount, name: tep-dw4, namespace: testpool }
+  - { kind: ServiceAccount, name: tep-dw5, namespace: testpool }
+  - { kind: ServiceAccount, name: tep-dw6, namespace: testpool }
+roleRef:
+  kind: Role
+  name: tep-worker
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: tep-dw1, namespace: testpool }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: tep-dw2, namespace: testpool }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: tep-dw3, namespace: testpool }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: tep-dw4, namespace: testpool }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: tep-dw5, namespace: testpool }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: tep-dw6, namespace: testpool }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tep-dw1-token
+  namespace: testpool
+  annotations: { kubernetes.io/service-account.name: tep-dw1 }
+type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tep-dw2-token
+  namespace: testpool
+  annotations: { kubernetes.io/service-account.name: tep-dw2 }
+type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tep-dw3-token
+  namespace: testpool
+  annotations: { kubernetes.io/service-account.name: tep-dw3 }
+type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tep-dw4-token
+  namespace: testpool
+  annotations: { kubernetes.io/service-account.name: tep-dw4 }
+type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tep-dw5-token
+  namespace: testpool
+  annotations: { kubernetes.io/service-account.name: tep-dw5 }
+type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tep-dw6-token
+  namespace: testpool
+  annotations: { kubernetes.io/service-account.name: tep-dw6 }
+type: kubernetes.io/service-account-token

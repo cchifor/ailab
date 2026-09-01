@@ -1,0 +1,95 @@
+# golden-populate: env-shaped pod on a BLANK testpool-iscsi volume; golden-refresh.sh pulls the
+# golden image set into it, then snapshots its PVC (golden-populate-dockerlib) as golden-vN.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: golden-populate
+  namespace: testpool
+  labels:
+    app: dind-spike
+spec:
+  runtimeClassName: kata-env
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  dnsPolicy: "None"
+  dnsConfig:
+    nameservers: ["1.1.1.1", "9.9.9.9"]
+  terminationGracePeriodSeconds: 10
+  containers:
+    - name: dind
+      image: docker.io/library/docker:28.3-dind
+      securityContext:
+        privileged: true
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -x
+          date +%s.%N > /work/t0-entrypoint
+          apk add --no-cache e2fsprogs >/work/apk.log 2>&1 || { echo APK-FAIL; cat /work/apk.log; exit 3; }
+          date +%s.%N > /work/t0b-tools
+          DEV=/dev/dockerblk
+          mkdir -p /var/lib/docker
+          if ! mount -o defaults,noatime "$DEV" /var/lib/docker 2>/work/mount1.err; then
+            mkfs.ext4 -q -L dockerlib "$DEV"
+            mount -o defaults,noatime "$DEV" /var/lib/docker
+          fi
+          date +%s.%N > /work/t0c-mounted
+          dockerd-entrypoint.sh dockerd --host=unix:///run/dsock/docker.sock --registry-mirror=https://registry.chifor.me >/work/dockerd.log 2>&1 &
+          export DOCKER_HOST=unix:///run/dsock/docker.sock
+          i=0
+          until docker version >/dev/null 2>&1; do
+            i=$((i+1)); [ $i -gt 1200 ] && echo "DOCKERD NEVER READY" && tail -40 /work/dockerd.log && exit 1
+            sleep 0.2
+          done
+          date +%s.%N > /work/t1-dockerd-ready
+          echo "=== storage driver: $(docker info --format '{{.Driver}}')"
+          docker info --format '{{.Driver}}' | grep -q overlay2 || { echo "FATAL: not overlay2"; tail -40 /work/dockerd.log; exit 2; }
+          echo SPIKE-1B-DRIVER-OK
+          sleep infinity
+      resources:
+        requests:
+          cpu: "2"
+          memory: 3Gi
+        limits:
+          cpu: "5"
+          memory: 10Gi
+      volumeDevices:
+        - name: dockerlib
+          devicePath: /dev/dockerblk
+      volumeMounts:
+        - { name: shm, mountPath: /dev/shm }
+        - { name: dsock, mountPath: /run/dsock }
+        - { name: work, mountPath: /work }
+    - name: control
+      image: docker.io/library/docker:28.3-cli
+      command: ["sleep", "infinity"]
+      env:
+        - name: DOCKER_HOST
+          value: unix:///run/dsock/docker.sock
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: "2"
+          memory: 1Gi
+      volumeMounts:
+        - { name: dsock, mountPath: /run/dsock }
+        - { name: work, mountPath: /work }
+  volumes:
+    - name: shm
+      emptyDir: { medium: Memory, sizeLimit: 1Gi }
+    - name: dsock
+      emptyDir: {}
+    - name: work
+      emptyDir: {}
+    - name: dockerlib
+      ephemeral:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            volumeMode: Block
+            storageClassName: testpool-iscsi
+            resources:
+              requests:
+                storage: 40Gi

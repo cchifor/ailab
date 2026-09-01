@@ -1,0 +1,31 @@
+# Egress posture for env pods — vanilla NetworkPolicy (portability).
+#
+# AMENDMENT to the plan's strict allowlist, recorded deliberately: the workload audit shows the
+# suites pull from ghcr/mcr/quay and npm/pypi AT RUNTIME (image builds inside envs, one-off pulls
+# not in the golden set), so a mirror-only allowlist would break L/XL suites. The boundary that
+# actually matters — and what the plan's verification asserts — is CLUSTER-ward isolation. So:
+# allow world egress EXCEPT the cluster pod/service CIDRs, the apiserver VIP, and link-local
+# metadata. Env pods can never reach any cluster workload, Service, or the apiserver; internet +
+# LAN (registry mirror .36, litellm NodePort) remain reachable, same trust posture as a dev-worker.
+# Residual (documented): node IPs (kubelet mTLS-protected) are not blocked in v1.
+#
+# Ingress: default-deny. Nothing dials into an env; all consumption rides apiserver exec streams,
+# which do not traverse the CNI and are unaffected by NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: env-egress
+  namespace: testpool
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16      # pod CIDR
+              - 10.96.0.0/12       # service CIDR
+              - 192.168.0.40/32    # kube-apiserver VIP
+              - 169.254.0.0/16     # link-local / metadata

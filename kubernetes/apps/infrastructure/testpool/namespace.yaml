@@ -1,0 +1,46 @@
+# The leasable test-environment pool (agentforge plans/2026-09-01-test-env-pool-k8s-plan.md).
+# PSA enforce=privileged: DinD needs privileged:true in the pod spec and PSA judges the spec
+# regardless of RuntimeClass (estate precedent: agentforge-ci); Kata confines the privilege to
+# the guest VM. This namespace is the isolation unit for tep RBAC — nothing else runs here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: testpool
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: testpool-quota
+  namespace: testpool
+spec:
+  hard:
+    pods: "6"                      # 2 active + 2 warm/refill + bootstrap/churn headroom
+    persistentvolumeclaims: "8"
+    requests.storage: 400Gi        # thin-provisioned clones; array UNMAP does not reclaim (estate memory)
+    requests.memory: 24Gi          # requests are parked-priced; limits are flavor-sized
+    requests.cpu: "12"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: testpool-limits
+  namespace: testpool
+spec:
+  limits:
+    - type: Container
+      max:
+        memory: 24Gi
+        cpu: "6"
+        ephemeral-storage: 8Gi
+      default:
+        memory: 1Gi
+        cpu: "1"
+        ephemeral-storage: 1Gi
+      defaultRequest:
+        memory: 256Mi
+        cpu: 100m
+        ephemeral-storage: 256Mi

@@ -1,0 +1,21 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: testpool
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  # The leasable test-environment pool. dependsOn agent-sandbox: the SandboxTemplate/WarmPool
+  # resources need the extension CRDs Established first. wait:false — the warm pool's members may
+  # legitimately sit non-Ready (e.g. Pending until the golden snapshot is bootstrapped, README
+  # activation order), and this Kustomization must not be held hostage by pool state.
+  dependsOn:
+    - name: agent-sandbox
+  path: ./kubernetes/apps/infrastructure/testpool
+  prune: true
+  wait: false
