@@ -85,6 +85,12 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///run/dsock/docker.sock
+            # In-env location marker for workload-class guards (agentforge AGENTS.md routing):
+            # wrapper scripts / compose interpolations read it to prove they run inside a
+            # leased env rather than on a dev-worker. Guards must not REQUIRE it before the
+            # warm member has cycled onto this template revision.
+            - name: TESTPOOL_ENV
+              value: "1"
             # Per-lease browser cache (per-repo playwright versions install here on first use,
             # ~150MB/version). Cross-lease warm browsers need the /data single-golden-volume
             # layout (caches subpath shared to control) — a future restructure; the control IMAGE
