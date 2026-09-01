@@ -82,6 +82,10 @@
   ansible.builtin.import_tasks: k8s_tools.yml
   when: dev_worker_install_k8s_tools | bool
 
+- name: tep — test-environment pool CLI + namespace-scoped kubeconfig
+  ansible.builtin.import_tasks: tep.yml
+  when: dev_worker_tep_enabled | bool
+
 - name: GitHub TUI tooling (gh-dash, gh-actions-fleet)
   ansible.builtin.import_tasks: tooling_extras.yml
 

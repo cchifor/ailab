@@ -1,0 +1,242 @@
+#!/bin/sh
+# tep — test-environment pool CLI (POSIX sh + kubectl).
+# Design: agentforge plans/2026-09-01-test-env-pool-k8s-plan.md; spike-proven mechanics in
+# ailab kubernetes/infra/env-pool/SPIKE-REPORT.md. The kubeconfig (~/.tep/kubeconfig, distributed
+# by ansible roles/dev_worker) is namespace-scoped; the namespace is the isolation unit.
+#
+#   tep lease   [-f flavor] [-t ttl_min] [name]       claim a warm env (queues if pool drained)
+#   tep sync    [-n name] [dir]                       ship the worktree (default: cwd) to /work/src
+#   tep run     [-n name] [-t timeout_min] -- cmd...  run under the in-pod supervisor; streams; survives disconnect
+#   tep logs    [-n name] [run_id] [-f]               (re)attach to a run's log
+#   tep status  [-n name]                             lease + runs overview
+#   tep cancel  [-n name] <run_id>                    signal a run
+#   tep fetch   [-n name] <remote> [local]            copy artifacts out (tar-over-exec)
+#   tep extend  [-n name] -t min                      push shutdownTime out (capped)
+#   tep release [-n name]                             delete the claim (env + volume destroyed)
+#   tep list                                          claims + pool state
+# -n defaults to the current lease (~/.tep/current, set by the last successful lease).
+#
+# Guardrail posture (plan, "Trust model"): single-operator; ownership checks are accident
+# prevention, not security. Lease names embed the worker hostname; cross-owner ops warn.
+set -eu
+
+TEP_DIR="${TEP_DIR:-$HOME/.tep}"
+KCFG="${TEP_KUBECONFIG:-$TEP_DIR/kubeconfig}"
+POOL="${TEP_POOL:-env-std-pool}"
+DEFAULT_TTL_MIN="${TEP_DEFAULT_TTL_MIN:-120}"
+MAX_TTL_MIN="${TEP_MAX_TTL_MIN:-480}"
+BIND_TIMEOUT_S="${TEP_BIND_TIMEOUT_S:-20}"      # lost-race window: unbound after this => yield+retry
+QUEUE_TIMEOUT_S="${TEP_QUEUE_TIMEOUT_S:-900}"   # max time to wait for warm capacity
+RUN_GRACE_MIN=10                                 # extend-on-submit slack beyond the run timeout
+
+K() { kubectl --kubeconfig="$KCFG" "$@"; }
+die() { echo "tep: $*" >&2; exit 1; }
+now_plus_min() { date -u -d "+$1 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+"$1"M +%Y-%m-%dT%H:%M:%SZ; }
+
+[ -f "$KCFG" ] || die "no kubeconfig at $KCFG (run the dev_worker ansible role, or set TEP_KUBECONFIG)"
+mkdir -p "$TEP_DIR"
+
+cur_name() { # $1 = explicit name or empty -> fall back to the current lease
+  if [ -n "${1:-}" ]; then echo "$1"; return; fi
+  [ -f "$TEP_DIR/current" ] && cat "$TEP_DIR/current" || die "no current lease; pass -n <name> or run: tep lease"
+}
+pod_of() { K get sandboxclaim "$1" -o jsonpath='{.status.sandbox.name}' 2>/dev/null; }
+claim_ready() { [ "$(K get sandboxclaim "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = "True" ]; }
+warn_owner() {
+  o=$(K get sandboxclaim "$1" -o jsonpath='{.metadata.labels.tep\.chifor\.me/owner}' 2>/dev/null || true)
+  [ -n "$o" ] && [ "$o" != "$(hostname)" ] && echo "tep: WARNING lease '$1' is owned by '$o' (you are $(hostname))" >&2 || true
+}
+cexec() { pod=$1; shift; K exec "$pod" -c control -- sh -c "$*"; }
+cexec_i() { pod=$1; shift; K exec -i "$pod" -c control -- sh -c "$*"; }
+
+pool_ready() { K get sandboxwarmpool "$POOL" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0; }
+
+cmd_lease() {
+  TTL=$DEFAULT_TTL_MIN; NAME=""
+  while [ $# -gt 0 ]; do case "$1" in
+    -t) TTL=$2; shift 2 ;;
+    -f) POOL="env-$2-pool"; shift 2 ;;
+    *) NAME=$1; shift ;;
+  esac; done
+  [ "$TTL" -le "$MAX_TTL_MIN" ] || die "ttl ${TTL}m exceeds cap ${MAX_TTL_MIN}m"
+  [ -n "$NAME" ] || NAME="tep-$(hostname | tr 'A-Z_.' 'a-z--')-$(date +%s | tail -c 6)"
+
+  # Gate on warm capacity: v1.0 cold-creates on a drained pool, and with one env per node a cold
+  # claim fights the refill for capacity — queue client-side instead (plan, lease semantics).
+  waited=0
+  while [ "$(pool_ready)" = "0" ] || [ -z "$(pool_ready)" ]; do
+    [ $waited -ge "$QUEUE_TIMEOUT_S" ] && die "pool '$POOL' drained for ${QUEUE_TIMEOUT_S}s — try later or check: tep list"
+    [ $waited -eq 0 ] && echo "tep: pool '$POOL' drained; queued (refill is ~2-3 min)..."
+    sleep 10; waited=$((waited+10))
+  done
+
+  attempt=0
+  while :; do
+    attempt=$((attempt+1)); [ $attempt -le 3 ] || die "lost the adoption race 3x; check: tep list"
+    EXP=$(now_plus_min "$TTL")
+    T0=$(date +%s)
+    printf '{"apiVersion":"extensions.agents.x-k8s.io/v1beta1","kind":"SandboxClaim","metadata":{"name":"%s","labels":{"tep.chifor.me/owner":"%s"}},"spec":{"warmPoolRef":{"name":"%s"},"lifecycle":{"shutdownTime":"%s","shutdownPolicy":"Delete"}}}' \
+      "$NAME" "$(hostname | tr 'A-Z_.' 'a-z--')" "$POOL" "$EXP" | K apply -f - >/dev/null
+    i=0
+    until [ -n "$(pod_of "$NAME")" ]; do
+      i=$((i+1))
+      if [ $i -gt $((BIND_TIMEOUT_S*5)) ]; then
+        # Lost-race protocol: never fight the refill with a cold-create — yield and retry.
+        echo "tep: unbound after ${BIND_TIMEOUT_S}s (lost the race?) — yielding (attempt $attempt)" >&2
+        K delete sandboxclaim "$NAME" --wait=true >/dev/null 2>&1 || true
+        sleep $((attempt*7))
+        continue 2
+      fi
+      sleep 0.2
+    done
+    i=0
+    until claim_ready "$NAME"; do
+      i=$((i+1)); [ $i -gt 1500 ] && die "claim bound but not Ready after 300s — inspect: tep status $NAME"
+      sleep 0.2
+    done
+    POD=$(pod_of "$NAME")
+    # Handoff revalidation: readiness is point-in-time; prove dockerd answers before handing out.
+    if ! cexec "$POD" 'docker version >/dev/null 2>&1'; then
+      echo "tep: handoff revalidation failed — releasing + retrying" >&2
+      K delete sandboxclaim "$NAME" --wait=false >/dev/null 2>&1 || true
+      sleep 3; continue
+    fi
+    T1=$(date +%s)
+    echo "$NAME" > "$TEP_DIR/current"
+    echo "LEASED $NAME pod=$POD in $((T1-T0))s expires=$EXP"
+    return 0
+  done
+}
+
+cmd_sync() { # tep sync [-n name] [dir]
+  if [ "${1:-}" = "-n" ]; then NAME=$(cur_name "$2"); shift 2; else NAME=$(cur_name ""); fi
+  SRC="${1:-.}"
+  warn_owner "$NAME"; POD=$(pod_of "$NAME"); [ -n "$POD" ] || die "no pod for $NAME"
+  T0=$(date +%s)
+  # Contract (plan): includes untracked, EXCLUDES .git (worktree pointer files dangle in-env);
+  # rsync when both ends have it (delta), tar otherwise (v1 control image has no rsync).
+  if command -v rsync >/dev/null 2>&1 && cexec "$POD" 'command -v rsync >/dev/null 2>&1' 2>/dev/null; then
+    RSH_STATE="$TEP_DIR/.rsh-pod"; echo "$POD" > "$RSH_STATE"
+    rsync -a --delete --exclude=.git --blocking-io \
+      --rsh="tep __rsh" "$SRC"/ "env:/work/src/"
+  else
+    tar czf - --exclude=.git -C "$SRC" . | cexec_i "$POD" 'rm -rf /work/src && mkdir -p /work/src && tar xzf - -C /work/src'
+  fi
+  T1=$(date +%s)
+  echo "SYNCED $(du -sk "$SRC" 2>/dev/null | cut -f1)KB in $((T1-T0))s -> $POD:/work/src"
+}
+
+cmd___rsh() { # internal: rsync remote-shell shim (rsync calls: tep __rsh env rsync --server ...)
+  POD=$(cat "$TEP_DIR/.rsh-pod"); shift # drop hostname 'env'
+  exec kubectl --kubeconfig="$KCFG" exec -i "$POD" -c control -- "$@"
+}
+
+cmd_run() { # tep run [-n name] [-t min] -- cmd...
+  if [ "${1:-}" = "-n" ]; then NAME=$(cur_name "$2"); shift 2; else NAME=$(cur_name ""); fi
+  TIMEOUT_MIN=60
+  while [ $# -gt 0 ]; do case "$1" in
+    -t) TIMEOUT_MIN=$2; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac; done
+  [ $# -gt 0 ] || die "usage: tep run [-n name] [-t min] -- <command>"
+  warn_owner "$NAME"; POD=$(pod_of "$NAME"); [ -n "$POD" ] || die "no pod for $NAME"
+
+  # Extend-on-submit (plan, liveness): the lease must outlive the declared budget BEFORE launch.
+  NEED=$((TIMEOUT_MIN + RUN_GRACE_MIN)); [ $NEED -gt $MAX_TTL_MIN ] && NEED=$MAX_TTL_MIN
+  NEWEXP=$(now_plus_min "$NEED")
+  CUREXP=$(K get sandboxclaim "$NAME" -o jsonpath='{.spec.lifecycle.shutdownTime}')
+  # ISO-8601 UTC timestamps compare lexicographically; POSIX test has no > string operator.
+  if [ "$(printf '%s\n%s\n' "$NEWEXP" "$CUREXP" | sort | tail -1)" = "$NEWEXP" ] && [ "$NEWEXP" != "$CUREXP" ]; then
+    K patch sandboxclaim "$NAME" --type=merge -p "{\"spec\":{\"lifecycle\":{\"shutdownTime\":\"$NEWEXP\"}}}" >/dev/null
+    echo "tep: lease extended to $NEWEXP (run budget ${TIMEOUT_MIN}m + ${RUN_GRACE_MIN}m grace)"
+  fi
+
+  RID="r$(date +%s | tail -c 7)"
+  RD="/work/runs/$RID"
+  # Supervisor contract (plan): detach; file-backed log + atomic exit; timeout enforced in-pod.
+  # The command travels on STDIN (no shell re-quoting hazards). The remote script uses ';' steps
+  # so ONLY the nohup backgrounds — an && chain before '&' backgrounds the whole chain and races
+  # the pid write past mkdir (observed live).
+  printf '%s\n' "$*" | cexec_i "$POD" "mkdir -p $RD; cat > $RD/cmd; nohup sh -c 'cd /work/src 2>/dev/null || cd /work; timeout $((TIMEOUT_MIN*60)) sh $RD/cmd >> $RD/log 2>&1; echo \$? > $RD/exit' >/dev/null 2>&1 & echo \$! > $RD/pid"
+  echo "RUN $RID started in $POD (budget ${TIMEOUT_MIN}m) — streaming (re-attach: tep logs -n $NAME $RID -f)"
+  cmd_logs -n "$NAME" "$RID" -f
+}
+
+cmd_logs() { # tep logs [-n name] [run_id] [-f]
+  if [ "${1:-}" = "-n" ]; then NAME=$(cur_name "$2"); shift 2; else NAME=$(cur_name ""); fi
+  RID="${1:-}"; [ "$RID" = "-f" ] && RID=""; [ -n "$RID" ] || RID=$(cexec "$(pod_of "$NAME")" 'ls -1t /work/runs 2>/dev/null | head -1')
+  [ -n "$RID" ] || die "no runs in $NAME"
+  FOLLOW=""; [ "${2:-}" = "-f" ] && FOLLOW=1
+  POD=$(pod_of "$NAME")
+  if [ -n "$FOLLOW" ]; then
+    # tail until the exit file appears; each iteration is a fresh short exec, so the follow
+    # SURVIVES exec-stream drops without losing output (file-backed, line-offset accounting).
+    LINE=0
+    while :; do
+      CHUNK=$(cexec "$POD" "tail -n +$((LINE+1)) /work/runs/$RID/log 2>/dev/null" || true)
+      if [ -n "$CHUNK" ]; then
+        printf '%s\n' "$CHUNK"
+        LINE=$((LINE + $(printf '%s\n' "$CHUNK" | wc -l)))
+      fi
+      if EX=$(cexec "$POD" "cat /work/runs/$RID/exit 2>/dev/null" 2>/dev/null) && [ -n "$EX" ]; then
+        CHUNK=$(cexec "$POD" "tail -n +$((LINE+1)) /work/runs/$RID/log 2>/dev/null" || true)
+        [ -n "$CHUNK" ] && printf '%s\n' "$CHUNK"
+        echo "RUN $RID exit=$EX"; return "$EX"
+      fi
+      sleep 2
+    done
+  else
+    cexec "$POD" "cat /work/runs/$RID/log 2>/dev/null; test -f /work/runs/$RID/exit && echo \"RUN $RID exit=\$(cat /work/runs/$RID/exit)\" || echo \"RUN $RID running\""
+  fi
+}
+
+cmd_status() { # tep status [-n name]
+  if [ "${1:-}" = "-n" ]; then NAME=$(cur_name "$2"); else NAME=$(cur_name ""); fi
+  K get sandboxclaim "$NAME" -o custom-columns='CLAIM:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,SANDBOX:.status.sandbox.name,EXPIRES:.spec.lifecycle.shutdownTime'
+  POD=$(pod_of "$NAME") && [ -n "$POD" ] && cexec "$POD" 'for d in /work/runs/*/; do [ -d "$d" ] || continue; r=$(basename "$d"); if [ -f "$d/exit" ]; then echo "$r exit=$(cat "$d/exit")"; else echo "$r running (pid $(cat "$d/pid" 2>/dev/null))"; fi; done 2>/dev/null; echo "docker: $(docker info --format "{{.Driver}} imgs={{.Images}} ctrs={{.Containers}}" 2>/dev/null)"' || true
+}
+
+cmd_cancel() { # tep cancel [-n name] <run_id>
+  if [ "${1:-}" = "-n" ]; then NAME=$(cur_name "$2"); shift 2; else NAME=$(cur_name ""); fi
+  RID="${1:?usage: tep cancel [-n name] <run_id>}"
+  warn_owner "$NAME"
+  cexec "$(pod_of "$NAME")" "PID=\$(cat /work/runs/$RID/pid 2>/dev/null) && kill -TERM -- -\$PID 2>/dev/null || kill \$PID 2>/dev/null; echo cancelled"
+}
+
+cmd_fetch() { # tep fetch [-n name] <remote-path> [local-dir]
+  if [ "${1:-}" = "-n" ]; then NAME=$(cur_name "$2"); shift 2; else NAME=$(cur_name ""); fi
+  REMOTE="${1:?usage: tep fetch [-n name] <remote-path> [local-dir]}"; LOCAL="${2:-.}"
+  cexec "$(pod_of "$NAME")" "cd \$(dirname $REMOTE) && tar czf - \$(basename $REMOTE)" | tar xzf - -C "$LOCAL"
+  echo "FETCHED $REMOTE -> $LOCAL"
+}
+
+cmd_extend() { # tep extend [-n name] -t min
+  if [ "${1:-}" = "-n" ]; then NAME=$(cur_name "$2"); shift 2; else NAME=$(cur_name ""); fi
+  MIN=$DEFAULT_TTL_MIN; [ "${1:-}" = "-t" ] && MIN=$2
+  [ "$MIN" -le "$MAX_TTL_MIN" ] || die "cap is ${MAX_TTL_MIN}m"
+  warn_owner "$NAME"
+  NEWEXP=$(now_plus_min "$MIN")
+  K patch sandboxclaim "$NAME" --type=merge -p "{\"spec\":{\"lifecycle\":{\"shutdownTime\":\"$NEWEXP\"}}}" >/dev/null
+  echo "EXTENDED $NAME to $NEWEXP"
+}
+
+cmd_release() { # tep release [-n name]
+  if [ "${1:-}" = "-n" ]; then NAME=$(cur_name "$2"); else NAME=$(cur_name ""); fi
+  warn_owner "$NAME"
+  K delete sandboxclaim "$NAME" --wait=false
+  [ -f "$TEP_DIR/current" ] && [ "$(cat "$TEP_DIR/current")" = "$NAME" ] && rm -f "$TEP_DIR/current"
+  echo "RELEASED $NAME (env + volume destroyed; pool refills itself)"
+}
+
+cmd_list() {
+  echo "== pools"; K get sandboxwarmpool -o custom-columns='POOL:.metadata.name,WANT:.spec.replicas,READY:.status.readyReplicas'
+  echo "== claims"; K get sandboxclaims -o custom-columns='CLAIM:.metadata.name,OWNER:.metadata.labels.tep\.chifor\.me/owner,READY:.status.conditions[?(@.type=="Ready")].status,SANDBOX:.status.sandbox.name,EXPIRES:.spec.lifecycle.shutdownTime' 2>/dev/null || echo "(none)"
+}
+
+CMD="${1:-}"; [ -n "$CMD" ] && shift || die "usage: tep {lease|sync|run|logs|status|cancel|fetch|extend|release|list}"
+case "$CMD" in
+  lease|sync|run|logs|status|cancel|fetch|extend|release|list) "cmd_$CMD" "$@" ;;
+  __rsh) cmd___rsh "$@" ;;
+  *) die "unknown command: $CMD" ;;
+esac

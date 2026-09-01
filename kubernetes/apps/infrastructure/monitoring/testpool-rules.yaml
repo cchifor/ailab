@@ -1,0 +1,76 @@
+# Alerts for the test-environment pool (kubernetes/apps/infrastructure/testpool + the
+# agent-sandbox operator). Deliberately SMALL — alertmanager has no severity routing, every rule
+# pages ntfy — and deliberately kube-state-metrics-only, so the rules cannot go blind if the
+# operator's own /metrics scrape (agent-sandbox/servicemonitor.yaml) breaks. Live-validated
+# expressions (each returned sane values against prometheus-lan on 2026-09-01).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: testpool
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: testpool
+      rules:
+        - alert: TestpoolOperatorDown
+          expr: kube_deployment_status_replicas_available{namespace="agent-sandbox-system",deployment="agent-sandbox-controller"} == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "agent-sandbox controller has no available replicas for 10m"
+            description: >-
+              Nothing reconciles claims/pools: leases hang, TTL expiry stops (envs overstay),
+              warm refills stop. kubectl -n agent-sandbox-system describe deploy/agent-sandbox-controller.
+
+        - alert: TestpoolNoWarmCapacity
+          # No Ready sandbox-owned pod in testpool for 30m — the warm SLO (0.2-1s leases) is
+          # gone and tep queues. Counts pods created by Sandboxes only (the pre-pull DaemonSet
+          # and one-off pods do not mask a drained pool).
+          expr: >-
+            (count(
+              (kube_pod_status_ready{namespace="testpool",condition="true"} == 1)
+              * on (namespace, pod) group_left ()
+              kube_pod_info{namespace="testpool",created_by_kind="Sandbox"}
+            ) or vector(0)) == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "testpool has had no Ready environment for 30m"
+            description: >-
+              Warm pool drained and not refilling (golden snapshot missing? fill failing under the
+              readiness grace? node down?). tep leases are queueing. Check:
+              kubectl -n testpool get sandboxwarmpools,sandboxes,pvc and the env node.
+
+        - alert: TestpoolPVCStuckPending
+          expr: kube_persistentvolumeclaim_status_phase{namespace="testpool",phase="Pending"} == 1
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "testpool PVC {{ $labels.persistentvolumeclaim }} Pending for 30m"
+            description: >-
+              Snapshot restore/provisioning is stuck (missing golden-vN? Trident/CSI failing?).
+              The 15m pool readiness grace recreates members, so a persistent Pending means every
+              attempt is failing. kubectl -n testpool describe pvc {{ $labels.persistentvolumeclaim }}.
+
+        - alert: TestpoolReleasedPVLeak
+          # The F7 regression detector: with the Delete-reclaim class a Released PV should never
+          # persist; each one is a leaked thin LUN on the QNAP (UNMAP never reclaims).
+          expr: >-
+            (count(
+              kube_persistentvolume_status_phase{phase="Released"} == 1
+              and on (persistentvolume)
+              kube_persistentvolume_claim_ref{claim_namespace=~"testpool.*"}
+            ) or vector(0)) > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Released PV(s) from testpool persisting >1h — thin-LUN leak"
+            description: >-
+              reclaimPolicy regression or a stuck Trident delete. Each leaked PV pins an array LUN.
+              kubectl get pv | grep Released; patch reclaim to Delete or investigate Trident.
