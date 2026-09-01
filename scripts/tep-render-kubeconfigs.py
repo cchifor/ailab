@@ -41,17 +41,19 @@ def main() -> None:
         lines.append(f"  {w}: {token}")
     plaintext = "tep_cluster_ca_b64: " + ca + "\ntep_tokens:\n" + "\n".join(lines) + "\n"
 
-    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, dir=str(OUT.parent), newline="\n") as f:
-        f.write(plaintext)
-        tmp = f.name
-    try:
-        enc = subprocess.run(["sops", "--encrypt", tmp], capture_output=True, text=True)
-        if enc.returncode != 0:
-            sys.exit(f"sops encrypt failed (SOPS_AGE_KEY_FILE set? .sops.yaml rule matches?): {enc.stderr.strip()[:300]}")
-        OUT.write_text(enc.stdout, encoding="utf-8")
-    finally:
-        pathlib.Path(tmp).unlink(missing_ok=True)
-    print(f"wrote {OUT} ({len(WORKERS)} tokens; run `just dev-workers` to distribute)")
+    # Write plaintext to the FINAL path, then encrypt in place: SOPS creation rules match by file
+    # path, so a random temp name matches NO rule ("no matching creation rules found" — learned the
+    # hard way). The brief plaintext-on-disk window is local-only; on any failure the file is removed.
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(plaintext, encoding="utf-8", newline="\n")
+    enc = subprocess.run(["sops", "--encrypt", "--in-place", str(OUT)], capture_output=True, text=True)
+    if enc.returncode != 0:
+        OUT.unlink(missing_ok=True)
+        sys.exit(f"sops encrypt failed (SOPS_AGE_KEY_FILE set? .sops.yaml rule matches?): {enc.stderr.strip()[:300]}")
+    if "tep_tokens" in OUT.read_text(encoding="utf-8") and "ENC[" not in OUT.read_text(encoding="utf-8"):
+        OUT.unlink(missing_ok=True)
+        sys.exit("post-encrypt sanity failed: tokens not encrypted — refusing to keep the file")
+    print(f"wrote {OUT} ({len(WORKERS)} tokens, encrypted; run `just dev-workers` to distribute)")
 
 
 if __name__ == "__main__":

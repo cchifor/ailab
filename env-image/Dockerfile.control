@@ -1,10 +1,15 @@
 # testpool env-control — the toolchain half of the env pod (SandboxTemplate container "control").
-# Base = the Playwright runtime image (Ubuntu jammy + node + browsers + system deps) so PW-class
-# suites run host-side in-env, plus: docker CLI (copied from the pinned cli image — talks to the
-# dind sidecar over the shared socket), uv (python toolchain), rsync (enables tep's delta-sync
-# path), git, netcat (the tcp ready-port), jq. The workload audit's host-side needs: uv+pytest,
-# node/npm (in base), playwright (in base), docker CLI, rsync, tar, git.
-FROM mcr.microsoft.com/playwright:v1.61.1-jammy
+#
+# DELIBERATELY NOT the mcr.microsoft.com/playwright image (~2 GB: all three browser engines baked
+# for ONE playwright version). Repos pin different playwright versions and the npm package must
+# match the browser build — so browsers live in the GOLDEN VOLUME instead
+# (PLAYWRIGHT_BROWSERS_PATH=/data/caches/ms-playwright, set in the SandboxTemplate): version-correct
+# per repo, warm after first use, snapshot-persisted, array-side CoW-shared across leases. This
+# image carries only what is version-STABLE: node, the playwright SYSTEM libraries
+# (install-deps), docker CLI, uv, rsync, git, jq. ~700 MB instead of ~2 GB.
+# The CI-container lane (docker run mcr.microsoft.com/playwright ...) is unaffected — that image
+# stays in hack/golden-images.txt as a docker-cache entry.
+FROM docker.io/library/node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 COPY --from=docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44 \
      /usr/local/bin/docker /usr/local/bin/docker
@@ -13,4 +18,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.15 /uv /uvx /usr/local/bin/
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       rsync git jq netcat-openbsd python3 python3-venv ca-certificates curl \
- && rm -rf /var/lib/apt/lists/*
+ # Playwright SYSTEM deps only (no browsers): version-stable apt libraries for chromium/firefox/
+ # webkit; the browsers themselves install per-repo-version into PLAYWRIGHT_BROWSERS_PATH.
+ && npx -y playwright@1.61.1 install-deps \
+ && rm -rf /var/lib/apt/lists/* /root/.npm

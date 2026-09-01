@@ -29,24 +29,26 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: dind
-          image: docker.io/library/docker:28.3-dind@sha256:a56b3bdde89315ed2cc0e4906e582b5033d93bf20d9cb9510c2cdd4e7f7690b1
+          image: registry.chifor.me/testpool/env-dind:20260901-1f7d6e25@sha256:0480f62bd40ed66e1112621826e7df6274f13b4e26758f76d0778d8c17501802
           securityContext:
             privileged: true
           command: ["sh", "-c"]
           args:
             - |
               set -x
-              apk add --no-cache e2fsprogs >/work/apk.log 2>&1 || { echo APK-FAIL; exit 3; }
+              # e2fsprogs is baked in env-dind (env-image/Dockerfile.dind) — no runtime apk.
               DEV=/dev/dockerblk
               mkdir -p /var/lib/docker
               if ! mount -o defaults,noatime "$DEV" /var/lib/docker 2>/work/mount1.err; then
                 mkfs.ext4 -q -L dockerlib "$DEV"
                 mount -o defaults,noatime "$DEV" /var/lib/docker
               fi
+              # SPIKE-PROVEN flags ONLY: --userland-proxy=false needs br_netfilter, which the kata
+              # guest kernel lacks — it hard-failed dockerd in production (2026-09-01). Do not add
+              # untested flags to this line.
               dockerd-entrypoint.sh dockerd \
                 --host=unix:///run/dsock/docker.sock \
-                --registry-mirror=https://registry.chifor.me \
-                --userland-proxy=false >/work/dockerd.log 2>&1 &
+                --registry-mirror=https://registry.chifor.me >/work/dockerd.log 2>&1 &
               export DOCKER_HOST=unix:///run/dsock/docker.sock
               i=0
               until docker version >/dev/null 2>&1; do
@@ -83,6 +85,12 @@ spec:
           env:
             - name: DOCKER_HOST
               value: unix:///run/dsock/docker.sock
+            # Per-lease browser cache (per-repo playwright versions install here on first use,
+            # ~150MB/version). Cross-lease warm browsers need the /data single-golden-volume
+            # layout (caches subpath shared to control) — a future restructure; the control IMAGE
+            # deliberately carries no browsers (see env-image/Dockerfile.control rationale).
+            - name: PLAYWRIGHT_BROWSERS_PATH
+              value: /work/caches/ms-playwright
           startupProbe:
             tcpSocket: { port: 9099 }
             periodSeconds: 1

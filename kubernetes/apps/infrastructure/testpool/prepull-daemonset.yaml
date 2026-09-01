@@ -27,7 +27,7 @@ spec:
       priorityClassName: system-node-critical
       containers:
         - name: dind-pin
-          image: docker.io/library/docker:28.3-dind@sha256:a56b3bdde89315ed2cc0e4906e582b5033d93bf20d9cb9510c2cdd4e7f7690b1
+          image: registry.chifor.me/testpool/env-dind:20260901-1f7d6e25@sha256:0480f62bd40ed66e1112621826e7df6274f13b4e26758f76d0778d8c17501802
           command: ["sleep", "infinity"]
           resources:
             requests: { cpu: 10m, memory: 16Mi }
