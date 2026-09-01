@@ -41,11 +41,10 @@ resource "proxmox_virtual_environment_vm" "dev_worker" {
     type  = "host" # homogeneous CPUs; no live migration (dev workers are rebuildable)
   }
 
-  # Ballooning: VM floats between floating (uniform idle floor) and dedicated (load ceiling), so idle
-  # dev workers return RAM to the host. The floor is a UNIFORM module scalar (all workers same spec) —
-  # kept low because the heavyweight LLMs on node2/node3 are now idle-unloaded (llama-swap), so
-  # ballooning actually works and inflates a busy worker toward the ceiling. See variables.tf +
-  # docs/runbooks/dev-workers.md.
+  # Ballooning: VM floats between floating (idle floor) and dedicated (load ceiling), so idle
+  # dev workers return RAM to the host. The default floor is a module scalar, kept low because the
+  # heavyweight LLMs on node2/node3 are now idle-unloaded (llama-swap), so ballooning actually works
+  # and inflates a busy worker toward the ceiling. See variables.tf + docs/runbooks/dev-workers.md.
   # Floor and ceiling are the uniform scalars UNLESS this worker carries an override: ai-node1's two
   # workers pin a 12 GiB floor (that node is oversubscribed enough that ballooning never inflates
   # them) and dev-worker-6 runs the 12 GiB-ceiling downsize POC — see the notes on dev_worker_nodes

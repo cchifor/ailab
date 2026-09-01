@@ -101,8 +101,9 @@ variable "dev_worker_memory_mib" {
 }
 variable "dev_worker_memory_floating_mib" {
   description = <<-EOT
-    Uniform balloon FLOOR (MiB) for EVERY dev-worker — a single scalar (mirrors the runners module),
-    NOT a per-node override, so all workers share one spec. Low by design (4 GiB): with the heavyweight
+    Default balloon FLOOR (MiB) — the shared baseline (mirrors the runners module); dw1/dw4
+    override it to 12288 via memory_floating_mib in dev_worker_nodes (node1 mitigation, see the
+    note there). Low by design (4 GiB): with the heavyweight
     LLMs now idle-unloaded via llama-swap, ballooning works, so the floor only has to cover an
     idle/light worker (~2-3 GiB) with margin and the balloon inflates on demand toward
     dev_worker_memory_mib. 4 GiB is also what lets a node hold its on-demand heavyweight (~59/71 GiB)

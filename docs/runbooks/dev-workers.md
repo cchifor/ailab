@@ -16,10 +16,10 @@ per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw4 — node1 
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
-| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
 | dev-worker-2 | ai-node2 | 4202 | 192.168.0.9  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
 | dev-worker-3 | ai-node3 | 4203 | 192.168.0.10 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-4 | ai-node1 | 4204 | 192.168.0.11 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-4 | ai-node1 | 4204 | 192.168.0.11 | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
 | dev-worker-5 | ai-node2 | 4205 | 192.168.0.12 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
 | dev-worker-6 | ai-node3 | 4206 | 192.168.0.13 | 8 vCPU / **12 GiB** (4–12 balloon, downsize POC) / 40+128 GiB |
 
@@ -269,9 +269,9 @@ triggers Claude Code's auto-attach).
 - persistence: start a tmux pane, reboot the VM, confirm tmux-continuum restored the session
 - dashboard layout: `tmux list-windows -t sessions -F '#{window_name}'` must be exactly
   `home system jobs github docker cluster cheats` — see the dashboard/resurrect note below
-- **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The uniform 4 GiB
-  balloon floor guarantees each guest's idle working set; a busy worker inflates toward 16 GiB when
-  the node's LLM is idle-unloaded. If a host shows sustained pressure, the first lever is its
+- **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The 4 GiB
+  balloon floor (12 GiB on dw1/dw4) guarantees each guest's idle working set; a busy worker inflates
+  toward its ceiling (16 GiB; 12 GiB on dw6) when the node's LLM is idle-unloaded. If a host shows sustained pressure, the first lever is its
   heavyweight LLM — confirm it idle-unloaded (or shorten the llama-swap TTL, `docs/runbooks/ai-model-swap.md`)
   — then, only if still pressured, downsize that node's Talos CP VM (`control_planes{}`, rolling reboot
   via `talosctl shutdown` — see `ai-host-setup.md`) rather than starving a dev-worker.
