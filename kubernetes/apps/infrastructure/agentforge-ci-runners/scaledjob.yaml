@@ -152,7 +152,7 @@ spec:
           # ── dind: the PRIVILEGED docker:dind sidecar (image builds / job containers) ──────────────────
           - name: dind
             # PLACEHOLDER digest — pin the real docker:dind image @sha256 (see header) before enabling.
-            image: docker.io/library/docker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+            image: docker.io/library/docker@sha256:3ef33f2e220b79ed3ef3b99d81746f06f306cd6340e2cb7331d17ae996e74cb6
             # Run dockerd, then watch the sentinel and exit when the runner is done (graceful pod teardown
             # WITHOUT a shared PID namespace). Insecure TCP on loopback only (the pod netns is isolated by
             # Kata + the CNP); NO TLS dir so the runner can reach tcp://127.0.0.1:2375.
