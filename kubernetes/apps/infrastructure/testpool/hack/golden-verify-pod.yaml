@@ -44,7 +44,7 @@ spec:
           date +%s.%N > /work/t1-dockerd-ready
           echo "=== storage driver: $(docker info --format '{{.Driver}}')"
           docker info --format '{{.Driver}}' | grep -q overlay2 || { echo "FATAL: not overlay2"; tail -40 /work/dockerd.log; exit 2; }
-          echo SPIKE-1B-DRIVER-OK
+          echo ENV-DIND-OK
           sleep infinity
       resources:
         requests:
@@ -96,4 +96,4 @@ spec:
               name: GOLDEN_NAME
             resources:
               requests:
-                storage: 40Gi
+                storage: 60Gi

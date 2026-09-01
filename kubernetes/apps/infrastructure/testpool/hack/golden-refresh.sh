@@ -18,6 +18,8 @@ HERE=$(dirname "$0")
 NEXT=${1:?usage: golden-refresh.sh golden-vN+1 (e.g. golden-v2)}
 
 echo "== populate pod"
+# INVARIANT: the populate volume size MUST EQUAL the SandboxTemplate VCT size — Trident refuses
+# restore-larger-than-source (observed live: 60Gi claim vs 40Gi golden = ProvisioningFailed loop).
 $KC apply -f "$HERE/golden-populate-pod.yaml"
 i=0
 until $KC logs golden-populate -c dind 2>/dev/null | grep -q ENV-DIND-OK; do
@@ -52,7 +54,12 @@ spec:
     persistentVolumeClaimName: $PVC
 EOF
 until [ "$($KC get volumesnapshot "$NEXT" -o jsonpath='{.status.readyToUse}' 2>/dev/null)" = "true" ]; do sleep 2; done
-echo "$NEXT readyToUse"
+# Assert the restoreSize matches the populate volume — an instantly-"ready" snapshot with the WRONG
+# size means you hit a same-named zombie/stale object (observed live: a deleted-but-finalizer-held
+# 40Gi golden answered readyToUse for a 60Gi rebuild and the pool looped ProvisioningFailed).
+RS=$($KC get volumesnapshot "$NEXT" -o jsonpath='{.status.restoreSize}')
+grep -q "storage: $RS" "$HERE/golden-populate-pod.yaml" || { echo "FATAL: $NEXT restoreSize=$RS does not match golden-populate-pod.yaml — stale/zombie snapshot?"; exit 4; }
+echo "$NEXT readyToUse (restoreSize $RS)"
 
 echo "== verify (scratch restore)"
 sed "s/GOLDEN_NAME/$NEXT/" "$HERE/golden-verify-pod.yaml" | $KC apply -f -
@@ -74,6 +81,11 @@ DONE. To ROLL OUT $NEXT:
   1. Edit sandboxtemplate-std.yaml: dataSource.name -> $NEXT   (git commit + PR + merge; Flux applies)
   2. Bounce the warm pool so members refill from $NEXT:
        kubectl --context admin@ai -n $NS delete sandbox -l agents.x-k8s.io/warm-pool-sandbox
-  3. Keep the previous golden until no PVC references it, then:
+  3. Keep the previous golden until no PVC references it, then delete it. CAUTION: a
+     VolumeSnapshot referenced by ANY PVC (including a Pending warm-pool member's!) holds the
+     as-source-protection finalizer — deletion hangs as a zombie until the referencing PVCs are
+     gone, and a same-named recreate silently no-ops onto the dying object. If the pool pins the
+     old golden: scale the SandboxWarmPool to 0, drain members, wait the snapshot fully gone,
+     THEN recreate/rename (observed live 2026-09-01):
        kubectl --context admin@ai -n $NS delete volumesnapshot <old>
 EOF
