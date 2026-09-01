@@ -302,6 +302,43 @@ panels += [
        "Bps", legends=["{{instance}} rx", "{{instance}} tx"]),
 ]
 
+# ───────────────────────── Test Env Pool ─────────────────────────
+# The leasable test-environment pool (kubernetes/apps/infrastructure/testpool + the env-pool Talos
+# worker). Sources: kube-state-metrics (env pods are created_by_kind="Sandbox"; the pre-pull
+# DaemonSet is deliberately excluded by that filter), node_exporter on the env node(s), and
+# kubelet volume stats. cAdvisor is BLIND to kata pods on this estate — node-level panels instead.
+ENVNODE = 'instance=~"192.168.0.37:9100"'   # env-pool Talos worker node_exporter (extend when env-node-2 lands)
+TP = 'namespace="testpool"'
+TPPOD = f'kube_pod_info{{{TP},created_by_kind="Sandbox"}}'
+panels.append(row("Test Env Pool (leasable Kata DinD environments — testpool)", 124))
+panels += [
+    stat("Envs Ready", 0, 125, 4, 4,
+         f'(count((kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}) or vector(0))',
+         steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
+    stat("Envs Total (warm + leased)", 4, 125, 4, 4, f'(count({TPPOD}) or vector(0))'),
+    stat("Env Volumes (PVCs)", 8, 125, 4, 4, f'(count(kube_persistentvolumeclaim_info{{{TP}}}) or vector(0))'),
+    stat("Operator Up", 12, 125, 4, 4,
+         'kube_deployment_status_replicas_available{namespace="agent-sandbox-system",deployment="agent-sandbox-controller"}',
+         steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
+    stat("Env Node CPU Used", 16, 125, 4, 4,
+         f'100 * (1 - avg(rate(node_cpu_seconds_total{{{ENVNODE},mode="idle"}}[5m])))',
+         unit="percent", decimals=1, steps=PCT),
+    stat("Env Node Memory Used", 20, 125, 4, 4,
+         f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{ENVNODE}}}) / sum(node_memory_MemTotal_bytes{{{ENVNODE}}}))',
+         unit="percent", decimals=1, steps=PCT),
+    ts("Environments over Time (Ready / total)", 0, 129, 8, 7,
+       [f'(count((kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}) or vector(0))',
+        f'(count({TPPOD}) or vector(0))'],
+       "short", legends=["ready", "total"], decimals=0),
+    ts("Env Node CPU / Memory %", 8, 129, 8, 7,
+       [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{ENVNODE},mode="idle"}}[5m])))',
+        f'100 * (1 - node_memory_MemAvailable_bytes{{{ENVNODE}}} / node_memory_MemTotal_bytes{{{ENVNODE}}})'],
+       "percent", legends=["{{instance}} cpu", "{{instance}} mem"], maxv=100),
+    ts("Env Volume Usage", 16, 129, 8, 7,
+       [f'kubelet_volume_stats_used_bytes{{{TP}}}'],
+       "bytes", legends=["{{persistentvolumeclaim}}"]),
+]
+
 dashboard = {
     "title": "AI Lab Fleet",
     "uid": "ailab-reporting",

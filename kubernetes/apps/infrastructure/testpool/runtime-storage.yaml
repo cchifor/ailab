@@ -1,0 +1,38 @@
+# RuntimeClass kata-env — the pool's canonical runtime (per-provider overlays swap this name:
+# kata-vm-isolation on AKS, a kata-deploy class on EKS, runc-env on GKE). Scheduling pins every
+# kata-env pod to the env pool BY CONSTRUCTION: nodeSelector ailab.io/env-pool + only the
+# dedicated=env toleration — such pods are unschedulable on AgentForge's agent nodes (whose
+# dedicated=agent taint they do not tolerate) or anywhere else.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-env
+handler: kata # same handler as the agent pool's RuntimeClass; the env node runs the identical extension
+overhead:
+  podFixed:
+    cpu: 250m
+    memory: 160Mi # upstream kata-deploy figure; understates a big-maxmem QEMU (~282Mi measured) — slack absorbed by node sizing
+scheduling:
+  nodeSelector:
+    ailab.io/env-pool: "true"
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: env
+      effect: NoSchedule
+---
+# Pool-owned StorageClass — spike finding F7: the shared qnap-iscsi class is reclaimPolicy Retain,
+# which leaks a Released PV + thin LUN per ephemeral env volume. Identical driver/parameters,
+# reclaimPolicy Delete (verified: lease teardown deletes the LUN array-side), WaitForFirstConsumer
+# per the ephemeral-volume guidance.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: testpool-iscsi
+provisioner: csi.trident.qnap.io
+parameters:
+  fsType: ext4
+  selector: performance=performance1
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true

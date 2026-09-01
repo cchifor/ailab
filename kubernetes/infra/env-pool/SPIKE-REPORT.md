@@ -118,13 +118,16 @@ served the same file** — the worker → control → dind → container same-pa
 bind-mount fidelity proof — → `release` (claim deleted, sandbox GC'd, pool
 refilled). Node total with a warm env + churn running: **~1.1 GiB / 7%**.
 
-## Spike 3 — clone-churn soak ▶ running
+## Spike 3 — clone-churn soak ✅ (completed same day)
 
 50 cycles of ephemeral PVC-from-snapshot → runc-pod attach → delete on the
-Delete-class SC (`spike/churn_soak.py`), running detached (~1.5–3 min/cycle,
-dominated by the same scheduler-retry quanta). Results (failure counts, leftover
-PVs/LUNs, cycle p50/p95) land in the operator's scratchpad `churn_soak.out`;
-orphan verdict to be appended here before production rollout.
+Delete-class SC (`spike/churn_soak.py`): **50/50 OK, zero pod failures, zero
+timeouts, zero leftover PVs/PVCs** — the Velero-style orphan-LUN failure mode
+did not manifest on the lease path. Cycle p50 **78.8 s** / p95 **85.8 s** / max
+140.8 s (dominated by scheduler-retry quanta + attach, consistent with the
+per-stage decomposition). Residual for production: the periodic orphan sweep
+still ships (array-side audit, dry-run default) — 50 clean cycles is evidence,
+not proof forever.
 
 ## Next (per the plan)
 

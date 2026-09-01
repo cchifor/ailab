@@ -1,0 +1,50 @@
+# Pins the env images on every env-pool node (sleep-DaemonSet pattern): removes the multi-minute
+# stage-3 image pull from cold/refill paths, makes the images kubelet-GC-proof (referenced by a
+# running container), and self-heals after a node rebuild. Runs runc (no RuntimeClass — this must
+# never consume kata resources) and tolerates only the env taint.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: env-image-prepull
+  namespace: testpool
+spec:
+  selector:
+    matchLabels:
+      app: env-image-prepull
+  template:
+    metadata:
+      labels:
+        app: env-image-prepull
+    spec:
+      nodeSelector:
+        ailab.io/env-pool: "true"
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: env
+          effect: NoSchedule
+      automountServiceAccountToken: false
+      priorityClassName: system-node-critical
+      containers:
+        - name: dind-pin
+          image: docker.io/library/docker:28.3-dind@sha256:a56b3bdde89315ed2cc0e4906e582b5033d93bf20d9cb9510c2cdd4e7f7690b1
+          command: ["sleep", "infinity"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+          securityContext:
+            runAsUser: 65534
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+        - name: cli-pin
+          image: docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+          command: ["sleep", "infinity"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+          securityContext:
+            runAsUser: 65534
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

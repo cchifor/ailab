@@ -1,0 +1,11 @@
+# The leasable test-environment pool (testpool) — production tree.
+# hack/ is deliberately NOT listed (operator-run scripts + pod manifests, never Flux-applied).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - runtime-storage.yaml
+  - networkpolicy.yaml
+  - sandboxtemplate-std.yaml
+  - prepull-daemonset.yaml
+  - tep-access.yaml

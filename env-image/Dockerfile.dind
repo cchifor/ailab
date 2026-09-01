@@ -1,0 +1,6 @@
+# testpool env-dind — the DinD half of the env pod (SandboxTemplate container "dind").
+# Upstream docker:dind + the guest-side storage tooling baked (kills the runtime `apk add`
+# observed at ~3 s/lease in the spikes). Everything else about the dind container (block mount,
+# iptables-legacy entrypoint wrapper, overlay2 assertion) stays in the SandboxTemplate args.
+FROM docker.io/library/docker:28.3-dind@sha256:a56b3bdde89315ed2cc0e4906e582b5033d93bf20d9cb9510c2cdd4e7f7690b1
+RUN apk add --no-cache e2fsprogs

@@ -1,0 +1,134 @@
+# env-std — the std flavor (L/PW/parallel-M class; 16 Gi limit). Two-container shape and every
+# entrypoint quirk below is spike-proven (kubernetes/infra/env-pool/SPIKE-REPORT.md, F1-F7):
+#   - /var/lib/docker MUST be a Block-mode PVC (Filesystem mode rides virtio-fs -> vfs fallback)
+#   - try-mount-else-mkfs (busybox blkid exits 0 on blank devices)
+#   - keep dockerd-entrypoint.sh (iptables-LEGACY selection; kata guest kernel has no nf_tables),
+#     with an explicit unix-only --host (no tcp bind, no 15s TLS-warning slowdown)
+#   - entrypoint asserts overlay2 and refuses vfs
+#   - ALL exec traffic targets the control container (dockerd's cgroup-v2 subtree control makes
+#     the dind container un-exec-able); readiness = control's tcp ready-port, no exec probes
+# v1 images are upstream docker:28.3 digest-pinned; the full toolchain image (uv/node/Playwright/
+# rsync/tep-supervisor baked, no runtime apk) replaces them in the next iteration — see README.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: env-std
+  namespace: testpool
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: env-std
+        testpool.chifor.me/flavor: std
+    spec:
+      runtimeClassName: kata-env
+      automountServiceAccountToken: false
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "9.9.9.9"]
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: dind
+          image: docker.io/library/docker:28.3-dind@sha256:a56b3bdde89315ed2cc0e4906e582b5033d93bf20d9cb9510c2cdd4e7f7690b1
+          securityContext:
+            privileged: true
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -x
+              apk add --no-cache e2fsprogs >/work/apk.log 2>&1 || { echo APK-FAIL; exit 3; }
+              DEV=/dev/dockerblk
+              mkdir -p /var/lib/docker
+              if ! mount -o defaults,noatime "$DEV" /var/lib/docker 2>/work/mount1.err; then
+                mkfs.ext4 -q -L dockerlib "$DEV"
+                mount -o defaults,noatime "$DEV" /var/lib/docker
+              fi
+              dockerd-entrypoint.sh dockerd \
+                --host=unix:///run/dsock/docker.sock \
+                --registry-mirror=https://registry.chifor.me \
+                --userland-proxy=false >/work/dockerd.log 2>&1 &
+              export DOCKER_HOST=unix:///run/dsock/docker.sock
+              i=0
+              until docker version >/dev/null 2>&1; do
+                i=$((i+1)); [ $i -gt 1800 ] && echo "DOCKERD NEVER READY" && tail -40 /work/dockerd.log && exit 1
+                sleep 0.2
+              done
+              docker info --format '{{.Driver}}' | grep -q overlay2 || { echo "FATAL: storage driver is not overlay2"; tail -40 /work/dockerd.log; exit 2; }
+              echo ENV-DIND-OK
+              sleep infinity
+          resources:
+            requests: { cpu: "1", memory: 2Gi }     # parked-priced: scheduling by requests, capacity by limits
+            limits: { cpu: "5", memory: 12Gi }
+          volumeDevices:
+            - name: dockerlib
+              devicePath: /dev/dockerblk
+          volumeMounts:
+            - { name: shm, mountPath: /dev/shm }
+            - { name: dsock, mountPath: /run/dsock }
+            - { name: work, mountPath: /work }
+        - name: control
+          image: docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+          command: ["sh", "-c"]
+          args:
+            - |
+              i=0
+              until docker version >/dev/null 2>&1; do
+                i=$((i+1)); [ $i -gt 3600 ] && echo CONTROL-GAVE-UP && exit 1
+                sleep 0.2
+              done
+              mkdir -p /work/runs /work/src
+              ( while true; do nc -l -p 9099 -s 0.0.0.0 </dev/null >/dev/null 2>&1 || sleep 0.2; done ) &
+              echo ENV-CONTROL-READY
+              sleep infinity
+          env:
+            - name: DOCKER_HOST
+              value: unix:///run/dsock/docker.sock
+          startupProbe:
+            tcpSocket: { port: 9099 }
+            periodSeconds: 1
+            failureThreshold: 600
+          readinessProbe:
+            tcpSocket: { port: 9099 }
+            periodSeconds: 2
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "2", memory: 1Gi }
+          volumeMounts:
+            - { name: dsock, mountPath: /run/dsock }
+            - { name: work, mountPath: /work }
+      volumes:
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 1Gi } # Chromium needs >=1g shm; charged to the pod limit
+        - name: dsock
+          emptyDir: {}
+        - name: work
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: dockerlib
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        volumeMode: Block
+        storageClassName: testpool-iscsi
+        # Publication protocol: golden snapshots are immutable golden-vN; THIS name is the pointer
+        # and bumping it (git change) is the rollout. hack/golden-refresh.sh builds vN+1.
+        dataSource:
+          apiGroup: snapshot.storage.k8s.io
+          kind: VolumeSnapshot
+          name: golden-v1
+        resources:
+          requests:
+            storage: 60Gi
+---
+# Warm pool: 1 member. A parked env costs ~100 Mi working set (spike-measured), and adoption is
+# 0.2-1 s; the cold chain (~90-150 s) is paid here, off the lease path. Until golden-v1 exists
+# (bootstrap runbook in README) members cycle Pending harmlessly under the 15m readiness grace.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: env-std-pool
+  namespace: testpool
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: env-std

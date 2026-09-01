@@ -1,0 +1,23 @@
+# kubernetes-sigs/agent-sandbox, PINNED at v1.0.0 (vendored release manifest, sha-identical to
+# https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.0/sandbox-with-extensions.yaml).
+# Upgrade procedure: v1beta1 API with a strict version-march — never skip minors past a storage-
+# version migration; vendor the new file + read the release notes BEFORE bumping (test-env-pool plan,
+# "Risks"). The operator was first hand-applied during spike 2 (2026-09-01); Flux SSA adopts it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - agent-sandbox-v1.0.0.yaml
+  - servicemonitor.yaml
+patches:
+  # Raise the warm-pool readiness grace period above the measured env fill time (~86 s) and the
+  # golden-bootstrap window: members not Ready within this window are killed and recreated (upstream
+  # default 5m). 15m also keeps the pool self-healing while a golden snapshot is still being
+  # bootstrapped (PVCs Pending on a missing snapshot are recreated, not wedged).
+  - target:
+      kind: Deployment
+      name: agent-sandbox-controller
+      namespace: agent-sandbox-system
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --sandbox-warm-pool-readiness-grace-period=15m

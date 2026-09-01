@@ -1,0 +1,9 @@
+# Golden image set — pre-pulled into every golden snapshot (one image ref per line, # = comment).
+# Keep this to the RECURRING set; one-off images pull via the Zot mirror / direct egress at lease
+# time. Every line should be digest-pinnable at refresh time; the refresh script records the
+# resolved digests into the snapshot annotation trail.
+postgres:16-alpine
+gitea/gitea:1.26-rootless
+node:22-slim
+python:3.12-slim
+mcr.microsoft.com/playwright:v1.61.1-jammy

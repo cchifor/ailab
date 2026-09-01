@@ -1,0 +1,35 @@
+# Build + push the testpool env images (env-image/Dockerfile.{dind,control}).
+# Single job, fail-closed, no aggregator (the join(needs.*) empty-string trap). Runs on the
+# host-mode pool (plain docker CLI + REGISTRY_* org robot secrets, same as agentforge images.yml).
+# Prints pushed digests; SWITCHING the SandboxTemplate/pre-pull DaemonSet to these images is a
+# deliberate follow-up PR that pins the printed digests (never :latest in manifests).
+name: env-image
+on:
+  push:
+    branches: [main]
+    paths:
+      - "env-image/**"
+      - ".gitea/workflows/env-image.yaml"
+
+jobs:
+  build-push:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Registry login
+        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login registry.chifor.me -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+      - name: Build + push
+        run: |
+          set -eu
+          TAG="$(date +%Y%m%d)-$(echo "${{ github.sha }}" | cut -c1-8)"
+          for v in dind control; do
+            IMG="registry.chifor.me/testpool/env-$v"
+            docker build -f "env-image/Dockerfile.$v" -t "$IMG:$TAG" env-image
+            docker push "$IMG:$TAG"
+            DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG:$TAG")
+            echo "PUSHED $DIGEST"
+          done
+      - name: Logout
+        if: always()
+        run: docker logout registry.chifor.me
