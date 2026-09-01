@@ -37,8 +37,8 @@ spec:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
-        - name: cli-pin
-          image: docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+        - name: control-pin
+          image: registry.chifor.me/testpool/env-control:20260901-da642abc@sha256:36d8ea2dee1523c84d924e0b41cdcaff2343dcd555866414411570f6e1f4f472
           command: ["sleep", "infinity"]
           resources:
             requests: { cpu: 10m, memory: 16Mi }

@@ -7,8 +7,11 @@
 #   - entrypoint asserts overlay2 and refuses vfs
 #   - ALL exec traffic targets the control container (dockerd's cgroup-v2 subtree control makes
 #     the dind container un-exec-able); readiness = control's tcp ready-port, no exec probes
-# v1 images are upstream docker:28.3 digest-pinned; the full toolchain image (uv/node/Playwright/
-# rsync/tep-supervisor baked, no runtime apk) replaces them in the next iteration — see README.
+# Both images are estate-built (env-image/, rebuilt by CI on main): env-dind = docker:28.3-dind
+# + e2fsprogs; env-control = the lease toolchain (node 22, uv, docker CLI, rsync/git/jq/nc —
+# deliberately NO browsers, see the PLAYWRIGHT_BROWSERS_PATH note below). Validated before this
+# pin: tool versions + the busybox-style `nc -l -p` ready-port line work under its Debian
+# netcat-openbsd (patchlevel 1.219-1 accepts -p/-s with -l).
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
@@ -69,7 +72,7 @@ spec:
             - { name: dsock, mountPath: /run/dsock }
             - { name: work, mountPath: /work }
         - name: control
-          image: docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+          image: registry.chifor.me/testpool/env-control:20260901-da642abc@sha256:36d8ea2dee1523c84d924e0b41cdcaff2343dcd555866414411570f6e1f4f472
           command: ["sh", "-c"]
           args:
             - |
