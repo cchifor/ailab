@@ -222,6 +222,39 @@ one-person company — so it gets one host, a memory cap, and a kill switch.
 - **Config is ansible-managed:** settings changed in herdr's TUI are written to `config.toml` and
   will be reverted — with a pane-killing server restart — on the next ansible run. Persist
   changes by editing `templates/herdr-config.toml.j2` instead.
+
+### Conductor pattern (multi-agent orchestration on the pilot)
+
+Herdr's payoff over "an agent in tmux" is a **conductor**: an interactive Claude Code session
+in a herdr pane (`HERDR_ENV=1`) that plans, spawns, watches, and verifies worker agents
+through the `herdr` CLI — and never implements. Codex-validated design (2026-09-01); the
+cross-repo conventions (global ~2-Claude cap, worktree hygiene, tep head-of-line, gitea PRs)
+live in the agentforge `AGENTS.md`.
+
+- **Setup (ansible, `-t herdr`):** the claude+codex integrations
+  (`~c4/.claude/hooks/herdr-agent-state.sh`, `~c4/.codex/herdr-agent-state.sh` — session
+  identity for native resume; lifecycle detection stays HEURISTIC at 0.8.2) and the
+  version-matched conductor skill (`~c4/.claude/skills/herdr/SKILL.md`, generated from
+  `herdr --skill`).
+- **Shape:** one workspace per feature-run, conductor in its root pane; one worktree
+  workspace per worker — `herdr worktree create --workspace <run> --branch
+  feat/<run>-<role> --base <SHA> --no-focus`, resolving `origin/main` to ONE sha shared by
+  every worker. Start workers with `herdr agent start <role> --kind claude|codex --pane
+  <id>`; mix providers — codex workers do not burn the Claude subscription.
+- **Drive:** briefs as files in the worktree; `agent prompt <role> --wait --until idle
+  --until done --until blocked` (all three — focusing a tab flips done→idle); workers write
+  `reports/<role>.md` and commit explicit paths. `agent_prompt_stalled` means delivery
+  UNCERTAIN — poll for artifacts, never resend blind.
+- **Trust:** lifecycle state is a signal, never success. Verify report + `git -C <worktree>
+  diff --stat` + S-tier checks via a plain `pane run`; on `blocked`, inspect with `agent
+  read --source detection` / `agent explain` and escalate unclear dialogs via
+  `notification show`. Workers run acceptEdits + the Bash sandbox; merge/push authority
+  stays with the conductor; disable auto-memory for ephemeral workers (one shared project
+  memory dir across worktrees leaks context between them).
+- **Capacity:** plan for conductor + ONE active heavy worker — dw5's balloon can pin near
+  the 4 GiB floor under node load, and the 1-member tep pool serializes PW-class runs anyway.
+- **Teardown:** `herdr worktree remove --workspace <ws>` only after verification (never
+  `--force` first); keep briefs/reports out of product commits.
 - **Upgrade:** bump `dev_worker_herdr_version` + `dev_worker_herdr_sha256` together. A herdr server
   restart kills every pane process (pre-1.0, no compatibility guarantee across versions), so treat
   a bump as a maintenance action on the pilot host, not a background refresh.

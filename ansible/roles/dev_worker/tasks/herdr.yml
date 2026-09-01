@@ -114,3 +114,51 @@
     state: started
     daemon_reload: true
   when: not ansible_check_mode
+
+# ---- conductor prerequisites (multi-agent orchestration on the pilot) ----
+# Per-agent integrations: session-identity hooks so herdr can natively resume claude/codex
+# agents. NOTE (0.8.2): lifecycle state (working/blocked/idle/done) stays screen-manifest
+# HEURISTIC even with these installed — a conductor must corroborate state with report files
+# and commits, never trust it as success (runbook § "Conductor pattern"). creates= makes each
+# a one-shot; after a herdr version bump delete the hook files so the next run refreshes them.
+- name: Install the herdr claude integration
+  ansible.builtin.command: herdr integration install claude
+  args:
+    creates: "/home/{{ dev_worker_admin_user }}/.claude/hooks/herdr-agent-state.sh"
+  become: true
+  become_user: "{{ dev_worker_admin_user }}"
+
+- name: Install the herdr codex integration
+  ansible.builtin.command: herdr integration install codex
+  args:
+    creates: "/home/{{ dev_worker_admin_user }}/.codex/herdr-agent-state.sh"
+  become: true
+  become_user: "{{ dev_worker_admin_user }}"
+
+# Conductor skill: the pinned binary emits its own version-matched agent skill; staged as a
+# Claude Code skill it makes a conductor session herdr-fluent. The skill self-gates on
+# HERDR_ENV=1, so it is inert for sessions outside herdr panes. Read step is read-only and
+# runs in check mode too, so a --check run can predict content drift after a version bump.
+- name: Read the agent skill from the pinned herdr binary
+  ansible.builtin.command: herdr --skill
+  register: dev_worker_herdr_skill
+  changed_when: false
+  check_mode: false
+  become: true
+  become_user: "{{ dev_worker_admin_user }}"
+
+- name: Ensure the conductor skill directory
+  ansible.builtin.file:
+    path: "/home/{{ dev_worker_admin_user }}/.claude/skills/herdr"
+    state: directory
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0755"
+
+- name: Stage the herdr conductor skill
+  ansible.builtin.copy:
+    content: "{{ dev_worker_herdr_skill.stdout }}\n"
+    dest: "/home/{{ dev_worker_admin_user }}/.claude/skills/herdr/SKILL.md"
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0644"
