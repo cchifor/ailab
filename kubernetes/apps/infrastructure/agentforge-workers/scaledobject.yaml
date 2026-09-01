@@ -24,6 +24,13 @@
 # Ready=True and the HPA simply showed TARGETS <unknown>. It was a Sunday, so the cron warm-floor
 # (Mon-Fri) did not mask it either.
 #
+# That incident now has a mechanical backstop: ForgeScaleOracleMissing in
+# monitoring/agentforge-rules.yaml alerts when this exact query resolves to NO SERIES while the
+# dispatcher is up. Its selector is a COPY of the `query` below and must be changed in the same
+# commit — if they diverge the alert fires a false positive rather than going quiet, which is the
+# safe direction, but it is still a bug. The alert cannot replace the discipline in the paragraph
+# above; it only stops a lapse from staying invisible for a weekend.
+#
 # While the worker Deployment is gated/unlisted this ScaledObject has no target and stays Ready:False
 # ("ScaledObject doesn't have a valid target") — harmless in the dormant posture (like the NotReady ESOs);
 # it activates the moment worker-deployment.yaml is un-gated.
