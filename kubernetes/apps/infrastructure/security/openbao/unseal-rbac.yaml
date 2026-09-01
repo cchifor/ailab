@@ -116,7 +116,8 @@ rules:
     resources: ["secrets"]
     resourceNames: ["openbao-provisioner-token"]
     verbs: ["get"]
-  # read the DURABLE operator-provisioner token — REQUIRED for the add-only operator reconcile on an
+  # read the DURABLE operator-provisioner token — REQUIRED for the operator reconcile (create-if-absent
+  # seeds; docs/runbooks/openbao-recovery.md § "The seed-ownership contract") on an
   # already-provisioned vault (main.py `_run`: it reads this Secret and, only if present, calls
   # run_operator_reconcile to (re)apply operator roles + KV SEEDS + the broker-oauth cas_required
   # stamps token-only, i.e. without the long-revoked root).

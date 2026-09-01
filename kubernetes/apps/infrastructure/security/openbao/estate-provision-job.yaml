@@ -15,8 +15,11 @@
 #
 # AUTH + shape: identical to devworker-provision-job.yaml — breakglass root (Secret
 # openbao-breakglass-token, data key root_token, optional:false so absence turns the Job red),
-# `bao kv patch` seed-wins contract, daily re-run via ttlSecondsAfterFinished + Flux re-apply,
-# per-object force annotation (2026-07-28 immutable-Job wedge guard).
+# `bao kv patch` SEED-WINS contract, daily re-run via ttlSecondsAfterFinished + Flux re-apply,
+# per-object force annotation (2026-07-28 immutable-Job wedge guard). Seed-wins is the contract of
+# THIS Job and the dev-worker one, NOT of the AgentForge operator seed in provision-job.yaml, which
+# is create-if-absent (live vault wins, divergence reported as drift) — canonical statement:
+# docs/runbooks/openbao-recovery.md § "The seed-ownership contract".
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -42,9 +45,11 @@ data:
       exit 1
     }
 
-    # Seed-wins contract (same as operator-seeds and devworker-seeds): keys absent from a seed
-    # survive untouched, keys present OVERWRITE live KV — rotating a value only in the vault is
-    # silently reverted within a day. Rotate = vault AND the seeds file in the same change.
+    # Seed-wins contract (same as devworker-seeds; NOT the same as operator-seeds, which is
+    # create-if-absent — the live vault wins there. docs/runbooks/openbao-recovery.md § "The
+    # seed-ownership contract" has all three side by side). Keys absent from a seed survive
+    # untouched, keys present OVERWRITE live KV — rotating a value only in the vault is silently
+    # reverted within a day. Rotate = vault AND the seeds file in the same change.
     for seed in "$SEED_DIR"/*.json; do
       [ -f "$seed" ] || continue
       name="$(basename "$seed" .json)"

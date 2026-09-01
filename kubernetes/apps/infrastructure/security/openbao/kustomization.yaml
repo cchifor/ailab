@@ -12,7 +12,11 @@ resources:
   - unseal-job.yaml # `agentforge openbao-init` — init + first unseal (idempotent, fail-closed)
   - unsealer.yaml # `agentforge openbao-unseal --loop` Deployment + egress CiliumNetworkPolicy
   - provision-job.yaml # `agentforge openbao-provision` — af mount + k8s auth + policies + scoped token
-  - operator-seeds.sops.yaml # SOPS seed values (dispatcher PAT + reaper DSN) mounted into provision-job
+  # THREE independent seeders below, and they do NOT share a precedence — check which one owns a path
+  # before reasoning about it. Canonical: docs/runbooks/openbao-recovery.md § "The seed-ownership
+  # contract". operator-seeds = create-if-absent (bootstrap floor, live vault wins, drift reported);
+  # devworker-seeds + estate-seeds = `bao kv patch` seed-wins (seed overwrites live KV daily).
+  - operator-seeds.sops.yaml # SOPS seed values (dispatcher PAT + reaper DSN) mounted into provision-job — FLOOR, create-if-absent
   - capability-kids-configmap.yaml # OPERATOR-owned capability-kid policy (mounted by provisioner-deploy); CP-unwritable
   - provisioner-deploy.yaml # `agentforge provisioner` controller Deployment + egress CiliumNetworkPolicy
   - openbao-lan.yaml # LAN NodePort :30820 for the dev-worker bao agents (ADR 0020)

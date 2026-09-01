@@ -73,38 +73,48 @@ spec:
             # available (there is no admin token after the revoke). See operator-seeds.sops.yaml.
             #
             # ALSO the durable home for a CP-mode TENANT ORCHESTRATOR's credentials
-            # (`tenants/<org>/<ws>/orchestrator`: the AF_BOT_TOKEN_* forge PATs + the
+            # (`tenants/<org>/<ws>/orchestrator`: the AF_BOT_TOKEN_*/AF_BOT_TOKENS forge PATs + the
             # AF_CONTROL_PLANE_TOKEN workspace bearer). The control plane RENDERS the Deployment's
             # `envFrom: af-creds-<ws>-<pool>` and RECORDS the bearer's SHA-256, but it never writes the
             # plaintext anywhere — materializing that Secret is the OPERATOR's half of the contract
             # (agentforge-platform docs/operations.md, "Worker credentials (af-creds) materialization";
             # the P2/ESO path is "a Vault write, not a hand-built Secret"). Seeding here — rather than a
-            # one-off `bao kv put` — is what makes it survive: `_apply_operator_seeds` re-runs on EVERY
-            # provision Job and MERGE-writes add-only, so the values are re-seeded after an OpenBao wipe
-            # (see docs/runbooks/openbao-recovery.md) while `AF_CAPABILITY_SIGNING_KEY`/`AF_CAPABILITY_KID`,
-            # which the keypair lifecycle mirrors into the SAME doc, are preserved untouched.
+            # one-off `bao kv put` — is what makes it SURVIVE A WIPE: `_apply_operator_seeds` re-runs on
+            # EVERY provision Job, so an emptied path is refilled from this document.
             #
-            # "ADD-ONLY" IS ABOUT THE DOCUMENT, NOT ABOUT PRECEDENCE — and reading it as precedence is
-            # how a rotated credential gets silently reverted. The implementation is one line
-            # (agentforge provisioner/bootstrap.py::_apply_operator_seeds):
+            # ── THE CONTRACT (canonical statement: docs/runbooks/openbao-recovery.md, "The
+            #    seed-ownership contract"). Do not restate it here or anywhere else — link to it. ──
             #
-            #     merged = {**existing, **dict(values)}   # add-only: seed keys win, all others preserved
+            # SEEDS ARE A BOOTSTRAP FLOOR, NOT A MIRROR. `_apply_operator_seeds` is CREATE-IF-ABSENT:
+            #   * empty path  -> the seed installs the value (this is what makes DR work; against an
+            #     empty vault create-if-absent and the old seed-wins merge are indistinguishable);
+            #   * live key    -> THE LIVE VAULT WINS. The seed does not overwrite it; a divergence is
+            #     REPORTED AS DRIFT rather than silently resolved;
+            #   * unmentioned key -> survives, unconditionally. The write is a read-modify-write, never
+            #     a KV-v2 full replace. THIS, and only this, is what the word "add-only" ever named —
+            #     it is the guarantee protecting AF_CAPABILITY_SIGNING_KEY/AF_CAPABILITY_KID, which the
+            #     keypair lifecycle mirrors into this SAME doc.
             #
-            # Two separate guarantees, and only the first is what "add-only" names:
-            #   * DOCUMENT level — this is a read-modify-write, never a KV-v2 full replace, so every key
-            #     the seed does NOT mention survives. That is the guarantee protecting the capability
-            #     signing key above.
-            #   * KEY level — for a key present in BOTH, THE SEED VALUE WINS and overwrites the vault.
-            #     The seeds document is authoritative over live KV for the keys it carries.
+            # Why it changed: while a seed key beat the live vault, a stale fragment in this document
+            # silently reverted a corrected credential on every provision run — a revoked credential
+            # delivered by the durability machinery, with the vault looking healthy. Two worker pools
+            # and the dispatcher went down that way. Live-wins removes the silent revert; drift
+            # reporting is what replaces it, so a stale seed is now noisy instead of destructive.
             #
-            # So a seeded credential is not merely a backup; it is the source of truth on every
-            # provision. Rotating a seeded PAT in the vault WITHOUT refreshing this document means the
-            # next provision Job quietly restores the pre-rotation value — a revoked credential,
-            # delivered by the durability machinery, with the vault looking healthy. Any run that
-            # rotates (`agentforge-bootstrap` rotates on EVERY invocation) must re-encrypt and commit
-            # `operator-seeds.sops.yaml` in the same change, which is what `--seeds-out` is for.
-            # A hand `kubectl create secret` is NOT a substitute: the tenant ExternalSecret is
-            # creationPolicy:Owner and overwrites the Secret from OpenBao on its next refresh.
+            # STILL MANDATORY: re-encrypt and commit `operator-seeds.sops.yaml` in the SAME change as
+            # any rotation (`agentforge-bootstrap` rotates on EVERY invocation; `--seeds-out` emits the
+            # fragment). The reason is now DR, not precedence — this document is the floor a wipe
+            # restores from, so a stale fragment restores a REVOKED credential, and reports drift on
+            # every run until it is refreshed.
+            #
+            # NOTE the two OTHER seeders in this directory are NOT create-if-absent: the dev-worker and
+            # estate Jobs (devworker-provision-job.yaml, estate-provision-job.yaml) are shell
+            # `bao kv patch` and remain SEED-WINS on every daily run. Same word, different precedence —
+            # check which Job owns a path before reasoning about it.
+            #
+            # A hand `kubectl create secret` is NOT a substitute for any of this: the tenant
+            # ExternalSecret is creationPolicy:Owner and overwrites the Secret from OpenBao on its next
+            # refresh.
             - { name: AF_OB_SEEDS_FILE, value: "/etc/openbao-seeds/seeds.json" }
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }

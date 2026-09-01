@@ -2,7 +2,13 @@
 # own OpenBao identity. Enables the `approle` auth mount, writes one read-only policy + one AppRole
 # role per worker (PERIODIC tokens, so a renewing agent never hits the max-TTL cliff that locked the
 # estate out on 2026-08-25), and seed-patches the af/dev-workers/* KV paths from the
-# openbao-devworker-seeds Secret (seed-wins contract — see devworker-seeds.sops.yaml).
+# openbao-devworker-seeds Secret (SEED-WINS contract — a key present in the seed overwrites live KV
+# on every daily run). NB: that is the contract of THIS Job and of estate-provision-job.yaml, and it
+# is NOT the AgentForge operator seed's — provision-job.yaml's `_apply_operator_seeds` is
+# create-if-absent (live vault wins, divergence reported as drift). The header inside
+# devworker-seeds.sops.yaml still says "SAME CONTRACT as operator-seeds.sops.yaml"; that half is
+# stale and cannot be fixed without re-encrypting the file. Canonical statement of all three:
+# docs/runbooks/openbao-recovery.md § "The seed-ownership contract".
 #
 # AUTH: the openbao-breakglass-token Secret (the never-expiring root minted during the 2026-08-30
 # re-bootstrap; deliberately NOT in git — docs/runbooks/openbao-recovery.md). Root is required

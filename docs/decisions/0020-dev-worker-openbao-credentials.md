@@ -79,10 +79,18 @@ never has to print a secret value in order to use it.
    block tells the agents this, in those words.
 4. **The KV subtree is seed-authoritative.** `af/dev-workers/common` and
    `af/dev-workers/<hostname>`, seed-patched from the SOPS `devworker-seeds.sops.yaml` on every
-   provision run — the same contract as `operator-seeds.sops.yaml`: keys present in the seed **win**
-   over live KV, keys absent from it survive untouched. This is what makes the subtree self-heal
-   after a wipe, and it is why rotating a seeded value only in the vault gets reverted on the next
-   daily run.
+   provision run: keys present in the seed **win** over live KV, keys absent from it survive
+   untouched. This is what makes the subtree self-heal after a wipe, and it is why rotating a seeded
+   value only in the vault gets reverted on the next daily run.
+
+   *Correction of record (documentation only — the decision above is unchanged and still live):* this
+   was written as "the same contract as `operator-seeds.sops.yaml`". That parity has since been
+   broken on the **operator** side, not here. `_apply_operator_seeds` is now **create-if-absent** — a
+   bootstrap floor where the live vault wins and divergence is reported as drift — after a stale
+   `tenants/*` fragment silently reverted a corrected credential and took down two worker pools and
+   the dispatcher. The dev-worker Job is a shell `bao kv patch` loop and is **unaffected**: seed-wins
+   remains exactly as decided. Canonical side-by-side of the three seeders:
+   `docs/runbooks/openbao-recovery.md` § "The seed-ownership contract".
 5. **Provisioning is a declarative daily Job, not a ceremony.** `openbao-devworker-provision`
    (the official `quay.io/openbao/openbao` image, `ttlSecondsAfterFinished: 86400` so Flux re-runs it daily)
    enables the `approle` mount, upserts the six policies/roles, and seed-patches the KV. It

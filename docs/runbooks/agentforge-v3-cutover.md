@@ -42,24 +42,31 @@ KV key of the OpenBao doc becomes a Secret key, so **the KV key name IS the env 
 
 Durability layer (NOT a delivery path): `kubernetes/apps/infrastructure/security/openbao/`
 `operator-seeds.sops.yaml` → `seeds.json`, applied by `_apply_operator_seeds` on **every** provision
-Job run, **merge-writes with seed keys winning over the live vault**. Current relevant fragments:
+Job run as a **bootstrap floor** — create-if-absent, so an empty path is filled and a live key keeps
+its live value (canonical statement: `docs/runbooks/openbao-recovery.md` § "The seed-ownership
+contract"). Current relevant fragments:
 `operator/dispatcher/forge` (**since #226**: `AF_BOT_TOKENS` — the canonical five-principal map —
 **plus** the legacy `AF_BOT_TOKEN_PLANNER` bridge) and **both** tenant orchestrator paths
 (**since #230**: the platform-dev fragment gained `AF_BOT_TOKENS`, a playground fragment was
 added) — so a wipe + re-provision restores the map v3 actually reads.
 
-> **The seeds trap (why this PR never pre-staged an `AF_BOT_TOKENS` placeholder in seeds.json):**
-> seed keys are authoritative over the vault — **KEY-level: for a key present in both, the seed
-> value WINS; DOCUMENT-level is what "add-only" names** (unmentioned keys survive). Both halves are
-> pinned in the #229 comment on `security/openbao/provision-job.yaml`. A placeholder
-> `AF_BOT_TOKENS` committed ahead of the real values would have been merge-written **over** the
-> minted map on the next provision run and fail-closed the fleet — the same end state as the
-> 2026-08-04 incident, delivered by our own durability machinery. The refresh therefore happened
-> **with the real values, out of band**: #226 (dispatcher) and #230 (both tenant paths) landed on
-> main, so the vault state now survives a wipe. The standing rule: the provision Job re-applies
-> seeds on every run (daily), so **any future rotation has a ~24 h deadline** to re-encrypt
-> `operator-seeds.sops.yaml` in the same change (`--seeds-out`; requires `--write-openbao`) — see
-> the re-mint subsection of §4. A vault-only rotation is silently reverted to REVOKED values.
+> **The seeds trap (why this PR never pre-staged an `AF_BOT_TOKENS` placeholder in seeds.json).**
+> *At the time*, seed keys beat the live vault: a placeholder `AF_BOT_TOKENS` committed ahead of the
+> real values would have been merge-written **over** the minted map on the next provision run and
+> fail-closed the fleet — the same end state as the 2026-08-04 incident, delivered by our own
+> durability machinery. The refresh therefore happened **with the real values, out of band**: #226
+> (dispatcher) and #230 (both tenant paths) landed on main, so the vault state survives a wipe.
+>
+> **Correction of record — the mechanism has changed; the rule has not.** `_apply_operator_seeds` is
+> now **create-if-absent** (canonical: `docs/runbooks/openbao-recovery.md` § "The seed-ownership
+> contract"), so a placeholder can no longer overwrite a live key. It can still ruin you *after a
+> wipe*: the seeds document is the **DR floor**, so a placeholder committed there is exactly what a
+> re-provision would install into the emptied path. Never commit a value you would not accept as the
+> post-wipe value. The standing rule survives with a new reason: re-encrypt `operator-seeds.sops.yaml`
+> in the **same change** as any rotation (`--seeds-out`; requires `--write-openbao`) — see the re-mint
+> subsection of §4 — because a stale fragment is a REVOKED credential waiting in the DR floor, and
+> reports as drift on every provision run until it is refreshed. What is *no longer* true: a
+> vault-only rotation is **not** silently reverted within ~24 h.
 
 The ops-bot "provisioning surface" in this repo is exactly the above: there are **no per-bot ESO
 entries** to add (delivery is the single `AF_BOT_TOKENS` key), no per-bot k8s Secrets, and the Gitea
@@ -280,11 +287,12 @@ Two pins:
 
 And the **seeds contract (mandatory, same change)**: any re-mint MUST re-encrypt
 `operator-seeds.sops.yaml` with the new values in the same change — `agentforge-bootstrap
---seeds-out` emits the fragment (it requires `--write-openbao`) — because **seed keys WIN over
-the live vault on every provision run** (KEY-level precedence; DOCUMENT-level is what "add-only"
-names — the #229 comment on `security/openbao/provision-job.yaml` has both halves). The provision
-Job re-applies seeds daily, so a vault-only rotation is silently reverted to REVOKED values
-within ~24 h — the durability machinery delivering the outage itself. Remember also that
+--seeds-out` emits the fragment (it requires `--write-openbao`). The reason is **DR, not
+precedence**: `_apply_operator_seeds` is create-if-absent, so the seed will not overwrite your fresh
+value, but that document IS the floor a wipe restores from — leave it stale and a re-provision
+installs a REVOKED map into the emptied path, while every provision run in the meantime reports the
+divergence as drift. (Canonical statement, including what "add-only" did and did not ever mean:
+`docs/runbooks/openbao-recovery.md` § "The seed-ownership contract".) Remember also that
 `agentforge-bootstrap` ROTATES on every run and writes ONLY `AF_BOT_TOKENS` (never the legacy
 bridge keys): after any mint, copy the fresh map to all three paths, re-patch the legacy
 `AF_BOT_TOKEN_*` bridge keys with the matching new per-bot PATs (keeps the v2 pin-revert path
@@ -477,8 +485,10 @@ Order matters here too (the mirror image of the window):
 4. Credentials: nothing to do **unless the post-soak cleanup has landed** — check
    `dispatcher-externalsecret.yaml` FIRST. As of #234 (`a172e85`) it no longer maps
    `AF_BOT_TOKEN_PLANNER`, so a reverted v2 dispatcher would start against a Secret missing the
-   only key it reads and exit. The vault key itself survives (`operator/dispatcher/forge` is
-   add-only), so **restore that mapping in the same change as the pin revert** — re-adding the
+   only key it reads and exit. The vault key itself survives (no seeder ever replaces a KV document,
+   so a key the seed does not mention is never dropped from `operator/dispatcher/forge` — the
+   document-level guarantee in `docs/runbooks/openbao-recovery.md` § "The seed-ownership contract"),
+   so **restore that mapping in the same change as the pin revert** — re-adding the
    four-line `secretKey`/`remoteRef` block is sufficient, no re-mint needed.
    Otherwise nothing to do: **no mint ran** (§4), so nothing was ever revoked — the legacy
    `AF_BOT_TOKEN_*` keys still hold WORKING PATs, while `AF_BOT_TOKENS` is an unknown env var to

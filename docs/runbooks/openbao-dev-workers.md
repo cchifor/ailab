@@ -31,12 +31,25 @@ Secret.
 | Service `openbao-lan` | `kubernetes/apps/infrastructure/security/openbao/openbao-lan.yaml` | NodePort **30820** on the node IPs (.41/.42/.43) → OpenBao :8200. No endpoints while sealed (selector needs `openbao-active`). |
 | SAN `openbao.lan.chifor.me` | `.../openbao/tls.yaml` | The name the workers dial. cert-manager re-issues on spec change; **the server only re-reads on pod restart**. |
 | Job `openbao-devworker-provision` (+ ConfigMap `openbao-devworker-provision-script`) | `.../openbao/devworker-provision-job.yaml` | Daily: enable `approle`, upsert 6 policies + 6 roles (periodic 72h tokens, no CIDR binding — see below), seed-patch the KV from one `<name>.json` per path. |
-| Secret `openbao-devworker-seeds` | `.../openbao/devworker-seeds.sops.yaml` | Seed values for `af/dev-workers/*`. **Seed wins over live KV** on every run. |
+| Secret `openbao-devworker-seeds` | `.../openbao/devworker-seeds.sops.yaml` | Seed values for `af/dev-workers/*`. **Seed wins over live KV** on every run — see the precedence warning below. |
 | Secret `openbao-breakglass-token` | live cluster only — **not in git** | The Job's auth. Never-expiring root, left by the 2026-08-30 re-bootstrap. **Data key is `root_token`.** |
 | `bao agent` + unit | `ansible/roles/dev_worker/templates/openbao-agent.hcl.j2`, `openbao-agent.service.j2` | AppRole auto-auth → periodic token → sink + template rendering. |
 | sink `/run/openbao-agent/token` | tmpfs (systemd `RuntimeDirectory=`) | Group-readable (`openbao-agent`) token for `cred`. Gone on reboot; re-created on login. |
 | `/usr/local/bin/cred` | `ansible/roles/dev_worker/files/cred` | `cred list` · `cred get <name> <field>` · `cred exec <name> <field> <VAR> -- <cmd>`. |
 | managed CLAUDE.md block | per user, `~/.claude/CLAUDE.md` | Tells the agents to use `cred` and to never print values. |
+
+> **Precedence: this subtree is seed-WINS, and that is no longer the estate-wide default.** The
+> `openbao-devworker-provision` Job is a shell `bao kv patch` loop: a key present in
+> `devworker-seeds.sops.yaml` **overwrites live KV on every daily run**, and a key absent from it
+> survives. The AgentForge **operator** seed (`operator-seeds.sops.yaml` → `_apply_operator_seeds`)
+> is the opposite — **create-if-absent**, live vault wins, divergence reported as drift. Same word
+> "seed", different precedence; the canonical side-by-side is
+> `docs/runbooks/openbao-recovery.md` § "The seed-ownership contract". **Consequence here is
+> unchanged:** rotating a seeded value in the vault alone is silently reverted within a day (see
+> *Rotation*). Any prose in this repo that calls the dev-worker contract "the same as
+> `operator-seeds.sops.yaml`" predates the operator-side change — including the header comment
+> inside `devworker-seeds.sops.yaml` itself, which cannot be corrected without re-encrypting the
+> file.
 
 **KV layout** (mount `af`, KV v2 — the same mount ADR 0019 uses):
 
@@ -165,8 +178,10 @@ grep -E '^\s+common\.json: ENC\[' "$SEEDS"     # the value line must be cipherte
 git diff --stat -- "$SEEDS"                    # only this file
 ```
 
-Then commit + merge. **The seed is authoritative:** whatever is in this file overwrites live KV on
-the next daily run, so rotating the PAT in the vault alone is silently reverted (see *Rotation*).
+Then commit + merge. **This subtree's seed is authoritative** (`bao kv patch`, seed-wins — not the
+operator seed's create-if-absent floor; see the precedence note under *What this is*): whatever is in
+this file overwrites live KV on the next daily run, so rotating the PAT in the vault alone is
+silently reverted (see *Rotation*).
 
 ### (d) Verify the provision Job
 

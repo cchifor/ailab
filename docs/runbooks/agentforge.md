@@ -451,7 +451,11 @@ kubectl -n openbao exec -i openbao-0 -- sh -c 'BAO_TOKEN=$(cat) bao kv get -fiel
 # 2. add it to the seeds document (needs the age private key)
 sops edit kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml
 #    -> add under a new logical path entry: af/operator/dispatcher/webhook: {AF_WEBHOOK_SECRET: <value>}
-#       (seed keys WIN over the live vault on the next provision — the value MUST match the live one,
-#        and the Gitea org hook must be re-pointed if it is ever rotated: engine `--webhook-rotate-secret`)
+#       (the seed is a bootstrap FLOOR, not a mirror: create-if-absent, so it fills the path after a
+#        wipe and can NOT overwrite the live value — a mismatch is reported as drift instead. Still
+#        record the live value: the floor is what a re-provision installs, so a wrong one fails the
+#        listener's HMAC after the next wipe. Rotation re-points the Gitea org hook and updates this
+#        document in the same change: engine `--webhook-rotate-secret`. Canonical contract:
+#        docs/runbooks/openbao-recovery.md § "The seed-ownership contract")
 # 3. commit + PR as usual; no cluster action needed (the seeds file is read at provision time only)
 ```
