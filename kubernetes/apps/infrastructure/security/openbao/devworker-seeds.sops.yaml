@@ -1,9 +1,17 @@
 # Seed values for the dev-worker KV subtree (af/dev-workers/*) — mounted into the
-# openbao-devworker-provision Job (devworker-provision-job.yaml). SAME CONTRACT as
-# operator-seeds.sops.yaml: the Job `bao kv patch`es each path with this JSON on every run, so
-# (a) keys absent from the seed survive untouched, but (b) keys PRESENT here overwrite live KV — the
-# seed is authoritative, and rotating a seeded credential only in the vault gets silently reverted on
-# the next daily run. Rotate = write the vault AND re-encrypt this file in the same change.
+# openbao-devworker-provision Job (devworker-provision-job.yaml). The Job `bao kv patch`es each
+# path with this JSON on every run, so (a) keys absent from the seed survive untouched, but
+# (b) keys PRESENT here overwrite live KV — the seed is authoritative, and rotating a seeded
+# credential only in the vault gets silently reverted on the next daily run. Rotate = write the
+# vault AND re-encrypt this file in the same change.
+#
+# NO LONGER THE SAME CONTRACT AS operator-seeds.sops.yaml, and the difference is the whole point.
+# That file is applied by `_apply_operator_seeds` (Python), which since agentforge #276 is
+# CREATE-IF-ABSENT: the live vault wins every key it already holds, and a disagreeing seed is
+# reported as drift instead of overwriting. This file and estate-seeds.sops.yaml are applied by
+# shell `bao kv patch` loops, which still overwrite. The header here used to claim parity with the
+# operator seed; that claim is what let a revoked credential be silently restored over a corrected
+# one for hours at a time. See docs/runbooks/openbao-recovery.md, "The seed-ownership contract".
 # After an OpenBao wipe (docs/runbooks/openbao-recovery.md) this is what restores the subtree; the
 # per-worker AppRole secret-ids do NOT come back with it (re-mint, docs/runbooks/openbao-dev-workers.md).
 #
