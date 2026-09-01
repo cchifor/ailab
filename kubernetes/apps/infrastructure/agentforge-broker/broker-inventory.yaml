@@ -97,7 +97,7 @@ seats:
 # makes that divergence unrepresentable, so the recipe above is the only supported one.
 seedCoverage:
   recordedAt: "2026-09-01"
-  seedsDocumentSha256: "4af1dac08e1bdc84d12891771d1bb92902a9f70662582cbf1463f175f101e555"
+  seedsDocumentSha256: "1dded8220f5b6893eb70314de5ad41be299d0e391ce51dddcee145c2739ddfd9"
   seedsDocument: kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml
   recordedForAuds:
     - "anthropic/claude-max-1"
