@@ -120,6 +120,19 @@
 #                            evaluating the identical shape over a counter that does move:
 #                            sum by (namespace)(increase(forge_claims_total{job="agentforge-worker"}
 #                            [30m])) -> 5.09, and `> 0.5` fires.
+#   ForgeScaleOracleMissing  Measured 2026-09-01. forge_pending -> 9 series; the ScaledObject's own
+#                            query -> 4. Four counterfactuals, all as designed: (a) the shipped expr
+#                            NOW -> EMPTY; (b) same expr with account="claude-max-9" -> FIRES (this is
+#                            a replay of the 2026-08-09 seat-move incident, not a synthetic probe);
+#                            (c) bogus account AND no publisher -> EMPTY, i.e. the `and on()` guard
+#                            really does dedupe against ForgeTargetDown; (d) over [24h:1m] the shipped
+#                            expr would have fired ZERO times while the naive absent(forge_pending)
+#                            form would have fired 1270 times — that delta IS the reason for the
+#                            guard. Retention at the time: 44.9h, so the 24h window is fully covered
+#                            (the dispatcher held a live target for only 170 of those 1440 minutes,
+#                            the tail of the 48-day outage). `for: 15m` is sized to clear Prometheus'
+#                            5m staleness window plus a restarted dispatcher's first publish, both of
+#                            which are already ForgeTargetDown's business.
 #
 # monitoring/agentforge.yaml (the dead ServiceMonitor) stays commented out and is now depended on by
 # NOTHING — ailab#286 asks the operator whether to retire the whole ADR 0018 host-service surface; that
@@ -332,3 +345,42 @@ spec:
               and the orchestrator log for _heal_state_label. This is also the surviving proxy for the
               retired ForgeWebhookHMACFailures: a drifted webhook secret shows up here as work that
               only ever arrives via the poll.
+        # The KEDA scale oracle reads ONE query; this asserts that query still resolves. It is
+        # deliberately NOT `absent(forge_pending)` — see the measurement note at the top. The
+        # `and on() (count(up{...}) > 0)` guard is what makes it worth having: WITHOUT it the rule
+        # duplicates ForgeTargetDown on every dispatcher outage (measured: 1270 of the last 1440
+        # minutes, the tail of the 48-day CrashLoopBackOff), and a second chronic red on the same
+        # ntfy channel is strictly worse than none — that channel is exactly how the 48-day outage
+        # stayed invisible while ForgeTargetDown paged every 4h. WITH the guard it fires only when
+        # the publisher is UP and the scaler's own selector still resolves to nothing.
+        #
+        # That is a real, dated incident, not a hypothesis. On 2026-08-09 the playground planner
+        # moved claude-max-1 -> claude-max-2 and this query was left naming claude-max-1
+        # (scaledobject.yaml:16-25): it matched nothing, ignoreNullValues treated that as 0, the
+        # trigger went Active=False, and the pool sat at 0 replicas with FOUR pending planner issues
+        # invisible to it. The ScaledObject stayed Ready=True and nothing logged an error at any
+        # layer. The existing control is a comment saying the binding must move in the same change —
+        # discipline that has already failed once. This is the mechanical backstop.
+        #
+        # THE SELECTOR BELOW MUST TRACK scaledobject.yaml's `query` EXACTLY. If they diverge, this
+        # rule fires a false positive rather than going quiet — loud in the correct direction, and
+        # the fix is to re-align the two.
+        - alert: ForgeScaleOracleMissing
+          expr: |
+            absent(sum(forge_pending{account="claude-max-2",role=~"planner|reviewer|implementer|tester"}))
+              and on() (count(up{job="agentforge-dispatcher"} == 1) > 0)
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge KEDA scale oracle resolves to nothing while the dispatcher is up"
+            description: >-
+              The dispatcher is scraping normally, but the exact query the playground ScaledObject
+              scales on returns NO SERIES, so KEDA's ignoreNullValues=true is reading "no pending
+              work" from what is actually a dead oracle. Backlog will not scale the pool up; only the
+              Mon-Fri 08:00-18:00 cron warm-floor will, so evening and weekend delivery stops
+              silently. Most likely the account/role labels in scaledobject.yaml no longer match what
+              the dispatcher emits (the 2026-08-09 seat move), or a repo left the dispatcher's config.
+              Compare `kubectl --context admin@ai -n af-tenant-tenant-zero-playground get scaledobject
+              af-orch-playground-planner -o jsonpath='{.spec.triggers[0].metadata.query}'` against the
+              live label set: `count by (account,role) (forge_pending)`. NOT a dispatcher outage —
+              ForgeTargetDown owns that and this rule stays silent for it by construction.
