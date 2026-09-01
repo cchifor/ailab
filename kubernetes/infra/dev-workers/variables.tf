@@ -191,7 +191,13 @@ variable "dev_worker_nodes" {
     "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.9", hostname = "dev-worker-2" }
     "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.10", hostname = "dev-worker-3" }
     "dev-worker-4" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.11", hostname = "dev-worker-4", memory_floating_mib = 12288 }
-    "dev-worker-5" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.12", hostname = "dev-worker-5" }
+    # dw5 floor: 2026-09-01 swap-death incident — ai-node2 sits ~93% used since talos-env-node-1
+    # (16 GiB fixed, env pool) joined it, so ballooning never inflates dw5 and a 4 GiB floor
+    # thrashed a working session to death (swap full, 20M major faults; same signature as the
+    # dw1 2026-08-11 panic). Hand-applied `qm set 4205 --balloon 6144` + monitor-inflate during
+    # recovery; codified here so the next apply keeps it. Shrink back to the uniform floor only
+    # after node2's budget has real balloon headroom again (see the runbook budget note).
+    "dev-worker-5" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.12", hostname = "dev-worker-5", memory_floating_mib = 6144 }
     "dev-worker-6" = { node_name = "ai-node3", vm_id = 4206, ip = "192.168.0.13", hostname = "dev-worker-6", memory_mib = 12288 }
   }
 }
