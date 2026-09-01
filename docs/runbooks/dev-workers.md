@@ -8,18 +8,20 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 - role: `ansible/roles/dev_worker/` · playbook: `ansible/dev-workers.yml`
 - inventory group: `dev_workers` (`.37/.38/.39` + `.5/.6/.7`) · secrets: `ansible/secrets/dev-worker.sops.yaml`
 
-**All six share one uniform spec** — cores + ceiling + floor are module-wide scalars in
+**The base spec is shared** — cores + ceiling + floor are module-wide scalars in
 `kubernetes/infra/dev-workers/variables.tf` (`dev_worker_cores`, `dev_worker_memory_mib`,
-`dev_worker_memory_floating_mib`); the `dev_worker_nodes` map carries only identity.
+`dev_worker_memory_floating_mib`); the `dev_worker_nodes` map carries identity plus two optional
+per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw4 — node1 mitigation) and
+`memory_mib` (12 GiB ceiling on dw6 — downsize POC, see the section below).
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
-| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
 | dev-worker-2 | ai-node2 | 4202 | 192.168.0.9  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
 | dev-worker-3 | ai-node3 | 4203 | 192.168.0.10 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-4 | ai-node1 | 4204 | 192.168.0.11 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-4 | ai-node1 | 4204 | 192.168.0.11 | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
 | dev-worker-5 | ai-node2 | 4205 | 192.168.0.12 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-6 | ai-node3 | 4206 | 192.168.0.13 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-6 | ai-node3 | 4206 | 192.168.0.13 | 8 vCPU / **12 GiB** (4–12 balloon, downsize POC) / 40+128 GiB |
 
 > **IP renumber (consecutive .8–.13).** cloud-init fixes the IP at create and the tofu module has
 > `lifecycle.ignore_changes = [initialization]`, so the live IPs were changed **in-guest** (not by tofu):
@@ -33,20 +35,42 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 host fits only because the rarely-used heavyweight models on node2/node3 (gpt-oss ~59 GiB, Qwen3.5-122B
 ~71 GiB GTT) are now **idle-unloaded via llama-swap** rather than pinned resident — see
 `docs/runbooks/ai-model-swap.md`. With the model idle, the host drops to ~45% used and ballooning
-actually works, so a worker inflates toward the 16 GiB ceiling on demand. Dev-worker memory is a
-**uniform 16 GiB ceiling with a uniform 4 GiB floor** (module scalars
-`dev_worker_memory_mib` / `dev_worker_memory_floating_mib`) — low floor by design, because ballooning
+actually works, so a worker inflates toward the ceiling on demand. Dev-worker memory defaults to a
+**16 GiB ceiling with a 4 GiB floor** (module scalars
+`dev_worker_memory_mib` / `dev_worker_memory_floating_mib`; per-worker overrides on dw1/dw4 floors
+and the dw6 ceiling) — low floor by design, because ballooning
 now inflates busy workers and 4 GiB is what lets a node hold its on-demand heavyweight **plus** its
 two workers-at-floor at once.
 
 (IPs `.37/.38/.39` + `.5/.6/.7` are free static addresses inside the `.2`–`.50` reserve, below the
 DHCP pool — no router change is needed.)
 
+## Post-testpool ceiling downsize (POC on dev-worker-6, 2026-09-01)
+
+Since the test-env pool went live (`kubernetes/apps/infrastructure/testpool/`, `tep`), the heavy
+compose stacks (L/XL/Playwright class) lease kata envs on talos-env-node-1 instead of running on
+the worker; only S-class (plain pytest, 2–4 GiB) and the small M-class docker tiers stay local, so
+the 16 GiB ceiling is oversized. Measured over the 10 days ending 2026-09-01 (node_exporter,
+pre-pool load included): peak used was 7.9 GiB (dw4) / 6.9 GiB (dw1), and ≤2.5 GiB on the other
+four.
+
+**POC:** dev-worker-6 runs a **12 GiB ceiling** (`memory_mib = 12288` override in
+`kubernetes/infra/dev-workers/variables.tf`), hand-applied 2026-09-01 (`qm set 4206 --memory 12288`
++ `qm reboot 4206`) and codified the same day — the first `tofu apply` after the merge no-ops.
+Post-resize checks passed: prometheus-node-exporter :9100 up, local `docker run` fine, `tep list`
+reaches the pool. **Fleet-wide plan** (after the POC soaks): drop the ceiling scalar to 12288 for
+all six, freeing 4 GiB × 2 workers of worst-case commitment per node — headroom that feeds the
+planned env-big (24 GiB) testpool node. On dw1/dw4 a 12 GiB ceiling meets their codified 12 GiB
+floor (floor == ceiling: effectively fixed memory), which matches how node1 already behaves —
+ballooning never inflates guests there. Do NOT lower the dw1/dw4 floors as part of this; that
+mitigation stands until node1 capacity is fixed (see the note in variables.tf).
+
 Per-node RAM budget (~125 GiB usable): Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB hard** —
 `kubernetes/infra/variables.tf`) + ai-llm LXC (96 GiB cap; **~0 GiB when idle-unloaded**, ~59/71 GiB
 when a heavyweight is loaded on demand) + runner (24 GiB ceiling / **10 GiB floor**, ×2 node1/node2,
-×1 node3) + dev-worker (16 GiB ceiling / **4 GiB floor**, ×2 per node). In steady state (heavyweight
-unloaded) node2/node3 sit ~45% used and workers balloon freely toward 16 GiB. **Time-share rule:** a
+×1 node3) + dev-worker (16 GiB ceiling — 12 GiB on dw6 / **4 GiB floor** — **12 GiB on dw1/dw4**,
+×2 per node; node1's two raised floors add 16 GiB of guaranteed allocation there). In steady
+state (heavyweight unloaded) node2/node3 sit ~45% used and workers balloon freely toward the ceiling. **Time-share rule:** a
 node serves *either* its on-demand heavyweight *or* its two workers at full tilt — not both. Loading
 the 122B on node3 (71 GiB) fits alongside cp3 28 + runner 10 + 2×dev-worker-at-floor 4 = 117 < 125,
 with the co-located workers pinned near their 4 GiB floor for that session. If a host shows sustained
@@ -246,9 +270,9 @@ triggers Claude Code's auto-attach).
 - persistence: start a tmux pane, reboot the VM, confirm tmux-continuum restored the session
 - dashboard layout: `tmux list-windows -t sessions -F '#{window_name}'` must be exactly
   `home system jobs github docker cluster cheats` — see the dashboard/resurrect note below
-- **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The uniform 4 GiB
-  balloon floor guarantees each guest's idle working set; a busy worker inflates toward 16 GiB when
-  the node's LLM is idle-unloaded. If a host shows sustained pressure, the first lever is its
+- **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The 4 GiB
+  balloon floor (12 GiB on dw1/dw4) guarantees each guest's idle working set; a busy worker inflates
+  toward its ceiling (16 GiB; 12 GiB on dw6) when the node's LLM is idle-unloaded. If a host shows sustained pressure, the first lever is its
   heavyweight LLM — confirm it idle-unloaded (or shorten the llama-swap TTL, `docs/runbooks/ai-model-swap.md`)
   — then, only if still pressured, downsize that node's Talos CP VM (`control_planes{}`, rolling reboot
   via `talosctl shutdown` — see `ai-host-setup.md`) rather than starving a dev-worker.
