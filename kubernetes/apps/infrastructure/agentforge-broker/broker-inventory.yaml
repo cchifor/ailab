@@ -65,23 +65,43 @@ seats:
 # seeds file names every broker oauth path the estate declares. That refusal is fail-closed
 # and correct, but it lands at provisioner startup; this record moves it into the PR.
 #
-# `declaredOauthPaths` is a KEY-NAME-ONLY record of the SOPS-encrypted operator seeds
-# (kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml). CI cannot
-# decrypt it — and must not be able to — so the record is refreshed out of band by an
-# operator who can, and the check then verifies the record against the seats above:
+# `declaredSeedPaths` / `declaredOauthPaths` are a KEY-NAME-ONLY record of the SOPS-encrypted
+# operator seeds document named by `seedsDocument` below. CI cannot decrypt it — and must not
+# be able to — so the record is refreshed out of band by an operator who can, and the check
+# then verifies the record against the seats above:
 #
 #   kubectl --context admin@ai get secret openbao-operator-seeds -n openbao \
 #     -o jsonpath='{.data.seeds\.json}' | base64 -d \
 #     | python scripts/gen-broker-inventory.py --refresh-seed-coverage
 #
-# NO VALUE is ever read, printed or stored — only the logical KV path names.
+# NO VALUE is ever read, printed or stored — only the logical KV path names. Since
+# agentforge #276/#277 the operator seeds are create-if-absent, so this document's remaining
+# job is to be WHAT A WIPED VAULT RESTORES FROM: its completeness is the DR guarantee, and
+# `declaredSeedPaths` is the plaintext shadow of it — a path dropped from the seeds shows up
+# as a removed line here, in the very PR that drops it.
+#
+# `seedsDocumentSha256` is the SHA-256 of that file's CIPHERTEXT, exactly as it sits on disk.
+# It is not a secret and reveals nothing about the plaintext; it is the one property of the
+# document CI can compute for itself. Without it the record could go STALE IN SILENCE — the
+# seeds could gain a path, lose one, or have a credential re-cut, and this record would keep
+# asserting what it asserted before while `--check` stayed green. `--check` re-hashes the
+# file and FAILS when it differs from the stamp; `--write` copies the stamp forward untouched,
+# so only a real re-read of the document (the command above) can re-bless it.
+#
+# Refresh from a checkout whose seeds document is the one the cluster has reconciled — the
+# hash is taken from the working tree while the paths come from the live Secret, so refreshing
+# mid-flight would stamp a file that the recorded paths did not come from.
 seedCoverage:
   recordedAt: "2026-07-29"
+  seedsDocumentSha256: ""
+  seedsDocument: kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml
   recordedForAuds:
     - "anthropic/claude-max-1"
     - "anthropic/claude-max-2"
     - "anthropic/claude-max-3"
     - "openai/codex-pro"
+  declaredSeedPaths:
+    []
   declaredOauthPaths:
     []
   missingOauthPaths:

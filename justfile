@@ -189,10 +189,14 @@ af-verify-brokers:
 af-gen-brokers:
     python scripts/gen-broker-inventory.py --write
 
-# Re-record which broker oauth KV paths the SOPS operator seeds file actually declares (KEY NAMES
-# ONLY — never a value). Needed after adding a seat: the KV garbage collector (agentforge #69)
-# refuses to start unless the seeds file names every declared broker credential, and the drift
-# check fails on a coverage record taken against a different seat list.
+# Re-record which KV paths the SOPS operator seeds file actually declares (KEY NAMES ONLY — never
+# a value), and stamp the SHA-256 of that file's CIPHERTEXT so the record cannot go stale in
+# silence. Needed after adding a seat — the KV garbage collector (agentforge #69) refuses to start
+# unless the seeds file names every declared broker credential — AND after ANY edit to
+# operator-seeds.sops.yaml, including a value-only credential re-cut: the drift check fails on a
+# coverage record taken against a different seat list OR against a different seeds document.
+# Run it from a checkout whose seeds document is the one the cluster has reconciled: the hash comes
+# from the working tree while the paths come from the live Secret.
 af-record-seed-coverage:
     kubectl --context admin@ai get secret openbao-operator-seeds -n openbao \
       -o jsonpath='{.data.seeds\.json}' | base64 -d \
