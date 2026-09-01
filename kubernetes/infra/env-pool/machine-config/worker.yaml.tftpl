@@ -1,0 +1,41 @@
+machine:
+  # Test-environment pool (plans/2026-09-01-test-env-pool-k8s-plan.md). The label lets pool
+  # workloads target these nodes; the taint keeps everything ELSE off them. NOTE NodeRestriction
+  # silently drops worker-kubelet self-registered ailab.io/* labels + custom taints — the
+  # authoritative label/taint application is cluster-side in node-labels.tf (same trap as
+  # agent-nodes); these entries are declarative documentation + CP-side no-op.
+  nodeLabels:
+    ailab.io/env-pool: "true"
+  nodeTaints:
+    dedicated: env:NoSchedule
+  install:
+    disk: /dev/sda
+  # Kata needs vhost vsock (agent transport) + vhost-net in the WORKER kernel. The agent-nodes
+  # P2 rollout applies the same two modules (present in the applied agent-node machine config;
+  # the extensions themselves are baked in the boot image).
+  kernel:
+    modules:
+      - name: vhost_net
+      - name: vhost_vsock
+  network:
+    nameservers: ${nameservers}
+    interfaces:
+      - deviceSelector:
+          driver: virtio_net
+        dhcp: false
+        addresses:
+          - ${node_ip}/${prefix}
+        routes:
+          - network: 0.0.0.0/0
+            gateway: ${gateway}
+          # Storage-fabric /32 (WS2/ADR 0011): reach the QNAP storage service IP via this node's
+          # Proxmox host (forwards + SNATs over the fabric). REQUIRED for iSCSI/NFS PV mounts —
+          # spike 1's block PVCs ride qnap-iscsi through exactly this route.
+          - network: ${storage_service_ip}/32
+            gateway: ${host_ip}
+  registries:
+    mirrors:
+      docker.io:
+        endpoints:
+          - https://mirror.gcr.io
+# NO cluster: stanza — plain worker.
