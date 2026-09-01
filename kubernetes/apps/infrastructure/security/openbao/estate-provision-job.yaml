@@ -116,7 +116,7 @@ spec:
       containers:
         - name: provision
           # Official OpenBao image (bao CLI + busybox sh), pinned to the server's version.
-          image: quay.io/openbao/openbao:2.5.5
+          image: quay.io/openbao/openbao:2.6.2
           command: ["/bin/sh", "/scripts/provision.sh"]
           env:
             # The headless per-pod name publishes not-ready addresses: a sealed-but-up pod yields a

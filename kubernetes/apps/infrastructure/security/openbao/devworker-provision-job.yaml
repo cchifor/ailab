@@ -147,7 +147,7 @@ spec:
         - name: provision
           # The official OpenBao image (bao CLI + busybox sh), pinned to the SERVER's version so the
           # CLI and the API can never drift; quay.io is where the chart pulls the server from too.
-          image: quay.io/openbao/openbao:2.5.5
+          image: quay.io/openbao/openbao:2.6.2
           command: ["/bin/sh", "/scripts/provision.sh"]
           env:
             - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
