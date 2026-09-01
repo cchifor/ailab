@@ -189,13 +189,23 @@ af-verify-brokers:
 af-gen-brokers:
     python scripts/gen-broker-inventory.py --write
 
-# Re-record which broker oauth KV paths the SOPS operator seeds file actually declares (KEY NAMES
-# ONLY — never a value). Needed after adding a seat: the KV garbage collector (agentforge #69)
-# refuses to start unless the seeds file names every declared broker credential, and the drift
-# check fails on a coverage record taken against a different seat list.
+# Re-record which KV paths the SOPS operator seeds file actually declares (KEY NAMES ONLY — never
+# a value), and stamp the SHA-256 of that file's CIPHERTEXT so the record cannot go stale in
+# silence. Needed after adding a seat — the KV garbage collector (agentforge #69) refuses to start
+# unless the seeds file names every declared broker credential — AND after ANY edit to
+# operator-seeds.sops.yaml, including a value-only credential re-cut: the drift check fails on a
+# coverage record taken against a different seat list OR against a different seeds document.
+#
+# The paths are read from the SAME FILE the digest is taken from. Reading them from the live
+# cluster Secret instead (`kubectl get secret openbao-operator-seeds`) looks equivalent and is not:
+# the two sources diverge whenever the working tree is behind or ahead of what Flux has reconciled,
+# and the refresh would then stamp one document while recording another's paths — a record that is
+# wrong AND reads green. That is not hypothetical: on a checkout one commit behind main it stamped
+# a seeds document still carrying a REVOKED dispatcher PAT while recording paths from the corrected
+# live Secret. Same-file sourcing makes the divergence unrepresentable.
 af-record-seed-coverage:
-    kubectl --context admin@ai get secret openbao-operator-seeds -n openbao \
-      -o jsonpath='{.data.seeds\.json}' | base64 -d \
+    sops -d --extract '["stringData"]["seeds.json"]' \
+      kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml \
       | python scripts/gen-broker-inventory.py --refresh-seed-coverage
 
 # PREFLIGHT #2: assert the host-mode Gitea act_runner CI pool is fit before the Stage-0/Stage-4 image

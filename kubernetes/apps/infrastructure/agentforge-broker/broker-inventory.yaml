@@ -65,23 +65,56 @@ seats:
 # seeds file names every broker oauth path the estate declares. That refusal is fail-closed
 # and correct, but it lands at provisioner startup; this record moves it into the PR.
 #
-# `declaredOauthPaths` is a KEY-NAME-ONLY record of the SOPS-encrypted operator seeds
-# (kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml). CI cannot
-# decrypt it — and must not be able to — so the record is refreshed out of band by an
-# operator who can, and the check then verifies the record against the seats above:
+# `declaredSeedPaths` / `declaredOauthPaths` are a KEY-NAME-ONLY record of the SOPS-encrypted
+# operator seeds document named by `seedsDocument` below. CI cannot decrypt it — and must not
+# be able to — so the record is refreshed out of band by an operator who can, and the check
+# then verifies the record against the seats above:
 #
-#   kubectl --context admin@ai get secret openbao-operator-seeds -n openbao \
-#     -o jsonpath='{.data.seeds\.json}' | base64 -d \
+#   sops -d --extract '["stringData"]["seeds.json"]' \
+#     kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml \
 #     | python scripts/gen-broker-inventory.py --refresh-seed-coverage
 #
-# NO VALUE is ever read, printed or stored — only the logical KV path names.
+# NO VALUE is ever read, printed or stored — only the logical KV path names. Since
+# agentforge #276/#277 the operator seeds are create-if-absent, so this document's remaining
+# job is to be WHAT A WIPED VAULT RESTORES FROM: its completeness is the DR guarantee, and
+# `declaredSeedPaths` is the plaintext shadow of it — a path dropped from the seeds shows up
+# as a removed line here, in the very PR that drops it.
+#
+# `seedsDocumentSha256` is the SHA-256 of that file's CIPHERTEXT, exactly as it sits on disk.
+# It is not a secret and reveals nothing about the plaintext; it is the one property of the
+# document CI can compute for itself. Without it the record could go STALE IN SILENCE — the
+# seeds could gain a path, lose one, or have a credential re-cut, and this record would keep
+# asserting what it asserted before while `--check` stayed green. `--check` re-hashes the
+# file and FAILS when it differs from the stamp; `--write` copies the stamp forward untouched,
+# so only a real re-read of the document (the command above) can re-bless it.
+#
+# The paths above come from the SAME FILE the digest is taken from. Piping the live cluster
+# Secret in instead (`kubectl get secret openbao-operator-seeds`) looks equivalent and is not:
+# the two diverge whenever the working tree is behind or ahead of what Flux has reconciled, and
+# the refresh would stamp one document while recording another's paths — wrong, and green. On a
+# checkout one commit behind main that combination stamped a seeds document still carrying a
+# REVOKED dispatcher PAT against paths read from the corrected live Secret. Same-file sourcing
+# makes that divergence unrepresentable, so the recipe above is the only supported one.
 seedCoverage:
-  recordedAt: "2026-07-29"
+  recordedAt: "2026-09-01"
+  seedsDocumentSha256: "4af1dac08e1bdc84d12891771d1bb92902a9f70662582cbf1463f175f101e555"
+  seedsDocument: kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml
   recordedForAuds:
     - "anthropic/claude-max-1"
     - "anthropic/claude-max-2"
     - "anthropic/claude-max-3"
     - "openai/codex-pro"
+  declaredSeedPaths:
+    - "operator/broker/anthropic/claude-max-1/ledger"
+    - "operator/broker/anthropic/claude-max-2/ledger"
+    - "operator/broker/anthropic/claude-max-3/ledger"
+    - "operator/broker/openai/codex-pro/ledger"
+    - "operator/ci/runner-registration"
+    - "operator/ci/scaler-token"
+    - "operator/dispatcher/forge"
+    - "operator/reaper/ledger"
+    - "tenants/tenant-zero/platform-dev/orchestrator"
+    - "tenants/tenant-zero/playground/orchestrator"
   declaredOauthPaths:
     []
   missingOauthPaths:

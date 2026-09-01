@@ -36,11 +36,24 @@ DERIVED ARTEFACTS (this script owns these spans end to end):
 (agentforge #69) — distinct from (3), which is a comma-separated URL LIST and a
 GATE, not a writer.
 
+THE SEED-COVERAGE RECORD is the one part that is NOT derivable in CI. CI cannot
+decrypt `openbao/operator-seeds.sops.yaml` — and must not be able to — so an
+operator who can refreshes a KEY-NAMES-ONLY record of what that document
+declares (`--refresh-seed-coverage`), and the record is then what CI checks. A
+record can go stale silently, so the refresh also stamps
+`seedCoverage.seedsDocumentSha256`: the SHA-256 of the ENCRYPTED document as it
+sits on disk. `--check` re-hashes the same ciphertext (no decryption, nothing
+secret in the hash) and fails when it differs from the stamp — because a seeds
+document that moved after the record was taken is a document the record no
+longer describes. Since agentforge #276/#277 the operator seeds are
+create-if-absent, so this document's remaining job is to be what a wiped vault
+restores from: its completeness IS the disaster-recovery guarantee.
+
 USAGE
   python scripts/gen-broker-inventory.py            # check (default) — exit 1 on drift
   python scripts/gen-broker-inventory.py --write    # regenerate in place
-  kubectl get secret openbao-operator-seeds -n openbao \
-      -o jsonpath='{.data.seeds\\.json}' | base64 -d \
+  sops -d --extract '["stringData"]["seeds.json"]' \
+      kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml \
     | python scripts/gen-broker-inventory.py --refresh-seed-coverage
 
 `--check` renders every derived artefact into memory and compares it byte for
@@ -55,17 +68,21 @@ scans, so this carries no runtime dependency beyond Python itself.
 from __future__ import annotations
 
 import argparse
+import datetime
 import difflib
+import hashlib
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 BROKER_DIR = REPO / "kubernetes/apps/infrastructure/agentforge-broker"
 CP_DEPLOY = REPO / "kubernetes/apps/apps/agentforge/deployment.yaml"
 PROVISIONER_DEPLOY = REPO / "kubernetes/apps/infrastructure/security/openbao/provisioner-deploy.yaml"
+OPERATOR_SEEDS = REPO / "kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml"
+SEEDS_LABEL = OPERATOR_SEEDS.relative_to(REPO).as_posix()
 INVENTORY = BROKER_DIR / "broker-inventory.yaml"
 
 BROKER_NS = "agentforge-broker"
@@ -405,29 +422,83 @@ def kv_gc_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _read_seed_coverage() -> tuple[list[str], str]:
+def seeds_document_sha256() -> str:
+    """SHA-256 of the SOPS-encrypted operator seeds document, byte for byte off disk.
+
+    Hashes CIPHERTEXT. Nothing is decrypted, so this runs anywhere — which is the
+    whole point: it is the one property of the seeds document CI can compute for
+    itself, and therefore the only thing that can tie the out-of-band coverage
+    record to the document it claims to describe.
+    """
+    if not OPERATOR_SEEDS.exists():
+        raise SourceError(
+            f"{OPERATOR_SEEDS.relative_to(REPO).as_posix()} is missing — the seed-coverage record "
+            "describes a document that is not in the tree. Refusing to report a coverage state "
+            "derived from nothing (fail closed)."
+        )
+    return hashlib.sha256(OPERATOR_SEEDS.read_bytes()).hexdigest()
+
+
+@dataclass(frozen=True)
+class SeedRecord:
+    """What the committed inventory RECORDS about the encrypted seeds document.
+
+    Written only by `--refresh-seed-coverage`, from one read of the decrypted
+    document. `--write` copies it forward verbatim: a generator that could
+    re-stamp `document_sha256` on its own would let a changed document be
+    re-blessed without anyone re-reading its contents, which is exactly the
+    guarantee the stamp exists to provide.
+    """
+
+    recorded_at: str = ""
+    #: SHA-256 of the ENCRYPTED seeds document at the moment the paths below were read.
+    document_sha256: str = ""
+    #: Every top-level logical KV path the document declares (NAMES ONLY).
+    seed_paths: list[str] = field(default_factory=list)
+    #: The subset of `seed_paths` that are broker oauth paths — what the KV-GC gate reads.
+    oauth_paths: list[str] = field(default_factory=list)
+
+
+def _read_path_list(text: str, key: str) -> list[str]:
+    """Read one `  <key>:` list of scalars out of the committed seedCoverage block.
+
+    STRICTLY the named block. Matching `operator/.../oauth` file-wide would also
+    sweep up missingOauthPaths — which made the previously-missing paths read back
+    as declared and the record oscillate between two states on successive runs.
+    """
+    block = re.search(rf"(?m)^[ ]{{2}}{re.escape(key)}:\n((?:[ ]{{4}}[-\[].*\n)*)", text)
+    if not block:
+        return []
+    return [
+        v.strip('"')
+        for v in re.findall(r"(?m)^[ ]{4}-[ ]*(\S+)[ \t]*$", block.group(1))
+    ]
+
+
+def _read_seed_coverage() -> SeedRecord:
     """Recover the recorded seed-coverage block from the committed inventory.
 
-    Returns (declared oauth paths, recordedAt). The record is refreshed ONLY by
-    `--refresh-seed-coverage`, which reads the decrypted seeds file and keeps
-    key NAMES only — never a value. A missing record is an error: the KV GC
-    coverage gate cannot be evaluated from an absent inventory.
+    The record is refreshed ONLY by `--refresh-seed-coverage`, which reads the
+    decrypted seeds document and keeps key NAMES only — never a value. A missing
+    record is an error: the KV GC coverage gate cannot be evaluated from an
+    absent inventory.
     """
     if not INVENTORY.exists():
-        return [], ""
+        return SeedRecord()
     text = INVENTORY.read_text(encoding="utf-8")
     at = re.search(r"(?m)^[ ]*recordedAt:[ ]*\"([^\"]*)\"", text)
-    # STRICTLY the declaredOauthPaths block. Matching `operator/.../oauth` file-wide would also
-    # sweep up missingOauthPaths — which made the previously-missing paths read back as declared
-    # and the record oscillate between two states on successive runs.
-    block = re.search(r"(?m)^[ ]{2}declaredOauthPaths:\n((?:[ ]{4}[-\[].*\n)*)", text)
-    paths = re.findall(r"(?m)^[ ]{4}-[ ]*(\S+)[ \t]*$", block.group(1)) if block else []
-    return list(paths), (at.group(1) if at else "")
+    digest = re.search(r"(?m)^[ ]*seedsDocumentSha256:[ ]*\"([^\"]*)\"", text)
+    return SeedRecord(
+        recorded_at=at.group(1) if at else "",
+        document_sha256=digest.group(1) if digest else "",
+        seed_paths=_read_path_list(text, "declaredSeedPaths"),
+        oauth_paths=_read_path_list(text, "declaredOauthPaths"),
+    )
 
 
-def render_inventory(seats: list[Seat], declared: list[str], recorded_at: str) -> str:
+def render_inventory(seats: list[Seat], record: SeedRecord) -> str:
     required = [s.kv_path(OAUTH_OBJECT) for s in seats]
-    missing = [p for p in required if p not in set(declared)]
+    missing = [p for p in required if p not in set(record.oauth_paths)]
     ready = not missing
 
     out: list[str] = []
@@ -466,24 +537,52 @@ def render_inventory(seats: list[Seat], declared: list[str], recorded_at: str) -
     add("# seeds file names every broker oauth path the estate declares. That refusal is fail-closed")
     add("# and correct, but it lands at provisioner startup; this record moves it into the PR.")
     add("#")
-    add("# `declaredOauthPaths` is a KEY-NAME-ONLY record of the SOPS-encrypted operator seeds")
-    add("# (kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml). CI cannot")
-    add("# decrypt it — and must not be able to — so the record is refreshed out of band by an")
-    add("# operator who can, and the check then verifies the record against the seats above:")
+    add("# `declaredSeedPaths` / `declaredOauthPaths` are a KEY-NAME-ONLY record of the SOPS-encrypted")
+    add("# operator seeds document named by `seedsDocument` below. CI cannot decrypt it — and must not")
+    add("# be able to — so the record is refreshed out of band by an operator who can, and the check")
+    add("# then verifies the record against the seats above:")
     add("#")
-    add("#   kubectl --context admin@ai get secret openbao-operator-seeds -n openbao \\")
-    add("#     -o jsonpath='{.data.seeds\\.json}' | base64 -d \\")
+    add("#   sops -d --extract '[\"stringData\"][\"seeds.json\"]' \\")
+    add(f"#     {SEEDS_LABEL} \\")
     add("#     | python scripts/gen-broker-inventory.py --refresh-seed-coverage")
     add("#")
-    add("# NO VALUE is ever read, printed or stored — only the logical KV path names.")
+    add("# NO VALUE is ever read, printed or stored — only the logical KV path names. Since")
+    add("# agentforge #276/#277 the operator seeds are create-if-absent, so this document's remaining")
+    add("# job is to be WHAT A WIPED VAULT RESTORES FROM: its completeness is the DR guarantee, and")
+    add("# `declaredSeedPaths` is the plaintext shadow of it — a path dropped from the seeds shows up")
+    add("# as a removed line here, in the very PR that drops it.")
+    add("#")
+    add("# `seedsDocumentSha256` is the SHA-256 of that file's CIPHERTEXT, exactly as it sits on disk.")
+    add("# It is not a secret and reveals nothing about the plaintext; it is the one property of the")
+    add("# document CI can compute for itself. Without it the record could go STALE IN SILENCE — the")
+    add("# seeds could gain a path, lose one, or have a credential re-cut, and this record would keep")
+    add("# asserting what it asserted before while `--check` stayed green. `--check` re-hashes the")
+    add("# file and FAILS when it differs from the stamp; `--write` copies the stamp forward untouched,")
+    add("# so only a real re-read of the document (the command above) can re-bless it.")
+    add("#")
+    add("# The paths above come from the SAME FILE the digest is taken from. Piping the live cluster")
+    add("# Secret in instead (`kubectl get secret openbao-operator-seeds`) looks equivalent and is not:")
+    add("# the two diverge whenever the working tree is behind or ahead of what Flux has reconciled, and")
+    add("# the refresh would stamp one document while recording another's paths — wrong, and green. On a")
+    add("# checkout one commit behind main that combination stamped a seeds document still carrying a")
+    add("# REVOKED dispatcher PAT against paths read from the corrected live Secret. Same-file sourcing")
+    add("# makes that divergence unrepresentable, so the recipe above is the only supported one.")
     add("seedCoverage:")
-    add(f"  recordedAt: \"{recorded_at}\"")
+    add(f"  recordedAt: \"{record.recorded_at}\"")
+    add(f"  seedsDocumentSha256: \"{record.document_sha256}\"")
+    add(f"  seedsDocument: {SEEDS_LABEL}")
     add("  recordedForAuds:")
     for seat in seats:
         add(f"    - \"{seat.aud}\"")
+    add("  declaredSeedPaths:")
+    if record.seed_paths:
+        for path in sorted(record.seed_paths):
+            add(f"    - \"{path}\"")
+    else:
+        add("    []")
     add("  declaredOauthPaths:")
-    if declared:
-        for path in sorted(declared):
+    if record.oauth_paths:
+        for path in sorted(record.oauth_paths):
             add(f"    - {path}")
     else:
         add("    []")
@@ -513,18 +612,17 @@ def _recorded_for_auds() -> list[str]:
 
 
 def render_all(seats: list[Seat]) -> dict[Path, str]:
-    declared, recorded_at = _read_seed_coverage()
     return {
         CP_DEPLOY: render_cp_deployment(seats),
         PROVISIONER_DEPLOY: render_provisioner_deployment(seats),
-        INVENTORY: render_inventory(seats, declared, recorded_at),
+        INVENTORY: render_inventory(seats, _read_seed_coverage()),
     }
 
 
 def _coverage_gate(seats: list[Seat]) -> list[str]:
-    """The KV-GC seed-coverage assertions. Returns a list of failure messages."""
+    """The seed-coverage assertions. Returns a list of failure messages."""
     failures: list[str] = []
-    declared, _ = _read_seed_coverage()
+    record = _read_seed_coverage()
     recorded_auds = _recorded_for_auds()
     current_auds = [s.aud for s in seats]
 
@@ -539,7 +637,29 @@ def _coverage_gate(seats: list[Seat]) -> list[str]:
             "current seats are seeded. Re-record it with --refresh-seed-coverage."
         )
 
-    missing = [s.kv_path(OAUTH_OBJECT) for s in seats if s.kv_path(OAUTH_OBJECT) not in set(declared)]
+    # Ties the record to the DOCUMENT, not just to the seat list. Hashes ciphertext, so it is
+    # computable in CI, which cannot (and must not) decrypt anything.
+    current_digest = seeds_document_sha256()
+    if not record.document_sha256:
+        failures.append(
+            "seedCoverage.seedsDocumentSha256 is EMPTY: nothing ties this record to the seeds "
+            f"document it describes ({SEEDS_LABEL}, which currently hashes to {current_digest}). "
+            "An unstamped record cannot be evidence — the document may have gained or lost a path "
+            "since it was taken and the record would read the same either way. Re-record it with "
+            "--refresh-seed-coverage."
+        )
+    elif record.document_sha256 != current_digest:
+        failures.append(
+            "seedCoverage.seedsDocumentSha256 is STALE: recorded against "
+            f"{record.document_sha256} but {SEEDS_LABEL} now hashes to {current_digest}. The seeds "
+            "document CHANGED after the coverage record was taken — a path may have been dropped, "
+            "added, or a credential re-cut — so the record is no longer evidence about the "
+            "document. Re-record it with --refresh-seed-coverage."
+        )
+
+    missing = [
+        s.kv_path(OAUTH_OBJECT) for s in seats if s.kv_path(OAUTH_OBJECT) not in set(record.oauth_paths)
+    ]
     if kv_gc_enabled() and missing:
         failures.append(
             "the provisioner sets AF_PROVISIONER_KV_GC_SEEDS_FILE (the KV garbage collector is "
@@ -568,16 +688,31 @@ def cmd_check(seats: list[Seat]) -> int:
         )
         sys.stdout.writelines(diff)
 
+    rendered_failed = not ok
+    coverage_failed = False
     for failure in _coverage_gate(seats):
         ok = False
+        coverage_failed = True
         print(f"DRIFT seed-coverage: {failure}")
 
     if ok:
         print(f"\nOK — {len(seats)} seats, every derived artefact matches the broker manifests.")
-    else:
-        print("\nFAIL — a derived value disagrees with the broker manifest set (the source).")
-        print("Run `python scripts/gen-broker-inventory.py --write` and review the diff.")
-    return 0 if ok else 1
+        return 0
+
+    # TWO failure classes, TWO remedies, and both are printed when both apply. `--write` re-renders
+    # derived artefacts from the broker manifests; it deliberately CANNOT re-stamp the seed-coverage
+    # record (that would let a changed seeds document be re-blessed without anyone re-reading it).
+    # Printing only the --write remedy under a coverage failure sends the reader to a command that
+    # cannot fix it and then reports success — the same misdirection agentforge #277 removed by
+    # giving seed drift its own remedy text instead of filing it under permission refusals.
+    print("\nFAIL")
+    if rendered_failed:
+        print("  * a derived value disagrees with the broker manifest set (the source).")
+        print("    Run `python scripts/gen-broker-inventory.py --write` and review the diff.")
+    if coverage_failed:
+        print("  * the seed-coverage record no longer describes the seeds document.")
+        print("    Re-record it (`just af-record-seed-coverage`); `--write` cannot re-stamp it.")
+    return 1
 
 
 def cmd_write(seats: list[Seat]) -> int:
@@ -598,6 +733,12 @@ def cmd_write(seats: list[Seat]) -> int:
     return 0
 
 
+#: A logical KV path name is a bounded, printable, whitespace-free scalar. A key that is not one
+#: would corrupt the generated YAML (or read back TRUNCATED at the first space, making the record
+#: oscillate), and is far likelier to mean the wrong document is on stdin than to be a real path.
+_SEED_PATH = re.compile(r"^[\x21-\x7e]{1,200}$")
+
+
 def cmd_refresh_seed_coverage(seats: list[Seat], stdin_text: str, recorded_at: str) -> int:
     """Record the seeds file's KEY NAMES. Never reads, prints or stores a value."""
     raw = stdin_text.strip()
@@ -614,20 +755,33 @@ def cmd_refresh_seed_coverage(seats: list[Seat], stdin_text: str, recorded_at: s
         print("ERROR: the seeds document must be a JSON object")
         return 1
 
-    declared = sorted(
-        key
-        for key in doc  # KEYS ONLY — doc[key] is never touched
-        if re.fullmatch(r"operator/broker/[a-z0-9-]+/[a-z0-9-]+/oauth", key)
-    )
+    # KEYS ONLY, from here down — doc[key] is never touched.
+    seed_paths = sorted(doc)
+    if not all(isinstance(k, str) and _SEED_PATH.match(k) for k in seed_paths):
+        # Value-free on purpose: an offending key is not printed either, since a document this
+        # shape is most likely not the seeds document at all.
+        print("ERROR: a top-level seeds key is not a bounded, whitespace-free, printable path name")
+        return 1
+    oauth_paths = [k for k in seed_paths if re.fullmatch(r"operator/broker/[a-z0-9-]+/[a-z0-9-]+/oauth", k)]
     del doc
 
-    text = render_inventory(seats, declared, recorded_at)
-    INVENTORY.write_text(text, encoding="utf-8", newline="")
+    # Stamped from the SAME act that read the paths above: the two are only evidence together.
+    record = SeedRecord(
+        recorded_at=recorded_at,
+        document_sha256=seeds_document_sha256(),
+        seed_paths=seed_paths,
+        oauth_paths=oauth_paths,
+    )
+    INVENTORY.write_text(render_inventory(seats, record), encoding="utf-8", newline="")
     rel = INVENTORY.relative_to(REPO).as_posix()
-    print(f"recorded {len(declared)} broker oauth path(s) into {rel} (key names only)")
-    for path in declared:
+    print(
+        f"recorded {len(seed_paths)} seed path(s), {len(oauth_paths)} of them broker oauth, "
+        f"into {rel} (key names only)"
+    )
+    print(f"  stamped  {SEEDS_LABEL} sha256={record.document_sha256}")
+    for path in seed_paths:
         print(f"  declared {path}")
-    missing = [s.kv_path(OAUTH_OBJECT) for s in seats if s.kv_path(OAUTH_OBJECT) not in set(declared)]
+    missing = [s.kv_path(OAUTH_OBJECT) for s in seats if s.kv_path(OAUTH_OBJECT) not in set(oauth_paths)]
     for path in missing:
         print(f"  MISSING  {path}")
     return 0
@@ -641,25 +795,31 @@ def main() -> int:
     group.add_argument(
         "--refresh-seed-coverage",
         action="store_true",
-        help="read the DECRYPTED seeds JSON on stdin and record its broker oauth KEY NAMES",
+        help="read the DECRYPTED seeds JSON on stdin and record its KEY NAMES + a ciphertext hash",
     )
-    parser.add_argument("--recorded-at", default="", help="date stamp for --refresh-seed-coverage")
+    parser.add_argument(
+        "--recorded-at",
+        default="",
+        help="date stamp for --refresh-seed-coverage (default: today, UTC)",
+    )
     args = parser.parse_args()
 
     try:
         seats = load_seats()
+        if args.write:
+            return cmd_write(seats)
+        if args.refresh_seed_coverage:
+            # Default to TODAY, never to the previous stamp: `recordedAt` answers "when was this
+            # evidence taken", and carrying the old date forward across a fresh read is the same
+            # silent staleness `seedsDocumentSha256` exists to stop.
+            today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+            return cmd_refresh_seed_coverage(seats, sys.stdin.read(), args.recorded_at or today)
+        return cmd_check(seats)
     except SourceError as exc:
         # An unreadable or self-inconsistent source is a FAILURE, never a skip:
         # a gate that cannot determine the answer must not report success.
         print(f"ERROR {exc}")
         return 1
-
-    if args.write:
-        return cmd_write(seats)
-    if args.refresh_seed_coverage:
-        _, previous = _read_seed_coverage()
-        return cmd_refresh_seed_coverage(seats, sys.stdin.read(), args.recorded_at or previous)
-    return cmd_check(seats)
 
 
 if __name__ == "__main__":
