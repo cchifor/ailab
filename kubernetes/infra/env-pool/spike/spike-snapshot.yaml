@@ -1,0 +1,11 @@
+# Spike 1c: golden-snapshot mechanics — snapshot the populated docker volume, then restore it
+# into a second env pod and prove the warm cache (images present, zero pulls) + measure timing.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: golden-spike-v1
+  namespace: testpool-spike
+spec:
+  volumeSnapshotClassName: qnap-iscsi
+  source:
+    persistentVolumeClaimName: dind-blk-dockerlib

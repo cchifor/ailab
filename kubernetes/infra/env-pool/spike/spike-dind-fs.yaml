@@ -1,0 +1,70 @@
+# Spike 1a: Filesystem-mode qnap-iscsi PVC as /var/lib/docker inside a Kata pod.
+# Passes if: dockerd starts, `docker info` reports Storage Driver overlay2 (NOT vfs),
+# and an L-class pull+run works. The generic ephemeral volume dies with the pod.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dind-fs
+  namespace: testpool-spike
+  labels:
+    app: dind-spike
+spec:
+  runtimeClassName: kata-env-spike
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  # Kata pods cannot reach ClusterIPs on this Cilium (bpf-lb-sock=false) — kube-dns included.
+  # The design's answer: explicit upstream resolvers, no cluster DNS dependency at all.
+  dnsPolicy: "None"
+  dnsConfig:
+    nameservers: ["1.1.1.1", "9.9.9.9"]
+  terminationGracePeriodSeconds: 10
+  containers:
+    - name: dind
+      image: docker.io/library/docker:28.3-dind
+      securityContext:
+        privileged: true
+      env:
+        - name: DOCKER_TLS_CERTDIR
+          value: "" # spike: plain socket, no TLS material
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -x
+          date +%s.%N > /tmp/t0-entrypoint
+          dockerd-entrypoint.sh --registry-mirror=https://registry.chifor.me &
+          i=0
+          until curl -sf --unix-socket /var/run/docker.sock http://localhost/_ping >/dev/null 2>&1; do
+            i=$((i+1)); [ $i -gt 600 ] && echo "DOCKERD NEVER READY" && exit 1
+            sleep 0.2
+          done
+          date +%s.%N > /tmp/t1-dockerd-ready
+          echo "=== dockerd ready; storage driver:"
+          docker info --format '{{.Driver}}'
+          docker info --format '{{.Driver}}' | grep -q overlay2 || { echo "FATAL: not overlay2"; exit 2; }
+          sleep infinity
+      resources:
+        requests:
+          cpu: "2"
+          memory: 3Gi
+        limits:
+          cpu: "6"
+          memory: 12Gi
+      volumeMounts:
+        - name: dockerlib
+          mountPath: /var/lib/docker
+        - name: shm
+          mountPath: /dev/shm
+  volumes:
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+    - name: dockerlib
+      ephemeral:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: qnap-iscsi
+            resources:
+              requests:
+                storage: 40Gi

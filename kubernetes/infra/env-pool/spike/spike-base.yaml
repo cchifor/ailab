@@ -1,0 +1,30 @@
+# Spike 1 (Kata-DinD-block linchpin) — THROWAWAY objects, hand-applied, deleted after the spike.
+# Committed for the record next to the module; not referenced by any Flux kustomization.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: testpool-spike
+  labels:
+    # DinD needs privileged:true in the pod spec; PSA judges the spec regardless of RuntimeClass
+    # (estate precedent: agentforge-ci). Kata confines the privilege to the guest VM.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-env-spike
+handler: kata # same handler the agent-pool kata RuntimeClass uses; the env node runs the identical extension image
+overhead:
+  podFixed:
+    cpu: 250m
+    memory: 160Mi
+scheduling:
+  nodeSelector:
+    ailab.io/env-pool: "true"
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: env
+      effect: NoSchedule
