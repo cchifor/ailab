@@ -89,9 +89,14 @@ variable "dev_worker_cores" {
 variable "dev_worker_memory_mib" {
   description = "Max VM memory (MiB) — the ceiling the balloon can inflate to under load."
   type        = number
-  # 16 GiB ceiling, uniform across all workers. Now genuinely reachable via ballooning: the rarely-used
-  # heavyweight LLMs on node2/node3 are behind llama-swap (idle-unload), so once a node's model is
-  # unloaded pvestatd can inflate a busy worker up to this ceiling. See docs/runbooks/dev-workers.md.
+  # 16 GiB default ceiling. Genuinely reachable via ballooning: the rarely-used heavyweight LLMs on
+  # node2/node3 are behind llama-swap (idle-unload), so once a node's model is unloaded pvestatd can
+  # inflate a busy worker up to this ceiling. See docs/runbooks/dev-workers.md.
+  # Since the testpool went live (2026-09-01) the heavy compose stacks (L/XL/Playwright) lease kata
+  # envs via `tep` instead of running on the worker, so this ceiling is oversized: the busiest
+  # worker's 10-day peak was 7.9 GiB (dw4, measured 2026-09-01, pre-pool load included). dev-worker-6
+  # runs a 12 GiB POC via the per-worker memory_mib override in dev_worker_nodes; a fleet-wide
+  # reduction follows once the POC has soaked. See docs/runbooks/dev-workers.md.
   default = 16384
 }
 variable "dev_worker_memory_floating_mib" {
@@ -128,9 +133,10 @@ variable "dev_worker_ssh_public_key" {
 }
 
 # ---- TWO dev-worker VMs per physical host (was one) ----
-# All six share ONE uniform spec: cores + dev_worker_memory_mib (16 GiB ceiling) +
-# dev_worker_memory_floating_mib (4 GiB floor) are module-wide scalars, so this map carries only
-# identity (node/vmid/ip/hostname) — no per-node sizing override. Placement stays one-more-per-node
+# The base spec is shared: cores + dev_worker_memory_mib (ceiling) + dev_worker_memory_floating_mib
+# (floor) are module-wide scalars; this map carries identity (node/vmid/ip/hostname) plus two
+# OPTIONAL per-worker sizing overrides (memory_floating_mib and memory_mib, both documented below).
+# Placement stays one-more-per-node
 # (fault isolation): dw1/4 -> node1, dw2/5 -> node2, dw3/6 -> node3.
 # IPs: consecutive .8-.13 (free static block, inside the .2-.50 reserve, below the router DHCP pool at
 # .51 — no router change needed). vmids 42xx band (4201-4206) don't collide (Talos 4001-4003, runners
@@ -172,6 +178,11 @@ variable "dev_worker_nodes" {
     hostname  = string
     # null => use the uniform dev_worker_memory_floating_mib.
     memory_floating_mib = optional(number)
+    # null => use the uniform dev_worker_memory_mib ceiling. Set on dev-worker-6 only: the 12 GiB
+    # downsize POC, viable since heavy compose stacks moved to testpool leases (see the note on
+    # dev_worker_memory_mib above). Hand-applied 2026-09-01 (`qm set 4206 --memory 12288` + reboot),
+    # so the first apply after merge is a no-op for the VM.
+    memory_mib = optional(number)
   }))
   default = {
     "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.8", hostname = "dev-worker-1", memory_floating_mib = 12288 }
@@ -179,6 +190,6 @@ variable "dev_worker_nodes" {
     "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.10", hostname = "dev-worker-3" }
     "dev-worker-4" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.11", hostname = "dev-worker-4", memory_floating_mib = 12288 }
     "dev-worker-5" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.12", hostname = "dev-worker-5" }
-    "dev-worker-6" = { node_name = "ai-node3", vm_id = 4206, ip = "192.168.0.13", hostname = "dev-worker-6" }
+    "dev-worker-6" = { node_name = "ai-node3", vm_id = 4206, ip = "192.168.0.13", hostname = "dev-worker-6", memory_mib = 12288 }
   }
 }

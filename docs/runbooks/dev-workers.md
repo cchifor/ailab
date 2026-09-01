@@ -19,7 +19,7 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 | dev-worker-3 | ai-node3 | 4203 | 192.168.0.10 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
 | dev-worker-4 | ai-node1 | 4204 | 192.168.0.11 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
 | dev-worker-5 | ai-node2 | 4205 | 192.168.0.12 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-6 | ai-node3 | 4206 | 192.168.0.13 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-6 | ai-node3 | 4206 | 192.168.0.13 | 8 vCPU / **12 GiB** (4–12 balloon, downsize POC) / 40+128 GiB |
 
 > **IP renumber (consecutive .8–.13).** cloud-init fixes the IP at create and the tofu module has
 > `lifecycle.ignore_changes = [initialization]`, so the live IPs were changed **in-guest** (not by tofu):
@@ -41,6 +41,26 @@ two workers-at-floor at once.
 
 (IPs `.37/.38/.39` + `.5/.6/.7` are free static addresses inside the `.2`–`.50` reserve, below the
 DHCP pool — no router change is needed.)
+
+## Post-testpool ceiling downsize (POC on dev-worker-6, 2026-09-01)
+
+Since the test-env pool went live (`kubernetes/apps/infrastructure/testpool/`, `tep`), the heavy
+compose stacks (L/XL/Playwright class) lease kata envs on talos-env-node-1 instead of running on
+the worker; only S-class (plain pytest, 2–4 GiB) and the small M-class docker tiers stay local, so
+the 16 GiB ceiling is oversized. Measured over the 10 days ending 2026-09-01 (node_exporter,
+pre-pool load included): peak used was 7.9 GiB (dw4) / 6.9 GiB (dw1), and ≤2.5 GiB on the other
+four.
+
+**POC:** dev-worker-6 runs a **12 GiB ceiling** (`memory_mib = 12288` override in
+`kubernetes/infra/dev-workers/variables.tf`), hand-applied 2026-09-01 (`qm set 4206 --memory 12288`
++ `qm reboot`) and codified the same day — the first `tofu apply` after the merge no-ops.
+Post-resize checks passed: prometheus-node-exporter :9100 up, local `docker run` fine, `tep list`
+reaches the pool. **Fleet-wide plan** (after the POC soaks): drop the ceiling scalar to 12288 for
+all six, freeing 4 GiB × 2 workers of worst-case commitment per node — headroom that feeds the
+planned env-big (24 GiB) testpool node. On dw1/dw4 a 12 GiB ceiling meets their codified 12 GiB
+floor (floor == ceiling: effectively fixed memory), which matches how node1 already behaves —
+ballooning never inflates guests there. Do NOT lower the dw1/dw4 floors as part of this; that
+mitigation stands until node1 capacity is fixed (see the note in variables.tf).
 
 Per-node RAM budget (~125 GiB usable): Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB hard** —
 `kubernetes/infra/variables.tf`) + ai-llm LXC (96 GiB cap; **~0 GiB when idle-unloaded**, ~59/71 GiB

@@ -46,13 +46,14 @@ resource "proxmox_virtual_environment_vm" "dev_worker" {
   # kept low because the heavyweight LLMs on node2/node3 are now idle-unloaded (llama-swap), so
   # ballooning actually works and inflates a busy worker toward the ceiling. See variables.tf +
   # docs/runbooks/dev-workers.md.
-  # The floor is the uniform scalar UNLESS this worker carries an override. Only ai-node1's two workers
-  # do, and only because that node is oversubscribed enough that ballooning never inflates them — see
-  # the long note on dev_worker_nodes in variables.tf. `memory` is deliberately NOT in
-  # lifecycle.ignore_changes below: ignoring it would stop tofu managing memory at all and hide the
-  # next divergence, where codifying the override keeps the drift visible and reviewable.
+  # Floor and ceiling are the uniform scalars UNLESS this worker carries an override: ai-node1's two
+  # workers pin a 12 GiB floor (that node is oversubscribed enough that ballooning never inflates
+  # them) and dev-worker-6 runs the 12 GiB-ceiling downsize POC — see the notes on dev_worker_nodes
+  # in variables.tf. `memory` is deliberately NOT in lifecycle.ignore_changes below: ignoring it
+  # would stop tofu managing memory at all and hide the next divergence, where codifying the
+  # override keeps the drift visible and reviewable.
   memory {
-    dedicated = var.dev_worker_memory_mib
+    dedicated = coalesce(each.value.memory_mib, var.dev_worker_memory_mib)
     floating  = coalesce(each.value.memory_floating_mib, var.dev_worker_memory_floating_mib)
   }
 
