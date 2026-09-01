@@ -112,5 +112,12 @@ resource "proxmox_virtual_environment_vm" "dev_worker" {
   lifecycle {
     # Avoid churn after first boot (cloud-init only applies once); ignore image_datastore drift.
     ignore_changes = [initialization]
+    # PVE requires balloon floor <= memory ceiling; with two independent per-worker overrides a bad
+    # combination (or raising the shared floor above a lowered ceiling) is otherwise only caught by
+    # a provider error at apply. Fail at plan, naming the worker.
+    precondition {
+      condition     = coalesce(each.value.memory_floating_mib, var.dev_worker_memory_floating_mib) <= coalesce(each.value.memory_mib, var.dev_worker_memory_mib)
+      error_message = "dev_worker_nodes[\"${each.key}\"]: effective balloon floor exceeds the effective memory ceiling."
+    }
   }
 }

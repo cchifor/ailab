@@ -56,7 +56,7 @@ four.
 
 **POC:** dev-worker-6 runs a **12 GiB ceiling** (`memory_mib = 12288` override in
 `kubernetes/infra/dev-workers/variables.tf`), hand-applied 2026-09-01 (`qm set 4206 --memory 12288`
-+ `qm reboot`) and codified the same day — the first `tofu apply` after the merge no-ops.
++ `qm reboot 4206`) and codified the same day — the first `tofu apply` after the merge no-ops.
 Post-resize checks passed: prometheus-node-exporter :9100 up, local `docker run` fine, `tep list`
 reaches the pool. **Fleet-wide plan** (after the POC soaks): drop the ceiling scalar to 12288 for
 all six, freeing 4 GiB × 2 workers of worst-case commitment per node — headroom that feeds the
@@ -68,7 +68,8 @@ mitigation stands until node1 capacity is fixed (see the note in variables.tf).
 Per-node RAM budget (~125 GiB usable): Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB hard** —
 `kubernetes/infra/variables.tf`) + ai-llm LXC (96 GiB cap; **~0 GiB when idle-unloaded**, ~59/71 GiB
 when a heavyweight is loaded on demand) + runner (24 GiB ceiling / **10 GiB floor**, ×2 node1/node2,
-×1 node3) + dev-worker (16 GiB ceiling — 12 GiB on dw6 / **4 GiB floor**, ×2 per node). In steady
+×1 node3) + dev-worker (16 GiB ceiling — 12 GiB on dw6 / **4 GiB floor** — **12 GiB on dw1/dw4**,
+×2 per node; node1's two raised floors add 16 GiB of guaranteed allocation there). In steady
 state (heavyweight unloaded) node2/node3 sit ~45% used and workers balloon freely toward the ceiling. **Time-share rule:** a
 node serves *either* its on-demand heavyweight *or* its two workers at full tilt — not both. Loading
 the 122B on node3 (71 GiB) fits alongside cp3 28 + runner 10 + 2×dev-worker-at-floor 4 = 117 < 125,

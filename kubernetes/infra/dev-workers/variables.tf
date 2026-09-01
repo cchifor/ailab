@@ -105,8 +105,9 @@ variable "dev_worker_memory_floating_mib" {
     override it to 12288 via memory_floating_mib in dev_worker_nodes (node1 mitigation, see the
     note there). Low by design (4 GiB): with the heavyweight
     LLMs now idle-unloaded via llama-swap, ballooning works, so the floor only has to cover an
-    idle/light worker (~2-3 GiB) with margin and the balloon inflates on demand toward
-    dev_worker_memory_mib. 4 GiB is also what lets a node hold its on-demand heavyweight (~59/71 GiB)
+    idle/light worker (~2-3 GiB) with margin and the balloon inflates on demand toward the worker's
+    effective ceiling (dev_worker_memory_mib, or its memory_mib override — dw6 runs 12288).
+    4 GiB is also what lets a node hold its on-demand heavyweight (~59/71 GiB)
     AND 2 workers-at-floor at once (node3: 71 + cp3 28 + runner 10 + 2*4 = 117 < 125 GiB). During a
     rare heavyweight session the co-located workers are pinned near this floor (light use only).
     See docs/runbooks/dev-workers.md and docs/runbooks/ai-model-swap.md.
