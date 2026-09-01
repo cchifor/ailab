@@ -70,8 +70,8 @@ seats:
 # be able to — so the record is refreshed out of band by an operator who can, and the check
 # then verifies the record against the seats above:
 #
-#   kubectl --context admin@ai get secret openbao-operator-seeds -n openbao \
-#     -o jsonpath='{.data.seeds\.json}' | base64 -d \
+#   sops -d --extract '["stringData"]["seeds.json"]' \
+#     kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml \
 #     | python scripts/gen-broker-inventory.py --refresh-seed-coverage
 #
 # NO VALUE is ever read, printed or stored — only the logical KV path names. Since
@@ -88,12 +88,16 @@ seats:
 # file and FAILS when it differs from the stamp; `--write` copies the stamp forward untouched,
 # so only a real re-read of the document (the command above) can re-bless it.
 #
-# Refresh from a checkout whose seeds document is the one the cluster has reconciled — the
-# hash is taken from the working tree while the paths come from the live Secret, so refreshing
-# mid-flight would stamp a file that the recorded paths did not come from.
+# The paths above come from the SAME FILE the digest is taken from. Piping the live cluster
+# Secret in instead (`kubectl get secret openbao-operator-seeds`) looks equivalent and is not:
+# the two diverge whenever the working tree is behind or ahead of what Flux has reconciled, and
+# the refresh would stamp one document while recording another's paths — wrong, and green. On a
+# checkout one commit behind main that combination stamped a seeds document still carrying a
+# REVOKED dispatcher PAT against paths read from the corrected live Secret. Same-file sourcing
+# makes that divergence unrepresentable, so the recipe above is the only supported one.
 seedCoverage:
-  recordedAt: "2026-07-29"
-  seedsDocumentSha256: ""
+  recordedAt: "2026-09-01"
+  seedsDocumentSha256: "4af1dac08e1bdc84d12891771d1bb92902a9f70662582cbf1463f175f101e555"
   seedsDocument: kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml
   recordedForAuds:
     - "anthropic/claude-max-1"
@@ -101,7 +105,16 @@ seedCoverage:
     - "anthropic/claude-max-3"
     - "openai/codex-pro"
   declaredSeedPaths:
-    []
+    - "operator/broker/anthropic/claude-max-1/ledger"
+    - "operator/broker/anthropic/claude-max-2/ledger"
+    - "operator/broker/anthropic/claude-max-3/ledger"
+    - "operator/broker/openai/codex-pro/ledger"
+    - "operator/ci/runner-registration"
+    - "operator/ci/scaler-token"
+    - "operator/dispatcher/forge"
+    - "operator/reaper/ledger"
+    - "tenants/tenant-zero/platform-dev/orchestrator"
+    - "tenants/tenant-zero/playground/orchestrator"
   declaredOauthPaths:
     []
   missingOauthPaths:

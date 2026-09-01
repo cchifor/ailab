@@ -192,6 +192,19 @@ class CheckGate(unittest.TestCase):
             rendered = gbi.render_inventory(box.seats(), gbi._read_seed_coverage())
             self.assertEqual(rendered, first)
 
+    def test_a_coverage_failure_does_not_prescribe_write_as_the_remedy(self):
+        # `--write` copies the stamp forward and CANNOT re-bless a changed document (proved by
+        # test_write_does_not_re_bless_a_changed_document). Sending the reader there under a
+        # coverage failure points at a command that exits 0 while the gate stays red.
+        with Sandbox() as box:
+            box.refresh()
+            box.touch_seeds()
+            rc, out = box.check()
+            self.assertEqual(rc, 1)
+            self.assertIn("af-record-seed-coverage", out)
+            remedy = out.split("FAIL", 1)[1]
+            self.assertNotIn("--write` and review the diff", remedy)
+
 
 class DeclaredPaths(unittest.TestCase):
     def test_records_every_top_level_path_not_only_the_oauth_ones(self):

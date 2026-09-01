@@ -52,8 +52,8 @@ restores from: its completeness IS the disaster-recovery guarantee.
 USAGE
   python scripts/gen-broker-inventory.py            # check (default) — exit 1 on drift
   python scripts/gen-broker-inventory.py --write    # regenerate in place
-  kubectl get secret openbao-operator-seeds -n openbao \
-      -o jsonpath='{.data.seeds\\.json}' | base64 -d \
+  sops -d --extract '["stringData"]["seeds.json"]' \
+      kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml \
     | python scripts/gen-broker-inventory.py --refresh-seed-coverage
 
 `--check` renders every derived artefact into memory and compares it byte for
@@ -542,8 +542,8 @@ def render_inventory(seats: list[Seat], record: SeedRecord) -> str:
     add("# be able to — so the record is refreshed out of band by an operator who can, and the check")
     add("# then verifies the record against the seats above:")
     add("#")
-    add("#   kubectl --context admin@ai get secret openbao-operator-seeds -n openbao \\")
-    add("#     -o jsonpath='{.data.seeds\\.json}' | base64 -d \\")
+    add("#   sops -d --extract '[\"stringData\"][\"seeds.json\"]' \\")
+    add(f"#     {SEEDS_LABEL} \\")
     add("#     | python scripts/gen-broker-inventory.py --refresh-seed-coverage")
     add("#")
     add("# NO VALUE is ever read, printed or stored — only the logical KV path names. Since")
@@ -560,9 +560,13 @@ def render_inventory(seats: list[Seat], record: SeedRecord) -> str:
     add("# file and FAILS when it differs from the stamp; `--write` copies the stamp forward untouched,")
     add("# so only a real re-read of the document (the command above) can re-bless it.")
     add("#")
-    add("# Refresh from a checkout whose seeds document is the one the cluster has reconciled — the")
-    add("# hash is taken from the working tree while the paths come from the live Secret, so refreshing")
-    add("# mid-flight would stamp a file that the recorded paths did not come from.")
+    add("# The paths above come from the SAME FILE the digest is taken from. Piping the live cluster")
+    add("# Secret in instead (`kubectl get secret openbao-operator-seeds`) looks equivalent and is not:")
+    add("# the two diverge whenever the working tree is behind or ahead of what Flux has reconciled, and")
+    add("# the refresh would stamp one document while recording another's paths — wrong, and green. On a")
+    add("# checkout one commit behind main that combination stamped a seeds document still carrying a")
+    add("# REVOKED dispatcher PAT against paths read from the corrected live Secret. Same-file sourcing")
+    add("# makes that divergence unrepresentable, so the recipe above is the only supported one.")
     add("seedCoverage:")
     add(f"  recordedAt: \"{record.recorded_at}\"")
     add(f"  seedsDocumentSha256: \"{record.document_sha256}\"")
@@ -684,16 +688,31 @@ def cmd_check(seats: list[Seat]) -> int:
         )
         sys.stdout.writelines(diff)
 
+    rendered_failed = not ok
+    coverage_failed = False
     for failure in _coverage_gate(seats):
         ok = False
+        coverage_failed = True
         print(f"DRIFT seed-coverage: {failure}")
 
     if ok:
         print(f"\nOK — {len(seats)} seats, every derived artefact matches the broker manifests.")
-    else:
-        print("\nFAIL — a derived value disagrees with the broker manifest set (the source).")
-        print("Run `python scripts/gen-broker-inventory.py --write` and review the diff.")
-    return 0 if ok else 1
+        return 0
+
+    # TWO failure classes, TWO remedies, and both are printed when both apply. `--write` re-renders
+    # derived artefacts from the broker manifests; it deliberately CANNOT re-stamp the seed-coverage
+    # record (that would let a changed seeds document be re-blessed without anyone re-reading it).
+    # Printing only the --write remedy under a coverage failure sends the reader to a command that
+    # cannot fix it and then reports success — the same misdirection agentforge #277 removed by
+    # giving seed drift its own remedy text instead of filing it under permission refusals.
+    print("\nFAIL")
+    if rendered_failed:
+        print("  * a derived value disagrees with the broker manifest set (the source).")
+        print("    Run `python scripts/gen-broker-inventory.py --write` and review the diff.")
+    if coverage_failed:
+        print("  * the seed-coverage record no longer describes the seeds document.")
+        print("    Re-record it (`just af-record-seed-coverage`); `--write` cannot re-stamp it.")
+    return 1
 
 
 def cmd_write(seats: list[Seat]) -> int:
