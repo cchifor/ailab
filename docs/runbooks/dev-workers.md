@@ -8,9 +8,11 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 - role: `ansible/roles/dev_worker/` · playbook: `ansible/dev-workers.yml`
 - inventory group: `dev_workers` (`.37/.38/.39` + `.5/.6/.7`) · secrets: `ansible/secrets/dev-worker.sops.yaml`
 
-**All six share one uniform spec** — cores + ceiling + floor are module-wide scalars in
+**The base spec is shared** — cores + ceiling + floor are module-wide scalars in
 `kubernetes/infra/dev-workers/variables.tf` (`dev_worker_cores`, `dev_worker_memory_mib`,
-`dev_worker_memory_floating_mib`); the `dev_worker_nodes` map carries only identity.
+`dev_worker_memory_floating_mib`); the `dev_worker_nodes` map carries identity plus two optional
+per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw4 — node1 mitigation) and
+`memory_mib` (12 GiB ceiling on dw6 — downsize POC, see the section below).
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
@@ -33,9 +35,10 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 host fits only because the rarely-used heavyweight models on node2/node3 (gpt-oss ~59 GiB, Qwen3.5-122B
 ~71 GiB GTT) are now **idle-unloaded via llama-swap** rather than pinned resident — see
 `docs/runbooks/ai-model-swap.md`. With the model idle, the host drops to ~45% used and ballooning
-actually works, so a worker inflates toward the 16 GiB ceiling on demand. Dev-worker memory is a
-**uniform 16 GiB ceiling with a uniform 4 GiB floor** (module scalars
-`dev_worker_memory_mib` / `dev_worker_memory_floating_mib`) — low floor by design, because ballooning
+actually works, so a worker inflates toward the ceiling on demand. Dev-worker memory defaults to a
+**16 GiB ceiling with a 4 GiB floor** (module scalars
+`dev_worker_memory_mib` / `dev_worker_memory_floating_mib`; per-worker overrides on dw1/dw4 floors
+and the dw6 ceiling) — low floor by design, because ballooning
 now inflates busy workers and 4 GiB is what lets a node hold its on-demand heavyweight **plus** its
 two workers-at-floor at once.
 
@@ -65,8 +68,8 @@ mitigation stands until node1 capacity is fixed (see the note in variables.tf).
 Per-node RAM budget (~125 GiB usable): Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB hard** —
 `kubernetes/infra/variables.tf`) + ai-llm LXC (96 GiB cap; **~0 GiB when idle-unloaded**, ~59/71 GiB
 when a heavyweight is loaded on demand) + runner (24 GiB ceiling / **10 GiB floor**, ×2 node1/node2,
-×1 node3) + dev-worker (16 GiB ceiling / **4 GiB floor**, ×2 per node). In steady state (heavyweight
-unloaded) node2/node3 sit ~45% used and workers balloon freely toward 16 GiB. **Time-share rule:** a
+×1 node3) + dev-worker (16 GiB ceiling — 12 GiB on dw6 / **4 GiB floor**, ×2 per node). In steady
+state (heavyweight unloaded) node2/node3 sit ~45% used and workers balloon freely toward the ceiling. **Time-share rule:** a
 node serves *either* its on-demand heavyweight *or* its two workers at full tilt — not both. Loading
 the 122B on node3 (71 GiB) fits alongside cp3 28 + runner 10 + 2×dev-worker-at-floor 4 = 117 < 125,
 with the co-located workers pinned near their 4 GiB floor for that session. If a host shows sustained
