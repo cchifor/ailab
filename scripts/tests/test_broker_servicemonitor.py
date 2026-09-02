@@ -64,14 +64,28 @@ def _services(path: pathlib.Path) -> dict[str, str]:
     return out
 
 
+def _clean_value(raw: str) -> str:
+    """Strip a trailing YAML comment then surrounding quotes — matches gbi._field's own
+    tokenisation, so this test tracks the same parsing the inventory generator relies on."""
+    return re.sub(r"\s+#.*$", "", raw).strip().strip('"').strip("'")
+
+
+def _labels_from_block(block: str, indent: int) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in block.splitlines():
+        m = re.match(rf"^[ ]{{{indent}}}([A-Za-z0-9_./-]+):[ \t]*(\S.*)$", line)
+        if m:
+            out[m.group(1)] = _clean_value(m.group(2))
+    return out
+
+
 def _service_labels(doc: str) -> dict[str, str]:
     labels_block = gbi._sub_block(gbi._top_block(doc, "metadata"), "labels", 2)
-    out: dict[str, str] = {}
-    for line in labels_block.splitlines():
-        m = re.match(r"^[ ]{4}([A-Za-z0-9_./-]+):[ \t]*(\S.*)$", line)
-        if m:
-            out[m.group(1)] = m.group(2).strip().strip('"').strip("'")
-    return out
+    return _labels_from_block(labels_block, 4)
+
+
+def _service_namespace(doc: str) -> str | None:
+    return gbi._field(gbi._top_block(doc, "metadata"), "namespace", 2)
 
 
 def _service_port_names(doc: str) -> set[str]:
@@ -79,18 +93,45 @@ def _service_port_names(doc: str) -> set[str]:
     return set(re.findall(r"(?m)^[ ]*-[ ]*name:[ ]*([A-Za-z0-9-]+)", ports_block))
 
 
-def _servicemonitor_selector_labels() -> dict[str, str]:
+def _servicemonitor_text() -> str:
     assert SERVICEMONITOR.exists(), f"{SERVICEMONITOR} does not exist"
-    text = SERVICEMONITOR.read_text(encoding="utf-8")
-    spec_block = gbi._top_block(text, "spec")
-    selector_block = gbi._sub_block(spec_block, "selector", 2)
+    return SERVICEMONITOR.read_text(encoding="utf-8")
+
+
+def _servicemonitor_spec_block() -> str:
+    return gbi._top_block(_servicemonitor_text(), "spec")
+
+
+def _servicemonitor_selector_labels() -> dict[str, str]:
+    selector_block = gbi._sub_block(_servicemonitor_spec_block(), "selector", 2)
     match_labels_block = gbi._sub_block(selector_block, "matchLabels", 4)
-    out: dict[str, str] = {}
-    for line in match_labels_block.splitlines():
-        m = re.match(r"^[ ]{6}([A-Za-z0-9_./-]+):[ \t]*(\S.*)$", line)
-        if m:
-            out[m.group(1)] = m.group(2).strip().strip('"').strip("'")
-    return out
+    return _labels_from_block(match_labels_block, 6)
+
+
+def _servicemonitor_metadata() -> tuple[str | None, dict[str, str]]:
+    """(metadata.namespace, metadata.labels) of the ServiceMonitor itself."""
+    metadata_block = gbi._top_block(_servicemonitor_text(), "metadata")
+    namespace = gbi._field(metadata_block, "namespace", 2)
+    labels_block = gbi._sub_block(metadata_block, "labels", 2)
+    return namespace, _labels_from_block(labels_block, 4)
+
+
+def _servicemonitor_namespace_selector_match_names() -> set[str]:
+    ns_selector_block = gbi._sub_block(_servicemonitor_spec_block(), "namespaceSelector", 2)
+    m = re.search(r"matchNames:[ \t]*\[([^\]]*)\]", ns_selector_block)
+    assert m, f"namespaceSelector.matchNames not found (inline-list form) in:\n{ns_selector_block}"
+    return {_clean_value(item) for item in m.group(1).split(",") if item.strip()}
+
+
+def _servicemonitor_endpoint_ports() -> set[str]:
+    """The `port:` value of every entry under spec.endpoints — what Prometheus actually resolves
+    against each matched Service's named ports, as opposed to a test-hardcoded literal."""
+    endpoints_block = gbi._sub_block(_servicemonitor_spec_block(), "endpoints", 2)
+    assert endpoints_block, "spec.endpoints not found in servicemonitor.yaml"
+    return {
+        _clean_value(v)
+        for v in re.findall(r"(?m)^[ \t]*-?[ \t]*port:[ \t]*(\S.*)$", endpoints_block)
+    }
 
 
 class ServiceMonitorFileExists(unittest.TestCase):
@@ -127,7 +168,21 @@ class SelectorMatchesEveryPinnedService(unittest.TestCase):
 
 
 class MetricsPortExistsOnEverySeat(unittest.TestCase):
-    def test_metrics_port_on_the_routable_service(self):
+    """The ServiceMonitor's own `spec.endpoints[].port` values (NOT a hardcoded literal) must each
+    resolve to a named port on every routable Service — renaming the port on either side must fail
+    this test rather than leaving Prometheus with zero targets."""
+
+    def test_endpoint_ports_are_parsed_and_non_empty(self):
+        ports = _servicemonitor_endpoint_ports()
+        self.assertTrue(ports, "servicemonitor.yaml: spec.endpoints[].port must not be empty")
+        self.assertIn(
+            "metrics",
+            ports,
+            f"servicemonitor.yaml: expected a 'metrics' endpoint port, found {sorted(ports)}",
+        )
+
+    def test_every_endpoint_port_exists_on_the_routable_service_of_every_seat(self):
+        endpoint_ports = _servicemonitor_endpoint_ports()
         broker_files = _broker_files()
         self.assertTrue(broker_files, f"no broker-*.yaml under {BROKER_DIR}")
 
@@ -138,13 +193,69 @@ class MetricsPortExistsOnEverySeat(unittest.TestCase):
             self.assertTrue(routable, f"{path.name}: no non-headless Service found")
             for svc_name, doc in routable.items():
                 ports = _service_port_names(doc)
-                self.assertIn(
-                    "metrics",
-                    ports,
-                    f"{path.name}: Service {svc_name!r} has no port named 'metrics' "
-                    f"(found {sorted(ports)}) — the ServiceMonitor's `port: metrics` endpoint "
-                    "would resolve to nothing",
-                )
+                for endpoint_port in endpoint_ports:
+                    self.assertIn(
+                        endpoint_port,
+                        ports,
+                        f"{path.name}: Service {svc_name!r} has no port named {endpoint_port!r} "
+                        f"(found {sorted(ports)}) — the ServiceMonitor's `port: {endpoint_port}` "
+                        "endpoint would resolve to nothing",
+                    )
+
+
+class NamespaceSelectorCoversEveryServiceNamespace(unittest.TestCase):
+    """spec.namespaceSelector.matchNames must include the namespace every selected Service
+    actually lives in — otherwise selector.matchLabels agreeing is not enough: Prometheus never
+    even looks in that namespace and discovers zero targets regardless."""
+
+    def test_match_names_cover_every_seat_services_namespace(self):
+        match_names = _servicemonitor_namespace_selector_match_names()
+        self.assertTrue(match_names, "servicemonitor.yaml: namespaceSelector.matchNames is empty")
+
+        broker_files = _broker_files()
+        self.assertTrue(broker_files, f"no broker-*.yaml under {BROKER_DIR}")
+
+        service_namespaces: set[str] = set()
+        for path in broker_files:
+            for svc_name, doc in _services(path).items():
+                ns = _service_namespace(doc)
+                self.assertTrue(ns, f"{path.name}: Service {svc_name!r} has no metadata.namespace")
+                service_namespaces.add(ns)
+
+        for ns in service_namespaces:
+            self.assertIn(
+                ns,
+                match_names,
+                f"servicemonitor.yaml: namespaceSelector.matchNames {sorted(match_names)} does "
+                f"not include {ns!r}, which every broker Service actually lives in — Prometheus "
+                "would never look there.",
+            )
+
+
+class ServiceMonitorMetadataAgreesWithOperatorDefaults(unittest.TestCase):
+    """The kube-prometheus-stack operator's default serviceMonitorSelector/ruleSelector key off
+    `release: <helm release name>`, and only ServiceMonitors IN the `monitoring` namespace are
+    picked up unless serviceMonitorNamespaceSelector is widened. Dropping either silently drops
+    every target while every other test in this module stays green."""
+
+    def test_namespace_is_monitoring(self):
+        namespace, _ = _servicemonitor_metadata()
+        self.assertEqual(
+            namespace,
+            "monitoring",
+            "servicemonitor.yaml: metadata.namespace must be 'monitoring' for the operator's "
+            "default serviceMonitorNamespaceSelector to ever look at this object",
+        )
+
+    def test_release_label_matches_kube_prometheus_stack(self):
+        _, labels = _servicemonitor_metadata()
+        self.assertEqual(
+            labels.get("release"),
+            "kube-prometheus-stack",
+            f"servicemonitor.yaml: metadata.labels.release is {labels.get('release')!r}, "
+            "expected 'kube-prometheus-stack' — the operator's serviceMonitorSelector keys on "
+            "this label; without it Prometheus never adopts this ServiceMonitor at all",
+        )
 
 
 class NotMatchedByTheInventoryGlob(unittest.TestCase):
