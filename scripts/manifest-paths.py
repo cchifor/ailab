@@ -24,6 +24,26 @@ referentially. Every kept path is additionally asserted to contain a
 `kustomization.yaml` (or `.yml`) — a `spec.path` with no such file is a
 manifest bug this discovery step should catch, not a silent empty build.
 
+That exclusion is NOT a license to drop every unrecognized `sourceRef`
+silently, though — an ever-growing, unaudited blind spot is exactly the
+"silent-pass bug" this gate's own header (see scripts/manifest-lint.sh)
+forbids. So the set of externally-sourced Kustomizations this step is
+ALLOWED to skip is a closed, reviewed allowlist, `EXPECTED_EXTERNAL_SOURCES`,
+keyed by `(sourceRef.kind, sourceRef.name)` — currently exactly
+`agentforge-tenants` and `platform`, above. A Kustomization whose `sourceRef`
+resolves to neither this repo's own flux-system source NOR an entry in that
+allowlist (a typo'd `sourceRef`, a new external source nobody added to the
+list, a missing `sourceRef` entirely) is a `DiscoveryError` — fail closed —
+rather than a silent third exclusion. Checking those other repos out so
+their paths could be built here too is explicitly out of scope for this PR:
+it would need cross-repo git credentials this runner is not provisioned with
+and multi-repo egress the spec's own risk section never anticipated (only
+registry.k8s.io/ghcr.io/raw.githubusercontent.com are named there); growing
+`EXPECTED_EXTERNAL_SOURCES` is a one-line, reviewed change, so the door is
+left open for that decision without this discovery step silently degrading
+today. Every exclusion is also printed to stderr (not just omitted from
+stdout) so a CI log makes the gate's actual coverage visible.
+
 PARSER: PyYAML if importable (safe_load_all — these are plain, anchor-free
 manifests), else a stdlib-only regex fallback over `---`-separated documents
 that this runner's own `.gitea/workflows/manifests.yaml` never installs a
@@ -34,7 +54,9 @@ this repo's real manifest set (that agreement is itself asserted).
 USAGE
   python3 scripts/manifest-paths.py     # one buildable path per line on stdout
 Exit 0 = discovery succeeded (zero or more paths). Exit 1 = a Kustomization
-in scope names no spec.path, or a kept path has no kustomization.yaml.
+in scope names no spec.path, a kept path has no kustomization.yaml, or a
+Kustomization's sourceRef is neither this repo's own flux-system source nor
+a reviewed entry in EXPECTED_EXTERNAL_SOURCES.
 """
 from __future__ import annotations
 
@@ -55,6 +77,17 @@ CLUSTER_AI = REPO / "kubernetes/apps/clusters/ai"
 #: whose sourceRef does not match this is sourced from a DIFFERENT repo.
 LOCAL_SOURCE_KIND = "GitRepository"
 LOCAL_SOURCE_NAME = "flux-system"
+
+#: Reviewed, closed allowlist of (sourceRef.kind, sourceRef.name) pairs that are known and
+#: accepted to be externally sourced (see the module docstring) — the ONLY sourceRefs discovery
+#: is allowed to exclude without raising. Anything else that isn't the local source above is a
+#: DiscoveryError.
+EXPECTED_EXTERNAL_SOURCES = frozenset(
+    {
+        ("GitRepository", "agentforge-tenants"),
+        ("GitRepository", "platform"),
+    }
+)
 
 _KIND_RE = re.compile(r"^kind:\s*Kustomization\s*$", re.MULTILINE)
 # `sourceRef:`'s own children can appear in EITHER order (`kind:` then `name:`, or vice versa) and
@@ -149,6 +182,12 @@ def discover_paths(cluster_ai: Path | None = None) -> list[str]:
     """Every spec.path of a Kustomization in `cluster_ai/*.yaml` (top level
     only) whose sourceRef resolves to this repo's own flux-system source.
 
+    A Kustomization whose sourceRef resolves to neither this repo's own
+    flux-system source NOR a reviewed entry in EXPECTED_EXTERNAL_SOURCES
+    raises DiscoveryError — fail closed rather than silently narrowing the
+    gate's coverage (see the module docstring). Each accepted external
+    exclusion is printed to stderr so it stays visible in a CI log.
+
     `cluster_ai` defaults to the CURRENT value of the module-level CLUSTER_AI
     global (read at call time, not import time) so tests can monkeypatch
     `manifest_paths.CLUSTER_AI` onto a fixture tree without needing to pass
@@ -160,14 +199,30 @@ def discover_paths(cluster_ai: Path | None = None) -> list[str]:
     for manifest in sorted(cluster_ai.glob("*.yaml")):
         text = manifest.read_text()
         for spec in _kustomization_specs(text):
-            if not _is_local(spec["sourceRef"]):
+            source_ref = spec["sourceRef"]
+            if _is_local(source_ref):
+                path = spec["path"]
+                if not path:
+                    raise DiscoveryError(
+                        f"{manifest.relative_to(REPO)}: a locally-sourced Kustomization has no spec.path"
+                    )
+                paths.append(path)
                 continue
-            path = spec["path"]
-            if not path:
+            key = ((source_ref or {}).get("kind"), (source_ref or {}).get("name"))
+            if key not in EXPECTED_EXTERNAL_SOURCES:
                 raise DiscoveryError(
-                    f"{manifest.relative_to(REPO)}: a locally-sourced Kustomization has no spec.path"
+                    f"{manifest.relative_to(REPO)}: sourceRef {key} is neither this repo's own "
+                    "flux-system source nor a reviewed entry in EXPECTED_EXTERNAL_SOURCES — "
+                    "refusing to silently drop it from the gate. Fix sourceRef.kind/name if this "
+                    "was meant to resolve locally, or add the pair to EXPECTED_EXTERNAL_SOURCES "
+                    "if it is a reviewed, accepted external source."
                 )
-            paths.append(path)
+            print(
+                f"manifest-paths.py: excluding {manifest.relative_to(REPO)} "
+                f"(sourceRef {key[0]}/{key[1]}) -> {spec['path']}: sourced from a different repo, "
+                "not buildable in this checkout",
+                file=sys.stderr,
+            )
     return paths
 
 
