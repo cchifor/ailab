@@ -34,7 +34,7 @@ metadata:
   name: reviewer-node
   namespace: monitoring
   labels:
-    release: prometheus
+    release: kube-prometheus-stack
 spec:
   selector:
     matchLabels:
