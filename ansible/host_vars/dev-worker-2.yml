@@ -1,0 +1,6 @@
+---
+# dev-worker-2 hosts the claude PR-review persona (shadow mode, fixture repo only —
+# plan: agentforge plans/2026-09-02-ai-pr-review-plan.md). The toggle defaults off in the
+# role; this host_vars flip is the only enablement, mirroring the herdr pilot pattern.
+pr_reviewer_enabled: true
+pr_reviewer_persona: claude

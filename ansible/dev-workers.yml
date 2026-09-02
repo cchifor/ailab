@@ -53,3 +53,10 @@
     - role: dev_worker
       tags: [dev_workers]
       when: dev_worker_enabled | default(false)
+
+    # Event-driven LLM PR reviewer (plan: agentforge plans/2026-09-02-ai-pr-review-plan.md).
+    # Enabled per-host in host_vars (dev-worker-2 = claude persona); own tag so the bot can be
+    # (re)deployed without a full role run: --tags reviewbot.
+    - role: pr_reviewer
+      tags: [dev_workers, reviewbot]
+      when: pr_reviewer_enabled | default(false)
