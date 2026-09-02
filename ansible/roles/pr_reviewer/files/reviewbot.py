@@ -32,7 +32,7 @@ import urllib.request
 CFG = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "/etc/reviewbot/config.json"))
 PAT = open(CFG["pat_file"]).read().strip()
 HOOK_SECRET = open(CFG["webhook_secret_file"]).read().strip().encode()
-MARKER_RE = re.compile(r"<!-- review-bot:v1 persona=(\S+) head=([0-9a-f]{40}) -->")
+MARKER_RE = re.compile(r"<!-- review-bot:v1 persona=(\S+) head=([0-9a-f]{40})(?: verdict=(\S+))? -->")
 EVENTS = {"pull_request", "pull_request_sync", "pull_request_label", "pull_request_review_request"}
 
 db_lock = threading.Lock()
@@ -270,6 +270,50 @@ def existing_marker(repo, pr, head_sha):
     return None
 
 
+def persona_verdicts(repo, pr, head_sha):
+    """Latest marker verdict per persona at this head (old markers count as 'findings')."""
+    out = {}
+    for rv in api(f"/repos/{repo}/pulls/{pr}/reviews?limit=50"):
+        m = MARKER_RE.search(rv.get("body") or "")
+        if m and m.group(2) == head_sha:
+            out[m.group(1)] = m.group(3) or "findings"
+    return out
+
+
+def maybe_merge(repo, pr):
+    """Merge authority (operator-directed 2026-09-02): the reviewer SYSTEM merges only when
+    every configured persona's review at the CURRENT head is verdict=clean, CI is green,
+    the author is allowlisted, and no no-automerge label is set. One persona alone never
+    merges; third-party PRs are never merged."""
+    if not CFG.get("automerge") or posting_disabled():
+        return
+    try:
+        d = api(f"/repos/{repo}/pulls/{pr}")
+        if d.get("state") != "open" or d.get("draft") or not d.get("mergeable"):
+            return
+        if ((d.get("user") or {}).get("login") or "").lower() not in \
+                [a.lower() for a in CFG.get("merge_authors", [])]:
+            return
+        if any((l.get("name") or "").lower() == "no-automerge" for l in d.get("labels") or []):
+            return
+        head = d["head"]["sha"]
+        verdicts = persona_verdicts(repo, pr, head)
+        needed = CFG.get("merge_personas", [])
+        if not needed or any(verdicts.get(p) != "clean" for p in needed):
+            return
+        st = api(f"/repos/{repo}/commits/{head}/status")
+        if st.get("state") != "success":
+            return
+        api(f"/repos/{repo}/pulls/{pr}/merge", "POST", {"Do": "merge"})
+        log(f"MERGED {repo}#{pr} @ {head[:9]} (all personas clean + CI green)")
+    except urllib.error.HTTPError as e:
+        if e.code in (405, 409):
+            return  # already merged / just became unmergeable - benign race
+        log(f"merge check {repo}#{pr} failed: {e.code}")
+    except Exception as e:
+        log(f"merge check {repo}#{pr} error: {e}")
+
+
 def review_job(job_id, repo, pr, head_sha):
     d = pr_ok(repo, pr, head_sha)
     if d is None:
@@ -307,7 +351,10 @@ def review_job(job_id, repo, pr, head_sha):
         else:
             demoted.append(f"- `{f['path']}:{f.get('line','?')}` {body}")
 
-    marker = f"<!-- review-bot:v1 persona={CFG['persona']} head={head_sha} -->"
+    blocking = [f for f in out["findings"]
+                if str(f.get("severity", "")).lower() in ("blocker", "important")]
+    verdict = "clean" if not blocking else "findings"
+    marker = f"<!-- review-bot:v1 persona={CFG['persona']} head={head_sha} verdict={verdict} -->"
     body = out["summary"]
     if demoted:
         body += "\n\nFindings outside commentable diff positions:\n" + "\n".join(demoted)
@@ -337,8 +384,9 @@ def review_job(job_id, repo, pr, head_sha):
         # POST outcome ambiguous: quarantine; a human (or the reconciler seeing the
         # marker) resolves it. Never blind-retry a possibly-landed mutation.
         return ("quarantined", None, f"ambiguous POST: {e}")
-    log(f"reviewed {repo}#{pr} @ {head_sha[:9]}: {len(comments)} inline, {len(demoted)} demoted")
-    return ("done", rv.get("id"), f"{len(comments)} inline / {len(demoted)} demoted")
+    log(f"reviewed {repo}#{pr} @ {head_sha[:9]}: {len(comments)} inline, {len(demoted)} demoted, verdict={verdict}")
+    maybe_merge(repo, pr)
+    return ("done", rv.get("id"), f"{len(comments)} inline / {len(demoted)} demoted / {verdict}")
 
 
 def write_metrics():
@@ -425,6 +473,8 @@ def reconciler():
                     sha = pr["head"]["sha"]
                     if not existing_marker(repo, pr["number"], sha):
                         enqueue(repo, pr["number"], sha, "reconcile")
+                    else:
+                        maybe_merge(repo, pr["number"])
             with db_lock:
                 c = db()
                 c.execute("INSERT OR REPLACE INTO meta VALUES('last_reconcile',?)",

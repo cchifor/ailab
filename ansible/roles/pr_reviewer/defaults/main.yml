@@ -38,4 +38,12 @@ pr_reviewer_max_comments: 15
 pr_reviewer_max_attempts: 5
 pr_reviewer_reconcile_s: 600
 pr_reviewer_textfile: /var/lib/prometheus/node-exporter/reviewbot.prom
+# Merge authority (operator-directed 2026-09-02): the reviewer system merges a PR only when
+# EVERY persona below has a verdict=clean review at the current head, CI is green, the
+# author is in the allowlist, and no `no-automerge` label is present. Applies to all
+# personas' configs identically - whichever persona completes the picture merges (races
+# are benign: the second merge attempt gets a 405).
+pr_reviewer_automerge: true
+pr_reviewer_merge_personas: [claude, codex]
+pr_reviewer_merge_authors: [cchifor, chifor]
 pr_reviewer_allow_cidr: "192.168.0.0/24"
