@@ -1,0 +1,10 @@
+---
+# dev-worker-6 joined the herdr pilot 2026-09-02: the operator hand-installed herdr
+# (~/.local/bin, user-level server) and used it for real work before the managed pilot
+# reached this host. The claude+codex integrations and the conductor skill were
+# hand-applied the same day (the role converges them); the MANAGED takeover (pinned
+# /usr/local/bin binary, ansible config.toml, system unit) happens on the next
+# `-t herdr` run against this host — run it at an IDLE moment (config takeover restarts
+# the server and kills live panes) and remove the hand-installed ~/.local/bin/herdr
+# first (it shadows /usr/local/bin in PATH). See docs/runbooks/dev-workers.md § herdr.
+dev_worker_enable_herdr: true
