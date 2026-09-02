@@ -384,3 +384,43 @@ spec:
               af-orch-playground-planner -o jsonpath='{.spec.triggers[0].metadata.query}'` against the
               live label set: `count by (account,role) (forge_pending)`. NOT a dispatcher outage —
               ForgeTargetDown owns that and this rule stays silent for it by construction.
+        # NEW (C-P0-07), and DIFFERENT JOB FAMILY from every rule above: job="agentforge-broker" is
+        # the operator-owned credential broker fleet in its own namespace (agentforge-broker), not a
+        # CP-rendered tenant pool or the dispatcher — a third, disjoint (namespace, job) pair from the
+        # ailab#284 coverage boundary documented at the top of this file. Before this PR the broker
+        # fleet (4 seats x 2 replicas = 8 pods) had NO ServiceMonitor at all
+        # (agentforge-broker/servicemonitor.yaml, this same PR) — af_broker_* was exported
+        # (broker-*.yaml's `metrics` containerPort on 9464, CNP ingress rule (2) already admitted
+        # `monitoring`) but nothing ever scraped it, so a dead/unreachable broker was invisible to
+        # Prometheus by construction, not just unalarmed. Cannot yet be measured "live" the way the
+        # rules above are (evidence section, 2026-08-10) — there is no scrape target for this job
+        # until Flux applies the paired ServiceMonitor in the SAME PR, so `up{job="agentforge-broker"}`
+        # is presently an empty vector on main. The `up{job=...} == 0` shape itself is exactly
+        # ForgeTargetDown's proven-firing pattern (see that rule and its evidence above), reused here
+        # rather than invented from scratch, so its capacity to fire is not in question — only its
+        # first live measurement is deferred to the operator's post-merge Prometheus /targets check
+        # (this PR's verification section). `for: 5m` matches ForgeTargetDown's own hold, for the same
+        # reason: a broker Deployment's terminationGracePeriodSeconds is short relative to it, so a
+        # brief rolling-update gap should not page. severity: critical (not warning) because a broker
+        # being unreachable is NOT a delivery slowdown like a stalled reconcile — every sandbox job
+        # bound to that seat's audience loses its ONLY path to a capability token and the seat goes
+        # fully dark until the broker is restored; the design's HA (2 replicas + PDB + anti-affinity
+        # per seat) makes a genuine target-down a real failure, not routine churn.
+        - alert: ForgeBrokerTargetDown
+          expr: up{job="agentforge-broker"} == 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "AgentForge broker seat {{ $labels.seat }} is failing to scrape"
+            description: >-
+              The metrics endpoint on broker seat {{ $labels.seat }} (pod {{ $labels.pod }}, ns
+              agentforge-broker) has been unscrapeable for >5m while the pod still exists — a
+              crash-loop, a wedged event loop, or a NetworkPolicy change. Every sandbox job whose
+              AF_BROKER_AUDIENCE binds to this seat loses its only path to a per-job capability
+              token until the seat recovers; with 2 replicas + a PodDisruptionBudget per seat, both
+              replicas being down at once is not routine churn. {{ $labels.seat }} IS the seat's
+              Service app.kubernetes.io/name (e.g. broker-anthropic-max1) — check `kubectl --context
+              admin@ai -n agentforge-broker describe pod -l app.kubernetes.io/name={{ $labels.seat }}`
+              and the container log. Prometheus /targets and Grafana explore `sum by (seat)
+              (rate(af_broker_tokens_used_total[5m]))` corroborate whether OTHER seats are still
+              healthy.
