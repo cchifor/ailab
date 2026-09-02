@@ -174,6 +174,26 @@ def parse_hunks(diff_text):
     return ok
 
 
+# Continuous-deployment lane for automated image-pin PRs. Every rule below encodes a
+# recorded incident: non-digest changes riding a pin, the db-migrate+deployment pin that
+# must be split when the alembic head moves, and pin bodies re-announcing migrations that
+# need /readyz triage. Findings block automerge -> a human takes over; digest-only pins
+# flow review -> merge -> Flux deploy untouched.
+PIN_RUBRIC = """This PR is an AUTOMATED IMAGE-PIN bump (continuous-deployment lane). Apply
+these rules on top of everything else:
+- The only acceptable changes are container image tag/digest references (and their
+  adjacent build-note comments) inside kubernetes manifests. Anything else in the diff
+  (env, rbac, volumes, commands, new resources) is severity=blocker.
+- If the diff touches a db-migrate Job manifest, report severity=important: a pending
+  alembic head means the pin must be SPLIT and the migration verified by a human.
+- If the PR title or description discloses a pending database migration or a new alembic
+  revision, report severity=important: a human must verify expected==actual on the
+  control plane /readyz before this deploys.
+- A digest-only bump with none of the above deserves zero findings (nits only for stale
+  neighbouring comments).
+
+"""
+
 PROMPT = """You are a code reviewer. Review ONLY the unified diff below.
 Respond with a single JSON object, no prose around it, shaped exactly:
 {"summary": "<3-6 sentence overall assessment>",
@@ -194,8 +214,8 @@ DIFF:
 """
 
 
-def run_llm(title, desc, diff_text):
-    prompt = PROMPT.replace("{title}", title).replace("{description}", desc or "") + diff_text
+def run_llm(title, desc, diff_text, rubric=""):
+    prompt = rubric + PROMPT.replace("{title}", title).replace("{description}", desc or "") + diff_text
     workdir = tempfile.mkdtemp(prefix="reviewbot-")
     env = {k: v for k, v in os.environ.items() if k not in ("GITEA_TOKEN",)}
     kind = CFG.get("llm_kind", "claude")
@@ -335,7 +355,9 @@ def review_job(job_id, repo, pr, head_sha):
         return ("superseded", None, "head moved during diff fetch")
 
     commentable = parse_hunks(diff)
-    out = run_llm(d.get("title", ""), d.get("body", ""), diff)
+    author = ((d.get("user") or {}).get("login") or "").lower()
+    rubric = PIN_RUBRIC if author in [a.lower() for a in CFG.get("pin_authors", [])] else ""
+    out = run_llm(d.get("title", ""), d.get("body", ""), diff, rubric)
 
     comments, demoted = [], []
     for f in out["findings"][:CFG["max_comments"]]:

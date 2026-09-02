@@ -14,10 +14,15 @@ pr_reviewer_repos:
   - cchifor/review-bot-fixture
   - cchifor/ailab
   - cchifor/agentforge
-# PRs authored by any bot identity are never reviewed (no bot->bot trigger loops).
+# PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
+# The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
+# its PRs get the pin rubric below and automerge when digest-only + clean + CI green.
+# Reviewing it cannot loop - the pin bot never reacts to reviews.
 pr_reviewer_ignore_authors:
   - reviewer-claude
   - reviewer-codex
+# PRs from these authors get the stricter pin-lane rubric prepended to the review prompt.
+pr_reviewer_pin_authors:
   - agentforge-ci-bot
 # The headless LLM command (argv list; -p/--output-format/tool restrictions are appended
 # by the service). The claude binary lives in the agent user's ~/.local/bin.
@@ -45,5 +50,5 @@ pr_reviewer_textfile: /var/lib/prometheus/node-exporter/reviewbot.prom
 # are benign: the second merge attempt gets a 405).
 pr_reviewer_automerge: true
 pr_reviewer_merge_personas: [claude, codex]
-pr_reviewer_merge_authors: [cchifor, chifor]
+pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot]
 pr_reviewer_allow_cidr: "192.168.0.0/24"
