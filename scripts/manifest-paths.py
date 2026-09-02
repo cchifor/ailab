@@ -344,13 +344,21 @@ def _docs_via_yaml(text: str, where: str = "<text>") -> list[dict]:
             raise DiscoveryError(f"{where}: a document is not a mapping — refusing to classify it")
         if "kind" not in d:
             raise DiscoveryError(f"{where}: a document has content but no top-level `kind:` — refusing to classify it")
+        kind = d["kind"]
+        if not isinstance(kind, str):
+            # The stdlib fallback's _scalar_entry already refuses any top-level `kind:` that is
+            # not a plain/quoted scalar (anchor/alias/tag/flow collection); PyYAML must fail
+            # closed on the same shape rather than silently pass a non-string kind through, which
+            # would make it compare unequal to every known kind and vanish from discovery with no
+            # error (round-3 claude nit, :373).
+            raise DiscoveryError(f"{where}: `kind:` must be a string, got {kind!r}")
         metadata = d.get("metadata") or {}
         spec = d.get("spec") or {}
         if not isinstance(metadata, dict) or not isinstance(spec, dict):
             raise DiscoveryError(f"{where}: `metadata:`/`spec:` must be mappings")
         docs.append(
             {
-                "kind": d["kind"],
+                "kind": kind,
                 "metadata": {k: metadata.get(k) for k in ("name", "namespace") if k in metadata},
                 "spec": {k: spec.get(k) for k in ("path", "url", "sourceRef") if k in spec},
             }
@@ -507,9 +515,13 @@ def discover_paths(cluster_ai: Path | None = None) -> list[str]:
                 continue
             verdict, (namespace, name), url = _resolve_source(doc, sources, where)
             path = doc["spec"].get("path")
+            if not isinstance(path, str) or not path:
+                # Checked BEFORE branching on verdict: an allowlisted external Kustomization with
+                # a missing/null/empty spec.path is still a broken Flux object — excluding it
+                # silently (because it was never going to be built here anyway) would let the
+                # gate stay green over an invalid manifest (round-3 codex finding, :489).
+                raise DiscoveryError(f"{where}: Kustomization has no spec.path (must be a non-empty string)")
             if verdict == "local":
-                if not isinstance(path, str) or not path:
-                    raise DiscoveryError(f"{where}: a locally-sourced Kustomization has no spec.path")
                 paths.append(path)
                 continue
             print(
@@ -520,8 +532,15 @@ def discover_paths(cluster_ai: Path | None = None) -> list[str]:
     return paths
 
 
+#: The three kustomization root filenames `kustomize build` itself accepts, in the order it
+#: checks them — kubectl/kustomize source, cmd/kustomize/internal/target: kustomization.yaml,
+#: kustomization.yml, then the capitalized Kustomization (no extension). Rejecting the third
+#: would fail CI for a directory kustomize would happily build (round-3 codex finding, :527).
+_KUSTOMIZATION_FILENAMES = ("kustomization.yaml", "kustomization.yml", "Kustomization")
+
+
 def verify_buildable(paths: list[str], repo: Path | None = None) -> None:
-    """Fail closed: every discovered path must contain a kustomization.yaml.
+    """Fail closed: every discovered path must contain a kustomization root file.
 
     `repo` defaults to the CURRENT module-level REPO global (read at call
     time) for the same monkeypatch-friendly reason as discover_paths().
@@ -530,9 +549,7 @@ def verify_buildable(paths: list[str], repo: Path | None = None) -> None:
         repo = REPO
     for path in paths:
         target = (repo / path).resolve()
-        if not (target / "kustomization.yaml").exists() and not (
-            target / "kustomization.yml"
-        ).exists():
+        if not any((target / name).exists() for name in _KUSTOMIZATION_FILENAMES):
             raise DiscoveryError(f"{path}: no kustomization.yaml found at {target}")
 
 
