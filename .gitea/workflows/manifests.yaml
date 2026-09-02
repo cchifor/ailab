@@ -1,0 +1,52 @@
+# Manifest validation gate — the FIRST thing in ailab that actually BUILDS every Flux
+# Kustomization path and validates the result, rather than trusting `kubectl apply --dry-run` (a
+# client dry-run parses YAML and never runs kustomize's own overlay/patch/generator machinery) or
+# nothing at all.
+#
+# FAIL CLOSED, following broker-inventory.yaml and tenant-guard-cel.yaml: ONE job, no `needs:`,
+# no matrix, no aggregator (the estate has already shipped a gate that could not fail —
+# `join(needs.*.result, ' ')` evaluates to an EMPTY STRING on this forge's act_runner, so its loop
+# body ran zero times and the gate passed unconditionally for its entire life; there is no
+# cross-job result aggregation here for that bug to hide inside). No `continue-on-error`, no
+# `if:` conditions, no `|| true`, no soft skips — every step is `set -euo pipefail` internally
+# (scripts/manifest-lint.sh) or a bare non-zero-exits-the-job command.
+#
+# WHY .gitea/ AND NOT .github/: Gitea reads .gitea/workflows and, once that directory exists,
+# ignores .github/workflows entirely. This repo already has four workflows here.
+name: manifests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Supersede our own queued runs, same rationale as broker-inventory.yaml: this does not fix pool
+# contention, it stops this workflow adding to it.
+concurrency:
+  group: manifests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifests:
+    name: kustomize build + kubeconform
+    # GITEA, NOT GITHUB: no hosted runners on this forge; every registered runner carries only
+    # `self-hosted-hv`, and nothing answers `ubuntu-latest` (a job asking for it queues forever
+    # rather than failing). Fall back to the real pool label if RUNNER_LABEL is ever unset.
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: kustomize build + kubeconform over every Flux Kustomization path
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/manifest-lint.sh
+
+      - name: Inline content-hash drift (checksum/capability-kids, NFS provisioner Job suffix)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-inline-hashes.py
