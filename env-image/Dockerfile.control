@@ -6,9 +6,21 @@
 # (PLAYWRIGHT_BROWSERS_PATH=/data/caches/ms-playwright, set in the SandboxTemplate): version-correct
 # per repo, warm after first use, snapshot-persisted, array-side CoW-shared across leases. This
 # image carries only what is version-STABLE: node, the playwright SYSTEM libraries
-# (install-deps), docker CLI, uv, rsync, git, jq. ~700 MB instead of ~2 GB.
+# (install-deps), docker CLI, the docker compose v2 CLI plugin, uv, rsync, git, jq. ~750 MB
+# instead of ~2 GB. No `just` (that recipe runner never runs inside a lease).
 # The CI-container lane (docker run mcr.microsoft.com/playwright ...) is unaffected — that image
 # stays in hack/golden-images.txt as a docker-cache entry.
+#
+# docker compose v2: the docker CLI above is a single COPY'd static binary (no Docker apt repo
+# configured, so `apt-get install docker-compose-plugin` is not an option here) — installed the
+# same way as a static binary into a CLI-plugin directory docker already searches
+# (https://github.com/docker/compose#linux). PR G1's webapp/e2e-pool.sh --integration shells
+# `docker compose -f compose/e2e.yml up` inside this container's globalSetup; without the plugin
+# the bare docker CLI has no compose subcommand at all ("unknown shorthand flag: 'f' in -f" /
+# "docker: unknown command: docker compose"), so the integration e2e layer cannot run in the pool
+# (found during C-P0-10's codex round). Pinned version + sha256, verified before install — re-pin
+# by bumping COMPOSE_VERSION/COMPOSE_SHA256 together from
+# https://github.com/docker/compose/releases/download/<version>/checksums.txt.
 FROM docker.io/library/node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 COPY --from=docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44 \
@@ -22,3 +34,11 @@ RUN apt-get update \
  # webkit; the browsers themselves install per-repo-version into PLAYWRIGHT_BROWSERS_PATH.
  && npx -y playwright@1.61.1 install-deps \
  && rm -rf /var/lib/apt/lists/* /root/.npm
+
+ARG COMPOSE_VERSION=v5.5.0
+ARG COMPOSE_SHA256=c57ab918abd5b05ca7e7d0f275875dd1330a695074f309dc9eab1b49efafcd4b
+RUN mkdir -p /usr/libexec/docker/cli-plugins \
+ && curl -fsSL -o /usr/libexec/docker/cli-plugins/docker-compose \
+      "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+ && echo "${COMPOSE_SHA256}  /usr/libexec/docker/cli-plugins/docker-compose" | sha256sum -c - \
+ && chmod +x /usr/libexec/docker/cli-plugins/docker-compose
