@@ -33,6 +33,9 @@ pr_reviewer_llm_cmd:
 # pr_reviewer_llm_model (the claude branch inherits the account default and ignores it).
 pr_reviewer_llm_kind: claude
 pr_reviewer_llm_model: ""
+# claude-only: retry once on this model when the primary run errors (limits etc.);
+# "opus" is the CLI alias for the latest opus, so it needs no version maintenance.
+pr_reviewer_llm_fallback_model: ""
 # When set, the LLM subprocess runs as this dedicated OS user via sudo (created by the
 # role): its home holds ONLY that persona's LLM auth, so a prompt-injected diff has no
 # credentials to read. Required for codex (no tool-denial flags); claude gets the same

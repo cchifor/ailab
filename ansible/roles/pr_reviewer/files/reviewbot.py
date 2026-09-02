@@ -236,11 +236,15 @@ def run_llm(title, desc, diff_text, rubric=""):
     else:
         # Tool-less for real: Read/Grep/Glob/LS are denied too — the diff arrives inline,
         # and a filesystem read tool on untrusted input is the same exfil vector as above
-        # (same finding, claude edition).
-        args = CFG["llm_cmd"] + ["-p", "--output-format", "json",
-                                 "--disallowedTools", "Bash", "Edit", "Write", "Read",
-                                 "Grep", "Glob", "LS", "WebFetch", "WebSearch",
-                                 "NotebookEdit", "Task", "Agent"]
+        # (same finding, claude edition). Model: pinned primary (fable), one retry on the
+        # fallback (the `opus` alias = latest opus) when the primary errors, e.g. limits.
+        def claude_args(model):
+            a = CFG["llm_cmd"] + ["-p", "--output-format", "json",
+                                  "--disallowedTools", "Bash", "Edit", "Write", "Read",
+                                  "Grep", "Glob", "LS", "WebFetch", "WebSearch",
+                                  "NotebookEdit", "Task", "Agent"]
+            return a + (["--model", model] if model else [])
+        args = claude_args(CFG.get("llm_model") or "")
     if sudo_user:
         # The out dir belongs to the ISOLATED user (0700): with a world-writable dir any
         # local process could pre-create last-message.md and have forged JSON posted as
@@ -286,6 +290,13 @@ def run_llm(title, desc, diff_text, rubric=""):
                 except json.JSONDecodeError:
                     pass
         else:
+            fb = CFG.get("llm_fallback_model") or ""
+            if r.returncode != 0 and fb:
+                log(f"primary model failed (exit {r.returncode}: {r.stderr[-120:]}); "
+                    f"retrying with fallback '{fb}'")
+                r = subprocess.run(claude_args(fb), input=prompt, capture_output=True,
+                                   text=True, timeout=CFG["llm_timeout_s"], cwd=workdir,
+                                   env=env)
             if r.returncode != 0:
                 raise RuntimeError(f"llm exit {r.returncode}: {r.stderr[-300:]}")
             envelope = json.loads(r.stdout)
@@ -577,6 +588,8 @@ def write_metrics():
             last_rec = c.execute("SELECT v FROM meta WHERE k='last_reconcile'").fetchone()
             quar = c.execute("SELECT COUNT(*) FROM jobs WHERE state='quarantined'").fetchone()[0]
             done = c.execute("SELECT COUNT(*) FROM jobs WHERE state='done'").fetchone()[0]
+            running = c.execute("SELECT COUNT(*) FROM jobs WHERE state IN "
+                                "('running','posting')").fetchone()[0]
             c.close()
         now = time.time()
         lines = [
@@ -585,6 +598,7 @@ def write_metrics():
             f'reviewbot_oldest_job_age_seconds{{persona="{CFG["persona"]}"}} {(now - oldest) if oldest else 0:.0f}',
             f'reviewbot_quarantined_jobs{{persona="{CFG["persona"]}"}} {quar}',
             f'reviewbot_jobs_done{{persona="{CFG["persona"]}"}} {done}',
+            f'reviewbot_job_running{{persona="{CFG["persona"]}"}} {running}',
         ]
         if last_ok:
             lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_ok[0]):.0f}')
