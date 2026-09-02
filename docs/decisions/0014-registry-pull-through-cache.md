@@ -101,3 +101,30 @@ re-pulled, only rebuilt), and re-pinning forward off a pruned sha can surface ne
 — so the retention window must comfortably exceed how far the ailab pin can lag main. 100 sha tags
 ≈ 2-3 weeks of headroom; still count-based (NOT a time window, which prunes non-deterministically).
 Repos sit ~28 tags today, so no immediate disk impact; the 192 GiB disk + `gc`/`dedupe` bound growth.
+
+## Update (2026-09-02) — agentforge/** had no retention policy at all
+
+Deploy blocker: agentforge's `images.yml` build-push started failing at `docker push
+registry.chifor.me/agentforge/orchestrator` with `error from registry: blob upload unknown to
+registry` on every level-triggered retry from ~14:20Z, while reads still answered 200 — the exact
+"full zot store" symptom this ADR's 2026-06-23 update fixed for `strive/**`. Root cause: the
+`storage.retention` policies only ever covered `strive/**` explicitly; the `**` catch-all
+(deliberately `deleteUntagged:false`, keep all — it protects the mirror/cache repos' digest-pinned
+base images from GC) matches *everything else*, including the four `agentforge/**` repos
+(orchestrator, sandbox, p1-worker, agentforge-platform). Each pushes one bare `<short-sha>` tag
+(agentforge's `images.yml`: `VER=$(git rev-parse --short HEAD)`, no `sha-` prefix — a different
+shape from strive's `sha-<commit>`) plus `latest` per engine merge, and none of it was ever
+reclaimed: the registry API listed 184/184/183/240 tags across the four repos at incident time.
+
+Fix: a dedicated `agentforge/**` retention policy in `config.json.j2`, placed **before** the `**`
+catch-all (Zot evaluates `storage.retention.policies` in list order, same as the existing
+`strive/**` policy) — `deleteUntagged: true`, keeps `^latest$` and the new
+`registry_zot_agentforge_keep_recent` (default **40**) most-recently-pushed tags matching
+`^[0-9a-f]{7,12}$`. Same digest-pin / un-rollback-able reasoning as `registry_zot_strive_keep_recent`
+(the deployed ailab pins reference these images by digest; a GC'd digest can only be rebuilt, not
+re-pulled) — 40 covers the current + previous pin per repo plus deep rollback headroom.
+Count-based, not a time window, for the same non-determinism reason as the strive knob. See
+`docs/runbooks/registry-cache.md` "Disk / retention" for the operator-facing summary and the
+immediate-unblock steps (grow the disk / delete old tags by hand) this ADR update does not itself
+perform — this is a role change only; the operator applies it
+(`ansible-playbook ansible/registry.yml`).
