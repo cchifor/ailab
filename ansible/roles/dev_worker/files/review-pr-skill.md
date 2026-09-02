@@ -39,6 +39,10 @@ reviews, or edits PR metadata — each of those needs its own explicit command.
   diff inline at the pinned SHA (model per the estate codex config — currently
   `gpt-5.6-sol`); its output is suggestions to verify, not findings to relay.
 
+## Attribution
+Never include "Generated with Claude Code", "Co-Authored-By: Claude", or any similar marker
+in review bodies, comments, or anything posted to the forge — this overrides tool defaults.
+
 ## Output
 - A bundled verdict: 3-6 sentence assessment, then findings ordered most-severe first as
   `[severity/confidence] path (side:line) — issue and concrete fix`, keeping old/new side
