@@ -79,22 +79,39 @@ registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credenti
 # causing registry-404 ImagePullBackOff on every reschedule (2026-06-28 incident).
 registry_zot_strive_keep_recent: 100
 
-# agentforge/** (orchestrator, sandbox, p1-worker, agentforge-platform) pushes ONE bare
-# `<short-sha>` tag (agentforge/.gitea/workflows/images.yml: `VER=$(git rev-parse --short HEAD)`,
-# 7-12 hex chars, NO `sha-` prefix — different shape from strive's `sha-<commit>`) plus `latest`
-# per engine merge. It was NOT covered by any dedicated policy — it fell through to the `**`
+# agentforge/** does NOT all push the same tag shape (verified against the live tag lists AND
+# both engine repos' workflows on 2026-09-02, see docs/decisions/0014-registry-pull-through-cache.md
+# "Update (2026-09-02)"):
+#   - orchestrator, sandbox, p1-worker (agentforge/.gitea/workflows/images.yml:
+#     `VER=$(git rev-parse --short HEAD)`, `docker push ${repo}:${VER}` + `${repo}:latest`) push
+#     ONE bare `<short-sha>` tag (7-12 hex, NO `sha-` prefix — different shape from strive's
+#     `sha-<commit>`) plus `latest`, per engine merge.
+#   - agentforge-platform (agentforge-platform/.gitea/workflows/images.yml: `docker push
+#     "$IMAGE:${{ github.sha }}"` + `"$IMAGE:${{ steps.sha.outputs.short }}"`) pushes BOTH the
+#     full 40-hex `github.sha` tag AND the 7-hex short-sha tag per build, and never pushes
+#     `latest` at all.
+# None of this was covered by any dedicated policy before this PR — it fell through to the `**`
 # catch-all above, which deliberately keeps EVERY tag (that catch-all exists to protect the
 # mirror/cache repos' digest-pinned base images, not to bound our own build repos) — so these four
 # repos grew unbounded and eventually filled the store (blob-write failures while reads still 200;
-# incident 2026-09-02, see docs/decisions/0014-registry-pull-through-cache.md "Update
-# (2026-09-02)"). Same shape and same reasoning as registry_zot_strive_keep_recent above: exactly
-# like ailab pins, the deployed agentforge/agentforge-platform manifests pin these images by
-# DIGEST, and Zot's GC removes untagged manifests — a GC'd short-sha build is un-rollback-able
-# (only rebuildable from git, and re-pinning off a rebuild can surface newly-required config), so
-# the window must comfortably outlive how far the deployed pin can lag main. 40 covers the current
-# + previous pin per repo plus deep rollback headroom (agentforge merges far less often than
-# strive's ~5-6 builds/day, so 40 is proportionally more headroom, not less). COUNT-based
-# (mostRecentlyPushedCount), NOT a time window, for the same non-determinism reason as
-# registry_zot_strive_keep_recent (a pushedWithin/pulledWithin window drops the deployed pin in
-# quiet periods and balloons under heavy CI).
+# incident 2026-09-02). The agentforge/** policy below therefore carries TWO
+# mostRecentlyPushedCount rules under one shared knob: one for the bare short-sha shape
+# (`^[0-9a-f]{7,12}$`, covers all four repos) and one for the full 40-hex shape
+# (`^[0-9a-f]{40}$`, matches only agentforge-platform's `github.sha` tag; harmless no-op pattern
+# for the other three repos, which never push a 40-hex tag). Both tags of the same
+# agentforge-platform build are pushed together in the same workflow run, so the two windows
+# track the same set of builds — a single merged `{7,40}` pattern was considered and rejected: it
+# would let BOTH tags of one build count as one push against a shared count, halving the
+# platform's effective retention window to N/2 builds instead of N.
+#
+# Same shape and same reasoning as registry_zot_strive_keep_recent above: exactly like ailab
+# pins, the deployed agentforge/agentforge-platform manifests pin these images by DIGEST, and
+# Zot's GC removes untagged manifests — a GC'd build (short-sha OR full-sha tag) is
+# un-rollback-able (only rebuildable from git, and re-pinning off a rebuild can surface
+# newly-required config), so the window must comfortably outlive how far the deployed pin can lag
+# main. 40 covers the current + previous pin per repo plus deep rollback headroom (agentforge
+# merges far less often than strive's ~5-6 builds/day, so 40 is proportionally more headroom, not
+# less). COUNT-based (mostRecentlyPushedCount), NOT a time window, for the same non-determinism
+# reason as registry_zot_strive_keep_recent (a pushedWithin/pulledWithin window drops the deployed
+# pin in quiet periods and balloons under heavy CI).
 registry_zot_agentforge_keep_recent: 40
