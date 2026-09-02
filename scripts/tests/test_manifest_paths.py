@@ -120,9 +120,13 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
 
 
 class FailClosedOnABrokenFixture(unittest.TestCase):
-    """Proves the shape scripts/manifest-lint.sh depends on: a Kustomization naming a path with
-    no kustomization.yaml must not be silently skipped — discovery itself must fail closed, since
-    `bash -euo pipefail scripts/manifest-lint.sh` stops the instant this script's exit is non-zero."""
+    """Proves this module's own contribution to the shape scripts/manifest-lint.sh depends on: a
+    Kustomization naming a path with no kustomization.yaml must not be silently skipped —
+    discover_paths()/verify_buildable()/main() must fail closed, at the Python level, since
+    `bash -euo pipefail scripts/manifest-lint.sh` stops the instant `manifest-paths.py`'s own exit
+    is non-zero. manifest-lint.sh's OWN failure paths (a failing `kustomize build`, a kubeconform
+    violation) are proven only by running the script itself against docker — see the implement and
+    review reports for that proof; they are not exercised by this unittest module."""
 
     def _write_local_kustomization(self, cluster_ai: pathlib.Path, name: str, path: str) -> None:
         (cluster_ai / f"{name}.yaml").write_text(
@@ -229,6 +233,107 @@ class FailClosedOnABrokenFixture(unittest.TestCase):
                 mp.verify_buildable(paths)
         finally:
             mp.yaml = had_yaml
+
+
+class RegexFallbackParityWithPyYAML(unittest.TestCase):
+    """The regex fallback (_docs_via_regex) is what actually runs on the CI runner today (see
+    manifest-paths.py's module docstring — nothing there installs PyYAML). It must therefore agree
+    with the PyYAML parser on YAML that is legal but NOT in this repo's own house style, not just
+    on documents that happen to already match this fixture generator's shape. Two YAML-legal shapes
+    the original regexes got wrong (both reported in review, both fail OPEN — a Kustomization
+    silently dropped from discovery rather than erroring or matching):
+
+    1. `sourceRef`'s `kind:`/`name:` children in reverse order (a mapping's key order carries no
+       meaning in YAML) — the old `_SOURCE_REF_RE` required `kind:` immediately followed by
+       `name:`, so `name:` first made the whole sourceRef (and so the whole document) invisible.
+    2. A quoted `path:` scalar (`path: "./kubernetes/apps/x"`) — PyYAML unquotes it; the old
+       `_PATH_RE` kept the quote characters, corrupting the path rather than dropping it (a
+       different, fail-closed-but-WRONG failure: verify_buildable would report "no
+       kustomization.yaml found" at a quote-mangled path that was never the real target).
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = pathlib.Path(self._tmp.name)
+        self.cluster_ai = self.repo / "kubernetes/apps/clusters/ai"
+        self.cluster_ai.mkdir(parents=True)
+        self._orig_repo, self._orig_cluster_ai = mp.REPO, mp.CLUSTER_AI
+        mp.REPO, mp.CLUSTER_AI = self.repo, self.cluster_ai
+
+        target = self.repo / "kubernetes/apps/reordered"
+        target.mkdir(parents=True)
+        (target / "kustomization.yaml").write_text("resources: []\n")
+
+    def tearDown(self):
+        mp.REPO, mp.CLUSTER_AI = self._orig_repo, self._orig_cluster_ai
+        self._tmp.cleanup()
+
+    def _discover_via_regex(self) -> list[str]:
+        had_yaml = mp.yaml
+        try:
+            mp.yaml = None
+            return mp.discover_paths()
+        finally:
+            mp.yaml = had_yaml
+
+    def test_reordered_source_ref_keys_still_resolve_local(self):
+        # `name:` BEFORE `kind:` — legal YAML, illegal for the old adjacency-and-order regex.
+        (self.cluster_ai / "reordered.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: reordered\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  interval: 10m\n"
+            "  sourceRef:\n"
+            "    name: flux-system\n"
+            "    kind: GitRepository\n"
+            "  path: ./kubernetes/apps/reordered\n"
+            "  prune: true\n"
+        )
+        self.assertEqual(
+            self._discover_via_regex(), mp.discover_paths()  # PyYAML mode, same fixture on disk
+        )
+        self.assertEqual(self._discover_via_regex(), ["./kubernetes/apps/reordered"])
+
+    def test_source_ref_with_intervening_key_still_resolves_local(self):
+        # A `namespace:` line BETWEEN `kind:` and `name:` — also legal, also broke the old regex.
+        (self.cluster_ai / "reordered.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: reordered\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  interval: 10m\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
+            "    namespace: flux-system\n"
+            "    name: flux-system\n"
+            "  path: ./kubernetes/apps/reordered\n"
+            "  prune: true\n"
+        )
+        self.assertEqual(self._discover_via_regex(), mp.discover_paths())
+        self.assertEqual(self._discover_via_regex(), ["./kubernetes/apps/reordered"])
+
+    def test_quoted_path_is_unquoted_same_as_pyyaml(self):
+        (self.cluster_ai / "reordered.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: reordered\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  interval: 10m\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
+            "    name: flux-system\n"
+            '  path: "./kubernetes/apps/reordered"\n'
+            "  prune: true\n"
+        )
+        self.assertEqual(self._discover_via_regex(), mp.discover_paths())
+        self.assertEqual(self._discover_via_regex(), ["./kubernetes/apps/reordered"])
 
 
 if __name__ == "__main__":
