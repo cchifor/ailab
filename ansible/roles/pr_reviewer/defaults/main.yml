@@ -41,7 +41,10 @@ pr_reviewer_llm_timeout_s: 300
 pr_reviewer_max_diff_bytes: 400000
 pr_reviewer_max_comments: 15
 pr_reviewer_max_attempts: 5
-pr_reviewer_reconcile_s: 600
+pr_reviewer_reconcile_s: 300
+# codex-only: reasoning effort for reviews (the seeded account default is xhigh - 5-10min
+# per review; medium is the right latency/quality point for a review bot).
+pr_reviewer_llm_effort: medium
 pr_reviewer_textfile: /var/lib/prometheus/node-exporter/reviewbot.prom
 # Merge authority (operator-directed 2026-09-02): the reviewer system merges a PR only when
 # EVERY persona below has a verdict=clean review at the current head, CI is green, the

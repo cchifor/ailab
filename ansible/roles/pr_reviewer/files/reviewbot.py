@@ -228,7 +228,9 @@ def run_llm(title, desc, diff_text, rubric=""):
         # attacker-influenced diff in the prompt, the model could read credentials into
         # its (posted!) output. llm_sudo_user runs it as a dedicated OS user whose home
         # holds only that persona's LLM auth and can read nothing else of value.
-        args = CFG["llm_cmd"] + ["exec", "-m", CFG["llm_model"], "--skip-git-repo-check",
+        args = CFG["llm_cmd"] + ["exec", "-m", CFG["llm_model"],
+                                 "-c", "model_reasoning_effort=" + CFG.get("llm_effort", "medium"),
+                                 "--skip-git-repo-check",
                                  "-s", "read-only", "--output-last-message", out_file, "-"]
     else:
         # Tool-less for real: Read/Grep/Glob/LS are denied too — the diff arrives inline,
@@ -510,7 +512,18 @@ def reconciler():
 
 def main():
     os.makedirs(os.path.dirname(CFG["state_db"]), exist_ok=True)
-    db().close()
+    c = db()
+    # Restart recovery: a killed in-flight run leaves 'running' (and rarely 'posting')
+    # rows nothing would ever pick again - deploy restarts orphaned two jobs on day one.
+    # Re-queueing 'posting' is safe: the pre-post marker check dedupes an already-landed
+    # review. Retry timers also reset so a restart never waits out stale backoff.
+    n = c.execute("UPDATE jobs SET state='queued', next_at=0, updated=? WHERE state IN "
+                  "('running','posting')", (time.time(),)).rowcount
+    c.execute("UPDATE jobs SET next_at=0 WHERE state='retry'")
+    c.commit()
+    c.close()
+    if n:
+        log(f"startup: re-queued {n} orphaned job(s)")
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=reconciler, daemon=True).start()
     srv = http.server.ThreadingHTTPServer((CFG["listen"], CFG["port"]), Hook)
