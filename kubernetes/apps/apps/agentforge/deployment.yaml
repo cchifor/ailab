@@ -178,6 +178,20 @@ spec:
             # the role names (af-cp-sub-status / af-cp-sub-rotator) are the Settings defaults and
             # match the Stage-0 provisioner roles; only the CA path needs naming (mounted below).
             - { name: AFP_OPENBAO_CA_PATH, value: "/etc/openbao-ca/ca.crt" }
+            # Operator-reserved ClusterIP carve-out the add-account allocator draws from
+            # (agentforge_platform.domain.clusterip.parse_pool / allocate). Inside this cluster's
+            # 10.96.0.0/12 Service CIDR's KEP-3070 static band (10.96.0.0/24, the first 256
+            # addresses — kube-apiserver's dynamic allocator avoids it), and disjoint from the
+            # three hand-pinned broker addresses already live (10.108.137.32 / 10.109.144.42 /
+            # 10.108.162.59 — broker-anthropic-max1.yaml / -max2.yaml / -openai-codex.yaml).
+            # Validated at CP boot by settings.py:604-620 (Settings._validate_broker_clusterip_pool
+            # -> domain/clusterip.py parse_pool): a malformed or too-wide value fails config load,
+            # not the operator's first add. See docs/runbooks/agentforge-platform-activation.md
+            # (Day-2 — LLM subscriptions operations) for the static-band rationale and the
+            # claude-max-3 backfill this value depends on.
+            # OPERATOR CHECK before merge: `kubectl get svc -A -o wide | grep ' 10\.96\.0\.'`
+            # must be empty (nothing already lives in this band).
+            - { name: AFP_BROKER_CLUSTERIP_POOL, value: "10.96.0.192/26" }
             # Aud -> broker /readyz map (C4 rotation observability). ALSO the account INVENTORY the
             # Settings surface manages — its keys mirror the live agentforge-broker manifests, which
             # is how the three pre-existing accounts are detected (managed=pre-existing, no adoption
