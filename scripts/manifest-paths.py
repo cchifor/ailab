@@ -57,13 +57,28 @@ LOCAL_SOURCE_KIND = "GitRepository"
 LOCAL_SOURCE_NAME = "flux-system"
 
 _KIND_RE = re.compile(r"^kind:\s*Kustomization\s*$", re.MULTILINE)
-_SOURCE_REF_RE = re.compile(
-    r"^  sourceRef:\n"
-    r"    kind:\s*(?P<kind>\S+)\s*\n"
-    r"    name:\s*(?P<name>\S+)\s*$",
-    re.MULTILINE,
-)
-_PATH_RE = re.compile(r"^  path:\s*(?P<path>\S+)\s*$", re.MULTILINE)
+# `sourceRef:`'s own children can appear in EITHER order (`kind:` then `name:`, or vice versa) and
+# need not be adjacent (e.g. an intervening `namespace:` line) — real YAML has no ordering
+# requirement on a mapping's keys, and treating this fallback's key order as significant would
+# make it FAIL OPEN: a Kustomization the PyYAML parser resolves to `_is_local()` would silently
+# vanish from `_docs_via_regex()`'s output instead of erroring, which is worse than a false
+# failure. So first capture the whole indented block under `sourceRef:` (every following line
+# indented at least as deep as its own children), then search `kind:`/`name:` inside that block
+# independently of order or adjacency.
+_SOURCE_REF_BLOCK_RE = re.compile(r"^  sourceRef:\n((?:^    \S.*\n?)+)", re.MULTILINE)
+_SOURCE_REF_KIND_RE = re.compile(r"^\s*kind:\s*(?P<kind>\S+)\s*$", re.MULTILINE)
+_SOURCE_REF_NAME_RE = re.compile(r"^\s*name:\s*(?P<name>\S+)\s*$", re.MULTILINE)
+# `path:`'s value may be quoted (`path: "./kubernetes/apps/x"`) — captured whole (not just \S+ )
+# and unquoted below, so this fallback does not confuse a quoted YAML string for a literal path
+# containing quote characters (which PyYAML would never do).
+_PATH_RE = re.compile(r"^  path:\s*(?P<path>.+?)\s*$", re.MULTILINE)
+
+
+def _unquote(value: str) -> str:
+    """Strip one matching pair of surrounding quotes, as YAML scalar parsing would."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
 
 
 class DiscoveryError(RuntimeError):
@@ -83,12 +98,16 @@ def _docs_via_regex(text: str) -> list[dict]:
         if not _KIND_RE.search(raw):
             continue
         doc: dict = {"kind": "Kustomization"}
-        m = _SOURCE_REF_RE.search(raw)
-        if m:
-            doc["sourceRef"] = {"kind": m.group("kind"), "name": m.group("name")}
+        block_m = _SOURCE_REF_BLOCK_RE.search(raw)
+        if block_m:
+            block = block_m.group(1)
+            kind_m = _SOURCE_REF_KIND_RE.search(block)
+            name_m = _SOURCE_REF_NAME_RE.search(block)
+            if kind_m and name_m:
+                doc["sourceRef"] = {"kind": kind_m.group("kind"), "name": name_m.group("name")}
         m = _PATH_RE.search(raw)
         if m:
-            doc["path"] = m.group("path")
+            doc["path"] = _unquote(m.group("path"))
         docs.append(doc)
     return docs
 

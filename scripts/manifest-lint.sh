@@ -92,7 +92,7 @@ for path in "${PATHS[@]}"; do
   name="${path#./}"
   name="${name//\//__}"
   echo "== kustomize build $path =="
-  docker run --rm -v "$REPO_ROOT:/work" -w /work "$KUSTOMIZE_IMAGE" \
+  docker run --rm -v "$REPO_ROOT:/work:ro" -w /work "$KUSTOMIZE_IMAGE" \
     build "$path" > "$OUT_DIR/$name.yaml"
 done
 
@@ -105,7 +105,7 @@ for f in "$OUT_DIR"/*.yaml; do
 done
 
 echo "== kubeconform -strict over ${#CONTAINER_FILES[@]} rendered manifests =="
-docker run --rm -v "$OUT_DIR:/out" "$KUBECONFORM_IMAGE" \
+docker run --rm -v "$OUT_DIR:/out:ro" "$KUBECONFORM_IMAGE" \
   -strict -summary -ignore-missing-schemas \
   -schema-location default \
   -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \

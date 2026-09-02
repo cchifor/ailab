@@ -12,7 +12,7 @@
 # (scripts/manifest-lint.sh) or a bare non-zero-exits-the-job command.
 #
 # WHY .gitea/ AND NOT .github/: Gitea reads .gitea/workflows and, once that directory exists,
-# ignores .github/workflows entirely. This repo already has four workflows here.
+# ignores .github/workflows entirely. This repo already has five workflows here.
 name: manifests
 
 on:
