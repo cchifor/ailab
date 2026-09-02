@@ -1,0 +1,89 @@
+# Dedicated PR-reviewer VMs (reviewer-1 = claude persona, reviewer-2 = codex persona).
+# Deliberately minimal compared to dev-workers: no docker, no tmux dashboard, no toolchains -
+# just node (for the LLM CLIs), node_exporter, ufw, and the pr_reviewer role. LLM CLI auth
+# (~/.claude, ~/.codex) is seeded ONCE from the previous reviewer hosts (subscription OAuth;
+# see docs/runbooks/dev-workers.md § reviewers) and is NOT ansible-managed.
+#   ansible-playbook reviewers.yml           # provision/refresh both
+- name: Configure PR-reviewer VMs
+  hosts: reviewers
+  become: true
+  gather_facts: true
+  vars:
+    reviewer_lan_cidr: "192.168.0.0/24"
+    reviewer_node_major: 20
+    reviewer_npm_prefix: /home/c4/.npm-global
+  pre_tasks:
+    - name: Wait for cloud-init to finish
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+
+    - name: Base packages
+      ansible.builtin.apt:
+        name: [git, curl, ca-certificates, python3, rsync, ufw]
+        state: present
+        update_cache: true
+
+    - name: Add NodeSource apt signing key
+      ansible.builtin.get_url:
+        url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+        dest: /etc/apt/keyrings/nodesource.asc
+        mode: "0644"
+
+    - name: Add NodeSource apt repository
+      ansible.builtin.deb822_repository:
+        name: nodesource
+        types: [deb]
+        uris: "https://deb.nodesource.com/node_{{ reviewer_node_major }}.x"
+        suites: [nodistro]
+        components: [main]
+        architectures: [amd64]
+        signed_by: /etc/apt/keyrings/nodesource.asc
+        enabled: true
+
+    - name: Install Node.js
+      ansible.builtin.apt:
+        name: nodejs
+        state: present
+        update_cache: true
+
+    - name: Install the LLM CLIs (npm prefix, agent user)
+      become: true
+      become_user: c4
+      ansible.builtin.command: "npm install -g @anthropic-ai/claude-code @openai/codex"
+      environment:
+        npm_config_prefix: "{{ reviewer_npm_prefix }}"
+      args:
+        creates: "{{ reviewer_npm_prefix }}/bin/claude"
+
+    # Allow rules BEFORE enable, so the ansible SSH connection can never be locked out.
+    - name: Allow LAN inbound on reviewer service ports
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ reviewer_lan_cidr }}"
+        to_port: "{{ item.port }}"
+        proto: tcp
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: "22", comment: "SSH from LAN" }
+        - { port: "9100", comment: "node_exporter scrape from LAN" }
+        - { port: "8477", comment: "reviewbot webhook from LAN" }
+
+    - name: Default deny incoming
+      community.general.ufw:
+        direction: incoming
+        policy: deny
+
+    - name: Default allow outgoing
+      community.general.ufw:
+        direction: outgoing
+        policy: allow
+
+    - name: Enable ufw
+      community.general.ufw:
+        state: enabled
+
+  roles:
+    - role: node_exporter
+    - role: pr_reviewer
+      tags: [reviewbot]

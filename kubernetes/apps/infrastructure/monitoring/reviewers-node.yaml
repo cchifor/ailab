@@ -1,0 +1,47 @@
+# Host-level node_exporter on the 2 dedicated PR-reviewer VMs (.24/.25:9100, provisioned by
+# ansible/reviewers.yml; ufw already open). Carries the reviewbot_* textfile metrics that feed
+# the "PR Reviewers" row on the AI Lab Fleet dashboard. relabel forces job="reviewer-node".
+# Mirror of dev-workers-node.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: reviewer-node
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: reviewer-node
+spec:
+  clusterIP: None
+  ports:
+    - { name: metrics, port: 9100, targetPort: 9100, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: reviewer-node
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: reviewer-node
+subsets:
+  - addresses:
+      - { ip: 192.168.0.24 } # reviewer-1 (ai-node3, claude persona)
+      - { ip: 192.168.0.25 } # reviewer-2 (ai-node3, codex persona)
+    ports:
+      - { name: metrics, port: 9100, protocol: TCP }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: reviewer-node
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reviewer-node
+  endpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: reviewer-node

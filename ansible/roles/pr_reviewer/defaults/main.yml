@@ -33,4 +33,4 @@ pr_reviewer_max_comments: 15
 pr_reviewer_max_attempts: 5
 pr_reviewer_reconcile_s: 600
 pr_reviewer_textfile: /var/lib/prometheus/node-exporter/reviewbot.prom
-pr_reviewer_allow_cidr: "{{ dev_worker_lan_cidr }}"
+pr_reviewer_allow_cidr: "192.168.0.0/24"
