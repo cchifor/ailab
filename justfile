@@ -170,6 +170,13 @@ nested-virt-verify:
 af-verify-hashes:
     python scripts/check-inline-hashes.py
 
+# Fail-closed `kustomize build` + `kubeconform -strict` over every Flux Kustomization path this
+# checkout can build (kubernetes/apps/clusters/ai, excluding the two Kustomizations sourced from a
+# different repo — see scripts/manifest-paths.py). Needs docker. This is what
+# .gitea/workflows/manifests.yaml runs on every push/PR.
+manifest-lint:
+    bash scripts/manifest-lint.sh
+
 # Evaluate the agentforge-tenant-guard VAP's CEL against a fixture table of admission requests:
 # the CP's live PodMonitor render must stay ADMITTED and each shape the policy exists to stop must
 # be DENIED by the expected clause. Nothing else in this estate evaluates that CEL — a client
