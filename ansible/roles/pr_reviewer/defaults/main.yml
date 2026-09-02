@@ -14,6 +14,7 @@ pr_reviewer_repos:
   - cchifor/review-bot-fixture
   - cchifor/ailab
   - cchifor/agentforge
+  - cchifor/platform
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
 # The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
 # its PRs get the pin rubric below and automerge when digest-only + clean + CI green.
