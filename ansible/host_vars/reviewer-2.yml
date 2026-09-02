@@ -1,0 +1,10 @@
+---
+# reviewer-2: the codex PR-review persona (moved off dev-worker-3 for isolation, 2026-09-02).
+pr_reviewer_enabled: true
+pr_reviewer_persona: codex
+pr_reviewer_llm_kind: codex
+pr_reviewer_llm_model: gpt-5.6-sol
+pr_reviewer_llm_cmd:
+  - "/usr/bin/codex"
+pr_reviewer_llm_timeout_s: 600
+pr_reviewer_llm_sudo_user: codexrun

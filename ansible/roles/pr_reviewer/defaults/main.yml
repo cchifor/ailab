@@ -8,22 +8,51 @@ pr_reviewer_user: c4
 pr_reviewer_listen: "0.0.0.0"
 pr_reviewer_port: 8477
 pr_reviewer_gitea_url: "https://git.chifor.me"
-# Central allowlist — the ONLY thing that admits a repo in Phase 1. Fixture first.
+# Central allowlist — the ONLY thing that admits a repo. Real repos joined 2026-09-02
+# (operator-directed rollout); posting stays COMMENT-only, statuses off until the soak.
 pr_reviewer_repos:
   - cchifor/review-bot-fixture
-# PRs authored by any bot identity are never reviewed (no bot->bot trigger loops).
+  - cchifor/ailab
+  - cchifor/agentforge
+  - cchifor/platform
+# PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
+# The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
+# its PRs get the pin rubric below and automerge when digest-only + clean + CI green.
+# Reviewing it cannot loop - the pin bot never reacts to reviews.
 pr_reviewer_ignore_authors:
   - reviewer-claude
   - reviewer-codex
+# PRs from these authors get the stricter pin-lane rubric prepended to the review prompt.
+pr_reviewer_pin_authors:
   - agentforge-ci-bot
 # The headless LLM command (argv list; -p/--output-format/tool restrictions are appended
 # by the service). The claude binary lives in the agent user's ~/.local/bin.
 pr_reviewer_llm_cmd:
   - "/home/c4/.local/bin/claude"
+# claude: headless -p with tool restrictions. codex: exec with read-only sandbox; needs
+# pr_reviewer_llm_model (the claude branch inherits the account default and ignores it).
+pr_reviewer_llm_kind: claude
+pr_reviewer_llm_model: ""
+# When set, the LLM subprocess runs as this dedicated OS user via sudo (created by the
+# role): its home holds ONLY that persona's LLM auth, so a prompt-injected diff has no
+# credentials to read. Required for codex (no tool-denial flags); claude gets the same
+# effect from --disallowedTools.
+pr_reviewer_llm_sudo_user: ""
 pr_reviewer_llm_timeout_s: 300
 pr_reviewer_max_diff_bytes: 400000
 pr_reviewer_max_comments: 15
 pr_reviewer_max_attempts: 5
-pr_reviewer_reconcile_s: 600
+pr_reviewer_reconcile_s: 300
+# codex-only: reasoning effort for reviews (the seeded account default is xhigh - 5-10min
+# per review; medium is the right latency/quality point for a review bot).
+pr_reviewer_llm_effort: medium
 pr_reviewer_textfile: /var/lib/prometheus/node-exporter/reviewbot.prom
-pr_reviewer_allow_cidr: "{{ dev_worker_lan_cidr }}"
+# Merge authority (operator-directed 2026-09-02): the reviewer system merges a PR only when
+# EVERY persona below has a verdict=clean review at the current head, CI is green, the
+# author is in the allowlist, and no `no-automerge` label is present. Applies to all
+# personas' configs identically - whichever persona completes the picture merges (races
+# are benign: the second merge attempt gets a 405).
+pr_reviewer_automerge: true
+pr_reviewer_merge_personas: [claude, codex]
+pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot]
+pr_reviewer_allow_cidr: "{{ lan_cidr | default('192.168.0.0/24') }}"

@@ -12,6 +12,7 @@ resources:
   - proxmox-node.yaml # host node_exporter on the 3 Proxmox hosts (scrape target)
   - ci-runners-node.yaml # host node_exporter on the CI runner VMs (Gitea Actions; scrape target)
   - dev-workers-node.yaml # host node_exporter on the 6 dev-worker VMs (scrape target)
+  - reviewers-node.yaml # host node_exporter + reviewbot_* textfile metrics on the 2 reviewer VMs
   # agentforge.yaml stays DISABLED and is now dead: it scraped agentforge as a host systemd unit on
   # the dev-worker VMs (ADR 0018), a topology ADR 0019 superseded — 0 unit files on all 6 hosts,
   # nothing on :9464, and job="agentforge" has 0 targets / 0 series (measured 2026-08-10). Nothing

@@ -339,6 +339,38 @@ panels += [
        "bytes", legends=["{{persistentvolumeclaim}}"]),
 ]
 
+# ───────────────────────── PR Reviewers ─────────────────────────
+# The automatic LLM review bots (ansible/roles/pr_reviewer; plan: agentforge
+# plans/2026-09-02-ai-pr-review-plan.md). Source: reviewbot_* textfile metrics through the
+# workers' node_exporter — heartbeat AGE is the liveness signal (a dead daemon leaves a
+# stale file that queue-depth panels would happily keep showing).
+panels.append(row("PR Reviewers (automatic LLM review bots — reviewbot)", 136))
+panels += [
+    stat("Claude Bot Heartbeat Age", 0, 137, 4, 4,
+         'time() - reviewbot_heartbeat_timestamp_seconds{persona="claude"}',
+         unit="s", steps=[{"color": "green", "value": None}, {"color": "orange", "value": 120},
+                          {"color": "red", "value": 900}]),
+    stat("Codex Bot Heartbeat Age", 4, 137, 4, 4,
+         'time() - reviewbot_heartbeat_timestamp_seconds{persona="codex"}',
+         unit="s", steps=[{"color": "green", "value": None}, {"color": "orange", "value": 120},
+                          {"color": "red", "value": 900}]),
+    stat("Queue Depth (all personas)", 8, 137, 4, 4, 'sum(reviewbot_queue_depth) or vector(0)',
+         steps=[{"color": "green", "value": None}, {"color": "orange", "value": 3},
+                {"color": "red", "value": 10}]),
+    stat("Oldest Queued Job", 12, 137, 4, 4,
+         'max(reviewbot_oldest_job_age_seconds) or vector(0)', unit="s",
+         steps=[{"color": "green", "value": None}, {"color": "orange", "value": 1800},
+                {"color": "red", "value": 7200}]),
+    stat("Quarantined Jobs", 16, 137, 4, 4, 'sum(reviewbot_quarantined_jobs) or vector(0)',
+         steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}]),
+    stat("Reviews Done (total)", 20, 137, 4, 4, 'sum(reviewbot_jobs_done) or vector(0)'),
+    ts("Reviews Completed over Time", 0, 141, 12, 7,
+       ['reviewbot_jobs_done'], "short", legends=["{{persona}}"], decimals=0),
+    ts("Queue Depth / Oldest Age", 12, 141, 12, 7,
+       ['reviewbot_queue_depth', 'reviewbot_oldest_job_age_seconds'],
+       "short", legends=["{{persona}} depth", "{{persona}} oldest s"]),
+]
+
 dashboard = {
     "title": "AI Lab Fleet",
     "uid": "ailab-reporting",

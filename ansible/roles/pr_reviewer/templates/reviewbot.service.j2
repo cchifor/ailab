@@ -16,7 +16,11 @@ ExecStart=/usr/bin/python3 /usr/local/lib/reviewbot/reviewbot.py /etc/reviewbot/
 Restart=always
 RestartSec=10
 MemoryMax=2G
+{% if not pr_reviewer_llm_sudo_user %}
+# NoNewPrivileges is incompatible with the sudo-based LLM isolation (it blocked every
+# codex run on reviewer-2, caught live 2026-09-02); it stays on where sudo is unused.
 NoNewPrivileges=true
+{% endif %}
 
 [Install]
 WantedBy=multi-user.target

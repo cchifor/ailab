@@ -1,0 +1,6 @@
+---
+# reviewer-1: the claude PR-review persona (moved off dev-worker-2 for isolation, 2026-09-02).
+pr_reviewer_enabled: true
+pr_reviewer_persona: claude
+pr_reviewer_llm_cmd:
+  - "/usr/bin/claude"

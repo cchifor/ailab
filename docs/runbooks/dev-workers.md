@@ -185,6 +185,19 @@ sops --encrypt --in-place ansible/secrets/dev-worker.sops.yaml
 git add ansible/secrets/dev-worker.sops.yaml
 ```
 
+## reviewers (dedicated PR-review VMs)
+
+reviewer-1 (.24, claude persona) and reviewer-2 (.25, codex persona) — both vmid 4301/4302 on
+ai-node3, 2 vCPU / 4 GiB FIXED, tofu module kubernetes/infra/reviewers, guest config
+ansible/reviewers.yml (deliberately minimal: node + LLM CLIs, node_exporter, ufw, pr_reviewer
+role — no docker/tmux/toolchains). Migrated off dev-worker-2/-3 2026-09-02 so reviews never
+contend with feature work. LLM auth (~/.claude, ~/.codex) was seeded once from the old hosts
+and is NOT ansible-managed — a subscription re-login is manual. Org webhooks 38/39 point at
+.24/.25:8477; scrape via monitoring/reviewers-node.yaml (job=reviewer-node); the AI Lab Fleet
+dashboard "PR Reviewers" row reads the reviewbot_* textfile metrics. Tofu state: applied from
+the session scratchpad clone — hand the tfstate to the main checkout and verify a no-op plan
+(same handover as env-pool; see backend.tf).
+
 ## herdr pilot (dev-worker-5 + dev-worker-6)
 
 > dev-worker-6 joined 2026-09-02 after the operator hand-installed herdr there
