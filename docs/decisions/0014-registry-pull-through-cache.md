@@ -111,20 +111,30 @@ registry` on every level-triggered retry from ~14:20Z, while reads still answere
 `storage.retention` policies only ever covered `strive/**` explicitly; the `**` catch-all
 (deliberately `deleteUntagged:false`, keep all — it protects the mirror/cache repos' digest-pinned
 base images from GC) matches *everything else*, including the four `agentforge/**` repos
-(orchestrator, sandbox, p1-worker, agentforge-platform). Each pushes one bare `<short-sha>` tag
-(agentforge's `images.yml`: `VER=$(git rev-parse --short HEAD)`, no `sha-` prefix — a different
-shape from strive's `sha-<commit>`) plus `latest` per engine merge, and none of it was ever
-reclaimed: the registry API listed 184/184/183/240 tags across the four repos at incident time.
+(orchestrator, sandbox, p1-worker, agentforge-platform), and none of it was ever reclaimed: the
+registry API listed 184/184/183/240 tags across the four repos at incident time. The four repos do
+NOT all push the same tag shape (re-checked live via `GET /v2/agentforge/<repo>/tags/list` for all
+four repos on 2026-09-02, after a review round found the first draft of this policy covered only
+three of the four): orchestrator, sandbox and p1-worker (agentforge's `images.yml`:
+`VER=$(git rev-parse --short HEAD)`, `docker push ${repo}:${VER}` + `${repo}:latest`) push one
+bare `<short-sha>` tag (no `sha-` prefix — a different shape from strive's `sha-<commit>`) plus
+`latest` per engine merge; agentforge-platform (`agentforge-platform/images.yml`: `docker push
+"$IMAGE:${{ github.sha }}"` + `"$IMAGE:${{ steps.sha.outputs.short }}"`) pushes BOTH the full
+40-hex `github.sha` tag and the short-sha tag per build, and never pushes `latest` at all — the
+live check found 240 tags = 120 full-sha + 120 short-sha, no `latest`.
 
 Fix: a dedicated `agentforge/**` retention policy in `config.json.j2`, placed **before** the `**`
 catch-all (Zot evaluates `storage.retention.policies` in list order, same as the existing
-`strive/**` policy) — `deleteUntagged: true`, keeps `^latest$` and the new
-`registry_zot_agentforge_keep_recent` (default **40**) most-recently-pushed tags matching
-`^[0-9a-f]{7,12}$`. Same digest-pin / un-rollback-able reasoning as `registry_zot_strive_keep_recent`
-(the deployed ailab pins reference these images by digest; a GC'd digest can only be rebuilt, not
-re-pulled) — 40 covers the current + previous pin per repo plus deep rollback headroom.
-Count-based, not a time window, for the same non-determinism reason as the strive knob. See
-`docs/runbooks/registry-cache.md` "Disk / retention" for the operator-facing summary and the
-immediate-unblock steps (grow the disk / delete old tags by hand) this ADR update does not itself
-perform — this is a role change only; the operator applies it
-(`ansible-playbook ansible/registry.yml`).
+`strive/**` policy) — `deleteUntagged: true`, keeps `^latest$` and, under the new
+`registry_zot_agentforge_keep_recent` (default **40**) knob, the most-recently-pushed tags
+matching EITHER `^[0-9a-f]{7,12}$` (the short-sha shape all four repos push) OR `^[0-9a-f]{40}$`
+(agentforge-platform's additional full-sha tag) — two separate `mostRecentlyPushedCount` rules
+under the same knob rather than one merged pattern, so a build's two tags each get their own
+40-deep window instead of splitting one shared window in half. Same digest-pin / un-rollback-able
+reasoning as `registry_zot_strive_keep_recent` (the deployed ailab / agentforge-platform pins
+reference these images by digest; a GC'd digest can only be rebuilt, not re-pulled) — 40 covers
+the current + previous pin per repo plus deep rollback headroom. Count-based, not a time window,
+for the same non-determinism reason as the strive knob. See `docs/runbooks/registry-cache.md`
+"Disk / retention" for the operator-facing summary and the immediate-unblock steps (grow the disk
+/ delete old tags by hand) this ADR update does not itself perform — this is a role change only;
+the operator applies it (`ansible-playbook ansible/registry.yml`).

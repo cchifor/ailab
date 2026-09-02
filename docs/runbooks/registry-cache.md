@@ -73,12 +73,17 @@ each more specific one listed before the catch-all it would otherwise fall throu
 
 - `strive/**` keeps `latest` + the `registry_zot_strive_keep_recent` (100) most-recently-pushed
   `sha-<commit>` tags per repo and GC reclaims the rest.
-- `agentforge/**` (orchestrator, sandbox, p1-worker, agentforge-platform) keeps `latest` + the
-  `registry_zot_agentforge_keep_recent` (40) most-recently-pushed bare short-sha tags per repo
-  (agentforge's `.gitea/workflows/images.yml` pushes `VER=$(git rev-parse --short HEAD)` with NO
-  `sha-` prefix — a different tag shape from strive's, hence the separate pattern
-  `^[0-9a-f]{7,12}$`). Added 2026-09-02 after these four repos grew unbounded (184/184/183/240
-  tags) and filled the store — see ADR 0014 "Update (2026-09-02)".
+- `agentforge/**` keeps `latest` + the `registry_zot_agentforge_keep_recent` (40)
+  most-recently-pushed tags per repo, under TWO patterns because the four repos do not all push
+  the same tag shape: orchestrator, sandbox and p1-worker (agentforge's
+  `.gitea/workflows/images.yml`: `VER=$(git rev-parse --short HEAD)`, `docker push
+  ${repo}:${VER}` + `${repo}:latest`) push a bare short-sha tag (7-12 hex, NO `sha-` prefix — a
+  different shape from strive's) plus `latest`, matched by `^[0-9a-f]{7,12}$`; agentforge-platform
+  (`agentforge-platform/.gitea/workflows/images.yml`: `docker push "$IMAGE:${{ github.sha }}"` +
+  `"$IMAGE:${{ steps.sha.outputs.short }}"`) pushes BOTH the full 40-hex `github.sha` tag and the
+  short-sha tag, and never pushes `latest` at all — matched by the separate pattern
+  `^[0-9a-f]{40}$`. Added 2026-09-02 after these four repos grew unbounded (184/184/183/240 tags)
+  and filled the store — see ADR 0014 "Update (2026-09-02)".
 - `**` (everything else, i.e. the mirror/cache repos) stays protected (`deleteUntagged:false`,
   keep all) so digest-pinned base images are never collected.
 
