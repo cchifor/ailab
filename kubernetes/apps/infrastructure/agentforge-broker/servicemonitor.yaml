@@ -1,0 +1,51 @@
+# ServiceMonitor for the per-seat brokers — MIRRORS agentforge-workers/dispatcher-servicemonitor.yaml's
+# shape: it lives in the `monitoring` namespace (where kube-prometheus's Prometheus looks for
+# ServiceMonitors, via `serviceMonitorSelector`/`serviceMonitorNamespaceSelector: {}` on the
+# kube-prometheus-stack HelmRelease), carries `release: kube-prometheus-stack` (the label that
+# selector matches on), and sets an explicit namespaceSelector since the target Services live in a
+# DIFFERENT namespace (`agentforge-broker`) than this manifest.
+#
+# NOT NAMED broker-*.yaml DELIBERATELY: scripts/gen-broker-inventory.py:278 derives the seat list
+# from `BROKER_DIR.glob("broker-*.yaml")` and treats every match as a broker Deployment manifest
+# (parse_seat expects exactly one Deployment + a matching pair of Services). A ServiceMonitor under
+# that glob would blow up the generator, not silently miscount — see
+# scripts/tests/test_broker_servicemonitor.py.
+#
+# SELECTOR: matches `app.kubernetes.io/component: broker` + `app.kubernetes.io/part-of: agentforge`,
+# the two labels every per-account Service (broker-anthropic-max1, -max2, -claude-max-3,
+# -openai-codex) and its `-headless` twin already carry (see each broker-*.yaml). The headless
+# Service is ALSO selected — it has no `metrics` port so Prometheus generates no target for it,
+# which is harmless (see this PR's risk note) and avoids a second, narrower selector to maintain.
+#
+# INGRESS: already open. Each broker-*.yaml's CiliumNetworkPolicy ingress rule (2) admits
+# `k8s:io.kubernetes.pod.namespace: monitoring` on port 9464 (the `metrics` containerPort) —
+# added ahead of this PR specifically so a ServiceMonitor landing here would not also need a CNP
+# change. This PR does not touch any CiliumNetworkPolicy.
+#
+# job=agentforge-broker relabeling matches the `up{job="agentforge-broker"}` selector the
+# ForgeBrokerTargetDown rule (monitoring/agentforge-rules.yaml) reads. seat<-...service_label_...name
+# turns the per-seat Service's `app.kubernetes.io/name` (e.g. `broker-anthropic-max1`) into a first-
+# class `seat` label on every `af_broker_*` series and on `up` itself, so a scrape failure and a
+# usage query can both be filtered/grouped the same way without joining against kube-state-metrics.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agentforge-broker
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [agentforge-broker]
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: broker
+      app.kubernetes.io/part-of: agentforge
+  endpoints:
+    - port: metrics
+      interval: 15s
+      relabelings:
+        - targetLabel: job
+          replacement: agentforge-broker
+        - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+          targetLabel: seat

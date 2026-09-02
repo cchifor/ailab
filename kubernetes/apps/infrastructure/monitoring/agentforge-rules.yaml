@@ -14,8 +14,10 @@
 # `forge_*{job="agentforge"}` both return 0 series.
 #
 # The live jobs are `agentforge-worker` (the operator-managed orchestrator pods, via
-# agentforge-workers/worker-podmonitor.yaml) and `agentforge-dispatcher` (the read-only KEDA scale
-# oracle, via agentforge-workers/dispatcher-servicemonitor.yaml).
+# agentforge-workers/worker-podmonitor.yaml), `agentforge-dispatcher` (the read-only KEDA scale
+# oracle, via agentforge-workers/dispatcher-servicemonitor.yaml), and `agentforge-broker` (the
+# per-seat credential brokers, ns agentforge-broker, via agentforge-broker/servicemonitor.yaml,
+# metrics prefixed `af_broker_*` not `forge_*` — added by C-P0-07).
 #
 # ROLE ASYMMETRY — the reason these rules are not a find-and-replace of the job label. The dispatcher
 # is a stripped READ-ONLY scale oracle: "NO webhook API, NO claims, NO Job creation" per
@@ -493,3 +495,137 @@ spec:
               af-orch-playground-planner -o jsonpath='{.spec.triggers[0].metadata.query}'` against the
               live label set: `count by (account,role) (forge_pending)`. NOT a dispatcher outage —
               ForgeTargetDown owns that and this rule stays silent for it by construction.
+        # NEW (C-P0-07), and DIFFERENT JOB FAMILY from every rule above: job="agentforge-broker" is
+        # the operator-owned credential broker fleet in its own namespace (agentforge-broker), not a
+        # CP-rendered tenant pool or the dispatcher — a third, disjoint (namespace, job) pair from the
+        # ailab#284 coverage boundary documented at the top of this file. Before this PR the broker
+        # fleet (4 seats x 2 replicas = 8 pods) had NO ServiceMonitor at all
+        # (agentforge-broker/servicemonitor.yaml, this same PR) — af_broker_* was exported
+        # (broker-*.yaml's `metrics` containerPort on 9464, CNP ingress rule (2) already admitted
+        # `monitoring`) but nothing ever scraped it, so a dead/unreachable broker was invisible to
+        # Prometheus by construction, not just unalarmed. Cannot yet be measured "live" the way the
+        # rules above are (evidence section, 2026-08-10) — there is no scrape target for this job
+        # until Flux applies the paired ServiceMonitor in the SAME PR, so `up{job="agentforge-broker"}`
+        # is presently an empty vector on main. The `up{job=...} == 0` shape itself is exactly
+        # ForgeTargetDown's proven-firing pattern (see that rule and its evidence above), reused here
+        # rather than invented from scratch, so its capacity to fire is not in question — only its
+        # first live measurement is deferred to the operator's post-merge Prometheus /targets check
+        # (this PR's verification section). `for: 5m` matches ForgeTargetDown's own hold, for the same
+        # reason: a broker Deployment's terminationGracePeriodSeconds is short relative to it, so a
+        # brief rolling-update gap should not page. severity: critical (not warning) because a broker
+        # target being unreachable is NOT a delivery slowdown like a stalled reconcile. NOTE this
+        # fires per TARGET (one of the seat's two replicas), not per seat: `up` is per-instance, so
+        # with 2 replicas + a PDB the common case is ONE replica unscrapeable while its sibling still
+        # serves the seat's traffic — a real failure worth paging on (HA degraded to a single point
+        # of failure), but not yet the seat going fully dark. The seat itself only goes dark once
+        # BOTH replicas are down, which this expr alone cannot distinguish from the single-replica
+        # case; the description below says so explicitly rather than overstating the blast radius.
+        #
+        # COVERAGE GAP, closed via a SECOND, complementary rule from a DIFFERENT DATA SOURCE
+        # (review-bot rounds, ailab#467, reviewer-codex, important/high, raised on every head) —
+        # `up == 0` requires a target Prometheus is STILL discovering. A pod dropped from the
+        # Service's Endpoints entirely (readiness probe failing outright, the pod deleted, evicted or
+        # unscheduled) disappears from service discovery before any `up=0` sample is ever produced
+        # for it, so a replica stuck NotReady — as opposed to one that is discovered but
+        # unscrapeable — does NOT trip ForgeBrokerTargetDown. Nor can any `up`-derived proxy close
+        # that: an earlier revision of this PR tried `count by (seat) (up{job=...}) < 2`, which sees
+        # ONE vanished replica but, when BOTH of a seat's replicas vanish, has no `up` series left
+        # to count for that seat — `count by (seat)` emits no row and `< 2` matches nothing, so the
+        # most severe per-seat outage (the seat fully dark) was exactly the case it stayed silent
+        # on. Same disease agentforge-coverage-rules.yaml documents for `absent()`: a rule that
+        # reads only the scraped family is structurally blind to a target that is never scraped.
+        # Fixed the way that file fixes it — by reading kube-state-metrics (already scraped
+        # estate-wide; ha-rules.yaml's CriticalWorkloadSingleReplica and gitea-rules.yaml read the
+        # very same kube_deployment_status_replicas_available series), which reports spec and
+        # available replica counts for EVERY Deployment including one with 0 available, so a
+        # fully dark seat produces a row (0 < 2) instead of an absence. See
+        # ForgeBrokerSeatReplicasUnavailable below. Residual, documented, NOT covered here: the
+        # Deployment object itself being deleted (kube_deployment_* vanishes with it) is a
+        # git/Flux event, not a runtime failure — Flux's own reconcile alerting and the operator's
+        # post-merge Prometheus /targets check (8 targets) are the authority for that; and a
+        # kube-state-metrics outage silences this rule like every other kube_* rule in this
+        # directory — the stock kube-prometheus-stack TargetDown covers that job.
+        - alert: ForgeBrokerTargetDown
+          expr: up{job="agentforge-broker"} == 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "AgentForge broker seat {{ $labels.seat }} has an unscrapeable replica"
+            description: >-
+              The metrics endpoint on pod {{ $labels.pod }} (broker seat {{ $labels.seat }}, ns
+              agentforge-broker) has been unscrapeable for >5m while Prometheus still discovers it as
+              a target — a crash-loop, a wedged event loop, or a NetworkPolicy change. This is ONE of
+              the seat's 2 replicas: HA is degraded (a second failure would take the seat fully dark,
+              losing every sandbox job's only path to a capability token for this audience), but the
+              sibling replica may still be serving. To check: query
+              `sum by (seat) (up{job="agentforge-broker"})` — it reads 2 when both of this seat's
+              replicas are discovered and scraping, 1 when only the sibling still is, and a real 0
+              when every replica Prometheus discovers for the seat is failing its scrape (the seat is
+              dark although its pods are still registered). If the seat is ABSENT from that result
+              altogether, none of its replicas is discovered any more — a different failure this
+              alert cannot see; ForgeBrokerSeatReplicasUnavailable (kube-state-metrics, next rule)
+              is the alert that fires for it, so check whether it is firing for this seat.
+              {{ $labels.seat }} IS the seat's Service app.kubernetes.io/name (e.g.
+              broker-anthropic-max1) — check `kubectl --context admin@ai -n agentforge-broker
+              describe pod -l app.kubernetes.io/name={{ $labels.seat }}` and the container log.
+              Grafana explore `sum by (seat) (rate(af_broker_tokens_used_total[5m]))` corroborates
+              whether the seat is still serving traffic overall.
+        # Complementary to ForgeBrokerTargetDown, not a duplicate: that rule fires on a DISCOVERED
+        # target failing to scrape (`up == 0`); this one fires when a seat's Deployment has FEWER
+        # AVAILABLE replicas than it asks for, whatever the reason — deleted, evicted, unscheduled
+        # (Pending), CrashLoopBackOff, or NotReady long enough that its readiness-gated Endpoints
+        # membership was pulled — the whole class of failure `up` cannot see because a vanished
+        # target produces no `up` series at all, not a `0` one. Read from kube-state-metrics
+        # (kube_deployment_spec_replicas / kube_deployment_status_replicas_available, keyed by
+        # (namespace, deployment) — the same series and the same `max by (namespace, deployment)`
+        # shape ha-rules.yaml's CriticalWorkloadSingleReplica already uses), so it needs no `up`
+        # series to exist: kube-state-metrics reports 0 available as a real sample, so a seat with
+        # BOTH replicas gone yields `0 < 2` — a firing row, not a missing one — and a seat with one
+        # replica unready yields `1 < 2`. NAMESPACE-SCOPED rather than a regex of the four seat
+        # names: every Deployment in ns agentforge-broker IS a seat (scripts/tests/
+        # test_broker_servicemonitor.py asserts it, one Deployment per broker-*.yaml), so a fifth
+        # seat is covered without editing this rule, whereas a name list would silently miss it.
+        # `seat` is label_replace()d from the Deployment name: for every seat, Deployment name ==
+        # routable Service name == the Service's app.kubernetes.io/name that the ServiceMonitor
+        # relabels into `seat` (same test file pins all three equal), so this alert and
+        # ForgeBrokerTargetDown name a seat identically and the runbook queries carry over. The
+        # comparison is `available < spec` (not `!= `) so a scale-UP in progress (available >
+        # spec, transiently, with maxSurge: 1) never pages; `for: 5m` matches ForgeBrokerTargetDown's
+        # hold — broker-*.yaml sets maxUnavailable: 0, so a healthy rollout never drops available
+        # below spec at all and a 5m hold rides out a slow image pull on a fresh node. Overlaps the
+        # stock KubeDeploymentReplicasMismatch (warning, 15m) during genuine degradation the way
+        # CriticalWorkloadSingleReplica does, intentionally: this is the critical, seat-named
+        # "every sandbox job's capability tokens are one failure from unavailable" signal.
+        - alert: ForgeBrokerSeatReplicasUnavailable
+          expr: |-
+            label_replace(
+              max by (namespace, deployment) (
+                kube_deployment_status_replicas_available{namespace="agentforge-broker"}
+              )
+              <
+              max by (namespace, deployment) (
+                kube_deployment_spec_replicas{namespace="agentforge-broker"}
+              ),
+              "seat", "$1", "deployment", "(.+)"
+            )
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "AgentForge broker seat {{ $labels.seat }} has only {{ $value }} available replica(s)"
+            description: >-
+              Deployment {{ $labels.namespace }}/{{ $labels.deployment }} (broker seat
+              {{ $labels.seat }}) has had FEWER available replicas than its spec.replicas asks for
+              (currently {{ $value }} available) for >5m, per kube-state-metrics — a replica was
+              deleted, evicted, is Pending, is crash-looping, or has been NotReady long enough to be
+              dropped from the Service's Endpoints. This is a DIFFERENT failure from
+              ForgeBrokerTargetDown's "discovered but unscrapeable": that rule cannot see a replica
+              Prometheus no longer discovers, this one can, and it keeps firing all the way down to
+              0 available (the seat fully dark — every sandbox job for this audience has lost its
+              only path to a capability token). {{ $labels.seat }} IS the Deployment name AND the
+              seat's Service app.kubernetes.io/name (e.g. broker-anthropic-max1) — check `kubectl
+              --context admin@ai -n agentforge-broker get deploy,pods -l
+              app.kubernetes.io/name={{ $labels.seat }}` for a replica that is Pending,
+              CrashLoopBackOff, or absent, `kubectl --context admin@ai -n agentforge-broker describe
+              deploy {{ $labels.seat }}` for the rollout/conditions, and
+              `sum by (seat) (up{job="agentforge-broker"})` to see how many replicas Prometheus still
+              discovers and scrapes for the seat (absent from that result = none at all).
