@@ -9,7 +9,7 @@
 # (install-deps), docker CLI, uv, rsync, git, jq. ~700 MB instead of ~2 GB.
 # The CI-container lane (docker run mcr.microsoft.com/playwright ...) is unaffected — that image
 # stays in hack/golden-images.txt as a docker-cache entry.
-FROM docker.io/library/node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+FROM docker.io/library/node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
 
 COPY --from=docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44 \
      /usr/local/bin/docker /usr/local/bin/docker
