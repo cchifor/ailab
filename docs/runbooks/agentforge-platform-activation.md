@@ -499,7 +499,16 @@ following stay OPERATOR steps:
      account = 'claude-max-3';` against the `app_dsn` database (see the DSN note at the top of
      `settings.py`) — check the row count: 0 rows updated means no row exists yet for this
      env-inventory seat (expected until the first UI-visible edit creates one), not an error; skip
-     to step 3 in that case and repeat step 2 once a row exists.
+     to step 3 in that case and repeat step 2 once a row exists. **Skipping this step is safe, not
+     merely deferred**: `allocate()` (`domain/clusterip.py`) draws every candidate from
+     `pool.hosts()` — addresses INSIDE the configured `/26` — so a missing row here can never make
+     the allocator hand a NEW seat the address claude-max-3 already holds; that would require
+     claude-max-3's own (fixed, already-assigned) address to be a member of the pool, which the
+     pre-merge OPERATOR CHECK above already measured and found false, and a Service's `clusterIP`
+     does not change without deleting and recreating the Service. So a zero-row skip only delays
+     CP-side inventory/reporting accuracy for this one seat (the list endpoint keeps serving it
+     from `env`) — it does not reopen the collision this PR's spec was written to close. Treat step
+     2 as complete for pool-safety purposes even at 0 rows; revisit only to keep inventory current.
   3. Pin the same address as `clusterIP:` in `broker-anthropic-claude-max-3.yaml`, then
      regenerate the derived inventory (`clusterIP: null` today at
      `kubernetes/apps/infrastructure/agentforge-broker/broker-inventory.yaml:46` —

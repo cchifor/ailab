@@ -188,7 +188,11 @@ spec:
             # OPERATOR CHECK before merge — must be empty (nothing already lives in the /26):
             # `kubectl get svc -A -o wide | grep -E ' 10\.96\.0\.(19[2-9]|2[0-4][0-9]|25[0-5])( |$)'`
             # (10.96.0.1 `kubernetes` and 10.96.0.10 `kube-dns` sit elsewhere in the static band
-            # and are expected — do not scope the grep to the whole `10.96.0.` /24).
+            # and are expected — do not scope the grep to the whole `10.96.0.` /24). Deviation from
+            # the spec's literal `grep ' 10\.96\.0\.'`: that /24-wide form can never be empty on
+            # this cluster (it always matches kubernetes + kube-dns), so it would block every merge
+            # forever; narrowed to the /26 per a MEDIUM review-bot finding on PR #469 (fix landed in
+            # commit 6ca1975) and reconfirmed under codex round 1 of this artefact.
             - { name: AFP_BROKER_CLUSTERIP_POOL, value: "10.96.0.192/26" }
             # Aud -> broker /readyz map (C4 rotation observability). ALSO the account INVENTORY the
             # Settings surface manages — its keys mirror the live agentforge-broker manifests, which
