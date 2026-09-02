@@ -6,8 +6,15 @@ kubernetes/apps/apps/agentforge/deployment.yaml (the WS4 env block) rather than
 duplicating the literal here, so a future edit that breaks the invariants this
 guards is caught even if nobody remembers to update this test's expectations.
 
-stdlib-only (ipaddress + yaml, both already used by scripts/manifest-paths.py in
-this repo) — no docker, no network, no cluster access. Run:
+stdlib-only (ipaddress + re) — no PyYAML. This repo's "Script unit tests" CI
+step (.gitea/workflows/broker-inventory.yaml) installs no dependencies and
+scripts/tests/test_manifest_paths.py documents that PyYAML is NOT on that
+runner (its regex fallback is "what runs in CI"); scripts/manifest-paths.py
+guards its own `import yaml` behind try/except ImportError for the same
+reason. A flow-mapping env entry like the one this test reads is a single
+regular line, so a small targeted regex over the raw text is enough — no
+general YAML parser (real or fallback) is needed here. No docker, no network,
+no cluster access. Run:
 
     python3 -m unittest discover -s scripts/tests -v
 """
@@ -15,9 +22,8 @@ from __future__ import annotations
 
 import ipaddress
 import pathlib
+import re
 import unittest
-
-import yaml
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _DEPLOYMENT_PATH = (
@@ -42,21 +48,32 @@ _SERVICE_CIDR = ipaddress.ip_network("10.96.0.0/12")
 
 
 def _env_value(name: str) -> str:
-    """The `value:` of one `env:` entry on the agentforge Deployment's first container.
+    """The `value:` of one `env:` entry on the agentforge Deployment.
 
-    Fails the test (not a collection error) if the Deployment shape, the
-    container, or the named var is missing — a moved/renamed anchor should
-    show up as a failing assertion, not a silent skip.
+    Matches the two env-entry shapes this file actually uses:
+    flow-mapping (`- { name: X, value: "Y" }`, one line) and block-style
+    (`- name: X` then an indented `value: "Y"` on the next line, as rendered
+    for a `>-` folded scalar's first line too). Deliberately NOT a general
+    YAML parser — this repo's CI runner has no PyYAML (see module docstring)
+    — so a moved/renamed anchor or a `valueFrom:`-only entry (no literal
+    `value:`) fails this assertion rather than silently matching nothing.
     """
-    with _DEPLOYMENT_PATH.open() as f:
-        manifest = yaml.safe_load(f)
-    containers = manifest["spec"]["template"]["spec"]["containers"]
-    for container in containers:
-        for entry in container.get("env", []):
-            if entry.get("name") == name:
-                return entry["value"]
+    text = _DEPLOYMENT_PATH.read_text()
+    escaped = re.escape(name)
+    flow = re.search(
+        r"-\s*\{\s*name:\s*" + escaped + r'\s*,\s*value:\s*"([^"]*)"\s*\}',
+        text,
+    )
+    if flow:
+        return flow.group(1)
+    block = re.search(
+        r"-\s*name:\s*" + escaped + r'\s*\n\s*value:\s*"?([^"\n]*)"?\s*(?:\n|$)',
+        text,
+    )
+    if block:
+        return block.group(1)
     raise AssertionError(
-        f"no env var {name!r} found on any container in {_DEPLOYMENT_PATH}"
+        f"no env var {name!r} found in {_DEPLOYMENT_PATH}"
     )
 
 
@@ -88,6 +105,16 @@ class BrokerClusterIpPoolEnv(unittest.TestCase):
         for address in _PINNED_ADDRESSES:
             with self.subTest(address=address):
                 self.assertNotIn(ipaddress.ip_address(address), self.network)
+
+
+class EnvValueParserFallsClosed(unittest.TestCase):
+    """The regex parser itself: proves it fails loudly, not silently, on a
+    missing var — the same shape of guarantee test_manifest_paths.py asks of
+    its own stdlib fallback (never silently drop what it can't parse)."""
+
+    def test_missing_var_raises_assertion_error(self) -> None:
+        with self.assertRaises(AssertionError):
+            _env_value("AFP_DOES_NOT_EXIST")
 
 
 if __name__ == "__main__":
