@@ -236,6 +236,17 @@ live daemon + a static `.runner` file cannot prove. Exit 0 = pool fit; exit 1 = 
   may target the `self-hosted-hv:host` label; a forked / untrusted pull request must **never** receive host
   execution or the `REGISTRY_*` secrets (Gitea does not expose org secrets to fork PRs by default — keep it
   that way), and workflow logs must never echo credentials.
+- **Security — `pull_request` gates in ailab run the PR head's OWN scripts on the runner.** The ailab
+  workflows that trigger on `pull_request` (`broker-inventory.yaml`, `rules-lint.yaml`, and `manifests.yaml`
+  once ailab #464 merges) check out the PR head and execute its `scripts/*.py` / `scripts/*.sh` (and
+  `docker run`) on this pool — the classic pwn-request surface. The ONLY thing making that safe is that the
+  forge is closed: `DISABLE_REGISTRATION=true`, `ENABLE_OPENID_SIGNUP=false`, `REQUIRE_SIGNIN_VIEW=true`
+  (`kubernetes/apps/apps/gitea/gitea.yaml`), so every account that can open a PR is an operator-provisioned
+  Authelia one; the gates are deliberately NOT author-gated because their fail-closed idiom forbids `if:`
+  on the gate. **If the forge is ever opened to external or self-registered accounts, or a bot PAT is
+  suspected compromised, revisit those triggers FIRST** — drop `pull_request` (the `push` run already gives
+  the pre-merge signal on every branch), or split trusted/untrusted triggers — before the first outside
+  account exists.
 
 **IP note (2026-07 renumber).** The live pool is **.14–.18** (`ci-runner-1..5`); older docs said
 `.47/.48/.49 + .33/.34`. Those addresses were **vacated by an in-guest renumber and reused by the ADR 0019
