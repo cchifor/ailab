@@ -38,6 +38,9 @@ talosconfig
 # ---- Claude Code (local agent worktrees, plans, session state) ----
 .claude/
 
+# ---- manifest-lint.sh scratch output (kustomize build renders, per scripts/manifest-lint.sh) ----
+/out/
+
 # ---- misc ----
 __pycache__/
 *.pyc
