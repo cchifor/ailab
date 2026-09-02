@@ -15,7 +15,13 @@ scrapes:
      Deployment per matched file) rather than silently miscount, but the file is named
      `servicemonitor.yaml` specifically so the question never comes up in production;
   4. `python3 scripts/gen-broker-inventory.py --check` (run against the real, on-disk repo, exactly
-     as .gitea/workflows/broker-inventory.yaml invokes it) stays green with the new file present.
+     as .gitea/workflows/broker-inventory.yaml invokes it) stays green with the new file present;
+  5. the two broker alerts in monitoring/agentforge-rules.yaml keep the shape the spec and the
+     review-bot rounds decided (expr/for/severity/`{{ $labels.seat }}`), and the `seat` identity
+     they share is the SAME string on both sides: the ServiceMonitor derives it from the routable
+     Service's `app.kubernetes.io/name`, the kube-state-metrics rule derives it from the
+     Deployment's name via label_replace — so every seat's Deployment name, routable Service name
+     and `app.kubernetes.io/name` label must be one and the same value.
 
 Runs against the REAL repo tree (read-only) rather than a sandbox copy: unlike
 test_gen_broker_inventory.py this test writes nothing and mutates no module globals, so there is
@@ -135,6 +141,46 @@ def _servicemonitor_endpoint_ports() -> set[str]:
     }
 
 
+def _alert_block(name: str) -> str:
+    """Text of one `- alert: <name>` entry in agentforge-rules.yaml: its own line plus every
+    following line indented STRICTLY deeper than it (expr/for/labels/annotations). Stops at the
+    first line back at (or above) the alert line's own indent — a sibling `- alert:`/`- record:`
+    item OR that sibling's OWN preceding `#` comment block, both of which sit at the identical
+    indent in this file and must NOT be attributed to this alert (a naive "stop at the next
+    literal `- alert:` line" regex pulls the next alert's comment block, including any incidental
+    mention of this alert's own field values, into this one — verified load-bearing: mutating
+    ForgeBrokerTargetDown's `for: 5m` to `for: 5s` must fail this alert's own test, not pass
+    because the next alert's preceding comment happens to say "for: 5m" too). Raises StopIteration
+    (a failing test) when no such alert exists."""
+    lines = RULES_FILE.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.lstrip() == f"- alert: {name}")
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        stripped = lines[i].lstrip()
+        if stripped and (len(lines[i]) - len(stripped)) <= indent:
+            end = i
+            break
+    return "\n".join(lines[start:end])
+
+
+def _deployments(path: pathlib.Path) -> dict[str, str]:
+    """name -> full Deployment doc text, for every `kind: Deployment` document in one broker-*.yaml."""
+    text = path.read_text(encoding="utf-8")
+    out: dict[str, str] = {}
+    for doc in gbi._docs(text):
+        if gbi._kind(doc) != "Deployment":
+            continue
+        name = gbi._name(doc)
+        assert name, f"{path}: a Deployment document has no metadata.name"
+        out[name] = doc
+    return out
+
+
+def _deployment_namespace(doc: str) -> str | None:
+    return gbi._field(gbi._top_block(doc, "metadata"), "namespace", 2)
+
+
 class ServiceMonitorFileExists(unittest.TestCase):
     def test_file_is_present(self):
         self.assertTrue(
@@ -205,14 +251,16 @@ class MetricsPortExistsOnEverySeat(unittest.TestCase):
 
 
 class RoutableServiceCarriesTheSeatNameLabel(unittest.TestCase):
-    """`ForgeBrokerTargetDown`/`ForgeBrokerSeatReplicaMissing`'s `{{ $labels.seat }}` and the
-    documented `count by (seat) (...)` triage queries all depend on the ServiceMonitor's
-    `relabelings` finding `app.kubernetes.io/name` on the target's Service (review-bot round,
-    ailab#467, reviewer-claude, important/medium) — the selector only matches on
-    `component`/`part-of`, so nothing else guarantees `app.kubernetes.io/name` is present. If a
-    seat's routable Service ever lacked it, targets would still be scraped but `seat` would
-    silently resolve to empty, breaking both alerts' identity and every `count by (seat)` query
-    the descriptions lean on."""
+    """`ForgeBrokerTargetDown`'s `{{ $labels.seat }}` and the documented `sum by (seat) (...)`
+    triage query depend on the ServiceMonitor's `relabelings` finding `app.kubernetes.io/name` on
+    the target's Service (review-bot round, ailab#467, reviewer-claude, important/medium) — the
+    selector only matches on `component`/`part-of`, so nothing else guarantees
+    `app.kubernetes.io/name` is present. If a seat's routable Service ever lacked it, targets
+    would still be scraped but `seat` would silently resolve to empty, breaking the alert's
+    identity and every `by (seat)` query the descriptions lean on. The label's VALUE is asserted
+    too, not just its presence: it must equal the routable Service's own name, which is what
+    `ForgeBrokerSeatReplicasUnavailable` (kube-state-metrics, keyed by Deployment name) resolves
+    `seat` to — see BrokerDeploymentIdentityMatchesTheSeatLabel for the Deployment side."""
 
     def test_every_routable_service_carries_app_kubernetes_io_name(self):
         broker_files = _broker_files()
@@ -229,7 +277,84 @@ class RoutableServiceCarriesTheSeatNameLabel(unittest.TestCase):
                     f"{path.name}: Service {svc_name!r} has no (or an empty) "
                     "app.kubernetes.io/name label -- the ServiceMonitor's relabelings derive "
                     "the `seat` label from exactly this, on every af_broker_*/up series and in "
-                    "both alerts' {{ $labels.seat }} text",
+                    "ForgeBrokerTargetDown's {{ $labels.seat }} text",
+                )
+                self.assertEqual(
+                    labels["app.kubernetes.io/name"],
+                    svc_name,
+                    f"{path.name}: Service {svc_name!r} carries app.kubernetes.io/name="
+                    f"{labels['app.kubernetes.io/name']!r} -- the `seat` label the ServiceMonitor "
+                    "derives from it must be the routable Service's own name, the value the "
+                    "kube-state-metrics rule ForgeBrokerSeatReplicasUnavailable reaches via the "
+                    "Deployment name, so both alert families name the same seat the same way",
+                )
+
+
+class BrokerDeploymentIdentityMatchesTheSeatLabel(unittest.TestCase):
+    """`ForgeBrokerSeatReplicasUnavailable` (review-bot rounds, ailab#467, reviewer-codex,
+    important/high x4) reads kube-state-metrics, whose only identity for a broker seat is the
+    `(namespace, deployment)` pair — it never sees the ServiceMonitor's `seat` relabeling. The
+    rule therefore label_replace()s `deployment` into `seat`, and that is only the SAME seat the
+    ServiceMonitor's `seat` names if, for every seat, Deployment name == routable Service name ==
+    the Service's `app.kubernetes.io/name` (RoutableServiceCarriesTheSeatNameLabel covers the last
+    equality). The rule's `namespace="agentforge-broker"` matcher must likewise be the namespace
+    every broker Deployment and Service actually declares, and every Deployment in that directory
+    must be a seat — the rule is namespace-scoped rather than name-enumerated precisely so a fifth
+    seat is covered without a rules edit, which is only safe while the namespace holds nothing
+    but seats."""
+
+    RULE = "ForgeBrokerSeatReplicasUnavailable"
+
+    def _rule_namespaces(self) -> set[str]:
+        block = _alert_block(self.RULE)
+        return set(re.findall(r'namespace="([^"]+)"', block))
+
+    def test_rule_pins_exactly_one_namespace_and_it_is_the_broker_namespace(self):
+        namespaces = self._rule_namespaces()
+        self.assertEqual(
+            namespaces,
+            {"agentforge-broker"},
+            f"{self.RULE}: every kube_deployment_* selector must pin namespace="
+            f'"agentforge-broker" and nothing else (found {sorted(namespaces)})',
+        )
+
+    def test_every_broker_deployment_is_a_seat_in_the_rules_namespace(self):
+        (rule_namespace,) = self._rule_namespaces()
+        broker_files = _broker_files()
+        self.assertTrue(broker_files, f"no broker-*.yaml under {BROKER_DIR}")
+
+        for path in broker_files:
+            deployments = _deployments(path)
+            self.assertEqual(
+                len(deployments),
+                1,
+                f"{path.name}: expected exactly one Deployment (one seat), found "
+                f"{sorted(deployments)}",
+            )
+            (dep_name, dep_doc), = deployments.items()
+            self.assertEqual(
+                _deployment_namespace(dep_doc),
+                rule_namespace,
+                f"{path.name}: Deployment {dep_name!r} is in namespace "
+                f"{_deployment_namespace(dep_doc)!r}, but {self.RULE} only reads "
+                f"kube_deployment_* in {rule_namespace!r} -- this seat would be invisible to it",
+            )
+            services = _services(path)
+            routable = {n: d for n, d in services.items() if not n.endswith("-headless")}
+            self.assertEqual(
+                set(routable),
+                {dep_name},
+                f"{path.name}: routable Service(s) {sorted(routable)} must be named exactly like "
+                f"the Deployment {dep_name!r} -- {self.RULE} resolves `seat` from the Deployment "
+                "name while the ServiceMonitor resolves it from the Service's "
+                "app.kubernetes.io/name, and the two must agree for the alerts to name one seat",
+            )
+            for svc_name, doc in routable.items():
+                self.assertEqual(
+                    _service_namespace(doc),
+                    rule_namespace,
+                    f"{path.name}: Service {svc_name!r} namespace must equal the rule's "
+                    f"{rule_namespace!r}",
                 )
 
 
@@ -369,62 +494,72 @@ class BrokerAlertRulesAreShapedAndOrdered(unittest.TestCase):
     cross-review round 1, ailab#467, medium): `promtool check rules` validates PromQL/YAML
     syntax (run in this PR's verification tier) but nothing in this repo asserted that either
     alert's expr/for/severity/seat-label shape actually matches what the spec and the review-bot
-    round decided, so a silent hand-edit (e.g. `for: 5m` -> `for: 5s`, or `severity: critical` ->
+    rounds decided, so a silent hand-edit (e.g. `for: 5m` -> `for: 5s`, or `severity: critical` ->
     `warning`) would pass promtool while quietly breaking the alert's documented behaviour.
     Nothing else in this file (or anywhere else in scripts/tests) has ever had a Python test for
     a PrometheusRule alert — reused this module's own stdlib-only, no-PyYAML text-block
-    convention rather than introducing a new parsing approach for one file."""
-
-    @staticmethod
-    def _block(name: str) -> str:
-        """Text of one `- alert: <name>` entry: its own line plus every following line indented
-        STRICTLY deeper than it (expr/for/labels/annotations). Stops at the first line back at
-        (or above) the alert line's own indent — a sibling `- alert:`/`- record:` item OR that
-        sibling's OWN preceding `#` comment block, both of which sit at the identical indent in
-        this file and must NOT be attributed to this alert (a naive "stop at the next literal
-        `- alert:` line" regex pulls the next alert's comment block, including any incidental
-        mention of this alert's own field values, into this one — verified load-bearing: mutating
-        ForgeBrokerTargetDown's `for: 5m` to `for: 5s` must fail this alert's own test, not pass
-        because ForgeBrokerSeatReplicaMissing's preceding comment happens to say "for: 5m" too)."""
-        lines = RULES_FILE.read_text(encoding="utf-8").splitlines()
-        start = next(
-            i for i, line in enumerate(lines) if line.lstrip() == f"- alert: {name}"
-        )
-        indent = len(lines[start]) - len(lines[start].lstrip())
-        end = len(lines)
-        for i in range(start + 1, len(lines)):
-            stripped = lines[i].lstrip()
-            if stripped and (len(lines[i]) - len(stripped)) <= indent:
-                end = i
-                break
-        return "\n".join(lines[start:end])
+    convention (`_alert_block`) rather than introducing a new parsing approach for one file."""
 
     def test_forgebrokertargetdown_is_shaped_as_the_spec_decided(self):
-        block = self._block("ForgeBrokerTargetDown")
+        block = _alert_block("ForgeBrokerTargetDown")
         self.assertIn('expr: up{job="agentforge-broker"} == 0', block)
         self.assertIn("for: 5m", block)
         self.assertIn("severity: critical", block)
         self.assertIn("{{ $labels.seat }}", block)
 
-    def test_forgebrokerseatreplicamissing_is_shaped_as_documented(self):
-        block = self._block("ForgeBrokerSeatReplicaMissing")
-        self.assertIn(
-            'expr: count by (seat) (up{job="agentforge-broker"}) < 2',
-            block,
+    def test_forgebrokertargetdown_remediation_query_surfaces_a_real_zero(self):
+        # review-bot round, ailab#467, reviewer-claude, important/medium: `count by (seat)
+        # (up == 1)` returns NO row for a dark seat (never a 0), so the runbook text must point
+        # the operator at `sum by (seat) (up{job="agentforge-broker"})`, which reads 0 when
+        # every discovered replica fails its scrape, and at the kube-state-metrics rule for the
+        # case where the seat has no discovered replica at all.
+        block = _alert_block("ForgeBrokerTargetDown")
+        self.assertIn('sum by (seat) (up{job="agentforge-broker"})', block)
+        self.assertIn("ForgeBrokerSeatReplicasUnavailable", block)
+        self.assertNotIn("count by (seat)", block)
+
+    def test_forgebrokerseatreplicasunavailable_compares_expected_vs_available_from_ksm(self):
+        # review-bot rounds, ailab#467, reviewer-codex, important/high (x4): a replica that
+        # vanishes from service discovery produces no `up` series at all, so neither `up == 0`
+        # nor a `count by (seat) (up) < 2` proxy can see a fully dark seat. kube-state-metrics
+        # reports spec vs available replicas for every Deployment INCLUDING one with 0 available,
+        # so `available < spec` yields a row (value = available) for a partially unready seat
+        # (1 < 2) AND for a fully dark one (0 < 2), keyed by the Deployment name.
+        block = _alert_block("ForgeBrokerSeatReplicasUnavailable")
+        self.assertIn('kube_deployment_status_replicas_available{namespace="agentforge-broker"}', block)
+        self.assertIn('kube_deployment_spec_replicas{namespace="agentforge-broker"}', block)
+        # available on the LEFT of `<`, spec on the right: the alert's value is the available count
+        self.assertLess(
+            block.index("kube_deployment_status_replicas_available"),
+            block.index("kube_deployment_spec_replicas"),
+            "available replicas must be the left-hand side of the `<` comparison",
         )
+        self.assertRegex(block, r"\)\s*\n\s*<\s*\n")
+        self.assertIn("max by (namespace, deployment)", block)
+        self.assertIn('"seat", "$1", "deployment", "(.+)"', block)
+        self.assertIn("label_replace(", block)
         self.assertIn("for: 5m", block)
         self.assertIn("severity: critical", block)
         self.assertIn("{{ $labels.seat }}", block)
+        self.assertIn("{{ $value }}", block)
 
-    def test_targetdown_precedes_seatreplicamissing_in_reading_order(self):
+    def test_the_discovery_count_proxy_rule_is_retired(self):
+        # `count by (seat) (up{job="agentforge-broker"}) < 2` used discovery data as a readiness
+        # proxy and could not see a seat with zero discovered replicas; it is superseded by the
+        # kube-state-metrics comparison above and must not linger as a second, weaker copy.
+        text = RULES_FILE.read_text(encoding="utf-8")
+        self.assertNotIn("- alert: ForgeBrokerSeatReplicaMissing", text)
+        self.assertNotIn('count by (seat) (up{job="agentforge-broker"}) < 2', text)
+
+    def test_targetdown_precedes_seatreplicasunavailable_in_reading_order(self):
         # documented order: "discovered but unscrapeable" (ForgeBrokerTargetDown) before
-        # "vanished from discovery entirely" (ForgeBrokerSeatReplicaMissing) — see the latter's
-        # own preceding comment block, which explicitly narrates it as complementary to the former
+        # "fewer available replicas than the Deployment asks for" (ForgeBrokerSeatReplicasUnavailable)
+        # — see the latter's own preceding comment block, which narrates it as complementary
         text = RULES_FILE.read_text(encoding="utf-8")
         self.assertLess(
             text.index("- alert: ForgeBrokerTargetDown"),
-            text.index("- alert: ForgeBrokerSeatReplicaMissing"),
-            "ForgeBrokerTargetDown must precede ForgeBrokerSeatReplicaMissing",
+            text.index("- alert: ForgeBrokerSeatReplicasUnavailable"),
+            "ForgeBrokerTargetDown must precede ForgeBrokerSeatReplicasUnavailable",
         )
 
     def test_both_alerts_live_in_the_agentforge_rule_group(self):
@@ -432,7 +567,7 @@ class BrokerAlertRulesAreShapedAndOrdered(unittest.TestCase):
         # up by the operator's ruleSelector the way the rest of this file is
         text = RULES_FILE.read_text(encoding="utf-8")
         group_start = text.index("groups:")
-        for name in ("ForgeBrokerTargetDown", "ForgeBrokerSeatReplicaMissing"):
+        for name in ("ForgeBrokerTargetDown", "ForgeBrokerSeatReplicasUnavailable"):
             self.assertGreater(
                 text.index(f"- alert: {name}"),
                 group_start,
