@@ -456,9 +456,13 @@ following stay OPERATOR steps:
   WS4 env block) to be set — without it the allocator has no range to draw from and the add
   refuses with a 503 before it ever CAS-writes anything. Current value: `10.96.0.192/26`, chosen
   inside this cluster's `10.96.0.0/12` Service CIDR's KEP-3070 static band (`10.96.0.0/24`, the
-  first 256 addresses — the range kube-apiserver's dynamic ClusterIP allocator is documented to
-  avoid, so a Service in it never collides with one the apiserver assigns on its own) and disjoint
-  from the three already-live hand-pinned broker addresses (`10.108.137.32` / `10.109.144.42` /
+  first 256 addresses). KEP-3070 makes the dynamic ClusterIP allocator PREFER the rest of the CIDR
+  over that static band, not avoid it absolutely: if the non-static portion of `10.96.0.0/12`
+  (over a million addresses) is ever exhausted, the apiserver falls back into the static band
+  rather than refuse to create a Service. At this cluster's scale that fallback is not expected in
+  practice, but it means the pre-merge OPERATOR CHECK below is a point-in-time snapshot, not a
+  standing reservation — see the note at the end of this bullet. The pool is also disjoint from
+  the three already-live hand-pinned broker addresses (`10.108.137.32` / `10.109.144.42` /
   `10.108.162.59`). Validated at CP boot, not at add time (`settings.py:604-620` ->
   `domain/clusterip.py::parse_pool`), so a bad value fails the rollout loudly instead of a
   UI-facing 503. Before widening or moving the pool, re-run it scoped to the new range, e.g. for
@@ -466,16 +470,24 @@ following stay OPERATOR steps:
   `kubectl get svc -A -o wide | grep -E ' 10\.96\.0\.(19[2-9]|2[0-4][0-9]|25[0-5])( |$)'` — it must
   stay empty, or the allocator could hand out an address something else already holds. (Do NOT
   grep the bare `10.96.0.` /24: `kubernetes` sits at `10.96.0.1` and `kube-dns` at `10.96.0.10`,
-  both expected, both elsewhere in the static band, both outside this pool.)
+  both expected, both elsewhere in the static band, both outside this pool.) If the fallback above
+  ever did put a dynamically created Service inside this `/26` between one check and the next add,
+  the render is still safe, not silent: `allocate()` only checks `subscription_accounts.cluster_ip`
+  (the CP's own inventory), so a live-but-untracked collision would make the rendered add-PR's
+  Service fail to `kubectl apply` (`ClusterIP` already in use) — Flux reports it, the operator
+  fixes the one Service, no outage (this is the risk the spec for this change named up front).
+  Widening the pool or re-running the OPERATOR CHECK does not need to happen on every add; it is a
+  pre-merge sanity check for this value, not a runtime guarantee the CP enforces.
   **claude-max-3 backfill**: this seat was hand-added before the allocator existed — the
   `broker-anthropic-claude-max-3` Service (distinct from its `-headless` sibling, which every
   broker has and which is unrelated to this) carries no `clusterIP:` pin, so the apiserver
-  assigned it dynamically on first apply. That dynamic assignment cannot land inside this pool's
-  `/26`: the pool sits in the KEP-3070 STATIC band (the first 256 addresses of the Service CIDR),
-  which kube-apiserver's dynamic allocator is documented to avoid entirely — so, unlike the
-  hand-pinned max1/max2/codex addresses this pool is disjoint from, claude-max-3's live address
-  was never a collision hazard for the allocator and this backfill is not closing one. What it
-  DOES fix: pre-existing seats like claude-max-3 are detected from the CP's env inventory
+  assigned it dynamically on first apply. Per the KEP-3070 caveat above, that address is very
+  unlikely but not provably impossible to be inside this pool's `/26` — the OPERATOR CHECK, run
+  before this pool was set, is the actual evidence it was not. This backfill's real purpose is CP
+  inventory/reporting accuracy, not collision prevention (`allocate()` never reads live cluster
+  state, only `subscription_accounts.cluster_ip`, so a DB-invisible address cannot be "avoided" by
+  the allocator either way). What it DOES fix: pre-existing seats like claude-max-3 are detected
+  from the CP's env inventory
   (`AFP_BROKER_READYZ_URLS`; `settings.py:397` "managed=pre-existing, no adoption migration"), not
   from a DB row, so `subscription_accounts` may have NO row for it yet — the list endpoint still
   shows it (source `env`, `api/subscriptions.py:599`), but with no row its ClusterIP is invisible

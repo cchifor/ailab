@@ -67,8 +67,10 @@ including the AgentForge broker Services — is allocated from it by the apiserv
 >
 > **Exception**: CP-managed adds (Settings → Subscriptions → Add account) allocate from the
 > operator-reserved `AFP_BROKER_CLUSTERIP_POOL` (currently `10.96.0.192/26`, inside the KEP-3070
-> static band the dynamic allocator never draws from) and pin that chosen address directly — see
-> `docs/runbooks/agentforge-platform-activation.md` (Day-2 — LLM subscriptions operations).
+> static band the dynamic allocator prefers not to use) and pin that chosen address directly — see
+> `docs/runbooks/agentforge-platform-activation.md` (Day-2 — LLM subscriptions operations) for the
+> KEP-3070 fallback caveat (the static band is a preference, not an absolute reservation) and how
+> a collision would surface (failed `kubectl apply`, not a silent outage).
 >
 > Both rules are machine-checked. `scripts/gen-broker-inventory.py` fails if a pinned broker
 > ClusterIP falls outside the CIDR or is pinned twice, and the current allocation is listed in the

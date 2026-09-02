@@ -53,21 +53,26 @@ def _env_value(name: str) -> str:
     Matches the two env-entry shapes this file actually uses:
     flow-mapping (`- { name: X, value: "Y" }`, one line) and block-style
     (`- name: X` then an indented `value: "Y"` on the next line, as rendered
-    for a `>-` folded scalar's first line too). Deliberately NOT a general
-    YAML parser — this repo's CI runner has no PyYAML (see module docstring)
-    — so a moved/renamed anchor or a `valueFrom:`-only entry (no literal
-    `value:`) fails this assertion rather than silently matching nothing.
+    for a `>-` folded scalar's first line too). The `value:` itself may be
+    double-quoted, single-quoted, or bare (YAML allows all three; this repo
+    happens to use double quotes today) — tolerated so a benign requoting of
+    the entry doesn't make this test raise as if the invariant it guards had
+    broken. Deliberately NOT a general YAML parser — this repo's CI runner
+    has no PyYAML (see module docstring) — so a moved/renamed anchor or a
+    `valueFrom:`-only entry (no literal `value:`) still fails this assertion
+    rather than silently matching nothing.
     """
     text = _DEPLOYMENT_PATH.read_text()
     escaped = re.escape(name)
+    _VALUE = r"""['"]?([^'"\n}]*?)['"]?"""
     flow = re.search(
-        r"-\s*\{\s*name:\s*" + escaped + r'\s*,\s*value:\s*"([^"]*)"\s*\}',
+        r"-\s*\{\s*name:\s*" + escaped + r"\s*,\s*value:\s*" + _VALUE + r"\s*\}",
         text,
     )
     if flow:
         return flow.group(1)
     block = re.search(
-        r"-\s*name:\s*" + escaped + r'\s*\n\s*value:\s*"?([^"\n]*)"?\s*(?:\n|$)',
+        r"-\s*name:\s*" + escaped + r"\s*\n\s*value:\s*" + _VALUE + r"\s*(?:\n|$)",
         text,
     )
     if block:
