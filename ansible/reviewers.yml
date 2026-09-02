@@ -9,7 +9,7 @@
   become: true
   gather_facts: true
   vars:
-    reviewer_lan_cidr: "192.168.0.0/24"
+    reviewer_lan_cidr: "{{ lan_cidr | default('192.168.0.0/24') }}"
     reviewer_node_major: 20
   pre_tasks:
     - name: Wait for cloud-init to finish

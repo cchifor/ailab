@@ -55,4 +55,4 @@ pr_reviewer_textfile: /var/lib/prometheus/node-exporter/reviewbot.prom
 pr_reviewer_automerge: true
 pr_reviewer_merge_personas: [claude, codex]
 pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot]
-pr_reviewer_allow_cidr: "192.168.0.0/24"
+pr_reviewer_allow_cidr: "{{ lan_cidr | default('192.168.0.0/24') }}"

@@ -269,6 +269,21 @@ def run_llm(title, desc, diff_text, rubric=""):
                 text = io.open(out_file, encoding="utf-8").read()
             if not text.strip():
                 raise RuntimeError(f"codex produced no output (exit {r.returncode}): {r.stderr[-300:]}")
+            # The sandbox permits reads of the isolated user's own HOME, auth.json
+            # included (round-3 finding): scan the (public-once-posted) output for that
+            # credential material and quarantine instead of posting. Mistake prevention,
+            # not tamper-proof - an encoding model defeats a substring scan.
+            ar = subprocess.run(["sudo", "-n", "-u", sudo_user, "cat",
+                                 f"/home/{sudo_user}/.codex/auth.json"],
+                                capture_output=True, text=True)
+            if ar.returncode == 0:
+                try:
+                    for v in json.loads(ar.stdout).values():
+                        for tokv in (v.values() if isinstance(v, dict) else [v]):
+                            if isinstance(tokv, str) and len(tokv) >= 20 and tokv in text:
+                                raise RuntimeError("credential material detected in llm output")
+                except json.JSONDecodeError:
+                    pass
         else:
             if r.returncode != 0:
                 raise RuntimeError(f"llm exit {r.returncode}: {r.stderr[-300:]}")
@@ -290,6 +305,12 @@ def run_llm(title, desc, diff_text, rubric=""):
     out = json.loads(m.group(0))
     if not isinstance(out.get("summary"), str) or not isinstance(out.get("findings"), list):
         raise RuntimeError("llm JSON missing summary/findings")
+    # Model text must not be able to fabricate verdict markers (or hide inside HTML
+    # comments at all) - the canonical marker is the only one the parsers may see.
+    out["summary"] = out["summary"].replace("<!--", "<! --")
+    for f in out["findings"]:
+        if isinstance(f.get("body"), str):
+            f["body"] = f["body"].replace("<!--", "<! --")
     return out
 
 
@@ -319,8 +340,13 @@ def iter_reviews(repo, pr):
 def marker_of(rv):
     """A marker is only credible from the persona's own bot account: reviewer-<persona>.
     Anyone can paste marker TEXT into a review body (reviewer-codex finding on ailab#463 -
-    a forged verdict=clean pair would have automerged); the author check is the gate."""
-    m = MARKER_RE.search(rv.get("body") or "")
+    a forged verdict=clean pair would have automerged); the author check is the gate.
+    The LAST match wins: the canonical marker is appended after the LLM-authored summary,
+    and model output is untrusted (round-3 finding: an injected diff could make the model
+    emit a forged marker ahead of the real one) - it is also sanitized at generation."""
+    m = None
+    for m in MARKER_RE.finditer(rv.get("body") or ""):
+        pass  # last match wins
     if not m:
         return None
     if ((rv.get("user") or {}).get("login") or "") != f"reviewer-{m.group(1)}":
@@ -371,7 +397,8 @@ def maybe_merge(repo, pr):
         if st.get("state") != "success":
             return
         try:
-            api(f"/repos/{repo}/pulls/{pr}/merge", "POST", {"Do": "merge"})
+            api(f"/repos/{repo}/pulls/{pr}/merge", "POST",
+                {"Do": "merge", "head_commit_id": head})
         except urllib.error.HTTPError as e:
             msg = e.read().decode()[:200] if e.fp else ""
             # Branch protection wants approvals and this persona's clean review predates
@@ -379,12 +406,23 @@ def maybe_merge(repo, pr):
             # silently-swallowed 405): upgrade our own clean verdict to an approval, retry.
             if e.code == 405 and "approval" in msg.lower() and \
                     verdicts.get(CFG["persona"]) == "clean":
+                mine = f"reviewer-{CFG['persona']}"
+                already = any((rv.get("user") or {}).get("login") == mine
+                              and rv.get("state") == "APPROVED"
+                              and (rv.get("commit_id") or "") == head
+                              for rv in iter_reviews(repo, pr))
+                if already:
+                    # Our approval stands and the merge is still short (e.g. a 2-approval
+                    # policy): log once per pass, never spam further approvals.
+                    log(f"merge {repo}#{pr} still needs approvals beyond ours")
+                    return
                 marker = (f"<!-- review-bot:v1 persona={CFG['persona']} "
                           f"head={head} verdict=clean -->")
                 api(f"/repos/{repo}/pulls/{pr}/reviews", "POST",
                     {"commit_id": head, "event": "APPROVED",
                      "body": f"Approving per clean verdict at {head[:9]}.\n\n{marker}"})
-                api(f"/repos/{repo}/pulls/{pr}/merge", "POST", {"Do": "merge"})
+                api(f"/repos/{repo}/pulls/{pr}/merge", "POST",
+                    {"Do": "merge", "head_commit_id": head})
             elif e.code in (405, 409) and "merged" in msg.lower():
                 return  # already merged - benign race
             else:
