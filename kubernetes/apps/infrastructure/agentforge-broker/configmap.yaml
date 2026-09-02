@@ -44,6 +44,13 @@ data:
   # the -kids ExternalSecret refreshInterval (~1m, see each broker-*.yaml) so end-to-end kid propagation is
   # ~2m worst case (ESO fetch + file reload).
   AF_BROKER_KID_RELOAD_INTERVAL_S: "60"
+  # How often the broker re-reads the mounted operator OAuth (AF_BROKER_OAUTH_MOUNT_PATH below) from disk
+  # (BrokerSettings.oauth_reload_interval_s, an atomic last-good swap). EXPLICIT since C-P0-08: the code
+  # default is 300s, which was the silent second term of the rotate->serving latency behind the -oauth
+  # ExternalSecret's refreshInterval (now 5m, see each broker-*.yaml). Kept in step with the -kids reloader
+  # above so both mounted-file reloaders run on the same 60s cadence: rotation propagation is ~6 min worst
+  # case (5m ESO fetch + 60s file reload), was ~65 (1h + 300s).
+  AF_BROKER_OAUTH_RELOAD_INTERVAL_S: "60"
   # The PATH to the mounted ledger DSN file (design §5/§B) — NON-secret. The DSN itself (with the
   # agentforge_broker password) is the read-only broker-ledger Secret mounted at this path; the DSN is
   # NEVER placed in this ConfigMap. (Follow-up: the merged broker/config.py reads AF_BROKER_LEDGER_DSN

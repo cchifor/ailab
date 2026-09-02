@@ -134,6 +134,21 @@
 #                            5m staleness window plus a restarted dispatcher's first publish, both of
 #                            which are already ForgeTargetDown's business.
 #
+# -- ADDITIVE, SILENT UNTIL THE ENGINE PIN LANDS (C-P0-08, 2026-09-02) ------------------------------
+#
+# ForgeDispatchStalled, ForgeUnexplainedEscalations and ForgeOperatorServiceFailing (after
+# ForgeReconcileDriftHigh) consume the P0 engine instruments: forge_last_dispatch_timestamp (agentforge C-P0-04, the
+# dispatcher's success-arm stamp), forge_escalations_unexplained_total (the _heal_unexplained_escalation
+# reconciler) and forge_operator_service_failures_total{kind} (agentforge C-P0-01, the per-issue
+# grant/replan guards). Unlike every rule measured above they CANNOT be proven live from this repo: a
+# series the pinned image does not export is an EMPTY VECTOR, and an empty vector never fires — so
+# these are inert, not wrong, until the ailab pin PR carrying those engine changes merges. Their shapes
+# are the file's already-proven ones (ForgeReconcileStalled's `time() - (ts > 0)`,
+# ForgeReconcileDriftHigh's `sum by (namespace) (increase(...[w]))`), reused rather than invented, and
+# `promtool check rules` (scripts/rules-lint.sh) proves they parse and type-check. Operator, after the
+# pin: `count(forge_last_dispatch_timestamp)` > 0 and `forge_operator_service_failures_total` returns
+# the two pre-touched kinds (grant, replan) at 0 — then each `expr` below is non-empty and evaluable.
+#
 # monitoring/agentforge.yaml (the dead ServiceMonitor) stays commented out and is now depended on by
 # NOTHING — ailab#286 asks the operator whether to retire the whole ADR 0018 host-service surface; that
 # decision is not taken here. Re-measure any claim above with: kubectl --context admin@ai -n monitoring
@@ -345,6 +360,100 @@ spec:
               and the orchestrator log for _heal_state_label. This is also the surviving proxy for the
               retired ForgeWebhookHMACFailures: a drifted webhook secret shows up here as work that
               only ever arrives via the poll.
+        # NEW (C-P0-08). The dispatcher twin of ForgeReconcileStalled, and the alert that gives the
+        # C-P0-04 backoff cap (600s -> 120s) its teeth: the dispatcher is the KEDA scale oracle for
+        # EVERY pool, so a frozen forge_pending costs the whole fleet, unlike one stale worker scan.
+        # forge_last_dispatch_timestamp is stamped only on the SUCCESS arm of a dispatch pass, so a
+        # dispatcher that is up, scraped and looping on failed forge reads ("target present, oracle
+        # dead") shows as an ageing stamp here while ForgeTargetDown stays silent — that gap, which
+        # nothing above can see, is this rule's whole reason to exist.
+        # The `> 0` inner filter is load-bearing exactly as in ForgeReconcileStalled: the gauge is a
+        # structural 0 on every WORKER (the same registry is built there and never stamped) and on a
+        # fresh dispatcher before its first successful pass, and `time() - 0` would breach forever.
+        # Pinned to job="agentforge-dispatcher" for the same reason in the other direction — only that
+        # job ever writes it. Threshold 600s = 5x the capped 120s backoff, i.e. at least four
+        # consecutive failed passes after the cap, so a single transient forge error cannot page;
+        # `for: 5m` on top of that clears Prometheus' staleness window and a restart's first pass.
+        - alert: ForgeDispatchStalled
+          expr: time() - (forge_last_dispatch_timestamp{job="agentforge-dispatcher"} > 0) > 600
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge dispatcher {{ $labels.pod }} has not completed a dispatch pass for >10m"
+            description: >-
+              The dispatcher is scraped (ForgeTargetDown is quiet) but its last SUCCESSFUL dispatch
+              pass is more than 10 minutes old, so forge_pending — the ONE query every KEDA
+              ScaledObject scales on — is frozen at whatever it last published. Backlog will not
+              scale any pool up and a scaled-to-zero pool stays at zero: a silent fleet-wide stop on
+              delivery, which is why this pages while a single worker's stale scan would not. The
+              stamp only advances on a fully successful pass, so this is a dispatcher that keeps
+              failing its forge reads (Gitea unreachable from the agentforge namespace, a revoked
+              bot token, a repo that no longer exists) and is now in its capped 120s backoff. Check
+              the dispatcher log for the failing pass (`kubectl --context admin@ai -n
+              {{ $labels.namespace }} logs deploy/agentforge-dispatcher`) and Gitea reachability
+              from that namespace. NOT a scrape outage — ForgeTargetDown owns that and this rule needs a
+              live target to fire at all.
+        # NEW (C-P0-08), and the P0 residue of the "escalate() recovery reconciler" item: the
+        # comment-before-label ordering already ships (R4, agentforge #236) and
+        # _heal_unexplained_escalation re-explains any needs-human park lacking an af:esc record, so
+        # the remaining gap was that nobody would ever SEE it happen. The counter is deliberately
+        # unlabelled (metrics.py: the engine cannot tell a torn escalation from a hand-applied label)
+        # and pre-exported at 0 on every process that builds the registry, so `increase()` of a
+        # never-written series is exactly 0 and the rule stays silent — including on the dispatcher,
+        # which is why the job pin is convention (every worker-owned rule above carries it) rather
+        # than a correctness guard here. Aggregated by namespace like ForgeReconcileDriftHigh: the
+        # pod set churns (~15 generations/day measured above) and a per-pod series would lose its
+        # window on every restart. `> 0` is exact for a counter that moves in integer steps; no
+        # `for:` because the healer's write is the whole event — it does not persist to debounce.
+        # The summary rounds `$value`: increase() extrapolates to the window edges, so a single
+        # increment reads as e.g. 1.02 — harmless for the threshold, misleading in the alert text.
+        - alert: ForgeUnexplainedEscalations
+          expr: sum by (namespace) (increase(forge_escalations_unexplained_total{job="agentforge-worker"}[1h])) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge {{ $labels.namespace }}: {{ $value | printf \"%.0f\" }} needs-human park(s) without an escalation record in the last 1h"
+            description: >-
+              The reconciler found an issue parked at needs-human with NO af:esc record and wrote a
+              synthesized explanation for it. That is the healer working, but the cause is one of two
+              things worth a look: a TORN escalation (the label and the comment are two forge writes,
+              so a worker died between them — check for a pod restart in this namespace around the
+              increment) or a needs-human label applied BY HAND without the runbook comment (an
+              operator parked work and left no reason, so the synthesized one is a placeholder).
+              Either way find the issue: search the tenant's open needs-human issues for the
+              healer's own comment (the af:esc record it wrote names itself), read what it could
+              reconstruct, and if it was a hand-park replace the placeholder with the real reason so
+              the next operator does not have to guess. Sustained increments across many issues mean
+              a worker crash-looping mid-escalation — correlate with ForgeTargetDown and the pod's
+              restart count, not with the issues themselves.
+        # NEW (C-P0-08), consuming the C-P0-01 counter: reconcile_once's per-issue operator services
+        # (a needs-budget grant, a needs-replan request) are guarded per issue — log + count + skip —
+        # so that one issue's failing forge write no longer propagates into the discovery loop's
+        # 60->600s backoff and blacks out discovery for EVERY repo. The counter is what makes that
+        # guard visible: a failure before the request label cleared is retried next pass (the label
+        # stays), one after it is consumed and only counted here, so a rising rate is either a forge
+        # write that keeps failing for the same issue every pass or an operator request that was
+        # silently eaten. Labelled by kind (grant | replan), pre-touched at 0 for both, so `increase()`
+        # is 0 until a real failure and the rule is inert until then. `> 3` in 30m: the reconcile pass
+        # runs roughly every minute, so a retried failure counts once per pass and clears 3 in ~4
+        # passes — one transient forge blip does not page, a stuck one does within five minutes.
+        # `$value` rounded in the summary for the same increase()-extrapolation reason as above.
+        - alert: ForgeOperatorServiceFailing
+          expr: sum by (namespace, kind) (increase(forge_operator_service_failures_total{job="agentforge-worker"}[30m])) > 3
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge {{ $labels.namespace }}: {{ $labels.kind }} operator service failed {{ $value | printf \"%.0f\" }} times in 30m"
+            description: >-
+              A per-issue operator service ({{ $labels.kind }}: grant = a needs-budget budget grant,
+              replan = a needs-replan request) failed inside the reconcile pass more than 3 times in
+              30 minutes and was skipped for those passes. The pass itself kept going — that is the
+              C-P0-01 guard working, and discovery for the other repos was NOT blacked out — but the
+              request it was serving is stuck: if the failure happens before the request label
+              clears, the same issue is retried every pass and this keeps counting; if after, the
+              operator's request was consumed without effect and the issue sits with its label gone
+              and nothing done. Check the orchestrator log in this namespace for the guarded
+              exception (it names the issue and the failing forge call), fix the cause (usually a
+              Gitea write the bot token no longer has, or a repo/label that was renamed), then re-apply
+              the needs-budget / needs-replan label on the issue to have it served again.
         # The KEDA scale oracle reads ONE query; this asserts that query still resolves. It is
         # deliberately NOT `absent(forge_pending)` — see the measurement note at the top. The
         # `and on() (count(up{...}) > 0)` guard is what makes it worth having: WITHOUT it the rule

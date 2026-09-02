@@ -245,7 +245,10 @@ metadata:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
-  refreshInterval: "1h"
+  refreshInterval: "5m" # C-P0-08: tightened from 1h for the same reason the -kids one below runs at 1m — a rotation
+  # happens BECAUSE the old credential is failing, so the ESO fetch is the first term of the rotate->serving
+  # latency (5m here + AF_BROKER_OAUTH_RELOAD_INTERVAL_S=60s file reload in configmap.yaml = ~6 min end to
+  # end, was ~65). OpenBao read load: 4 seats x 12/h — negligible.
   secretStoreRef:
     name: agentforge-broker-store
     kind: SecretStore

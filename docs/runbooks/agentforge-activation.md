@@ -55,6 +55,26 @@ before they go Ready. The Stage-1 canary is unaffected (same ns as the cert).
 after ExternalSecrets Ready, KEDA targets present, ledger schema/grants applied. tenant-zero worker scales
 0→N on `forge_pending`.
 
+**Ledger usage index (same `agentforge_broker_admin` session as `SCHEMA_SQL`, once per ledger database).**
+`GET /internal/usage` on every broker replica aggregates `sessions` by `(aud, opened_at)`; that read is served
+by `sessions_aud_opened_idx`, which the broker's own role (no DDL) can never create for itself. A ledger
+provisioned before agentforge added the index to `SCHEMA_SQL` only gains it here. As `agentforge_broker_admin`
+on the `agentforge_broker` database on infra-pg, apply `USAGE_INDEX_SQL` (idempotent):
+
+```sql
+CREATE INDEX IF NOT EXISTS sessions_aud_opened_idx ON sessions (aud, opened_at);
+```
+
+then verify with `USAGE_INDEX_VERIFY_SQL` — exactly ONE row, whose `indexdef` names `(aud, opened_at)`:
+
+```sql
+SELECT indexdef FROM pg_indexes WHERE tablename = 'sessions' AND indexname = 'sessions_aud_opened_idx';
+```
+
+Both constants live in agentforge `src/agentforge/broker/ledger.py`; the full note (perf-only — a missing
+index is a seq scan over a small table, never a correctness fault — `CONCURRENTLY` for a large ledger, and
+rollback) is agentforge `docs/runbooks/broker-ledger-usage-index.md`.
+
 ### ⛔ Stage 5 — boundary tests → v1.1
 ADR-0018 canary (no cred mounts, `--network none`, Kata guest kernel, egress matrix) all green → flip
 `privilege_hardening: v1.1`. **Rollback on canary failure:** pause ScaledObjects/ScaledJobs, re-comment
