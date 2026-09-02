@@ -70,7 +70,15 @@ Per-node RAM budget (~125 GiB usable): Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB 
 when a heavyweight is loaded on demand) + runner (24 GiB ceiling / **10 GiB floor**, ×2 node1/node2,
 ×1 node3) + dev-worker (16 GiB ceiling — 12 GiB on dw6 / **4 GiB floor** — **12 GiB on dw1/dw4**,
 ×2 per node; node1's two raised floors add 16 GiB of guaranteed allocation there). In steady
-state (heavyweight unloaded) node2/node3 sit ~45% used and workers balloon freely toward the ceiling. **Time-share rule:** a
+state (heavyweight unloaded) node3 sits ~45% used and its workers balloon freely toward the
+ceiling. **node2 no longer has that headroom**: `talos-env-node-1` (16 GiB fixed, the test-env
+pool node — `kubernetes/infra/env-pool/`) joined it 2026-09-01 and steady-state sits ~93% used,
+above PVE's ~80% auto-balloon threshold — node2's workers are effectively floor-pinned. That
+floor-pinned dw5 into swap-death during a working session the same day (the dw1 2026-08-11
+signature: swap full, huge major-fault rate, SSH banner timeouts while ping answers); dw5 now
+carries a codified 6 GiB floor (`memory_floating_mib = 6144`). Recovery that worked, twice now:
+raise the floor (`qm set <vmid> --balloon <MiB>`) so pvestatd cannot re-pin, then force-inflate
+via `qm monitor <vmid>` → `balloon <MiB>` — `qm set` alone never inflates a running guest. **Time-share rule:** a
 node serves *either* its on-demand heavyweight *or* its two workers at full tilt — not both. Loading
 the 122B on node3 (71 GiB) fits alongside cp3 28 + runner 10 + 2×dev-worker-at-floor 4 = 117 < 125,
 with the co-located workers pinned near their 4 GiB floor for that session. If a host shows sustained
