@@ -203,6 +203,36 @@ class MetricsPortExistsOnEverySeat(unittest.TestCase):
                     )
 
 
+class HeadlessServiceCarriesNoMetricsPort(unittest.TestCase):
+    """The ServiceMonitor's selector deliberately also matches each seat's `-headless` twin (no
+    narrower selector is maintained to exclude it) — that is only harmless because the headless
+    Service exposes no `metrics` port, so Prometheus generates no target for it. Nothing enforced
+    that invariant before this test (review-bot round, ailab#467, reviewer-claude, nit/low): if a
+    future edit gave the headless Service a `metrics` port (common when a headless/routable pair
+    share a port list), Prometheus would scrape TWO targets per pod, doubling every `af_broker_*`
+    and `up` series for that seat."""
+
+    def test_headless_services_have_no_metrics_port(self):
+        broker_files = _broker_files()
+        self.assertTrue(broker_files, f"no broker-*.yaml under {BROKER_DIR}")
+
+        for path in broker_files:
+            services = _services(path)
+            headless = {n: d for n, d in services.items() if n.endswith("-headless")}
+            self.assertTrue(headless, f"{path.name}: no *-headless Service found")
+            for svc_name, doc in headless.items():
+                ports = _service_port_names(doc)
+                self.assertNotIn(
+                    "metrics",
+                    ports,
+                    f"{path.name}: headless Service {svc_name!r} now has a 'metrics' port "
+                    f"(found {sorted(ports)}) — the ServiceMonitor's selector also matches this "
+                    "Service, so Prometheus would generate a second, duplicate target per pod "
+                    "(doubling every af_broker_*/up series for this seat) unless the selector is "
+                    "narrowed to exclude it",
+                )
+
+
 class NamespaceSelectorCoversEveryServiceNamespace(unittest.TestCase):
     """spec.namespaceSelector.matchNames must include the namespace every selected Service
     actually lives in — otherwise selector.matchLabels agreeing is not enough: Prometheus never

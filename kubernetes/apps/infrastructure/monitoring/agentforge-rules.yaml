@@ -411,6 +411,23 @@ spec:
         # of failure), but not yet the seat going fully dark. The seat itself only goes dark once
         # BOTH replicas are down, which this expr alone cannot distinguish from the single-replica
         # case; the description below says so explicitly rather than overstating the blast radius.
+        #
+        # KNOWN COVERAGE GAP (review-bot round, ailab#467, reviewer-codex, important/high) — recorded
+        # rather than silently accepted: `up == 0` requires a target Prometheus is STILL discovering.
+        # A pod dropped from the Service's Endpoints entirely (e.g. it fails its own readiness probe,
+        # or is deleted) disappears from service discovery before any `up=0` sample is ever produced
+        # for it, so a replica stuck NotReady — as opposed to one that is discovered but unscrapeable
+        # — will NOT trip this alert; Prometheus /targets is the only view that shows a vanished
+        # target as missing rather than merely down. NOT fixed in this PR: (1) the spec mandated this
+        # exact `up{job=...} == 0` shape, deliberately mirroring ForgeTargetDown's own already-merged,
+        # identically-limited pattern above, rather than introducing a new one; (2) a genuine fix needs
+        # a DIFFERENT signal this file has never used — e.g. kube-state-metrics
+        # kube_deployment_status_replicas_ready vs. spec_replicas — which is a real design decision
+        # (does kube-state-metrics scrape this namespace today? what's the replica-count source of
+        # truth if the Deployment is mid-rollout?) that deserves its own spec item and review, not a
+        # scope-expanding addition folded into a broker-observability PR. The description below now
+        # says explicitly how an operator distinguishes "down" from "vanished" until that follow-up
+        # lands.
         - alert: ForgeBrokerTargetDown
           expr: up{job="agentforge-broker"} == 0
           for: 5m
@@ -419,14 +436,18 @@ spec:
             summary: "AgentForge broker seat {{ $labels.seat }} has an unscrapeable replica"
             description: >-
               The metrics endpoint on pod {{ $labels.pod }} (broker seat {{ $labels.seat }}, ns
-              agentforge-broker) has been unscrapeable for >5m while the pod still exists — a
-              crash-loop, a wedged event loop, or a NetworkPolicy change. This is ONE of the seat's
-              2 replicas: HA is degraded (a second failure would take the seat fully dark, losing
-              every sandbox job's only path to a capability token for this audience), but the
-              sibling replica may still be serving. Check `count by (seat) (up{job="agentforge-broker"}
-              == 1)` (or Prometheus /targets) for this seat — if it is 0, the seat itself is dark,
-              not just this replica. {{ $labels.seat }} IS the seat's Service
-              app.kubernetes.io/name (e.g. broker-anthropic-max1) — check `kubectl --context admin@ai
-              -n agentforge-broker describe pod -l app.kubernetes.io/name={{ $labels.seat }}` and the
-              container log. Grafana explore `sum by (seat) (rate(af_broker_tokens_used_total[5m]))`
-              corroborates whether the seat is still serving traffic overall.
+              agentforge-broker) has been unscrapeable for >5m while Prometheus still discovers it as
+              a target — a crash-loop, a wedged event loop, or a NetworkPolicy change. This is ONE of
+              the seat's 2 replicas: HA is degraded (a second failure would take the seat fully dark,
+              losing every sandbox job's only path to a capability token for this audience), but the
+              sibling replica may still be serving. To check: query `up{job="agentforge-broker",
+              seat="<seat>"}` (substitute the seat above) — if every returned series reads 0, OR the
+              query returns no series at all, the seat itself is fully dark, not just this replica; if
+              any series reads 1, the sibling is still up. Also check Prometheus /targets for this
+              seat: fewer than 2 listed targets means a replica was dropped from discovery entirely
+              (e.g. stuck NotReady) rather than scraped-and-failing — this alert alone will not have
+              fired for that one. {{ $labels.seat }} IS the seat's Service app.kubernetes.io/name
+              (e.g. broker-anthropic-max1) — check `kubectl --context admin@ai -n agentforge-broker
+              describe pod -l app.kubernetes.io/name={{ $labels.seat }}` and the container log.
+              Grafana explore `sum by (seat) (rate(af_broker_tokens_used_total[5m]))` corroborates
+              whether the seat is still serving traffic overall.
