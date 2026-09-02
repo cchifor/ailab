@@ -60,3 +60,25 @@
   loop: "{{ dev_worker_users | zip(dev_worker_claude_probe.results) | list }}"
   loop_control:
     label: "{{ item.0.name }}"
+
+
+# Estate skills for the agent user — versioned here so every worker (and the operator via
+# the same file) runs the SAME playbook for feature delivery instead of a drifting pasted
+# prompt. Own tag: deploy with -t skills.
+- name: Ensure the feature-implementation skill directory
+  ansible.builtin.file:
+    path: "/home/{{ dev_worker_admin_user }}/.claude/skills/feature-implementation"
+    state: directory
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0755"
+  tags: [skills]
+
+- name: Install the feature-implementation skill
+  ansible.builtin.copy:
+    src: feature-implementation-skill.md
+    dest: "/home/{{ dev_worker_admin_user }}/.claude/skills/feature-implementation/SKILL.md"
+    owner: "{{ dev_worker_admin_user }}"
+    group: "{{ dev_worker_admin_user }}"
+    mode: "0644"
+  tags: [skills]
