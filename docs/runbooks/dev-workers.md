@@ -185,7 +185,14 @@ sops --encrypt --in-place ansible/secrets/dev-worker.sops.yaml
 git add ansible/secrets/dev-worker.sops.yaml
 ```
 
-## herdr pilot (dev-worker-5 only)
+## herdr pilot (dev-worker-5 + dev-worker-6)
+
+> dev-worker-6 joined 2026-09-02 after the operator hand-installed herdr there
+> (~/.local/bin, user-level server) and used it for real work. Integrations + conductor
+> skill were hand-applied and are role-converged; the managed takeover (pinned binary,
+> ansible config.toml, system unit) is pending an idle moment on dw6 — it restarts the
+> server (pane-killing), and the hand-installed ~/.local/bin/herdr must be removed first
+> (it shadows /usr/local/bin in PATH).
 
 [Herdr](https://herdr.dev/) — an agent-native terminal multiplexer — runs on dev-worker-5
 **beside** tmux. This is an evaluation, not a migration: tmux keeps everything load-bearing (the
