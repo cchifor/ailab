@@ -15,15 +15,21 @@
 #
 # FAIL CLOSED, in the idiom of manifest-lint.sh / broker-inventory.yaml: `set -euo pipefail`, no
 # `|| true`, no soft skips. No python, no docker, zero rules files, an extraction that fails, or a
-# promtool error is a non-zero exit from THIS script.
+# promtool error is a non-zero exit from THIS script. And the two tools must AGREE on how many
+# rules they saw: promrule-spec.py reports the `- alert:`/`- record:` count it extracted, promtool
+# prints "N rules found" per file, and a mismatch between the two totals is a failure — that is
+# the guard against the one way this gate could pass while checking less than the whole file
+# (a truncated extraction, which the extractor's own count check also refuses).
 #
 # IMAGE IS DIGEST-PINNED (Prometheus v3.5.0 LTS; the cluster runs kube-prometheus-stack 86.x, a v3
 # Prometheus, so its promtool — stricter than v2 — is the one whose verdict matters). quay.io, not
 # Docker Hub: anonymous Docker Hub pulls 429 on this estate (kube-prometheus-stack.yaml). Re-pin:
 #   docker pull quay.io/prometheus/prometheus:vX.Y.Z && docker inspect --format '{{index .RepoDigests}}' ...
 #
-# Standalone until manifest-lint.sh lands on main (C-P0-05, ailab#464); the intended hook there is
-# one line, `bash scripts/rules-lint.sh`, after its kubeconform step.
+# CI: .gitea/workflows/rules-lint.yaml runs this on every push and PR (one job, fail closed) until
+# manifest-lint.sh lands on main (C-P0-05, ailab#464); the intended hook there is one line,
+# `bash scripts/rules-lint.sh`, after its kubeconform step, at which point that workflow folds
+# into manifests.yaml.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -62,8 +68,17 @@ trap 'rm -rf "$OUT_DIR"' EXIT
 chmod 755 "$OUT_DIR"
 
 "$PY" --version
-"$PY" scripts/promrule-spec.py --out "$OUT_DIR" "${RULE_FILES[@]}"
+# The extractor's stdout is kept (not just streamed) for the rule-count reconciliation below; the
+# scratch files live OUTSIDE $OUT_DIR so nothing but the specs is ever bind-mounted into promtool.
+LOG_DIR="$(mktemp -d)"
+trap 'rm -rf "$OUT_DIR" "$LOG_DIR"' EXIT
+"$PY" scripts/promrule-spec.py --out "$OUT_DIR" "${RULE_FILES[@]}" | tee "$LOG_DIR/extract.log"
 chmod 644 "$OUT_DIR"/*.yaml
+EXPECTED_RULES="$(sed -n 's/^promrule-spec: \([0-9][0-9]*\) rules across .*$/\1/p' "$LOG_DIR/extract.log")"
+if ! [[ "$EXPECTED_RULES" =~ ^[0-9]+$ ]] || [ "$EXPECTED_RULES" -eq 0 ]; then
+  echo "promrule-spec did not report a positive total rule count (got '${EXPECTED_RULES}') — failing closed" >&2
+  exit 1
+fi
 
 CONTAINER_FILES=()
 for f in "$OUT_DIR"/*.yaml; do
@@ -76,6 +91,13 @@ fi
 
 echo "== promtool check rules over ${#CONTAINER_FILES[@]} extracted specs =="
 docker run --rm -v "$OUT_DIR:/rules:ro" --entrypoint promtool "$PROMETHEUS_IMAGE" \
-  check rules "${CONTAINER_FILES[@]}"
+  check rules "${CONTAINER_FILES[@]}" 2>&1 | tee "$LOG_DIR/promtool.log"
 
-echo "rules-lint: OK (${#RULE_FILES[@]} PrometheusRule specs checked by promtool)"
+# Reconcile: the sum of promtool's per-file "N rules found" must equal what was extracted.
+FOUND_RULES="$(sed -n 's/.*SUCCESS: \([0-9][0-9]*\) rules found.*$/\1/p' "$LOG_DIR/promtool.log" | awk '{ s += $1 } END { print s + 0 }')"
+if [ "$FOUND_RULES" -ne "$EXPECTED_RULES" ]; then
+  echo "promtool found ${FOUND_RULES} rules but promrule-spec extracted ${EXPECTED_RULES} — the gate did not check the whole set" >&2
+  exit 1
+fi
+
+echo "rules-lint: OK (${#RULE_FILES[@]} PrometheusRule specs, ${FOUND_RULES} rules checked by promtool)"

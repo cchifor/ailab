@@ -1,0 +1,61 @@
+# PromQL gate — `promtool check rules` over every kubernetes/apps/infrastructure/monitoring/*-rules.yaml
+# (scripts/rules-lint.sh). kustomize + kubeconform prove a PrometheusRule is a well-formed CRD
+# object; neither parses a single `expr`, and a rule whose PromQL does not parse makes
+# prometheus-operator reject the WHOLE file at reconcile time, so every alert in it silently
+# vanishes from Prometheus. promtool is the only tool that type-checks the expressions.
+#
+# FAIL CLOSED, following broker-inventory.yaml and tenant-guard-cel.yaml: ONE job, no `needs:`,
+# no matrix, no aggregator (the estate has already shipped a gate that could not fail —
+# `join(needs.*.result, ' ')` evaluates to an EMPTY STRING on this forge's act_runner, so its loop
+# body ran zero times and the gate passed unconditionally for its entire life; there is no
+# cross-job result aggregation here for that bug to hide inside). No `continue-on-error`, no
+# `if:` conditions, no `|| true`, no soft skips — the script is `set -euo pipefail` internally and
+# exits non-zero on a missing python, a missing docker, zero rules files, an extraction it cannot
+# do exactly, a promtool error, or a rule count promtool and the extractor disagree on.
+#
+# TRANSITIONAL: this is the standalone home of the gate until scripts/manifest-lint.sh (C-P0-05,
+# ailab#464) is on main; then `bash scripts/rules-lint.sh` becomes one more step of
+# .gitea/workflows/manifests.yaml and this file is deleted in the same PR.
+#
+# WHY .gitea/ AND NOT .github/: Gitea reads .gitea/workflows and, once that directory exists,
+# ignores .github/workflows entirely. This repo already has its workflows here.
+name: rules-lint
+
+on:
+  # Push on every branch as well as pull_request, for the same reason broker-inventory.yaml does:
+  # the feature-branch push is the event this forge demonstrably serves, so it gives a pre-merge
+  # signal even when the pull_request run never starts. pull_request on a self-hosted runner
+  # executes the PR head's own scripts on the runner host, acceptable here because the forge is
+  # closed (registration disabled, sign-in required to view; see manifests.yaml on C-P0-05 for the
+  # live verification) — every account that can open a PR is an operator-provisioned one.
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Supersede our own queued runs, same rationale as broker-inventory.yaml: this does not fix pool
+# contention, it stops this workflow adding to it.
+concurrency:
+  group: rules-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  promtool:
+    name: promtool check rules
+    # GITEA, NOT GITHUB: no hosted runners on this forge; every registered runner carries only
+    # `self-hosted-hv`, and nothing answers `ubuntu-latest` (a job asking for it queues forever
+    # rather than failing). Fall back to the real pool label if RUNNER_LABEL is ever unset.
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    # Starvation must be LOUD: a job never assigned a runner would otherwise linger until a bulk
+    # sweep marks it cancelled, which reads as benign. One digest-pinned image pull + promtool over
+    # a dozen small files is well inside this.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: promtool check rules over monitoring/*-rules.yaml
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/rules-lint.sh
