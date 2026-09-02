@@ -405,11 +405,13 @@ spec:
         # pod set churns (~15 generations/day measured above) and a per-pod series would lose its
         # window on every restart. `> 0` is exact for a counter that moves in integer steps; no
         # `for:` because the healer's write is the whole event — it does not persist to debounce.
+        # The summary rounds `$value`: increase() extrapolates to the window edges, so a single
+        # increment reads as e.g. 1.02 — harmless for the threshold, misleading in the alert text.
         - alert: ForgeUnexplainedEscalations
           expr: sum by (namespace) (increase(forge_escalations_unexplained_total{job="agentforge-worker"}[1h])) > 0
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge {{ $labels.namespace }}: {{ $value }} needs-human park(s) without an escalation record in the last 1h"
+            summary: "AgentForge {{ $labels.namespace }}: {{ $value | printf \"%.0f\" }} needs-human park(s) without an escalation record in the last 1h"
             description: >-
               The reconciler found an issue parked at needs-human with NO af:esc record and wrote a
               synthesized explanation for it. That is the healer working, but the cause is one of two
@@ -434,11 +436,12 @@ spec:
         # is 0 until a real failure and the rule is inert until then. `> 3` in 30m: the reconcile pass
         # runs roughly every minute, so a retried failure counts once per pass and clears 3 in ~4
         # passes — one transient forge blip does not page, a stuck one does within five minutes.
+        # `$value` rounded in the summary for the same increase()-extrapolation reason as above.
         - alert: ForgeOperatorServiceFailing
           expr: sum by (namespace, kind) (increase(forge_operator_service_failures_total{job="agentforge-worker"}[30m])) > 3
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge {{ $labels.namespace }}: {{ $labels.kind }} operator service failed {{ $value }} times in 30m"
+            summary: "AgentForge {{ $labels.namespace }}: {{ $labels.kind }} operator service failed {{ $value | printf \"%.0f\" }} times in 30m"
             description: >-
               A per-issue operator service ({{ $labels.kind }}: grant = a needs-budget budget grant,
               replan = a needs-replan request) failed inside the reconcile pass more than 3 times in
