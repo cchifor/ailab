@@ -311,6 +311,36 @@ class RepoUrlIdentity(unittest.TestCase):
         self.assertFalse(mp.is_this_repo("https://github.com/someone-else/ailab.git"))
         self.assertFalse(mp.is_this_repo(""))
 
+    def test_every_known_host_and_url_form_of_this_repo_is_accepted(self):
+        # The hosts that actually serve cchifor/ailab: the in-cluster Gitea http and ssh Services,
+        # the public Gitea hostname, and the GitHub push-mirror (ADR 0017) — in every url form
+        # Flux's GitRepository accepts (scheme://, with/without userinfo and port, scp-like).
+        for url in (
+            "http://gitea-http.gitea.svc.cluster.local:3000/cchifor/ailab.git",
+            "ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/ailab.git",
+            "https://git.chifor.me/cchifor/ailab",
+            "https://git.chifor.me/cchifor/ailab.git",
+            "ssh://git@github.com/cchifor/ailab",
+            "https://github.com/cchifor/ailab.git",
+            "git@github.com:cchifor/ailab.git",
+            "git@git.chifor.me:cchifor/ailab",
+        ):
+            self.assertTrue(mp.is_this_repo(url), url)
+
+    def test_same_slug_on_an_unknown_host_is_not_this_repo(self):
+        # Repository identity is host + slug, not the slug alone: a GitRepository repointed at
+        # `unrelated.example/cchifor/ailab` serves content that is NOT this checkout (round-3
+        # codex finding, :323).
+        for url in (
+            "https://unrelated.example/cchifor/ailab.git",
+            "ssh://git@evil.example/cchifor/ailab",
+            "git@unrelated.example:cchifor/ailab.git",
+            "https://github.com.evil.example/cchifor/ailab",
+            "https://notgithub.com/cchifor/ailab",
+            "https://git.chifor.me/deeper/cchifor/ailab",
+        ):
+            self.assertFalse(mp.is_this_repo(url), url)
+
 
 class FailClosedOnABrokenFixture(_FixtureRepo):
     """Proves this module's own contribution to the shape scripts/manifest-lint.sh depends on: a
@@ -534,6 +564,15 @@ class SourceRefResolution(_FixtureRepo):
         self._mk_target("kubernetes/apps/x")
         (self.cluster_ai / "x.yaml").write_text(_kustomization_doc("x", "./kubernetes/apps/x"))
         self._assert_raises_both_modes("cchifor/platform")
+
+    def test_bootstrap_git_repository_on_an_unknown_host_is_not_local(self):
+        # Same slug, unknown host: Flux would consume content from a server this estate does not
+        # run, so building THIS checkout would validate the wrong thing -> not local, not a
+        # reviewed external -> fail closed (round-3 codex finding, :323).
+        _write_flux_system_source(self.cluster_ai, url="https://unrelated.example/cchifor/ailab.git")
+        self._mk_target("kubernetes/apps/x")
+        (self.cluster_ai / "x.yaml").write_text(_kustomization_doc("x", "./kubernetes/apps/x"))
+        self._assert_raises_both_modes("unrelated.example")
 
     def test_bootstrap_git_repository_on_the_github_backup_url_is_local(self):
         # ADR 0017 rollback shape: same repo, mirrored on GitHub.
@@ -874,6 +913,85 @@ class RegexFallbackParityWithPyYAML(_FixtureRepo):
             mp.discover_paths()
         with _regex_mode(), self.assertRaises(mp.DiscoveryError):
             mp.discover_paths()
+
+    def test_sequence_under_a_scalar_valued_key_is_rejected_in_both_modes(self):
+        # `interval: 10m` followed by an indented `- invalid` is NOT YAML (a real parser rejects
+        # it). The fallback must not quietly attach the stray lines to `interval` just because it
+        # never extracts that key — that would let CI pass a manifest Flux rejects (round-3 codex
+        # finding, :211).
+        (self.cluster_ai / "reordered.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: reordered\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  interval: 10m\n"
+            "    - invalid\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
+            "    name: flux-system\n"
+            "  path: ./kubernetes/apps/reordered\n"
+        )
+        self._assert_raises_both_modes()
+
+    def test_sequence_at_key_indent_under_a_scalar_valued_key_is_rejected_in_both_modes(self):
+        (self.cluster_ai / "reordered.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: reordered\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  interval: 10m\n"
+            "  - invalid\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
+            "    name: flux-system\n"
+            "  path: ./kubernetes/apps/reordered\n"
+        )
+        self._assert_raises_both_modes()
+
+    def test_nested_mapping_under_a_scalar_valued_key_is_rejected_in_both_modes(self):
+        (self.cluster_ai / "reordered.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: reordered\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  prune: true\n"
+            "    bogus: 1\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
+            "    name: flux-system\n"
+            "  path: ./kubernetes/apps/reordered\n"
+        )
+        self._assert_raises_both_modes()
+
+    def test_block_scalar_under_an_unextracted_key_is_tolerated(self):
+        # A block scalar (`|`/`>`) IS a value that legitimately owns the indented lines after it;
+        # the strictness above must not reject this legal, common shape.
+        (self.cluster_ai / "reordered.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: reordered\n"
+            "  namespace: flux-system\n"
+            "  annotations:\n"
+            "    note: |\n"
+            "      multi\n"
+            "      line\n"
+            "spec:\n"
+            "  description: >-  # folded\n"
+            "    a folded\n"
+            "    description\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
+            "    name: flux-system\n"
+            "  path: ./kubernetes/apps/reordered\n"
+        )
+        self._assert_parity(["./kubernetes/apps/reordered"])
 
     def test_unterminated_quote_is_rejected_by_the_fallback(self):
         (self.cluster_ai / "reordered.yaml").write_text(
