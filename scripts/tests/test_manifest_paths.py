@@ -413,7 +413,20 @@ class ManifestLintScriptFailsClosedOnABrokenFixture(unittest.TestCase):
     is stubbed on PATH (so the script's own `command -v docker` precondition passes) but the stub
     only ever records that it ran; asserting that marker file is absent afterwards is what proves
     the failure happened at discovery, not later at a build/validate step (round-1 codex review
-    finding: this was the one failure path the test suite previously only proved manually)."""
+    finding: this was the one failure path the test suite previously only proved manually).
+
+    This test was added AFTER manifest-lint.sh's shell-level fail-closed behavior already existed
+    and already passed (06b60f0, before this test's own commit) — a genuine tests-first red/green
+    commit pair for it would mean rewriting scripts/manifest-lint.sh's already-pushed history,
+    which this repo's git rules forbid (no force-push, no amending a pushed commit; round-2 codex
+    review finding). To prove this is real coverage rather than a tautological backfill, it was
+    manually red-proofed against two independent regressions of the exact shape the file's own
+    header comments warn about, each reverted before committing: (1) restoring the `mapfile -t
+    PATHS < <(...)` process-substitution form the header comment explicitly rejects; (2) removing
+    the `if [ "${#PATHS[@]}" -eq 0 ]` guard together with `|| true`-ing the discovery call — the
+    second one flips this test from pass to a genuine failure (`returncode == 0`, stdout ends
+    "manifest-lint: OK (0 paths built and validated)"), proving this test would catch that class
+    of silent-pass regression were it ever reintroduced."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
