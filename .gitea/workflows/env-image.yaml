@@ -1,6 +1,9 @@
 # Build + push the testpool env images (env-image/Dockerfile.{dind,control}).
 # Single job, fail-closed, no aggregator (the join(needs.*) empty-string trap). Runs on the
 # host-mode pool (plain docker CLI + REGISTRY_* org robot secrets, same as agentforge images.yml).
+# env-control is smoke-tested (`docker compose version`, `docker buildx version`) right after its
+# build and before push — this is the only check this workflow runs on either image's contents
+# (C-P0-15).
 # Prints pushed digests; SWITCHING the SandboxTemplate/pre-pull DaemonSet to these images is a
 # deliberate follow-up PR that pins the printed digests (never :latest in manifests).
 name: env-image
@@ -26,6 +29,24 @@ jobs:
           for v in dind control; do
             IMG="registry.chifor.me/testpool/env-$v"
             docker build -f "env-image/Dockerfile.$v" -t "$IMG:$TAG" env-image
+            if [ "$v" = control ]; then
+              # env-control is the SandboxTemplate "control" container, and PR G1's
+              # webapp/e2e-pool.sh --integration shells `docker compose -f compose/e2e.yml up -d
+              # --build --wait` inside it (globalSetup for the integration e2e layer). Assert the
+              # compose v2 CLI plugin the Dockerfile installs actually resolves BEFORE this image
+              # ever reaches the registry, so a regression (a base-image bump that drops the
+              # plugin dir, an edit that removes the COPY) fails CI instead of surfacing as a pool
+              # outage discovered mid-lease (found during C-P0-10's codex round: bare docker CLI
+              # here has no compose subcommand at all, "unknown shorthand flag: 'f' in -f").
+              docker run --rm "$IMG:$TAG" docker compose version
+              # Also assert buildx: compose v2 builds fine without it (BuildKit as an internal
+              # library), but the `--build` invocation above needs buildx once compose stops
+              # shipping that internal builder (compose v5+), and without the plugin compose logs
+              # a warning and silently falls back to the deprecated legacy (non-BuildKit) builder
+              # instead of failing — a fallback the `docker compose version` check above cannot
+              # detect. Fail closed on that instead.
+              docker run --rm "$IMG:$TAG" docker buildx version
+            fi
             docker push "$IMG:$TAG"
             DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG:$TAG")
             echo "PUSHED $DIGEST"

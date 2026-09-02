@@ -6,13 +6,46 @@
 # (PLAYWRIGHT_BROWSERS_PATH=/data/caches/ms-playwright, set in the SandboxTemplate): version-correct
 # per repo, warm after first use, snapshot-persisted, array-side CoW-shared across leases. This
 # image carries only what is version-STABLE: node, the playwright SYSTEM libraries
-# (install-deps), docker CLI, uv, rsync, git, jq. ~700 MB instead of ~2 GB.
+# (install-deps), docker CLI, the docker compose v2 CLI plugin, the docker buildx CLI plugin, uv,
+# rsync, git, jq. Measured on disk (`docker images`): 1.63 GB without the two plugins below, 1.81
+# GB with both (+~180 MB: docker-compose is ~72 MB, docker-buildx ~65 MB, plus their unpacked
+# layer overhead) — still well under the ~2 GB single-playwright-version image this replaces. No
+# `just` (that recipe runner never runs inside a lease).
 # The CI-container lane (docker run mcr.microsoft.com/playwright ...) is unaffected — that image
 # stays in hack/golden-images.txt as a docker-cache entry.
+#
+# docker compose v2 + docker buildx: the docker CLI above is a single COPY'd static binary (no
+# Docker apt repo configured, so `apt-get install docker-compose-plugin` is not an option here).
+# Both plugins are COPY'd from the SAME digest-pinned docker:28.3-cli image the CLI itself comes
+# from (docker-compose v2.39.2, docker-buildx v0.27.0, both under
+# /usr/local/libexec/docker/cli-plugins/ in that image) rather than curl-ing a separate release
+# from GitHub at build time: one fewer network dependency during the build, and both plugins are
+# pinned by the same image digest already in this file (a v5.5.0 static download was tried first
+# and its sha256 verified independently, but was dropped in favour of this COPY once it became
+# clear compose v5 needs buildx too — simplest to source both from one already-pinned place).
+# PR G1's webapp/e2e-pool.sh --integration shells `docker compose -f compose/e2e.yml up -d --build
+# --wait` inside this container's globalSetup; without docker-compose the bare docker CLI has no
+# compose subcommand at all ("unknown shorthand flag: 'f' in -f" / "docker: unknown command:
+# docker compose"), so the integration e2e layer cannot run in the pool at all (found during
+# C-P0-10's codex round). Without docker-buildx, compose v2.39.2 still builds fine — it invokes
+# BuildKit as an internal library, no plugin needed there. But this image was first shipped with
+# the standalone compose v5.5.0 static binary, and compose v5 removed that internal builder: it
+# calls the `docker buildx build` CLI command instead and, absent the plugin, logs "Docker Compose
+# requires buildx plugin to be installed" and silently falls back to the deprecated legacy
+# (non-BuildKit) builder — which happens to still work against agentforge-platform's Dockerfile
+# today (no BuildKit-only syntax there) but is exactly the kind of thing that breaks silently the
+# day either side drifts, and the new `docker compose version` smoke check below cannot catch it.
+# Shipping buildx removes that whole fallback path regardless of which compose version is used.
+# Re-pin by bumping the docker:28.3-cli digest for both COPY --from lines together (and re-check
+# the plugin versions/paths it carries — `docker run --rm --entrypoint sh <digest> -c "ls
+# /usr/local/libexec/docker/cli-plugins/"`).
 FROM docker.io/library/node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 COPY --from=docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44 \
      /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44 \
+     /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-buildx \
+     /usr/local/libexec/docker/cli-plugins/
 COPY --from=ghcr.io/astral-sh/uv:0.8.15 /uv /uvx /usr/local/bin/
 
 RUN apt-get update \
