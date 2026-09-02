@@ -69,7 +69,7 @@ spec:
             - { name: dsock, mountPath: /run/dsock }
             - { name: work, mountPath: /work }
         - name: control
-          image: docker.io/library/docker:28.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+          image: docker.io/library/docker:29.7-cli@sha256:3f4743208d2338c934d7b8bcfbe1bb54c0b2355c510ad5e0f31c0c4a54bd704e
           command: ["sh", "-c"]
           args:
             - |

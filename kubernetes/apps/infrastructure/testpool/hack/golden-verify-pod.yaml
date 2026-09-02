@@ -17,7 +17,7 @@ spec:
   terminationGracePeriodSeconds: 10
   containers:
     - name: dind
-      image: docker.io/library/docker:28.3-dind
+      image: docker.io/library/docker:29.7-dind
       securityContext:
         privileged: true
       command: ["sh", "-c"]
@@ -61,7 +61,7 @@ spec:
         - { name: dsock, mountPath: /run/dsock }
         - { name: work, mountPath: /work }
     - name: control
-      image: docker.io/library/docker:28.3-cli
+      image: docker.io/library/docker:29.7-cli
       command: ["sleep", "infinity"]
       env:
         - name: DOCKER_HOST
