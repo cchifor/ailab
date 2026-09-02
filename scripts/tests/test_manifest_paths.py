@@ -377,6 +377,19 @@ class FailClosedOnABrokenFixture(_FixtureRepo):
         with self.assertRaises(mp.DiscoveryError):
             mp.verify_buildable(paths)
 
+    def test_verify_buildable_accepts_the_canonical_kustomization_filename(self):
+        # kustomize itself accepts three filenames: kustomization.yaml, kustomization.yml, and the
+        # capitalized `Kustomization` (no extension) — the precheck must not fail CI for a
+        # directory `kustomize build` would validly build (round-3 codex finding, :527).
+        target = self.repo / "kubernetes/apps/canonical"
+        target.mkdir(parents=True)
+        (target / "Kustomization").write_text("resources: []\n")
+        self._write_local_kustomization(self.cluster_ai, "canonical", "./kubernetes/apps/canonical")
+
+        paths = self._discover_both_modes()
+        self.assertEqual(paths, ["./kubernetes/apps/canonical"])
+        mp.verify_buildable(paths)  # must not raise
+
     def test_missing_kustomization_yaml_makes_main_exit_non_zero(self):
         (self.repo / "kubernetes/apps/broken").mkdir(parents=True)
         self._write_local_kustomization(self.cluster_ai, "broken", "./kubernetes/apps/broken")
@@ -418,6 +431,37 @@ class FailClosedOnABrokenFixture(_FixtureRepo):
             with ctx, contextlib.redirect_stderr(buf):
                 self.assertEqual(mp.discover_paths(), [])
             self.assertIn("agentforge-tenants", buf.getvalue())
+
+    def test_externally_sourced_kustomization_with_missing_path_fails_closed(self):
+        # An allowlisted external sourceRef must not exempt a Kustomization from the same
+        # spec.path validity check local ones get: a missing or malformed path on the Flux
+        # object itself is still a broken manifest, not something safe to silently exclude
+        # (round-3 codex finding, :489).
+        (self.cluster_ai / "agentforge-tenants-source.yaml").write_text(
+            _git_repository_doc("agentforge-tenants", TENANTS_URL)
+        )
+        (self.cluster_ai / "external-nopath.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: external-nopath\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
+            "    name: agentforge-tenants\n"
+            "  prune: true\n"
+        )
+        self._assert_raises_both_modes("spec.path")
+
+    def test_externally_sourced_kustomization_with_empty_path_fails_closed(self):
+        (self.cluster_ai / "agentforge-tenants-source.yaml").write_text(
+            _git_repository_doc("agentforge-tenants", TENANTS_URL)
+        )
+        (self.cluster_ai / "external-emptypath.yaml").write_text(
+            _kustomization_doc("external-emptypath", "", source_name="agentforge-tenants")
+        )
+        self._assert_raises_both_modes("spec.path")
 
     def test_unrecognized_external_source_ref_fails_closed(self):
         # A sourceRef that resolves to a declared GitRepository of a different repo but is NOT a
@@ -913,6 +957,26 @@ class RegexFallbackParityWithPyYAML(_FixtureRepo):
             mp.discover_paths()
         with _regex_mode(), self.assertRaises(mp.DiscoveryError):
             mp.discover_paths()
+
+    def test_non_string_top_level_kind_is_rejected_not_silently_skipped(self):
+        # A document whose top-level `kind:` is not a scalar (e.g. a flow-style list) must fail
+        # closed under PyYAML the same way the stdlib fallback already does via _scalar_entry
+        # (any of "&*!|>[{%@`" makes a value "not a plain scalar"), rather than being silently
+        # classified as "not a Kustomization/GitRepository" and dropped — the two parsers must
+        # never diverge on whether a document was seen at all (round-3 claude nit, :373).
+        (self.cluster_ai / "badkind.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: [Kustomization]\n"
+            "metadata:\n"
+            "  name: badkind\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
+            "    name: flux-system\n"
+            "  path: ./kubernetes/apps/badkind\n"
+        )
+        self._assert_raises_both_modes("kind")
 
     def test_deeper_line_under_a_scalar_valued_key_is_refused_by_the_fallback(self):
         # `interval: 10m` followed by a DEEPER-indented `- invalid` is, strictly, a legal
