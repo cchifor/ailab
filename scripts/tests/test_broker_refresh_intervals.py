@@ -43,6 +43,7 @@ CONFIGMAP = BROKER_DIR / "configmap.yaml"
 MONITORING_DIR = REPO / "kubernetes/apps/infrastructure/monitoring"
 RULES = MONITORING_DIR / "agentforge-rules.yaml"
 RULES_LINT = REPO / "scripts/rules-lint.sh"
+RULES_LINT_WORKFLOW = REPO / ".gitea/workflows/rules-lint.yaml"
 SPEC_EXTRACTOR = REPO / "scripts/promrule-spec.py"
 
 _MOD_PATH = REPO / "scripts" / "gen-broker-inventory.py"
@@ -241,6 +242,41 @@ class PromruleSpecExtractorFailsClosed(unittest.TestCase):
             with self.subTest(case=label), self.assertRaises(mod.SpecError):
                 mod.extract_spec(text, label)
 
+    # A column-0 comment INSIDE spec (this repo's rule files are comment-heavy) and a stray non-key
+    # line at column 0. The first used to read as "next top-level key" and silently truncated the
+    # extracted spec — promtool then blessed a file whose later rules it never saw. Comments must
+    # be transparent; anything else at column 0 that is not a key is a SpecError, never a guess.
+    COMMENTED = (
+        "apiVersion: monitoring.coreos.com/v1\n"
+        "kind: PrometheusRule\n"
+        "metadata:\n  name: x\n  namespace: monitoring\n"
+        "spec:\n  groups:\n    - name: g\n      rules:\n        - alert: A\n          expr: up == 0\n"
+        "# a column-0 comment inside spec\n"
+        "        - alert: B\n          expr: up == 1\n"
+        "        # an indented one too\n"
+        "        - record: c\n          expr: up\n"
+    )
+
+    def test_a_column_0_comment_inside_spec_does_not_truncate_the_rules(self) -> None:
+        mod = _load_extractor()
+        spec = mod.extract_spec(self.COMMENTED, "fixture")
+        self.assertIn("- alert: B\n", spec)
+        self.assertIn("- record: c\n", spec)
+        self.assertEqual(mod.rule_count(spec), 3)
+        self.assertEqual(mod.rule_count(self.COMMENTED), mod.rule_count(spec))
+
+    def test_a_non_key_line_at_column_0_inside_spec_fails_closed(self) -> None:
+        mod = _load_extractor()
+        with self.assertRaises(mod.SpecError):
+            mod.extract_spec(self.RULE + "- alert: stray\n  expr: up\n", "stray")
+
+    def test_the_repo_rules_files_keep_every_rule_through_extraction(self) -> None:
+        mod = _load_extractor()
+        for path in sorted(MONITORING_DIR.glob("*-rules.yaml")):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(file=path.name):
+                self.assertEqual(mod.rule_count(mod.extract_spec(text, path.name)), mod.rule_count(text))
+
     def test_cli_writes_one_file_per_input_and_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = pathlib.Path(tmp) / "a-rules.yaml"
@@ -254,6 +290,10 @@ class PromruleSpecExtractorFailsClosed(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertTrue((out / "a-rules.yaml").read_text(encoding="utf-8").startswith("groups:"))
+            # The per-file and total rule counts rules-lint.sh reconciles against promtool's own
+            # "N rules found" — a truncated extraction can no longer pass unnoticed.
+            self.assertIn("(1 rules)", proc.stdout)
+            self.assertIn("promrule-spec: 1 rules across 1 files", proc.stdout)
             bad = pathlib.Path(tmp) / "b-rules.yaml"
             bad.write_text("kind: ConfigMap\n", encoding="utf-8")
             proc = subprocess.run(
@@ -282,6 +322,23 @@ class RulesLintScriptRunsPromtoolOverEveryRulesFile(unittest.TestCase):
         # Comment lines are the script explaining its own idiom ("no `|| true`"); only code counts.
         code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
         self.assertNotIn("|| true", code)
+        # The extracted-vs-promtool rule count reconciliation (see PromruleSpecExtractorFailsClosed).
+        self.assertIn("rules found", code)
+        self.assertIn("rules across", code)
+
+    def test_ci_runs_the_script_fail_closed_on_every_push(self) -> None:
+        """Until manifest-lint.sh (C-P0-05) is on main the gate has its own workflow, in the idiom
+        of broker-inventory.yaml: one job, no needs/if/continue-on-error, a timeout, push+PR."""
+        self.assertTrue(RULES_LINT_WORKFLOW.is_file(), f"{RULES_LINT_WORKFLOW} missing")
+        text = RULES_LINT_WORKFLOW.read_text(encoding="utf-8")
+        code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertIn("bash scripts/rules-lint.sh", code)
+        self.assertIn("timeout-minutes:", code)
+        self.assertRegex(code, r"(?m)^on:\n(?:  .*\n)*  push:")
+        self.assertRegex(code, r"(?m)^  pull_request:")
+        self.assertEqual(len(re.findall(r"(?m)^  [A-Za-z0-9_-]+:\s*$", code.split("jobs:", 1)[1])), 1, "one job")
+        for forbidden in ("needs:", "if:", "continue-on-error", "|| true", "matrix:"):
+            self.assertNotIn(forbidden, code, forbidden)
 
 
 if __name__ == "__main__":
