@@ -451,7 +451,32 @@ following stay OPERATOR steps:
 - **Refresh now (codex only)**: UI button creates a Job from CronJob `af-codex-refresh` (VAP-pinned).
 - **Add account**: UI CAS-writes the cred, then opens an ailab PR via `agentforge-infra-bot`
   (AGit). Review + approve (reviewer-bot) + merge per the protected-main flow; the operation
-  tracker advances to `active` once Flux/ESO/broker all report.
+  tracker advances to `active` once Flux/ESO/broker all report. Requires
+  `AFP_BROKER_CLUSTERIP_POOL` (CP Deployment, `kubernetes/apps/apps/agentforge/deployment.yaml`,
+  WS4 env block) to be set — without it the allocator has no range to draw from and the add
+  refuses with a 503 before it ever CAS-writes anything. Current value: `10.96.0.192/26`, chosen
+  inside this cluster's `10.96.0.0/12` Service CIDR's KEP-3070 static band (`10.96.0.0/24`, the
+  first 256 addresses — the range kube-apiserver's dynamic ClusterIP allocator is documented to
+  avoid, so a Service in it never collides with one the apiserver assigns on its own) and disjoint
+  from the three already-live hand-pinned broker addresses (`10.108.137.32` / `10.109.144.42` /
+  `10.108.162.59`). Validated at CP boot, not at add time (`settings.py:604-620` ->
+  `domain/clusterip.py::parse_pool`), so a bad value fails the rollout loudly instead of a
+  UI-facing 503. Re-run `kubectl get svc -A -o wide | grep ' 10\.96\.0\.'` before widening or
+  moving the pool — it must stay empty, or the allocator could hand out an address something
+  else already holds.
+  **claude-max-3 backfill**: this seat was hand-added before the allocator existed
+  (`broker-anthropic-claude-max-3.yaml` ships with `clusterIP: None`/unpinned — apiserver assigns
+  it dynamically on first apply), so its live address is NOT recorded in
+  `subscription_accounts.cluster_ip` the way an allocator-driven add would record one. Until it
+  is backfilled, that live address is invisible to `_allocate_cluster_ip`'s taken-set query and
+  the allocator could hand a *future* add the exact address claude-max-3 is already using. Fix
+  once, before relying on the pool: read the live address
+  (`kubectl --context admin@ai -n agentforge-broker get svc broker-anthropic-claude-max-3 -o
+  jsonpath='{.spec.clusterIP}'`), then set it on the row —
+  `UPDATE subscription_accounts SET cluster_ip = '<address>' WHERE provider = 'anthropic' AND
+  account = 'claude-max-3';` against the `app_dsn` database (see the DSN note at the top of
+  `settings.py`) — and pin the same address as `clusterIP:` in
+  `broker-anthropic-claude-max-3.yaml` so a future `kustomize build` stops rendering it unpinned.
 - **Remove account**: UI blocks while any workspace config or deployed render references the
   account, then opens the manifest-removal PR. AFTER merge+prune, the KV soft-delete is manual:
   `bao kv delete -mount=af operator/broker/<provider>/<account>/oauth` (provisioner token cannot
