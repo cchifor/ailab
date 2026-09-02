@@ -12,6 +12,8 @@
   "state_db": "/var/lib/reviewbot/state.sqlite",
   "textfile": {{ pr_reviewer_textfile | to_json }},
   "llm_cmd": {{ pr_reviewer_llm_cmd | to_json }},
+  "llm_kind": {{ pr_reviewer_llm_kind | to_json }},
+  "llm_model": {{ pr_reviewer_llm_model | to_json }},
   "llm_timeout_s": {{ pr_reviewer_llm_timeout_s }},
   "max_diff_bytes": {{ pr_reviewer_max_diff_bytes }},
   "max_comments": {{ pr_reviewer_max_comments }},

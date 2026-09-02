@@ -15,6 +15,7 @@ event=COMMENT locked, central allowlist only, runs as the worker user.
 """
 import hashlib
 import hmac
+import io
 import http.server
 import json
 import os
@@ -197,22 +198,40 @@ def run_llm(title, desc, diff_text):
     prompt = PROMPT.replace("{title}", title).replace("{description}", desc or "") + diff_text
     workdir = tempfile.mkdtemp(prefix="reviewbot-")
     env = {k: v for k, v in os.environ.items() if k not in ("GITEA_TOKEN",)}
+    kind = CFG.get("llm_kind", "claude")
+    out_file = os.path.join(workdir, "last-message.md")
+    if kind == "codex":
+        # codex exec: read-only sandbox, prompt on stdin ("-"), final message to a file
+        # (stdout carries the whole session log, not the answer).
+        args = CFG["llm_cmd"] + ["exec", "-m", CFG["llm_model"], "--skip-git-repo-check",
+                                 "-s", "read-only", "--output-last-message", out_file, "-"]
+    else:
+        args = CFG["llm_cmd"] + ["-p", "--output-format", "json",
+                                 "--disallowedTools", "Bash", "Edit", "Write", "WebFetch",
+                                 "WebSearch", "NotebookEdit", "Task", "Agent"]
     try:
-        r = subprocess.run(
-            CFG["llm_cmd"] + ["-p", "--output-format", "json",
-                              "--disallowedTools", "Bash", "Edit", "Write", "WebFetch",
-                              "WebSearch", "NotebookEdit", "Task", "Agent"],
-            input=prompt, capture_output=True, text=True,
-            timeout=CFG["llm_timeout_s"], cwd=workdir, env=env)
+        r = subprocess.run(args, input=prompt, capture_output=True, text=True,
+                           timeout=CFG["llm_timeout_s"], cwd=workdir, env=env)
+        if kind == "codex":
+            # The file is written before exit; read it even on a nonzero rc (a known CLI
+            # quirk), and only fail when it is absent or empty.
+            text = ""
+            if os.path.exists(out_file):
+                text = io.open(out_file, encoding="utf-8").read()
+            if not text.strip():
+                raise RuntimeError(f"codex produced no output (exit {r.returncode}): {r.stderr[-300:]}")
+        else:
+            if r.returncode != 0:
+                raise RuntimeError(f"llm exit {r.returncode}: {r.stderr[-300:]}")
+            envelope = json.loads(r.stdout)
+            text = envelope.get("result", "")
     finally:
         try:
+            if os.path.exists(out_file):
+                os.remove(out_file)
             os.rmdir(workdir)
         except OSError:
             pass
-    if r.returncode != 0:
-        raise RuntimeError(f"llm exit {r.returncode}: {r.stderr[-300:]}")
-    envelope = json.loads(r.stdout)
-    text = envelope.get("result", "")
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         raise RuntimeError("llm returned no JSON object")
@@ -319,6 +338,7 @@ def write_metrics():
             last_ok = c.execute("SELECT v FROM meta WHERE k='last_success'").fetchone()
             last_rec = c.execute("SELECT v FROM meta WHERE k='last_reconcile'").fetchone()
             quar = c.execute("SELECT COUNT(*) FROM jobs WHERE state='quarantined'").fetchone()[0]
+            done = c.execute("SELECT COUNT(*) FROM jobs WHERE state='done'").fetchone()[0]
             c.close()
         now = time.time()
         lines = [
@@ -326,6 +346,7 @@ def write_metrics():
             f'reviewbot_queue_depth{{persona="{CFG["persona"]}"}} {depth}',
             f'reviewbot_oldest_job_age_seconds{{persona="{CFG["persona"]}"}} {(now - oldest) if oldest else 0:.0f}',
             f'reviewbot_quarantined_jobs{{persona="{CFG["persona"]}"}} {quar}',
+            f'reviewbot_jobs_done{{persona="{CFG["persona"]}"}} {done}',
         ]
         if last_ok:
             lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_ok[0]):.0f}')
