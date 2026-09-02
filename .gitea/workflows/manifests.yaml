@@ -17,6 +17,13 @@ name: manifests
 
 on:
   push:
+  # pull_request on a self-hosted runner executes the PR head's own code (scripts/manifest-lint.sh,
+  # `docker run` over its manifests) on the runner host. That is acceptable HERE because this forge
+  # is closed: git.chifor.me runs with DISABLE_REGISTRATION=true, ENABLE_OPENID_SIGNUP=false and
+  # REQUIRE_SIGNIN_VIEW=true (kubernetes/apps/apps/gitea/gitea.yaml), so the only accounts that can
+  # open a PR are the operator-provisioned Authelia OIDC ones — there is no anonymous or external
+  # contributor path. broker-inventory.yaml already runs pull_request on the same pool under the
+  # same assumption; if the forge is ever opened up, gate this trigger to trusted authors first.
   pull_request:
 
 permissions:

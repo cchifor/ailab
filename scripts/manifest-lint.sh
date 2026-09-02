@@ -8,10 +8,13 @@
 # .gitea/workflows/manifests.yaml's one job directly — there is no result aggregation for a
 # silent-pass bug (join(needs.*.result) == "" on this forge's act_runner) to hide inside.
 #
-# PATH DISCOVERY is delegated to scripts/manifest-paths.py, which already excludes the two
-# Kustomizations in kubernetes/apps/clusters/ai whose sourceRef points at a different repo
-# (agentforge-tenants, platform) — see that script's docstring. Every path it prints is proven
-# (verify_buildable) to contain a kustomization.yaml before this script ever shells out to docker.
+# PATH DISCOVERY is delegated to scripts/manifest-paths.py, which RESOLVES every Kustomization's
+# sourceRef against the GitRepository objects the tree declares and excludes only the two whose
+# resolved url is a different repo AND that are on its reviewed allowlist (agentforge-tenants,
+# platform) — every other non-local shape is a non-zero exit there; see that script's docstring.
+# Every path it prints is proven (verify_buildable) to contain a kustomization.yaml before this
+# script ever shells out to docker. It prints which parser it used (PyYAML, or the strict stdlib
+# fallback that is what the CI runner has) to stderr, so the log shows it.
 #
 # IMAGES ARE DIGEST-PINNED (kustomize v5.4.3, kubeconform v0.6.7) — a floating tag is a
 # supply-chain surface this gate would otherwise reintroduce on every run. Re-pin by re-running:
@@ -25,6 +28,14 @@
 # a CRD kubeconform cannot find a schema for must not become a false-negative failure on this
 # script's first day. `kustomize build` succeeding is the hard gate; kubeconform is additive on
 # top of it. See "SKIP LIST" below for the one adjustment the first real run required.
+#
+# ACCEPTED LIMITATION of -ignore-missing-schemas: kubeconform decides "missing schema" from the
+# document's own apiVersion/kind, so a MISSPELLED built-in kind (`kind: Deploymnet`) or apiVersion
+# is indistinguishable from an unknown CRD — it is counted as Skipped, not failed, and -strict
+# never sees it (-strict only protects a resource whose schema resolves). Such a typo still fails
+# at `kubectl apply`/Flux time, and `kustomize build` still has to render it, but THIS gate will
+# not catch it. Dropping the flag would turn every un-catalogued CRD in this estate into a false
+# failure instead; the trade is recorded here rather than hidden.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -87,13 +98,20 @@ if [ "${#PATHS[@]}" -eq 0 ]; then
 fi
 echo "discovered ${#PATHS[@]} locally-buildable Flux Kustomization paths"
 
+# Rendered filename = <2-digit index>-<slug>.yaml. The index is what makes the name INJECTIVE:
+# the slug alone (leading "./" stripped, "/" flattened to "__") is only for readability and is
+# NOT collision-safe — ./a/b and ./a__b flatten to the same slug, and the second build would
+# silently overwrite the first, so kubeconform would validate one rendered manifest for two built
+# paths. The index makes every path's render its own file whatever its slug; the count check
+# after the loop is the belt to that brace.
+i=0
 for path in "${PATHS[@]}"; do
-  # slug: strip leading "./", flatten the rest to a flat filename for out/<name>.yaml
-  name="${path#./}"
-  name="${name//\//__}"
+  i=$((i + 1))
+  slug="${path#./}"
+  slug="${slug//\//__}"
   echo "== kustomize build $path =="
   docker run --rm -v "$REPO_ROOT:/work:ro" -w /work "$KUSTOMIZE_IMAGE" \
-    build "$path" > "$OUT_DIR/$name.yaml"
+    build "$path" > "$OUT_DIR/$(printf '%02d' "$i")-$slug.yaml"
 done
 
 # kubeconform's image has no shell (distroless), so `/out/*.yaml` cannot glob INSIDE the
@@ -103,6 +121,10 @@ CONTAINER_FILES=()
 for f in "$OUT_DIR"/*.yaml; do
   CONTAINER_FILES+=("/out/$(basename "$f")")
 done
+if [ "${#CONTAINER_FILES[@]}" -ne "${#PATHS[@]}" ]; then
+  echo "built ${#PATHS[@]} paths but found ${#CONTAINER_FILES[@]} rendered files in $OUT_DIR — refusing to validate a partial set" >&2
+  exit 1
+fi
 
 echo "== kubeconform -strict over ${#CONTAINER_FILES[@]} rendered manifests =="
 docker run --rm -v "$OUT_DIR:/out:ro" "$KUBECONFORM_IMAGE" \
