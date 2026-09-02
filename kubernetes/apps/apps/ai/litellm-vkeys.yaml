@@ -153,7 +153,7 @@ spec:
         - name: seed
           # Reuse the pinned litellm image (has python3) — no new image dependency. Same digest as the
           # litellm-local Deployment; bump together with it.
-          image: ghcr.io/berriai/litellm@sha256:078f96272f0c84da383e6a1f197478390b5204a86dcf00a181bcfe02a00e5dfa
+          image: ghcr.io/berriai/litellm@sha256:a53a7d3ffebede1925bd3ee8a21e4a7b9b63e2e68ec883af136edcccb6eeb82c
           command: ["python3", "/spec/seed.py"]
           env:
             # In-cluster ClusterIP of the litellm-lan Service (a NodePort also has a ClusterIP).
