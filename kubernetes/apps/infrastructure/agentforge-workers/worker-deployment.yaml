@@ -139,10 +139,11 @@ spec:
           # CP-rendered pool's probes and this operator-managed one, not two.
           #   startupProbe: "has it finished booting?", NOT "is it healthy?" — serve() does its config
           #   fetch BEFORE binding the port, so every probe before that point is a connection refusal
-          #   rather than a verdict. 5 x 24 = 120s budget matches the config-fetch timeout the renderer
-          #   derives from (a worker that blows this budget is killed the same way a config failure
-          #   already kills it: CrashLoopBackOff, safe because it has not started the orchestrator loop
-          #   and holds no claims yet).
+          #   rather than a verdict. 5 x 24 = 120s, the same budget the renderer derives: ~4x the one
+          #   bounded term (a single 30s config GET, no retry loop) plus headroom for interpreter start
+          #   / cold imports on a fresh node (a worker that blows this budget is killed the same way a
+          #   config failure already kills it: CrashLoopBackOff, safe because it has not started the
+          #   orchestrator loop and holds no claims yet).
           startupProbe:
             httpGet: { path: /healthz, port: webhook }
             periodSeconds: 5

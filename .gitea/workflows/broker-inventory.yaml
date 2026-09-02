@@ -87,8 +87,11 @@ jobs:
       # The generator's own unit tests. These existed before this step did and ran NOWHERE, which
       # made them documentation rather than a guard — the seed-coverage record's parsing in
       # particular has already regressed once (a file-wide regex swept missingOauthPaths back in as
-      # declared, and the record oscillated between two states on successive runs). Stdlib
-      # unittest only; no dependency to install.
+      # declared, and the record oscillated between two states on successive runs). Runs on
+      # unittest (stdlib) plus PyYAML (scripts/tests/test_worker_probes.py, C-P0-06) — PyYAML is
+      # the runner's system package (Ubuntu 24.04 cloud image; same unguarded-baseline assumption
+      # scripts/check-tenant-guard-cel.py makes), not something this step installs, so a runner
+      # image change that drops it fails this step rather than silently skipping the test.
       - name: Script unit tests
         shell: bash
         run: |
