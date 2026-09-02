@@ -1,0 +1,114 @@
+# reviewbot — receiver + worker + reconciler in one systemd service. Secrets come from
+# ansible/secrets/reviewbot.sops.yaml (dedicated .sops.yaml rule — the generic
+# ansible/secrets rule encrypts only github_app_private_key, a recorded trap):
+#   reviewbot_webhook_secret: <hex>
+#   reviewbot_claude_pat: <gitea PAT for reviewer-claude, scope write:repository>
+# The whole role skips gracefully while that file is absent.
+- name: Check for the reviewbot secrets file (control node)
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/secrets/reviewbot.sops.yaml"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: reviewbot_secrets_stat
+
+- name: Load reviewbot secrets (SOPS)
+  community.sops.load_vars:
+    file: "{{ playbook_dir }}/secrets/reviewbot.sops.yaml"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: reviewbot_secrets_stat.stat.exists
+
+- name: Reviewbot directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/reviewbot, owner: "{{ pr_reviewer_user }}", mode: "0750" }
+    - { path: /usr/local/lib/reviewbot, owner: root, mode: "0755" }
+    - { path: /var/lib/reviewbot, owner: "{{ pr_reviewer_user }}", mode: "0750" }
+
+# The packaged node-exporter textfile dir is root-owned; the service (runs as the agent
+# user) writes its heartbeat metrics there atomically. Group-writable via the agent group.
+- name: Make the textfile collector dir writable for the reviewbot user
+  ansible.builtin.file:
+    path: "{{ pr_reviewer_textfile | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ pr_reviewer_user }}"
+    mode: "0775"
+
+- name: Install reviewbot.py
+  ansible.builtin.copy:
+    src: reviewbot.py
+    dest: /usr/local/lib/reviewbot/reviewbot.py
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart reviewbot
+
+- name: Render reviewbot config
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: /etc/reviewbot/config.json
+    owner: "{{ pr_reviewer_user }}"
+    group: "{{ pr_reviewer_user }}"
+    mode: "0640"
+  notify: Restart reviewbot
+
+- name: Install the bot PAT
+  ansible.builtin.copy:
+    content: "{{ reviewbot_claude_pat }}\n"
+    dest: /etc/reviewbot/pat
+    owner: "{{ pr_reviewer_user }}"
+    group: "{{ pr_reviewer_user }}"
+    mode: "0600"
+  no_log: true
+  when: reviewbot_claude_pat is defined
+  notify: Restart reviewbot
+
+- name: Install the webhook secret
+  ansible.builtin.copy:
+    content: "{{ reviewbot_webhook_secret }}\n"
+    dest: /etc/reviewbot/webhook-secret
+    owner: "{{ pr_reviewer_user }}"
+    group: "{{ pr_reviewer_user }}"
+    mode: "0600"
+  no_log: true
+  when: reviewbot_webhook_secret is defined
+  notify: Restart reviewbot
+
+# ufw default-denies inbound on the workers (dev_worker firewall.yml); the Gitea webhook
+# delivery is LAN-sourced (cluster egress masquerades to node IPs), same as the agentforge
+# receiver rule.
+- name: Allow LAN inbound on the reviewbot webhook port
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ pr_reviewer_allow_cidr }}"
+    to_port: "{{ pr_reviewer_port }}"
+    proto: tcp
+    comment: reviewbot webhook receiver from LAN
+
+- name: Install the reviewbot unit
+  ansible.builtin.template:
+    src: reviewbot.service.j2
+    dest: /etc/systemd/system/reviewbot.service
+    mode: "0644"
+  notify: Restart reviewbot
+
+# Skipped in check mode like the herdr unit: systemd state on a never-written unit file
+# breaks a fresh-host --check preview.
+- name: Enable + start reviewbot
+  ansible.builtin.systemd:
+    name: reviewbot.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - not ansible_check_mode
+    - reviewbot_claude_pat is defined
+    - reviewbot_webhook_secret is defined

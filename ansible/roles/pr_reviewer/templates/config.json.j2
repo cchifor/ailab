@@ -1,0 +1,20 @@
+{
+  "persona": {{ pr_reviewer_persona | to_json }},
+  "listen": {{ pr_reviewer_listen | to_json }},
+  "port": {{ pr_reviewer_port }},
+  "gitea_url": {{ pr_reviewer_gitea_url | to_json }},
+  "repos": {{ pr_reviewer_repos | to_json }},
+  "ignore_authors": {{ pr_reviewer_ignore_authors | to_json }},
+  "pat_file": "/etc/reviewbot/pat",
+  "webhook_secret_file": "/etc/reviewbot/webhook-secret",
+  "posting_disable_flag": "/etc/reviewbot/posting-disabled",
+  "inhibit_flag": "/etc/reviewbot/inhibit",
+  "state_db": "/var/lib/reviewbot/state.sqlite",
+  "textfile": {{ pr_reviewer_textfile | to_json }},
+  "llm_cmd": {{ pr_reviewer_llm_cmd | to_json }},
+  "llm_timeout_s": {{ pr_reviewer_llm_timeout_s }},
+  "max_diff_bytes": {{ pr_reviewer_max_diff_bytes }},
+  "max_comments": {{ pr_reviewer_max_comments }},
+  "max_attempts": {{ pr_reviewer_max_attempts }},
+  "reconcile_s": {{ pr_reviewer_reconcile_s }}
+}

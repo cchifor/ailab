@@ -1,0 +1,22 @@
+# {{ ansible_managed }} — reviewbot ({{ pr_reviewer_persona }} persona).
+# Runs as the agent user (Phase 1; a dedicated per-persona user is Phase 2 hardening —
+# the LLM subprocess needs the user's claude subscription auth in ~/.claude).
+[Unit]
+Description=reviewbot — LLM PR reviewer ({{ pr_reviewer_persona }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ pr_reviewer_user }}
+Group={{ pr_reviewer_user }}
+Environment=HOME=/home/{{ pr_reviewer_user }}
+Environment=PATH=/home/{{ pr_reviewer_user }}/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /usr/local/lib/reviewbot/reviewbot.py /etc/reviewbot/config.json
+Restart=always
+RestartSec=10
+MemoryMax=2G
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

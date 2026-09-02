@@ -1,0 +1,6 @@
+- name: Restart reviewbot
+  ansible.builtin.systemd:
+    name: reviewbot.service
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode

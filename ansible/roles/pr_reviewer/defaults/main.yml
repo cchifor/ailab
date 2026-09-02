@@ -1,0 +1,29 @@
+# pr_reviewer — event-driven LLM PR review bot (plan: agentforge
+# plans/2026-09-02-ai-pr-review-plan.md). Phase-1 posture: shadow mode, COMMENT-only,
+# central allowlist (no per-repo policy files yet), single persona per host.
+# Enabled per-host via host_vars (dev-worker-2 = claude persona), never in group_vars.
+pr_reviewer_enabled: false
+pr_reviewer_persona: claude
+pr_reviewer_user: c4
+pr_reviewer_listen: "0.0.0.0"
+pr_reviewer_port: 8477
+pr_reviewer_gitea_url: "https://git.chifor.me"
+# Central allowlist — the ONLY thing that admits a repo in Phase 1. Fixture first.
+pr_reviewer_repos:
+  - cchifor/review-bot-fixture
+# PRs authored by any bot identity are never reviewed (no bot->bot trigger loops).
+pr_reviewer_ignore_authors:
+  - reviewer-claude
+  - reviewer-codex
+  - agentforge-ci-bot
+# The headless LLM command (argv list; -p/--output-format/tool restrictions are appended
+# by the service). The claude binary lives in the agent user's ~/.local/bin.
+pr_reviewer_llm_cmd:
+  - "/home/c4/.local/bin/claude"
+pr_reviewer_llm_timeout_s: 300
+pr_reviewer_max_diff_bytes: 400000
+pr_reviewer_max_comments: 15
+pr_reviewer_max_attempts: 5
+pr_reviewer_reconcile_s: 600
+pr_reviewer_textfile: /var/lib/prometheus/node-exporter/reviewbot.prom
+pr_reviewer_allow_cidr: "{{ dev_worker_lan_cidr }}"
