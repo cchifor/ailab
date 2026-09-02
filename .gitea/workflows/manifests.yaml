@@ -22,8 +22,14 @@ on:
   # is closed: git.chifor.me runs with DISABLE_REGISTRATION=true, ENABLE_OPENID_SIGNUP=false and
   # REQUIRE_SIGNIN_VIEW=true (kubernetes/apps/apps/gitea/gitea.yaml), so the only accounts that can
   # open a PR are the operator-provisioned Authelia OIDC ones — there is no anonymous or external
-  # contributor path. broker-inventory.yaml already runs pull_request on the same pool under the
-  # same assumption; if the forge is ever opened up, gate this trigger to trusted authors first.
+  # contributor path. Verified LIVE, not just from the desired-state manifest (2026-09-02): an
+  # anonymous GET of /api/v1/repos/cchifor/ailab is 403, /explore redirects to the login page, and
+  # /user/sign_up renders "Registration is disabled". broker-inventory.yaml already runs
+  # pull_request on the same pool under the same assumption. NOT gated by author on purpose: every
+  # account that exists is already a trusted one, an author allowlist would be a second list to
+  # keep in sync with Authelia, and this file's fail-closed idiom forbids `if:` conditions on the
+  # gate (a mistyped allowlist would silently skip it). If the forge is ever opened to external
+  # accounts, that is the moment to gate this trigger to trusted authors first.
   pull_request:
 
 permissions:

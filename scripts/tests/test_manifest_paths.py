@@ -914,11 +914,12 @@ class RegexFallbackParityWithPyYAML(_FixtureRepo):
         with _regex_mode(), self.assertRaises(mp.DiscoveryError):
             mp.discover_paths()
 
-    def test_sequence_under_a_scalar_valued_key_is_rejected_in_both_modes(self):
-        # `interval: 10m` followed by an indented `- invalid` is NOT YAML (a real parser rejects
-        # it). The fallback must not quietly attach the stray lines to `interval` just because it
-        # never extracts that key — that would let CI pass a manifest Flux rejects (round-3 codex
-        # finding, :211).
+    def test_deeper_line_under_a_scalar_valued_key_is_refused_by_the_fallback(self):
+        # `interval: 10m` followed by a DEEPER-indented `- invalid` is, strictly, a legal
+        # multi-line plain scalar ("10m - invalid") — PyYAML reads it and discovery proceeds (Flux
+        # would then reject the duration, but that is not this tool's call). The fallback refuses
+        # multi-line plain scalars by design (fail closed, never silently attach stray lines to a
+        # key it does not extract — round-3 codex finding, :211).
         (self.cluster_ai / "reordered.yaml").write_text(
             "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
             "kind: Kustomization\n"
@@ -933,9 +934,14 @@ class RegexFallbackParityWithPyYAML(_FixtureRepo):
             "    name: flux-system\n"
             "  path: ./kubernetes/apps/reordered\n"
         )
-        self._assert_raises_both_modes()
+        self.assertEqual(mp.discover_paths(), ["./kubernetes/apps/reordered"])
+        with _regex_mode(), self.assertRaises(mp.DiscoveryError) as cm:
+            mp.discover_paths()
+        self.assertIn("interval", str(cm.exception))
 
     def test_sequence_at_key_indent_under_a_scalar_valued_key_is_rejected_in_both_modes(self):
+        # `interval: 10m` then `- invalid` at the KEY's indent is not YAML at all — PyYAML rejects
+        # it — and the fallback must too rather than attach it to `interval` (round-3 codex, :211).
         (self.cluster_ai / "reordered.yaml").write_text(
             "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
             "kind: Kustomization\n"

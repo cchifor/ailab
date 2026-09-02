@@ -28,10 +28,13 @@ where Flux's bootstrap `flux-system` GitRepository — url `.../cchifor/
 ailab.git`, i.e. this repo — lives) into a `(namespace, name) -> url` table,
 then classifies each Kustomization by looking its reference UP in that table:
 
-  * LOCAL    — the resolved object's url identifies THIS repo (`cchifor/
-               ailab`; `is_this_repo()` accepts the in-cluster Gitea url and
-               the GitHub push-mirror url ADR 0017 keeps as the rollback,
-               since both carry the same content). The path is built.
+  * LOCAL    — the resolved object's url identifies THIS repo: path
+               `cchifor/ailab` on one of the hosts that actually serve it
+               (`LOCAL_REPO_HOSTS`: the in-cluster Gitea Services, the
+               public Gitea hostname, and the GitHub push-mirror ADR 0017
+               keeps as the rollback — same content on all of them). The
+               same slug on any other host is NOT this repo. The path is
+               built.
   * EXTERNAL — the resolved object's url is a different repo AND the object
                is a reviewed entry in `EXPECTED_EXTERNAL_SOURCES`, the closed
                allowlist of externally-sourced objects this step is ALLOWED
@@ -68,9 +71,13 @@ a few expected lines: it is a small, STRICT block-mapping reader that derives
 indentation from the document itself (any width), tolerates blank/comment
 lines, key order, flow-style `sourceRef: {kind: .., name: ..}`, quoted and
 comment-trailed scalars — and raises `DiscoveryError` on anything it cannot
-resolve unambiguously (aliases/anchors, tags, block scalars, a flow-style
-`spec:`/`metadata:`, an unterminated quote, a line it cannot read as a
-mapping entry, a document with content but no top-level `kind:`). It never
+resolve unambiguously (aliases/anchors, tags, block scalars in an extracted
+field, a flow-style `spec:`/`metadata:`, an unterminated quote, a line it
+cannot read as a mapping entry, lines nested under a key that already has a
+plain scalar value, a document with content but no top-level `kind:`). It
+is deliberately stricter than YAML in one respect: a multi-line plain scalar
+or a multi-line flow collection is refused (fail closed) rather than read —
+neither appears in a Flux manifest this tree would accept. It never
 silently skips a document: a Kustomization the fallback failed to see would
 be a path that never gets built while the gate stays green, which is the one
 outcome this file exists to prevent. Both parsers are exercised by
@@ -98,10 +105,22 @@ except ImportError:  # pragma: no cover — exercised by the regex-fallback test
 REPO = Path(__file__).resolve().parents[1]
 CLUSTER_AI = REPO / "kubernetes/apps/clusters/ai"
 
-#: `<owner>/<repo>` of THIS repository. A GitRepository whose url ends in this slug (any scheme,
-#: host, port, `.git` suffix or not — the in-cluster Gitea url in gotk-sync.yaml and the GitHub
-#: push-mirror url ADR 0017 keeps as the rollback both do) is a source of THIS repo's content.
+#: `<owner>/<repo>` of THIS repository, and the ONLY hosts that serve it: the in-cluster Gitea
+#: http and ssh Services (gotk-sync.yaml / agentforge-tenants-source.yaml use them), the public
+#: Gitea hostname, and the GitHub push-mirror ADR 0017 keeps as the rollback. A GitRepository url
+#: is this repo's content only when BOTH the host is one of these AND its path is exactly this
+#: slug (`.git` suffix or not, any scheme/userinfo/port, scp-like form included). The slug alone
+#: is not identity: `unrelated.example/cchifor/ailab` serves whatever that server holds, and Flux
+#: would apply THAT, not this checkout — so it is not local, and not a reviewed external either.
 LOCAL_REPO_SLUG = "cchifor/ailab"
+LOCAL_REPO_HOSTS = frozenset(
+    {
+        "gitea-http.gitea.svc.cluster.local",
+        "gitea-ssh.gitea.svc.cluster.local",
+        "git.chifor.me",
+        "github.com",
+    }
+)
 
 #: Reviewed, closed allowlist of (namespace, name) GitRepository objects that are known and
 #: accepted to be externally sourced (see the module docstring) — the ONLY resolved sources
@@ -198,6 +217,14 @@ def _mapping(lines: list[str], start: int, stop: int, parent_indent: int, where:
         if indent > child_indent or _SEQ_ITEM_RE.match(line):
             if current is None:
                 raise DiscoveryError(f"{where}: line {i + 1}: unexpected indentation: {line.strip()!r}")
+            if not _owns_children(entries[current][1]):
+                # `interval: 10m` followed by a deeper line (or a `- item` at its own indent) is
+                # not YAML — a real parser rejects it — and this reader must not quietly attach
+                # the stray lines to a key it never extracts: CI would pass a manifest Flux rejects.
+                raise DiscoveryError(
+                    f"{where}: line {i + 1}: {line.strip()!r} is nested under `{current}: "
+                    f"{entries[current][1].strip()}`, which already has an inline value — not valid YAML"
+                )
             entries[current][3] = i + 1
             i += 1
             continue
@@ -211,6 +238,17 @@ def _mapping(lines: list[str], start: int, stop: int, parent_indent: int, where:
         current = key
         i += 1
     return entries
+
+
+_BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[-+]?[1-9]?|[1-9]?[-+]?)(?:\s+#.*)?$")
+
+
+def _owns_children(raw_value: str) -> bool:
+    """May lines indented under a `key: <raw_value>` entry belong to it? Yes when the value is
+    empty (a nested block follows), a comment, or a block-scalar indicator (`|`, `>-`, ...) whose
+    body IS the indented lines. A plain or quoted scalar owns nothing below it."""
+    v = raw_value.strip()
+    return not v or v.startswith("#") or bool(_BLOCK_SCALAR_RE.match(v))
 
 
 def _scalar_entry(lines: list[str], entry: list, where: str) -> str | None:
@@ -341,16 +379,33 @@ def _rel(path: Path) -> str:
 # Resolution
 # --------------------------------------------------------------------------------------------
 
-_SLUG_RE = re.compile(r"[/:]([^/:]+/[^/:]+?)(?:\.git)?/?$")
+#: `scheme://[user@]host[:port]/path` and the scp-like `[user@]host:path` form git and Flux accept.
+_URL_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/\s]+@)?(?P<host>[^:/\s]+)(?::\d+)?/(?P<path>[^\s]*)$", re.I)
+_SCP_RE = re.compile(r"^(?:[^@/\s]+@)?(?P<host>[^:/\s]+):(?P<path>[^\s]*)$")
+
+
+def _host_and_slug(url: str) -> tuple[str, str] | None:
+    """(host, owner/repo) of a git url, or None if it is not one of the forms this tool reads."""
+    u = url.strip()
+    m = _URL_RE.match(u) if "://" in u else (_SCP_RE.match(u) or _URL_RE.match(u))
+    if not m:
+        return None
+    path = m.group("path").strip("/")
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    return m.group("host").lower(), path
 
 
 def is_this_repo(url: str | None) -> bool:
-    """Does a GitRepository url identify THIS repository (LOCAL_REPO_SLUG), whatever the scheme,
-    host or port — the in-cluster Gitea url and the GitHub push-mirror url alike?"""
+    """Does a GitRepository url identify THIS repository — LOCAL_REPO_SLUG on one of the
+    LOCAL_REPO_HOSTS — in any url form Flux accepts? Same slug on any other host is NOT this repo."""
     if not isinstance(url, str):
         return False
-    m = _SLUG_RE.search(url.strip())
-    return bool(m) and m.group(1).lower() == LOCAL_REPO_SLUG.lower()
+    parsed = _host_and_slug(url)
+    if parsed is None:
+        return False
+    host, slug = parsed
+    return host in LOCAL_REPO_HOSTS and slug.lower() == LOCAL_REPO_SLUG.lower()
 
 
 def _source_manifests(cluster_ai: Path) -> list[Path]:
