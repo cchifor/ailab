@@ -76,7 +76,9 @@ variable "data_datastore" {
 }
 variable "data_gb" {
   type    = number
-  default = 192
+  # 192 -> 256 during the 2026-09-02 registry-full incident (platform#1037): grown LIVE via
+  # pct resize (the grow-only path this module documents), so the next apply is a no-op.
+  default = 256
 }
 
 # ---- Debian 13 LXC template (matches ai-lxc). Distinct file_name so a destroy here never deletes

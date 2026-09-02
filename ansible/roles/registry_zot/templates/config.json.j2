@@ -16,7 +16,8 @@
             { "patterns": ["^latest$"] },
             { "patterns": ["^ailab$"] },
             { "patterns": ["^ailab-prev\\d*$"] },
-            { "patterns": ["^sha-.*"], "mostRecentlyPushedCount": {{ registry_zot_strive_keep_recent }} }
+            { "patterns": ["^sha-.*"], "mostRecentlyPushedCount": {{ registry_zot_strive_keep_recent }} },
+            { "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"] }
           ]
         },
         {
@@ -25,7 +26,8 @@
           "keepTags": [
             { "patterns": ["^latest$"] },
             { "patterns": ["^[0-9a-f]{40}$"], "mostRecentlyPushedCount": {{ registry_zot_agentforge_keep_recent }} },
-            { "patterns": ["^[0-9a-f]{7,12}$"], "mostRecentlyPushedCount": {{ registry_zot_agentforge_keep_recent }} }
+            { "patterns": ["^[0-9a-f]{7,12}$"], "mostRecentlyPushedCount": {{ registry_zot_agentforge_keep_recent }} },
+            { "patterns": ["^[0-9a-f]{7,40}$"], "mostRecentlyPulledCount": {{ registry_zot_agentforge_keep_pulled }} }
           ]
         },
         {

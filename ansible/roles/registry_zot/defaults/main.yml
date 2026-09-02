@@ -115,3 +115,10 @@ registry_zot_strive_keep_recent: 100
 # reason as registry_zot_strive_keep_recent (a pushedWithin/pulledWithin window drops the deployed
 # pin in quiet periods and balloons under heavy CI).
 registry_zot_agentforge_keep_recent: 40
+# Keeps actively-PULLED tags alive past the pushed-count window: digest-pinned LIVE images
+# whose tags age out of the count would otherwise be GC'd and break the next reschedule
+# (the 2026-06-28 strive ImagePullBackOff shape). Residual: a live pin never re-pulled for
+# 30+ builds can still age out - the durable fix is a protect-tag job like strive's,
+# tracked as follow-up. The live config also carried a hand-applied ailab-<digest> protect
+# keepTag missing from this template; reconciled in the same change.
+registry_zot_agentforge_keep_pulled: 10
