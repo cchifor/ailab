@@ -14,7 +14,7 @@ creation_rules:
   # Reviewbot secrets (PR review bots — ansible/roles/pr_reviewer). Same reason as dev-worker
   # above — MUST precede the generic ansible/secrets rule.
   - path_regex: ansible[/\\]secrets[/\\]reviewbot\.sops\.ya?ml$
-    encrypted_regex: ^(reviewbot_claude_pat|reviewbot_codex_pat|reviewbot_webhook_secret)$
+    encrypted_regex: ^(reviewbot_[a-z0-9]+_pat|reviewbot_[a-z0-9]+_webhook_secret)$
     age: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
   # Registry secrets. Same reason as dev-worker above — MUST precede the generic ansible/secrets rule
   # (which would otherwise encrypt only github_app_private_key and leave these two keys plaintext).

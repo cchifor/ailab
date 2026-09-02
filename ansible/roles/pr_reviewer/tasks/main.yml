@@ -1,8 +1,10 @@
 # reviewbot — receiver + worker + reconciler in one systemd service. Secrets come from
 # ansible/secrets/reviewbot.sops.yaml (dedicated .sops.yaml rule — the generic
-# ansible/secrets rule encrypts only github_app_private_key, a recorded trap):
-#   reviewbot_webhook_secret: <hex>
-#   reviewbot_claude_pat: <gitea PAT for reviewer-claude, scope write:repository>
+# ansible/secrets rule encrypts only github_app_private_key, a recorded trap). STRICTLY
+# per-persona — every reviewer identity has its own Gitea bot user, own PAT, and own
+# webhook secret, so revocation/rotation and attribution stay independent:
+#   reviewbot_<persona>_pat: <gitea PAT for reviewer-<persona>, scope write:repository>
+#   reviewbot_<persona>_webhook_secret: <hex — HMAC for THAT persona's org webhook>
 # The whole role skips gracefully while that file is absent.
 - name: Check for the reviewbot secrets file (control node)
   ansible.builtin.stat:
@@ -19,6 +21,12 @@
   become: false
   run_once: true
   when: reviewbot_secrets_stat.stat.exists
+
+- name: Resolve this persona's secrets
+  ansible.builtin.set_fact:
+    _reviewbot_pat: "{{ lookup('vars', 'reviewbot_' ~ pr_reviewer_persona ~ '_pat', default='') }}"
+    _reviewbot_webhook_secret: "{{ lookup('vars', 'reviewbot_' ~ pr_reviewer_persona ~ '_webhook_secret', default='') }}"
+  no_log: true
 
 - name: Reviewbot directories
   ansible.builtin.file:
@@ -62,24 +70,24 @@
 
 - name: Install the bot PAT
   ansible.builtin.copy:
-    content: "{{ reviewbot_claude_pat }}\n"
+    content: "{{ _reviewbot_pat }}\n"
     dest: /etc/reviewbot/pat
     owner: "{{ pr_reviewer_user }}"
     group: "{{ pr_reviewer_user }}"
     mode: "0600"
   no_log: true
-  when: reviewbot_claude_pat is defined
+  when: _reviewbot_pat | length > 0
   notify: Restart reviewbot
 
 - name: Install the webhook secret
   ansible.builtin.copy:
-    content: "{{ reviewbot_webhook_secret }}\n"
+    content: "{{ _reviewbot_webhook_secret }}\n"
     dest: /etc/reviewbot/webhook-secret
     owner: "{{ pr_reviewer_user }}"
     group: "{{ pr_reviewer_user }}"
     mode: "0600"
   no_log: true
-  when: reviewbot_webhook_secret is defined
+  when: _reviewbot_webhook_secret | length > 0
   notify: Restart reviewbot
 
 # ufw default-denies inbound on the workers (dev_worker firewall.yml); the Gitea webhook
@@ -110,5 +118,5 @@
     daemon_reload: true
   when:
     - not ansible_check_mode
-    - reviewbot_claude_pat is defined
-    - reviewbot_webhook_secret is defined
+    - _reviewbot_pat | length > 0
+    - _reviewbot_webhook_secret | length > 0
