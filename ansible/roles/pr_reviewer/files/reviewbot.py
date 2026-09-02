@@ -241,7 +241,18 @@ def run_llm(title, desc, diff_text, rubric=""):
                                  "Grep", "Glob", "LS", "WebFetch", "WebSearch",
                                  "NotebookEdit", "Task", "Agent"]
     if sudo_user:
-        os.chmod(workdir, 0o777)  # the isolated user must write last-message.md here
+        # The out dir belongs to the ISOLATED user (0700): with a world-writable dir any
+        # local process could pre-create last-message.md and have forged JSON posted as
+        # the review (reviewer-codex finding). c4 never opens the file itself - it is
+        # retrieved and cleaned through sudo as the same isolated user.
+        r = subprocess.run(["sudo", "-n", "-u", sudo_user, "mktemp", "-d",
+                            "/tmp/reviewbot-llm-XXXXXX"], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"isolated tmpdir failed: {r.stderr[-150:]}")
+        out_dir = r.stdout.strip()
+        out_file = os.path.join(out_dir, "last-message.md")
+        args = [a if a != os.path.join(workdir, "last-message.md") else out_file
+                for a in args]
         args = ["sudo", "-n", "-u", sudo_user, f"HOME=/home/{sudo_user}"] + args
     try:
         r = subprocess.run(args, input=prompt, capture_output=True, text=True,
@@ -250,7 +261,11 @@ def run_llm(title, desc, diff_text, rubric=""):
             # The file is written before exit; read it even on a nonzero rc (a known CLI
             # quirk), and only fail when it is absent or empty.
             text = ""
-            if os.path.exists(out_file):
+            if sudo_user:
+                rr = subprocess.run(["sudo", "-n", "-u", sudo_user, "cat", out_file],
+                                    capture_output=True, text=True)
+                text = rr.stdout if rr.returncode == 0 else ""
+            elif os.path.exists(out_file):
                 text = io.open(out_file, encoding="utf-8").read()
             if not text.strip():
                 raise RuntimeError(f"codex produced no output (exit {r.returncode}): {r.stderr[-300:]}")
@@ -261,7 +276,10 @@ def run_llm(title, desc, diff_text, rubric=""):
             text = envelope.get("result", "")
     finally:
         try:
-            if os.path.exists(out_file):
+            if sudo_user:
+                subprocess.run(["sudo", "-n", "-u", sudo_user, "rm", "-rf",
+                                os.path.dirname(out_file)], capture_output=True)
+            elif os.path.exists(out_file):
                 os.remove(out_file)
             os.rmdir(workdir)
         except OSError:
@@ -284,19 +302,45 @@ def pr_ok(repo, pr, head_sha):
     return d
 
 
+def iter_reviews(repo, pr):
+    """All reviews, paginated (long-lived PRs exceed one page and Gitea returns
+    oldest-first - unpaginated reads would silently miss the newest markers)."""
+    page = 1
+    while page <= 10:
+        batch = api(f"/repos/{repo}/pulls/{pr}/reviews?limit=50&page={page}")
+        if not batch:
+            return
+        yield from batch
+        if len(batch) < 50:
+            return
+        page += 1
+
+
+def marker_of(rv):
+    """A marker is only credible from the persona's own bot account: reviewer-<persona>.
+    Anyone can paste marker TEXT into a review body (reviewer-codex finding on ailab#463 -
+    a forged verdict=clean pair would have automerged); the author check is the gate."""
+    m = MARKER_RE.search(rv.get("body") or "")
+    if not m:
+        return None
+    if ((rv.get("user") or {}).get("login") or "") != f"reviewer-{m.group(1)}":
+        return None
+    return m
+
+
 def existing_marker(repo, pr, head_sha):
-    for rv in api(f"/repos/{repo}/pulls/{pr}/reviews?limit=50"):
-        m = MARKER_RE.search(rv.get("body") or "")
+    for rv in iter_reviews(repo, pr):
+        m = marker_of(rv)
         if m and m.group(1) == CFG["persona"] and m.group(2) == head_sha:
             return rv["id"]
     return None
 
 
 def persona_verdicts(repo, pr, head_sha):
-    """Latest marker verdict per persona at this head (old markers count as 'findings')."""
+    """Latest authenticated marker verdict per persona at this head."""
     out = {}
-    for rv in api(f"/repos/{repo}/pulls/{pr}/reviews?limit=50"):
-        m = MARKER_RE.search(rv.get("body") or "")
+    for rv in iter_reviews(repo, pr):
+        m = marker_of(rv)
         if m and m.group(2) == head_sha:
             out[m.group(1)] = m.group(3) or "findings"
     return out
