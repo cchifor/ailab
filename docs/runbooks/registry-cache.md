@@ -68,13 +68,35 @@ path. Zot `gc` (every `gcInterval`, now 1h) reclaims the orphaned blobs.
 ## Disk / retention
 
 The store lives on the mp0 data disk (now **192 GiB**, `kubernetes/infra/registry-lxc` `data_gb`). A
-`storage.retention` policy (config.json.j2) bounds growth: `strive/**` keeps `latest` + the
-`registry_zot_strive_keep_recent` (100) most-recently-pushed `sha-<commit>` tags per repo and GC
-reclaims the rest; mirror/cache repos are protected (`deleteUntagged:false`, keep all) so
-digest-pinned base images are never collected. If the store ever fills again (writes fail with
-`blob upload unknown` / `provided digest did not match` while reads still 200), grow it online —
-`pct resize <vmid> mp0 +NG` then bump `data_gb` + `tofu apply` to match — and/or lower
-`registry_zot_strive_keep_recent`.
+`storage.retention` policy (config.json.j2) bounds growth with policies evaluated **in order**,
+each more specific one listed before the catch-all it would otherwise fall through to:
+
+- `strive/**` keeps `latest` + the `registry_zot_strive_keep_recent` (100) most-recently-pushed
+  `sha-<commit>` tags per repo and GC reclaims the rest.
+- `agentforge/**` keeps `latest` + the `registry_zot_agentforge_keep_recent` (40)
+  most-recently-pushed tags per repo, under TWO patterns because the four repos do not all push
+  the same tag shape: orchestrator, sandbox and p1-worker (agentforge's
+  `.gitea/workflows/images.yml`: `VER=$(git rev-parse --short HEAD)`, `docker push
+  ${repo}:${VER}` + `${repo}:latest`) push a bare short-sha tag (7-12 hex, NO `sha-` prefix — a
+  different shape from strive's) plus `latest`, matched by `^[0-9a-f]{7,12}$`; agentforge-platform
+  (`agentforge-platform/.gitea/workflows/images.yml`: `docker push "$IMAGE:${{ github.sha }}"` +
+  `"$IMAGE:${{ steps.sha.outputs.short }}"`) pushes BOTH the full 40-hex `github.sha` tag and the
+  short-sha tag, and never pushes `latest` at all — matched by the separate pattern
+  `^[0-9a-f]{40}$`. Added 2026-09-02 after these four repos grew unbounded (184/184/183/240 tags)
+  and filled the store — see ADR 0014 "Update (2026-09-02)".
+- `**` (everything else, i.e. the mirror/cache repos) stays protected (`deleteUntagged:false`,
+  keep all) so digest-pinned base images are never collected.
+
+Both count-based knobs exist for the same reason: the deployed ailab pins reference these images by
+**digest**, and Zot's GC removes untagged manifests — a GC'd digest is un-rollback-able (only
+rebuildable from git), so each window must comfortably outlive how far the live pin can lag `main`.
+If the store ever fills again (writes fail with `blob upload unknown` / `provided digest did not
+match` while reads still 200), grow it online — `pct resize <vmid> mp0 +NG` then bump `data_gb` +
+`tofu apply` to match — and/or lower `registry_zot_strive_keep_recent` /
+`registry_zot_agentforge_keep_recent`. For an immediate unblock without a role change: grow the
+disk as above, or `skopeo delete` old `agentforge/**` tags by hand (see "Refresh a stale cached
+tag" above for the delete pattern) — `ansible-playbook ansible/registry.yml` then converges the
+new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs within ~3h.
 
 ## Verify it's working
 

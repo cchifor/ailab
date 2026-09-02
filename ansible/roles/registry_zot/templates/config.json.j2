@@ -20,6 +20,15 @@
           ]
         },
         {
+          "repositories": ["agentforge/**"],
+          "deleteUntagged": true,
+          "keepTags": [
+            { "patterns": ["^latest$"] },
+            { "patterns": ["^[0-9a-f]{40}$"], "mostRecentlyPushedCount": {{ registry_zot_agentforge_keep_recent }} },
+            { "patterns": ["^[0-9a-f]{7,12}$"], "mostRecentlyPushedCount": {{ registry_zot_agentforge_keep_recent }} }
+          ]
+        },
+        {
           "repositories": ["**"],
           "deleteUntagged": false,
           "keepTags": [{ "patterns": [".*"] }]
