@@ -279,7 +279,9 @@ class RulesLintScriptRunsPromtoolOverEveryRulesFile(unittest.TestCase):
         self.assertIn("promrule-spec.py", text)
         self.assertIn("*-rules.yaml", text)
         self.assertIn("set -euo pipefail", text)
-        self.assertNotIn("|| true", text)
+        # Comment lines are the script explaining its own idiom ("no `|| true`"); only code counts.
+        code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertNotIn("|| true", code)
 
 
 if __name__ == "__main__":
