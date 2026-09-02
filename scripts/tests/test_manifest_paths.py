@@ -2,11 +2,13 @@
 """Unit tests for scripts/manifest-paths.py — the Flux Kustomization path discovery step that
 scripts/manifest-lint.sh feeds to `kustomize build`.
 
-The subject has two obligations: (1) discovery over the REAL repo returns exactly the set of
+The subject has three obligations: (1) discovery over the REAL repo returns exactly the set of
 locally-buildable paths (the recorded set below — see the note on the "24" anchor), never more and
 never fewer, and NEVER a path this checkout cannot actually `kustomize build`; (2) discovery FAILS
 CLOSED — a Kustomization naming a path with no kustomization.yaml is a non-zero exit, proven with a
-fixture, before it is ever proven with the real tree. Run:
+fixture, before it is ever proven with the real tree; (3) an externally-sourced Kustomization is
+excluded ONLY when its sourceRef is a reviewed entry in EXPECTED_EXTERNAL_SOURCES — any other
+non-local sourceRef is ALSO a non-zero exit, not a silent third exclusion. Run:
 
     python -m unittest discover -s scripts/tests -p "test_*.py"
 
@@ -17,7 +19,11 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
 import pathlib
+import shutil
+import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -44,7 +50,12 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 #: Kustomization documents total (23 locally-sourced + the 2 externally-sourced ones above), not
 #: 24+2. The 23-path set below is independently re-derived (every path checked for a real
 #: kustomization.yaml, every exclusion checked against its manifest's own sourceRef) rather than
-#: hand-copied from the spec text; see deviations_from_spec in the implement report.
+#: hand-copied from the spec text; see deviations_from_spec in the implement report. The 2
+#: exclusions are not just "not local", either — mp.EXPECTED_EXTERNAL_SOURCES is a closed,
+#: reviewed allowlist of exactly those two (sourceRef.kind, sourceRef.name) pairs; a THIRD
+#: externally-sourced Kustomization appearing in clusters/ai without a matching entry there makes
+#: discover_paths() raise DiscoveryError rather than silently grow this exclusion set (round-1
+#: codex cross-review finding; see FailClosedOnABrokenFixture.test_unrecognized_external_source_ref_fails_closed).
 EXPECTED_LOCAL_PATHS = frozenset(
     {
         "./kubernetes/apps/infrastructure/agent-sandbox",
@@ -86,6 +97,18 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
     def test_excludes_externally_sourced_kustomizations(self):
         discovered = set(mp.discover_paths())
         self.assertTrue(discovered.isdisjoint(EXCLUDED_EXTERNAL_PATHS))
+
+    def test_real_tree_excludes_only_the_reviewed_allowlist_and_reports_them(self):
+        # Every currently non-local Kustomization in clusters/ai must be covered by the closed
+        # allowlist (discover_paths() itself already fails closed on anything else — proven by
+        # the fixture tests below); this also proves the exclusion is printed, not silent.
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            paths = mp.discover_paths()
+        self.assertEqual(set(paths), set(EXPECTED_LOCAL_PATHS))
+        stderr = buf.getvalue()
+        for _kind, name in mp.EXPECTED_EXTERNAL_SOURCES:
+            self.assertIn(name, stderr)
 
     def test_every_discovered_path_has_a_kustomization_yaml(self):
         # This is verify_buildable()'s own job; re-proving it here means a future edit to
@@ -204,8 +227,8 @@ class FailClosedOnABrokenFixture(unittest.TestCase):
             mp.discover_paths()
 
     def test_externally_sourced_kustomization_is_excluded_even_when_broken(self):
-        # A path in another repo (no local kustomization.yaml, and never could have one) must be
-        # excluded rather than reported as a local failure.
+        # An ALLOWLISTED external source (no local kustomization.yaml, and never could have one)
+        # must be excluded rather than reported as a local failure.
         (self.cluster_ai / "external.yaml").write_text(
             "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
             "kind: Kustomization\n"
@@ -215,11 +238,52 @@ class FailClosedOnABrokenFixture(unittest.TestCase):
             "spec:\n"
             "  sourceRef:\n"
             "    kind: GitRepository\n"
+            "    name: agentforge-tenants\n"
+            "  path: ./somewhere-else\n"
+            "  prune: true\n"
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertEqual(mp.discover_paths(), [])
+        self.assertIn("agentforge-tenants", buf.getvalue())
+
+    def test_unrecognized_external_source_ref_fails_closed(self):
+        # A sourceRef that is neither this repo's own flux-system source NOR a reviewed entry in
+        # EXPECTED_EXTERNAL_SOURCES must not be silently dropped — that would let the gate's
+        # coverage shrink unnoticed the moment anyone adds a Kustomization with a typo'd or
+        # genuinely new sourceRef. It must fail closed instead (round-1 codex review finding).
+        (self.cluster_ai / "mystery.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: mystery\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
             "    name: some-other-repo\n"
             "  path: ./somewhere-else\n"
             "  prune: true\n"
         )
-        self.assertEqual(mp.discover_paths(), [])
+        with self.assertRaises(mp.DiscoveryError):
+            mp.discover_paths()
+
+    def test_missing_source_ref_fails_closed_rather_than_silently_excluded(self):
+        # A Kustomization with no sourceRef at all used to be treated as "not local" and silently
+        # dropped; that is the same silent-narrowing shape as an unrecognized external sourceRef,
+        # so it must fail closed too.
+        (self.cluster_ai / "nosourceref.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: nosourceref\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  path: ./somewhere-else\n"
+            "  prune: true\n"
+        )
+        with self.assertRaises(mp.DiscoveryError):
+            mp.discover_paths()
 
     def test_regex_fallback_also_fails_closed_on_the_broken_fixture(self):
         (self.repo / "kubernetes/apps/broken").mkdir(parents=True)
@@ -334,6 +398,82 @@ class RegexFallbackParityWithPyYAML(unittest.TestCase):
         )
         self.assertEqual(self._discover_via_regex(), mp.discover_paths())
         self.assertEqual(self._discover_via_regex(), ["./kubernetes/apps/reordered"])
+
+
+class ManifestLintScriptFailsClosedOnABrokenFixture(unittest.TestCase):
+    """The tests_first requirement (spec: "a fixture kustomization pointing at a missing file
+    makes the lint script exit non-zero") is about scripts/manifest-lint.sh itself, not just the
+    Python discovery step it calls out to — FailClosedOnABrokenFixture above only proves
+    manifest-paths.py's own main() fails closed. This class actually runs
+    `bash scripts/manifest-lint.sh` as a subprocess against a broken fixture repo (a real copy of
+    the two scripts, no docker network calls) and proves the script's own control flow — the
+    `set -euo pipefail` + "write PATHS_FILE to a real file, not a process substitution" shape
+    documented at the top of manifest-lint.sh — actually propagates that failure to the script's
+    exit code, BEFORE any `docker run` (kustomize build / kubeconform) is ever reached. `docker`
+    is stubbed on PATH (so the script's own `command -v docker` precondition passes) but the stub
+    only ever records that it ran; asserting that marker file is absent afterwards is what proves
+    the failure happened at discovery, not later at a build/validate step (round-1 codex review
+    finding: this was the one failure path the test suite previously only proved manually)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fixture_repo = pathlib.Path(self._tmp.name) / "repo"
+        (self.fixture_repo / "scripts").mkdir(parents=True)
+        shutil.copy(_MOD_PATH, self.fixture_repo / "scripts" / "manifest-paths.py")
+        shutil.copy(
+            _MOD_PATH.parent / "manifest-lint.sh", self.fixture_repo / "scripts" / "manifest-lint.sh"
+        )
+        cluster_ai = self.fixture_repo / "kubernetes/apps/clusters/ai"
+        cluster_ai.mkdir(parents=True)
+        (cluster_ai / "broken.yaml").write_text(
+            "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
+            "kind: Kustomization\n"
+            "metadata:\n"
+            "  name: broken\n"
+            "  namespace: flux-system\n"
+            "spec:\n"
+            "  interval: 10m\n"
+            "  sourceRef:\n"
+            "    kind: GitRepository\n"
+            "    name: flux-system\n"
+            "  path: ./kubernetes/apps/does-not-exist\n"
+            "  prune: true\n"
+        )
+
+        # A `docker` stub so manifest-lint.sh's `command -v docker` precondition passes without
+        # a real docker daemon; it only records an invocation, so the test can assert it was
+        # NEVER called — the script must fail before reaching the build/validate steps.
+        self.stub_bin = pathlib.Path(self._tmp.name) / "stub-bin"
+        self.stub_bin.mkdir()
+        self.docker_marker = pathlib.Path(self._tmp.name) / "docker-was-invoked"
+        docker_stub = self.stub_bin / "docker"
+        docker_stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo \"$@\" >> {self.docker_marker}\n"
+            "exit 0\n"
+        )
+        docker_stub.chmod(docker_stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_broken_fixture_makes_manifest_lint_sh_exit_non_zero_before_any_docker_run(self):
+        env = dict(os.environ)
+        env["PATH"] = f"{self.stub_bin}:{env.get('PATH', '')}"
+        result = subprocess.run(
+            ["bash", "scripts/manifest-lint.sh"],
+            cwd=self.fixture_repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertNotEqual(result.returncode, 0, f"stdout={result.stdout!r} stderr={result.stderr!r}")
+        self.assertIn("no kustomization.yaml found", result.stderr)
+        self.assertFalse(
+            self.docker_marker.exists(),
+            "docker was invoked -- failure must happen at discovery, before any build/validate step",
+        )
 
 
 if __name__ == "__main__":
