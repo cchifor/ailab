@@ -199,16 +199,28 @@ def run_llm(title, desc, diff_text):
     workdir = tempfile.mkdtemp(prefix="reviewbot-")
     env = {k: v for k, v in os.environ.items() if k not in ("GITEA_TOKEN",)}
     kind = CFG.get("llm_kind", "claude")
+    sudo_user = CFG.get("llm_sudo_user") or ""
     out_file = os.path.join(workdir, "last-message.md")
     if kind == "codex":
         # codex exec: read-only sandbox, prompt on stdin ("-"), final message to a file
-        # (stdout carries the whole session log, not the answer).
+        # (stdout carries the whole session log, not the answer). The read-only sandbox
+        # still permits READS (reviewer-codex finding on ailab#463): with an
+        # attacker-influenced diff in the prompt, the model could read credentials into
+        # its (posted!) output. llm_sudo_user runs it as a dedicated OS user whose home
+        # holds only that persona's LLM auth and can read nothing else of value.
         args = CFG["llm_cmd"] + ["exec", "-m", CFG["llm_model"], "--skip-git-repo-check",
                                  "-s", "read-only", "--output-last-message", out_file, "-"]
     else:
+        # Tool-less for real: Read/Grep/Glob/LS are denied too — the diff arrives inline,
+        # and a filesystem read tool on untrusted input is the same exfil vector as above
+        # (same finding, claude edition).
         args = CFG["llm_cmd"] + ["-p", "--output-format", "json",
-                                 "--disallowedTools", "Bash", "Edit", "Write", "WebFetch",
-                                 "WebSearch", "NotebookEdit", "Task", "Agent"]
+                                 "--disallowedTools", "Bash", "Edit", "Write", "Read",
+                                 "Grep", "Glob", "LS", "WebFetch", "WebSearch",
+                                 "NotebookEdit", "Task", "Agent"]
+    if sudo_user:
+        os.chmod(workdir, 0o777)  # the isolated user must write last-message.md here
+        args = ["sudo", "-n", "-u", sudo_user, f"HOME=/home/{sudo_user}"] + args
     try:
         r = subprocess.run(args, input=prompt, capture_output=True, text=True,
                            timeout=CFG["llm_timeout_s"], cwd=workdir, env=env)

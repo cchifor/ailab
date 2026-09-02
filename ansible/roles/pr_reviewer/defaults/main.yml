@@ -27,6 +27,11 @@ pr_reviewer_llm_cmd:
 # pr_reviewer_llm_model (the claude branch inherits the account default and ignores it).
 pr_reviewer_llm_kind: claude
 pr_reviewer_llm_model: ""
+# When set, the LLM subprocess runs as this dedicated OS user via sudo (created by the
+# role): its home holds ONLY that persona's LLM auth, so a prompt-injected diff has no
+# credentials to read. Required for codex (no tool-denial flags); claude gets the same
+# effect from --disallowedTools.
+pr_reviewer_llm_sudo_user: ""
 pr_reviewer_llm_timeout_s: 300
 pr_reviewer_max_diff_bytes: 400000
 pr_reviewer_max_comments: 15

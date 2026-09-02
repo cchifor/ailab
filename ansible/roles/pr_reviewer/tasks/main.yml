@@ -50,6 +50,24 @@
     group: "{{ pr_reviewer_user }}"
     mode: "0775"
 
+- name: Create the isolated LLM run user
+  ansible.builtin.user:
+    name: "{{ pr_reviewer_llm_sudo_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: true
+  when: pr_reviewer_llm_sudo_user | length > 0
+
+# LLM auth for the isolated user (e.g. /home/codexrun/.codex/auth.json) is seeded
+# MANUALLY, like the agent user's — see the runbook.
+- name: Allow the service user to run the LLM as the isolated user
+  ansible.builtin.copy:
+    content: "{{ pr_reviewer_user }} ALL=({{ pr_reviewer_llm_sudo_user }}) NOPASSWD: ALL\n"
+    dest: /etc/sudoers.d/reviewbot-llm
+    mode: "0440"
+    validate: visudo -cf %s
+  when: pr_reviewer_llm_sudo_user | length > 0
+
 - name: Install reviewbot.py
   ansible.builtin.copy:
     src: reviewbot.py

@@ -5,5 +5,6 @@ pr_reviewer_persona: codex
 pr_reviewer_llm_kind: codex
 pr_reviewer_llm_model: gpt-5.6-sol
 pr_reviewer_llm_cmd:
-  - "/home/c4/.npm-global/bin/codex"
+  - "/usr/bin/codex"
 pr_reviewer_llm_timeout_s: 600
+pr_reviewer_llm_sudo_user: codexrun

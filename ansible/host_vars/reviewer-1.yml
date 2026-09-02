@@ -3,4 +3,4 @@
 pr_reviewer_enabled: true
 pr_reviewer_persona: claude
 pr_reviewer_llm_cmd:
-  - "/home/c4/.npm-global/bin/claude"
+  - "/usr/bin/claude"

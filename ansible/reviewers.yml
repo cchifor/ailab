@@ -47,14 +47,16 @@
         state: present
         update_cache: true
 
-    - name: Install the LLM CLIs (npm prefix, agent user)
-      become: true
-      become_user: c4
-      ansible.builtin.command: "npm install -g @anthropic-ai/claude-code @openai/codex"
-      environment:
-        npm_config_prefix: "{{ reviewer_npm_prefix }}"
+    # Global install rather than the agent user's npm prefix: the isolated codexrun user
+    # cannot traverse c4's 0750 home, and binaries carry no secrets - auth stays per-user
+    # in each HOME. NodeSource npm's global prefix is /usr, so the bins land in /usr/bin.
+    - name: Install the LLM CLIs (global, per-binary guards)
+      ansible.builtin.command: "npm install -g {{ item.pkg }}"
       args:
-        creates: "{{ reviewer_npm_prefix }}/bin/claude"
+        creates: "/usr/bin/{{ item.bin }}"
+      loop:
+        - { pkg: "@anthropic-ai/claude-code", bin: claude }
+        - { pkg: "@openai/codex", bin: codex }
 
     # Allow rules BEFORE enable, so the ansible SSH connection can never be locked out.
     - name: Allow LAN inbound on reviewer service ports
