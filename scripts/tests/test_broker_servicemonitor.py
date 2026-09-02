@@ -38,6 +38,7 @@ import unittest
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BROKER_DIR = REPO / "kubernetes/apps/infrastructure/agentforge-broker"
 SERVICEMONITOR = BROKER_DIR / "servicemonitor.yaml"
+RULES_FILE = REPO / "kubernetes/apps/infrastructure/monitoring/agentforge-rules.yaml"
 
 _MOD_PATH = REPO / "scripts" / "gen-broker-inventory.py"
 _spec = importlib.util.spec_from_file_location("gen_broker_inventory", _MOD_PATH)
@@ -361,6 +362,82 @@ class GenBrokerInventoryCheckStaysGreen(unittest.TestCase):
             "gen-broker-inventory.py --check must stay green with servicemonitor.yaml present "
             f"(rc={proc.returncode})\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
         )
+
+
+class BrokerAlertRulesAreShapedAndOrdered(unittest.TestCase):
+    """Regression coverage for both C-P0-07 broker alerts in agentforge-rules.yaml (codex
+    cross-review round 1, ailab#467, medium): `promtool check rules` validates PromQL/YAML
+    syntax (run in this PR's verification tier) but nothing in this repo asserted that either
+    alert's expr/for/severity/seat-label shape actually matches what the spec and the review-bot
+    round decided, so a silent hand-edit (e.g. `for: 5m` -> `for: 5s`, or `severity: critical` ->
+    `warning`) would pass promtool while quietly breaking the alert's documented behaviour.
+    Nothing else in this file (or anywhere else in scripts/tests) has ever had a Python test for
+    a PrometheusRule alert — reused this module's own stdlib-only, no-PyYAML text-block
+    convention rather than introducing a new parsing approach for one file."""
+
+    @staticmethod
+    def _block(name: str) -> str:
+        """Text of one `- alert: <name>` entry: its own line plus every following line indented
+        STRICTLY deeper than it (expr/for/labels/annotations). Stops at the first line back at
+        (or above) the alert line's own indent — a sibling `- alert:`/`- record:` item OR that
+        sibling's OWN preceding `#` comment block, both of which sit at the identical indent in
+        this file and must NOT be attributed to this alert (a naive "stop at the next literal
+        `- alert:` line" regex pulls the next alert's comment block, including any incidental
+        mention of this alert's own field values, into this one — verified load-bearing: mutating
+        ForgeBrokerTargetDown's `for: 5m` to `for: 5s` must fail this alert's own test, not pass
+        because ForgeBrokerSeatReplicaMissing's preceding comment happens to say "for: 5m" too)."""
+        lines = RULES_FILE.read_text(encoding="utf-8").splitlines()
+        start = next(
+            i for i, line in enumerate(lines) if line.lstrip() == f"- alert: {name}"
+        )
+        indent = len(lines[start]) - len(lines[start].lstrip())
+        end = len(lines)
+        for i in range(start + 1, len(lines)):
+            stripped = lines[i].lstrip()
+            if stripped and (len(lines[i]) - len(stripped)) <= indent:
+                end = i
+                break
+        return "\n".join(lines[start:end])
+
+    def test_forgebrokertargetdown_is_shaped_as_the_spec_decided(self):
+        block = self._block("ForgeBrokerTargetDown")
+        self.assertIn('expr: up{job="agentforge-broker"} == 0', block)
+        self.assertIn("for: 5m", block)
+        self.assertIn("severity: critical", block)
+        self.assertIn("{{ $labels.seat }}", block)
+
+    def test_forgebrokerseatreplicamissing_is_shaped_as_documented(self):
+        block = self._block("ForgeBrokerSeatReplicaMissing")
+        self.assertIn(
+            'expr: count by (seat) (up{job="agentforge-broker"}) < 2',
+            block,
+        )
+        self.assertIn("for: 5m", block)
+        self.assertIn("severity: critical", block)
+        self.assertIn("{{ $labels.seat }}", block)
+
+    def test_targetdown_precedes_seatreplicamissing_in_reading_order(self):
+        # documented order: "discovered but unscrapeable" (ForgeBrokerTargetDown) before
+        # "vanished from discovery entirely" (ForgeBrokerSeatReplicaMissing) — see the latter's
+        # own preceding comment block, which explicitly narrates it as complementary to the former
+        text = RULES_FILE.read_text(encoding="utf-8")
+        self.assertLess(
+            text.index("- alert: ForgeBrokerTargetDown"),
+            text.index("- alert: ForgeBrokerSeatReplicaMissing"),
+            "ForgeBrokerTargetDown must precede ForgeBrokerSeatReplicaMissing",
+        )
+
+    def test_both_alerts_live_in_the_agentforge_rule_group(self):
+        # a `- alert:` entry pasted outside spec.groups[].rules would render but never be picked
+        # up by the operator's ruleSelector the way the rest of this file is
+        text = RULES_FILE.read_text(encoding="utf-8")
+        group_start = text.index("groups:")
+        for name in ("ForgeBrokerTargetDown", "ForgeBrokerSeatReplicaMissing"):
+            self.assertGreater(
+                text.index(f"- alert: {name}"),
+                group_start,
+                f"{name} must appear after `groups:` (i.e. inside a rule group)",
+            )
 
 
 if __name__ == "__main__":
