@@ -158,6 +158,33 @@ spec:
           # startupProbe: the dispatcher's /healthz reads no state, so there is no boot-vs-healthy
           # distinction for a startup probe to gate — livenessProbe already tolerates a slow start at
           # its own periodSeconds x failureThreshold budget.
+          #
+          # WHY LIVENESS STAYS ON /healthz, NOT /readyz (review round 1, C-P0-06): the single-
+          # replica, Recreate dispatcher's ONLY per-pass work is main.py::_dispatch_loop calling
+          # _dispatch_once, whose body is nothing but a sequence of `await forge.list_issues(...)`
+          # calls (main.py:1236,1250,1269) — no lock, no unbounded local loop, no other await.
+          # Every one rides a GiteaClient httpx.AsyncClient built with a FIXED per-operation
+          # timeout (adapters/gitea/client.py: DEFAULT_TIMEOUT_S=30s at client.py:82/176, passed as
+          # `timeout=self._timeout_s` at client.py:222) and at most `_RETRY_MAX=2` bounded retries
+          # (client.py:116,133-136) — so each call either answers or raises within a bounded time,
+          # never blocks forever. _dispatch_loop's try/except (main.py:1406-1420) calls
+          # `health.pass_failed()` on EVERY raise, BEFORE the backoff sleep — so a pass that cannot
+          # succeed still updates DispatchHealth promptly and /readyz sees it. A pass that neither
+          # succeeds nor fails — the one shape that would starve /readyz of a signal while /healthz
+          # stayed green — therefore cannot happen: there is no code path in _dispatch_once that
+          # blocks with no timeout and no exception. (If the loop task instead dies outright — an
+          # uncaught BaseException — _dispatcher_main's asyncio.wait(FIRST_COMPLETED) +
+          # task.result() at main.py:1499-1504 cancels the webhook listener in the same breath and
+          # the WHOLE process exits, so kubelet sees a dead container, not a healthy-looking
+          # /healthz — no probe is needed to catch that case.) Binding liveness to /readyz instead
+          # would be the wrong fix even so: /readyz stays 503 for the FULL DURATION of any real
+          # forge outage by design (not_ready_reasons() only clears on the next successful pass),
+          # so a readyz-bound liveness probe would crash-loop the dispatcher's only replica through
+          # every ordinary outage — exactly the failure the /healthz comment above exists to rule
+          # out — for a replacement pod that hits the identical outage. /readyz stays the readiness
+          # signal (correctly pulls the pod from the Service while the gauge is stale); /healthz
+          # stays liveness's target because nothing behind it can wedge without either completing
+          # or raising.
           livenessProbe:
             httpGet: { path: /healthz, port: webhook }
             periodSeconds: 30

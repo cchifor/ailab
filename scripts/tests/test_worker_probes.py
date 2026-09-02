@@ -156,7 +156,20 @@ class WorkerProbes(unittest.TestCase):
 
 class DispatcherProbes(unittest.TestCase):
     """The dispatcher carries liveness+readiness (no startupProbe — the spec names only these
-    two for the dispatcher) on the `webhook` containerPort (8710 == Settings.webhook_port)."""
+    two for the dispatcher) on the `webhook` containerPort (8710 == Settings.webhook_port).
+
+    Liveness stays bound to /healthz rather than /readyz (review round 1, C-P0-06): the
+    dispatch loop's only per-pass work (main.py::_dispatch_once) is a sequence of
+    `await forge.list_issues(...)` calls, each riding a GiteaClient timeout-bounded httpx
+    client (adapters/gitea/client.py DEFAULT_TIMEOUT_S=30s + bounded retries) with no lock
+    and no other await — so a pass always either succeeds or raises within a bounded time,
+    and _dispatch_loop's except-arm (main.py:1406-1420) records the failure before its
+    backoff sleep. A "wedged loop, healthy /healthz" therefore requires a blocking code path
+    with no timeout and no exception, and none exists in _dispatch_once — see the manifest
+    comment above dispatcher-deployment.yaml's livenessProbe for the full derivation. Binding
+    liveness to /readyz instead would crash-loop the single dispatcher replica through every
+    ordinary bounded forge outage (readyz stays 503 for the outage's full duration by design),
+    which is the CrashLoopBackOff dispatch_api.py's own /healthz docstring warns against."""
 
     def setUp(self) -> None:
         self.deployment = load_deployment(DISPATCHER_MANIFEST)
