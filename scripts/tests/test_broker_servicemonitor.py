@@ -203,6 +203,35 @@ class MetricsPortExistsOnEverySeat(unittest.TestCase):
                     )
 
 
+class RoutableServiceCarriesTheSeatNameLabel(unittest.TestCase):
+    """`ForgeBrokerTargetDown`/`ForgeBrokerSeatReplicaMissing`'s `{{ $labels.seat }}` and the
+    documented `count by (seat) (...)` triage queries all depend on the ServiceMonitor's
+    `relabelings` finding `app.kubernetes.io/name` on the target's Service (review-bot round,
+    ailab#467, reviewer-claude, important/medium) — the selector only matches on
+    `component`/`part-of`, so nothing else guarantees `app.kubernetes.io/name` is present. If a
+    seat's routable Service ever lacked it, targets would still be scraped but `seat` would
+    silently resolve to empty, breaking both alerts' identity and every `count by (seat)` query
+    the descriptions lean on."""
+
+    def test_every_routable_service_carries_app_kubernetes_io_name(self):
+        broker_files = _broker_files()
+        self.assertTrue(broker_files, f"no broker-*.yaml under {BROKER_DIR}")
+
+        for path in broker_files:
+            services = _services(path)
+            routable = {n: d for n, d in services.items() if not n.endswith("-headless")}
+            self.assertTrue(routable, f"{path.name}: no non-headless Service found")
+            for svc_name, doc in routable.items():
+                labels = _service_labels(doc)
+                self.assertTrue(
+                    labels.get("app.kubernetes.io/name"),
+                    f"{path.name}: Service {svc_name!r} has no (or an empty) "
+                    "app.kubernetes.io/name label -- the ServiceMonitor's relabelings derive "
+                    "the `seat` label from exactly this, on every af_broker_*/up series and in "
+                    "both alerts' {{ $labels.seat }} text",
+                )
+
+
 class HeadlessServiceCarriesNoMetricsPort(unittest.TestCase):
     """The ServiceMonitor's selector deliberately also matches each seat's `-headless` twin (no
     narrower selector is maintained to exclude it) — that is only harmless because the headless

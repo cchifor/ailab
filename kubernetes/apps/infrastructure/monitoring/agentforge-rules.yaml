@@ -412,22 +412,27 @@ spec:
         # BOTH replicas are down, which this expr alone cannot distinguish from the single-replica
         # case; the description below says so explicitly rather than overstating the blast radius.
         #
-        # KNOWN COVERAGE GAP (review-bot round, ailab#467, reviewer-codex, important/high) — recorded
-        # rather than silently accepted: `up == 0` requires a target Prometheus is STILL discovering.
-        # A pod dropped from the Service's Endpoints entirely (e.g. it fails its own readiness probe,
-        # or is deleted) disappears from service discovery before any `up=0` sample is ever produced
-        # for it, so a replica stuck NotReady — as opposed to one that is discovered but unscrapeable
-        # — will NOT trip this alert; Prometheus /targets is the only view that shows a vanished
-        # target as missing rather than merely down. NOT fixed in this PR: (1) the spec mandated this
-        # exact `up{job=...} == 0` shape, deliberately mirroring ForgeTargetDown's own already-merged,
-        # identically-limited pattern above, rather than introducing a new one; (2) a genuine fix needs
-        # a DIFFERENT signal this file has never used — e.g. kube-state-metrics
-        # kube_deployment_status_replicas_ready vs. spec_replicas — which is a real design decision
-        # (does kube-state-metrics scrape this namespace today? what's the replica-count source of
-        # truth if the Deployment is mid-rollout?) that deserves its own spec item and review, not a
-        # scope-expanding addition folded into a broker-observability PR. The description below now
-        # says explicitly how an operator distinguishes "down" from "vanished" until that follow-up
-        # lands.
+        # COVERAGE GAP, closed via a SECOND, complementary rule (review-bot round, ailab#467,
+        # reviewer-codex, important/high, raised twice) — `up == 0` requires a target Prometheus is
+        # STILL discovering. A pod dropped from the Service's Endpoints entirely (readiness probe
+        # failing outright, or the pod deleted/unscheduled) disappears from service discovery before
+        # any `up=0` sample is ever produced for it, so a replica stuck NotReady — as opposed to one
+        # that is discovered but unscrapeable — would NOT trip ForgeBrokerTargetDown alone. Fixed
+        # WITHOUT a new metric source: `relabelings` (as opposed to `metricRelabelings`) attach the
+        # `seat` label to a target at DISCOVERY time, before any scrape is attempted, so
+        # `up{job="agentforge-broker"}` carries one series per DISCOVERED replica regardless of
+        # whether its scrape succeeds — `count by (seat) (...)` therefore drops below 2 the moment a
+        # replica vanishes from discovery, which is exactly the case `== 0` cannot see. See
+        # ForgeBrokerSeatReplicaMissing below. Residual gap, NOT fixed: if BOTH of a seat's replicas
+        # vanish from discovery simultaneously, that seat contributes ZERO `up` series and `count by
+        # (seat)` produces no row for it at all (absent, not a value < 2) — `< 2` cannot match a
+        # missing row. Closing that residual case needs either a static enumeration of the 4 seats to
+        # compare discovered counts against (this repo has no such list as a queryable metric today)
+        # or a different signal entirely (e.g. kube-state-metrics ready-replica counts) — a real
+        # design decision deserving its own spec item, not folded into this fix. The operator's
+        # documented post-merge check (Prometheus /targets showing 8 targets) remains the authority
+        # for "is every replica of every seat discovered at all", which is what a from-scratch
+        # ServiceMonitor rollout most needs verified once, live.
         - alert: ForgeBrokerTargetDown
           expr: up{job="agentforge-broker"} == 0
           for: 5m
@@ -451,3 +456,39 @@ spec:
               describe pod -l app.kubernetes.io/name={{ $labels.seat }}` and the container log.
               Grafana explore `sum by (seat) (rate(af_broker_tokens_used_total[5m]))` corroborates
               whether the seat is still serving traffic overall.
+        # Complementary to ForgeBrokerTargetDown, not a duplicate: that rule fires on a DISCOVERED
+        # target failing to scrape (`up == 0`); this one fires when a replica has vanished from
+        # Prometheus's discovery entirely (deleted, unscheduled, or NotReady long enough that its
+        # readiness-gated Endpoints membership was pulled) — the class of failure `up == 0` cannot
+        # see because a vanished target produces no `up` series at all, not a `0` one. `seat` is
+        # attached at discovery time via `relabelings` (see servicemonitor.yaml), so it survives
+        # onto a target's `up` series independent of scrape success — `count by (seat)` therefore
+        # reflects how many of a seat's replicas Prometheus currently knows about, period.
+        # Threshold is `< 2` (this design's replica count per seat, README/broker-anthropic-*.yaml)
+        # rather than a generic `absent()`, because the failure mode is "fewer replicas than
+        # expected", not "zero of anything" — and `for: 5m` matches ForgeBrokerTargetDown's own
+        # hold, for the identical reason (a rolling-update's brief single-replica window should not
+        # page). severity: critical, same reasoning as ForgeBrokerTargetDown: HA degraded to a
+        # single point of failure for a seat every sandbox job's capability tokens depend on.
+        - alert: ForgeBrokerSeatReplicaMissing
+          expr: count by (seat) (up{job="agentforge-broker"}) < 2
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "AgentForge broker seat {{ $labels.seat }} is missing a replica from discovery"
+            description: >-
+              Prometheus currently discovers FEWER than 2 targets for broker seat {{ $labels.seat }}
+              (job=agentforge-broker) — a replica was deleted, is unscheduled, or has been NotReady
+              long enough to be dropped from the Service's Endpoints, which is a DIFFERENT failure
+              from ForgeBrokerTargetDown's "discovered but unscrapeable" (that rule cannot see a
+              target that was never discovered to begin with). {{ $labels.seat }} IS the seat's
+              Service app.kubernetes.io/name (e.g. broker-anthropic-max1) — check `kubectl --context
+              admin@ai -n agentforge-broker get pods -l app.kubernetes.io/name={{ $labels.seat }}`
+              for a replica that is Pending, CrashLoopBackOff, or simply absent, and `kubectl
+              --context admin@ai -n agentforge-broker get endpoints {{ $labels.seat }}` to confirm
+              how many addresses are actually registered. NOTE: if BOTH replicas of this seat have
+              vanished from discovery, this seat contributes zero `up` series and will NOT appear in
+              this alert's own result either (a missing row, not a `0` count) — Prometheus /targets,
+              filtered to job=agentforge-broker, is the only view that still lists a seat with 0
+              discovered replicas; check there if the seat is suspected fully dark and neither this
+              alert nor ForgeBrokerTargetDown is firing for it.
