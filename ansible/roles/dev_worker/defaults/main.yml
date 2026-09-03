@@ -143,6 +143,9 @@ dev_worker_agentforge_memory_swap_max: "2G"
 # and native `claude --resume` after a server restart. Evaluation criteria + rollback:
 # docs/runbooks/dev-workers.md § "herdr pilot".
 dev_worker_enable_herdr: false
+# Config converges apply via live reload (no pane kills). Flip this true for ONE run when a
+# changed key genuinely needs a server restart, then revert — see handlers/main.yml.
+dev_worker_herdr_force_restart: false
 dev_worker_herdr_version: "0.8.2"
 # Upstream releases ship no checksum file; this is the sha256 of herdr-linux-x86_64 as hashed at
 # pin time (2026-08-31). Recompute whenever the version bumps.

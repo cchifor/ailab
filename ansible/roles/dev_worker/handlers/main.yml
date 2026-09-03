@@ -47,15 +47,37 @@
   when: dev_worker_enable_herdr | default(false) | bool
 
 # Live config apply — no pane kills (see the note at the config template task). Runs as the
-# agent user against their server socket; falls back to nothing if the server is down (the
-# unit start will read the fresh config anyway).
+# agent user against their HOME-based server socket (verified working under env -i with just
+# HOME on dw5). FAIL-CLOSED: only a dead server is tolerated (the unit start reads fresh
+# config anyway); any other failure (invalid config, socket errors, missing subcommand)
+# fails the converge — failed_when: false here converged green while the server kept stale
+# settings (both reviewers' catch on the PR).
 - name: Reload herdr config
   ansible.builtin.command: /usr/local/bin/herdr server reload-config
   become: true
   become_user: "{{ dev_worker_admin_user }}"
+  environment:
+    HOME: "/home/{{ dev_worker_admin_user }}"
+  register: herdr_reload
+  changed_when: herdr_reload.rc == 0
+  failed_when: >-
+    herdr_reload.rc != 0 and not
+    (herdr_reload.stderr | default('') is search('connect|refused|No such file|not running|dial'))
+  when:
+    - dev_worker_enable_herdr | default(false) | bool
+    - not (dev_worker_herdr_force_restart | default(false) | bool)
+  listen: Reload herdr config
+
+# Escape hatch for config keys that genuinely need a restart (reviewer-claude's catch: a
+# reload-only path would apply them silently never). Opt in per run/host with
+# dev_worker_herdr_force_restart=true, then revert — pane-killing, so deliberate only.
+- name: Reload herdr config (forced restart)
+  ansible.builtin.command: systemctl try-restart herdr.service
   changed_when: true
-  failed_when: false
-  when: dev_worker_enable_herdr | default(false) | bool
+  when:
+    - dev_worker_enable_herdr | default(false) | bool
+    - dev_worker_herdr_force_restart | default(false) | bool
+  listen: Reload herdr config
 
 - name: Apply sysctl
   ansible.builtin.command: sysctl --system
