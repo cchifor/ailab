@@ -46,6 +46,12 @@
     group: "{{ dev_worker_admin_user }}"
     mode: "0700"
 
+# notify: RELOAD, not restart. A config revert used to trigger the pane-killing restart —
+# and combined with a scheduled morning converge it killed the operator's live pilot
+# workspace mid-work (dw5, 2026-09-03 06:05: TUI-written settings drifted config.toml, the
+# converge reverted it, both restarts nuked every pane — experienced as "the worker
+# restarted"). `herdr server reload-config` applies config live; keys that genuinely need
+# a restart wait for the next binary/unit change, which still notifies Restart herdr.
 - name: Lay down the ansible-managed herdr config
   ansible.builtin.template:
     src: herdr-config.toml.j2
@@ -53,7 +59,7 @@
     owner: "{{ dev_worker_admin_user }}"
     group: "{{ dev_worker_admin_user }}"
     mode: "0644"
-  notify: Restart herdr
+  notify: Reload herdr config
 
 # Root-only by design (it drives systemctl and rm -rf's user state), so owned and executable by
 # root alone rather than relying on the script's own EUID check.

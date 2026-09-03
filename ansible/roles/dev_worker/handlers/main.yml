@@ -46,6 +46,17 @@
   changed_when: true
   when: dev_worker_enable_herdr | default(false) | bool
 
+# Live config apply — no pane kills (see the note at the config template task). Runs as the
+# agent user against their server socket; falls back to nothing if the server is down (the
+# unit start will read the fresh config anyway).
+- name: Reload herdr config
+  ansible.builtin.command: /usr/local/bin/herdr server reload-config
+  become: true
+  become_user: "{{ dev_worker_admin_user }}"
+  changed_when: true
+  failed_when: false
+  when: dev_worker_enable_herdr | default(false) | bool
+
 - name: Apply sysctl
   ansible.builtin.command: sysctl --system
   changed_when: false
