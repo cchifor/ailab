@@ -222,6 +222,27 @@ def run_llm(title, desc, diff_text, rubric=""):
     kind = CFG.get("llm_kind", "claude")
     sudo_user = CFG.get("llm_sudo_user") or ""
     out_file = os.path.join(workdir, "last-message.md")
+
+    def wrap_sudo(a):
+        """Isolated-user prefix, shared by the primary AND fallback invocations - the
+        fallback previously bypassed it (both personas' finding on this PR), which under
+        llm_sudo_user would run the retry as the service user: wrong credentials, or a
+        0700-workdir failure."""
+        if not sudo_user:
+            return a
+        return ["sudo", "-n", "-u", sudo_user, f"HOME=/home/{sudo_user}"] + a
+
+    def claude_args(model):
+        # Tool-less for real: Read/Grep/Glob/LS are denied too - the diff arrives inline,
+        # and a filesystem read tool on untrusted input is a credential-exfil vector
+        # (reviewer findings on #463). Function-scoped (not branch-local) so no code path
+        # can ever reach a NameError regardless of kind.
+        a = CFG["llm_cmd"] + ["-p", "--output-format", "json",
+                              "--disallowedTools", "Bash", "Edit", "Write", "Read",
+                              "Grep", "Glob", "LS", "WebFetch", "WebSearch",
+                              "NotebookEdit", "Task", "Agent"]
+        return a + (["--model", model] if model else [])
+
     if kind == "codex":
         # codex exec: read-only sandbox, prompt on stdin ("-"), final message to a file
         # (stdout carries the whole session log, not the answer). The read-only sandbox
@@ -234,13 +255,9 @@ def run_llm(title, desc, diff_text, rubric=""):
                                  "--skip-git-repo-check",
                                  "-s", "read-only", "--output-last-message", out_file, "-"]
     else:
-        # Tool-less for real: Read/Grep/Glob/LS are denied too — the diff arrives inline,
-        # and a filesystem read tool on untrusted input is the same exfil vector as above
-        # (same finding, claude edition).
-        args = CFG["llm_cmd"] + ["-p", "--output-format", "json",
-                                 "--disallowedTools", "Bash", "Edit", "Write", "Read",
-                                 "Grep", "Glob", "LS", "WebFetch", "WebSearch",
-                                 "NotebookEdit", "Task", "Agent"]
+        # Model: pinned primary (fable), one retry on the fallback (the `opus` alias =
+        # latest opus) when the primary errors, e.g. limits.
+        args = claude_args(CFG.get("llm_model") or "")
     if sudo_user:
         # The out dir belongs to the ISOLATED user (0700): with a world-writable dir any
         # local process could pre-create last-message.md and have forged JSON posted as
@@ -254,7 +271,7 @@ def run_llm(title, desc, diff_text, rubric=""):
         out_file = os.path.join(out_dir, "last-message.md")
         args = [a if a != os.path.join(workdir, "last-message.md") else out_file
                 for a in args]
-        args = ["sudo", "-n", "-u", sudo_user, f"HOME=/home/{sudo_user}"] + args
+        args = wrap_sudo(args)
     try:
         r = subprocess.run(args, input=prompt, capture_output=True, text=True,
                            timeout=CFG["llm_timeout_s"], cwd=workdir, env=env)
@@ -286,6 +303,17 @@ def run_llm(title, desc, diff_text, rubric=""):
                 except json.JSONDecodeError:
                     pass
         else:
+            fb = CFG.get("llm_fallback_model") or ""
+            if r.returncode != 0 and fb:
+                # Worst case a job now spends 2x llm_timeout_s (near-timeout primary +
+                # full fallback run) - accepted: the worker is single-threaded by design
+                # and nothing else times jobs; a truncated remaining-budget retry would
+                # mostly produce useless partial reviews.
+                log(f"primary model failed (exit {r.returncode}: {r.stderr[-120:]}); "
+                    f"retrying with fallback '{fb}'")
+                r = subprocess.run(wrap_sudo(claude_args(fb)), input=prompt,
+                                   capture_output=True, text=True,
+                                   timeout=CFG["llm_timeout_s"], cwd=workdir, env=env)
             if r.returncode != 0:
                 raise RuntimeError(f"llm exit {r.returncode}: {r.stderr[-300:]}")
             envelope = json.loads(r.stdout)
@@ -577,6 +605,8 @@ def write_metrics():
             last_rec = c.execute("SELECT v FROM meta WHERE k='last_reconcile'").fetchone()
             quar = c.execute("SELECT COUNT(*) FROM jobs WHERE state='quarantined'").fetchone()[0]
             done = c.execute("SELECT COUNT(*) FROM jobs WHERE state='done'").fetchone()[0]
+            running = c.execute("SELECT COUNT(*) FROM jobs WHERE state IN "
+                                "('running','posting')").fetchone()[0]
             c.close()
         now = time.time()
         lines = [
@@ -585,6 +615,7 @@ def write_metrics():
             f'reviewbot_oldest_job_age_seconds{{persona="{CFG["persona"]}"}} {(now - oldest) if oldest else 0:.0f}',
             f'reviewbot_quarantined_jobs{{persona="{CFG["persona"]}"}} {quar}',
             f'reviewbot_jobs_done{{persona="{CFG["persona"]}"}} {done}',
+            f'reviewbot_job_running{{persona="{CFG["persona"]}"}} {running}',
         ]
         if last_ok:
             lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_ok[0]):.0f}')

@@ -4,3 +4,7 @@ pr_reviewer_enabled: true
 pr_reviewer_persona: claude
 pr_reviewer_llm_cmd:
   - "/usr/bin/claude"
+# Fable primary (verified on this VM), latest-opus fallback on primary errors (operator-
+# directed 2026-09-02) — makes claude reviews model-pinned like the codex persona.
+pr_reviewer_llm_model: claude-fable-5
+pr_reviewer_llm_fallback_model: opus
