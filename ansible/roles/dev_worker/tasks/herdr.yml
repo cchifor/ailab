@@ -52,6 +52,9 @@
 # converge reverted it, both restarts nuked every pane — experienced as "the worker
 # restarted"). `herdr server reload-config` applies config live; keys that genuinely need
 # a restart wait for the next binary/unit change, which still notifies Restart herdr.
+# backup+register feed the reload handler's restore-on-failure path: without it, a failed
+# reload leaves the NEW config on disk, the next converge sees no diff, and the drift goes
+# green forever (reviewer-claude catch on the reload PR).
 - name: Lay down the ansible-managed herdr config
   ansible.builtin.template:
     src: herdr-config.toml.j2
@@ -59,6 +62,8 @@
     owner: "{{ dev_worker_admin_user }}"
     group: "{{ dev_worker_admin_user }}"
     mode: "0644"
+    backup: true
+  register: herdr_config_result
   notify: Reload herdr config
 
 # Root-only by design (it drives systemctl and rm -rf's user state), so owned and executable by

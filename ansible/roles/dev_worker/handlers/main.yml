@@ -52,26 +52,40 @@
 # config anyway); any other failure (invalid config, socket errors, missing subcommand)
 # fails the converge — failed_when: false here converged green while the server kept stale
 # settings (both reviewers' catch on the PR).
-# Deterministic, no substring guessing (reviewer-codex round 2): a failed reload is
-# tolerated ONLY when systemctl says the unit is not active (dead server; the unit start
-# reads fresh config) — any failure while the server runs fails the converge. And herdr's
-# own reload response is the authority on restart-required keys: a reload that "applies"
-# with non-empty diagnostics fails the converge too, telling the operator to use the
-# force-restart flag — a restart-only key can no longer converge green while unapplied.
+# Deterministic and durable (reviewer rounds 2+3): failure verdicts come from systemctl
+# state and herdr's JSON-parsed diagnostics (no byte-sequence matching); and on ANY
+# failure the PREVIOUS config is restored from the template task's backup, so the next
+# converge re-diffs and re-notifies — a failed reload can never go green-forever with
+# stale live config just because the new file already landed on disk.
 - name: Reload herdr config
   ansible.builtin.shell: |
+    CONFIG="/home/{{ dev_worker_admin_user }}/.config/herdr/config.toml"
+    BACKUP="{{ herdr_config_result.backup_file | default('') }}"
     out=$(/usr/local/bin/herdr server reload-config 2>&1); rc=$?
     if [ $rc -eq 0 ]; then
-      case "$out" in *'"diagnostics":[]'*) exit 0 ;; esac
-      echo "reload applied WITH diagnostics - key(s) likely need a restart; rerun with -e dev_worker_herdr_force_restart=true: $out" >&2
-      exit 1
+      if printf '%s' "$out" | python3 -c '
+    import json, sys
+    try:
+        d = json.load(sys.stdin)
+    except Exception:
+        sys.exit(1)
+    sys.exit(1 if (d.get("result") or {}).get("diagnostics") else 0)'; then
+        exit 0
+      fi
+      reason="reload applied WITH diagnostics - key(s) likely need a restart; rerun with -e dev_worker_herdr_force_restart=true"
+    else
+      if ! systemctl is-active --quiet herdr.service; then
+        echo "server not active; unit start will read fresh config"
+        exit 0
+      fi
+      reason="reload FAILED (rc=$rc) while the server is ACTIVE - stale config"
     fi
-    if systemctl is-active --quiet herdr.service; then
-      echo "reload FAILED (rc=$rc) while the server is ACTIVE - stale config: $out" >&2
-      exit 1
+    if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
+      cp "$BACKUP" "$CONFIG"
+      echo "previous config restored from $BACKUP so the next converge re-notifies" >&2
     fi
-    echo "server not active; unit start will read fresh config"
-    exit 0
+    echo "$reason: $out" >&2
+    exit 1
   become: true
   become_user: "{{ dev_worker_admin_user }}"
   environment:
