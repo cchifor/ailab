@@ -198,14 +198,23 @@ dashboard "PR Reviewers" row reads the reviewbot_* textfile metrics. Tofu state:
 the session scratchpad clone — hand the tfstate to the main checkout and verify a no-op plan
 (same handover as env-pool; see backend.tf).
 
+## Daily fleet converge (scheduled, GitOps-true)
+
+Windows Task Scheduler task **ailab-fleet-converge** on the operator workstation runs
+`scripts/fleet-converge-daily.sh` (staged at `~/.ailab-converge/` in WSL) daily at 06:35:
+it fetches + hard-resets a PRISTINE dedicated clone (`~/.ailab-converge/repo`) to
+origin/main and converges all six workers (dw6 --skip-tags herdr is history; full role
+everywhere now). Never converge the fleet from a working checkout — the 2026-09-03
+incident: an earlier ~06:05 job ran from the operator checkout (stale at Aug 31, on a
+dirty WIP branch), reverting merged work every morning. That stale job's scheduler is
+STILL UNLOCATED — the 06:35 run wins each morning regardless, but remove the old job when
+found. Logs: `~/.ailab-converge/converge.log`.
+
 ## herdr pilot (dev-worker-5 + dev-worker-6)
 
-> dev-worker-6 joined 2026-09-02 after the operator hand-installed herdr there
-> (~/.local/bin, user-level server) and used it for real work. Integrations + conductor
-> skill were hand-applied and are role-converged; the managed takeover (pinned binary,
-> ansible config.toml, system unit) is pending an idle moment on dw6 — it restarts the
-> server (pane-killing), and the hand-installed ~/.local/bin/herdr must be removed first
-> (it shadows /usr/local/bin in PATH).
+> dev-worker-6's managed takeover completed 2026-09-03 (operator-approved): hand-installed
+> ~/.local/bin/herdr removed, pinned binary + ansible config + system unit + integrations +
+> conductor skill all role-managed, unit active. Both pilot hosts are now fully managed.
 
 [Herdr](https://herdr.dev/) — an agent-native terminal multiplexer — runs on dev-worker-5
 **beside** tmux. This is an evaluation, not a migration: tmux keeps everything load-bearing (the
