@@ -79,7 +79,7 @@ spec:
           # v3-CUTOVER PLACEHOLDER digest (unpullable by design). The REAL v3 p1-worker digest lands
           # on the cutover branch via the normal pin flow (`just pin-workloads p1-worker=sha256:…`).
           # Operator procedure: docs/runbooks/agentforge-v3-cutover.md.
-          image: registry.chifor.me/agentforge/p1-worker@sha256:20160145474264c51fcef09bb0b0756ca9582c54192819c423cd178b1311187d
+          image: registry.chifor.me/agentforge/p1-worker@sha256:615d96ebb9a65bf4ec3c8ad6aed6dd16f22dde72c533ceea6c77b0c78daaa085
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # dispatcher` (composes to: tini -- agentforge dispatcher). A bare `dispatcher` would crash-loop.
           args: ["agentforge", "dispatcher"]
