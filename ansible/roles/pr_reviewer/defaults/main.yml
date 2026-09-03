@@ -29,8 +29,9 @@ pr_reviewer_pin_authors:
 # by the service). The claude binary lives in the agent user's ~/.local/bin.
 pr_reviewer_llm_cmd:
   - "/home/c4/.local/bin/claude"
-# claude: headless -p with tool restrictions. codex: exec with read-only sandbox; needs
-# pr_reviewer_llm_model (the claude branch inherits the account default and ignores it).
+# claude: headless -p with tool restrictions; pr_reviewer_llm_model pins the review model
+# when set (unset = the account default) and llm_fallback_model retries once on errors.
+# codex: exec with read-only sandbox; requires pr_reviewer_llm_model.
 pr_reviewer_llm_kind: claude
 pr_reviewer_llm_model: ""
 # claude-only: retry once on this model when the primary run errors (limits etc.);
