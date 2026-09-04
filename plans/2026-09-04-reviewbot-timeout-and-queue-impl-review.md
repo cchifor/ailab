@@ -1,61 +1,97 @@
 # Implementation review — reviewbot-timeout-and-queue — round 1
 
-<!-- codex-impl-review-status: pending -->
-
-## Summary
-
-- The implementation broadly follows the plan, and the current `bump_meta` / `record_gauge` call sites do not recursively acquire the plain `db_lock`.
-- The central queue bound is not guaranteed: expensive nonzero exits can receive five full attempts, and several paths remain outside the wall-clock deadline.
-- Quarantine retirement has a race, unresolved quarantines eventually become invisible, and requeuing an ambiguous POST can still duplicate a review.
-- Important worker/concurrency behavior is not tested, and the promtool wrapper is not fully fail-closed.
-- No clear new remote-authentication, SQL-injection, or secret-handling vulnerability was found.
+<!-- codex-impl-review-status: complete -->
 
 ## Findings
 
 ### Near-deadline failures bypass the timeout-attempt cap
 **Location:** ansible/roles/pr_reviewer/files/reviewbot.py:393
 **Severity:** blocker
-<!-- codex: When the primary exits nonzero after consuming all but `llm_fallback_min_s`, fallback is skipped and a `RuntimeError` leaves `timeout_attempts` unchanged, permitting up to five nearly 900-second runs instead of the claimed two-budget maximum. Classify budget-consuming failures as deadline failures, or apply the lower cap based on elapsed duration as well as `TimeoutExpired`. -->
+**Resolved** in 65dae2cc. Confirmed real: a nonzero exit after ~880 s raised a plain
+`RuntimeError`, which `next_failure_state` billed to the fast-failure budget — 5 further
+attempts of nearly a full budget each. Failures consuming >= `llm_timeout_s / 3` now raise
+`ExpensiveFailure`, and `is_budget_failure()` counts it against the deadline cap. Pinned by
+`test_a_costly_nonzero_exit_is_classified_as_a_budget_failure` and, through the database, by
+`test_an_expensive_nonzero_exit_counts_against_the_deadline_budget`.
 
 ### The wall-clock deadline does not cover the whole operation
 **Location:** ansible/roles/pr_reviewer/files/reviewbot.py:344
 **Severity:** important
-<!-- codex: The deadline starts after isolated-directory setup, while codex output/auth reads and cleanup are untimed; `max(1.0, remainder)` also launches the primary after an already-expired budget, and `review_job()` adds separately timed API work. Start the clock at entry, reject non-positive remainders, bound every child process, and add an outer attempt deadline if the limit is intended to cover the complete worker attempt. -->
+**Partly resolved** in 65dae2cc: the clock starts at function entry (before the isolated-user
+`mktemp`), `remaining()` raises `TimeoutExpired` on a non-positive remainder instead of
+launching a run with `max(1.0, ...)`, and the auxiliary `sudo cat`/`rm` calls are bounded at
+60 s.
+<!-- codex: ... and add an outer attempt deadline if the limit is intended to cover the complete worker attempt. -->
+<!-- opus-pushback: `llm_timeout_s` is documented as the LLM budget, not a whole-attempt SLA, and the rest of review_job is already bounded — every api() call carries timeout=60 and the diff fetch is size-capped. An outer watchdog would have to kill an in-flight job from another thread, which is a large amount of new failure surface for a case ReviewbotWorkerStuck already alerts on at 40 min. -->
 
 ### Best-effort telemetry can change or mask job outcomes
-**Location:** ansible/roles/pr_reviewer/files/reviewbot.py:413; ansible/roles/pr_reviewer/files/reviewbot.py:818
+**Location:** ansible/roles/pr_reviewer/files/reviewbot.py:413; :818
 **Severity:** important
-<!-- codex: A truthy non-mapping `usage` raises an uncaught `AttributeError`, and a `record_gauge()` failure in `finally` replaces an active `TimeoutExpired`; a subsequent `bump_meta()` failure then escapes the worker exception handler and kills the sole worker thread. Type-check the envelope and make all telemetry writes catch/log failures without replacing the original job result or exception. -->
+**Resolved** in 65dae2cc. All three paths were real: a truthy non-mapping `usage` raised
+`AttributeError` past the `(TypeError, ValueError)` guard, `record_gauge` in `finally` would
+replace an in-flight `TimeoutExpired`, and a `bump_meta` failure would escape the worker's
+exception handler and kill the only worker thread. Both helpers now swallow and log their own
+failures; `usage` is type-checked. Pinned by
+`test_telemetry_failure_cannot_mask_the_real_exception` (which breaks the database rather than
+stubbing the helper — the swallowing is inside it) and `test_telemetry_never_propagates`.
 
 ### Quarantine retirement races with an in-flight old head
-**Location:** ansible/roles/pr_reviewer/files/reviewbot.py:131; ansible/roles/pr_reviewer/files/reviewbot.py:708
+**Location:** ansible/roles/pr_reviewer/files/reviewbot.py:131; :708
 **Severity:** important
-<!-- codex: If head B is queued while head A is running and A subsequently times out, A becomes quarantined after B's enqueue already attempted retirement; later B deduplication returns before retiring A, leaving a stale quarantine indefinitely. Retire quarantines for other heads even on the dedupe path, and explicitly retire closed PRs so unresolved current-head quarantines can remain alerted instead of silently aging out after 24 hours. -->
+**Resolved** in 65dae2cc. The race is real: head B enqueued while A is still `running` leaves
+A out of enqueue's retire, and A's later give-up strands. Retirement now happens on the dedupe
+path, when a later head completes, and via a reconciler sweep for PRs that are no longer open.
+The sweep checks each quarantined row INDIVIDUALLY against the API rather than diffing against
+the reconciler's open-PR listing — that listing is paginated at `limit=50`, so "absent from the
+page" is not proof a PR is closed and would silently retire live quarantines. A transient API
+error leaves the row alone: staying noisy is the safe failure.
 
 ### Requeue can double-post an ambiguous review
-**Location:** ansible/roles/pr_reviewer/files/reviewbot.py:668; ansible/roles/pr_reviewer/files/reviewbot.py:861
+**Location:** ansible/roles/pr_reviewer/files/reviewbot.py:668; :861
 **Severity:** important
-<!-- codex: After a client-side POST timeout, Gitea may still commit the original request after the requeued worker's marker check but before its second POST, so the preflight check does not make ambiguous-POST recovery idempotent. Keep this quarantine class manual until the request has conclusively settled, or use a server-side idempotency mechanism before allowing it to re-enter the queue. -->
+**Resolved** in 65dae2cc — the finding is correct and my claim was too strong. The marker
+pre-check makes a retry cheap, not idempotent: Gitea can commit the original POST after the
+requeued worker's marker check and before its own. `--requeue` now refuses the `ambiguous POST`
+class unless `--force` is passed, and the alert annotation and runbook text that asserted it was
+"safe for both quarantine classes" are corrected.
 
 ### Schema migration runs on every connection
 **Location:** ansible/roles/pr_reviewer/files/reviewbot.py:50
 **Severity:** nit
-<!-- codex: `db_lock` serializes the four service threads, but every connection still performs two schema statements plus `PRAGMA table_info`, and the standalone requeue process does not share that lock; two processes can both observe the missing column and the second `ALTER TABLE` then fails. Run initialization and migration once before starting threads, using a transaction or duplicate-column-safe retry, and keep `db()` as a connection factory. -->
+**Partly resolved** in 65dae2cc: the `ALTER TABLE` tolerates a duplicate column, which is the
+correctness half — `--requeue` is a second process and does not share `db_lock`. Left the
+per-connection `PRAGMA table_info` in place: `db()` is already a per-call connection factory
+following two `CREATE TABLE IF NOT EXISTS` statements, the file is local SQLite, and hoisting
+initialisation out would restructure every existing call site for a cost that does not show up
+against a worker that does one job per minute at most.
 
 ### Tests omit the worker and real concurrency paths
 **Location:** scripts/tests/test_reviewbot.py:155
 **Severity:** important
-<!-- codex: The finalized plan promised concurrent ticker/worker access and worker-level persistence, but the suite never runs a worker step, ticker, concurrent migration, or the CLI entry point; consequently it does not prove timeout counters survive a later success or expose the quarantine retirement race. The fake subprocess also ignores its supplied timeout and `assertRaises(Exception)` accepts unrelated telemetry failures, so add an enforceable fake runner, exact exception assertions, and integration tests around a factored single worker iteration. -->
+**Resolved** in 65dae2cc, and the criticism of the existing tests was correct: the fake
+subprocess ignored the timeout it was handed (making the budget assertions vacuous) and
+`assertRaises(Exception)` would have accepted an unrelated telemetry failure. `worker_once()`
+is now factored out of the loop so one claim/run/persist cycle is testable end to end, and the
+suite grew 24 -> 48: worker-level persistence, counters surviving a later success, the
+stale-quarantine race, a ticker/worker concurrency test, the quarantine sweep, and the CLI exit
+codes. The fake runner now raises `TimeoutExpired` when it exceeds its own timeout.
 
 ### The promtool test wrapper is not fully fail-closed
 **Location:** scripts/rules-lint.sh:113
 **Severity:** important
-<!-- codex: The unmatched fixture glob is handled, but Prometheus v3.5 merely warns when a fixture's `rule_files` pattern matches nothing, allowing a negative-only fixture to pass without loading any extracted rule. Validate every referenced basename against the extracted files, or make the warning and a zero-group load fatal. -->
+**Resolved** in 65dae2cc: every `rule_files:` entry a fixture names must now exist among the
+extracted specs, or the gate exits 1. Verified both ways — a typo'd reference is rejected and
+the real fixture is accepted. One correction to the finding's premise: the vacuous-pass hole is
+latent rather than active here, because this fixture carries positive assertions, so promtool
+alone already exits 1 on an unmatched reference (measured). The check protects future
+negative-only fixtures.
 
 ### Requeue argument failures have inconsistent exit behavior
 **Location:** ansible/roles/pr_reviewer/files/reviewbot.py:886
 **Severity:** nit
-<!-- codex: A non-integer PR raises a traceback with exit 1, while an unknown mode falls through and starts the daemon; the tests call `requeue()` directly and therefore miss both behaviors. Use explicit argument parsing and test successful requeue, no match, malformed PR, wrong arity, and unknown-command exit codes. -->
+**Resolved** in 65dae2cc. The unknown-option case was the serious half — it fell through and
+STARTED THE DAEMON. Explicit parsing now returns 2 for an unknown option, wrong arity, or a
+non-integer PR, and `CommandLineTest` covers all of them plus the `--force` behaviour.
 
 ## Diff stat
 
