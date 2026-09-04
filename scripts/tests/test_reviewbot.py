@@ -156,7 +156,7 @@ class FailurePolicyTest(unittest.TestCase):
 class SharedBudgetTest(unittest.TestCase):
     """llm_timeout_s is the budget for the WHOLE run_llm operation. It used to be applied per
     subprocess, so a near-timeout primary plus a full fallback could spend 2x -- 30 minutes of
-    a single-threaded worker at the new 900 s value."""
+    a single-threaded worker at the new 900 s value, and 150 min across the 5 attempts."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

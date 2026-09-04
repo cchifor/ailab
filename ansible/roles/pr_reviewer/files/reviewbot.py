@@ -401,6 +401,10 @@ def run_llm(title, desc, diff_text, rubric=""):
     # used to get llm_timeout_s EACH, so a near-timeout primary plus a full fallback could
     # spend 2x the budget inside a single attempt - tolerable at 300 s, but 30 minutes of a
     # single-threaded worker at 900 s, which would have made the queue worse than before.
+    #
+    # Worst case for one head with this bounded: 3 fast failures (each under llm_timeout_s/3)
+    # plus 2 budget failures = 45 min, against 50 min before the change and the 150 min a
+    # naive deadline bump would have cost. Enumerated in the plan, not estimated.
     try:
         r = subprocess.run(args, input=prompt, capture_output=True, text=True,
                            timeout=remaining(), cwd=workdir, env=env)

@@ -114,7 +114,13 @@ a mis-quarantine rather than a conservative policy. This needs a new `timeout_at
 column, added by a guarded `ALTER TABLE` (checked via `PRAGMA table_info`) so existing
 databases migrate in place. `max_attempts` remains the total-failure ceiling.
 
-Worst case per head is then 2 x 900 s = 30 min of worker time, genuinely.
+Worst case per head is then **45 min** of worker time, not the 2 x 900 s = 30 min this
+plan first claimed: that figure counted only the two budget failures and ignored that up to
+three FAST failures can precede them, each costing just under the expensive-failure threshold.
+Enumerated against the real `next_failure_state`, the worst sequence is `b,f,f,f,b` =
+3 x 300 s + 2 x 900 s = 2700 s. Bounded, and the point still holds — the same code paths were
+50 min before this change and would have been 150 min after a naive deadline bump — but the
+number is 45, and a comment claiming 30 would be false.
 
 ### 4. Quarantine: close the loop, and make the strand recoverable and visible
 
