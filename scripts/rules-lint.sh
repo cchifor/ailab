@@ -26,6 +26,14 @@
 # Docker Hub: anonymous Docker Hub pulls 429 on this estate (kube-prometheus-stack.yaml). Re-pin:
 #   docker pull quay.io/prometheus/prometheus:vX.Y.Z && docker inspect --format '{{index .RepoDigests}}' ...
 #
+# UNIT TESTS TOO, not just `check rules`: a rule whose PromQL parses can still be one that
+# can never fire. Both obvious thresholds for reviewbot-rules.yaml were wrong that way when
+# first written (`oldest_job_age > 3600` could not fire during a 50-minute incident; an ungated
+# 6h no-success rule fired for 369 minutes across a healthy 48h window). So any
+# monitoring/*-rules.test.yaml is run through `promtool test rules`, which evaluates the real
+# expressions against synthetic series and asserts which alerts fire. Optional by design — a
+# rules file with no fixture is still checked, just not exercised.
+#
 # CI: .gitea/workflows/rules-lint.yaml runs this on every push and PR (one job, fail closed) until
 # manifest-lint.sh lands on main (C-P0-05, ailab#464); the intended hook there is one line,
 # `bash scripts/rules-lint.sh`, after its kubeconform step, at which point that workflow folds
@@ -98,6 +106,23 @@ FOUND_RULES="$(sed -n 's/.*SUCCESS: \([0-9][0-9]*\) rules found.*$/\1/p' "$LOG_D
 if [ "$FOUND_RULES" -ne "$EXPECTED_RULES" ]; then
   echo "promtool found ${FOUND_RULES} rules but promrule-spec extracted ${EXPECTED_RULES} — the gate did not check the whole set" >&2
   exit 1
+fi
+
+# `promtool test rules` resolves each fixture's `rule_files:` RELATIVE TO THE FIXTURE, so the
+# tests are copied in beside the extracted specs they name.
+TEST_FILES=("$RULES_DIR"/*-rules.test.yaml)
+if [ -f "${TEST_FILES[0]}" ]; then
+  CONTAINER_TESTS=()
+  for f in "${TEST_FILES[@]}"; do
+    cp "$f" "$OUT_DIR/$(basename "$f")"
+    chmod 644 "$OUT_DIR/$(basename "$f")"
+    CONTAINER_TESTS+=("/rules/$(basename "$f")")
+  done
+  echo "== promtool test rules over ${#CONTAINER_TESTS[@]} fixture(s) =="
+  docker run --rm -v "$OUT_DIR:/rules:ro" --entrypoint promtool "$PROMETHEUS_IMAGE" \
+    test rules "${CONTAINER_TESTS[@]}"
+else
+  echo "no $RULES_DIR/*-rules.test.yaml fixtures — skipping promtool test rules"
 fi
 
 echo "rules-lint: OK (${#RULE_FILES[@]} PrometheusRule specs, ${FOUND_RULES} rules checked by promtool)"
