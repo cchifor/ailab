@@ -26,6 +26,14 @@
 # Docker Hub: anonymous Docker Hub pulls 429 on this estate (kube-prometheus-stack.yaml). Re-pin:
 #   docker pull quay.io/prometheus/prometheus:vX.Y.Z && docker inspect --format '{{index .RepoDigests}}' ...
 #
+# UNIT TESTS TOO, not just `check rules`: a rule whose PromQL parses can still be one that
+# can never fire. Both obvious thresholds for reviewbot-rules.yaml were wrong that way when
+# first written (`oldest_job_age > 3600` could not fire during a 50-minute incident; an ungated
+# 6h no-success rule fired for 369 minutes across a healthy 48h window). So any
+# monitoring/*-rules.test.yaml is run through `promtool test rules`, which evaluates the real
+# expressions against synthetic series and asserts which alerts fire. Optional by design — a
+# rules file with no fixture is still checked, just not exercised.
+#
 # CI: .gitea/workflows/rules-lint.yaml runs this on every push and PR (one job, fail closed) until
 # manifest-lint.sh lands on main (C-P0-05, ailab#464); the intended hook there is one line,
 # `bash scripts/rules-lint.sh`, after its kubeconform step, at which point that workflow folds
@@ -98,6 +106,49 @@ FOUND_RULES="$(sed -n 's/.*SUCCESS: \([0-9][0-9]*\) rules found.*$/\1/p' "$LOG_D
 if [ "$FOUND_RULES" -ne "$EXPECTED_RULES" ]; then
   echo "promtool found ${FOUND_RULES} rules but promrule-spec extracted ${EXPECTED_RULES} — the gate did not check the whole set" >&2
   exit 1
+fi
+
+# `promtool test rules` resolves each fixture's `rule_files:` RELATIVE TO THE FIXTURE, so the
+# tests are copied in beside the extracted specs they name.
+TEST_FILES=("$RULES_DIR"/*-rules.test.yaml)
+if [ -f "${TEST_FILES[0]}" ]; then
+  CONTAINER_TESTS=()
+  for f in "${TEST_FILES[@]}"; do
+    cp "$f" "$OUT_DIR/$(basename "$f")"
+    chmod 644 "$OUT_DIR/$(basename "$f")"
+    CONTAINER_TESTS+=("/rules/$(basename "$f")")
+  done
+  # FAIL CLOSED on a fixture that loads nothing. promtool only WARNS when a `rule_files:`
+  # entry matches no file, so a fixture naming a rules file that was never extracted (a
+  # typo, a renamed manifest) would evaluate zero rules and pass - a gate checking nothing,
+  # which is the exact defect this repo has already shipped once. Every referenced basename
+  # must exist among the extracted specs.
+  for t in "${TEST_FILES[@]}"; do
+    # scripts/promtest-refs.py FAILS CLOSED when it cannot parse a nonempty rule_files
+    # list, so `rule_files:` at EOF, written inline, or absent is an error rather than an
+    # empty happy path that checks zero references. Captured (not piped into `while`) so
+    # the extractor's exit status is not swallowed by the loop. NO PIPE: piping through `tr`
+    # would put that exit status behind `set -o pipefail` (which this script does set, but a
+    # gate whose fail-closed behaviour depends on a setting 90 lines away is one edit from
+    # silently passing). promtest-refs.py writes LF on every platform instead.
+    if ! refs="$("$PY" scripts/promtest-refs.py "$t")"; then
+      echo "$(basename "$t"): unusable rule_files list - refusing a fixture that may load no rules" >&2
+      exit 1
+    fi
+    while read -r ref; do
+      [ -n "$ref" ] || continue
+      if [ ! -f "$OUT_DIR/$ref" ]; then
+        echo "$(basename "$t") references rule file '$ref', which is not among the extracted specs" >&2
+        exit 1
+      fi
+    done <<< "$refs"
+  done
+
+  echo "== promtool test rules over ${#CONTAINER_TESTS[@]} fixture(s) =="
+  docker run --rm -v "$OUT_DIR:/rules:ro" --entrypoint promtool "$PROMETHEUS_IMAGE" \
+    test rules "${CONTAINER_TESTS[@]}"
+else
+  echo "no $RULES_DIR/*-rules.test.yaml fixtures — skipping promtool test rules"
 fi
 
 echo "rules-lint: OK (${#RULE_FILES[@]} PrometheusRule specs, ${FOUND_RULES} rules checked by promtool)"

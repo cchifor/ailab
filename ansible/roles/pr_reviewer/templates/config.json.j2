@@ -21,9 +21,11 @@
   "merge_authors": {{ pr_reviewer_merge_authors | to_json }},
   "pin_authors": {{ pr_reviewer_pin_authors | to_json }},
   "llm_timeout_s": {{ pr_reviewer_llm_timeout_s }},
+  "llm_fallback_min_s": {{ pr_reviewer_llm_fallback_min_s }},
   "llm_effort": {{ pr_reviewer_llm_effort | to_json }},
   "max_diff_bytes": {{ pr_reviewer_max_diff_bytes }},
   "max_comments": {{ pr_reviewer_max_comments }},
   "max_attempts": {{ pr_reviewer_max_attempts }},
+  "max_timeout_attempts": {{ pr_reviewer_max_timeout_attempts }},
   "reconcile_s": {{ pr_reviewer_reconcile_s }}
 }

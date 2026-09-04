@@ -1,0 +1,155 @@
+# Alerts for the 2 PR-reviewer VMs and the reviewbot service on them (metrics via
+# reviewers-node.yaml, job=reviewer-node; reviewbot_* come from the node_exporter textfile
+# collector that reviewbot.py writes).
+#
+# WHY THIS EXISTS: on 2026-09-03/04 the claude persona failed every review of a large PR for
+# ~30 hours and NOTHING fired. The reviewers had a scrape target, a dashboard row, and zero
+# rules. platform#1067 was attempted 9 times across 3 heads over 71 minutes, never produced a
+# verdict, and the operator merged it by hand after noticing the queue by eye. Root cause was
+# a 300 s LLM deadline against runs that legitimately need 515 s.
+#
+# THRESHOLDS ARE MEASURED, NOT GUESSED. Each was checked against the live 48 h series before
+# being written down, because the obvious values are wrong here in both directions:
+#   * `reviewbot_oldest_job_age_seconds > 3600` — the intuitive "stuck over an hour" — held for
+#     ZERO minutes during the incident (its peak was 3008 s). It would have been a rule that
+#     could not fire. 1800 held for 40 min; 900 held for 101 min.
+#   * `time() - reviewbot_last_success_timestamp_seconds > 6h` held for 369 MINUTES in the same
+#     48 h — six hours of firing on an idle night when nobody had opened a PR. Gated on
+#     `reviewbot_queue_depth > 0` it collapses to 25 scattered sample-minutes, all of which
+#     `for: 30m` filters out.
+# The lesson the estate already paid for once (agentforge-rules.yaml pinned to a job with zero
+# targets) is that "the expression parses" and "the expression can fire" are different claims.
+# reviewbot-rules.test.yaml pins both, and scripts/rules-lint.sh runs it on every PR.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: reviewbot
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: reviewbot
+      rules:
+        # FIRST, because it is what keeps the rest honest. Every reviewbot_* rule below reads a
+        # textfile series; if the VM dies those series do not go stale, they VANISH, and an
+        # expression over an absent series never fires. Without this alert the whole group is
+        # silently defeated by the one failure it most needs to survive. CRITICAL to match
+        # DevWorkerNodeDown — a dead reviewer stalls the automerge lane for every repo.
+        - alert: ReviewerNodeDown
+          expr: up{job="reviewer-node"} == 0
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: "Reviewer VM {{ $labels.instance }} is down (no node_exporter scrape)"
+            description: >-
+              node_exporter on reviewer {{ $labels.instance }} has been unscrapeable for >10m.
+              .24 = reviewer-1 (claude persona), .25 = reviewer-2 (codex persona); both are on
+              ai-node3 (vmid 4501/4502). While a reviewer is down its persona posts no verdicts,
+              so every PR needing "all personas clean" stops merging. Note the reviewbot_*
+              alerts in this group CANNOT fire while this one is active — their series are gone,
+              not stale.
+        # Liveness of the metrics ticker, which writes every 15s. Only meaningful since metrics
+        # moved off the worker loop: they used to be written only between jobs, so the heartbeat
+        # tracked the LLM deadline exactly (measured max staleness 296s against a 300s timeout)
+        # and no threshold below the deadline was possible.
+        - alert: ReviewbotHeartbeatStale
+          expr: time() - reviewbot_heartbeat_timestamp_seconds > 300
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) heartbeat is stale (>5m)"
+            description: >-
+              The reviewbot metrics ticker on {{ $labels.instance }} writes every 15s, so 300s is
+              20 missed ticks — the process is wedged or dead, not busy. This proves PROCESS
+              liveness only; a worker stuck inside a job keeps the heartbeat fresh, which is what
+              ReviewbotWorkerStuck is for. Check `systemctl status reviewbot` and the journal.
+        # The worker-progress signal the heartbeat deliberately no longer provides. One attempt
+        # is bounded at llm_timeout_s (900s, primary+fallback SHARING one budget), plus posting,
+        # so 40 min means wedged rather than working.
+        - alert: ReviewbotWorkerStuck
+          expr: reviewbot_running_job_age_seconds > 2400
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) has held one job for >40m"
+            description: >-
+              A single job on {{ $labels.instance }} has been in running/posting for over 40
+              minutes. One attempt is capped at llm_timeout_s (900s) including the fallback, so
+              this is a hang, not a long review — most likely a subprocess that ignored its
+              deadline or a wedged Gitea POST. The worker is single-threaded: nothing else is
+              being reviewed while this is true.
+        # THE DETECTOR FOR THE 2026-09-04 INCIDENT, and the only rule here that would have caught
+        # it early. 6 of the 12 timeouts fell inside the 09:59-11:00 hour. Everything else looked
+        # healthy throughout: small PRs kept succeeding, so last_success stayed fresh, the queue
+        # drained between retries, and the heartbeat never went stale for more than one deadline.
+        - alert: ReviewbotReviewTimeouts
+          expr: increase(reviewbot_llm_timeouts_total[1h]) >= 3
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) hit {{ $value | printf \"%.0f\" }} LLM deadlines in an hour"
+            description: >-
+              Three or more reviews on {{ $labels.instance }} exceeded llm_timeout_s within an
+              hour. Each one burns the WHOLE budget of a single-threaded worker and produces
+              nothing, and after max_timeout_attempts the head is quarantined with no verdict —
+              which blocks the automerge lane for that PR. Either a specific PR is too expensive
+              (check reviewbot_llm_seconds_max and reviewbot_llm_output_tokens_max: run length
+              tracks REASONING, not diff size) or the deadline is too tight again. Raise
+              pr_reviewer_llm_timeout_s in the role defaults, not per host.
+        # Age, not depth: a reconcile burst of 18 that drains in 20 min is the NORMAL shape and
+        # must not page. See the header for why this is 1800 and not the intuitive 3600.
+        # Note this counts queued/retry only, so a single stuck job with an empty queue reports
+        # zero — that gap is covered by ReviewbotWorkerStuck, not by lowering this.
+        - alert: ReviewbotQueueBacklog
+          expr: reviewbot_oldest_job_age_seconds > 1800
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) has a job queued >30m"
+            description: >-
+              The oldest queued job on {{ $labels.instance }} has been waiting over 30 minutes.
+              Healthy bursts drain well inside this (the codex persona's 48h worst case was 28.8
+              min); the claude persona's incident peak was 50.1 min. Usually means the worker is
+              spending its time on failing retries — check ReviewbotReviewTimeouts and the
+              journal for repeated attempts on one PR.
+        # Safety net for the enqueue dedupe: 'quarantined' is now in the dedupe set (that is what
+        # stops the reconciler re-queueing a hopeless job every 300s forever), so a give-up
+        # STICKS until a new head supersedes it or an operator runs --requeue. It therefore has
+        # to be visible. Reads the 24h-windowed gauge, not the cumulative one, which never falls
+        # for a PR that was closed rather than pushed to and would latch this alert on forever.
+        - alert: ReviewbotQuarantined
+          expr: reviewbot_quarantined_recent_jobs > 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) quarantined a review in the last 24h"
+            description: >-
+              {{ $value }} job(s) on {{ $labels.instance }} gave up in the last 24h and will NOT
+              be retried on their own — that PR has no verdict from this persona and cannot
+              automerge. Recover with
+              `sudo -u c4 python3 /usr/local/lib/reviewbot/reviewbot.py /etc/reviewbot/config.json --requeue <owner/repo> <pr>`.
+              That refuses the `ambiguous POST` class unless you add --force: the pre-post marker
+              check makes a retry cheap, not idempotent, so check the PR in Gitea first. Pushing a
+              new head retires the row instead. See docs/runbooks/dev-workers.md.
+        # Backstop for a TOTAL stall, gated on there being work to do. Honest scope: this would
+        # NOT have caught the 2026-09-04 incident (small PRs kept succeeding throughout it) —
+        # ReviewbotReviewTimeouts is the rule for that shape. Ungated it is a pure false-positive
+        # generator; see the header.
+        - alert: ReviewbotStalled
+          expr: >-
+            (time() - reviewbot_last_success_timestamp_seconds > 3600)
+            and on (persona, instance)
+            (reviewbot_queue_depth > 0)
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) has queued work but no success in >1h"
+            description: >-
+              {{ $labels.instance }} has jobs queued and has not completed one in over an hour.
+              The queue gate is load-bearing: without it this fires through every idle night
+              (measured: 369 minutes of an ungated 6h version over one 48h window). Check
+              whether the LLM CLI still authenticates — a subscription re-login invalidates the
+              seeded credentials, which are NOT ansible-managed.

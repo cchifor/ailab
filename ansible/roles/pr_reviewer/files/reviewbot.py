@@ -29,9 +29,14 @@ import time
 import urllib.error
 import urllib.request
 
-CFG = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "/etc/reviewbot/config.json"))
-PAT = open(CFG["pat_file"]).read().strip()
-HOOK_SECRET = open(CFG["webhook_secret_file"]).read().strip().encode()
+def _read(path):
+    with io.open(path, encoding="utf-8") as f:
+        return f.read().strip()
+
+
+CFG = json.loads(_read(sys.argv[1] if len(sys.argv) > 1 else "/etc/reviewbot/config.json"))
+PAT = _read(CFG["pat_file"])
+HOOK_SECRET = _read(CFG["webhook_secret_file"]).encode()
 MARKER_RE = re.compile(r"<!-- review-bot:v1 persona=(\S+) head=([0-9a-f]{40})(?: verdict=(\S+))? -->")
 EVENTS = {"pull_request", "pull_request_sync", "pull_request_label", "pull_request_review_request"}
 
@@ -47,9 +52,64 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS jobs(
         id INTEGER PRIMARY KEY, repo TEXT, pr INTEGER, head_sha TEXT,
         state TEXT, attempts INTEGER DEFAULT 0, next_at REAL DEFAULT 0,
-        created REAL, updated REAL, review_id INTEGER, note TEXT)""")
+        created REAL, updated REAL, review_id INTEGER, note TEXT,
+        timeout_attempts INTEGER DEFAULT 0)""")
     c.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
+    # Deadline failures are capped separately from fast ones (see worker()), which needs a
+    # counter the CREATE above only supplies on a fresh database. Migrate existing ones in
+    # place - the service is restarted onto an existing state.sqlite on every deploy.
+    if "timeout_attempts" not in {r[1] for r in c.execute("PRAGMA table_info(jobs)")}:
+        try:
+            c.execute("ALTER TABLE jobs ADD COLUMN timeout_attempts INTEGER DEFAULT 0")
+            c.commit()
+        except sqlite3.OperationalError as e:
+            # db_lock only serializes THIS process's threads; `--requeue` runs as a second
+            # process against the same file and can win the race to add the column.
+            if "duplicate column" not in str(e).lower():
+                raise
     return c
+
+
+def bump_meta(key, n=1):
+    """Durable counter in `meta` (survives restarts, no schema change). Callers must NOT
+    hold db_lock - it is a plain Lock, not reentrant.
+
+    TELEMETRY NEVER PROPAGATES. This is called from the worker's exception handler, where a
+    raise would escape the handler entirely and kill the only worker thread, and from a
+    `finally` block, where it would replace the in-flight exception with a database error."""
+    try:
+        with db_lock:
+            c = db()
+            cur = c.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+            try:
+                base = float(cur[0]) if cur else 0.0
+            except (TypeError, ValueError):
+                base = 0.0
+            c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (key, str(base + n)))
+            c.commit()
+            c.close()
+    except Exception as e:
+        log(f"telemetry: counter {key} failed: {e}")
+
+
+def record_gauge(key, value):
+    """Store `<key>` and keep a running `<key>_max`. Same locking and never-propagate rules
+    as bump_meta - this one runs inside run_llm's `finally`."""
+    try:
+        with db_lock:
+            c = db()
+            cur = c.execute("SELECT v FROM meta WHERE k=?", (key + "_max",)).fetchone()
+            try:
+                top = float(cur[0]) if cur else 0.0
+            except (TypeError, ValueError):
+                top = 0.0
+            c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (key, str(value)))
+            c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)",
+                      (key + "_max", str(max(top, value))))
+            c.commit()
+            c.close()
+    except Exception as e:
+        log(f"telemetry: gauge {key} failed: {e}")
 
 
 def api(path, method="GET", body=None, raw=False):
@@ -82,15 +142,55 @@ def enqueue(repo, pr, head_sha, source):
         return
     with db_lock:
         c = db()
+        # When this head was FIRST seen in any state, 'superseded' included. For a delayed
+        # webhook carrying a stale head this is old, which is what stops it superseding the
+        # newer rows below; for a genuinely new head it is None and everything older than now
+        # coalesces, exactly as before.
+        first_seen = c.execute(
+            "SELECT MIN(created) FROM jobs WHERE repo=? AND pr=? AND head_sha=?",
+            (repo, pr, head_sha)).fetchone()[0]
         cur = c.execute(
-            "SELECT id FROM jobs WHERE repo=? AND pr=? AND head_sha=? AND state IN "
-            "('queued','running','posting','retry','done')", (repo, pr, head_sha))
-        if cur.fetchone():
+            "SELECT id,created FROM jobs WHERE repo=? AND pr=? AND head_sha=? AND state IN "
+            "('queued','running','posting','retry','done','quarantined')",
+            (repo, pr, head_sha))
+        seen = cur.fetchone()
+        # Previously seen, and no longer in any active state => this head has been superseded.
+        # A late webhook delivery for it must not create a fresh job: the worker would spend an
+        # API round trip rediscovering that the head moved. Only AUTHORITATIVE sources may
+        # resurrect such a head - the reconciler read the PR's current head from the API, and
+        # "head-moved" comes from pr_ok() having just compared against it - so a force-push
+        # back to an earlier SHA is still healed within one reconcile cycle rather than
+        # stranded.
+        if seen is None and first_seen is not None and source not in ("reconcile", "head-moved"):
+            c.close()
+            return
+        if seen:
+            # Retire quarantines left on OLDER heads of this PR. Head B can be enqueued while
+            # head A is still RUNNING - A is not in the retire below because it is not yet
+            # quarantined - and A's later give-up would then sit here forever, alerting about
+            # a PR that head B went on to review perfectly well.
+            # OLDER ONLY, and never an ambiguous POST: this path also runs for a DELAYED
+            # webhook carrying a stale head, which must not clear the CURRENT head's live
+            # quarantine - that would let the reconciler re-run it with fresh counters, an
+            # ambiguous POST the operator has not cleared with --force included.
+            c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
+                      "AND state='quarantined' AND head_sha<>? AND created<? "
+                      "AND COALESCE(note,'') NOT LIKE 'ambiguous POST%'",
+                      (time.time(), repo, pr, head_sha, seen[1]))
+            c.commit()
             c.close()
             return
         # Coalesce: an older queued/retry head for the same PR is superseded, never reviewed.
+        # QUARANTINED rows are retired here too. Without that, the dedupe above (which now
+        # includes 'quarantined', closing an infinite reconcile->quarantine->reconcile loop)
+        # would make one give-up permanent: a push would not clear the row, so the gauge and
+        # its alert would stay up forever. A new head is exactly the signal that the old
+        # give-up is obsolete.
+        cutoff = first_seen if first_seen is not None else time.time()
         c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
-                  "AND state IN ('queued','retry')", (time.time(), repo, pr))
+                  "AND created<? AND (state IN ('queued','retry') OR (state='quarantined' AND "
+                  "COALESCE(note,'') NOT LIKE 'ambiguous POST%'))",
+                  (time.time(), repo, pr, cutoff))
         c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated,note) "
                   "VALUES(?,?,?,'queued',?,?,?)",
                   (repo, pr, head_sha, time.time(), time.time(), source))
@@ -215,7 +315,89 @@ DIFF:
 """
 
 
+def llm_error_text(rc, stdout, stderr):
+    """Describe a nonzero LLM exit using the channel that actually carries the reason.
+
+    The claude CLI reports real failures inside the stdout JSON envelope and leaves stderr
+    holding only warnings, so the old stderr-only message was actively misleading: ailab#482
+    recorded `llm exit 1: Permission deny rule "LS" matches no known tool` - a startup warning
+    - as the cause of a failed review. Must never raise: this runs on the error path, and a
+    JSONDecodeError here would replace the real failure with a parsing bug."""
+    detail = ""
+    try:
+        env = json.loads(stdout or "")
+        if isinstance(env, dict):
+            bits = []
+            for k in ("subtype", "error", "result"):
+                v = env.get(k)
+                if isinstance(v, (str, int, float)) and str(v).strip():
+                    bits.append(f"{k}={str(v).strip()}")
+            detail = " ".join(bits)[:300]
+    except Exception:
+        detail = ""
+    if not detail:
+        detail = (stdout or "").strip()[-300:]
+    return (f"llm exit {rc}: {detail or '(no stdout)'} "
+            f"[stderr: {(stderr or '').strip()[-150:] or 'empty'}]")
+
+
+class ExpensiveFailure(RuntimeError):
+    """A non-deadline failure that still consumed most of the attempt's wall-clock budget.
+
+    Counted against the DEADLINE budget, not the fast-failure one. Without this, a primary
+    that burns 880 of its 900 seconds and then exits nonzero is classified as a cheap error
+    and granted max_attempts (5) further tries - up to 75 minutes of the single-threaded
+    worker for one PR, which is the exact pathology the timeout cap exists to prevent."""
+
+
 def run_llm(title, desc, diff_text, rubric=""):
+    """Run one review and bill the attempt by what it COST, not by which line failed.
+
+    Any failure that consumed a third or more of the budget is re-raised as ExpensiveFailure
+    so the worker charges it to the DEADLINE cap. Classifying only the nonzero-exit site was
+    not enough: a run can burn ~900s and then fail on malformed success JSON, a missing
+    summary, an empty codex output or the credential scan, and every one of those would
+    otherwise be billed as a cheap error worth five more full-length retries."""
+    started = time.monotonic()
+    try:
+        return _run_llm(title, desc, diff_text, rubric, started)
+    except (subprocess.TimeoutExpired, ExpensiveFailure):
+        raise
+    except Exception as e:
+        spent = time.monotonic() - started
+        if spent >= CFG["llm_timeout_s"] / 3.0:
+            raise ExpensiveFailure(f"{e} [after {spent:.0f}s]") from e
+        raise
+    finally:
+        record_gauge("llm_seconds", round(time.monotonic() - started, 1))
+
+
+def aux_run(args, remaining, **kw):
+    """An auxiliary subprocess (reading the model's output file, the auth file) inside the
+    operation budget.
+
+    Two things it must not do. It must not outlive the shared deadline - hence
+    min(60, remaining()). And its own timeout must not surface as a `TimeoutExpired`: run_llm
+    re-raises that verbatim and the worker bills it as a full LLM deadline against the cap of
+    2, even when the model itself finished quickly. It becomes an ordinary failure, and the
+    elapsed-cost classifier then assigns the right retry budget."""
+    try:
+        return subprocess.run(args, timeout=max(1.0, min(60.0, remaining())), **kw)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"auxiliary command timed out: {' '.join(map(str, args[:4]))}") from e
+
+
+def _run_llm(title, desc, diff_text, rubric, started):
+    # Clock started in run_llm, before any setup: the budget is for the whole operation, and
+    # the isolated-user mktemp below is a subprocess that can itself hang.
+    deadline = started + CFG["llm_timeout_s"]
+
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired(cmd=CFG["llm_cmd"], timeout=CFG["llm_timeout_s"])
+        return left
+
     prompt = rubric + PROMPT.replace("{title}", title).replace("{description}", desc or "") + diff_text
     workdir = tempfile.mkdtemp(prefix="reviewbot-")
     env = {k: v for k, v in os.environ.items() if k not in ("GITEA_TOKEN",)}
@@ -237,9 +419,13 @@ def run_llm(title, desc, diff_text, rubric=""):
         # and a filesystem read tool on untrusted input is a credential-exfil vector
         # (reviewer findings on #463). Function-scoped (not branch-local) so no code path
         # can ever reach a NameError regardless of kind.
+        # No "LS": it matches no tool in claude CLI 2.x, so the CLI printed
+        # `Permission deny rule "LS" matches no known tool` on EVERY run - noise that went on
+        # to masquerade as a review failure (see llm_error_text). Directory listing stays
+        # denied through Glob/Bash/Read, all of which do match.
         a = CFG["llm_cmd"] + ["-p", "--output-format", "json",
                               "--disallowedTools", "Bash", "Edit", "Write", "Read",
-                              "Grep", "Glob", "LS", "WebFetch", "WebSearch",
+                              "Grep", "Glob", "WebFetch", "WebSearch",
                               "NotebookEdit", "Task", "Agent"]
         return a + (["--model", model] if model else [])
 
@@ -263,25 +449,43 @@ def run_llm(title, desc, diff_text, rubric=""):
         # local process could pre-create last-message.md and have forged JSON posted as
         # the review (reviewer-codex finding). c4 never opens the file itself - it is
         # retrieved and cleaned through sudo as the same isolated user.
-        r = subprocess.run(["sudo", "-n", "-u", sudo_user, "mktemp", "-d",
-                            "/tmp/reviewbot-llm-XXXXXX"], capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError(f"isolated tmpdir failed: {r.stderr[-150:]}")
+        # Failing here is before the main try/finally, so clean up the workdir explicitly
+        # rather than leaking one per failed attempt.
+        try:
+            r = subprocess.run(["sudo", "-n", "-u", sudo_user, "mktemp", "-d",
+                                "/tmp/reviewbot-llm-XXXXXX"], capture_output=True, text=True,
+                               timeout=remaining())
+            if r.returncode != 0:
+                raise RuntimeError(f"isolated tmpdir failed: {r.stderr[-150:]}")
+        except BaseException:
+            try:
+                os.rmdir(workdir)
+            except OSError:
+                pass
+            raise
         out_dir = r.stdout.strip()
         out_file = os.path.join(out_dir, "last-message.md")
         args = [a if a != os.path.join(workdir, "last-message.md") else out_file
                 for a in args]
         args = wrap_sudo(args)
+    # ONE wall-clock budget for the whole operation, primary and fallback together. They
+    # used to get llm_timeout_s EACH, so a near-timeout primary plus a full fallback could
+    # spend 2x the budget inside a single attempt - tolerable at 300 s, but 30 minutes of a
+    # single-threaded worker at 900 s, which would have made the queue worse than before.
+    #
+    # Worst case for one head with this bounded: 3 fast failures (each under llm_timeout_s/3)
+    # plus 2 budget failures = 45 min, against 50 min before the change and the 150 min a
+    # naive deadline bump would have cost. Enumerated in the plan, not estimated.
     try:
         r = subprocess.run(args, input=prompt, capture_output=True, text=True,
-                           timeout=CFG["llm_timeout_s"], cwd=workdir, env=env)
+                           timeout=remaining(), cwd=workdir, env=env)
         if kind == "codex":
             # The file is written before exit; read it even on a nonzero rc (a known CLI
             # quirk), and only fail when it is absent or empty.
             text = ""
             if sudo_user:
-                rr = subprocess.run(["sudo", "-n", "-u", sudo_user, "cat", out_file],
-                                    capture_output=True, text=True)
+                rr = aux_run(["sudo", "-n", "-u", sudo_user, "cat", out_file], remaining,
+                             capture_output=True, text=True)
                 text = rr.stdout if rr.returncode == 0 else ""
             elif os.path.exists(out_file):
                 text = io.open(out_file, encoding="utf-8").read()
@@ -291,9 +495,9 @@ def run_llm(title, desc, diff_text, rubric=""):
             # included (round-3 finding): scan the (public-once-posted) output for that
             # credential material and quarantine instead of posting. Mistake prevention,
             # not tamper-proof - an encoding model defeats a substring scan.
-            ar = subprocess.run(["sudo", "-n", "-u", sudo_user, "cat",
-                                 f"/home/{sudo_user}/.codex/auth.json"],
-                                capture_output=True, text=True)
+            ar = aux_run(["sudo", "-n", "-u", sudo_user, "cat",
+                          f"/home/{sudo_user}/.codex/auth.json"], remaining,
+                         capture_output=True, text=True)
             if ar.returncode == 0:
                 try:
                     for v in json.loads(ar.stdout).values():
@@ -305,29 +509,47 @@ def run_llm(title, desc, diff_text, rubric=""):
         else:
             fb = CFG.get("llm_fallback_model") or ""
             if r.returncode != 0 and fb:
-                # Worst case a job now spends 2x llm_timeout_s (near-timeout primary +
-                # full fallback run) - accepted: the worker is single-threaded by design
-                # and nothing else times jobs; a truncated remaining-budget retry would
-                # mostly produce useless partial reviews.
-                log(f"primary model failed (exit {r.returncode}: {r.stderr[-120:]}); "
-                    f"retrying with fallback '{fb}'")
-                r = subprocess.run(wrap_sudo(claude_args(fb)), input=prompt,
-                                   capture_output=True, text=True,
-                                   timeout=CFG["llm_timeout_s"], cwd=workdir, env=env)
+                left = max(0.0, deadline - time.monotonic())
+                if left < CFG.get("llm_fallback_min_s", 60):
+                    # A few seconds of fallback only buys a second failure; the retry (with a
+                    # whole fresh budget) is the better use of the time.
+                    log(f"primary model failed ({llm_error_text(r.returncode, r.stdout, r.stderr)}); "
+                        f"{left:.0f}s of budget left - skipping the '{fb}' fallback")
+                else:
+                    log(f"primary model failed ({llm_error_text(r.returncode, r.stdout, r.stderr)}); "
+                        f"retrying with fallback '{fb}' in the remaining {left:.0f}s")
+                    r = subprocess.run(wrap_sudo(claude_args(fb)), input=prompt,
+                                       capture_output=True, text=True,
+                                       timeout=left, cwd=workdir, env=env)
             if r.returncode != 0:
-                raise RuntimeError(f"llm exit {r.returncode}: {r.stderr[-300:]}")
+                # Cost classification happens ONCE, in run_llm's wrapper, so every raise site
+                # in here is covered by it - not just this one.
+                raise RuntimeError(llm_error_text(r.returncode, r.stdout, r.stderr))
             envelope = json.loads(r.stdout)
             text = envelope.get("result", "")
+            # The data that decides whether llm_timeout_s is right. Output tokens because run
+            # length tracks REASONING, not diff size: the run that forced this whole change
+            # emitted 40,948 output tokens for a 3,374-char answer.
+            usage = envelope.get("usage")
+            if isinstance(usage, dict):
+                try:
+                    record_gauge("llm_output_tokens", float(usage.get("output_tokens") or 0))
+                except (TypeError, ValueError):
+                    pass
     finally:
+        # STRICTLY non-propagating. `except OSError` did not cover the TimeoutExpired the 60s
+        # `rm -rf` can raise, and an exception escaping a `finally` REPLACES whatever the
+        # function was really doing - a successful review, or the true failure - and would then
+        # be misreported as an exhausted LLM deadline.
         try:
             if sudo_user:
                 subprocess.run(["sudo", "-n", "-u", sudo_user, "rm", "-rf",
-                                os.path.dirname(out_file)], capture_output=True)
+                                os.path.dirname(out_file)], capture_output=True, timeout=60)
             elif os.path.exists(out_file):
                 os.remove(out_file)
             os.rmdir(workdir)
-        except OSError:
-            pass
+        except Exception as e:
+            log(f"llm cleanup failed (ignored): {e}")
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         raise RuntimeError("llm returned no JSON object")
@@ -604,9 +826,22 @@ def write_metrics():
             last_ok = c.execute("SELECT v FROM meta WHERE k='last_success'").fetchone()
             last_rec = c.execute("SELECT v FROM meta WHERE k='last_reconcile'").fetchone()
             quar = c.execute("SELECT COUNT(*) FROM jobs WHERE state='quarantined'").fetchone()[0]
+            # Bounded twin of the gauge above, and the one the alert reads. The cumulative
+            # count never falls for a PR that was CLOSED rather than pushed to, so alerting on
+            # it would latch on forever after a single give-up; this window self-clears.
+            quar_recent = c.execute("SELECT COUNT(*) FROM jobs WHERE state='quarantined' "
+                                    "AND updated>?", (time.time() - 86400,)).fetchone()[0]
             done = c.execute("SELECT COUNT(*) FROM jobs WHERE state='done'").fetchone()[0]
             running = c.execute("SELECT COUNT(*) FROM jobs WHERE state IN "
                                 "('running','posting')").fetchone()[0]
+            # `updated` is stamped on the transition to running, so this is the age of the
+            # in-flight attempt. Needed because the heartbeat now proves only that the metrics
+            # ticker is alive - a permanently wedged worker would otherwise look healthy.
+            run_since = c.execute("SELECT MIN(updated) FROM jobs WHERE state IN "
+                                  "('running','posting')").fetchone()[0]
+            gauges = {r[0]: r[1] for r in c.execute(
+                "SELECT k,v FROM meta WHERE k IN ('llm_timeouts_total','llm_failures_total',"
+                "'llm_seconds','llm_seconds_max','llm_output_tokens','llm_output_tokens_max')")}
             c.close()
         now = time.time()
         lines = [
@@ -614,9 +849,23 @@ def write_metrics():
             f'reviewbot_queue_depth{{persona="{CFG["persona"]}"}} {depth}',
             f'reviewbot_oldest_job_age_seconds{{persona="{CFG["persona"]}"}} {(now - oldest) if oldest else 0:.0f}',
             f'reviewbot_quarantined_jobs{{persona="{CFG["persona"]}"}} {quar}',
+            f'reviewbot_quarantined_recent_jobs{{persona="{CFG["persona"]}"}} {quar_recent}',
             f'reviewbot_jobs_done{{persona="{CFG["persona"]}"}} {done}',
             f'reviewbot_job_running{{persona="{CFG["persona"]}"}} {running}',
+            f'reviewbot_running_job_age_seconds{{persona="{CFG["persona"]}"}} '
+            f'{(now - run_since) if run_since else 0:.0f}',
         ]
+        for key, metric in (("llm_timeouts_total", "reviewbot_llm_timeouts_total"),
+                            ("llm_failures_total", "reviewbot_llm_failures_total"),
+                            ("llm_seconds", "reviewbot_llm_seconds_last"),
+                            ("llm_seconds_max", "reviewbot_llm_seconds_max"),
+                            ("llm_output_tokens", "reviewbot_llm_output_tokens_last"),
+                            ("llm_output_tokens_max", "reviewbot_llm_output_tokens_max")):
+            try:
+                lines.append(f'{metric}{{persona="{CFG["persona"]}"}} '
+                             f'{float(gauges.get(key, 0)):.0f}')
+            except (TypeError, ValueError):
+                pass
         if last_ok:
             lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_ok[0]):.0f}')
         if last_rec:
@@ -629,46 +878,150 @@ def write_metrics():
         log("metrics error:", e)
 
 
-def worker():
+def fail_note(e):
+    """A TimeoutExpired stringifies to the whole argv list, which is how the journal ended up
+    full of 200-character command dumps that said nothing about the PR."""
+    if isinstance(e, subprocess.TimeoutExpired):
+        return f"llm deadline exceeded after {CFG['llm_timeout_s']}s"
+    if isinstance(e, ExpensiveFailure):
+        return f"llm failed after consuming most of the budget: {str(e)[:150]}"
+    return str(e)[:200]
+
+
+def is_budget_failure(e):
+    """Did this failure consume the attempt's wall-clock budget? A hard deadline and a
+    near-deadline nonzero exit cost the worker the same thing, so they share a cap."""
+    return isinstance(e, (subprocess.TimeoutExpired, ExpensiveFailure))
+
+
+def next_failure_state(e, attempts, timeouts):
+    """Retry-or-quarantine after a failed attempt. Returns (state, attempts, timeouts, note).
+
+    Pure and separate from worker() so the policy itself is unit-testable: deadline failures
+    are counted in their own budget (a timeout burns the WHOLE llm_timeout_s and yields
+    nothing, an API error fails in seconds), and mixing the two counters would quarantine a
+    job that hit one fast transient error and then one real timeout - a mis-quarantine, not a
+    conservative policy."""
+    expired = is_budget_failure(e)
+    attempts += 1
+    if expired:
+        timeouts += 1
+    if timeouts >= CFG.get("max_timeout_attempts", 2):
+        return ("quarantined", attempts, timeouts,
+                f"deadline exhausted after {timeouts} timed-out attempts")
+    if attempts >= CFG["max_attempts"]:
+        return "quarantined", attempts, timeouts, f"attempts exhausted: {fail_note(e)}"
+    return "retry", attempts, timeouts, fail_note(e)
+
+
+def metrics_ticker():
+    """Metrics used to be written only at the top of the worker loop, so every reviewbot_*
+    series froze for the whole LLM run - measured max heartbeat staleness 296 s against a
+    300 s deadline. Nothing could be alerted on tighter than the deadline itself. Exactly ONE
+    thread may call write_metrics(): it writes through a fixed .tmp path, which two concurrent
+    writers would race on."""
     while True:
         write_metrics()
+        time.sleep(15)
+
+
+def worker_once():
+    """One claim -> run -> persist cycle, returning the job id it handled (None if idle).
+
+    Factored out of worker() so a single iteration is testable end to end: the loop itself is
+    `while True`, and the behaviour that matters (which failures burn the deadline budget,
+    that counters persist across a later success, that a completed head retires a stale
+    quarantine) only exists in the round trip through the database."""
+    with db_lock:
+        c = db()
+        row = c.execute("SELECT id,repo,pr,head_sha,attempts,timeout_attempts,created "
+                        "FROM jobs WHERE state IN ('queued','retry') AND next_at<=? "
+                        "ORDER BY created LIMIT 1", (time.time(),)).fetchone()
+        if row:
+            c.execute("UPDATE jobs SET state='running', updated=? WHERE id=?",
+                      (time.time(), row[0]))
+            c.commit()
+        c.close()
+    if not row:
+        return None
+    jid, repo, pr, head_sha, attempts, timeouts, created = row
+    timeouts = timeouts or 0
+    try:
+        state, rid, note = review_job(jid, repo, pr, head_sha)
+    except Exception as e:
+        bump_meta("llm_timeouts_total" if is_budget_failure(e) else "llm_failures_total")
+        state, attempts, timeouts, note = next_failure_state(e, attempts, timeouts)
+        rid = None
+        log(f"job {jid} {repo}#{pr} attempt {attempts} failed: {fail_note(e)}")
+    with db_lock:
+        c = db()
+        c.execute("UPDATE jobs SET state=?, attempts=?, timeout_attempts=?, next_at=?, "
+                  "updated=?, review_id=?, note=? WHERE id=?",
+                  (state, attempts, timeouts,
+                   time.time() + min(3600, 60 * 2 ** attempts),
+                   time.time(), rid, note, jid))
+        if state == "done":
+            c.execute("INSERT OR REPLACE INTO meta VALUES('last_success',?)",
+                      (str(time.time()),))
+            # A head that reviewed cleanly settles the PR, so any quarantine left on an
+            # EARLIER head is stale - it would otherwise keep the alert up for 24h about a
+            # PR that has in fact been reviewed (the running-head race in enqueue()).
+            # `created<?` is what makes "EARLIER" true rather than merely claimed: without it
+            # this matched ANY other head, so a job for a stale head that reached done could
+            # revive - clear - the CURRENT head's live quarantine.
+            # An ambiguous POST is never auto-cleared: only an operator decides that one.
+            c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
+                      "AND state='quarantined' AND head_sha<>? AND created<? "
+                      "AND COALESCE(note,'') NOT LIKE 'ambiguous POST%'",
+                      (time.time(), repo, pr, head_sha, created))
+        c.commit()
+        c.close()
+    return jid
+
+
+def worker():
+    while True:
         if inhibited() or posting_disabled():
             time.sleep(15)
             continue
-        with db_lock:
-            c = db()
-            row = c.execute("SELECT id,repo,pr,head_sha,attempts FROM jobs WHERE "
-                            "state IN ('queued','retry') AND next_at<=? "
-                            "ORDER BY created LIMIT 1", (time.time(),)).fetchone()
-            if row:
-                c.execute("UPDATE jobs SET state='running', updated=? WHERE id=?",
-                          (time.time(), row[0]))
-                c.commit()
-            c.close()
-        if not row:
+        if worker_once() is None:
             time.sleep(10)
-            continue
-        jid, repo, pr, head_sha, attempts = row
+
+
+def retire_closed_quarantines():
+    """Clear quarantines whose PR is no longer open.
+
+    A quarantine on a merged or closed PR is not actionable, but the row would keep
+    ReviewbotQuarantined up for its whole 24h window. Each row is checked INDIVIDUALLY against
+    the API rather than being diffed against the reconciler's open-PR listing: that listing is
+    paginated (limit=50), so "absent from the page" is not proof a PR is closed and would
+    silently retire live quarantines. A transient API error leaves the row alone - staying
+    noisy is the safe failure here."""
+    with db_lock:
+        c = db()
+        stale = list(c.execute("SELECT DISTINCT repo,pr FROM jobs WHERE state='quarantined'"))
+        c.close()
+    for repo, pr in stale:
         try:
-            state, rid, note = review_job(jid, repo, pr, head_sha)
+            d = api(f"/repos/{repo}/pulls/{pr}")
         except Exception as e:
-            attempts += 1
-            if attempts >= CFG["max_attempts"]:
-                state, rid, note = "quarantined", None, f"attempts exhausted: {e}"
-            else:
-                state, rid, note = "retry", None, str(e)[:200]
-            log(f"job {jid} {repo}#{pr} attempt {attempts} failed: {e}")
+            log(f"quarantine sweep {repo}#{pr}: {e}")
+            continue
+        # EXACT "closed" only. `!= "open"` would treat any unexpected payload - `{}`, an
+        # error object, a schema change - as proof the PR is closed and silently clear a live
+        # quarantine.
+        if d.get("state") != "closed":
+            continue
         with db_lock:
             c = db()
-            c.execute("UPDATE jobs SET state=?, attempts=?, next_at=?, updated=?, "
-                      "review_id=?, note=? WHERE id=?",
-                      (state, attempts, time.time() + min(3600, 60 * 2 ** attempts),
-                       time.time(), rid, note, jid))
-            if state == "done":
-                c.execute("INSERT OR REPLACE INTO meta VALUES('last_success',?)",
-                          (str(time.time()),))
+            n = c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
+                          "AND state='quarantined' "
+                          "AND COALESCE(note,'') NOT LIKE 'ambiguous POST%'",
+                          (time.time(), repo, pr)).rowcount
             c.commit()
             c.close()
+        if n:
+            log(f"retired {n} quarantine(s) for closed {repo}#{pr}")
 
 
 def reconciler():
@@ -684,6 +1037,7 @@ def reconciler():
                         enqueue(repo, pr["number"], sha, "reconcile")
                     else:
                         maybe_merge(repo, pr["number"])
+            retire_closed_quarantines()
             with db_lock:
                 c = db()
                 c.execute("INSERT OR REPLACE INTO meta VALUES('last_reconcile',?)",
@@ -695,7 +1049,75 @@ def reconciler():
         time.sleep(CFG["reconcile_s"])
 
 
+def requeue(repo, pr, force=False):
+    """Put a quarantined head back in the queue:
+    `reviewbot.py <config> --requeue <repo> <pr> [--force]`.
+
+    enqueue() dedupes against 'quarantined' (that is what stops the reconciler re-enqueueing a
+    hopeless job forever), so a give-up sticks until either a new head supersedes it or this
+    runs.
+
+    REFUSES the 'ambiguous POST' class without --force. The pre-post marker check makes a
+    retry cheap, not idempotent: after a client-side timeout Gitea may still commit the
+    original POST, and it can do so AFTER the requeued worker checks for the marker and
+    BEFORE it posts its own - which double-posts the review. Check the PR in Gitea first;
+    --force is for when you have confirmed no review landed."""
+    # ONE transaction, and the UPDATE names the exact ids that were inspected. Reading,
+    # deciding, then updating "every quarantined row for this PR" would requeue a row the
+    # DAEMON created in between - without the --force decision the operator made about the
+    # rows they were actually shown. db_lock cannot help: this runs as a separate process.
+    with db_lock:
+        c = db()
+        rows = list(c.execute("SELECT id,head_sha,note FROM jobs WHERE repo=? AND pr=? "
+                              "AND state='quarantined'", (repo, pr)))
+        if not rows:
+            c.close()
+            print(f"no quarantined jobs for {repo}#{pr}")
+            return 1
+        ambiguous = [r for r in rows if str(r[2] or "").startswith("ambiguous POST")]
+        if ambiguous and not force:
+            c.close()
+            for jid, sha, note in ambiguous:
+                print(f"REFUSING job {jid} {repo}#{pr} @ {sha[:9]}: {note}")
+            print("This review may already have landed and a retry could post it twice. Check "
+                  "the PR in Gitea; if no review is present, re-run with --force.")
+            return 2
+        ids = [r[0] for r in rows]
+        n = c.execute(
+            "UPDATE jobs SET state='queued', attempts=0, timeout_attempts=0, next_at=0, "
+            "updated=? WHERE state='quarantined' AND id IN (%s)" % ",".join("?" * len(ids)),
+            [time.time()] + ids).rowcount
+        c.commit()
+        c.close()
+    for jid, sha, note in rows:
+        print(f"requeued job {jid} {repo}#{pr} @ {sha[:9]} (was quarantined: {note})")
+    if n != len(rows):
+        print(f"note: {len(rows) - n} row(s) changed state concurrently and were not requeued")
+    return 0
+
+
+USAGE = "usage: reviewbot.py <config> [--requeue <owner/repo> <pr> [--force]]"
+
+
 def main():
+    # Anything after the config path is a subcommand. An UNRECOGNISED one must be an error,
+    # never a silent fall-through into starting the daemon.
+    argv = sys.argv[2:]
+    if argv:
+        if argv[0] != "--requeue":
+            print(f"unknown option {argv[0]!r}\n{USAGE}", file=sys.stderr)
+            return 2
+        rest = [a for a in argv[1:] if a != "--force"]
+        force = "--force" in argv[1:]
+        if len(rest) != 2:
+            print(USAGE, file=sys.stderr)
+            return 2
+        try:
+            pr = int(rest[1])
+        except ValueError:
+            print(f"pr must be an integer, got {rest[1]!r}\n{USAGE}", file=sys.stderr)
+            return 2
+        return requeue(rest[0], pr, force=force)
     os.makedirs(os.path.dirname(CFG["state_db"]), exist_ok=True)
     c = db()
     # Restart recovery: a killed in-flight run leaves 'running' (and rarely 'posting')
@@ -711,10 +1133,14 @@ def main():
         log(f"startup: re-queued {n} orphaned job(s)")
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=reconciler, daemon=True).start()
+    # Metrics get their own thread so they keep flowing THROUGH a long LLM run; the worker no
+    # longer writes them (one writer only - see metrics_ticker).
+    threading.Thread(target=metrics_ticker, daemon=True).start()
     srv = http.server.ThreadingHTTPServer((CFG["listen"], CFG["port"]), Hook)
     log(f"reviewbot persona={CFG['persona']} listening on {CFG['listen']}:{CFG['port']}")
     srv.serve_forever()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

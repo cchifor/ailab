@@ -187,7 +187,7 @@ git add ansible/secrets/dev-worker.sops.yaml
 
 ## reviewers (dedicated PR-review VMs)
 
-reviewer-1 (.24, claude persona) and reviewer-2 (.25, codex persona) — both vmid 4301/4302 on
+reviewer-1 (.24, claude persona) and reviewer-2 (.25, codex persona) — **vmid 4501/4502** on
 ai-node3, 2 vCPU / 4 GiB FIXED, tofu module kubernetes/infra/reviewers, guest config
 ansible/reviewers.yml (deliberately minimal: node + LLM CLIs, node_exporter, ufw, pr_reviewer
 role — no docker/tmux/toolchains). Migrated off dev-worker-2/-3 2026-09-02 so reviews never
@@ -197,6 +197,52 @@ and is NOT ansible-managed — a subscription re-login is manual. Org webhooks 3
 dashboard "PR Reviewers" row reads the reviewbot_* textfile metrics. Tofu state: applied from
 the session scratchpad clone — hand the tfstate to the main checkout and verify a no-op plan
 (same handover as env-pool; see backend.tf).
+
+> vmid 4501/4502, NOT 4301/4302 — those are talos-agent-node-1/2. Pointing a reviewer apply at
+> 4301/4302 is what destroyed the agent nodes and cost ~6h of agentforge downtime. Verify with
+> `python scripts/node-ssh.py 192.168.0.4 "qm list"` before any destructive tofu run.
+
+### When a review never lands (deadlines, quarantine, requeue)
+
+A persona that produces no verdict blocks the automerge lane: merging requires EVERY configured
+persona clean at the current head. The 2026-09-04 incident was exactly this — platform#1067 was
+attempted 9 times across 3 heads over 71 minutes and never reviewed, and the operator merged by
+hand. Order of diagnosis:
+
+1. `sudo journalctl -u reviewbot -n 50` on the persona's VM. `llm deadline exceeded after <n>s`
+   means the review needs more budget than `llm_timeout_s` allows.
+2. `curl -s localhost:9100/metrics | grep reviewbot_` — `reviewbot_llm_seconds_max` and
+   `reviewbot_llm_output_tokens_max` say how long the worst real run took and why. Run length
+   tracks REASONING, not diff size: a 2 KB diff has timed out and a 342 KB one has passed.
+3. If the deadline is genuinely too tight, raise `pr_reviewer_llm_timeout_s` in the pr_reviewer
+   **role defaults**, not in host_vars — a default that is only survivable because two hosts
+   override it is what produced this incident. Redeploy with
+   `ansible-playbook reviewers.yml -l <host> -t reviewbot`.
+
+**Quarantine is now sticky by design.** `enqueue()` dedupes against `quarantined`, which is what
+stops the reconciler re-queueing a hopeless job every 300 s forever (each round costs
+`max_timeout_attempts` x `llm_timeout_s` of a single-threaded worker). A quarantined head is
+therefore never retried on its own. Clear it either by pushing a new head — which retires the
+row automatically — or explicitly:
+
+```bash
+sudo -u c4 python3 /usr/local/lib/reviewbot/reviewbot.py /etc/reviewbot/config.json \
+  --requeue cchifor/platform 1067
+```
+
+That is safe for the `deadline exhausted` / `attempts exhausted` classes: `review_job()`
+re-checks the Gitea marker before doing any work, so a review that actually landed costs one API
+call rather than a second post.
+
+It **refuses** the `ambiguous POST` class unless you add `--force`. The marker pre-check makes a
+retry cheap, not idempotent: after a client-side POST timeout Gitea may still commit the original
+request, and it can do so *after* the requeued worker checks for the marker and *before* it posts
+its own — which double-posts the review. Open the PR in Gitea and confirm no review from that
+persona is present at that head; only then use `--force`.
+
+`ReviewbotQuarantined` fires on `reviewbot_quarantined_recent_jobs` (a 24 h window), not the
+cumulative gauge — the cumulative one never falls for a PR that was closed rather than pushed
+to, so alerting on it would latch on forever.
 
 ## Daily fleet converge (scheduled, GitOps-true)
 

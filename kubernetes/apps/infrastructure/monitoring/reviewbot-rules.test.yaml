@@ -1,0 +1,252 @@
+# `promtool test rules` fixtures for reviewbot-rules.yaml. Run by scripts/rules-lint.sh on
+# every PR, after `promtool check rules`.
+#
+# WHY: `check rules` proves an expression PARSES. It cannot prove the expression can ever be
+# true, and both of the obvious thresholds for this service were wrong in exactly that way when
+# first drafted — `oldest_job_age > 3600` never fired during a 50-minute incident, and an
+# ungated 6h no-success rule fired for 369 minutes across one healthy 48h window. Every rule
+# below is therefore asserted BOTH ways: it fires on the shape of the real incident, and it
+# stays silent on the healthy shape it must not page for.
+#
+# `rule_files` is the extracted spec name, because rules-lint.sh hands promtool the `spec:`
+# body of each PrometheusRule (the CRD wrapper is not a promtool rules file) under the
+# manifest's own basename.
+rule_files:
+  - reviewbot-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------- node down
+  - interval: 1m
+    name: a dead reviewer VM pages, a live one does not
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "0x30"
+      - series: 'up{job="reviewer-node",instance="192.168.0.25:9100"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ReviewerNodeDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "Reviewer VM 192.168.0.24:9100 is down (no node_exporter scrape)"
+              description: >-
+                node_exporter on reviewer 192.168.0.24:9100 has been unscrapeable for >10m. .24 =
+                reviewer-1 (claude persona), .25 = reviewer-2 (codex persona); both are on ai-node3
+                (vmid 4501/4502). While a reviewer is down its persona posts no verdicts, so every
+                PR needing "all personas clean" stops merging. Note the reviewbot_* alerts in this
+                group CANNOT fire while this one is active — their series are gone, not stale.
+      # Not yet at the 10m hold.
+      - eval_time: 5m
+        alertname: ReviewerNodeDown
+        exp_alerts: []
+
+  # --------------------------------------------------------------- heartbeat
+  - interval: 1m
+    name: a frozen heartbeat pages, a ticking one does not
+    input_series:
+      # Value tracks wall clock => time() - value stays ~0. This is the healthy ticker.
+      - series: 'reviewbot_heartbeat_timestamp_seconds{persona="codex",instance="192.168.0.25:9100"}'
+        values: "0+60x40"
+      # Value frozen at 0 => staleness grows as time() advances. This is a wedged process.
+      - series: 'reviewbot_heartbeat_timestamp_seconds{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReviewbotHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              persona: claude
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot (claude) heartbeat is stale (>5m)"
+              description: >-
+                The reviewbot metrics ticker on 192.168.0.24:9100 writes every 15s, so 300s is 20
+                missed ticks — the process is wedged or dead, not busy. This proves PROCESS liveness
+                only; a worker stuck inside a job keeps the heartbeat fresh, which is what
+                ReviewbotWorkerStuck is for. Check `systemctl status reviewbot` and the journal.
+
+  # ------------------------------------------------------------ worker stuck
+  # The gap ReviewbotQueueBacklog cannot see: oldest_job_age counts queued/retry only, so one
+  # wedged job with an empty queue reports zero there.
+  - interval: 1m
+    name: a wedged job pages even with an empty queue
+    input_series:
+      - series: 'reviewbot_running_job_age_seconds{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0+60x60"
+      - series: 'reviewbot_oldest_job_age_seconds{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ReviewbotWorkerStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              persona: claude
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot (claude) has held one job for >40m"
+              description: >-
+                A single job on 192.168.0.24:9100 has been in running/posting for over 40 minutes.
+                One attempt is capped at llm_timeout_s (900s) including the fallback, so this is a
+                hang, not a long review — most likely a subprocess that ignored its deadline or a
+                wedged Gitea POST. The worker is single-threaded: nothing else is being reviewed
+                while this is true.
+      # A normal long review (~15 min, the 900s budget) must not page.
+      - eval_time: 15m
+        alertname: ReviewbotWorkerStuck
+        exp_alerts: []
+      # And the backlog rule must stay silent here — proving these two cover different gaps.
+      - eval_time: 50m
+        alertname: ReviewbotQueueBacklog
+        exp_alerts: []
+
+  # ------------------------------------------------------- LLM deadline rate
+  - interval: 1m
+    name: repeated LLM deadlines page (the 2026-09-04 shape)
+    input_series:
+      # 6 timeouts inside the hour, as on 2026-09-04 09:59-11:00.
+      - series: 'reviewbot_llm_timeouts_total{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0 0 1 1 2 2 3 3 4 4 5 5 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReviewbotReviewTimeouts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              persona: claude
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot (claude) hit 6 LLM deadlines in an hour"
+              description: >-
+                Three or more reviews on 192.168.0.24:9100 exceeded llm_timeout_s within an hour.
+                Each one burns the WHOLE budget of a single-threaded worker and produces nothing,
+                and after max_timeout_attempts the head is quarantined with no verdict — which
+                blocks the automerge lane for that PR. Either a specific PR is too expensive (check
+                reviewbot_llm_seconds_max and reviewbot_llm_output_tokens_max: run length tracks
+                REASONING, not diff size) or the deadline is too tight again. Raise
+                pr_reviewer_llm_timeout_s in the role defaults, not per host.
+
+  - interval: 1m
+    name: an occasional deadline does not page
+    input_series:
+      # Two timeouts in the window — under the >=3 threshold. A tighter rule would page on the
+      # ordinary tail of a healthy service.
+      - series: 'reviewbot_llm_timeouts_total{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ReviewbotReviewTimeouts
+        exp_alerts: []
+
+  # --------------------------------------------------------- queue backlog
+  - interval: 1m
+    name: backlog threshold fires on the incident peak
+    input_series:
+      # Climbs past 1800s and keeps going, as the claude persona did (peak 3008s). The
+      # first-drafted 3600s threshold would NOT have fired on this — that is the bug this
+      # fixture exists to prevent from coming back.
+      - series: 'reviewbot_oldest_job_age_seconds{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ReviewbotQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              persona: claude
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot (claude) has a job queued >30m"
+              description: >-
+                The oldest queued job on 192.168.0.24:9100 has been waiting over 30 minutes.
+                Healthy bursts drain well inside this (the codex persona's 48h worst case was 28.8
+                min); the claude persona's incident peak was 50.1 min. Usually means the worker is
+                spending its time on failing retries — check ReviewbotReviewTimeouts and the
+                journal for repeated attempts on one PR.
+
+  - interval: 1m
+    name: a healthy reconcile burst that drains does not page
+    input_series:
+      # Rises to ~1680s (28 min, the codex persona's measured 48h worst case) then drains.
+      - series: 'reviewbot_oldest_job_age_seconds{persona="codex",instance="192.168.0.25:9100"}'
+        values: "0+60x28 0x30"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: ReviewbotQueueBacklog
+        exp_alerts: []
+
+  # ------------------------------------------------------------- quarantine
+  - interval: 1m
+    name: a recent quarantine pages; an aged-out one does not
+    input_series:
+      - series: 'reviewbot_quarantined_recent_jobs{persona="claude",instance="192.168.0.24:9100"}'
+        values: "1x40"
+      # The cumulative gauge is deliberately NOT what the rule reads: it never falls, so a
+      # single historical give-up would latch the alert on forever.
+      - series: 'reviewbot_quarantined_jobs{persona="codex",instance="192.168.0.25:9100"}'
+        values: "7x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReviewbotQuarantined
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              persona: claude
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot (claude) quarantined a review in the last 24h"
+              description: >-
+                1 job(s) on 192.168.0.24:9100 gave up in the last 24h and will NOT be retried on
+                their own — that PR has no verdict from this persona and cannot automerge. Recover
+                with `sudo -u c4 python3 /usr/local/lib/reviewbot/reviewbot.py
+                /etc/reviewbot/config.json --requeue <owner/repo> <pr>`. That refuses the `ambiguous
+                POST` class unless you add --force: the pre-post marker check makes a retry cheap,
+                not idempotent, so check the PR in Gitea first. Pushing a new head retires the row
+                instead. See docs/runbooks/dev-workers.md.
+
+  # ----------------------------------------------------------------- stalled
+  - interval: 1m
+    name: an idle night does NOT page (the 369-minute false positive)
+    input_series:
+      # Last success is 7 hours old and never advances, but nothing is queued: nobody opened a
+      # PR. An ungated `no success in 6h` rule fires here — measured at 369 minutes over one
+      # healthy 48h window. This fixture is the regression guard for that.
+      - series: 'reviewbot_last_success_timestamp_seconds{persona="claude",instance="192.168.0.24:9100"}'
+        values: "-25200x60"
+      - series: 'reviewbot_queue_depth{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: ReviewbotStalled
+        exp_alerts: []
+
+  - interval: 1m
+    name: queued work with no completion does page
+    input_series:
+      - series: 'reviewbot_last_success_timestamp_seconds{persona="claude",instance="192.168.0.24:9100"}'
+        values: "-7200x60"
+      - series: 'reviewbot_queue_depth{persona="claude",instance="192.168.0.24:9100"}'
+        values: "3x60"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ReviewbotStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              persona: claude
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot (claude) has queued work but no success in >1h"
+              description: >-
+                192.168.0.24:9100 has jobs queued and has not completed one in over an hour. The
+                queue gate is load-bearing: without it this fires through every idle night
+                (measured: 369 minutes of an ungated 6h version over one 48h window). Check whether
+                the LLM CLI still authenticates — a subscription re-login invalidates the seeded
+                credentials, which are NOT ansible-managed.
