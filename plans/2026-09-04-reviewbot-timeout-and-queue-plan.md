@@ -260,4 +260,4 @@ not smoke checks.
 10. **Regression guard**: a normal small PR still reviews in <60 s and `reviewbot_jobs_done`
     keeps incrementing.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
