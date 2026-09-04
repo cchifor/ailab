@@ -43,10 +43,27 @@ pr_reviewer_llm_fallback_model: ""
 # credentials to read. Required for codex (no tool-denial flags); claude gets the same
 # effect from --disallowedTools.
 pr_reviewer_llm_sudo_user: ""
-pr_reviewer_llm_timeout_s: 300
+# WALL-CLOCK BUDGET FOR ONE ATTEMPT — primary AND fallback share it (they used to get one
+# each, so the real worst case was 2x this). 300 was too small and is what broke the claude
+# persona: measured 2026-09-04, a 341,672-byte diff needs 515 s (40,948 output tokens — run
+# length tracks REASONING, not diff size, which is why a 2 KB diff timed out too), while
+# healthy runs land at 19-220 s. 12 timeouts in 3 days, and platform#1067 never got a verdict
+# in 9 attempts. 900 is an initial operational value, not a measured SLO — reviewbot_llm_seconds_max
+# and ReviewbotReviewTimeouts are what revise it. reviewer-2/codex keeps its explicit 600.
+pr_reviewer_llm_timeout_s: 900
+# Skip the fallback model when less than this is left of the attempt's budget: a 30-second
+# fallback run only produces a second failure, and the retry is the better use of the time.
+pr_reviewer_llm_fallback_min_s: 60
 pr_reviewer_max_diff_bytes: 400000
 pr_reviewer_max_comments: 15
 pr_reviewer_max_attempts: 5
+# Deadline failures are counted SEPARATELY (jobs.timeout_attempts) and capped lower: a timeout
+# burns the entire budget and yields nothing, while an API error or bad JSON fails in seconds.
+# Retrying a deadline once is worth it (agentforge-platform#177 timed out, then succeeded on
+# the retry); five times is 75 minutes of a single-threaded worker. Separate counters, not a
+# lower cap on the shared one — otherwise one fast transient error plus one real timeout
+# quarantines a job that deserved another try.
+pr_reviewer_max_timeout_attempts: 2
 pr_reviewer_reconcile_s: 300
 # codex-only: reasoning effort for reviews (the seeded account default is xhigh - 5-10min
 # per review; medium is the right latency/quality point for a review bot).

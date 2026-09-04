@@ -1,0 +1,388 @@
+"""Unit tests for ansible/roles/pr_reviewer/files/reviewbot.py.
+
+WHY THESE EXIST: reviewbot's failure handling is a state machine (retry vs quarantine,
+per-class attempt budgets, a shared wall-clock budget across two subprocesses, enqueue
+dedupe/coalescing) and `py_compile` proves none of it. The 2026-09-04 incident was caused by
+a *policy* value being wrong, not by a syntax error: the claude persona's 300 s deadline was
+shorter than its real run-time distribution, every timeout burned the whole budget of a
+single-threaded worker, and `enqueue()` would have re-queued a quarantined head forever
+because 'quarantined' was missing from one SQL tuple. Every test below pins one of those.
+
+Stdlib `unittest` only, no pytest: .gitea/workflows/broker-inventory.yaml runs
+`python -m unittest discover -s scripts/tests` and the runner has no pytest.
+
+reviewbot.py reads its config at IMPORT time (`CFG = json.load(open(sys.argv[1] ...))`), so
+each test loads a fresh module object against a throwaway config + sqlite file.
+"""
+import importlib.util
+import json
+import pathlib
+import sqlite3
+import sys
+import tempfile
+import time as real_time
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+SRC = ROOT / "ansible" / "roles" / "pr_reviewer" / "files" / "reviewbot.py"
+
+BASE_CFG = {
+    "persona": "test",
+    "listen": "127.0.0.1",
+    "port": 18477,
+    "gitea_url": "https://git.invalid",
+    "repos": ["o/r"],
+    "ignore_authors": [],
+    "llm_cmd": ["/bin/true"],
+    "llm_kind": "claude",
+    "llm_model": "m",
+    "llm_fallback_model": "fb",
+    "llm_sudo_user": "",
+    "automerge": False,
+    "merge_personas": ["test"],
+    "merge_authors": [],
+    "pin_authors": [],
+    "llm_timeout_s": 900,
+    "llm_fallback_min_s": 60,
+    "llm_effort": "medium",
+    "max_diff_bytes": 400000,
+    "max_comments": 15,
+    "max_attempts": 5,
+    "max_timeout_attempts": 2,
+    "reconcile_s": 300,
+}
+
+
+def load(tmp, **overrides):
+    """Import reviewbot.py as a fresh module bound to a throwaway config."""
+    d = pathlib.Path(tmp)
+    (d / "pat").write_text("token\n", encoding="utf-8")
+    (d / "hook").write_text("secret\n", encoding="utf-8")
+    cfg = dict(BASE_CFG, **overrides)
+    cfg.update({
+        "pat_file": str(d / "pat"),
+        "webhook_secret_file": str(d / "hook"),
+        "posting_disable_flag": str(d / "posting-disabled"),
+        "inhibit_flag": str(d / "inhibit"),
+        "state_db": str(d / "state.sqlite"),
+        "textfile": str(d / "reviewbot.prom"),
+    })
+    cfg_path = d / "config.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    saved = sys.argv
+    sys.argv = ["reviewbot.py", str(cfg_path)]
+    try:
+        spec = importlib.util.spec_from_file_location("reviewbot_under_test", SRC)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    finally:
+        sys.argv = saved
+    return mod
+
+
+class ErrorTextTest(unittest.TestCase):
+    """llm_error_text runs on the failure path; it must never raise, and must prefer the
+    channel that actually carries the reason. ailab#482 recorded a harmless startup warning
+    from stderr as the cause of a failed review because stdout was discarded."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_prefers_stdout_envelope_over_stderr_warning(self):
+        out = json.dumps({"subtype": "error_max_turns", "is_error": True})
+        txt = self.m.llm_error_text(1, out, 'Permission deny rule "LS" matches no known tool')
+        self.assertIn("error_max_turns", txt)
+        self.assertIn("llm exit 1", txt)
+
+    def test_malformed_stdout_does_not_raise(self):
+        for bad in ('{"truncated": ', "", "not json at all", "[1,2,3]", "null", '{"result": null}'):
+            with self.subTest(bad=bad):
+                txt = self.m.llm_error_text(2, bad, "stderr tail")
+                self.assertIsInstance(txt, str)
+                self.assertIn("llm exit 2", txt)
+
+    def test_non_string_fields_are_tolerated(self):
+        txt = self.m.llm_error_text(1, json.dumps({"result": {"nested": "object"}}), "")
+        self.assertIsInstance(txt, str)
+
+    def test_exit_code_is_always_preserved(self):
+        self.assertIn("llm exit 137", self.m.llm_error_text(137, "", ""))
+
+
+class FailurePolicyTest(unittest.TestCase):
+    """The retry/quarantine budgets. Deadline failures are capped lower than fast ones and
+    counted SEPARATELY -- mixing them mis-quarantines a job that hit one transient error."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.timeout = self.m.subprocess.TimeoutExpired(cmd=["claude"], timeout=900)
+        self.fast = RuntimeError("llm exit 1: transient")
+
+    def test_two_timeouts_quarantine(self):
+        state, attempts, timeouts, _ = self.m.next_failure_state(self.timeout, 0, 0)
+        self.assertEqual(("retry", 1, 1), (state, attempts, timeouts))
+        state, attempts, timeouts, note = self.m.next_failure_state(self.timeout, attempts, timeouts)
+        self.assertEqual("quarantined", state)
+        self.assertIn("2 timed-out attempts", note)
+
+    def test_fast_error_then_timeout_does_not_quarantine(self):
+        """The mis-quarantine this design exists to avoid: one fast transient failure must not
+        consume the expensive-failure allowance."""
+        state, attempts, timeouts, _ = self.m.next_failure_state(self.fast, 0, 0)
+        self.assertEqual(("retry", 1, 0), (state, attempts, timeouts))
+        state, attempts, timeouts, _ = self.m.next_failure_state(self.timeout, attempts, timeouts)
+        self.assertEqual("retry", state, "one fast error + one timeout must still get a retry")
+        self.assertEqual(1, timeouts)
+
+    def test_fast_errors_still_use_the_total_ceiling(self):
+        attempts = timeouts = 0
+        states = []
+        for _ in range(5):
+            state, attempts, timeouts, _ = self.m.next_failure_state(self.fast, attempts, timeouts)
+            states.append(state)
+        self.assertEqual(["retry"] * 4 + ["quarantined"], states)
+        self.assertEqual(0, timeouts)
+
+    def test_timeout_note_is_readable(self):
+        """A TimeoutExpired stringifies to the whole argv list; the journal was full of them."""
+        self.assertEqual("llm deadline exceeded after 900s", self.m.fail_note(self.timeout))
+
+
+class SharedBudgetTest(unittest.TestCase):
+    """llm_timeout_s is the budget for the WHOLE run_llm operation. It used to be applied per
+    subprocess, so a near-timeout primary plus a full fallback could spend 2x -- 30 minutes of
+    a single-threaded worker at the new 900 s value."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.calls = []
+
+        class Clock:
+            now = 1000.0
+            def monotonic(self):
+                return Clock.now
+            def time(self):
+                return real_time.time()
+            def sleep(self, _n):
+                pass
+            def strftime(self, *a):
+                return real_time.strftime(*a)
+
+        self.clock = Clock()
+        self.m.time = self.clock
+
+    def _fake_run(self, elapsed, rc, stdout):
+        """Replace subprocess.run, recording the timeout each call was given."""
+        def run(args, **kw):
+            self.calls.append({"args": args, "timeout": kw.get("timeout")})
+            type(self.clock).now += elapsed
+            return self.m.subprocess.CompletedProcess(args, rc, stdout, "")
+        return run
+
+    def _ok_stdout(self):
+        return json.dumps({"result": json.dumps({"summary": "s", "findings": []}),
+                           "usage": {"output_tokens": 1234}})
+
+    def test_primary_gets_the_full_budget(self):
+        self.m.subprocess.run = self._fake_run(10, 0, self._ok_stdout())
+        self.m.run_llm("t", "d", "diff")
+        self.assertAlmostEqual(900, self.calls[0]["timeout"], delta=1)
+
+    def test_fallback_only_gets_what_is_left(self):
+        self.m.subprocess.run = self._fake_run(300, 1, "{}")
+        with self.assertRaises(Exception):
+            self.m.run_llm("t", "d", "diff")
+        self.assertEqual(2, len(self.calls), "fallback should have run")
+        self.assertAlmostEqual(600, self.calls[1]["timeout"], delta=2,
+                               msg="fallback must inherit the REMAINING budget, not a fresh one")
+
+    def test_fallback_skipped_when_budget_is_nearly_spent(self):
+        self.m.subprocess.run = self._fake_run(880, 1, "{}")
+        with self.assertRaises(Exception):
+            self.m.run_llm("t", "d", "diff")
+        self.assertEqual(1, len(self.calls),
+                         "only 20s left (< llm_fallback_min_s=60): fallback must be skipped")
+
+    def test_output_token_and_duration_telemetry_recorded(self):
+        self.m.subprocess.run = self._fake_run(42, 0, self._ok_stdout())
+        self.m.run_llm("t", "d", "diff")
+        c = sqlite3.connect(self.m.CFG["state_db"])
+        meta = dict(c.execute("SELECT k,v FROM meta"))
+        c.close()
+        self.assertEqual(1234.0, float(meta["llm_output_tokens"]))
+        self.assertEqual(42.0, float(meta["llm_seconds"]))
+        self.assertEqual(42.0, float(meta["llm_seconds_max"]))
+
+
+class QueueStateTest(unittest.TestCase):
+    """enqueue() dedupe/coalescing and the quarantine lifecycle."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.A = "a" * 40
+        self.B = "b" * 40
+
+    def _rows(self):
+        c = sqlite3.connect(self.m.CFG["state_db"])
+        rows = list(c.execute("SELECT head_sha,state FROM jobs ORDER BY id"))
+        c.close()
+        return rows
+
+    def _set_state(self, sha, state):
+        c = sqlite3.connect(self.m.CFG["state_db"])
+        c.execute("UPDATE jobs SET state=?, updated=? WHERE head_sha=?",
+                  (state, real_time.time(), sha))
+        c.commit()
+        c.close()
+
+    def test_quarantined_head_is_not_re_enqueued(self):
+        """The infinite loop: 'quarantined' was missing from the dedupe tuple, so the
+        reconciler re-queued a hopeless head every 300 s forever."""
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self._set_state(self.A, "quarantined")
+        self.m.enqueue("o/r", 1, self.A, "reconcile")
+        self.assertEqual([(self.A, "quarantined")], self._rows())
+
+    def test_new_head_retires_a_quarantined_row(self):
+        """Without this the give-up is permanent: a push would not clear the row, so the
+        gauge and its alert would stay up forever."""
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self._set_state(self.A, "quarantined")
+        self.m.enqueue("o/r", 1, self.B, "head-moved")
+        self.assertEqual([(self.A, "superseded"), (self.B, "queued")], self._rows())
+
+    def test_requeue_restores_a_quarantined_job(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self._set_state(self.A, "quarantined")
+        self.assertEqual(0, self.m.requeue("o/r", 1))
+        self.assertEqual([(self.A, "queued")], self._rows())
+
+    def test_requeue_reports_when_there_is_nothing_to_do(self):
+        self.assertEqual(1, self.m.requeue("o/r", 99))
+
+    def test_requeue_clears_both_attempt_counters(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        c = sqlite3.connect(self.m.CFG["state_db"])
+        c.execute("UPDATE jobs SET state='quarantined', attempts=5, timeout_attempts=2")
+        c.commit()
+        c.close()
+        self.m.requeue("o/r", 1)
+        c = sqlite3.connect(self.m.CFG["state_db"])
+        self.assertEqual((0, 0), c.execute(
+            "SELECT attempts,timeout_attempts FROM jobs").fetchone())
+        c.close()
+
+    def test_still_coalesces_queued_heads(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.enqueue("o/r", 1, self.B, "head-moved")
+        self.assertEqual([(self.A, "superseded"), (self.B, "queued")], self._rows())
+
+
+class MigrationTest(unittest.TestCase):
+    def test_adds_timeout_attempts_to_an_existing_database(self):
+        """Deploys restart onto an existing state.sqlite; CREATE TABLE IF NOT EXISTS would
+        leave the new column missing and every worker UPDATE would fail."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        dbp = pathlib.Path(tmp.name) / "state.sqlite"
+        old = sqlite3.connect(dbp)
+        old.execute("""CREATE TABLE jobs(
+            id INTEGER PRIMARY KEY, repo TEXT, pr INTEGER, head_sha TEXT,
+            state TEXT, attempts INTEGER DEFAULT 0, next_at REAL DEFAULT 0,
+            created REAL, updated REAL, review_id INTEGER, note TEXT)""")
+        old.execute("INSERT INTO jobs(repo,pr,head_sha,state) VALUES('o/r',1,'c','queued')")
+        old.commit()
+        old.close()
+
+        m = load(tmp.name)
+        c = m.db()
+        cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
+        self.assertIn("timeout_attempts", cols)
+        self.assertEqual((0,), c.execute("SELECT timeout_attempts FROM jobs").fetchone())
+        c.close()
+
+
+class MetricsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def _emit(self):
+        self.m.write_metrics()
+        return dict(
+            line.split(" ", 1) for line in
+            pathlib.Path(self.m.CFG["textfile"]).read_text(encoding="utf-8").splitlines()
+        )
+
+    def test_new_series_are_emitted(self):
+        got = self._emit()
+        names = {k.split("{")[0] for k in got}
+        for expected in ("reviewbot_running_job_age_seconds",
+                         "reviewbot_quarantined_recent_jobs",
+                         "reviewbot_llm_timeouts_total",
+                         "reviewbot_llm_failures_total",
+                         "reviewbot_llm_seconds_last",
+                         "reviewbot_llm_seconds_max",
+                         "reviewbot_llm_output_tokens_last",
+                         "reviewbot_llm_output_tokens_max"):
+            self.assertIn(expected, names)
+
+    def test_running_job_age_is_zero_when_idle_and_positive_when_running(self):
+        got = self._emit()
+        age = [v for k, v in got.items() if k.startswith("reviewbot_running_job_age_seconds")][0]
+        self.assertEqual(0, float(age))
+
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated) "
+                  "VALUES('o/r',1,'c','running',?,?)",
+                  (real_time.time() - 500, real_time.time() - 500))
+        c.commit()
+        c.close()
+        got = self._emit()
+        age = [v for k, v in got.items() if k.startswith("reviewbot_running_job_age_seconds")][0]
+        self.assertGreater(float(age), 400, "a wedged worker must be visible behind a fresh heartbeat")
+
+    def test_quarantined_recent_window_excludes_old_rows(self):
+        """The cumulative gauge never falls for a PR that was closed rather than pushed to, so
+        alerting on it would latch forever; the 24h window is what self-clears."""
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated) "
+                  "VALUES('o/r',1,'c','quarantined',0,?)", (real_time.time() - 200000,))
+        c.commit()
+        c.close()
+        got = self._emit()
+        recent = [v for k, v in got.items() if k.startswith("reviewbot_quarantined_recent_jobs")][0]
+        total = [v for k, v in got.items() if k.startswith("reviewbot_quarantined_jobs")][0]
+        self.assertEqual(0, float(recent))
+        self.assertEqual(1, float(total))
+
+    def test_counters_survive_and_accumulate(self):
+        self.m.bump_meta("llm_timeouts_total")
+        self.m.bump_meta("llm_timeouts_total")
+        got = self._emit()
+        val = [v for k, v in got.items() if k.startswith("reviewbot_llm_timeouts_total")][0]
+        self.assertEqual(2, float(val))
+
+
+class ToolDenyTest(unittest.TestCase):
+    def test_no_unknown_tool_names_in_the_deny_list(self):
+        """"LS" matched no tool in claude CLI 2.x, so the CLI warned on EVERY run and that
+        warning went on to masquerade as a review failure."""
+        src = SRC.read_text(encoding="utf-8")
+        args_block = src.split("--disallowedTools", 1)[1].split("]", 1)[0]
+        self.assertNotIn('"LS"', args_block)
+        for kept in ("Bash", "Read", "Grep", "Glob", "Write", "Edit"):
+            self.assertIn(f'"{kept}"', args_block)
+
+
+if __name__ == "__main__":
+    unittest.main()
