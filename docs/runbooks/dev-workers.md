@@ -230,9 +230,15 @@ sudo -u c4 python3 /usr/local/lib/reviewbot/reviewbot.py /etc/reviewbot/config.j
   --requeue cchifor/platform 1067
 ```
 
-Safe for both quarantine classes, the deliberate `ambiguous POST` one included: `review_job()`
-re-checks the Gitea marker before doing any work, so a review that actually landed is detected
-as already done rather than posted twice.
+That is safe for the `deadline exhausted` / `attempts exhausted` classes: `review_job()`
+re-checks the Gitea marker before doing any work, so a review that actually landed costs one API
+call rather than a second post.
+
+It **refuses** the `ambiguous POST` class unless you add `--force`. The marker pre-check makes a
+retry cheap, not idempotent: after a client-side POST timeout Gitea may still commit the original
+request, and it can do so *after* the requeued worker checks for the marker and *before* it posts
+its own — which double-posts the review. Open the PR in Gitea and confirm no review from that
+persona is present at that head; only then use `--force`.
 
 `ReviewbotQuarantined` fires on `reviewbot_quarantined_recent_jobs` (a 24 h window), not the
 cumulative gauge — the cumulative one never falls for a PR that was closed rather than pushed

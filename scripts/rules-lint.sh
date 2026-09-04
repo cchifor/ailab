@@ -118,6 +118,33 @@ if [ -f "${TEST_FILES[0]}" ]; then
     chmod 644 "$OUT_DIR/$(basename "$f")"
     CONTAINER_TESTS+=("/rules/$(basename "$f")")
   done
+  # FAIL CLOSED on a fixture that loads nothing. promtool only WARNS when a `rule_files:`
+  # entry matches no file, so a fixture naming a rules file that was never extracted (a
+  # typo, a renamed manifest) would evaluate zero rules and pass - a gate checking nothing,
+  # which is the exact defect this repo has already shipped once. Every referenced basename
+  # must exist among the extracted specs.
+  for t in "${TEST_FILES[@]}"; do
+    while read -r ref; do
+      ref="${ref%$''}"          # defensive: a CRLF-emitting python would break the test below
+      [ -n "$ref" ] || continue
+      if [ ! -f "$OUT_DIR/$ref" ]; then
+        echo "$(basename "$t") references rule file '$ref', which is not among the extracted specs" >&2
+        exit 1
+      fi
+    done < <("$PY" - "$t" <<'PYREFS'
+import re, sys
+# The `rule_files:` block of a promtool test file: list items until the next top-level key.
+text = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"^rule_files:\s*$(.*?)^\S", text, re.M | re.S)
+block = m.group(1) if m else ""
+for line in block.splitlines():
+    item = re.match(r"\s*-\s*(\S+)\s*$", line)
+    if item:
+        print(item.group(1))
+PYREFS
+)
+  done
+
   echo "== promtool test rules over ${#CONTAINER_TESTS[@]} fixture(s) =="
   docker run --rm -v "$OUT_DIR:/rules:ro" --entrypoint promtool "$PROMETHEUS_IMAGE" \
     test rules "${CONTAINER_TESTS[@]}"

@@ -206,10 +206,10 @@ tests:
                 1 job(s) on 192.168.0.24:9100 gave up in the last 24h and will NOT be retried on
                 their own — that PR has no verdict from this persona and cannot automerge. Recover
                 with `sudo -u c4 python3 /usr/local/lib/reviewbot/reviewbot.py
-                /etc/reviewbot/config.json --requeue <owner/repo> <pr>` (safe for both quarantine
-                classes — review_job re-checks the Gitea marker before doing any work, so an
-                already-landed review is not double-posted). Pushing a new head also retires the
-                row. See docs/runbooks/dev-workers.md.
+                /etc/reviewbot/config.json --requeue <owner/repo> <pr>`. That refuses the `ambiguous
+                POST` class unless you add --force: the pre-post marker check makes a retry cheap,
+                not idempotent, so check the PR in Gitea first. Pushing a new head retires the row
+                instead. See docs/runbooks/dev-workers.md.
 
   # ----------------------------------------------------------------- stalled
   - interval: 1m

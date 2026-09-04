@@ -20,6 +20,7 @@ import pathlib
 import sqlite3
 import sys
 import tempfile
+import threading
 import time as real_time
 import unittest
 
@@ -178,10 +179,15 @@ class SharedBudgetTest(unittest.TestCase):
         self.m.time = self.clock
 
     def _fake_run(self, elapsed, rc, stdout):
-        """Replace subprocess.run, recording the timeout each call was given."""
+        """Replace subprocess.run, recording the timeout each call was given AND enforcing
+        it. A fake that ignores its own timeout would let the budget assertions pass
+        vacuously -- the whole point is that the deadline is real."""
         def run(args, **kw):
-            self.calls.append({"args": args, "timeout": kw.get("timeout")})
+            timeout = kw.get("timeout")
+            self.calls.append({"args": args, "timeout": timeout})
             type(self.clock).now += elapsed
+            if timeout is not None and elapsed > timeout:
+                raise self.m.subprocess.TimeoutExpired(cmd=args, timeout=timeout)
             return self.m.subprocess.CompletedProcess(args, rc, stdout, "")
         return run
 
@@ -196,7 +202,7 @@ class SharedBudgetTest(unittest.TestCase):
 
     def test_fallback_only_gets_what_is_left(self):
         self.m.subprocess.run = self._fake_run(300, 1, "{}")
-        with self.assertRaises(Exception):
+        with self.assertRaises(RuntimeError):
             self.m.run_llm("t", "d", "diff")
         self.assertEqual(2, len(self.calls), "fallback should have run")
         self.assertAlmostEqual(600, self.calls[1]["timeout"], delta=2,
@@ -204,10 +210,69 @@ class SharedBudgetTest(unittest.TestCase):
 
     def test_fallback_skipped_when_budget_is_nearly_spent(self):
         self.m.subprocess.run = self._fake_run(880, 1, "{}")
-        with self.assertRaises(Exception):
+        with self.assertRaises(self.m.ExpensiveFailure):
             self.m.run_llm("t", "d", "diff")
         self.assertEqual(1, len(self.calls),
                          "only 20s left (< llm_fallback_min_s=60): fallback must be skipped")
+
+    def test_a_costly_nonzero_exit_is_classified_as_a_budget_failure(self):
+        """THE REGRESSION THIS EXISTS FOR: a primary that burns 880 of its 900s and then exits
+        nonzero is not a cheap error. Classified as one it would get max_attempts (5) further
+        tries -- 75 minutes of the single-threaded worker for one PR."""
+        self.m.subprocess.run = self._fake_run(880, 1, "{}")
+        with self.assertRaises(self.m.ExpensiveFailure) as ctx:
+            self.m.run_llm("t", "d", "diff")
+        self.assertTrue(self.m.is_budget_failure(ctx.exception))
+
+    def test_a_cheap_nonzero_exit_stays_a_fast_failure(self):
+        self.m.subprocess.run = self._fake_run(5, 1, "{}")
+        with self.assertRaises(RuntimeError) as ctx:
+            self.m.run_llm("t", "d", "diff")
+        self.assertNotIsInstance(ctx.exception, self.m.ExpensiveFailure)
+        self.assertFalse(self.m.is_budget_failure(ctx.exception))
+
+    def test_an_already_expired_budget_does_not_launch_a_run(self):
+        """`max(1.0, remaining)` used to start a fresh subprocess after the budget was gone."""
+        self.m.subprocess.run = self._fake_run(0, 0, self._ok_stdout())
+        type(self.clock).now += 10000  # setup itself blew the deadline
+        original = self.m.time.monotonic
+
+        class Expired:
+            now = type(self.clock).now
+            def monotonic(self_inner):
+                type(self.clock).now += 10000
+                return type(self.clock).now
+            def time(self_inner):
+                return real_time.time()
+            def sleep(self_inner, _n):
+                pass
+            def strftime(self_inner, *a):
+                return real_time.strftime(*a)
+
+        self.m.time = Expired()
+        with self.assertRaises(self.m.subprocess.TimeoutExpired):
+            self.m.run_llm("t", "d", "diff")
+        self.assertEqual([], self.calls)
+        self.m.time = self.clock
+        self.assertTrue(callable(original))
+
+    def test_a_non_mapping_usage_field_cannot_raise(self):
+        """A truthy non-dict `usage` used to raise AttributeError out of the success path."""
+        bad = json.dumps({"result": json.dumps({"summary": "s", "findings": []}),
+                          "usage": "not-a-mapping"})
+        self.m.subprocess.run = self._fake_run(10, 0, bad)
+        out = self.m.run_llm("t", "d", "diff")
+        self.assertEqual([], out["findings"])
+
+    def test_telemetry_failure_cannot_mask_the_real_exception(self):
+        """record_gauge runs in `finally`; if it raised, it would replace the in-flight
+        TimeoutExpired with a database error and the worker would then bill the attempt to the
+        wrong budget. Breaks the DATABASE rather than stubbing record_gauge out -- the
+        swallowing is inside record_gauge, so replacing it would remove the thing under test."""
+        self.m.CFG["state_db"] = "/nonexistent-dir/state.sqlite"
+        self.m.subprocess.run = self._fake_run(1000, 0, self._ok_stdout())
+        with self.assertRaises(self.m.subprocess.TimeoutExpired):
+            self.m.run_llm("t", "d", "diff")
 
     def test_output_token_and_duration_telemetry_recorded(self):
         self.m.subprocess.run = self._fake_run(42, 0, self._ok_stdout())
@@ -284,6 +349,255 @@ class QueueStateTest(unittest.TestCase):
         self.m.enqueue("o/r", 1, self.A, "webhook")
         self.m.enqueue("o/r", 1, self.B, "head-moved")
         self.assertEqual([(self.A, "superseded"), (self.B, "queued")], self._rows())
+
+
+class WorkerIterationTest(unittest.TestCase):
+    """worker_once() round-trips through the database, which is where the interesting
+    behaviour actually lives: which failures burn the deadline budget, that the counters
+    survive into a later attempt, and that a completed head clears a stale quarantine."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.A = "a" * 40
+        self.B = "b" * 40
+
+    def _job(self):
+        c = self.m.db()
+        row = c.execute("SELECT state,attempts,timeout_attempts,note FROM jobs "
+                        "ORDER BY id DESC LIMIT 1").fetchone()
+        c.close()
+        return row
+
+    def test_idle_worker_returns_none(self):
+        self.assertIsNone(self.m.worker_once())
+
+    def test_a_deadline_failure_persists_the_timeout_counter(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.review_job = lambda *a: (_ for _ in ()).throw(
+            self.m.subprocess.TimeoutExpired(cmd=["claude"], timeout=900))
+        self.assertIsNotNone(self.m.worker_once())
+        state, attempts, timeouts, _ = self._job()
+        self.assertEqual(("retry", 1, 1), (state, attempts, timeouts))
+
+    def test_two_deadline_failures_quarantine_through_the_database(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.review_job = lambda *a: (_ for _ in ()).throw(
+            self.m.subprocess.TimeoutExpired(cmd=["claude"], timeout=900))
+        self.m.worker_once()
+        c = self.m.db()
+        c.execute("UPDATE jobs SET next_at=0")   # skip the retry backoff
+        c.commit()
+        c.close()
+        self.m.worker_once()
+        state, _attempts, timeouts, note = self._job()
+        self.assertEqual("quarantined", state)
+        self.assertEqual(2, timeouts)
+        self.assertIn("2 timed-out attempts", note)
+
+    def test_an_expensive_nonzero_exit_counts_against_the_deadline_budget(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.review_job = lambda *a: (_ for _ in ()).throw(
+            self.m.ExpensiveFailure("llm exit 1 [after 880s]"))
+        self.m.worker_once()
+        _state, _attempts, timeouts, _note = self._job()
+        self.assertEqual(1, timeouts, "a near-deadline nonzero exit is not a cheap failure")
+
+    def test_timeout_counter_survives_a_later_success(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.review_job = lambda *a: (_ for _ in ()).throw(
+            self.m.subprocess.TimeoutExpired(cmd=["claude"], timeout=900))
+        self.m.worker_once()
+        c = self.m.db()
+        c.execute("UPDATE jobs SET next_at=0")
+        c.commit()
+        c.close()
+        self.m.review_job = lambda *a: ("done", 7, "1 inline / 0 demoted / clean")
+        self.m.worker_once()
+        state, _attempts, timeouts, _note = self._job()
+        self.assertEqual("done", state)
+        self.assertEqual(1, timeouts, "the counter must not be silently reset by a success")
+
+    def test_a_completed_head_retires_a_quarantine_left_on_an_older_head(self):
+        """The enqueue race: head B is queued while head A is still RUNNING, so A is not
+        retired by enqueue and its later give-up would keep the alert up for 24h about a PR
+        that B reviewed perfectly well."""
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        c = self.m.db()
+        c.execute("UPDATE jobs SET state='quarantined' WHERE head_sha=?", (self.A,))
+        c.commit()
+        c.close()
+        self.m.enqueue("o/r", 1, self.B, "head-moved")
+        c = self.m.db()
+        c.execute("UPDATE jobs SET state='quarantined' WHERE head_sha=?", (self.A,))  # A lost the race
+        c.commit()
+        c.close()
+        self.m.review_job = lambda *a: ("done", 7, "clean")
+        self.m.worker_once()
+        c = self.m.db()
+        rows = dict(c.execute("SELECT head_sha,state FROM jobs"))
+        c.close()
+        self.assertEqual("superseded", rows[self.A])
+        self.assertEqual("done", rows[self.B])
+
+    def test_dedupe_path_also_retires_an_other_head_quarantine(self):
+        self.m.enqueue("o/r", 1, self.B, "webhook")
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated) "
+                  "VALUES('o/r',1,?,'quarantined',?,?)",
+                  (self.A, real_time.time(), real_time.time()))
+        c.commit()
+        c.close()
+        self.m.enqueue("o/r", 1, self.B, "reconcile")   # dedupe hit
+        c = self.m.db()
+        rows = dict(c.execute("SELECT head_sha,state FROM jobs"))
+        c.close()
+        self.assertEqual("superseded", rows[self.A])
+
+
+class QuarantineSweepTest(unittest.TestCase):
+    """A quarantine on a closed/merged PR is not actionable and must not hold the alert up for
+    its full 24h window; a transient API error must NOT silently clear one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.A = "a" * 40
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        c = self.m.db()
+        c.execute("UPDATE jobs SET state='quarantined'")
+        c.commit()
+        c.close()
+
+    def _state(self):
+        c = self.m.db()
+        st = c.execute("SELECT state FROM jobs").fetchone()[0]
+        c.close()
+        return st
+
+    def test_closed_pr_quarantine_is_retired(self):
+        self.m.api = lambda *a, **k: {"state": "closed"}
+        self.m.retire_closed_quarantines()
+        self.assertEqual("superseded", self._state())
+
+    def test_open_pr_quarantine_is_kept(self):
+        self.m.api = lambda *a, **k: {"state": "open"}
+        self.m.retire_closed_quarantines()
+        self.assertEqual("quarantined", self._state())
+
+    def test_api_error_leaves_the_row_alone(self):
+        """Staying noisy is the safe failure: clearing on error would hide a real strand."""
+        def boom(*_a, **_k):
+            raise OSError("connection reset by peer")
+        self.m.api = boom
+        self.m.retire_closed_quarantines()
+        self.assertEqual("quarantined", self._state())
+
+
+class ConcurrencyTest(unittest.TestCase):
+    """Four threads share one plain (non-reentrant) db_lock and one sqlite file."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_ticker_and_worker_do_not_deadlock_or_corrupt(self):
+        errors = []
+
+        def spin_metrics():
+            try:
+                for _ in range(40):
+                    self.m.write_metrics()
+            except Exception as e:                      # noqa: BLE001 - reported below
+                errors.append(e)
+
+        def spin_jobs():
+            try:
+                for i in range(40):
+                    self.m.enqueue("o/r", i, f"{i:040x}", "webhook")
+                    self.m.bump_meta("llm_timeouts_total")
+                    self.m.worker_once()
+            except Exception as e:                      # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=spin_metrics), threading.Thread(target=spin_jobs)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        self.assertFalse([t for t in threads if t.is_alive()], "deadlock: thread still running")
+        self.assertEqual([], errors)
+
+    def test_telemetry_never_propagates(self):
+        """bump_meta runs inside the worker's exception handler; a raise there would escape
+        the handler and kill the only worker thread."""
+        self.m.CFG["state_db"] = "/nonexistent-dir/state.sqlite"
+        self.m.bump_meta("llm_timeouts_total")      # must not raise
+        self.m.record_gauge("llm_seconds", 1.0)     # must not raise
+
+
+class CommandLineTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.A = "a" * 40
+        self._argv = sys.argv
+
+    def tearDown(self):
+        sys.argv = self._argv
+
+    def _main(self, *args):
+        sys.argv = ["reviewbot.py", "cfg"] + list(args)
+        return self.m.main()
+
+    def test_unknown_option_does_not_start_the_daemon(self):
+        self.assertEqual(2, self._main("--oops"))
+
+    def test_wrong_arity_is_rejected(self):
+        self.assertEqual(2, self._main("--requeue", "o/r"))
+
+    def test_non_integer_pr_is_rejected_without_a_traceback(self):
+        self.assertEqual(2, self._main("--requeue", "o/r", "not-a-number"))
+
+    def test_requeue_with_no_match_returns_1(self):
+        self.assertEqual(1, self._main("--requeue", "o/r", "42"))
+
+    def test_requeue_refuses_an_ambiguous_post_without_force(self):
+        """A retry is cheap but NOT idempotent: Gitea may commit the original POST after the
+        requeued worker's marker check and before its own, double-posting the review."""
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        c = self.m.db()
+        c.execute("UPDATE jobs SET state='quarantined', note='ambiguous POST: timed out'")
+        c.commit()
+        c.close()
+        self.assertEqual(2, self._main("--requeue", "o/r", "1"))
+        c = self.m.db()
+        self.assertEqual("quarantined", c.execute("SELECT state FROM jobs").fetchone()[0])
+        c.close()
+
+    def test_force_overrides_the_ambiguous_post_refusal(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        c = self.m.db()
+        c.execute("UPDATE jobs SET state='quarantined', note='ambiguous POST: timed out'")
+        c.commit()
+        c.close()
+        self.assertEqual(0, self._main("--requeue", "o/r", "1", "--force"))
+        c = self.m.db()
+        self.assertEqual("queued", c.execute("SELECT state FROM jobs").fetchone()[0])
+        c.close()
+
+    def test_exhausted_quarantine_requeues_without_force(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        c = self.m.db()
+        c.execute("UPDATE jobs SET state='quarantined', "
+                  "note='deadline exhausted after 2 timed-out attempts'")
+        c.commit()
+        c.close()
+        self.assertEqual(0, self._main("--requeue", "o/r", "1"))
 
 
 class MigrationTest(unittest.TestCase):
