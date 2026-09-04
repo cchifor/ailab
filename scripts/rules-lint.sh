@@ -124,25 +124,22 @@ if [ -f "${TEST_FILES[0]}" ]; then
   # which is the exact defect this repo has already shipped once. Every referenced basename
   # must exist among the extracted specs.
   for t in "${TEST_FILES[@]}"; do
+    # scripts/promtest-refs.py FAILS CLOSED when it cannot parse a nonempty rule_files
+    # list, so `rule_files:` at EOF, written inline, or absent is an error rather than an
+    # empty happy path that checks zero references. Captured (not piped into `while`) so
+    # the extractor's exit status is not swallowed by the loop; `tr -d` strips any CR a
+    # CRLF-emitting interpreter would add, without needing an escape in this file.
+    if ! refs="$("$PY" scripts/promtest-refs.py "$t" | tr -d "\r")"; then
+      echo "$(basename "$t"): unusable rule_files list - refusing a fixture that may load no rules" >&2
+      exit 1
+    fi
     while read -r ref; do
-      ref="${ref%$''}"          # defensive: a CRLF-emitting python would break the test below
       [ -n "$ref" ] || continue
       if [ ! -f "$OUT_DIR/$ref" ]; then
         echo "$(basename "$t") references rule file '$ref', which is not among the extracted specs" >&2
         exit 1
       fi
-    done < <("$PY" - "$t" <<'PYREFS'
-import re, sys
-# The `rule_files:` block of a promtool test file: list items until the next top-level key.
-text = open(sys.argv[1], encoding="utf-8").read()
-m = re.search(r"^rule_files:\s*$(.*?)^\S", text, re.M | re.S)
-block = m.group(1) if m else ""
-for line in block.splitlines():
-    item = re.match(r"\s*-\s*(\S+)\s*$", line)
-    if item:
-        print(item.group(1))
-PYREFS
-)
+    done <<< "$refs"
   done
 
   echo "== promtool test rules over ${#CONTAINER_TESTS[@]} fixture(s) =="

@@ -224,6 +224,26 @@ class SharedBudgetTest(unittest.TestCase):
             self.m.run_llm("t", "d", "diff")
         self.assertTrue(self.m.is_budget_failure(ctx.exception))
 
+    def test_a_long_run_that_fails_on_MALFORMED_OUTPUT_is_also_expensive(self):
+        """The round-2 blocker: cost was classified only at the nonzero-exit site, so a run
+        that burned the budget and then failed on unparseable output was billed cheap and got
+        five more full-length retries (~75 min for one PR)."""
+        self.m.subprocess.run = self._fake_run(880, 0, json.dumps({"result": "no json here"}))
+        with self.assertRaises(self.m.ExpensiveFailure):
+            self.m.run_llm("t", "d", "diff")
+
+    def test_a_long_run_that_fails_on_MISSING_FIELDS_is_also_expensive(self):
+        body = json.dumps({"result": json.dumps({"nope": 1})})
+        self.m.subprocess.run = self._fake_run(880, 0, body)
+        with self.assertRaises(self.m.ExpensiveFailure):
+            self.m.run_llm("t", "d", "diff")
+
+    def test_a_quick_malformed_output_stays_cheap(self):
+        self.m.subprocess.run = self._fake_run(5, 0, json.dumps({"result": "no json here"}))
+        with self.assertRaises(RuntimeError) as ctx:
+            self.m.run_llm("t", "d", "diff")
+        self.assertNotIsInstance(ctx.exception, self.m.ExpensiveFailure)
+
     def test_a_cheap_nonzero_exit_stays_a_fast_failure(self):
         self.m.subprocess.run = self._fake_run(5, 1, "{}")
         with self.assertRaises(RuntimeError) as ctx:
@@ -441,19 +461,57 @@ class WorkerIterationTest(unittest.TestCase):
         self.assertEqual("superseded", rows[self.A])
         self.assertEqual("done", rows[self.B])
 
-    def test_dedupe_path_also_retires_an_other_head_quarantine(self):
-        self.m.enqueue("o/r", 1, self.B, "webhook")
+    def test_dedupe_path_also_retires_an_older_head_quarantine(self):
+        old = real_time.time() - 3600
         c = self.m.db()
         c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated) "
-                  "VALUES('o/r',1,?,'quarantined',?,?)",
-                  (self.A, real_time.time(), real_time.time()))
+                  "VALUES('o/r',1,?,'quarantined',?,?)", (self.A, old, old))
         c.commit()
         c.close()
+        self.m.enqueue("o/r", 1, self.B, "webhook")     # newer head
         self.m.enqueue("o/r", 1, self.B, "reconcile")   # dedupe hit
         c = self.m.db()
         rows = dict(c.execute("SELECT head_sha,state FROM jobs"))
         c.close()
         self.assertEqual("superseded", rows[self.A])
+
+    def test_a_delayed_webhook_for_a_stale_head_cannot_clear_a_live_quarantine(self):
+        """enqueue() also runs for a LATE webhook carrying an old head. If that retired the
+        CURRENT head's quarantine, the reconciler would re-run it with fresh counters."""
+        self.m.enqueue("o/r", 1, self.A, "webhook")             # old head, reviewed
+        c = self.m.db()
+        c.execute("UPDATE jobs SET state='done' WHERE head_sha=?", (self.A,))
+        c.commit()
+        c.close()
+        self.m.enqueue("o/r", 1, self.B, "head-moved")          # current head
+        c = self.m.db()
+        c.execute("UPDATE jobs SET state='quarantined' WHERE head_sha=?", (self.B,))
+        c.commit()
+        c.close()
+        self.m.enqueue("o/r", 1, self.A, "webhook")             # the DELAYED delivery
+        c = self.m.db()
+        rows = dict(c.execute("SELECT head_sha,state FROM jobs"))
+        c.close()
+        self.assertEqual("quarantined", rows[self.B],
+                         "a stale head must not retire the current head's quarantine")
+
+    def test_an_ambiguous_post_quarantine_is_never_auto_retired(self):
+        """Only an operator (with --force) decides that one: auto-clearing it would let the
+        reconciler re-run a review that may already have landed."""
+        old = real_time.time() - 3600
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated,note) "
+                  "VALUES('o/r',1,?,'quarantined',?,?,'ambiguous POST: timed out')",
+                  (self.A, old, old))
+        c.commit()
+        c.close()
+        self.m.enqueue("o/r", 1, self.B, "head-moved")   # new head: retires ordinary ones
+        self.m.review_job = lambda *a: ("done", 7, "clean")
+        self.m.worker_once()                            # completion: retires ordinary ones
+        c = self.m.db()
+        rows = dict(c.execute("SELECT head_sha,state FROM jobs"))
+        c.close()
+        self.assertEqual("quarantined", rows[self.A])
 
 
 class QuarantineSweepTest(unittest.TestCase):
@@ -487,6 +545,22 @@ class QuarantineSweepTest(unittest.TestCase):
         self.m.retire_closed_quarantines()
         self.assertEqual("quarantined", self._state())
 
+    def test_an_unexpected_payload_is_not_treated_as_closed(self):
+        """`state != "open"` would read `{}`, an error object or a schema change as proof the
+        PR is closed and silently clear a live quarantine."""
+        self.m.api = lambda *a, **k: {}
+        self.m.retire_closed_quarantines()
+        self.assertEqual("quarantined", self._state())
+
+    def test_sweep_does_not_clear_an_ambiguous_post(self):
+        c = self.m.db()
+        c.execute("UPDATE jobs SET note='ambiguous POST: read timed out'")
+        c.commit()
+        c.close()
+        self.m.api = lambda *a, **k: {"state": "closed"}
+        self.m.retire_closed_quarantines()
+        self.assertEqual("quarantined", self._state())
+
     def test_api_error_leaves_the_row_alone(self):
         """Staying noisy is the safe failure: clearing on error would hide a real strand."""
         def boom(*_a, **_k):
@@ -505,10 +579,17 @@ class ConcurrencyTest(unittest.TestCase):
         self.m = load(self.tmp.name)
 
     def test_ticker_and_worker_do_not_deadlock_or_corrupt(self):
+        """write_metrics() swallows its own exceptions, so "no exception escaped" is not
+        evidence it worked: the file and the counters are asserted afterwards, and
+        integrity_check proves the interleaved writes did not corrupt the database.
+        review_job is stubbed so this exercises the worker transition rather than DNS."""
         errors = []
+        self.m.review_job = lambda *a: ("done", 1, "clean")
+        start = threading.Barrier(2)                    # force real overlap
 
         def spin_metrics():
             try:
+                start.wait(timeout=30)
                 for _ in range(40):
                     self.m.write_metrics()
             except Exception as e:                      # noqa: BLE001 - reported below
@@ -516,6 +597,7 @@ class ConcurrencyTest(unittest.TestCase):
 
         def spin_jobs():
             try:
+                start.wait(timeout=30)
                 for i in range(40):
                     self.m.enqueue("o/r", i, f"{i:040x}", "webhook")
                     self.m.bump_meta("llm_timeouts_total")
@@ -530,6 +612,16 @@ class ConcurrencyTest(unittest.TestCase):
             t.join(timeout=60)
         self.assertFalse([t for t in threads if t.is_alive()], "deadlock: thread still running")
         self.assertEqual([], errors)
+
+        text = pathlib.Path(self.m.CFG["textfile"]).read_text(encoding="utf-8")
+        self.assertIn("reviewbot_heartbeat_timestamp_seconds", text)
+        self.assertIn("reviewbot_llm_timeouts_total", text)
+        c = self.m.db()
+        self.assertEqual("ok", c.execute("PRAGMA integrity_check").fetchone()[0])
+        self.assertEqual(40, c.execute("SELECT COUNT(*) FROM jobs WHERE state='done'").fetchone()[0])
+        self.assertEqual(40.0, float(
+            c.execute("SELECT v FROM meta WHERE k='llm_timeouts_total'").fetchone()[0]))
+        c.close()
 
     def test_telemetry_never_propagates(self):
         """bump_meta runs inside the worker's exception handler; a raise there would escape

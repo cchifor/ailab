@@ -143,17 +143,23 @@ def enqueue(repo, pr, head_sha, source):
     with db_lock:
         c = db()
         cur = c.execute(
-            "SELECT id FROM jobs WHERE repo=? AND pr=? AND head_sha=? AND state IN "
+            "SELECT id,created FROM jobs WHERE repo=? AND pr=? AND head_sha=? AND state IN "
             "('queued','running','posting','retry','done','quarantined')",
             (repo, pr, head_sha))
-        if cur.fetchone():
-            # Retire quarantines left on OTHER heads of this PR. Head B can be enqueued while
+        seen = cur.fetchone()
+        if seen:
+            # Retire quarantines left on OLDER heads of this PR. Head B can be enqueued while
             # head A is still RUNNING - A is not in the retire below because it is not yet
             # quarantined - and A's later give-up would then sit here forever, alerting about
             # a PR that head B went on to review perfectly well.
+            # OLDER ONLY, and never an ambiguous POST: this path also runs for a DELAYED
+            # webhook carrying a stale head, which must not clear the CURRENT head's live
+            # quarantine - that would let the reconciler re-run it with fresh counters, an
+            # ambiguous POST the operator has not cleared with --force included.
             c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
-                      "AND state='quarantined' AND head_sha<>?",
-                      (time.time(), repo, pr, head_sha))
+                      "AND state='quarantined' AND head_sha<>? AND created<? "
+                      "AND COALESCE(note,'') NOT LIKE 'ambiguous POST%'",
+                      (time.time(), repo, pr, head_sha, seen[1]))
             c.commit()
             c.close()
             return
@@ -164,7 +170,8 @@ def enqueue(repo, pr, head_sha, source):
         # its alert would stay up forever. A new head is exactly the signal that the old
         # give-up is obsolete.
         c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
-                  "AND state IN ('queued','retry','quarantined')", (time.time(), repo, pr))
+                  "AND (state IN ('queued','retry') OR (state='quarantined' AND "
+                  "COALESCE(note,'') NOT LIKE 'ambiguous POST%'))", (time.time(), repo, pr))
         c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated,note) "
                   "VALUES(?,?,?,'queued',?,?,?)",
                   (repo, pr, head_sha, time.time(), time.time(), source))
@@ -325,9 +332,30 @@ class ExpensiveFailure(RuntimeError):
 
 
 def run_llm(title, desc, diff_text, rubric=""):
-    # Clock starts HERE, before any setup: the budget is for the whole operation, and the
-    # isolated-user mktemp below is a subprocess that can itself hang.
+    """Run one review and bill the attempt by what it COST, not by which line failed.
+
+    Any failure that consumed a third or more of the budget is re-raised as ExpensiveFailure
+    so the worker charges it to the DEADLINE cap. Classifying only the nonzero-exit site was
+    not enough: a run can burn ~900s and then fail on malformed success JSON, a missing
+    summary, an empty codex output or the credential scan, and every one of those would
+    otherwise be billed as a cheap error worth five more full-length retries."""
     started = time.monotonic()
+    try:
+        return _run_llm(title, desc, diff_text, rubric, started)
+    except (subprocess.TimeoutExpired, ExpensiveFailure):
+        raise
+    except Exception as e:
+        spent = time.monotonic() - started
+        if spent >= CFG["llm_timeout_s"] / 3.0:
+            raise ExpensiveFailure(f"{e} [after {spent:.0f}s]") from e
+        raise
+    finally:
+        record_gauge("llm_seconds", round(time.monotonic() - started, 1))
+
+
+def _run_llm(title, desc, diff_text, rubric, started):
+    # Clock started in run_llm, before any setup: the budget is for the whole operation, and
+    # the isolated-user mktemp below is a subprocess that can itself hang.
     deadline = started + CFG["llm_timeout_s"]
 
     def remaining():
@@ -387,11 +415,20 @@ def run_llm(title, desc, diff_text, rubric=""):
         # local process could pre-create last-message.md and have forged JSON posted as
         # the review (reviewer-codex finding). c4 never opens the file itself - it is
         # retrieved and cleaned through sudo as the same isolated user.
-        r = subprocess.run(["sudo", "-n", "-u", sudo_user, "mktemp", "-d",
-                            "/tmp/reviewbot-llm-XXXXXX"], capture_output=True, text=True,
-                           timeout=remaining())
-        if r.returncode != 0:
-            raise RuntimeError(f"isolated tmpdir failed: {r.stderr[-150:]}")
+        # Failing here is before the main try/finally, so clean up the workdir explicitly
+        # rather than leaking one per failed attempt.
+        try:
+            r = subprocess.run(["sudo", "-n", "-u", sudo_user, "mktemp", "-d",
+                                "/tmp/reviewbot-llm-XXXXXX"], capture_output=True, text=True,
+                               timeout=remaining())
+            if r.returncode != 0:
+                raise RuntimeError(f"isolated tmpdir failed: {r.stderr[-150:]}")
+        except BaseException:
+            try:
+                os.rmdir(workdir)
+            except OSError:
+                pass
+            raise
         out_dir = r.stdout.strip()
         out_file = os.path.join(out_dir, "last-message.md")
         args = [a if a != os.path.join(workdir, "last-message.md") else out_file
@@ -451,16 +488,9 @@ def run_llm(title, desc, diff_text, rubric=""):
                                        capture_output=True, text=True,
                                        timeout=left, cwd=workdir, env=env)
             if r.returncode != 0:
-                # A failure that ate a third of the budget is expensive whether or not it was
-                # a deadline, and must be counted against the deadline cap (see
-                # ExpensiveFailure). A third, not "nearly all": at 900s that makes anything
-                # over 5 minutes of the only worker expensive, which bounds a cheap-failure
-                # head at 5x300s and a costly one at 2x900s.
-                spent = time.monotonic() - started
-                cls = (ExpensiveFailure if spent >= CFG["llm_timeout_s"] / 3.0
-                       else RuntimeError)
-                raise cls(f"{llm_error_text(r.returncode, r.stdout, r.stderr)} "
-                          f"[after {spent:.0f}s]")
+                # Cost classification happens ONCE, in run_llm's wrapper, so every raise site
+                # in here is covered by it - not just this one.
+                raise RuntimeError(llm_error_text(r.returncode, r.stdout, r.stderr))
             envelope = json.loads(r.stdout)
             text = envelope.get("result", "")
             # The data that decides whether llm_timeout_s is right. Output tokens because run
@@ -473,7 +503,10 @@ def run_llm(title, desc, diff_text, rubric=""):
                 except (TypeError, ValueError):
                     pass
     finally:
-        record_gauge("llm_seconds", round(time.monotonic() - started, 1))
+        # STRICTLY non-propagating. `except OSError` did not cover the TimeoutExpired the 60s
+        # `rm -rf` can raise, and an exception escaping a `finally` REPLACES whatever the
+        # function was really doing - a successful review, or the true failure - and would then
+        # be misreported as an exhausted LLM deadline.
         try:
             if sudo_user:
                 subprocess.run(["sudo", "-n", "-u", sudo_user, "rm", "-rf",
@@ -481,8 +514,8 @@ def run_llm(title, desc, diff_text, rubric=""):
             elif os.path.exists(out_file):
                 os.remove(out_file)
             os.rmdir(workdir)
-        except OSError:
-            pass
+        except Exception as e:
+            log(f"llm cleanup failed (ignored): {e}")
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         raise RuntimeError("llm returned no JSON object")
@@ -899,8 +932,10 @@ def worker_once():
             # A head that reviewed cleanly settles the PR, so any quarantine left on an
             # EARLIER head is stale - it would otherwise keep the alert up for 24h about a
             # PR that has in fact been reviewed (the running-head race in enqueue()).
+            # An ambiguous POST is never auto-cleared: only an operator decides that one.
             c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
-                      "AND state='quarantined' AND head_sha<>?",
+                      "AND state='quarantined' AND head_sha<>? "
+                      "AND COALESCE(note,'') NOT LIKE 'ambiguous POST%'",
                       (time.time(), repo, pr, head_sha))
         c.commit()
         c.close()
@@ -935,15 +970,21 @@ def retire_closed_quarantines():
         except Exception as e:
             log(f"quarantine sweep {repo}#{pr}: {e}")
             continue
-        if d.get("state") == "open":
+        # EXACT "closed" only. `!= "open"` would treat any unexpected payload - `{}`, an
+        # error object, a schema change - as proof the PR is closed and silently clear a live
+        # quarantine.
+        if d.get("state") != "closed":
             continue
         with db_lock:
             c = db()
-            c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
-                      "AND state='quarantined'", (time.time(), repo, pr))
+            n = c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
+                          "AND state='quarantined' "
+                          "AND COALESCE(note,'') NOT LIKE 'ambiguous POST%'",
+                          (time.time(), repo, pr)).rowcount
             c.commit()
             c.close()
-        log(f"retired quarantine for closed {repo}#{pr}")
+        if n:
+            log(f"retired {n} quarantine(s) for closed {repo}#{pr}")
 
 
 def reconciler():
@@ -984,30 +1025,37 @@ def requeue(repo, pr, force=False):
     original POST, and it can do so AFTER the requeued worker checks for the marker and
     BEFORE it posts its own - which double-posts the review. Check the PR in Gitea first;
     --force is for when you have confirmed no review landed."""
+    # ONE transaction, and the UPDATE names the exact ids that were inspected. Reading,
+    # deciding, then updating "every quarantined row for this PR" would requeue a row the
+    # DAEMON created in between - without the --force decision the operator made about the
+    # rows they were actually shown. db_lock cannot help: this runs as a separate process.
     with db_lock:
         c = db()
         rows = list(c.execute("SELECT id,head_sha,note FROM jobs WHERE repo=? AND pr=? "
                               "AND state='quarantined'", (repo, pr)))
-        c.close()
-    if not rows:
-        print(f"no quarantined jobs for {repo}#{pr}")
-        return 1
-    ambiguous = [r for r in rows if str(r[2] or "").startswith("ambiguous POST")]
-    if ambiguous and not force:
-        for jid, sha, note in ambiguous:
-            print(f"REFUSING job {jid} {repo}#{pr} @ {sha[:9]}: {note}")
-        print("This review may already have landed and a retry could post it twice. Check the "
-              "PR in Gitea; if no review is present, re-run with --force.")
-        return 2
-    with db_lock:
-        c = db()
-        c.execute("UPDATE jobs SET state='queued', attempts=0, timeout_attempts=0, next_at=0, "
-                  "updated=? WHERE repo=? AND pr=? AND state='quarantined'",
-                  (time.time(), repo, pr))
+        if not rows:
+            c.close()
+            print(f"no quarantined jobs for {repo}#{pr}")
+            return 1
+        ambiguous = [r for r in rows if str(r[2] or "").startswith("ambiguous POST")]
+        if ambiguous and not force:
+            c.close()
+            for jid, sha, note in ambiguous:
+                print(f"REFUSING job {jid} {repo}#{pr} @ {sha[:9]}: {note}")
+            print("This review may already have landed and a retry could post it twice. Check "
+                  "the PR in Gitea; if no review is present, re-run with --force.")
+            return 2
+        ids = [r[0] for r in rows]
+        n = c.execute(
+            "UPDATE jobs SET state='queued', attempts=0, timeout_attempts=0, next_at=0, "
+            "updated=? WHERE state='quarantined' AND id IN (%s)" % ",".join("?" * len(ids)),
+            [time.time()] + ids).rowcount
         c.commit()
         c.close()
     for jid, sha, note in rows:
         print(f"requeued job {jid} {repo}#{pr} @ {sha[:9]} (was quarantined: {note})")
+    if n != len(rows):
+        print(f"note: {len(rows) - n} row(s) changed state concurrently and were not requeued")
     return 0
 
 
