@@ -718,6 +718,62 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(0, self._main("--requeue", "o/r", "1"))
 
 
+class StaleHeadTest(unittest.TestCase):
+    """Residual found by both personas on ailab#486: the enqueue cutoff stopped a stale head
+    SUPERSEDING newer rows, but it was still re-inserted as a fresh job, and the completion
+    retirement matched ANY other head while its comment promised earlier-only."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.A = "a" * 40
+        self.B = "b" * 40
+
+    def _rows(self):
+        c = self.m.db()
+        rows = list(c.execute("SELECT head_sha,state FROM jobs ORDER BY id"))
+        c.close()
+        return rows
+
+    def test_a_late_webhook_does_not_resurrect_a_superseded_head(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.enqueue("o/r", 1, self.B, "head-moved")      # A -> superseded
+        before = self._rows()
+        self.m.enqueue("o/r", 1, self.A, "pull_request")    # the late delivery
+        self.assertEqual(before, self._rows(), "a stale head must not be re-inserted")
+
+    def test_the_reconciler_may_still_resurrect_it(self):
+        """A force-push back to an earlier SHA makes that head current again. The reconciler
+        read it from the API, so it is authoritative and must NOT be ignored - otherwise the
+        PR is silently stranded with no verdict."""
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.enqueue("o/r", 1, self.B, "head-moved")
+        self.m.enqueue("o/r", 1, self.A, "reconcile")
+        self.assertIn((self.A, "queued"), self._rows())
+
+    def test_completion_retires_only_EARLIER_quarantines(self):
+        """The comment said EARLIER; the SQL said any-other-head. A job for a stale head that
+        reached done could therefore clear the CURRENT head's live quarantine."""
+        old = real_time.time() - 3600
+        c = self.m.db()
+        # A is the OLD head being processed; B is the CURRENT head, quarantined.
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated,next_at) "
+                  "VALUES('o/r',1,?,'queued',?,?,0)", (self.A, old, old))
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated) "
+                  "VALUES('o/r',1,?,'quarantined',?,?)",
+                  (self.B, real_time.time(), real_time.time()))
+        c.commit()
+        c.close()
+        self.m.review_job = lambda *a: ("done", 7, "clean")
+        self.m.worker_once()                                # processes A (older created)
+        c = self.m.db()
+        state = c.execute("SELECT state FROM jobs WHERE head_sha=?", (self.B,)).fetchone()[0]
+        c.close()
+        self.assertEqual("quarantined", state,
+                         "a stale head completing must not clear the current head's quarantine")
+
+
 class AuxRunTest(unittest.TestCase):
     """Auxiliary subprocesses (reading the model's output file, the auth file) share the
     operation budget, but their OWN timeout must not be billed as an LLM deadline: run_llm

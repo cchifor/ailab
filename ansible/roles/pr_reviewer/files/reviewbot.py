@@ -154,6 +154,16 @@ def enqueue(repo, pr, head_sha, source):
             "('queued','running','posting','retry','done','quarantined')",
             (repo, pr, head_sha))
         seen = cur.fetchone()
+        # Previously seen, and no longer in any active state => this head has been superseded.
+        # A late webhook delivery for it must not create a fresh job: the worker would spend an
+        # API round trip rediscovering that the head moved. Only AUTHORITATIVE sources may
+        # resurrect such a head - the reconciler read the PR's current head from the API, and
+        # "head-moved" comes from pr_ok() having just compared against it - so a force-push
+        # back to an earlier SHA is still healed within one reconcile cycle rather than
+        # stranded.
+        if seen is None and first_seen is not None and source not in ("reconcile", "head-moved"):
+            c.close()
+            return
         if seen:
             # Retire quarantines left on OLDER heads of this PR. Head B can be enqueued while
             # head A is still RUNNING - A is not in the retire below because it is not yet
@@ -924,8 +934,8 @@ def worker_once():
     quarantine) only exists in the round trip through the database."""
     with db_lock:
         c = db()
-        row = c.execute("SELECT id,repo,pr,head_sha,attempts,timeout_attempts FROM jobs "
-                        "WHERE state IN ('queued','retry') AND next_at<=? "
+        row = c.execute("SELECT id,repo,pr,head_sha,attempts,timeout_attempts,created "
+                        "FROM jobs WHERE state IN ('queued','retry') AND next_at<=? "
                         "ORDER BY created LIMIT 1", (time.time(),)).fetchone()
         if row:
             c.execute("UPDATE jobs SET state='running', updated=? WHERE id=?",
@@ -934,7 +944,7 @@ def worker_once():
         c.close()
     if not row:
         return None
-    jid, repo, pr, head_sha, attempts, timeouts = row
+    jid, repo, pr, head_sha, attempts, timeouts, created = row
     timeouts = timeouts or 0
     try:
         state, rid, note = review_job(jid, repo, pr, head_sha)
@@ -956,11 +966,14 @@ def worker_once():
             # A head that reviewed cleanly settles the PR, so any quarantine left on an
             # EARLIER head is stale - it would otherwise keep the alert up for 24h about a
             # PR that has in fact been reviewed (the running-head race in enqueue()).
+            # `created<?` is what makes "EARLIER" true rather than merely claimed: without it
+            # this matched ANY other head, so a job for a stale head that reached done could
+            # revive - clear - the CURRENT head's live quarantine.
             # An ambiguous POST is never auto-cleared: only an operator decides that one.
             c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
-                      "AND state='quarantined' AND head_sha<>? "
+                      "AND state='quarantined' AND head_sha<>? AND created<? "
                       "AND COALESCE(note,'') NOT LIKE 'ambiguous POST%'",
-                      (time.time(), repo, pr, head_sha))
+                      (time.time(), repo, pr, head_sha, created))
         c.commit()
         c.close()
     return jid
