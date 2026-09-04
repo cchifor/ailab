@@ -17,6 +17,13 @@ CI runner is not guaranteed PyYAML for this script's sake (rules-lint.sh's own h
 import re
 import sys
 
+# LF only, on every platform. rules-lint.sh consumes this output directly (no `tr` in a pipe,
+# which would put the extractor's exit status behind `set -o pipefail`), so a CRLF here would
+# turn every reference into a filename with a trailing CR and fail the gate for the wrong
+# reason.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(newline="\n")
+
 # The block runs from `rule_files:` to the next column-0 key, or to end of file.
 BLOCK = re.compile(r"^rule_files:[ \t]*$(.*?)(?=^\S|\Z)", re.M | re.S)
 ITEM = re.compile(r"^\s*-\s*(\S+)\s*$")

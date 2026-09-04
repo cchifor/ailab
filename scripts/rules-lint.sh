@@ -127,9 +127,11 @@ if [ -f "${TEST_FILES[0]}" ]; then
     # scripts/promtest-refs.py FAILS CLOSED when it cannot parse a nonempty rule_files
     # list, so `rule_files:` at EOF, written inline, or absent is an error rather than an
     # empty happy path that checks zero references. Captured (not piped into `while`) so
-    # the extractor's exit status is not swallowed by the loop; `tr -d` strips any CR a
-    # CRLF-emitting interpreter would add, without needing an escape in this file.
-    if ! refs="$("$PY" scripts/promtest-refs.py "$t" | tr -d "\r")"; then
+    # the extractor's exit status is not swallowed by the loop. NO PIPE: piping through `tr`
+    # would put that exit status behind `set -o pipefail` (which this script does set, but a
+    # gate whose fail-closed behaviour depends on a setting 90 lines away is one edit from
+    # silently passing). promtest-refs.py writes LF on every platform instead.
+    if ! refs="$("$PY" scripts/promtest-refs.py "$t")"; then
       echo "$(basename "$t"): unusable rule_files list - refusing a fixture that may load no rules" >&2
       exit 1
     fi

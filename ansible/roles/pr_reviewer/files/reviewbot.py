@@ -142,6 +142,13 @@ def enqueue(repo, pr, head_sha, source):
         return
     with db_lock:
         c = db()
+        # When this head was FIRST seen in any state, 'superseded' included. For a delayed
+        # webhook carrying a stale head this is old, which is what stops it superseding the
+        # newer rows below; for a genuinely new head it is None and everything older than now
+        # coalesces, exactly as before.
+        first_seen = c.execute(
+            "SELECT MIN(created) FROM jobs WHERE repo=? AND pr=? AND head_sha=?",
+            (repo, pr, head_sha)).fetchone()[0]
         cur = c.execute(
             "SELECT id,created FROM jobs WHERE repo=? AND pr=? AND head_sha=? AND state IN "
             "('queued','running','posting','retry','done','quarantined')",
@@ -169,9 +176,11 @@ def enqueue(repo, pr, head_sha, source):
         # would make one give-up permanent: a push would not clear the row, so the gauge and
         # its alert would stay up forever. A new head is exactly the signal that the old
         # give-up is obsolete.
+        cutoff = first_seen if first_seen is not None else time.time()
         c.execute("UPDATE jobs SET state='superseded', updated=? WHERE repo=? AND pr=? "
-                  "AND (state IN ('queued','retry') OR (state='quarantined' AND "
-                  "COALESCE(note,'') NOT LIKE 'ambiguous POST%'))", (time.time(), repo, pr))
+                  "AND created<? AND (state IN ('queued','retry') OR (state='quarantined' AND "
+                  "COALESCE(note,'') NOT LIKE 'ambiguous POST%'))",
+                  (time.time(), repo, pr, cutoff))
         c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated,note) "
                   "VALUES(?,?,?,'queued',?,?,?)",
                   (repo, pr, head_sha, time.time(), time.time(), source))
@@ -353,6 +362,21 @@ def run_llm(title, desc, diff_text, rubric=""):
         record_gauge("llm_seconds", round(time.monotonic() - started, 1))
 
 
+def aux_run(args, remaining, **kw):
+    """An auxiliary subprocess (reading the model's output file, the auth file) inside the
+    operation budget.
+
+    Two things it must not do. It must not outlive the shared deadline - hence
+    min(60, remaining()). And its own timeout must not surface as a `TimeoutExpired`: run_llm
+    re-raises that verbatim and the worker bills it as a full LLM deadline against the cap of
+    2, even when the model itself finished quickly. It becomes an ordinary failure, and the
+    elapsed-cost classifier then assigns the right retry budget."""
+    try:
+        return subprocess.run(args, timeout=max(1.0, min(60.0, remaining())), **kw)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"auxiliary command timed out: {' '.join(map(str, args[:4]))}") from e
+
+
 def _run_llm(title, desc, diff_text, rubric, started):
     # Clock started in run_llm, before any setup: the budget is for the whole operation, and
     # the isolated-user mktemp below is a subprocess that can itself hang.
@@ -450,8 +474,8 @@ def _run_llm(title, desc, diff_text, rubric, started):
             # quirk), and only fail when it is absent or empty.
             text = ""
             if sudo_user:
-                rr = subprocess.run(["sudo", "-n", "-u", sudo_user, "cat", out_file],
-                                    capture_output=True, text=True, timeout=60)
+                rr = aux_run(["sudo", "-n", "-u", sudo_user, "cat", out_file], remaining,
+                             capture_output=True, text=True)
                 text = rr.stdout if rr.returncode == 0 else ""
             elif os.path.exists(out_file):
                 text = io.open(out_file, encoding="utf-8").read()
@@ -461,9 +485,9 @@ def _run_llm(title, desc, diff_text, rubric, started):
             # included (round-3 finding): scan the (public-once-posted) output for that
             # credential material and quarantine instead of posting. Mistake prevention,
             # not tamper-proof - an encoding model defeats a substring scan.
-            ar = subprocess.run(["sudo", "-n", "-u", sudo_user, "cat",
-                                 f"/home/{sudo_user}/.codex/auth.json"],
-                                capture_output=True, text=True, timeout=60)
+            ar = aux_run(["sudo", "-n", "-u", sudo_user, "cat",
+                          f"/home/{sudo_user}/.codex/auth.json"], remaining,
+                         capture_output=True, text=True)
             if ar.returncode == 0:
                 try:
                     for v in json.loads(ar.stdout).values():

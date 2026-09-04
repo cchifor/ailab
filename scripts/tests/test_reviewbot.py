@@ -495,6 +495,32 @@ class WorkerIterationTest(unittest.TestCase):
         self.assertEqual("quarantined", rows[self.B],
                          "a stale head must not retire the current head's quarantine")
 
+    def test_a_delayed_webhook_for_a_SUPERSEDED_head_cannot_clear_a_live_quarantine(self):
+        """The hole both reviewers found on ailab#486, and the one my first test MISSED.
+
+        The earlier version of this scenario gave the old head a 'done' row, which IS in the
+        dedupe SELECT, so the delayed delivery took the dedupe path and was safely ignored.
+        A head whose own row is 'SUPERSEDED' is not in that SELECT: it falls through to the
+        INSERT path, whose coalesce UPDATE then clears the CURRENT head's live quarantine and
+        re-enqueues the stale head with fresh counters - including, before the ambiguous-POST
+        carve-out, one the operator had not cleared."""
+        self.m.enqueue("o/r", 1, self.A, "webhook")          # head A
+        self.m.enqueue("o/r", 1, self.B, "head-moved")       # A -> superseded, B queued
+        c = self.m.db()
+        self.assertEqual("superseded",
+                         c.execute("SELECT state FROM jobs WHERE head_sha=?", (self.A,)).fetchone()[0])
+        c.execute("UPDATE jobs SET state='quarantined' WHERE head_sha=?", (self.B,))
+        c.commit()
+        c.close()
+
+        self.m.enqueue("o/r", 1, self.A, "webhook")          # the DELAYED delivery
+
+        c = self.m.db()
+        rows = dict(c.execute("SELECT head_sha,state FROM jobs WHERE state<>'superseded'"))
+        c.close()
+        self.assertEqual("quarantined", rows.get(self.B),
+                         "a stale head reached the coalesce path and cleared the live quarantine")
+
     def test_an_ambiguous_post_quarantine_is_never_auto_retired(self):
         """Only an operator (with --force) decides that one: auto-clearing it would let the
         reconciler re-run a review that may already have landed."""
@@ -690,6 +716,40 @@ class CommandLineTest(unittest.TestCase):
         c.commit()
         c.close()
         self.assertEqual(0, self._main("--requeue", "o/r", "1"))
+
+
+class AuxRunTest(unittest.TestCase):
+    """Auxiliary subprocesses (reading the model's output file, the auth file) share the
+    operation budget, but their OWN timeout must not be billed as an LLM deadline: run_llm
+    re-raises TimeoutExpired verbatim and the worker charges it against the cap of 2, even
+    when the model itself finished quickly."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_a_timeout_becomes_an_ordinary_failure(self):
+        def boom(args, **kw):
+            raise self.m.subprocess.TimeoutExpired(cmd=args, timeout=kw.get("timeout"))
+        self.m.subprocess.run = boom
+        with self.assertRaises(RuntimeError) as ctx:
+            self.m.aux_run(["sudo", "cat", "x"], lambda: 500.0)
+        self.assertNotIsInstance(ctx.exception, self.m.subprocess.TimeoutExpired)
+        self.assertFalse(self.m.is_budget_failure(ctx.exception),
+                         "an auxiliary read must not consume the deadline budget")
+
+    def test_it_never_outlives_the_remaining_budget(self):
+        seen = {}
+
+        def record(args, **kw):
+            seen["timeout"] = kw.get("timeout")
+            return self.m.subprocess.CompletedProcess(args, 0, "", "")
+        self.m.subprocess.run = record
+        self.m.aux_run(["sudo", "cat", "x"], lambda: 5.0)
+        self.assertEqual(5.0, seen["timeout"], "must not use a fixed 60s past the deadline")
+        self.m.aux_run(["sudo", "cat", "x"], lambda: 500.0)
+        self.assertEqual(60.0, seen["timeout"], "and must still cap at 60s when time is ample")
 
 
 class MigrationTest(unittest.TestCase):
