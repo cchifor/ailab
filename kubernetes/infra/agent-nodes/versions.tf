@@ -3,7 +3,7 @@ terraform {
   required_providers {
     proxmox = {
       source  = "bpg/proxmox"
-      version = "~> 0.111" # same pin as the Talos (infra/), ai-lxc, runners, and dev-workers modules
+      version = "~> 0.112" # same pin as the Talos (infra/), ai-lxc, runners, and dev-workers modules
     }
     # Worker JOIN reuses the EXISTING cluster PKI: the talos provider here only renders the worker
     # machine-config + applies it. The machine_secrets themselves come from infra/ remote state
