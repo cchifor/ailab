@@ -117,7 +117,7 @@ spec:
           # same `just pin-workloads agentforge-platform=…` run. The v3 head DOES move (PR1's four
           # definition tables): per the ordering rule above, `scripts/af-db.sh migrate` runs from
           # the cutover branch checkout BEFORE the merge (docs/runbooks/agentforge-v3-cutover.md §6).
-          image: registry.chifor.me/agentforge/agentforge-platform@sha256:f3509148c7bce714254fac820127fbc6a0060fe52d23c707d77cb3bc9ba72237
+          image: registry.chifor.me/agentforge/agentforge-platform@sha256:39392232fbdb31874bce1ecadeb2267e9c28e204f27f51463573c8bdf5797322
           command: ["agentforge-platform", "migrate"]
           env:
             # `migrate` runs alembic as admin_dsn (the DB-owning afp_admin role, BYPASSRLS) — see the
