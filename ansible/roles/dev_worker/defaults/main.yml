@@ -52,8 +52,8 @@ dev_worker_codex_pkg: "@openai/codex"
 
 # ---- Codex CLI version + model (bump deliberately; tasks/codex.yml) ----
 # Any user whose installed codex is OLDER than this is upgraded to exactly it (never downgraded).
-# gpt-6-astra needs >= 0.153.1: an older CLI is rejected upstream with
-# `400 The 'gpt-6-astra' model requires a newer version of Codex` (0.147.0, 2026-09-05).
+# gpt-6-astra needs >= 0.153.0 (measured 2026-09-05: 0.152.1 rejected, 0.153.0 accepted): an
+# older CLI is rejected upstream with `400 The 'gpt-6-astra' model requires a newer version of Codex`.
 dev_worker_codex_version: "0.153.4"
 # Written as TOP-LEVEL keys into each user's ~/.codex/config.toml (edit-in-place, see codex.yml).
 # Empty string = leave that key unmanaged.

@@ -11,9 +11,10 @@
   vars:
     reviewer_lan_cidr: "{{ lan_cidr | default('192.168.0.0/24') }}"
     reviewer_node_major: 20
-    # Codex CLI floor (bump deliberately). gpt-6-astra needs >= 0.153.1 — an older CLI is rejected
-    # upstream with `400 ... requires a newer version of Codex`. Older installs are upgraded to
-    # exactly this; newer ones are left alone. reviewbot spawns /usr/bin/codex per job, so no restart.
+    # Codex CLI floor (bump deliberately). gpt-6-astra needs >= 0.153.0 (measured 2026-09-05:
+    # 0.152.1 rejected, 0.153.0 accepted) — an older CLI is rejected upstream with
+    # `400 ... requires a newer version of Codex`. Older installs are upgraded to exactly this;
+    # newer ones are left alone. reviewbot spawns /usr/bin/codex per job, so no restart.
     reviewer_codex_version: "0.153.4"
   pre_tasks:
     - name: Wait for cloud-init to finish
@@ -62,12 +63,15 @@
         - { pkg: "@openai/codex", bin: codex }
 
     # The `creates` guard above installs once and never upgrades; codex does not self-update.
+    # Tagged `reviewbot` so the documented rollout (`ansible-playbook reviewers.yml -t reviewbot`)
+    # carries the floor too — an untagged pre_task is skipped by a tag-limited run.
     - name: Probe the installed Codex CLI
       ansible.builtin.command: /usr/bin/codex --version
       register: reviewer_codex_probe
       changed_when: false
       failed_when: false
       check_mode: false # probe only — must run under --check so the version test has data
+      tags: [reviewbot, codex]
 
     - name: Upgrade the Codex CLI (below the pinned version)
       ansible.builtin.command: "npm install -g @openai/codex@{{ reviewer_codex_version }}"
@@ -76,6 +80,7 @@
         or (reviewer_codex_probe.stdout | regex_search('(?<=codex-cli )[0-9]+[.][0-9]+[.][0-9]+') | default('0', true))
            is version(reviewer_codex_version, '<')
       changed_when: true
+      tags: [reviewbot, codex]
 
     # Allow rules BEFORE enable, so the ansible SSH connection can never be locked out.
     - name: Allow LAN inbound on reviewer service ports

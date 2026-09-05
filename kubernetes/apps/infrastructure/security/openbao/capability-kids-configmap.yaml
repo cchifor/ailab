@@ -82,7 +82,8 @@
 # target; what the gate actually SENDS is cross_review.model + the cross-reviewer role in
 # cchifor/agentforge-config (the source of truth — it moves last in the rollout). The older entries stay
 # so a config rollback needs no policy change. A model in this list is only usable once the
-# sandbox/orchestrator images ship a codex CLI the upstream accepts for it (gpt-6-astra: >= 0.153.1).
+# sandbox + p1-worker images ship a codex CLI the upstream accepts for it (gpt-6-astra: >= 0.153.0,
+# measured 2026-09-05); the `orchestrator` image is the CLI-free `runtime` target.
 #
 # EVERY anthropic seat in the estate MUST appear here. This list is what creates the aggregated
 # `af/data/operator/broker/<provider>/<account>/kids` registry doc a broker's `-kids` ExternalSecret

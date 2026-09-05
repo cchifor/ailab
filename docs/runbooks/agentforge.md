@@ -227,7 +227,8 @@ truth for what is ENTITLED, and `cross_review.model` + the cross-reviewer role i
 `cchifor/agentforge-config` are the source of truth for what is SENT — read both live rather than
 trusting a list in prose; the gateway `model_set` is built from the latter. Both must contain the
 sent model, or you get a 403. A THIRD gate sits upstream: chatgpt.com rejects `gpt-6-astra` from a
-codex CLI older than 0.153.1 (`400 The 'gpt-6-astra' model requires a newer version of Codex`) —
+codex CLI older than 0.153.0 (measured 2026-09-05: 0.152.1 rejected, 0.153.0 accepted;
+`400 The 'gpt-6-astra' model requires a newer version of Codex`) —
 that is a `broker upstream 400` WARNING line, not an audit line, and the fix is the image's
 `CODEX_VERSION` (agentforge `deploy/*.Dockerfile`), not policy.
 
