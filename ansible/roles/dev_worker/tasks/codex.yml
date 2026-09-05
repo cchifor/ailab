@@ -2,9 +2,10 @@
 # NEW vs homelab: Codex, installed per-user into ~/.npm-global exactly like Claude Code (reuses the
 # npm prefix + PATH set up in claude_code.yml). The npm package keeps Claude Code + Codex symmetric;
 # same presence-probe idempotency, PLUS a version floor: codex does NOT self-update (it only nags),
-# and a model can require a newer CLI than the one on disk — gpt-6-astra needs >= 0.153.1, and an
-# older CLI is rejected upstream with `400 The 'gpt-6-astra' model requires a newer version of
-# Codex` (seen 2026-09-05: the fleet sat on 0.142.5–0.153.0). So any user whose CLI is below
+# and a model can require a newer CLI than the one on disk — gpt-6-astra needs >= 0.153.0
+# (measured 2026-09-05: 0.152.1 rejected, 0.153.0 accepted), and an older CLI is rejected upstream
+# with `400 The 'gpt-6-astra' model requires a newer version of Codex` (the fleet sat on
+# 0.142.5–0.153.0 that day). So any user whose CLI is below
 # dev_worker_codex_version is upgraded to exactly it; a newer one is left alone.
 #
 # The model pin lives in each user's ~/.codex/config.toml as TOP-LEVEL keys (`model`,

@@ -132,13 +132,15 @@ ssh c4@192.168.0.37 'claude --version && codex --version'   # both resolve from 
 
 **Codex version + model are ansible-managed** (role `dev_worker`, `tasks/codex.yml`, tag `codex`):
 `dev_worker_codex_version` is a floor — an older CLI is upgraded to exactly it, a newer one is left
-alone (codex does not self-update, and `gpt-6-astra` is refused upstream from CLIs < 0.153.1) —
+alone (codex does not self-update, and `gpt-6-astra` is refused upstream from CLIs < 0.153.0 —
+measured 2026-09-05: 0.152.1 rejected, 0.153.0 accepted) —
 and `dev_worker_codex_model` / `dev_worker_codex_reasoning_effort` (`gpt-6-astra` / `xhigh`) are
 written as top-level keys into each user's `~/.codex/config.toml` in place and section-aware
 (`ini_file` with no section touches only the region above the first `[table]`, so the
 `[projects.*]` trust tables codex appends and any `[profiles.*]` are never edited). Roll out alone with
 `ansible-playbook dev-workers.yml -t codex`. The reviewer VMs get the same floor from
-`reviewer_codex_version` in `reviewers.yml`, and reviewer-2's review model is
+`reviewer_codex_version` in `reviewers.yml` (its probe/upgrade tasks carry the `reviewbot` tag, so
+the documented `-t reviewbot` rollout includes them), and reviewer-2's review model is
 `pr_reviewer_llm_model` in its host_vars.
 
 ### Optional: sandboxed separate agent account

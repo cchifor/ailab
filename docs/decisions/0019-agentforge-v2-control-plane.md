@@ -51,10 +51,12 @@ inference, no static keys ever handed to agent code:
   operator **kid-policy** allowlist `{gpt-5.3-codex, gpt-5.5, gpt-5.6}` (a second, OpenBao-published
   model allowlist enforced by the broker on top of the capability `model_set`), so the runner must
   force codex onto an allowed model via `-c model=<job.model>` (agentforge PR #44) with the config set
-  to `gpt-5.6` (config PR #4). Without both, the broker returns `403 model-not-allowed` /
+  to `gpt-5.6` (config PR #4; set back to `gpt-5.5` on 2026-07-21, agentforge-config e28541d, when
+  chatgpt.com 400'd `gpt-5.6`). Without both, the broker returns `403 model-not-allowed` /
   `capability policy rejected`. **The estate codex model is `gpt-6-astra`** (GPT-6 Astra, decided
-  2026-09-05): the kid-policy allowlist entitles it (this repo), the sandbox/orchestrator images ship
-  codex ≥ 0.153.1 (agentforge #309), and `cross_review.model` + the cross-reviewer role in
+  2026-09-05): the kid-policy allowlist entitles it (this repo), the sandbox + p1-worker images ship
+  codex 0.153.4 (agentforge #309; the `orchestrator` image is the CLI-free `runtime` target; the
+  measured floor is 0.153.0 — 0.152.1 rejected, 0.153.0 accepted), and `cross_review.model` + the cross-reviewer role in
   `cchifor/agentforge-config` — the source of truth for what the gate actually sends — move to it
   last (agentforge-config #8). The upstream rejects an older CLI for this model with
   `400 … requires a newer version of Codex`, which is why the image bump must land BEFORE the flip.
