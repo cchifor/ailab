@@ -44,9 +44,21 @@ dev_worker_kubectl_minor: "1.30"
 dev_worker_ttyd_version: "1.7.7"
 dev_worker_tpm_version: "v3.1.0"
 
-# ---- npm package ids (latest from npm; both self-update at runtime, so presence is enough) ----
+# ---- npm package ids ----
+# Claude Code self-updates at runtime, so presence is enough. Codex does NOT (it only nags), and a
+# model can require a newer CLI than the one on disk, so codex carries a version pin (below).
 dev_worker_claude_code_pkg: "@anthropic-ai/claude-code"
 dev_worker_codex_pkg: "@openai/codex"
+
+# ---- Codex CLI version + model (bump deliberately; tasks/codex.yml) ----
+# Any user whose installed codex is OLDER than this is upgraded to exactly it (never downgraded).
+# gpt-6-astra needs >= 0.153.1: an older CLI is rejected upstream with
+# `400 The 'gpt-6-astra' model requires a newer version of Codex` (0.147.0, 2026-09-05).
+dev_worker_codex_version: "0.153.4"
+# Written as TOP-LEVEL keys into each user's ~/.codex/config.toml (edit-in-place, see codex.yml).
+# Empty string = leave that key unmanaged.
+dev_worker_codex_model: "gpt-6-astra"
+dev_worker_codex_reasoning_effort: "xhigh"
 
 # ---- feature toggles ----
 dev_worker_install_docker: true

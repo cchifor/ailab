@@ -142,7 +142,9 @@ Flux roll); **ailab** = this repo (manifests); **agentforge-config** = the live-
    `.kids.<kid>.allowed_models`, synced from OpenBao) — permits `{gpt-5.3-codex, gpt-5.5, gpt-5.6}` but NOT
    `gpt-5.6-sol`. Fix (code + config, chosen over editing the operator kid-policy): make codex send the
    already-allowed `gpt-5.6` via `-c model=<job.model>` — **agentforge #44** — plus config `cross_review.model`
-   = `gpt-5.6` in **agentforge-config**.
+   = `gpt-5.6` in **agentforge-config**. (Superseded 2026-09-05: the kid policy now also entitles
+   `gpt-6-astra`, the estate target; agentforge-config is the source of truth for what the gate
+   sends — see runbooks/agentforge.md § Capability / policy model.)
 7. **Codex upstream `401 — "Provided authentication token is expired. Please try signing in again."`** The
    broker grants + forwards (model PASSED), but chatgpt.com rejects the stored OAuth: the broker uses a STATIC
    `access_token` with no self-refresh, the ChatGPT token is a ~10-day JWT, and the auto-refresher CronJob is

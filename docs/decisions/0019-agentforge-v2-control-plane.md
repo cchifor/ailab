@@ -52,7 +52,12 @@ inference, no static keys ever handed to agent code:
   model allowlist enforced by the broker on top of the capability `model_set`), so the runner must
   force codex onto an allowed model via `-c model=<job.model>` (agentforge PR #44) with the config set
   to `gpt-5.6` (config PR #4). Without both, the broker returns `403 model-not-allowed` /
-  `capability policy rejected`.
+  `capability policy rejected`. **The estate codex model is `gpt-6-astra`** (GPT-6 Astra, decided
+  2026-09-05): the kid-policy allowlist entitles it (this repo), the sandbox/orchestrator images ship
+  codex ≥ 0.153.1 (agentforge #309), and `cross_review.model` + the cross-reviewer role in
+  `cchifor/agentforge-config` — the source of truth for what the gate actually sends — move to it
+  last (agentforge-config #8). The upstream rejects an older CLI for this model with
+  `400 … requires a newer version of Codex`, which is why the image bump must land BEFORE the flip.
 - **(c) OpenBao 2.5.5 has DISABLED the legacy `generate-root` flow.** `bao operator generate-root`
   and raw `sys/generate-root/attempt` return **`405 "unsupported operation"`** — there is NO
   root-token recovery from the unseal key on this version. Operator-path writes (the broker OAuth

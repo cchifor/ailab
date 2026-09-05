@@ -3,7 +3,7 @@
 pr_reviewer_enabled: true
 pr_reviewer_persona: codex
 pr_reviewer_llm_kind: codex
-pr_reviewer_llm_model: gpt-5.6-sol
+pr_reviewer_llm_model: gpt-6-astra
 pr_reviewer_llm_cmd:
   - "/usr/bin/codex"
 pr_reviewer_llm_timeout_s: 600

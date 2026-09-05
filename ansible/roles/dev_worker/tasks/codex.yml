@@ -1,7 +1,21 @@
 ---
 # NEW vs homelab: Codex, installed per-user into ~/.npm-global exactly like Claude Code (reuses the
-# npm prefix + PATH set up in claude_code.yml). The npm package keeps Claude Code + Codex symmetric
-# and auto-updatable; same presence-probe idempotency.
+# npm prefix + PATH set up in claude_code.yml). The npm package keeps Claude Code + Codex symmetric;
+# same presence-probe idempotency, PLUS a version floor: codex does NOT self-update (it only nags),
+# and a model can require a newer CLI than the one on disk — gpt-6-astra needs >= 0.153.1, and an
+# older CLI is rejected upstream with `400 The 'gpt-6-astra' model requires a newer version of
+# Codex` (seen 2026-09-05: the fleet sat on 0.142.5–0.153.0). So any user whose CLI is below
+# dev_worker_codex_version is upgraded to exactly it; a newer one is left alone.
+#
+# The model pin lives in each user's ~/.codex/config.toml as TOP-LEVEL keys (`model`,
+# `model_reasoning_effort`). codex appends `[projects.*]` trust tables to that same file at runtime
+# (and users may add `[profiles.*]`), and TOML top-level keys must precede the first table header.
+# The edit is therefore SECTION-AWARE: community.general.ini_file with no `section` targets only the
+# region before the first `[table]` — a same-named key inside a table is neither matched nor touched,
+# and a missing key is inserted at the top (proven 2026-09-05 against a `[profiles.review]` fixture;
+# lineinfile would have rewritten the profile's line instead). Never template the whole file: that
+# would wipe the trust tables and any user-added settings. Own tag: --tags codex (users.yml's
+# dev_worker_users fact is `always`).
 
 - name: Probe installed Codex per user
   become: true
@@ -10,18 +24,59 @@
   register: dev_worker_codex_probe
   changed_when: false
   failed_when: false
+  check_mode: false # probe only — must run under --check so the version test below has data
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
 
-- name: Install Codex per user (only if absent)
+# `codex --version` prints `codex-cli X.Y.Z`; absent (rc != 0) or older than the pin → (re)install.
+# The version is taken from the `codex-cli ` prefix specifically, so an upgrade-nag line carrying
+# another x.y.z can never be mistaken for the installed version.
+- name: Install or upgrade Codex per user (absent, or below the pinned version)
   become: true
   become_user: "{{ item.0.name }}"
-  ansible.builtin.command: "npm install -g {{ dev_worker_codex_pkg }}"
+  ansible.builtin.command: "npm install -g {{ dev_worker_codex_pkg }}@{{ dev_worker_codex_version }}"
   environment:
     npm_config_prefix: "{{ item.0.home }}/{{ dev_worker_npm_dir }}"
-  when: item.1.rc != 0
+  when: >-
+    item.1.rc != 0
+    or (item.1.stdout | regex_search('(?<=codex-cli )[0-9]+[.][0-9]+[.][0-9]+') | default('0', true))
+       is version(dev_worker_codex_version, '<')
   changed_when: true
   loop: "{{ dev_worker_users | zip(dev_worker_codex_probe.results) | list }}"
   loop_control:
     label: "{{ item.0.name }}"
+
+# credentials.yml (later in the role) also ensures this dir; it is repeated here so a tag-limited
+# `--tags codex` run works on a host where the users exist but credentials.yml has not run under
+# the tag. (User creation itself is untagged, so a genuinely fresh host needs a full role run.)
+- name: Ensure each user's ~/.codex exists
+  ansible.builtin.file:
+    path: "{{ item.home }}/.codex"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0700"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Pin the Codex model + reasoning effort per user (top-level keys, table-aware, in place)
+  community.general.ini_file:
+    path: "{{ item.0.home }}/.codex/config.toml"
+    # No `section`: only the top-level region (before the first table header) is edited.
+    option: "{{ item.1.key }}"
+    value: '"{{ item.1.value }}"'
+    no_extra_spaces: false # `key = "value"`, the form codex itself writes
+    create: true
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0600"
+  when: item.1.value | length > 0
+  loop: >-
+    {{ dev_worker_users | product([
+         {'key': 'model', 'value': dev_worker_codex_model},
+         {'key': 'model_reasoning_effort', 'value': dev_worker_codex_reasoning_effort}
+       ]) | list }}
+  loop_control:
+    label: "{{ item.0.name }} {{ item.1.key }}"

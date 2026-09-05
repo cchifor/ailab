@@ -78,6 +78,12 @@
 # two candidate resolutions and their consequences are written up in the ailab PR that added this
 # block; pick one deliberately.
 #
+# openai/codex-pro allowed_models (2026-09-05): `gpt-6-astra` (GPT-6 Astra) is the estate codex model
+# target; what the gate actually SENDS is cross_review.model + the cross-reviewer role in
+# cchifor/agentforge-config (the source of truth — it moves last in the rollout). The older entries stay
+# so a config rollback needs no policy change. A model in this list is only usable once the
+# sandbox/orchestrator images ship a codex CLI the upstream accepts for it (gpt-6-astra: >= 0.153.1).
+#
 # EVERY anthropic seat in the estate MUST appear here. This list is what creates the aggregated
 # `af/data/operator/broker/<provider>/<account>/kids` registry doc a broker's `-kids` ExternalSecret
 # reads: a broker with NO entitled audience never gets its KV path written, so its `-kids` Secret
@@ -135,7 +141,7 @@ data:
           },
           {
             "audience": "openai/codex-pro",
-            "allowed_models": ["gpt-5.3-codex", "gpt-5.5", "gpt-5.6"],
+            "allowed_models": ["gpt-5.3-codex", "gpt-5.5", "gpt-5.6", "gpt-6-astra"],
             "allowed_routes": ["/v1/responses", "/v1/responses/compact"],
             "allowed_methods": ["POST"],
             "max_ttl_s": 3600,

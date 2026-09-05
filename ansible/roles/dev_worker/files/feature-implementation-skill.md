@@ -57,7 +57,7 @@ At the end, state which phases ran and what was skipped, and why.
 - Write the plan to `plans/YYYY-MM-DD-<slug>-plan.md`, referencing the pinned base commit.
 - Cross-review with codex before implementing: read-only, ephemeral, prompt on stdin
   (`codex exec -s read-only`, model per the estate's codex config — currently pinned
-  `gpt-5.6-sol`), giving the reviewer the plan INLINE plus the pinned commit id and the
+  `gpt-6-astra`), giving the reviewer the plan INLINE plus the pinned commit id and the
   repo conventions it needs — enough context to judge, nothing stale to wander into.
   Max 2 rounds, then escalate disagreements to the operator.
 - Material UI/UX decisions: propose as an HTML page (artifact-design skill) and get the
