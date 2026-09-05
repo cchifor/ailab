@@ -27,7 +27,7 @@ spec:
         # the pod template on any policy change → the Recreate strategy rolls the pod and re-reads the
         # mounted file. RECOMPUTE on every ConfigMap edit: sha256 of the `capability-kids.json` value in
         # capability-kids-configmap.yaml (kept in this SAME PR so code+config activate atomically).
-        checksum/capability-kids: "0ed6833e2ea283e758514f9003e06c6efee6fb39e08aa90b23034857272a920a"
+        checksum/capability-kids: "1b9ec9844a5110fe7393ec00aa7aefe4595514dc3d9845c391554e071f10a24c"
       labels:
         app.kubernetes.io/name: agentforge-provisioner
         app.kubernetes.io/component: provisioner

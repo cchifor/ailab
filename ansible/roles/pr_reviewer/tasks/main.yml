@@ -59,7 +59,35 @@
   when: pr_reviewer_llm_sudo_user | length > 0
 
 # LLM auth for the isolated user (e.g. /home/codexrun/.codex/auth.json) is seeded
-# MANUALLY, like the agent user's — see the runbook.
+# MANUALLY, like the agent user's — see the runbook. The MODEL pin in that user's
+# config.toml is managed here (edit-in-place, top-level key above the [projects.*]
+# tables codex appends) so no host carries a stale pin; reviewbot still passes `-m`
+# explicitly on every exec, so this is consistency, not the authority.
+- name: Ensure the isolated codex user's ~/.codex exists
+  ansible.builtin.file:
+    path: "/home/{{ pr_reviewer_llm_sudo_user }}/.codex"
+    state: directory
+    owner: "{{ pr_reviewer_llm_sudo_user }}"
+    group: "{{ pr_reviewer_llm_sudo_user }}"
+  when:
+    - pr_reviewer_llm_kind == "codex"
+    - pr_reviewer_llm_sudo_user | length > 0
+
+- name: Pin the codex model in the isolated user's config
+  ansible.builtin.lineinfile:
+    path: "/home/{{ pr_reviewer_llm_sudo_user }}/.codex/config.toml"
+    regexp: '^model\s*='
+    line: 'model = "{{ pr_reviewer_llm_model }}"'
+    insertbefore: BOF
+    create: true
+    owner: "{{ pr_reviewer_llm_sudo_user }}"
+    group: "{{ pr_reviewer_llm_sudo_user }}"
+    mode: "0600"
+  when:
+    - pr_reviewer_llm_kind == "codex"
+    - pr_reviewer_llm_sudo_user | length > 0
+    - pr_reviewer_llm_model | length > 0
+
 - name: Allow the service user to run the LLM as the isolated user
   ansible.builtin.copy:
     content: "{{ pr_reviewer_user }} ALL=({{ pr_reviewer_llm_sudo_user }}) NOPASSWD: ALL\n"

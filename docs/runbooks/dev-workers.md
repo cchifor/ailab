@@ -130,6 +130,16 @@ Verify:
 ssh c4@192.168.0.37 'claude --version && codex --version'   # both resolve from ~/.npm-global/bin
 ```
 
+**Codex version + model are ansible-managed** (role `dev_worker`, `tasks/codex.yml`, tag `codex`):
+`dev_worker_codex_version` is a floor — an older CLI is upgraded to exactly it, a newer one is left
+alone (codex does not self-update, and `gpt-6-astra` is refused upstream from CLIs < 0.153.1) —
+and `dev_worker_codex_model` / `dev_worker_codex_reasoning_effort` (`gpt-6-astra` / `xhigh`) are
+written as top-level keys into each user's `~/.codex/config.toml` in place, above the
+`[projects.*]` trust tables codex appends itself. Roll out alone with
+`ansible-playbook dev-workers.yml -t codex`. The reviewer VMs get the same floor from
+`reviewer_codex_version` in `reviewers.yml`, and reviewer-2's review model is
+`pr_reviewer_llm_model` in its host_vars.
+
 ### Optional: sandboxed separate agent account
 To isolate the headless agent from `c4`'s sudo, set `dev_worker_agent_user: claude-agent` in
 `group_vars/dev_workers.yml` and re-run. That restores the homelab two-user split: `claude-agent`

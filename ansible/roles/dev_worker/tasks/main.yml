@@ -51,8 +51,10 @@
 - name: Claude Code (per-user npm global)
   ansible.builtin.import_tasks: claude_code.yml
 
-- name: Codex (per-user npm global)
+# Own tag so the CLI version floor + model pin can be rolled out alone: --tags codex.
+- name: Codex (per-user npm global, version floor, model pin)
   ansible.builtin.import_tasks: codex.yml
+  tags: [codex]
 
 # Needs both users + their npm dirs to exist.
 - name: Shared Claude/Codex credential ACLs

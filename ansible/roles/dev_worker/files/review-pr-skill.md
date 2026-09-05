@@ -37,7 +37,7 @@ reviews, or edits PR metadata — each of those needs its own explicit command.
   it is touched only at the posting step.
 - Codex cross-check only when the operator asked for it: read-only, ephemeral, stdin,
   diff inline at the pinned SHA (model per the estate codex config — currently
-  `gpt-5.6-sol`); its output is suggestions to verify, not findings to relay.
+  `gpt-6-astra`); its output is suggestions to verify, not findings to relay.
 
 ## Attribution
 Never include "Generated with Claude Code", "Co-Authored-By: Claude", or any similar marker

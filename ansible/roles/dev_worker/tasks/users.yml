@@ -35,9 +35,11 @@
         mode: "0600"
 
 # Per-user loop target: just the admin user when unified, or both when a separate agent is configured.
+# `always`: tag-limited runs (--tags codex) loop over this fact too.
 - name: Record the dev-worker user(s) for per-user loops
   ansible.builtin.set_fact:
     dev_worker_users: >-
       {{ [{'name': dev_worker_admin_user, 'home': '/home/' + dev_worker_admin_user}] +
          ([{'name': dev_worker_agent_user, 'home': '/home/' + dev_worker_agent_user}]
           if dev_worker_agent_user != dev_worker_admin_user else []) }}
+  tags: [always]

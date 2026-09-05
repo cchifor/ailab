@@ -219,10 +219,16 @@ A request is authorized only if the model the CLI **actually SENDS** is present 
    "model(s) outside kid policy"). This is operator-controlled config; changing it needs an OpenBao
    operator write (gated), so prefer aligning the *sent* model to what's already allowed.
 
-**Worked example (codex):** codex's built-in default model is **`gpt-5.6-sol`**, which is NOT in the
-kid policy. The kid policy allows **`{gpt-5.3-codex, gpt-5.5, gpt-5.6}`**, so codex is **forced** (via
-`-c model=<job.model>` on the CLI) to send **`gpt-5.6`**, and `cross_review.model` in config is set to
-`gpt-5.6` so the gateway `model_set` agrees. Both lists must contain the sent model, or you get a 403.
+**Worked example (codex):** codex's built-in default model (`gpt-5.6-sol` on the 0.14x CLIs) is NOT
+in the kid policy, so codex is **forced** (via `-c model=<job.model>` on the CLI) to send the config
+model. Since 2026-09-05 that is **`gpt-6-astra`**: the kid policy allows
+**`{gpt-5.3-codex, gpt-5.5, gpt-5.6, gpt-6-astra}`** (`capability-kids-configmap.yaml`, checksum bumped
+in `provisioner-deploy.yaml`), and `cross_review.model` + the cross-reviewer role in config are
+`gpt-6-astra` so the gateway `model_set` agrees. Both lists must contain the sent model, or you get a
+403. A THIRD gate sits upstream: chatgpt.com rejects `gpt-6-astra` from a codex CLI older than 0.153.1
+(`400 The 'gpt-6-astra' model requires a newer version of Codex`) — that is a `broker upstream 400`
+WARNING line, not an audit line, and the fix is the image's `CODEX_VERSION` (agentforge
+`deploy/*.Dockerfile`), not policy.
 
 Inspect the live kid policy (keys/models only — never dump secret values):
 
