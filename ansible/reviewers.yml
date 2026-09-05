@@ -73,7 +73,7 @@
       ansible.builtin.command: "npm install -g @openai/codex@{{ reviewer_codex_version }}"
       when: >-
         reviewer_codex_probe.rc != 0
-        or (reviewer_codex_probe.stdout | regex_search('[0-9]+[.][0-9]+[.][0-9]+') | default('0', true))
+        or (reviewer_codex_probe.stdout | regex_search('(?<=codex-cli )[0-9]+[.][0-9]+[.][0-9]+') | default('0', true))
            is version(reviewer_codex_version, '<')
       changed_when: true
 

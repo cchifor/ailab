@@ -134,8 +134,9 @@ ssh c4@192.168.0.37 'claude --version && codex --version'   # both resolve from 
 `dev_worker_codex_version` is a floor — an older CLI is upgraded to exactly it, a newer one is left
 alone (codex does not self-update, and `gpt-6-astra` is refused upstream from CLIs < 0.153.1) —
 and `dev_worker_codex_model` / `dev_worker_codex_reasoning_effort` (`gpt-6-astra` / `xhigh`) are
-written as top-level keys into each user's `~/.codex/config.toml` in place, above the
-`[projects.*]` trust tables codex appends itself. Roll out alone with
+written as top-level keys into each user's `~/.codex/config.toml` in place and section-aware
+(`ini_file` with no section touches only the region above the first `[table]`, so the
+`[projects.*]` trust tables codex appends and any `[profiles.*]` are never edited). Roll out alone with
 `ansible-playbook dev-workers.yml -t codex`. The reviewer VMs get the same floor from
 `reviewer_codex_version` in `reviewers.yml`, and reviewer-2's review model is
 `pr_reviewer_llm_model` in its host_vars.

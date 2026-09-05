@@ -60,25 +60,28 @@
 
 # LLM auth for the isolated user (e.g. /home/codexrun/.codex/auth.json) is seeded
 # MANUALLY, like the agent user's — see the runbook. The MODEL pin in that user's
-# config.toml is managed here (edit-in-place, top-level key above the [projects.*]
-# tables codex appends) so no host carries a stale pin; reviewbot still passes `-m`
-# explicitly on every exec, so this is consistency, not the authority.
+# config.toml is managed here as a top-level key, section-aware (ini_file with no
+# `section` edits only the region before the first `[table]`, so the `[projects.*]`
+# tables codex appends and any `[profiles.*]` are never touched) so no host carries
+# a stale pin; reviewbot still passes `-m` explicitly on every exec, so this is
+# consistency, not the authority.
 - name: Ensure the isolated codex user's ~/.codex exists
   ansible.builtin.file:
     path: "/home/{{ pr_reviewer_llm_sudo_user }}/.codex"
     state: directory
     owner: "{{ pr_reviewer_llm_sudo_user }}"
     group: "{{ pr_reviewer_llm_sudo_user }}"
+    mode: "0700" # holds the seeded auth.json — non-traversable, like the dev_worker one
   when:
     - pr_reviewer_llm_kind == "codex"
     - pr_reviewer_llm_sudo_user | length > 0
 
-- name: Pin the codex model in the isolated user's config
-  ansible.builtin.lineinfile:
+- name: Pin the codex model in the isolated user's config (top-level key, table-aware)
+  community.general.ini_file:
     path: "/home/{{ pr_reviewer_llm_sudo_user }}/.codex/config.toml"
-    regexp: '^model\s*='
-    line: 'model = "{{ pr_reviewer_llm_model }}"'
-    insertbefore: BOF
+    option: model
+    value: '"{{ pr_reviewer_llm_model }}"'
+    no_extra_spaces: false
     create: true
     owner: "{{ pr_reviewer_llm_sudo_user }}"
     group: "{{ pr_reviewer_llm_sudo_user }}"

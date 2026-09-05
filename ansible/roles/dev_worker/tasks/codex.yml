@@ -8,10 +8,14 @@
 # dev_worker_codex_version is upgraded to exactly it; a newer one is left alone.
 #
 # The model pin lives in each user's ~/.codex/config.toml as TOP-LEVEL keys (`model`,
-# `model_reasoning_effort`). codex appends `[projects.*]` trust tables to that same file at runtime,
-# and TOML top-level keys must precede the first table header, so each pin is anchored at BOF with
-# lineinfile (edit-in-place). Never template the whole file: that would wipe the trust tables and
-# any user-added settings. Own tag: --tags codex (users.yml's dev_worker_users fact is `always`).
+# `model_reasoning_effort`). codex appends `[projects.*]` trust tables to that same file at runtime
+# (and users may add `[profiles.*]`), and TOML top-level keys must precede the first table header.
+# The edit is therefore SECTION-AWARE: community.general.ini_file with no `section` targets only the
+# region before the first `[table]` — a same-named key inside a table is neither matched nor touched,
+# and a missing key is inserted at the top (proven 2026-09-05 against a `[profiles.review]` fixture;
+# lineinfile would have rewritten the profile's line instead). Never template the whole file: that
+# would wipe the trust tables and any user-added settings. Own tag: --tags codex (users.yml's
+# dev_worker_users fact is `always`).
 
 - name: Probe installed Codex per user
   become: true
@@ -26,6 +30,8 @@
     label: "{{ item.name }}"
 
 # `codex --version` prints `codex-cli X.Y.Z`; absent (rc != 0) or older than the pin → (re)install.
+# The version is taken from the `codex-cli ` prefix specifically, so an upgrade-nag line carrying
+# another x.y.z can never be mistaken for the installed version.
 - name: Install or upgrade Codex per user (absent, or below the pinned version)
   become: true
   become_user: "{{ item.0.name }}"
@@ -34,7 +40,7 @@
     npm_config_prefix: "{{ item.0.home }}/{{ dev_worker_npm_dir }}"
   when: >-
     item.1.rc != 0
-    or (item.1.stdout | regex_search('[0-9]+[.][0-9]+[.][0-9]+') | default('0', true))
+    or (item.1.stdout | regex_search('(?<=codex-cli )[0-9]+[.][0-9]+[.][0-9]+') | default('0', true))
        is version(dev_worker_codex_version, '<')
   changed_when: true
   loop: "{{ dev_worker_users | zip(dev_worker_codex_probe.results) | list }}"
@@ -42,7 +48,8 @@
     label: "{{ item.0.name }}"
 
 # credentials.yml (later in the role) also ensures this dir; it is repeated here so a tag-limited
-# `--tags codex` run on a fresh host has somewhere to write the config.
+# `--tags codex` run works on a host where the users exist but credentials.yml has not run under
+# the tag. (User creation itself is untagged, so a genuinely fresh host needs a full role run.)
 - name: Ensure each user's ~/.codex exists
   ansible.builtin.file:
     path: "{{ item.home }}/.codex"
@@ -54,12 +61,13 @@
   loop_control:
     label: "{{ item.name }}"
 
-- name: Pin the Codex model + reasoning effort per user (top-level keys, edit-in-place)
-  ansible.builtin.lineinfile:
+- name: Pin the Codex model + reasoning effort per user (top-level keys, table-aware, in place)
+  community.general.ini_file:
     path: "{{ item.0.home }}/.codex/config.toml"
-    regexp: '^{{ item.1.key }}\s*='
-    line: '{{ item.1.key }} = "{{ item.1.value }}"'
-    insertbefore: BOF
+    # No `section`: only the top-level region (before the first table header) is edited.
+    option: "{{ item.1.key }}"
+    value: '"{{ item.1.value }}"'
+    no_extra_spaces: false # `key = "value"`, the form codex itself writes
     create: true
     owner: "{{ item.0.name }}"
     group: "{{ item.0.name }}"
