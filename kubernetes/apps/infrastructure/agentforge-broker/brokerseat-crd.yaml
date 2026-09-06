@@ -127,7 +127,7 @@ spec:
                         type: string
                         # Entitled = the extended declaration names the aud for >= 1 workspace; Published =
                         # the aud's kids registry holds >= 1 committed kid (plan amendment F9, both).
-                        enum: [CredentialPresent, CasRequired, Seeded, Rendered, Available, Ready, Entitled, Published, Collision]
+                        enum: [CredentialPresent, CasRequired, RenderAttempted, Seeded, Rendered, Available, Ready, Entitled, Published, Collision]
                       status:
                         type: string
                         enum: ["True", "False", "Unknown"]

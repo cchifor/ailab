@@ -153,8 +153,9 @@ class CrdSchema(unittest.TestCase):
         self.assertRegex(status, r"(?m)^\s*enum:\s*\[Pending, Seeding, Rendering, Ready, Degraded, Terminating\]\s*$")
         self.assertRegex(status, r"(?m)^\s*x-kubernetes-list-type:\s*map\s*$")
         self.assertRegex(status, r"(?m)^\s*x-kubernetes-list-map-keys:\s*\[type\]\s*$")
-        # the condition vocabulary incl. amendment F9's Published (Entitled AND Published)
-        self.assertRegex(status, r"(?m)^\s*enum:\s*\[CredentialPresent, CasRequired, Seeded, Rendered, Available, Ready, Entitled, Published, Collision\]\s*$")
+        # the condition vocabulary incl. amendment F9's Published (Entitled AND Published) and
+        # round-5's RenderAttempted (durable render history written before the first create)
+        self.assertRegex(status, r"(?m)^\s*enum:\s*\[CredentialPresent, CasRequired, RenderAttempted, Seeded, Rendered, Available, Ready, Entitled, Published, Collision\]\s*$")
 
     def test_spec_requires_exactly_the_cp_triple(self) -> None:
         spec = gbi._sub_block(self.doc, "spec", 12)
