@@ -36,6 +36,8 @@ PROVISIONER_EXPECTED: dict[tuple[str, str], frozenset[str]] = {
     # barrier pod evidence (E2c): the one inventory read beyond the CR
     ("", "pods"): frozenset({"list"}),
     ("", "endpoints"): frozenset({"get"}),
+    # workload quiescence for deleted seats (E2b round 3): label-selected metadata list only
+    ("apps", "replicasets"): frozenset({"list"}),
 }
 
 CP_EXPECTED: dict[tuple[str, str], frozenset[str]] = {
@@ -49,6 +51,8 @@ FORBIDDEN_RESOURCES = {"secrets", "configmaps", "pods/exec", "pods/log", "pods/a
 # `pods` is allowed with exactly one verb (list — metadata/phase/deletionTimestamp for the barrier's
 # pod evidence); any other verb on pods is a widening.
 POD_ALLOWED_VERBS = frozenset({"list"})
+# `replicasets` likewise: list only (the controller never creates/scales/deletes a ReplicaSet).
+RS_ALLOWED_VERBS = frozenset({"list"})
 
 
 def _docs_by_kind() -> dict[tuple[str, str], str]:
@@ -70,9 +74,12 @@ class ProvisionerRole(unittest.TestCase):
             self.assertNotIn(key[1], FORBIDDEN_RESOURCES, key)
             self.assertNotEqual(key[0], "*", key)
         self.assertEqual(self.rules[("", "pods")], POD_ALLOWED_VERBS)
+        self.assertEqual(self.rules[("apps", "replicasets")], RS_ALLOWED_VERBS)
         # `list` only on the CR itself and on pods (evidence): children are addressed by derived name.
         for (group, resource), verbs in self.rules.items():
-            if (group, resource) not in {("agentforge.io", "brokerseats"), ("", "pods")}:
+            if (group, resource) not in {
+                ("agentforge.io", "brokerseats"), ("", "pods"), ("apps", "replicasets"),
+            }:
                 self.assertNotIn("list", verbs, (group, resource))
         # the ONLY writes on the CR are the finalizer (patch) + status (patch) + finalizers subresource.
         self.assertNotIn("create", self.rules[("agentforge.io", "brokerseats")])
