@@ -17,8 +17,10 @@
 #     Talos) demands of anyone setting blockOwnerDeletion=true on a child's ownerReference — granted
 #     regardless. Children are addressed BY DERIVED NAME (GET, then create-on-404 / replace-on-drift),
 #     so: NO list/watch on any child kind, NO delete anywhere (teardown is k8s GC via ownerReferences
-#     under the CP's Foreground delete), and NO secrets/configmaps/pods — the provisioner still cannot
-#     read a broker Secret or the sandbox pods. `update` on the child kinds is the drift-correcting
+#     under the CP's Foreground delete), and NO secrets/configmaps — the provisioner still cannot read
+#     a broker Secret. The ONE inventory read beyond the CR is `pods list` + `endpoints get` in this
+#     namespace (barrier pod evidence, see below); never pods/exec or pods/log, and nothing in the
+#     sandbox namespace. `update` on the child kinds is the drift-correcting
 #     replace of an object it owns; the admission guard refuses it on anything Flux-labelled or not
 #     already carrying this stem's ownership, so a git seat's Deployment is out of reach even for
 #     the <=10 min before Flux SSA would re-assert it.
@@ -57,6 +59,17 @@ rules:
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["get", "create", "update"]
+  # Pod EVIDENCE for the kid barrier (agentforge E2c review round): a served/absent proof must cover
+  # every replica that may still cache a kid — including terminating pods, which the Deployment's
+  # status.replicas omits and which DNS may already have dropped. `pods list` (metadata + phase +
+  # deletionTimestamp only; never exec/log) and `endpoints get` are the authoritative inventory the
+  # provisioner polls against. Still NO secrets/configmaps, NO pods/exec, NO pods/log.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
