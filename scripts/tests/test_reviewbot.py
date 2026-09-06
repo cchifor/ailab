@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time as real_time
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SRC = ROOT / "ansible" / "roles" / "pr_reviewer" / "files" / "reviewbot.py"
@@ -906,8 +907,6 @@ class ToolDenyTest(unittest.TestCase):
             self.assertIn(f'"{kept}"', args_block)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class SizeCapTest(unittest.TestCase):
@@ -1019,5 +1018,10 @@ class SizeCapTest(unittest.TestCase):
 
             def read(self):
                 return b"\xff\xfe not utf-8"
-        m.urllib.request.urlopen = lambda req, timeout=60: Resp()
-        self.assertEqual(m.api("/x", raw=True), b"\xff\xfe not utf-8")
+        # `m.urllib` IS the process-wide urllib package: patch it scoped, never assign.
+        with mock.patch.object(m.urllib.request, "urlopen", lambda req, timeout=60: Resp()):
+            self.assertEqual(m.api("/x", raw=True), b"\xff\xfe not utf-8")
+
+
+if __name__ == "__main__":
+    unittest.main()
