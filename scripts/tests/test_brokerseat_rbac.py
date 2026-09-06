@@ -33,6 +33,9 @@ PROVISIONER_EXPECTED: dict[tuple[str, str], frozenset[str]] = {
     ("policy", "poddisruptionbudgets"): frozenset({"get", "create", "update"}),
     ("external-secrets.io", "externalsecrets"): frozenset({"get", "create", "update"}),
     ("cilium.io", "ciliumnetworkpolicies"): frozenset({"get", "create", "update"}),
+    # barrier pod evidence (E2c): the one inventory read beyond the CR
+    ("", "pods"): frozenset({"list"}),
+    ("", "endpoints"): frozenset({"get"}),
 }
 
 CP_EXPECTED: dict[tuple[str, str], frozenset[str]] = {
@@ -41,8 +44,11 @@ CP_EXPECTED: dict[tuple[str, str], frozenset[str]] = {
 }
 
 FORBIDDEN_VERBS = {"delete", "deletecollection", "watch", "*", "escalate", "bind", "impersonate"}
-FORBIDDEN_RESOURCES = {"secrets", "configmaps", "pods", "pods/exec", "pods/log", "serviceaccounts",
-                       "roles", "rolebindings", "*"}
+FORBIDDEN_RESOURCES = {"secrets", "configmaps", "pods/exec", "pods/log", "pods/attach",
+                       "pods/portforward", "serviceaccounts", "roles", "rolebindings", "*"}
+# `pods` is allowed with exactly one verb (list — metadata/phase/deletionTimestamp for the barrier's
+# pod evidence); any other verb on pods is a widening.
+POD_ALLOWED_VERBS = frozenset({"list"})
 
 
 def _docs_by_kind() -> dict[tuple[str, str], str]:
@@ -63,9 +69,10 @@ class ProvisionerRole(unittest.TestCase):
             self.assertTrue(verbs.isdisjoint(FORBIDDEN_VERBS), (key, verbs))
             self.assertNotIn(key[1], FORBIDDEN_RESOURCES, key)
             self.assertNotEqual(key[0], "*", key)
-        # `list` only on the CR itself: children are addressed by derived name.
+        self.assertEqual(self.rules[("", "pods")], POD_ALLOWED_VERBS)
+        # `list` only on the CR itself and on pods (evidence): children are addressed by derived name.
         for (group, resource), verbs in self.rules.items():
-            if (group, resource) != ("agentforge.io", "brokerseats"):
+            if (group, resource) not in {("agentforge.io", "brokerseats"), ("", "pods")}:
                 self.assertNotIn("list", verbs, (group, resource))
         # the ONLY writes on the CR are the finalizer (patch) + status (patch) + finalizers subresource.
         self.assertNotIn("create", self.rules[("agentforge.io", "brokerseats")])
