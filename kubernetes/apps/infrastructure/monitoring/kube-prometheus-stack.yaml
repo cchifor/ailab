@@ -227,7 +227,8 @@ spec:
       defaultDashboardsTimezone: browser
       # SSO via Authelia OIDC (ADR 0012). The client secret comes from the grafana-oauth SOPS secret as
       # GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET (env overrides grafana.ini). The local admin stays as
-      # break-glass. role_attribute_path maps the Authelia 'admins' group to Grafana Admin.
+      # break-glass. role_attribute_path maps the Authelia 'admins' group to Grafana Admin,
+      # 'grafana-editors' to Editor, everyone else to Viewer.
       envFromSecret: grafana-oauth
       grafana.ini:
         server:
@@ -257,10 +258,11 @@ spec:
           name_attribute_path: name
           use_pkce: true
           auth_style: InHeader
-          # admins group -> Grafana Admin; any other SSO user -> Editor (NOT Viewer) so they get
-          # Explore (logs/metrics ad-hoc queries) — Grafana hides Explore from Viewers. Single-operator
-          # lab, so Editor-by-default is fine; the `groups` claim still elevates admins to full Admin.
-          role_attribute_path: "contains(groups[*], 'admins') && 'Admin' || 'Editor'"
+          # admins group -> Grafana Admin; `grafana-editors` group -> Editor (Explore / ad-hoc queries,
+          # which Grafana hides from Viewers); ANY other SSO user -> Viewer (read-only). Editor-by-default
+          # was fine while this was a single-operator lab; the first non-admin SSO user (2026-09-06) is
+          # meant to READ dashboards only, so the default is Viewer and Editor is an explicit group.
+          role_attribute_path: "contains(groups[*], 'admins') && 'Admin' || contains(groups[*], 'grafana-editors') && 'Editor' || 'Viewer'"
       additionalDataSources:
         - name: Loki
           type: loki
