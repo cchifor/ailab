@@ -65,6 +65,27 @@ def db():
     if "verdict" not in cols:
         try:
             c.execute("ALTER TABLE jobs ADD COLUMN verdict TEXT")
+            # ONE-TIME BACKFILL, and the reason the column is worth having. Over-cap skips have
+            # reached state='done' since long before this column existed - first silently, then
+            # via skip_body - so treating every NULL verdict as a real review would preserve
+            # exactly the round inflation this change exists to remove. Measured when written:
+            # 13 such rows across 7 PRs, three of which (platform#1074/#1072/#1081) were
+            # sitting at round 4 having never actually been reviewed. Their notes are the only
+            # surviving evidence, and every one of them carries "size cap".
+            n = c.execute("UPDATE jobs SET verdict='skipped' WHERE verdict IS NULL "
+                          "AND state='done' AND note LIKE '%size cap%'").rowcount
+            c.commit()
+            if n:
+                log(f"migration: backfilled {n} historical over-cap skip(s) as verdict=skipped")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+    if "coverage" not in cols:
+        # Coverage is tracked SEPARATELY from the verdict. A capacity-limited review that finds
+        # something posts verdict='findings' - correct for humans and for the merge gate - but
+        # it is still an incomplete read of the PR and must not advance the convergence round.
+        try:
+            c.execute("ALTER TABLE jobs ADD COLUMN coverage TEXT")
             c.commit()
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
@@ -420,7 +441,13 @@ def section_paths(data):
     A section whose name cannot be read is EXCLUDED and disclosed, never reviewed under a
     guessed name and never a reason to discard the whole PR."""
     def dec(b):
-        return b.decode("utf-8", "replace").strip()
+        v = b.decode("utf-8", "replace").strip()
+        # Git quotes any path with a non-ASCII byte, a quote or a control char, and writes it
+        # with C/octal escapes: `--- "a/caf\\303\\251.py"`. The a//b/ prefix is then INSIDE the
+        # quotes, so a naive strip yields a wrong name. Unescaping is not worth the risk here;
+        # the section is reported as unnameable, which excludes and discloses it - exactly what
+        # split_sections already promised.
+        return "" if v.startswith('"') else v
 
     old = new = None
     m = OLD_PATH_RE.search(data)
@@ -908,7 +935,12 @@ def maybe_merge(repo, pr):
 
 
 def review_round(repo, pr):
-    """1-based round: how many distinct heads THIS persona has actually REVIEWED for the PR.
+    """1-based round: how many distinct heads THIS persona has FULLY reviewed for the PR.
+
+    Two things disqualify a head: no real verdict (a skip), and incomplete coverage (files were
+    dropped to fit the cap). The second is not implied by the first - a partial review that
+    finds a blocker posts verdict='findings', which is right for the merge gate but is still an
+    incomplete read and must not buy the PR a relaxed severity ladder.
 
     Only heads with a real verdict count. A skipped head (over the size cap, nothing
     reviewable) reaches state='done' too, and counting those inflated the round number of a PR
@@ -922,7 +954,8 @@ def review_round(repo, pr):
     with db_lock:
         c = db()
         n = c.execute("SELECT COUNT(DISTINCT head_sha) FROM jobs WHERE repo=? AND pr=? "
-                      "AND state='done' AND (verdict IS NULL OR verdict IN ('clean','findings'))",
+                      "AND state='done' AND (verdict IS NULL OR verdict IN ('clean','findings')) "
+                      "AND (coverage IS NULL OR coverage='full')",
                       (repo, pr)).fetchone()[0]
         c.close()
     return n + 1
@@ -980,7 +1013,7 @@ def review_job(job_id, repo, pr, head_sha):
         return post_review(job_id, repo, pr, head_sha,
                            skip_body(head_sha, len(diff_bytes), "over the raw intake bound"),
                            "COMMENT", [], f"diff {len(diff_bytes)} B over raw bound - skipped",
-                           verdict="skipped")
+                           verdict="skipped", coverage="none")
     try:
         diff, dropped, coverage = plan_coverage(diff_bytes)
     except ValueError as e:
@@ -989,8 +1022,12 @@ def review_job(job_id, repo, pr, head_sha):
         bump_meta("reviews_skipped_total")
         return post_review(job_id, repo, pr, head_sha,
                            skip_body(head_sha, len(diff_bytes), f"unparsable diff ({e})"),
-                           "COMMENT", [], f"diff not partitionable: {e}", verdict="skipped")
-    total_files = len(dropped) + (diff.count("diff --git a/") if diff else 0)
+                           "COMMENT", [], f"diff not partitionable: {e}",
+                           verdict="skipped", coverage="none")
+    # Line-anchored, NOT a substring count: a diff that ADDS a line containing
+    # "diff --git a/" (this repo's own test_reviewbot.py does exactly that) would otherwise
+    # inflate the file count and make the coverage table lie.
+    total_files = len(dropped) + (len(SECTION_START.findall(diff.encode())) if diff else 0)
     if coverage in ("none", "over"):
         why = ("nothing reviewable is left after excluding generated and binary files"
                if coverage == "none" else
@@ -999,7 +1036,7 @@ def review_job(job_id, repo, pr, head_sha):
         return post_review(job_id, repo, pr, head_sha,
                            skip_body(head_sha, len(diff_bytes), why, dropped, total_files),
                            "COMMENT", [], f"{coverage}: {len(dropped)} files excluded - skipped",
-                           verdict="skipped")
+                           verdict="skipped", coverage=coverage)
     excluded_paths = {p for p, _, _ in dropped}
     # Close the .diff endpoint's current-PR race.
     d2 = pr_ok(repo, pr, head_sha)
@@ -1075,7 +1112,7 @@ def review_job(job_id, repo, pr, head_sha):
                        "APPROVED" if verdict == "clean" else "COMMENT", comments,
                        f"{len(comments)} inline / {len(demoted)} demoted / {verdict}"
                        + (f" / {len(dropped)} files excluded" if dropped else ""),
-                       verdict=verdict)
+                       verdict=verdict, coverage=coverage)
 
 
 def skip_body(head_sha, nbytes, why=None, dropped=None, total_files=0):
@@ -1098,7 +1135,8 @@ def skip_body(head_sha, nbytes, why=None, dropped=None, total_files=0):
     return body + marker
 
 
-def post_review(job_id, repo, pr, head_sha, body, event, comments, note, verdict=None):
+def post_review(job_id, repo, pr, head_sha, body, event, comments, note, verdict=None,
+                coverage=None):
     """The single mutation path: final eligibility + dedup checks, then ONE POST whose
     ambiguous failure quarantines (never blind-retried). Shared by real reviews and by the
     over-cap skip so both carry the same discipline."""
@@ -1116,8 +1154,8 @@ def post_review(job_id, repo, pr, head_sha, body, event, comments, note, verdict
 
     with db_lock:
         c = db()
-        c.execute("UPDATE jobs SET state='posting', verdict=?, updated=? WHERE id=?",
-                  (verdict, time.time(), job_id))
+        c.execute("UPDATE jobs SET state='posting', verdict=?, coverage=?, updated=? "
+                  "WHERE id=?", (verdict, coverage, time.time(), job_id))
         c.commit()
         c.close()
     try:

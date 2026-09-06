@@ -851,6 +851,16 @@ class SplitSectionsTest(unittest.TestCase):
         self.assertEqual("dir/Auto Advantage - Packet.pdf", secs[0]["b"])
         self.assertEqual(raw, secs[0]["data"])
 
+    def test_a_git_quoted_path_is_unnameable_not_missparsed(self):
+        """Git quotes any path with a non-ASCII byte and writes C/octal escapes, putting the
+        a//b/ prefix INSIDE the quotes — so a naive strip yields a wrong name. The docstring
+        promised such a section is excluded; now it actually is."""
+        raw = (b'diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
+               b'--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -0,0 +1 @@\n+x\n')
+        sec = self.m.split_sections(raw)[0]
+        self.assertIsNone(sec["b"])
+        self.assertEqual("unparsable path", self.m.section_reason(sec))
+
     def test_an_unnameable_section_is_excluded_not_fatal(self):
         """One section we cannot name must not discard the other 57."""
         raw = _sec("good.py") + b"diff --git nonsense\n@@ -0,0 +1 @@\n+x\n"
@@ -950,6 +960,16 @@ class PlanCoverageTest(unittest.TestCase):
         self.assertEqual("over", cov)
         self.assertIsNone(diff)
 
+    def test_a_diff_that_quotes_a_diff_header_does_not_inflate_the_count(self):
+        """Self-referential: this very test file adds lines containing `diff --git a/`, and a
+        substring count would read them as extra files and make the coverage table lie."""
+        body = b'+    raw = b"diff --git a/x b/x"\n'
+        raw = _sec("uv.lock", b"+lock\n") + _sec("tests/t.py", body)
+        diff, dropped, cov = self._plan(raw, 100000)
+        kept = len(self.m.SECTION_START.findall(diff.encode()))
+        self.assertEqual(1, kept, "one real section, despite the literal in the added line")
+        self.assertEqual(2, kept + len(dropped))
+
     def test_the_over_cap_notice_names_what_is_actually_too_big(self):
         """When nothing is reviewed, the author needs the BLOCKING files — not a list of the
         lockfiles we already excluded. Largest first, so the top of the table is what to split
@@ -1041,6 +1061,66 @@ class RoundCountingTest(unittest.TestCase):
     def test_partial_does_not_advance_the_round(self):
         self._job("a" * 40, "partial")
         self.assertEqual(1, self.m.review_round("o/r", 1))
+
+    def test_historical_skips_are_backfilled_not_counted(self):
+        """THE headline bug this change claimed to fix, and nearly did not. Over-cap skips
+        reached state='done' long before the verdict column existed, so counting every NULL
+        verdict as a real review preserved the exact inflation being removed. Measured live:
+        13 such rows across 7 PRs; platform#1074/#1072/#1081 were each at round 4 having never
+        been reviewed once. Their note is the only surviving evidence, and the migration
+        backfills from it.
+
+        Built on a PRE-migration schema on purpose: the backfill fires once, when the column is
+        created, which in production is the first start after deploy — with the legacy rows
+        already present."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        dbp = pathlib.Path(d.name) / "state.sqlite"
+        old = sqlite3.connect(dbp)
+        old.execute("""CREATE TABLE jobs(
+            id INTEGER PRIMARY KEY, repo TEXT, pr INTEGER, head_sha TEXT,
+            state TEXT, attempts INTEGER DEFAULT 0, next_at REAL DEFAULT 0,
+            created REAL, updated REAL, review_id INTEGER, note TEXT)""")
+        for i in range(3):
+            old.execute("INSERT INTO jobs(repo,pr,head_sha,state,note) "
+                        "VALUES('o/r',1,?,'done',?)",
+                        (f"{i:040x}", f"diff {i} B over size cap - skipped"))
+        # one genuine review on a fourth head, which must still count
+        old.execute("INSERT INTO jobs(repo,pr,head_sha,state,note) "
+                    "VALUES('o/r',1,?,'done','2 inline / 0 demoted / findings')", ("f" * 40,))
+        old.commit()
+        old.close()
+
+        m2 = load(d.name)                     # importing runs the migration + backfill
+        self.assertEqual(2, m2.review_round("o/r", 1),
+                         "only the real review counts; the three skips are backfilled")
+        c = m2.db()
+        self.assertEqual(3, c.execute(
+            "SELECT COUNT(*) FROM jobs WHERE verdict='skipped'").fetchone()[0])
+        c.close()
+
+    def test_a_partial_review_with_findings_still_does_not_advance(self):
+        """The downgrade to verdict='partial' only fires on a clean result, so a capacity-
+        limited review that finds a blocker is recorded as 'findings' — correct for the merge
+        gate, but still an incomplete read. Coverage is tracked separately for exactly this."""
+        c = self.m.db()
+        for i in range(2):
+            c.execute("INSERT INTO jobs(repo,pr,head_sha,state,verdict,coverage,created,updated) "
+                      "VALUES('o/r',2,?,'done','findings','partial',?,?)",
+                      (f"{i:040x}", real_time.time(), real_time.time()))
+        c.commit()
+        c.close()
+        self.assertEqual(1, self.m.review_round("o/r", 2),
+                         "two partial reviews must not reach round 3's relaxed severity")
+
+    def test_full_coverage_findings_do_advance(self):
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,verdict,coverage,created,updated) "
+                  "VALUES('o/r',3,?,'done','findings','full',?,?)",
+                  ("a" * 40, real_time.time(), real_time.time()))
+        c.commit()
+        c.close()
+        self.assertEqual(2, self.m.review_round("o/r", 3))
 
     def test_legacy_rows_without_a_verdict_still_count(self):
         """Rows written before the verdict column existed were all real reviews."""
