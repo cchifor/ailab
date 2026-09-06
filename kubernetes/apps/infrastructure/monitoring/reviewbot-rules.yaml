@@ -99,6 +99,37 @@ spec:
               (check reviewbot_llm_seconds_max and reviewbot_llm_output_tokens_max: run length
               tracks REASONING, not diff size) or the deadline is too tight again. Raise
               pr_reviewer_llm_timeout_s in the role defaults, not per host.
+        # The twin of ReviewbotReviewTimeouts, and the one this rule set was MISSING. A
+        # timeout means the deadline was too tight for the work; a failure means the review
+        # could not be produced at all — an undecodable diff, unparseable model output, a
+        # Gitea write that did not land. Both leave the PR with no verdict and block the
+        # automerge lane, so both must page.
+        #
+        # Measured 2026-09-06: platform#1074 (a 4.0 MB diff carrying a non-UTF-8 byte) failed
+        # on every attempt on both personas for 22 hours — 66 failures, peaking at 15/h — and
+        # NOTHING fired, because the only alert on this counter watched the timeout half.
+        # ReviewbotQuarantined did catch the first occurrence, then went silent: the PR was
+        # being pushed to, so each job was superseded by a new head before it could exhaust
+        # max_attempts and quarantine.
+        #
+        # Threshold mirrors the timeout rule (>=3/h) rather than the observed 15/h peak: the
+        # healthy baseline is a flat ZERO — all 66 failures in that 48h window were this one
+        # PR — so three in an hour is already abnormal, and `for: 10m` rides out a blip.
+        - alert: ReviewbotReviewFailures
+          expr: increase(reviewbot_llm_failures_total[1h]) >= 3
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) failed {{ $value | printf \"%.0f\" }} reviews in an hour"
+            description: >-
+              Three or more reviews on {{ $labels.instance }} failed within an hour without
+              hitting the deadline (that would be ReviewbotReviewTimeouts). The PRs involved
+              have no verdict from this persona and cannot automerge. Check
+              `journalctl -u reviewbot | grep failed` on the host — the failure note carries
+              the reason and the PR. A single PR failing every attempt looks like this and
+              will NOT reach ReviewbotQuarantined if it is being actively pushed to, because
+              each new head supersedes the job before its attempts are exhausted. If the
+              reviewers are behind main, converge them: `ansible-playbook reviewers.yml`.
         # Age, not depth: a reconcile burst of 18 that drains in 20 min is the NORMAL shape and
         # must not page. See the header for why this is 1800 and not the intuitive 3600.
         # Note this counts queued/retry only, so a single stuck job with an empty queue reports

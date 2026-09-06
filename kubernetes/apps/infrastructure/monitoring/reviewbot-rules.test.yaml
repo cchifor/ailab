@@ -145,6 +145,54 @@ tests:
         alertname: ReviewbotReviewTimeouts
         exp_alerts: []
 
+  # ------------------------------------------------------- review failures
+  - interval: 1m
+    name: repeated non-deadline failures page (the 2026-09-06 shape)
+    input_series:
+      # platform#1074: an undecodable 4.0 MB diff failing every attempt on both personas.
+      # 66 failures over 22h, peaking at 15/h. NOTHING alerted on this counter before.
+      - series: 'reviewbot_llm_failures_total{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0 0 1 1 2 2 3 3 4 4 5 5 6 6 7 7 8 8 9 9 10 10 11 11 12 12 13 13 14 14 15 15 15 15 15 15 15 15 15 15"
+      # The deadline counter stays flat: this failure mode is NOT a timeout, which is exactly
+      # why ReviewbotReviewTimeouts could not see it.
+      - series: 'reviewbot_llm_timeouts_total{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewbotReviewFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              persona: claude
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot (claude) failed 12 reviews in an hour"
+              description: >-
+                Three or more reviews on 192.168.0.24:9100 failed within an hour without hitting
+                the deadline (that would be ReviewbotReviewTimeouts). The PRs involved have no
+                verdict from this persona and cannot automerge. Check `journalctl -u reviewbot |
+                grep failed` on the host — the failure note carries the reason and the PR. A
+                single PR failing every attempt looks like this and will NOT reach
+                ReviewbotQuarantined if it is being actively pushed to, because each new head
+                supersedes the job before its attempts are exhausted. If the reviewers are behind
+                main, converge them: `ansible-playbook reviewers.yml`.
+      # The timeout rule must stay silent on a pure-failure incident: they are different
+      # remedies (deadline too tight vs review cannot be produced at all).
+      - eval_time: 25m
+        alertname: ReviewbotReviewTimeouts
+        exp_alerts: []
+
+  - interval: 1m
+    name: an occasional transient failure does not page
+    input_series:
+      # Two failures in the window — a Gitea blip, not a broken PR. Under the >=3 threshold.
+      - series: 'reviewbot_llm_failures_total{persona="codex",instance="192.168.0.25:9100"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ReviewbotReviewFailures
+        exp_alerts: []
+
   # --------------------------------------------------------- queue backlog
   - interval: 1m
     name: backlog threshold fires on the incident peak

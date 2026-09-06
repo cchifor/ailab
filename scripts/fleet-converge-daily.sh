@@ -27,6 +27,13 @@ flock -n 9 || { echo "another converge is running; skipping" >>"$LOG"; exit 0; }
   # dw6's herdr takeover stays operator-scheduled (pane-killing); everything else full-role.
   ansible-playbook dev-workers.yml --limit 'dev_workers:!dev-worker-6' 2>&1 | tail -10
   ansible-playbook dev-workers.yml --limit dev-worker-6 --skip-tags herdr 2>&1 | tail -4
+  # The reviewer VMs converge here too. Until 2026-09-06 they converged NOWHERE: this script
+  # only ran dev-workers.yml, so every reviewbot.py change merged to main sat undeployed
+  # until somebody remembered to run the playbook by hand. That is not hypothetical — the
+  # tolerant-diff-decode fix (e5e15d85, merged 09-05) went 22 hours undeployed while
+  # platform#1074 failed on EVERY attempt on BOTH personas, 66 times, and the PR could not be
+  # reviewed at all. A daily no-op is cheap; two days of silent drift is not.
+  ansible-playbook reviewers.yml 2>&1 | tail -6
   echo "=== done $(date -Is)"
 } >>"$LOG" 2>&1
 
