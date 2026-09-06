@@ -409,6 +409,17 @@ BINARY_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".woff"
 # Not *.txt — requirements.txt is a dependency manifest, not prose.
 DOC_GLOBS = ("*.md", "*.rst", "*.adoc")
 
+# Exclusions whose trigger is a byte the PR AUTHOR controls inside an otherwise reviewable
+# file. Dropping such a file is still right - mojibake is not a review - but it must never
+# leave a mergeable verdict: one 0xf6 in a .py would otherwise quarantine that file's payload
+# out of the review and merge it unread, the exact failure this whole design refuses. Policy
+# exclusions (a glob, a binary extension, git's own binary marker) do not downgrade: their
+# rules live in the role, not in the repo under review, and no reviewer can vouch for a
+# lockfile either way. Git's OWN binary marker is not policy: a single NUL byte inside an
+# otherwise reviewable `payload.sh` makes git emit "Binary files ... differ" for it, so the
+# marker is as author-controlled as the 0xf6 above - authentic, but not independent.
+AUTHOR_TRIGGERED_REASONS = ("non-utf8", "unparsable path", "binary content")
+
 # `diff --git` is used ONLY as a section boundary. It is NOT a reliable place to read paths
 # from: git emits paths containing spaces UNQUOTED, so `a/(\S+) b/(\S+)` silently fails to
 # match them. Measured on platform#1084, whose corpus is full of names like
@@ -420,7 +431,64 @@ OLD_PATH_RE = re.compile(rb"^--- (?:a/)?(.*)$", re.M)
 NEW_PATH_RE = re.compile(rb"^\+\+\+ (?:b/)?(.*)$", re.M)
 # Binary sections carry no ---/+++ at all.
 BIN_PATH_RE = re.compile(rb"^Binary files (?:a/)?(.*) and (?:b/)?(.*) differ$", re.M)
+# A pure rename (similarity 100%) carries no ---/+++ either, and its `diff --git a/old b/new`
+# header disagrees across the ` b/` split by definition. These two lines carry the names
+# WITHOUT the a//b/ prefix and are the only reliable source for that shape.
+RENAME_FROM_RE = re.compile(rb"^(?:rename|copy) from (.*)$", re.M)
+RENAME_TO_RE = re.compile(rb"^(?:rename|copy) to (.*)$", re.M)
+# The two markers git writes for a binary file, matched ONLY as its own unprefixed lines.
+# Every line of a diff BODY carries a +/-/space prefix, so a column-0 marker cannot have been
+# authored inside a file — while a bare substring search let a source file that merely NAMES
+# the marker (this very module does, above) classify ITSELF as binary and drop out of review.
+BIN_MARKER_RE = re.compile(rb"^(?:GIT binary patch|Binary files .* differ)$", re.M)
 NULL_PATHS = ("/dev/null", "dev/null")
+
+# C-escapes git writes in a quoted path; the rest of the set is \ooo octal.
+_C_UNESCAPE = {ord("a"): 7, ord("b"): 8, ord("f"): 12, ord("n"): 10, ord("r"): 13,
+               ord("t"): 9, ord("v"): 11, ord("\\"): 92, ord('"'): 34}
+
+
+def unquote_path(tok):
+    """Decode git's C-quoted path form, or None if the token is not one.
+
+    Git quotes a path containing a non-ASCII byte, a quote or a control character and writes
+    `"a/caf\\303\\251.py"` — the a//b/ prefix INSIDE the quotes. The escape format is fully
+    specified, so the name is decodable; refusing it dropped every non-ASCII filename from
+    every review, which is both unfair to whoever named the file and a one-character
+    self-exclusion vector. A genuinely malformed header still decodes to None and stays
+    'unparsable path'."""
+    if len(tok) < 2 or not tok.startswith(b'"') or not tok.endswith(b'"'):
+        return None
+    body, out, i = tok[1:-1], bytearray(), 0
+    while i < len(body):
+        ch = body[i]
+        if ch == 0x22:                      # a bare quote cannot appear unescaped
+            return None
+        if ch != 0x5C:                      # backslash
+            out.append(ch)
+            i += 1
+            continue
+        i += 1
+        if i >= len(body):
+            return None
+        esc = body[i]
+        if esc in _C_UNESCAPE:
+            out.append(_C_UNESCAPE[esc])
+            i += 1
+        elif len(body) - i >= 3 and all(0x30 <= d <= 0x37 for d in body[i:i + 3]):
+            # \ooo, exactly three octal digits, decoded by hand: int(x, 8) also accepts
+            # '0o7', '0_7' and surrounding whitespace, none of which git ever writes.
+            val = ((body[i] - 0x30) << 6) | ((body[i + 1] - 0x30) << 3) | (body[i + 2] - 0x30)
+            if val > 0xFF:
+                return None
+            out.append(val)
+            i += 3
+        else:
+            return None
+    try:
+        return out.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _header_paths(first_line):
@@ -441,14 +509,19 @@ def section_paths(data):
 
     A section whose name cannot be read is EXCLUDED and disclosed, never reviewed under a
     guessed name and never a reason to discard the whole PR."""
-    def dec(b):
-        v = b.decode("utf-8", "replace").strip()
+    def dec(b, prefixed=True):
         # Git quotes any path with a non-ASCII byte, a quote or a control char, and writes it
         # with C/octal escapes: `--- "a/caf\\303\\251.py"`. The a//b/ prefix is then INSIDE the
-        # quotes, so a naive strip yields a wrong name. Unescaping is not worth the risk here;
-        # the section is reported as unnameable, which excludes and discloses it - exactly what
-        # split_sections already promised.
-        return "" if v.startswith('"') else v
+        # quotes, so a naive strip yields a wrong name - decode the escapes and strip it there.
+        # `prefixed` is False for rename/copy lines, which carry no prefix at all:
+        # stripping one there would rename a real `a/...` directory out of existence.
+        raw = b.strip()
+        if raw.startswith(b'"'):
+            name = unquote_path(raw)
+            if name is None:
+                return ""
+            return name[2:] if prefixed and name[:2] in ("a/", "b/") else name
+        return raw.decode("utf-8", "replace")
 
     old = new = None
     m = OLD_PATH_RE.search(data)
@@ -464,6 +537,9 @@ def section_paths(data):
     m = BIN_PATH_RE.search(data)
     if m:
         return (dec(m.group(1)), dec(m.group(2)))
+    frm, to = RENAME_FROM_RE.search(data), RENAME_TO_RE.search(data)
+    if frm and to:
+        return (dec(frm.group(1), False), dec(to.group(1), False))
     same = _header_paths(data.split(b"\n", 1)[0])
     if same is not None:
         return (dec(same), dec(same))
@@ -521,8 +597,11 @@ def section_reason(sec):
         dot = path.rfind(".")
         if dot > 0 and path[dot:].lower() in BINARY_EXTS:
             return "binary"
-    if b"GIT binary patch" in sec["data"] or b"\nBinary files " in sec["data"]:
-        return "binary"
+    if BIN_MARKER_RE.search(sec["data"]):
+        # Reached only for a path we would otherwise READ (the glob and extension rules ran
+        # first), so this is git reacting to the file's bytes - a distinct reason, and one
+        # that caps the verdict.
+        return "binary content"
     try:
         sec["data"].decode("utf-8")
     except UnicodeDecodeError:
@@ -538,7 +617,8 @@ def plan_coverage(raw):
     """Decide what to review. Returns (diff_text_or_None, dropped, coverage).
 
     coverage: "full"    every reviewable file included - the model's verdict stands
-              "partial" prose dropped for capacity - verdict is capped, never clean
+              "partial" prose dropped for capacity, or a file excluded by a byte its author
+                        controls - verdict is capped, never clean
               "none"    nothing reviewable at all (a lockfile-only PR)
               "over"    code alone exceeds the cap - a PR-hygiene problem, honest skip
     dropped: [(path, reason, nbytes)] for every omitted section, in report order."""
@@ -573,7 +653,8 @@ def plan_coverage(raw):
         dropped += [(x["b"] or "(unnamed section)", "not reviewed: over cap", len(x["data"]))
                     for x in biggest]
         return None, dropped, "over"
-    coverage = "partial" if any(r == "dropped: size cap" for _, r, _ in dropped) else "full"
+    capped = ("dropped: size cap",) + AUTHOR_TRIGGERED_REASONS
+    coverage = "partial" if any(r in capped for _, r, _ in dropped) else "full"
     return b"".join(x["data"] for x in kept).decode("utf-8"), dropped, coverage
 
 

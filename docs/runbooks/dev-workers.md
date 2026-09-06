@@ -248,11 +248,18 @@ hand. Order of diagnosis:
    `ansible-playbook reviewers.yml -l <host> -t reviewbot`.
 
 **Large PRs are partially reviewed, not skipped whole.** The diff is split into whole files
-before the size cap is applied. Generated/vendored/binary/non-UTF-8 files are always excluded
-(that is policy, and it does NOT downgrade the verdict — a reviewer cannot vouch for a lockfile
-either way). If what remains still does not fit, prose is shed largest-first, and THAT caps the
-verdict at `partial`, which never automerges. Code is never truncated: if the code alone is over
-the cap the review is skipped and the notice names the largest files so the PR can be split.
+before the size cap is applied. Generated/vendored files and binaries by EXTENSION are
+excluded without downgrading the verdict — those rules live in the role, not in the repo under
+review, and a reviewer cannot vouch for a lockfile either way. Three exclusions DO cap the
+verdict at `partial`, which never automerges: bytes that do not decode as UTF-8 (`non-utf8`),
+a path that cannot be read (`unparsable path`), and git's own binary marker on a path the
+extension rules would have read (`binary content` — one NUL inside `payload.sh` is enough to
+produce it). All three triggers are bytes the PR author controls inside an otherwise reviewable
+file, so leaving them at `clean` would let a PR quarantine its own payload and merge it unread.
+Prose shed largest-first for capacity caps the verdict the same way. Code is never truncated:
+if the code alone is over the cap the review is skipped and the notice names the largest files
+so the PR can be split. Paths git C-quotes (any non-ASCII byte, e.g. `"a/caf\303\251.py"`) are
+decoded and reviewed normally, so an accented filename is not a self-exclusion vector.
 
 Every filtered review carries a "Not reviewed" table above the model's summary, so a partial
 review can never be mistaken for a full one. Verdicts are `clean | findings | partial |

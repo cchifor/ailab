@@ -955,15 +955,32 @@ class SplitSectionsTest(unittest.TestCase):
         self.assertEqual("dir/Auto Advantage - Packet.pdf", secs[0]["b"])
         self.assertEqual(raw, secs[0]["data"])
 
-    def test_a_git_quoted_path_is_unnameable_not_missparsed(self):
+    def test_a_git_quoted_path_is_decoded_and_stays_reviewable(self):
         """Git quotes any path with a non-ASCII byte and writes C/octal escapes, putting the
-        a//b/ prefix INSIDE the quotes — so a naive strip yields a wrong name. The docstring
-        promised such a section is excluded; now it actually is."""
+        a//b/ prefix INSIDE the quotes. The escape format is fully specified, so the name is
+        decodable: excluding every such file dropped anyone's accented filename from every
+        review AND gave a PR a one-character way to exclude its own payload."""
         raw = (b'diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
                b'--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -0,0 +1 @@\n+x\n')
         sec = self.m.split_sections(raw)[0]
-        self.assertIsNone(sec["b"])
-        self.assertEqual("unparsable path", self.m.section_reason(sec))
+        self.assertEqual("caf\u00e9.py", sec["b"])
+        self.assertEqual("caf\u00e9.py", sec["a"])
+        self.assertIsNone(self.m.section_reason(sec), "a normal .py file, oddly named")
+
+    def test_quoted_path_escapes(self):
+        """The decoder accepts exactly git's escape set and refuses everything else — a
+        malformed token must stay 'unparsable path', not become a guessed name."""
+        u = self.m.unquote_path
+        self.assertEqual("caf\u00e9.py", u(b'"caf\\303\\251.py"'))
+        self.assertEqual('a b"c\td.py', u(b'"a b\\"c\\td.py"'))
+        self.assertEqual("back\\slash.py", u(b'"back\\\\slash.py"'))
+        # int(x, 8) would accept every one of the octal forms below; git writes exactly
+        # three octal digits and nothing else.
+        for bad in (b'"unterminated', b'no quotes at all', b'"\\q.py"', b'"\\77"',
+                    b'"\\400.py"', b'"\\303.py"', b'"a"b"',
+                    b'"a/\\0o7.py"', b'"a/\\1_0.py"', b'"a/\\ 12.py"', b'"a/\\089.py"'):
+            with self.subTest(bad=bad):
+                self.assertIsNone(u(bad))
 
     def test_an_unnameable_section_is_excluded_not_fatal(self):
         """One section we cannot name must not discard the other 57."""
@@ -1003,13 +1020,38 @@ class SectionReasonTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual("binary", self._reason(path))
 
-    def test_binary_patch_marker(self):
-        self.assertEqual("binary", self._reason("x.dat", b"\nBinary files a/x.dat and b/x.dat differ\n"))
+    def test_binary_patch_marker_is_its_own_reason(self):
+        """Git's marker is reached only for a path the glob and extension rules would have
+        READ, so it reports the file's bytes, not policy — and one NUL inside payload.sh is
+        enough to produce it. Distinct reason, because this one caps the verdict."""
+        self.assertEqual("binary content",
+                         self._reason("x.dat", b"\nBinary files a/x.dat and b/x.dat differ\n"))
+        self.assertEqual("binary content",
+                         self._reason("payload.sh", b"\nGIT binary patch\nliteral 4\nzc$x\n"))
+
+    def test_a_source_file_that_merely_names_the_marker_is_still_reviewed(self):
+        """Every line of a diff BODY carries a +/-/space prefix, so a column-0 marker can only
+        be git's own. A bare substring search made THIS module classify itself as binary and
+        drop out of its own review: the diff of reviewbot.py contains the marker as source."""
+        body = (b'+    if BIN_MARKER_RE.search(sec["data"]):  # GIT binary patch\n'
+                b'+# Binary files a/x and b/x differ  <- named in a comment\n')
+        self.assertIsNone(self._reason("reviewbot.py", body))
 
     def test_non_utf8_quarantines_one_file(self):
         """platform#1074 carried a 0xf6 byte that failed EVERY attempt for 22h. Naming the one
         unreadable file beats feeding the model replacement characters for the whole PR."""
         self.assertEqual("non-utf8", self._reason("weird.py", b"+caf\xf6\n"))
+
+    def test_a_pure_rename_is_nameable(self):
+        """A 100%-similarity rename carries no ---/+++ and its `diff --git a/old b/new` header
+        disagrees across the ` b/` split by definition. Before the rename lines were read, every
+        such section was 'unparsable path' — which now caps the verdict, so a plain file move
+        would have blocked automerge on any PR that contained one."""
+        raw = (b"diff --git a/old/x.py b/new/x.py\nsimilarity index 100%\n"
+               b"rename from old/x.py\nrename to new/x.py\n")
+        sec = self.m.split_sections(raw)[0]
+        self.assertEqual(("old/x.py", "new/x.py"), (sec["a"], sec["b"]))
+        self.assertIsNone(self.m.section_reason(sec))
 
     def test_a_rename_is_disqualified_by_either_side(self):
         self.assertEqual("generated", self._reason("deps.txt", old="uv.lock"))
@@ -1417,8 +1459,12 @@ class SizeCapTest(unittest.TestCase):
         body = self.posted[0][1]["body"]
         self.assertIn("weird.py", body, "but it IS named in the posted coverage table")
         self.assertIn("non-utf8", body)
-        # A policy exclusion does not downgrade the verdict — only a capacity drop does.
-        self.assertIn(f"head={head} verdict=clean", body)
+        # An exclusion triggered by a byte the AUTHOR controls inside an otherwise reviewable
+        # file caps the verdict: the merge gate is a clean-only allowlist, so a PR can no
+        # longer quarantine its own payload with one 0xf6 and merge it unread. Policy
+        # exclusions (globs, binary extensions, git's own marker) still do not downgrade.
+        self.assertIn(f"head={head} verdict=partial", body)
+        self.assertNotIn("verdict=clean", body)
 
     def setUp_module(self, m):
         """Re-point the stubs at a freshly loaded module (a second `load` in one test)."""
@@ -1455,6 +1501,52 @@ class SizeCapTest(unittest.TestCase):
         m.maybe_merge("o/r", 7)
         self.assertFalse(any(meth == "POST" for meth, _ in calls),
                          f"a skipped verdict must never merge: {calls}")
+
+    def test_policy_exclusions_still_do_not_downgrade(self):
+        """The other half of the contract: a lockfile or a .png must not cost the verdict, or
+        ~7% of merges stall for files no reviewer can vouch for either way."""
+        m = load(self.tmp.name, max_diff_bytes=100000)
+        raw = _sec("uv.lock") + _sec("img/logo.png") + _sec("good.py", b"+ok\n")
+        diff, dropped, coverage = m.plan_coverage(raw)
+        self.assertEqual("full", coverage)
+        self.assertEqual({"generated", "binary"}, {r for _, r, _ in dropped})
+        self.assertIn("good.py", diff)
+
+    def test_git_binary_marker_on_a_reviewable_path_caps_the_verdict(self):
+        """codex cross-review, round 4: one NUL byte in payload.sh makes git emit its own
+        binary marker for it, so an authentic marker is still an author-controlled trigger."""
+        m = load(self.tmp.name, max_diff_bytes=100000)
+        raw = (_sec("payload.sh", b"\nBinary files /dev/null and b/payload.sh differ\n")
+               + _sec("good.py", b"+ok\n"))
+        diff, dropped, coverage = m.plan_coverage(raw)
+        self.assertEqual("partial", coverage, "an unreviewed executable must not ride a clean")
+        self.assertEqual([("payload.sh", "binary content", len(_sec(
+            "payload.sh", b"\nBinary files /dev/null and b/payload.sh differ\n")))], dropped)
+        self.assertIn("good.py", diff)
+
+    def test_author_triggered_exclusion_blocks_automerge(self):
+        """The end-to-end property the cap exists for: a head whose only non-clean signal is
+        an author-triggered exclusion must not merge."""
+        head = "d" * 40
+        m = load(self.tmp.name, automerge=True, merge_authors=["someone"], merge_personas=["test"])
+        marker = f"<!-- review-bot:v1 persona=test head={head} verdict=partial -->"
+        calls = []
+
+        def api(path, method="GET", body=None, raw=False):
+            calls.append((method, path))
+            if path == "/repos/o/r/pulls/7":
+                return {"state": "open", "draft": False, "mergeable": True,
+                        "user": {"login": "someone"}, "labels": [], "head": {"sha": head}}
+            if path.startswith("/repos/o/r/pulls/7/reviews"):
+                return [{"id": 1, "body": f"partial\n\n{marker}",
+                         "user": {"login": "reviewer-test"}}]
+            if path.endswith("/status"):
+                return {"state": "success"}
+            return {}
+        m.api = api
+        m.maybe_merge("o/r", 7)
+        self.assertFalse(any(meth == "POST" for meth, _ in calls),
+                         f"a partial verdict must never merge: {calls}")
 
     def test_api_raw_returns_bytes_without_decoding(self):
         m = self.m
