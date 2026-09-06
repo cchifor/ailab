@@ -289,6 +289,11 @@ spec:
               # python3; 20e55c58 has only agentforge + agentforge-bootstrap. 2026-09-06: re-verified on
               # 78a0be9f (main@5c7cf47) by running the image — /app/.venv/bin/python3 3.12.14 first on PATH,
               # /app/.venv/bin/agentforge-codex-refresh present. Re-check on every orchestrator pin.
+              # 2026-09-06 (revert of the 4afa915d pin): verified-on is eac5331e — this cronjob RAN on
+              # eac5331e up to 23:30Z tonight, which is the layout check itself: a missing python3 or
+              # agentforge-codex-refresh surfaces as "codex-refresh FAILED: FileNotFoundError", and none
+              # was observed. 4afa915d was live for minutes only and is reverted for a provisioner()
+              # regression, not for anything in this path.
               image: registry.chifor.me/agentforge/orchestrator@sha256:eac5331e064f21cbfdf9512141e0ffc6f36b3b54c7f716875034ed7d01a03b30
               command: ["python3", "/scripts/refresh.py"]
               volumeMounts:
