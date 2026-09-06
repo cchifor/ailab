@@ -1,0 +1,52 @@
+// Managed by ansible (roles/journal_ship) — edits here are overwritten on the next converge.
+//
+// Ships this host's journald to Loki. The reviewer VMs had no log shipping at all until
+// 2026-09-06, when platform#1074 failed on every attempt on both personas for 22 hours and the
+// reason existed only in journald on those two machines.
+
+loki.source.journal "host" {
+  // Follow mode; max_age bounds the first read so a fresh install does not replay the whole
+  // journal into Loki in one burst.
+  max_age       = "{{ journal_ship_max_age }}"
+  relabel_rules = discovery.relabel.journal.rules
+  forward_to    = [loki.write.lan.receiver]
+  labels        = {
+    host = "{{ inventory_hostname }}",
+  }
+}
+
+discovery.relabel "journal" {
+  targets = []
+
+  // `unit` is the one journald field worth INDEXING: it is bounded (a handful of services per
+  // host) and it is how every query starts — {host="reviewer-1", unit="reviewbot.service"}.
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  // `job` is set HERE, not in the source's `labels` block. Alloy stamps its own component
+  // path as `job` (loki.source.journal.host) and that wins over a label of the same name set
+  // on the source, so the intended value has to be applied during relabeling. Measured, not
+  // assumed: the first deploy of this file shipped everything under
+  // job="loki.source.journal.host" and the dashboard panel querying job="host-journal" matched
+  // nothing at all.
+  rule {
+    target_label = "job"
+    replacement  = "{{ journal_ship_job }}"
+  }
+
+  // Everything else stays in the line. Deliberately NOT promoted to labels: the useful
+  // identifiers here are the repo and PR number, which are unbounded, and Loki indexes labels —
+  // one high-cardinality label would cost more than the whole feature is worth. `|= "1074"`
+  // filters at query time for free.
+}
+
+loki.write "lan" {
+  endpoint {
+    url = "{{ journal_ship_loki_url }}"
+  }
+  // No basic_auth: this Loki runs auth_enabled=false behind a LAN-only NodePort. The exposure
+  // trade-off is argued in kubernetes/apps/infrastructure/monitoring/loki-lan.yaml; if that ever
+  // changes, this is the one line that needs credentials.
+  external_labels = {}
+}

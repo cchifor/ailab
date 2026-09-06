@@ -15,6 +15,7 @@ import json
 import pathlib
 
 DS = "${DS_PROMETHEUS}"
+DS_LOKI = "${DS_LOKI}"
 _pid = 0
 HOSTS = 'job="proxmox-node"'           # the 3 Proxmox hosts' node_exporter
 AINODE = 'job="ai-llm-node"'           # the 3 AI LXCs' node_exporter (relabeled; was instance-IP regex)
@@ -35,6 +36,19 @@ def _nid():
 
 def _ds():
     return {"type": "prometheus", "uid": DS}
+
+
+def logs(title, x, y, w, h, expr):
+    """A Loki logs panel. Separate helper because it takes the LOKI datasource, not DS."""
+    return {
+        "id": _nid(), "type": "logs", "title": title,
+        "datasource": {"type": "loki", "uid": DS_LOKI},
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "options": {"showTime": True, "wrapLogMessage": True, "sortOrder": "Descending",
+                    "enableLogDetails": True, "dedupStrategy": "none"},
+        "targets": [{"refId": "A", "datasource": {"type": "loki", "uid": DS_LOKI},
+                     "expr": expr, "queryType": "range"}],
+    }
 
 
 def row(title, y):
@@ -396,17 +410,25 @@ panels += [
          'max(reviewbot_running_job_age_seconds) or vector(0)', unit="s",
          steps=[{"color": "green", "value": None}, {"color": "orange", "value": 900},
                 {"color": "red", "value": 2400}]),
-    # The evidence that decides whether llm_timeout_s is still right. 900s is an operational
-    # value, not a measured SLO — orange once a real run has used two thirds of the budget.
-    stat("Longest Review Seen", 8, 141, 4, 4,
-         'max(reviewbot_llm_seconds_max) or vector(0)', unit="s",
+    # The evidence that decides whether llm_timeout_s is still right. SPLIT PER PERSONA
+    # because the deadlines differ (claude 900s, codex 600s): a single max() across both,
+    # thresholded on claude's budget, renders a codex run one second from ITS deadline as
+    # green — blind for the tighter persona, which is the one that would break first.
+    # Orange at two thirds of each persona's own budget.
+    stat("Longest Review — claude", 8, 141, 4, 4,
+         'max(reviewbot_llm_seconds_max{persona="claude"}) or vector(0)', unit="s",
          steps=[{"color": "green", "value": None}, {"color": "orange", "value": 600},
                 {"color": "red", "value": 900}]),
-    stat("Peak Output Tokens", 12, 141, 4, 4,
+    stat("Longest Review — codex", 12, 141, 4, 4,
+         'max(reviewbot_llm_seconds_max{persona="codex"}) or vector(0)', unit="s",
+         steps=[{"color": "green", "value": None}, {"color": "orange", "value": 400},
+                {"color": "red", "value": 600}]),
+    stat("Peak Output Tokens", 16, 141, 4, 4,
          'max(reviewbot_llm_output_tokens_max) or vector(0)'),
-    stat("Reviews Done (24h)", 16, 141, 4, 4,
+    # 24h, not the cumulative total: the total only ever climbs and says nothing about now.
+    # The "Reviews Completed over Time" panel below carries the running figure.
+    stat("Reviews Done (24h)", 20, 141, 4, 4,
          'sum(increase(reviewbot_jobs_done[24h])) or vector(0)'),
-    stat("Reviews Done (total)", 20, 141, 4, 4, 'sum(reviewbot_jobs_done) or vector(0)'),
     # THE ERROR PANEL. Failures and timeouts are separate series because they mean different
     # things and have different remedies: a timeout says the deadline is too tight for the
     # work, a failure says the review could not be produced at all (unparseable output, an
@@ -430,6 +452,14 @@ panels += [
     ts("Queue Depth / Oldest Age", 12, 152, 12, 7,
        ['reviewbot_queue_depth', 'reviewbot_oldest_job_age_seconds'],
        "short", legends=["{{persona}} depth", "{{persona}} oldest s"]),
+    # THE REASON, not just the rate. Everything above is numeric and can only say THAT a review
+    # failed; this says which PR and why. Shipped by roles/journal_ship (Alloy -> loki-lan).
+    # The filter is deliberately broad — `failed`, `error`, `skipped` — because the 2026-09-06
+    # failure text ("'utf-8' codec can't decode byte 0xf6") matched no term anyone would have
+    # thought to search for in advance.
+    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 159, 24, 9,
+         '{job="host-journal", unit="reviewbot.service"} '
+         '|~ "(?i)(failed|error|quarantin|skipped|exhausted)"'),
 ]
 
 dashboard = {
@@ -442,7 +472,10 @@ dashboard = {
     "time": {"from": "now-6h", "to": "now"},
     "templating": {"list": [
         {"name": "DS_PROMETHEUS", "type": "datasource", "query": "prometheus",
-         "current": {}, "hide": 0, "label": "Datasource", "refresh": 1}
+         "current": {}, "hide": 0, "label": "Datasource", "refresh": 1},
+        # The Reviewer Errors logs panel needs Loki. Same shape loki-logs-dashboard.yaml uses.
+        {"name": "DS_LOKI", "type": "datasource", "query": "loki",
+         "current": {}, "hide": 0, "label": "Logs", "refresh": 1},
     ]},
     "panels": panels,
 }

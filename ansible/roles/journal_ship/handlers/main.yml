@@ -1,0 +1,7 @@
+---
+- name: Restart alloy
+  ansible.builtin.systemd:
+    name: "{{ journal_ship_service }}"
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode

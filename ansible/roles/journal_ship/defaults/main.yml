@@ -1,0 +1,32 @@
+---
+# journal_ship — ship a host's journald to Loki with Grafana Alloy.
+#
+# WHY THIS ROLE EXISTS: the reviewer VMs had no log shipping at all, and on 2026-09-06
+# platform#1074 failed on every attempt on both personas for 22 hours with the reason
+# (`'utf-8' codec can't decode byte 0xf6`) visible ONLY in journald on those two hosts. Metrics
+# can say a thing is failing; only the log says which PR and why. Everything else in this estate
+# that reports (node_exporter, the reviewbot textfile metrics) is numeric.
+#
+# DELIBERATELY GENERIC, not a pr_reviewer sub-task: nothing here is reviewer-specific, and the
+# CI runners and dev workers have the same blind spot. Enable it per host group.
+journal_ship_enabled: false
+# Grafana Alloy, the SAME agent the cluster already runs for pod logs (monitoring/alloy.yaml) —
+# `loki.source.journal` is a first-class component, so this adds a second deployment of a known
+# agent rather than a new tool. Unlike node_exporter there is no distro package (Ubuntu ships
+# neither alloy nor promtail), so this is the one place the estate takes a vendor apt repo; it
+# is pinned to Grafana's signing key and stays scoped to this role's hosts.
+journal_ship_package: alloy
+journal_ship_service: alloy
+journal_ship_apt_key_url: https://apt.grafana.com/gpg.key
+journal_ship_apt_repo_uri: https://apt.grafana.com
+# Where to push. The LAN NodePort in front of Loki (monitoring/loki-lan.yaml) — Loki itself is a
+# ClusterIP and these hosts are outside the cluster. Any control-plane node IP works; .41 is
+# chosen over the .40 VIP because .40 is the API-server VIP only and serves nothing on 30310.
+journal_ship_loki_url: "http://192.168.0.41:30310/loki/api/v1/push"
+# Static labels applied to every stream. Kept SMALL on purpose: Loki indexes labels, and one
+# high-cardinality label (a PR number, a job id) would cost far more than it is worth. The PR
+# and the reason live in the log LINE, which `|=` filters at query time.
+journal_ship_job: host-journal
+# How far back to read on first start. Bounded so a fresh install does not replay a year of
+# journal into Loki in one burst.
+journal_ship_max_age: 12h

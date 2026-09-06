@@ -1,0 +1,71 @@
+---
+# Ship journald to Loki with Grafana Alloy. Skips entirely unless journal_ship_enabled, so the
+# role is safe to list on a play that covers hosts which should not ship.
+- name: Ensure apt keyring dir exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  when: journal_ship_enabled
+
+# Grafana's repo, not a distro package: Ubuntu ships neither alloy nor promtail. Fetched to a
+# keyring file and referenced by signed_by below, so this repo can only ever install packages
+# signed by Grafana — never a system-wide trusted key (the apt-key anti-pattern).
+- name: Add Grafana apt signing key
+  ansible.builtin.get_url:
+    url: "{{ journal_ship_apt_key_url }}"
+    dest: /etc/apt/keyrings/grafana.asc
+    mode: "0644"
+  when: journal_ship_enabled
+
+- name: Add Grafana apt repository
+  ansible.builtin.deb822_repository:
+    name: grafana
+    types: [deb]
+    uris: "{{ journal_ship_apt_repo_uri }}"
+    suites: [stable]
+    components: [main]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/grafana.asc
+    enabled: true
+  when: journal_ship_enabled
+  register: journal_ship_repo
+
+- name: Install Alloy
+  ansible.builtin.apt:
+    name: "{{ journal_ship_package }}"
+    state: present
+    update_cache: "{{ journal_ship_repo is changed }}"
+  when: journal_ship_enabled
+
+# Alloy runs as its own `alloy` user and must be in systemd-journal to read the journal at all.
+# Without this it starts cleanly and ships NOTHING, which is the failure mode this whole change
+# exists to avoid — so it is asserted, not assumed (the smoke test in the runbook proves it).
+- name: Allow Alloy to read the journal
+  ansible.builtin.user:
+    name: alloy
+    groups: systemd-journal
+    append: true
+  when: journal_ship_enabled
+  notify: Restart alloy
+
+- name: Render the Alloy river config
+  ansible.builtin.template:
+    src: config.alloy.j2
+    dest: /etc/alloy/config.alloy
+    owner: root
+    group: alloy
+    mode: "0640"
+    validate: "alloy fmt %s"
+  when: journal_ship_enabled
+  notify: Restart alloy
+
+- name: Enable + start Alloy
+  ansible.builtin.systemd:
+    name: "{{ journal_ship_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - journal_ship_enabled
+    - not ansible_check_mode

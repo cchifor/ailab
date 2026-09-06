@@ -23,6 +23,7 @@ resources:
   # infrastructure/agentforge-workers/worker-podmonitor.yaml — neither needs this file.
   # - agentforge.yaml # agentforge forge_* exporter on the 6 dev-worker VMs :9464 (ADR 0018)
   - kube-prometheus-stack.yaml
+  - loki-lan.yaml # LAN NodePort :30310 — journald ingestion from the reviewer VMs (see file header for the exposure trade-off)
   - prometheus-lan.yaml # LAN NodePort :30090 — nightly k6 remote-write + baseline queries from the CI runner VMs (exposure trade-off in file header)
   - loki.yaml
   - alloy.yaml

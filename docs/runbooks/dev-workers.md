@@ -229,10 +229,16 @@ persona clean at the current head. The 2026-09-04 incident was exactly this — 
 attempted 9 times across 3 heads over 71 minutes and never reviewed, and the operator merged by
 hand. Order of diagnosis:
 
-1. `sudo journalctl -u reviewbot -n 50` on the persona's VM. `llm deadline exceeded after <n>s`
-   means the review needs more budget than `llm_timeout_s` allows.
-1b. Is the host running main? A `codec can't decode` / repeated identical failure usually
-   means the VM is behind: compare the md5 above and converge before debugging further.
+1. **Grafana first, SSH second.** The "PR Reviewers" row on the AI Lab Fleet dashboard has a
+   *Reviewer Errors* panel reading both hosts' journals out of Loki (roles/journal_ship ->
+   monitoring/loki-lan.yaml). In Explore:
+   `{job="host-journal", unit="reviewbot.service"} |~ "(?i)(failed|error|skipped)"`, and add
+   `|= "1074"` to follow one PR. Only if that is empty is `sudo journalctl -u reviewbot -n 50`
+   on the VM worth the trip. `llm deadline exceeded after <n>s` means the review needs more
+   budget than `llm_timeout_s` allows.
+   - **Is the host running main?** A `codec can't decode`, or the same failure on every
+     attempt, usually means the VM is behind: compare the md5 above and converge before
+     debugging any further.
 2. `curl -s localhost:9100/metrics | grep reviewbot_` — `reviewbot_llm_seconds_max` and
    `reviewbot_llm_output_tokens_max` say how long the worst real run took and why. Run length
    tracks REASONING, not diff size: a 2 KB diff has timed out and a 342 KB one has passed.

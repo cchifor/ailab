@@ -8,3 +8,6 @@ pr_reviewer_llm_cmd:
   - "/usr/bin/codex"
 pr_reviewer_llm_timeout_s: 600
 pr_reviewer_llm_sudo_user: codexrun
+# Ship journald to Loki (roles/journal_ship) — the reviewer failure REASON was
+# previously visible only by SSHing to this host.
+journal_ship_enabled: true

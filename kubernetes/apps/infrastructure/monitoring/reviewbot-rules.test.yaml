@@ -165,6 +165,14 @@ tests:
               severity: warning
               persona: claude
               instance: 192.168.0.24:9100
+            # NOTE the summary interpolates {{ $value }} — increase()'s extrapolated result
+            # (raw delta 12 over this eval window -> "12") — so this assertion is coupled to
+            # the input series and eval_time, and a later tweak to either fails HERE on the
+            # text rather than on the behaviour under test. Kept anyway: promtool compares
+            # exp_annotations exactly whenever the rule defines annotations (omitting them
+            # asserts `{}` and fails), so labels-only is not available, and the alternative -
+            # dropping $value from the summary - costs the on-call reader the one number that
+            # says how bad it is. ReviewbotReviewTimeouts above has the same shape.
             exp_annotations:
               summary: "reviewbot (claude) failed 12 reviews in an hour"
               description: >-
