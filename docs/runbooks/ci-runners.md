@@ -275,6 +275,19 @@ agent-nodes** (`kubernetes/infra/agent-nodes`, now live at .47/.48/.49). `infra/
   disk). To fix a live runner immediately: `sudo chown -R runner:runner /home/runner/.docker; sudo docker
   buildx rm --all-inactive --force; sudo docker volume prune -af`. Alert **CIRunnerDockerConfigRootOwned**
   fires if the self-heal ever fails to restore ownership.
+- **`pull_request` runs of a bot-authored PR sit at `waiting` forever (never picked up, while the
+  same workflows run fine for humans and on `push`):** this is NOT a runner/label/capacity problem.
+  Gitea inserts `pull_request` runs for PRs opened by a **restricted** user (the AGit PRs
+  `agentforge-infra-bot` / `agentforge-ci-bot` open, ADR 0019) in the *blocked* state — the same
+  "approve first-time contributor" gate GitHub has — and only a repo writer's click on **Approve**
+  on the run page (`/cchifor/<repo>/actions/runs/<id>`) releases it; every earlier bot run on ailab
+  was approved by hand. There is no API route for that click in 1.26. To make bot PRs run without a
+  human: give the bot **Actions: write** on the repo through an org **team with per-unit
+  permissions** (Code: read, Actions: write — `CanWrite(TypeActions)` short-circuits the gate) rather
+  than un-restricting the account (the restricted flag is what keeps the bot from browsing the
+  estate's other repos). Check the state with
+  `curl -s -H "Authorization: token $T" https://git.chifor.me/api/v1/repos/cchifor/ailab/actions/runs?limit=20`
+  (status `waiting` on a `pull_request` event by the bot).
 - **Runner not appearing:** check `journalctl -u actions.runner.cchifor-platform -n 100` on the VM —
   usually a bad App ID / installation ID, a key that isn't for this App, or the App missing
   `Administration: Read & write`. The wrapper logs `[ephemeral-runner] ERROR: …` on token failures.

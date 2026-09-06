@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time as real_time
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SRC = ROOT / "ansible" / "roles" / "pr_reviewer" / "files" / "reviewbot.py"
@@ -904,6 +905,122 @@ class ToolDenyTest(unittest.TestCase):
         self.assertNotIn('"LS"', args_block)
         for kept in ("Bash", "Read", "Grep", "Glob", "Write", "Edit"):
             self.assertIn(f'"{kept}"', args_block)
+
+
+
+
+class SizeCapTest(unittest.TestCase):
+    """The over-cap path must be VISIBLE and the cap must be measured on bytes.
+
+    Two 2026-09 incidents pin this class. agentforge-platform#194 (480 KB) hit the cap and
+    review_job returned 'done' with no Gitea write, so the PR showed no review at all and a
+    skip was indistinguishable from a reviewer outage. platform#1074 diffed a PDF corpus as
+    text: `api(raw=True)` decoded the body strictly BEFORE the cap was checked, raised
+    UnicodeDecodeError on every attempt and quarantined the job (ReviewbotQuarantined)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, max_diff_bytes=100)
+        self.posted = []
+        self.llm_calls = []
+        m = self.m
+        m.pr_ok = lambda repo, pr, head: {"head": {"sha": head}, "user": {"login": "someone"},
+                                          "title": "t", "body": ""}
+        m.existing_marker = lambda repo, pr, head: None
+        m.maybe_merge = lambda repo, pr: None
+        m.convergence_context = lambda *a, **k: ""
+        m.review_round = lambda repo, pr: 1
+
+        def run_llm(*a, **k):
+            self.llm_calls.append(a)
+            return {"findings": [], "summary": "looks fine"}
+        m.run_llm = run_llm
+
+    def _fake_api(self, diff_bytes):
+        posted = self.posted
+
+        def api(path, method="GET", body=None, raw=False):
+            if path.endswith(".diff"):
+                assert raw, "the diff must be fetched raw (bytes)"
+                return diff_bytes
+            if method == "POST":
+                posted.append((path, body))
+                return {"id": 77}
+            return {}
+        self.m.api = api
+
+    def test_over_cap_posts_a_visible_skip_and_never_calls_the_model(self):
+        head = "a" * 40
+        self._fake_api(b"x" * 101)
+        state, rid, note = self.m.review_job(1, "o/r", 5, head)
+        self.assertEqual(state, "done")
+        self.assertEqual(rid, 77)
+        self.assertIn("over size cap", note)
+        self.assertEqual(self.llm_calls, [])
+        self.assertEqual(len(self.posted), 1)
+        path, body = self.posted[0]
+        self.assertEqual(path, "/repos/o/r/pulls/5/reviews")
+        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["comments"], [])
+        self.assertIn("101 bytes", body["body"])
+        self.assertIn("100-byte cap", body["body"])
+        self.assertIn(f"<!-- review-bot:v1 persona=test head={head} verdict=skipped -->",
+                      body["body"])
+        # The marker the skip carries is credible from the persona's own account and
+        # reads back as a non-clean verdict, which is what keeps the automerge lane shut.
+        rv = {"body": body["body"], "user": {"login": "reviewer-test"}}
+        self.assertEqual(self.m.marker_of(rv).group(3), "skipped")
+
+    def test_cap_is_measured_on_bytes_and_binary_diffs_do_not_crash(self):
+        head = "b" * 40
+        # Exactly at the cap, and not valid UTF-8: a strict decode raised before the cap
+        # was ever consulted; a decoded-then-re-encoded length would also differ from the
+        # wire size (replacement chars are 3 bytes each).
+        self._fake_api(b"\xff" * 100)
+        state, rid, note = self.m.review_job(2, "o/r", 6, head)
+        self.assertEqual(state, "done")
+        self.assertEqual(len(self.llm_calls), 1)
+        self.assertIsInstance(self.llm_calls[0][2], str)
+        self.assertEqual(self.posted[0][1]["event"], "APPROVED")
+        self.assertIn(f"head={head} verdict=clean", self.posted[0][1]["body"])
+
+    def test_skipped_verdict_blocks_automerge(self):
+        head = "c" * 40
+        m = load(self.tmp.name, automerge=True, merge_authors=["someone"], merge_personas=["test"])
+        skip = m.skip_body(head, 123456)
+        calls = []
+
+        def api(path, method="GET", body=None, raw=False):
+            calls.append((method, path))
+            if path == "/repos/o/r/pulls/7":
+                return {"state": "open", "draft": False, "mergeable": True,
+                        "user": {"login": "someone"}, "labels": [], "head": {"sha": head}}
+            if path.startswith("/repos/o/r/pulls/7/reviews"):
+                return [{"id": 1, "body": skip, "user": {"login": "reviewer-test"}}]
+            if path.endswith("/status"):
+                return {"state": "success"}
+            return {}
+        m.api = api
+        m.maybe_merge("o/r", 7)
+        self.assertFalse(any(meth == "POST" for meth, _ in calls),
+                         f"a skipped verdict must never merge: {calls}")
+
+    def test_api_raw_returns_bytes_without_decoding(self):
+        m = self.m
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b"\xff\xfe not utf-8"
+        # `m.urllib` IS the process-wide urllib package: patch it scoped, never assign.
+        with mock.patch.object(m.urllib.request, "urlopen", lambda req, timeout=60: Resp()):
+            self.assertEqual(m.api("/x", raw=True), b"\xff\xfe not utf-8")
 
 
 if __name__ == "__main__":
