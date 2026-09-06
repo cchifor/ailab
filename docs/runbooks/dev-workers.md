@@ -247,6 +247,20 @@ hand. Order of diagnosis:
    override it is what produced this incident. Redeploy with
    `ansible-playbook reviewers.yml -l <host> -t reviewbot`.
 
+**Large PRs are partially reviewed, not skipped whole.** The diff is split into whole files
+before the size cap is applied. Generated/vendored/binary/non-UTF-8 files are always excluded
+(that is policy, and it does NOT downgrade the verdict — a reviewer cannot vouch for a lockfile
+either way). If what remains still does not fit, prose is shed largest-first, and THAT caps the
+verdict at `partial`, which never automerges. Code is never truncated: if the code alone is over
+the cap the review is skipped and the notice names the largest files so the PR can be split.
+
+Every filtered review carries a "Not reviewed" table above the model's summary, so a partial
+review can never be mistaken for a full one. Verdicts are `clean | findings | partial |
+skipped`; the merge gate is an allowlist requiring `clean` from every persona, so the three
+others are non-merging by construction. Tune with `pr_reviewer_exclude_globs` /
+`pr_reviewer_doc_globs` in the role — never from the repo under review, or a PR could exclude
+its own payload.
+
 **Quarantine is now sticky by design.** `enqueue()` dedupes against `quarantined`, which is what
 stops the reconciler re-queueing a hopeless job every 300 s forever (each round costs
 `max_timeout_attempts` x `llm_timeout_s` of a single-threaded worker). A quarantined head is

@@ -48,6 +48,9 @@ BASE_CFG = {
     "llm_fallback_min_s": 60,
     "llm_effort": "medium",
     "max_diff_bytes": 400000,
+    "max_raw_bytes": 10485760,
+    "exclude_globs": [],
+    "doc_globs": [],
     "max_comments": 15,
     "max_attempts": 5,
     "max_timeout_attempts": 2,
@@ -809,6 +812,242 @@ class AuxRunTest(unittest.TestCase):
         self.assertEqual(60.0, seen["timeout"], "and must still cap at 60s when time is ample")
 
 
+def _sec(path, body=b"+x\n", old=None):
+    """One diff section for `path`, byte-exact in the shape git emits."""
+    old = old or path
+    return (b"diff --git a/" + old.encode() + b" b/" + path.encode() + b"\n"
+            b"--- a/" + old.encode() + b"\n+++ b/" + path.encode() + b"\n"
+            b"@@ -0,0 +1 @@\n" + body)
+
+
+class SplitSectionsTest(unittest.TestCase):
+    """Byte accounting is the whole safety property: if the split is not exact, the diff the
+    model reads is not the diff whose hunk coordinates get validated."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_round_trips_byte_for_byte(self):
+        raw = _sec("a.py") + _sec("b/c.py") + _sec("d.md")
+        secs = self.m.split_sections(raw)
+        self.assertEqual(3, len(secs))
+        self.assertEqual(raw, b"".join(x["data"] for x in secs))
+
+    def test_captures_both_rename_paths(self):
+        sec = self.m.split_sections(_sec("new.py", old="old.py"))[0]
+        self.assertEqual(("old.py", "new.py"), (sec["a"], sec["b"]))
+
+    def test_unquoted_path_with_spaces_is_parsed(self):
+        """Git emits paths containing spaces UNQUOTED in the `diff --git` line. Measured on
+        platform#1084: 8 of 58 headers looked like
+        `a/corpus/Auto Advantage Finance - Binder Packet.pdf b/...`, and a header regex built
+        on \S+ missed every one — which made the whole 3 MB PR unparsable when dropping its
+        PDFs would have left 968 bytes of real content to review."""
+        raw = _sec("dir/Auto Advantage - Packet.pdf")
+        secs = self.m.split_sections(raw)
+        self.assertEqual(1, len(secs))
+        self.assertEqual("dir/Auto Advantage - Packet.pdf", secs[0]["b"])
+        self.assertEqual(raw, secs[0]["data"])
+
+    def test_an_unnameable_section_is_excluded_not_fatal(self):
+        """One section we cannot name must not discard the other 57."""
+        raw = _sec("good.py") + b"diff --git nonsense\n@@ -0,0 +1 @@\n+x\n"
+        secs = self.m.split_sections(raw)
+        self.assertEqual(2, len(secs))
+        self.assertEqual(raw, b"".join(x["data"] for x in secs))
+        self.assertIsNone(secs[1]["b"])
+        self.assertEqual("unparsable path", self.m.section_reason(secs[1]))
+
+    def test_preamble_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.m.split_sections(b"warning: something\n" + _sec("a.py"))
+
+    def test_empty_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.m.split_sections(b"")
+
+
+class SectionReasonTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def _reason(self, path, body=b"+x\n", old=None):
+        return self.m.section_reason(self.m.split_sections(_sec(path, body, old))[0])
+
+    def test_lockfiles_and_vendor_are_generated(self):
+        for path in ("uv.lock", "sub/poetry.lock", "package-lock.json",
+                     "vendor/x.go", "src/vendored/y.py", "node_modules/z.js", "a.min.js"):
+            with self.subTest(path=path):
+                self.assertEqual("generated", self._reason(path))
+
+    def test_binary_extensions(self):
+        for path in ("corpus/report.pdf", "img/logo.PNG", "dist/app.wasm"):
+            with self.subTest(path=path):
+                self.assertEqual("binary", self._reason(path))
+
+    def test_binary_patch_marker(self):
+        self.assertEqual("binary", self._reason("x.dat", b"\nBinary files a/x.dat and b/x.dat differ\n"))
+
+    def test_non_utf8_quarantines_one_file(self):
+        """platform#1074 carried a 0xf6 byte that failed EVERY attempt for 22h. Naming the one
+        unreadable file beats feeding the model replacement characters for the whole PR."""
+        self.assertEqual("non-utf8", self._reason("weird.py", b"+caf\xf6\n"))
+
+    def test_a_rename_is_disqualified_by_either_side(self):
+        self.assertEqual("generated", self._reason("deps.txt", old="uv.lock"))
+
+    def test_ordinary_code_and_fixtures_are_reviewable(self):
+        """The safety property. Measured across 56 merged PRs, a fixtures/golden/testdata
+        directory rule would have excluded ONLY tests/golden/... and tests/unit/fixtures/*.json
+        — exactly where a regression hides. These must stay in scope."""
+        for path in ("src/app.py", "tests/golden/broker.json", "tests/unit/fixtures/usage.json",
+                     "testdata/case.yaml", "requirements.txt"):
+            with self.subTest(path=path):
+                self.assertIsNone(self._reason(path))
+
+
+class PlanCoverageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def _plan(self, raw, cap):
+        self.m.CFG["max_diff_bytes"] = cap
+        return self.m.plan_coverage(raw)
+
+    def test_everything_fits(self):
+        diff, dropped, cov = self._plan(_sec("a.py") + _sec("b.md"), 100000)
+        self.assertEqual("full", cov)
+        self.assertEqual([], dropped)
+        self.assertIn("a.py", diff)
+
+    def test_generated_exclusion_does_not_downgrade(self):
+        """A lockfile is excluded by POLICY, not capacity — the reviewer can still vouch for
+        the code. Marking every lockfile-touching PR partial would block ~7% of merges."""
+        raw = _sec("uv.lock", b"+" + b"h" * 5000 + b"\n") + _sec("a.py")
+        diff, dropped, cov = self._plan(raw, 100000)
+        self.assertEqual("full", cov)
+        self.assertEqual(["uv.lock"], [p for p, _, _ in dropped])
+        self.assertNotIn("uv.lock", diff)
+
+    def test_docs_shed_largest_first_and_downgrade_to_partial(self):
+        raw = (_sec("code.py", b"+" + b"c" * 200 + b"\n")
+               + _sec("small.md", b"+" + b"s" * 200 + b"\n")
+               + _sec("big.md", b"+" + b"b" * 3000 + b"\n"))
+        diff, dropped, cov = self._plan(raw, 1000)
+        self.assertEqual("partial", cov)
+        self.assertEqual(["big.md"], [p for p, r, _ in dropped if r == "dropped: size cap"])
+        self.assertIn("code.py", diff, "code is never dropped")
+        self.assertIn("small.md", diff, "only shed what is needed, largest first")
+
+    def test_code_alone_over_cap_is_an_honest_skip(self):
+        diff, dropped, cov = self._plan(_sec("huge.py", b"+" + b"x" * 5000 + b"\n"), 1000)
+        self.assertEqual("over", cov)
+        self.assertIsNone(diff)
+
+    def test_the_over_cap_notice_names_what_is_actually_too_big(self):
+        """When nothing is reviewed, the author needs the BLOCKING files — not a list of the
+        lockfiles we already excluded. Largest first, so the top of the table is what to split
+        out. Measured need: platform#1081 is 406 KB of code with nothing droppable."""
+        raw = (_sec("uv.lock", b"+" + b"l" * 100 + b"\n")
+               + _sec("small.py", b"+" + b"s" * 100 + b"\n")
+               + _sec("enormous.py", b"+" + b"x" * 5000 + b"\n"))
+        diff, dropped, cov = self._plan(raw, 1000)
+        self.assertEqual("over", cov)
+        self.assertIn(("uv.lock", "generated"), [(p, r) for p, r, _ in dropped])
+        over = [p for p, r, _ in dropped if r == "not reviewed: over cap"]
+        self.assertEqual(["enormous.py", "small.py"], over)
+
+    def test_nothing_reviewable_is_not_clean(self):
+        diff, dropped, cov = self._plan(_sec("uv.lock"), 100000)
+        self.assertEqual("none", cov)
+        self.assertIsNone(diff)
+
+    def test_the_measured_platform_1074_shape(self):
+        """Reproduces the real composition: 53% lockfile, 22% docs, 24% code. The lockfile goes
+        by policy; the docs go only because what remains still does not fit; every line of code
+        is reviewed."""
+        raw = (_sec("uv.lock", b"+" + b"l" * 5320 + b"\n")
+               + _sec("plan-a.md", b"+" + b"d" * 1100 + b"\n")
+               + _sec("plan-b.md", b"+" + b"d" * 1100 + b"\n")
+               + _sec("strategies/c_ledger.py", b"+" + b"p" * 1200 + b"\n")
+               + _sec("strategies/e_library.py", b"+" + b"p" * 1200 + b"\n"))
+        diff, dropped, cov = self._plan(raw, 2800)
+        self.assertEqual("partial", cov)
+        self.assertIn("c_ledger.py", diff)
+        self.assertIn("e_library.py", diff)
+        self.assertNotIn("uv.lock", diff)
+        reasons = {p: r for p, r, _ in dropped}
+        self.assertEqual("generated", reasons["uv.lock"])
+        self.assertTrue(any(r == "dropped: size cap" for r in reasons.values()))
+
+    def test_unparsable_diff_raises_rather_than_guessing(self):
+        with self.assertRaises(ValueError):
+            self._plan(b"not a diff at all\n", 100000)
+
+
+class CoverageTableTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_paths_are_neutralised(self):
+        """Diff paths are attacker-controlled and land in a posted comment and in the prompt."""
+        evil = "a/`code`|x\ny.py"
+        t = self.m.coverage_table([(evil, "generated", 1)], 10, 1, 20, 2)
+        self.assertNotIn("`code`", t)
+        self.assertNotIn("\ny.py", t)
+
+    def test_reports_the_arithmetic(self):
+        t = self.m.coverage_table([("a.md", "dropped: size cap", 40)], 60, 2, 100, 3)
+        self.assertIn("1 of 3 files", t)
+        self.assertIn("40 of 100 bytes", t)
+
+
+class RoundCountingTest(unittest.TestCase):
+    """A skipped head must not advance the convergence counter. From round 3 the severity
+    ladder stops holding the merge on `important` findings, so three over-cap skips used to buy
+    a PR its first real review under relaxed rules — measured live on platform#1074/#1072/#1081,
+    each sitting at round 4 with zero reviews between them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def _job(self, head, verdict):
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,verdict,created,updated) "
+                  "VALUES('o/r',1,?,'done',?,?,?)", (head, verdict, real_time.time(), real_time.time()))
+        c.commit()
+        c.close()
+
+    def test_skipped_heads_do_not_advance_the_round(self):
+        for i in range(3):
+            self._job(f"{i:040x}", "skipped")
+        self.assertEqual(1, self.m.review_round("o/r", 1))
+
+    def test_real_reviews_advance_the_round(self):
+        self._job("a" * 40, "clean")
+        self._job("b" * 40, "findings")
+        self.assertEqual(3, self.m.review_round("o/r", 1))
+
+    def test_partial_does_not_advance_the_round(self):
+        self._job("a" * 40, "partial")
+        self.assertEqual(1, self.m.review_round("o/r", 1))
+
+    def test_legacy_rows_without_a_verdict_still_count(self):
+        """Rows written before the verdict column existed were all real reviews."""
+        self._job("a" * 40, None)
+        self.assertEqual(2, self.m.review_round("o/r", 1))
+
+
 class MigrationTest(unittest.TestCase):
     def test_adds_timeout_attempts_to_an_existing_database(self):
         """Deploys restart onto an existing state.sqlite; CREATE TABLE IF NOT EXISTS would
@@ -951,20 +1190,24 @@ class SizeCapTest(unittest.TestCase):
         self.m.api = api
 
     def test_over_cap_posts_a_visible_skip_and_never_calls_the_model(self):
+        """Unchanged contract: CODE alone over the cap is still an honest skip, visible in
+        Gitea, with no model call. Only the reachable path changed — the diff is now
+        partitioned first, and this file survives every exclusion tier."""
         head = "a" * 40
-        self._fake_api(b"x" * 101)
+        raw = _sec("big.py", b"+" + b"x" * 200 + b"\n")
+        self._fake_api(raw)
         state, rid, note = self.m.review_job(1, "o/r", 5, head)
         self.assertEqual(state, "done")
         self.assertEqual(rid, 77)
-        self.assertIn("over size cap", note)
+        self.assertIn("skipped", note)
         self.assertEqual(self.llm_calls, [])
         self.assertEqual(len(self.posted), 1)
         path, body = self.posted[0]
         self.assertEqual(path, "/repos/o/r/pulls/5/reviews")
         self.assertEqual(body["event"], "COMMENT")
         self.assertEqual(body["comments"], [])
-        self.assertIn("101 bytes", body["body"])
-        self.assertIn("100-byte cap", body["body"])
+        self.assertIn(f"{len(raw):,} bytes", body["body"])
+        self.assertIn("over the size cap", body["body"])
         self.assertIn(f"<!-- review-bot:v1 persona=test head={head} verdict=skipped -->",
                       body["body"])
         # The marker the skip carries is credible from the persona's own account and
@@ -972,18 +1215,41 @@ class SizeCapTest(unittest.TestCase):
         rv = {"body": body["body"], "user": {"login": "reviewer-test"}}
         self.assertEqual(self.m.marker_of(rv).group(3), "skipped")
 
-    def test_cap_is_measured_on_bytes_and_binary_diffs_do_not_crash(self):
+    def test_a_non_utf8_file_no_longer_costs_the_whole_review(self):
+        """platform#1074 diffed a PDF corpus as text and a strict decode killed EVERY attempt
+        for 22h. Tolerant decoding fixed the crash but fed the model replacement characters for
+        the whole PR; now the unreadable FILE is excluded by name and the rest is still
+        reviewed. The cap is still measured on wire bytes, never on a decoded length."""
         head = "b" * 40
-        # Exactly at the cap, and not valid UTF-8: a strict decode raised before the cap
-        # was ever consulted; a decoded-then-re-encoded length would also differ from the
-        # wire size (replacement chars are 3 bytes each).
-        self._fake_api(b"\xff" * 100)
-        state, rid, note = self.m.review_job(2, "o/r", 6, head)
+        m = load(self.tmp.name, max_diff_bytes=100000)
+        self.setUp_module(m)
+        self._fake_api(_sec("weird.py", b"+caf\xf6\n") + _sec("good.py", b"+ok\n"))
+        state, rid, note = m.review_job(2, "o/r", 6, head)
         self.assertEqual(state, "done")
-        self.assertEqual(len(self.llm_calls), 1)
-        self.assertIsInstance(self.llm_calls[0][2], str)
-        self.assertEqual(self.posted[0][1]["event"], "APPROVED")
-        self.assertIn(f"head={head} verdict=clean", self.posted[0][1]["body"])
+        self.assertEqual(len(self.llm_calls), 1, "the readable file must still be reviewed")
+        sent = self.llm_calls[0][2]
+        self.assertIn("good.py", sent)
+        self.assertNotIn("weird.py", sent, "the unreadable file is not in the prompt diff")
+        body = self.posted[0][1]["body"]
+        self.assertIn("weird.py", body, "but it IS named in the posted coverage table")
+        self.assertIn("non-utf8", body)
+        # A policy exclusion does not downgrade the verdict — only a capacity drop does.
+        self.assertIn(f"head={head} verdict=clean", body)
+
+    def setUp_module(self, m):
+        """Re-point the stubs at a freshly loaded module (a second `load` in one test)."""
+        m.pr_ok = lambda repo, pr, head: {"head": {"sha": head}, "user": {"login": "someone"},
+                                          "title": "t", "body": ""}
+        m.existing_marker = lambda repo, pr, head: None
+        m.maybe_merge = lambda repo, pr: None
+        m.convergence_context = lambda *a, **k: ""
+        m.review_round = lambda repo, pr: 1
+
+        def run_llm(*a, **k):
+            self.llm_calls.append(a)
+            return {"findings": [], "summary": "looks fine"}
+        m.run_llm = run_llm
+        self.m = m
 
     def test_skipped_verdict_blocks_automerge(self):
         head = "c" * 40
