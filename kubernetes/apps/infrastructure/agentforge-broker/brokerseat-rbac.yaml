@@ -1,0 +1,127 @@
+# BrokerSeat RBAC — the two identities that touch controller seats, each with EXACTLY the verbs its
+# code path issues, both as Role+RoleBinding pairs in THIS namespace (agentforge-broker) with a
+# CROSS-NAMESPACE subject (the reaper-rbac.yaml shape: the SA lives in one ns, the grant in the ns it
+# acts on). Neither SA gains anything outside agentforge-broker here; the provisioner's existing
+# ClusterRole agentforge-provisioner-namespaces (namespaces only) and Role in openbao (its own token
+# Secret) are untouched.
+#
+# INERT in A1: the provisioner does not read BrokerSeats until A2 sets AF_PROVISIONER_BROKERSEAT_NAMESPACE
+# and the CP creates none until A3b sets AFP_SEAT_MODE=controller. The grants pre-stage so each later PR
+# is a one-line env change. Every write these grants permit is ALSO shape-pinned at admission by
+# brokerseat-admission.yaml (see there for why RBAC alone cannot express "only a seat object").
+#
+# (1) The PROVISIONER (SA openbao/agentforge-provisioner) — the controller. Reconcile is level-triggered
+#     (LIST once per 30 s pass), so it reads CRs by list/get and PATCHes exactly two things on the CR:
+#     its finalizer (RFC 6902 test+add/remove on metadata.finalizers) and the /status subresource.
+#     `brokerseats/finalizers` update is what OwnerReferencesPermissionEnforcement (if enabled on
+#     Talos) demands of anyone setting blockOwnerDeletion=true on a child's ownerReference — granted
+#     regardless. Children are addressed BY DERIVED NAME (GET, then create-on-404 / replace-on-drift),
+#     so: NO list/watch on any child kind, NO delete anywhere (teardown is k8s GC via ownerReferences
+#     under the CP's Foreground delete), and NO secrets/configmaps/pods — the provisioner still cannot
+#     read a broker Secret or the sandbox pods. `update` on the child kinds is the drift-correcting
+#     replace of an object it owns; the admission guard refuses it on anything Flux-labelled or not
+#     already carrying this stem's ownership, so a git seat's Deployment is out of reach even for
+#     the <=10 min before Flux SSA would re-assert it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentforge-provisioner-brokerseats
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: agentforge-broker
+    app.kubernetes.io/component: brokerseat-controller
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+rules:
+  - apiGroups: ["agentforge.io"]
+    resources: ["brokerseats"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["agentforge.io"]
+    resources: ["brokerseats/status"]
+    verbs: ["patch"]
+  - apiGroups: ["agentforge.io"]
+    resources: ["brokerseats/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentforge-provisioner-brokerseats
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: agentforge-broker
+    app.kubernetes.io/component: brokerseat-controller
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentforge-provisioner-brokerseats
+subjects:
+  # the long-running provisioner in the openbao namespace (provisioner-deploy.yaml) — cross-ns subject
+  - kind: ServiceAccount
+    name: agentforge-provisioner
+    namespace: openbao
+---
+# (2) The CONTROL PLANE (SA agentforge/agentforge-platform) — the only intended CREATOR of a BrokerSeat.
+#     Its wizard add creates a CR carrying ONLY {provider, account, clusterIP}; its remove deletes the CR
+#     with propagationPolicy=Foreground and waits for the 404; its inventory/drift banner lists them.
+#     Deliberately NOT granted: update/patch (the spec is immutable anyway — change = delete+re-create),
+#     brokerseats/status (readiness is the provisioner's word alone), brokerseats/finalizers, and
+#     anything at all on the five child kinds. `services: get` is the ONE read on a child kind: the
+#     teardown witness is CR 404 AND the pinned Service <stem> 404 (a released ClusterIP is only
+#     provable by the Service being gone) — read-only corroboration, never a write. Note `create` on
+#     brokerseats cannot be resourceName-scoped (names don't exist pre-create; k8s ignores resourceNames
+#     for create), so the CR's SHAPE is pinned by the agentforge-cp-brokerseat-guard VAP.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: af-cp-brokerseats
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: agentforge-broker
+    app.kubernetes.io/component: brokerseat-cp
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+rules:
+  - apiGroups: ["agentforge.io"]
+    resources: ["brokerseats"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: af-cp-brokerseats
+  namespace: agentforge-broker
+  labels:
+    app.kubernetes.io/name: agentforge-broker
+    app.kubernetes.io/component: brokerseat-cp
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: af-cp-brokerseats
+subjects:
+  # the CP webapp/reconciler in the agentforge namespace (apps/agentforge/serviceaccount-service.yaml)
+  - kind: ServiceAccount
+    name: agentforge-platform
+    namespace: agentforge
