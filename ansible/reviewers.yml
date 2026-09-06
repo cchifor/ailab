@@ -111,5 +111,10 @@
 
   roles:
     - role: node_exporter
+    # journald -> Loki. These VMs reported numbers and nothing else: on 2026-09-06 the reason a
+    # PR could not be reviewed (`'utf-8' codec can't decode byte 0xf6`) existed only in journald
+    # here, so every occurrence cost an SSH round trip to two machines.
+    - role: journal_ship
+      tags: [logs]
     - role: pr_reviewer
       tags: [reviewbot]

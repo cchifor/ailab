@@ -8,3 +8,6 @@ pr_reviewer_llm_cmd:
 # directed 2026-09-02) — makes claude reviews model-pinned like the codex persona.
 pr_reviewer_llm_model: claude-fable-5
 pr_reviewer_llm_fallback_model: opus
+# Ship journald to Loki (roles/journal_ship) — the reviewer failure REASON was
+# previously visible only by SSHing to this host.
+journal_ship_enabled: true

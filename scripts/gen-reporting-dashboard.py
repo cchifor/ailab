@@ -15,6 +15,7 @@ import json
 import pathlib
 
 DS = "${DS_PROMETHEUS}"
+DS_LOKI = "${DS_LOKI}"
 _pid = 0
 HOSTS = 'job="proxmox-node"'           # the 3 Proxmox hosts' node_exporter
 AINODE = 'job="ai-llm-node"'           # the 3 AI LXCs' node_exporter (relabeled; was instance-IP regex)
@@ -35,6 +36,19 @@ def _nid():
 
 def _ds():
     return {"type": "prometheus", "uid": DS}
+
+
+def logs(title, x, y, w, h, expr):
+    """A Loki logs panel. Separate helper because it takes the LOKI datasource, not DS."""
+    return {
+        "id": _nid(), "type": "logs", "title": title,
+        "datasource": {"type": "loki", "uid": DS_LOKI},
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "options": {"showTime": True, "wrapLogMessage": True, "sortOrder": "Descending",
+                    "enableLogDetails": True, "dedupStrategy": "none"},
+        "targets": [{"refId": "A", "datasource": {"type": "loki", "uid": DS_LOKI},
+                     "expr": expr, "queryType": "range"}],
+    }
 
 
 def row(title, y):
@@ -344,6 +358,20 @@ panels += [
 # plans/2026-09-02-ai-pr-review-plan.md). Source: reviewbot_* textfile metrics through the
 # workers' node_exporter — heartbeat AGE is the liveness signal (a dead daemon leaves a
 # stale file that queue-depth panels would happily keep showing).
+#
+# ERRORS ARE A FIRST-CLASS ROW HERE, because this dashboard could not show the 2026-09-06
+# incident at all: platform#1074 (a 4.0 MB diff carrying a non-UTF-8 byte) failed on EVERY
+# attempt on BOTH personas for 22 hours — 66 failures — and the only visible trace was a
+# sawtooth on "Queue Depth / Oldest Age", which is the RETRY BACKOFF of the failing job and
+# reads like mild queueing rather than a hard stop. reviewbot_llm_failures_total was already
+# being exported and was plotted nowhere.
+#
+# Two panel-level traps this row is written to avoid:
+#   * The "Quarantined" stat used reviewbot_quarantined_jobs, the CUMULATIVE gauge, which
+#     never falls — after any single quarantine it is permanently red and therefore ignored.
+#     The 24h-windowed twin is the one that answers "is something wrong NOW".
+#   * Counters must be shown as increase() over a window, not as raw totals: a monotonic
+#     total climbs forever and its slope is invisible at a glance.
 panels.append(row("PR Reviewers (automatic LLM review bots — reviewbot)", 136))
 panels += [
     stat("Claude Bot Heartbeat Age", 0, 137, 4, 4,
@@ -361,14 +389,77 @@ panels += [
          'max(reviewbot_oldest_job_age_seconds) or vector(0)', unit="s",
          steps=[{"color": "green", "value": None}, {"color": "orange", "value": 1800},
                 {"color": "red", "value": 7200}]),
-    stat("Quarantined Jobs", 16, 137, 4, 4, 'sum(reviewbot_quarantined_jobs) or vector(0)',
+    # Orange at 3 mirrors ReviewbotReviewFailures / ReviewbotReviewTimeouts exactly, so the
+    # panel turning amber and the alert firing mean the same thing. Healthy is a flat 0:
+    # every one of the 66 failures in the 48h around 2026-09-06 was the same broken PR.
+    stat("Review Failures (1h)", 16, 137, 4, 4,
+         'sum(increase(reviewbot_llm_failures_total[1h])) or vector(0)',
+         steps=[{"color": "green", "value": None}, {"color": "orange", "value": 3},
+                {"color": "red", "value": 10}]),
+    stat("Deadline Timeouts (1h)", 20, 137, 4, 4,
+         'sum(increase(reviewbot_llm_timeouts_total[1h])) or vector(0)',
+         steps=[{"color": "green", "value": None}, {"color": "orange", "value": 3},
+                {"color": "red", "value": 10}]),
+    # 24h window, NOT the cumulative gauge — see the header.
+    stat("Quarantined (24h)", 0, 141, 4, 4,
+         'sum(reviewbot_quarantined_recent_jobs) or vector(0)',
          steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}]),
-    stat("Reviews Done (total)", 20, 137, 4, 4, 'sum(reviewbot_jobs_done) or vector(0)'),
-    ts("Reviews Completed over Time", 0, 141, 12, 7,
+    # A job held this long is wedged, not working: one attempt is capped at llm_timeout_s
+    # (900s claude / 600s codex) including the fallback. Matches ReviewbotWorkerStuck.
+    stat("Running Job Age", 4, 141, 4, 4,
+         'max(reviewbot_running_job_age_seconds) or vector(0)', unit="s",
+         steps=[{"color": "green", "value": None}, {"color": "orange", "value": 900},
+                {"color": "red", "value": 2400}]),
+    # The evidence that decides whether llm_timeout_s is still right. SPLIT PER PERSONA
+    # because the deadlines differ (claude 900s, codex 600s): a single max() across both,
+    # thresholded on claude's budget, renders a codex run one second from ITS deadline as
+    # green — blind for the tighter persona, which is the one that would break first.
+    # Orange at two thirds of each persona's own budget.
+    stat("Longest Review — claude", 8, 141, 4, 4,
+         'max(reviewbot_llm_seconds_max{persona="claude"}) or vector(0)', unit="s",
+         steps=[{"color": "green", "value": None}, {"color": "orange", "value": 600},
+                {"color": "red", "value": 900}]),
+    stat("Longest Review — codex", 12, 141, 4, 4,
+         'max(reviewbot_llm_seconds_max{persona="codex"}) or vector(0)', unit="s",
+         steps=[{"color": "green", "value": None}, {"color": "orange", "value": 400},
+                {"color": "red", "value": 600}]),
+    stat("Peak Output Tokens", 16, 141, 4, 4,
+         'max(reviewbot_llm_output_tokens_max) or vector(0)'),
+    # 24h, not the cumulative total: the total only ever climbs and says nothing about now.
+    # The "Reviews Completed over Time" panel below carries the running figure.
+    stat("Reviews Done (24h)", 20, 141, 4, 4,
+         'sum(increase(reviewbot_jobs_done[24h])) or vector(0)'),
+    # THE ERROR PANEL. Failures and timeouts are separate series because they mean different
+    # things and have different remedies: a timeout says the deadline is too tight for the
+    # work, a failure says the review could not be produced at all (unparseable output, an
+    # undecodable diff, a Gitea write that did not land).
+    ts("Errors — Review Failures / Deadline Timeouts (1h)", 0, 145, 12, 7,
+       ['increase(reviewbot_llm_failures_total[1h])',
+        'increase(reviewbot_llm_timeouts_total[1h])',
+        'reviewbot_quarantined_recent_jobs'],
+       "short", legends=["{{persona}} failures", "{{persona}} timeouts",
+                         "{{persona}} quarantined 24h"], decimals=0),
+    # Duration against the deadline it must fit inside. The gap between last and max is what
+    # says whether the budget has headroom or is being grazed.
+    ts("Review Duration vs Deadline", 12, 145, 12, 7,
+       ['reviewbot_llm_seconds_last', 'reviewbot_llm_seconds_max'],
+       "s", legends=["{{persona}} last", "{{persona}} max"], decimals=0),
+    ts("Reviews Completed over Time", 0, 152, 12, 7,
        ['reviewbot_jobs_done'], "short", legends=["{{persona}}"], decimals=0),
-    ts("Queue Depth / Oldest Age", 12, 141, 12, 7,
+    # The sawtooth here is retry backoff, not queueing: a job in 'retry' counts toward both
+    # series until its next_at expires, so a permanently failing PR draws a rising ramp that
+    # resets on every attempt. Read it together with the Errors panel above.
+    ts("Queue Depth / Oldest Age", 12, 152, 12, 7,
        ['reviewbot_queue_depth', 'reviewbot_oldest_job_age_seconds'],
        "short", legends=["{{persona}} depth", "{{persona}} oldest s"]),
+    # THE REASON, not just the rate. Everything above is numeric and can only say THAT a review
+    # failed; this says which PR and why. Shipped by roles/journal_ship (Alloy -> loki-lan).
+    # The filter is deliberately broad — `failed`, `error`, `skipped` — because the 2026-09-06
+    # failure text ("'utf-8' codec can't decode byte 0xf6") matched no term anyone would have
+    # thought to search for in advance.
+    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 159, 24, 9,
+         '{job="host-journal", unit="reviewbot.service"} '
+         '|~ "(?i)(failed|error|quarantin|skipped|exhausted)"'),
 ]
 
 dashboard = {
@@ -381,7 +472,10 @@ dashboard = {
     "time": {"from": "now-6h", "to": "now"},
     "templating": {"list": [
         {"name": "DS_PROMETHEUS", "type": "datasource", "query": "prometheus",
-         "current": {}, "hide": 0, "label": "Datasource", "refresh": 1}
+         "current": {}, "hide": 0, "label": "Datasource", "refresh": 1},
+        # The Reviewer Errors logs panel needs Loki. Same shape loki-logs-dashboard.yaml uses.
+        {"name": "DS_LOKI", "type": "datasource", "query": "loki",
+         "current": {}, "hide": 0, "label": "Logs", "refresh": 1},
     ]},
     "panels": panels,
 }

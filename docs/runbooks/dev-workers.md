@@ -215,6 +215,13 @@ the session scratchpad clone — hand the tfstate to the main checkout and verif
 > 4301/4302 is what destroyed the agent nodes and cost ~6h of agentforge downtime. Verify with
 > `python scripts/node-ssh.py 192.168.0.4 "qm list"` before any destructive tofu run.
 
+> **The reviewers converge daily now** (`scripts/fleet-converge-daily.sh`, 06:35). Before
+> 2026-09-06 they converged NOWHERE — that script only ran `dev-workers.yml` — so reviewbot
+> changes merged to main sat undeployed until run by hand. The tolerant-diff-decode fix went 22
+> hours undeployed while platform#1074 failed 66 times on both personas. If you suspect drift:
+> `ssh c4@192.168.0.24 md5sum /usr/local/lib/reviewbot/reviewbot.py` against
+> `md5sum ansible/roles/pr_reviewer/files/reviewbot.py` on main.
+
 ### When a review never lands (deadlines, quarantine, requeue)
 
 A persona that produces no verdict blocks the automerge lane: merging requires EVERY configured
@@ -222,8 +229,16 @@ persona clean at the current head. The 2026-09-04 incident was exactly this — 
 attempted 9 times across 3 heads over 71 minutes and never reviewed, and the operator merged by
 hand. Order of diagnosis:
 
-1. `sudo journalctl -u reviewbot -n 50` on the persona's VM. `llm deadline exceeded after <n>s`
-   means the review needs more budget than `llm_timeout_s` allows.
+1. **Grafana first, SSH second.** The "PR Reviewers" row on the AI Lab Fleet dashboard has a
+   *Reviewer Errors* panel reading both hosts' journals out of Loki (roles/journal_ship ->
+   monitoring/loki-lan.yaml). In Explore:
+   `{job="host-journal", unit="reviewbot.service"} |~ "(?i)(failed|error|skipped)"`, and add
+   `|= "1074"` to follow one PR. Only if that is empty is `sudo journalctl -u reviewbot -n 50`
+   on the VM worth the trip. `llm deadline exceeded after <n>s` means the review needs more
+   budget than `llm_timeout_s` allows.
+   - **Is the host running main?** A `codec can't decode`, or the same failure on every
+     attempt, usually means the VM is behind: compare the md5 above and converge before
+     debugging any further.
 2. `curl -s localhost:9100/metrics | grep reviewbot_` — `reviewbot_llm_seconds_max` and
    `reviewbot_llm_output_tokens_max` say how long the worst real run took and why. Run length
    tracks REASONING, not diff size: a 2 KB diff has timed out and a 342 KB one has passed.

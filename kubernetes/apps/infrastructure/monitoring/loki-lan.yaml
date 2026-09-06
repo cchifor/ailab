@@ -1,0 +1,49 @@
+# LAN-only NodePort in front of Loki, for host log ingestion from VMs outside the cluster.
+#
+# WHY: the two PR-reviewer VMs (192.168.0.24/.25) had NO log shipping at all. On 2026-09-06
+# platform#1074 failed on every attempt on both personas for 22 hours, and the reason —
+# `'utf-8' codec can't decode byte 0xf6` — existed only in journald on those hosts. The
+# dashboard could show that failures were happening (once reviewbot-rules and the Errors panel
+# landed) but never WHY, so every occurrence costs an SSH round trip to two machines. Metrics
+# say "something is failing"; only the log says "this PR, this reason".
+#
+# Loki is a ClusterIP service and these VMs are outside the cluster, so ingestion needs a LAN
+# endpoint. This mirrors prometheus-lan.yaml exactly — same shape, same trade-off, same
+# reasoning — rather than inventing a second pattern for the same problem.
+#
+# EXPOSURE TRADE-OFF (deliberate, and wider than prometheus-lan's): a NodePort cannot
+# path-scope, so this exposes Loki's whole HTTP API to the mgmt LAN — push AND query. Accepted
+# on the same grounds prometheus-lan documents: the mgmt LAN is single-operator/private and node
+# IPs have no WAN route (public ingress stays cloudflared/tailscale-only, see apps/edge), and
+# every path-scoped alternative needs a moving part this cluster does not run (no LAN ingress
+# controller or LoadBalancer exists). Two differences worth stating plainly:
+#   * Loki here is single-binary with auth_enabled=false, so anything on the LAN can WRITE logs
+#     into any tenant as well as read them. Log injection is the new risk this adds over
+#     prometheus-lan's read+remote-write, and it is why the label set below is fixed by the
+#     shipper config rather than accepted from the sender.
+#   * The delete API (/loki/api/v1/delete) requires compactor.retention_enabled plus
+#     deletion_mode, which loki.yaml does not set — so log deletion is not reachable here.
+# If LAN trust ever changes, put an auth proxy in front and repoint this Service's selector;
+# the shipper side only knows a URL (journal_ship_loki_url in the ansible role).
+#
+# Reachable at http://<any-node-ip>:30310 (.41/.42/.43 — .40 is the API-server VIP only).
+# Selector matches the loki chart's own Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki-lan
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: loki-lan
+spec:
+  type: NodePort
+  selector: # all three, exactly as the chart's own `loki` Service selects (verified live)
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/instance: loki
+    app.kubernetes.io/component: single-binary
+  ports:
+    - name: http-metrics
+      port: 3100
+      targetPort: http-metrics
+      protocol: TCP
+      nodePort: 30310

@@ -99,6 +99,70 @@ spec:
               (check reviewbot_llm_seconds_max and reviewbot_llm_output_tokens_max: run length
               tracks REASONING, not diff size) or the deadline is too tight again. Raise
               pr_reviewer_llm_timeout_s in the role defaults, not per host.
+        # The twin of ReviewbotReviewTimeouts, and the one this rule set was MISSING. A
+        # timeout means the deadline was too tight for the work; a failure means the review
+        # could not be produced at all — an undecodable diff, unparseable model output, a
+        # Gitea write that did not land. Both leave the PR with no verdict and block the
+        # automerge lane, so both must page.
+        #
+        # Measured 2026-09-06: platform#1074 (a 4.0 MB diff carrying a non-UTF-8 byte) failed
+        # on every attempt on both personas for 22 hours — 66 failures, peaking at 15/h — and
+        # NOTHING fired, because the only alert on this counter watched the timeout half.
+        # ReviewbotQuarantined did catch the first occurrence, then went silent: the PR was
+        # being pushed to, so each job was superseded by a new head before it could exhaust
+        # max_attempts and quarantine.
+        #
+        # Threshold mirrors the timeout rule (>=3/h) rather than the observed 15/h peak: the
+        # healthy baseline is a flat ZERO — all 66 failures in that 48h window were this one
+        # PR — so three in an hour is already abnormal, and `for: 10m` rides out a blip.
+        - alert: ReviewbotReviewFailures
+          expr: increase(reviewbot_llm_failures_total[1h]) >= 3
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) failed {{ $value | printf \"%.0f\" }} reviews in an hour"
+            description: >-
+              Three or more reviews on {{ $labels.instance }} failed within an hour without
+              hitting the deadline (that would be ReviewbotReviewTimeouts). The PRs involved
+              have no verdict from this persona and cannot automerge. Check
+              `journalctl -u reviewbot | grep failed` on the host — the failure note carries
+              the reason and the PR. A single PR failing every attempt looks like this and
+              will NOT reach ReviewbotQuarantined if it is being actively pushed to, because
+              each new head supersedes the job before its attempts are exhausted. If the
+              reviewers are behind main, converge them: `ansible-playbook reviewers.yml`.
+        # The runbook's first diagnosis step is now a Grafana logs panel, so the log pipeline
+        # is load-bearing and has to be watched like one. It is also pinned to a SINGLE node
+        # IP (journal_ship_loki_url -> 192.168.0.41:30310): a NodePort is served by all three
+        # nodes, but Alloy takes one URL, so draining .41 stops shipping while .42/.43 would
+        # have served it. That is an accepted trade-off — there is no LAN VIP or internal DNS
+        # name for the node set — and this alert is what makes it survivable: repointing is a
+        # one-variable change once you know it happened.
+        - alert: ReviewerLogShippingDown
+          expr: up{job="reviewer-alloy"} == 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Reviewer log shipping is down on {{ $labels.instance }}"
+            description: >-
+              Alloy on {{ $labels.instance }} has been unscrapeable for >15m, so reviewer
+              journals are probably not reaching Loki and the dashboard's Reviewer Errors panel
+              is blind — while still rendering an empty, healthy-looking panel. Check
+              `systemctl status alloy` on the host. If the Loki endpoint moved, the URL is
+              journal_ship_loki_url in roles/journal_ship (pinned to one node IP by design).
+        # Drops are silent by nature: Alloy keeps running, the panel just thins out. rate_limited
+        # and queue_is_full mean Loki is pushing back; line_too_long and ingester_error mean the
+        # payload is being refused outright.
+        - alert: ReviewerLogsDropped
+          expr: sum by (instance, reason) (increase(loki_write_dropped_bytes_total{job="reviewer-alloy"}[1h])) > 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Reviewer log shipping dropped bytes on {{ $labels.instance }} ({{ $labels.reason }})"
+            description: >-
+              Alloy on {{ $labels.instance }} dropped log bytes in the last hour, reason
+              `{{ $labels.reason }}`. The Reviewer Errors panel is now incomplete without
+              looking incomplete. rate_limited / queue_is_full point at Loki ingestion limits;
+              line_too_long and ingester_error point at the payload.
         # Age, not depth: a reconcile burst of 18 that drains in 20 min is the NORMAL shape and
         # must not page. See the header for why this is 1800 and not the intuitive 3600.
         # Note this counts queued/retry only, so a single stuck job with an empty queue reports

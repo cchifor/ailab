@@ -145,6 +145,114 @@ tests:
         alertname: ReviewbotReviewTimeouts
         exp_alerts: []
 
+  # ------------------------------------------------------- review failures
+  - interval: 1m
+    name: repeated non-deadline failures page (the 2026-09-06 shape)
+    input_series:
+      # platform#1074: an undecodable 4.0 MB diff failing every attempt on both personas.
+      # 66 failures over 22h, peaking at 15/h. NOTHING alerted on this counter before.
+      - series: 'reviewbot_llm_failures_total{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0 0 1 1 2 2 3 3 4 4 5 5 6 6 7 7 8 8 9 9 10 10 11 11 12 12 13 13 14 14 15 15 15 15 15 15 15 15 15 15"
+      # The deadline counter stays flat: this failure mode is NOT a timeout, which is exactly
+      # why ReviewbotReviewTimeouts could not see it.
+      - series: 'reviewbot_llm_timeouts_total{persona="claude",instance="192.168.0.24:9100"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewbotReviewFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              persona: claude
+              instance: 192.168.0.24:9100
+            # NOTE the summary interpolates {{ $value }} — increase()'s extrapolated result
+            # (raw delta 12 over this eval window -> "12") — so this assertion is coupled to
+            # the input series and eval_time, and a later tweak to either fails HERE on the
+            # text rather than on the behaviour under test. Kept anyway: promtool compares
+            # exp_annotations exactly whenever the rule defines annotations (omitting them
+            # asserts `{}` and fails), so labels-only is not available, and the alternative -
+            # dropping $value from the summary - costs the on-call reader the one number that
+            # says how bad it is. ReviewbotReviewTimeouts above has the same shape.
+            exp_annotations:
+              summary: "reviewbot (claude) failed 12 reviews in an hour"
+              description: >-
+                Three or more reviews on 192.168.0.24:9100 failed within an hour without hitting
+                the deadline (that would be ReviewbotReviewTimeouts). The PRs involved have no
+                verdict from this persona and cannot automerge. Check `journalctl -u reviewbot |
+                grep failed` on the host — the failure note carries the reason and the PR. A
+                single PR failing every attempt looks like this and will NOT reach
+                ReviewbotQuarantined if it is being actively pushed to, because each new head
+                supersedes the job before its attempts are exhausted. If the reviewers are behind
+                main, converge them: `ansible-playbook reviewers.yml`.
+      # The timeout rule must stay silent on a pure-failure incident: they are different
+      # remedies (deadline too tight vs review cannot be produced at all).
+      - eval_time: 25m
+        alertname: ReviewbotReviewTimeouts
+        exp_alerts: []
+
+  - interval: 1m
+    name: an occasional transient failure does not page
+    input_series:
+      # Two failures in the window — a Gitea blip, not a broken PR. Under the >=3 threshold.
+      - series: 'reviewbot_llm_failures_total{persona="codex",instance="192.168.0.25:9100"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ReviewbotReviewFailures
+        exp_alerts: []
+
+  # ---------------------------------------------------- log shipping (Alloy)
+  - interval: 1m
+    name: a dead log shipper pages; a live one does not
+    input_series:
+      - series: 'up{job="reviewer-alloy",instance="192.168.0.24:12345"}'
+        values: "0x40"
+      - series: 'up{job="reviewer-alloy",instance="192.168.0.25:12345"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReviewerLogShippingDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-alloy
+              instance: 192.168.0.24:12345
+            exp_annotations:
+              summary: "Reviewer log shipping is down on 192.168.0.24:12345"
+              description: >-
+                Alloy on 192.168.0.24:12345 has been unscrapeable for >15m, so reviewer journals
+                are probably not reaching Loki and the dashboard's Reviewer Errors panel is blind
+                — while still rendering an empty, healthy-looking panel. Check `systemctl status
+                alloy` on the host. If the Loki endpoint moved, the URL is journal_ship_loki_url
+                in roles/journal_ship (pinned to one node IP by design).
+      - eval_time: 5m
+        alertname: ReviewerLogShippingDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: dropped log bytes page, a flat counter does not
+    input_series:
+      - series: 'loki_write_dropped_bytes_total{job="reviewer-alloy",instance="192.168.0.24:12345",reason="rate_limited"}'
+        values: "0 0 0 0 512 512 512 512 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900"
+      # The healthy shape: a counter that exists and never moves must stay silent.
+      - series: 'loki_write_dropped_bytes_total{job="reviewer-alloy",instance="192.168.0.25:12345",reason="rate_limited"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewerLogsDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 192.168.0.24:12345
+              reason: rate_limited
+            exp_annotations:
+              summary: "Reviewer log shipping dropped bytes on 192.168.0.24:12345 (rate_limited)"
+              description: >-
+                Alloy on 192.168.0.24:12345 dropped log bytes in the last hour, reason
+                `rate_limited`. The Reviewer Errors panel is now incomplete without looking
+                incomplete. rate_limited / queue_is_full point at Loki ingestion limits;
+                line_too_long and ingester_error point at the payload.
+
   # --------------------------------------------------------- queue backlog
   - interval: 1m
     name: backlog threshold fires on the incident peak
