@@ -520,6 +520,16 @@ kubectl --context admin@ai -n agentforge-broker get deploy -o custom-columns=\
 | CP `agentforge/agentforge-platform` | `brokerseats` create/get/list/delete; `services` get (teardown witness). NO update/patch/status. | `agentforge-cp-brokerseat-guard`: a CR it creates carries no finalizers, ownerReferences, labels, annotations or status, and is named `broker-<provider>-<account>`. |
 | provisioner `openbao/agentforge-provisioner` | `brokerseats` get/list/patch, `/status` patch, `/finalizers` update; the 5 child kinds get/create/update. NO delete, NO watch, NO list on children, NO secrets/configmaps/pods. | `agentforge-provisioner-seat-objects-guard`: every object it writes is named from its stem, labelled + owner-referenced by its CR, never Flux-labelled, never replacing an object that is not already that CR's, and structurally the template's shape (one digest-pinned container as SA `agentforge-broker`, only its own three Secrets, Services/PDB/CNP selecting its own pods, ExternalSecrets on `agentforge-broker-store` sourcing only `operator/broker/<p>/<a>/{oauth,kids,ledger}`, no `target.template`, only the template's CNP rule shapes). |
 
+Both guards also carry the list of **git-managed stems** (each Flux seat's hand-named stem and the
+mechanical `broker-<provider>-<account>` alias of its audience): the CRD refuses a CR named that way at
+create, the objects guard refuses any seat object under such a stem (validation 13 — it is what stops an
+ExternalSecret `<alias>-oauth` from syncing a git seat's credential into a new Secret name). The two
+literals are pinned to `gen-broker-inventory.py`'s seat list by `test_brokerseat_{crd,admission}.py`:
+**adding or retiring a git seat means updating both literals in the same PR** or CI is red. What
+admission cannot do is look the cluster up: whether one of a seat's 8 derived names already exists
+under a foreign owner stays the controller's `NameCollision` refusal (plus the apiserver's own 409 on
+create and the objects guard's same-owner rule on update).
+
 An admission **denial** (`kubectl` / provisioner log line starting `agentforge CP …` or `agentforge
 provisioner …`) is never a configuration step you are missing: the writer submitted a non-seat shape.
 Treat it as a bug in the writer (or a compromised SA) and read the failing clause's comment in
@@ -570,8 +580,13 @@ the provisioner's finalizer `agentforge.io/brokerseat` holds the CR until it has
 pinned Service `<stem>` 404** (the `services: get` grant) — the apiserver, not a probe window, is the
 authority, and only then is the ClusterIP freed in the CP's DB. The OpenBao docs (`oauth`/`kids`/`ledger`)
 are left in place, exactly as for a git seat remove — the operator KV soft-delete step the CP's
-`cleanup_required` names is unchanged. Break-glass `kubectl delete bseat <stem>` also works (it cascades
-the same way) but leaves the CP row in drift until **Repair** re-creates it — prefer the wizard.
+`cleanup_required` names is unchanged. Break-glass by hand MUST be
+`kubectl --context admin@ai -n agentforge-broker delete bseat <stem> --cascade=foreground`: kubectl's
+default is a **background** delete, and background GC waits for the owner to disappear while the
+provisioner's finalizer waits for the children to disappear — a deadlock that leaves the CR
+`Terminating` and the 8 objects in place. (Foreground is the only propagation the CP uses; orphan and
+background propagation are untested until the A3b live proof.) A hand delete also leaves the CP row in
+drift until **Repair** re-creates it — prefer the wizard.
 
 ### Revert order (never remove the CRD while a CR exists)
 

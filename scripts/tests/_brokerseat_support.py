@@ -193,6 +193,10 @@ def vap(doc: str) -> dict[str, Any]:
         _scalar_or_folded(e, "name"): _scalar_or_folded(e, "expression")
         for e in _entries(gbi._sub_block(spec, "variables", 2), 4)
     }
+    narrowing = {
+        key: bool(gbi._sub_block(mc_block, key, 4).strip()) or gbi._field(mc_block, key, 4) is not None
+        for key in ("namespaceSelector", "objectSelector", "excludeResourceRules", "matchPolicy")
+    }
     return {
         "name": name(doc),
         "failurePolicy": gbi._field(spec, "failurePolicy", 2),
@@ -201,7 +205,16 @@ def vap(doc: str) -> dict[str, Any]:
         "matchConditions": conditions,
         "variables": variables,
         "validations": validations,
+        "narrowing": narrowing,
     }
+
+
+def cel_string_list(expression: str) -> set[str]:
+    """`['a', 'b']` (possibly folded over lines) -> {'a', 'b'}; raises on any other shape."""
+    m = re.fullmatch(r"\[\s*((?:'[^']*'\s*,?\s*)+)\]", expression.strip())
+    if not m:
+        raise AssertionError(f"not a CEL string-list literal: {expression!r}")
+    return {p.strip().strip("'") for p in m.group(1).split(",") if p.strip()}
 
 
 def binding(doc: str) -> dict[str, Any]:

@@ -97,22 +97,27 @@ class CrdCelRules(unittest.TestCase):
         self.assertEqual(len("broker-") + max(map(len, providers)) + 1 + int(m.group(1)), 52)
         self.assertEqual(len("broker-") + max(map(len, providers)) + 1 + int(m.group(1)) + len("-headless"), 61)
 
-    def test_reserved_git_stems_cover_exactly_the_hand_named_git_seats(self) -> None:
-        """A hand-named git seat (broker-anthropic-max1 = anthropic/claude-max-1) ALSO satisfies the
-        mechanical rule for another account slug; the root reserved list must name every such seat
-        and nothing else (a retired seat must leave the list, or its name is refused forever)."""
+    def test_reserved_git_stems_cover_exactly_the_git_seats(self) -> None:
+        """The root reserved list = every Flux seat's hand-named stem (broker-anthropic-max1 =
+        anthropic/claude-max-1 ALSO satisfies the mechanical rule for slug max1) + the mechanical
+        alias of every git audience (a CR there would duplicate a seat git serves — the controller's
+        AudManagedByGit refusal, made an apiserver refusal at create). Nothing else: a retired seat
+        must leave the list, or its name is refused forever. The objects guard carries the same set
+        (test_brokerseat_admission.py pins the two literals to each other)."""
         reserved = None
         for rule in self._at_root():
             m = re.fullmatch(r"!\(self\.metadata\.name in \[(.*)\]\)", rule)
             if m:
                 reserved = {p.strip().strip("'") for p in m.group(1).split(",")}
-        self.assertIsNotNone(reserved, "a root rule reserving the hand-named git stems")
+        self.assertIsNotNone(reserved, "a root rule reserving the git seat stems")
         seats = gbi.load_seats()
+        self.assertTrue(seats)
         hand_named = {s.deployment for s in seats if s.deployment != f"broker-{s.provider}-{s.account}"}
+        aliases = {f"broker-{s.provider}-{s.account}" for s in seats}
         self.assertTrue(hand_named, "the tree currently has hand-named git seats")
-        self.assertEqual(reserved, hand_named)
-        mechanical = {s.deployment for s in seats} - hand_named
-        self.assertTrue(reserved.isdisjoint(mechanical))
+        self.assertEqual(reserved, hand_named | aliases)
+        for alias in aliases:
+            self.assertRegex(alias, r"^broker-(anthropic|openai)-[a-z0-9]+(-[a-z0-9]+)*$")
 
     def test_reserved_account_slugs(self) -> None:
         slug_rules = [r for indent, r in self.rules if indent > 16]
@@ -148,7 +153,8 @@ class CrdSchema(unittest.TestCase):
         self.assertRegex(status, r"(?m)^\s*enum:\s*\[Pending, Seeding, Rendering, Ready, Degraded, Terminating\]\s*$")
         self.assertRegex(status, r"(?m)^\s*x-kubernetes-list-type:\s*map\s*$")
         self.assertRegex(status, r"(?m)^\s*x-kubernetes-list-map-keys:\s*\[type\]\s*$")
-        self.assertRegex(status, r"CredentialPresent, CasRequired, Seeded, Rendered, Available, Ready, Entitled, Collision")
+        # the condition vocabulary incl. amendment F9's Published (Entitled AND Published)
+        self.assertRegex(status, r"(?m)^\s*enum:\s*\[CredentialPresent, CasRequired, Seeded, Rendered, Available, Ready, Entitled, Published, Collision\]\s*$")
 
     def test_spec_requires_exactly_the_cp_triple(self) -> None:
         spec = gbi._sub_block(self.doc, "spec", 12)

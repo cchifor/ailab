@@ -14,23 +14,37 @@
 #       annotation on a seat, and the CR name is forced to the mechanical broker-<provider>-<account>.
 #   (b) agentforge-provisioner-seat-objects-guard — everything the provisioner writes is a SEAT OBJECT:
 #       named from its stem, labelled agentforge.io/broker-seat=<stem>, owned by exactly the BrokerSeat
-#       <stem> (controller + blockOwnerDeletion), NEVER carrying a Flux label and NEVER replacing an
-#       object that is not already this stem's — so a Flux-managed git seat is out of reach even though
-#       RBAC grants `update` on the kind. Beyond names it binds STRUCTURE to what the seat template
-#       renders (plan amendments F10/F11/F12 + round-2 F10): one pinned-image container running as the
-#       tokenless broker SA whose Secret sources are only <stem>-{oauth,kids,ledger}; Services and the
-#       PDB selecting the seat's own pods and nothing else; ExternalSecrets on the shared operator
-#       store, targeting their own name, sourcing exactly operator/broker/<provider>/<account>/<kind>
-#       with no template/templateFrom/find/sourceRef; a CiliumNetworkPolicy whose endpointSelector is
-#       exactly the seat's own identity with only the template's ingress/egress rule shapes (identity
-#       peers in the template's namespaces, the provider's FQDNs on 443) and the template's egressDeny
-#       belt. A seat object that would widen the seat's network reach, mount another seat's credential
-#       or hand a pod another seat's identity is refused at admission, whatever the controller does.
+#       <stem> (controller + blockOwnerDeletion), NEVER carrying a Flux label, NEVER replacing an
+#       object that is not already this stem's — so a Flux-managed git seat's objects are out of reach
+#       even though RBAC grants `update` on the kind — and NEVER a stem that is a git seat's audience
+#       (validation 13: an ExternalSecret under a mechanical alias of a git aud would otherwise sync that
+#       seat's OAuth into a new Secret name). Beyond names it binds STRUCTURE to what the seat template
+#       renders (plan amendments F10/F11/F12 + round-2 F10, review round 1): one pinned-image container
+#       running the template's argv as the tokenless broker SA under the template's pod + container
+#       securityContext, with the template's probes (no `host`, no lifecycle hooks, no hostPort) and
+#       Secret sources only <stem>-{oauth,kids,ledger}; Services and the PDB selecting the seat's own
+#       pods and nothing else; ExternalSecrets on the shared operator store, targeting their own name,
+#       sourcing exactly operator/broker/<provider>/<account>/<kind> with no template/templateFrom/find/
+#       sourceRef; a CiliumNetworkPolicy whose endpointSelector is exactly the seat's own identity with
+#       only the template's ingress/egress rule shapes (identity peers in the template's namespaces, the
+#       provider's FQDNs on 443, every port entry {port, protocol}, no TLS interception/listener, no
+#       enableDefaultDeny) and the template's egressDeny belt in its unrestricted shape. A seat object
+#       that would widen the seat's network reach, weaken its pod isolation, mount another seat's
+#       credential or hand a pod another seat's identity is refused at admission, whatever the
+#       controller does.
+#
+# WHAT ADMISSION CANNOT DO: a VAP sees one request, never the cluster. Whether one of the 8 derived
+# names ALREADY exists under a foreign owner (a previous CR incarnation still being GC'd, a hand-made
+# object) is the controller's NameCollision refusal (plan D6), corroborated by the apiserver's own 409
+# on create and by validation 4 on update; the readyz-map membership test (AudManagedByGit) likewise
+# stays with the controller — validation 13 is its admission-time twin for the seats git carries today.
 #
 # The fixture table in scripts/check-seat-guard-cel.py evaluates BOTH policies' CEL (cel-python) against
-# the stamped render of a real git seat and one adversarial mutation per clause; it runs in
-# .gitea/workflows/tenant-guard-cel.yaml. Nothing else in the estate evaluates this CEL (a client
-# dry-run parses YAML; a server dry-run proves it compiles) — re-run it after EVERY edit here.
+# the stamped render of a real git seat (re-keyed to a non-git account) and one adversarial mutation
+# per predicate; it runs in .gitea/workflows/tenant-guard-cel.yaml. Nothing else in the estate
+# evaluates this CEL (a client dry-run parses YAML; a server dry-run proves it compiles) — re-run it
+# after EVERY edit here, and remember cel-go's checker is stricter than cel-python's (no `[dyn, string]`
+# list literals; the plan's F18 kind check is the compile proof).
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -158,12 +172,22 @@ spec:
         variables.stem.startsWith('broker-openai-')
           ? ['chatgpt.com', 'auth.openai.com']
           : ['api.anthropic.com', 'console.anthropic.com', 'claude.ai']
+    # Every Flux-managed git seat, as the stems a controller seat for the SAME audience would take:
+    # the mechanical broker-<provider>-<account> of its aud AND its hand-named stem where the two
+    # differ (broker-anthropic-max1 = anthropic/claude-max-1, ...). The same literal is the CRD's
+    # reserved-name rule. scripts/tests/test_brokerseat_admission.py asserts it equals
+    # scripts/gen-broker-inventory.py load_seats() (add or retire a git seat -> update BOTH literals or
+    # CI is red); validation 13 is the only consumer.
+    - name: gitSeatStems
+      expression: >-
+        ['broker-anthropic-max1', 'broker-anthropic-max2', 'broker-openai-codex',
+         'broker-anthropic-claude-max-1', 'broker-anthropic-claude-max-2', 'broker-openai-codex-pro',
+         'broker-anthropic-claude-max-3']
   validations:
     # (1) NAMESPACE — a seat object lives in agentforge-broker and nowhere else (the Role is namespaced
-    #     there today; this holds even if that ever widens).
-    - expression: >-
-        request.namespace == 'agentforge-broker' &&
-        (!has(object.metadata.namespace) || object.metadata.namespace == 'agentforge-broker')
+    #     there today; this holds even if that ever widens). request.namespace IS the object's
+    #     namespace: the apiserver rejects a mismatch with a 400 before admission runs.
+    - expression: "request.namespace == 'agentforge-broker'"
       message: "agentforge provisioner may only write seat objects in namespace agentforge-broker."
     # (2) NAME + OWNERSHIP LABEL — the object carries agentforge.io/broker-seat=<stem> where <stem> is a
     #     mechanical broker-<provider>-<account> (<= 52 chars, the CP renderer's _STEM_MAX), and its
@@ -327,53 +351,132 @@ spec:
              has(object.spec.data[0].remoteRef.property) && object.spec.data[0].remoteRef.property == 'AF_BROKER_LEDGER_DSN')))
       message: "agentforge provisioner seat ExternalSecrets must source exactly operator/broker/<provider>/<account>/{oauth|kids|ledger} for THEIR OWN stem in the seat template's shape (oauth: one dataFrom.extract; kids: one data entry registry.json; ledger: one data entry AF_BROKER_LEDGER_DSN)."
     # (12) CILIUMNETWORKPOLICY — endpointSelector is EXACTLY the seat's own pod identity (never empty,
-    #      never another seat); no `specs`, no nodeSelector, no ingressDeny; every ingress rule is
-    #      identity-based (fromEndpoints in the template's peer namespaces, no entities/CIDR/nodes) on
-    #      ports 8700/9464 only; every egress allow rule is either toEndpoints in kube-system/databases
-    #      on 53/5432 (L7 `dns` visibility allowed) or toFQDNs matchName from the provider's allowlist
-    #      on 443 — no toEntities/toCIDR/toServices/toGroups/toNodes, no matchPattern; and the template's
-    #      egressDeny belt (host/remote-node + the private, link-local and loopback CIDRs, ::/0) is
-    #      present. A CNP can only ADD reach for the pods it selects, so this is what keeps a seat pod
-    #      from being opened to the world or to another seat's identity.
+    #      never another seat); no `specs`, no nodeSelector, no ingressDeny, no enableDefaultDeny (the
+    #      namespace default-deny is the baseline this policy opens from); every ingress rule is
+    #      identity-based (fromEndpoints matchLabels in the template's peer namespaces, no entities/
+    #      CIDR/nodes) on ports 8700/9464 only; every egress allow rule is either toEndpoints in
+    #      kube-system/databases on 53/5432 (L7 `dns` visibility allowed) or toFQDNs matchName from the
+    #      provider's allowlist on 443 — no toEntities/toCIDR/toServices/toGroups/toNodes, no
+    #      matchPattern. EVERY port entry is exactly {port, protocol} (an absent protocol is ANY in
+    #      Cilium; endPort would widen to a range) and no toPorts entry carries terminatingTLS/
+    #      originatingTLS/serverNames/listener (they reference Secrets and Envoy configs outside the
+    #      seat). The template's egressDeny belt (host/remote-node + the private, link-local and
+    #      loopback CIDRs, ::/0) is present and every deny entry has the template's UNRESTRICTED shape:
+    #      exactly one selector key and nothing else (a toPorts on a deny rule would confine the
+    #      rebinding protection to one port). A CNP can only ADD reach for the pods it selects, so this
+    #      is what keeps a seat pod from being opened to the world or to another seat's identity.
     - expression: >-
         variables.kind != 'CiliumNetworkPolicy' ||
         (!has(object.specs) && has(object.spec) &&
          has(object.spec.endpointSelector) &&
          object.spec.endpointSelector == {'matchLabels': {'app.kubernetes.io/name': variables.stem}} &&
-         !has(object.spec.nodeSelector) && !has(object.spec.ingressDeny) &&
+         !has(object.spec.nodeSelector) && !has(object.spec.ingressDeny) && !has(object.spec.enableDefaultDeny) &&
          has(object.spec.ingress) && object.spec.ingress.all(r,
            has(r.fromEndpoints) && size(r.fromEndpoints) >= 1 && r.fromEndpoints.all(f,
-             has(f.matchLabels) && !has(f.matchExpressions) &&
+             size(f) == 1 && has(f.matchLabels) &&
              'k8s:io.kubernetes.pod.namespace' in f.matchLabels &&
              f.matchLabels['k8s:io.kubernetes.pod.namespace'] in ['agentforge', 'agentforge-sandbox', 'monitoring', 'openbao']) &&
            !has(r.fromEntities) && !has(r.fromCIDR) && !has(r.fromCIDRSet) && !has(r.fromNodes) &&
            !has(r.fromRequires) && !has(r.fromGroups) && !has(r.icmps) && !has(r.authentication) &&
            has(r.toPorts) && size(r.toPorts) >= 1 && r.toPorts.all(tp,
-             !has(tp.rules) && has(tp.ports) && tp.ports.all(p,
-               has(p.port) && p.port in ['8700', '9464'] && (!has(p.protocol) || p.protocol == 'TCP')))) &&
+             size(tp) == 1 && has(tp.ports) && tp.ports.all(p,
+               size(p) == 2 && has(p.port) && has(p.protocol) &&
+               p.port in ['8700', '9464'] && p.protocol == 'TCP'))) &&
          has(object.spec.egress) && object.spec.egress.all(r,
            !has(r.toEntities) && !has(r.toCIDR) && !has(r.toCIDRSet) && !has(r.toServices) &&
            !has(r.toGroups) && !has(r.toNodes) && !has(r.toRequires) && !has(r.icmps) && !has(r.authentication) &&
            has(r.toPorts) && size(r.toPorts) >= 1 &&
            ((has(r.toEndpoints) && !has(r.toFQDNs) && size(r.toEndpoints) >= 1 &&
                r.toEndpoints.all(e,
-                 has(e.matchLabels) && !has(e.matchExpressions) &&
+                 size(e) == 1 && has(e.matchLabels) &&
                  'k8s:io.kubernetes.pod.namespace' in e.matchLabels &&
                  e.matchLabels['k8s:io.kubernetes.pod.namespace'] in ['kube-system', 'databases']) &&
                r.toPorts.all(tp,
-                 has(tp.ports) && tp.ports.all(p, has(p.port) && p.port in ['53', '5432']) &&
-                 (!has(tp.rules) || (has(tp.rules.dns) && !has(tp.rules.http) && !has(tp.rules.l7) && !has(tp.rules.kafka))))) ||
+                 !has(tp.terminatingTLS) && !has(tp.originatingTLS) && !has(tp.serverNames) && !has(tp.listener) &&
+                 has(tp.ports) && tp.ports.all(p,
+                   size(p) == 2 && has(p.port) && has(p.protocol) &&
+                   p.port in ['53', '5432'] && p.protocol in ['TCP', 'UDP']) &&
+                 (!has(tp.rules) || (size(tp.rules) == 1 && has(tp.rules.dns))))) ||
             (has(r.toFQDNs) && !has(r.toEndpoints) && size(r.toFQDNs) >= 1 &&
-               r.toFQDNs.all(f, has(f.matchName) && !has(f.matchPattern) && f.matchName in variables.fqdnAllow) &&
+               r.toFQDNs.all(f, size(f) == 1 && has(f.matchName) && f.matchName in variables.fqdnAllow) &&
                r.toPorts.all(tp,
-                 !has(tp.rules) && has(tp.ports) && tp.ports.all(p,
-                   has(p.port) && p.port == '443' && (!has(p.protocol) || p.protocol == 'TCP')))))) &&
+                 size(tp) == 1 && has(tp.ports) && tp.ports.all(p,
+                   size(p) == 2 && has(p.port) && has(p.protocol) &&
+                   p.port == '443' && p.protocol == 'TCP'))))) &&
          has(object.spec.egressDeny) &&
+         object.spec.egressDeny.all(r, size(r) == 1 && (has(r.toEntities) || has(r.toCIDR) || has(r.toEndpoints))) &&
          object.spec.egressDeny.exists(r, has(r.toEntities) && 'host' in r.toEntities && 'remote-node' in r.toEntities) &&
          object.spec.egressDeny.exists(r, has(r.toCIDR) &&
            '10.0.0.0/8' in r.toCIDR && '172.16.0.0/12' in r.toCIDR && '192.168.0.0/16' in r.toCIDR &&
            '169.254.0.0/16' in r.toCIDR && '127.0.0.0/8' in r.toCIDR && '::/0' in r.toCIDR))
-      message: "agentforge provisioner seat CiliumNetworkPolicy must select exactly app.kubernetes.io/name=<stem>, carry no specs/nodeSelector/ingressDeny, use only fromEndpoints ingress (agentforge/agentforge-sandbox/monitoring/openbao, ports 8700/9464), only toEndpoints (kube-system/databases, 53/5432) or provider-allowlisted toFQDNs matchName (443) egress, and keep the template's egressDeny belt."
+      message: "agentforge provisioner seat CiliumNetworkPolicy must select exactly app.kubernetes.io/name=<stem>, carry no specs/nodeSelector/ingressDeny/enableDefaultDeny, use only fromEndpoints ingress (agentforge/agentforge-sandbox/monitoring/openbao, ports 8700/9464) and only toEndpoints (kube-system/databases, 53/5432) or provider-allowlisted toFQDNs matchName (443) egress, with every port entry exactly {port, protocol}, no TLS/listener on any toPorts, and the template's egressDeny belt in its unrestricted single-selector shape."
+    # (13) NEVER A GIT-MANAGED AUDIENCE — the stem is not a Flux-managed seat's hand-named stem nor the
+    #      mechanical alias of its audience (variables.gitSeatStems). Validation 11 already forces every
+    #      OpenBao path an ExternalSecret names onto the STEM's audience, so this is what stops an
+    #      ExternalSecret <alias>-oauth from syncing a git seat's credential into a new Secret, and a
+    #      Deployment/Service/PDB/CNP from impersonating that seat under its alias. (The controller's
+    #      AudManagedByGit refusal reads the live readyz map; a VAP can only carry the list.)
+    - expression: "!(variables.stem in variables.gitSeatStems)"
+      message: "agentforge provisioner seat objects may not use the stem of a Flux-managed git seat or the mechanical alias of its audience (variables.gitSeatStems; also reserved by the BrokerSeat CRD)."
+    # (14) DEPLOYMENT ISOLATION — the template's pod securityContext (non-root 65532, fsGroup 65532,
+    #      seccomp RuntimeDefault, no sysctls) and container securityContext (runAsNonRoot, no privilege
+    #      escalation, not privileged, drop ALL / add none, read-only rootfs, seccomp RuntimeDefault,
+    #      Default procMount, uid/gid 65532 if set), the template's argv (no `command`, args exactly
+    #      ["agentforge", "broker"] — the digest pin means nothing if the entrypoint is overridden), no
+    #      hostPort, no stdin/tty/volumeDevices, and the pod-level pins PSA restricted leaves open
+    #      (nodeName, hostAliases, shareProcessNamespace, imagePullSecrets, a non-default scheduler).
+    #      The namespace's restricted PSA is the SECOND belt, not the first.
+    - expression: >-
+        variables.kind != 'Deployment' ||
+        (has(variables.podSpec.securityContext) &&
+         variables.podSpec.securityContext.runAsNonRoot == true &&
+         variables.podSpec.securityContext.runAsUser == 65532 &&
+         variables.podSpec.securityContext.runAsGroup == 65532 &&
+         variables.podSpec.securityContext.fsGroup == 65532 &&
+         has(variables.podSpec.securityContext.seccompProfile) &&
+         variables.podSpec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+         !has(variables.podSpec.securityContext.sysctls) &&
+         !has(variables.podSpec.nodeName) && !has(variables.podSpec.hostAliases) &&
+         (!has(variables.podSpec.shareProcessNamespace) || variables.podSpec.shareProcessNamespace == false) &&
+         (!has(variables.podSpec.imagePullSecrets) || size(variables.podSpec.imagePullSecrets) == 0) &&
+         (!has(variables.podSpec.schedulerName) || variables.podSpec.schedulerName == 'default-scheduler') &&
+         variables.ctrs.all(c,
+           has(c.securityContext) &&
+           c.securityContext.runAsNonRoot == true &&
+           c.securityContext.allowPrivilegeEscalation == false &&
+           (!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+           has(c.securityContext.capabilities) && c.securityContext.capabilities.drop == ['ALL'] &&
+           !has(c.securityContext.capabilities.add) &&
+           c.securityContext.readOnlyRootFilesystem == true &&
+           has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+           (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+           (!has(c.securityContext.runAsUser) || c.securityContext.runAsUser == 65532) &&
+           (!has(c.securityContext.runAsGroup) || c.securityContext.runAsGroup == 65532) &&
+           !has(c.command) && has(c.args) && c.args == ['agentforge', 'broker'] &&
+           (!has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)) &&
+           (!has(c.stdin) || c.stdin == false) && (!has(c.tty) || c.tty == false) &&
+           !has(c.volumeDevices)))
+      message: "agentforge provisioner seat Deployment must keep the template's pod securityContext (runAsNonRoot, uid/gid/fsGroup 65532, seccomp RuntimeDefault, no sysctls) and container securityContext (runAsNonRoot, allowPrivilegeEscalation=false, not privileged, capabilities drop ALL / add none, readOnlyRootFilesystem, seccomp RuntimeDefault, procMount Default), run exactly args [agentforge, broker] with no command override, and set no hostPort/stdin/tty/volumeDevices/nodeName/hostAliases/shareProcessNamespace/imagePullSecrets/custom scheduler."
+    # (15) DEPLOYMENT PROBES — exactly the template's handlers: readiness = httpGet /readyz on the named
+    #      port `http` (the fail-closed ledger/credential probe), liveness = httpGet /healthz on `http`,
+    #      neither with `host` (a kubelet-originated probe to another host bypasses the seat's Cilium
+    #      boundary — PSA does not block it) nor httpHeaders, no exec/tcpSocket/grpc handler, no
+    #      startupProbe, no lifecycle hooks (postStart/preStop run inside the pod with the same reach).
+    - expression: >-
+        variables.kind != 'Deployment' ||
+        variables.ctrs.all(c,
+          !has(c.lifecycle) && !has(c.startupProbe) &&
+          has(c.readinessProbe) && has(c.readinessProbe.httpGet) &&
+          !has(c.readinessProbe.exec) && !has(c.readinessProbe.tcpSocket) && !has(c.readinessProbe.grpc) &&
+          !has(c.readinessProbe.httpGet.host) && !has(c.readinessProbe.httpGet.httpHeaders) &&
+          (!has(c.readinessProbe.httpGet.scheme) || c.readinessProbe.httpGet.scheme == 'HTTP') &&
+          c.readinessProbe.httpGet.path == '/readyz' && c.readinessProbe.httpGet.port == 'http' &&
+          has(c.livenessProbe) && has(c.livenessProbe.httpGet) &&
+          !has(c.livenessProbe.exec) && !has(c.livenessProbe.tcpSocket) && !has(c.livenessProbe.grpc) &&
+          !has(c.livenessProbe.httpGet.host) && !has(c.livenessProbe.httpGet.httpHeaders) &&
+          (!has(c.livenessProbe.httpGet.scheme) || c.livenessProbe.httpGet.scheme == 'HTTP') &&
+          c.livenessProbe.httpGet.path == '/healthz' && c.livenessProbe.httpGet.port == 'http')
+      message: "agentforge provisioner seat Deployment probes must be exactly the template's: readiness httpGet /readyz and liveness httpGet /healthz on port http, no host/httpHeaders/scheme override, no exec/tcpSocket/grpc, no startupProbe, no lifecycle hooks."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

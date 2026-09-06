@@ -60,17 +60,18 @@ spec:
             # = the CP renderer's _STEM_MAX: <name>-headless / <name>-ledger must fit 63 characters.
             - rule: "size(self.metadata.name) <= 52"
               message: "name too long: pick a shorter account slug"
-            # The three HAND-NAMED Flux seats (broker-anthropic-max1 = anthropic/claude-max-1, ...) happen
-            # to ALSO satisfy the mechanical rule for a different account slug (max1, max2, codex), so
-            # the name rule alone would admit a CR whose 8 child names collide with a git seat's objects
-            # (the controller would refuse it as NameCollision, the objects guard denies every write —
-            # late, never silent). Reserve them here so the collision is refused AT CREATE with a clear
-            # message. Git seats whose stem is already mechanical (broker-anthropic-claude-max-3) need
-            # no entry: their aud IS in the readyz map, which is the controller's AudManagedByGit
-            # refusal. scripts/tests/test_brokerseat_crd.py derives this list from the broker-*.yaml
-            # seats and fails when a hand-named git seat is missing from it.
-            - rule: "!(self.metadata.name in ['broker-anthropic-max1', 'broker-anthropic-max2', 'broker-openai-codex'])"
-              message: "metadata.name is a hand-named Flux-managed git seat stem; controller seats cannot take it"
+            # Every Flux-managed git seat, as the stems a controller seat for the SAME audience would
+            # take: the mechanical broker-<provider>-<account> of its aud (a CR there would duplicate a
+            # seat git already serves — the controller's AudManagedByGit refusal, made an apiserver
+            # refusal AT CREATE with a clear message) AND its hand-named stem where the two differ
+            # (broker-anthropic-max1 = anthropic/claude-max-1, ...: those names happen to satisfy the
+            # mechanical rule for another slug, and their 8 child names would collide with the git
+            # objects). The SAME literal is the objects guard's variables.gitSeatStems
+            # (brokerseat-admission.yaml, validation 13). scripts/tests/test_brokerseat_crd.py derives
+            # this list from the broker-*.yaml seats and fails when a git seat is missing from it or a
+            # retired one lingers (add or retire a git seat -> update BOTH literals).
+            - rule: "!(self.metadata.name in ['broker-anthropic-max1', 'broker-anthropic-max2', 'broker-openai-codex', 'broker-anthropic-claude-max-1', 'broker-anthropic-claude-max-2', 'broker-openai-codex-pro', 'broker-anthropic-claude-max-3'])"
+              message: "metadata.name is a Flux-managed git seat's stem or the mechanical alias of its audience; controller seats cannot take it"
           properties:
             spec:
               type: object
@@ -122,7 +123,9 @@ spec:
                     properties:
                       type:
                         type: string
-                        enum: [CredentialPresent, CasRequired, Seeded, Rendered, Available, Ready, Entitled, Collision]
+                        # Entitled = the extended declaration names the aud for >= 1 workspace; Published =
+                        # the aud's kids registry holds >= 1 committed kid (plan amendment F9, both).
+                        enum: [CredentialPresent, CasRequired, Seeded, Rendered, Available, Ready, Entitled, Published, Collision]
                       status:
                         type: string
                         enum: ["True", "False", "Unknown"]

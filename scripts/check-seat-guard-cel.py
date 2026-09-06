@@ -26,14 +26,23 @@ tenant-guard.yaml and its CP PodMonitor render; it is left byte-for-byte untouch
 
 THE BASELINE is not hand-typed: it is the NEWEST Flux-managed git seat whose stem is already the
 mechanical broker-<provider>-<account> (broker-anthropic-claude-max-3.yaml today), loaded from the
-tree and stamped exactly as the controller's render_seat_objects will stamp its 8 objects
-(agentforge.io/broker-seat=<stem>, ONE controller+blockOwnerDeletion ownerReference to BrokerSeat
-<stem>, the render-digest annotation) with the pinned Service's clusterIP set. The git seats and the
-CP's broker templates agree byte-for-byte (the CP's golden suite pins it), so this is the closest
-in-repo artefact to what the provisioner will submit; if the template shape ever changes, the seat
-files change with it and THIS table says whether the guard still admits the new shape. Every deny
-case is that baseline with ONE property changed, and pins WHICH clause denies it (not just "denied"),
-so a case cannot pass because some other clause happened to reject the fixture.
+tree, RE-KEYED to a hypothetical controller account (`<account>-x`: the same stem/aud substitution
+the renderer performs, so every name and OpenBao path follows — a git seat's own audience is exactly
+what validation 13 refuses) and stamped exactly as the controller's render_seat_objects will stamp
+its 8 objects (agentforge.io/broker-seat=<stem>, ONE controller+blockOwnerDeletion ownerReference to
+BrokerSeat <stem>, the render-digest annotation) with the pinned Service's clusterIP set. The git
+seats and the CP's broker templates agree byte-for-byte (the CP's golden suite pins it), so this is
+the closest in-repo artefact to what the provisioner will submit; if the template shape ever changes,
+the seat files change with it and THIS table says whether the guard still admits the new shape. Every
+deny case is that baseline with ONE property changed, and pins WHICH clause denies it (not just
+"denied"), so a case cannot pass because some other clause happened to reject the fixture. The
+un-re-keyed objects (the git seat under its own stem) are the fixtures for validation 13.
+
+FAIL CLOSED on what it cannot model: a policy with matchConstraints.namespaceSelector /
+objectSelector / excludeResourceRules / matchPolicy, or a binding with matchResources / paramRef /
+validationActions other than [Deny], is refused outright (exit 1) rather than evaluated as if those
+narrowings were absent — a selector could otherwise disable enforcement while this table stays green.
+resourceRules ARE modelled (apiGroups, apiVersions, resources incl. subresources, operations).
 
 WHAT IT IS NOT. A fidelity approximation, not the apiserver: cel-python 0.5.0 (the `_==_`/`_!=_`
 null overloads and the strings-extension `split` are re-supplied below, as in the tenant harness);
@@ -47,7 +56,10 @@ is ALLOCATED by the registry before the policy sees the object (so an "unpinned"
 reaches the VAP already carrying an in-CIDR address — pinning is the CRD's `spec.clusterIP`
 contract, the Service clause pins the SHAPE: None for -headless, in-CIDR for <stem>). Likewise a
 request whose namespace differs from its object's is a 400 before admission, so validation 1 is
-exercised only with request == object namespace.
+exercised only with request == object namespace. And a field behind a disabled feature gate is
+DROPPED before admission (1.31 default: `procMount` without ProcMountType), so `dep-ctr-procmount-
+unmasked` denies here but admits — harmlessly, the field is gone — on such a cluster; the predicate
+stays for clusters where the gate exists.
 
 USAGE:  python scripts/check-seat-guard-cel.py            (run in .gitea/workflows/tenant-guard-cel.yaml)
         python scripts/check-seat-guard-cel.py -v         list every case + its verdict
@@ -108,7 +120,9 @@ ANOTHER_UID = "0b1d0b1d-0000-4000-8000-0000deadbeef"
 DIGEST = "sha256:" + "0" * 64
 PINNED_IP = "10.96.0.200"
 OTHER_STEM = "broker-anthropic-other"  # a hypothetical OTHER controller seat
-GIT_STEM = "broker-anthropic-max1"  # a hand-named Flux-managed git seat (KNOWN_STEMS)
+GIT_STEM = "broker-anthropic-max1"  # a hand-named Flux-managed git seat (KNOWN_STEMS) ...
+GIT_ALIAS = "broker-anthropic-claude-max-1"  # ... and the mechanical alias of its audience anthropic/claude-max-1
+UNSUPPORTED_MATCH = ("namespaceSelector", "objectSelector", "excludeResourceRules", "matchPolicy")
 
 SKIP = "skip"
 
@@ -162,7 +176,10 @@ class Baseline:
     provider: str
     account: str
     source: str
-    objects: dict[str, dict[str, Any]] = field(default_factory=dict)  # slot -> object
+    git_stem: str  # the source git seat's own stem (what validation 13 refuses)
+    git_account: str
+    objects: dict[str, dict[str, Any]] = field(default_factory=dict)  # slot -> object, re-keyed
+    git_objects: dict[str, dict[str, Any]] = field(default_factory=dict)  # slot -> object, git stem
 
     @property
     def aud(self) -> str:
@@ -170,6 +187,14 @@ class Baseline:
 
     def kv(self, kind: str) -> str:
         return f"operator/broker/{self.aud}/{kind}"
+
+    def rekeyed(self, slot: str, stem: str, account: str, provider: str | None = None) -> dict[str, Any]:
+        """The slot's object as the renderer would emit it for another stem/account (names, labels,
+        selectors, ownerReference, OpenBao paths all follow); `provider` defaults to the baseline's."""
+        text = json.dumps(self.objects[slot])
+        text = text.replace(f"{self.provider}/{self.account}", f"{provider or self.provider}/{account}")
+        text = text.replace(self.stem, stem)
+        return json.loads(text)
 
 
 def _audience_of(deployment: dict[str, Any]) -> str | None:
@@ -228,27 +253,40 @@ def load_baseline(seat_file: Path | None = None) -> Baseline:
         p for p in BROKER_DIR.glob("broker-*.yaml") if p != INVENTORY
     )
     for path in candidates:
-        docs = [d for d in yaml.safe_load_all(path.read_text(encoding="utf-8")) if d]
+        text = path.read_text(encoding="utf-8")
+        docs = [d for d in yaml.safe_load_all(text) if d]
         deps = [d for d in docs if d.get("kind") == "Deployment"]
         if len(deps) != 1:
             continue
         aud = _audience_of(deps[0])
         if not aud or "/" not in aud:
             continue
-        provider, account = aud.split("/", 1)
-        stem = deps[0]["metadata"]["name"]
-        if stem != f"broker-{provider}-{account}":
+        provider, git_account = aud.split("/", 1)
+        git_stem = deps[0]["metadata"]["name"]
+        if git_stem != f"broker-{provider}-{git_account}":
             if seat_file:
-                raise SystemExit(f"{path}: stem {stem} is not the mechanical broker-{provider}-{account}")
+                raise SystemExit(f"{path}: stem {git_stem} is not the mechanical broker-{provider}-{git_account}")
             continue
-        slots = _slots(docs, stem)
-        for obj in slots.values():
-            obj["metadata"].pop("annotations", None) if obj.get("kind") != "Deployment" else None
-            stamp(obj, stem)
-        # The git seat may not be pinned yet (claude-max-3 isn't); the controller ALWAYS pins.
-        slots["service"]["spec"].setdefault("clusterIP", PINNED_IP)
+        # Re-key to a hypothetical controller account of the same provider: the renderer's own
+        # substitution (aud first, then stem — the two strings never overlap: '/' vs '-').
+        account = f"{git_account}-x"
+        stem = f"broker-{provider}-{account}"
+        rekeyed_text = text.replace(f"{provider}/{git_account}", f"{provider}/{account}").replace(git_stem, stem)
+
+        def _stamped(src: str, s: str) -> dict[str, dict[str, Any]]:
+            slots = _slots([d for d in yaml.safe_load_all(src) if d], s)
+            for obj in slots.values():
+                if obj.get("kind") != "Deployment":
+                    obj["metadata"].pop("annotations", None)
+                stamp(obj, s)
+            # The git seat may not be pinned yet (claude-max-3 isn't); the controller ALWAYS pins.
+            slots["service"]["spec"].setdefault("clusterIP", PINNED_IP)
+            return slots
+
         return Baseline(stem=stem, provider=provider, account=account,
-                        source=path.relative_to(REPO_ROOT).as_posix(), objects=slots)
+                        source=path.relative_to(REPO_ROOT).as_posix(),
+                        git_stem=git_stem, git_account=git_account,
+                        objects=_stamped(rekeyed_text, stem), git_objects=_stamped(text, git_stem))
     raise SystemExit("no git seat with a mechanical broker-<provider>-<account> stem found under "
                      f"{BROKER_DIR} — pass --seat-file explicitly")
 
@@ -332,6 +370,18 @@ def _rule(o: dict[str, Any], direction: str, idx: int) -> dict[str, Any]:
     return o["spec"][direction][idx]
 
 
+def _psc(o: dict[str, Any]) -> dict[str, Any]:
+    return _dep_spec(o)["securityContext"]
+
+
+def _csc(o: dict[str, Any]) -> dict[str, Any]:
+    return _ctr(o)["securityContext"]
+
+
+def _deny(o: dict[str, Any], key: str) -> dict[str, Any]:
+    return next(r for r in o["spec"]["egressDeny"] if key in r)
+
+
 def objects_cases(b: Baseline) -> list[Case]:
     S = b.stem
 
@@ -396,7 +446,8 @@ def objects_cases(b: Baseline) -> list[Case]:
         seat("dep-ownerref-not-controller", "deployment", 3, lambda o: o["metadata"]["ownerReferences"][0].update(controller=False)),
         seat("dep-ownerref-controller-absent", "deployment", 3, lambda o: o["metadata"]["ownerReferences"][0].pop("controller")),
         seat("dep-ownerref-no-blockownerdeletion", "deployment", 3, lambda o: o["metadata"]["ownerReferences"][0].pop("blockOwnerDeletion")),
-        seat("dep-ownerref-wrong-kind", "deployment", 3, lambda o: o["metadata"]["ownerReferences"][0].update(kind="Deployment", apiVersion="apps/v1")),
+        seat("dep-ownerref-wrong-kind", "deployment", 3, lambda o: o["metadata"]["ownerReferences"][0].update(kind="Deployment")),
+        seat("dep-ownerref-wrong-apiversion", "deployment", 3, lambda o: o["metadata"]["ownerReferences"][0].update(apiVersion="agentforge.io/v1beta1")),
         seat("dep-ownerref-empty-uid", "deployment", 3, lambda o: o["metadata"]["ownerReferences"][0].update(uid="")),
         # ---- (4) never a Flux object; UPDATE only over this stem's own object ----------------------
         seat("dep-flux-name-label", "deployment", 4, lambda o: o["metadata"]["labels"].update(
@@ -452,6 +503,13 @@ def objects_cases(b: Baseline) -> list[Case]:
             {"name": "cm", "configMap": {"name": "agentforge-broker-env"}})),
         seat("dep-pvc-volume", "deployment", 7, lambda o: _dep_spec(o)["volumes"].append(
             {"name": "pvc", "persistentVolumeClaim": {"claimName": "x"}})),
+        # the explicit per-type denies are the belt BEHIND the positive secret|emptyDir shape: a
+        # two-source volume (which the apiserver's own validation refuses) must trip them on its own
+        seat("dep-volume-emptydir-plus-hostpath", "deployment", 7, lambda o: _vol(o, "tmp").update(hostPath={"path": "/var/run"})),
+        seat("dep-volume-emptydir-plus-projected", "deployment", 7, lambda o: _vol(o, "tmp").update(
+            projected={"sources": [{"serviceAccountToken": {"path": "token"}}]})),
+        seat("dep-volume-emptydir-plus-configmap", "deployment", 7, lambda o: _vol(o, "tmp").update(configMap={"name": "agentforge-broker-env"})),
+        seat("dep-volume-emptydir-plus-pvc", "deployment", 7, lambda o: _vol(o, "tmp").update(persistentVolumeClaim={"claimName": "x"})),
         seat("dep-env-secretkeyref-other-seat", "deployment", 7, lambda o: _ctr(o)["env"].append(
             {"name": "X", "valueFrom": {"secretKeyRef": {"name": f"{GIT_STEM}-oauth", "key": "CLAUDE_CODE_OAUTH_TOKEN"}}})),
         seat("dep-env-secretkeyref-shared-secret", "deployment", 7, lambda o: _ctr(o)["env"].append(
@@ -469,6 +527,7 @@ def objects_cases(b: Baseline) -> list[Case]:
         seat("svc-type-nodeport", "service", 8, lambda o: o["spec"].update(type="NodePort")),
         seat("svc-type-loadbalancer", "service", 8, lambda o: o["spec"].update(type="LoadBalancer")),
         seat("svc-externalname", "service", 8, lambda o: o["spec"].update(type="ExternalName", externalName="attacker.example")),
+        seat("svc-externalname-field-only", "service", 8, lambda o: o["spec"].update(externalName="attacker.example")),
         seat("svc-externalips", "service", 8, lambda o: o["spec"].update(externalIPs=["192.168.0.50"])),
         seat("svc-extra-port", "service", 8, lambda o: o["spec"]["ports"].append(
             {"name": "ssh", "port": 22, "targetPort": 22, "protocol": "TCP"})),
@@ -544,10 +603,12 @@ def objects_cases(b: Baseline) -> list[Case]:
         seat("cnp-specs-list", "cnp", 12, lambda o: o.update(specs=[copy.deepcopy(o["spec"])])),
         seat("cnp-nodeselector", "cnp", 12, lambda o: o["spec"].update(nodeSelector={"matchLabels": {}})),
         seat("cnp-ingressdeny", "cnp", 12, lambda o: o["spec"].update(ingressDeny=[{"fromEntities": ["world"]}])),
-        seat("cnp-ingress-fromentities-world", "cnp", 12, lambda o: o["spec"]["ingress"].append(
+        # a peer widener ADDED to a well-formed rule (a rule without fromEndpoints is refused by the
+        # structural predicate; these trip the explicit fromEntities/fromCIDR denies on their own)
+        seat("cnp-ingress-fromentities-world", "cnp", 12, lambda o: _rule(o, "ingress", 0).update(fromEntities=["world"])),
+        seat("cnp-ingress-fromcidr", "cnp", 12, lambda o: _rule(o, "ingress", 0).update(fromCIDR=["0.0.0.0/0"])),
+        seat("cnp-ingress-rule-without-fromendpoints", "cnp", 12, lambda o: o["spec"]["ingress"].append(
             {"fromEntities": ["world"], "toPorts": [{"ports": [{"port": "8700", "protocol": "TCP"}]}]})),
-        seat("cnp-ingress-fromcidr", "cnp", 12, lambda o: o["spec"]["ingress"].append(
-            {"fromCIDR": ["0.0.0.0/0"], "toPorts": [{"ports": [{"port": "8700", "protocol": "TCP"}]}]})),
         seat("cnp-ingress-fromendpoints-empty-selector", "cnp", 12, lambda o: o["spec"]["ingress"].append(
             {"fromEndpoints": [{}], "toPorts": [{"ports": [{"port": "8700", "protocol": "TCP"}]}]})),
         seat("cnp-ingress-fromendpoints-no-namespace", "cnp", 12, lambda o: o["spec"]["ingress"].append(
@@ -561,13 +622,13 @@ def objects_cases(b: Baseline) -> list[Case]:
         seat("cnp-ingress-no-toports", "cnp", 12, lambda o: _rule(o, "ingress", 0).pop("toPorts")),
         seat("cnp-ingress-l7-rules", "cnp", 12, lambda o: _rule(o, "ingress", 0)["toPorts"][0].update(
             rules={"http": [{"method": "GET"}]})),
-        seat("cnp-egress-toentities-world", "cnp", 12, lambda o: o["spec"]["egress"].append(
+        # a destination widener ADDED to a well-formed toEndpoints rule (same reasoning as ingress)
+        seat("cnp-egress-toentities-world", "cnp", 12, lambda o: _rule(o, "egress", 1).update(toEntities=["world"])),
+        seat("cnp-egress-tocidr", "cnp", 12, lambda o: _rule(o, "egress", 1).update(toCIDR=["0.0.0.0/0"])),
+        seat("cnp-egress-toservices", "cnp", 12, lambda o: _rule(o, "egress", 1).update(
+            toServices=[{"k8sService": {"serviceName": "openbao", "namespace": "openbao"}}])),
+        seat("cnp-egress-rule-without-destination", "cnp", 12, lambda o: o["spec"]["egress"].append(
             {"toEntities": ["world"], "toPorts": [{"ports": [{"port": "443", "protocol": "TCP"}]}]})),
-        seat("cnp-egress-tocidr", "cnp", 12, lambda o: o["spec"]["egress"].append(
-            {"toCIDR": ["0.0.0.0/0"], "toPorts": [{"ports": [{"port": "443", "protocol": "TCP"}]}]})),
-        seat("cnp-egress-toservices", "cnp", 12, lambda o: o["spec"]["egress"].append(
-            {"toServices": [{"k8sService": {"serviceName": "openbao", "namespace": "openbao"}}],
-             "toPorts": [{"ports": [{"port": "8200", "protocol": "TCP"}]}]})),
         seat("cnp-egress-fqdn-not-allowlisted", "cnp", 12, lambda o: _rule(o, "egress", 2)["toFQDNs"].append(
             {"matchName": "attacker.example"})),
         seat("cnp-egress-fqdn-matchpattern", "cnp", 12, lambda o: _rule(o, "egress", 2)["toFQDNs"].append(
@@ -593,6 +654,130 @@ def objects_cases(b: Baseline) -> list[Case]:
             egressDeny=[r for r in o["spec"]["egressDeny"] if "toCIDR" not in r])),
         seat("cnp-egressdeny-without-node-entities", "cnp", 12, lambda o: o["spec"].update(
             egressDeny=[r for r in o["spec"]["egressDeny"] if "toEntities" not in r])),
+        # the belt must carry EVERY range: the three RFC1918 ones alone (no link-local metadata,
+        # loopback, IPv6) or everything but ::/0 is not the template's belt
+        seat("cnp-egressdeny-belt-rfc1918-only", "cnp", 12, lambda o: _deny(o, "toCIDR").update(
+            toCIDR=["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"])),
+        seat("cnp-egressdeny-belt-without-ipv6", "cnp", 12, lambda o: _deny(o, "toCIDR").update(
+            toCIDR=["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8"])),
+        # ---- (13) never a git-managed audience (review round 1, F1) ------------------------------
+        # the baseline's own source seat under its real stem — every one of its 8 objects is refused
+        # (an ExternalSecret there would sync the git seat's credential into a controller Secret) ...
+        *[Case(name=f"{slot}-git-seat-own-stem", policy=OBJECTS_GUARD, object=copy.deepcopy(obj), expect=13)
+          for slot, obj in b.git_objects.items()],
+        # ... and so is the mechanical ALIAS of a hand-named git seat's audience, for every kind
+        *[Case(name=f"{slot}-git-aud-alias", policy=OBJECTS_GUARD,
+               object=b.rekeyed(slot, GIT_ALIAS, "claude-max-1"), expect=13)
+          for slot in ("deployment", "pdb", "headless", "service", "es-oauth", "es-kids", "es-ledger", "cnp")],
+        # ... and the hand-named stem itself (its child names collide with the git objects)
+        Case(name="es-oauth-hand-named-git-stem", policy=OBJECTS_GUARD,
+             object=b.rekeyed("es-oauth", GIT_STEM, "max1"), expect=13),
+        # while another provider's account under a slug that merely LOOKS like a git one is fine
+        Case(name="es-oauth-other-provider-same-slug-admitted", policy=OBJECTS_GUARD,
+             object=b.rekeyed("es-oauth", "broker-openai-claude-max-1", "claude-max-1", provider="openai"), expect=None),
+        # ---- (5) host namespaces, each on its own (review round 1, F8) ---------------------------
+        seat("dep-hostpid", "deployment", 5, lambda o: _dep_spec(o).update(hostPID=True)),
+        seat("dep-hostipc", "deployment", 5, lambda o: _dep_spec(o).update(hostIPC=True)),
+        # ---- (12) TLS interception / listener (F2), enableDefaultDeny + deny-rule shape (F3), ports (F4)
+        seat("cnp-ingress-terminating-tls", "cnp", 12, lambda o: _rule(o, "ingress", 0)["toPorts"][0].update(
+            terminatingTLS={"secret": {"name": f"{GIT_STEM}-oauth", "namespace": "agentforge-broker"}})),
+        seat("cnp-egress-originating-tls", "cnp", 12, lambda o: _rule(o, "egress", 2)["toPorts"][0].update(
+            originatingTLS={"secret": {"name": "openbao-tls", "namespace": "agentforge-broker"}})),
+        seat("cnp-egress-db-originating-tls", "cnp", 12, lambda o: _rule(o, "egress", 1)["toPorts"][0].update(
+            originatingTLS={"secret": {"name": "openbao-tls"}})),
+        seat("cnp-ingress-listener", "cnp", 12, lambda o: _rule(o, "ingress", 0)["toPorts"][0].update(
+            listener={"envoyConfig": {"name": "x"}, "name": "l"})),
+        seat("cnp-egress-fqdn-servernames", "cnp", 12, lambda o: _rule(o, "egress", 2)["toPorts"][0].update(
+            serverNames=["attacker.example"])),
+        seat("cnp-enabledefaultdeny", "cnp", 12, lambda o: o["spec"].update(enableDefaultDeny={"egress": False})),
+        seat("cnp-egressdeny-belt-narrowed-by-toports", "cnp", 12, lambda o: _deny(o, "toCIDR").update(
+            toPorts=[{"ports": [{"port": "1", "protocol": "TCP"}]}])),
+        seat("cnp-egressdeny-entities-narrowed-by-toports", "cnp", 12, lambda o: _deny(o, "toEntities").update(
+            toPorts=[{"ports": [{"port": "1", "protocol": "TCP"}]}])),
+        seat("cnp-egressdeny-two-selectors", "cnp", 12, lambda o: _deny(o, "toEntities").update(
+            toEndpoints=[{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "openbao"}}])),
+        seat("cnp-egressdeny-extra-key", "cnp", 12, lambda o: _deny(o, "toCIDR").update(
+            toRequires=[{"matchLabels": {"x": "y"}}])),
+        seat("cnp-egressdeny-only-fqdns", "cnp", 12, lambda o: o["spec"].update(egressDeny=[
+            {"toFQDNs": [{"matchName": "x.example"}]}])),
+        seat("cnp-ingress-endport", "cnp", 12, lambda o: _rule(o, "ingress", 0)["toPorts"][0]["ports"][0].update(endPort=9464)),
+        seat("cnp-ingress-port-without-protocol", "cnp", 12, lambda o: _rule(o, "ingress", 0)["toPorts"][0]["ports"][0].pop("protocol")),
+        seat("cnp-egress-dns-endport", "cnp", 12, lambda o: _rule(o, "egress", 0)["toPorts"][0]["ports"][0].update(endPort=65535)),
+        seat("cnp-egress-db-port-without-protocol", "cnp", 12, lambda o: _rule(o, "egress", 1)["toPorts"][0]["ports"][0].pop("protocol")),
+        seat("cnp-egress-fqdn-port-without-protocol", "cnp", 12, lambda o: _rule(o, "egress", 2)["toPorts"][0]["ports"][0].pop("protocol")),
+        seat("cnp-egress-fqdn-endport", "cnp", 12, lambda o: _rule(o, "egress", 2)["toPorts"][0]["ports"][0].update(endPort=65535)),
+        seat("cnp-egress-fqdn-toports-extra-key", "cnp", 12, lambda o: _rule(o, "egress", 2)["toPorts"][0].update(
+            rules={"http": [{}]})),
+        seat("cnp-ingress-fromendpoints-matchexpressions", "cnp", 12, lambda o: _rule(o, "ingress", 0)["fromEndpoints"][0].update(
+            matchExpressions=[{"key": "x", "operator": "Exists"}])),
+        seat("cnp-egress-toendpoints-matchexpressions", "cnp", 12, lambda o: _rule(o, "egress", 1)["toEndpoints"][0].update(
+            matchExpressions=[{"key": "x", "operator": "Exists"}])),
+        seat("cnp-egress-fqdn-entry-extra-key", "cnp", 12, lambda o: _rule(o, "egress", 2)["toFQDNs"][0].update(
+            matchPattern="*.anthropic.com")),
+        seat("cnp-egress-dns-rules-plus-l7", "cnp", 12, lambda o: _rule(o, "egress", 0)["toPorts"][0]["rules"].update(
+            l7proto="x")),
+        # ---- (14) pod / container isolation (review round 1, F6) ---------------------------------
+        seat("dep-pod-sc-absent", "deployment", 14, lambda o: _dep_spec(o).pop("securityContext")),
+        seat("dep-pod-runasnonroot-false", "deployment", 14, lambda o: _psc(o).update(runAsNonRoot=False)),
+        seat("dep-pod-runasuser-0", "deployment", 14, lambda o: _psc(o).update(runAsUser=0)),
+        seat("dep-pod-runasgroup-0", "deployment", 14, lambda o: _psc(o).update(runAsGroup=0)),
+        seat("dep-pod-fsgroup-0", "deployment", 14, lambda o: _psc(o).update(fsGroup=0)),
+        seat("dep-pod-seccomp-unconfined", "deployment", 14, lambda o: _psc(o).update(seccompProfile={"type": "Unconfined"})),
+        seat("dep-pod-seccomp-absent", "deployment", 14, lambda o: _psc(o).pop("seccompProfile")),
+        seat("dep-pod-sysctls", "deployment", 14, lambda o: _psc(o).update(sysctls=[{"name": "net.ipv4.ip_forward", "value": "1"}])),
+        seat("dep-ctr-sc-absent", "deployment", 14, lambda o: _ctr(o).pop("securityContext")),
+        seat("dep-ctr-privileged", "deployment", 14, lambda o: _csc(o).update(privileged=True)),
+        seat("dep-ctr-allowprivesc", "deployment", 14, lambda o: _csc(o).update(allowPrivilegeEscalation=True)),
+        seat("dep-ctr-cap-add", "deployment", 14, lambda o: _csc(o)["capabilities"].update(add=["NET_ADMIN"])),
+        seat("dep-ctr-cap-drop-not-all", "deployment", 14, lambda o: _csc(o)["capabilities"].update(drop=["NET_RAW"])),
+        seat("dep-ctr-cap-absent", "deployment", 14, lambda o: _csc(o).pop("capabilities")),
+        seat("dep-ctr-rootfs-writable", "deployment", 14, lambda o: _csc(o).update(readOnlyRootFilesystem=False)),
+        seat("dep-ctr-runasnonroot-false", "deployment", 14, lambda o: _csc(o).update(runAsNonRoot=False)),
+        seat("dep-ctr-seccomp-unconfined", "deployment", 14, lambda o: _csc(o).update(seccompProfile={"type": "Unconfined"})),
+        seat("dep-ctr-seccomp-absent", "deployment", 14, lambda o: _csc(o).pop("seccompProfile")),
+        seat("dep-ctr-procmount-unmasked", "deployment", 14, lambda o: _csc(o).update(procMount="Unmasked")),
+        seat("dep-ctr-runasuser-0", "deployment", 14, lambda o: _csc(o).update(runAsUser=0)),
+        seat("dep-ctr-runasgroup-0", "deployment", 14, lambda o: _csc(o).update(runAsGroup=0)),
+        seat("dep-ctr-command-override", "deployment", 14, lambda o: _ctr(o).update(command=["/bin/sh", "-c", "id"])),
+        seat("dep-ctr-args-other", "deployment", 14, lambda o: _ctr(o).update(args=["agentforge", "provisioner"])),
+        seat("dep-ctr-args-absent", "deployment", 14, lambda o: _ctr(o).pop("args")),
+        seat("dep-ctr-hostport", "deployment", 14, lambda o: _ctr(o)["ports"][0].update(hostPort=8700)),
+        seat("dep-ctr-stdin", "deployment", 14, lambda o: _ctr(o).update(stdin=True)),
+        seat("dep-ctr-tty", "deployment", 14, lambda o: _ctr(o).update(tty=True)),
+        seat("dep-ctr-volumedevices", "deployment", 14, lambda o: _ctr(o).update(volumeDevices=[{"name": "tmp", "devicePath": "/dev/x"}])),
+        seat("dep-nodename", "deployment", 14, lambda o: _dep_spec(o).update(nodeName="ai-agent-1")),
+        seat("dep-hostaliases", "deployment", 14, lambda o: _dep_spec(o).update(hostAliases=[
+            {"ip": "10.0.0.1", "hostnames": ["api.anthropic.com"]}])),
+        seat("dep-shareprocessnamespace", "deployment", 14, lambda o: _dep_spec(o).update(shareProcessNamespace=True)),
+        seat("dep-imagepullsecrets", "deployment", 14, lambda o: _dep_spec(o).update(imagePullSecrets=[{"name": f"{GIT_STEM}-oauth"}])),
+        seat("dep-scheduler-other", "deployment", 14, lambda o: _dep_spec(o).update(schedulerName="attacker")),
+        seat("dep-pod-sc-defaulted-scheduler-admitted", "deployment", None, lambda o: _dep_spec(o).update(schedulerName="default-scheduler")),
+        # ---- (15) probes / lifecycle (review round 1, F5) ------------------------------------------
+        seat("dep-readiness-host", "deployment", 15, lambda o: _ctr(o)["readinessProbe"]["httpGet"].update(host="10.96.0.1")),
+        seat("dep-liveness-host", "deployment", 15, lambda o: _ctr(o)["livenessProbe"]["httpGet"].update(host="169.254.169.254")),
+        seat("dep-readiness-tcpsocket", "deployment", 15, lambda o: (_ctr(o)["readinessProbe"].pop("httpGet"),
+            _ctr(o)["readinessProbe"].update(tcpSocket={"host": "10.96.0.1", "port": 443}))),
+        seat("dep-readiness-exec", "deployment", 15, lambda o: (_ctr(o)["readinessProbe"].pop("httpGet"),
+            _ctr(o)["readinessProbe"].update(exec={"command": ["/bin/sh", "-c", "true"]}))),
+        seat("dep-liveness-grpc", "deployment", 15, lambda o: (_ctr(o)["livenessProbe"].pop("httpGet"),
+            _ctr(o)["livenessProbe"].update(grpc={"port": 8700}))),
+        seat("dep-readiness-exec-plus-httpget", "deployment", 15, lambda o: _ctr(o)["readinessProbe"].update(
+            exec={"command": ["true"]})),
+        seat("dep-liveness-exec-plus-httpget", "deployment", 15, lambda o: _ctr(o)["livenessProbe"].update(
+            exec={"command": ["true"]})),
+        seat("dep-readiness-path-other", "deployment", 15, lambda o: _ctr(o)["readinessProbe"]["httpGet"].update(path="/healthz")),
+        seat("dep-liveness-path-other", "deployment", 15, lambda o: _ctr(o)["livenessProbe"]["httpGet"].update(path="/readyz")),
+        seat("dep-readiness-port-other", "deployment", 15, lambda o: _ctr(o)["readinessProbe"]["httpGet"].update(port="metrics")),
+        seat("dep-liveness-port-number", "deployment", 15, lambda o: _ctr(o)["livenessProbe"]["httpGet"].update(port=8700)),
+        seat("dep-readiness-httpheaders", "deployment", 15, lambda o: _ctr(o)["readinessProbe"]["httpGet"].update(
+            httpHeaders=[{"name": "Host", "value": "attacker.example"}])),
+        seat("dep-readiness-scheme-https", "deployment", 15, lambda o: _ctr(o)["readinessProbe"]["httpGet"].update(scheme="HTTPS")),
+        seat("dep-readiness-scheme-http-admitted", "deployment", None, lambda o: _ctr(o)["readinessProbe"]["httpGet"].update(scheme="HTTP")),
+        seat("dep-startup-probe", "deployment", 15, lambda o: _ctr(o).update(startupProbe={"httpGet": {"path": "/", "port": "http"}})),
+        seat("dep-lifecycle-poststart", "deployment", 15, lambda o: _ctr(o).update(lifecycle={"postStart": {"httpGet": {"host": "10.96.0.1", "path": "/", "port": 443}}})),
+        seat("dep-lifecycle-prestop-exec", "deployment", 15, lambda o: _ctr(o).update(lifecycle={"preStop": {"exec": {"command": ["true"]}}})),
+        seat("dep-no-readiness-probe", "deployment", 15, lambda o: _ctr(o).pop("readinessProbe")),
+        seat("dep-no-liveness-probe", "deployment", 15, lambda o: _ctr(o).pop("livenessProbe")),
         # ---- the SA gate: other identities writing the same kinds are NOT this policy's business ---
         seat("objects-guard-skips-cp-sa", "deployment", SKIP, unstamp, username=CP_SA),
         seat("objects-guard-skips-flux-sa", "deployment", SKIP, unstamp, username=FLUX_SA),
@@ -652,20 +837,45 @@ class Verdict:
 
 
 def load_policies(path: Path = POLICY) -> dict[str, dict[str, Any]]:
-    out: dict[str, dict[str, Any]] = {}
+    """The policies of `path`, each REQUIRED to be bound the only way this harness can model:
+    exactly one binding, validationActions [Deny], no matchResources/paramRef, and no policy-level
+    namespaceSelector/objectSelector/excludeResourceRules/matchPolicy. Anything else is refused
+    (a selector could disable enforcement while the table stays green)."""
+    policies: dict[str, dict[str, Any]] = {}
+    bindings: dict[str, list[dict[str, Any]]] = {}
     for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
         if doc and doc.get("kind") == "ValidatingAdmissionPolicy":
-            out[doc["metadata"]["name"]] = doc
-    if not out:
+            policies[doc["metadata"]["name"]] = doc
+        elif doc and doc.get("kind") == "ValidatingAdmissionPolicyBinding":
+            bindings.setdefault(doc["spec"]["policyName"], []).append(doc)
+    if not policies:
         raise SystemExit(f"{path}: no ValidatingAdmissionPolicy document")
-    return out
+    for name, pol in policies.items():
+        mc = pol["spec"].get("matchConstraints", {})
+        for key in UNSUPPORTED_MATCH:
+            if key in mc:
+                raise SystemExit(f"{path}: policy {name} sets matchConstraints.{key}, which this harness "
+                                 "cannot model — refusing to evaluate as if it were absent")
+        bs = bindings.get(name, [])
+        if len(bs) != 1:
+            raise SystemExit(f"{path}: policy {name} needs exactly one binding, found {len(bs)}")
+        spec = bs[0]["spec"]
+        if spec.get("validationActions") != ["Deny"]:
+            raise SystemExit(f"{path}: binding for {name} must have validationActions [Deny], has {spec.get('validationActions')}")
+        for key in ("matchResources", "paramRef"):
+            if key in spec:
+                raise SystemExit(f"{path}: binding for {name} sets {key}, which this harness cannot model")
+    return policies
 
 
-def _rule_matches(rule: dict[str, Any], group: str, resource: str, operation: str) -> bool:
+def _rule_matches(rule: dict[str, Any], group: str, version: str, resource: str, operation: str) -> bool:
     groups = rule.get("apiGroups", [])
+    versions = rule.get("apiVersions", [])
     ops = rule.get("operations", [])
     resources = rule.get("resources", [])
     if "*" not in groups and group not in groups:
+        return False
+    if "*" not in versions and version not in versions:
         return False
     if "*" not in ops and operation not in ops:
         return False
@@ -746,7 +956,7 @@ def evaluate(policy: dict[str, Any], case: Case) -> Verdict:
     group, version, plural = RESOURCES[kind]
     resource = plural + (f"/{case.subresource}" if case.subresource else "")
     rules = policy["spec"].get("matchConstraints", {}).get("resourceRules", [])
-    if not any(_rule_matches(r, group, resource, case.operation) for r in rules):
+    if not any(_rule_matches(r, group, version, resource, case.operation) for r in rules):
         return Verdict("skip", "resourceRules")
 
     ns = case.namespace if case.namespace is not None else obj.get("metadata", {}).get("namespace", "")

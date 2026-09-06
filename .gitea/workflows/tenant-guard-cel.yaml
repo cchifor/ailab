@@ -50,7 +50,7 @@ jobs:
   tenant-guard-cel:
     name: tenant-guard + seat-guard CEL admit/deny tables
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
-    # The two tables are ~35 + ~165 in-process CEL evaluations; they finish in well under a minute.
+    # The two tables are ~35 + ~230 in-process CEL evaluations; they finish in well under a minute.
     # The rest is the dependency install, and the cap is here so a wedged install cannot hold a
     # runner slot.
     timeout-minutes: 10

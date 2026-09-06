@@ -72,6 +72,38 @@ class Guards(unittest.TestCase):
             self.assertFalse(b["paramRef"], policy_name)
             self.assertFalse(b["matchResources"], f"{policy_name}: the SA gate is the matchCondition, not a namespace selector")
 
+    def test_no_selector_or_exclusion_can_narrow_the_guards(self) -> None:
+        """scripts/check-seat-guard-cel.py models resourceRules + matchConditions only; a
+        namespaceSelector/objectSelector/excludeResourceRules/matchPolicy on the policy (or a
+        matchResources on the binding, above) could disable enforcement while its table stays green.
+        The harness refuses such a policy outright; this pins the same absence without cel-python."""
+        for policy_name in (CP_GUARD, OBJECTS_GUARD):
+            p = self.policies[policy_name]
+            self.assertEqual(
+                p["narrowing"],
+                {"namespaceSelector": False, "objectSelector": False, "excludeResourceRules": False, "matchPolicy": False},
+                policy_name,
+            )
+
+    def test_git_seat_stems_literal_equals_the_inventory_and_the_crd(self) -> None:
+        """Validation 13's list = every Flux seat's hand-named stem + the mechanical alias of its aud,
+        exactly as scripts/gen-broker-inventory.py load_seats() reports them today, and the CRD's
+        reserved-name rule carries the same set — add or retire a git seat and this goes red until
+        both literals follow."""
+        seats = sup.gbi.load_seats()
+        self.assertTrue(seats)
+        expected = {s.deployment for s in seats} | {f"broker-{s.provider}-{s.account}" for s in seats}
+        literal = sup.cel_string_list(self.policies[OBJECTS_GUARD]["variables"]["gitSeatStems"])
+        self.assertEqual(literal, expected)
+        crd_rules = [r for _, r in sup.crd_rules()]
+        reserved = None
+        for rule in crd_rules:
+            m = re.fullmatch(r"!\(self\.metadata\.name in \[(.*)\]\)", rule)
+            if m:
+                reserved = {p.strip().strip("'") for p in m.group(1).split(",")}
+        self.assertEqual(reserved, expected, "the CRD's reserved list must be the same set")
+        self.assertIn("!(variables.stem in variables.gitSeatStems)", self.policies[OBJECTS_GUARD]["validations"])
+
     def test_cp_guard_covers_brokerseat_create_update_and_status(self) -> None:
         rules = self.policies[CP_GUARD]["resourceRules"]
         self.assertEqual(len(rules), 1)
@@ -115,7 +147,7 @@ class Guards(unittest.TestCase):
     def test_objects_guard_pins_the_designed_invariants(self) -> None:
         p = self.policies[OBJECTS_GUARD]
         text = "\n".join(p["validations"])
-        self.assertEqual(len(p["validations"]), 12)
+        self.assertEqual(len(p["validations"]), 15)
         # the stem is READ from the ownership label (a variable) and every clause derives from it
         self.assertEqual(
             p["variables"]["stem"],
@@ -153,14 +185,39 @@ class Guards(unittest.TestCase):
             "object.spec.endpointSelector == {'matchLabels': {'app.kubernetes.io/name': variables.stem}}",
             "!has(object.specs)",
             "!has(object.spec.ingressDeny)",
+            "!has(object.spec.enableDefaultDeny)",
             "f.matchName in variables.fqdnAllow",
             "object.spec.selector == {'app.kubernetes.io/name': variables.stem}",
+            # review round 1: F2 (TLS/listener), F3 (deny-rule shape), F4 (port entries)
+            "!has(tp.terminatingTLS) && !has(tp.originatingTLS) && !has(tp.serverNames) && !has(tp.listener)",
+            "object.spec.egressDeny.all(r, size(r) == 1 && (has(r.toEntities) || has(r.toCIDR) || has(r.toEndpoints)))",
+            "size(p) == 2 && has(p.port) && has(p.protocol)",
+            # F1 (git audiences), F6 (isolation), F5 (probes), F8 (host namespaces, each its own predicate)
+            "!(variables.stem in variables.gitSeatStems)",
+            "(!has(c.securityContext.privileged) || c.securityContext.privileged == false)",
+            "c.securityContext.allowPrivilegeEscalation == false",
+            "c.securityContext.capabilities.drop == ['ALL']",
+            "!has(c.securityContext.capabilities.add)",
+            "c.securityContext.readOnlyRootFilesystem == true",
+            "variables.podSpec.securityContext.runAsNonRoot == true",
+            "!has(c.command) && has(c.args) && c.args == ['agentforge', 'broker']",
+            "c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)",
+            "!has(c.readinessProbe.httpGet.host)",
+            "!has(c.livenessProbe.httpGet.host)",
+            "!has(c.lifecycle) && !has(c.startupProbe)",
+            "(!has(variables.podSpec.hostPID) || variables.podSpec.hostPID == false)",
+            "(!has(variables.podSpec.hostIPC) || variables.podSpec.hostIPC == false)",
         ):
             self.assertIn(needle, text, needle)
+        # the {port, protocol} entry shape is pinned at all THREE port sites (ingress, toEndpoints
+        # egress, toFQDNs egress); the TLS/listener pin at both egress toPorts sites
+        self.assertEqual(text.count("size(p) == 2 && has(p.port) && has(p.protocol)"), 3)
+        self.assertEqual(text.count("size(tp) == 1 && has(tp.ports)"), 2)
+        self.assertEqual(text.count("!has(tp.terminatingTLS) && !has(tp.originatingTLS) && !has(tp.serverNames) && !has(tp.listener)"), 1)
         self.assertEqual(
             sorted(p["variables"]),
             sorted(["kind", "labels", "stem", "oldLabels", "seatSecrets", "owner", "podSpec", "ctrs",
-                    "vols", "podLabels", "esKeys", "fqdnAllow"]),
+                    "vols", "podLabels", "esKeys", "fqdnAllow", "gitSeatStems"]),
         )
 
     def test_image_regex_semantics(self) -> None:
