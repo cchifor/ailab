@@ -247,6 +247,27 @@ hand. Order of diagnosis:
    override it is what produced this incident. Redeploy with
    `ansible-playbook reviewers.yml -l <host> -t reviewbot`.
 
+**Large PRs are partially reviewed, not skipped whole.** The diff is split into whole files
+before the size cap is applied. Generated/vendored files and binaries by EXTENSION are
+excluded without downgrading the verdict — those rules live in the role, not in the repo under
+review, and a reviewer cannot vouch for a lockfile either way. Three exclusions DO cap the
+verdict at `partial`, which never automerges: bytes that do not decode as UTF-8 (`non-utf8`),
+a path that cannot be read (`unparsable path`), and git's own binary marker on a path the
+extension rules would have read (`binary content` — one NUL inside `payload.sh` is enough to
+produce it). All three triggers are bytes the PR author controls inside an otherwise reviewable
+file, so leaving them at `clean` would let a PR quarantine its own payload and merge it unread.
+Prose shed largest-first for capacity caps the verdict the same way. Code is never truncated:
+if the code alone is over the cap the review is skipped and the notice names the largest files
+so the PR can be split. Paths git C-quotes (any non-ASCII byte, e.g. `"a/caf\303\251.py"`) are
+decoded and reviewed normally, so an accented filename is not a self-exclusion vector.
+
+Every filtered review carries a "Not reviewed" table above the model's summary, so a partial
+review can never be mistaken for a full one. Verdicts are `clean | findings | partial |
+skipped`; the merge gate is an allowlist requiring `clean` from every persona, so the three
+others are non-merging by construction. Tune with `pr_reviewer_exclude_globs` /
+`pr_reviewer_doc_globs` in the role — never from the repo under review, or a PR could exclude
+its own payload.
+
 **Quarantine is now sticky by design.** `enqueue()` dedupes against `quarantined`, which is what
 stops the reconciler re-queueing a hopeless job every 300 s forever (each round costs
 `max_timeout_attempts` x `llm_timeout_s` of a single-threaded worker). A quarantined head is

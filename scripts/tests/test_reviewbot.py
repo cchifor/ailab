@@ -48,6 +48,9 @@ BASE_CFG = {
     "llm_fallback_min_s": 60,
     "llm_effort": "medium",
     "max_diff_bytes": 400000,
+    "max_raw_bytes": 10485760,
+    "exclude_globs": [],
+    "doc_globs": [],
     "max_comments": 15,
     "max_attempts": 5,
     "max_timeout_attempts": 2,
@@ -775,6 +778,110 @@ class StaleHeadTest(unittest.TestCase):
                          "a stale head completing must not clear the current head's quarantine")
 
 
+# The verbatim text the claude CLI returned on 2026-09-06, which quarantined 8 PRs.
+REAL_LIMIT_TEXT = ("llm exit 1: subtype=success result=You've hit your session limit \u00b7 "
+                   "resets 4:20pm (UTC) [stderr: empty]")
+
+
+class RateLimitTest(unittest.TestCase):
+    """A subscription rate limit is an ACCOUNT condition, not a PR failure.
+
+    2026-09-06: every queued PR burned its 5 attempts against the same account-wide wall and
+    quarantined, leaving 8 PRs permanently unreviewed behind an EMPTY QUEUE — the reviewer
+    looked idle and healthy while nothing was being reviewed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+
+    def test_the_real_error_text_is_recognised(self):
+        self.assertTrue(self.m.RATE_LIMIT_RE.search(REAL_LIMIT_TEXT))
+
+    def test_reset_time_is_parsed_from_the_error(self):
+        at = self.m.parse_reset(REAL_LIMIT_TEXT)
+        self.assertIsNotNone(at)
+        self.assertGreater(at, real_time.time())
+        self.assertEqual((16, 20), real_time.gmtime(at)[3:5])
+
+    def test_am_pm_and_midnight_edges(self):
+        for text, hh in (("resets 11:20am (UTC)", 11), ("resets 12:30am (UTC)", 0),
+                         ("resets 12:30pm (UTC)", 12), ("resets 4:20pm (UTC)", 16)):
+            with self.subTest(text=text):
+                self.assertEqual(hh, real_time.gmtime(self.m.parse_reset(text))[3])
+
+    def test_an_unparsable_reset_is_not_fatal(self):
+        self.assertIsNone(self.m.parse_reset("you have hit your session limit, try later"))
+
+    def test_a_far_future_reset_cannot_wedge_the_worker(self):
+        """A misparse must not park the persona for a week."""
+        at = self.m.park(real_time.time() + 90 * 86400)
+        self.assertLessEqual(at - real_time.time(), self.m.MAX_PARK_S + 1)
+
+    def test_no_reset_time_still_parks_for_the_default(self):
+        at = self.m.park(None)
+        self.assertGreater(at - real_time.time(), 60)
+
+    def test_it_never_consumes_an_attempt(self):
+        """THE fix. Attempts must be unchanged, so no number of rate-limit windows can
+        exhaust a PR's retry budget and quarantine it."""
+        e = self.m.RateLimited(REAL_LIMIT_TEXT, real_time.time() + 600)
+        state, attempts, timeouts, note = self.m.next_failure_state(e, 4, 1)
+        self.assertEqual(("retry", 4, 1), (state, attempts, timeouts))
+        self.assertIn("no attempt consumed", note)
+
+    def test_it_never_quarantines_even_at_the_attempt_ceiling(self):
+        e = self.m.RateLimited(REAL_LIMIT_TEXT, None)
+        for attempts in (0, 4, 5, 99):
+            with self.subTest(attempts=attempts):
+                self.assertEqual("retry", self.m.next_failure_state(e, attempts, 0)[0])
+
+    def test_it_is_not_billed_to_the_deadline_budget(self):
+        e = self.m.RateLimited(REAL_LIMIT_TEXT, None)
+        self.assertFalse(self.m.is_budget_failure(e))
+
+    def test_the_worker_defers_the_job_to_the_reset_and_keeps_the_queue(self):
+        head = "a" * 40
+        self.m.enqueue("o/r", 1, head, "webhook")
+        reset = real_time.time() + 1200
+
+        def boom(*a, **k):
+            raise self.m.RateLimited(REAL_LIMIT_TEXT, reset)
+        self.m.review_job = boom
+        self.m.worker_once()
+
+        c = self.m.db()
+        state, attempts, next_at = c.execute(
+            "SELECT state, attempts, next_at FROM jobs WHERE head_sha=?", (head,)).fetchone()
+        c.close()
+        self.assertEqual("retry", state)
+        self.assertEqual(0, attempts, "the PR must not pay for the subscription")
+        self.assertAlmostEqual(reset, next_at, delta=60,
+                               msg="deferred to the reset, not an exponential backoff")
+        self.assertGreater(self.m.RATE_LIMITED_UNTIL, real_time.time())
+
+    def test_the_whole_worker_parks_rather_than_walking_the_queue_into_the_wall(self):
+        """8 PRs quarantined because each one discovered the same wall separately."""
+        for i in range(3):
+            self.m.enqueue("o/r", i + 10, f"{i:040x}", "webhook")
+        calls = []
+
+        def boom(jid, repo, pr, head):
+            calls.append(pr)
+            raise self.m.RateLimited(REAL_LIMIT_TEXT, real_time.time() + 900)
+        self.m.review_job = boom
+        for _ in range(3):
+            self.m.worker_once()
+        self.assertEqual(1, len(calls), "only the first job may hit the wall")
+
+    def test_recovery_after_the_reset(self):
+        self.m.RATE_LIMITED_UNTIL = real_time.time() - 1
+        self.m.enqueue("o/r", 20, "b" * 40, "webhook")
+        self.m.review_job = lambda *a: ("done", 7, "clean")
+        self.assertIsNotNone(self.m.worker_once())
+
+
 class AuxRunTest(unittest.TestCase):
     """Auxiliary subprocesses (reading the model's output file, the auth file) share the
     operation budget, but their OWN timeout must not be billed as an LLM deadline: run_llm
@@ -807,6 +914,364 @@ class AuxRunTest(unittest.TestCase):
         self.assertEqual(5.0, seen["timeout"], "must not use a fixed 60s past the deadline")
         self.m.aux_run(["sudo", "cat", "x"], lambda: 500.0)
         self.assertEqual(60.0, seen["timeout"], "and must still cap at 60s when time is ample")
+
+
+def _sec(path, body=b"+x\n", old=None):
+    """One diff section for `path`, byte-exact in the shape git emits."""
+    old = old or path
+    return (b"diff --git a/" + old.encode() + b" b/" + path.encode() + b"\n"
+            b"--- a/" + old.encode() + b"\n+++ b/" + path.encode() + b"\n"
+            b"@@ -0,0 +1 @@\n" + body)
+
+
+class SplitSectionsTest(unittest.TestCase):
+    """Byte accounting is the whole safety property: if the split is not exact, the diff the
+    model reads is not the diff whose hunk coordinates get validated."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_round_trips_byte_for_byte(self):
+        raw = _sec("a.py") + _sec("b/c.py") + _sec("d.md")
+        secs = self.m.split_sections(raw)
+        self.assertEqual(3, len(secs))
+        self.assertEqual(raw, b"".join(x["data"] for x in secs))
+
+    def test_captures_both_rename_paths(self):
+        sec = self.m.split_sections(_sec("new.py", old="old.py"))[0]
+        self.assertEqual(("old.py", "new.py"), (sec["a"], sec["b"]))
+
+    def test_unquoted_path_with_spaces_is_parsed(self):
+        """Git emits paths containing spaces UNQUOTED in the `diff --git` line. Measured on
+        platform#1084: 8 of 58 headers looked like
+        `a/corpus/Auto Advantage Finance - Binder Packet.pdf b/...`, and a header regex built
+        on \S+ missed every one — which made the whole 3 MB PR unparsable when dropping its
+        PDFs would have left 968 bytes of real content to review."""
+        raw = _sec("dir/Auto Advantage - Packet.pdf")
+        secs = self.m.split_sections(raw)
+        self.assertEqual(1, len(secs))
+        self.assertEqual("dir/Auto Advantage - Packet.pdf", secs[0]["b"])
+        self.assertEqual(raw, secs[0]["data"])
+
+    def test_a_git_quoted_path_is_decoded_and_stays_reviewable(self):
+        """Git quotes any path with a non-ASCII byte and writes C/octal escapes, putting the
+        a//b/ prefix INSIDE the quotes. The escape format is fully specified, so the name is
+        decodable: excluding every such file dropped anyone's accented filename from every
+        review AND gave a PR a one-character way to exclude its own payload."""
+        raw = (b'diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
+               b'--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -0,0 +1 @@\n+x\n')
+        sec = self.m.split_sections(raw)[0]
+        self.assertEqual("caf\u00e9.py", sec["b"])
+        self.assertEqual("caf\u00e9.py", sec["a"])
+        self.assertIsNone(self.m.section_reason(sec), "a normal .py file, oddly named")
+
+    def test_quoted_path_escapes(self):
+        """The decoder accepts exactly git's escape set and refuses everything else — a
+        malformed token must stay 'unparsable path', not become a guessed name."""
+        u = self.m.unquote_path
+        self.assertEqual("caf\u00e9.py", u(b'"caf\\303\\251.py"'))
+        self.assertEqual('a b"c\td.py', u(b'"a b\\"c\\td.py"'))
+        self.assertEqual("back\\slash.py", u(b'"back\\\\slash.py"'))
+        # int(x, 8) would accept every one of the octal forms below; git writes exactly
+        # three octal digits and nothing else.
+        for bad in (b'"unterminated', b'no quotes at all', b'"\\q.py"', b'"\\77"',
+                    b'"\\400.py"', b'"\\303.py"', b'"a"b"',
+                    b'"a/\\0o7.py"', b'"a/\\1_0.py"', b'"a/\\ 12.py"', b'"a/\\089.py"'):
+            with self.subTest(bad=bad):
+                self.assertIsNone(u(bad))
+
+    def test_an_unnameable_section_is_excluded_not_fatal(self):
+        """One section we cannot name must not discard the other 57."""
+        raw = _sec("good.py") + b"diff --git nonsense\n@@ -0,0 +1 @@\n+x\n"
+        secs = self.m.split_sections(raw)
+        self.assertEqual(2, len(secs))
+        self.assertEqual(raw, b"".join(x["data"] for x in secs))
+        self.assertIsNone(secs[1]["b"])
+        self.assertEqual("unparsable path", self.m.section_reason(secs[1]))
+
+    def test_preamble_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.m.split_sections(b"warning: something\n" + _sec("a.py"))
+
+    def test_empty_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.m.split_sections(b"")
+
+
+class SectionReasonTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def _reason(self, path, body=b"+x\n", old=None):
+        return self.m.section_reason(self.m.split_sections(_sec(path, body, old))[0])
+
+    def test_lockfiles_and_vendor_are_generated(self):
+        for path in ("uv.lock", "sub/poetry.lock", "package-lock.json",
+                     "vendor/x.go", "src/vendored/y.py", "node_modules/z.js", "a.min.js"):
+            with self.subTest(path=path):
+                self.assertEqual("generated", self._reason(path))
+
+    def test_binary_extensions(self):
+        for path in ("corpus/report.pdf", "img/logo.PNG", "dist/app.wasm"):
+            with self.subTest(path=path):
+                self.assertEqual("binary", self._reason(path))
+
+    def test_binary_patch_marker_is_its_own_reason(self):
+        """Git's marker is reached only for a path the glob and extension rules would have
+        READ, so it reports the file's bytes, not policy — and one NUL inside payload.sh is
+        enough to produce it. Distinct reason, because this one caps the verdict."""
+        self.assertEqual("binary content",
+                         self._reason("x.dat", b"\nBinary files a/x.dat and b/x.dat differ\n"))
+        self.assertEqual("binary content",
+                         self._reason("payload.sh", b"\nGIT binary patch\nliteral 4\nzc$x\n"))
+
+    def test_a_source_file_that_merely_names_the_marker_is_still_reviewed(self):
+        """Every line of a diff BODY carries a +/-/space prefix, so a column-0 marker can only
+        be git's own. A bare substring search made THIS module classify itself as binary and
+        drop out of its own review: the diff of reviewbot.py contains the marker as source."""
+        body = (b'+    if BIN_MARKER_RE.search(sec["data"]):  # GIT binary patch\n'
+                b'+# Binary files a/x and b/x differ  <- named in a comment\n')
+        self.assertIsNone(self._reason("reviewbot.py", body))
+
+    def test_non_utf8_quarantines_one_file(self):
+        """platform#1074 carried a 0xf6 byte that failed EVERY attempt for 22h. Naming the one
+        unreadable file beats feeding the model replacement characters for the whole PR."""
+        self.assertEqual("non-utf8", self._reason("weird.py", b"+caf\xf6\n"))
+
+    def test_a_pure_rename_is_nameable(self):
+        """A 100%-similarity rename carries no ---/+++ and its `diff --git a/old b/new` header
+        disagrees across the ` b/` split by definition. Before the rename lines were read, every
+        such section was 'unparsable path' — which now caps the verdict, so a plain file move
+        would have blocked automerge on any PR that contained one."""
+        raw = (b"diff --git a/old/x.py b/new/x.py\nsimilarity index 100%\n"
+               b"rename from old/x.py\nrename to new/x.py\n")
+        sec = self.m.split_sections(raw)[0]
+        self.assertEqual(("old/x.py", "new/x.py"), (sec["a"], sec["b"]))
+        self.assertIsNone(self.m.section_reason(sec))
+
+    def test_a_rename_is_disqualified_by_either_side(self):
+        self.assertEqual("generated", self._reason("deps.txt", old="uv.lock"))
+
+    def test_ordinary_code_and_fixtures_are_reviewable(self):
+        """The safety property. Measured across 56 merged PRs, a fixtures/golden/testdata
+        directory rule would have excluded ONLY tests/golden/... and tests/unit/fixtures/*.json
+        — exactly where a regression hides. These must stay in scope."""
+        for path in ("src/app.py", "tests/golden/broker.json", "tests/unit/fixtures/usage.json",
+                     "testdata/case.yaml", "requirements.txt"):
+            with self.subTest(path=path):
+                self.assertIsNone(self._reason(path))
+
+
+class PlanCoverageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def _plan(self, raw, cap):
+        self.m.CFG["max_diff_bytes"] = cap
+        return self.m.plan_coverage(raw)
+
+    def test_everything_fits(self):
+        diff, dropped, cov = self._plan(_sec("a.py") + _sec("b.md"), 100000)
+        self.assertEqual("full", cov)
+        self.assertEqual([], dropped)
+        self.assertIn("a.py", diff)
+
+    def test_generated_exclusion_does_not_downgrade(self):
+        """A lockfile is excluded by POLICY, not capacity — the reviewer can still vouch for
+        the code. Marking every lockfile-touching PR partial would block ~7% of merges."""
+        raw = _sec("uv.lock", b"+" + b"h" * 5000 + b"\n") + _sec("a.py")
+        diff, dropped, cov = self._plan(raw, 100000)
+        self.assertEqual("full", cov)
+        self.assertEqual(["uv.lock"], [p for p, _, _ in dropped])
+        self.assertNotIn("uv.lock", diff)
+
+    def test_docs_shed_largest_first_and_downgrade_to_partial(self):
+        raw = (_sec("code.py", b"+" + b"c" * 200 + b"\n")
+               + _sec("small.md", b"+" + b"s" * 200 + b"\n")
+               + _sec("big.md", b"+" + b"b" * 3000 + b"\n"))
+        diff, dropped, cov = self._plan(raw, 1000)
+        self.assertEqual("partial", cov)
+        self.assertEqual(["big.md"], [p for p, r, _ in dropped if r == "dropped: size cap"])
+        self.assertIn("code.py", diff, "code is never dropped")
+        self.assertIn("small.md", diff, "only shed what is needed, largest first")
+
+    def test_code_alone_over_cap_is_an_honest_skip(self):
+        diff, dropped, cov = self._plan(_sec("huge.py", b"+" + b"x" * 5000 + b"\n"), 1000)
+        self.assertEqual("over", cov)
+        self.assertIsNone(diff)
+
+    def test_a_diff_that_quotes_a_diff_header_does_not_inflate_the_count(self):
+        """Self-referential: this very test file adds lines containing `diff --git a/`, and a
+        substring count would read them as extra files and make the coverage table lie."""
+        body = b'+    raw = b"diff --git a/x b/x"\n'
+        raw = _sec("uv.lock", b"+lock\n") + _sec("tests/t.py", body)
+        diff, dropped, cov = self._plan(raw, 100000)
+        kept = len(self.m.SECTION_START.findall(diff.encode()))
+        self.assertEqual(1, kept, "one real section, despite the literal in the added line")
+        self.assertEqual(2, kept + len(dropped))
+
+    def test_the_over_cap_notice_names_what_is_actually_too_big(self):
+        """When nothing is reviewed, the author needs the BLOCKING files — not a list of the
+        lockfiles we already excluded. Largest first, so the top of the table is what to split
+        out. Measured need: platform#1081 is 406 KB of code with nothing droppable."""
+        raw = (_sec("uv.lock", b"+" + b"l" * 100 + b"\n")
+               + _sec("small.py", b"+" + b"s" * 100 + b"\n")
+               + _sec("enormous.py", b"+" + b"x" * 5000 + b"\n"))
+        diff, dropped, cov = self._plan(raw, 1000)
+        self.assertEqual("over", cov)
+        self.assertIn(("uv.lock", "generated"), [(p, r) for p, r, _ in dropped])
+        over = [p for p, r, _ in dropped if r == "not reviewed: over cap"]
+        self.assertEqual(["enormous.py", "small.py"], over)
+
+    def test_nothing_reviewable_is_not_clean(self):
+        diff, dropped, cov = self._plan(_sec("uv.lock"), 100000)
+        self.assertEqual("none", cov)
+        self.assertIsNone(diff)
+
+    def test_the_measured_platform_1074_shape(self):
+        """Reproduces the real composition: 53% lockfile, 22% docs, 24% code. The lockfile goes
+        by policy; the docs go only because what remains still does not fit; every line of code
+        is reviewed."""
+        raw = (_sec("uv.lock", b"+" + b"l" * 5320 + b"\n")
+               + _sec("plan-a.md", b"+" + b"d" * 1100 + b"\n")
+               + _sec("plan-b.md", b"+" + b"d" * 1100 + b"\n")
+               + _sec("strategies/c_ledger.py", b"+" + b"p" * 1200 + b"\n")
+               + _sec("strategies/e_library.py", b"+" + b"p" * 1200 + b"\n"))
+        diff, dropped, cov = self._plan(raw, 2800)
+        self.assertEqual("partial", cov)
+        self.assertIn("c_ledger.py", diff)
+        self.assertIn("e_library.py", diff)
+        self.assertNotIn("uv.lock", diff)
+        reasons = {p: r for p, r, _ in dropped}
+        self.assertEqual("generated", reasons["uv.lock"])
+        self.assertTrue(any(r == "dropped: size cap" for r in reasons.values()))
+
+    def test_unparsable_diff_raises_rather_than_guessing(self):
+        with self.assertRaises(ValueError):
+            self._plan(b"not a diff at all\n", 100000)
+
+
+class CoverageTableTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_paths_are_neutralised(self):
+        """Diff paths are attacker-controlled and land in a posted comment and in the prompt."""
+        evil = "a/`code`|x\ny.py"
+        t = self.m.coverage_table([(evil, "generated", 1)], 10, 1, 20, 2)
+        self.assertNotIn("`code`", t)
+        self.assertNotIn("\ny.py", t)
+
+    def test_reports_the_arithmetic(self):
+        t = self.m.coverage_table([("a.md", "dropped: size cap", 40)], 60, 2, 100, 3)
+        self.assertIn("1 of 3 files", t)
+        self.assertIn("40 of 100 bytes", t)
+
+
+class RoundCountingTest(unittest.TestCase):
+    """A skipped head must not advance the convergence counter. From round 3 the severity
+    ladder stops holding the merge on `important` findings, so three over-cap skips used to buy
+    a PR its first real review under relaxed rules — measured live on platform#1074/#1072/#1081,
+    each sitting at round 4 with zero reviews between them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def _job(self, head, verdict):
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,verdict,created,updated) "
+                  "VALUES('o/r',1,?,'done',?,?,?)", (head, verdict, real_time.time(), real_time.time()))
+        c.commit()
+        c.close()
+
+    def test_skipped_heads_do_not_advance_the_round(self):
+        for i in range(3):
+            self._job(f"{i:040x}", "skipped")
+        self.assertEqual(1, self.m.review_round("o/r", 1))
+
+    def test_real_reviews_advance_the_round(self):
+        self._job("a" * 40, "clean")
+        self._job("b" * 40, "findings")
+        self.assertEqual(3, self.m.review_round("o/r", 1))
+
+    def test_partial_does_not_advance_the_round(self):
+        self._job("a" * 40, "partial")
+        self.assertEqual(1, self.m.review_round("o/r", 1))
+
+    def test_historical_skips_are_backfilled_not_counted(self):
+        """THE headline bug this change claimed to fix, and nearly did not. Over-cap skips
+        reached state='done' long before the verdict column existed, so counting every NULL
+        verdict as a real review preserved the exact inflation being removed. Measured live:
+        13 such rows across 7 PRs; platform#1074/#1072/#1081 were each at round 4 having never
+        been reviewed once. Their note is the only surviving evidence, and the migration
+        backfills from it.
+
+        Built on a PRE-migration schema on purpose: the backfill fires once, when the column is
+        created, which in production is the first start after deploy — with the legacy rows
+        already present."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        dbp = pathlib.Path(d.name) / "state.sqlite"
+        old = sqlite3.connect(dbp)
+        old.execute("""CREATE TABLE jobs(
+            id INTEGER PRIMARY KEY, repo TEXT, pr INTEGER, head_sha TEXT,
+            state TEXT, attempts INTEGER DEFAULT 0, next_at REAL DEFAULT 0,
+            created REAL, updated REAL, review_id INTEGER, note TEXT)""")
+        for i in range(3):
+            old.execute("INSERT INTO jobs(repo,pr,head_sha,state,note) "
+                        "VALUES('o/r',1,?,'done',?)",
+                        (f"{i:040x}", f"diff {i} B over size cap - skipped"))
+        # one genuine review on a fourth head, which must still count
+        old.execute("INSERT INTO jobs(repo,pr,head_sha,state,note) "
+                    "VALUES('o/r',1,?,'done','2 inline / 0 demoted / findings')", ("f" * 40,))
+        old.commit()
+        old.close()
+
+        m2 = load(d.name)                     # importing runs the migration + backfill
+        self.assertEqual(2, m2.review_round("o/r", 1),
+                         "only the real review counts; the three skips are backfilled")
+        c = m2.db()
+        self.assertEqual(3, c.execute(
+            "SELECT COUNT(*) FROM jobs WHERE verdict='skipped'").fetchone()[0])
+        c.close()
+
+    def test_a_partial_review_with_findings_still_does_not_advance(self):
+        """The downgrade to verdict='partial' only fires on a clean result, so a capacity-
+        limited review that finds a blocker is recorded as 'findings' — correct for the merge
+        gate, but still an incomplete read. Coverage is tracked separately for exactly this."""
+        c = self.m.db()
+        for i in range(2):
+            c.execute("INSERT INTO jobs(repo,pr,head_sha,state,verdict,coverage,created,updated) "
+                      "VALUES('o/r',2,?,'done','findings','partial',?,?)",
+                      (f"{i:040x}", real_time.time(), real_time.time()))
+        c.commit()
+        c.close()
+        self.assertEqual(1, self.m.review_round("o/r", 2),
+                         "two partial reviews must not reach round 3's relaxed severity")
+
+    def test_full_coverage_findings_do_advance(self):
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,verdict,coverage,created,updated) "
+                  "VALUES('o/r',3,?,'done','findings','full',?,?)",
+                  ("a" * 40, real_time.time(), real_time.time()))
+        c.commit()
+        c.close()
+        self.assertEqual(2, self.m.review_round("o/r", 3))
+
+    def test_legacy_rows_without_a_verdict_still_count(self):
+        """Rows written before the verdict column existed were all real reviews."""
+        self._job("a" * 40, None)
+        self.assertEqual(2, self.m.review_round("o/r", 1))
 
 
 class MigrationTest(unittest.TestCase):
@@ -951,20 +1416,24 @@ class SizeCapTest(unittest.TestCase):
         self.m.api = api
 
     def test_over_cap_posts_a_visible_skip_and_never_calls_the_model(self):
+        """Unchanged contract: CODE alone over the cap is still an honest skip, visible in
+        Gitea, with no model call. Only the reachable path changed — the diff is now
+        partitioned first, and this file survives every exclusion tier."""
         head = "a" * 40
-        self._fake_api(b"x" * 101)
+        raw = _sec("big.py", b"+" + b"x" * 200 + b"\n")
+        self._fake_api(raw)
         state, rid, note = self.m.review_job(1, "o/r", 5, head)
         self.assertEqual(state, "done")
         self.assertEqual(rid, 77)
-        self.assertIn("over size cap", note)
+        self.assertIn("skipped", note)
         self.assertEqual(self.llm_calls, [])
         self.assertEqual(len(self.posted), 1)
         path, body = self.posted[0]
         self.assertEqual(path, "/repos/o/r/pulls/5/reviews")
         self.assertEqual(body["event"], "COMMENT")
         self.assertEqual(body["comments"], [])
-        self.assertIn("101 bytes", body["body"])
-        self.assertIn("100-byte cap", body["body"])
+        self.assertIn(f"{len(raw):,} bytes", body["body"])
+        self.assertIn("over the size cap", body["body"])
         self.assertIn(f"<!-- review-bot:v1 persona=test head={head} verdict=skipped -->",
                       body["body"])
         # The marker the skip carries is credible from the persona's own account and
@@ -972,18 +1441,45 @@ class SizeCapTest(unittest.TestCase):
         rv = {"body": body["body"], "user": {"login": "reviewer-test"}}
         self.assertEqual(self.m.marker_of(rv).group(3), "skipped")
 
-    def test_cap_is_measured_on_bytes_and_binary_diffs_do_not_crash(self):
+    def test_a_non_utf8_file_no_longer_costs_the_whole_review(self):
+        """platform#1074 diffed a PDF corpus as text and a strict decode killed EVERY attempt
+        for 22h. Tolerant decoding fixed the crash but fed the model replacement characters for
+        the whole PR; now the unreadable FILE is excluded by name and the rest is still
+        reviewed. The cap is still measured on wire bytes, never on a decoded length."""
         head = "b" * 40
-        # Exactly at the cap, and not valid UTF-8: a strict decode raised before the cap
-        # was ever consulted; a decoded-then-re-encoded length would also differ from the
-        # wire size (replacement chars are 3 bytes each).
-        self._fake_api(b"\xff" * 100)
-        state, rid, note = self.m.review_job(2, "o/r", 6, head)
+        m = load(self.tmp.name, max_diff_bytes=100000)
+        self.setUp_module(m)
+        self._fake_api(_sec("weird.py", b"+caf\xf6\n") + _sec("good.py", b"+ok\n"))
+        state, rid, note = m.review_job(2, "o/r", 6, head)
         self.assertEqual(state, "done")
-        self.assertEqual(len(self.llm_calls), 1)
-        self.assertIsInstance(self.llm_calls[0][2], str)
-        self.assertEqual(self.posted[0][1]["event"], "APPROVED")
-        self.assertIn(f"head={head} verdict=clean", self.posted[0][1]["body"])
+        self.assertEqual(len(self.llm_calls), 1, "the readable file must still be reviewed")
+        sent = self.llm_calls[0][2]
+        self.assertIn("good.py", sent)
+        self.assertNotIn("weird.py", sent, "the unreadable file is not in the prompt diff")
+        body = self.posted[0][1]["body"]
+        self.assertIn("weird.py", body, "but it IS named in the posted coverage table")
+        self.assertIn("non-utf8", body)
+        # An exclusion triggered by a byte the AUTHOR controls inside an otherwise reviewable
+        # file caps the verdict: the merge gate is a clean-only allowlist, so a PR can no
+        # longer quarantine its own payload with one 0xf6 and merge it unread. Policy
+        # exclusions (globs, binary extensions, git's own marker) still do not downgrade.
+        self.assertIn(f"head={head} verdict=partial", body)
+        self.assertNotIn("verdict=clean", body)
+
+    def setUp_module(self, m):
+        """Re-point the stubs at a freshly loaded module (a second `load` in one test)."""
+        m.pr_ok = lambda repo, pr, head: {"head": {"sha": head}, "user": {"login": "someone"},
+                                          "title": "t", "body": ""}
+        m.existing_marker = lambda repo, pr, head: None
+        m.maybe_merge = lambda repo, pr: None
+        m.convergence_context = lambda *a, **k: ""
+        m.review_round = lambda repo, pr: 1
+
+        def run_llm(*a, **k):
+            self.llm_calls.append(a)
+            return {"findings": [], "summary": "looks fine"}
+        m.run_llm = run_llm
+        self.m = m
 
     def test_skipped_verdict_blocks_automerge(self):
         head = "c" * 40
@@ -1005,6 +1501,52 @@ class SizeCapTest(unittest.TestCase):
         m.maybe_merge("o/r", 7)
         self.assertFalse(any(meth == "POST" for meth, _ in calls),
                          f"a skipped verdict must never merge: {calls}")
+
+    def test_policy_exclusions_still_do_not_downgrade(self):
+        """The other half of the contract: a lockfile or a .png must not cost the verdict, or
+        ~7% of merges stall for files no reviewer can vouch for either way."""
+        m = load(self.tmp.name, max_diff_bytes=100000)
+        raw = _sec("uv.lock") + _sec("img/logo.png") + _sec("good.py", b"+ok\n")
+        diff, dropped, coverage = m.plan_coverage(raw)
+        self.assertEqual("full", coverage)
+        self.assertEqual({"generated", "binary"}, {r for _, r, _ in dropped})
+        self.assertIn("good.py", diff)
+
+    def test_git_binary_marker_on_a_reviewable_path_caps_the_verdict(self):
+        """codex cross-review, round 4: one NUL byte in payload.sh makes git emit its own
+        binary marker for it, so an authentic marker is still an author-controlled trigger."""
+        m = load(self.tmp.name, max_diff_bytes=100000)
+        raw = (_sec("payload.sh", b"\nBinary files /dev/null and b/payload.sh differ\n")
+               + _sec("good.py", b"+ok\n"))
+        diff, dropped, coverage = m.plan_coverage(raw)
+        self.assertEqual("partial", coverage, "an unreviewed executable must not ride a clean")
+        self.assertEqual([("payload.sh", "binary content", len(_sec(
+            "payload.sh", b"\nBinary files /dev/null and b/payload.sh differ\n")))], dropped)
+        self.assertIn("good.py", diff)
+
+    def test_author_triggered_exclusion_blocks_automerge(self):
+        """The end-to-end property the cap exists for: a head whose only non-clean signal is
+        an author-triggered exclusion must not merge."""
+        head = "d" * 40
+        m = load(self.tmp.name, automerge=True, merge_authors=["someone"], merge_personas=["test"])
+        marker = f"<!-- review-bot:v1 persona=test head={head} verdict=partial -->"
+        calls = []
+
+        def api(path, method="GET", body=None, raw=False):
+            calls.append((method, path))
+            if path == "/repos/o/r/pulls/7":
+                return {"state": "open", "draft": False, "mergeable": True,
+                        "user": {"login": "someone"}, "labels": [], "head": {"sha": head}}
+            if path.startswith("/repos/o/r/pulls/7/reviews"):
+                return [{"id": 1, "body": f"partial\n\n{marker}",
+                         "user": {"login": "reviewer-test"}}]
+            if path.endswith("/status"):
+                return {"state": "success"}
+            return {}
+        m.api = api
+        m.maybe_merge("o/r", 7)
+        self.assertFalse(any(meth == "POST" for meth, _ in calls),
+                         f"a partial verdict must never merge: {calls}")
 
     def test_api_raw_returns_bytes_without_decoding(self):
         m = self.m

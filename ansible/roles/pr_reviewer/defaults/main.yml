@@ -54,7 +54,25 @@ pr_reviewer_llm_timeout_s: 900
 # Skip the fallback model when less than this is left of the attempt's budget: a 30-second
 # fallback run only produces a second failure, and the retry is the better use of the time.
 pr_reviewer_llm_fallback_min_s: 60
+# The LLM-input cap. Whole files are excluded by class BEFORE this is measured (generated,
+# vendored, binary, non-UTF-8), and prose is shed largest-first if the remainder still does not
+# fit — so this now bounds what the model READS rather than deciding whether it reads anything.
+# Measured over the 7 PRs that hit the cap: 5 become reviewable, 2 are genuinely oversized code
+# and are still skipped, with a composition table telling the author which files to split out.
 pr_reviewer_max_diff_bytes: 400000
+# Intake bound, checked before any parsing. platform#1084 arrived at 3.4 MB (a PDF corpus);
+# there is no reason to partition a payload that large to discover it is unreviewable.
+pr_reviewer_max_raw_bytes: 10485760
+# Whole-file exclusions. These live HERE and in the module defaults — never in the repo under
+# review, or a PR could exclude its own payload. Empty means "use the module defaults"
+# (GENERATED_GLOBS / DOC_GLOBS in reviewbot.py), which is the normal case.
+#   exclude_globs — never reviewed, and NOT a reason to downgrade the verdict
+#   doc_globs     — reviewed when it fits, shed first under pressure, downgrades to `partial`
+# Deliberately NOT directory heuristics like fixtures/ golden/ testdata/: measured across 56
+# merged PRs those matched only tests/golden/… and tests/unit/fixtures/*.json, which is exactly
+# where a regression hides.
+pr_reviewer_exclude_globs: []
+pr_reviewer_doc_globs: []
 pr_reviewer_max_comments: 15
 pr_reviewer_max_attempts: 5
 # Deadline failures are counted SEPARATELY (jobs.timeout_attempts) and capped lower: a timeout
