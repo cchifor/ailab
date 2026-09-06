@@ -28,6 +28,55 @@ subsets:
     ports:
       - { name: metrics, port: 9100, protocol: TCP }
 ---
+# Grafana Alloy on the same two VMs (roles/journal_ship), shipping journald to Loki. Scraped
+# so the SHIPPER ITSELF is monitored: the runbook now says "Grafana first, SSH second" for
+# reviewer incidents, which makes this pipeline load-bearing — and an unmonitored pipeline that
+# quietly stops is exactly the empty-panel failure the reviewbot dashboard work argues against.
+# Feeds ReviewerLogShippingDown / ReviewerLogsDropped in reviewbot-rules.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: reviewer-alloy
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: reviewer-alloy
+spec:
+  clusterIP: None
+  ports:
+    - { name: metrics, port: 12345, targetPort: 12345, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: reviewer-alloy
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: reviewer-alloy
+subsets:
+  - addresses:
+      - { ip: 192.168.0.24 } # reviewer-1 (claude persona)
+      - { ip: 192.168.0.25 } # reviewer-2 (codex persona)
+    ports:
+      - { name: metrics, port: 12345, protocol: TCP }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: reviewer-alloy
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reviewer-alloy
+  endpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: reviewer-alloy
+---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

@@ -201,6 +201,58 @@ tests:
         alertname: ReviewbotReviewFailures
         exp_alerts: []
 
+  # ---------------------------------------------------- log shipping (Alloy)
+  - interval: 1m
+    name: a dead log shipper pages; a live one does not
+    input_series:
+      - series: 'up{job="reviewer-alloy",instance="192.168.0.24:12345"}'
+        values: "0x40"
+      - series: 'up{job="reviewer-alloy",instance="192.168.0.25:12345"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReviewerLogShippingDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-alloy
+              instance: 192.168.0.24:12345
+            exp_annotations:
+              summary: "Reviewer log shipping is down on 192.168.0.24:12345"
+              description: >-
+                Alloy on 192.168.0.24:12345 has been unscrapeable for >15m, so reviewer journals
+                are probably not reaching Loki and the dashboard's Reviewer Errors panel is blind
+                — while still rendering an empty, healthy-looking panel. Check `systemctl status
+                alloy` on the host. If the Loki endpoint moved, the URL is journal_ship_loki_url
+                in roles/journal_ship (pinned to one node IP by design).
+      - eval_time: 5m
+        alertname: ReviewerLogShippingDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: dropped log bytes page, a flat counter does not
+    input_series:
+      - series: 'loki_write_dropped_bytes_total{job="reviewer-alloy",instance="192.168.0.24:12345",reason="rate_limited"}'
+        values: "0 0 0 0 512 512 512 512 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900"
+      # The healthy shape: a counter that exists and never moves must stay silent.
+      - series: 'loki_write_dropped_bytes_total{job="reviewer-alloy",instance="192.168.0.25:12345",reason="rate_limited"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ReviewerLogsDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 192.168.0.24:12345
+              reason: rate_limited
+            exp_annotations:
+              summary: "Reviewer log shipping dropped bytes on 192.168.0.24:12345 (rate_limited)"
+              description: >-
+                Alloy on 192.168.0.24:12345 dropped log bytes in the last hour, reason
+                `rate_limited`. The Reviewer Errors panel is now incomplete without looking
+                incomplete. rate_limited / queue_is_full point at Loki ingestion limits;
+                line_too_long and ingester_error point at the payload.
+
   # --------------------------------------------------------- queue backlog
   - interval: 1m
     name: backlog threshold fires on the incident peak

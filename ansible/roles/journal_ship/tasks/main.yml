@@ -60,6 +60,26 @@
   when: journal_ship_enabled
   notify: Restart alloy
 
+# The package's default is --server.http.listen-addr=127.0.0.1:12345, i.e. unscrapeable.
+- name: Bind Alloy's metrics endpoint to the LAN
+  ansible.builtin.lineinfile:
+    path: /etc/default/alloy
+    regexp: '^CUSTOM_ARGS='
+    line: 'CUSTOM_ARGS="--server.http.listen-addr={{ journal_ship_metrics_listen }}"'
+    create: true
+    mode: "0644"
+  when: journal_ship_enabled
+  notify: Restart alloy
+
+- name: Allow LAN inbound on the Alloy metrics port
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ journal_ship_allow_cidr }}"
+    to_port: "{{ journal_ship_metrics_port }}"
+    proto: tcp
+    comment: alloy metrics scrape from LAN
+  when: journal_ship_enabled
+
 - name: Enable + start Alloy
   ansible.builtin.systemd:
     name: "{{ journal_ship_service }}"
