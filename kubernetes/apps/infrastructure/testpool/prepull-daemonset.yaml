@@ -38,7 +38,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
         - name: control-pin
-          image: registry.chifor.me/testpool/env-control:20260906-9c48b627@sha256:47514f2a10842a6239f3ac1e47db66e530ed813fe7ce6c1a9a91e8731005b3d9
+          image: registry.chifor.me/testpool/env-control:20260906-9c48b627@sha256:483a885a680a16501c4e07994b2b9d1b35e95e59498fe82651a7957db9c2f534
           command: ["sleep", "infinity"]
           resources:
             requests: { cpu: 10m, memory: 16Mi }
