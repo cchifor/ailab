@@ -70,6 +70,14 @@ rules:
   - apiGroups: [""]
     resources: ["endpoints"]
     verbs: ["get"]
+  # Workload QUIESCENCE for a deleted seat (agentforge E2b review round 3): after a background
+  # `kubectl delete bseat` the CR is gone while the Deployment's ReplicaSets linger and can still
+  # create pods, so "no pods right now" is not "no pods ever again". The controller retires a
+  # terminating watch only when the pod LIST is empty AND no ReplicaSet carrying the seat's labels
+  # exists. `replicasets list` (label-selected, metadata only) is that evidence; nothing else.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
