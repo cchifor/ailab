@@ -14,6 +14,7 @@ validated, invalid ones demote to the summary. Phase-1 posture (see plan):
 event=COMMENT locked, central allowlist only, runs as the worker user.
 """
 import fnmatch
+import calendar
 import hashlib
 import hmac
 import io
@@ -589,6 +590,72 @@ def coverage_table(dropped, kept_bytes, kept_files, raw_bytes, total_files):
             f"| file | reason | bytes |\n|---|---|---|\n{rows}\n")
 
 
+# ── subscription rate limits ─────────────────────────────────────────────────────────
+# 2026-09-06: the claude persona hit its Max session limit repeatedly. Every queued PR burned
+# its 5 attempts against the same ACCOUNT-WIDE wall and quarantined, so 8 PRs were left
+# permanently unreviewed with an EMPTY QUEUE - the reviewer looked idle and healthy while
+# nothing was being reviewed. Quarantine is sticky by design, so each needed a manual
+# --requeue.
+#
+# A rate limit is a property of the SUBSCRIPTION, not of the pull request. Billing it to the PR
+# is a category error: no number of retries on that PR can help, and retrying at all just burns
+# the next PR's budget against the same wall. It is now handled by WAITING - visibly, with the
+# queue intact - until the reset the error itself names.
+RATE_LIMIT_RE = re.compile(r"\b(session|usage|rate)[ _-]?limit", re.I)
+# "…resets 4:20pm (UTC)" / "resets 11:20am (UTC)"
+RESET_RE = re.compile(r"resets?\s+(\d{1,2}):(\d{2})\s*([ap]m)?\s*\(?\s*UTC\s*\)?", re.I)
+# Never park longer than this, whatever the text says: a misparse must not wedge the worker.
+MAX_PARK_S = 6 * 3600
+DEFAULT_PARK_S = 900
+# When the whole persona is waiting on its subscription. Module-level because the worker is
+# single-threaded by design - one account, one wall, one timer.
+RATE_LIMITED_UNTIL = 0.0
+
+
+class RateLimited(RuntimeError):
+    """The subscription is exhausted until `reset_at`. Not the PR's fault."""
+
+    def __init__(self, message, reset_at=None):
+        super().__init__(message)
+        self.reset_at = reset_at
+
+
+def parse_reset(text):
+    """Epoch of the reset time named in the error, clamped to a sane window.
+
+    The CLI gives a wall-clock UTC time with no date ("resets 4:20pm (UTC)"), so a time that
+    has already passed today means tomorrow."""
+    m = RESET_RE.search(text or "")
+    if not m:
+        return None
+    hour, minute, ampm = int(m.group(1)), int(m.group(2)), (m.group(3) or "").lower()
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    now = time.gmtime()
+    today = calendar.timegm((now.tm_year, now.tm_mon, now.tm_mday, hour, minute, 0, 0, 0, 0))
+    if today <= time.time():
+        today += 86400
+    # No clamp here: this reports what the error SAID. Clamping at parse time silently
+    # rewrote 4:20pm into "now + 6h", which is a different wall-clock time and made the
+    # value wrong for logging and for the metric. park() is where the bound belongs.
+    return today
+
+
+def park(reset_at):
+    """Stop taking work until the subscription resets. Returns the deadline actually used."""
+    global RATE_LIMITED_UNTIL
+    until = reset_at or (time.time() + DEFAULT_PARK_S)
+    until = max(time.time() + 60, min(until, time.time() + MAX_PARK_S))
+    RATE_LIMITED_UNTIL = max(RATE_LIMITED_UNTIL, until)
+    log(f"subscription rate-limited; parking the worker for "
+        f"{RATE_LIMITED_UNTIL - time.time():.0f}s (queue left intact)")
+    return RATE_LIMITED_UNTIL
+
+
 class ExpensiveFailure(RuntimeError):
     """A non-deadline failure that still consumed most of the attempt's wall-clock budget.
 
@@ -756,6 +823,11 @@ def _run_llm(title, desc, diff_text, rubric, started):
                     pass
         else:
             fb = CFG.get("llm_fallback_model") or ""
+            if r.returncode != 0 and RATE_LIMIT_RE.search(llm_error_text(r.returncode, r.stdout, r.stderr)):
+                # The fallback model runs on the SAME subscription, so retrying it just burns
+                # more of a budget that is already gone. Fail straight through to the parker.
+                detail = llm_error_text(r.returncode, r.stdout, r.stderr)
+                raise RateLimited(detail, parse_reset(detail))
             if r.returncode != 0 and fb:
                 left = max(0.0, deadline - time.monotonic())
                 if left < CFG.get("llm_fallback_min_s", 60):
@@ -1196,7 +1268,7 @@ def write_metrics():
                 "SELECT k,v FROM meta WHERE k IN ('llm_timeouts_total','llm_failures_total',"
                 "'llm_seconds','llm_seconds_max','llm_output_tokens','llm_output_tokens_max',"
                 "'reviews_full_total','reviews_partial_total','reviews_skipped_total',"
-                "'findings_dropped_total')")}
+                "'findings_dropped_total','llm_rate_limited_total')")}
             c.close()
         now = time.time()
         lines = [
@@ -1210,7 +1282,10 @@ def write_metrics():
             f'reviewbot_running_job_age_seconds{{persona="{CFG["persona"]}"}} '
             f'{(now - run_since) if run_since else 0:.0f}',
         ]
-        for key, metric in (("reviews_full_total", "reviewbot_reviews_full_total"),
+        lines.append(f'reviewbot_rate_limited_seconds_remaining{{persona="{CFG["persona"]}"}} '
+                     f'{max(0.0, RATE_LIMITED_UNTIL - now):.0f}')
+        for key, metric in (("llm_rate_limited_total", "reviewbot_llm_rate_limited_total"),
+                            ("reviews_full_total", "reviewbot_reviews_full_total"),
                             ("reviews_partial_total", "reviewbot_reviews_partial_total"),
                             ("reviews_skipped_total", "reviewbot_reviews_skipped_total"),
                             ("findings_dropped_total", "reviewbot_findings_dropped_total"),
@@ -1244,6 +1319,10 @@ def fail_note(e):
         return f"llm deadline exceeded after {CFG['llm_timeout_s']}s"
     if isinstance(e, ExpensiveFailure):
         return f"llm failed after consuming most of the budget: {str(e)[:150]}"
+    if isinstance(e, RateLimited):
+        when = (time.strftime("%H:%M UTC", time.gmtime(e.reset_at)) if e.reset_at
+                else f"~{DEFAULT_PARK_S // 60}m")
+        return f"subscription rate-limited, waiting until {when} (no attempt consumed)"
     return str(e)[:200]
 
 
@@ -1261,6 +1340,10 @@ def next_failure_state(e, attempts, timeouts):
     nothing, an API error fails in seconds), and mixing the two counters would quarantine a
     job that hit one fast transient error and then one real timeout - a mis-quarantine, not a
     conservative policy."""
+    if isinstance(e, RateLimited):
+        # Attempts UNCHANGED. The PR did nothing wrong, and burning its budget here is what
+        # turned one rate-limit window into 8 permanently quarantined PRs.
+        return "retry", attempts, timeouts, fail_note(e)
     expired = is_budget_failure(e)
     attempts += 1
     if expired:
@@ -1291,6 +1374,10 @@ def worker_once():
     `while True`, and the behaviour that matters (which failures burn the deadline budget,
     that counters persist across a later success, that a completed head retires a stale
     quarantine) only exists in the round trip through the database."""
+    # Checked HERE, not just in worker(): while the subscription is exhausted every job
+    # would fail identically, and the guarantee has to hold for whoever claims work.
+    if time.time() < RATE_LIMITED_UNTIL:
+        return None
     with db_lock:
         c = db()
         row = c.execute("SELECT id,repo,pr,head_sha,attempts,timeout_attempts,created "
@@ -1305,8 +1392,15 @@ def worker_once():
         return None
     jid, repo, pr, head_sha, attempts, timeouts, created = row
     timeouts = timeouts or 0
+    limited_until = 0.0
     try:
         state, rid, note = review_job(jid, repo, pr, head_sha)
+    except RateLimited as e:
+        bump_meta("llm_rate_limited_total")
+        limited_until = park(e.reset_at)
+        state, attempts, timeouts, note = next_failure_state(e, attempts, timeouts)
+        rid = None
+        log(f"job {jid} {repo}#{pr} deferred: {fail_note(e)}")
     except Exception as e:
         bump_meta("llm_timeouts_total" if is_budget_failure(e) else "llm_failures_total")
         state, attempts, timeouts, note = next_failure_state(e, attempts, timeouts)
@@ -1314,11 +1408,12 @@ def worker_once():
         log(f"job {jid} {repo}#{pr} attempt {attempts} failed: {fail_note(e)}")
     with db_lock:
         c = db()
+        # A deferred job waits for the SUBSCRIPTION, not for an exponential backoff it did
+        # nothing to earn.
+        next_at = limited_until or (time.time() + min(3600, 60 * 2 ** attempts))
         c.execute("UPDATE jobs SET state=?, attempts=?, timeout_attempts=?, next_at=?, "
                   "updated=?, review_id=?, note=? WHERE id=?",
-                  (state, attempts, timeouts,
-                   time.time() + min(3600, 60 * 2 ** attempts),
-                   time.time(), rid, note, jid))
+                  (state, attempts, timeouts, next_at, time.time(), rid, note, jid))
         if state == "done":
             c.execute("INSERT OR REPLACE INTO meta VALUES('last_success',?)",
                       (str(time.time()),))
@@ -1342,6 +1437,12 @@ def worker():
     while True:
         if inhibited() or posting_disabled():
             time.sleep(15)
+            continue
+        # One account, one wall: while the subscription is exhausted every job would fail
+        # identically, so take no work at all rather than walking the queue into it.
+        wait = RATE_LIMITED_UNTIL - time.time()
+        if wait > 0:
+            time.sleep(min(wait, 30))
             continue
         if worker_once() is None:
             time.sleep(10)

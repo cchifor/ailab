@@ -778,6 +778,110 @@ class StaleHeadTest(unittest.TestCase):
                          "a stale head completing must not clear the current head's quarantine")
 
 
+# The verbatim text the claude CLI returned on 2026-09-06, which quarantined 8 PRs.
+REAL_LIMIT_TEXT = ("llm exit 1: subtype=success result=You've hit your session limit \u00b7 "
+                   "resets 4:20pm (UTC) [stderr: empty]")
+
+
+class RateLimitTest(unittest.TestCase):
+    """A subscription rate limit is an ACCOUNT condition, not a PR failure.
+
+    2026-09-06: every queued PR burned its 5 attempts against the same account-wide wall and
+    quarantined, leaving 8 PRs permanently unreviewed behind an EMPTY QUEUE — the reviewer
+    looked idle and healthy while nothing was being reviewed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+
+    def test_the_real_error_text_is_recognised(self):
+        self.assertTrue(self.m.RATE_LIMIT_RE.search(REAL_LIMIT_TEXT))
+
+    def test_reset_time_is_parsed_from_the_error(self):
+        at = self.m.parse_reset(REAL_LIMIT_TEXT)
+        self.assertIsNotNone(at)
+        self.assertGreater(at, real_time.time())
+        self.assertEqual((16, 20), real_time.gmtime(at)[3:5])
+
+    def test_am_pm_and_midnight_edges(self):
+        for text, hh in (("resets 11:20am (UTC)", 11), ("resets 12:30am (UTC)", 0),
+                         ("resets 12:30pm (UTC)", 12), ("resets 4:20pm (UTC)", 16)):
+            with self.subTest(text=text):
+                self.assertEqual(hh, real_time.gmtime(self.m.parse_reset(text))[3])
+
+    def test_an_unparsable_reset_is_not_fatal(self):
+        self.assertIsNone(self.m.parse_reset("you have hit your session limit, try later"))
+
+    def test_a_far_future_reset_cannot_wedge_the_worker(self):
+        """A misparse must not park the persona for a week."""
+        at = self.m.park(real_time.time() + 90 * 86400)
+        self.assertLessEqual(at - real_time.time(), self.m.MAX_PARK_S + 1)
+
+    def test_no_reset_time_still_parks_for_the_default(self):
+        at = self.m.park(None)
+        self.assertGreater(at - real_time.time(), 60)
+
+    def test_it_never_consumes_an_attempt(self):
+        """THE fix. Attempts must be unchanged, so no number of rate-limit windows can
+        exhaust a PR's retry budget and quarantine it."""
+        e = self.m.RateLimited(REAL_LIMIT_TEXT, real_time.time() + 600)
+        state, attempts, timeouts, note = self.m.next_failure_state(e, 4, 1)
+        self.assertEqual(("retry", 4, 1), (state, attempts, timeouts))
+        self.assertIn("no attempt consumed", note)
+
+    def test_it_never_quarantines_even_at_the_attempt_ceiling(self):
+        e = self.m.RateLimited(REAL_LIMIT_TEXT, None)
+        for attempts in (0, 4, 5, 99):
+            with self.subTest(attempts=attempts):
+                self.assertEqual("retry", self.m.next_failure_state(e, attempts, 0)[0])
+
+    def test_it_is_not_billed_to_the_deadline_budget(self):
+        e = self.m.RateLimited(REAL_LIMIT_TEXT, None)
+        self.assertFalse(self.m.is_budget_failure(e))
+
+    def test_the_worker_defers_the_job_to_the_reset_and_keeps_the_queue(self):
+        head = "a" * 40
+        self.m.enqueue("o/r", 1, head, "webhook")
+        reset = real_time.time() + 1200
+
+        def boom(*a, **k):
+            raise self.m.RateLimited(REAL_LIMIT_TEXT, reset)
+        self.m.review_job = boom
+        self.m.worker_once()
+
+        c = self.m.db()
+        state, attempts, next_at = c.execute(
+            "SELECT state, attempts, next_at FROM jobs WHERE head_sha=?", (head,)).fetchone()
+        c.close()
+        self.assertEqual("retry", state)
+        self.assertEqual(0, attempts, "the PR must not pay for the subscription")
+        self.assertAlmostEqual(reset, next_at, delta=60,
+                               msg="deferred to the reset, not an exponential backoff")
+        self.assertGreater(self.m.RATE_LIMITED_UNTIL, real_time.time())
+
+    def test_the_whole_worker_parks_rather_than_walking_the_queue_into_the_wall(self):
+        """8 PRs quarantined because each one discovered the same wall separately."""
+        for i in range(3):
+            self.m.enqueue("o/r", i + 10, f"{i:040x}", "webhook")
+        calls = []
+
+        def boom(jid, repo, pr, head):
+            calls.append(pr)
+            raise self.m.RateLimited(REAL_LIMIT_TEXT, real_time.time() + 900)
+        self.m.review_job = boom
+        for _ in range(3):
+            self.m.worker_once()
+        self.assertEqual(1, len(calls), "only the first job may hit the wall")
+
+    def test_recovery_after_the_reset(self):
+        self.m.RATE_LIMITED_UNTIL = real_time.time() - 1
+        self.m.enqueue("o/r", 20, "b" * 40, "webhook")
+        self.m.review_job = lambda *a: ("done", 7, "clean")
+        self.assertIsNotNone(self.m.worker_once())
+
+
 class AuxRunTest(unittest.TestCase):
     """Auxiliary subprocesses (reading the model's output file, the auth file) share the
     operation budget, but their OWN timeout must not be billed as an LLM deadline: run_llm
