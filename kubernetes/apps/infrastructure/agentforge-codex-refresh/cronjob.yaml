@@ -289,7 +289,7 @@ spec:
               # python3; 20e55c58 has only agentforge + agentforge-bootstrap. 2026-09-06: re-verified on
               # 78a0be9f (main@5c7cf47) by running the image — /app/.venv/bin/python3 3.12.14 first on PATH,
               # /app/.venv/bin/agentforge-codex-refresh present. Re-check on every orchestrator pin.
-              image: registry.chifor.me/agentforge/orchestrator@sha256:eac5331e064f21cbfdf9512141e0ffc6f36b3b54c7f716875034ed7d01a03b30
+              image: registry.chifor.me/agentforge/orchestrator@sha256:5c1b73f0804ac5cb1b6a5eb6e2f906a0c06751c9db4c7538b062afc4eaa00322
               command: ["python3", "/scripts/refresh.py"]
               volumeMounts:
                 - { name: work, mountPath: /work }
