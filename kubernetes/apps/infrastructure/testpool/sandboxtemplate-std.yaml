@@ -32,7 +32,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: dind
-          image: registry.chifor.me/testpool/env-dind:20260901-1f7d6e25@sha256:0480f62bd40ed66e1112621826e7df6274f13b4e26758f76d0778d8c17501802
+          image: registry.chifor.me/testpool/env-dind:20260906-9c48b627@sha256:86280ae7ccc0f28506d97c1c4127b878da0b6e9b390ba8d106a50cb55593dc5f
           securityContext:
             privileged: true
           command: ["sh", "-c"]
@@ -72,7 +72,7 @@ spec:
             - { name: dsock, mountPath: /run/dsock }
             - { name: work, mountPath: /work }
         - name: control
-          image: registry.chifor.me/testpool/env-control:20260901-da642abc@sha256:36d8ea2dee1523c84d924e0b41cdcaff2343dcd555866414411570f6e1f4f472
+          image: registry.chifor.me/testpool/env-control:20260906-9c48b627@sha256:47514f2a10842a6239f3ac1e47db66e530ed813fe7ce6c1a9a91e8731005b3d9
           command: ["sh", "-c"]
           args:
             - |
