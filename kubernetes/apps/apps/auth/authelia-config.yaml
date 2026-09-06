@@ -75,6 +75,18 @@ data:
         claims_policies:
           agentforge_id_token:
             id_token: ['groups', 'email', 'name', 'preferred_username']
+        # Named client policies (Authelia >= 4.38). `admins_only` denies every authenticated user outside
+        # the `admins` group at the OIDC authorization step (Authelia shows "access denied", no app session
+        # is created). Applied to the first-party admin surfaces — Homepage (oauth2-proxy) and the
+        # registry web UI — so a plain SSO user (Gitea + chat + Grafana viewer) cannot reach them. Every
+        # client left on 'one_factor' is open to any Authelia user by design (Gitea, Grafana, Open WebUI;
+        # the AgentForge CP fails shut on its own without an `af:*` group).
+        authorization_policies:
+          admins_only:
+            default_policy: 'deny'
+            rules:
+              - policy: 'one_factor'
+                subject: ['group:admins']
         clients:
           - client_id: 'grafana'
             client_name: 'Grafana'
@@ -105,7 +117,7 @@ data:
             # plaintext is in the SOPS secret oauth2-proxy-homepage (homepage ns).
             client_secret: '$pbkdf2-sha512$310000$E0TyCO.pOHUf1f7/qGL0IQ$MfA8SKebk4E.zU5LmVQ.tWFOWUwctQVgYgHO4i0A8YXYqZeUtppo1E7p4yF1GqXyKaJoKqiOjDs/S2.K8NF9qw'
             public: false
-            authorization_policy: 'one_factor'
+            authorization_policy: 'admins_only' # admin surface — see authorization_policies above
             consent_mode: 'implicit' # first-party app: auto-grant consent (no prompt) for seamless SSO
             require_pkce: true
             pkce_challenge_method: 'S256'
@@ -121,7 +133,7 @@ data:
             # http.auth.openid. Docker push (ci/htpasswd) + anonymous pull (Talos) are unaffected.
             client_secret: '$pbkdf2-sha512$310000$qq/PKAlfJkUAEttvKgwY3A$wEzLVupv9Wtgxw3uxsIiGk2RWL.qxZoXcbz.o1CddtC84NQGawI6XXnD.n.6SRO7rMncrQygfWrrP64rLUwqFA'
             public: false
-            authorization_policy: 'one_factor'
+            authorization_policy: 'admins_only' # admin surface — see authorization_policies above
             consent_mode: 'implicit'
             require_pkce: false
             redirect_uris:
