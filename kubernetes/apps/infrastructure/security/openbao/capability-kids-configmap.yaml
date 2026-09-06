@@ -91,6 +91,14 @@
 # never syncs and every replica wedges in ContainerCreating. claude-max-3 was omitted when the seat
 # was added (ailab #128) and its pods were stuck for ~46h as a result — keep this in lockstep with
 # `ANTHROPIC_BROKER_ACCOUNTS` (agentforge provisioner/bootstrap.py), the code-side source of truth.
+#
+# anthropic/claude-max-4 (2026-09-06) is entitled here AHEAD of its broker manifest (ailab #487, opened
+# by the control plane): the provisioner publishes the platform-dev kid to every audience listed here
+# on each reconcile pass, so listing the seat first is what makes `af/data/operator/broker/anthropic/
+# claude-max-4/kids` exist by the time #487's `-kids` ExternalSecret asks for it — the opposite order
+# is the 46h ContainerCreating wedge above. Ceilings are identical to its peer seats. (The seat's
+# `-ledger` seed lands in operator-seeds.sops.yaml in this same change; its `-oauth` document was
+# CAS-written by the control plane before #487 was opened.)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -132,6 +140,16 @@ data:
           },
           {
             "audience": "anthropic/claude-max-3",
+            "allowed_models": ["claude-haiku-4-5", "claude-opus-4-8", "claude-sonnet-5"],
+            "allowed_routes": ["/v1/messages", "/v1/messages/count_tokens"],
+            "allowed_methods": ["POST"],
+            "max_ttl_s": 3600,
+            "max_token_budget": 2000000,
+            "max_rate_limit": 120,
+            "max_concurrency": 4
+          },
+          {
+            "audience": "anthropic/claude-max-4",
             "allowed_models": ["claude-haiku-4-5", "claude-opus-4-8", "claude-sonnet-5"],
             "allowed_routes": ["/v1/messages", "/v1/messages/count_tokens"],
             "allowed_methods": ["POST"],
