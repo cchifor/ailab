@@ -1,0 +1,137 @@
+# BrokerSeat — a git-less broker seat materialised by the EXISTING agentforge provisioner
+# (SA openbao/agentforge-provisioner, orchestrator image). One CR == one seat == the same 8 objects a
+# broker-*.yaml carries (Deployment, PDB, 2 Services, 3 ExternalSecrets, CiliumNetworkPolicy), rendered
+# byte-for-byte from the vendored seat templates and OWNED by the CR (ownerReferences, controller +
+# blockOwnerDeletion), so `kubectl delete bseat` (the CP deletes with propagationPolicy=Foreground)
+# cascades and Flux prune (label-tracked) never sees them. Flux-managed seats stay in broker-*.yaml:
+# the metadata.name rule makes a CR unable to take a hand-named git stem, and the controller refuses any
+# aud the readyz map already serves. THE CP MAY ONLY NAME provider/account/clusterIP (VAP
+# agentforge-cp-brokerseat-guard); entitlement, ledger source, image and barrier membership are decided
+# by the provisioner from operator env (AF_PROVISIONER_SEAT_TEMPLATE_AUDS, AF_PROVISIONER_SEAT_IMAGE).
+# cas_required on the seat's oauth path is stamped by the CP (af-cp-sub-rotator) and VERIFIED here.
+# NOTE the file name deliberately does not match broker-*.yaml (scripts/gen-broker-inventory.py glob).
+#
+# INERT in A1 (plans/2026-09-06-brokerseat-controller-plan.md): nothing reads this CRD until the A2
+# pin bump sets AF_PROVISIONER_BROKERSEAT_NAMESPACE on the provisioner, and the CP creates no CR until
+# A3b flips AFP_SEAT_MODE=controller. REVERT ORDER: delete every BrokerSeat BEFORE removing this file —
+# CRD deletion cascades to its CRs, and each CR's Foreground GC then removes the seat's 8 objects
+# (docs/runbooks/agentforge.md § "Controller seats (BrokerSeat)").
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: brokerseats.agentforge.io
+  labels:
+    app.kubernetes.io/name: agentforge-broker
+    app.kubernetes.io/component: brokerseat-crd
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  group: agentforge.io
+  scope: Namespaced
+  names:
+    kind: BrokerSeat
+    listKind: BrokerSeatList
+    plural: brokerseats
+    singular: brokerseat
+    shortNames: [bseat]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - { name: Aud,       type: string,  jsonPath: .status.aud }
+        - { name: Phase,     type: string,  jsonPath: .status.phase }
+        - { name: ClusterIP, type: string,  jsonPath: .spec.clusterIP }
+        - { name: Ready,     type: integer, jsonPath: .status.readyReplicas }
+        - { name: Reason,    type: string,  jsonPath: .status.reason, priority: 1 }
+        - { name: Age,       type: date,    jsonPath: .metadata.creationTimestamp }
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          x-kubernetes-validations:
+            # A controller seat is ALWAYS named broker-<provider>-<account>: the name is a pure function
+            # of the spec, so the CP cannot pick a stem and the child names (<name>, <name>-headless,
+            # <name>-{oauth,kids,ledger}) are derivable by everyone that reads the CR.
+            - rule: "self.metadata.name == 'broker-' + self.spec.provider + '-' + self.spec.account"
+              message: "metadata.name must equal broker-<spec.provider>-<spec.account>"
+            # = the CP renderer's _STEM_MAX: <name>-headless / <name>-ledger must fit 63 characters.
+            - rule: "size(self.metadata.name) <= 52"
+              message: "name too long: pick a shorter account slug"
+            # Every Flux-managed git seat, as the stems a controller seat for the SAME audience would
+            # take: the mechanical broker-<provider>-<account> of its aud (a CR there would duplicate a
+            # seat git already serves — the controller's AudManagedByGit refusal, made an apiserver
+            # refusal AT CREATE with a clear message) AND its hand-named stem where the two differ
+            # (broker-anthropic-max1 = anthropic/claude-max-1, ...: those names happen to satisfy the
+            # mechanical rule for another slug, and their 8 child names would collide with the git
+            # objects). The SAME literal is the objects guard's variables.gitSeatStems
+            # (brokerseat-admission.yaml, validation 13). BOTH lists are DERIVED by
+            # scripts/gen-broker-inventory.py from the broker-*.yaml seats (`--write` regenerates them,
+            # `--check` — CI — reports DRIFT), so adding or retiring a git seat never means editing them
+            # by hand; scripts/tests/test_brokerseat_crd.py additionally pins the span to load_seats().
+            # ⚙ GENERATED — do NOT hand-edit this rule. See scripts/gen-broker-inventory.py.
+            - rule: "!(self.metadata.name in ['broker-anthropic-claude-max-1', 'broker-anthropic-claude-max-2', 'broker-anthropic-claude-max-3', 'broker-anthropic-max1', 'broker-anthropic-max2', 'broker-openai-codex', 'broker-openai-codex-pro'])"
+              message: "metadata.name is a Flux-managed git seat's stem or the mechanical alias of its audience; controller seats cannot take it"
+          properties:
+            spec:
+              type: object
+              required: [provider, account, clusterIP]
+              x-kubernetes-validations:
+                # Immutable: a pinned Service cannot be re-pinned in place. Change = delete + re-create.
+                - rule: "self == oldSelf"
+                  message: "spec is immutable; delete and re-create the BrokerSeat"
+              properties:
+                provider:
+                  type: string
+                  enum: [anthropic, openai]
+                account:
+                  type: string
+                  minLength: 1
+                  maxLength: 35
+                  pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+                  x-kubernetes-validations:
+                    - rule: "!(self in ['tenants', 'operator', 'shared', 'default', 'headless'])"
+                      message: "reserved account slug"
+                clusterIP:
+                  # Allocated by the control plane from AFP_BROKER_CLUSTERIP_POOL (10.96.0.192/26); MUST be
+                  # inside the cluster Service CIDR 10.96.0.0/12 or the apiserver refuses the Service.
+                  type: string
+                  pattern: "^10\\.(9[6-9]|10[0-9]|11[01])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"
+            status:
+              type: object
+              properties:
+                aud: { type: string }
+                phase:
+                  type: string
+                  enum: [Pending, Seeding, Rendering, Ready, Degraded, Terminating]
+                observedGeneration: { type: integer, format: int64 }
+                reason: { type: string, maxLength: 64 }
+                message: { type: string, maxLength: 1024 }
+                readyReplicas: { type: integer, minimum: 0 }
+                renderDigest: { type: string, maxLength: 71 }
+                image: { type: string, maxLength: 256 }
+                serviceURL: { type: string }
+                headlessURL: { type: string }
+                lastReconciledAt: { type: string, format: date-time }
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type:
+                        type: string
+                        # Entitled = the extended declaration names the aud for >= 1 workspace; Published =
+                        # the aud's kids registry holds >= 1 committed kid (plan amendment F9, both).
+                        enum: [CredentialPresent, CasRequired, Seeded, Rendered, Available, Ready, Entitled, Published, Collision]
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      reason: { type: string, maxLength: 64 }
+                      message: { type: string, maxLength: 1024 }
+                      observedGeneration: { type: integer, format: int64 }
+                      lastTransitionTime: { type: string, format: date-time }

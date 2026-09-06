@@ -19,6 +19,13 @@ resources:
   - configmap.yaml # SHARED non-secret AF_BROKER_ env + ledger coordinates (audience is per-Deployment)
   - servicemonitor.yaml # kube-prometheus scrape of af_broker_* (CNP ingress (2) already admits ns monitoring on 9464)
   - orchestrator-endpoints-rbac.yaml # orchestrator READ on broker Endpoints (Kata pod-IP resolution)
+  # -- BrokerSeat controller seats (plans/2026-09-06-brokerseat-controller-plan.md, A1: INERT until A2/A3b) --
+  # File names deliberately OUTSIDE the broker-*.yaml glob scripts/gen-broker-inventory.py derives the
+  # git-seat inventory from (test_brokerseat_crd.py pins that). Nothing reads these until the provisioner
+  # is pointed at the namespace (A2) and the CP flips to controller mode (A3b); zero behaviour change.
+  - brokerseat-crd.yaml # CRD brokerseats.agentforge.io (name CEL-locked, spec immutable, status subresource)
+  - brokerseat-rbac.yaml # provisioner (CR+children, no delete/watch/secrets) + CP (CR create/get/list/delete, services get) Roles
+  - brokerseat-admission.yaml # VAPs: CP may only name provider/account/clusterIP; provisioner writes only seat-shaped objects
   # -- PER-ACCOUNT fan-out (Deployment + PDB + Service + 3 ExternalSecrets + CiliumNetworkPolicy each) --
   - broker-anthropic-max1.yaml # audience anthropic/claude-max-1 (upstream Anthropic)
   - broker-anthropic-max2.yaml # audience anthropic/claude-max-2 (upstream Anthropic)

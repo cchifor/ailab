@@ -155,7 +155,7 @@ ForgeWebhookHMACFailures / ForgeReconcileDriftHigh → ntfy. First diagnostics s
 
 | Namespace | What lives there |
 |---|---|
-| `agentforge-broker` | Per-account **broker** Deployments `broker-anthropic-max1`, `broker-anthropic-max2`, `broker-openai-codex` (each **2 replicas** + PDB + a **pinned-ClusterIP** Service on :8700). Also the `af-codex-refresh` CronJob. Brokers run the `…/agentforge/orchestrator` image (CLI-free broker build), NOT p1-worker. |
+| `agentforge-broker` | Per-account **broker** Deployments `broker-anthropic-max1`, `broker-anthropic-max2`, `broker-openai-codex` (each **2 replicas** + PDB + a **pinned-ClusterIP** Service on :8700). Also the `af-codex-refresh` CronJob. Brokers run the `…/agentforge/orchestrator` image (CLI-free broker build), NOT p1-worker. Since plan A1 also the `BrokerSeat` CRD + seat RBAC/VAPs (inert until A2/A3b — see *Controller seats (BrokerSeat)* below). |
 | `agentforge-sandbox` | Ephemeral **Kata microVM** Job pods `af-sbx-*` (one per agent run), the reaper's cross-ns RBAC target, the sandbox-guard / sandbox-job-guard VAPs, and the shared NFS staging/workspace PVs. |
 | `af-tenant-tenant-zero-playground` | The planner **orchestrator** Deployment `af-orch-playground-planner` (the KEDA scale **target**, `agentforge serve`, `AF_EXECUTOR=sandbox`) + the KEDA `ScaledObject/af-orch-playground-planner`. Runs as SA `af-orch-playground-planner`. |
 | `agentforge` | Trusted home: `agentforge-dispatcher` (always-on KEDA scale **oracle**, exports `forge_pending`), `agentforge-reaper` (leader-elected GC of leaked Jobs/Pods/dirs), and `agentforge-platform` (the CP webapp/reconciler). |
@@ -467,3 +467,160 @@ sops edit kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.ya
 #        docs/runbooks/openbao-recovery.md § "The seed-ownership contract")
 # 3. commit + PR as usual; no cluster action needed (the seeds file is read at provision time only)
 ```
+
+## Controller seats (BrokerSeat) — git-less seats materialised by the provisioner
+
+> **Status: A1 landed, INERT** (`plans/2026-09-06-brokerseat-controller-plan.md`). The CRD
+> `brokerseats.agentforge.io`, the two Roles and the two ValidatingAdmissionPolicies exist in
+> `kubernetes/apps/infrastructure/agentforge-broker/brokerseat-{crd,rbac,admission}.yaml`, but
+> **nothing reads them yet**: the provisioner only starts reconciling once A2 sets
+> `AF_PROVISIONER_BROKERSEAT_NAMESPACE`, and the control plane only creates a CR once A3b flips
+> `AFP_SEAT_MODE=controller`. Until then the four `broker-*.yaml` git seats are the whole estate and
+> everything above about them is unchanged. The kind-based pre-flip check (plan F18,
+> `scripts/seat-kind-check.sh`, attached to A3b) is **pending** — not built in A1. What A1 DID prove
+> on a throwaway kind v1.31.4 cluster (2026-09-06, not committed): the CRD and both policies apply
+> and compile (the objects guard's first draft did not — cel-go refuses a `[dyn, string]` list
+> literal that cel-python accepts, which is exactly why F18 must run before the flip); every CRD CEL
+> rule (mechanical name, reserved git stems, reserved slugs, CIDR, immutability) and 85 of the
+> harness's cases replay with identical verdicts through server dry-runs under SA impersonation,
+> including a provisioner UPDATE over a Flux-labelled git object being refused.
+
+A controller seat is one `BrokerSeat` CR in `agentforge-broker`, named `broker-<provider>-<account>`
+(the CRD's CEL forces that name and refuses the hand-named git stems), whose spec is ONLY
+`{provider, account, clusterIP}` — the control plane names those three, the provisioner decides
+everything else (image from `AF_PROVISIONER_SEAT_IMAGE`, ledger DSN + entitlement cloned from the
+provider's template seat in `AF_PROVISIONER_SEAT_TEMPLATE_AUDS`, barrier membership from Ready). Per CR
+the provisioner renders the SAME 8 objects a `broker-*.yaml` carries (Deployment, PDB, `<stem>-headless`
++ pinned `<stem>` Service, `<stem>-{oauth,kids,ledger}` ExternalSecrets, CiliumNetworkPolicy), byte-for-byte
+from the vendored seat templates.
+
+### Ownership: how to tell a controller seat's objects from a git seat's
+
+| Marker | Controller seat object | Flux-managed git seat object |
+|---|---|---|
+| `metadata.labels["agentforge.io/broker-seat"]` | **`<stem>`** (the CR name) | absent |
+| `metadata.ownerReferences` | **exactly one**: `BrokerSeat/<stem>`, `controller: true`, `blockOwnerDeletion: true`, `uid` = the CR's | absent |
+| `metadata.annotations["agentforge.io/render-digest"]` | `sha256:…` of the desired body (steady state = no write) | absent |
+| `kustomize.toolkit.fluxcd.io/name` label | **never** (admission refuses it) | `agentforge-broker` |
+| Flux `prune: true` | never sees it (not label-tracked) | owns it |
+
+```bash
+kubectl --context admin@ai -n agentforge-broker get bseat                      # Aud / Phase / ClusterIP / Ready / Age
+kubectl --context admin@ai -n agentforge-broker get bseat -o wide              # + Reason
+kubectl --context admin@ai -n agentforge-broker get deploy,svc,pdb,externalsecret,cnp \
+  -l agentforge.io/broker-seat=<stem>                                          # the 8 owned objects
+kubectl --context admin@ai -n agentforge-broker get deploy -o custom-columns=\
+'NAME:.metadata.name,SEAT:.metadata.labels.agentforge\.io/broker-seat,FLUX:.metadata.labels.kustomize\.toolkit\.fluxcd\.io/name'
+```
+
+### Who may write what (RBAC + admission, both in this repo)
+
+| Identity | RBAC (brokerseat-rbac.yaml) | Admission pin (brokerseat-admission.yaml) |
+|---|---|---|
+| CP `agentforge/agentforge-platform` | `brokerseats` create/get/list/delete; `services` get (teardown witness). NO update/patch/status. | `agentforge-cp-brokerseat-guard`: a CR it creates carries no finalizers, ownerReferences, labels, annotations or status, and is named `broker-<provider>-<account>`. |
+| provisioner `openbao/agentforge-provisioner` | `brokerseats` get/list/patch, `/status` patch, `/finalizers` update; the 5 child kinds get/create/update. NO delete, NO watch, NO list on children, NO secrets/configmaps/pods. | `agentforge-provisioner-seat-objects-guard`: every object it writes is named from its stem, labelled + owner-referenced by its CR, never Flux-labelled, never replacing an object that is not already that CR's, and structurally the template's shape (one digest-pinned container as SA `agentforge-broker`, only its own three Secrets, Services/PDB/CNP selecting its own pods, ExternalSecrets on `agentforge-broker-store` sourcing only `operator/broker/<p>/<a>/{oauth,kids,ledger}`, no `target.template`, only the template's CNP rule shapes). |
+
+Both guards also carry the list of **git-managed stems** (each Flux seat's hand-named stem and the
+mechanical `broker-<provider>-<account>` alias of its audience): the CRD refuses a CR named that way at
+create, the objects guard refuses any seat object under such a stem (validation 13 — it is what stops an
+ExternalSecret `<alias>-oauth` from syncing a git seat's credential into a new Secret name). Both
+spans are **generated**: `scripts/gen-broker-inventory.py --write` (`just af-gen-brokers`) derives
+them from the `broker-*.yaml` seats exactly like the readyz URLs/map, and `--check` (the
+broker-inventory CI gate) reports DRIFT when they differ — adding or retiring a git seat is still
+"add the manifest, regenerate", never a hand edit (`test_brokerseat_{crd,admission}.py` pin the spans to
+`load_seats()` as a second belt). The control plane vendors this generator byte for byte
+(`agentforge-platform` `adapters/gitops/broker_renderer.py::INVENTORY_GENERATOR_PATH`, checked before
+every add/Retry), so a generator change here needs a platform re-vendor PR (goldens +
+`scripts/golden_drift.py`) before the next control-plane seat add or Retry renders against it. What
+admission cannot do is look the cluster up: whether one of a seat's 8 derived names already exists
+under a foreign owner stays the controller's `NameCollision` refusal (plus the apiserver's own 409 on
+create and the objects guard's same-owner rule on update).
+
+An admission **denial** (`kubectl` / provisioner log line starting `agentforge CP …` or `agentforge
+provisioner …`) is never a configuration step you are missing: the writer submitted a non-seat shape.
+Treat it as a bug in the writer (or a compromised SA) and read the failing clause's comment in
+`brokerseat-admission.yaml`. The CEL of both guards is proven by
+`scripts/check-seat-guard-cel.py` (cel-python; the baseline is the stamped render of the newest git seat,
+one adversarial mutation per clause) — run it after **every** edit of that file, it is what
+`.gitea/workflows/tenant-guard-cel.yaml` runs:
+
+```bash
+uv run --no-project --with 'cel-python==0.5.0' python3 scripts/check-seat-guard-cel.py -v
+python3 -m unittest discover -s scripts/tests -p "test_brokerseat_*.py" -v     # CRD/RBAC/VAP shape pins (stdlib)
+```
+
+### Refusal reasons (`status.phase` / `status.reason`) and what each means
+
+The provisioner writes status ONLY when it changes; `kubectl get bseat -o wide` shows the reason,
+`-o yaml` the message and conditions. Every refusal below is **zero writes** for that seat that pass and
+an `af_provisioner_alerts_total{alert="brokerseat-*"}` increment; the other seats and the tenant pass
+are unaffected (per-CR isolation).
+
+| Phase / Reason | Meaning | What to do |
+|---|---|---|
+| `Pending` / `CredentialMissing` | `af/data/operator/broker/<aud>/oauth` is absent or soft-deleted (the CP writes it in the wizard add). | Retry the add from the wizard; nothing is rendered until the credential exists. |
+| `Pending` / `CasNotStamped` | The oauth path's KV metadata has no `cas_required=true` (the CP stamps it at add; plan D2, #287). An unstamped seat is **never rendered**. | Retry from the wizard (re-stamps). |
+| `Degraded` / `AudManagedByGit` | The CR's aud is in the provisioner's readyz map, i.e. it is one of the Flux seats. | Delete the CR (it is a duplicate of a git seat); the git seat stays untouched. |
+| `Degraded` / `NameCollision` | One of the 8 derived names exists WITHOUT this CR's ownerReference uid — a git object, a hand-made object, or a previous incarnation still being garbage-collected. The controller never adopts, never fights Flux. | Wait one pass if a delete is in flight; otherwise remove the foreign object through git / the wizard. Admission (`Flux label` / `same owner uid` clauses) refuses any write to it regardless. |
+| `Degraded` / `ClusterIPImmutable` | The live pinned Service's clusterIP ≠ `spec.clusterIP`. The spec is immutable (CRD CEL), so nothing can be corrected in place. | Remove + re-add from the wizard (delete + re-create). |
+| `Degraded` / `ClusterIPRejected` | The apiserver refused the pinned address (already assigned to another Service). | Retry from the wizard: Foreground-delete, wait for CR + Service 404, allocate a fresh address, re-create (plan F22). |
+| `Degraded` / `SpecInvalid` | Spec failed the controller's own parse (slug / CIDR) — should be impossible past the CRD schema. | Delete the CR; report. |
+| `Seeding` / `LedgerSourceUnset` | `AF_PROVISIONER_SEAT_TEMPLATE_AUDS` names no template seat for this provider (fail closed). | Fix the provisioner env (A2 PR); the seat converges on the next pass. |
+| `Degraded` / `KidsDocInvalid` or `LedgerDocInvalid` | An existing `…/kids` or `…/ledger` doc for this aud does not parse / lacks `AF_BROKER_LEDGER_DSN`. Seeds are create-if-absent and are **never overwritten**. | Inspect the doc through the operator token (names only in logs); fix or soft-delete it; never resurrect a soft-deleted doc. |
+| `Rendering` / `DeploymentUnavailable` | All 8 objects exist but the Deployment has no available replica (the pod readinessProbe IS `/readyz`, fail-closed on ledger/credential). | Debug the pods exactly like a git seat (§ Broker debugging): ESO `NotReady`, image pull, ledger reachability. |
+| `Degraded` / `<ExceptionName>` | A per-CR error (OpenBao / seat API / provisioner) — alert `brokerseat-reconcile-error`. | Provisioner logs for the named exception; the seat is retried every pass. |
+| `Terminating` | `deletionTimestamp` set — teardown in progress (below). | Wait; nothing to do. |
+| `Ready` with condition `Entitled=False` | The seat serves the credential but no workspace kid names its aud yet (the clone from the template seat found no entitled workspace). | Loud, not fatal: add a `capability-kids` ConfigMap entry or entitle the template seat; explicit ConfigMap entries always win. |
+
+Alerts to watch: `brokerseat-list-unreadable` (CR LIST failing → last-good view kept, barrier defers new
+kids — safe direction), `brokerseat-inventory-unknown` (3 consecutive unknown passes since process
+start), `brokerseat-collision`, `brokerseat-reconcile-error`.
+
+### Teardown = Foreground delete, and how the address is released
+
+The wizard's remove (or a cancel) makes the CP `DELETE` the CR with `propagationPolicy: Foreground` and a
+uid precondition. Kubernetes GC then deletes the 8 `blockOwnerDeletion` dependents FIRST (Deployment →
+ReplicaSets → Pods, both Services, the PDB, the three ExternalSecrets and their owned Secrets, the CNP);
+the provisioner's finalizer `agentforge.io/brokerseat` holds the CR until it has GETs of all 8 returning
+404, then removes itself; the CR disappears. The CP's witness for "address released" is **CR 404 AND the
+pinned Service `<stem>` 404** (the `services: get` grant) — the apiserver, not a probe window, is the
+authority, and only then is the ClusterIP freed in the CP's DB. The OpenBao docs (`oauth`/`kids`/`ledger`)
+are left in place, exactly as for a git seat remove — the operator KV soft-delete step the CP's
+`cleanup_required` names is unchanged. Break-glass by hand MUST be
+`kubectl --context admin@ai -n agentforge-broker delete bseat <stem> --cascade=foreground`: kubectl's
+default is a **background** delete, and background GC waits for the owner to disappear while the
+provisioner's finalizer waits for the children to disappear — a deadlock that leaves the CR
+`Terminating` and the 8 objects in place. (Foreground is the only propagation the CP uses; orphan and
+background propagation are untested until the A3b live proof.) A hand delete also leaves the CP row in
+drift until **Repair** re-creates it — prefer the wizard.
+
+### Revert order (never remove the CRD while a CR exists)
+
+1. **A3b** (`AFP_SEAT_MODE=controller` → `gitops`): configuration-only; new adds open PRs again, existing
+   controller seats keep serving and stay removable/repairable (mode is persisted per account).
+2. Remove every controller seat from the wizard and wait until `kubectl -n agentforge-broker get bseat`
+   is empty and the pinned Services are gone. The controller must still be running for this step (it
+   removes its finalizer).
+3. **A2** (unset `AF_PROVISIONER_BROKERSEAT_NAMESPACE` / pin back): the controller stage becomes a no-op.
+4. **A1** (this section's files) only after step 2. Deleting the CRD cascades to any remaining CR, and a
+   CR carrying the provisioner's finalizer with no controller left to remove it wedges the CRD deletion
+   (`customresourcecleanup` waits forever) — which is why CRs go first. An image or CRD rollback while
+   seats exist is refused by this order, not by tooling.
+
+### DR
+
+- **A CR vanished out of band** (hand delete, etcd restore): the CP row shows drift ("controller seat
+  missing"); **Repair** on the row re-creates the CR from the persisted spec (same name, same clusterIP);
+  the kids/ledger seeds are create-if-absent so re-adding converges on the retained docs; the oauth doc
+  is untouched. Never duplicate-add.
+- **Cluster rebuilt from git**: Flux re-applies A1 (CRD/RBAC/VAPs); A2's env brings the controller up on
+  zero CRs; each controller-managed account is re-added from the wizard (Repair per row). Git seats come
+  back with Flux as today.
+
+### Operator env the provisioner will read (set by A2, NOT by A1)
+
+| Env (provisioner-deploy.yaml) | Meaning | Default when unset |
+|---|---|---|
+| `AF_PROVISIONER_BROKERSEAT_NAMESPACE` | The namespace to LIST BrokerSeats in (`agentforge-broker`). **The feature flag**: unset = byte-identical provisioner behaviour. | unset (controller OFF) |
+| `AF_PROVISIONER_SEAT_IMAGE` | The digest-pinned `registry.chifor.me/agentforge/orchestrator@sha256:…` every controller seat's Deployment runs; validated at startup against the same regex the objects guard enforces; `just pin-bootstrap` rewrites it in lockstep with the pod image. | none — required once the flag is set (startup refusal otherwise) |
+| `AF_PROVISIONER_SEAT_TEMPLATE_AUDS` | JSON `{provider: aud}` naming the reviewed seat whose ledger DSN is copied and whose per-workspace entitlements are cloned for every new seat of that provider. | `{"anthropic":"anthropic/claude-max-1","openai":"openai/codex-pro"}` (a provider missing here → `LedgerSourceUnset`, fail closed) |

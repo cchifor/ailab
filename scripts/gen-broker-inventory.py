@@ -31,6 +31,19 @@ DERIVED ARTEFACTS (this script owns these spans end to end):
   4. `AF_PROVISIONER_BROKER_READYZ_MAP`   — openbao/provisioner-deploy.yaml
   5. `broker-inventory.yaml`              — the generated inventory + the KV-GC
                                             seed-coverage record
+  6. the BrokerSeat CRD's reserved-name    — agentforge-broker/brokerseat-crd.yaml
+     CEL rule (git seat stems + aliases)     (the `- rule: "!(self.metadata.name in [...])"` line)
+  7. the objects guard's `gitSeatStems`    — agentforge-broker/brokerseat-admission.yaml
+     CEL variable                            (the `- name: gitSeatStems` entry + its expression)
+
+(6) and (7) carry the SAME list: every git seat's hand-named stem plus the
+mechanical `broker-<provider>-<account>` alias of its audience — the names a
+controller-managed BrokerSeat for an audience git already serves would take.
+They are admission facts (the CRD refuses such a CR at create, the objects
+guard refuses any seat object under such a stem), so a git seat added without
+regenerating them would be a seat the controller could silently duplicate.
+Deriving them here keeps the add seamless: the control plane vendors this
+generator byte for byte and runs it on every add/Retry.
 
 (4) is the aud -> URL MAP the merged KV garbage collector requires
 (agentforge #69) — distinct from (3), which is a comma-separated URL LIST and a
@@ -84,6 +97,8 @@ PROVISIONER_DEPLOY = REPO / "kubernetes/apps/infrastructure/security/openbao/pro
 OPERATOR_SEEDS = REPO / "kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml"
 SEEDS_LABEL = OPERATOR_SEEDS.relative_to(REPO).as_posix()
 INVENTORY = BROKER_DIR / "broker-inventory.yaml"
+BROKERSEAT_CRD = BROKER_DIR / "brokerseat-crd.yaml"
+BROKERSEAT_ADMISSION = BROKER_DIR / "brokerseat-admission.yaml"
 
 BROKER_NS = "agentforge-broker"
 BROKER_PORT = 8700
@@ -411,6 +426,65 @@ def render_provisioner_deployment(seats: list[Seat]) -> str:
     return text
 
 
+def git_seat_stems(seats: list[Seat]) -> list[str]:
+    """Every git seat as the stems a controller-managed BrokerSeat for the SAME audience would take:
+    the seat's own (possibly hand-named) Deployment stem AND the mechanical broker-<provider>-<account>
+    alias of its audience. Sorted, de-duplicated (both coincide for a mechanically named seat)."""
+    stems = {s.deployment for s in seats} | {f"broker-{s.provider}-{s.account}" for s in seats}
+    return sorted(stems)
+
+
+def _cel_string_list(items: list[str], indent: int) -> str:
+    """A CEL list literal of single-quoted strings, one per continuation line, in the `>-`
+    folded-block shape the repo uses (continuation lines ONE space deeper so YAML keeps the
+    newlines — CEL ignores whitespace inside a list literal; cel-go compiles it as list(string))."""
+    pad = " " * indent
+    quoted = [f"'{s}'" for s in items]
+    if len(quoted) == 1:
+        return f"{pad}[{quoted[0]}]"
+    lines = [f"{pad}[{quoted[0]},"]
+    lines += [f"{pad} {q}," for q in quoted[1:-1]]
+    lines.append(f"{pad} {quoted[-1]}]")
+    return "\n".join(lines)
+
+
+def _replace_line_span(text: str, path_label: str, pattern: re.Pattern[str], render: "callable") -> str:
+    """Replace the ONE line matching `pattern` (a regex whose group 1 is its indent) with
+    `render(indent)`. Exactly one match is required — an absent span is drift, not a no-op, and a
+    duplicated one is a corrupt source."""
+    lines = text.splitlines(keepends=True)
+    hits = [i for i, line in enumerate(lines) if pattern.match(line.rstrip("\n"))]
+    if len(hits) != 1:
+        raise SourceError(f"{path_label}: expected exactly one generated span matching {pattern.pattern!r}, found {len(hits)}")
+    i = hits[0]
+    indent = pattern.match(lines[i].rstrip("\n")).group(1)
+    return "".join(lines[:i]) + render(indent) + "\n" + "".join(lines[i + 1 :])
+
+
+#: The BrokerSeat CRD's reserved-name rule — the single `- rule:` line whose expression is
+#: `!(self.metadata.name in [...])` (brokerseat-crd.yaml, root x-kubernetes-validations).
+_CRD_RESERVED_RULE = re.compile(r'^([ ]*)- rule: "!\(self\.metadata\.name in \[.*\]\)"[ \t]*$')
+
+
+def render_brokerseat_crd(seats: list[Seat]) -> str:
+    text = BROKERSEAT_CRD.read_text(encoding="utf-8")
+    label = BROKERSEAT_CRD.relative_to(REPO).as_posix()
+    literal = ", ".join(f"'{s}'" for s in git_seat_stems(seats))
+    return _replace_line_span(
+        text, label, _CRD_RESERVED_RULE,
+        lambda indent: f'{indent}- rule: "!(self.metadata.name in [{literal}])"',
+    )
+
+
+def render_brokerseat_admission(seats: list[Seat]) -> str:
+    """The objects guard's `gitSeatStems` variable: the `- name: gitSeatStems` entry and its folded
+    expression (same entry shape as an env var, so the env-span replacer locates it)."""
+    text = BROKERSEAT_ADMISSION.read_text(encoding="utf-8")
+    label = BROKERSEAT_ADMISSION.relative_to(REPO).as_posix()
+    span = "    - name: gitSeatStems\n      expression: >-\n" + _cel_string_list(git_seat_stems(seats), 8)
+    return _replace_env_span(text, label, "gitSeatStems", span)
+
+
 def kv_gc_enabled() -> bool:
     """True when the provisioner mounts a seeds file, which switches the KV GC ON."""
     text = PROVISIONER_DEPLOY.read_text(encoding="utf-8")
@@ -616,6 +690,8 @@ def render_all(seats: list[Seat]) -> dict[Path, str]:
         CP_DEPLOY: render_cp_deployment(seats),
         PROVISIONER_DEPLOY: render_provisioner_deployment(seats),
         INVENTORY: render_inventory(seats, _read_seed_coverage()),
+        BROKERSEAT_CRD: render_brokerseat_crd(seats),
+        BROKERSEAT_ADMISSION: render_brokerseat_admission(seats),
     }
 
 

@@ -12,6 +12,14 @@
 # VAP clause is worse than a rotted test suite — it produces no apply-time error and no runtime
 # error, just a tenant path that quietly admits what it used to refuse.
 #
+# SECOND TABLE (BrokerSeat, plan A1): kubernetes/apps/infrastructure/agentforge-broker/
+# brokerseat-admission.yaml holds the two guards behind the BrokerSeat RBAC (the CP may only NAME a
+# seat; the provisioner may only write seat-shaped objects it owns, never a Flux one). Same
+# situation — CEL nobody else evaluates — so scripts/check-seat-guard-cel.py runs here too, in the
+# SAME step, sequentially, so a failure in either table fails the one job directly. Its baseline is
+# the stamped render of a real git seat (broker-*.yaml), which is why the agentforge-broker
+# directory is in the trigger paths: a seat-template change must re-prove the guard admits it.
+#
 # WHY .gitea/ AND NOT .github/: Gitea reads .gitea/workflows and, once that directory exists, ignores
 # .github/workflows entirely. This repo already has three workflows here; the convention is set.
 #
@@ -26,25 +34,30 @@ on:
   pull_request:
     paths:
       - "kubernetes/apps/apps/agentforge/admission/**"
+      - "kubernetes/apps/infrastructure/agentforge-broker/**"
       - "scripts/check-tenant-guard-cel.py"
+      - "scripts/check-seat-guard-cel.py"
       - ".gitea/workflows/tenant-guard-cel.yaml"
   push:
     branches: [main]
     paths:
       - "kubernetes/apps/apps/agentforge/admission/**"
+      - "kubernetes/apps/infrastructure/agentforge-broker/**"
       - "scripts/check-tenant-guard-cel.py"
+      - "scripts/check-seat-guard-cel.py"
 
 jobs:
   tenant-guard-cel:
-    name: tenant-guard CEL admit/deny table
+    name: tenant-guard + seat-guard CEL admit/deny tables
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
-    # The table is ~35 in-process CEL evaluations; it finishes in seconds. The minutes are for the
-    # dependency install, and the cap is here so a wedged install cannot hold a runner slot.
+    # The two tables are ~35 + ~230 in-process CEL evaluations; they finish in well under a minute.
+    # The rest is the dependency install, and the cap is here so a wedged install cannot hold a
+    # runner slot.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
 
-      - name: Evaluate tenant-guard.yaml against its admit/deny fixture table
+      - name: Evaluate tenant-guard.yaml + brokerseat-admission.yaml against their admit/deny fixture tables
         shell: bash
         run: |
           set -euo pipefail
@@ -73,8 +86,11 @@ jobs:
           if command -v uv >/dev/null 2>&1; then
             uv run --no-project --with 'cel-python==0.5.0' \
               "$PY" scripts/check-tenant-guard-cel.py
+            uv run --no-project --with 'cel-python==0.5.0' \
+              "$PY" scripts/check-seat-guard-cel.py
           else
             "$PY" -m pip install --quiet --disable-pip-version-check 'cel-python==0.5.0' \
               || "$PY" -m pip install --quiet --disable-pip-version-check --break-system-packages 'cel-python==0.5.0'
             "$PY" scripts/check-tenant-guard-cel.py
+            "$PY" scripts/check-seat-guard-cel.py
           fi
