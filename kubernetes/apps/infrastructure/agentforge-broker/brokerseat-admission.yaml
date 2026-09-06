@@ -175,14 +175,21 @@ spec:
     # Every Flux-managed git seat, as the stems a controller seat for the SAME audience would take:
     # the mechanical broker-<provider>-<account> of its aud AND its hand-named stem where the two
     # differ (broker-anthropic-max1 = anthropic/claude-max-1, ...). The same literal is the CRD's
-    # reserved-name rule. scripts/tests/test_brokerseat_admission.py asserts it equals
-    # scripts/gen-broker-inventory.py load_seats() (add or retire a git seat -> update BOTH literals or
-    # CI is red); validation 13 is the only consumer.
+    # reserved-name rule. BOTH are DERIVED by scripts/gen-broker-inventory.py from the broker-*.yaml
+    # seats (`--write` regenerates them, `--check` — CI — reports DRIFT; the control plane vendors that
+    # generator and runs it on every add/Retry), so a git seat add never edits this by hand;
+    # scripts/tests/test_brokerseat_admission.py additionally pins the span to load_seats().
+    # Validation 13 is the only consumer.
+    # ⚙ GENERATED — do NOT hand-edit this entry. See scripts/gen-broker-inventory.py.
     - name: gitSeatStems
       expression: >-
-        ['broker-anthropic-max1', 'broker-anthropic-max2', 'broker-openai-codex',
-         'broker-anthropic-claude-max-1', 'broker-anthropic-claude-max-2', 'broker-openai-codex-pro',
-         'broker-anthropic-claude-max-3']
+        ['broker-anthropic-claude-max-1',
+         'broker-anthropic-claude-max-2',
+         'broker-anthropic-claude-max-3',
+         'broker-anthropic-max1',
+         'broker-anthropic-max2',
+         'broker-openai-codex',
+         'broker-openai-codex-pro']
   validations:
     # (1) NAMESPACE — a seat object lives in agentforge-broker and nowhere else (the Role is namespaced
     #     there today; this holds even if that ever widens). request.namespace IS the object's

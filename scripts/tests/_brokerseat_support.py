@@ -183,6 +183,12 @@ def vap(doc: str) -> dict[str, Any]:
             if not fm:
                 raise AssertionError(f"resourceRule without {k}: {entry!r}")
             fields[k] = flow_list(fm.group(1))
+        # narrowing keys the CEL harness refuses (scope: Cluster stops matching namespaced requests;
+        # resourceNames narrows by name) — surfaced so a stdlib test can pin their absence
+        fields["narrowingKeys"] = sorted(
+            k for k in ("scope", "resourceNames")
+            if re.search(rf"(?m)^\s*(?:-\s*)?{k}:", entry)
+        )
         rules.append(fields)
     conditions = [
         {"name": _scalar_or_folded(e, "name"), "expression": _scalar_or_folded(e, "expression")}

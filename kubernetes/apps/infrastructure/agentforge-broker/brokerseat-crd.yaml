@@ -67,10 +67,12 @@ spec:
             # (broker-anthropic-max1 = anthropic/claude-max-1, ...: those names happen to satisfy the
             # mechanical rule for another slug, and their 8 child names would collide with the git
             # objects). The SAME literal is the objects guard's variables.gitSeatStems
-            # (brokerseat-admission.yaml, validation 13). scripts/tests/test_brokerseat_crd.py derives
-            # this list from the broker-*.yaml seats and fails when a git seat is missing from it or a
-            # retired one lingers (add or retire a git seat -> update BOTH literals).
-            - rule: "!(self.metadata.name in ['broker-anthropic-max1', 'broker-anthropic-max2', 'broker-openai-codex', 'broker-anthropic-claude-max-1', 'broker-anthropic-claude-max-2', 'broker-openai-codex-pro', 'broker-anthropic-claude-max-3'])"
+            # (brokerseat-admission.yaml, validation 13). BOTH lists are DERIVED by
+            # scripts/gen-broker-inventory.py from the broker-*.yaml seats (`--write` regenerates them,
+            # `--check` — CI — reports DRIFT), so adding or retiring a git seat never means editing them
+            # by hand; scripts/tests/test_brokerseat_crd.py additionally pins the span to load_seats().
+            # ⚙ GENERATED — do NOT hand-edit this rule. See scripts/gen-broker-inventory.py.
+            - rule: "!(self.metadata.name in ['broker-anthropic-claude-max-1', 'broker-anthropic-claude-max-2', 'broker-anthropic-claude-max-3', 'broker-anthropic-max1', 'broker-anthropic-max2', 'broker-openai-codex', 'broker-openai-codex-pro'])"
               message: "metadata.name is a Flux-managed git seat's stem or the mechanical alias of its audience; controller seats cannot take it"
           properties:
             spec:

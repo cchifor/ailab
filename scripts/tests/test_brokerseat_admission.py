@@ -84,6 +84,10 @@ class Guards(unittest.TestCase):
                 {"namespaceSelector": False, "objectSelector": False, "excludeResourceRules": False, "matchPolicy": False},
                 policy_name,
             )
+            # per-rule narrowing too: `scope: Cluster` on a child-kind rule would stop matching every
+            # namespaced request, `resourceNames` would narrow by name — both invisible to the harness
+            for rule in p["resourceRules"]:
+                self.assertEqual(rule["narrowingKeys"], [], (policy_name, rule["resources"]))
 
     def test_git_seat_stems_literal_equals_the_inventory_and_the_crd(self) -> None:
         """Validation 13's list = every Flux seat's hand-named stem + the mechanical alias of its aud,

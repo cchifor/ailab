@@ -19,6 +19,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import re
 import shutil
 import sys
 import tempfile
@@ -57,7 +58,8 @@ def seeds_json(paths=None):
 class Sandbox:
     """A throwaway copy of the real files the script reads, with the module repointed at it."""
 
-    _COPIED = ("CP_DEPLOY", "PROVISIONER_DEPLOY", "OPERATOR_SEEDS", "INVENTORY")
+    _COPIED = ("CP_DEPLOY", "PROVISIONER_DEPLOY", "OPERATOR_SEEDS", "INVENTORY",
+               "BROKERSEAT_CRD", "BROKERSEAT_ADMISSION")
 
     def __enter__(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -204,6 +206,114 @@ class CheckGate(unittest.TestCase):
             self.assertIn("af-record-seed-coverage", out)
             remedy = out.split("FAIL", 1)[1]
             self.assertNotIn("--write` and review the diff", remedy)
+
+
+class BrokerSeatSpans(unittest.TestCase):
+    """The two BrokerSeat admission spans (derived artefacts 6 and 7): the CRD's reserved-name rule
+    and the objects guard's `gitSeatStems` variable. Both must equal the git seats' stems + aliases,
+    be found (fail closed when absent), report DRIFT when hand-edited, and be restored by --write
+    in a shape cel-go compiles (a flat list literal of single-quoted strings)."""
+
+    def _expected(self, box):
+        seats = box.seats()
+        return sorted({s.deployment for s in seats} | {f"broker-{s.provider}-{s.account}" for s in seats})
+
+    def test_stems_are_every_git_seat_stem_and_alias(self):
+        with Sandbox() as box:
+            stems = gbi.git_seat_stems(box.seats())
+            self.assertEqual(stems, self._expected(box))
+            self.assertTrue(stems)
+            for stem in stems:
+                self.assertRegex(stem, r"^broker-(anthropic|openai)-[a-z0-9]+(-[a-z0-9]+)*$")
+
+    def test_committed_spans_match_the_seats(self):
+        with Sandbox() as box:
+            box.refresh()
+            rc, out = box.check()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("OK kubernetes/apps/infrastructure/agentforge-broker/brokerseat-crd.yaml", out)
+            self.assertIn("OK kubernetes/apps/infrastructure/agentforge-broker/brokerseat-admission.yaml", out)
+
+    def test_hand_edited_crd_rule_is_drift_and_write_restores_it(self):
+        with Sandbox() as box:
+            box.refresh()
+            text = gbi.BROKERSEAT_CRD.read_text(encoding="utf-8")
+            victim = self._expected(box)[0]
+            edited = text.replace(f"'{victim}', ", "", 1)
+            self.assertNotEqual(edited, text)
+            gbi.BROKERSEAT_CRD.write_text(edited, encoding="utf-8", newline="")
+            rc, out = box.check()
+            self.assertEqual(rc, 1)
+            self.assertIn("DRIFT kubernetes/apps/infrastructure/agentforge-broker/brokerseat-crd.yaml", out)
+            self.assertIn(victim, out)
+            box.write()
+            self.assertEqual(gbi.BROKERSEAT_CRD.read_text(encoding="utf-8"), text)
+            self.assertEqual(box.check()[0], 0)
+
+    def test_hand_edited_admission_variable_is_drift_and_write_restores_it(self):
+        with Sandbox() as box:
+            box.refresh()
+            text = gbi.BROKERSEAT_ADMISSION.read_text(encoding="utf-8")
+            victim = self._expected(box)[-1]
+            edited = text.replace(f"'{victim}'", f"'{victim}-x'", 1)
+            self.assertNotEqual(edited, text)
+            gbi.BROKERSEAT_ADMISSION.write_text(edited, encoding="utf-8", newline="")
+            rc, out = box.check()
+            self.assertEqual(rc, 1)
+            self.assertIn("DRIFT kubernetes/apps/infrastructure/agentforge-broker/brokerseat-admission.yaml", out)
+            box.write()
+            self.assertEqual(gbi.BROKERSEAT_ADMISSION.read_text(encoding="utf-8"), text)
+            self.assertEqual(box.check()[0], 0)
+
+    def test_a_new_git_seat_regenerates_both_spans(self):
+        # The seamless-add contract: a seat manifest appears -> --write extends both lists.
+        with Sandbox() as box:
+            box.refresh()
+            src = sorted(pathlib.Path(gbi.BROKER_DIR).glob("broker-*.yaml"))[0]
+            text = src.read_text(encoding="utf-8")
+            seat = gbi.parse_seat(src)
+            new_account = f"{seat.account}-9"
+            text = text.replace(f"{seat.provider}/{seat.account}", f"{seat.provider}/{new_account}")
+            text = text.replace(seat.deployment, f"broker-{seat.provider}-{new_account}")
+            (pathlib.Path(gbi.BROKER_DIR) / f"broker-{seat.provider}-{new_account}.yaml").write_text(
+                text, encoding="utf-8", newline="")
+            new_stem = f"broker-{seat.provider}-{new_account}"
+            self.assertIn(new_stem, gbi.git_seat_stems(box.seats()))
+            rc, out = box.check()
+            self.assertEqual(rc, 1)
+            self.assertIn("DRIFT kubernetes/apps/infrastructure/agentforge-broker/brokerseat-crd.yaml", out)
+            self.assertIn("DRIFT kubernetes/apps/infrastructure/agentforge-broker/brokerseat-admission.yaml", out)
+            box.write()
+            self.assertIn(f"'{new_stem}'", gbi.BROKERSEAT_CRD.read_text(encoding="utf-8"))
+            self.assertIn(f"'{new_stem}'", gbi.BROKERSEAT_ADMISSION.read_text(encoding="utf-8"))
+
+    def test_rendered_spans_are_flat_single_quoted_cel_list_literals(self):
+        # cel-go refuses heterogeneous list literals; every element is a quoted string, nothing else.
+        with Sandbox() as box:
+            crd = gbi.render_brokerseat_crd(box.seats())
+            m = re.search(r'(?m)^\s*- rule: "!\(self\.metadata\.name in \[(.*)\]\)"\s*$', crd)
+            self.assertIsNotNone(m)
+            self.assertRegex(m.group(1), r"^'[a-z0-9-]+'(, '[a-z0-9-]+')*$")
+            adm = gbi.render_brokerseat_admission(box.seats())
+            m = re.search(r"(?ms)^    - name: gitSeatStems\n      expression: >-\n(.*?)\n(?=  [a-z]|    - name:)", adm)
+            self.assertIsNotNone(m)
+            body = " ".join(l.strip() for l in m.group(1).splitlines())
+            self.assertRegex(body, r"^\['[a-z0-9-]+'(, '[a-z0-9-]+')*\]$")
+            self.assertEqual(gbi._cel_string_list(["a"], 8), "        ['a']")
+
+    def test_missing_span_fails_closed(self):
+        with Sandbox() as box:
+            text = gbi.BROKERSEAT_CRD.read_text(encoding="utf-8")
+            gbi.BROKERSEAT_CRD.write_text(
+                "\n".join(l for l in text.splitlines() if "self.metadata.name in [" not in l) + "\n",
+                encoding="utf-8", newline="")
+            with self.assertRaises(gbi.SourceError):
+                gbi.render_brokerseat_crd(box.seats())
+            text = gbi.BROKERSEAT_ADMISSION.read_text(encoding="utf-8")
+            gbi.BROKERSEAT_ADMISSION.write_text(text.replace("- name: gitSeatStems", "- name: gitSeatStemsX"),
+                                                encoding="utf-8", newline="")
+            with self.assertRaises(gbi.SourceError):
+                gbi.render_brokerseat_admission(box.seats())
 
 
 class DeclaredPaths(unittest.TestCase):

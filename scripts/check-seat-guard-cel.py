@@ -39,9 +39,10 @@ deny case is that baseline with ONE property changed, and pins WHICH clause deni
 un-re-keyed objects (the git seat under its own stem) are the fixtures for validation 13.
 
 FAIL CLOSED on what it cannot model: a policy with matchConstraints.namespaceSelector /
-objectSelector / excludeResourceRules / matchPolicy, or a binding with matchResources / paramRef /
-validationActions other than [Deny], is refused outright (exit 1) rather than evaluated as if those
-narrowings were absent — a selector could otherwise disable enforcement while this table stays green.
+objectSelector / excludeResourceRules / matchPolicy, a resourceRule carrying `scope` or
+`resourceNames`, or a binding with matchResources / paramRef / validationActions other than [Deny],
+is refused outright (exit 1) rather than evaluated as if those narrowings were absent — `scope:
+Cluster` or a selector could otherwise disable enforcement while this table stays green.
 resourceRules ARE modelled (apiGroups, apiVersions, resources incl. subresources, operations).
 
 WHAT IT IS NOT. A fidelity approximation, not the apiserver: cel-python 0.5.0 (the `_==_`/`_!=_`
@@ -123,6 +124,7 @@ OTHER_STEM = "broker-anthropic-other"  # a hypothetical OTHER controller seat
 GIT_STEM = "broker-anthropic-max1"  # a hand-named Flux-managed git seat (KNOWN_STEMS) ...
 GIT_ALIAS = "broker-anthropic-claude-max-1"  # ... and the mechanical alias of its audience anthropic/claude-max-1
 UNSUPPORTED_MATCH = ("namespaceSelector", "objectSelector", "excludeResourceRules", "matchPolicy")
+UNSUPPORTED_RULE_KEYS = ("scope", "resourceNames")
 
 SKIP = "skip"
 
@@ -856,6 +858,12 @@ def load_policies(path: Path = POLICY) -> dict[str, dict[str, Any]]:
             if key in mc:
                 raise SystemExit(f"{path}: policy {name} sets matchConstraints.{key}, which this harness "
                                  "cannot model — refusing to evaluate as if it were absent")
+        for i, rule in enumerate(mc.get("resourceRules", [])):
+            for key in UNSUPPORTED_RULE_KEYS:
+                if key in rule:
+                    raise SystemExit(f"{path}: policy {name} resourceRules[{i}] sets {key}, which this harness "
+                                     "does not model (scope: Cluster would silently stop matching namespaced "
+                                     "requests; resourceNames would narrow by name) — refusing")
         bs = bindings.get(name, [])
         if len(bs) != 1:
             raise SystemExit(f"{path}: policy {name} needs exactly one binding, found {len(bs)}")

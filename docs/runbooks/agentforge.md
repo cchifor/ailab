@@ -523,9 +523,15 @@ kubectl --context admin@ai -n agentforge-broker get deploy -o custom-columns=\
 Both guards also carry the list of **git-managed stems** (each Flux seat's hand-named stem and the
 mechanical `broker-<provider>-<account>` alias of its audience): the CRD refuses a CR named that way at
 create, the objects guard refuses any seat object under such a stem (validation 13 — it is what stops an
-ExternalSecret `<alias>-oauth` from syncing a git seat's credential into a new Secret name). The two
-literals are pinned to `gen-broker-inventory.py`'s seat list by `test_brokerseat_{crd,admission}.py`:
-**adding or retiring a git seat means updating both literals in the same PR** or CI is red. What
+ExternalSecret `<alias>-oauth` from syncing a git seat's credential into a new Secret name). Both
+spans are **generated**: `scripts/gen-broker-inventory.py --write` (`just af-gen-brokers`) derives
+them from the `broker-*.yaml` seats exactly like the readyz URLs/map, and `--check` (the
+broker-inventory CI gate) reports DRIFT when they differ — adding or retiring a git seat is still
+"add the manifest, regenerate", never a hand edit (`test_brokerseat_{crd,admission}.py` pin the spans to
+`load_seats()` as a second belt). The control plane vendors this generator byte for byte
+(`agentforge-platform` `adapters/gitops/broker_renderer.py::INVENTORY_GENERATOR_PATH`, checked before
+every add/Retry), so a generator change here needs a platform re-vendor PR (goldens +
+`scripts/golden_drift.py`) before the next control-plane seat add or Retry renders against it. What
 admission cannot do is look the cluster up: whether one of a seat's 8 derived names already exists
 under a foreign owner stays the controller's `NameCollision` refusal (plus the apiserver's own 409 on
 create and the objects guard's same-owner rule on update).
