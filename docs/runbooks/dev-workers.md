@@ -253,6 +253,19 @@ request, and it can do so *after* the requeued worker checks for the marker and 
 its own — which double-posts the review. Open the PR in Gitea and confirm no review from that
 persona is present at that head; only then use `--force`.
 
+### When a PR is "skipped" (diff over the size cap)
+
+A diff over `pr_reviewer_max_diff_bytes` (400 KB) is not reviewed. Since 2026-09-06 the skip is
+VISIBLE: the persona posts a COMMENT review ("Not reviewed: the diff at <head> is N bytes, over
+this reviewer's cap...") carrying `verdict=skipped`. That marker dedupes the head like a real
+review and keeps the automerge lane shut (merging needs `verdict=clean` from every persona), so
+the PR shows *why* nothing landed. Before that, `review_job()` returned `done` with no Gitea
+write and agentforge-platform#194 (480 KB) sat with no review at all, indistinguishable from an
+outage. Fix on the PR side: split it, or mark generated/binary-ish files `-diff` in
+`.gitattributes`. The cap is measured on the raw bytes of the `.diff` endpoint and the body is
+decoded tolerantly — platform#1074 (a PDF corpus diffed as text) used to raise
+`UnicodeDecodeError` before the cap was consulted and quarantined the job.
+
 `ReviewbotQuarantined` fires on `reviewbot_quarantined_recent_jobs` (a 24 h window), not the
 cumulative gauge — the cumulative one never falls for a PR that was closed rather than pushed
 to, so alerting on it would latch on forever.

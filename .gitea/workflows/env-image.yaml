@@ -13,6 +13,14 @@ on:
     paths:
       - "env-image/**"
       - ".gitea/workflows/env-image.yaml"
+  # Manual trigger. The path-filtered push above did NOT fire for the four 2026-09-02 env-image
+  # commits (compose + buildx plugins, #473): the registry still holds only the 20260901 tags and
+  # the pinned env-control has no compose plugin (`e2e-pool.sh --integration` fails in every
+  # lease). Dispatch from the API after a merge that the path filter missed:
+  #   curl -X POST -H "Authorization: token $T" \
+  #     https://git.chifor.me/api/v1/repos/cchifor/ailab/actions/workflows/env-image.yaml/dispatches \
+  #     -d '{"ref":"main"}'
+  workflow_dispatch:
 
 jobs:
   build-push:

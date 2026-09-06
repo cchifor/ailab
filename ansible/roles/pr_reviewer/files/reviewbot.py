@@ -126,7 +126,11 @@ def api(path, method="GET", body=None, raw=False):
     )
     with urllib.request.urlopen(req, timeout=60) as r:
         data = r.read()
-    return data.decode() if raw else (json.loads(data) if data else {})
+    # raw=True hands back the BYTES: the one raw caller (the PR .diff) sizes the payload
+    # before decoding it, and decodes tolerantly - a diff carrying non-UTF-8 bytes (a PDF
+    # corpus diffed as text, platform#1074) raised UnicodeDecodeError here, ahead of the size
+    # cap, on every attempt until the job quarantined (ReviewbotQuarantined, 2026-09-05).
+    return data if raw else (json.loads(data) if data else {})
 
 
 def posting_disabled():
@@ -739,9 +743,15 @@ def review_job(job_id, repo, pr, head_sha):
     if existing_marker(repo, pr, head_sha):
         return ("done", None, "marker already present")
 
-    diff = api(f"/repos/{repo}/pulls/{pr}.diff", raw=True)
-    if len(diff.encode()) > CFG["max_diff_bytes"]:
-        return ("done", None, "diff over size cap - skipped (no success status posted)")
+    diff_bytes = api(f"/repos/{repo}/pulls/{pr}.diff", raw=True)
+    if len(diff_bytes) > CFG["max_diff_bytes"]:
+        # Visible skip. Before 2026-09-06 this returned 'done' without a Gitea write, so an
+        # over-cap PR (agentforge-platform#194, 480 KB) showed no review at all and nobody
+        # could tell a skip from a reviewer outage. The marker's verdict=skipped dedupes the
+        # head exactly like a real review and keeps maybe_merge closed (it needs clean).
+        return post_review(job_id, repo, pr, head_sha, skip_body(head_sha, len(diff_bytes)),
+                           "COMMENT", [], f"diff {len(diff_bytes)} B over size cap - skipped")
+    diff = diff_bytes.decode("utf-8", errors="replace")
     # Close the .diff endpoint's current-PR race.
     d2 = pr_ok(repo, pr, head_sha)
     if d2 is None or "moved_to" in d2:
@@ -785,7 +795,26 @@ def review_job(job_id, repo, pr, head_sha):
     if demoted:
         body += "\n\nFindings outside commentable diff positions:\n" + "\n".join(demoted)
     body += f"\n\n{marker}"
+    return post_review(job_id, repo, pr, head_sha, body,
+                       "APPROVED" if verdict == "clean" else "COMMENT", comments,
+                       f"{len(comments)} inline / {len(demoted)} demoted / {verdict}")
 
+
+def skip_body(head_sha, nbytes):
+    """The over-cap notice. Authored here, never by the model, so the marker it carries is
+    the canonical one (marker_of trusts the last match from the persona's own account)."""
+    cap = CFG["max_diff_bytes"]
+    marker = f"<!-- review-bot:v1 persona={CFG['persona']} head={head_sha} verdict=skipped -->"
+    return (f"Not reviewed: the diff at {head_sha[:9]} is {nbytes} bytes, over this reviewer's "
+            f"{cap}-byte cap (`pr_reviewer_max_diff_bytes`). Split the PR into smaller ones, or "
+            f"mark generated/binary-ish files `-diff` in `.gitattributes` so they leave the diff. "
+            f"Automerge stays off until a reviewable head arrives.\n\n{marker}")
+
+
+def post_review(job_id, repo, pr, head_sha, body, event, comments, note):
+    """The single mutation path: final eligibility + dedup checks, then ONE POST whose
+    ambiguous failure quarantines (never blind-retried). Shared by real reviews and by the
+    over-cap skip so both carry the same discipline."""
     # Final eligibility + dedup check immediately before the mutation.
     d3 = pr_ok(repo, pr, head_sha)
     if d3 is None or "moved_to" in d3:
@@ -805,16 +834,14 @@ def review_job(job_id, repo, pr, head_sha):
         c.close()
     try:
         rv = api(f"/repos/{repo}/pulls/{pr}/reviews", "POST",
-                 {"commit_id": head_sha,
-                  "event": "APPROVED" if verdict == "clean" else "COMMENT",
-                  "body": body, "comments": comments})
+                 {"commit_id": head_sha, "event": event, "body": body, "comments": comments})
     except Exception as e:
         # POST outcome ambiguous: quarantine; a human (or the reconciler seeing the
         # marker) resolves it. Never blind-retry a possibly-landed mutation.
         return ("quarantined", None, f"ambiguous POST: {e}")
-    log(f"reviewed {repo}#{pr} @ {head_sha[:9]}: {len(comments)} inline, {len(demoted)} demoted, verdict={verdict}")
+    log(f"reviewed {repo}#{pr} @ {head_sha[:9]}: {note}")
     maybe_merge(repo, pr)
-    return ("done", rv.get("id"), f"{len(comments)} inline / {len(demoted)} demoted / {verdict}")
+    return ("done", rv.get("id"), note)
 
 
 def write_metrics():
