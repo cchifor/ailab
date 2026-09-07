@@ -226,10 +226,12 @@ variable "runner_nodes" {
     "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
     "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4" }
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
-    # "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }  # OUT-OF-BAND, not in state -- import before enabling
-    # "ci-runner-7" = { node_name = "ai-node3", vm_id = 4107, ip = "192.168.0.29", hostname = "ci-runner-7" }  # OUT-OF-BAND, not in state -- import before enabling
-    # "ci-runner-8"  = { node_name = "ai-node1", vm_id = 4108, ip = "192.168.0.30", hostname = "ci-runner-8" }  # OUT-OF-BAND, not in state -- import before enabling
-    # "ci-runner-9"  = { node_name = "ai-node2", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9" }  # OUT-OF-BAND, not in state -- import before enabling
-    # "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10" }  # OUT-OF-BAND, not in state -- import before enabling
+    "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
+    "ci-runner-7" = { node_name = "ai-node3", vm_id = 4107, ip = "192.168.0.29", hostname = "ci-runner-7" }
+    "ci-runner-8" = { node_name = "ai-node1", vm_id = 4108, ip = "192.168.0.30", hostname = "ci-runner-8" }
+    # ci-runner-9 MOVED ai-node2 -> ai-node1 on 2026-09-07 (offline qm migrate) to pull ~10 GiB off
+    # ai-node2, which was floor-pinning its dev-workers. Placement here reflects the live estate.
+    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9" }
+    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10" }
   }
 }

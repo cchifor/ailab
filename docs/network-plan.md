@@ -31,13 +31,13 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.5 / .6 / .7` | **free (static)** | — | — |
 | `.8`–`.13` | Dev-worker VMs `dev-worker-1..6` (2 per node) | 4201–4206 | `kubernetes/infra/dev-workers/variables.tf` |
 | `.14`–`.18` | CI runner VMs `ci-runner-1..5` (GitHub + Gitea Actions) | 4101–4105 | `kubernetes/infra/runners/variables.tf` |
-| `.19` | CI runner VM `ci-runner-6` — **LIVE** (tofu entry still commented out) | 4106 | ⚠️ unmanaged — see note below |
+| `.19` | CI runner VM `ci-runner-6` | 4106 | `kubernetes/infra/runners/variables.tf` |
 | `.20 / .21 / .22` | 🔒 **cloudlab** GPU hosts `cloud1/2/3` (bare metal, static) | — | `../cloudlab/inventory/hosts.yml` |
-| `.23` | CI runner VM `ci-runner-10` | 4110 | ⚠️ unmanaged — see note below |
+| `.23` | CI runner VM `ci-runner-10` | 4110 | `kubernetes/infra/runners/variables.tf` |
 | `.24 / .25` | Reviewer VMs `reviewer-1/2` | 4501–4502 | ⚠️ unmanaged — see note below |
 | `.26` | 🔒 **cloudlab** LXC `cloud-llm-3` | 5101 | `../cloudlab/README.md` |
 | `.27 / .28` | 🔒 **cloudlab** LXCs `cloud-exec-1/2` | 5102–5103 | `../cloudlab/kubernetes/infra/executor-lxc/variables.tf` |
-| `.29 / .30 / .31` | CI runner VMs `ci-runner-7/8/9` (moved off `.20`–`.22` on 2026-09-03) | 4107–4109 | ⚠️ unmanaged — see note below |
+| `.29 / .30 / .31` | CI runner VMs `ci-runner-7/8/9` (moved off `.20`–`.22` on 2026-09-03; `ci-runner-9` moved ai-node2→ai-node1 on 2026-09-07) | 4107–4109 | `kubernetes/infra/runners/variables.tf` |
 | `.32`–`.35` | **free (static)** | — | — |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
 | `.37` | Talos env-node `talos-env-node-1` (k8s member) | 4401 | ⚠️ unmanaged — see note below |

@@ -46,7 +46,7 @@ Free static space is only `.5`–`.7`, `.32`–`.35`, `.38`, `.39`, `.50`.
 | Proxmox hosts | ai-node1/2/3 = .2 / .3 / .4 | — |
 | Talos CPs | .41 / .42 / .43 (API VIP .40:6443) | 4001–4003 |
 | GHA / Gitea CI runners | .14 / .15 / .16 / .17 / .18 | 4101–4105 |
-| CI runners (out-of-band, not in tofu) | .19 / .29 / .30 / .31 / .23 | 4106–4110 |
+| CI runners (adopted into tofu 2026-09-07) | .19 / .29 / .30 / .31 / .23 | 4106–4110 |
 | dev-workers | .8–.13 (user `c4`; also the agentforge hosts, ADR 0018) | 4201–4206 |
 | Agent nodes (Talos workers, AgentForge v2, ADR 0019) | .47 / .48 / .49 | 4301–4303 |
 | Talos env-node (out-of-band, not in tofu) | .37 | 4401 |

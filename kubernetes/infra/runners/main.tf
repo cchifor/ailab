@@ -97,6 +97,13 @@ resource "proxmox_virtual_environment_vm" "runner" {
     # `agent` is ignored too: VMs are created with agent=false (above, so apply doesn't hang), but the
     # guest agent is enabled out-of-band post-create (terraform_data.enable_guest_agent, guest-agent.tf).
     # Without this, a later apply reverts agent -> false and breaks qemu-guest-agent.service on every runner.
-    ignore_changes = [initialization, agent]
+    # disk[0].import_from is CREATE-ONLY: it names the cloud image the root disk was imported from
+    # at first boot. The provider does not read it back, so a VM ADOPTED via `tofu import` has it
+    # empty in state while the config supplies it, producing a permanent in-place diff. Applying
+    # that diff on a live runner would be a disk-level write to satisfy a field that only has
+    # meaning at creation -- not a risk worth taking against a runner holding ~137 GiB of build
+    # cache. Ignoring it is the same reasoning that already applies to `initialization`: both are
+    # first-boot-only inputs. Added 2026-09-07 while adopting ci-runner-6..10 (4106-4110).
+    ignore_changes = [initialization, agent, disk[0].import_from]
   }
 }
