@@ -77,16 +77,16 @@ spec:
                   name: openbao-provisioner-token
                   key: token
                   optional: false # FAIL-CLOSED: no scoped token -> do not start
-            # CA for TLS verification of the OpenBao server cert. The controller's exact CA env var is not
-            # part of the fixed interface, so the generic Python TLS trust vars are set (honored by
-            # requests/hvac/urllib) alongside the mounted /tls/ca.crt. CHANGEME: confirm the controller reads
-            # one of these (or add AF_PROVISIONER_OPENBAO_CACERT) once the image's config surface is known.
             # The port the exporter binds, stated rather than defaulted. THE VALUE IS THE ENGINE
             # DEFAULT (main.py:1827, `int(os.environ.get("AF_PROVISIONER_METRICS_PORT", "9465"))`),
             # so setting it changes NO behaviour — it makes the containerPort above and the
             # PodMonitor's named endpoint one declared contract instead of two copies of a default
             # nothing in this repo would notice drifting.
             - { name: AF_PROVISIONER_METRICS_PORT, value: "9465" }
+            # CA for TLS verification of the OpenBao server cert. The controller's exact CA env var is not
+            # part of the fixed interface, so the generic Python TLS trust vars are set (honored by
+            # requests/hvac/urllib) alongside the mounted /tls/ca.crt. CHANGEME: confirm the controller reads
+            # one of these (or add AF_PROVISIONER_OPENBAO_CACERT) once the image's config surface is known.
             - { name: REQUESTS_CA_BUNDLE, value: "/tls/ca.crt" }
             - { name: SSL_CERT_FILE, value: "/tls/ca.crt" }
             # OPT-IN capability-kid provisioning (agentforge #55 @28c2252). Setting the policy file turns the
