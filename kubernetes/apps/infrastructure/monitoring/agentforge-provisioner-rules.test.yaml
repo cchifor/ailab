@@ -1,0 +1,346 @@
+# `promtool test rules` fixtures for agentforge-provisioner-rules.yaml. Run by
+# scripts/rules-lint.sh on every PR, after `promtool check rules`.
+#
+# WHY A FIXTURE AT ALL. `check rules` proves an expression PARSES; it cannot prove the expression
+# can ever be true, and this estate has shipped both halves of that mistake — five rules pinned to a
+# job with zero series (agentforge-rules.yaml's header), and thresholds that could not fire during
+# the very incident they were written for (reviewbot-rules.test.yaml's header). Every rule here is
+# asserted BOTH ways: it fires on the shape of the real failure, and it stays silent on the healthy
+# shape it must not page for. Two of them additionally CANNOT be measured live today —
+# ForgeBrokerSeatControllerFailing has no series until the BrokerSeat controller stage is switched
+# on (ailab#512), and ForgeBrokerSeatDegraded's gauge has no children until the same flip — so this
+# file is the only proof they fire at all, which is exactly why it exists rather than being optional.
+#
+# THREE PROPERTIES THIS FILE PINS THAT PROSE CANNOT:
+#   1. REGEX ANCHORING. PromQL label matchers are fully anchored, so `reason=~"seat-.*"` must NOT
+#      match `brokerseat-collision`. The brokerseat test asserts the seat-entitlement rule stays
+#      empty on a brokerseat-* series and vice versa; if anchoring ever changed, a critical page
+#      would silently become a warning one and this fixture is what goes red.
+#   2. THE up / kube-state-metrics DIVISION OF LABOUR. A pod that no monitor selects (no `up` series
+#      at all) is ForgeProvisionerUnscraped's case; a pod that IS discovered but fails its scrape
+#      (`up == 0`) is ForgeProvisionerTargetDown's. The two tests below feed exactly those two
+#      shapes and assert each rule fires on its own and stays silent on the other's — the
+#      distinction ailab#293 turned on, since `absent()` cannot see an unselected target.
+#   3. SELF-RESOLUTION. The counter rules read `rate(...) > 0` over a standing condition. The
+#      seat-entitlement test runs the counter flat after minute 12 and asserts the alert is gone by
+#      minute 45, so a resolved finding clears itself with no operator action and no state to reset.
+#
+# `rule_files` is the EXTRACTED spec name, because rules-lint.sh hands promtool the `spec:` body of
+# each PrometheusRule (the CRD wrapper is not a promtool rules file) under the manifest's own
+# basename. scripts/promtest-refs.py fails the gate if that name does not resolve.
+rule_files:
+  - agentforge-provisioner-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------------ up == 0 (discovered, dead)
+  - interval: 1m
+    name: a discovered provisioner target that stops answering pages after the 10m hold
+    input_series:
+      # ONE target: replicas 1, strategy Recreate. `0x30` = discovered by the PodMonitor and failing
+      # every scrape — a crash-loop or a wedged asyncio loop, NOT a rollout (a rollout deletes the
+      # pod, which removes the target and produces no `up` sample at all; see the next two tests).
+      - series: 'up{job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ForgeProvisionerTargetDown
+        exp_alerts:
+          - exp_labels:
+              job: agentforge-provisioner
+              namespace: openbao
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              severity: critical
+            exp_annotations:
+              summary: >-
+                AgentForge provisioner agentforge-provisioner-696fdc794d-gfphx is failing to scrape
+              description: >-
+                The provisioner's metrics endpoint (:9465, ns openbao) has been unscrapeable for
+                >10m while Prometheus still discovers the pod, so every af_provisioner_* series is
+                stale and EVERY alert rule in this group that reads one is blind for as long as this
+                fires. The provisioner is the only writer of tenant OpenBao policies, k8s-auth roles
+                and capability kids, so while it is down no tenant is provisioned and no kid is
+                revoked. Triage - `kubectl --context admin@ai -n openbao describe pod
+                agentforge-provisioner-696fdc794d-gfphx` then `kubectl --context admin@ai -n openbao
+                logs deploy/agentforge-provisioner --tail=100`; a Ready pod with a dead endpoint
+                means the asyncio loop is wedged rather than the process gone. If the pod is ABSENT
+                rather than unscrapeable this rule cannot see it - ForgeProvisionerUnscraped and the
+                stock KubeDeploymentReplicasMismatch are the alerts for that.
+      - eval_time: 5m
+        alertname: ForgeProvisionerTargetDown
+        exp_alerts: []
+  # ------------------------------------------------------------------------- the healthy shape
+  - interval: 1m
+    name: a scraping provisioner pages neither rule
+    input_series:
+      - series: 'up{job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "1x40"
+      - series: 'kube_pod_container_status_ready{namespace="openbao",container="provisioner",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ForgeProvisionerTargetDown
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: ForgeProvisionerUnscraped
+        exp_alerts: []
+  # ------------------------------------------------- the ailab#293 shape: Ready, and nothing scrapes
+  - interval: 1m
+    name: a Ready provisioner with no scrape target at all is caught by kube-state-metrics
+    input_series:
+      # Kubernetes says the container is Ready. There is deliberately NO `up` series: this is what an
+      # unselected target looks like — the PodMonitor deleted, its selector drifted, or the named
+      # `metrics` containerPort renamed. Every af_provisioner_*-reading rule is blind here, which is
+      # why the left side comes from a source that does not depend on the scrape at all.
+      - series: 'kube_pod_container_status_ready{namespace="openbao",container="provisioner",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: ForgeProvisionerUnscraped
+        exp_alerts:
+          - exp_labels:
+              namespace: openbao
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              severity: warning
+            exp_annotations:
+              summary: >-
+                AgentForge provisioner agentforge-provisioner-696fdc794d-gfphx is unscraped (no
+                af_provisioner_* target)
+              description: >-
+                This provisioner pod has been Ready for >20m and Prometheus has discovered no scrape
+                target for it, so EVERY af_provisioner_* series is missing and every other rule in
+                this group is silent for a reason that has nothing to do with the estate being
+                healthy - exactly the state ailab#293 recorded, in which the seat-entitlement audit
+                reported findings every 30s for months with nowhere to send them. MOST LIKELY CAUSE
+                - the PodMonitor was removed, its selector no longer matches the pod template, or
+                the container's named `metrics` port was renamed or dropped; all three live in this
+                repo. Triage - `kubectl --context admin@ai -n monitoring get podmonitor
+                agentforge-provisioner -o yaml`, compare its selector against `kubectl --context
+                admin@ai -n openbao get deploy agentforge-provisioner -o
+                jsonpath={.spec.template.metadata.labels}`, and check the Prometheus /targets page
+                for job=agentforge-provisioner.
+      - eval_time: 15m
+        alertname: ForgeProvisionerUnscraped
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: ForgeProvisionerTargetDown
+        exp_alerts: []
+  # ------------------------------------------- discovered-but-down is NOT "unscraped" (no overlap)
+  - interval: 1m
+    name: a discovered failing target pages TargetDown only, never Unscraped
+    input_series:
+      - series: 'kube_pod_container_status_ready{namespace="openbao",container="provisioner",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "1x40"
+      - series: 'up{job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0x40"
+    alert_rule_test:
+      # The anti-join's right side is `up`, which EXISTS here (at 0), so the pod is subtracted out.
+      # Had the right side been af_provisioner_ops_total — a labelled counter whose children need not
+      # exist — both alerts would fire for one failure and the operator would get two pages.
+      - eval_time: 25m
+        alertname: ForgeProvisionerUnscraped
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ForgeProvisionerTargetDown
+        exp_alerts:
+          - exp_labels:
+              job: agentforge-provisioner
+              namespace: openbao
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              severity: critical
+            exp_annotations:
+              summary: >-
+                AgentForge provisioner agentforge-provisioner-696fdc794d-gfphx is failing to scrape
+              description: >-
+                The provisioner's metrics endpoint (:9465, ns openbao) has been unscrapeable for
+                >10m while Prometheus still discovers the pod, so every af_provisioner_* series is
+                stale and EVERY alert rule in this group that reads one is blind for as long as this
+                fires. The provisioner is the only writer of tenant OpenBao policies, k8s-auth roles
+                and capability kids, so while it is down no tenant is provisioned and no kid is
+                revoked. Triage - `kubectl --context admin@ai -n openbao describe pod
+                agentforge-provisioner-696fdc794d-gfphx` then `kubectl --context admin@ai -n openbao
+                logs deploy/agentforge-provisioner --tail=100`; a Ready pod with a dead endpoint
+                means the asyncio loop is wedged rather than the process gone. If the pod is ABSENT
+                rather than unscrapeable this rule cannot see it - ForgeProvisionerUnscraped and the
+                stock KubeDeploymentReplicasMismatch are the alerts for that.
+  # ---------------------------------------------------- BrokerSeat controller: the alert-only path
+  - interval: 1m
+    name: a standing brokerseat failure pages, and lands in the brokerseat rule ONLY
+    input_series:
+      # One increment per reconcile pass, exactly as ProvisionerAudit.alert produces for a standing
+      # condition. Nothing else about the pod changes: it stays Ready, no probe fails, no restart is
+      # recorded — which is why this counter is the only channel these failures have.
+      - series: 'af_provisioner_alerts_total{reason="brokerseat-reconcile-error",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ForgeBrokerSeatControllerFailing
+        exp_alerts:
+          - exp_labels:
+              job: agentforge-provisioner
+              namespace: openbao
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              reason: brokerseat-reconcile-error
+              severity: critical
+            exp_annotations:
+              summary: >-
+                BrokerSeat controller is raising brokerseat-reconcile-error
+              description: >-
+                The provisioner's BrokerSeat controller stage has been raising
+                brokerseat-reconcile-error continuously for >10m, which means seat reconciliation is
+                failing while the pod stays Ready with no restarts - this alert is the ONLY channel
+                these failures have. What each reason means - `brokerseat-reconcile-error` a per-CR
+                pass raised and the seat was marked Degraded; `brokerseat-collision` an object the
+                controller would own is owned by someone else (Flux, or a second writer) and it
+                refused to adopt it; `brokerseat-inventory-unknown` three consecutive passes could
+                not establish the seat inventory, so the controller is acting on an UNKNOWN view;
+                `brokerseat-pod-scan-unreadable` / `brokerseat-list-unreadable` /
+                `brokerseat-git-map-unreadable` a kube-apiserver LIST or the git-seat map failed;
+                `brokerseat-watch-unpersisted` a terminating seat's durable watch could not be
+                written, so its finalizer is HELD and the CR will not delete. Triage - `kubectl
+                --context admin@ai -n openbao logs deploy/agentforge-provisioner --tail=200 | grep
+                provisioner.alert` names the seat, then `kubectl --context admin@ai -n
+                agentforge-broker get bseat -o wide` for the phases.
+      - eval_time: 5m
+        alertname: ForgeBrokerSeatControllerFailing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ForgeProvisionerSeatEntitlementDrift
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ForgeProvisionerAlerting
+        exp_alerts: []
+  # ------------------------------------------------ the seat-entitlement drift that is live today
+  - interval: 1m
+    name: a standing seat-entitlement finding pages, then clears itself once it stops recurring
+    input_series:
+      # THREE per pass — the live shape measured 2026-09-07 (seat-undeclared-grant on
+      # claude-max-1/claude-max-2/codex-pro, 2085 alerts in 6h). Flat from minute 12: the operator
+      # resolved ailab#287 and the audit stopped finding it.
+      - series: 'af_provisioner_alerts_total{reason="seat-undeclared-grant",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0+3x12 36x40"
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: ForgeProvisionerSeatEntitlementDrift
+        exp_alerts:
+          - exp_labels:
+              job: agentforge-provisioner
+              namespace: openbao
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              reason: seat-undeclared-grant
+              severity: warning
+            exp_annotations:
+              summary: >-
+                Seat entitlement audit is reporting seat-undeclared-grant
+              description: >-
+                The provisioner's read-only seat-entitlement audit has reported
+                seat-undeclared-grant on every pass for >15m. This compares each broker seat's kid
+                registry against the operator declaration in openbao/capability-kids-configmap.yaml
+                and NEVER writes - resolving a finding is a privilege change and stays a reviewed,
+                human act. KNOWN STANDING FINDING at the time this rule shipped -
+                `seat-undeclared-grant` for kid tz-213512e80fde7c84 on three of four seats, the open
+                question in ailab#287; if that is what is firing, this alert is correct and the
+                ticket is where it gets decided. Otherwise - `seat-registry-unreadable` means a
+                seat's registry could not be read at all (fail-closed, never reported as
+                consistent), `seat-missing-grant` means a declared entitlement is absent so that
+                workspace's capabilities are rejected 401, and `seat-scope-mismatch` means a kid is
+                admitted at a different scope than declared. Triage - `kubectl --context admin@ai -n
+                openbao logs deploy/agentforge-provisioner --tail=200 | grep 'seat entitlement
+                audit'` carries the per-finding message naming the seat and the kid.
+      - eval_time: 45m
+        alertname: ForgeProvisionerSeatEntitlementDrift
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: ForgeBrokerSeatControllerFailing
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: ForgeProvisionerAlerting
+        exp_alerts: []
+  # --------------------------------------------------- the seat phase gauge (inert until #512)
+  - interval: 1m
+    name: a seat parked in Degraded pages; Ready seats in the same gauge do not
+    input_series:
+      - series: 'af_provisioner_seats{phase="Degraded",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "2x30"
+      - series: 'af_provisioner_seats{phase="Ready",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "4x30"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: ForgeBrokerSeatDegraded
+        exp_alerts:
+          - exp_labels:
+              job: agentforge-provisioner
+              namespace: openbao
+              phase: Degraded
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              severity: warning
+            exp_annotations:
+              summary: >-
+                2 BrokerSeat(s) have been Degraded for >15m
+              description: >-
+                The BrokerSeat controller has reported at least one seat in phase Degraded on every
+                pass for >15m. A Degraded seat is one whose children could not be rendered, whose
+                credential seeding refused, or that lost a name/clusterIP collision - the CR exists
+                and the controller keeps reconciling it, but the seat is NOT serving. Triage -
+                `kubectl --context admin@ai -n agentforge-broker get bseat -o wide` for the phase
+                column, then `kubectl --context admin@ai -n agentforge-broker describe bseat <name>`
+                for the conditions and reason, and the provisioner log for the matching
+                provisioner.alert line. If this fires alongside ForgeBrokerSeatControllerFailing the
+                pass itself is failing and that alert is the one to work first.
+      - eval_time: 10m
+        alertname: ForgeBrokerSeatDegraded
+        exp_alerts: []
+  # -------------------------------------------------- zero IS observable on the seat gauge
+  - interval: 1m
+    name: a healthy controller reporting zero Degraded seats is silent, not absent
+    input_series:
+      # audit.seat_phases writes EVERY phase in the vocabulary each pass, so once the controller runs
+      # the Degraded child exists at 0 — the one clean-state assertion this group can make, and the
+      # thing af_provisioner_alerts_total structurally cannot (no child until the first increment).
+      - series: 'af_provisioner_seats{phase="Degraded",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ForgeBrokerSeatDegraded
+        exp_alerts: []
+  # ------------------------------------------------------------------- the catch-all's own case
+  - interval: 1m
+    name: a reason neither family names still reaches someone
+    input_series:
+      # openbao-error is not in either regex, and neither is a reason the engine adds tomorrow — the
+      # negative matcher is what makes new coverage the default instead of an edit nobody remembers.
+      - series: 'af_provisioner_alerts_total{reason="openbao-error",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: ForgeProvisionerAlerting
+        exp_alerts:
+          - exp_labels:
+              job: agentforge-provisioner
+              namespace: openbao
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              reason: openbao-error
+              severity: warning
+            exp_annotations:
+              summary: >-
+                AgentForge provisioner is raising openbao-error
+              description: >-
+                The provisioner has raised openbao-error on every reconcile pass for >15m. This is
+                the catch-all for every fail-closed alert that is neither a BrokerSeat controller
+                failure nor a seat-entitlement finding, so read the reason first - `openbao-error`
+                is OpenBao itself unreachable or refusing (check the openbao StatefulSet is
+                unsealed), `reconcile-error` a tenant pass raised, `collision` / `teardown-unowned`
+                / `teardown-foreign` / `gc-foreign` an object the provisioner would manage is owned
+                by something else and it refused to touch it, `kvgc-*` the broker-credential KV
+                collector, `capability-kid-*` the kid activation barrier or a revoke that did not
+                complete, and `kid-config-unreadable` the mounted capability-kids ConfigMap. Triage
+                - `kubectl --context admin@ai -n openbao logs deploy/agentforge-provisioner
+                --tail=200 | grep provisioner.alert` carries the sanitized name/org/ws for each; no
+                alert record ever carries key material.
+      - eval_time: 17m
+        alertname: ForgeBrokerSeatControllerFailing
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: ForgeProvisionerSeatEntitlementDrift
+        exp_alerts: []

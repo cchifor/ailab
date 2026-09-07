@@ -19,6 +19,7 @@ resources:
   - operator-seeds.sops.yaml # SOPS seed values (dispatcher PAT + reaper DSN) mounted into provision-job — FLOOR, create-if-absent
   - capability-kids-configmap.yaml # OPERATOR-owned capability-kid policy (mounted by provisioner-deploy); CP-unwritable
   - provisioner-deploy.yaml # `agentforge provisioner` controller Deployment + egress CiliumNetworkPolicy
+  - provisioner-podmonitor.yaml # kube-prometheus scrape of af_provisioner_* on :9465 (ailab#293) — object lives in ns `monitoring`, target is the Deployment above
   - openbao-lan.yaml # LAN NodePort :30820 for the dev-worker bao agents (ADR 0020)
   - devworker-seeds.sops.yaml # SOPS seed values for af/dev-workers/* (seed-wins contract)
   - devworker-provision-job.yaml # approle + per-worker policies/roles + KV seed (breakglass-auth)

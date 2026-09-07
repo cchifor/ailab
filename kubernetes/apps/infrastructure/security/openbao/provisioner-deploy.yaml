@@ -45,6 +45,29 @@ spec:
           # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0; bootstrap-class).
           image: registry.chifor.me/agentforge/orchestrator@sha256:946153ed9e445e859f347bef877cfded45c52cb6b4d259fa1115665725c22189
           args: ["agentforge", "provisioner"]
+          # METRICS (ailab#293). The provisioner ALREADY exports af_provisioner_* — the composition
+          # root `provisioner()` calls start_http_server(metrics_port, registry=metrics.registry)
+          # UNCONDITIONALLY (agentforge src/agentforge/main.py:2042 @ main 1a45b80), on a DEDICATED
+          # CollectorRegistry built by ProvisionerMetrics (provisioner/audit.py:50), so the endpoint
+          # serves the af_provisioner_* families and nothing else (no python_*/process_* defaults).
+          # It has been serving all along: ailab#293 proved HTTP 200 on :9465/metrics from a pod in
+          # ns `monitoring` on 2026-08-10, and re-confirmed the LISTEN socket in /proc/net/tcp. What
+          # was missing was SELECTION — no Service, no ServiceMonitor, no PodMonitor anywhere in ns
+          # openbao — so every one of those series has reached nothing for the life of the workload.
+          #
+          # DECLARING THE PORT IS THE POINT, not decoration: a PodMonitor binds an endpoint either by
+          # NAMED port or by raw `portNumber`, and the named form is the one that cannot silently
+          # drift if AF_PROVISIONER_METRICS_PORT is ever changed (ailab#293 option B's own caveat).
+          # The name `metrics` matches the broker/worker convention (broker-*.yaml, worker-
+          # deployment.yaml), so provisioner-podmonitor.yaml reads `port: metrics` exactly as
+          # agentforge-workers/worker-podmonitor.yaml does.
+          #
+          # PLACED HERE, BEFORE `env:`, DELIBERATELY: the held ailab#512 (A2, BrokerSeat controller
+          # stage) appends three env vars at the END of the env block below. Keeping this hunk at
+          # the top of the container spec keeps the two PRs textually disjoint so neither has to be
+          # rebased on the other, in either landing order.
+          ports:
+            - { name: metrics, containerPort: 9465, protocol: TCP }
           env:
             # Same headless pod address the bootstrap Jobs use (= AF_OB_ADDR); the cert covers it.
             - { name: AF_PROVISIONER_OPENBAO_URL, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
@@ -58,6 +81,12 @@ spec:
             # part of the fixed interface, so the generic Python TLS trust vars are set (honored by
             # requests/hvac/urllib) alongside the mounted /tls/ca.crt. CHANGEME: confirm the controller reads
             # one of these (or add AF_PROVISIONER_OPENBAO_CACERT) once the image's config surface is known.
+            # The port the exporter binds, stated rather than defaulted. THE VALUE IS THE ENGINE
+            # DEFAULT (main.py:1827, `int(os.environ.get("AF_PROVISIONER_METRICS_PORT", "9465"))`),
+            # so setting it changes NO behaviour — it makes the containerPort above and the
+            # PodMonitor's named endpoint one declared contract instead of two copies of a default
+            # nothing in this repo would notice drifting.
+            - { name: AF_PROVISIONER_METRICS_PORT, value: "9465" }
             - { name: REQUESTS_CA_BUNDLE, value: "/tls/ca.crt" }
             - { name: SSL_CERT_FILE, value: "/tls/ca.crt" }
             # OPT-IN capability-kid provisioning (agentforge #55 @28c2252). Setting the policy file turns the

@@ -1,0 +1,277 @@
+# Alerts for the AgentForge provisioner controller (ns openbao) — the af_provisioner_* half of the
+# fleet, which until the PodMonitor in this same PR had NO scrape target at all (ailab#293).
+#
+# READ THIS FIRST: EVERY RULE HERE IS NEW COVERAGE, NOT A RE-POINTING. Before this PR the
+# provisioner's ONLY operator-visible channel was a WARNING line in its pod log, re-emitted every
+# 30s reconcile pass. Measured 2026-09-07 on http://192.168.0.47:30090: 16 `af_*` metric names
+# exist, all of them `af_broker_*`; `af_provisioner_*` is 0 series and `up{namespace="openbao"}` is
+# 0 series. The audit code has been counting all along — `ProvisionerAudit.alert` increments
+# af_provisioner_alerts_total{reason} at agentforge provisioner/audit.py:113 and its own docstring
+# says the counter "is the ALERTING surface … it MUST keep advancing every pass". Nothing was
+# listening.
+#
+# WHY IT MATTERS NOW. The BrokerSeat controller (agentforge E1/E2 + ailab#512, held) is ALERT-ONLY
+# by construction: brokerseat-reconcile-error, brokerseat-collision, brokerseat-inventory-unknown,
+# brokerseat-pod-scan-unreadable, brokerseat-watch-unpersisted, brokerseat-list-unreadable and
+# brokerseat-git-map-unreadable (constants at agentforge provisioner/brokerseat.py:220-227) are all
+# raised through that same counter, and the seat-entitlement audit's findings (reason `seat-<kind>`,
+# capability_kid.py:2114) likewise. None of them restarts the pod, fails a probe or changes a
+# Deployment's Ready count, so kube-state-metrics cannot see them either: on 2026-09-07 the pod was
+# 1/1 Ready with 0 restarts and 6h uptime while emitting 2085 `seat-undeclared-grant` alerts. Ready
+# and 0 restarts is what a totally failed reconcile looks like from outside.
+#
+# -- WHAT EACH RULE CAN SEE, AND FROM WHICH SOURCE ---------------------------------------------
+# The three sources are deliberately separated, because a rule that reads only the scraped family is
+# blind to a target that is never scraped — the lesson agentforge-coverage-rules.yaml exists to
+# record, and the exact failure ailab#293 is:
+#   * `up{job="agentforge-provisioner"}`  — synthesised per DISCOVERED target. Says "the monitor
+#     found the pod and the scrape did / did not succeed". Silent when nothing is discovered.
+#   * kube-state-metrics                  — independent of any agentforge exporter. Says "Kubernetes
+#     believes this container is Ready", including for a pod nothing scrapes.
+#   * af_provisioner_*                    — the payload. Exists only once the target is scraped.
+# ForgeProvisionerUnscraped is the join of the first two and is the ONLY rule here that survives the
+# monitor itself being deleted; every af_provisioner_*-reading rule below goes silent in that case,
+# which is the precise reason it is not the only guard.
+#
+# -- REGEX ANCHORING IS LOAD-BEARING ------------------------------------------------------------
+# PromQL label matchers are FULLY ANCHORED, so `reason=~"seat-.*"` does NOT match
+# `brokerseat-collision` — the two families below are disjoint, not overlapping, and a
+# brokerseat-* alert reaches ForgeBrokerSeatControllerFailing (critical) rather than the warning
+# seat-entitlement rule. agentforge-provisioner-rules.test.yaml asserts exactly that both ways: if
+# anchoring were ever to change, the fixture goes red rather than a page silently changing severity.
+#
+# -- WHY `rate(...) > 0` AND NOT `increase(...) > 0` OR A GAUGE ---------------------------------
+# af_provisioner_alerts_total is a COUNTER with one label, `reason`, incremented once per finding per
+# reconcile pass (30s). A standing condition therefore keeps advancing it for as long as it stands,
+# which is what makes `rate() > 0` a STANDING-CONDITION detector rather than an edge detector — the
+# distinction ailab#288 got wrong once already with a delta() form that could not fire on a backlog
+# that never moved. A cleared condition stops incrementing, the rate decays to 0 within the window,
+# and the alert resolves on its own with no state to reset.
+# ZERO IS NOT OBSERVABLE ON THIS COUNTER, and no rule here pretends otherwise: a Prometheus counter
+# with a label has no child until the first increment, and the engine pre-touches none of the
+# reasons (ailab#293 established this; it is agentforge-side to fix). So "the audit ran and found
+# nothing" and "the audit never ran" are the same silence in af_provisioner_alerts_total. That hole
+# is covered from the OTHER two sources — ForgeProvisionerTargetDown and ForgeProvisionerUnscraped
+# both fire without needing a single af_provisioner_* sample to exist.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up; listed in
+# kustomization.yaml (a rule file Flux never applies is the same defect as a rule that cannot fire —
+# agentforge-rules.yaml's header records the 2026-08-10 case where this file's siblings were both).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentforge-provisioner
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: agentforge-provisioner
+      rules:
+        # The pod is DISCOVERED but its metrics endpoint does not answer: a crash-loop, a wedged
+        # event loop, an ingress-policy change. NOT a rollout — the Deployment is replicas:1 with
+        # `strategy: Recreate`, so during a roll the pod is DELETED and the target disappears from
+        # service discovery entirely, producing no `up` series at all rather than a 0 one (that case
+        # belongs to ForgeProvisionerUnscraped, whose left side comes from kube-state-metrics).
+        # `for: 10m` — twice ForgeTargetDown's hold, because this is a SINGLE-replica Recreate
+        # workload: there is no sibling to carry it and a cold image pull on a fresh node is on the
+        # critical path of every restart. critical, matching ForgeTargetDown/ForgeBrokerTargetDown:
+        # while the provisioner is down NOTHING reconciles tenant OpenBao policies or k8s-auth roles,
+        # no capability kid is provisioned or revoked, and (once ailab#512 lands) no BrokerSeat is
+        # reconciled — a revocation that does not happen is a security stall, not a slowdown.
+        - alert: ForgeProvisionerTargetDown
+          expr: up{job="agentforge-provisioner"} == 0
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: "AgentForge provisioner {{ $labels.pod }} is failing to scrape"
+            description: >-
+              The provisioner's metrics endpoint (:9465, ns openbao) has been unscrapeable for >10m
+              while Prometheus still discovers the pod, so every af_provisioner_* series is stale and
+              EVERY alert rule in this group that reads one is blind for as long as this fires. The
+              provisioner is the only writer of tenant OpenBao policies, k8s-auth roles and
+              capability kids, so while it is down no tenant is provisioned and no kid is revoked.
+              Triage - `kubectl --context admin@ai -n openbao describe pod {{ $labels.pod }}` then
+              `kubectl --context admin@ai -n openbao logs deploy/agentforge-provisioner --tail=100`;
+              a Ready pod with a dead endpoint means the asyncio loop is wedged rather than the
+              process gone. If the pod is ABSENT rather than unscrapeable this rule cannot see it -
+              ForgeProvisionerUnscraped and the stock KubeDeploymentReplicasMismatch are the alerts
+              for that.
+        # THE REGRESSION GUARD FOR ailab#293 ITSELF, and the only rule here that survives its own
+        # subject being deleted. LEFT: what Kubernetes says exists (kube-state-metrics, scraped
+        # estate-wide, no agentforge exporter involved). RIGHT: the targets Prometheus discovered.
+        # A pod that no PodMonitor selects is never scraped, so it produces NO series — there is
+        # nothing for absent() to be absent of, and every af_provisioner_*-reading rule above and
+        # below is structurally blind to it. This is ForgeOrchestratorUnscraped's shape
+        # (agentforge-coverage-rules.yaml) applied to the provisioner.
+        # `up` — NOT af_provisioner_ops_total — is the right-hand side on purpose. `up` is
+        # synthesised by Prometheus for every discovered target whether or not the scrape succeeds,
+        # so this rule stays silent for a target that is discovered-but-down (that is
+        # ForgeProvisionerTargetDown's job, at critical) and fires ONLY for a target that is not
+        # discovered at all. af_provisioner_ops_total would have conflated the two and is besides a
+        # labelled counter whose children need not exist.
+        # `== 1` excludes a pod that is not yet Ready; `for: 20m` (ForgeOrchestratorUnscraped's own
+        # hold) rides out a Recreate roll plus PodMonitor discovery plus the first scrape, and a
+        # Prometheus restart.
+        - alert: ForgeProvisionerUnscraped
+          expr: |-
+            max by (namespace, pod) (
+              kube_pod_container_status_ready{namespace="openbao", container="provisioner"} == 1
+            )
+            unless on (namespace, pod) up{job="agentforge-provisioner"}
+          for: 20m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge provisioner {{ $labels.pod }} is unscraped (no af_provisioner_* target)"
+            description: >-
+              This provisioner pod has been Ready for >20m and Prometheus has discovered no scrape
+              target for it, so EVERY af_provisioner_* series is missing and every other rule in this
+              group is silent for a reason that has nothing to do with the estate being healthy -
+              exactly the state ailab#293 recorded, in which the seat-entitlement audit reported
+              findings every 30s for months with nowhere to send them. MOST LIKELY CAUSE - the
+              PodMonitor was removed, its selector no longer matches the pod template, or the
+              container's named `metrics` port was renamed or dropped; all three live in this repo.
+              Triage - `kubectl --context admin@ai -n monitoring get podmonitor
+              agentforge-provisioner -o yaml`, compare its selector against `kubectl --context
+              admin@ai -n openbao get deploy agentforge-provisioner -o
+              jsonpath={.spec.template.metadata.labels}`, and check the Prometheus /targets page for
+              job=agentforge-provisioner.
+        # THE BROKERSEAT CONTROLLER'S ONLY CHANNEL. Every failure mode of the controller stage is
+        # raised as af_provisioner_alerts_total{reason="brokerseat-*"} and NOTHING else: the pod
+        # stays Ready, no probe fails, no restart is recorded. Covers all seven constants
+        # (brokerseat.py:220-227) with one expression rather than seven alerts, so a reason added
+        # later is covered the day the engine ships it instead of the day someone remembers to add a
+        # rule here - the `reason` label is on the alert, so the page still names which one.
+        # critical: a failing seat reconcile means a subscription seat is not being rendered,
+        # repaired or torn down, and a collision means two owners believe they own one seat.
+        # TIMING is sized against the incident this closes - a 20-minute window in which every
+        # reconcile pass failed and nothing alerted. With a 30s pass and a 30s scrape the counter
+        # advances at least twice per rate window, so `rate([10m])` leaves 0 within ~1 scrape of the
+        # first increment and `for: 10m` puts the page ~11m in, comfortably inside 20. The flip side,
+        # stated rather than discovered later: a SINGLE isolated increment holds rate>0 for at most
+        # the 10m window, which does not reliably outlast the 10m hold - one transient failure
+        # deliberately does not page, a standing one always does.
+        - alert: ForgeBrokerSeatControllerFailing
+          expr: rate(af_provisioner_alerts_total{reason=~"brokerseat-.*"}[10m]) > 0
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: "BrokerSeat controller is raising {{ $labels.reason }}"
+            description: >-
+              The provisioner's BrokerSeat controller stage has been raising {{ $labels.reason }}
+              continuously for >10m, which means seat reconciliation is failing while the pod stays
+              Ready with no restarts - this alert is the ONLY channel these failures have. What each
+              reason means - `brokerseat-reconcile-error` a per-CR pass raised and the seat was
+              marked Degraded; `brokerseat-collision` an object the controller would own is owned by
+              someone else (Flux, or a second writer) and it refused to adopt it;
+              `brokerseat-inventory-unknown` three consecutive passes could not establish the seat
+              inventory, so the controller is acting on an UNKNOWN view;
+              `brokerseat-pod-scan-unreadable` /
+              `brokerseat-list-unreadable` / `brokerseat-git-map-unreadable` a kube-apiserver LIST or
+              the git-seat map failed; `brokerseat-watch-unpersisted` a terminating seat's durable
+              watch could not be written, so its finalizer is HELD and the CR will not delete.
+              Triage - `kubectl --context admin@ai -n openbao logs deploy/agentforge-provisioner
+              --tail=200 | grep provisioner.alert` names the seat, then `kubectl --context admin@ai
+              -n agentforge-broker get bseat -o wide` for the phases.
+        # The controller's own view of its seats, from the gauge it sets at the end of every pass
+        # (audit.seat_phases, brokerseat.py:720) over the WHOLE phase vocabulary, so a phase that
+        # empties reads 0 rather than keeping its last value. Complementary to the rule above, not a
+        # duplicate: that one fires when a PASS fails, this one when the pass SUCCEEDS and reports a
+        # seat parked in Degraded - a seat whose Deployment could not be rendered, or that lost a
+        # collision, is Degraded on an entirely healthy reconcile.
+        # DELIBERATELY EMPTY UNTIL ailab#512 LANDS, and this is the one rule here that cannot fire
+        # today: the gauge is a LABELLED gauge with no children until the controller stage runs a
+        # pass, which needs AF_PROVISIONER_BROKERSEAT_NAMESPACE set (ailab#512). Shipping it now is
+        # deliberate - it is the alert #512's activation needs on day one, its capacity to fire is
+        # proven by the promtool fixture rather than by a live series, and it is silent (not
+        # false-green) meanwhile. Once #512 is on, af_provisioner_seats also becomes the clean-state
+        # anchor af_provisioner_alerts_total cannot be: all six phases get a child every pass, so 0
+        # is observable and "the controller is healthy" becomes a positive assertion.
+        - alert: ForgeBrokerSeatDegraded
+          expr: af_provisioner_seats{phase="Degraded"} > 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $value }} BrokerSeat(s) have been Degraded for >15m"
+            description: >-
+              The BrokerSeat controller has reported at least one seat in phase Degraded on every
+              pass for >15m. A Degraded seat is one whose children could not be rendered, whose
+              credential seeding refused, or that lost a name/clusterIP collision - the CR exists and
+              the controller keeps reconciling it, but the seat is NOT serving. Triage - `kubectl
+              --context admin@ai -n agentforge-broker get bseat -o wide` for the phase column, then
+              `kubectl --context admin@ai -n agentforge-broker describe bseat <name>` for the
+              conditions and reason, and the provisioner log for the matching provisioner.alert line.
+              If this fires alongside ForgeBrokerSeatControllerFailing the pass itself is failing and
+              that alert is the one to work first.
+        # The seat-ENTITLEMENT audit (agentforge#123/#152): a read-only per-pass comparison of every
+        # broker seat's kid registry against the operator declaration in
+        # openbao/capability-kids-configmap.yaml. Reasons are `seat-<finding kind>` -
+        # seat-undeclared-grant (standing signing authority no declaration authorises),
+        # seat-missing-grant, seat-scope-mismatch, seat-invalid-record, seat-key-divergence,
+        # seat-registry-unreadable (fail-closed: a registry it cannot read is never "consistent") -
+        # plus seat-inventory-unreadable / seat-inventory-invalid / seat-preflight-error from the
+        # preflight wrapper. Anchoring keeps `brokerseat-*` out of this rule; see the header.
+        # ⚠ THIS FIRES ON LANDING, AND IT IS A TRUE POSITIVE. Verified from the live pod log
+        # 2026-09-07: 2085 `seat-undeclared-grant` alerts in 6h, three per 30s pass - kid
+        # `tz-213512e80fde7c84` holds standing signing authority on anthropic/claude-max-1,
+        # anthropic/claude-max-2 and openai/codex-pro that the declaration does not authorise. That
+        # is ailab#287's open authorisation question, unchanged since 2026-08-10 and NOT decided
+        # here. The alert is not teething and must not be tuned away: an unauthorised grant that has
+        # been standing for a month is exactly what this wiring exists to surface.
+        # warning, not critical: it is a standing authorisation defect for a human to resolve over
+        # days, not a service outage. `for: 15m` over a `[15m]` rate rides out the roll this PR
+        # itself causes without ever missing a standing finding.
+        - alert: ForgeProvisionerSeatEntitlementDrift
+          expr: rate(af_provisioner_alerts_total{reason=~"seat-.*"}[15m]) > 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Seat entitlement audit is reporting {{ $labels.reason }}"
+            description: >-
+              The provisioner's read-only seat-entitlement audit has reported {{ $labels.reason }} on
+              every pass for >15m. This compares each broker seat's kid registry against the operator
+              declaration in openbao/capability-kids-configmap.yaml and NEVER writes - resolving a
+              finding is a privilege change and stays a reviewed, human act. KNOWN STANDING FINDING
+              at the time this rule shipped - `seat-undeclared-grant` for kid
+              tz-213512e80fde7c84 on three of four seats, the open question in ailab#287; if that is
+              what is firing, this alert is correct and the ticket is where it gets decided.
+              Otherwise - `seat-registry-unreadable` means a seat's registry could not be read at
+              all (fail-closed, never reported as consistent), `seat-missing-grant` means a declared
+              entitlement is absent so that workspace's capabilities are rejected 401, and
+              `seat-scope-mismatch` means a kid is admitted at a different scope than declared.
+              Triage - `kubectl --context admin@ai -n openbao logs deploy/agentforge-provisioner
+              --tail=200 | grep 'seat entitlement audit'` carries the per-finding message naming the
+              seat and the kid.
+        # CATCH-ALL, and the reason this group cannot silently under-cover. Everything the
+        # provisioner can raise that is NOT one of the two families above: openbao-error,
+        # reconcile-error, collision, orphan, teardown-unowned, teardown-foreign, gc-foreign,
+        # gc-capability-kid-foreign, kvgc-* (11 reasons), capability-kid-* (5 reasons),
+        # kid-config-unreadable, seat-preflight-error's siblings - and, importantly, ANY REASON THE
+        # ENGINE ADDS LATER. A negative matcher means a new reason is covered on the day it ships
+        # rather than the day someone remembers to write a rule for it; the estate's recurring defect
+        # is coverage that silently fails open, and an allowlist of 30 reason strings is exactly that
+        # shape. The `reason` label is on the alert, so the page still names which one.
+        # warning: this family spans a genuine OpenBao outage (openbao-error) and a routine
+        # unowned-object refusal (teardown-unowned), so the severity is set by what the operator does
+        # next - read the reason - rather than by the worst member. Does NOT fire today: the live pod
+        # emitted only seat-undeclared-grant across 6h on 2026-09-07.
+        - alert: ForgeProvisionerAlerting
+          expr: |-
+            rate(af_provisioner_alerts_total{reason!~"seat-.*|brokerseat-.*"}[15m]) > 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge provisioner is raising {{ $labels.reason }}"
+            description: >-
+              The provisioner has raised {{ $labels.reason }} on every reconcile pass for >15m. This
+              is the catch-all for every fail-closed alert that is neither a BrokerSeat controller
+              failure nor a seat-entitlement finding, so read the reason first - `openbao-error` is
+              OpenBao itself unreachable or refusing (check the openbao StatefulSet is unsealed),
+              `reconcile-error` a tenant pass raised, `collision` / `teardown-unowned` /
+              `teardown-foreign` / `gc-foreign` an object the provisioner would manage is owned by
+              something else and it refused to touch it, `kvgc-*` the broker-credential KV collector,
+              `capability-kid-*` the kid activation barrier or a revoke that did not complete, and
+              `kid-config-unreadable` the mounted capability-kids ConfigMap. Triage - `kubectl
+              --context admin@ai -n openbao logs deploy/agentforge-provisioner --tail=200 | grep
+              provisioner.alert` carries the sanitized name/org/ws for each; no alert record ever
+              carries key material.
