@@ -165,9 +165,9 @@ spec:
             - { name: ENABLE_FOLLOW_UP_GENERATION, value: "false" }
             - { name: ENABLE_AUTOCOMPLETE_GENERATION, value: "false" }
             # Belt-and-suspenders: any task that DOES fire (web-search / retrieval / image query generation,
-            # only when those features are used) is routed to the fast, always-warm daily driver — NEVER the
+            # only when those features are used) is routed to the fastest local model — NEVER the
             # slow 122b. LiteLLM models are OpenAI-compatible, so OWUI uses TASK_MODEL_EXTERNAL (not TASK_MODEL).
-            - { name: TASK_MODEL_EXTERNAL, value: "qwen3.6-35b-a3b" }
+            - { name: TASK_MODEL_EXTERNAL, value: "qwen3-coder-30b-a3b" }
           volumeMounts:
             - { name: data, mountPath: /app/backend/data }
           readinessProbe:
