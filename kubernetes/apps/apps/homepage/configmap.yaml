@@ -69,7 +69,6 @@ data:
             href: https://dsh.chifor.me
             description: Agent harness (local models via LiteLLM)
             icon: si-deepseek
-            siteMonitor: http://dsh.dsh.svc.cluster.local:80
         - LiteLLM:
             href: https://api.chifor.me
             description: OpenAI-compatible router

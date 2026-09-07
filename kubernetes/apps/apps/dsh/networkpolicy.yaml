@@ -30,13 +30,13 @@ spec:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
           podSelector: { matchLabels: { app.kubernetes.io/name: cloudflared } }
       ports: [{ port: 8080, protocol: TCP }]
-    # Homepage's siteMonitor probes the Service for the status dot on home.chifor.me. Without this
-    # the default-deny above silently shows dsh as permanently down. Narrowed to the homepage pod
-    # itself: that namespace also runs oauth2-proxy, which has no reason to reach dsh directly.
-    - from:
-        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: homepage } }
-          podSelector: { matchLabels: { app.kubernetes.io/name: homepage } }
-      ports: [{ port: 8080, protocol: TCP }]
+    # NO homepage exception. An earlier revision allowed the homepage pod through so its siteMonitor
+    # could paint an up/down dot on home.chifor.me. Review called it what it is: a path to the agent
+    # harness that goes AROUND Cloudflare Access. dsh's own cookie would still answer 401, but the
+    # whole argument for this policy is that Access is the only gate -- because dsh's session carries
+    # no SSO identity and cannot tell one person from another. Keeping a second path in exchange for
+    # a status dot trades the property for a cosmetic. The homepage tile still links to dsh; it just
+    # does not probe it.
   egress:
     - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }}]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
