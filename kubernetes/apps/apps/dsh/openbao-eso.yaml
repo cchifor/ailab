@@ -1,0 +1,66 @@
+# dsh reads the LiteLLM key from OpenBao, not from a SOPS Secret.
+#
+# WHY: the credential has to reach a namespace that is deliberately isolated, and this repo
+# cannot mint a SOPS Secret (the age key is not available here). More to the point, the estate
+# rule is that tokens live in OpenBao — so the key is stored at af/estate/litellm and pulled in
+# by External Secrets, the same way agentforge-broker and the tenants do it.
+#
+# The OpenBao side (created 2026-09-07, breakglass ceremony per
+# docs/runbooks/openbao-estate-credentials.md):
+#   af/estate/litellm            field `master_key`  (the value; nothing here ever prints it)
+#   policy af-app-dsh            read on af/data/estate/litellm ONLY — one path, read-only
+#   auth/kubernetes/role/af-app-dsh   bound_service_account_names=dsh-eso, namespaces=dsh
+# Named af-app-dsh rather than af-operator-dsh: the af-operator-* family is AgentForge's, and
+# this is an ordinary app, not part of that control plane.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dsh-eso
+automountServiceAccountToken: false   # ESO mints its own token; nothing else may use this SA
+---
+# The CA that signed OpenBao's server cert, materialised locally so the SecretStore can verify
+# TLS. Issuing a throwaway cert from the same ClusterIssuer is how every other namespace in this
+# estate gets `ca.crt` — the leaf is never used, only the chain.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-ca
+spec:
+  secretName: openbao-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: openbao-ca-ref
+  dnsNames: ["openbao-ca-ref.dsh.svc"]
+  privateKey: { algorithm: ECDSA, size: 256 }
+  issuerRef: { name: ailab-ca, kind: ClusterIssuer, group: cert-manager.io }
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: dsh-store
+spec:
+  provider:
+    vault:
+      server: https://openbao.openbao.svc:8200
+      path: af
+      version: v2
+      auth:
+        kubernetes:
+          mountPath: kubernetes
+          role: af-app-dsh
+          serviceAccountRef: { name: dsh-eso }
+      caProvider: { type: Secret, name: openbao-tls, key: ca.crt }
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: dsh-litellm
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { name: dsh-store, kind: SecretStore }
+  target:
+    name: dsh-litellm
+    creationPolicy: Owner
+  data:
+    - secretKey: api_key
+      remoteRef: { key: estate/litellm, property: master_key }
