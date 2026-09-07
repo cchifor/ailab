@@ -142,21 +142,23 @@ data:
           api_base: http://192.168.0.28:8083/v1
           api_key: "sk-noauth"
         model_info: { max_input_tokens: 57344 }
-      # ---- cloud2 vLLM (W4A16 + MTP), TENSOR-PARALLEL over TWO RTX 3090s ------------------
+      # ---- cloud2 vLLM (W4A16 + MTP), TENSOR-PARALLEL over ALL FOUR RTX 3090s, VISION ON ---
       # syv-ai/qwen38-27b-rtx3090 recipe: int4 AutoRound body, int8 lm_head/embed, MTP n=4 drafts.
       # Kept under its OWN model_name (not pooled with qwen3.8-27b-cloud) because the backends are
       # not interchangeable: different engine and different throughput, so pooling them would let
       # LiteLLM silently route a request to a 3x slower backend with no way to tell which answered.
       #
-      # TP=2 on GPU1+GPU3 since 2026-09-07 (the only x16/x16 pair on that board). Matched A/B,
-      # same harness, one variable -- TP=1 -> TP=2:
-      #   single-stream 155.9 -> 179.5 tok/s (+15.1%) | xhigh C=4 211.5 -> 284.7 (+34.6%)
-      #   KV pool 73,246 -> 364,688 tokens (5.0x), which is the real win: it is what makes
-      #   best-of-N run in parallel. Per-sample quality is IDENTICAL -- TP shards the same
-      #   weights and all-gathers the same logits. Do not exceed 4 concurrent.
+      # TP=4 across all four cards since 2026-09-07. Measured against TP=2 on the same harness:
+      #   single-stream 179.5 -> 200.4 tok/s | xhigh C=1 158.8 -> 176.8 | C=4 284.7 -> 367.7
+      #   KV pool 385,074 -> 1,010,719 tokens, concurrency 2.94x -> 7.71x at 131072.
+      # Chosen over TWO independent TP=2 engines: those pay for the weights twice, so their
+      # two 385,074 pools total LESS than TP=4's single 1,010,719 -- and a split prefix cache
+      # makes every agent turn a cold prefill. Measured on a 10-turn loop over a 22k seed:
+      # turn 1 = 22.6 s with 0 cached, turn 10 = 9.9 s with 24,192 of 25,779 cached.
+      # Per-sample quality is IDENTICAL under TP -- same weights, same all-gathered logits.
       #
-      # CONTEXT: host runs --max-model-len 131072 (2x the recipe default; free at TP=2, still
-      # 2.78x concurrency). max_input_tokens = 131072 - 49152 = 81920. That output headroom is
+      # CONTEXT: host runs --max-model-len 131072 (ceiling is 262144 if one huge prompt ever
+      # needs it, at 3.83x). max_input_tokens = 131072 - 49152 = 81920. That output headroom is
       # deliberately large: xhigh reasoning measured 15,996-38,897 tokens per answer here, and
       # under-budgeting a reasoning model yields finish_reason=length with EMPTY content.
       #
@@ -175,6 +177,9 @@ data:
       #   xhigh  -> 75-110 elements, correct saddle/crank geometry, legs articulated to pedals
       # The cost is real (xhigh ~20-30K tokens vs ~4K) but there is no decode cliff: a 28,177-token
       # single-stream generation held 158.8 tok/s. Callers can still override per request.
+      # VISION: images work (host VISION=1). Verified with distinct-image probe 2026-09-07 --
+      # red/blue/green -> RED/Blue/Green, 3/3 distinct AND correct. VIDEO IS UNTESTED: this
+      # INT4 export ships no video_preprocessor_config.json, so do not advertise video.
       - model_name: qwen3.8-27b-vllm
         litellm_params:
           model: openai/qwen3.8-27b
@@ -185,7 +190,7 @@ data:
           extra_body:
             top_k: 20
             chat_template_kwargs: { reasoning_effort: xhigh }
-        model_info: { max_input_tokens: 81920 }
+        model_info: { supports_vision: true, max_input_tokens: 81920 }
       # ---- COGNITIVE TIER: cloud3, three GPUs pooled ------------------------------------------
       # Qwen3-Coder-Next: 80B MoE with only 3B ACTIVE. MEASURED 102.3 tok/s at 493 W here, versus
       # 32.4 tok/s at 636 W for the 27B dense and 16.6 tok/s for the 122B — decode speed tracks
