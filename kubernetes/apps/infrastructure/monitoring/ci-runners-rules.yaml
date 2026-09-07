@@ -276,3 +276,34 @@ spec:
               like healthy. The runner is carrying a gitea-runner-cleanup.sh older than the alert rules.
               Fix by deploying the role (`just gitea-runners`) and confirming
               `gitea_runner_cleanup_pressure_defer` then has one series per runner.
+        # ── Target-identity guard ──────────────────────────────────────────────────────────────
+        # 2026-09-07: this job had been scraping 192.168.0.20/.21/.22 as "ci-runner-7/8/9" since
+        # 2026-08-25. Those addresses belong to the cloudlab GPU hosts cloud1/cloud2/cloud3 — the
+        # real runners had been renumbered to .29/.30/.31 on 2026-09-03 and ci-runners-node.yaml was
+        # never updated. Nothing caught it for two weeks, because a wrong-but-reachable target looks
+        # exactly like a healthy one: `up` was 1, so TargetDown stayed quiet, while three real
+        # runners had NO alerting and every rule below was being evaluated against another cluster's
+        # hypervisors.
+        #
+        # Guard on IDENTITY, not on kernel flavour. Matching `release=~".*-pve"` would have caught
+        # this specific incident, but only this one: it cannot detect a wrong Ubuntu host, and a
+        # future cloudlab node that stops reporting a -pve kernel would slip past. `nodename` is the
+        # runner's own hostname, set by the gitea_runner role, so "every target in this job must
+        # call itself ci-runner-*" is the actual invariant. It is also self-maintaining — a new
+        # runner satisfies it automatically, while any foreign host fails it immediately.
+        #
+        # This does NOT replace CIRunnerDown: it only sees targets that ARE being scraped, so it
+        # says nothing about a runner missing from the Endpoints list entirely.
+        - alert: CIRunnerTargetNotARunner
+          expr: node_uname_info{job="ci-runner-node", nodename!~"ci-runner-.*"}
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner job is scraping {{ $labels.nodename }} ({{ $labels.instance }}), which is not a CI runner"
+            description: >-
+              {{ $labels.instance }} is in the ci-runner-node scrape set but reports nodename
+              "{{ $labels.nodename }}" (kernel {{ $labels.release }}), which does not match
+              ci-runner-*. Every job="ci-runner-node" alert is therefore being evaluated against the
+              wrong machine, and whichever runner should hold that slot is unmonitored. Check the
+              Endpoints list in ci-runners-node.yaml against docs/network-plan.md — the IPAM registry
+              — remembering the LAN is shared with the cloudlab cluster on .20-.22 and .26-.28.
