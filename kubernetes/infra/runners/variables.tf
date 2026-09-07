@@ -170,10 +170,45 @@ variable "runner_ssh_public_key" {
 # inside the static-reserved block (.2-.50, outside the router DHCP pool that bit the AI LXCs at .51-.53).
 # vmids 4101-4105 don't collide (Talos 4001-4003, dev-workers 4201-4203, AI LXC 5001-5003, registry 5004).
 #
-# ci-runner-6 (node3, .19 / vmid 4106) was RESERVED but DEFERRED per ADR 0013: measured 2026-07-01,
-# node3 had no room while its qwen3.5-122b LLM was loaded. RE-MEASURED 2026-08-25: node3 reports
-# 37.5 GiB free — the most of the three nodes — so the deferral is lifted and 4106 is deployed along
-# with 4107. At the 10 GiB balloon floor the pair leaves node3 ~17.5 GiB headroom.
+# ci-runner-6 (node3, .19 / vmid 4106) was DEFERRED here per ADR 0013 (2026-07-01: node3 had no room
+# for a second runner while its qwen3.5-122b LLM was loaded). The deferral was lifted 2026-08-25 and
+# ci-runner-6..10 were built -- but OUT-OF-BAND, by hand, not through this module.
+#
+# The 2026-08-25 placement measurement that chose the nodes is kept below because it is still the
+# rationale for where they run, and the node placement it produced is CORRECT and matches the live
+# estate. Placement follows a floor-budget measurement, not free RAM: what bounds a node is the sum of
+# guest balloon FLOORS (which ballooning can never reclaim below) plus its LLM when loaded, against
+# 124.9 GiB physical less ~5 GiB host.
+#   node1: floors 84.0 + qwen3.6-35b 24 = 108 -> 12 GiB spare
+#   node2: floors 68.0 + qwen3.6-35b 24 =  92 -> 28 GiB spare
+#   node3: floors 82.0 + qwen3.5-122b 71 = 153 -> OVERSUBSCRIBED
+#
+# !! DO NOT UNCOMMENT THE MAP ENTRIES BELOW WITHOUT IMPORTING FIRST !!
+#
+# Two independent reasons, both verified 2026-09-07:
+#
+#   1. NOT IN STATE. terraform.tfstate tracks ci-runner-1..5 ONLY. All five of 4106-4110 exist on
+#      Proxmox but this module cannot see them, so `tofu plan` reads them as five VMs to CREATE.
+#      An apply would try to create vmids that already exist.
+#
+#   2. THREE OF THE IPs WERE WRONG AND POINTED AT ANOTHER CLUSTER. The entries as written declared
+#      ci-runner-7/8/9 at .20/.21/.22. Those addresses belong to the cloudlab GPU hosts cloud1/2/3
+#      (bare metal, separate Proxmox cluster, separate repo) -- they are NOT ailab addresses. The
+#      runners were moved off them on 2026-09-03. Live mapping, verified by node_exporter nodename:
+#          ci-runner-6  .19  ai-node3  vmid 4106
+#          ci-runner-7  .29  ai-node3  vmid 4107   (was wrongly declared .20 = cloud1)
+#          ci-runner-8  .30  ai-node1  vmid 4108   (was wrongly declared .21 = cloud2)
+#          ci-runner-9  .31  ai-node2  vmid 4109   (was wrongly declared .22 = cloud3)
+#          ci-runner-10 .23  ai-node2  vmid 4110
+#
+# `lifecycle { ignore_changes = [initialization] }` means `ip` here is DOCUMENTATION ONLY for an
+# existing VM -- but it is NOT documentation-only at CREATE time, which is exactly the path an
+# un-imported apply would take. That is how the 2026-09-03 collisions happened.
+#
+# To bring them under management: import each one, then uncomment its entry and reconcile sizing
+# against the live VM.
+#   tofu import 'proxmox_virtual_environment_vm.runner["ci-runner-6"]' ai-node3/4106
+# docs/network-plan.md is the IPAM registry and the only place these addresses are written down.
 variable "runner_nodes" {
   type = map(object({
     node_name = string
@@ -182,7 +217,8 @@ variable "runner_nodes" {
     hostname  = string
   }))
   default = {
-    # Consecutive IPs .14-.18; .19-.20 = ci-runner-6/-7 (node3); .21-.23 = ci-runner-8/-9/-10. cloud-init sets the IP at create
+    # ci-runner-1..5: consecutive IPs .14-.18, managed here. The commented 6..10 are out-of-band;
+    # their real addresses are in the header note above and in docs/network-plan.md. cloud-init sets the IP at create
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
     "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1" }
@@ -190,26 +226,10 @@ variable "runner_nodes" {
     "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
     "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4" }
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
-    # ci-runner-6/-7 (2026-08-25): node3's 2nd and 3rd runners. ci-runner-6 was the slot ADR 0013
-    # reserved here ("once node3 has RAM"); node3 now measures 37.5 GiB free — the most of the three —
-    # so it takes that slot plus one more. Placed on node3 rather than node1 because node1 has only
-    # 24.9 GiB free and two runners at the 10 GiB balloon floor would leave ~4.9 GiB (~96% allocated),
-    # which is the cchifor/platform#620 condition that ballooned idle runners to 1-2 GiB and OOM-killed
-    # CI jobs. node3 lands at ~17.5 GiB headroom instead. NOTE: retiring node1's qwen3.8-27b frees a
-    # RESERVATION, not live RAM (the model is idle-unloaded), so it does not change node1's free bytes.
-    "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
-    "ci-runner-7" = { node_name = "ai-node3", vm_id = 4107, ip = "192.168.0.20", hostname = "ci-runner-7" }
-
-    # ci-runner-8/-9/-10 (2026-08-25). Placement follows a floor-budget measurement, not free RAM:
-    # what bounds a node is the sum of guest balloon FLOORS (which ballooning can never reclaim below)
-    # plus its LLM when loaded, against 124.9 GiB physical less ~5 GiB host.
-    #   node1: floors 84.0 + qwen3.6-35b 24 (measured on node2 as 24 GiB GTT) = 108 -> 12 GiB spare
-    #   node2: floors 68.0 + qwen3.6-35b 24 (LOADED today)                    =  92 -> 28 GiB spare
-    #   node3: floors 82.0 + qwen3.5-122b 71                                  = 153 -> OVERSUBSCRIBED
-    # So node2 takes two and node1 one. node3 takes none: it already carries three runners and is the
-    # tightest on live free RAM. See the note on node3 below.
-    "ci-runner-8"  = { node_name = "ai-node1", vm_id = 4108, ip = "192.168.0.21", hostname = "ci-runner-8" }
-    "ci-runner-9"  = { node_name = "ai-node2", vm_id = 4109, ip = "192.168.0.22", hostname = "ci-runner-9" }
-    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10" }
+    # "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }  # OUT-OF-BAND, not in state -- import before enabling
+    # "ci-runner-7" = { node_name = "ai-node3", vm_id = 4107, ip = "192.168.0.29", hostname = "ci-runner-7" }  # OUT-OF-BAND, not in state -- import before enabling
+    # "ci-runner-8"  = { node_name = "ai-node1", vm_id = 4108, ip = "192.168.0.30", hostname = "ci-runner-8" }  # OUT-OF-BAND, not in state -- import before enabling
+    # "ci-runner-9"  = { node_name = "ai-node2", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9" }  # OUT-OF-BAND, not in state -- import before enabling
+    # "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10" }  # OUT-OF-BAND, not in state -- import before enabling
   }
 }

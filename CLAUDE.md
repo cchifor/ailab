@@ -36,15 +36,29 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 - Roll **ONE CP at a time**; verify **`talosctl … etcd status` is 3/3 in-sync** (quorum) between each reboot.
 
 ## Inventory (mgmt LAN 192.168.0.0/24)
+
+**`docs/network-plan.md` is the IPAM registry — read it before allocating ANY address.** The LAN is
+shared with the `cloudlab` GPU cluster (`.20`–`.22`, `.26`–`.28`), which is invisible to ailab tooling.
+Free static space is only `.5`–`.7`, `.32`–`.35`, `.38`, `.39`, `.50`.
+
 | Role | IPs | vmid |
 |---|---|---|
 | Proxmox hosts | ai-node1/2/3 = .2 / .3 / .4 | — |
 | Talos CPs | .41 / .42 / .43 (API VIP .40:6443) | 4001–4003 |
 | GHA / Gitea CI runners | .14 / .15 / .16 / .17 / .18 | 4101–4105 |
+| CI runners (out-of-band, not in tofu) | .19 / .29 / .30 / .31 / .23 | 4106–4110 |
 | dev-workers | .8–.13 (user `c4`; also the agentforge hosts, ADR 0018) | 4201–4206 |
 | Agent nodes (Talos workers, AgentForge v2, ADR 0019) | .47 / .48 / .49 | 4301–4303 |
+| Talos env-node (out-of-band, not in tofu) | .37 | 4401 |
+| Reviewer VMs (out-of-band, not in tofu) | .24 / .25 | 4501–4502 |
 | AI LLM LXCs | .44 / .45 / .46 | 5001–5003 |
-| registry LXC (node1) | — | 5004 |
+| registry LXC (node1) | .36 | 5004 |
+
+> **Renumbering a guest takes THREE edits**: the guest (netplan), the tofu variable, AND the Proxmox
+> `ipconfig0` (`qm set <vmid> --ipconfig0 …` + `qm cloudinit update <vmid>`). Both VM modules set
+> `lifecycle { ignore_changes = [initialization] }`, so `tofu plan` is BLIND to `ipconfig0` drift —
+> skipping the third edit leaves a stale address that cloud-init re-applies on the next reboot. That
+> is what produced the 2026-09-03 collisions with the Talos nodes. See `docs/network-plan.md`.
 
 ## Where to look
 `docs/decisions/` = ADRs (living decisions) · `docs/runbooks/` = operations (`ci-runners`, `dev-workers`, `ai-host-setup`, `internet-exposure`) · `plans/` = dated planning records (historical — don't rewrite) · `README.md` = repo overview.
