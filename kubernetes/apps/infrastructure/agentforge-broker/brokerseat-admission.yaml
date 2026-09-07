@@ -186,6 +186,7 @@ spec:
         ['broker-anthropic-claude-max-1',
          'broker-anthropic-claude-max-2',
          'broker-anthropic-claude-max-3',
+         'broker-anthropic-claude-max-4',
          'broker-anthropic-max1',
          'broker-anthropic-max2',
          'broker-openai-codex',

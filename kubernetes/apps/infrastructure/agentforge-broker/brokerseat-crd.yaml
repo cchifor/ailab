@@ -72,7 +72,7 @@ spec:
             # `--check` — CI — reports DRIFT), so adding or retiring a git seat never means editing them
             # by hand; scripts/tests/test_brokerseat_crd.py additionally pins the span to load_seats().
             # ⚙ GENERATED — do NOT hand-edit this rule. See scripts/gen-broker-inventory.py.
-            - rule: "!(self.metadata.name in ['broker-anthropic-claude-max-1', 'broker-anthropic-claude-max-2', 'broker-anthropic-claude-max-3', 'broker-anthropic-max1', 'broker-anthropic-max2', 'broker-openai-codex', 'broker-openai-codex-pro'])"
+            - rule: "!(self.metadata.name in ['broker-anthropic-claude-max-1', 'broker-anthropic-claude-max-2', 'broker-anthropic-claude-max-3', 'broker-anthropic-claude-max-4', 'broker-anthropic-max1', 'broker-anthropic-max2', 'broker-openai-codex', 'broker-openai-codex-pro'])"
               message: "metadata.name is a Flux-managed git seat's stem or the mechanical alias of its audience; controller seats cannot take it"
           properties:
             spec:
