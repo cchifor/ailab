@@ -118,6 +118,31 @@ spec:
                  "anthropic/claude-max-3":"http://broker-anthropic-claude-max-3-headless.agentforge-broker.svc.cluster.local:8700",
                  "openai/codex-pro":"http://broker-openai-codex-headless.agentforge-broker.svc.cluster.local:8700"}
             - { name: AF_PROVISIONER_BARRIER_TIMEOUT_S, value: "180" }
+            # ── A2: the BrokerSeat controller stage (agentforge #336/#337/#338/#339) ──────────
+            # HELD: landing this is the operator's call. See the PR body.
+            #
+            # The stage is INERT until AF_PROVISIONER_BROKERSEAT_NAMESPACE is set; setting it turns
+            # `reconcile_seats` on at the top of every pass. The other two are start-up-validated by
+            # `load_seat_controller_env` and the provisioner REFUSES TO START if any is malformed —
+            # a wrong namespace, a tag instead of a digest, an unknown provider, or an aud whose
+            # provider disagrees with its key. That is deliberate: a half-configured controller is
+            # worse than one that is off.
+            - { name: AF_PROVISIONER_BROKERSEAT_NAMESPACE, value: "agentforge-broker" }
+            # The image rendered seats RUN. Must equal the digest the git seats already run, or a
+            # controller seat would come up on a different build from its siblings — taken from the
+            # merged broker manifests (all four agree; e.g. agentforge-broker/broker-anthropic-max1
+            # .yaml), which the pin bot keeps in lockstep with this deployment's own image.
+            - name: AF_PROVISIONER_SEAT_IMAGE
+              value: "registry.chifor.me/agentforge/orchestrator@sha256:946153ed9e445e859f347bef877cfded45c52cb6b4d259fa1115665725c22189"
+            # provider -> the operator-reviewed seat each new seat is cloned FROM: its ledger DSN is
+            # copied (D3 — unset means seeding refuses with LedgerSourceUnset) and its entitlements
+            # are cloned onto seats the declaration does not name explicitly. These two are the
+            # seats the vendored templates reproduce BYTE-FOR-BYTE (agentforge
+            # tests/golden/ailab-broker/), which is why they are the correct sources;
+            # anthropic/claude-max-3 is deliberately NOT a template — it was hand-onboarded outside
+            # the template shape and the golden suite documents that exclusion.
+            - name: AF_PROVISIONER_SEAT_TEMPLATE_AUDS
+              value: '{"anthropic":"anthropic/claude-max-1","openai":"openai/codex-pro"}'
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }
             # Operator kid-policy file (agentforge-capability-kids ConfigMap), read-only.
