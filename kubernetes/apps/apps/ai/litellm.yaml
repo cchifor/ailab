@@ -150,11 +150,33 @@ data:
       # not interchangeable: different engine and different throughput, so pooling them would let
       # LiteLLM silently route a request to a 3x slower backend with no way to tell which answered.
       # Host CTX=fast => max_model_len 65536; minus ~8K output headroom = 57344, same as above.
+      # SAMPLING PARAMS ARE LOAD-BEARING HERE -- without them this model does not stop.
+      # Qwen3.8 is a hybrid reasoning model whose chat template defaults to reasoning_effort
+      # xhigh. vLLM's own defaults leave top_k DISABLED, and with no top-k truncation the
+      # sampler wanders and never emits the closing </think>. Open WebUI then dies with
+      # `TransferEncodingError: Not enough data to satisfy transfer length header`.
+      #
+      # MEASURED on cloud2 2026-09-07, prompt "Generate an SVG of a pelican riding a bicycle":
+      #   vLLM defaults (no top_k), xhigh : >391 s, never finished; at a 20000-token cap it
+      #                                     returned finish=length with ZERO content -- the
+      #                                     whole budget went into thinking that never closed.
+      #   Qwen params (temp 1.0/top_p 0.95/top_k 20):
+      #     low    ->  25 s,  4199 tok, finish=stop, valid SVG
+      #     medium ->  32 s,  4805 tok, finish=stop, valid SVG
+      #     xhigh  -> 140 s, 19577 tok, finish=stop, valid SVG
+      # xhigh costs 4x the tokens and 4.4x the wall-clock of medium for marginally more output,
+      # so medium is the quality-per-compute pick. Thinking stays ON: it is not the problem.
+      # Callers can still override reasoning_effort per request; :18020 direct is unchanged.
       - model_name: qwen3.8-27b-vllm
         litellm_params:
           model: openai/qwen3.8-27b
           api_base: http://192.168.0.28:18020/v1
           api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+          extra_body:
+            top_k: 20
+            chat_template_kwargs: { reasoning_effort: medium }
         model_info: { max_input_tokens: 57344 }
       # ---- COGNITIVE TIER: cloud3, three GPUs pooled ------------------------------------------
       # Qwen3-Coder-Next: 80B MoE with only 3B ACTIVE. MEASURED 102.3 tok/s at 493 W here, versus
