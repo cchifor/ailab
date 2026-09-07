@@ -154,6 +154,13 @@ spec:
       app.kubernetes.io/name: cloudflared
   template:
     metadata:
+      annotations:
+        # cloudflared-config is a STATIC ConfigMap, not a hashed configMapGenerator, so editing the
+        # ingress rules above updates it IN PLACE and the running connectors keep serving their OLD
+        # routes until something restarts them. A new hostname then looks deployed but 404s at the
+        # edge. Bump this whenever the ingress list changes -- it is the rollout trigger. (Same trap
+        # cloud-power's kustomization documents for app code.)
+        chifor.me/config-revision: "2026-09-07-dsh"
       labels:
         app.kubernetes.io/name: cloudflared
     spec:

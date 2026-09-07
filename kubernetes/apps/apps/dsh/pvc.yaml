@@ -19,11 +19,17 @@ spec:
 ---
 # The npm install lives on its own volume so the app can be upgraded (bump DSH_VERSION, delete this
 # PVC) without touching credentials, and so the pod needs no npm egress after first boot.
+#
+# ReadWriteMany on nfs-csi, NOT local-path: the install Job and the Deployment both mount this. With
+# a local-path RWO volume the Job binds it to whichever node the Job landed on, and if the
+# Deployment is ever scheduled elsewhere it stays Pending forever with no obvious cause. RWX removes
+# that failure mode. Unlike dsh-home this holds only a node_modules tree -- nothing here cares about
+# POSIX modes, so NFS is fine.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: dsh-app
 spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: local-path
+  accessModes: [ReadWriteMany]
+  storageClassName: nfs-csi
   resources: { requests: { storage: 4Gi } }

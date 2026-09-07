@@ -23,6 +23,12 @@ spec:
     - from:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
       ports: [{ port: 8080, protocol: TCP }]
+    # Homepage's siteMonitor probes the Service for the status dot on home.chifor.me. Without this
+    # the default-deny above silently shows dsh as permanently down. Ingress only, one port, from a
+    # namespace that is already the dashboard -- it grants no path a browser did not already have.
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: homepage } }
+      ports: [{ port: 8080, protocol: TCP }]
   egress:
     - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }}]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]

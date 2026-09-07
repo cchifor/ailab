@@ -42,7 +42,14 @@ spec:
             - |
               set -eu
               MARKER="/app/.installed-${DSH_VERSION}"
-              if [ -f "$MARKER" ]; then echo "already installed: ${DSH_VERSION}"; exit 0; fi
+              # The marker is written LAST and only after the binary is proven present. An earlier
+              # version wrote it beside the install, which meant an OOM-killed or evicted Job could
+              # leave a marker over a half-written node_modules and every later run would skip the
+              # repair. Verify-then-mark, never mark-then-verify.
+              if [ -f "$MARKER" ] && [ -x /app/node_modules/.bin/dsh ]; then
+                echo "already installed: ${DSH_VERSION}"; exit 0
+              fi
+              [ -f "$MARKER" ] && echo "marker present but binary missing -- reinstalling" && rm -f "$MARKER"
               echo "installing @deepseek-ai/dsh@${DSH_VERSION} into /app"
               npm install --prefix /app --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}"
               test -x /app/node_modules/.bin/dsh
