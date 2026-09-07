@@ -1,0 +1,17 @@
+# {{ ansible_managed }} (role: dev_worker)
+# Per-user systemd manager default. tmux 3.4 links against libsystemd and wraps every pane in a
+# transient `tmux-spawn-<uuid>.scope`; it passes only Description/Slice/PIDs/CollectMode on
+# StartTransientUnit and never sets OOMPolicy, so the scope takes whatever this manager default is.
+# Stock `stop` means one OOM-killed child SIGTERMs the entire pane — that is what killed a live
+# Claude Code session on dev-worker-1 on 2026-09-07 when the kernel OOM-killed only its pytest child.
+#
+# SCOPE OF EFFECT: user managers only (`/etc/systemd/user.conf.d/`), never the system manager. The
+# memory-capped system units — claude-job@.service, agentforge.service — keep the stock `stop`, so a
+# runaway headless job still takes its own unit down, which is what those caps exist to do.
+#
+# NOT RETROACTIVE (measured on systemd 255): a scope's OOMPolicy is fixed at creation and is not
+# settable at runtime -- `systemctl --user set-property … OOMPolicy=…` fails with "Cannot set
+# property, or unknown property". Re-check if systemd is ever upgraded past 255. Panes that were
+# already open when this landed keep `stop` until they are re-created or the worker reboots.
+[Manager]
+DefaultOOMPolicy={{ dev_worker_user_oom_policy }}

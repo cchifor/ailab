@@ -45,6 +45,16 @@
 - name: Reboot on kernel panic (after the dev-worker-1 12h silent outage, 2026-08-11)
   ansible.builtin.import_tasks: kernel_panic.yml
 
+# Third member of the out-of-memory family above, and the one that decides who PAYS for a spike. The
+# swapfile delays the OOM-killer and kernel_panic.yml recovers the box if the kernel dies; this one
+# makes sure a single OOM-killed child does not take a live tmux pane (and the Claude session in it)
+# with it, and caps the tmux slice so the runaway is the one that dies. Carries its own tag so the
+# guard can be rolled out on its own: --tags oom (it re-derives dev_worker_users when users.yml is
+# outside the tag set, the same way claude_statusline.yml does).
+- name: OOM containment for interactive tmux panes (after the dev-worker-1 session loss, 2026-09-07)
+  ansible.builtin.import_tasks: oom_containment.yml
+  tags: [oom]
+
 - name: Node.js (for Claude Code + Codex)
   ansible.builtin.import_tasks: node.yml
 

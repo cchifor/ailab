@@ -1,0 +1,19 @@
+# {{ ansible_managed }} (role: dev_worker)
+# Ceiling for the whole interactive tmux world (every pane of every tmux server for this user lands
+# in app-tmux.slice). The point is WHERE the kill happens: at this cap the kernel kills the largest
+# task inside the slice — the runaway itself — while the box still has headroom. Without it the
+# runaway keeps growing until GLOBAL memory pressure fires, and then the victim is whatever the
+# kernel's badness heuristic picks anywhere on the machine. On dev-worker-1 on 2026-09-07 the process
+# that tripped the global OOM killer was dockerd's hatchet-engine, several cgroups away from the pane
+# that caused it.
+#
+# memory.oom.group is deliberately left at 0: kill the offending task, not every pane in the slice.
+# Paired with OOMPolicy=continue (user-oom-policy.conf.j2) the surviving panes stay attached — the
+# cap decides WHO dies, the policy decides whether anyone else dies with them. Neither guard
+# subsumes the other.
+#
+# See defaults/main.yml for why there is no MemoryHigh here and why swap is denied.
+[Slice]
+MemoryAccounting=yes
+MemoryMax={{ dev_worker_tmux_memory_max }}
+MemorySwapMax={{ dev_worker_tmux_memory_swap_max }}

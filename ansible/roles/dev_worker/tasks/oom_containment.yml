@@ -1,0 +1,138 @@
+---
+# OOM blast-radius containment for the interactive tmux world.
+#
+# INCIDENT (dev-worker-1, 2026-09-07 09:49): a mutation-testing harness in a Claude Code pane
+# produced a pytest that reached 7.5 GiB anon RSS on this 12 GiB worker. The kernel's GLOBAL OOM
+# killer fired and killed exactly one process — that pytest. The session died anyway: tmux 3.4 links
+# against libsystemd and wraps every pane in a transient `tmux-spawn-<uuid>.scope`, systemd's stock
+# DefaultOOMPolicy is `stop`, so the user manager tore down the whole scope. `claude` took the SIGTERM
+# (its transcript's last write is 1s later — the session flushing), the pane's bash was SIGKILLed 90s
+# later when the stop timed out, and four hours of work in progress went with it. The kernel killed
+# the test; systemd killed the session.
+#
+# Two independent guards, and neither subsumes the other:
+#   1. OOMPolicy=continue — a dying child must not take its pane with it. Fixes the amplifier, i.e.
+#      the reason a WIP session died at all. Does nothing about the memory pressure itself.
+#   2. app-tmux.slice cap — the runaway is killed inside the tmux slice while the box still has
+#      headroom, instead of growing until global pressure lets the kernel pick a victim anywhere
+#      (in the incident, dockerd's hatchet-engine is what tripped the OOM killer). Does nothing
+#      about who else dies when it fires — that is guard 1's job.
+#
+# VERIFIED ON THE BOX before shipping, not inferred (see tests/test-oom-containment.sh):
+#   - `strings $(which tmux)` contains no "OOMPolicy": tmux sets only Description/Slice/PIDs/
+#     CollectMode, so the scope inherits the manager default rather than a hard-coded value.
+#   - A pane spawned after the re-exec reports OOMPolicy=continue.
+#   - app-tmux.slice is auto-synthesized (no unit file), and it still honours a drop-in:
+#     memory.max and memory.swap.max in the live cgroup change to match.
+#   - The incident's global OOM kill DID increment app-tmux.slice's memory.events:oom_kill (read
+#     back as 1 on a slice whose MemoryMax was infinity at the time) — that counter is what systemd
+#     watches to apply OOMPolicy, so this reaches global kills and not just cgroup-limit kills.
+
+# main.yml tags this file `oom` so the guard can be rolled out on its own, without a full role re-run.
+# users.yml is not in that tag set, so its dev_worker_users fact is absent on a tag-limited run —
+# derive the same list here when that happens (same idiom as claude_statusline.yml).
+- name: Resolve the dev-worker user(s) when running tag-limited (users.yml was skipped)
+  ansible.builtin.set_fact:
+    dev_worker_users: >-
+      {{ [{'name': dev_worker_admin_user, 'home': '/home/' + dev_worker_admin_user}] +
+         ([{'name': dev_worker_agent_user, 'home': '/home/' + dev_worker_agent_user}]
+          if dev_worker_agent_user != dev_worker_admin_user else []) }}
+  when: dev_worker_users is not defined
+
+- name: Resolve the dev-worker uids (for each user's systemd manager runtime dir)
+  ansible.builtin.getent:
+    database: passwd
+
+- name: Ensure the per-user systemd manager config drop-in dir
+  ansible.builtin.file:
+    path: /etc/systemd/user.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Keep a dying child from taking its tmux pane down (DefaultOOMPolicy)
+  ansible.builtin.template:
+    src: user-oom-policy.conf.j2
+    dest: /etc/systemd/user.conf.d/10-oom-policy.conf
+    mode: "0644"
+  register: dev_worker_oom_policy_dropin
+
+- name: Ensure the app-tmux.slice drop-in dir
+  ansible.builtin.file:
+    path: /etc/systemd/user/app-tmux.slice.d
+    state: directory
+    mode: "0755"
+
+- name: Cap the tmux slice so a runaway dies locally, before the box does
+  ansible.builtin.template:
+    src: tmux-slice-memory-cap.conf.j2
+    dest: /etc/systemd/user/app-tmux.slice.d/10-memory-cap.conf
+    mode: "0644"
+  register: dev_worker_tmux_slice_cap
+
+# A user manager exists only while the user has a session (or lingering). Probe rather than let
+# `systemctl --user` fail: an absent /run/user/<uid> is a legitimate state on a worker nobody is
+# logged into, and the drop-ins above are already on disk for its next login.
+- name: Probe which per-user systemd managers are running
+  ansible.builtin.stat:
+    path: "/run/user/{{ getent_passwd[item.name][1] }}/systemd/private"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: dev_worker_manager_probe
+
+- name: Record the users whose systemd manager can be re-executed
+  ansible.builtin.set_fact:
+    dev_worker_live_user_managers: >-
+      {{ dev_worker_manager_probe.results | selectattr('stat.exists')
+         | map(attribute='item.name') | list }}
+
+# daemon-RELOAD does not re-read user.conf.d — manager configuration is only parsed at manager
+# start, so the policy needs a re-exec. That serialises the manager's state, re-executes the binary
+# and deserialises: running units (every open tmux pane) are preserved and nothing is restarted --
+# the only visible effect is a brief window where the manager's D-Bus socket is unavailable, so a
+# unit STARTING at that instant can fail. It also re-reads unit drop-ins, covering the slice cap in
+# the same step.
+- name: Re-exec the running per-user systemd managers so the drop-ins take effect
+  become: true
+  become_user: "{{ item }}"
+  ansible.builtin.command:
+    cmd: systemctl --user daemon-reexec
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ getent_passwd[item][1] }}"
+  loop: "{{ dev_worker_live_user_managers }}"
+  changed_when: true
+  when: dev_worker_oom_policy_dropin is changed or dev_worker_tmux_slice_cap is changed
+
+# This role's job here is a safety net that is invisible until the day it matters, so prove it is
+# armed on every run rather than trusting that the files on disk were parsed. Reads the manager's
+# effective values, not the drop-in text.
+#
+# Skipped under --check: check mode writes neither drop-in and skips the re-exec, so the read-back
+# would report the pre-change value and the assert below would fail on every host that is not
+# already converged — which is exactly the set of hosts a pre-flight is run against. Guarding it
+# keeps `--check --diff` usable for reviewing the change instead of guaranteeing a red run.
+- name: Read back the effective OOM containment settings
+  become: true
+  become_user: "{{ item }}"
+  ansible.builtin.command:
+    cmd: systemctl --user show -p DefaultOOMPolicy
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ getent_passwd[item][1] }}"
+  loop: "{{ dev_worker_live_user_managers }}"
+  changed_when: false
+  when: not ansible_check_mode
+  register: dev_worker_oom_policy_effective
+
+- name: Assert the interactive OOM containment is armed
+  ansible.builtin.assert:
+    that:
+      - item.stdout == "DefaultOOMPolicy=" ~ dev_worker_user_oom_policy
+    fail_msg: >-
+      {{ item.item }}'s systemd manager reports {{ item.stdout }}, expected
+      DefaultOOMPolicy={{ dev_worker_user_oom_policy }}. New tmux panes would still be torn down
+      whenever one of their children is OOM-killed (the dev-worker-1 2026-09-07 failure).
+    quiet: true
+  loop: "{{ dev_worker_oom_policy_effective.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not ansible_check_mode

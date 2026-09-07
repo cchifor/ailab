@@ -107,6 +107,35 @@ dev_worker_job_memory_high: "2G"
 dev_worker_job_memory_max: "2560M"
 dev_worker_job_memory_swap_max: "2G"
 
+# ---- interactive tmux OOM containment (dev-worker-1 incident, 2026-09-07) ----
+# tmux 3.4 is linked against libsystemd, so every pane runs in its own transient
+# `tmux-spawn-<uuid>.scope` under app-tmux.slice. systemd's stock DefaultOOMPolicy is `stop`, which
+# means ONE OOM-killed child terminates the WHOLE pane — shell, `claude`, and any work in progress.
+# That is what destroyed a live Claude Code session on dev-worker-1: the kernel killed only the
+# runaway pytest, systemd killed everything else in the pane. `continue` keeps the pane alive and
+# lets the dead child be dead. Applies to per-user managers ONLY; system units keep the stock `stop`,
+# so the memory-capped claude-job@/agentforge units still fail as a unit the way they are meant to.
+dev_worker_user_oom_policy: continue
+# Ceiling for ALL tmux panes combined, so a runaway is killed inside the tmux slice before global
+# memory pressure lets the kernel pick an arbitrary victim elsewhere on the box (in the incident it
+# was dockerd's hatchet-engine that tripped the OOM killer, not the pane that caused it). Measured on
+# dev-worker-1 on 2026-09-07: the slice's steady state was ~200 MB across 8 panes, and its peak that
+# boot -- 8.05 GiB -- WAS the incident. (memory.peak is per-boot and resets, so re-measure rather
+# than trusting that figure later.) 6G is 30x the steady state and still leaves ~6 GiB for dockerd
+# (capped 2000M) and the system on a 12 GiB worker.
+dev_worker_tmux_memory_max: "6G"
+# Swap is denied to the tmux slice DELIBERATELY, and this is the one place the role departs from the
+# MemoryHigh+MemoryMax+MemorySwapMax house pattern used by dev_worker_job_memory_* above.
+#   - MemorySwapMax=0: with a 2G swap allowance a runaway reaches MemoryMax in RAM *plus* 2 GiB of
+#     swap before it dies -- an 8 GiB footprint, larger than the 7.5 GiB that took the box down in
+#     the first place, and thrashing a shared 4 GiB swapfile the whole way. The slice's own swap peak
+#     is 276 MB, so denying it costs interactive work nothing.
+#   - No MemoryHigh: MemoryHigh throttles by driving reclaim, and with swap denied there is nothing
+#     to reclaim from an anon-heavy runaway (a bytearray loop) — it would burn CPU in a futile
+#     reclaim loop on every pane in the slice on its way to MemoryMax anyway. A single hard ceiling
+#     kills the offender immediately instead of degrading every other pane first.
+dev_worker_tmux_memory_swap_max: "0"
+
 # ---- tmux persistence (NEW vs homelab) ----
 dev_worker_tmux_continuum_save_interval: "15"
 
