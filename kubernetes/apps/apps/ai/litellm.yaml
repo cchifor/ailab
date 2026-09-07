@@ -285,9 +285,15 @@ data:
       max_budget: 50 # USD
       budget_duration: 30d
     # Router (all proxy traffic flows through it): health-aware load-balancing across a model's
-    # deployments. qwen3.6-35b-a3b (and the gpt-oss shim) have TWO deployments (llm-node1/llm-node2);
-    # on a failed call the router retries the OTHER node and, after allowed_fails, parks the bad one for
-    # cooldown_time — so a down/restarting daily-driver node degrades gracefully instead of ~50% errors.
+    # deployments. On a failed call the router retries the OTHER deployment and, after allowed_fails,
+    # parks the bad one for cooldown_time — so a down/restarting node degrades gracefully rather than
+    # returning ~50% errors.
+    # NB (2026-09-07): this text used to cite qwen3.6-35b-a3b's llm-node1/llm-node2 pair as the worked
+    # example. That pair no longer exists — qwen3.6 was retired from THIS proxy in #524/#525, and
+    # llm-node1 was deleted outright after ai-llm-1 stopped running a llama-server at all. The
+    # multi-deployment machinery below is still live and still correct; it just has a different set of
+    # models under it now. qwen3.6 does survive on litellm-local.yaml (agentforge workers), single
+    # deployment, llm-node2 only.
     # (Single-deployment models like qwen3.5-122b/cloud still benefit from num_retries on transient 5xx.)
     router_settings:
       # least-busy: route to the deployment with the fewest in-flight requests. With --parallel 2 on each
@@ -353,7 +359,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "923cdbdd5584"
+        checksum/config: "7b84eb822f46"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

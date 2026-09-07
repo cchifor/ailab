@@ -29,44 +29,24 @@ subsets:
       - { ip: 192.168.0.45, hostname: ai-llm-2 }
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
-# Per-node Services, originally a PAIR for load-balancing qwen3.6 across node1+node2. Only node2 is
-# live now, so llm-node2 is the single real route (litellm-local.yaml uses it); llm-node1 is dead and
-# pending deletion, see below. Deliberately NOT labelled app.kubernetes.io/component=llama-server:
-# the `llm` Service above already scrapes .45, so labelling these too would double-scrape it.
-# PENDING DELETION (2026-09-07). Its only consumer was litellm-local.yaml, whose node1 deployment
-# was removed in the same change; nothing in the repo routes here any more. Kept for one cycle so the
-# litellm-local pod can roll onto the new config FIRST -- LiteLLM reads its config only at startup, so
-# deleting the Service in the same reconcile would yank it from under a still-running old pod. Remove
-# Do NOT gate the deletion on pod creation time alone -- a new pod can sit blocked in its
-# wait-for-db init while the OLD ReplicaSet is still serving traffic. Gate on all three:
-#   1. the Deployment rollout COMPLETED  (kubectl -n ai rollout status deploy/litellm-local)
-#      and the live pod's checksum/config annotation equals the value in litellm-local.yaml;
-#   2. the running proxy has no llm-node1 deployment loaded (inspect its loaded model_list,
-#      not just /v1/models -- that lists configured aliases without contacting a backend);
-#   3. one authenticated inference against qwen3.6-35b-a3b through litellm-local succeeds.
-# Only then merge the removal, as a SEPARATE change -- two commits in one merge still reconcile
-# together, so the ordering has to come from two merges, not two commits.
-apiVersion: v1
-kind: Service
-metadata:
-  name: llm-node1
-  namespace: ai
-  labels: { app.kubernetes.io/name: llm-node1 }
-spec:
-  type: ClusterIP
-  ports:
-    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
----
-apiVersion: v1
-kind: Endpoints
-metadata:
-  name: llm-node1
-  namespace: ai
-  labels: { app.kubernetes.io/name: llm-node1 }
-subsets:
-  - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
-    ports: [{ name: http, port: 8080, protocol: TCP }]
----
+# Per-node Service for the surviving qwen3.6 route. This was originally a PAIR (llm-node1 +
+# llm-node2) load-balancing qwen3.6 across node1 and node2. llm-node1 was RETIRED 2026-09-07:
+# ai-llm-1 (.44) has no llama-server.service at all, so that Service pointed at a closed port and
+# LiteLLM was round-robining roughly half of the agentforge workers' qwen3.6 requests into it.
+#
+# The Service+Endpoints pair was deliberately kept for one reconcile after its consumer
+# (litellm-local.yaml) dropped the node1 deployment, because LiteLLM reads its config only at
+# startup -- deleting it in the same reconcile would have pulled it out from under a still-running
+# old pod. All three gate conditions were then verified on the live cluster before this removal:
+#   1. `kubectl -n ai rollout status deploy/litellm-local` -> successfully rolled out, and the sole
+#      remaining pod carries checksum/config 64ae47a82bad (the 23-day-old pod is gone);
+#   2. the running proxy's loaded config has ZERO `api_base` entries pointing at llm-node1 -- only
+#      llm-node2 and llm-qwen35 remain;
+#   3. an authenticated chat/completions call for qwen3.6-35b-a3b through litellm-local returned
+#      HTTP 200, finish_reason=stop.
+#
+# Deliberately NOT labelled app.kubernetes.io/component=llama-server: the `llm` Service above
+# already scrapes .45, so labelling this too would double-scrape it.
 apiVersion: v1
 kind: Service
 metadata:
