@@ -401,4 +401,4 @@ identity** against per-workstream acceptance criteria rather than by counting do
 count can mask a target that disappeared instead of being fixed, and says nothing about deferred W5
 capacity work. Confirm etcd is still 3/3 in sync.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
