@@ -76,6 +76,21 @@ spec:
       # pre-taint pods there also read as KubeDaemonSetMisScheduled without this.
       tolerations:
         - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+        # 2026-09-07: talos-env-node-1 joined 2026-09-01 with dedicated=env:NoSchedule and this
+        # list only had `agent`, so the node fell out of desiredNumberScheduled while the pod
+        # placed before the taint kept running -- controller-owned but permanently
+        # misscheduled, i.e. working yet unmanaged: not rolled on upgrade, and not recreated
+        # if deleted. Explicit value=env rather than operator=Exists on the key, so a future
+        # dedicated node class has to opt in deliberately instead of inheriting access.
+        #
+        # Be honest about what this buys TODAY: all 18 PodVolumeBackups ever taken from
+        # talos-env-node-1 were testpool volumes, and the schedules below now EXCLUDE testpool, so
+        # the agent has nothing to back up there right now. It is kept deliberately anyway --
+        # removing it would mean any future non-testpool volume landing on that node is silently
+        # unbacked, which is the exact failure class this estate keeps rediscovering. Cost is one
+        # DaemonSet pod; the alternative also needs an out-of-band delete of the stale pod to clear
+        # KubeDaemonSetMisScheduled. Revisit if env-node is ever guaranteed to hold only testpool.
+        - { key: dedicated, operator: Equal, value: env, effect: NoSchedule }
     # NB: `snapshotsEnabled` only gates whether the chart renders VolumeSnapshotLocation objects — it is
     # NOT the CSI-snapshot switch. With configuration.volumeSnapshotLocation empty it renders nothing
     # either way, so it is left alone. The real snapshot suppression is snapshotVolumes/fs-backup below.
@@ -156,7 +171,13 @@ spec:
           defaultVolumesToFsBackup: true
           snapshotVolumes: false
           includedNamespaces: ["*"]
-          excludedNamespaces: [kube-system, velero, trivy-system] # trivy DB cache is rebuildable — keep it out of the off-site chain
+          # testpool added 2026-09-07: it is the EPHEMERAL leasable test-env pool, so its PVCs are
+          # created and torn down under lease churn. The 09-06 and 09-07 backups both went
+          # PartiallyFailed on "failed to get PV ... for PVC testpool/dockerlib-env-std-pool-...:
+          # persistentvolumes not found" -- the PV was already gone while the PVC was still being
+          # enumerated. That race is structural, not a one-off, and a PartiallyFailed run also
+          # stops the chain's last-success timestamp advancing, so it masks real backup failure.
+          excludedNamespaces: [kube-system, velero, trivy-system, testpool] # trivy DB cache is rebuildable — keep it out of the off-site chain
       weekly:
         disabled: false
         schedule: "0 3 * * 0"
@@ -165,7 +186,13 @@ spec:
           defaultVolumesToFsBackup: true
           snapshotVolumes: false
           includedNamespaces: ["*"]
-          excludedNamespaces: [kube-system, velero, trivy-system] # trivy DB cache is rebuildable — keep it out of the off-site chain
+          # testpool added 2026-09-07: it is the EPHEMERAL leasable test-env pool, so its PVCs are
+          # created and torn down under lease churn. The 09-06 and 09-07 backups both went
+          # PartiallyFailed on "failed to get PV ... for PVC testpool/dockerlib-env-std-pool-...:
+          # persistentvolumes not found" -- the PV was already gone while the PVC was still being
+          # enumerated. That race is structural, not a one-off, and a PartiallyFailed run also
+          # stops the chain's last-success timestamp advancing, so it masks real backup failure.
+          excludedNamespaces: [kube-system, velero, trivy-system, testpool] # trivy DB cache is rebuildable — keep it out of the off-site chain
     resources:
       requests: { cpu: 50m, memory: 256Mi }
       # 1Gi -> 2Gi (2026-08-05 storage audit): the server was OOMKilled at 02:00:31 on 2026-08-03
