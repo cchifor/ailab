@@ -1,0 +1,98 @@
+# PodMonitor for the AgentForge provisioner controller (provisioner-deploy.yaml) — the scrape target
+# ailab#293 records as missing. Closing that gap is the whole file; everything below says why it is
+# THIS shape and not another, because the estate has shipped monitors that selected nothing twice
+# (ailab#284, and the `job="agentforge"` rules agentforge-rules.yaml's header dissects).
+#
+# WHAT WAS BROKEN. The provisioner exports af_provisioner_ops_total / af_provisioner_alerts_total /
+# af_provisioner_seats on :9465 and always has — `provisioner()` calls start_http_server on a
+# dedicated CollectorRegistry unconditionally (agentforge main.py:2042, provisioner/audit.py:50).
+# ailab#293 verified the endpoint live: HTTP 200 from a pod in ns `monitoring`, LISTEN on 0x24F9 in
+# /proc/net/tcp. But ns openbao held NO Service, NO ServiceMonitor and NO PodMonitor, so
+# `up{namespace="openbao"}` was 0 series and the whole af_provisioner_* namespace was 0 series.
+# Re-measured 2026-09-07 against http://192.168.0.47:30090: 16 `af_*` metric names, every one of
+# them `af_broker_*`, none `af_provisioner_*`. The alerts the provisioner raises — including every
+# BrokerSeat controller failure mode and the seat-entitlement audit's findings — reached exactly one
+# place: a WARNING line in the pod log, re-emitted every 30s pass and read by nobody.
+#
+# A PodMonitor, NOT a Service + ServiceMonitor. The provisioner has no Service and needs none: it is
+# a controller, nothing calls it, and the only reason to add one would be to give Prometheus
+# something to select. The estate already scrapes serviceless workloads exactly this way — see
+# agentforge-workers/worker-podmonitor.yaml ("A PodMonitor, NOT a ServiceMonitor: the worker has NO
+# metrics Service … and the estate already scrapes serviceless ports this way") and
+# monitoring/flux-monitoring.yaml. The sibling agentforge-broker/servicemonitor.yaml is a
+# ServiceMonitor for the opposite reason: each broker seat already HAS a routable Service carrying a
+# `metrics` port, so selecting the Service was free there and would be an invented object here.
+# ailab#293 weighed both (its options A and B) and landed on the PodMonitor with a NAMED port.
+#
+# NAMED PORT, NOT `portNumber`. prometheus-operator v0.91.x accepts a raw `portNumber: 9465`, which
+# would need no Deployment change at all — and that is precisely its defect: it hard-codes a number
+# that agrees with the container only by luck, and would break silently the day
+# AF_PROVISIONER_METRICS_PORT moves. The paired change in provisioner-deploy.yaml declares
+# `{name: metrics, containerPort: 9465}` AND sets AF_PROVISIONER_METRICS_PORT to the same 9465 the
+# engine already defaults to, so port, container and monitor are one declared contract.
+# scripts/tests/test_provisioner_podmonitor.py fails if the three ever disagree.
+#
+# SHAPE follows the two working monitors in this estate rather than inventing a third: the object
+# lives in ns `monitoring` (kube-prometheus-stack's Prometheus sets podMonitorSelector on
+# `release: kube-prometheus-stack` with podMonitorNamespaceSelector `{}`, so a monitor here may name
+# any target namespace), carries that release label, sets an EXPLICIT namespaceSelector because the
+# target pod is in a different namespace than this object, targets the named port, and relabels
+# `job` to a stable value the alert rules read. That is worker-podmonitor.yaml's shape with
+# agentforge-broker/servicemonitor.yaml's job-relabel convention.
+#
+# SELECTOR — checked against the LIVE pod template, which is how ailab#284 should have been caught.
+# `kubectl -n openbao get deploy agentforge-provisioner -o jsonpath={.spec.template.metadata.labels}`
+# returns exactly {app.kubernetes.io/component: provisioner, app.kubernetes.io/name:
+# agentforge-provisioner, app.kubernetes.io/part-of: agentforge}, so the pair below matches, and no
+# other workload in ns openbao carries `app.kubernetes.io/name: agentforge-provisioner` (the four
+# bootstrap Jobs, the unsealer and the raft StatefulSet all name themselves differently). One
+# Deployment, `strategy: Recreate`, `replicas: 1` — so this monitor produces exactly ONE target.
+#
+# NETWORK: nothing to open. The provisioner's CiliumNetworkPolicy (provisioner-deploy.yaml) declares
+# `egress`/`egressDeny` ONLY, and Cilium puts an endpoint into default-deny for a DIRECTION only when
+# a policy selecting it carries rules for that direction — so ingress to this endpoint is unenforced,
+# which is what ailab#293's HTTP 200 from ns `monitoring` demonstrated empirically. This PR
+# deliberately does NOT add an ingress section: doing so would flip the endpoint from
+# ingress-unenforced to ingress-default-deny, a change with its own blast radius that has nothing to
+# do with wiring up a scrape. If that tightening is wanted it is its own PR, and it must then admit
+# ns `monitoring` on 9465 the way each broker-*.yaml's ingress rule (2) admits it on 9464.
+#
+# FLUX ORDERING: safe, for the same reason agentforge-broker/servicemonitor.yaml is. The
+# monitoring.coreos.com CRDs come from kube-prometheus-stack under
+# infrastructure/monitoring/, the `infrastructure` Kustomization is `wait: true`, and
+# clusters/ai/openbao.yaml `dependsOn: [infrastructure]` — so the PodMonitor CRD is established
+# before this path is ever applied, including on a rebuild-from-git. (This is the same trap the
+# openbao kustomization.yaml header records for the ESO canary, which had NO such dependency and
+# deadlocked Flux on a missing GVK; here the dependency already exists.)
+#
+# WHAT IT DOES NOT COVER: an unscraped target produces no series at all, so no af_provisioner_*-
+# reading rule can detect this monitor being deleted or its selector drifting. That regression guard
+# is ForgeProvisionerUnscraped in monitoring/agentforge-provisioner-rules.yaml, which joins
+# kube-state-metrics against `up` and therefore needs neither.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: agentforge-provisioner
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [openbao]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-provisioner
+      app.kubernetes.io/component: provisioner
+  podMetricsEndpoints:
+    # 30s matches worker-podmonitor.yaml and the provisioner's own 30s reconcile interval
+    # (AF_PROVISIONER_RECONCILE_INTERVAL_S default), so a standing per-pass alert counter advances
+    # at least once between consecutive scrapes and `rate()` over it cannot read a real, continuous
+    # failure as zero.
+    - port: metrics
+      interval: 30s
+      relabelings:
+        # job=agentforge-provisioner is the selector every rule in
+        # monitoring/agentforge-provisioner-rules.yaml reads, including the `up`-based ones. Pinned
+        # here rather than inherited so the job name does not change if the object is ever renamed.
+        - targetLabel: job
+          replacement: agentforge-provisioner
