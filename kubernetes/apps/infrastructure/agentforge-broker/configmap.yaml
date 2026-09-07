@@ -60,6 +60,46 @@ data:
   # upstream Bearer, design §4). The dir holds CLAUDE_CODE_OAUTH_TOKEN (anthropic) or auth.json
   # (openai); the gateway picks by this instance's provider. Required by the gateway composition root.
   AF_BROKER_OAUTH_MOUNT_PATH: "/var/run/broker/oauth"
+  # ── Usage HEARTBEAT (agentforge plan 3c) — OFF. Turning it on SPENDS THE SUBSCRIPTION. ──
+  #
+  # WHY IT EXISTS. For the three anthropic seats the vendor usage probe answers `scope_missing`
+  # BY DESIGN: a `claude setup-token` "can only make model requests", so api.anthropic.com's
+  # /api/oauth/usage is closed to it. The ONLY compliant server-side source of a Claude figure is
+  # the rate-limit-header tee the broker runs on RELAYED responses — and that needs traffic.
+  # Nothing has ever been relayed through any broker (af_broker_tokens_used_total = 0 on all four
+  # seats over 30 d; af_broker_requests_total has no series at all), so every Claude meter reads
+  # zero. With this set, each broker REPLICA sends one minimal Haiku turn (max_tokens: 1) whenever
+  # it has itself relayed nothing for that many minutes, and records the response's rate-limit
+  # headers. A replica that IS relaying agent traffic skips the beat and spends nothing.
+  #
+  # VALUE = MINUTES. "0" or unset = OFF (no task, no request, ever). A value in (0, 15) is
+  # REFUSED by the broker (warn + stay off) — the knob spends the operator's subscription, so the
+  # only safe rounding is downward. Recommended first value: "60".
+  #
+  # COST at "60", per DAY: each anthropic seat runs replicas: 2, so 2 x 24 = 48 requests/seat/day,
+  # 3 seats (claude-max-1/2/3) = 144 requests/day; claude-max-4 when it lands makes it 192. Each
+  # request is ~14 input tokens (the Claude Code system line + a one-character user turn) and
+  # 1 output token, so ~700 tokens/seat/day, ~2.1k tokens/day across the three live seats. At the
+  # "15" floor those figures are 4x: 576 requests and ~8.4k tokens/day across three seats.
+  # It is charged to the SAME Claude subscription the PR-reviewer agents run on. It is small, but
+  # it is not free, and it is a standing charge that continues while nobody is using the estate.
+  #
+  # WHAT YOU WILL SEE when it works (first beat lands within one interval of the ConfigMap roll):
+  #   * af_broker_usage_heartbeat_total{aud,outcome} appears — outcome=ok is the good one;
+  #     `skipped` means real agent traffic suppressed the beat; `rejected` (with a 4xx in the
+  #     broker log line "usage heartbeat aud=... outcome=rejected status=...") means the request
+  #     shape needs a fix, not that the seat is broken.
+  #   * af_broker_usage_utilization_pct{aud,window="headers_session"} and {window="headers_weekly"}
+  #     gain series for the anthropic seats — today only openai/codex-pro has any, from its
+  #     working vendor probe.
+  #   * agentforge.chifor.me → Settings → Subscriptions: the Claude seats' 5 h and 7 d meters stop
+  #     reading zero. `fetched_at` stays null and the band still says `scope_missing` — that is
+  #     the VENDOR PROBE, which cannot be fixed; the header windows are the real figures.
+  #
+  # SCOPE. Anthropic seats only. This ConfigMap is shared with broker-openai-codex, but the broker
+  # builds no heartbeat for an openai audience (its wham/usage probe already returns real
+  # figures), so setting this here costs the Codex subscription nothing.
+  AF_BROKER_USAGE_HEARTBEAT_INTERVAL_M: "0"
   # NON-SECRET ledger coordinates (documentation + operational reference). The DB login is
   # agentforge_broker: open/reserve/reconcile ONLY, NEVER close (the reaper alone holds close, design §5).
   LEDGER_HOST: "infra-pg-rw.databases.svc.cluster.local"
