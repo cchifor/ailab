@@ -43,26 +43,27 @@ spec:
             - { name: http, containerPort: 8080 }
           env:
             # TWO OpenAI connections (';'-separated — OPENAI_API_BASE_URLS takes precedence over the
-            # singular OPENAI_API_BASE_URL, which is now unset):
-            #   [0] LiteLLM router — everything (cloud + qwen3.6 + qwen3.5-122b).
-            #   [1] qwen3.8-27b DIRECT to its llama-swap, deliberately BYPASSING LiteLLM.
-            # Why the bypass: cancelling/deleting a message in OWUI aborts the browser request, but
-            # LiteLLM (1.91.0) does NOT propagate that disconnect upstream — it holds the connection to
-            # llama-swap open until request_timeout (900s). qwen3.8 serves ONE slot (--parallel 1), so
-            # an abandoned request owns the model for up to 15 min and every later message queues behind
-            # it. Measured 2026-08-15: four requests each terminated at exactly 900s, 1:1 with
-            # llama-swap "recovered from upstream disconnection". llama-swap is a Go reverse proxy that
-            # DOES propagate context cancellation — PROVEN 2026-08-15 by aborting a streaming client
-            # mid-generation: the llama.cpp slot went is_processing=False within 6s. Via LiteLLM the same
-            # abort orphaned the generation for 7+ minutes (it kept decoding with no client attached,
-            # 13k -> 15.7k tokens) until the service was restarted, wedging the single slot.
-            # qwen3.8-27b is served ONLY by this connection — its LiteLLM deployment was REMOVED, and the
-            # "direct." prefix_id dropped, so exactly ONE model of that name exists and it is the one that
-            # can be stopped. It was previously registered in BOTH with a prefix, which left the BROKEN
-            # LiteLLM-routed entry as the obvious pick in the model list: measured over 6h, 20/20 requests
-            # took the LiteLLM path and none used the direct one. Do NOT re-add it to litellm.yaml.
-            # (kubernetes/apps/apps/ai/litellm-local.yaml keeps its own qwen3.8 entry for the platform's
-            # cost-tracked tenant routing; it has the same no-cancel property and is a separate decision.)
+            # singular OPENAI_API_BASE_URL, which is unset). BOTH point at the SAME LiteLLM router;
+            # they exist to split the model picker into Local/External, not to reach two backends.
+            # See the OPENAI_API_BASE_URLS entry below for why that requires two connections.
+            #
+            # HISTORY, kept because the measurement is still true and still costs people time:
+            # connection [1] used to be qwen3.8-27b wired DIRECT to its llama-swap, bypassing LiteLLM,
+            # because LiteLLM (1.91.0) does NOT propagate client disconnects upstream. Cancelling a
+            # message in Open WebUI aborts the browser request, but LiteLLM held the upstream open
+            # until request_timeout (900s). On a --parallel 1 backend that meant an abandoned request
+            # owned the model for up to 15 minutes and every later message queued behind it. Measured
+            # 2026-08-15: four requests each terminated at exactly 900s, 1:1 with llama-swap
+            # "recovered from upstream disconnection", while aborting against llama-swap directly
+            # freed the slot in 6s (is_processing=False).
+            #
+            # That bypass is GONE — both connections are LiteLLM now — so the caveat applies again to
+            # anything served through this router on a single-slot backend. It is tolerable here
+            # because the model that provoked it, qwen3.8-27b, is now served by cloud2's vLLM (TP=4,
+            # continuous batching, many slots), not by a one-slot llama.cpp. If a --parallel 1 model
+            # is ever registered here, expect abandoned generations to hold it for request_timeout.
+            # (litellm-local.yaml keeps its own qwen3.8 entry for the platform's cost-tracked tenant
+            # routing; same no-cancel property, separate decision.)
             - name: OPENAI_API_KEY # the LiteLLM master key (LiteLLM now requires it)
               valueFrom:
                 secretKeyRef: { name: litellm-secret, key: master-key }
@@ -77,8 +78,9 @@ spec:
             # (`if model_id and model_id not in models`), so [0] wins for the local four and [1]
             # supplies the remainder. Reversing them would put everything under External again.
             - { name: OPENAI_API_BASE_URLS, value: "http://litellm.ai.svc.cluster.local:4000/v1;http://litellm.ai.svc.cluster.local:4000/v1" }
-            # $(OPENAI_API_KEY) is expanded by kubelet from the env var declared ABOVE (declaration order
-            # matters); llama-swap ignores the bearer token, so connection [1] uses a placeholder.
+            # $(OPENAI_API_KEY) is expanded by kubelet from the env var declared ABOVE (declaration
+            # order matters). BOTH connections are the same LiteLLM router, so both take the real key
+            # -- there is no placeholder slot any more.
             # ONE key per URL, index-aligned. This previously carried TWO keys against ONE url --
             # a latent mismatch: the second was simply unused, and `sk-noauth` would have been an
             # outright failure if it had ever been reached, since LiteLLM rejects it (400 "No
@@ -93,10 +95,17 @@ spec:
             # [1] has no model_ids, so it discovers normally and keeps full metadata.
             - { name: OPENAI_API_CONFIGS, value: '{"0":{"enable":true,"connection_type":"local","model_ids":["qwen3.8-27b-vllm-cloud","qwen3.8-27b-vllm-fast-cloud","qwen3-coder-30b-a3b-cloud","qwen3.5-122b-ailab"]},"1":{"enable":true,"connection_type":"external"}}' }
             # Keyed by connection INDEX as a string (openai.py: api_configs.get(str(idx), ...)).
-            # model_ids restricts connection [1] to just qwen3.8 so llama-swap does not add duplicates.
-            # NO prefix_id: the model must surface under its real id "qwen3.8-27b" so existing chats
-            # (which store models: ['qwen3.8-27b']) keep resolving — now to the direct, cancellable path.
-            # A prefix here would strand every prior conversation on a name nothing serves.
+            #
+            # NO prefix_id, deliberately. Open WebUI would render it as "<prefix>.<id>", and the ids
+            # already carry the estate in their own names (-cloud / -ailab), so a prefix would only
+            # add a second, redundant namespace on top.
+            #
+            # ⚠️ The renames in this change DO strand existing conversations. A chat stores the model
+            # id it was started with, so anything begun on qwen3.8-27b-vllm (or qwen3.5-122b, etc.)
+            # now points at a name nothing serves and must be re-pointed in the UI. That is accepted:
+            # the alternative was router_settings.model_group_alias with hidden:true, and upstream
+            # reports hidden aliases surface inconsistently in /v1/models, which would put phantom
+            # duplicates back in the very picker this change exists to clean up.
             - { name: ENABLE_OLLAMA_API, value: "False" } # we only use the OpenAI endpoint
             # Was 900s to match LiteLLM request_timeout + llama-swap healthCheckTimeout. A qwen3.5-122b
             # cold-load + long reasoning turn can run minutes; OWUI's aiohttp client would otherwise abort
