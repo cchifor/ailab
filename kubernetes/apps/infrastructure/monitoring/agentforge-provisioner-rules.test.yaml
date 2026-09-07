@@ -93,18 +93,28 @@ tests:
         exp_alerts: []
   # ------------------------------------------------------------------------- the healthy shape
   - interval: 1m
-    name: a scraping provisioner pages neither rule
+    name: a scraping provisioner that is recording work pages nothing at all
     input_series:
+      # THE FULL HEALTHY SHAPE, and it needs all THREE series. `up` plus kube-state-metrics alone is
+      # not "healthy" any more: a target that answers while recording NOTHING is exactly what
+      # ForgeProvisionerNotProgressing pages for, so an audit counter that is actually ADVANCING is
+      # part of what health means here. Leaving it out would make this test assert a silence the
+      # input does not support — the defect this whole file exists to keep out.
       - series: 'up{job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
         values: "1x40"
       - series: 'kube_pod_container_status_ready{namespace="openbao",container="provisioner",pod="agentforge-provisioner-696fdc794d-gfphx"}'
         values: "1x40"
+      - series: 'af_provisioner_ops_total{action="write_auth_role",outcome="drift-corrected",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0+2x40"
     alert_rule_test:
       - eval_time: 35m
         alertname: ForgeProvisionerTargetDown
         exp_alerts: []
       - eval_time: 35m
         alertname: ForgeProvisionerUnscraped
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: ForgeProvisionerNotProgressing
         exp_alerts: []
   # ------------------------------------------------- the ailab#293 shape: Ready, and nothing scrapes
   - interval: 1m
