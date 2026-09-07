@@ -1,0 +1,79 @@
+# One-shot installer for the dsh npm package into the dsh-app PVC.
+#
+# WHY A JOB AND NOT AN IMAGE: dsh publishes no official container image, and pushing a hand-built one
+# needs the SOPS `ci` registry credential. A community image would hold the LiteLLM credential, so it
+# is not a shortcut worth taking. Installing the official npm package into a volume keeps the supply
+# chain to "what DeepSeek published", pinned by version.
+#
+# WHY A JOB AND NOT AN initContainer: the runtime pod is default-deny egress (networkpolicy.yaml)
+# precisely because this thing executes model-generated tool calls. An initContainer shares the pod's
+# NetworkPolicy, so npm access would have to be granted to the running agent forever. This Job
+# carries app=dsh-install, which the deny policy's podSelector (app=dsh) does not match, so the npm
+# reach exists ONLY here and only while installing.
+#
+# TO UPGRADE: bump DSH_VERSION and the Job name together (a Job's pod template is immutable), then
+# delete the marker file or the PVC so this re-runs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsh-install-0-1-2-rc-1
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 4
+  template:
+    metadata:
+      labels: { app: dsh-install }
+    spec:
+      restartPolicy: OnFailure
+      # npm install executes arbitrary lifecycle scripts from the network. The runtime pod is denied
+      # an API token; the installer -- the one container here that actually runs third-party code
+      # fetched at build time -- had one mounted by default. That is backwards.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: install
+          image: mirror.gcr.io/library/node:22-alpine
+          env:
+            - { name: DSH_VERSION, value: "0.1.2-rc.1" }
+            - { name: npm_config_cache, value: /app/.npm }   # shared across versions; harmless
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Versioned prefix, NOT a shared /app. dsh-app is ReadWriteMany, so the Job and the
+              # RUNNING Deployment can mount it simultaneously; installing in place would rewrite
+              # node_modules under a live process. Each version gets its own tree, and the Deployment
+              # names the version it wants -- so an upgrade lands beside the running one and only
+              # takes effect when the pod rolls.
+              DEST="/app/${DSH_VERSION}"
+              mkdir -p "$DEST"
+              MARKER="${DEST}/.installed"
+              # The marker is written LAST and only after the binary is proven present. An earlier
+              # version wrote it beside the install, which meant an OOM-killed or evicted Job could
+              # leave a marker over a half-written node_modules and every later run would skip the
+              # repair. Verify-then-mark, never mark-then-verify.
+              if [ -f "$MARKER" ] && [ -x "${DEST}/node_modules/.bin/dsh" ]; then
+                echo "already installed: ${DSH_VERSION}"; exit 0
+              fi
+              [ -f "$MARKER" ] && echo "marker present but binary missing -- reinstalling" && rm -f "$MARKER"
+              echo "installing @deepseek-ai/dsh@${DSH_VERSION} into ${DEST}"
+              npm install --prefix "$DEST" --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}"
+              test -x "${DEST}/node_modules/.bin/dsh"
+              touch "$MARKER"
+              echo "installed:"; "${DEST}/node_modules/.bin/dsh" --version || true
+          volumeMounts:
+            - { name: app, mountPath: /app }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 2Gi }
+      volumes:
+        - { name: app, persistentVolumeClaim: { claimName: dsh-app } }

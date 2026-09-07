@@ -1,0 +1,35 @@
+# Two volumes, split by lifetime and by what loses you if it disappears.
+#
+# dsh-home ($DSH_HOME) MUST be writable and MUST persist: every launch rewrites the profile's
+# cordis.yml, and browser-auth initialisation takes a file lock on .credentials.yaml even when no
+# secret changes. An emptyDir would boot fine and silently discard the LiteLLM credential and the
+# browser session on every pod replacement. Read-only does not work at all.
+#
+# local-path, not the nfs-csi default: .credentials.yaml is rejected if it carries any group/other
+# permission bit, and an NFS mount is the wrong place to be arguing about POSIX modes. The cost is
+# node affinity, which is acceptable for a single-replica personal tool.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dsh-home
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources: { requests: { storage: 5Gi } }
+---
+# The npm install lives on its own volume so the app can be upgraded (bump DSH_VERSION, delete this
+# PVC) without touching credentials, and so the pod needs no npm egress after first boot.
+#
+# ReadWriteMany on nfs-csi, NOT local-path: the install Job and the Deployment both mount this. With
+# a local-path RWO volume the Job binds it to whichever node the Job landed on, and if the
+# Deployment is ever scheduled elsewhere it stays Pending forever with no obvious cause. RWX removes
+# that failure mode. Unlike dsh-home this holds only a node_modules tree -- nothing here cares about
+# POSIX modes, so NFS is fine.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dsh-app
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: nfs-csi
+  resources: { requests: { storage: 4Gi } }

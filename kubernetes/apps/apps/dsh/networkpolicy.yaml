@@ -1,0 +1,48 @@
+# dsh runs model-generated tool calls. SAFETY.md is explicit that it is experimental and unaudited,
+# and that "sandbox and approval controls cannot protect resources that execution is permitted to
+# use" -- so the containment that matters is the one OUTSIDE the app. Default-deny both directions,
+# then allow only what it demonstrably needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dsh-default-deny
+spec:
+  podSelector: { matchLabels: { app: dsh } }
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dsh-allow
+spec:
+  podSelector: { matchLabels: { app: dsh } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Only cloudflared may reach the relay. This is what stops a pod-network client from bypassing
+    # the Cloudflare Access gate at the edge, so the selector has to actually mean it.
+    #
+    # The podSelector is NOT redundant with the namespaceSelector. `edge` also runs
+    # cloudflared-strive, a SEPARATE tunnel for another domain; a bare namespaceSelector admitted it
+    # too, which is a wider boundary than the comment above claims. Both selectors sit in ONE `from`
+    # element on purpose -- as two list items they would be OR'ed and grant namespace-wide access
+    # again.
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: cloudflared } }
+      ports: [{ port: 8080, protocol: TCP }]
+    # NO homepage exception. An earlier revision allowed the homepage pod through so its siteMonitor
+    # could paint an up/down dot on home.chifor.me. Review called it what it is: a path to the agent
+    # harness that goes AROUND Cloudflare Access. dsh's own cookie would still answer 401, but the
+    # whole argument for this policy is that Access is the only gate -- because dsh's session carries
+    # no SSO identity and cannot tell one person from another. Keeping a second path in exchange for
+    # a status dot trades the property for a cosmetic. The homepage tile still links to dsh; it just
+    # does not probe it.
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }}]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    # LiteLLM is the ONLY model path. dsh reaches every model through the proxy, so it never needs
+    # egress to the internet for inference -- no OpenAI, no Anthropic, no DeepSeek.
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ai } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: litellm } }
+      ports: [{ port: 4000, protocol: TCP }]
