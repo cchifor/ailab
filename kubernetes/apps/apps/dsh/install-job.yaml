@@ -37,7 +37,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: install
-          image: mirror.gcr.io/library/node:22-alpine
+          image: mirror.gcr.io/library/node:24-alpine
           env:
             - { name: DSH_VERSION, value: "0.1.2-rc.1" }
             - { name: npm_config_cache, value: /app/.npm }   # shared across versions; harmless

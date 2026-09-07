@@ -30,7 +30,7 @@ spec:
         # Fail loudly if the install Job has not populated the app volume, rather than letting the
         # main container crash-loop on a missing binary.
         - name: wait-for-install
-          image: mirror.gcr.io/library/node:22-alpine
+          image: mirror.gcr.io/library/node:24-alpine
           env:
             - { name: DSH_VERSION, value: "0.1.2-rc.1" }
           command: ["/bin/sh", "-c"]
@@ -50,7 +50,7 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
         - name: seed-settings
-          image: mirror.gcr.io/library/node:22-alpine
+          image: mirror.gcr.io/library/node:24-alpine
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -70,7 +70,7 @@ spec:
             capabilities: { drop: [ALL] }
       containers:
         - name: dsh
-          image: mirror.gcr.io/library/node:22-alpine
+          image: mirror.gcr.io/library/node:24-alpine
           # --trusted-host is what makes the public authority acceptable to the /api trust fence:
           # a non-loopback deployment must declare the names it is reached by, or every proxied
           # request is refused 403. It must match the cloudflared hostname exactly.
@@ -112,7 +112,7 @@ spec:
             requests: { cpu: 250m, memory: 512Mi }
             limits:   { cpu: "2",  memory: 4Gi }
         - name: relay
-          image: mirror.gcr.io/library/node:22-alpine
+          image: mirror.gcr.io/library/node:24-alpine
           command: ["node", "/relay/relay.js"]
           env:
             - { name: RELAY_PORT, value: "8080" }
