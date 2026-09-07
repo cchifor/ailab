@@ -112,9 +112,9 @@ tests:
                 target for it, so EVERY af_provisioner_* series is missing and every other rule in
                 this group is silent for a reason that has nothing to do with the estate being
                 healthy - exactly the state ailab#293 recorded, in which the seat-entitlement audit
-                reported findings every 30s for months with nowhere to send them. MOST LIKELY CAUSE
-                - the PodMonitor was removed, its selector no longer matches the pod template, or
-                the container's named `metrics` port was renamed or dropped; all three live in this
+                reported findings every 30s for weeks with nowhere to send them. MOST LIKELY CAUSE -
+                the PodMonitor was removed, its selector no longer matches the pod template, or the
+                container's named `metrics` port was renamed or dropped; all three live in this
                 repo. Triage - `kubectl --context admin@ai -n monitoring get podmonitor
                 agentforge-provisioner -o yaml`, compare its selector against `kubectl --context
                 admin@ai -n openbao get deploy agentforge-provisioner -o

@@ -71,8 +71,9 @@ spec:
         # The pod is DISCOVERED but its metrics endpoint does not answer: a crash-loop, a wedged
         # event loop, an ingress-policy change. NOT a rollout — the Deployment is replicas:1 with
         # `strategy: Recreate`, so during a roll the pod is DELETED and the target disappears from
-        # service discovery entirely, producing no `up` series at all rather than a 0 one (that case
-        # belongs to ForgeProvisionerUnscraped, whose left side comes from kube-state-metrics).
+        # service discovery entirely, producing no `up` series at all rather than a 0 one. A roll is
+        # therefore silent in BOTH rules of this pair (ForgeProvisionerUnscraped's 20m hold rides it
+        # out); what the kube-state-metrics rule adds is the pod that is Ready and STAYS undiscovered.
         # `for: 10m` — twice ForgeTargetDown's hold, because this is a SINGLE-replica Recreate
         # workload: there is no sibling to carry it and a cold image pull on a fresh node is on the
         # critical path of every restart. critical, matching ForgeTargetDown/ForgeBrokerTargetDown:
@@ -128,7 +129,7 @@ spec:
               target for it, so EVERY af_provisioner_* series is missing and every other rule in this
               group is silent for a reason that has nothing to do with the estate being healthy -
               exactly the state ailab#293 recorded, in which the seat-entitlement audit reported
-              findings every 30s for months with nowhere to send them. MOST LIKELY CAUSE - the
+              findings every 30s for weeks with nowhere to send them. MOST LIKELY CAUSE - the
               PodMonitor was removed, its selector no longer matches the pod template, or the
               container's named `metrics` port was renamed or dropped; all three live in this repo.
               Triage - `kubectl --context admin@ai -n monitoring get podmonitor
