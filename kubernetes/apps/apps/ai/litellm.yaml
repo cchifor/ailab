@@ -142,31 +142,39 @@ data:
           api_base: http://192.168.0.28:8083/v1
           api_key: "sk-noauth"
         model_info: { max_input_tokens: 57344 }
-      # ---- cloud2 vLLM (W4A16 + MTP speculative decoding), ONE RTX 3090 ---------------------
-      # syv-ai/qwen38-27b-rtx3090 recipe: int4 AutoRound body, int8 lm_head/embed, MTP drafts.
-      # MEASURED 2026-09-07 on cloud2 GPU0: 110-123 tok/s single-user vs 32.4 for the llama.cpp
-      # instances above -- 3.6x, on ONE card instead of three, at 21.5 GiB / 250 W.
+      # ---- cloud2 vLLM (W4A16 + MTP), TENSOR-PARALLEL over TWO RTX 3090s ------------------
+      # syv-ai/qwen38-27b-rtx3090 recipe: int4 AutoRound body, int8 lm_head/embed, MTP n=4 drafts.
       # Kept under its OWN model_name (not pooled with qwen3.8-27b-cloud) because the backends are
       # not interchangeable: different engine and different throughput, so pooling them would let
       # LiteLLM silently route a request to a 3x slower backend with no way to tell which answered.
-      # Host CTX=fast => max_model_len 65536; minus ~8K output headroom = 57344, same as above.
-      # SAMPLING PARAMS ARE LOAD-BEARING HERE -- without them this model does not stop.
-      # Qwen3.8 is a hybrid reasoning model whose chat template defaults to reasoning_effort
-      # xhigh. vLLM's own defaults leave top_k DISABLED, and with no top-k truncation the
-      # sampler wanders and never emits the closing </think>. Open WebUI then dies with
-      # `TransferEncodingError: Not enough data to satisfy transfer length header`.
       #
-      # MEASURED on cloud2 2026-09-07, prompt "Generate an SVG of a pelican riding a bicycle":
-      #   vLLM defaults (no top_k), xhigh : >391 s, never finished; at a 20000-token cap it
-      #                                     returned finish=length with ZERO content -- the
-      #                                     whole budget went into thinking that never closed.
-      #   Qwen params (temp 1.0/top_p 0.95/top_k 20):
-      #     low    ->  25 s,  4199 tok, finish=stop, valid SVG
-      #     medium ->  32 s,  4805 tok, finish=stop, valid SVG
-      #     xhigh  -> 140 s, 19577 tok, finish=stop, valid SVG
-      # xhigh costs 4x the tokens and 4.4x the wall-clock of medium for marginally more output,
-      # so medium is the quality-per-compute pick. Thinking stays ON: it is not the problem.
-      # Callers can still override reasoning_effort per request; :18020 direct is unchanged.
+      # TP=2 on GPU1+GPU3 since 2026-09-07 (the only x16/x16 pair on that board). Matched A/B,
+      # same harness, one variable -- TP=1 -> TP=2:
+      #   single-stream 155.9 -> 179.5 tok/s (+15.1%) | xhigh C=4 211.5 -> 284.7 (+34.6%)
+      #   KV pool 73,246 -> 364,688 tokens (5.0x), which is the real win: it is what makes
+      #   best-of-N run in parallel. Per-sample quality is IDENTICAL -- TP shards the same
+      #   weights and all-gathers the same logits. Do not exceed 4 concurrent.
+      #
+      # CONTEXT: host runs --max-model-len 131072 (2x the recipe default; free at TP=2, still
+      # 2.78x concurrency). max_input_tokens = 131072 - 49152 = 81920. That output headroom is
+      # deliberately large: xhigh reasoning measured 15,996-38,897 tokens per answer here, and
+      # under-budgeting a reasoning model yields finish_reason=length with EMPTY content.
+      #
+      # SAMPLING PARAMS ARE LOAD-BEARING -- without them this model does not stop. vLLM's own
+      # defaults leave top_k DISABLED, and with no top-k truncation the sampler wanders and never
+      # emits the closing </think>; Open WebUI then dies with `TransferEncodingError`.
+      # temperature 1.0 / top_p 0.95 / top_k 20 is Qwen3.8's official thinking-mode recipe.
+      # A controlled 6-vs-6 A/B (same endpoint, same queue, uncapped) tested T=0.6 against it:
+      # reliability identical (6/6 both), placement identical, and T=1.0 came back RICHER
+      # (mean 88.7 vs 76.8 elements). Do not lower it -- an earlier apparent T=0.6 win was an
+      # artifact of comparing batches run under different caps and client timeouts.
+      #
+      # reasoning_effort xhigh -- the model's own template default, and MEASURED better here on
+      # "Generate an SVG of a pelican riding a bicycle" at constant temperature:
+      #   medium -> 47-50 SVG elements, consistently flat: bird not seated, legs off the pedals
+      #   xhigh  -> 75-110 elements, correct saddle/crank geometry, legs articulated to pedals
+      # The cost is real (xhigh ~20-30K tokens vs ~4K) but there is no decode cliff: a 28,177-token
+      # single-stream generation held 158.8 tok/s. Callers can still override per request.
       - model_name: qwen3.8-27b-vllm
         litellm_params:
           model: openai/qwen3.8-27b
@@ -176,8 +184,8 @@ data:
           top_p: 0.95
           extra_body:
             top_k: 20
-            chat_template_kwargs: { reasoning_effort: medium }
-        model_info: { max_input_tokens: 57344 }
+            chat_template_kwargs: { reasoning_effort: xhigh }
+        model_info: { max_input_tokens: 81920 }
       # ---- COGNITIVE TIER: cloud3, three GPUs pooled ------------------------------------------
       # Qwen3-Coder-Next: 80B MoE with only 3B ACTIVE. MEASURED 102.3 tok/s at 493 W here, versus
       # 32.4 tok/s at 636 W for the 27B dense and 16.6 tok/s for the 122B — decode speed tracks
