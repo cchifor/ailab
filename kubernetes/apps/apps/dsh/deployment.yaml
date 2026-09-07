@@ -61,6 +61,10 @@ spec:
                 echo "seeding settings.yaml with the LiteLLM provider"
                 cp /seed/settings.seed.yaml /dsh-home/settings.yaml
               fi
+              # patchReload MUST NOT be "live" in a container or dsh crash-loops on FIRST boot.
+              # MEASURED, not guessed -- see fix-profile.js for the mechanism and the evidence.
+              mkdir -p /dsh-home/profiles/web
+              node /seed/fix-profile.js
           volumeMounts:
             - { name: home, mountPath: /dsh-home }
             - { name: relay, mountPath: /seed, readOnly: true }

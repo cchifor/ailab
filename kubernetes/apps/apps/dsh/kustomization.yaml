@@ -17,6 +17,7 @@ configMapGenerator:
     files:
       - relay.js
       - settings.seed.yaml
+      - fix-profile.js
 
 # ONE source of truth for the version. It has to appear in the Deployment twice (the initContainer
 # that waits for the tree, and the container that execs it), and a hand-maintained triplicate is a
