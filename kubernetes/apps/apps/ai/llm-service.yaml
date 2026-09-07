@@ -16,18 +16,36 @@ metadata:
   namespace: ai
   labels: { app.kubernetes.io/name: llm }
 subsets:
-  # qwen3.6-35b-a3b is pinned on BOTH node1 and node2. `llm` stays for metrics scraping + the compat
-  # /v1/models DNS; LiteLLM no longer routes chat here (it uses the per-node Services below for
-  # health-aware LB — blind kube-proxy round-robin has no readiness, so a down node still gets ~50%).
+  # qwen3.6-35b-a3b now runs on node2 (.45) ONLY -- node1's copy was disabled 2026-08-15 and its
+  # llama-server unit no longer exists. (This comment previously said "pinned on BOTH node1 and
+  # node2", which stopped being true three weeks before the address was removed below.) `llm` stays
+  # for metrics scraping + the compat /v1/models DNS; LiteLLM does not route chat here.
+  # .44 REMOVED 2026-09-07. ai-llm-1 has no llama-server.service at all -- only
+  # llama-swap-qwen38 on :8082 -- so .44:8080 has been a dead scrape target since node1's
+  # qwen3.6 deployment was disabled (2026-08-15), producing a permanent TargetDown{job="llm"}.
+  # This Service is scrape-only (nothing routes chat through it), so removing the address costs
+  # no capacity. node1 is NOT unmonitored as a result: it is still covered as an LXC host.
   - addresses:
-      - { ip: 192.168.0.44, hostname: ai-llm-1 }
       - { ip: 192.168.0.45, hostname: ai-llm-2 }
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
-# Per-node Services for the pinned qwen3.6 pair — used ONLY by LiteLLM to load-balance the two nodes as
-# separate deployments (native cooldown + retry → a down/restarting node is parked, not blindly hit).
-# Deliberately NOT labelled app.kubernetes.io/component=llama-server: the `llm` Service above already
-# scrapes .44+.45, so labelling these too would double-scrape both nodes.
+# Per-node Services, originally a PAIR for load-balancing qwen3.6 across node1+node2. Only node2 is
+# live now, so llm-node2 is the single real route (litellm-local.yaml uses it); llm-node1 is dead and
+# pending deletion, see below. Deliberately NOT labelled app.kubernetes.io/component=llama-server:
+# the `llm` Service above already scrapes .45, so labelling these too would double-scrape it.
+# PENDING DELETION (2026-09-07). Its only consumer was litellm-local.yaml, whose node1 deployment
+# was removed in the same change; nothing in the repo routes here any more. Kept for one cycle so the
+# litellm-local pod can roll onto the new config FIRST -- LiteLLM reads its config only at startup, so
+# deleting the Service in the same reconcile would yank it from under a still-running old pod. Remove
+# Do NOT gate the deletion on pod creation time alone -- a new pod can sit blocked in its
+# wait-for-db init while the OLD ReplicaSet is still serving traffic. Gate on all three:
+#   1. the Deployment rollout COMPLETED  (kubectl -n ai rollout status deploy/litellm-local)
+#      and the live pod's checksum/config annotation equals the value in litellm-local.yaml;
+#   2. the running proxy has no llm-node1 deployment loaded (inspect its loaded model_list,
+#      not just /v1/models -- that lists configured aliases without contacting a backend);
+#   3. one authenticated inference against qwen3.6-35b-a3b through litellm-local succeeds.
+# Only then merge the removal, as a SEPARATE change -- two commits in one merge still reconcile
+# together, so the ordering has to come from two merges, not two commits.
 apiVersion: v1
 kind: Service
 metadata:
@@ -92,4 +110,8 @@ subsets:
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
 # llm-qwen38 (node1 :8082) REMOVED 2026-08-25 — the qwen3.8-27b on-demand instance is retired;
-# its 31.4 GiB node1 reservation funds ci-runner-7/-8. :8082 on .44 is now free.
+# its 31.4 GiB node1 reservation funds ci-runner-7/-8.
+# CORRECTION 2026-09-07: ":8082 on .44 is now free" was already false when written and is corrected
+# here -- ai-llm-1 runs llama-swap-qwen38.service on :8082 today (probed: HTTP 200 on /v1/models).
+# What IS free on .44 is :8080: the llama-server unit does not exist there at all, which is why .44
+# was removed from the `llm` Endpoints above.

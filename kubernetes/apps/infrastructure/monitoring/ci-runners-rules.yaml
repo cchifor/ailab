@@ -276,3 +276,66 @@ spec:
               like healthy. The runner is carrying a gitea-runner-cleanup.sh older than the alert rules.
               Fix by deploying the role (`just gitea-runners`) and confirming
               `gitea_runner_cleanup_pressure_defer` then has one series per runner.
+        # ── Target-identity guard ──────────────────────────────────────────────────────────────
+        # 2026-09-07: this job had been scraping 192.168.0.20/.21/.22 as "ci-runner-7/8/9" since
+        # 2026-08-25. Those addresses belong to the cloudlab GPU hosts cloud1/cloud2/cloud3 — the
+        # real runners had been renumbered to .29/.30/.31 on 2026-09-03 and ci-runners-node.yaml was
+        # never updated. Nothing caught it for two weeks, because a wrong-but-reachable target looks
+        # exactly like a healthy one: `up` was 1, so TargetDown stayed quiet, while three real
+        # runners had NO alerting and every rule below was being evaluated against another cluster's
+        # hypervisors.
+        #
+        # Guard on IDENTITY, not on kernel flavour. Matching `release=~".*-pve"` would have caught
+        # this specific incident, but only this one: it cannot detect a wrong Ubuntu host, and a
+        # future cloudlab node that stops reporting a -pve kernel would slip past. `nodename` is the
+        # runner's own hostname, set by the gitea_runner role, so "every target in this job must
+        # call itself ci-runner-*" is the actual invariant. It is also self-maintaining — a new
+        # runner satisfies it automatically, while any foreign host fails it immediately.
+        #
+        # KNOWN LIMITS, stated rather than implied. This is a tripwire, not a completeness proof:
+        #   - it says nothing about a runner MISSING from the Endpoints list entirely (that is
+        #     CIRunnerDown's job, and a never-added target has no series here at all);
+        #   - a foreign host that happens to call itself ci-runner-* would pass;
+        #   - a target that is up but exposes no node_uname_info produces NO series, so this rule is
+        #     silent on it -- which is the same absent-series trap as the beacon rules above. The
+        #     companion rule below closes exactly that hole;
+        #   - conversely a genuine runner renamed out of the ci-runner-* convention would fire. That
+        #     is intended: the naming convention IS the invariant being asserted, so breaking it
+        #     should be visible rather than silent.
+        # 15m before firing, so a runner rebuilt in place does not page during its rename window.
+        - alert: CIRunnerTargetNotARunner
+          expr: node_uname_info{job="ci-runner-node", nodename!~"ci-runner-.*"}
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner job is scraping {{ $labels.nodename }} ({{ $labels.instance }}), which is not a CI runner"
+            description: >-
+              {{ $labels.instance }} is in the ci-runner-node scrape set but reports nodename
+              "{{ $labels.nodename }}" (kernel {{ $labels.release }}), which does not match
+              ci-runner-*. Every job="ci-runner-node" alert is therefore being evaluated against the
+              wrong machine, and whichever runner should hold that slot is unmonitored. Check the
+              Endpoints list in ci-runners-node.yaml against docs/network-plan.md — the IPAM registry
+              — remembering the LAN is shared with the cloudlab cluster on .20-.22 and .26-.28.
+
+        # Companion to CIRunnerTargetNotARunner: that rule can only judge a target that actually
+        # exposes node_uname_info. A target that is UP but publishes no uname series is invisible to
+        # it — the identity check silently passes by having nothing to evaluate. This is the same
+        # absent-series failure the cleanup-beacon rules above exist to catch: `== 0` on a missing
+        # series is indistinguishable from healthy.
+        # `unless on (instance)` is load-bearing here for the same reason it is there: comparing
+        # counts would collapse both sides to one number and could never name WHICH target is mute.
+        - alert: CIRunnerTargetIdentityUnverifiable
+          expr: >-
+            up{job="ci-runner-node"} == 1
+            unless on (instance)
+            node_uname_info{job="ci-runner-node"}
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner target {{ $labels.instance }} exposes no node_uname_info — identity unverifiable"
+            description: >-
+              {{ $labels.instance }} is scraped successfully but publishes no node_uname_info series,
+              so CIRunnerTargetNotARunner cannot confirm it is actually a CI runner and passes it by
+              default. Either node_exporter is running with the uname collector disabled, or this is
+              not a node_exporter at all. Check what is listening on :9100 at that address and
+              confirm it against docs/network-plan.md — the IPAM registry.

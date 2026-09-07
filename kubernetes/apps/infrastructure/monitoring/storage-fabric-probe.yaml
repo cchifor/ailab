@@ -37,6 +37,13 @@ spec:
       # there read as KubeDaemonSetMisScheduled.
       tolerations:
         - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+        # 2026-09-07: talos-env-node-1 joined 2026-09-01 with dedicated=env:NoSchedule and this
+        # list only had `agent`, so the node fell out of desiredNumberScheduled while the pod
+        # placed before the taint kept running -- controller-owned but permanently
+        # misscheduled, i.e. working yet unmanaged: not rolled on upgrade, and not recreated
+        # if deleted. Explicit value=env rather than operator=Exists on the key, so a future
+        # dedicated node class has to opt in deliberately instead of inheriting access.
+        - { key: dedicated, operator: Equal, value: env, effect: NoSchedule }
       containers:
         - name: blackbox
           image: quay.io/prometheus/blackbox-exporter:v0.28.0 # quay (not Docker Hub)
