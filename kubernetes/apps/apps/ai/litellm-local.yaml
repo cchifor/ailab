@@ -14,8 +14,13 @@ metadata:
 data:
   config.yaml: |
     model_list:
-      # qwen3.6-35b-a3b — the daily driver, PINNED on node1 (.44) AND node2 (.45). TWO deployments
-      # so the router health-aware load-balances the pair (see litellm.yaml for the full rationale).
+      # qwen3.6-35b-a3b — served on node2 (.45) ONLY. It was a PAIR (node1 + node2) with two
+      # deployments for health-aware load-balancing; node1's half was removed 2026-09-07 because
+      # ai-llm-1 no longer runs a llama-server at all (see the note on the route below).
+      # This proxy's model inventory intentionally DIFFERS from litellm.yaml: the main proxy retired
+      # qwen3.6 for interactive use, while the agentforge workers still consume it here. What must
+      # stay in sync is the set of models litellm-vkeys.yaml grants org keys against -- those must
+      # remain a subset of THIS file's model_list.
       # max_input_tokens: host CTX=262144 across --parallel 2 slots => per-slot n_ctx = 131072;
       # minus ~16K output headroom = 114688 — LiteLLM fails fast above that instead of forwarding
       # a doomed request.
@@ -85,7 +90,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "4c10fb34e594"
+        checksum/config: "64ae47a82bad"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux

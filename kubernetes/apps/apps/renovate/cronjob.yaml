@@ -17,7 +17,11 @@ spec:
       # three failed Jobs FOREVER, so a single transient failure pins KubeJobFailed indefinitely --
       # the 2026-09-03 run died on a GitHub rate-limited `ls-remote`, every run since succeeded, and
       # the alert was still firing four days later off that one dead Job object.
-      # 48h rather than something short: a genuine failure must stay inspectable for a day or two.
+      # 48h is a CLEANUP-ELIGIBILITY ceiling, NOT a guaranteed retention window: failedJobsHistoryLimit
+      # below independently evicts the oldest failed Job once a fourth appears, which under continuous
+      # 4-hourly failures is ~12h, well inside the TTL. So "48h to investigate" holds for an ISOLATED
+      # failure (the case this fixes) and not for a storm -- in a storm you get the three most recent
+      # failures instead, which is the more useful evidence anyway.
       # This does NOT paper over real breakage -- the schedule is every 4h, so a persistently failing
       # Renovate produces a fresh failed Job long before the old one expires and the alert stays up.
       # NB applies to Jobs created AFTER this lands; the existing failed Job must be deleted once.

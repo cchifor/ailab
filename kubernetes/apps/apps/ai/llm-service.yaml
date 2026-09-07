@@ -37,8 +37,15 @@ subsets:
 # was removed in the same change; nothing in the repo routes here any more. Kept for one cycle so the
 # litellm-local pod can roll onto the new config FIRST -- LiteLLM reads its config only at startup, so
 # deleting the Service in the same reconcile would yank it from under a still-running old pod. Remove
-# this Service + its Endpoints once `kubectl -n ai get pod -l app.kubernetes.io/name=litellm-local`
-# shows a pod created after that merge.
+# Do NOT gate the deletion on pod creation time alone -- a new pod can sit blocked in its
+# wait-for-db init while the OLD ReplicaSet is still serving traffic. Gate on all three:
+#   1. the Deployment rollout COMPLETED  (kubectl -n ai rollout status deploy/litellm-local)
+#      and the live pod's checksum/config annotation equals the value in litellm-local.yaml;
+#   2. the running proxy has no llm-node1 deployment loaded (inspect its loaded model_list,
+#      not just /v1/models -- that lists configured aliases without contacting a backend);
+#   3. one authenticated inference against qwen3.6-35b-a3b through litellm-local succeeds.
+# Only then merge the removal, as a SEPARATE change -- two commits in one merge still reconcile
+# together, so the ordering has to come from two merges, not two commits.
 apiVersion: v1
 kind: Service
 metadata:
@@ -103,4 +110,8 @@ subsets:
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
 # llm-qwen38 (node1 :8082) REMOVED 2026-08-25 — the qwen3.8-27b on-demand instance is retired;
-# its 31.4 GiB node1 reservation funds ci-runner-7/-8. :8082 on .44 is now free.
+# its 31.4 GiB node1 reservation funds ci-runner-7/-8.
+# CORRECTION 2026-09-07: ":8082 on .44 is now free" was already false when written and is corrected
+# here -- ai-llm-1 runs llama-swap-qwen38.service on :8082 today (probed: HTTP 200 on /v1/models).
+# What IS free on .44 is :8080: the llama-server unit does not exist there at all, which is why .44
+# was removed from the `llm` Endpoints above.
