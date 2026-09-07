@@ -354,6 +354,25 @@ spec:
             #      reconciler ClusterRole rule — and they need not be reverted at all: with no
             #      PodMonitor left on the tenant path, both are inert.
             - { name: AFP_METRICS_PODMONITOR_ENABLED, value: "true" }
+            # ── A3b: the control plane creates BrokerSeat CRs instead of GitOps PRs ───────────
+            # HELD: landing this is the operator's call, and it is ORDER-DEPENDENT. See the PR body.
+            #
+            # `gitops` (the default, and the behaviour until this line lands) makes a wizard add open a
+            # PR against this repo. `controller` makes it create a BrokerSeat CR in agentforge-broker
+            # instead — no PR, no manual step — which the provisioner reconciles.
+            #
+            # TWO PRECONDITIONS, both of which fail QUIETLY rather than loudly if skipped:
+            #   1. the CP image must carry #209/#210/#211 (ailab #509, which ships alembic 0021 and
+            #      must not merge before `just af-db-migrate` has run);
+            #   2. A2 must already be live — the provisioner's AF_PROVISIONER_BROKERSEAT_NAMESPACE.
+            #      With this ON and A2 OFF an add creates a CR that NOTHING reconciles and the
+            #      operation sits in `provisioning` forever. Recovery is to land A2: the controller is
+            #      level-triggered, so it picks the standing CR up on its next pass — delay, not loss.
+            #
+            # The mode is PERSISTED PER ACCOUNT at add time, so setting this back to `gitops` is a
+            # rollback for NEW adds only. Accounts already added in controller mode keep their CR and
+            # are still reconciled; it is not retroactive.
+            - { name: AFP_SEAT_MODE, value: "controller" }
           # WS4 (C1): the restricted agentforge-infra-bot Gitea token (AFP_INFRA_BOT_TOKEN) — the
           # SOPS Secret has existed since Stage 0 (agentforge-infra-bot.sops.yaml); this wires it.
           # The bot is a READ-only collaborator on cchifor/ailab: the CP can only OPEN AGit PRs
