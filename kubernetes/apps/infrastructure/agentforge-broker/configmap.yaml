@@ -101,7 +101,8 @@ data:
   # `envFrom`, which is read ONCE AT POD START. Flux will apply the edit and the running brokers
   # will keep whatever they started with. Pair the edit with
   #   kubectl -n agentforge-broker rollout restart deploy/broker-anthropic-max1 \
-  #     deploy/broker-anthropic-max2 deploy/broker-anthropic-claude-max-3
+  #     deploy/broker-anthropic-max2 deploy/broker-anthropic-claude-max-3 \
+  #     deploy/broker-anthropic-claude-max-4
   # or let the next pin(agentforge) bump roll them. This cuts BOTH ways: setting it back to "0"
   # does not stop the heartbeat until the pods roll either. (The upside of read-once: a
   # crash-loop or a rollout cannot multiply the beat rate — each replica sleeps a full interval
@@ -110,7 +111,7 @@ data:
   # SCOPE. Anthropic seats only. This ConfigMap is shared with broker-openai-codex, but the broker
   # builds no heartbeat for an openai audience (its wham/usage probe already returns real
   # figures), so setting this here costs the Codex subscription nothing.
-  AF_BROKER_USAGE_HEARTBEAT_INTERVAL_M: "0"
+  AF_BROKER_USAGE_HEARTBEAT_INTERVAL_M: "60"
   # NON-SECRET ledger coordinates (documentation + operational reference). The DB login is
   # agentforge_broker: open/reserve/reconcile ONLY, NEVER close (the reaper alone holds close, design §5).
   LEDGER_HOST: "infra-pg-rw.databases.svc.cluster.local"
