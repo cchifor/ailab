@@ -7,8 +7,10 @@
 # sync with `ctx`.
 #
 # Topology (2026-08-14):
-#   node1 + node2 : qwen3.6-35b-a3b PINNED on BOTH (the daily driver) -> redundancy + LiteLLM
-#                   load-balancing across the two `llm` Service endpoints (.44 + .45).
+#   node2 ONLY    : qwen3.6-35b-a3b, and MANAGED (llama-swap, ttl 1800) since 2026-09-07 -- see below.
+#                   The old "PINNED on BOTH node1+node2 -> LiteLLM load-balances .44+.45" topology is
+#                   GONE twice over: node1's copy was disabled 2026-08-15 (its llama-server.service no
+#                   longer exists at all), and .44 was removed from the `llm` Endpoints on 2026-09-07.
 #   node1 :8082   : qwen3.8-27b ON-DEMAND via its own llama-swap instance (the dense quality tier),
 #                   in the slot gemma-4 used to hold. Runs its own llama.cpp build (b10430) alongside
 #                   the daily driver's b9672 in the same CT. NOT pinned — it costs 31.4 GiB of host
@@ -35,7 +37,7 @@
 models:
   # ---- Daily driver: PINNED on node1 AND node2 (coding + image/video vision; the always-warm chat path) ----
   qwen3.6-35b-a3b:
-    nodes: [ai-node1, ai-node2]   # ctid 5001/.44 (NFS) + ctid 5002/.45 (local NVMe); both direct/pinned
+    nodes: [ai-node2]             # ctid 5002/.45 (local NVMe). node1/ctid 5001 dropped 2026-08-15.
     alias: qwen3.6-35b-a3b
     gguf: /models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf         # node1 serves from NFS
     gguf_node2: /models-local/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf  # node2 serves from local NVMe
@@ -45,8 +47,23 @@ models:
     parallel: 2               # 2 concurrent slots/node (per-slot n_ctx = ctx/parallel = 131072) for interactive
                               # concurrency; keep litellm max_input_tokens (114688 = 131072 - 16K headroom) in sync
     cache_type: q8_0          # K + V
-    swap: false               # PINNED (direct llama-server.service) on both nodes
-    ttl: 0
+    swap: true                # MANAGED via llama-swap since 2026-09-07 (was: pinned llama-server)
+    ttl: 1800                 # idle-unload after 30 min, matching node1's qwen3.8 and node3's 122b
+    # WHY THIS STOPPED BEING PINNED (2026-09-07). Measured GTT per node while dev-workers were thrashing:
+    #     ai-node1  17 MiB     (llama-swap, idle-unloaded)
+    #     ai-node2  24766 MiB  (this model, pinned, always resident)
+    #     ai-node3  17 MiB     (llama-swap, idle-unloaded)
+    # node2 was the ONLY node holding a model resident and the ONLY node whose dev-workers were
+    # floor-pinned: 118/124 GiB used, above PVE's 80% auto-balloon threshold, so dw2 and dw5 could
+    # never inflate. dw5 had swapped 140 GB with 39.6M major faults. The 24.2 GiB held here was the
+    # difference. Meanwhile the model was IDLE -- its only remaining consumer is litellm-local (the
+    # agentforge workers; the main proxy retired qwen3.6 in #524/#525) and llama-server logged
+    # "all slots are idle" with ~no requests in 24h. Pinning 24 GiB for an idle model is what the
+    # runbook's own time-share rule forbids: a node serves EITHER its heavyweight OR its two workers.
+    # Cost accepted: the first request after an idle period pays a cold load from local NVMe
+    # (~30-60s; that is why this model is staged to /models-local rather than served over NFS).
+    # KEEP parallel: 2 -- litellm max_input_tokens 114688 is derived from ctx/parallel, so changing
+    # one without the other silently breaks context limits.
     # Sampling + reasoning flags are provision.sh DEFAULTS (not per-model here), applied to both nodes on
     # re-provision (2026-07-10 web research): Qwen3.6-35B-A3B "general thinking" profile — temp 1.0, top-p
     # 0.95, top-k 20, min-p 0, presence-penalty 1.5, repeat-penalty 1.0 (llama.cpp generic defaults temp

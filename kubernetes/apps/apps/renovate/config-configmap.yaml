@@ -8,12 +8,27 @@ metadata:
 data:
   config.js: |
     module.exports = {
-      platform: 'github',
-      endpoint: 'https://api.github.com/',
+      // GITEA, not GitHub (2026-09-07). This config predated the ADR 0017 forge migration
+      // (2026-07-09) and was never moved, so Renovate had been opening dependency PRs against
+      // github.com/cchifor/ailab -- the READ-ONLY push mirror. It "worked": runs succeeded and
+      // PRs were created (e.g. renovate/valkey-valkey-9.x), but into a repo nobody reviews and
+      // that Flux does not reconcile. Measured before this change: 0 renovate PRs and 0
+      // renovate/* branches existed on git.chifor.me, so every update it had ever proposed was
+      // invisible to the workflow. Merging one there would also be overwritten by the next
+      // mirror push.
+      platform: 'gitea',
+      endpoint: 'https://git.chifor.me/api/v1/',
       repositories: ['cchifor/ailab'],
       onboarding: false,        // the repo already ships renovate.json — no onboarding PR
       requireConfig: 'required',
-      gitAuthor: 'Renovate Bot <bot@chifor.me>',
+      // Matches the dedicated Gitea identity minted for this bot (user id 50, collaborator with
+      // `write` on cchifor/ailab -- verified, not just declared). Estate convention is one
+      // *-bot user per automation rather than sharing an existing bot's identity.
+      gitAuthor: 'Renovate Bot <renovate-bot@chifor.me>',
       binarySource: 'install',  // install tool versions on demand (the full image)
-      // RENOVATE_TOKEN (+ RENOVATE_GITHUB_COM_TOKEN) come from the SOPS secret via envFrom.
+      // RENOVATE_TOKEN is now the GITEA PAT (write:repository, write:issue, read:user).
+      // RENOVATE_GITHUB_COM_TOKEN stays a github.com token ON PURPOSE: Renovate still queries
+      // github.com for release notes/changelogs regardless of the platform it runs against, and
+      // without it those lookups get rate-limited -- which is exactly what failed on 2026-09-03.
+      // Both come from the SOPS secret via envFrom.
     };
