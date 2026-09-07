@@ -22,8 +22,8 @@ llm-pi-ai:
         # Vision is real on this route: cloud2 serves Qwen3.8-27B with the tower loaded (VISION=1),
         # probe-verified. A hand-entered model is text-only until it says otherwise, so `input` is
         # what makes image attachment work at all.
-        - id: qwen3.8-27b-vllm
+        - id: qwen3.8-27b-vllm-cloud
           input: [text, image]
-        - id: qwen3.8-27b-vllm-fast
-        - id: qwen3-coder-30b-a3b
-        - id: qwen3.5-122b
+        - id: qwen3.8-27b-vllm-fast-cloud
+        - id: qwen3-coder-30b-a3b-cloud
+        - id: qwen3.5-122b-ailab

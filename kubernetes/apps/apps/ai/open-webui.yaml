@@ -66,10 +66,32 @@ spec:
             - name: OPENAI_API_KEY # the LiteLLM master key (LiteLLM now requires it)
               valueFrom:
                 secretKeyRef: { name: litellm-secret, key: master-key }
-            - { name: OPENAI_API_BASE_URLS, value: "http://litellm.ai.svc.cluster.local:4000/v1" }
+            # The SAME LiteLLM URL twice, on purpose. Open WebUI groups the model picker by
+            # `connection_type`, which is a per-CONNECTION setting, and every OpenAI-compatible
+            # connection defaults to "external" (routers/openai.py: connection_type =
+            # api_config.get("connection_type","external")). One connection therefore cannot hold
+            # both groups -- which is why every model, self-hosted included, showed under External.
+            #   [0] the four SELF-HOSTED models, marked connection_type: local
+            #   [1] the same router again, discovering everything else, marked external
+            # Order matters: get_merged_models keeps the FIRST connection to claim an id
+            # (`if model_id and model_id not in models`), so [0] wins for the local four and [1]
+            # supplies the remainder. Reversing them would put everything under External again.
+            - { name: OPENAI_API_BASE_URLS, value: "http://litellm.ai.svc.cluster.local:4000/v1;http://litellm.ai.svc.cluster.local:4000/v1" }
             # $(OPENAI_API_KEY) is expanded by kubelet from the env var declared ABOVE (declaration order
             # matters); llama-swap ignores the bearer token, so connection [1] uses a placeholder.
-            - { name: OPENAI_API_KEYS, value: "$(OPENAI_API_KEY);sk-noauth" }
+            # ONE key per URL, index-aligned. This previously carried TWO keys against ONE url --
+            # a latent mismatch: the second was simply unused, and `sk-noauth` would have been an
+            # outright failure if it had ever been reached, since LiteLLM rejects it (400 "No
+            # connected db"). Both connections are the same router, so both take the same key.
+            - { name: OPENAI_API_KEYS, value: "$(OPENAI_API_KEY);$(OPENAI_API_KEY)" }
+            # Per-connection settings, keyed by INDEX into OPENAI_API_BASE_URLS.
+            # `model_ids` on [0] is NOT a filter over discovery -- a non-empty list makes Open
+            # WebUI skip /v1/models for that connection entirely and synthesise the entries
+            # (routers/openai.py: `if len(model_ids) == 0:` ... else build a static list). So the
+            # local four carry no max_input_tokens here. That is cosmetic: LiteLLM still holds
+            # model_info.max_input_tokens server-side and fails a too-long request there.
+            # [1] has no model_ids, so it discovers normally and keeps full metadata.
+            - { name: OPENAI_API_CONFIGS, value: '{"0":{"enable":true,"connection_type":"local","model_ids":["qwen3.8-27b-vllm-cloud","qwen3.8-27b-vllm-fast-cloud","qwen3-coder-30b-a3b-cloud","qwen3.5-122b-ailab"]},"1":{"enable":true,"connection_type":"external"}}' }
             # Keyed by connection INDEX as a string (openai.py: api_configs.get(str(idx), ...)).
             # model_ids restricts connection [1] to just qwen3.8 so llama-swap does not add duplicates.
             # NO prefix_id: the model must surface under its real id "qwen3.8-27b" so existing chats
@@ -167,7 +189,11 @@ spec:
             # Belt-and-suspenders: any task that DOES fire (web-search / retrieval / image query generation,
             # only when those features are used) is routed to the fastest local model — NEVER the
             # slow 122b. LiteLLM models are OpenAI-compatible, so OWUI uses TASK_MODEL_EXTERNAL (not TASK_MODEL).
-            - { name: TASK_MODEL_EXTERNAL, value: "qwen3.8-27b-vllm-fast" }
+            - { name: TASK_MODEL_EXTERNAL, value: "qwen3.8-27b-vllm-fast-cloud" }
+            # Open WebUI has NO setting that pre-selects the Local TAB -- the bundle carries the
+            # labels All/Local/External/Direct but nothing defaults the filter. The nearest
+            # honest equivalent is landing on a local model, so new chats start there.
+            - { name: DEFAULT_MODELS, value: "qwen3.8-27b-vllm-cloud" }
           volumeMounts:
             - { name: data, mountPath: /app/backend/data }
           readinessProbe:
