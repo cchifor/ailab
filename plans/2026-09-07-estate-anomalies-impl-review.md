@@ -1,6 +1,6 @@
 # Implementation review — estate-anomalies — round 1
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Summary
 
@@ -15,27 +15,22 @@
 ### Record the recovery contract before excluding all of testpool
 **Location:** kubernetes/apps/infrastructure/storage/velero/helmrelease.yaml:180
 **Severity:** important
-<!-- codex: The reviewed material establishes lease churn and a missing-PV race, but does not establish W4's required recovery contract for every resource in testpool; Flux will apply the namespace-wide exclusion to both schedules on merge, regardless of whether the node-agent remains. Document that all namespace contents are disposable or covered by another recovery mechanism, otherwise narrow the exclusion to the disposable resources. -->
 
 ### Pod creation time is insufficient to authorize Service deletion
 **Location:** kubernetes/apps/apps/ai/llm-service.yaml:40
 **Severity:** important
-<!-- codex: A pod created after merge can remain blocked in wait-for-db while the old ReplicaSet still serves, so this cleanup instruction weakens the plan's verification gate even though retaining the Service in this commit is safe. Require completion of the Deployment rollout with the expected checksum, verification that the running proxy loaded no llm-node1 deployment, and successful authenticated inference before merging the deletion commit; merely creating two commits does not guarantee Flux reconciles them separately. -->
 
 ### The identity guard accepts incorrect runner inventories
 **Location:** kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml:298
 **Severity:** important
-<!-- codex: The prefix matcher accepts a foreign or duplicate host reporting ci-runner-*, produces no result when node_uname_info is absent despite up=1, and can misclassify a genuine runner whose hostname or nodename label changes; the successful live query establishes coverage of this incident, not the comment's universal identity claim. Add the planned expected IP/nodename inventory assertion and a per-target missing-uname check, and document the naming assumption and 15-minute firing delay ([Prometheus selector semantics](https://prometheus.io/docs/prometheus/latest/querying/basics/)). -->
 
 ### The TTL does not guarantee two days of failure evidence
 **Location:** kubernetes/apps/apps/renovate/cronjob.yaml:20
 **Severity:** nit
-<!-- codex: Although 172800 correctly means 48 hours, failedJobsHistoryLimit: 3 independently removes the oldest failure when the fourth accumulates—approximately 12 hours into continuous four-hourly failures—so the promised investigation window is not guaranteed ([Kubernetes history limits](https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/#jobs-history-limits)). Raise the history limit to cover the intended window or describe the TTL as cleanup eligibility rather than minimum retention; persistent failures retain recent failed Jobs, and the existing failed Job still needs separate cleanup after its logs are captured. -->
 
 ### Retirement comments remain contradictory
 **Location:** kubernetes/apps/apps/ai/litellm-local.yaml:17
 **Severity:** nit
-<!-- codex: The header and model-list preamble still describe node1/node2 and two deployments, despite the new single-node route, while llm-service.yaml:106 still calls .44:8082 free despite the added comments describing llama-swap there. Update these statements and clarify that model inventory intentionally differs from the main proxy, while identifying which settings must remain synchronized. -->
 
 ## Diff stat
 
