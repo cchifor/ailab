@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsh
+spec:
+  type: ClusterIP
+  selector: { app: dsh }
+  # Port 80 -> the RELAY container's 8080, never dsh's 3080: dsh listens on loopback only and is
+  # unreachable from the Service network by design.
+  ports:
+    - { name: http, port: 80, targetPort: relay, protocol: TCP }

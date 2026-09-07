@@ -1,0 +1,126 @@
+# DeepSeek Harness (dsh) at https://dsh.chifor.me.
+#
+# ONE REPLICA, Recreate. dsh owns a single $DSH_HOME (RWO) and the release documents no readiness or
+# shutdown behaviour under concurrent replicas; a rolling update would briefly run two processes over
+# one home directory and one credential lock. Not worth finding out.
+#
+# ROOT OF A DEDICATED HOSTNAME, never a sub-path: the frontend injects <base href="/"> and auth
+# redirects to /, so https://home.chifor.me/dsh/ cannot work even with path stripping at the proxy.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dsh
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: dsh } }
+  template:
+    metadata:
+      labels: { app: dsh }
+    spec:
+      terminationGracePeriodSeconds: 30   # SIGTERM starts root disposal on a 5s budget; give it room
+      automountServiceAccountToken: false # it executes model-generated code; do not hand it the API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # Fail loudly if the install Job has not populated the app volume, rather than letting the
+        # main container crash-loop on a missing binary.
+        - name: wait-for-install
+          image: mirror.gcr.io/library/node:22-alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              for i in $(seq 1 60); do
+                [ -x /app/node_modules/.bin/dsh ] && { echo "dsh present"; exit 0; }
+                echo "waiting for dsh-install Job to populate /app ($i/60)"; sleep 5
+              done
+              echo "ERROR: /app/node_modules/.bin/dsh missing -- is the dsh-install Job complete?" >&2
+              exit 1
+          volumeMounts: [{ name: app, mountPath: /app, readOnly: true }]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+        - name: seed-settings
+          image: mirror.gcr.io/library/node:22-alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -s /dsh-home/settings.yaml ]; then
+                echo "settings.yaml exists -- leaving it alone (dsh owns it once written)"
+              else
+                echo "seeding settings.yaml with the LiteLLM provider"
+                cp /seed/settings.seed.yaml /dsh-home/settings.yaml
+              fi
+          volumeMounts:
+            - { name: home, mountPath: /dsh-home }
+            - { name: relay, mountPath: /seed, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      containers:
+        - name: dsh
+          image: mirror.gcr.io/library/node:22-alpine
+          # --trusted-host is what makes the public authority acceptable to the /api trust fence:
+          # a non-loopback deployment must declare the names it is reached by, or every proxied
+          # request is refused 403. It must match the cloudflared hostname exactly.
+          command: ["/app/node_modules/.bin/dsh"]
+          args: ["web", "--no-open", "--port", "3080", "--trusted-host", "dsh.chifor.me"]
+          env:
+            - { name: DSH_HOME, value: /dsh-home }
+            - { name: HOME, value: /dsh-home }
+            # Feedback submission can export session data. Off for a private deployment.
+            - { name: DSH_TELEMETRY_DISABLED, value: "1" }
+          volumeMounts:
+            - { name: app,  mountPath: /app, readOnly: true }
+            - { name: home, mountPath: /dsh-home }
+            - { name: tmp,  mountPath: /tmp }
+          # Probes are exec, not httpGet: unauthenticated / returns 401 once routes mount, which a
+          # standard HTTP probe reads as failure, and the listener is on loopback where a Pod-IP
+          # probe cannot reach it at all. A TCP connect to 127.0.0.1 proves the listener is up
+          # without asserting anything about the auth state.
+          startupProbe:
+            exec: { command: ["/bin/sh","-c","node -e 'require(\"net\").connect(3080,\"127.0.0.1\").on(\"connect\",()=>process.exit(0)).on(\"error\",()=>process.exit(1))'"] }
+            periodSeconds: 5
+            failureThreshold: 60      # first boot settles the Loader before it listens
+          livenessProbe:
+            exec: { command: ["/bin/sh","-c","node -e 'require(\"net\").connect(3080,\"127.0.0.1\").on(\"connect\",()=>process.exit(0)).on(\"error\",()=>process.exit(1))'"] }
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 4Gi }
+        - name: relay
+          image: mirror.gcr.io/library/node:22-alpine
+          command: ["node", "/relay/relay.js"]
+          env:
+            - { name: RELAY_PORT, value: "8080" }
+            - { name: DSH_PORT,   value: "3080" }
+          ports: [{ name: relay, containerPort: 8080, protocol: TCP }]
+          volumeMounts: [{ name: relay, mountPath: /relay, readOnly: true }]
+          readinessProbe:
+            tcpSocket: { port: relay }
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+      volumes:
+        - { name: app,  persistentVolumeClaim: { claimName: dsh-app } }
+        - { name: home, persistentVolumeClaim: { claimName: dsh-home } }
+        - { name: tmp,  emptyDir: { sizeLimit: 1Gi } }
+        - { name: relay, configMap: { name: dsh-relay, defaultMode: 0444 } }

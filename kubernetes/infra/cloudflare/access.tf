@@ -56,6 +56,24 @@ resource "cloudflare_zero_trust_access_application" "k8s_tools" {
   policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
 }
 
+# dsh — DeepSeek Harness agent UI. Same gate as the dev-worker terminals, and for the same reason:
+# this runs model-generated tool calls, and SAFETY.md states the project is experimental and
+# unaudited and that its own sandbox "cannot protect resources that execution is permitted to use".
+#
+# Access is doing MORE work here than for the other apps. dsh has a browser-session cookie, but that
+# cookie carries NO SSO identity -- it is minted by exchanging a one-time startup token and is bound
+# only to the authority. So dsh cannot tell one person from another, and Access is the only
+# per-person gate in front of it. session_duration matches the dev-worker terminals rather than the
+# 24h k8s-tools window, because the blast radius is comparable to a shell.
+resource "cloudflare_zero_trust_access_application" "dsh" {
+  account_id       = var.cloudflare_account_id
+  name             = "dsh (DeepSeek Harness agent UI)"
+  type             = "self_hosted"
+  domain           = "dsh.chifor.me"
+  session_duration = "8h"
+  policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
+}
+
 # Cloudflare Access for the admin UIs now published to the WAN (PR #24; ratified in ADR 0007).
 # Proxmox + QNAP have their OWN logins, so Access is defense-in-depth in front of a hypervisor / NAS.
 # Prometheus + Alertmanager have NO native auth, so Access is the ONLY thing between the internet and

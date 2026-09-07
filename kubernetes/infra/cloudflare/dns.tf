@@ -33,5 +33,8 @@ resource "cloudflare_dns_record" "tunnel" {
     # could publish the OpenBao UI to the internet before its Access app exists. With it, a partial or
     # failed apply simply leaves the CNAME absent.
     cloudflare_zero_trust_access_application.openbao,
+    # Same fail-safe for the agent harness: dsh.chifor.me is a NEW record fronting something that
+    # runs model-generated tool calls, so the Access app must exist before the name resolves.
+    cloudflare_zero_trust_access_application.dsh,
   ]
 }

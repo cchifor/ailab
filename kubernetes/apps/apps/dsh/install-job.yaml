@@ -1,0 +1,61 @@
+# One-shot installer for the dsh npm package into the dsh-app PVC.
+#
+# WHY A JOB AND NOT AN IMAGE: dsh publishes no official container image, and pushing a hand-built one
+# needs the SOPS `ci` registry credential. A community image would hold the LiteLLM credential, so it
+# is not a shortcut worth taking. Installing the official npm package into a volume keeps the supply
+# chain to "what DeepSeek published", pinned by version.
+#
+# WHY A JOB AND NOT AN initContainer: the runtime pod is default-deny egress (networkpolicy.yaml)
+# precisely because this thing executes model-generated tool calls. An initContainer shares the pod's
+# NetworkPolicy, so npm access would have to be granted to the running agent forever. This Job
+# carries app=dsh-install, which the deny policy's podSelector (app=dsh) does not match, so the npm
+# reach exists ONLY here and only while installing.
+#
+# TO UPGRADE: bump DSH_VERSION and the Job name together (a Job's pod template is immutable), then
+# delete the marker file or the PVC so this re-runs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsh-install-0-1-2-rc-1
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 4
+  template:
+    metadata:
+      labels: { app: dsh-install }
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: install
+          image: mirror.gcr.io/library/node:22-alpine
+          env:
+            - { name: DSH_VERSION, value: "0.1.2-rc.1" }
+            - { name: npm_config_cache, value: /app/.npm }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              MARKER="/app/.installed-${DSH_VERSION}"
+              if [ -f "$MARKER" ]; then echo "already installed: ${DSH_VERSION}"; exit 0; fi
+              echo "installing @deepseek-ai/dsh@${DSH_VERSION} into /app"
+              npm install --prefix /app --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}"
+              test -x /app/node_modules/.bin/dsh
+              touch "$MARKER"
+              echo "installed:"; /app/node_modules/.bin/dsh --version || true
+          volumeMounts:
+            - { name: app, mountPath: /app }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 2Gi }
+      volumes:
+        - { name: app, persistentVolumeClaim: { claimName: dsh-app } }

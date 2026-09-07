@@ -13,3 +13,4 @@ resources:
   - gitea # self-hosted Git forge at git.chifor.me (OIDC login, SQLite on iSCSI)
   - vaultwarden # password manager at vault.chifor.me (own auth; /admin behind CF Access)
   - renovate # dependency-update bot (CronJob; opens PRs against this repo)
+  - dsh # DeepSeek Harness agent UI at dsh.chifor.me (models via LiteLLM)

@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# dsh — DeepSeek Harness agent UI at dsh.chifor.me, using the estate's own models through LiteLLM.
+namespace: dsh
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - install-job.yaml   # one-shot: npm-installs dsh into the app PVC (see the file for why not an image)
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml # default-deny both ways; only cloudflared in, only DNS + LiteLLM out
+
+configMapGenerator:
+  # Generated so the name carries a content hash: editing relay.js rolls the pod automatically
+  # instead of leaving the old relay running — the same trap that made a LiteLLM change inert.
+  - name: dsh-relay
+    files:
+      - relay.js
+      - settings.seed.yaml

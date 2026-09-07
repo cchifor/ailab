@@ -65,6 +65,11 @@ data:
             description: Chat UI (LLMs)
             icon: open-webui.png
             siteMonitor: http://open-webui.ai.svc.cluster.local:80
+        - DeepSeek Harness:
+            href: https://dsh.chifor.me
+            description: Agent harness (local models via LiteLLM)
+            icon: si-deepseek
+            siteMonitor: http://dsh.dsh.svc.cluster.local:80
         - LiteLLM:
             href: https://api.chifor.me
             description: OpenAI-compatible router

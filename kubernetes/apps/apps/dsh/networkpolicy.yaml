@@ -1,0 +1,34 @@
+# dsh runs model-generated tool calls. SAFETY.md is explicit that it is experimental and unaudited,
+# and that "sandbox and approval controls cannot protect resources that execution is permitted to
+# use" -- so the containment that matters is the one OUTSIDE the app. Default-deny both directions,
+# then allow only what it demonstrably needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dsh-default-deny
+spec:
+  podSelector: { matchLabels: { app: dsh } }
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dsh-allow
+spec:
+  podSelector: { matchLabels: { app: dsh } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Only cloudflared may reach the relay. Nothing else in the cluster has any business here, and
+    # this is what stops a pod-network client from bypassing the Cloudflare Access gate at the edge.
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
+      ports: [{ port: 8080, protocol: TCP }]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }}]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    # LiteLLM is the ONLY model path. dsh reaches every model through the proxy, so it never needs
+    # egress to the internet for inference -- no OpenAI, no Anthropic, no DeepSeek.
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ai } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: litellm } }
+      ports: [{ port: 4000, protocol: TCP }]

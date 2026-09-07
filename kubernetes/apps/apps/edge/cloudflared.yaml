@@ -26,6 +26,14 @@ data:
         service: http://open-webui.ai.svc.cluster.local:80
       - hostname: grafana.chifor.me
         service: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
+      # dsh — DeepSeek Harness. GATED by Cloudflare Access (kubernetes/infra/cloudflare/access.tf),
+      # same posture as the dev-worker terminals: this runs model-generated tool calls, and its own
+      # session cookie carries NO SSO identity, so edge auth is the only per-person gate.
+      # NO httpHostHeader override here, deliberately: dsh's /api trust fence refuses any request
+      # whose Host is not a declared authority, and the pod declares --trusted-host dsh.chifor.me.
+      # Rewriting Host would 403 every request.
+      - hostname: dsh.chifor.me
+        service: http://dsh.dsh.svc.cluster.local:80
       - hostname: api.chifor.me
         service: http://litellm.ai.svc.cluster.local:4000
       # Dev-worker web terminals: tunnel -> each VM's Caddy (LAN HTTPS, local-CA self-signed).
