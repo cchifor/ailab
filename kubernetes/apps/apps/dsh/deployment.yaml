@@ -59,7 +59,12 @@ spec:
                 echo "settings.yaml exists -- leaving it alone (dsh owns it once written)"
               else
                 echo "seeding settings.yaml with the LiteLLM provider"
-                cp /seed/settings.seed.yaml /dsh-home/settings.yaml
+                # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp
+                # preserves that, leaving a READ-ONLY settings.yaml. dsh owns this file after the
+                # first boot -- the Settings UI writes it -- so a 0444 copy silently breaks every
+                # later edit through the app. Observed: EACCES on the live volume, and the file
+                # sat at -r--r--r-- until it was chmod-ed by hand.
+                install -m 0644 /seed/settings.seed.yaml /dsh-home/settings.yaml
               fi
               # patchReload MUST NOT be "live" in a container or dsh crash-loops on FIRST boot.
               # MEASURED, not guessed -- see fix-profile.js for the mechanism and the evidence.
