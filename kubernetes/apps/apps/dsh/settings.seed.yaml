@@ -16,6 +16,12 @@
 llm-pi-ai:
   providers:
     litellm:
+      # Reads the key from the environment; the Deployment populates it from the
+      # External-Secrets-synced `dsh-litellm` Secret (ultimately af/estate/litellm in OpenBao).
+      # LiteLLM REQUIRES a real key -- an absent header is 401 and a wrong one is 400
+      # "No connected db", verified from this pod 2026-09-07. Without it the provider is
+      # registered but every model call fails, which is exactly how it behaved before.
+      apiKeyEnv: LITELLM_API_KEY
       api: openai-completions
       baseURL: http://litellm.ai.svc.cluster.local:4000/v1
       models:

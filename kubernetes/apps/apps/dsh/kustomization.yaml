@@ -4,6 +4,7 @@ kind: Kustomization
 namespace: dsh
 resources:
   - namespace.yaml
+  - openbao-eso.yaml   # SA + CA + SecretStore + ExternalSecret: the LiteLLM key from OpenBao
   - pvc.yaml
   - install-job.yaml   # one-shot: npm-installs dsh into the app PVC (see the file for why not an image)
   - deployment.yaml
@@ -17,6 +18,7 @@ configMapGenerator:
     files:
       - relay.js
       - settings.seed.yaml
+      - fix-profile.js
 
 # ONE source of truth for the version. It has to appear in the Deployment twice (the initContainer
 # that waits for the tree, and the container that execs it), and a hand-maintained triplicate is a

@@ -61,6 +61,10 @@ spec:
                 echo "seeding settings.yaml with the LiteLLM provider"
                 cp /seed/settings.seed.yaml /dsh-home/settings.yaml
               fi
+              # patchReload MUST NOT be "live" in a container or dsh crash-loops on FIRST boot.
+              # MEASURED, not guessed -- see fix-profile.js for the mechanism and the evidence.
+              mkdir -p /dsh-home/profiles/web
+              node /seed/fix-profile.js
           volumeMounts:
             - { name: home, mountPath: /dsh-home }
             - { name: relay, mountPath: /seed, readOnly: true }
@@ -84,6 +88,11 @@ spec:
             - exec "/app/${DSH_VERSION}/node_modules/.bin/dsh" web --no-open --port 3080 --trusted-host dsh.chifor.me
           env:
             - { name: DSH_VERSION, value: "0.1.2-rc.1" }
+            # The LiteLLM credential, synced from OpenBao by External Secrets (openbao-eso.yaml).
+            # settings.yaml references it as `apiKeyEnv: LITELLM_API_KEY` rather than embedding a
+            # value, so the secret never lands in git and never lands in the seed ConfigMap either.
+            - name: LITELLM_API_KEY
+              valueFrom: { secretKeyRef: { name: dsh-litellm, key: api_key } }
             - { name: DSH_HOME, value: /dsh-home }
             - { name: HOME, value: /dsh-home }
             # Feedback submission can export session data. Off for a private deployment.

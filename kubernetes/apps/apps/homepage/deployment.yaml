@@ -18,6 +18,15 @@ spec:
       app.kubernetes.io/name: homepage
   template:
     metadata:
+      annotations:
+        # homepage-config is a STATIC ConfigMap, not a hashed configMapGenerator, so editing
+        # services.yaml/widgets.yaml updates it IN PLACE and the running pod keeps serving the
+        # config it read at startup. A new tile then looks deployed but never appears on
+        # home.chifor.me -- which is exactly what happened to the dsh tile: correct in the live
+        # ConfigMap, invisible on the dashboard, pod 7d22h old. Bump this whenever the config
+        # changes; it is the rollout trigger. (cloudflared carries the same annotation for the
+        # same reason, and cloud-power documents the trap for app code.)
+        chifor.me/config-revision: "2026-09-07-dsh-tile"
       labels:
         app.kubernetes.io/name: homepage
     spec:
