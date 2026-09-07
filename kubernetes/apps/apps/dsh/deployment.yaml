@@ -31,15 +31,18 @@ spec:
         # main container crash-loop on a missing binary.
         - name: wait-for-install
           image: mirror.gcr.io/library/node:22-alpine
+          env:
+            - { name: DSH_VERSION, value: "0.1.2-rc.1" }
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
+              BIN="/app/${DSH_VERSION}/node_modules/.bin/dsh"
               for i in $(seq 1 60); do
-                [ -x /app/node_modules/.bin/dsh ] && { echo "dsh present"; exit 0; }
-                echo "waiting for dsh-install Job to populate /app ($i/60)"; sleep 5
+                [ -x "$BIN" ] && { echo "dsh ${DSH_VERSION} present"; exit 0; }
+                echo "waiting for the dsh-install Job to populate /app/${DSH_VERSION} ($i/60)"; sleep 5
               done
-              echo "ERROR: /app/node_modules/.bin/dsh missing -- is the dsh-install Job complete?" >&2
+              echo "ERROR: $BIN missing -- is the dsh-install-* Job for this version complete?" >&2
               exit 1
           volumeMounts: [{ name: app, mountPath: /app, readOnly: true }]
           securityContext:
@@ -71,9 +74,16 @@ spec:
           # --trusted-host is what makes the public authority acceptable to the /api trust fence:
           # a non-loopback deployment must declare the names it is reached by, or every proxied
           # request is refused 403. It must match the cloudflared hostname exactly.
-          command: ["/app/node_modules/.bin/dsh"]
-          args: ["web", "--no-open", "--port", "3080", "--trusted-host", "dsh.chifor.me"]
+          # Runs the VERSIONED tree, and DSH_VERSION is part of the pod spec. That is what couples an
+          # upgrade to a rollout: bumping the version here (and on the Job) changes the Deployment,
+          # so Kubernetes replaces the pod onto the new tree instead of the installer mutating
+          # node_modules under a live process. Keep this value and the Job's in lockstep -- the
+          # wait-for-install initContainer fails loudly rather than silently running the old one.
+          command: ["/bin/sh", "-c"]
+          args:
+            - exec "/app/${DSH_VERSION}/node_modules/.bin/dsh" web --no-open --port 3080 --trusted-host dsh.chifor.me
           env:
+            - { name: DSH_VERSION, value: "0.1.2-rc.1" }
             - { name: DSH_HOME, value: /dsh-home }
             - { name: HOME, value: /dsh-home }
             # Feedback submission can export session data. Off for a private deployment.

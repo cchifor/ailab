@@ -18,16 +18,24 @@ spec:
   podSelector: { matchLabels: { app: dsh } }
   policyTypes: [Ingress, Egress]
   ingress:
-    # Only cloudflared may reach the relay. Nothing else in the cluster has any business here, and
-    # this is what stops a pod-network client from bypassing the Cloudflare Access gate at the edge.
+    # Only cloudflared may reach the relay. This is what stops a pod-network client from bypassing
+    # the Cloudflare Access gate at the edge, so the selector has to actually mean it.
+    #
+    # The podSelector is NOT redundant with the namespaceSelector. `edge` also runs
+    # cloudflared-strive, a SEPARATE tunnel for another domain; a bare namespaceSelector admitted it
+    # too, which is a wider boundary than the comment above claims. Both selectors sit in ONE `from`
+    # element on purpose -- as two list items they would be OR'ed and grant namespace-wide access
+    # again.
     - from:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: cloudflared } }
       ports: [{ port: 8080, protocol: TCP }]
     # Homepage's siteMonitor probes the Service for the status dot on home.chifor.me. Without this
-    # the default-deny above silently shows dsh as permanently down. Ingress only, one port, from a
-    # namespace that is already the dashboard -- it grants no path a browser did not already have.
+    # the default-deny above silently shows dsh as permanently down. Narrowed to the homepage pod
+    # itself: that namespace also runs oauth2-proxy, which has no reason to reach dsh directly.
     - from:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: homepage } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: homepage } }
       ports: [{ port: 8080, protocol: TCP }]
   egress:
     - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }}]

@@ -25,6 +25,10 @@ spec:
       labels: { app: dsh-install }
     spec:
       restartPolicy: OnFailure
+      # npm install executes arbitrary lifecycle scripts from the network. The runtime pod is denied
+      # an API token; the installer -- the one container here that actually runs third-party code
+      # fetched at build time -- had one mounted by default. That is backwards.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -36,25 +40,32 @@ spec:
           image: mirror.gcr.io/library/node:22-alpine
           env:
             - { name: DSH_VERSION, value: "0.1.2-rc.1" }
-            - { name: npm_config_cache, value: /app/.npm }
+            - { name: npm_config_cache, value: /app/.npm }   # shared across versions; harmless
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
-              MARKER="/app/.installed-${DSH_VERSION}"
+              # Versioned prefix, NOT a shared /app. dsh-app is ReadWriteMany, so the Job and the
+              # RUNNING Deployment can mount it simultaneously; installing in place would rewrite
+              # node_modules under a live process. Each version gets its own tree, and the Deployment
+              # names the version it wants -- so an upgrade lands beside the running one and only
+              # takes effect when the pod rolls.
+              DEST="/app/${DSH_VERSION}"
+              mkdir -p "$DEST"
+              MARKER="${DEST}/.installed"
               # The marker is written LAST and only after the binary is proven present. An earlier
               # version wrote it beside the install, which meant an OOM-killed or evicted Job could
               # leave a marker over a half-written node_modules and every later run would skip the
               # repair. Verify-then-mark, never mark-then-verify.
-              if [ -f "$MARKER" ] && [ -x /app/node_modules/.bin/dsh ]; then
+              if [ -f "$MARKER" ] && [ -x "${DEST}/node_modules/.bin/dsh" ]; then
                 echo "already installed: ${DSH_VERSION}"; exit 0
               fi
               [ -f "$MARKER" ] && echo "marker present but binary missing -- reinstalling" && rm -f "$MARKER"
-              echo "installing @deepseek-ai/dsh@${DSH_VERSION} into /app"
-              npm install --prefix /app --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}"
-              test -x /app/node_modules/.bin/dsh
+              echo "installing @deepseek-ai/dsh@${DSH_VERSION} into ${DEST}"
+              npm install --prefix "$DEST" --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}"
+              test -x "${DEST}/node_modules/.bin/dsh"
               touch "$MARKER"
-              echo "installed:"; /app/node_modules/.bin/dsh --version || true
+              echo "installed:"; "${DEST}/node_modules/.bin/dsh" --version || true
           volumeMounts:
             - { name: app, mountPath: /app }
           securityContext:

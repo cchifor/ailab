@@ -17,3 +17,19 @@ configMapGenerator:
     files:
       - relay.js
       - settings.seed.yaml
+
+# ONE source of truth for the version. It has to appear in the Deployment twice (the initContainer
+# that waits for the tree, and the container that execs it), and a hand-maintained triplicate is a
+# footgun: a half-done bump would leave the pod silently running the previous tree. The Job's env is
+# the source; both Deployment copies are derived from it, so a bump touches the Job only (plus its
+# name, which must change because a Job's pod template is immutable).
+replacements:
+  - source:
+      kind: Job
+      name: dsh-install-0-1-2-rc-1
+      fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_VERSION].value
+    targets:
+      - select: { kind: Deployment, name: dsh }
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=wait-for-install].env.[name=DSH_VERSION].value
+          - spec.template.spec.containers.[name=dsh].env.[name=DSH_VERSION].value
