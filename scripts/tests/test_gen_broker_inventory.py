@@ -42,6 +42,7 @@ SEED_PATHS = [
     "operator/broker/anthropic/claude-max-1/oauth",
     "operator/broker/anthropic/claude-max-2/oauth",
     "operator/broker/anthropic/claude-max-3/oauth",
+    "operator/broker/anthropic/claude-max-4/oauth",
     "operator/broker/openai/codex-pro/oauth",
     "operator/broker/anthropic/claude-max-1/kids",
     "operator/estate/gitea/bot-tokens",
