@@ -56,31 +56,13 @@ data:
           api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
         model_info: { supports_vision: true, max_input_tokens: 114688 }
-      # gpt-oss-120b RETIRED as a LOCAL model (2026-07-08): node3 now serves ONLY qwen3.5-122b. Reason —
-      # qwen3.5-122b and gpt-oss-120b (both ~60-71 GiB) cannot co-reside in node3's single 96 GiB iGPU
-      # LXC, so when interactive traffic (qwen3.5-122b) and the deepagent platform (gpt-oss) interleave,
-      # llama-swap evicted+cold-reloaded on nearly EVERY request (measured ~55-82s reload per crossover,
-      # 4/4). Removing this route is what ends the thrash: no traffic reaches node3's gpt-oss anymore.
-      # The model_name is KEPT and SHIMMED to the always-warm, local, zero-cost qwen3.6 daily driver so
-      # existing callers that request "gpt-oss-120b" keep working (the chosen "falls back to qwen3.6"
-      # path). To serve a real gpt-oss-class model instead, point model/api_key at gpt-5.4 (mind the
-      # global max_budget) — or delete this entry to hard-retire the name. See docs/runbooks/ai-model-swap.md.
-      # Shimmed to qwen3.6, and normally registered on BOTH nodes so the shim path is balanced too.
-      # node1 deployment DISABLED 2026-08-15 for the same reason as qwen3.6 above — it shims to the SAME
-      # stopped node1 llama-server, so leaving it registered would keep failing gpt-oss-120b callers even
-      # though qwen3.6 itself had been fixed. Un-comment together with the qwen3.6 node1 block.
-      # - model_name: gpt-oss-120b
-      #   litellm_params:
-      #     model: openai/qwen3.6-35b-a3b
-      #     api_base: http://llm-node1.ai.svc.cluster.local:8080/v1
-      #     api_key: "sk-noauth"
-      #   model_info: { supports_vision: true, max_input_tokens: 114688 }
-      - model_name: gpt-oss-120b
-        litellm_params:
-          model: openai/qwen3.6-35b-a3b
-          api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
-          api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 114688 }
+      # gpt-oss-120b DELETED 2026-09-07. It had been retired as a local model on 2026-07-08 and kept
+      # as a NAME SHIMMED to qwen3.6-35b-a3b so old callers would not break. That shim is worse than a
+      # 404: a caller asking for gpt-oss-120b silently received a different model, with nothing in the
+      # response saying so. The retirement note already offered "delete this entry to hard-retire the
+      # name" as the alternative; this takes it. Callers now get an explicit model-not-found instead of
+      # quiet wrong answers. gpt-oss-120b weights DO still sit on cloud3's NFS store (60 GiB) but are
+      # not loaded by any llama-swap config, so nothing serves them. See docs/runbooks/ai-model-swap.md.
       - model_name: qwen3.5-122b
         litellm_params:
           model: openai/qwen3.5-122b
@@ -110,38 +92,13 @@ data:
       # unloads on TTL — a model switch costs a cold load from local NVMe. llama-swap always answers
       # :8080, so the router never sees a down backend while the cluster is awake.
       #
-      # ---- EXECUTOR TIER: cloud2, one instance PINNED PER GPU (3 deployments of one model_name) --
-      # Registered three times on purpose so the router load-balances least-busy across three
-      # physically separate GPUs — the same pattern the qwen3.6 pair uses above.
-      #
-      # NOT split across GPUs: llama.cpp's default --split-mode layer walks layers sequentially, so a
-      # pooled model leaves every card ~30% utilised. MEASURED on cloud3: 32.4 tok/s at 636 W pooled,
-      # versus 18.6 / 25.7 / 19.6 tok/s on three separate cards here — ~3x the aggregate throughput.
-      #
-      # UD-Q4_K_XL (17.9 GiB), not the Q6_K used on cloud3: Q6_K is 22.9 GiB and cannot fit a 24 GiB
-      # card alongside a usable KV cache. host -c 65536 --parallel 1 => the whole 64K window goes to
-      # one request; minus ~8K output headroom = 57344. 64K is the practical ceiling on 24 GiB.
-      #
-      # cloud1's three GPUs are deliberately NOT registered: that host showed ~10x degraded
-      # throughput (2.0 / 1.9 / 1.3 tok/s) traced to a faulty GPU riser, and is under investigation.
-      - model_name: qwen3.8-27b-cloud
-        litellm_params:
-          model: openai/qwen3.8-27b
-          api_base: http://192.168.0.28:8081/v1
-          api_key: "sk-noauth"
-        model_info: { max_input_tokens: 57344 }
-      - model_name: qwen3.8-27b-cloud
-        litellm_params:
-          model: openai/qwen3.8-27b
-          api_base: http://192.168.0.28:8082/v1
-          api_key: "sk-noauth"
-        model_info: { max_input_tokens: 57344 }
-      - model_name: qwen3.8-27b-cloud
-        litellm_params:
-          model: openai/qwen3.8-27b
-          api_base: http://192.168.0.28:8083/v1
-          api_key: "sk-noauth"
-        model_info: { max_input_tokens: 57344 }
+      # ---- EXECUTOR TIER (qwen3.8-27b-cloud) REMOVED 2026-09-07 -------------------------------
+      # Was three llama.cpp instances pinned one-per-GPU on cloud2 (:8081/:8082/:8083), registered under
+      # one model_name so the router load-balanced across three physically separate cards.
+      # All three were DEAD when checked (HTTP 000, GPUs 1-3 idle at 0 MiB) and had been dead BEFORE
+      # cloud2 moved to tensor-parallel vLLM -- the TP change did not kill them, it superseded them.
+      # cloud2 now runs ONE vLLM engine across all four cards (qwen3.8-27b-vllm below), which is both
+      # faster per request and larger in aggregate than the three pinned instances ever were.
       # ---- cloud2 vLLM (W4A16 + MTP), TENSOR-PARALLEL over ALL FOUR RTX 3090s, VISION ON ---
       # syv-ai/qwen38-27b-rtx3090 recipe: int4 AutoRound body, int8 lm_head/embed, MTP n=4 drafts.
       # Kept under its OWN model_name (not pooled with qwen3.8-27b-cloud) because the backends are
@@ -191,20 +148,21 @@ data:
             top_k: 20
             chat_template_kwargs: { reasoning_effort: xhigh }
         model_info: { supports_vision: true, max_input_tokens: 81920 }
-      # ---- COGNITIVE TIER: cloud3, three GPUs pooled ------------------------------------------
-      # Qwen3-Coder-Next: 80B MoE with only 3B ACTIVE. MEASURED 102.3 tok/s at 493 W here, versus
-      # 32.4 tok/s at 636 W for the 27B dense and 16.6 tok/s for the 122B — decode speed tracks
-      # ACTIVE parameters, not total, which is what makes long-context planning usable. This is the
-      # repo-ingestion / planner model; route ordinary coding to the executors above.
-      # Pooling three GPUs is right HERE (and only here) because 46 GiB of weights cannot fit one card.
-      # host -c 131072 across --parallel 2 => 65536/slot; minus ~8K output headroom = 57344 (same
-      # host settings as the 27B above — stated explicitly so the number is checkable, not inferred).
-      - model_name: qwen3-coder-next
+      # ---- COGNITIVE TIER: cloud3 ---------------------------------------------------------------
+      # qwen3-coder-next REPOINTED 2026-09-07: that model_name no longer exists. cloud3's llama-swap
+      # serves exactly two models (qwen3-coder-30b-a3b, qwen3.8-27b) and the weights for a
+      # "qwen3-coder-next" are not on the store at all, so every request under the old name 404'd at
+      # the backend. Registered here under the name llama-swap actually answers to.
+      # 30B MoE with 3B ACTIVE -- decode speed tracks ACTIVE parameters, not total, which is what makes
+      # this usable for agent loops. host -c 262144 across --parallel 2 => 131072/slot; minus ~8K output
+      # headroom = 122880.
+      # NOTE cloud3 now has FOUR GPUs (96 GiB), not the three this section was written for.
+      - model_name: qwen3-coder-30b-a3b
         litellm_params:
-          model: openai/qwen3-coder-next
+          model: openai/qwen3-coder-30b-a3b
           api_base: http://192.168.0.26:8080/v1
           api_key: "sk-noauth"
-        model_info: { max_input_tokens: 57344 }
+        model_info: { max_input_tokens: 122880 }
       # qwen3.8-27b — the quality tier, ON-DEMAND on node1 (.44) :8082 via its own llama-swap
       # instance, in the slot gemma-4 used to hold. 27B DENSE (not MoE), so every token reads all 27B
       # params: a MEASURED 9.3 tok/s vs qwen3.6's ~50. That is inherent to a dense model on a
