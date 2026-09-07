@@ -260,12 +260,62 @@ class ProvisionerRulesWiringTest(unittest.TestCase):
             "up{",
         )
         exprs = _exprs()
-        self.assertEqual(len(exprs), 6, f"expected 6 exprs, parsed {len(exprs)}")
+        self.assertEqual(len(exprs), 7, f"expected 7 exprs, parsed {len(exprs)}")
         for expr in exprs:
             self.assertTrue(
                 any(name in expr for name in known),
                 f"expr reads no series this wiring provides: {expr.strip()!r}",
             )
+
+    def test_no_counter_rule_uses_the_rate_over_the_hold_shape(self) -> None:
+        """A `rate(<counter>[W]) > 0` rule held `for: W` does NOT mean "the condition is standing".
+
+        rate() stays > 0 for the WHOLE window after the LAST increment, so the `for:` hold keeps
+        accumulating over a condition that already cleared: measured on this file's own first
+        revision, samples 1,2,3,4,4,4,... (increments stopped at minute 3) still paged at minute 11
+        under a description asserting the failure had been happening "continuously for >10m". The
+        firing behaviour is proven by the promtool fixture's "a burst that has already recovered
+        must NOT page"; this pins the SOURCE SHAPE so the fixture cannot be satisfied by re-tuning a
+        window back into that class. Every counter rule reads a SHORT trailing `increase()` window
+        instead, which reflects a current condition.
+        """
+        text = RULES.read_text(encoding="utf-8")
+        self.assertNotIn(
+            "rate(af_provisioner_",
+            text,
+            "a counter rule is back on the rate()-over-the-hold shape (see this test's docstring)",
+        )
+        counter_exprs = [e for e in _exprs() if "af_provisioner_alerts_total{reason" in e]
+        self.assertEqual(len(counter_exprs), 3, "expected the three reason-family counter rules")
+        for expr in counter_exprs:
+            self.assertRegex(
+                expr,
+                r"increase\(af_provisioner_alerts_total\{reason[^}]*\}\[2m\]\)",
+                f"counter rule does not read a short trailing increase window: {expr.strip()!r}",
+            )
+
+    def test_a_stall_detector_reads_progress_and_not_just_scraping(self) -> None:
+        """`up`/kube-state-metrics cannot see a provisioner that is up and reconciling NOTHING.
+
+        prometheus_client serves /metrics from a thread separate from the reconcile loop, so a
+        wedged or wholly-failing loop keeps `up` at 1 and the pod Ready while both counters freeze —
+        and a whole-pass failure increments NEITHER counter (it only logs). An earlier revision of
+        the rules header claimed TargetDown and Unscraped covered that; they cannot. This asserts
+        the group still carries a rule that joins a live target against ABSENT PROGRESS in both
+        counter families, with the anti-join form that also covers a counter which never appeared at
+        all. Its firing behaviour is the fixture's "the pre-fix blind spot" test.
+        """
+        exprs = [e for e in _exprs() if "unless" in e and "increase(af_provisioner_ops_total" in e]
+        self.assertEqual(len(exprs), 1, "expected exactly one stall detector")
+        expr = exprs[0]
+        self.assertIn(f'up{{job="{JOB}"}} == 1', expr, "the stall rule must require a LIVE target")
+        self.assertIn("increase(af_provisioner_ops_total[10m])", expr)
+        self.assertIn("increase(af_provisioner_alerts_total[10m])", expr)
+        # One `sum by` over the UNION of both families, never `sum(A) or sum(B)`: `or` drops its
+        # right operand wherever the left has a sample, so a frozen ops_total beside an advancing
+        # alerts_total would read 0 and page falsely.
+        self.assertEqual(expr.count("sum by (namespace, pod)"), 1)
+        self.assertIn("ForgeProvisionerNotProgressing", RULES.read_text(encoding="utf-8"))
 
     def test_seat_and_brokerseat_matchers_are_disjoint(self) -> None:
         """PromQL matchers are fully anchored, so `seat-.*` must not be written in a form that also
