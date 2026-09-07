@@ -156,11 +156,23 @@ spec:
             summary: "CI runner {{ $labels.instance }} docker build cache >14 GB after cleanup"
             description: >-
               Runner {{ $labels.instance }} build cache is >14 GB even after gitea-runner-cleanup.sh
-              (post-cleanup value from its beacon). The cache is capped at the daemon by BuildKit's own
-              GC (builder.gc maxUsedSpace 10GB, github_runner/daemon.json.j2), so a sustained value above
-              it means that GC is not in effect — daemon.json not applied, docker not restarted since the
-              change, or the schema silently ignored. Check `docker info`, `docker buildx du`, and
-              /etc/docker/daemon.json. Threshold was 25 GB while the timer chased the cache by hand.
+              (post-cleanup value from its beacon), i.e. above BuildKit's configured maxUsedSpace of
+              10GB (github_runner/daemon.json.j2). MEASURED 2026-09-07, the fleet had BOTH failure
+              modes at once, so check which one this host has before acting:
+              (1) STALE SCHEMA — .14-.18 still carried a 2026-07-01 daemon.json using the deprecated
+              `defaultKeepStorage` key. Docker 26+ replaced it with reservedSpace/maxUsedSpace/
+              minFreeSpace and IGNORES the old key silently, so GC was simply off. Fix = re-run the
+              role (`just gitea-runners`) and restart docker; confirm with
+              `sudo grep -A6 builder /etc/docker/daemon.json`.
+              (2) CONFIG CORRECT BUT NOT HONOURED — .29 carried the current schema AND had loaded it
+              (daemon.json 22:34:25, dockerd started 22:35:25) yet still held 72 GB with 69 GB
+              reclaimable. So a correct daemon.json is NOT sufficient evidence that GC works; these
+              runners use the containerd snapshotter (driver-type io.containerd.snapshotter.v1).
+              Verify with `docker buildx du` (its Reclaimable can disagree with `docker system df`).
+              Neither mode is urgent on its own: gitea-runner-cleanup.sh's own CACHE_MAX_BYTES sweep is
+              gated behind disk >= 75%, and these runners sit at 58-73% on ~192 GB disks, so the cache
+              self-corrects once the disk gate opens. Threshold was 25 GB while the timer chased the
+              cache by hand.
         # ---- the 2026-08-08 mid-job-prune RCA: the two signals that were missing ----
         # 1. Did the cleanup prune THROUGH a live job? Post-fix this is a last-resort action taken only at
         # CRITICAL disk after a failed idle wait, so ANY occurrence is worth a look: a prune's containerd
