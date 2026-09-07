@@ -14,7 +14,9 @@ no reloader/controller to keep them honest:
      must equal sha256(config.yaml value)[:12]. LiteLLM reads its config only
      at startup and no Reloader is installed, so a stale value silently leaves
      the gateway serving the previous routing table.
-  3. The content-addressed 10-hex suffix on the platform-dev NFS provisioner
+  3. The same `checksum/config` annotation in litellm.yaml (the MAIN proxy) —
+     found stale the same day as litellm-local's, which is why both are gated.
+  4. The content-addressed 10-hex suffix on the platform-dev NFS provisioner
      Job's `metadata.name` (platform-dev-nfs-provisioner-job.yaml) — a Job's
      `spec.template` is immutable, so the suffix changes whenever the
      container image/args script changes, letting Flux prune+recreate the Job
@@ -203,12 +205,51 @@ def check_litellm_local_config_checksum() -> Site:
     return Site(path, expected, actual)
 
 
+
+def check_litellm_config_checksum() -> Site:
+    """checksum/config (litellm.yaml, the MAIN proxy) vs a fresh sha256 of the
+    `config.yaml` value it stamps, in the same file.
+
+    Same mechanism and same failure mode as
+    check_litellm_local_config_checksum below/above — LiteLLM reads its mounted
+    config only at startup and no Reloader is installed, so this annotation is
+    the only thing that rolls the gateway on a model_list edit.
+
+    Found stale on 2026-09-07 exactly like litellm-local: the annotation read
+    923cdbdd5584 while the recipe produced 2b2e9034fa3d. Two independent
+    instances of the same defect in one file pair is why BOTH are gated here
+    rather than just the one that happened to be noticed first. This proxy is
+    the higher-traffic of the two — Open WebUI, the cloudflared tunnel, dsh and
+    gatus all route through it — so a silently-unrolled config here is the more
+    consequential of the two.
+
+    Recipe: the YAML-parsed (dedented) `config.yaml` string value, UTF-8,
+    including its single YAML-clip trailing newline, PLUS the newline `yq -r`
+    appends, sha256, truncated to 12 hex. See the note in the litellm-local
+    check about why that extra newline is deliberate.
+    """
+    path = REPO / "kubernetes/apps/apps/ai/litellm.yaml"
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r'checksum/config:\s*"([0-9a-f]{12})"', text)
+    if not m:
+        raise ValueError(f"checksum/config annotation not found in {path}")
+    expected = m.group(1)
+
+    raw_lines, content_indent = _literal_block(
+        text, re.compile(r"^[ ]*config\.yaml:\s*\|\s*$")
+    )
+    dedented = "".join("\n" if l.strip() == "" else l[content_indent:] for l in raw_lines)
+    actual = sha256_hex(dedented + "\n")[:12]
+    return Site(path, expected, actual)
+
+
 # Table of hash sites to verify. Add a `check_...() -> Site` function above
 # and append it here to cover a new site.
 SITES = [
     check_capability_kids_checksum,
     check_platform_dev_job_suffix,
     check_litellm_local_config_checksum,
+    check_litellm_config_checksum,
 ]
 
 
