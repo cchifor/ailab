@@ -34,6 +34,25 @@
 #      >10m". "a burst that has already recovered must NOT page" is the regression guard, and it is
 #      red against that form for all three counter rules. Its companions — the standing-condition
 #      tests — keep the other half honest: the rules must still page on a condition that IS standing.
+#      READ THE EVAL TIMES IN THAT TEST BEFORE EDITING THEM. Under the old form this series fires in
+#      ONE evaluation and clears in the next (minute 11 for the 10m rule, minute 16 for the two 15m
+#      ones), so a test that samples only round numbers passes the very expression it exists to
+#      reject: an earlier version asserted 17m/40m for the 15m rules, and a straight revert of
+#      ForgeProvisionerAlerting to `rate([15m])` passed this whole file. Minutes 11 and 16 are the
+#      load-bearing assertions.
+#   4b. AND THE ASSERTED SILENCE MUST BE PAIRED WITH THE ASSERTED FIRING. A test that only pins
+#      "silent at X" permits any LONGER hold, and one that only pins "firing at Y" permits any
+#      shorter one. The stall test asserted silence at 33m and firing at 36m, and holds of 6m and 7m
+#      both passed it; it now asserts the exact 33m/34m boundary, and the never-recorded test the
+#      exact 14m/15m one.
+#   4c. WHAT `increase([2m]) > 0` DOES NOT ESTABLISH, pinned so no annotation can drift back into
+#      claiming it. At the live 30s scrape and 30s evaluation interval a 2-minute window holds four
+#      samples, so a condition recurring once per MINUTE — half the reconcile passes clean — still
+#      pages (test: "at the live 30s scrape one failure per MINUTE still pages"). And the left-open
+#      window keeps the condition true for a minute after its last increment, so the alert can FIRST
+#      fire a minute AFTER it cleared (test: "the alert can first fire up to a minute AFTER the
+#      condition cleared"). "On every pass" and "still failing now" are both out of reach, and the
+#      descriptions say only "in every evaluated trailing 2-minute window".
 #   5. THE STALL BLIND SPOT, which is why ForgeProvisionerNotProgressing exists. An earlier revision
 #      of the rules file claimed ForgeProvisionerTargetDown and ForgeProvisionerUnscraped covered
 #      "the audit never ran". They do not, and "the pre-fix blind spot" is the proof: with up == 1,
@@ -42,6 +61,12 @@
 #      thread from the reconcile loop, so this is what a wedged loop actually looks like on the
 #      wire. The same test asserts the new rule is the one that fires, and its companions assert it
 #      does NOT fire while the counters are advancing.
+#   6. THE STALL RULE MUST NOT PAGE DURING START-UP. `increase(X[10m])` needs two samples, not ten
+#      minutes of them, so an unbounded `up == 1 unless increase(...) > 0` is true from a
+#      replacement pod's FIRST scrape and fires at minute 5 — measured against the unbounded form,
+#      with `up` from 0m and the first audit record at 6m. The `up offset 10m == 1` arm requires the
+#      same pod to have been scraped ten minutes ago; "a pod whose first audit record is slow must
+#      not page while it is starting up" is the guard, and deleting that arm turns it red.
 #
 # `rule_files` is the EXTRACTED spec name, because rules-lint.sh hands promtool the `spec:` body of
 # each PrometheusRule (the CRD wrapper is not a promtool rules file) under the manifest's own
@@ -228,14 +253,16 @@ tests:
               summary: >-
                 BrokerSeat controller is raising brokerseat-reconcile-error
               description: >-
-                The provisioner's BrokerSeat controller stage has been raising
-                brokerseat-reconcile-error on every pass for >10m - the counter has moved within the
-                last 2 minutes and has not been quiet for a whole 2 minutes at any point in that
-                window - which means seat reconciliation is failing while the pod stays Ready with
-                no restarts - this alert is the ONLY channel these failures have. What each reason
-                means - `brokerseat-reconcile-error` a per-CR pass raised and the seat was marked
-                Degraded; `brokerseat-collision` an object the controller would own is owned by
-                someone else (Flux, or a second writer) and it refused to adopt it;
+                The provisioner's BrokerSeat controller stage has raised brokerseat-reconcile-error
+                in every evaluated trailing 2-minute window for the last 10m - a recurring
+                condition, not a burst. READ THAT PRECISELY - at the 30s scrape a 2-minute window
+                holds four samples, so this establishes at least one failure per 2-minute window,
+                NOT a failure on every reconcile pass, and the most recent one may be up to a minute
+                old. It does mean seat reconciliation has been failing repeatedly while the pod
+                stays Ready with no restarts - this alert is the ONLY channel these failures have.
+                What each reason means - `brokerseat-reconcile-error` a per-CR pass raised and the
+                seat was marked Degraded; `brokerseat-collision` an object the controller would own
+                is owned by someone else (Flux, or a second writer) and it refused to adopt it;
                 `brokerseat-inventory-unknown` three consecutive passes could not establish the seat
                 inventory, so the controller is acting on an UNKNOWN view;
                 `brokerseat-pod-scan-unreadable` / `brokerseat-list-unreadable` /
@@ -281,20 +308,22 @@ tests:
                 Seat entitlement audit is reporting seat-undeclared-grant
               description: >-
                 The provisioner's read-only seat-entitlement audit has reported
-                seat-undeclared-grant on every pass for >15m, and reported it again within the last
-                2 minutes. This compares each broker seat's kid registry against the operator
-                declaration in openbao/capability-kids-configmap.yaml and NEVER writes - resolving a
-                finding is a privilege change and stays a reviewed, human act. KNOWN STANDING
-                FINDING at the time this rule shipped - `seat-undeclared-grant` for kid
-                tz-213512e80fde7c84 on three of four seats, the open question in ailab#287; if that
-                is what is firing, this alert is correct and the ticket is where it gets decided.
-                Otherwise - `seat-registry-unreadable` means a seat's registry could not be read at
-                all (fail-closed, never reported as consistent), `seat-missing-grant` means a
-                declared entitlement is absent so that workspace's capabilities are rejected 401,
-                and `seat-scope-mismatch` means a kid is admitted at a different scope than
-                declared. Triage - `kubectl --context admin@ai -n openbao logs
-                deploy/agentforge-provisioner --tail=200 | grep 'seat entitlement audit'` carries
-                the per-finding message naming the seat and the kid.
+                seat-undeclared-grant in every evaluated trailing 2-minute window for the last 15m -
+                at least one finding per 2-minute window rather than one on every reconcile pass,
+                the most recent of which may be up to a minute old. This compares each broker seat's
+                kid registry against the operator declaration in
+                openbao/capability-kids-configmap.yaml and NEVER writes - resolving a finding is a
+                privilege change and stays a reviewed, human act. KNOWN STANDING FINDING at the time
+                this rule shipped - `seat-undeclared-grant` for kid tz-213512e80fde7c84 on three of
+                four seats, the open question in ailab#287; if that is what is firing, this alert is
+                correct and the ticket is where it gets decided. Otherwise -
+                `seat-registry-unreadable` means a seat's registry could not be read at all
+                (fail-closed, never reported as consistent), `seat-missing-grant` means a declared
+                entitlement is absent so that workspace's capabilities are rejected 401, and
+                `seat-scope-mismatch` means a kid is admitted at a different scope than declared.
+                Triage - `kubectl --context admin@ai -n openbao logs deploy/agentforge-provisioner
+                --tail=200 | grep 'seat entitlement audit'` carries the per-finding message naming
+                the seat and the kid.
       # RESOLVED ~2 minutes after the LAST increment (minute 30), not a rate window later. This is
       # the bound property 3 pins: minute 33 is already clear, while the firing above at minute 17
       # sits in the middle of the 30 minutes the finding actually stood for.
@@ -379,19 +408,20 @@ tests:
               summary: >-
                 AgentForge provisioner is raising openbao-error
               description: >-
-                The provisioner has raised openbao-error on every reconcile pass for >15m, most
-                recently within the last 2 minutes. This is the catch-all for every fail-closed
-                alert that is neither a BrokerSeat controller failure nor a seat-entitlement
-                finding, so read the reason first - `openbao-error` is OpenBao itself unreachable or
-                refusing (check the openbao StatefulSet is unsealed), `reconcile-error` a tenant
-                pass raised, `collision` / `teardown-unowned` / `teardown-foreign` / `gc-foreign` an
-                object the provisioner would manage is owned by something else and it refused to
-                touch it, `kvgc-*` the broker-credential KV collector, `capability-kid-*` the kid
-                activation barrier or a revoke that did not complete, and `kid-config-unreadable`
-                the mounted capability-kids ConfigMap. Triage - `kubectl --context admin@ai -n
-                openbao logs deploy/agentforge-provisioner --tail=200 | grep provisioner.alert`
-                carries the sanitized name/org/ws for each; no alert record ever carries key
-                material.
+                The provisioner has raised openbao-error in every evaluated trailing 2-minute window
+                for the last 15m - at least one occurrence per 2-minute window rather than one on
+                every reconcile pass, the most recent of which may be up to a minute old. This is
+                the catch-all for every fail-closed alert that is neither a BrokerSeat controller
+                failure nor a seat-entitlement finding, so read the reason first - `openbao-error`
+                is OpenBao itself unreachable or refusing (check the openbao StatefulSet is
+                unsealed), `reconcile-error` a tenant pass raised, `collision` / `teardown-unowned`
+                / `teardown-foreign` / `gc-foreign` an object the provisioner would manage is owned
+                by something else and it refused to touch it, `kvgc-*` the broker-credential KV
+                collector, `capability-kid-*` the kid activation barrier or a revoke that did not
+                complete, and `kid-config-unreadable` the mounted capability-kids ConfigMap. Triage
+                - `kubectl --context admin@ai -n openbao logs deploy/agentforge-provisioner
+                --tail=200 | grep provisioner.alert` carries the sanitized name/org/ws for each; no
+                alert record ever carries key material.
       - eval_time: 17m
         alertname: ForgeBrokerSeatControllerFailing
         exp_alerts: []
@@ -428,13 +458,49 @@ tests:
     alert_rule_test:
       # Silent while the counters are still moving, and silent through the [10m] window that
       # follows the last increment at minute 20 - the condition only becomes true at minute 29.
-      # Minute 33 is the last silent evaluation: shortening either the window or the hold turns
-      # these three assertions red, which is what pins the latency rather than merely asserting it.
+      # Minute 33 is the last silent evaluation.
       - { eval_time: 20m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
       - { eval_time: 30m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
       - { eval_time: 33m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
-      # Firing from minute 34 - 14 minutes after the last audit record, comfortably inside the 20
-      # minutes the 2026-09-07 incident went unnoticed for.
+      # FIRING AT MINUTE 34, asserted at the exact boundary rather than comfortably past it. The
+      # 33m/34m PAIR is what pins the latency: silence at 33m alone permits a LONGER hold (5m -> 6m
+      # or 7m both passed an earlier version of this test, which asserted the firing at 36m), and
+      # firing at 34m alone permits a shorter one. 14 minutes after the last audit record,
+      # comfortably inside the 20 minutes the 2026-09-07 incident went unnoticed for.
+      - eval_time: 34m
+        alertname: ForgeProvisionerNotProgressing
+        exp_alerts:
+          - exp_labels:
+              namespace: openbao
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              severity: warning
+            exp_annotations:
+              summary: >-
+                AgentForge provisioner agentforge-provisioner-696fdc794d-gfphx is up but has
+                recorded nothing for >10m
+              description: >-
+                Prometheus is scraping this provisioner successfully (up == 1) and NEITHER
+                af_provisioner_ops_total NOR af_provisioner_alerts_total has advanced for 10 minutes
+                - 20 reconcile passes at the 30s interval - so the process is serving metrics while
+                its reconcile loop records nothing. THE EXPORTER RUNS IN A SEPARATE THREAD from that
+                loop, so this state is indistinguishable from health everywhere else: the pod is
+                Ready, restarts are 0, and ForgeProvisionerTargetDown and ForgeProvisionerUnscraped
+                are both structurally silent for it - which is exactly why this rule exists. It also
+                fires when the counters NEVER APPEARED, because a labelled counter has no child
+                until its first increment. It cannot fire during start-up - the expression
+                additionally requires this same pod to have been up and scraped 10 minutes ago, so a
+                pod that has not yet recorded its first pass is silent for its first 15 minutes.
+                THREE CAUSES, in the order to check them. (1) The loop is wedged or every pass is
+                raising - a whole-pass failure increments NO counter, it only logs, so `kubectl
+                --context admin@ai -n openbao logs deploy/agentforge-provisioner --tail=200 | grep
+                'reconcile pass failed'` is the first command and a hit there is the answer. (2)
+                Reconciliation is SUSPENDED by the break-glass flag - check
+                AF_PROVISIONER_SUSPEND_FILE on the Deployment and whether that path exists in the
+                pod. (3) The provisioner is healthy and genuinely had nothing to record, which this
+                rule CANNOT tell apart from (1) because the engine exports no per-pass heartbeat; if
+                `grep provisioner.audit` on the log shows recent per-pass lines the loop is alive,
+                and the fix is an engine-side pass counter, NOT widening this rule's window or
+                silencing it.
       - eval_time: 36m
         alertname: ForgeProvisionerNotProgressing
         exp_alerts:
@@ -455,17 +521,20 @@ tests:
                 Ready, restarts are 0, and ForgeProvisionerTargetDown and ForgeProvisionerUnscraped
                 are both structurally silent for it - which is exactly why this rule exists. It also
                 fires when the counters NEVER APPEARED, because a labelled counter has no child
-                until its first increment. THREE CAUSES, in the order to check them. (1) The loop is
-                wedged or every pass is raising - a whole-pass failure increments NO counter, it
-                only logs, so `kubectl --context admin@ai -n openbao logs
-                deploy/agentforge-provisioner --tail=200 | grep 'reconcile pass failed'` is the
-                first command and a hit there is the answer. (2) Reconciliation is SUSPENDED by the
-                break-glass flag - check AF_PROVISIONER_SUSPEND_FILE on the Deployment and whether
-                that path exists in the pod. (3) The provisioner is healthy and genuinely had
-                nothing to record, which this rule CANNOT tell apart from (1) because the engine
-                exports no per-pass heartbeat; if `grep provisioner.audit` on the log shows recent
-                per-pass lines the loop is alive, and the fix is an engine-side pass counter, NOT
-                widening this rule's window or silencing it.
+                until its first increment. It cannot fire during start-up - the expression
+                additionally requires this same pod to have been up and scraped 10 minutes ago, so a
+                pod that has not yet recorded its first pass is silent for its first 15 minutes.
+                THREE CAUSES, in the order to check them. (1) The loop is wedged or every pass is
+                raising - a whole-pass failure increments NO counter, it only logs, so `kubectl
+                --context admin@ai -n openbao logs deploy/agentforge-provisioner --tail=200 | grep
+                'reconcile pass failed'` is the first command and a hit there is the answer. (2)
+                Reconciliation is SUSPENDED by the break-glass flag - check
+                AF_PROVISIONER_SUSPEND_FILE on the Deployment and whether that path exists in the
+                pod. (3) The provisioner is healthy and genuinely had nothing to record, which this
+                rule CANNOT tell apart from (1) because the engine exports no per-pass heartbeat; if
+                `grep provisioner.audit` on the log shows recent per-pass lines the loop is alive,
+                and the fix is an engine-side pass counter, NOT widening this rule's window or
+                silencing it.
       # ...and TWO HOURS in, every other rule in the group is still silent. This block is the whole
       # finding: without the rule above, nothing in this file pages for a provisioner that is up,
       # Ready, and reconciling nothing.
@@ -489,6 +558,49 @@ tests:
       - series: 'kube_pod_container_status_ready{namespace="openbao",container="provisioner",pod="agentforge-provisioner-696fdc794d-gfphx"}'
         values: "1x60"
     alert_rule_test:
+      # THE START-UP BOUND, pinned at both ends. `increase(X[10m])` is satisfied by two samples, so
+      # without the `up offset 10m` arm this pod would satisfy the anti-join from its first scrape
+      # and page at minute 5 - during initialisation, under a description claiming nothing had been
+      # recorded for >10m. The arm requires this same pod to have been up 10 minutes ago, so the
+      # gate opens at minute 10 and the hold lands the page at minute 15. Minute 14 is the last
+      # silent evaluation; removing the arm turns the 5m and 14m assertions red.
+      - { eval_time: 5m,  alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - { eval_time: 9m,  alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - { eval_time: 14m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - eval_time: 15m
+        alertname: ForgeProvisionerNotProgressing
+        exp_alerts:
+          - exp_labels:
+              namespace: openbao
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              severity: warning
+            exp_annotations:
+              summary: >-
+                AgentForge provisioner agentforge-provisioner-696fdc794d-gfphx is up but has
+                recorded nothing for >10m
+              description: >-
+                Prometheus is scraping this provisioner successfully (up == 1) and NEITHER
+                af_provisioner_ops_total NOR af_provisioner_alerts_total has advanced for 10 minutes
+                - 20 reconcile passes at the 30s interval - so the process is serving metrics while
+                its reconcile loop records nothing. THE EXPORTER RUNS IN A SEPARATE THREAD from that
+                loop, so this state is indistinguishable from health everywhere else: the pod is
+                Ready, restarts are 0, and ForgeProvisionerTargetDown and ForgeProvisionerUnscraped
+                are both structurally silent for it - which is exactly why this rule exists. It also
+                fires when the counters NEVER APPEARED, because a labelled counter has no child
+                until its first increment. It cannot fire during start-up - the expression
+                additionally requires this same pod to have been up and scraped 10 minutes ago, so a
+                pod that has not yet recorded its first pass is silent for its first 15 minutes.
+                THREE CAUSES, in the order to check them. (1) The loop is wedged or every pass is
+                raising - a whole-pass failure increments NO counter, it only logs, so `kubectl
+                --context admin@ai -n openbao logs deploy/agentforge-provisioner --tail=200 | grep
+                'reconcile pass failed'` is the first command and a hit there is the answer. (2)
+                Reconciliation is SUSPENDED by the break-glass flag - check
+                AF_PROVISIONER_SUSPEND_FILE on the Deployment and whether that path exists in the
+                pod. (3) The provisioner is healthy and genuinely had nothing to record, which this
+                rule CANNOT tell apart from (1) because the engine exports no per-pass heartbeat; if
+                `grep provisioner.audit` on the log shows recent per-pass lines the loop is alive,
+                and the fix is an engine-side pass counter, NOT widening this rule's window or
+                silencing it.
       - eval_time: 16m
         alertname: ForgeProvisionerNotProgressing
         exp_alerts:
@@ -509,17 +621,20 @@ tests:
                 Ready, restarts are 0, and ForgeProvisionerTargetDown and ForgeProvisionerUnscraped
                 are both structurally silent for it - which is exactly why this rule exists. It also
                 fires when the counters NEVER APPEARED, because a labelled counter has no child
-                until its first increment. THREE CAUSES, in the order to check them. (1) The loop is
-                wedged or every pass is raising - a whole-pass failure increments NO counter, it
-                only logs, so `kubectl --context admin@ai -n openbao logs
-                deploy/agentforge-provisioner --tail=200 | grep 'reconcile pass failed'` is the
-                first command and a hit there is the answer. (2) Reconciliation is SUSPENDED by the
-                break-glass flag - check AF_PROVISIONER_SUSPEND_FILE on the Deployment and whether
-                that path exists in the pod. (3) The provisioner is healthy and genuinely had
-                nothing to record, which this rule CANNOT tell apart from (1) because the engine
-                exports no per-pass heartbeat; if `grep provisioner.audit` on the log shows recent
-                per-pass lines the loop is alive, and the fix is an engine-side pass counter, NOT
-                widening this rule's window or silencing it.
+                until its first increment. It cannot fire during start-up - the expression
+                additionally requires this same pod to have been up and scraped 10 minutes ago, so a
+                pod that has not yet recorded its first pass is silent for its first 15 minutes.
+                THREE CAUSES, in the order to check them. (1) The loop is wedged or every pass is
+                raising - a whole-pass failure increments NO counter, it only logs, so `kubectl
+                --context admin@ai -n openbao logs deploy/agentforge-provisioner --tail=200 | grep
+                'reconcile pass failed'` is the first command and a hit there is the answer. (2)
+                Reconciliation is SUSPENDED by the break-glass flag - check
+                AF_PROVISIONER_SUSPEND_FILE on the Deployment and whether that path exists in the
+                pod. (3) The provisioner is healthy and genuinely had nothing to record, which this
+                rule CANNOT tell apart from (1) because the engine exports no per-pass heartbeat; if
+                `grep provisioner.audit` on the log shows recent per-pass lines the loop is alive,
+                and the fix is an engine-side pass counter, NOT widening this rule's window or
+                silencing it.
       # The other two up-family rules stay out of it: the target IS discovered (so Unscraped's
       # anti-join is satisfied) and it IS answering (so TargetDown's `== 0` is false). All three
       # are disjoint by construction.
@@ -572,12 +687,133 @@ tests:
       - series: 'af_provisioner_alerts_total{reason="openbao-error",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
         values: "1 2 3 4 4x60"
     alert_rule_test:
-      # Minute 11 is where the old brokerseat rule paged. Minute 17 is where the old seat/catch-all
-      # rules paged. Both must now be empty, and stay empty for the rest of the window.
+      # THE EVAL TIMES ARE CHOSEN TO REJECT THE OLD EXPRESSION, not merely to be quiet. Under
+      # `rate([W]) > 0` held `for: W` this series fires in ONE evaluation and clears in the next, so
+      # a test that only samples a round number MISSES IT: the 10m rule fires at minute 11 and is
+      # gone by 12, and the two 15m rules fire at minute 16 and are gone by 17. An earlier version
+      # of this test asserted 17m/40m for the 15m rules and a straight revert of
+      # ForgeProvisionerAlerting to `rate([15m])` passed the WHOLE file - a guard that guarded
+      # nothing. **Minute 11 and minute 16 are the load-bearing assertions**; 17m and 40m only pin
+      # that it stays quiet.
       - { eval_time: 11m, alertname: ForgeBrokerSeatControllerFailing, exp_alerts: [] }
+      - { eval_time: 12m, alertname: ForgeBrokerSeatControllerFailing, exp_alerts: [] }
       - { eval_time: 17m, alertname: ForgeBrokerSeatControllerFailing, exp_alerts: [] }
       - { eval_time: 40m, alertname: ForgeBrokerSeatControllerFailing, exp_alerts: [] }
+      - { eval_time: 16m, alertname: ForgeProvisionerSeatEntitlementDrift, exp_alerts: [] }
       - { eval_time: 17m, alertname: ForgeProvisionerSeatEntitlementDrift, exp_alerts: [] }
       - { eval_time: 40m, alertname: ForgeProvisionerSeatEntitlementDrift, exp_alerts: [] }
+      - { eval_time: 16m, alertname: ForgeProvisionerAlerting, exp_alerts: [] }
       - { eval_time: 17m, alertname: ForgeProvisionerAlerting, exp_alerts: [] }
       - { eval_time: 40m, alertname: ForgeProvisionerAlerting, exp_alerts: [] }
+  # ------------------- FINDING 1 (round 2): the stall rule must not page during START-UP
+  - interval: 1m
+    name: a pod whose first audit record is slow must not page while it is starting up
+    input_series:
+      # THE CASE `increase()` DOES NOT GUARD ON ITS OWN. `increase(X[10m])` needs two samples, not
+      # ten minutes of them, so an unbounded `up == 1 unless increase(...) > 0` is TRUE from the
+      # target's very first scrape: it goes pending at 0m and fires at 5m for a pod that is simply
+      # initialising. Here the exporter answers from minute 0 and the first audit record lands at
+      # minute 6 - a slow first pass (a sealed OpenBao, an apiserver backoff), not an outage.
+      # Measured against the unbounded form: it paged at minute 5. The `up offset 10m == 1` arm is
+      # what makes this test pass, and deleting that arm is what turns it red.
+      - series: 'up{job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "1x60"
+      - series: 'af_provisioner_ops_total{action="write_auth_role",outcome="drift-corrected",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "_ _ _ _ _ _ 0+2x54"
+    alert_rule_test:
+      - { eval_time: 5m,  alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - { eval_time: 8m,  alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - { eval_time: 16m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - { eval_time: 40m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+  - interval: 1m
+    name: a prompt restart that records from its first pass is silent throughout
+    input_series:
+      # The common roll: the exporter and the first audit record arrive together. Silent at every
+      # point, with or without the start-up arm - recorded here so the arm above is not credited
+      # with a silence the anti-join already provided.
+      - series: 'up{job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "1x60"
+      - series: 'af_provisioner_ops_total{action="write_auth_role",outcome="drift-corrected",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0+2x60"
+    alert_rule_test:
+      - { eval_time: 5m,  alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - { eval_time: 40m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+  # ---- FINDING 2 (round 2): what "every evaluated 2-minute window" does and does NOT establish
+  - interval: 30s
+    name: at the live 30s scrape one failure per MINUTE still pages - so the annotation must not say every pass
+    input_series:
+      # THE LIVE CADENCE, not the 1-minute convenience the tests above use: the cluster's Prometheus
+      # runs scrapeInterval=30s and evaluationInterval=30s (read from the live Prometheus CR), and
+      # the provisioner's reconcile pass is 30s. This counter advances once per MINUTE, so HALF the
+      # reconcile passes recorded nothing - and the rule still pages, because every evaluated
+      # 2-minute window is positive. This is the honest bound on the annotation: it establishes a
+      # recurring condition, NOT a failure on every pass, and the description says exactly that.
+      - series: 'af_provisioner_alerts_total{reason="brokerseat-reconcile-error",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0 0 1 1 2 2 3 3 4 4 5 5 6 6 7 7 8 8 9 9 10 10 11 11 12 12 13 13 14 14 15 15 16 16 17 17 18 18 19 19 20 20 21 21 22 22 23 23 24 24 25 25"
+    alert_rule_test:
+      - { eval_time: 5m, alertname: ForgeBrokerSeatControllerFailing, exp_alerts: [] }
+      - eval_time: 12m
+        alertname: ForgeBrokerSeatControllerFailing
+        exp_alerts:
+          - exp_labels:
+              job: agentforge-provisioner
+              namespace: openbao
+              pod: agentforge-provisioner-696fdc794d-gfphx
+              reason: brokerseat-reconcile-error
+              severity: critical
+            exp_annotations:
+              summary: >-
+                BrokerSeat controller is raising brokerseat-reconcile-error
+              description: >-
+                The provisioner's BrokerSeat controller stage has raised brokerseat-reconcile-error
+                in every evaluated trailing 2-minute window for the last 10m - a recurring
+                condition, not a burst. READ THAT PRECISELY - at the 30s scrape a 2-minute window
+                holds four samples, so this establishes at least one failure per 2-minute window,
+                NOT a failure on every reconcile pass, and the most recent one may be up to a minute
+                old. It does mean seat reconciliation has been failing repeatedly while the pod
+                stays Ready with no restarts - this alert is the ONLY channel these failures have.
+                What each reason means - `brokerseat-reconcile-error` a per-CR pass raised and the
+                seat was marked Degraded; `brokerseat-collision` an object the controller would own
+                is owned by someone else (Flux, or a second writer) and it refused to adopt it;
+                `brokerseat-inventory-unknown` three consecutive passes could not establish the seat
+                inventory, so the controller is acting on an UNKNOWN view;
+                `brokerseat-pod-scan-unreadable` / `brokerseat-list-unreadable` /
+                `brokerseat-git-map-unreadable` a kube-apiserver LIST or the git-seat map failed;
+                `brokerseat-watch-unpersisted` a terminating seat's durable watch could not be
+                written, so its finalizer is HELD and the CR will not delete. Triage - `kubectl
+                --context admin@ai -n openbao logs deploy/agentforge-provisioner --tail=200 | grep
+                provisioner.alert` names the seat, then `kubectl --context admin@ai -n
+                agentforge-broker get bseat -o wide` for the phases.
+  - interval: 30s
+    name: the alert can first fire up to a minute AFTER the condition cleared - so it never claims otherwise
+    input_series:
+      # The other end of the same left-open window. Increments every 30s up to sample 19 (t=9m30s),
+      # flat after. The alert FIRST fires at 10m30s - one minute after the last increment - and is
+      # silent again at 11m. "Still failing right now" is therefore not something this rule can
+      # assert, and the description does not.
+      - series: 'af_provisioner_alerts_total{reason="brokerseat-reconcile-error",job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "0+1x19 19x60"
+    alert_rule_test:
+      - { eval_time: 10m, alertname: ForgeBrokerSeatControllerFailing, exp_alerts: [] }
+      - { eval_time: 11m, alertname: ForgeBrokerSeatControllerFailing, exp_alerts: [] }
+  # ------------------- an ESTABLISHED target that then DIES belongs to TargetDown, not this rule
+  - interval: 1m
+    name: a target that was up ten minutes ago and is down now still pages TargetDown only
+    input_series:
+      # THE CASE THAT KEEPS `up{...} == 1` LOAD-BEARING ON THE LIVE ARM. Once the start-up arm
+      # exists, a target that has been down for the WHOLE window is filtered out by that arm alone,
+      # so it no longer proves anything about the live arm. This target was up for 15 minutes and
+      # then died: at minute 20 the start-up arm is satisfied (it was up at minute 10) while `up` is
+      # now 0, so dropping the `== 1` from the live arm makes the stall rule fire for a target that
+      # is simply DOWN - two pages for one failure, which is exactly what ForgeProvisionerTargetDown
+      # owns. There are no af_provisioner_* series at all, because a dead exporter exports nothing.
+      - series: 'up{job="agentforge-provisioner",namespace="openbao",pod="agentforge-provisioner-696fdc794d-gfphx"}'
+        values: "1x15 0x40"
+    alert_rule_test:
+      - { eval_time: 18m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - { eval_time: 20m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - { eval_time: 25m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      - { eval_time: 40m, alertname: ForgeProvisionerNotProgressing, exp_alerts: [] }
+      # TargetDown's own hold has not expired at minute 20 (the target went down at 16), so nothing
+      # in the group pages yet - and when something does, it is that rule, at critical.
+      - { eval_time: 20m, alertname: ForgeProvisionerTargetDown, exp_alerts: [] }

@@ -309,6 +309,16 @@ class ProvisionerRulesWiringTest(unittest.TestCase):
         self.assertEqual(len(exprs), 1, "expected exactly one stall detector")
         expr = exprs[0]
         self.assertIn(f'up{{job="{JOB}"}} == 1', expr, "the stall rule must require a LIVE target")
+        # START-UP BOUND. `increase(X[10m])` is satisfied by two samples, not by ten minutes of
+        # them, so without an arm requiring the window to have been OBSERVED the rule is true from
+        # a replacement pod's first scrape and pages at 5m during initialisation (measured against
+        # the unbounded form). `up offset 10m == 1` on the same (namespace, pod) is that arm; the
+        # promtool fixture's start-up test is the behavioural half.
+        self.assertIn(
+            f'up{{job="{JOB}"}} offset 10m == 1',
+            expr,
+            "the stall rule must require the [10m] window to have been observed for this pod",
+        )
         self.assertIn("increase(af_provisioner_ops_total[10m])", expr)
         self.assertIn("increase(af_provisioner_alerts_total[10m])", expr)
         # One `sum by` over the UNION of both families, never `sum(A) or sum(B)`: `or` drops its

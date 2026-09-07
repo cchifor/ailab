@@ -58,13 +58,23 @@
 # that has already recovered must NOT page" is the regression guard for exactly that, and it FAILS
 # against the rate() form.
 # THE SHAPE USED INSTEAD is a SHORT trailing window that reflects a CURRENT condition —
-# `increase([2m]) > 0` reads "this counter moved within the last 2 minutes" — held by the rule's own
-# `for:`. The conjunction is what "on every pass" means: the alert fires only if the counter moved
-# in the last 2 minutes AND never went quiet for a whole 2 minutes at any point across the hold. 2m
-# is four reconcile passes and four scrapes, so a standing condition puts 3-4 increments in every
-# window and a single missed scrape cannot break the hold; the tail a cleared condition drags is
-# bounded at ~2 minutes instead of at the whole rate window, so a burst SHORTER than (hold − 2m)
-# cannot page at all and a cleared one resolves ~2m after its last increment with no state to reset.
+# `increase([2m]) > 0` reads "this counter moved inside the trailing 2-minute window" — held by the
+# rule's own `for:`. What the conjunction establishes, EXACTLY: a positive increase in EVERY
+# EVALUATED trailing 2-minute window across the whole hold. That is strictly weaker than "on every
+# pass" and the descriptions must not claim otherwise. At the live 30s scrape and 30s evaluation
+# interval (measured on the cluster) a `[2m]` window holds four samples, so ONE increment per minute
+# — half the reconcile passes clean — keeps every window positive and still pages: verified, a
+# counter advancing once per minute fires ForgeBrokerSeatControllerFailing at 12m. The rule detects a
+# condition that keeps RECURRING at least once per window, not one that fails on literally every
+# pass, and the annotations now say that.
+# The same left-open window bounds the other end. A condition whose last increment lands at sample L
+# keeps the window positive until L + (2m − 2 x scrape) = L + 1m, so the alert can FIRST fire up to
+# a minute AFTER the condition cleared, and stays firing at most a minute past it: measured — with
+# the last increment at 9m30s the alert first fires at 10m30s and is silent again at 11m. "Still
+# failing right now" is therefore not something these rules can assert, and none of them does.
+# What the shape DOES buy over `rate([W])` is the thing finding 2 was about: the tail is ~1 minute
+# rather than a whole rate window, so a burst SHORTER than (hold − 1m) cannot page at all, and a
+# cleared condition resolves about a minute after its last increment with no state to reset.
 # (The failure ailab#288 recorded — a delta() form that could not fire on a backlog that never
 # moved — is not re-introduced here: increase() over a counter that is being incremented every pass
 # is a persistence detector, not an edge detector. It is the CLEARED case the rate() form got wrong.)
@@ -219,16 +229,35 @@ spec:
         # AF_PROVISIONER_SUSPEND_FILE's path exists in the pod, reconciliation is skipped entirely
         # (main.py:1830-1834) — a flag left mounted is a security stall that looks like health from
         # every other angle. That env var is unset on this Deployment today.
-        # `for: 5m` over a `[10m]` window pages 14 minutes after the last audit record — a PromQL
-        # range selector is left-open, so the window empties one evaluation before the round 10, and
-        # the fixture pins the exact boundary (silent at 33m, firing at 34m, last record at 20m).
-        # Inside the 20 minutes the 2026-09-07 incident went unnoticed for, and long enough to ride
-        # out a Prometheus scrape gap. A Recreate roll cannot false-page it — the roll DELETES the pod, so
-        # `up` disappears and the left side goes empty rather than firing (the same property that
-        # makes ForgeProvisionerTargetDown silent through a roll).
+        # THE `offset 10m` ARM IS A START-UP BOUND, and without it this rule pages during
+        # INITIALISATION. `increase(X[10m])` does not require ten minutes of observation — it is
+        # perfectly happy with two samples — so a replacement pod whose exporter answers before it
+        # has recorded any work satisfies the anti-join from its very first scrape: the rule goes
+        # pending at 0m and FIRES AT 5m, under a description claiming nothing had been recorded for
+        # >10m. Measured, not argued: with `up` from 0m and the first audit record at 6m, the
+        # unbounded form pages at 5m and then resolves — a page for a pod that was starting up.
+        # `up offset 10m == 1` requires the SAME (namespace, pod) to have been up and scraped ten
+        # minutes ago, which is exactly "the window this rule reads has actually been observed". A
+        # freshly rolled pod carries a new `pod` label, so the arm is empty for its first 10 minutes
+        # and the earliest possible page for a newly discovered target is 15m (10m gate + 5m hold).
+        # It fails SAFE in the other direction too: a scrape gap around t-10m collapses the arm and
+        # silences the rule rather than firing it.
+        # `for: 5m` over the `[10m]` window then pages 14 minutes after the last audit record on an
+        # already-established target — a PromQL range selector is left-open, so the window empties
+        # one evaluation before the round 10, and the fixture pins the exact boundary (silent at
+        # 33m, FIRING AT 34m, last record at 20m). Inside the 20 minutes the 2026-09-07 incident
+        # went unnoticed for, and long enough to ride out a Prometheus scrape gap. A Recreate roll
+        # cannot false-page it — the roll DELETES the pod, so `up` disappears and the left side goes
+        # empty rather than firing (the same property that makes ForgeProvisionerTargetDown silent
+        # through a roll), and the replacement pod carries a new `pod` label whose `offset` arm is
+        # empty for its first ten minutes.
         - alert: ForgeProvisionerNotProgressing
           expr: |-
-            max by (namespace, pod) (up{job="agentforge-provisioner"} == 1)
+            (
+              max by (namespace, pod) (up{job="agentforge-provisioner"} == 1)
+              and on (namespace, pod)
+              max by (namespace, pod) (up{job="agentforge-provisioner"} offset 10m == 1)
+            )
             unless on (namespace, pod) (
               sum by (namespace, pod) (
                 increase(af_provisioner_ops_total[10m])
@@ -248,7 +277,10 @@ spec:
               restarts are 0, and ForgeProvisionerTargetDown and ForgeProvisionerUnscraped are both
               structurally silent for it - which is exactly why this rule exists. It also fires when
               the counters NEVER APPEARED, because a labelled counter has no child until its first
-              increment. THREE CAUSES, in the order to check them. (1) The loop is wedged or every
+              increment. It cannot fire during start-up - the expression additionally requires this
+              same pod to have been up and scraped 10 minutes ago, so a pod that has not yet
+              recorded its first pass is silent for its first 15 minutes. THREE CAUSES, in the order
+              to check them. (1) The loop is wedged or every
               pass is raising - a whole-pass failure increments NO counter, it only logs, so
               `kubectl --context admin@ai -n openbao logs deploy/agentforge-provisioner --tail=200 |
               grep 'reconcile pass failed'` is the first command and a hit there is the answer.
@@ -270,12 +302,14 @@ spec:
         # reconcile pass failed and nothing alerted. With a 30s pass and a 30s scrape the counter
         # advances 3-4 times inside every `[2m]` window, so the condition is true from the first
         # scrape after the first increment and `for: 10m` puts the page ~11m in, comfortably inside
-        # 20. WHAT THE 2m WINDOW BUYS, and the reason it is not `rate([10m])` (header): the alert can
-        # only fire if the counter moved within the last 2 minutes AND never went quiet for a full 2
-        # minutes across the whole hold - which is what "on every pass for >10m" claims. A burst
-        # shorter than ~8 minutes therefore cannot page at all, however dense it was, and a cleared
-        # condition resolves ~2m after its last increment instead of 10m after it. One transient
-        # failure deliberately does not page; a standing one always does.
+        # 20. WHAT THE 2m WINDOW BUYS, and the reason it is not `rate([10m])` (header): every
+        # evaluated trailing 2-minute window across the hold must be positive, so a burst shorter
+        # than ~9 minutes cannot page at all however dense it was, and a cleared condition resolves
+        # about a minute after its last increment instead of ten minutes after it. What it does NOT
+        # buy, and what the annotation therefore does not claim: this is not proof of a failure on
+        # every reconcile pass (one failure per minute out of two passes per minute keeps every
+        # window positive - measured), and the alert may first fire up to a minute after the
+        # condition cleared. One transient failure deliberately does not page; a recurring one does.
         - alert: ForgeBrokerSeatControllerFailing
           expr: increase(af_provisioner_alerts_total{reason=~"brokerseat-.*"}[2m]) > 0
           for: 10m
@@ -283,10 +317,12 @@ spec:
           annotations:
             summary: "BrokerSeat controller is raising {{ $labels.reason }}"
             description: >-
-              The provisioner's BrokerSeat controller stage has been raising {{ $labels.reason }}
-              on every pass for >10m - the counter has moved within the last 2 minutes and has not
-              been quiet for a whole 2 minutes at any point in that window - which means seat
-              reconciliation is failing while the pod stays
+              The provisioner's BrokerSeat controller stage has raised {{ $labels.reason }} in every
+              evaluated trailing 2-minute window for the last 10m - a recurring condition, not a
+              burst. READ THAT PRECISELY - at the 30s scrape a 2-minute window holds four samples,
+              so this establishes at least one failure per 2-minute window, NOT a failure on every
+              reconcile pass, and the most recent one may be up to a minute old. It does mean seat
+              reconciliation has been failing repeatedly while the pod stays
               Ready with no restarts - this alert is the ONLY channel these failures have. What each
               reason means - `brokerseat-reconcile-error` a per-CR pass raised and the seat was
               marked Degraded; `brokerseat-collision` an object the controller would own is owned by
@@ -350,8 +386,8 @@ spec:
         # itself causes (the pod is deleted, so the series disappears rather than reading 0) without
         # ever missing a standing finding, and - unlike the `rate([15m])` form it replaces - a
         # finding that lasted a couple of passes and cleared cannot page 15 minutes later. Only a
-        # finding still being re-reported within the last 2 minutes, with no 2-minute gap for a
-        # quarter of an hour, reaches the operator.
+        # finding re-reported in every evaluated 2-minute window for a quarter of an hour reaches the
+        # operator; see the header for what that does and does not establish.
         - alert: ForgeProvisionerSeatEntitlementDrift
           expr: increase(af_provisioner_alerts_total{reason=~"seat-.*"}[2m]) > 0
           for: 15m
@@ -359,10 +395,11 @@ spec:
           annotations:
             summary: "Seat entitlement audit is reporting {{ $labels.reason }}"
             description: >-
-              The provisioner's read-only seat-entitlement audit has reported {{ $labels.reason }} on
-              every pass for >15m, and reported it again within the last 2 minutes. This compares
-              each broker seat's kid registry against the operator
-              declaration in openbao/capability-kids-configmap.yaml and NEVER writes - resolving a
+              The provisioner's read-only seat-entitlement audit has reported {{ $labels.reason }} in
+              every evaluated trailing 2-minute window for the last 15m - at least one finding per
+              2-minute window rather than one on every reconcile pass, the most recent of which may
+              be up to a minute old. This compares each broker seat's kid registry against the
+              operator declaration in openbao/capability-kids-configmap.yaml and NEVER writes - resolving a
               finding is a privilege change and stays a reviewed, human act. KNOWN STANDING FINDING
               at the time this rule shipped - `seat-undeclared-grant` for kid
               tz-213512e80fde7c84 on three of four seats, the open question in ailab#287; if that is
@@ -385,7 +422,8 @@ spec:
         # shape. The `reason` label is on the alert, so the page still names which one.
         # `increase([2m]) > 0` with `for: 15m` for the reason the header gives: the rate() form this
         # replaces could page a quarter of an hour after a burst had already stopped, while claiming
-        # in this very description that it was still happening on every pass.
+        # in this very description that it was still happening on every pass. The description now
+        # claims only what every-evaluated-2-minute-window supports.
         # warning: this family spans a genuine OpenBao outage (openbao-error) and a routine
         # unowned-object refusal (teardown-unowned), so the severity is set by what the operator does
         # next - read the reason - rather than by the worst member. Does NOT fire today: the live pod
@@ -398,10 +436,11 @@ spec:
           annotations:
             summary: "AgentForge provisioner is raising {{ $labels.reason }}"
             description: >-
-              The provisioner has raised {{ $labels.reason }} on every reconcile pass for >15m, most
-              recently within the last 2 minutes. This is the catch-all for every fail-closed alert
-              that is neither a BrokerSeat controller failure nor a seat-entitlement finding, so read
-              the reason first - `openbao-error` is
+              The provisioner has raised {{ $labels.reason }} in every evaluated trailing 2-minute
+              window for the last 15m - at least one occurrence per 2-minute window rather than one
+              on every reconcile pass, the most recent of which may be up to a minute old. This is
+              the catch-all for every fail-closed alert that is neither a BrokerSeat controller
+              failure nor a seat-entitlement finding, so read the reason first - `openbao-error` is
               OpenBao itself unreachable or refusing (check the openbao StatefulSet is unsealed),
               `reconcile-error` a tenant pass raised, `collision` / `teardown-unowned` /
               `teardown-foreign` / `gc-foreign` an object the provisioner would manage is owned by
