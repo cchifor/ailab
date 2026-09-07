@@ -1,13 +1,5 @@
 # Estate anomaly remediation — 2026-09-07
 
-## Codex Review
-
-- The measured P0 reproduction, verified address mapping, and separation of QNAP follow-ups provide a strong basis for remediation.
-- W1 is suitable for an in-place Git change, provided Flux owns the Endpoints fields; W2 needs an explicit coverage decision and a rollout procedure for stale pods.
-- W3 has a confirmed consumer: `litellm-local.yaml` still routes to `llm-node1`. Remove that deployment and reload consumers before pruning the Service.
-- W5.1 should follow capacity relief unless a quantified memory budget demonstrates safety. Higher balloon floors can endanger neighbouring guests, including talos-cp2.
-- W6 needs configuration before import, protected state handling, and accounting for all ten planned resources; it must precede runner-module applies or rebuilds, without blocking independent monitoring fixes.
-
 ## Context
 
 A sweep of ailab + QNAP metrics and logs on 2026-09-07 found **22 firing alerts**. Triage separated
@@ -38,10 +30,15 @@ already exist, three of them cloud-init'd onto another live cluster's addresses.
 but **not at create time** — which is exactly the path an un-imported apply takes. This is the same
 mechanism that produced the 2026-09-03 Talos collisions.
 
-Already addressed in commit `7ab78e79` (this branch): entries commented out with correct addresses
-recorded, verified `No changes` afterwards. What remains is bringing them under management.
+The 10 additions are **5 VMs + 5 `terraform_data.enable_guest_agent` resources** — importing the VMs
+alone does not account for the other five. W6 handles both.
 
-<!-- codex: Containment is only effective for operators using this commit; land it on main and prohibit runners-module applies from older checkouts until state reconciliation is complete. Flux does not apply infra/, so merging this containment does not itself provision VMs, and rollback must preserve the corrected addresses and disabled unmanaged entries. -->
+Contained in commit `7ab78e79` (this branch): entries commented out with corrected addresses recorded,
+verified `No changes` afterwards. **Containment only protects operators working from this commit.**
+Two consequences: land it on `main` promptly, and treat "no runners-module apply from any checkout
+predating it" as an operating rule until W6 completes. Flux does not apply `infra/`, so merging the
+containment provisions nothing by itself. Any rollback of `7ab78e79` must preserve both the corrected
+addresses and the disabled unmanaged entries.
 
 ### Ground truth established during triage
 
@@ -60,11 +57,21 @@ Live mapping, verified via node_exporter `nodename` and `qm list` on each host:
 
 ## Approach
 
-Six workstreams, ordered by risk. Each is independently shippable; W1-W4 are pure config and carry no
-downtime. W5 is gated on explicit operator approval per the standing rule that no ai-node leaves
-service without per-action sign-off.
+Six workstreams. They are **not** uniformly independent or zero-downtime, and the sequencing below is
+load-bearing:
 
-<!-- codex: Independence and zero downtime are overstated: W2 can roll node agents, W3 requires consumer rollout before deletion, W4 includes operational requeues and entitlement changes, and W5.2 depends on W6 for the runners module. Separate automatically reconciled apps/ commits from manually applied infra/ work, with explicit rollout and rollback gates. -->
+- **W1** is a self-contained `apps/` change, auto-reconciled by Flux. Genuinely no downtime.
+- **W2** triggers a DaemonSet rolling update — brief per-node agent gaps.
+- **W3** requires a consumer rollout *before* any Service deletion, so it spans two commits.
+- **W4** mixes `apps/` changes with **operational actions** (reviewbot requeues, entitlement decisions)
+  that are not simply "config".
+- **W5** is capacity work on a Proxmox host; **W5.2 requires explicit per-action approval**, and
+  **W5.1 now follows W5.2** (see below for why the original ordering was wrong).
+- **W6** is manual OpenTofu state work and is a **prerequisite for any future runners-module apply,
+  including W5.2** — not an optional follow-up.
+
+W1-W4 can proceed in parallel with W6; only W5 is gated. Keep automatically-reconciled `apps/` commits
+separate from hand-applied `infra/` work so rollback boundaries stay clean.
 
 ### W1 — Stop scraping the wrong three machines (P1, no downtime)
 
@@ -78,242 +85,320 @@ Replace `.20/.21/.22` with `.29/.30/.31`. Final set: `.14-.19`, `.23`, `.29-.31`
 genuinely CI runners). Probed 2026-09-07: all three of `.29/.30/.31` serve `:9100` (HTTP 200), are
 healthy (~70 % root used, 55-63 GiB free), and **do** emit fresh
 `gitea_runner_reclaim_last_run_seconds` — so the three `CIRunnerMaintenanceBeaconMissing` alerts are
-pure false positives from the wrong hosts and will clear once the target list is corrected.
+false positives from the wrong hosts and should clear once the target list is corrected.
 
-<!-- codex: The Service is selectorless, making an in-place Git edit appropriate; check live managedFields and the owning Flux Kustomization before reconciliation because Endpoints subsets is an atomic list whose ownership covers the whole list. Submit the complete intended subsets value, including ports and retained addresses, rather than relying on another manager's partial additions surviving [Flux server-side apply](https://fluxcd.io/flux/components/kustomize/kustomizations/). -->
+Mechanics that matter:
 
-<!-- codex: Keep the Endpoints name, namespace, and owning Kustomization unchanged: removing addresses updates a field, whereas removing or moving the object between inventories can trigger Flux pruning. Verify any mirrored EndpointSlices converge to the same addresses, and avoid independently editing controller-owned slices or introducing an EndpointSlice migration into this fix. -->
+- The Service is **selectorless**, so the `Endpoints` object is a plain manifest and an in-place Git
+  edit is the right tool. `subsets` is an **atomic list**: ownership covers the whole list, so submit
+  the complete intended value (all addresses *and* `ports`) rather than assuming a partial merge.
+  Live `managedFields` confirms `kustomize-controller` owns `f:subsets` under the `infrastructure`
+  Kustomization — verify that still holds before applying.
+- Keep the object's **name, namespace, and owning Kustomization unchanged**. Removing addresses is a
+  field update; renaming or moving it between inventories invites Flux pruning.
+- The mirrored `EndpointSlice` is owned by the `Endpoints` object (verified). Let it converge on its
+  own — do not hand-edit controller-owned slices, and do not fold an EndpointSlice migration into
+  this fix.
 
-Add a guard so this cannot silently recur: an alert that fires when any `ci-runner-node` target
-matches `node_uname_info{release=~".*-pve"}` — a Proxmox host has no business in this job.
+Add a recurrence guard, scoped explicitly to `job="ci-runner-node"`: alert when a target matches
+`node_uname_info{release=~".*-pve"}`. This is a narrow tripwire, not a completeness check — it cannot
+catch a wrong *Ubuntu* host, a missing target, or a missing `node_uname_info` series. Pair it with an
+assertion that the scraped `nodename` set equals the expected `ci-runner-*` identities, and keep the
+existing target-availability alert.
 
-<!-- codex: Scope the guard explicitly to job="ci-runner-node"; the kernel suffix catches this incident but cannot detect a wrong Ubuntu host, a missing target, or a missing node_uname_info series. Validate expected target identities against the established nodename mapping and retain separate target-availability checks. -->
-
-### W2 — Cover the env-node with the infra DaemonSets (P1, no downtime)
+### W2 — Cover the env-node with the infra DaemonSets (P1, brief rolling update)
 
 `talos-env-node-1` joined 2026-09-01 carrying `dedicated=env:NoSchedule`. Three DaemonSets tolerate
-only `dedicated=agent`, so each reports `desired=6, misscheduled=1` with a pod stranded on the
-env-node that the controller will not manage:
+only `dedicated=agent`, so each reports `desired=6, misscheduled=1`.
 
-<!-- codex: NoSchedule prevents new placement but does not evict an existing pod, so misscheduled does not establish that the controller has lost ownership or that the agent is nonfunctional. The supplied Alloy/storage-probe comments already identify stale pre-taint pods; check ownerReferences, pod revision, and actual agent output before describing coverage as absent. -->
+**Correcting an overstatement in the first draft:** `NoSchedule` does not evict a running pod, and
+`misscheduled` does not mean the agent is broken. Verified on 2026-09-07: all three stranded pods are
+`Ready`, owned by their DaemonSet (`controller: true`), and on the DS's **current** revision
+(`alloy-zhhw8` = `5ffcfc5bf6`, same as its six siblings). The `velero/node-agent` pod on env-node has
+completed **18 PodVolumeBackups**. So these agents are *working* — the defect is that they are
+**unmanaged**: the controller will not roll them on a chart upgrade, and if one is deleted it will not
+be recreated (`desired=6` excludes that node), silently losing coverage.
 
-- `monitoring/alloy` — log/metric shipping
-- `monitoring/storage-fabric-probe` — storage probing
-- `velero/node-agent` — **filesystem backup coverage**
+That settles the coverage question in favour of tolerating rather than deleting: removing the pods
+would actively remove working log collection, storage probing, and backup coverage from env-node.
+Each agent still needs its own justification, not an argument by analogy:
 
-Seven other DaemonSets (cilium, cilium-envoy, csi-nfs-node, node-exporter, iscsi-recovery-tmo,
-trident-node-linux) already show `desired=7`, which is the evidence that covering the env-node is the
-intended behaviour and these three were simply missed.
+- `monitoring/alloy` — its manifest already states a node log collector "must cover ALL nodes, else
+  agent-node/Kata-sandbox logs are silently uncollected". env-node runs test-env workloads; same
+  mandate applies.
+- `monitoring/storage-fabric-probe` — env-node consumes `testpool-iscsi` PVs from the same QNAP
+  fabric, so per-node reachability probing is meaningful there.
+- `velero/node-agent` — env-node has real PVs and has already produced 18 PVBs. Note the tension with
+  W4: W4 excludes the `testpool` *namespace* from backup schedules, but the node agent must remain for
+  any non-testpool volume that lands on that node. If a decision is made that env-node should hold
+  **no** backed-up volumes, the correct action is to drop the agent and remove its stale pod, not to
+  tolerate the taint. Resolve this explicitly before implementing.
 
-<!-- codex: Other DaemonSets' placement does not establish the intended policy for these three, and this list names six rather than seven. Alloy explicitly documents all-node coverage, but justify storage probing and Velero separately, especially if W4 excludes testpool; if an agent should be excluded, retain that policy and remove its stale pod instead of tolerating the taint merely to clear alerts. -->
+Use an explicit `{ key: dedicated, operator: Equal, value: env, effect: NoSchedule }` entry alongside
+the existing `agent` one. Avoid `operator: Exists` on the key: it would silently extend these agents
+to every future dedicated node class, which is a placement-policy expansion needing its own
+justification rather than a preventive default.
 
-Add a `dedicated=env` toleration to each. Prefer `operator: Exists` on key `dedicated` where the
-chart allows it, so the next dedicated node class doesn't reopen this. Clears 6 of the 22 alerts
-(`KubeDaemonSetMisScheduled` ×3, `KubeDaemonSetRolloutStuck` ×3).
+For the six DaemonSets that already show `desired=7` (cilium, cilium-envoy, csi-nfs-node,
+node-exporter, iscsi-recovery-tmo, trident-node-linux) this is a coverage data point, not proof of
+intended policy — hence the per-agent justification above. *(First draft said "seven other
+DaemonSets" and listed six; the live count is six.)*
 
-<!-- codex: Prefer an explicit key=dedicated, operator=Equal, value=env, effect=NoSchedule entry alongside agent; Exists silently extends these agents' access and resource usage to future dedicated node classes. That broader placement policy needs its own justification rather than being a preventive default. -->
+Check each rendered DaemonSet's `updateStrategy` before assuming stale pods are replaced. `alloy` is
+`RollingUpdate` with `maxUnavailable: 1, maxSurge: 0` (verified); confirm the other two. Under
+`RollingUpdate` the template change replaces pods automatically — wait for a normal rollout rather than
+pre-emptively deleting. Under `OnDelete`, stale pods need individual manual deletion after the new
+template reconciles. Changing scheduling eligibility can zero `misscheduled` **without** proving any
+pod was replaced, so verify replacement directly.
 
-<!-- codex: Inspect each rendered DaemonSet's tolerations and updateStrategy: RollingUpdate should replace stale pods, while OnDelete requires manual deletion after the new template has reconciled. Wait for a normal rollout first, then delete only identified stale pods individually if required and verify replacement; changing eligibility can clear misscheduled counts without proving pod replacement ([Kubernetes rollout behavior](https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/)). -->
+### W3 — Retire node1's LLM route (P1, two-commit sequence)
 
-### W3 — Retire the dead `llm` endpoint (P1, no downtime)
+`kubernetes/apps/apps/ai/llm-service.yaml` lists `192.168.0.44:8080` in both the `llm` Endpoints
+(which drives the ServiceMonitor scrape) and the `llm-node1` Endpoints. Verified on the host:
+`ai-llm-1` runs only `llama-swap-qwen38.service` on **:8082**; there is no `llama-server.service`,
+while `ai-llm-2` (.45) has one on :8080. Result: a permanent `TargetDown{job=llm}`.
 
-`kubernetes/apps/apps/ai/llm-service.yaml` still lists `192.168.0.44:8080` in both the `llm`
-Endpoints (which drives the ServiceMonitor scrape) and the `llm-node1` Endpoints. Verified on the
-host: `ai-llm-1` runs only `llama-swap-qwen38.service` on **:8082**; there is no
-`llama-server.service` at all, while `ai-llm-2` (.45) has one on :8080. The retirement is intentional
-— node1's qwen3.6 deployment was disabled 2026-08-15 and the model retired entirely in #524/#525 —
-but the Endpoints and the `llm-node1` Service were never cleaned up, leaving a permanent
-`TargetDown{job=llm}`.
+**Scope correction:** this is the retirement of **node1's deployment**, not of the model. `qwen3.6-35b-a3b`
+was removed from the *main* `litellm.yaml` in #524/#525, but it is **still served on node2** and still
+advertised by `litellm-local.yaml` to the agentforge workers. Do not remove node2's route.
 
-<!-- codex: “The model retired entirely” conflicts with the supplied evidence: node2:8080 is healthy and litellm-local.yaml still advertises qwen3.6-35b-a3b through both node Services. Treat this as retirement of node1's deployment and preserve node2's route unless a separate model-retirement decision is established. -->
+**Confirmed live consumer.** `kubernetes/apps/apps/ai/litellm-local.yaml:33` registers
+`qwen3.6-35b-a3b` against **both** node Services. Proven from inside the cluster on 2026-09-07:
 
-Drop `.44` from the `llm` Endpoints and delete the now-unused `llm-node1` Service/Endpoints pair
-(confirm no remaining referent first). Update the stale file header, which still claims node1 and
-node2 both run qwen3.6 pinned on :8080.
+```
+llm-node1.ai.svc.cluster.local:8080 -> 000   (dead)
+llm-node2.ai.svc.cluster.local:8080 -> 200
+```
 
-<!-- codex: A remaining referent is already confirmed: litellm-local-config points at http://llm-node1.ai.svc.cluster.local:8080/v1, so deletion leaves a live gateway configured with an unresolvable backend even though that backend is already dead. Remove only that deployment, preserve the node2 deployment, and include the corresponding consumer audit for litellm.yaml, which the local manifest explicitly requires to stay in sync. -->
+LiteLLM round-robins across a model's deployments, so agentforge workers requesting that model land on
+a dead backend roughly half the time — the identical failure the main proxy was fixed for on
+2026-08-15. Currently latent (litellm-local's log shows only health probes), but it is a live
+misconfiguration, not merely cosmetic.
 
-<!-- codex: litellm-local reads configuration only at startup and requires its checksum/config annotation to change; updating the ConfigMap alone leaves existing pods using node1. Reconcile and verify consumer rollouts first, then remove the Service/Endpoints in a subsequent Git change and verify pruning, since one Flux reconciliation does not guarantee the required application-level ordering. -->
+Ordering is load-bearing, because **litellm-local reads its config only at startup** (its pod is 23
+days old):
 
-### W4 — Backup and job hygiene (P2, no downtime)
+1. **Commit 1 — remove the node1 deployment from `litellm-local.yaml`**, keeping the node2 deployment.
+   Ensure the Deployment carries a config checksum/annotation that changes with the ConfigMap so Flux
+   actually rolls the pod; editing the ConfigMap alone leaves the running pod using node1. Audit
+   `litellm.yaml` in the same pass — the local manifest explicitly requires the two to stay in sync.
+2. **Verify** the rollout: new pod, and its loaded routing config no longer contains `llm-node1`.
+3. **Commit 2 — remove `.44` from the `llm` Endpoints and delete the `llm-node1` Service/Endpoints
+   pair**, then verify Flux pruned them. One reconciliation does not guarantee application-level
+   ordering, so these must be separate changes.
 
-- **Velero `PartiallyFailed` (09-06, 09-07).** Root cause from the backup log: `failed to get PV ...
-  for PVC testpool/dockerlib-env-std-pool-2ds7g: persistentvolumes "..." not found` — an env-pod PVC
-  whose PV was already deleted mid-teardown. `testpool` is the ephemeral leasable test-env pool;
-  backing it up has no value and races teardown by construction. Exclude the namespace from the
-  `velero-daily`/`velero-weekly` schedules. This also stops the chain's last-success timestamp from
-  stalling.
+Also update the stale file header, which still claims node1 and node2 both run qwen3.6 pinned on :8080.
 
-<!-- codex: The log establishes one teardown race, not that every resource in testpool has no recovery value or that this is the only cause of stalled success timestamps. Confirm the namespace's recovery contract before excluding it wholesale, preserve existing exclusions, and require successful subsequent backups plus a representative restore check for retained workloads. -->
+### W4 — Backup and job hygiene (P2, config + operational actions)
 
-- **Renovate.** The 09-03 failure was transient (GitHub rate-limited an `ls-remote`) and later runs
-  succeed, but the failed Job lingers and keeps `KubeJobFailed` firing. Set `ttlSecondsAfterFinished`
-  / tighten `failedJobsHistoryLimit` so a transient failure self-clears. Separately: Renovate targets
-  `github.com/cchifor/ailab` — the **read-only mirror** — not the Gitea master forge, and GitHub
-  rejected its credential as *unauthenticated*. Repoint at Gitea, or record an explicit decision to
-  keep it on the mirror.
-
-<!-- codex: A jobTemplate TTL change applies to newly created Jobs, so explicitly handle the existing failed Job after preserving useful diagnostics; choose retention long enough to investigate real failures. Successful later execution also needs evidence of intended dependency-update behavior, rather than merely disappearance of KubeJobFailed. -->
-
-<!-- codex: Moving Renovate to Gitea is a separate integration change involving platform/endpoint settings, repository selection, token permissions, and duplicate-run prevention; it is not a URL-only hygiene fix. Keep credentials in SOPS+age and verify authentication and repository access without printing secret material. -->
-
-- **Reviewbot quarantines.** Two genuine one-offs, both 2026-09-06 ~20:10, needing a manual requeue:
-  `.24` (claude) platform#1095, 5 attempts exhausted on a Claude Max session limit; `.25` (codex)
-  platform#1096, `ambiguous POST: Connection reset by peer` (auto-retry correctly refused). Requeue
-  both. The claude-side case is a known class — a rate limit should back off past the reset time
-  rather than burn the attempt budget; file that as a follow-up rather than widening this change.
-
-<!-- codex: Before requeuing platform#1096, determine whether the ambiguous POST already succeeded and use existing deduplication or idempotency handling to avoid duplicate external actions. Requeue platform#1095 only after its session allowance has reset, and verify successful processing rather than quarantine count alone. -->
-
+- **Velero `PartiallyFailed` (09-06, 09-07).** From the backup log: `failed to get PV ... for PVC
+  testpool/dockerlib-env-std-pool-2ds7g: persistentvolumes "..." not found` — an env-pod PVC whose PV
+  was already deleted mid-teardown. `testpool` is the ephemeral leasable test-env pool. This log line
+  establishes **one** teardown race, not that every `testpool` resource is disposable nor that this is
+  the only cause of a stalled success timestamp. Confirm the namespace's recovery contract before
+  excluding it wholesale; then add `testpool` to the existing `excludedNamespaces` on **both** the
+  daily and weekly schedules (`helmrelease.yaml:159` and `:168`), preserving the current
+  `[kube-system, velero, trivy-system]` entries. See the W2 note on `velero/node-agent`.
+- **Renovate.** The 09-03 failure was transient (GitHub rate-limited an `ls-remote`); later runs
+  succeed, but the failed Job lingers (`failedJobsHistoryLimit: 3`, no TTL) and keeps `KubeJobFailed`
+  firing. Add `ttlSecondsAfterFinished` to the jobTemplate — noting it applies only to **newly
+  created** Jobs, so the existing failed Job must be removed explicitly after capturing its logs.
+  Choose a retention long enough to investigate genuine failures. Verify Renovate is doing its actual
+  job (opening dependency PRs), not merely that the alert stopped.
+- **Renovate forge target — split out as its own change.** `config-configmap.yaml:11-12` sets
+  `platform: 'github'` / `endpoint: 'https://api.github.com/'`, i.e. it targets the **read-only
+  mirror**, and GitHub rejected its credential as *unauthenticated*. Repointing to Gitea is a real
+  integration change — platform/endpoint settings, repository selection, token permissions, and
+  preventing duplicate runs across both forges — not a URL edit. Do it separately, keep credentials in
+  SOPS+age, and verify auth and repo access without printing secret material.
+- **Reviewbot quarantines.** Two one-offs from 2026-09-06 ~20:10. **Do not blind-requeue.**
+  - `.25` (codex) platform#1096 — `ambiguous POST: Connection reset by peer`. "Ambiguous" means the
+    review may already have posted. Check whether the POST succeeded and rely on the tool's pre-post
+    marker/idempotency check before requeuing, to avoid a duplicate external review.
+  - `.24` (claude) platform#1095 — attempts exhausted against a Claude Max session limit. Requeue only
+    after the allowance has reset, and confirm the review actually completes.
+  - Verify by successful processing, not by `reviewbot_quarantined_recent_jobs` reaching 0.
+  - Follow-up (separate): a rate limit should back off past the reset time rather than consume the
+    attempt budget.
 - **`ForgeProvisionerSeatEntitlementDrift`.** Three seats (`anthropic/claude-max-1`,
   `anthropic/claude-max-2`, `openai/codex-pro`, all `tenant-zero/playground`, kid
   `tz-213512e80fde7c84`) are granted in the broker kid registry but absent from
   `openbao/capability-kids-configmap`. The provisioner drift-corrects the auth roles every ~30 s and
-  the finding immediately returns — a reconciliation loop, not a transient. Either declare the three
-  seats or revoke the grants; do not silence the alert.
-
-<!-- codex: Establish the intended authorized entitlements and authoritative writer before choosing between declaration and revocation; declaring seats merely to clear drift can legitimize unintended access. Update the source that competing reconcilers consume and verify sustained agreement using non-secret metadata. -->
+  the finding immediately returns — a reconciliation loop, not a transient. **Establish which side is
+  authoritative and whether these grants were intended before choosing** — declaring seats purely to
+  silence drift would legitimize possibly-unintended access. Then update the source the competing
+  reconcilers read, and confirm sustained agreement using non-secret metadata. Do not silence the alert.
 
 ### W5 — ai-node2 memory (P1 severity, gated on approval)
 
-`ai-node2` is at **120/124 GiB used, 4 GiB available**, load average 20.7. Guest ceilings total
-~184 GiB against 124 GiB physical (talos-cp2 24G + ci-runner-2/5/9/10 at 24G each + dw2 16G + dw5 16G
-+ agent-node-2 16G + env-node-1 16G), plus the ai-llm-2 LXC. That is far above PVE's 80 % auto-balloon
-threshold, so every balloonable guest is pinned at its floor permanently. QEMU balloon stats:
+`ai-node2` is at **120/124 GiB used, 4 GiB available**, load average 20.7. Configured guest ceilings
+total ~184 GiB against 124 GiB physical (talos-cp2 24G + ci-runner-2/5/9/10 at 24G each + dw2 16G +
+dw5 16G + agent-node-2 16G + env-node-1 16G), plus the ai-llm-2 LXC. Ceilings establish **overcommit**;
+they do not measure resident demand.
 
-<!-- codex: Configured ceilings establish overcommit but do not measure resident demand, and two guests' balloon snapshots do not establish that every balloonable guest is permanently at its floor. Collect current allocations, balloon targets, host/LXC overhead, and pressure over time before attributing the whole host's behavior to a fixed threshold. -->
+Measured directly (`qm monitor` / `info balloon`, 2026-09-07):
 
-| VM | balloon | total_mem | swapped out | major faults |
+| VM | balloon `actual` | `total_mem` | `mem_swapped_out` (cumulative) | `major_page_faults` (cumulative) |
 |---|---|---|---|---|
-| dw2 (4202) | 4096 (floor) | 3.7 GiB | 21.6 GB | 3.9M |
-| dw5 (4205) | 6144 (floor) | 5.75 GiB | **140.5 GB** | **39.6M** |
+| dw2 (4202) | 4096 = its floor | 3.7 GiB | 21.6 GB | 3.9M |
+| dw5 (4205) | 6144 = its floor | 5.75 GiB | 140.5 GB | 39.6M |
 
-<!-- codex: Swapped-out bytes and major-fault totals are cumulative counters, not current swap occupancy or thrashing rates. Use interval deltas, current guest available memory, swap usage, and memory/I/O pressure to substantiate ongoing distress and compare remediation outcomes across reboots. -->
+**Read those two right-hand columns carefully:** they are counters accumulated since boot
+(2026-07-21, ~48 days), *not* current rates. They evidence a long history of swapping, not present
+intensity. The **current-state** evidence is separate and is what justifies acting: dw5 at 82 % swap
+occupancy with 1.69 GiB available, dw2 with 1.67 GiB available, `DevWorkerThrashing` pending as of
+14:48 today, and the host at 4 GiB free. Before and after any change, capture **interval deltas**
+(`rate()` on `node_vmstat_pswpout` / major faults), current available memory, swap occupancy, and PSI
+pressure — that is the comparable measurement, and only two guests were sampled, so confirm whether
+other balloonable guests on node2 are also pinned rather than assuming it.
 
-This failure mode is already documented in `dev-workers/variables.tf` — but for **ai-node1**, measured
-2026-08-12 at 88 %, mitigated by 12 GiB floors on dw1/dw4. The problem has since **moved**: node1 now
-has 25 GiB free (its LLM no longer pins qwen3.6) while node2 has gone 93 % → 97 %. dw5's 6144 override
-(added after the 2026-09-01 swap-death incident) is demonstrably insufficient, and **dw2 was never
-given an override at all**. Pressure grew when ci-runner-9 + ci-runner-10 started on node2 on
-2026-08-25 23:02 (+48 GiB of ceilings), then env-node-1 (09-01) and agent-node-2 (09-02).
+This failure mode is documented in `dev-workers/variables.tf` — but for **ai-node1**, measured
+2026-08-12 at 88 %, mitigated by 12 GiB floors on dw1/dw4. The problem has **moved**: node1 now has
+25 GiB free (its LLM no longer pins qwen3.6) while node2 has gone 93 % → 97 %. dw5's 6144 override
+(added after the 2026-09-01 swap-death incident) is insufficient, and **dw2 was never given an
+override**. Pressure grew when ci-runner-9 + ci-runner-10 started on node2 on 2026-08-25 23:02
+(+48 GiB of ceilings), then env-node-1 (09-01) and agent-node-2 (09-02).
 
-Two stages, the second gated:
+**Ordering reversed from the first draft.** Raising balloon floors on a host with 4 GiB free is *not*
+low-risk: higher guarantees plus guest boot peaks can force neighbours to reclaim or trigger host OOM
+— and one of those neighbours is **talos-cp2, a control-plane node**. Capacity relief comes first.
 
-1. **Immediate, low-risk.** Raise dw2's floor from the uniform 4096 and dw5's from 6144, codified in
-   `dev_worker_nodes`. `qm set --balloon` cannot inflate a running guest, so this needs a reboot of
-   those two dev-workers to take effect — dev-workers, not ai-nodes, so no cluster impact. Note this
-   only redistributes scarcity on a host that is already oversubscribed: it buys headroom, it does
-   not fix the ratio, and raising floors on a starved host can push pressure onto its neighbours.
+**W5.1 (first) — relieve capacity. REQUIRES EXPLICIT PER-ACTION APPROVAL BEFORE ANY GUEST IS STOPPED.**
 
-<!-- codex: W5.1 is not low-risk with only 4 GiB available: higher guarantees and guest boot peaks can force neighbouring guests to reclaim or trigger host OOM, including disruption to talos-cp2. Relieve capacity first through the approved W5.2 action, then choose explicit floor values from a host-wide budget with reserved headroom, abort thresholds, and rollback instructions. -->
+Move one guest off node2. Candidate destinations show 25 GiB (node1) and 22 GiB (node3) free, but a
+free-memory snapshot does **not** prove headroom for a guest with a 24 GiB ceiling plus overhead —
+budget source and destination *peak* demand, disk space, and host reserves before choosing. Likeliest
+candidate is one of the two out-of-band runners that landed on node2 on 08-25 (ci-runner-9 or
+ci-runner-10): most recent, most stateless, cheapest to recreate.
 
-<!-- codex: Establish the installed PVE version's live-versus-pending balloon behavior before asserting that reboot is mandatory, and distinguish a configured minimum from the current allocation. If restarts are required, drain active dev-worker jobs and restart one guest at a time; keeping the hypervisor running does not establish “no cluster impact.” -->
+Do not assume a rebuild is required. Per-node `local-lvm` and `cpu: host` are the repo's stated
+reasons, but Proxmox supports offline migration with local-disk transfer; check storage-transfer
+support, CPU compatibility, and attached resources, then choose migration vs. offline migration vs.
+rebuild on evidence.
 
-2. **The actual fix — REQUIRES EXPLICIT APPROVAL BEFORE ANY GUEST IS STOPPED.** Move one guest off
-   node2. node1 has 25 GiB free and node3 22 GiB, so there is somewhere to land. Per-node `local-lvm`
-   + `cpu: host` means this is a rebuild, not a live migration. Best candidate is one of the two
-   out-of-band runners that landed on node2 on 08-25 (ci-runner-9 or ci-runner-10): most recent, most
-   stateless, cheapest to recreate. Rebuilding one through tofu also serves W6's import goal.
-   **This step must not be executed without per-action sign-off.**
+If it is a rebuild, that is **replacement, not import** — so **W6 must complete first** (see below).
+The approved action needs: runner job draining, registration and address handoff, a hard prohibition on
+old and new guests holding the same IP simultaneously, and a tested return path. The standing
+per-action approval rule applies to any ai-node outage.
 
-<!-- codex: Snapshot free memory of 25/22 GiB does not prove safe capacity for a runner with a 24 GiB ceiling plus overhead, nor that moving one guest resolves node2's deficit. Budget source and destination peak demand, disk space, and host reserves before selecting the guest and destination. -->
+**W5.2 (second) — set floors from a host-wide budget.** Only after relief is measured. Choose explicit
+floor values for dw2/dw5 from a budget that reserves host headroom, with stated abort thresholds and
+rollback instructions, codified in `dev_worker_nodes`.
 
-<!-- codex: Local disks and cpu: host do not by themselves prove a rebuild is necessary; check storage-transfer support, CPU compatibility, and other attached resources before choosing migration, offline migration, or rebuild. Proxmox documents migration options for local storage, so this conclusion needs environment-specific evidence ([Proxmox administration guide](https://pve.proxmox.com/pve-docs/pve-admin-guide.pdf)). -->
+Verify the installed PVE version's live-vs-pending balloon behaviour rather than assuming a reboot is
+mandatory, and distinguish a configured minimum from the current allocation. If restarts are needed:
+**drain active dev-worker work first** (these hosts carry long-lived tmux sessions and agentforge
+jobs — a restart is disruptive to users even though the hypervisor stays up, so "no cluster impact" is
+not the same as "no impact"), and restart one guest at a time.
 
-<!-- codex: Rebuilding is replacement, not import: complete the runner module's state reconciliation before any apply or rebuild, then review replacement effects separately. The approved action needs runner job draining, registration and address handoff, a prohibition on simultaneous old/new guests using the same IP, and a tested return path; retain the standing per-action approval requirement for any ai-node outage. -->
-
-### W6 — Bring the out-of-band guests under IaC (P2, follow-up)
+### W6 — Bring the out-of-band guests under IaC (prerequisite, not optional)
 
 Five runners (4106-4110), the env-node (4401), and the two reviewer VMs (4501-4502) exist with no tofu
-state. Import them so the module manages what actually exists, then uncomment their entries:
+state. **Completion of runner-module state reconciliation is a prerequisite for every subsequent
+runners-module apply, including W5.1's rebuild option.** W1-W4 and the P0 containment do not depend on
+it and can proceed in parallel.
 
-<!-- codex: Reverse this sequence in a controlled local checkout: configure the exact for_each key with the verified address and live settings before importing that instance, with all applies disabled during the transition. OpenTofu requires matching configuration before import; enable only the instance being imported so intermediate plans do not propose creating all remaining guests ([OpenTofu import usage](https://opentofu.org/docs/cli/import/usage/)). -->
+Sequence, in a controlled local checkout with applies disabled throughout:
 
-```
-tofu import 'proxmox_virtual_environment_vm.runner["ci-runner-6"]' ai-node3/4106
-```
+1. Confirm the correct module, its pinned provider, the ailab endpoint, and the active backend; back
+   up `terraform.tfstate` securely and hold the lock against concurrent writers. Treat state and its
+   backups as **sensitive** — never print their contents.
+2. **Configure before importing.** OpenTofu requires matching configuration for the target address, so
+   enable **only** the one `for_each` key being imported, with its verified address and live settings.
+   Enabling all five at once makes intermediate plans propose creating the remaining four.
+3. Import that instance, confirming the provider's expected import-ID format:
+   ```
+   tofu import 'proxmox_virtual_environment_vm.runner["ci-runner-6"]' ai-node3/4106
+   ```
+4. Verify the imported VM's identity and reconcile sizing, disks, placement, networking, and lifecycle
+   against the live guest. **Stop on any unexpected create, update, destroy, or replace.**
+5. Repeat for the next key. Also account for the **five `terraform_data.enable_guest_agent` resources**
+   that made up the other half of `Plan: 10 to add` — decide per resource whether it is imported or
+   legitimately created.
+6. Finish with a **full, non-targeted** `tofu plan` with all intended entries enabled, expecting
+   `No changes`.
 
-<!-- codex: Run from the correct module with its pinned provider, confirmed ailab endpoint, active backend/workspace, and provider-verified import ID format; securely back up state and retain locking while excluding concurrent writers. Give env-node and reviewer VMs their own verified resource addresses and state locations, and protect state/backups as sensitive without printing their contents. -->
+Give the env-node and reviewer VMs their own verified resource addresses and state locations; they are
+not part of the runners module.
 
-Reconcile sizing against each live VM before enabling, and re-run `tofu plan` expecting `No changes`.
-Do the imports one at a time, verifying `plan` after each. This is what makes the P0 fix permanent
-rather than a comment someone eventually deletes.
-
-<!-- codex: Ten proposed additions for five VMs imply five additional resources that VM imports alone do not explain; identify every planned address and decide how its existing object or required creation is handled. Review disks, placement, networking, lifecycle behavior, and dependent resources as well as sizing, and stop on unexpected create, update, destroy, or replacement actions. -->
-
-<!-- codex: Make completion of runner state reconciliation a prerequisite for every subsequent runners-module apply, including W5.2, rather than an optional P2 follow-up; independent W1-W4 changes and the P0 containment can proceed. A no-change plan cannot validate initialization fields hidden by ignore_changes, so separately compare their recorded addresses with live/IPAM facts before treating future replacement as safe. -->
+**Caveat on the no-change check:** because `lifecycle { ignore_changes = [initialization] }` hides
+`ipconfig0`, a clean plan cannot validate those fields. Separately compare each guest's recorded
+address against live `qm config` and the IPAM registry before treating any future replacement as safe.
+State-only import must not restart or replace a guest; record protected-state recovery instructions and
+require manual review before any later apply.
 
 ### Out of scope (recorded, not fixed here)
 
 - **QNAP orphaned LUNs.** Two PVs (`pvc-c61ddeac…`, `pvc-de79ab3b…`, 48Gi each, `Delete` policy) retry
   `Unmap IscsiTarget fail … Error Code : -19` roughly every 90 s; three more sit `Released`/`Retain`.
-  Known pattern, needs QNAP-side LUN cleanup — a storage runbook task, not a config change.
+  Known pattern, needs QNAP-side LUN cleanup — a storage runbook task.
 - **QNAP has no capacity monitoring.** `qnap-rules.yaml` covers only SMART, temperature, fan and
-  exporter presence; the SNMP exporter emits 28 series and **none** are volume or pool usage. The
-  array backs every `qnap-iscsi` PV, so this is a real gap — but adding capacity OIDs is its own
-  change with its own verification, and folding it in here would blur the diff.
+  exporter presence; the SNMP exporter emits 28 series and **none** are volume or pool usage. The array
+  backs every `qnap-iscsi` PV, so this is a real gap — but adding capacity OIDs is its own change with
+  its own verification.
 
 ## Critical files
 
 | Path | Role |
 |---|---|
-| `kubernetes/infra/runners/variables.tf` | P0 — already fixed in `7ab78e79`; W6 uncomments after import |
+| `kubernetes/infra/runners/variables.tf` | P0 contained in `7ab78e79`; W6 configures-then-imports, one key at a time |
 | `docs/network-plan.md` | IPAM registry; landed in `7ab78e79`, source of truth for every address above |
-| `kubernetes/apps/infrastructure/monitoring/ci-runners-node.yaml` | W1 — Endpoints `.20-.22` → `.29-.31` |
-| `kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml` | W1 — add the "no PVE host in this job" guard |
-| `monitoring/alloy*.yaml`, `monitoring/storage-fabric-probe*.yaml` | W2 — env toleration |
-| Velero HelmRelease (`node-agent` tolerations + schedule `excludedNamespaces`) | W2 + W4 |
-| `kubernetes/apps/apps/ai/llm-service.yaml` | W3 — drop `.44`, delete `llm-node1`, fix stale header |
-| `kubernetes/infra/dev-workers/variables.tf` | W5.1 — dw2/dw5 balloon floors |
-| renovate CronJob manifest | W4 — TTL + forge target |
-| `openbao/capability-kids-configmap` | W4 — declare or revoke the three seats |
-
-<!-- codex: Add kubernetes/apps/apps/ai/litellm-local.yaml as a required W3 change, including its rollout checksum, and identify the matching primary LiteLLM consumer file for implementation review. Update the runners row to reflect configuration-before-import sequencing. -->
+| `kubernetes/apps/infrastructure/monitoring/ci-runners-node.yaml` | W1 — Endpoints `.20-.22` → `.29-.31` (submit full `subsets`) |
+| `kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml` | W1 — PVE-host tripwire + expected-nodename assertion |
+| `kubernetes/apps/infrastructure/monitoring/alloy.yaml` (l.25) | W2 — add `dedicated=env` toleration |
+| `kubernetes/apps/infrastructure/monitoring/storage-fabric-probe.yaml` (l.39) | W2 — add `dedicated=env` toleration |
+| `kubernetes/apps/infrastructure/storage/velero/helmrelease.yaml` (l.78, l.159, l.168) | W2 toleration + W4 `testpool` exclusion (both schedules) |
+| `kubernetes/apps/apps/ai/litellm-local.yaml` (l.33) | **W3 commit 1** — drop node1 deployment; needs config-checksum rollout |
+| `kubernetes/apps/apps/ai/litellm.yaml` | W3 — consumer audit, kept in sync with litellm-local |
+| `kubernetes/apps/apps/ai/llm-service.yaml` | **W3 commit 2** — drop `.44`, delete `llm-node1`, fix stale header |
+| `kubernetes/infra/dev-workers/variables.tf` | W5.2 — dw2/dw5 floors, after relief |
+| `kubernetes/apps/apps/renovate/cronjob.yaml` | W4 — jobTemplate TTL |
+| `kubernetes/apps/apps/renovate/config-configmap.yaml` (l.11-12) | W4 (separate change) — forge target |
+| `openbao/capability-kids-configmap` | W4 — declare or revoke, after establishing authority |
 
 ## Verification
 
-Per workstream, evidence before assertion:
+Evidence before assertions. Note that "an alert stopped firing" is never sufficient on its own.
 
-- **W1:** `count(up{job="ci-runner-node"}) == 10`; `up{job="ci-runner-node",
-  instance=~"192.168.0.2[012]:9100"}` returns empty; `gitea_runner_reclaim_last_run_seconds` present
-  for all 10; the three `CIRunnerMaintenanceBeaconMissing` alerts clear within one `for: 30m` window.
+- **W1:** `count(up{job="ci-runner-node"} == 1) == 10` — count the *healthy* series, since `count(up)`
+  also counts failed scrapes. Assert the ten scraped `nodename`s equal the expected `ci-runner-*` set;
+  `up{job="ci-runner-node", instance=~"192.168.0.2[012]:9100"}` returns empty; every target's
+  `gitea_runner_reclaim_last_run_seconds` is younger than the configured freshness threshold. Check the
+  live Endpoints and Prometheus discovery *after* Flux reconciles. (`for:` governs entry into firing,
+  not recovery latency, so allow for resolve delay.)
+- **W2:** conditional on the per-agent coverage decision. If tolerated: `observedGeneration` advanced,
+  `desired=7, ready=7, updatedNumberScheduled=7, misscheduled=0`, and each env-node pod's owner and
+  **revision hash matches the new template** (proving replacement, not adoption). Then verify actual
+  function: fresh env-node log lines arriving, probe series present, and a successful PVB from that
+  node where backups are intended.
+- **W3:** after commit 1, the running litellm-local pod is **new** and its loaded routing config
+  contains no `llm-node1`; a minimal authenticated inference succeeds for each retained local model
+  through each affected gateway (`/v1/models` lists configured inventory even when inference is
+  broken, so listing alone proves nothing) — without exposing credentials. After commit 2, assert the
+  expected surviving `llm` targets are present with `up=1` (an empty `up==0` result also passes when
+  every target has vanished), `TargetDown` for ns `ai` clears, and the `llm-node1` objects are pruned.
+- **W4:** the next **daily and weekly** backups both complete `Completed` with 0 errors, with a
+  representative restore check for anything retained in `testpool`'s recovery contract; the old failed
+  renovate Job is gone *and* Renovate has opened its expected dependency PRs; both reviewbot jobs
+  reached a real verdict without duplicate posts; entitlement agreement holds across several
+  reconciliation cycles, verified from non-secret metadata.
+- **W5.1:** the moved runner accepts a representative CI job, keeps a unique registration and address,
+  is scraped by W1's corrected target list, and its final state and placement are accurate. Confirm
+  **sustained** relief on node2 and adequate destination headroom under representative load before
+  retiring rollback resources.
+- **W5.2:** judge by sustained available memory, swap and major-fault **rates** (not cumulative
+  totals), and PSI pressure across a representative workload — `actual` may legitimately exceed the
+  configured floor, and swap occupancy need not fall promptly once pressure subsides. Observe node2
+  and its neighbours (especially talos-cp2) throughout, with explicit abort thresholds.
+- **W6:** after each import, verify the VM's identity and every associated planned resource; finish
+  with a full non-targeted `No changes` plan across each affected module. Confirm no guest restarted or
+  was replaced.
 
-<!-- codex: count(up) includes failed scrapes, so require exactly the ten expected instances with up=1, their verified nodenames, and reclaim timestamps younger than the configured freshness threshold. Check the live Endpoints/discovery result after Flux reconciles; an alert's for duration governs entry into firing, not necessarily its recovery delay. -->
-
-- **W2:** all three DaemonSets report `desired=7, ready=7, misscheduled=0`;
-  `KubeDaemonSetMisScheduled` and `KubeDaemonSetRolloutStuck` clear. Confirm the previously-stranded
-  pods are recreated from the DS's current template rather than adopted as-is.
-
-<!-- codex: Make desired=7 conditional on the coverage decision and also check observed generation, updatedNumberScheduled, and each env-node pod's owner/revision. Verify fresh env-node logs, probe output, and backup-agent functionality where backups are intended, since readiness and cleared scheduling alerts do not establish service coverage. -->
-
-- **W3:** `up{job="llm"} == 0` returns empty; `TargetDown` for ns `ai` clears; a `/v1/models` probe
-  through LiteLLM still answers for every model it advertises (proves no live route was removed).
-
-<!-- codex: An empty up==0 result also passes when all llm targets disappear; assert the expected surviving scrape targets and up=1 explicitly. /v1/models can return configured inventory while inference is broken, so verify the loaded routing configuration and perform an authenticated minimal inference for each retained local model through each affected gateway, without exposing credentials. -->
-
-- **W4:** next `velero-daily` completes `Completed` with 0 errors; `kubectl -n renovate get jobs` shows
-  no lingering `Failed`; both reviewbot personas report `reviewbot_quarantined_recent_jobs == 0`;
-  provisioner logs stop emitting `seat-undeclared-grant`.
-
-<!-- codex: Also verify weekly schedule exclusions, successful intended Renovate/reviewbot work, and entitlement agreement across multiple reconciliation cycles. Removing failed Jobs or suppressing the symptoms through disabled processing could satisfy these checks without repairing the underlying behavior. -->
-
-- **W5.1:** `qm monitor <vmid>` `info balloon` shows `actual` at the new floor after reboot;
-  `node_memory_SwapFree` recovers and `DevWorkerSwapPressure`/`DevWorkerThrashing` clear for `.9`/`.12`;
-  re-check ai-node2 `free -g` to confirm the neighbours did not get squeezed in exchange.
-
-<!-- codex: Balloon actual may legitimately exceed the configured floor, and swap occupancy need not immediately fall after pressure subsides; judge success using sustained available memory, swap/fault rates, pressure, and workload recovery. Observe host and neighbouring guests during representative load, with explicit abort thresholds, rather than relying on a single post-reboot free snapshot. -->
-
-<!-- codex: W5.2 has no verification entry: require the moved runner to accept a representative job, preserve its unique registration and address, remain scraped, and have accurate final state/placement. Confirm sustained source-host relief and destination headroom before retiring rollback resources or declaring the capacity problem resolved. -->
-
-- **W6:** after each import, `tofu plan` in `kubernetes/infra/runners` reports `No changes. Your
-  infrastructure matches the configuration.` — the same check that proved the P0 fix was a no-op.
-
-<!-- codex: Verify each imported VM's identity and every associated planned resource, then run a full non-targeted plan with all intended entries enabled in each affected module, including env/reviewer modules. State-only import should cause no guest restart or replacement; record protected state recovery instructions and require manual review before any later apply. -->
-
-Cluster-wide gate before calling this done: `kubectl get kustomization -A` all `True`, alert count down
-from 22 to the expected residue (Watchdog + InfoInhibitor + whatever W5.2/QNAP items remain knowingly
-open), and etcd still 3/3 in sync.
-
-<!-- codex: Confirm Flux observed the intended Git revision and relevant HelmReleases completed reconciliation; existing True conditions alone can describe an older revision and say nothing about manually applied infra/. Track residual alerts by identity and workstream acceptance criteria, since lowering an aggregate count can hide missing targets and does not establish completion of deferred capacity work. -->
+Cluster-wide gate: for each Flux Kustomization, `status.lastAppliedRevision` equals the merged commit
+(a stale `True` condition can describe an older revision) and affected HelmReleases report a completed
+reconciliation — and note Flux says nothing about hand-applied `infra/`. Track residual alerts **by
+identity** against per-workstream acceptance criteria rather than by counting down from 22: a falling
+count can mask a target that disappeared instead of being fixed, and says nothing about deferred W5
+capacity work. Confirm etcd is still 3/3 in sync.
 
 <!-- codex-review-status: complete -->
