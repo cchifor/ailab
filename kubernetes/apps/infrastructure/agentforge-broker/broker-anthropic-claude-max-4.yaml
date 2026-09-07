@@ -1,4 +1,4 @@
-# Per-account broker — audience `anthropic/claude-max-3` (upstream Anthropic). One of the three per-account
+# Per-account broker — audience `anthropic/claude-max-4` (upstream Anthropic). One of the three per-account
 # fan-out Deployments (was a single `anthropic/default` broker). `agentforge broker` = the orchestrator
 # runtime image (CLI-free; broker extra: pyjwt[crypto] + asyncpg, NO OpenBao/k8s client). The security flow
 # (verify -> reserve -> mark_dispatched -> [gateway] -> reconcile) is enforced around a PREFLIGHT-gated
@@ -8,7 +8,7 @@
 # identity AF_BROKER_AUDIENCE is set inline below (inline env wins over envFrom). Runtime SA
 # (agentforge-broker), ESO SecretStore (agentforge-broker-store), and openbao-ca cert are SHARED (see
 # serviceaccount.yaml / secretstore.yaml / openbao-ca-cert.yaml). This account's OAuth/kids/ledger sync from
-# OpenBao `operator/broker/anthropic/claude-max-3/{oauth,kids,ledger}` into the broker-anthropic-claude-max-3-*
+# OpenBao `operator/broker/anthropic/claude-max-4/{oauth,kids,ledger}` into the broker-anthropic-claude-max-4-*
 # Secrets, mounted read-only.
 #
 # HA (design §5): 2 replicas + a PodDisruptionBudget + pod anti-affinity + topology-spread across nodes so a
@@ -17,30 +17,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: broker-anthropic-claude-max-3
+  name: broker-anthropic-claude-max-4
   namespace: agentforge-broker
   annotations:
     # Capability-kid ACTIVATION BARRIER membership (scripts/gen-broker-inventory.py derives
     # AF_PROVISIONER_BROKER_READYZ_URLS from this). The barrier is ALL-OR-NOTHING per kid, so a
     # listed broker that is unreachable defers the signing-key commit for EVERY audience (#127).
     # Set "false" while a seat is down; there is deliberately NO default.
-    #
-    # FLIPPED "false" -> "true" (2026-07-29). This seat was deliberately OUT while its pods could
-    # not run: an earlier attempt added it mid-outage and re-armed #127. Verified before flipping:
-    #   * `kubectl -n agentforge-broker get deploy` -> 2/2 ready, rollout complete;
-    #   * GET /readyz -> 200 {"ready":true,"credential_generation":"f1a7714e",
-    #     "registry_generation":"c70b3be78f3a"} — and /readyz FAILS CLOSED on ledger or credential
-    #     loss, so a 200 with real generations proves ledger + oauth + kid registry are all loaded;
-    #   * the stated blocker in provisioner-deploy.yaml is gone —
-    #     `operator/broker/anthropic/claude-max-3/ledger` IS present in the live
-    #     openbao-operator-seeds Secret (key names checked, never values), and the operator
-    #     reconcile 403 behind it was fixed upstream by agentforge #67.
-    # Leaving it OUT is not the safe option: the barrier is what proves a broker serves a public
-    # kid before its private half is committed, and an unlisted seat gets that commit unproven —
-    # the exact shape of the 21h stuck-pod incident.
     agentforge.io/kid-barrier: "true"
   labels:
-    app.kubernetes.io/name: broker-anthropic-claude-max-3
+    app.kubernetes.io/name: broker-anthropic-claude-max-4
     app.kubernetes.io/component: broker
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
@@ -53,11 +39,11 @@ spec:
       maxSurge: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: broker-anthropic-claude-max-3
+      app.kubernetes.io/name: broker-anthropic-claude-max-4
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: broker-anthropic-claude-max-3
+        app.kubernetes.io/name: broker-anthropic-claude-max-4
         app.kubernetes.io/component: broker
         app.kubernetes.io/part-of: agentforge
     spec:
@@ -80,14 +66,14 @@ spec:
                 topologyKey: kubernetes.io/hostname
                 labelSelector:
                   matchLabels:
-                    app.kubernetes.io/name: broker-anthropic-claude-max-3
+                    app.kubernetes.io/name: broker-anthropic-claude-max-4
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
-              app.kubernetes.io/name: broker-anthropic-claude-max-3
+              app.kubernetes.io/name: broker-anthropic-claude-max-4
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -96,7 +82,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: broker
-          image: registry.chifor.me/agentforge/orchestrator@sha256:946153ed9e445e859f347bef877cfded45c52cb6b4d259fa1115665725c22189
+          image: registry.chifor.me/agentforge/orchestrator@sha256:ed59ca9277c9efae086503072f4080e15d9d43ac825885e57e5e5cc92ae5d2c1
           # ENTRYPOINT is ["tini","--"] + console script `agentforge`, so argv is the full `agentforge
           # broker` (composes to: tini -- agentforge broker).
           args: ["agentforge", "broker"]
@@ -104,7 +90,7 @@ spec:
             # This broker instance's identity = provider/account (design §3). A capability is accepted only
             # if its `aud` == this. Overrides (wins over) the account-agnostic envFrom ConfigMap below.
             - name: AF_BROKER_AUDIENCE
-              value: "anthropic/claude-max-3"
+              value: "anthropic/claude-max-4"
           envFrom:
             - configMapRef:
                 name: agentforge-broker-env # SHARED AF_BROKER_ non-secret knobs + non-secret ledger
@@ -155,15 +141,15 @@ spec:
       volumes:
         - name: broker-oauth
           secret:
-            secretName: broker-anthropic-claude-max-3-oauth
+            secretName: broker-anthropic-claude-max-4-oauth
             defaultMode: 0440
         - name: broker-kids
           secret:
-            secretName: broker-anthropic-claude-max-3-kids
+            secretName: broker-anthropic-claude-max-4-kids
             defaultMode: 0440
         - name: broker-ledger
           secret:
-            secretName: broker-anthropic-claude-max-3-ledger
+            secretName: broker-anthropic-claude-max-4-ledger
             defaultMode: 0440 # readable by uid 65532 via fsGroup; NEVER world-readable
         - name: tmp
           emptyDir:
@@ -173,17 +159,17 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: broker-anthropic-claude-max-3
+  name: broker-anthropic-claude-max-4
   namespace: agentforge-broker
   labels:
-    app.kubernetes.io/name: broker-anthropic-claude-max-3
+    app.kubernetes.io/name: broker-anthropic-claude-max-4
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: broker-anthropic-claude-max-3
+      app.kubernetes.io/name: broker-anthropic-claude-max-4
 ---
 # HEADLESS service (agentforge #55 activation barrier): resolves to the INDIVIDUAL broker pod IPs so
 # the openbao provisioner can poll EVERY replica's /internal/kid/<kid> before committing a kid's
@@ -194,10 +180,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: broker-anthropic-claude-max-3-headless
+  name: broker-anthropic-claude-max-4-headless
   namespace: agentforge-broker
   labels:
-    app.kubernetes.io/name: broker-anthropic-claude-max-3
+    app.kubernetes.io/name: broker-anthropic-claude-max-4
     app.kubernetes.io/component: broker
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
@@ -206,7 +192,7 @@ spec:
   clusterIP: None
   publishNotReadyAddresses: true
   selector:
-    app.kubernetes.io/name: broker-anthropic-claude-max-3
+    app.kubernetes.io/name: broker-anthropic-claude-max-4
   ports:
     - name: http
       port: 8700
@@ -219,20 +205,22 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: broker-anthropic-claude-max-3
+  name: broker-anthropic-claude-max-4
   namespace: agentforge-broker
   labels:
-    app.kubernetes.io/name: broker-anthropic-claude-max-3
+    app.kubernetes.io/name: broker-anthropic-claude-max-4
     app.kubernetes.io/component: broker
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
   type: ClusterIP
-  # NOT yet pinned: after the first apply, pin the assigned ClusterIP here AND allowlist it as
-  # a /32 in agentforge-sandbox/cilium-egress.yaml (Kata pods reach the broker by ClusterIP as
-  # `world`) — until then sandbox agents cannot reach this broker. See broker-anthropic-max1.yaml.
+  # PINNED: the Kata sandbox-agent Cilium egress policy allowlists this exact ClusterIP as a /32
+  # (agentforge-sandbox/cilium-egress.yaml) because Kata pods see the ClusterIP as `world` (off the
+  # socket-LB path). Pinning it keeps that /32 valid across a Service recreate — otherwise the agent
+  # silently loses broker reachability.
+  clusterIP: 10.96.0.193
   selector:
-    app.kubernetes.io/name: broker-anthropic-claude-max-3
+    app.kubernetes.io/name: broker-anthropic-claude-max-4
   ports:
     - name: http
       port: 8700
@@ -243,17 +231,17 @@ spec:
       targetPort: metrics
       protocol: TCP
 ---
-# broker-anthropic-claude-max-3-oauth (design §6) — the durable subscription OAuth for the anthropic/claude-max-3
+# broker-anthropic-claude-max-4-oauth (design §6) — the durable subscription OAuth for the anthropic/claude-max-4
 # account (property CLAUDE_CODE_OAUTH_TOKEN). Operator-owned OpenBao path
-# `af/data/operator/broker/anthropic/claude-max-3/oauth`, synced via the SHARED agentforge-broker-store
+# `af/data/operator/broker/anthropic/claude-max-4/oauth`, synced via the SHARED agentforge-broker-store
 # SecretStore. Reconciled by the ESO CONTROLLER (out-of-band); the broker only READS the mounted Secret.
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: broker-anthropic-claude-max-3-oauth
+  name: broker-anthropic-claude-max-4-oauth
   namespace: agentforge-broker
   labels:
-    app.kubernetes.io/name: broker-anthropic-claude-max-3
+    app.kubernetes.io/name: broker-anthropic-claude-max-4
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
@@ -265,23 +253,23 @@ spec:
     name: agentforge-broker-store
     kind: SecretStore
   target:
-    name: broker-anthropic-claude-max-3-oauth
+    name: broker-anthropic-claude-max-4-oauth
     creationPolicy: Owner
   dataFrom:
     - extract:
-        key: operator/broker/anthropic/claude-max-3/oauth
+        key: operator/broker/anthropic/claude-max-4/oauth
 ---
-# broker-anthropic-claude-max-3-kids (design §3/§7) — PUBLIC verify keys + per-kid ceilings ({"kids": {...}} JSON).
-# Operator keypair-controller publish path `af/data/operator/broker/anthropic/claude-max-3/kids` (property
+# broker-anthropic-claude-max-4-kids (design §3/§7) — PUBLIC verify keys + per-kid ceilings ({"kids": {...}} JSON).
+# Operator keypair-controller publish path `af/data/operator/broker/anthropic/claude-max-4/kids` (property
 # `registry.json`), synced into a single registry.json Secret key, mounted read-only at
 # AF_BROKER_KID_REGISTRY_PATH. The broker holds ONLY public halves — it can VERIFY but never MINT.
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: broker-anthropic-claude-max-3-kids
+  name: broker-anthropic-claude-max-4-kids
   namespace: agentforge-broker
   labels:
-    app.kubernetes.io/name: broker-anthropic-claude-max-3
+    app.kubernetes.io/name: broker-anthropic-claude-max-4
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
@@ -290,26 +278,26 @@ spec:
     name: agentforge-broker-store
     kind: SecretStore
   target:
-    name: broker-anthropic-claude-max-3-kids
+    name: broker-anthropic-claude-max-4-kids
     creationPolicy: Owner
   data:
     # the single kid-registry JSON document -> Secret key registry.json (mounted at the path above).
     - secretKey: registry.json
       remoteRef:
-        key: operator/broker/anthropic/claude-max-3/kids
+        key: operator/broker/anthropic/claude-max-4/kids
         property: registry.json
 ---
-# broker-anthropic-claude-max-3-ledger (design §5) — the open/reserve/reconcile-only agentforge_broker DSN (carries
+# broker-anthropic-claude-max-4-ledger (design §5) — the open/reserve/reconcile-only agentforge_broker DSN (carries
 # the password; NEVER placed in the ConfigMap). Operator path
-# `af/data/operator/broker/anthropic/claude-max-3/ledger` (key AF_BROKER_LEDGER_DSN), delivered as a
+# `af/data/operator/broker/anthropic/claude-max-4/ledger` (key AF_BROKER_LEDGER_DSN), delivered as a
 # file-mounted Secret at AF_BROKER_LEDGER_DSN_FILE. The reaper alone holds `close` (disjoint authority, §5).
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: broker-anthropic-claude-max-3-ledger
+  name: broker-anthropic-claude-max-4-ledger
   namespace: agentforge-broker
   labels:
-    app.kubernetes.io/name: broker-anthropic-claude-max-3
+    app.kubernetes.io/name: broker-anthropic-claude-max-4
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
@@ -318,12 +306,12 @@ spec:
     name: agentforge-broker-store
     kind: SecretStore
   target:
-    name: broker-anthropic-claude-max-3-ledger
+    name: broker-anthropic-claude-max-4-ledger
     creationPolicy: Owner
   data:
     - secretKey: AF_BROKER_LEDGER_DSN
       remoteRef:
-        key: operator/broker/anthropic/claude-max-3/ledger
+        key: operator/broker/anthropic/claude-max-4/ledger
         property: AF_BROKER_LEDGER_DSN
 ---
 # Per-account broker ingress + egress (design §8) — Cilium default-deny both directions; these rules are this
@@ -332,7 +320,7 @@ spec:
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: broker-anthropic-claude-max-3
+  name: broker-anthropic-claude-max-4
   namespace: agentforge-broker
   labels:
     app.kubernetes.io/managed-by: agentforge-operator
@@ -340,7 +328,7 @@ metadata:
 spec:
   endpointSelector:
     matchLabels:
-      app.kubernetes.io/name: broker-anthropic-claude-max-3
+      app.kubernetes.io/name: broker-anthropic-claude-max-4
   ingress:
     # (0) AgentForge control plane (Settings/subscriptions): read-only /readyz probe for the
     #     credential_generation rotation observation (contract C4).
@@ -360,6 +348,19 @@ spec:
             agentforge.io/pool: planner
             agentforge.io/org: tenant-zero
             agentforge.io/workspace: playground
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
+    # (1b) platform-dev/delivery subscription worker (tenant-zero) — its sandbox AGENT pods, matched on the
+    #      SAME STABLE per-pool/org/workspace identity labels as the playground admission above. Additive:
+    #      mirrors (1) exactly with pool=delivery / workspace=platform-dev; preserves the playground admission.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: agentforge-sandbox
+            agentforge.io/trust-class: agent
+            agentforge.io/pool: delivery
+            agentforge.io/org: tenant-zero
+            agentforge.io/workspace: platform-dev
       toPorts:
         - ports:
             - { port: "8700", protocol: TCP }

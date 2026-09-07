@@ -175,3 +175,47 @@ spec:
         - 169.254.169.254/32
         - 169.254.0.0/16
         - ::/0
+---
+# ==== BEGIN agentforge-cp managed block: broker ClusterIP /32 egress allows ====
+# RENDERED BY THE AGENTFORGE CONTROL PLANE — do not hand-edit. Every add/remove PR
+# re-emits this whole block from THE ENTRIES ALREADY IN THIS FILE plus the one account
+# it is changing; a hand-edit that is not a /32 entry FAILS that render rather than
+# being carried forward. Nothing reconciles this block against the control plane's
+# account inventory, so a DELETED entry is simply GONE: no later render brings it back,
+# and restoring it means re-adding the line by hand (or re-adding the account).
+#
+# One /32 per managed broker account: the address is allocated from the operator-reserved
+# AFP_BROKER_CLUSTERIP_POOL and pinned as `clusterIP:` on that account's Service in the
+# SAME change set, so a reviewer sees both halves of one fact and a revert takes both.
+#
+# READ THIS AS DEFENCE IN DEPTH, NOT AS THE LIVE PATH. A Kata sandbox pod is off Cilium's
+# socket-LB path and sees a ClusterIP as `world` — and `sandbox-agent-egress` above DENIES
+# the world entity, which Cilium evaluates with precedence over any allow in any policy.
+# So this toCIDR admits nothing today: agents reach their broker by POD IP, admitted by
+# ENDPOINT IDENTITY (`toEndpoints: app.kubernetes.io/component=broker` on 8700), which
+# already covers every new account automatically. This block pre-provisions the ClusterIP
+# path exactly, per host, for the day an operator narrows that egressDeny — and documents
+# which address belongs to which account meanwhile.
+#
+# ADDITIVE ONLY, and a SEPARATE object from the policies above so it can never widen the
+# trust-class=test zero-egress. Never a range, never the pool itself, which would hand
+# every agent everything in it.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-broker-clusterip-allow
+  namespace: agentforge-sandbox
+  labels:
+    app.kubernetes.io/managed-by: agentforge-control-plane
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      agentforge.io/trust-class: agent
+  egress:
+    - toCIDR:
+        - 10.96.0.193/32 # anthropic/claude-max-4
+      toPorts:
+        - ports:
+            - { port: "8700", protocol: TCP }
+# ==== END agentforge-cp managed block ====

@@ -31,3 +31,4 @@ resources:
   - broker-anthropic-max2.yaml # audience anthropic/claude-max-2 (upstream Anthropic)
   - broker-openai-codex.yaml   # audience openai/codex-pro (upstream OpenAI/ChatGPT)
   - broker-anthropic-claude-max-3.yaml # audience anthropic/claude-max-3
+  - broker-anthropic-claude-max-4.yaml # audience anthropic/claude-max-4
