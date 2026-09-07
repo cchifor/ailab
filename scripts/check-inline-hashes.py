@@ -10,7 +10,11 @@ no reloader/controller to keep them honest:
      value embedded in capability-kids-configmap.yaml. No reloader is
      installed, so this is what bumps the pod template (Recreate strategy) on
      any policy edit, forcing a re-read of the mounted file.
-  2. The content-addressed 10-hex suffix on the platform-dev NFS provisioner
+  2. The `checksum/config` pod-template annotation in litellm-local.yaml —
+     must equal sha256(config.yaml value)[:12]. LiteLLM reads its config only
+     at startup and no Reloader is installed, so a stale value silently leaves
+     the gateway serving the previous routing table.
+  3. The content-addressed 10-hex suffix on the platform-dev NFS provisioner
      Job's `metadata.name` (platform-dev-nfs-provisioner-job.yaml) — a Job's
      `spec.template` is immutable, so the suffix changes whenever the
      container image/args script changes, letting Flux prune+recreate the Job
@@ -156,11 +160,55 @@ def check_platform_dev_job_suffix() -> Site:
     return Site(job_path, expected, actual)
 
 
+
+def check_litellm_local_config_checksum() -> Site:
+    """checksum/config (litellm-local.yaml) vs a fresh sha256 of the
+    `config.yaml` value it stamps, in the SAME file.
+
+    Why this needs a gate: LiteLLM reads its mounted config only at startup and
+    there is no Reloader in-cluster, so this annotation is the ONLY thing that
+    rolls the gateway pod on a model_list edit. A stale value is a SILENT no-op
+    — the ConfigMap updates, Flux reports success, and the running proxy keeps
+    serving the previous routing table.
+
+    Not hypothetical: on 2026-09-07 the annotation read 31e15fbfa17c while the
+    documented recipe produced b76eae465448, so an earlier config edit had never
+    rolled the pod (23 days old) and half of the agentforge qwen3.6 traffic was
+    still being routed to a backend that no longer existed. This site exists so
+    that cannot recur silently.
+
+    Recipe (matches the comment above the annotation): the YAML-parsed
+    (dedented) `config.yaml` string value, UTF-8, including its single YAML-clip
+    trailing newline, sha256, truncated to 12 hex. Equivalent to the documented
+    `yq -r '... | .data."config.yaml"' litellm-local.yaml | sha256sum | cut -c1-12`.
+    """
+    path = REPO / "kubernetes/apps/apps/ai/litellm-local.yaml"
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r'checksum/config:\s*"([0-9a-f]{12})"', text)
+    if not m:
+        raise ValueError(f"checksum/config annotation not found in {path}")
+    expected = m.group(1)
+
+    raw_lines, content_indent = _literal_block(
+        text, re.compile(r"^[ ]*config\.yaml:\s*\|\s*$")
+    )
+    dedented = "".join("\n" if l.strip() == "" else l[content_indent:] for l in raw_lines)
+    # NOTE the extra newline, and do not "simplify" it away. The documented recipe pipes
+    # `yq -r` into sha256sum, and `yq -r` appends its OWN trailing newline to the string it
+    # prints - on top of the single newline YAML clip-chomping already leaves on a `|` block.
+    # So the bytes that recipe hashes are the value PLUS one more newline. Hashing the plain
+    # dedented value yields 4e99fb2996d1 where the recipe yields 64ae47a82bad, and this gate
+    # must agree with the recipe a human is told to run, not with a tidier interpretation.
+    actual = sha256_hex(dedented + "\n")[:12]
+    return Site(path, expected, actual)
+
+
 # Table of hash sites to verify. Add a `check_...() -> Site` function above
 # and append it here to cover a new site.
 SITES = [
     check_capability_kids_checksum,
     check_platform_dev_job_suffix,
+    check_litellm_local_config_checksum,
 ]
 
 
