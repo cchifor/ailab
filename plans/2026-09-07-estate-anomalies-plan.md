@@ -27,8 +27,17 @@ Plan: 10 to add, 0 to change, 0 to destroy.
 Proxmox cluster, separate repo). A `just runners` would have tried to create five VMs at vmids that
 already exist, three of them cloud-init'd onto another live cluster's addresses.
 `lifecycle { ignore_changes = [initialization] }` makes `ip` documentation-only for an *existing* VM,
-but **not at create time** — which is exactly the path an un-imported apply takes. This is the same
-mechanism that produced the 2026-09-03 Talos collisions.
+but **not at create time** — which is exactly the path an un-imported apply takes.
+
+This is a *related but distinct* trigger from the 2026-09-03 Talos near-collision. That one was stale
+`ipconfig0` metadata being re-applied **on reboot** after an in-guest renumber (`docs/network-plan.md`
+l.68-74); this is cloud-init applying a wrong address **at create time**. Same end state — a guest
+brought up on an address another cluster owns — reached two different ways. Do not conflate them when
+reasoning about which guard catches which.
+
+Note also that the plan proves *proposed* creates with unsafe addresses. Whether each create would
+succeed against an occupied VMID is untested and not worth testing; the point is that the module is
+one `just runners` away from attempting it.
 
 The 10 additions are **5 VMs + 5 `terraform_data.enable_guest_agent` resources** — importing the VMs
 alone does not account for the other five. W6 handles both.
@@ -72,6 +81,15 @@ load-bearing:
 
 W1-W4 can proceed in parallel with W6; only W5 is gated. Keep automatically-reconciled `apps/` commits
 separate from hand-applied `infra/` work so rollback boundaries stay clean.
+
+Two couplings to respect while sequencing:
+
+- **W2 and W4 edit the same file** — `velero/helmrelease.yaml` (tolerations at l.78 for W2, schedule
+  `excludedNamespaces` at l.159/168 for W4). Land them as one change to that file, or order them so
+  the second rebases cleanly; do not let two workstreams race it.
+- Many Kustomizations declare `dependsOn: infrastructure`, and `infrastructure` has `prune: true`.
+  A failed or wedged `infrastructure` reconciliation therefore stalls dependents, and object identity
+  in that layer matters (see W1).
 
 ### W1 — Stop scraping the wrong three machines (P1, no downtime)
 
@@ -217,9 +235,14 @@ Also update the stale file header, which still claims node1 and node2 both run q
     marker/idempotency check before requeuing, to avoid a duplicate external review.
   - `.24` (claude) platform#1095 — attempts exhausted against a Claude Max session limit. Requeue only
     after the allowance has reset, and confirm the review actually completes.
-  - Verify by successful processing, not by `reviewbot_quarantined_recent_jobs` reaching 0.
-  - Follow-up (separate): a rate limit should back off past the reset time rather than consume the
-    attempt budget.
+  - Verify by successful processing, not by `reviewbot_quarantined_recent_jobs` reaching 0 — that
+    gauge also falls on requeue or expiry without a review ever succeeding.
+  - **No follow-up needed for the rate-limit class** — correcting the first draft. `reviewbot.py`
+    already carries subscription rate-limit handling (`RATE_LIMIT_RE`, "a rate limit is a property of
+    the SUBSCRIPTION, not of the pull request"), added 2026-09-06 in response to this very incident.
+    Verified present on `gitea/main` **and deployed on both reviewer VMs** (.24 and .25). So the code
+    fix already shipped; job 435 was quarantined before it took effect. Confirm the deployed handler
+    actually covers this path before writing anything new.
 - **`ForgeProvisionerSeatEntitlementDrift`.** Three seats (`anthropic/claude-max-1`,
   `anthropic/claude-max-2`, `openai/codex-pro`, all `tenant-zero/playground`, kid
   `tz-213512e80fde7c84`) are granted in the broker kid registry but absent from
@@ -265,61 +288,108 @@ low-risk: higher guarantees plus guest boot peaks can force neighbours to reclai
 
 **W5.1 (first) — relieve capacity. REQUIRES EXPLICIT PER-ACTION APPROVAL BEFORE ANY GUEST IS STOPPED.**
 
-Move one guest off node2. Candidate destinations show 25 GiB (node1) and 22 GiB (node3) free, but a
-free-memory snapshot does **not** prove headroom for a guest with a 24 GiB ceiling plus overhead —
-budget source and destination *peak* demand, disk space, and host reserves before choosing. Likeliest
-candidate is one of the two out-of-band runners that landed on node2 on 08-25 (ci-runner-9 or
-ci-runner-10): most recent, most stateless, cheapest to recreate.
+Move one guest off node2. **Set the target first:** PVE's auto-balloon threshold is ~80 % of *actual
+host usage*, so node2 must fall from 120 GiB used to below **~99 GiB** (0.8 × 124) before ballooning
+resumes at all — plus margin. That is a ~21 GiB reduction, which is the bar any candidate must clear.
+A guest's 24 GiB *ceiling* is not the amount freed; measure its **resident** consumption.
+
+Candidate destinations show 25 GiB (node1) and 22 GiB (node3) free, but a free-memory snapshot does
+**not** prove headroom for the incoming guest's peak demand plus boot-time allocation — budget source
+release and destination peak, plus disk capacity, before choosing. Likeliest candidate is one of the
+two out-of-band runners that landed on node2 on 08-25 (ci-runner-9 or ci-runner-10): most recent,
+most stateless, cheapest to recreate.
 
 Do not assume a rebuild is required. Per-node `local-lvm` and `cpu: host` are the repo's stated
 reasons, but Proxmox supports offline migration with local-disk transfer; check storage-transfer
-support, CPU compatibility, and attached resources, then choose migration vs. offline migration vs.
-rebuild on evidence.
+support, CPU compatibility, passthrough devices, snapshots, and storage/network mappings, then choose
+live migration vs. offline migration vs. rebuild on evidence. If tofu is involved, inspect the actual
+planned action rather than assuming a `node_name` change forces replacement.
 
 If it is a rebuild, that is **replacement, not import** — so **W6 must complete first** (see below).
 The approved action needs: runner job draining, registration and address handoff, a hard prohibition on
 old and new guests holding the same IP simultaneously, and a tested return path. The standing
 per-action approval rule applies to any ai-node outage.
 
-**W5.2 (second) — set floors from a host-wide budget.** Only after relief is measured. Choose explicit
-floor values for dw2/dw5 from a budget that reserves host headroom, with stated abort thresholds and
-rollback instructions, codified in `dev_worker_nodes`.
+**W5.2 (second) — set floors from a host-wide budget.** Only after relief is measured.
 
-Verify the installed PVE version's live-vs-pending balloon behaviour rather than assuming a reboot is
-mandatory, and distinguish a configured minimum from the current allocation. If restarts are needed:
-**drain active dev-worker work first** (these hosts carry long-lived tmux sessions and agentforge
-jobs — a restart is disruptive to users even though the hypervisor stays up, so "no cluster impact" is
-not the same as "no impact"), and restart one guest at a time.
+State **exact MiB values** for dw2 and dw5 and the combined increase — the risk cannot be assessed
+otherwise. Derive them from a budget covering every guest floor plus non-balloonable memory
+(talos-cp2, agent-node-2, env-node-1 are fixed) and the ai-llm-2 LXC, reserving explicit host
+headroom, with stated abort thresholds and rollback. Do not simply inherit node1's 12 GiB figure;
+re-assess whether higher floors are even needed once W5.1 has relieved the host.
+
+**A reboot is not required** — correcting the first draft. `docs/runbooks/dev-workers.md` documents
+the procedure that has now worked twice: raise the floor with `qm set <vmid> --balloon <MiB>` so
+pvestatd cannot re-pin, then **force-inflate live** via `qm monitor <vmid>` → `balloon <MiB>`.
+`qm set` alone never inflates a running guest, which is the part the first draft mistook for "reboot
+required". Codify the value in `dev_worker_nodes` so the next apply keeps it.
+
+If a restart is nonetheless chosen, **drain active dev-worker work first** — these carry long-lived
+tmux sessions and agentforge jobs, so a restart is disruptive to users even though the hypervisor
+stays up ("no cluster impact" is not "no impact") — and restart one guest at a time.
+
+Observe the runbook's **time-share rule** while sizing: a node serves *either* its on-demand
+heavyweight *or* its two workers at full tilt, not both. If node2 pressure persists after relief,
+unloading ai-llm-2's heavyweight or shortening its llama-swap TTL is the cheaper lever than raising
+floors further.
 
 ### W6 — Bring the out-of-band guests under IaC (prerequisite, not optional)
 
-Five runners (4106-4110), the env-node (4401), and the two reviewer VMs (4501-4502) exist with no tofu
-state. **Completion of runner-module state reconciliation is a prerequisite for every subsequent
+**Completion of runner-module state reconciliation is a prerequisite for every subsequent
 runners-module apply, including W5.1's rebuild option.** W1-W4 and the P0 containment do not depend on
 it and can proceed in parallel.
 
-Sequence, in a controlled local checkout with applies disabled throughout:
+#### The trap that makes a naive import dangerous
 
-1. Confirm the correct module, its pinned provider, the ailab endpoint, and the active backend; back
-   up `terraform.tfstate` securely and hold the lock against concurrent writers. Treat state and its
-   backups as **sensitive** — never print their contents.
-2. **Configure before importing.** OpenTofu requires matching configuration for the target address, so
-   enable **only** the one `for_each` key being imported, with its verified address and live settings.
-   Enabling all five at once makes intermediate plans propose creating the remaining four.
-3. Import that instance, confirming the provider's expected import-ID format:
+`kubernetes/infra/runners/guest-agent.tf` declares `terraform_data.enable_guest_agent` with
+`for_each = var.runner_nodes`, and its create-time `local-exec` provisioner **POSTs to the Proxmox
+`/status/reboot` endpoint** — deliberately, because a cold reboot is what makes PVE attach the
+virtio-serial channel the guest agent needs.
+
+Consequence: importing the five **VMs** is *not* sufficient. Each enabled key also wants a
+`terraform_data` resource, and creating it **reboots a live CI runner**. Those five resources are the
+other half of `Plan: 10 to add`. Never apply ancillary creates just to make the next plan quiet —
+that would reboot five production runners mid-CI. Either recover/import the helper state, or make
+adoption explicitly bypass the create-time side effect, and confirm which before any apply.
+
+#### The env-node and reviewer VMs already have state — elsewhere
+
+Correcting the first draft: these are **not** stateless. `kubernetes/infra/env-pool/backend.tf` and
+`kubernetes/infra/reviewers/backend.tf` both record that the module was first applied **from a
+session scratchpad clone** (a worktree-isolated session could not write the main checkout), and that
+the authoritative `terraform.tfstate` must be handed over to the main checkout after merge. The
+reviewers backend carries an explicit standing instruction: **"Until then, do not apply from the main
+checkout."**
+
+So the task there is *state handover*, not import: locate and validate the scratchpad state, move it
+with the directory, `tofu init` at the new path, and verify a no-op plan. Importing into a second
+state while an authoritative one exists elsewhere would create a split-brain. These are also separate
+root modules with extra resources — env-pool applies Talos config plus Kubernetes labels/taints,
+reviewers includes an image resource — so the runner recipe below does not transfer to them.
+
+#### Runner adoption sequence
+
+In a controlled local checkout, with applies frozen and concurrent writers excluded:
+
+1. Confirm the root module, pinned provider, backend/workspace, tfvars, and PVE endpoint. Take a
+   protected backup of `terraform.tfstate` before each import and keep normal locking — note these
+   are **local** backends, so a lock in one worktree does not protect a copy in another. Treat state,
+   backups, and plan files as **sensitive**; never print their contents.
+2. **Configure, then import immediately, with no apply in between.** A commented-out key is not a
+   valid import target, so add the corrected entry to the effective configuration first. Enable one
+   key at a time so intermediate plans do not propose creating the remaining four.
+3. Import, confirming the provider's expected ID format:
    ```
    tofu import 'proxmox_virtual_environment_vm.runner["ci-runner-6"]' ai-node3/4106
    ```
-4. Verify the imported VM's identity and reconcile sizing, disks, placement, networking, and lifecycle
-   against the live guest. **Stop on any unexpected create, update, destroy, or replace.**
-5. Repeat for the next key. Also account for the **five `terraform_data.enable_guest_agent` resources**
-   that made up the other half of `Plan: 10 to add` — decide per resource whether it is imported or
-   legitimately created.
-6. Finish with a **full, non-targeted** `tofu plan` with all intended entries enabled, expecting
-   `No changes`.
-
-Give the env-node and reviewer VMs their own verified resource addresses and state locations; they are
-not part of the runners module.
+4. **Keep each successfully imported entry enabled** — re-commenting it afterwards would plan a
+   destroy.
+5. Verify identity and reconcile *all* live settings, not just sizing — disks, placement, networking,
+   lifecycle — and mind the module's shared CPU/memory/disk defaults so reconciling one import does
+   not silently resize ci-runner-1..5. **Stop on any unexpected create, update, destroy, or replace.**
+6. Repeat per key, resolving the matching `terraform_data.enable_guest_agent` each time per the trap
+   above.
+7. Finish with a **full, non-targeted** plan in each affected root module, expecting `No changes`.
 
 **Caveat on the no-change check:** because `lifecycle { ignore_changes = [initialization] }` hides
 `ipconfig0`, a clean plan cannot validate those fields. Separately compare each guest's recorded
@@ -342,6 +412,8 @@ require manual review before any later apply.
 | Path | Role |
 |---|---|
 | `kubernetes/infra/runners/variables.tf` | P0 contained in `7ab78e79`; W6 configures-then-imports, one key at a time |
+| `kubernetes/infra/runners/guest-agent.tf` | W6 — `terraform_data.enable_guest_agent` **reboots the VM on create**; must be resolved before any apply |
+| `kubernetes/infra/env-pool/backend.tf`, `kubernetes/infra/reviewers/backend.tf` | W6 — authoritative state lives in scratchpad clones; handover, not import. Reviewers says "do not apply from the main checkout" |
 | `docs/network-plan.md` | IPAM registry; landed in `7ab78e79`, source of truth for every address above |
 | `kubernetes/apps/infrastructure/monitoring/ci-runners-node.yaml` | W1 — Endpoints `.20-.22` → `.29-.31` (submit full `subsets`) |
 | `kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml` | W1 — PVE-host tripwire + expected-nodename assertion |
@@ -387,12 +459,19 @@ Evidence before assertions. Note that "an alert stopped firing" is never suffici
   **sustained** relief on node2 and adequate destination headroom under representative load before
   retiring rollback resources.
 - **W5.2:** judge by sustained available memory, swap and major-fault **rates** (not cumulative
-  totals), and PSI pressure across a representative workload — `actual` may legitimately exceed the
-  configured floor, and swap occupancy need not fall promptly once pressure subsides. Observe node2
-  and its neighbours (especially talos-cp2) throughout, with explicit abort thresholds.
+  totals), and PSI pressure across a representative workload — the floor is a lower bound, so
+  `actual` may legitimately exceed it; confirm the allocation sits within the configured range and
+  the setting persists. Use the real metric name `node_memory_SwapFree_bytes`, and do not read a
+  reboot's counter reset as recovery. Observe node2 and its neighbours (especially talos-cp2 and etcd
+  health) under representative CI/backup load, with explicit abort thresholds — a single host `free`
+  sample proves nothing.
 - **W6:** after each import, verify the VM's identity and every associated planned resource; finish
-  with a full non-targeted `No changes` plan across each affected module. Confirm no guest restarted or
-  was replaced.
+  with a full non-targeted `No changes` plan **in each affected root/state**, not just `runners`.
+  Reject unexpected creates, replacements, updates or destroys rather than applying them to obtain a
+  later no-op — the `terraform_data.enable_guest_agent` create reboots a live runner. Confirm no
+  guest restarted or was replaced. Because `initialization` is ignored, separately compare each
+  declared IP against live guest networking **and** Proxmox `ipconfig0`/cloud-init metadata; a no-op
+  plan cannot verify those fields, and that gap is exactly what bit the estate on 2026-09-03.
 
 Cluster-wide gate: for each Flux Kustomization, `status.lastAppliedRevision` equals the merged commit
 (a stale `True` condition can describe an older revision) and affected HelmReleases report a completed
