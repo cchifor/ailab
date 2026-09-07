@@ -142,6 +142,20 @@ data:
           api_base: http://192.168.0.28:8083/v1
           api_key: "sk-noauth"
         model_info: { max_input_tokens: 57344 }
+      # ---- cloud2 vLLM (W4A16 + MTP speculative decoding), ONE RTX 3090 ---------------------
+      # syv-ai/qwen38-27b-rtx3090 recipe: int4 AutoRound body, int8 lm_head/embed, MTP drafts.
+      # MEASURED 2026-09-07 on cloud2 GPU0: 110-123 tok/s single-user vs 32.4 for the llama.cpp
+      # instances above -- 3.6x, on ONE card instead of three, at 21.5 GiB / 250 W.
+      # Kept under its OWN model_name (not pooled with qwen3.8-27b-cloud) because the backends are
+      # not interchangeable: different engine and different throughput, so pooling them would let
+      # LiteLLM silently route a request to a 3x slower backend with no way to tell which answered.
+      # Host CTX=fast => max_model_len 65536; minus ~8K output headroom = 57344, same as above.
+      - model_name: qwen3.8-27b-vllm
+        litellm_params:
+          model: openai/qwen3.8-27b
+          api_base: http://192.168.0.28:18020/v1
+          api_key: "sk-noauth"
+        model_info: { max_input_tokens: 57344 }
       # ---- COGNITIVE TIER: cloud3, three GPUs pooled ------------------------------------------
       # Qwen3-Coder-Next: 80B MoE with only 3B ACTIVE. MEASURED 102.3 tok/s at 493 W here, versus
       # 32.4 tok/s at 636 W for the 27B dense and 16.6 tok/s for the 122B — decode speed tracks
