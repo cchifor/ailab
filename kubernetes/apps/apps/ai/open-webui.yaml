@@ -167,7 +167,7 @@ spec:
             # Belt-and-suspenders: any task that DOES fire (web-search / retrieval / image query generation,
             # only when those features are used) is routed to the fastest local model — NEVER the
             # slow 122b. LiteLLM models are OpenAI-compatible, so OWUI uses TASK_MODEL_EXTERNAL (not TASK_MODEL).
-            - { name: TASK_MODEL_EXTERNAL, value: "qwen3-coder-30b-a3b" }
+            - { name: TASK_MODEL_EXTERNAL, value: "qwen3.8-27b-vllm-fast" }
           volumeMounts:
             - { name: data, mountPath: /app/backend/data }
           readinessProbe:

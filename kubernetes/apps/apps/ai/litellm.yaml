@@ -123,6 +123,32 @@ data:
             top_k: 20
             chat_template_kwargs: { reasoning_effort: xhigh }
         model_info: { supports_vision: true, max_input_tokens: 81920 }
+      # qwen3.8-27b-vllm-fast — SAME cloud2 engine, thinking OFF. Exists for Open WebUI's
+      # TASK_MODEL_EXTERNAL (chat titles, tags, retrieval query generation), which needs a backend that
+      # is fast AND always warm. Review of PR #524 correctly flagged that pointing the task model at
+      # qwen3-coder-30b-a3b moved it onto a TTL-unloading llama-swap host, so a title could pay a cold
+      # model load. This route removes that: the vLLM service on :18020 is a persistent systemd unit,
+      # always resident, so there is no swap to wait for.
+      # enable_thinking:false is the whole point -- the main qwen3.8-27b-vllm route runs xhigh, which
+      # spends 15,996-38,897 reasoning tokens per answer. Generating a four-word chat title through that
+      # would be absurd. max_tokens is capped here for the same reason.
+      # NOTE it is enable_thinking:false, NOT reasoning_effort:'off'. There is no 'off' rung: the chat
+      # template hard-rejects anything outside xhigh/medium/low and returns
+      #   400 "Unexpected reasoning effort off. Supported types are xhigh (default), medium, and low."
+      # Verified against the live endpoint 2026-09-07: enable_thinking:false -> reasoning_tokens=0.
+      # No extra VRAM: same engine, same weights, different sampling.
+      - model_name: qwen3.8-27b-vllm-fast
+        litellm_params:
+          model: openai/qwen3.8-27b
+          api_base: http://192.168.0.28:18020/v1
+          api_key: "sk-noauth"
+          temperature: 0.7
+          top_p: 0.8
+          max_tokens: 512
+          extra_body:
+            top_k: 20
+            chat_template_kwargs: { enable_thinking: false }
+        model_info: { max_input_tokens: 81920 }
       # ---- COGNITIVE TIER: cloud3 ---------------------------------------------------------------
       # qwen3-coder-next REPOINTED 2026-09-07: that model_name no longer exists. cloud3's llama-swap
       # serves exactly two models (qwen3-coder-30b-a3b, qwen3.8-27b) and the weights for a
