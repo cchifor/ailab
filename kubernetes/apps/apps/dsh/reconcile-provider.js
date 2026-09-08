@@ -20,22 +20,24 @@
 // explanatory comment in the file, and there is no YAML parser in this init container -- it is a
 // bare node:22-alpine with only /seed and /dsh-home mounted.
 //
-// THREE ROBUSTNESS PROPERTIES, each one a review finding against an earlier draft:
+// ROBUSTNESS. This parses a file ANOTHER COMPONENT OWNS AND REWRITES, so every rule below exists
+// because a review found the earlier draft could corrupt it:
 //
-//   1. The path is WALKED, not string-matched. Searching the whole file for the first four-space
-//      `litellm:` would rewrite an unrelated section that happened to carry that key, while
-//      leaving the real provider stale -- the exact opposite of the point. Each level below is
-//      scoped to its parent's block.
-//   2. Keys are matched by regex with the indent DERIVED, not asserted. The Settings UI owns this
-//      file and may re-serialise it; hinging the reconcile on byte-exact leading whitespace and no
-//      trailing space is a needless single point of failure.
-//   3. A live file we cannot understand is a WARNING, not a fatal. This runs in an initContainer
-//      under `set -eu`, so a non-zero exit puts dsh into CrashLoopBackOff -- a harder outage than
-//      the stale-model bug being fixed. If the UI re-serialises settings.yaml into a shape this
-//      cannot walk, the right move is to leave it alone and let dsh boot. The SEED check stays
-//      fatal: that file is ours and version-controlled, so a malformed one is our error and must
-//      fail loudly on rollout rather than silently skipping the reconcile and reintroducing the
-//      very bug this exists to prevent.
+//   1. DIRECT CHILDREN ONLY, never arbitrary descendants. The root must sit at column 0, and each
+//      later step must match at exactly its parent's child indent. Accepting any deeper match let
+//      a nested `llm-pi-ai.metadata.providers.litellm` be selected and overwritten while the real
+//      provider stayed stale -- the exact failure this script exists to prevent. Requiring the
+//      exact depth also skips nested subtrees for free, since they are deeper.
+//   2. INDENT IS DERIVED ON READ, AND APPLIED ON WRITE. Keys are matched by regex with the live
+//      file's own indentation, because the UI may re-serialise. The seed block is then RE-INDENTED
+//      to the live block's depth before splicing: without that, a live file at 2-space and a seed
+//      at 4-space would splice `litellm:` at the depth of its own parent, moving it out of the
+//      mapping and invalidating the sibling providers.
+//   3. AN UNWALKABLE LIVE FILE IS A WARNING, NOT A FATAL. This runs in an initContainer under
+//      `set -eu`, so a non-zero exit puts dsh into CrashLoopBackOff -- a harder outage than the
+//      stale-model bug being fixed. The SEED check stays fatal: that file is ours and
+//      version-controlled, so a malformed one is our error and must fail on rollout rather than
+//      silently skip the reconcile and reintroduce the bug.
 const fs = require('fs');
 
 // Overridable purely so this can be exercised against a copy of a real settings.yaml before it is
@@ -48,15 +50,14 @@ const PATH = ['llm-pi-ai', 'providers', 'litellm'];
 
 const indentOf = (l) => l.length - l.trimStart().length;
 const isComment = (l) => l.trimStart().startsWith('#');
+const isBlank = (l) => l.trim() === '';
 
-// First line in [from, to) that is `<indent><key>:` with indent strictly deeper than the parent.
-function findKey(lines, key, parentDepth, from, to) {
-  const re = new RegExp('^( *)' + key + ':[ \\t]*$');
-  for (let i = from; i < to; i++) {
-    const m = re.exec(lines[i]);
-    if (m && m[1].length > parentDepth) return { index: i, depth: m[1].length };
-  }
-  return null;
+// Match `<exactly depth spaces><key>:` within [from, to). Exact depth is what confines the walk
+// to direct children (rule 1); anything nested is deeper and therefore skipped.
+function findKeyAt(lines, key, depth, from, to) {
+  const re = new RegExp('^ {' + depth + '}' + key + ':[ \\t]*$');
+  for (let i = from; i < to; i++) if (re.test(lines[i])) return i;
+  return -1;
 }
 
 // End (exclusive) of the block headed at `start`. A deeper-indented line continues the block.
@@ -70,30 +71,56 @@ function blockEnd(lines, start, depth, to) {
   let end = start + 1;
   while (end < to) {
     const l = lines[end];
-    if (l.trim() === '') { end++; continue; }
+    if (isBlank(l)) { end++; continue; }
     if (indentOf(l) > depth) { end++; continue; }
     if (isComment(l)) {
       let k = end;
-      while (k < to && (lines[k].trim() === '' || isComment(lines[k]))) k++;
+      while (k < to && (isBlank(lines[k]) || isComment(lines[k]))) k++;
       if (k < to && indentOf(lines[k]) > depth) { end = k; continue; }
     }
     break;
   }
-  while (end > start + 1 && lines[end - 1].trim() === '') end--;
+  while (end > start + 1 && isBlank(lines[end - 1])) end--;
   return end;
 }
 
-// Walks PATH from the file root, each level bounded by its parent's block.
-function resolve(lines, path) {
-  let from = 0, to = lines.length, parentDepth = -1, range = null;
-  for (let d = 0; d < path.length; d++) {
-    const hit = findKey(lines, path[d], parentDepth, from, to);
-    if (!hit) return { range: null, failedAt: path.slice(0, d + 1).join(' > ') };
-    const end = blockEnd(lines, hit.index, hit.depth, to);
-    range = [hit.index, end];
-    from = hit.index + 1; to = end; parentDepth = hit.depth;
+// Indent of the first real (non-blank, non-comment) child inside a block, or null if it has none.
+function childIndent(lines, start, end) {
+  for (let i = start + 1; i < end; i++) {
+    if (isBlank(lines[i]) || isComment(lines[i])) continue;
+    return indentOf(lines[i]);
   }
-  return { range, failedAt: null };
+  return null;
+}
+
+// Walks PATH as DIRECT children. Returns { range, depth, failedAt }.
+function resolve(lines, path) {
+  let from = 0, to = lines.length, depth = 0, range = null;
+  for (let d = 0; d < path.length; d++) {
+    const at = findKeyAt(lines, path[d], depth, from, to);
+    if (at === -1) return { range: null, depth: null, failedAt: path.slice(0, d + 1).join(' > ') };
+    const end = blockEnd(lines, at, depth, to);
+    range = [at, end];
+    if (d < path.length - 1) {
+      const ci = childIndent(lines, at, end);
+      if (ci === null || ci <= depth) {
+        return { range: null, depth: null, failedAt: path.slice(0, d + 2).join(' > ') };
+      }
+      from = at + 1; to = end; depth = ci;
+    }
+  }
+  return { range, depth, failedAt: null };
+}
+
+// Shift a block's indentation by `delta` columns (rule 2). Blank lines stay blank.
+function reindent(block, delta) {
+  if (delta === 0) return block.slice();
+  return block.map((l) => {
+    if (isBlank(l)) return l;
+    if (delta > 0) return ' '.repeat(delta) + l;
+    const strip = Math.min(-delta, indentOf(l));
+    return l.slice(strip);
+  });
 }
 
 if (!fs.existsSync(LIVE)) {
@@ -111,33 +138,42 @@ if (!seed.range) {
   process.exit(1);
 }
 const seedBlock = seedLines.slice(seed.range[0], seed.range[1]);
+const ids = (b) => b.filter((l) => /^\s*- id:/.test(l)).map((l) => l.trim().replace(/^- id:\s*/, ''));
 
 const live = resolve(liveLines, PATH);
 let out;
 if (live.range) {
+  const block = reindent(seedBlock, live.depth - seed.depth);
   const liveBlock = liveLines.slice(live.range[0], live.range[1]);
-  if (liveBlock.join('\n') === seedBlock.join('\n')) {
+  if (liveBlock.join('\n') === block.join('\n')) {
     console.log('litellm provider already matches the seed');
     process.exit(0);
   }
-  const ids = (b) => b.filter((l) => /^\s*- id:/.test(l)).map((l) => l.trim().replace(/^- id:\s*/, ''));
   console.log('reconciling litellm provider from the seed');
   console.log('  was:', ids(liveBlock).join(', ') || '(none)');
-  console.log('  now:', ids(seedBlock).join(', ') || '(none)');
-  out = [...liveLines.slice(0, live.range[0]), ...seedBlock, ...liveLines.slice(live.range[1])];
+  console.log('  now:', ids(block).join(', ') || '(none)');
+  if (live.depth !== seed.depth) console.log('  re-indented seed block by', live.depth - seed.depth);
+  out = [...liveLines.slice(0, live.range[0]), ...block, ...liveLines.slice(live.range[1])];
 } else {
-  // No litellm provider. Insert under the CORRECT providers block -- the one inside llm-pi-ai.
+  // No litellm provider. Insert under the CORRECT providers block -- the one inside llm-pi-ai --
+  // at that block's own child indent, not the seed's.
   const parent = resolve(liveLines, PATH.slice(0, -1));
   if (!parent.range) {
-    // WARN, not fatal: see robustness note 3. dsh boots with whatever it already has.
+    // WARN, not fatal: see rule 3. dsh boots with whatever it already has.
     console.warn('WARNING: settings.yaml has no ' + parent.failedAt + '; leaving it untouched.');
     console.warn('         The litellm provider was NOT reconciled. If dsh lists stale models,');
     console.warn('         this file has a shape this script cannot walk -- fix it by hand.');
     process.exit(0);
   }
+  // Prefer an existing sibling's indent; with no siblings, step in by the file's own step size.
+  const sib = childIndent(liveLines, parent.range[0], parent.range[1]);
+  const step = parent.depth > 0 ? parent.depth : 2;
+  const target = sib !== null && sib > parent.depth ? sib : parent.depth + step;
+  const block = reindent(seedBlock, target - seed.depth);
   console.log('litellm provider missing from llm-pi-ai.providers; inserting it from the seed');
+  console.log('  at indent', target);
   const at = parent.range[0];
-  out = [...liveLines.slice(0, at + 1), ...seedBlock, ...liveLines.slice(at + 1)];
+  out = [...liveLines.slice(0, at + 1), ...block, ...liveLines.slice(at + 1)];
 }
 
 fs.writeFileSync(LIVE, out.join('\n'));
