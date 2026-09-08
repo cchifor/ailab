@@ -75,6 +75,12 @@ spec:
               # patchReload MUST NOT be "live" in a container or dsh crash-loops on FIRST boot.
               # MEASURED, not guessed -- see fix-profile.js for the mechanism and the evidence.
               mkdir -p /dsh-home/profiles/web
+              # Reinstalled UNCONDITIONALLY: this patch layer is entirely ours, nothing in the app
+              # writes it, and it is what keeps the browser session from expiring after 30 days AND
+              # keeps trustedHosts populated. It lived only on the PVC until 2026-09-08, where a
+              # volume rebuild would have silently reverted both. install -m 0644, not cp, for the
+              # same 0444-ConfigMap-mode reason as settings.yaml above.
+              install -m 0644 /seed/cordis.patch.yml /dsh-home/profiles/web/cordis.patch.yml
               node /seed/fix-profile.js
           volumeMounts:
             - { name: home, mountPath: /dsh-home }

@@ -1,0 +1,41 @@
+# dsh profile patch layer, applied after every bundle layer. Installed to
+# $DSH_HOME/profiles/web/cordis.patch.yml by the seed-settings initContainer on
+# every boot.
+#
+# WHY THIS IS IN GIT. It was created by hand on the PVC on 2026-09-07 and lived
+# ONLY there until 2026-09-08. That made it invisible and fragile: recreating the
+# dsh-home volume would silently revert the browser session to a 30-day expiry
+# AND drop trustedHosts, which 403s every proxied request. Exactly the
+# unmanaged-state problem that left dsh advertising four dead model ids after a
+# rename. It is GitOps-owned now and reinstalled unconditionally each boot, so
+# the volume can be rebuilt without losing it.
+#
+# WHAT IT FIXES. dsh authenticates the browser with a per-process launch token
+# printed at startup (`dsh web: http://127.0.0.1:3080/?token=...`). Opening the
+# app without it returns
+#     dsh web authentication required; reopen the URL printed by dsh web.
+# A valid token on GET / mints a signed cookie and thereafter the token is not
+# needed. Two separate secrets are involved and they behave very differently:
+#   * the LAUNCH TOKEN is randomBytes held in an in-memory WeakMap, so it changes
+#     on every pod restart and cannot be pinned (there is no --token flag and no
+#     env override);
+#   * the COOKIE SIGNING SECRET is persisted in $DSH_HOME/.credentials.yaml, so
+#     cookies SURVIVE restarts. Only their own expiry ends them.
+# cookieMaxAgeDays therefore decides how often a human has to go and read the
+# token out of the pod logs. The default is 30 days; 3650 makes it effectively
+# once per browser. That is defensible here because Cloudflare Access already
+# authenticates every request per-person at the edge and the NetworkPolicy admits
+# only the cloudflared pod, so this cookie is a second layer rather than the
+# control. Revocation exists: delete the client-connection/browser-session record
+# from .credentials.yaml and every outstanding cookie is void on next activation.
+#
+# BOTH KEYS ARE RE-SPECIFIED DELIBERATELY. A patch REPLACES an entry's config
+# rather than merging into it (the loader's replaceKeys deletes every key before
+# assigning), so omitting trustedHosts here would not "keep the default" -- it
+# would erase the authorities the /api browser-trust fence checks and 403 every
+# request arriving through cloudflared. The upstream bundle comment documents the
+# same idiom: a deployment adding authorities keeps this expression.
+- id: connection
+  config:
+    trustedHosts: !!js ctx.webRuntime.trustedHosts
+    cookieMaxAgeDays: 3650
