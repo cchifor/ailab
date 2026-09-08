@@ -33,3 +33,4 @@ llm-pi-ai:
         - id: qwen3.8-27b-vllm-fast-cloud
         - id: qwen3-coder-30b-a3b-cloud
         - id: qwen3.5-122b-cloud
+        - id: qwen3.8-flash-next-cloud

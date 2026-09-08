@@ -172,6 +172,29 @@ data:
           api_base: http://192.168.0.26:8080/v1
           api_key: "sk-noauth"
         model_info: { max_input_tokens: 122880 }
+      # qwen3.8-flash-next — the PLANNING tier, added 2026-09-08. 80B-class MoE with few active
+      # params, which is what makes a long-context planner usable: decode speed tracks ACTIVE
+      # parameters, not total. MEASURED on cloud3: 59.8 tok/s generation, 128 tok/s prompt eval,
+      # 13.7 s cold load, 74.1 GiB of 96 GiB VRAM fully resident (nothing spills to host RAM).
+      #
+      # It runs on a SEPARATE llama.cpp build on the host (b10857) because the daily-driver build
+      # there predates this architecture and rejects it with "unknown model architecture:
+      # 'qwen4exp'". That is a serving-side detail — see cloudlab host/llama-swap.yaml — but it
+      # is why this model appeared later than the other three on the same endpoint.
+      #
+      # host -c 262144 --parallel 1, so the whole 256K window serves ONE request; minus 32768
+      # output headroom = 229376. The window is large because it is nearly free on this
+      # architecture: 4x the context cost 11.6 GiB and no measurable speed change.
+      - model_name: qwen3.8-flash-next-cloud
+        litellm_params:
+          model: openai/qwen3.8-flash-next
+          api_base: http://192.168.0.26:8080/v1
+          api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+          extra_body:
+            top_k: 20
+        model_info: { max_input_tokens: 229376 }
       # qwen3.8-27b — the quality tier, ON-DEMAND on node1 (.44) :8082 via its own llama-swap
       # instance, in the slot gemma-4 used to hold. 27B DENSE (not MoE), so every token reads all 27B
       # params: a MEASURED 9.3 tok/s vs qwen3.6's ~50. That is inherent to a dense model on a
@@ -367,7 +390,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "b2f935c5322b"
+        checksum/config: "1bf3ad1c4fb9"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
