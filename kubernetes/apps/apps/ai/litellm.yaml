@@ -1,7 +1,9 @@
 # LiteLLM proxy: one OpenAI-compatible endpoint (litellm.ai.svc:4000/v1) that routes by
 # model name to the per-node llama-server backends. node3 (llama-swap) served ONLY qwen3.5-122b until
-# 2026-09-08; that model moved to the cloudlab estate (cloud3), so node3 now carries NO managed model
-# and the local heavyweight tier is empty. gpt-oss-120b is retired locally (it thrashed
+# 2026-09-08; that model moved to the cloudlab estate (cloud3), so node3 is no longer a routed backend
+# HERE. That is a statement about this router's config, NOT about node3's capacity: its llama-swap
+# stays up and keeps serving the 122b until the four gates in llm-service.yaml pass, so the slot is
+# not yet reclaimable -- see the DO NOT REPURPOSE note in ai-lxc/models.yaml. gpt-oss-120b is retired locally (it thrashed
 # node3's single iGPU against qwen3.5-122b) and its model_name is shimmed to the pinned qwen3.6 (below).
 # See kubernetes/infra/ai-lxc + docs/runbooks/ai-model-swap.md.
 apiVersion: v1
