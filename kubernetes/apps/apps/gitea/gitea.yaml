@@ -64,6 +64,18 @@ spec:
       # to 20Gi drops usage to ~45% and clears the alert with headroom. The ~4.9 GiB DB is dominated by
       # Actions logs stuck in-DB (DBFS) — bounded via LOG_RETENTION_DAYS below, not by VACUUM.
       size: 20Gi
+    # The Actions storage PVC (actions-storage.yaml), mounted only into the RUNTIME container —
+    # extraContainerVolumeMounts, not the deprecated extraVolumeMounts, so the chart's init
+    # containers are untouched. Mounted at /data-actions rather than under /data, which is the main
+    # PVC: nesting one volume inside another works but makes the two lifecycles look like one, and
+    # these are separate claims that can be resized or replaced independently.
+    extraVolumes:
+      - name: actions-storage
+        persistentVolumeClaim:
+          claimName: gitea-actions-storage
+    extraContainerVolumeMounts:
+      - name: actions-storage
+        mountPath: /data-actions
     service:
       http: { type: ClusterIP, port: 3000 }
       ssh: { type: ClusterIP, port: 22 }
@@ -95,21 +107,11 @@ spec:
         enabled: true
         serviceMonitor:
           enabled: false
-      # S3 artifact/log offload (ADR 0017): credentials injected as GITEA__ env overrides, merged into
-      # the [storage.actions_s3] section below. Env-to-ini escaping: '.' -> _0X2E_, '__' is the
-      # section/key separator, a single '_' is literal (section [storage.actions_s3]). Keys come from
-      # the SOPS secret gitea-actions-s3 (versitygw `gitea` user, scoped to the gitea-actions bucket).
+      # Env overrides for values that must not sit in the plaintext config. The two
+      # GITEA__storage_0X2E_actions_s3__MINIO_* entries that used to head this list are gone with the
+      # S3 backend (W1); the gitea-actions-s3 secret is deliberately LEFT IN PLACE so the rollback
+      # below is a one-file revert rather than a secret restore.
       additionalConfigFromEnvs:
-        - name: GITEA__storage_0X2E_actions_s3__MINIO_ACCESS_KEY_ID
-          valueFrom:
-            secretKeyRef:
-              name: gitea-actions-s3
-              key: access-key
-        - name: GITEA__storage_0X2E_actions_s3__MINIO_SECRET_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: gitea-actions-s3
-              key: secret-key
         # [metrics] TOKEN — required in the Authorization: Bearer header to read /metrics (the endpoint is
         # internet-reachable via the CF tunnel). The ServiceMonitor sends the same secret value.
         - name: GITEA__metrics__TOKEN
@@ -205,23 +207,23 @@ spec:
           # QuTS LUN can't UNMAP-reclaim, so bounding growth is what matters). Fixing the S3 transfer of
           # huge logs is a tracked follow-up. Backlog clears over ~2 weeks as tasks age past 14d.
           LOG_RETENTION_DAYS: 14
-        # Named S3 target for Actions ONLY (artifacts + logs) → versitygw on the QNAP (ADR 0010/0017).
-        # A global [storage] STORAGE_TYPE=minio would divert attachments/LFS/avatars/packages too — a
-        # named section keeps everything else on the 10Gi PVC. SERVE_DIRECT stays off (default) so
-        # runners/browsers never reach the LAN-only self-signed endpoint. Creds via the
-        # additionalConfigFromEnvs block above (gitea-actions-s3 secret).
-        storage.actions_s3:
-          STORAGE_TYPE: minio
-          MINIO_ENDPOINT: 192.168.1.225:7070 # host:port, NO scheme
-          MINIO_BUCKET: gitea-actions
-          MINIO_LOCATION: us-east-1
-          MINIO_USE_SSL: true
-          MINIO_INSECURE_SKIP_VERIFY: true # versitygw self-signed cert
-          MINIO_BUCKET_LOOKUP_TYPE: path # path-style addressing (s3ForcePathStyle)
-          MINIO_CHECKSUM_ALGORITHM: md5 # versitygw rejects the default CRC32C checksum header (cf. Velero)
+        # Actions artifacts + logs on a LOCAL PVC, not versitygw S3 (W1 of the USB failure-domain
+        # plan). Until 2026-09-08 these lived in versitygw on a USB disk attached to the QNAP; when
+        # that disk stalled, Gitea could not COLD START, because it opens Actions storage during
+        # initialisation and versitygw was accepting TCP while never answering — the connection did
+        # not fail, it hung. A backup dependency held the forge down for ~4.5h. The USB disk is now
+        # off Gitea's critical path entirely.
+        #
+        # These paths are the mount of gitea-actions-storage (40Gi qnap-iscsi, actions-storage.yaml),
+        # and they intentionally keep the S3 prefix NAMES: the migration copied
+        # s3://gitea-actions/actions_artifacts/ -> /data-actions/actions_artifacts/ one-for-one, so
+        # the prefix is not duplicated and not renamed. Anything else and Gitea finds no history.
+        #
+        # A global [storage] STORAGE_TYPE change would divert attachments/LFS/avatars/packages too;
+        # these named sections keep everything else on the main 20Gi PVC, exactly as before.
         storage.actions_artifacts:
-          STORAGE_TYPE: actions_s3 # inherit endpoint/creds/bucket from the named section above
-          MINIO_BASE_PATH: actions_artifacts/ # explicit prefix so it can't collide with logs
+          STORAGE_TYPE: local
+          PATH: /data-actions/actions_artifacts
         storage.actions_log:
-          STORAGE_TYPE: actions_s3
-          MINIO_BASE_PATH: actions_log/
+          STORAGE_TYPE: local
+          PATH: /data-actions/actions_log
