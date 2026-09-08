@@ -69,18 +69,57 @@ subsets:
   - addresses: [{ ip: 192.168.0.45, hostname: ai-llm-2 }]
     ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
-# llm-qwen35 (node3 .46 :8080) REMOVED 2026-09-08 — qwen3.5-122b moved to the cloudlab estate.
-# It is served by cloud3's llama-swap (192.168.0.26:8080) where 72 GiB of Q4_K_M weights sit
-# entirely in 96 GiB of VRAM: MEASURED 60.6-66.2 tok/s fully resident, versus 16.6 tok/s here,
-# where node3's iGPU LXC could not hold it and MoE experts spilled to host RAM.
-# The user-facing route is qwen3.5-122b-cloud on the `litellm` gateway. The tenant gateway
-# (litellm-local) does NOT follow it across — see the note there for why.
+# llm-qwen35 (node3 .46 :8080) — qwen3.5-122b moved to the cloudlab estate 2026-09-08. It is now
+# served by cloud3's llama-swap (192.168.0.26:8080) where 72 GiB of Q4_K_M weights sit entirely in
+# 96 GiB of VRAM: MEASURED 60.6-66.2 tok/s fully resident, versus 16.6 tok/s here, where node3's
+# iGPU LXC could not hold it and MoE experts spilled to host RAM. The user-facing route is
+# qwen3.5-122b-cloud on the `litellm` gateway. The tenant gateway (litellm-local) does NOT follow
+# it across — see the note there for why.
+#
+# THIS SERVICE IS DELIBERATELY RETAINED FOR ONE RECONCILE, exactly as llm-node1 was above.
+# litellm.yaml repoints its api_base to 192.168.0.26 and bumps checksum/config in the SAME commit,
+# but a checksum bump is a ROLLING update: the old gateway pods keep serving — from the OLD
+# in-memory config, which still names llm-qwen35.ai.svc — until the new pods pass their probes and
+# the old ones terminate. Deleting the Service in this same apply pulls DNS out from under those
+# still-running pods, turning in-flight 122b requests into NXDOMAIN. Flux gives no ordering
+# guarantee between the ConfigMap and this file, and the PR's manual restart order cannot close
+# the window either, because Flux applies both before any restart runs.
+#
+# Removal is a FOLLOW-UP commit, gated on the same three checks used for llm-node1:
+#   1. `kubectl -n ai rollout status deploy/litellm` — successfully rolled out, and every
+#      remaining pod carries the NEW checksum/config (no old-checksum pod survives);
+#   2. the running proxy's loaded config has ZERO api_base entries naming llm-qwen35;
+#   3. an authenticated chat/completions call for qwen3.5-122b-cloud returns HTTP 200.
+#
 # ai-llm-3 (vmid 5003, .46) is deliberately KEPT, now empty: node3 was documented SINGLE-MODEL
 # because qwen3.5-122b and gpt-oss-120b could not co-reside, so the slot is free again. The LXC
 # still owns its address and its out-of-band /models-local mount (added by `pct set`, not tofu),
 # which is why removing the model is cheap and destroying the container would not be.
 # NOTE .46 still appears in monitoring.yaml's node_exporter endpoints — that is the LXC's own
 # host metrics and is unrelated to this Service; it stays.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-qwen35
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-qwen35, app.kubernetes.io/component: llama-server }
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llm-qwen35
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-qwen35 }
+subsets:
+  # Still points at the now-idle node3 llama-server. Harmless: nothing routes here any more (the
+  # gateway moved to 192.168.0.26), it exists only so the old pods' DNS keeps resolving until they
+  # are gone. Deleted in the follow-up commit described above.
+  - addresses: [{ ip: 192.168.0.46, hostname: ai-llm-3 }]
+    ports: [{ name: http, port: 8080, protocol: TCP }]
 ---
 # llm-qwen38 (node1 :8082) REMOVED 2026-08-25 — the qwen3.8-27b on-demand instance is retired;
 # its 31.4 GiB node1 reservation funds ci-runner-7/-8.
