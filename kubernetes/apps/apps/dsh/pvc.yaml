@@ -47,7 +47,7 @@ spec:
 # No. dsh-home is already ReadWriteOnce/local-path, and a local-path PV carries node affinity, so
 # the pod is pinned wherever dsh-home was first provisioned. VERIFIED on the live cluster
 # 2026-09-08: dsh-home is bound to pvc-329c5297 with node affinity talos-cp1, and the pod already
-# runs on talos-cp1. This claim therefore adds no constraint that did not already exist $E the
+# runs on talos-cp1. This claim therefore adds no constraint that did not already exist — the
 # Deployment could not reschedule to another node before this change either.
 #
 # The consequence is real but pre-existing: if that node is lost, dsh stays down until it returns.
