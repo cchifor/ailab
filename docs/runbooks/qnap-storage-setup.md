@@ -259,7 +259,7 @@ it was watching** — and cron ran it every 3 minutes with no mutual exclusion:
 |---|---|
 | Source of truth | `scripts/qnap-versitygw-watchdog.sh` (in git — **do not hand-edit the NAS copy**) |
 | Installer | `scripts/qnap-versitygw-install.sh` (idempotent; `DRY_RUN=1` to preview) |
-| Tests | `just test-versitygw-watchdog` (26 cases, run under WSL) |
+| Tests | `just test-versitygw-watchdog` (41 cases, run under WSL) |
 | Deployed to | `/share/ZFS2_DATA/.versitygw-supervisor/` — the **internal** pool, never the USB |
 | Cron | `*/3 * * * * /bin/bash /share/ZFS2_DATA/.versitygw-supervisor/watchdog.sh` |
 | Retired | `<USB>/versitygw/watchdog.sh.retired` (kept for reference; nothing invokes it) |
@@ -279,16 +279,42 @@ capable of helping:
 | ok | no, budget spent | `restart-budget-exhausted` — stop trying, raise a QuLog event |
 | bad | either | `disk-unhealthy` / `disk-wedged` — **never restart**, raise a QuLog event |
 
+A restart that never answers is also reaped, and if its startup is itself stuck on the USB the
+status is `start-wedged`.
+
 **A restart cannot repair uninterruptible disk I/O**, so a bad disk suppresses restarts entirely;
 retrying would only add more processes that hang. The supervisor **never reboots the NAS** — it is
 shared infrastructure (etcd backups, Velero, the `pve-nfs` export).
 
-The pile-up guard is a `mkdir` lock (the NAS has no `flock`) recording the probe child's pid **and**
-its `/proc/<pid>` start-time, so a recycled pid cannot hold it forever. A process in D-state ignores
-`SIGKILL` — proven in this incident, where kubelet ignored it for 6 minutes — so the parent **polls
-and abandons** rather than `wait`ing, and deliberately **leaves the lock held** in the abandoned
-child's name. That turns the old 25-copy pile-up into a hard ceiling of one, and it self-heals: when
-the disk recovers the child completes, its pid dies, and the next run reclaims the stale lock.
+### The pile-up guard
+
+A `mkdir` lock, because the NAS has no `flock`. It names an **owner**, and which owner changes over
+the run:
+
+- `kind=supervisor` — the script itself, by pid + `/proc` start-time (a recycled pid cannot make a
+  dead lock look alive). Held for the **whole** run including the stop/restart sequence; naming only
+  the probe would make the lock look stale the moment the probe exited, while the supervisor was
+  still mid-restart — a window for two gateways on `:7070`.
+- `kind=abandoned-probe` / `abandoned-start` — owned by a **process group**. A process in D-state
+  ignores `SIGKILL` (kubelet ignored it for 6 minutes in this incident), so the parent **polls and
+  abandons** rather than `wait`ing, and deliberately **leaves the lock held**. It must be the group,
+  not the pid: `mkdir`/`cat`/`rm` are children of the probe subshell, so `SIGKILL` can reap the
+  subshell while the command actually stuck on the disk lives on.
+
+That turns the old 25-copy pile-up into a hard ceiling of one, and it self-heals: when the disk
+recovers the abandoned group empties and the next run reclaims the lock.
+
+Two subtleties worth knowing before changing any of it:
+
+- **Reclaiming a stale lock is serialised by a second mutex** (`state/reclaim`), and re-checks
+  ownership while holding it. Without that, two runs that both saw a dead holder could both proceed
+   — the second deleting the *winner's freshly created* lock. The guard is held for milliseconds; an
+  older one means a run died inside it and is broken with a logged message.
+- **The `/proc` scan skips unreadable entries** rather than aborting. Globbing `/proc/[0-9]*/stat`
+  into one `awk` looks equivalent but is not: the shell expands the glob before `awk` opens
+  anything, so a process exiting in between makes `awk` exit non-zero, which reads as "the group is
+  gone" and releases an abandoned probe's lock while its D-state child is still alive.
+  `PROC_ROOT` exists solely so this is unit-testable; never set it in operation.
 
 ### Triage
 
