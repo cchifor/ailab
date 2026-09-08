@@ -4,3 +4,13 @@ resources:
   - namespace.yaml
   - secret.sops.yaml # SOPS: versitygw creds for the `velero` bucket (key `cloud`)
   - helmrelease.yaml # Velero chart 12.0.3 (CSI data movement -> versitygw) + daily/weekly schedules
+
+# HANDOVER STEP A (W6, temporary — removed in step C).
+# `kustomize.toolkit.fluxcd.io/prune: disabled` exempts these objects from Flux garbage collection
+# while ownership moves from the `infrastructure` Kustomization to the new `backup` one. Without it,
+# the moment these resources leave infrastructure's build, its next reconcile prunes them — and that
+# includes this NAMESPACE, whose deletion would take Velero's Backup/Restore CRs and its
+# BackupStorageLocation with it. Flux may well skip cross-Kustomization deletions on its own, but
+# "may well" is not a basis for gambling the backup system; this makes it unconditional.
+commonAnnotations:
+  kustomize.toolkit.fluxcd.io/prune: disabled
