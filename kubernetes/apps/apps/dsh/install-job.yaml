@@ -17,6 +17,16 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: dsh-install-0-1-2-rc-1
+  annotations:
+    # A Job's spec.template is IMMUTABLE, so any edit Flux applies to this object under the SAME
+    # name is rejected with "field is immutable" — which fails the whole dsh Kustomization, not
+    # just this Job (the 2026-07-28 outage). The upgrade path above avoids that by bumping the
+    # name, but that is a convention, and the estate's invariant is enforced mechanically:
+    # scripts/pin-image-digests.py refuses to pin ANY digest while a Flux-applied Job lacks this
+    # annotation, because it cannot know that a future edit will not land on one. Without it the
+    # image-pin job fails for every repo, which is how this was found — agentforge's pin-pr had
+    # been red on five consecutive runs, blocking every deploy in the estate.
+    kustomize.toolkit.fluxcd.io/force: "enabled"
 spec:
   ttlSecondsAfterFinished: 86400
   backoffLimit: 4
