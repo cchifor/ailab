@@ -38,7 +38,11 @@ spec:
     # a status dot trades the property for a cosmetic. The homepage tile still links to dsh; it just
     # does not probe it.
   egress:
-    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }}]
+    # CoreDNS specifically, not every pod in kube-system. A namespace-wide rule lets this pod
+    # open :53 to anything scheduled there, a wider hole than name resolution needs. Verified
+    # the two coredns pods carry k8s-app=kube-dns before narrowing to it.
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
     # LiteLLM is the ONLY model path. dsh reaches every model through the proxy, so it never needs
     # egress to the internet for inference -- no OpenAI, no Anthropic, no DeepSeek.

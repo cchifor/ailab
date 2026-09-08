@@ -167,10 +167,18 @@
 
 # The provider itself. npm-installed by the Job (DSH_PLUGINS), loaded here: we install with npm
 # rather than `dsh plugin add`, so the profile row it would have written is written by hand.
-- id: searxng-web
-  name: 'dsh-searxng-web'
-  config:
-    baseUrl: 'http://searxng.dsh.svc.cluster.local:8080'
+#
+# `insert:`, NOT a bare row. A bare `- id: X` is an OVERRIDE, and the loader SKIPS an override
+# whose target does not already exist — emitting one line, `patch: entry "searxng-web" not found`,
+# and carrying on. VERIFIED the hard way: with a bare row the resolved tree contained zero
+# searxng-web rows, while the `web` override below applied fine (its target exists), leaving
+# searchProvider pointing at a provider that was never registered. That fails at runtime, not at
+# load, and the only signal is a line in the pod log.
+- insert:
+    - id: searxng-web
+      name: 'dsh-searxng-web'
+      config:
+        baseUrl: 'http://searxng.dsh.svc.cluster.local:8080'
 
 # Point BOTH capabilities at it. searchProvider was deepseek-official (needs a DEEPSEEK_API_KEY we
 # do not hold) and fetchProvider was http (fetches arbitrary URLs directly, which is exactly the
