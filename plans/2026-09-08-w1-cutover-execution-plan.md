@@ -226,4 +226,48 @@ The S3 data is never deleted by any step here, which is what makes every rollbac
 - [ ] A fresh GitHub fetch + apply succeeds with Gitea stopped (B)
 - [ ] All Kustomizations Ready at the end; `backup` layer healthy
 
+## WHAT ACTUALLY HAPPENED — this plan was overtaken by events
+
+Recorded before the remaining steps, because it changes them.
+
+**The cutover applied itself before the window.** #567 was approved by both review bots and the
+estate **auto-merges on approval**, so it merged at 14:49:09Z and Flux applied it immediately. The
+suspend-then-merge ordering in steps 2-3 below never ran. This is a process finding, not a one-off:
+a PR that must not take effect on merge cannot be protected by intending to merge it later — it has
+to be held as a DRAFT, or its Kustomization suspended *before* the PR is opened.
+
+**Consequence: the write window this plan existed to prevent actually opened.** Measured immediately
+after:
+
+| | S3 (source of truth) | PVC (what Gitea could see) |
+|---|---|---|
+| artifacts | 8,982 | 8,982 — complete |
+| logs | 48,831 | 48,788 — **43 missing** |
+
+**Nothing was lost**, because the migration only ever `copy`s and never deletes — S3 still held
+everything. Recovered with a one-off catch-up Job pinned to Gitea's node (RWO is per-NODE, so a pod
+elsewhere could not have mounted the volume) using `--size-only`. It completed in **11 seconds**,
+which is the clearest possible evidence for the `--size-only` change: the same work with
+`--checksum` had been running for 20+ minutes and was on track for ~2 hours.
+
+After recovery: artifacts 8,982 = 8,982, logs 48,836 >= 48,831. The destination now holds *more*
+than the source, which is correct — those are new logs Gitea has written locally since the cutover,
+and they are the proof that local writes work.
+
+**Imperative work disclosed:** the catch-up Job was applied with `kubectl`, not through git, because
+the cutover had already (correctly) pruned the migration manifest. It is deleted again; the estate
+matches git.
+
+### Two defects found while verifying
+
+1. **Removing a config section from the HelmRelease does NOT remove it from the on-PVC `app.ini`.**
+   The chart's `environment-to-ini` MERGES into the existing file, so `[storage.actions_s3]` — with
+   its credentials — is still present and still says `STORAGE_TYPE = minio`, even though the values
+   no longer define it. It is inert (nothing references that named section any more; the two
+   sections that matter say `STORAGE_TYPE = local`), but it is misleading and it defeats the
+   "no `:7070` in app.ini" acceptance criterion as originally written.
+2. **A credential was printed to the session transcript** while grepping that config. The versitygw
+   `gitea` S3 key must be rotated. It is LAN-scoped and now unused except for rollback, but a leaked
+   credential is a leaked credential.
+
 <!-- codex-review-status: pending -->
