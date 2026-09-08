@@ -321,6 +321,44 @@ WINNERS=$(wc -l < "$ROOT/acquired" 2>/dev/null || echo 0)
   || bad "concurrent stale-lock reclaim" "$WINNERS runs got past the lock — reclamation is racy"
 
 echo
+echo "== operator maintenance lease =="
+# The lease exists so a deliberate outage (proving Gitea does not need the gateway) is not undone by
+# this watchdog restarting it. Its whole point is that it EXPIRES: editing cron instead would leave
+# the gateway unwatched if the operator's session died before restoring it.
+CASE=leasevalid; reset_case $CASE
+echo 000 > "$ROOT/http_code"; mk_start "$USBROOT/leasevalid" up   # gateway down: would normally restart
+mkdir -p "$ROOT/$CASE/state"
+echo $(( $(date +%s) + 900 )) > "$ROOT/$CASE/state/maintenance"
+run leasevalid
+check "a valid lease suspends remediation" "maintenance" "$(status_of)"
+[ ! -f "$ROOT/started" ] && ok "…and the gateway is NOT restarted under a lease"   || bad "no restart under a lease" "start.sh ran — the deliberate outage would have been undone"
+
+# Expiry is what makes it safe: a lost session must not leave the gateway unwatched forever.
+CASE=leaseexpired; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/leaseexpired" no
+mkdir -p "$ROOT/$CASE/state"
+echo $(( $(date +%s) - 60 )) > "$ROOT/$CASE/state/maintenance"
+run leaseexpired
+check "an expired lease resumes remediation by itself" "healthy" "$(status_of)"
+[ ! -f "$ROOT/$CASE/state/maintenance" ] && ok "…and the expired lease is removed"   || bad "expired lease removed" "still present"
+
+# A fat-fingered expiry must not disable the watchdog for a week.
+CASE=leasecapped; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/leasecapped" no
+mkdir -p "$ROOT/$CASE/state"
+echo $(( $(date +%s) + 864000 )) > "$ROOT/$CASE/state/maintenance"   # 10 days
+run leasecapped
+check "a lease beyond the cap is discarded, not honoured" "healthy" "$(status_of)"
+
+# Garbage must fail safe (remediate), never fail open (suspend).
+CASE=leasejunk; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/leasejunk" no
+mkdir -p "$ROOT/$CASE/state"
+echo "not-a-number" > "$ROOT/$CASE/state/maintenance"
+run leasejunk
+check "a malformed lease is discarded, not honoured" "healthy" "$(status_of)"
+
+echo
 echo "== the gateway's own log stays bounded while it holds the fd open =="
 # rotate() must COPY-then-TRUNCATE. `mv` would leave the running gateway appending to the renamed
 # inode forever: unbounded, and never size-checked again because rotate only stats the live path.

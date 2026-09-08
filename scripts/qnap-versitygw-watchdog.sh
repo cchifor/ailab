@@ -65,6 +65,7 @@ RESTART_WINDOW="${RESTART_WINDOW:-1800}"   # seconds (30 min)
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-20971520}" # 20 MiB, then copy-truncate; keep 1 saved generation
 STALE_LOCK_SECS="${STALE_LOCK_SECS:-3600}" # backstop for a lock that never got an ownership stamp
 RECLAIM_GUARD_SECS="${RECLAIM_GUARD_SECS:-300}" # the reclaim mutex is held for ms; older = a run died in it
+MAX_MAINT_SECS="${MAX_MAINT_SECS:-3600}"    # a maintenance lease can never suspend remediation for longer
 ABANDONED_LOCK_SECS="${ABANDONED_LOCK_SECS:-86400}" # backstop so a recycled pgid cannot disable the watchdog forever
 
 STATE="$BASE/state"
@@ -72,6 +73,7 @@ LOCK="$STATE/lock"
 RECLAIM="$STATE/reclaim"   # second mutex: serialises stale-lock reclamation only
 STATUS="$STATE/status"
 ATTEMPTS="$STATE/attempts"
+MAINT_LEASE="$STATE/maintenance"   # operator lease: an absolute epoch expiry; see below
 WD_LOG="$BASE/watchdog.log"
 VGW_LOG="$BASE/versitygw.log"   # versitygw's OWN stdout, moved OFF the USB (see redirect below)
 
@@ -308,6 +310,42 @@ fi
 RELEASE_LOCK=yes
 cleanup() { [ "$RELEASE_LOCK" = yes ] && rm -rf "$LOCK" 2>/dev/null; }
 trap cleanup EXIT INT TERM
+
+#--- operator maintenance lease -------------------------------------------------------------------
+# Deliberately breaking the gateway (to prove Gitea no longer depends on it, say) means stopping
+# versitygw — and this watchdog would restart it within 3 minutes. The obvious workaround, editing
+# root's crontab, is wrong twice over: the sed for it is easy to get subtly wrong, and if the
+# operator's session dies between pausing and restoring, the gateway is left UNWATCHED with nothing
+# to notice.
+#
+# A lease inverts that failure mode. It is a file holding an absolute expiry, checked here; while it
+# is valid the watchdog reports `maintenance` and remediates nothing. It EXPIRES ON ITS OWN, so a
+# lost session, a killed terminal or a closed laptop all end in the watchdog resuming by itself. The
+# cron entry is never touched, so nothing has to be put back.
+#
+# MAX_MAINT_SECS caps it: a lease further out than the cap is discarded rather than honoured, so a
+# fat-fingered expiry cannot disable remediation for a week. Create one with:
+#     expr $(date +%s) + 1200 > <BASE>/state/maintenance
+if [ -f "$MAINT_LEASE" ]; then
+  lease_exp=$(cat "$MAINT_LEASE" 2>/dev/null)
+  lease_now=$(date +%s)
+  case "${lease_exp:-x}" in
+    ''|*[!0-9]*)
+      rm -f "$MAINT_LEASE"
+      log "maintenance lease is not an integer -- discarded, remediation resumes" ;;
+    *)
+      if [ $((lease_exp - lease_now)) -gt "$MAX_MAINT_SECS" ]; then
+        rm -f "$MAINT_LEASE"
+        log "maintenance lease expiry is beyond the ${MAX_MAINT_SECS}s cap -- discarded, remediation resumes"
+      elif [ "$lease_now" -lt "$lease_exp" ]; then
+        set_status maintenance           "remediation SUSPENDED by an operator lease for $(( (lease_exp - lease_now + 59) / 60 ))m more -- the gateway is deliberately not being watched, and this clears itself when the lease expires"
+        exit 0
+      else
+        rm -f "$MAINT_LEASE"
+        log "maintenance lease expired -- remediation resumes"
+      fi ;;
+  esac
+fi
 
 #--- probe A: does the gateway ANSWER? ------------------------------------------------------------
 # Runs in the parent: curl bounds itself with --max-time and is blocked on a socket, not on disk,
