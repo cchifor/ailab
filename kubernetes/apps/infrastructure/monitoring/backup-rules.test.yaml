@@ -1,0 +1,125 @@
+# `promtool test rules` fixtures for backup-rules.yaml. Run by scripts/rules-lint.sh on every PR,
+# after `promtool check rules`.
+#
+# WHY THIS FILE EXISTS. The first version of VersitygwProbeFailed was
+# `max by (namespace) (kube_job_status_failed{...}) > 0`, which parses, fires on a real failure,
+# and is still wrong: kube_job_status_failed is a per-Job gauge that stays 1 for as long as the
+# failed Job object is retained (failedJobsHistoryLimit: 6, ttlSecondsAfterFinished: 3600), so one
+# failed probe kept a CRITICAL alert firing for an hour after the object store had recovered.
+# `check rules` cannot catch that — only evaluating the expression against a recovery timeline can.
+# Both peer reviewers found it independently on ailab#549; the second test below is that finding,
+# frozen so it cannot come back.
+#
+# `rule_files` is the extracted spec name, because rules-lint.sh hands promtool the `spec:` body of
+# each PrometheusRule (the CRD wrapper is not a promtool rules file) under the manifest's basename.
+rule_files:
+  - backup-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------------ the real failure shape
+  - interval: 1m
+    name: a failed round-trip pages when the failure is newer than the last success
+    input_series:
+      # An earlier probe that succeeded: start -> completion, failed=0.
+      - series: 'kube_job_status_start_time{namespace="talos-backup", job_name="versitygw-probe-29000000"}'
+        values: "1000+0x30"
+      - series: 'kube_job_status_completion_time{namespace="talos-backup", job_name="versitygw-probe-29000000"}'
+        values: "1100+0x30"
+      - series: 'kube_job_status_failed{namespace="talos-backup", job_name="versitygw-probe-29000000"}'
+        values: "0+0x30"
+      # The current probe, which failed. No completion_time — kube-state-metrics only sets it on success.
+      - series: 'kube_job_status_start_time{namespace="talos-backup", job_name="versitygw-probe-29000600"}'
+        values: "1600+0x30"
+      - series: 'kube_job_status_failed{namespace="talos-backup", job_name="versitygw-probe-29000600"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: VersitygwProbeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "versitygw object store failed a read/write round-trip"
+              description: >-
+                The versitygw probe could not complete PUT -> GET -> verify -> DELETE against
+                192.168.1.225:7070. The object store is NOT usable even if it is still accepting
+                connections — that exact combination (listening, unable to serve) is what caused the
+                2026-09-08 outage. Velero, the Talos etcd snapshots and the off-site sync all depend on
+                it and will fail until it is fixed; they are bounded by their own deadlines so they
+                will report rather than hang. Check the USB disk on the QNAP first:
+                `dmesg | grep -iE 'usb|jbd2|ext4'` — a stalled USB bridge leaves the ext4 journal
+                thread in D-state and every read on that filesystem hangs. Restarting versitygw does
+                NOT fix that; the device needs a reset or a replug.
+
+  # ------------------------------------------------------- REGRESSION: recovery must clear it
+  # The failed Job is deliberately still present, exactly as it is in the cluster for up to an hour
+  # after the failure. A later success must resolve the alert anyway. The superseded
+  # `max(kube_job_status_failed) > 0` form fails this test.
+  - interval: 1m
+    name: a retained failed Job does not keep paging once a later probe succeeds
+    input_series:
+      # The failure, still retained (failedJobsHistoryLimit keeps it around for triage).
+      - series: 'kube_job_status_start_time{namespace="talos-backup", job_name="versitygw-probe-29000600"}'
+        values: "1600+0x30"
+      - series: 'kube_job_status_failed{namespace="talos-backup", job_name="versitygw-probe-29000600"}'
+        values: "1+0x30"
+      # The next probe, which succeeded — the object store is healthy again.
+      - series: 'kube_job_status_start_time{namespace="talos-backup", job_name="versitygw-probe-29001200"}'
+        values: "2200+0x30"
+      - series: 'kube_job_status_completion_time{namespace="talos-backup", job_name="versitygw-probe-29001200"}'
+        values: "2300+0x30"
+      - series: 'kube_job_status_failed{namespace="talos-backup", job_name="versitygw-probe-29001200"}'
+        values: "0+0x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: VersitygwProbeFailed
+        exp_alerts: []
+
+  # --------------------------------------------- the deliberate gap, and what actually covers it
+  # If a probe has NEVER succeeded there is no completion_time to compare against, so
+  # VersitygwProbeFailed cannot fire. That is by design — VersitygwProbeStale's absent() clause is
+  # the alert for "no successful round-trip", and this asserts the handoff really happens rather
+  # than leaving a silent hole between the two rules.
+  - interval: 1m
+    name: a probe that has never succeeded is caught by the stale alert, not the failure alert
+    input_series:
+      - series: 'kube_job_status_start_time{namespace="talos-backup", job_name="versitygw-probe-29000600"}'
+        values: "1600+0x30"
+      - series: 'kube_job_status_failed{namespace="talos-backup", job_name="versitygw-probe-29000600"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: VersitygwProbeFailed
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: VersitygwProbeStale
+        exp_alerts:
+          # namespace/cronjob come from absent(): it returns a 1-element vector carrying the
+          # equality matchers of its selector, so the "probe is not running at all" alert still
+          # identifies WHICH probe rather than arriving unlabelled.
+          - exp_labels:
+              severity: warning
+              namespace: talos-backup
+              cronjob: versitygw-probe
+            exp_annotations:
+              summary: "versitygw probe has not succeeded in >30m (it runs every 10m)"
+              description: >-
+                No successful versitygw round-trip for over 30 minutes — three missed runs. Either the
+                object store is failing (see VersitygwProbeFailed, which should also be firing) or the
+                probe itself is not running: CronJob suspended, pods unschedulable, or the rclone image
+                unpullable. A probe that silently stops running is indistinguishable from a healthy
+                backend, which is the failure mode this alert exists to prevent. Check
+                `kubectl -n talos-backup get cronjob versitygw-probe` and its recent Jobs.
+
+  # ------------------------------------------------------------------ the healthy shape
+  - interval: 1m
+    name: a recently successful CronJob keeps the stale alert silent
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="versitygw-probe"}'
+        values: "600+0x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: VersitygwProbeStale
+        exp_alerts: []

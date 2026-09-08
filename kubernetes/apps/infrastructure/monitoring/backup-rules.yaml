@@ -157,3 +157,73 @@ spec:
               Without a recent etcd snapshot, a total cluster loss is only recoverable to the last
               good snapshot. The SOPS-encrypted Talos secrets bundle in git is a separate artifact
               and is unaffected.
+        # ── versitygw round-trip probe (W4) ────────────────────────────────────────────────────────
+        # These two alerts exist because on 2026-09-08 versitygw was unusable for ~4.5h and NOTHING
+        # said so. The first alert of the whole incident was GiteaForgeDown, 1.5h in — a downstream
+        # symptom of a storage failure that had no alert of its own.
+        #
+        # Why the existing signals were silent, and why these are shaped as they are:
+        #   * a USB stall left versitygw ACCEPTING TCP while its POSIX backend was blocked on hung
+        #     I/O, so `storage-fabric-probe`'s blackbox tcp_connect module was GREEN throughout;
+        #   * an unauthenticated HTTPS request returns 403 from the auth layer WITHOUT touching the
+        #     backend, so an HTTP check would also have been green;
+        #   * therefore the probe these watch does a real authenticated PUT -> GET -> verify content
+        #     -> DELETE (talos-backup/versitygw-probe.yaml). Only that proves the disk is usable.
+        #
+        # The pair is deliberate: Failed catches a backend that is answering-but-broken within a
+        # couple of minutes, while Stale catches the probe not running AT ALL (suspended CronJob,
+        # unschedulable, image pull failure) — a broken probe must never read as healthy.
+        - alert: VersitygwProbeFailed
+          # Fires when the most recent FAILURE is newer than the most recent SUCCESS.
+          #
+          # The obvious form — `max(kube_job_status_failed{...}) > 0` — is wrong, and wrong in the
+          # direction that matters: kube_job_status_failed is a per-Job gauge that stays 1 for as
+          # long as the failed Job object is retained. With failedJobsHistoryLimit: 6 and
+          # ttlSecondsAfterFinished: 3600 that is up to an hour, so a single failed probe would keep
+          # a CRITICAL alert firing for an hour after the object store recovered. An alert that
+          # reports an outage that is over is training to ignore it.
+          #
+          # Comparing timestamps makes recovery self-clearing: kube_job_status_completion_time is
+          # only set on SUCCESS, so as soon as one probe passes, the right-hand side moves past the
+          # stale failure and the alert resolves — while the failed Jobs stay in place for triage.
+          #
+          # If a probe has NEVER succeeded the right-hand side has no series and this cannot fire.
+          # That gap is deliberate and covered by VersitygwProbeStale's absent() clause below, which
+          # is the alert designed for "no successful round-trip", including the never case.
+          expr: |
+            max(
+              kube_job_status_start_time{namespace="talos-backup", job_name=~"versitygw-probe-.*"}
+              and on (namespace, job_name)
+              (kube_job_status_failed{namespace="talos-backup", job_name=~"versitygw-probe-.*"} > 0)
+            )
+            >
+            max(kube_job_status_completion_time{namespace="talos-backup", job_name=~"versitygw-probe-.*"})
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "versitygw object store failed a read/write round-trip"
+            description: >-
+              The versitygw probe could not complete PUT -> GET -> verify -> DELETE against
+              192.168.1.225:7070. The object store is NOT usable even if it is still accepting
+              connections — that exact combination (listening, unable to serve) is what caused the
+              2026-09-08 outage. Velero, the Talos etcd snapshots and the off-site sync all depend on
+              it and will fail until it is fixed; they are bounded by their own deadlines so they
+              will report rather than hang. Check the USB disk on the QNAP first:
+              `dmesg | grep -iE 'usb|jbd2|ext4'` — a stalled USB bridge leaves the ext4 journal
+              thread in D-state and every read on that filesystem hangs. Restarting versitygw does
+              NOT fix that; the device needs a reset or a replug.
+        - alert: VersitygwProbeStale
+          expr: |
+            (time() - kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="versitygw-probe"}) > 1800
+            or absent(kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="versitygw-probe"})
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "versitygw probe has not succeeded in >30m (it runs every 10m)"
+            description: >-
+              No successful versitygw round-trip for over 30 minutes — three missed runs. Either the
+              object store is failing (see VersitygwProbeFailed, which should also be firing) or the
+              probe itself is not running: CronJob suspended, pods unschedulable, or the rclone image
+              unpullable. A probe that silently stops running is indistinguishable from a healthy
+              backend, which is the failure mode this alert exists to prevent. Check
+              `kubectl -n talos-backup get cronjob versitygw-probe` and its recent Jobs.
