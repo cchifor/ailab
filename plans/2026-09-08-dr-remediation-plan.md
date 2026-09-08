@@ -168,4 +168,74 @@ USB disk, and it is currently dead.
 - [ ] A Velero backup reaching `Completed`, and an off-site sync newer than the failure
 - [ ] Estate still green: all Kustomizations Ready, forge serving
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
+
+## Codex review — what it changed
+
+Two findings materially changed the work:
+
+**`tune2fs -e remount-ro` alone is ineffective.** It writes the on-disk default, which the kernel
+only reads at MOUNT time; the live filesystem keeps `errors=continue` until then. The plan called it
+a fix. It needs `mount -o remount,errors=remount-ro` to take effect on a mounted filesystem. Also:
+do not hard-code the device node — it already re-enumerated once today.
+
+**Skipping `pg_dumpall --globals-only` was unsound.** The reasoning only holds when restoring INTO a
+CNPG cluster with identical declarative config. With `--no-owner --no-acl` the dumps are not
+self-contained for a standalone restore, and it predicted the exact failure that then occurred:
+`afp_app` is `NOBYPASSRLS`, so a `pg_read_all_data` role hits row-level security. It also pointed at
+the existing peer-auth superuser path in `gitea-db-bootstrap.yaml`, which is how the fix was built.
+
+It also flagged, for the work still outstanding: use `kubectl cnpg destroy <cluster> <n> --keep-pvc`
+rather than deleting the PVC by hand; that WAL retention is capped at 1 GB (~7 minutes at the
+observed write rate), which is the ROOT CAUSE of the lost slot and will recur unless fixed; and that
+dump generations should be published atomically with dated prefixes and `copy` (never `sync`).
+
+## Results
+
+**Item 1 — keys.** Copied to the requested directory, sha256-verified, and verified FUNCTIONALLY
+(the copied key decrypts a real SOPS file, so it is not merely byte-identical). Set read-only. The
+destination is on the same laptop: this closes the `_out/`-loss failure that has actually happened,
+and does NOT close machine loss. Off-machine escrow remains open.
+
+**Item 3a — Gitea has a backup.** Two passes. The first used per-owner credentials and covered 6 of
+8 databases with no globals. The second, after codex's finding, used a least-privilege
+`backup_dumper` role (`pg_read_all_data` + `BYPASSRLS`, created through the documented peer-auth
+path — still no network-reachable superuser) and captured **all 8 databases plus globals**:
+
+```
+globals.sql            13 roles          gitea.dump      2,286,503,804 bytes / 1129 TOC entries
+agentforge_broker         290,632        agentforge_platform   1,637,341
+authelia                4,451,220        grafana                 558,361
+litellm                   223,755        openwebui             1,704,273
+postgres                    2,574        total 2.2G
+```
+
+Every dump verified with `pg_restore --list`. Published atomically: written to a `.partial-<stamp>`
+directory, `SHA256SUMS` generated, then renamed — the RLS failure in the first attempt was left
+unpublished rather than presented as a complete generation.
+
+Role PASSWORDS are deliberately not in the dump (`--no-role-passwords`, which is what removes the
+superuser requirement). They live in SOPS and OpenBao, which are authoritative on restore. Stated
+because a dump set that silently lacks them looks complete.
+
+**Item 5 — OpenBao escrow.** Rewritten from the live vault: `fdd2e119` -> `522a7c2c`, every secret
+leaf `ENC[`, and the file's own ROTATE instruction corrected.
+
+**Items 4 and 2 — BLOCKED by hardware.** At 21:20 the USB disk physically failed:
+`usb usb4-port1: Cannot enable. Maybe the USB cable is bad?`, no block device, nothing mounted,
+versitygw gone. `tune2fs` cannot run on an absent device and the backup chain has no gateway. Both
+need the enclosure fixed first.
+
+The estate absorbed it: forge 200, Flux Ready from GitHub, 0 Kustomizations not Ready. The same
+failure was a 4.5-hour outage yesterday.
+
+## Follow-ups this created
+
+- **A watchdog bug**: with the volume UNMOUNTED (rather than wedged) the disk probe writes into the
+  now-empty mountpoint directory on the underlying filesystem and reports `disk=ok`. The outcome was
+  still correct — bounded restarts, then `restart-budget-exhausted ... needs human diagnosis` — but
+  the diagnosis was wrong. It should detect that the path is not a mountpoint and report
+  `disk-absent` without spending restart attempts.
+- **WAL retention** is the root cause of the lost replication slot and is not yet fixed.
+- **3b/3c/3d** (standby re-clone, nightly dump CronJob, restore drill) remain.
+- **The reviewer webhooks were dead** and are now fixed — see the separate finding.
