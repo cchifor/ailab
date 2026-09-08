@@ -56,7 +56,13 @@ spec:
             - |
               set -eu
               if [ -s /dsh-home/settings.yaml ]; then
-                echo "settings.yaml exists -- leaving it alone (dsh owns it once written)"
+                # dsh owns this file once written (the Settings UI writes it), so it is NOT
+                # overwritten -- but the litellm PROVIDER block inside it is infrastructure this
+                # repo owns, and leaving that stale broke every model in dsh when #547 renamed the
+                # local routes to their -cloud names. reconcile-provider.js rewrites only that
+                # block and preserves the rest byte-for-byte. See the header there.
+                echo "settings.yaml exists -- reconciling only the litellm provider block"
+                node /seed/reconcile-provider.js
               else
                 echo "seeding settings.yaml with the LiteLLM provider"
                 # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp
