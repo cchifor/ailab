@@ -38,7 +38,11 @@ spec:
     # a status dot trades the property for a cosmetic. The homepage tile still links to dsh; it just
     # does not probe it.
   egress:
-    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }}]
+    # CoreDNS specifically, not every pod in kube-system. A namespace-wide rule lets this pod
+    # open :53 to anything scheduled there, a wider hole than name resolution needs. Verified
+    # the two coredns pods carry k8s-app=kube-dns before narrowing to it.
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
     # LiteLLM is the ONLY model path. dsh reaches every model through the proxy, so it never needs
     # egress to the internet for inference -- no OpenAI, no Anthropic, no DeepSeek.
@@ -46,3 +50,10 @@ spec:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ai } }
           podSelector: { matchLabels: { app.kubernetes.io/name: litellm } }
       ports: [{ port: 4000, protocol: TCP }]
+    # SearXNG, in this namespace. This is the ONLY route dsh has to anything web-shaped, and it is
+    # a Service, not the internet: searxng fetches on its behalf. Adding this instead of general
+    # egress is the whole point — see searxng.yaml. The pod that runs model-authored code still
+    # cannot open a connection to an arbitrary host.
+    - to:
+        - podSelector: { matchLabels: { app: searxng } }
+      ports: [{ port: 8080, protocol: TCP }]

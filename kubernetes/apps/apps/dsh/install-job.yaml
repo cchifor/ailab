@@ -30,6 +30,10 @@ metadata:
 spec:
   ttlSecondsAfterFinished: 86400
   backoffLimit: 4
+  # Without a deadline a hung npm install retries until the TTL while the Deployment's
+  # wait-for-install blocks behind it, with no signal beyond a Pending pod. 20 minutes is
+  # generous against the 4-minute install measured on this cluster.
+  activeDeadlineSeconds: 1200
   template:
     metadata:
       labels: { app: dsh-install }

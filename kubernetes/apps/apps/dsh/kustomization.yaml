@@ -8,6 +8,7 @@ resources:
   - pvc.yaml
   - install-job.yaml   # one-shot: npm-installs dsh into the app PVC (see the file for why not an image)
   - deployment.yaml
+  - searxng.yaml      # self-hosted metasearch: dsh's ONLY route to web content
   - service.yaml
   - networkpolicy.yaml # default-deny both ways; only cloudflared in, only DNS + LiteLLM out
 
@@ -21,6 +22,7 @@ configMapGenerator:
       - fix-profile.js
       - reconcile-provider.js
       - cordis.patch.yml
+      - searxng-search.mjs   # the web SEARCH provider itself (see the file for why not npm)
 
 # ONE source of truth for the version. It has to appear in the Deployment twice (the initContainer
 # that waits for the tree, and the container that execs it), and a hand-maintained triplicate is a

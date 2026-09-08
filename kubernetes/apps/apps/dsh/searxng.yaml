@@ -1,0 +1,269 @@
+# SearXNG — a self-hosted metasearch engine, deployed for ONE reason: to give dsh web access
+# WITHOUT giving the pod that runs model-authored code a route to the internet.
+#
+# THE PROBLEM. dsh's web_search/web_fetch need outbound HTTP. The dsh pod executes code the model
+# writes, with a `danger-full-access` permission preset available in the UI, so general egress from
+# it is an exfiltration path no dsh-side setting can close. Its NetworkPolicy is deliberately DNS +
+# LiteLLM only, which is why tool-web shipped disabled.
+#
+# THE SHAPE OF THE FIX — dsh talks to this Service; this Service talks to the internet:
+#
+#     dsh (no internet) ──▶ searxng.dsh.svc:8080 ──▶ search engines
+#
+# The dsh policy gains exactly one destination, and the component that does reach the internet runs
+# no model-authored code. The dsh-searxng-web plugin backs BOTH web_search and web_fetch through
+# this instance, so neither tool needs a direct route out.
+#
+# Chosen over the alternatives on that basis. The shipped deepseek-official provider needs a
+# DEEPSEEK_API_KEY this estate does not hold (checked OpenBao: cloudflare, gitea, github, litellm,
+# proxmox, qnap, registry, unifi, wifi) and leaves fetch needing broad egress anyway; the keyless
+# DuckDuckGo community plugins need general egress from dsh itself. This is the only option that
+# keeps the containment, and it is also keyless and sends no queries to a third-party vendor.
+#
+# MEASURED before this was written, in a throwaway pod on this cluster: healthz 200 two seconds
+# after start, and /search?format=json returned 32 results for a real query. That run also showed
+# why metasearch beats a single provider here — DuckDuckGo answered with a CAPTCHA and Startpage
+# with malformed JSON, and the query still succeeded from the other engines.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: searxng-settings
+  namespace: dsh
+data:
+  # Seeded into a writable volume by the init container below, NOT mounted at /etc/searxng
+  # directly. The upstream entrypoint expects to own that directory: it copies its template in,
+  # rewrites the file with `sed -i`, and chowns the directory. A read-only ConfigMap mount there
+  # breaks all three. MEASURED, not guessed.
+  settings.yml: |
+    use_default_settings: true
+
+    general:
+      debug: false
+      instance_name: "dsh-searxng"
+      # ON, deliberately, against the instinct to switch telemetry off on a private box.
+      # count_exception() and count_error() RETURN IMMEDIATELY when metrics are off, so error
+      # recording is skipped entirely rather than merely unaggregated: /stats/errors answers a
+      # literal {} and monitoring would report "no engines failing" forever. There is no privacy
+      # cost on a pod only dsh can reach, and /metrics stays 404 unless open_metrics is given a
+      # password.
+      enable_metrics: true
+      open_metrics: ""
+
+    server:
+      # Replaced with generated randomness by the init container. SearXNG REFUSES TO BOOT on the
+      # upstream placeholder — verified: "server.secret_key is not changed. Please use something
+      # else instead of ultrasecretkey." and the worker exits. The entrypoint's own sed only fires
+      # on the branch where it copies its template, which it skips when settings.yml already
+      # exists, so seeding a file means taking responsibility for the key.
+      secret_key: "__SECRET_KEY__"
+      # No bot-limiting: the only client is dsh, on the pod network, behind a NetworkPolicy. Leaving
+      # it on logs a missing limiter.toml and adds nothing here.
+      limiter: false
+      public_instance: false
+      image_proxy: false
+
+    search:
+      # THE KEY LINE. SearXNG serves HTML only by default; `json` is what makes /search?format=json
+      # work, and that API is the entire reason this exists. Without it the provider gets HTML back
+      # and every search fails.
+      formats:
+        - html
+        - json
+      safe_search: 0
+      autocomplete: ""
+      # A CAPTCHA from one engine takes it dark for a full HOUR by default, which is wildly
+      # disproportionate for a single-client instance issuing a handful of queries. Re-probing
+      # every 5 minutes at this query rate is negligible traffic. The cf_ variants default to 15
+      # DAYS and 1 day respectively; an hour is plenty.
+      # Note this does NOT rescue DuckDuckGo: it raises the CAPTCHA exception with
+      # suspended_time=0 by upstream design, because DDG blocks the IP rather than the session, so
+      # it is a per-query loss that self-heals rather than a suspension.
+      suspended_times:
+        SearxEngineCaptcha: 300
+        cf_SearxEngineCaptcha: 3600
+        cf_SearxEngineAccessDenied: 3600
+
+    # Engines: mostly upstream defaults, with four deliberate deviations. Individual engines failing
+    # is NORMAL and non-fatal - the probe run saw duckduckgo CAPTCHA and still returned 32 results.
+    engines:
+      # GOOGLE WAS NOT RUNNING AT ALL. Upstream ships `google` with `disabled: true`, so with
+      # use_default_settings and no override the default fan-out never touched it - the 32 results
+      # came from brave, google cse, wikipedia and wikidata. Enabling it is the single largest
+      # quality gain available here, and it was verified working from THIS residential IP: 31/31
+      # HTTP 200 with parseable results, including 12 fully concurrent requests, no /sorry/
+      # redirect. Add nothing else to this entry - use_mobile_ui, google_domain, impersonate and
+      # user_agent are removed or hardcoded, and unknown engine keys are accepted by a bare
+      # setattr, so a stale option fails silently rather than erroring.
+      - name: google
+        disabled: false
+      # Startpage is behind Anubis, a proof-of-work interstitial served with HTTP 200. The CAPTCHA
+      # branch only inspects a Location header so it never fires; instead the parser builds the
+      # literal string "{}}" and json.loads chokes - the JSONDecodeError we observed. That path
+      # takes the generic exception route with suspend=False, so it is NEVER suspended and gets
+      # re-queried on EVERY search against a host already refusing us. Re-enable after an image
+      # bump carrying the upstream anubis solver.
+      - name: startpage
+        disabled: true
+      - name: startpage news
+        disabled: true
+      - name: startpage images
+        disabled: true
+      # Onion engines need Tor, which we do not run. `inactive` is checked before load_engine(),
+      # so this silences the two "can't register engine" errors at boot rather than hiding them.
+      - name: ahmia
+        inactive: true
+      - name: torch
+        inactive: true
+
+    outgoing:
+      # One hanging engine holds the whole JSON response for request_timeout seconds - measured,
+      # the instance logged actual_timeout=10.0. This is the only lever that moves it. Keep
+      # max_request_timeout as the hard ceiling: it is the only bound if a client ever sends the
+      # undocumented &timeout_limit= parameter, which can RAISE the timeout above request_timeout.
+      request_timeout: 5.0
+      max_request_timeout: 6.0
+      # PER-ENGINE cap, never binding at this query volume. Left at the default.
+      pool_connections: 50
+      # pool_maxsize and keepalive_expiry were REMOVED by the curl_cffi migration that is already
+      # inside this image, and apply_schema() iterates the schema rather than the supplied keys -
+      # so they were silently ignored dead config, not settings that were quietly taking effect.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: searxng
+  namespace: dsh
+  labels: { app: searxng }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: searxng }
+  template:
+    metadata:
+      labels: { app: searxng }
+    spec:
+      # Talks to search engines and answers dsh; needs no API access. Same reasoning as dsh itself.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 977          # searxng's own uid in the upstream image — verified with id(1)
+        runAsGroup: 977
+        fsGroup: 977
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # Seeds settings.yml into the writable config volume and injects a fresh secret_key. The
+        # key rotates on every restart, which is fine here: it signs SearXNG's own internal tokens
+        # for a single machine client with the limiter off, and it is not a credential for anything
+        # else. Generating it here rather than storing a Secret keeps key material out of git and
+        # out of the API server for a value nothing else needs to know.
+        - name: seed-settings
+          image: docker.io/searxng/searxng@sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              cp /seed/settings.yml /etc/searxng/settings.yml
+              K=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 40)
+              sed -i "s/__SECRET_KEY__/${K}/" /etc/searxng/settings.yml
+              # Fail loudly rather than boot into the refuses-to-start state described above.
+              if grep -q '__SECRET_KEY__' /etc/searxng/settings.yml; then
+                echo "FATAL: secret_key placeholder not substituted"; exit 1
+              fi
+              echo "settings seeded, secret_key generated"
+          volumeMounts:
+            - { name: seed, mountPath: /seed, readOnly: true }
+            - { name: config, mountPath: /etc/searxng }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+      containers:
+        - name: searxng
+          image: docker.io/searxng/searxng@sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759
+          env:
+            - { name: SEARXNG_BASE_URL, value: "http://searxng.dsh.svc.cluster.local:8080/" }
+            # One client, so the upstream worker count (which scales with host CPUs) would
+            # over-allocate on a 32-thread node for no benefit.
+            - { name: SEARXNG_UWSGI_WORKERS, value: "2" }
+            - { name: SEARXNG_UWSGI_THREADS, value: "2" }
+          ports: [{ name: http, containerPort: 8080, protocol: TCP }]
+          volumeMounts:
+            - { name: config, mountPath: /etc/searxng }
+            - { name: run, mountPath: /run }
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NOT read-only: the entrypoint writes into /etc/searxng, which is the emptyDir above.
+            readOnlyRootFilesystem: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 192Mi }
+            limits:   { cpu: "1", memory: 512Mi }
+          readinessProbe:
+            # /healthz answered 2s after start in the probe run; 6 x 5s is ample headroom.
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+            failureThreshold: 5
+      volumes:
+        - { name: seed, configMap: { name: searxng-settings } }
+        - { name: config, emptyDir: { sizeLimit: 16Mi } }
+        - { name: run, emptyDir: { sizeLimit: 64Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: searxng
+  namespace: dsh
+  labels: { app: searxng }
+spec:
+  type: ClusterIP
+  selector: { app: searxng }
+  ports: [{ name: http, port: 8080, targetPort: http, protocol: TCP }]
+---
+# SearXNG is the one component here that MAY reach the internet, so it carries its own policy
+# rather than inheriting dsh's. Ingress is restricted to the dsh pod: nothing else in the cluster
+# has reason to query it, and it is deliberately NOT exposed through cloudflared.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: searxng-allow
+  namespace: dsh
+spec:
+  podSelector:
+    matchLabels: { app: searxng }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: dsh } }
+      ports: [{ port: 8080, protocol: TCP }]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    # The internet, HTTPS/HTTP. Private ranges are excluded so a redirect or a hostile engine
+    # response cannot turn this into an SSRF pivot into the cluster or the home LAN. This pod is
+    # the one thing here with a route out, so it is the one that must not become a relay — the
+    # 192.168.0.0/16 exclusion in particular keeps it off the Proxmox/LAN estate.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      # 443 ONLY. Cleartext 80 was in the first draft and is dropped: every metasearch engine
+      # SearXNG reaches is HTTPS, so allowing plain HTTP bought nothing and widened what a hostile
+      # redirect from an engine could reach from the one pod in this namespace with a route out.
+      ports:
+        - { port: 443, protocol: TCP }

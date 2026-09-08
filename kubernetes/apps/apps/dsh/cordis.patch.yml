@@ -151,10 +151,60 @@
   name: '@deepseek-ai/dsh-skill-filesystem'
   disabled: false
 
-# NOT enabled: tool-web. The web tool needs outbound HTTP, and this namespace's NetworkPolicy
-# permits egress to DNS and the LiteLLM service ONLY -- deliberately, because this pod executes
-# model-authored code. Enabling the row without opening egress would hand the model a tool that
-# always fails, which is the same defect as the missing bash: a capability that appears available
-# and is not. Web search additionally defaults to DeepSeek's provider and needs its own credential,
-# which this deployment does not hold. Opening general egress from a model-executed sandbox is a
-# security decision, not a config tweak, so it is left to a deliberate follow-up.
+# ---------------------------------------------------------------------------
+# WEB ACCESS ENABLED 2026-09-08, through our own SearXNG rather than the internet.
+#
+# tool-web shipped disabled here for a good reason: this pod's NetworkPolicy allows egress to DNS
+# and LiteLLM only, because it executes model-authored code. Enabling the tool without solving
+# that would have handed the model a capability that always fails.
+#
+# It is solved by routing BOTH providers at searxng.dsh.svc, which fetches on dsh's behalf. dsh
+# gains one Service as a destination, not a route to the internet. See searxng.yaml for the
+# reasoning and the measurements.
+#
+# All three rows below restate their FULL config, because a patch replaces rather than merges.
+# ---------------------------------------------------------------------------
+
+# The provider itself, as a FILE, not an npm package.
+#
+# WHY NOT THE COMMUNITY PLUGIN. dsh-searxng-web@0.5.9 is a real, compatible package, but it is
+# unreachable here. dsh resolves a row's `name:` from the PROFILE directory
+# (file:///dsh-home/profiles/web/), not from the dsh install tree. That directory's node_modules is
+# a symlink farm containing dsh's OWN dependency closure and nothing else -- verified on the live
+# pod: 195 packages in /app, 193 in the farm, and the three absent ones are exactly the packages
+# dsh does not depend on. An npm-installed sibling therefore throws MODULE_NOT_FOUND, boot()
+# rethrows, and the POD CRASH-LOOPS. It does not degrade to "search is broken". The install Job's
+# own resolve check would have passed, because it validates the wrong anchor.
+#
+# A relative specifier resolves against that same directory, so the provider ships through the
+# mechanism this repo already uses for relay.js and reconcile-provider.js: the content-hashed
+# ConfigMap, installed by the seed-settings initContainer. Editing it re-hashes and rolls the pod.
+# No registry, no npm from a pod with no egress, no third-party code in the process that runs
+# model-authored tool calls, and the file sits outside /workspace so the agent cannot rewrite it.
+- insert:
+    - id: searxng
+      name: './searxng-search.mjs'
+      config:
+        baseUrl: 'http://searxng.dsh.svc.cluster.local:8080'
+
+# searchProvider moves to ours. fetchProvider deliberately STAYS on the built-in http provider:
+# SearXNG is a metasearch engine and does not fetch arbitrary pages on a caller's behalf, and the
+# built-in provider carries an SSRF guard (rejects non-public addresses, revalidates on redirect)
+# that is worth keeping. See tool-web below for what that means in practice.
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: searxng
+    fetchProvider: http
+
+# web_search ON, web_fetch OFF. Not an oversight: this pod's only egress is DNS, LiteLLM and
+# SearXNG, so the http fetch provider cannot reach any public URL and every web_fetch call would
+# fail. Advertising a tool that always fails is the exact defect this whole series has been
+# removing -- the model burns turns discovering it does not work. Search genuinely works, because
+# SearXNG does the reaching out. Flip fetch back on only together with a way for fetch to egress.
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000
+  disabled: false
