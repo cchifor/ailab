@@ -151,10 +151,48 @@
   name: '@deepseek-ai/dsh-skill-filesystem'
   disabled: false
 
-# NOT enabled: tool-web. The web tool needs outbound HTTP, and this namespace's NetworkPolicy
+
 # permits egress to DNS and the LiteLLM service ONLY -- deliberately, because this pod executes
 # model-authored code. Enabling the row without opening egress would hand the model a tool that
 # always fails, which is the same defect as the missing bash: a capability that appears available
 # and is not. Web search additionally defaults to DeepSeek's provider and needs its own credential,
 # which this deployment does not hold. Opening general egress from a model-executed sandbox is a
 # security decision, not a config tweak, so it is left to a deliberate follow-up.
+
+# ---------------------------------------------------------------------------
+# WEB ACCESS ENABLED 2026-09-08, through our own SearXNG rather than the internet.
+#
+# tool-web shipped disabled here for a good reason: this pod's NetworkPolicy allows egress to DNS
+# and LiteLLM only, because it executes model-authored code. Enabling the tool without solving
+# that would have handed the model a capability that always fails.
+#
+# It is solved by routing BOTH providers at searxng.dsh.svc, which fetches on dsh's behalf. dsh
+# gains one Service as a destination, not a route to the internet. See searxng.yaml for the
+# reasoning and the measurements.
+#
+# All three rows below restate their FULL config, because a patch replaces rather than merges.
+# ---------------------------------------------------------------------------
+
+# The provider itself. npm-installed by the Job (DSH_PLUGINS), loaded here: we install with npm
+# rather than `dsh plugin add`, so the profile row it would have written is written by hand.
+- id: searxng-web
+  name: 'dsh-searxng-web'
+  config:
+    baseUrl: 'http://searxng.dsh.svc.cluster.local:8080'
+
+# Point BOTH capabilities at it. searchProvider was deepseek-official (needs a DEEPSEEK_API_KEY we
+# do not hold) and fetchProvider was http (fetches arbitrary URLs directly, which is exactly the
+# egress we are refusing to grant).
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: searxng-web
+    fetchProvider: searxng-web
+
+# And expose them to the model.
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+  disabled: false

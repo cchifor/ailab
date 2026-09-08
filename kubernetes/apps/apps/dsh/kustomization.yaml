@@ -8,6 +8,7 @@ resources:
   - pvc.yaml
   - install-job.yaml   # one-shot: npm-installs dsh into the app PVC (see the file for why not an image)
   - deployment.yaml
+  - searxng.yaml      # self-hosted metasearch: dsh's ONLY route to web content
   - service.yaml
   - networkpolicy.yaml # default-deny both ways; only cloudflared in, only DNS + LiteLLM out
 
