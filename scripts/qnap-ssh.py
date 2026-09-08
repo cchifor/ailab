@@ -6,9 +6,16 @@ storage-setup runbook automation.
 
     python scripts/qnap-ssh.py "zfs list"
     echo "zpool status" | python scripts/qnap-ssh.py
+    python scripts/qnap-ssh.py --sudo "cat /etc/config/crontab"
+
+The account in .env (QNAP_SSH_USER) is an ordinary user -- it cannot write outside its own
+shares and cannot touch /etc/config -- so anything that manages system state needs --sudo.
+The sudo password is written to the remote sudo process's STDIN over the encrypted channel,
+never interpolated into the command string: a password in the command string would be visible
+in the NAS process table to any other logged-in user.
 """
-import os
 import pathlib
+import shlex
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -32,9 +39,13 @@ def main() -> int:
         except Exception:
             pass
     env = load_env(REPO / ".env")
-    cmd = " ".join(sys.argv[1:]).strip() or sys.stdin.read()
+    args = sys.argv[1:]
+    use_sudo = "--sudo" in args
+    if use_sudo:
+        args = [a for a in args if a != "--sudo"]
+    cmd = " ".join(args).strip() or sys.stdin.read()
     if not cmd.strip():
-        print("usage: qnap-ssh.py '<command>'", file=sys.stderr)
+        print("usage: qnap-ssh.py [--sudo] '<command>'", file=sys.stderr)
         return 2
     # Substitute {{QNAP_USER}} / {{QNAP_PW}} from .env so secrets never appear on our cmdline.
     cmd = cmd.replace("{{QNAP_USER}}", env.get("QNAP_SSH_USER", ""))
@@ -49,7 +60,17 @@ def main() -> int:
         password=env.get("QNAP_ADMIN_PASSWORD", ""),
         timeout=12, look_for_keys=False, allow_agent=False,
     )
+    password = env.get("QNAP_ADMIN_PASSWORD", "")
+    if use_sudo:
+        # -S reads the password from stdin; -p '' suppresses the prompt so it never mixes into the
+        # captured output. bash -c (not -lc) keeps the login profile out of the way -- the QNAP
+        # profile prints a banner that would corrupt machine-readable output.
+        cmd = "sudo -S -p '' /bin/bash -c " + shlex.quote(cmd)
     _in, out, err = c.exec_command(cmd, timeout=180)
+    if use_sudo:
+        _in.write(password + "\n")
+        _in.flush()
+        _in.channel.shutdown_write()
     sys.stdout.write(out.read().decode(errors="replace"))
     sys.stderr.write(err.read().decode(errors="replace"))
     rc = out.channel.recv_exit_status()
