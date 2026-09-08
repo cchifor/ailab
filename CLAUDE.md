@@ -9,12 +9,17 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 >  **Forge = Gitea (`git.chifor.me`), NOT GitHub.** As of 2026-07-09 (ADR 0017) Gitea is the
 > **master** forge for this repo and `cchifor/platform`. Push, open PRs, and run CI on
 > **Gitea** (`git.chifor.me/cchifor/ailab`, org `cchifor`). `github.com/cchifor/*` is a
-> **read-only push-mirror backup** (GitHub Actions dormant). **Flux reconciles from in-cluster
-> Gitea** (`gitea-http.gitea.svc:3000`). Use the Gitea API / `tea` / `scripts/forge.sh` (gitea
-> arm), **NOT `gh`**. Log in at git.chifor.me via Authelia.
+> **read-only push-mirror backup** (GitHub Actions dormant). Use the Gitea API / `tea` /
+> `scripts/forge.sh` (gitea arm), **NOT `gh`**. Log in at git.chifor.me via Authelia.
+>
+> **Flux's bootstrap source is the GITHUB MIRROR** (`https://github.com/cchifor/ailab.git`,
+> unauthenticated — it is public, and a source with no credential cannot write). It used to be
+> in-cluster Gitea; that was a bootstrap loop, because repairing a dead forge required fetching
+> from the dead forge (2026-09-08, ~4.5h). Gitea is still the sole WRITER and mirrors to GitHub
+> in ~4s. Application repos still source from Gitea.
 
 ## Workflow / GitOps
-- **Kubernetes** (`kubernetes/apps/**`): **Flux** reconciles `main` **from Gitea** (`git.chifor.me/cchifor/ailab`) — merge to ship. Push/PRs go to **Gitea** (squash-merge); GitHub is a backup mirror.
+- **Kubernetes** (`kubernetes/apps/**`): **Flux** reconciles `main` **from the GitHub mirror** (`github.com/cchifor/ailab`, W5 — see the box above) — merge to Gitea to ship; it mirrors in ~4s. Push/PRs still go to **Gitea** (squash-merge).
 - **VMs/LXCs** (`kubernetes/infra/**`): **OpenTofu**, applied by hand via `just` (Flux does NOT manage these).
   Modules: `infra/` (Talos CPs) · `infra/runners/` · `infra/dev-workers/` · `infra/agent-nodes/` (Talos workers, AgentForge v2) · `infra/ai-lxc/` · `infra/registry-lxc/`.
   Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just agent-nodes-plan/apply` · `just registry` (+ `*-plan/apply`). `just --list` for all.
