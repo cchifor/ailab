@@ -234,6 +234,109 @@ and Device Pairing → Push Service**, pair the Qmanager mobile app, and route t
 Storage/Hardware rules to it. Not open source and event metadata transits QNAP's cloud, which is the
 price of the independence.
 
+## 8. versitygw supervisor — the USB failure domain (W3, 2026-09-08)
+
+versitygw is the S3 gateway serving `talos-etcd-backups` and Velero, and it is a **single-node POSIX
+gateway on a USB disk** (`/dev/sdb2` → `/share/external/DEV3302_2`). It is not managed by Flux or
+OpenTofu; that is a recorded residual risk in `plans/2026-09-08-usb-failure-domain-plan.md`. It is
+started from **root's crontab** — there is no init script and no QPKG.
+
+### What went wrong on 2026-09-08
+
+A USB stall wedged the gateway and took the git forge down for ~4.5 h. The watchdog that was supposed
+to catch it was itself part of the failure. It lived at `<USB>/versitygw/watchdog.sh` — **on the disk
+it was watching** — and cron ran it every 3 minutes with no mutual exclusion:
+
+- it tested `ps | grep versitygw`, so a gateway that accepted TCP but answered nothing looked healthy;
+- `[ -f "$f" ]` (a cached stat) still succeeded while `/bin/sh "$f"` (a read) blocked, so a fresh copy
+  wedged every 3 minutes — **25 accumulated in D-state**;
+- it appended to a **478 MB unrotated log on the same USB disk**, so the gateway blocked on its own
+  logging (`ls -l /proc/<pid>/fd/1` confirmed the fd).
+
+### What is deployed now
+
+| | |
+|---|---|
+| Source of truth | `scripts/qnap-versitygw-watchdog.sh` (in git — **do not hand-edit the NAS copy**) |
+| Installer | `scripts/qnap-versitygw-install.sh` (idempotent; `DRY_RUN=1` to preview) |
+| Tests | `just test-versitygw-watchdog` (41 cases, run under WSL) |
+| Deployed to | `/share/ZFS2_DATA/.versitygw-supervisor/` — the **internal** pool, never the USB |
+| Cron | `*/3 * * * * /bin/bash /share/ZFS2_DATA/.versitygw-supervisor/watchdog.sh` |
+| Retired | `<USB>/versitygw/watchdog.sh.retired` (kept for reference; nothing invokes it) |
+
+The installer refuses to run if the supervisor base resolves to the same block device as the gateway,
+so a symlink or remount can never quietly re-arm the original bug.
+
+### How it decides
+
+It probes the **disk before** deciding anything, because that determines whether a restart is even
+capable of helping:
+
+| Disk | Gateway answers | Action |
+|---|---|---|
+| ok | yes | nothing (`healthy`); restart ledger cleared |
+| ok | no | stop the stale process, restart, confirm it answers — up to **3 times per 30 min** |
+| ok | no, budget spent | `restart-budget-exhausted` — stop trying, raise a QuLog event |
+| bad | either | `disk-unhealthy` / `disk-wedged` — **never restart**, raise a QuLog event |
+
+A restart that never answers is also reaped, and if its startup is itself stuck on the USB the
+status is `start-wedged`.
+
+**A restart cannot repair uninterruptible disk I/O**, so a bad disk suppresses restarts entirely;
+retrying would only add more processes that hang. The supervisor **never reboots the NAS** — it is
+shared infrastructure (etcd backups, Velero, the `pve-nfs` export).
+
+### The pile-up guard
+
+A `mkdir` lock, because the NAS has no `flock`. It names an **owner**, and which owner changes over
+the run:
+
+- `kind=supervisor` — the script itself, by pid + `/proc` start-time (a recycled pid cannot make a
+  dead lock look alive). Held for the **whole** run including the stop/restart sequence; naming only
+  the probe would make the lock look stale the moment the probe exited, while the supervisor was
+  still mid-restart — a window for two gateways on `:7070`.
+- `kind=abandoned-probe` / `abandoned-start` — owned by a **process group**. A process in D-state
+  ignores `SIGKILL` (kubelet ignored it for 6 minutes in this incident), so the parent **polls and
+  abandons** rather than `wait`ing, and deliberately **leaves the lock held**. It must be the group,
+  not the pid: `mkdir`/`cat`/`rm` are children of the probe subshell, so `SIGKILL` can reap the
+  subshell while the command actually stuck on the disk lives on.
+
+That turns the old 25-copy pile-up into a hard ceiling of one, and it self-heals: when the disk
+recovers the abandoned group empties and the next run reclaims the lock.
+
+Two subtleties worth knowing before changing any of it:
+
+- **Reclaiming a stale lock is serialised by a second mutex** (`state/reclaim`), and re-checks
+  ownership while holding it. Without that, two runs that both saw a dead holder could both proceed
+   — the second deleting the *winner's freshly created* lock. The guard is held for milliseconds; an
+  older one means a run died inside it and is broken with a logged message.
+- **The `/proc` scan skips unreadable entries** rather than aborting. Globbing `/proc/[0-9]*/stat`
+  into one `awk` looks equivalent but is not: the shell expands the glob before `awk` opens
+  anything, so a process exiting in between makes `awk` exit non-zero, which reads as "the group is
+  gone" and releases an abandoned probe's lock while its D-state child is still alive.
+  `PROC_ROOT` exists solely so this is unit-testable; never set it in operation.
+
+### Triage
+
+```bash
+python scripts/qnap-ssh.py --sudo "cat /share/ZFS2_DATA/.versitygw-supervisor/state/status"
+python scripts/qnap-ssh.py --sudo "tail -40 /share/ZFS2_DATA/.versitygw-supervisor/watchdog.log"
+```
+
+A `disk-wedged` status means **storage intervention**, not a restart: the USB bridge has stopped
+answering and only re-seating the device (or a NAS reboot, which is an operator decision) clears it.
+
+This supervisor is **not** what pages you. Detection and alerting are cluster-side: the
+`versitygw-probe` CronJob (§ `kubernetes/apps/infrastructure/storage/talos-backup/versitygw-probe.yaml`)
+does an authenticated PUT → GET → verify → DELETE every 10 minutes and raises `VersitygwProbeFailed`.
+The split is deliberate — cluster-side answers *"is the object store usable?"*, the NAS-side answers
+*"can a local restart fix it?"*. The NAS-side check stops short of a signed S3 round-trip on purpose:
+the NAS ships **bash 3.2.57 with no `flock`, `timeout`, or `pgrep`**, and hand-rolling SigV4 there
+would put fragile code in the one path that must never fail.
+
+> **Gotcha — the NAS's `base64` rejects a trailing newline.** `echo "$b64" | base64 -d` decodes
+> correctly but **exits 1**, which silently aborts any `set -e` script. Use `printf '%s'`.
+
 ## Open items this audit did NOT close
 
 | Gap | Why it is still open |

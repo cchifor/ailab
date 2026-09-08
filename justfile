@@ -137,6 +137,13 @@ test-gitea-runner:
 test-dev-worker:
     bash {{ansible_dir}}/roles/dev_worker/tests/test-tmux-persistence.sh
 
+# Test the QNAP versitygw supervisor's decision logic (stubbed curl/start.sh; no NAS needed).
+# The negative cases are the point: a sick disk must NOT trigger a restart, and a stuck probe must
+# NOT allow a second one to start — the two things the old watchdog got wrong on 2026-09-08.
+# Needs a real Linux /proc and two distinct filesystems (/tmp + /dev/shm), so run it under WSL.
+test-versitygw-watchdog:
+    bash scripts/tests/test-qnap-versitygw-watchdog.sh
+
 # Lint
 lint:
     cd {{ansible_dir}} && ansible-lint || true
