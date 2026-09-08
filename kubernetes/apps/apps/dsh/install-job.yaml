@@ -30,9 +30,9 @@ metadata:
 spec:
   ttlSecondsAfterFinished: 86400
   backoffLimit: 4
-  # Without a deadline a hung npm install retries until the TTL, and the Deployment's
-  # wait-for-install sits blocked behind it with no signal beyond a Pending pod. 20 minutes
-  # is generous against the 4-minute install measured on this cluster.
+  # Without a deadline a hung npm install retries until the TTL while the Deployment's
+  # wait-for-install blocks behind it, with no signal beyond a Pending pod. 20 minutes is
+  # generous against the 4-minute install measured on this cluster.
   activeDeadlineSeconds: 1200
   template:
     metadata:
@@ -66,11 +66,6 @@ spec:
             # check below is per-directory, so without a distinct path npm would simply skip the
             # reinstall and the mismatch would be silent. Bump this on any base-image libc change.
             - { name: DSH_BUILD, value: "glibc" }
-            # Web search/fetch provider, pinned. dsh ships only the deepseek-official search
-            # provider, which needs a DEEPSEEK_API_KEY this estate does not hold; this community
-            # plugin backs BOTH web_search and web_fetch with our own SearXNG instead. It is
-            # third-party code running in-process, so it is pinned exactly rather than floated.
-            - { name: DSH_PLUGINS, value: "dsh-searxng-web@0.5.9" }
             - { name: npm_config_cache, value: /app/.npm }   # shared across versions; harmless
           command: ["/bin/sh", "-c"]
           args:
@@ -88,42 +83,13 @@ spec:
               # version wrote it beside the install, which meant an OOM-killed or evicted Job could
               # leave a marker over a half-written node_modules and every later run would skip the
               # repair. Verify-then-mark, never mark-then-verify.
-              # The marker alone is not enough once plugins exist: adding one to DSH_PLUGINS must
-              # trigger a reinstall, and the marker would otherwise say "done" for a tree that
-              # predates it. Check every requested plugin is actually present.
-              # Check the installed VERSION, not merely that a directory exists. Directory names carry
-              # no version, so a bare -d test reports "already installed" after a version bump and the
-              # upgrade is silently skipped. ${p%@*} splits on the LAST @, so scoped names survive
-              # (@scope/pkg@1.2.3 -> @scope/pkg); an entry with no version is rejected rather than
-              # collapsing to an empty path. node reads package.json properly instead of regexing JSON.
-              PLUGINS_OK=1
-              for p in $DSH_PLUGINS; do
-                case "$p" in *@*) ;; *) echo "DSH_PLUGINS entry $p has no version -- refusing"; exit 1;; esac
-                pname="${p%@*}"; pver="${p##*@}"
-                got=$(node -p "try{require('${DEST}/node_modules/${pname}/package.json').version}catch(e){''}" 2>/dev/null)
-                [ "$got" = "$pver" ] || { echo "plugin ${pname}: want ${pver}, have ${got:-none}"; PLUGINS_OK=0; }
-              done
-              if [ -f "$MARKER" ] && [ -x "${DEST}/node_modules/.bin/dsh" ] && [ "$PLUGINS_OK" = 1 ]; then
-                echo "already installed: ${DSH_VERSION} (+ ${DSH_PLUGINS})"; exit 0
+              if [ -f "$MARKER" ] && [ -x "${DEST}/node_modules/.bin/dsh" ]; then
+                echo "already installed: ${DSH_VERSION}"; exit 0
               fi
-              [ "$PLUGINS_OK" = 1 ] || echo "plugin set changed -- reinstalling"
-              # Clear the marker BEFORE any reinstall, whatever the reason. The Deployment's
-              # wait-for-install gates on this file, so leaving it in place while npm rewrites
-              # node_modules lets dsh start against a half-populated tree. The plugin-set path
-              # makes that reachable in a way the original binary-missing check never was: there,
-              # the tree was empty; here, marker and binary both already exist.
-              rm -f "$MARKER"
+              [ -f "$MARKER" ] && echo "marker present but binary missing -- reinstalling" && rm -f "$MARKER"
               echo "installing @deepseek-ai/dsh@${DSH_VERSION} into ${DEST}"
-              npm install --prefix "$DEST" --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}" $DSH_PLUGINS
+              npm install --prefix "$DEST" --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}"
               test -x "${DEST}/node_modules/.bin/dsh"
-              # Not just present: at the pinned version AND resolvable. A directory can survive a
-              # half-finished install; require the module to actually resolve before marking done.
-              for p in $DSH_PLUGINS; do
-                pname="${p%@*}"; pver="${p##*@}"
-                got=$(node -p "try{require('${DEST}/node_modules/${pname}/package.json').version}catch(e){''}" 2>/dev/null)
-                [ "$got" = "$pver" ] || { echo "plugin ${pname} is ${got:-missing}, wanted ${pver}"; exit 1; }
-                node -e "require.resolve('${pname}',{paths:['${DEST}/node_modules']})" || { echo "plugin ${pname} does not resolve"; exit 1; }
-              done
               touch "$MARKER"
               echo "installed:"; "${DEST}/node_modules/.bin/dsh" --version || true
           volumeMounts:

@@ -88,6 +88,13 @@ spec:
               # volume rebuild would have silently reverted both. install -m 0644, not cp, for the
               # same 0444-ConfigMap-mode reason as settings.yaml above.
               install -m 0644 /seed/cordis.patch.yml /dsh-home/profiles/web/cordis.patch.yml
+              # The SearXNG search provider, installed BESIDE cordis.patch.yml because that is the
+              # directory a row's relative `name:` specifier resolves against. It cannot be npm-
+              # installed into /app: dsh resolves bare specifiers from the PROFILE directory, whose
+              # node_modules is a symlink farm of dsh's OWN dependency closure only. A sibling
+              # package installed next to dsh is not in that closure, so a bare specifier throws
+              # MODULE_NOT_FOUND and boot() rethrows -- crash-looping the pod, not degrading it.
+              install -m 0644 /seed/searxng-search.mjs /dsh-home/profiles/web/searxng-search.mjs
               node /seed/fix-profile.js
           volumeMounts:
             - { name: home, mountPath: /dsh-home }
