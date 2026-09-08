@@ -1,5 +1,19 @@
 # Runbook: on-demand LLM loading (llama-swap)
 
+> **RETIRED FROM ailab (2026-09-08).** qwen3.5-122b no longer runs on ai-node3. It moved to the
+> **cloudlab** estate — cloud3, llama-swap on `192.168.0.26:8080` — where the 72 GiB of Q4_K_M
+> weights fit ENTIRELY in 96 GiB of VRAM across four RTX 3090s. MEASURED 60.6-66.2 tok/s fully
+> resident, against 16.6 tok/s here, where node3's iGPU LXC could not hold it and MoE experts
+> spilled to host RAM.
+>
+> Everything below about node3 serving it is HISTORY. ai-node3 now has no managed model; the LXC
+> (ai-llm-3, vmid 5003, .46) is kept, empty. The user-facing route is `qwen3.5-122b-cloud` on the
+> `litellm` gateway. The tenant gateway `litellm-local` deliberately does NOT follow it across —
+> cloudlab powers off nightly and that gateway carries external-tenant budgets.
+>
+> The "node3 is SINGLE-MODEL" rule below existed only because qwen3.5-122b and gpt-oss-120b could
+> not co-reside. That slot is free again.
+
 **Topology (2026-07-08).** The daily driver **Qwen3.6-35B (~24 GiB) is PINNED on node1 AND node2** —
 two warm nodes give redundancy + LiteLLM load-balancing, and keep node2 light so its runners/dev-workers
 have RAM (the old "gpt-oss pinned on node2" layout over-subscribed node2 → OOM). **node3 is the

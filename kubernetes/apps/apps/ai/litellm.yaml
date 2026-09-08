@@ -38,14 +38,18 @@ data:
       # name" as the alternative; this takes it. Callers now get an explicit model-not-found instead of
       # quiet wrong answers. gpt-oss-120b weights DO still sit on cloud3's NFS store (60 GiB) but are
       # not loaded by any llama-swap config, so nothing serves them. See docs/runbooks/ai-model-swap.md.
-      - model_name: qwen3.5-122b-ailab
+      - model_name: qwen3.5-122b-cloud
         litellm_params:
           model: openai/qwen3.5-122b
-          api_base: http://llm-qwen35.ai.svc.cluster.local:8080/v1
+          api_base: http://192.168.0.26:8080/v1
           api_key: "sk-noauth"
         model_info:
-          max_input_tokens: 24576 # host CTX=32768 --parallel 1 (single 32K slot); ~8K output headroom for reasoning
-      # ---- CLOUD GPU CLUSTER (cloud3, 3x RTX 3090 = 72 GiB VRAM) -------------------------------
+          # cloud3 llama-swap serves this with `-c 262144 --parallel 2`. In llama.cpp `-c` is the
+          # TOTAL KV context shared across slots, so each of the 2 slots gets 262144/2 = 131072.
+          # 131072 - 32768 output headroom = 98304. (The previous 24576 described node3's retired
+          # CTX=32768/--parallel 1 host and under-declared cloud3 by 4x.)
+          max_input_tokens: 98304
+      # ---- CLOUD GPU CLUSTER (cloud3, 4x RTX 3090 = 96 GiB VRAM) -------------------------------
       # Served by llama-swap in LXC 5101 on cloud3 at 192.168.0.26:8080 — a plain LAN address, not a
       # k8s Service: the `pve` cloud cluster is a SEPARATE Proxmox cluster and these are not cluster
       # workloads. Serving side: git.chifor.me/cchifor/cloudlab (host/llama-swap.yaml).
@@ -359,7 +363,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "2ac807340ae8"
+        checksum/config: "dc6304502734"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

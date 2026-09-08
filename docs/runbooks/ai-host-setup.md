@@ -61,7 +61,9 @@ downsizing the Talos CP VMs 32→24 GiB, to free system RAM. **Measurement made 
 for the daily driver** (the LXC uses ~0.5 GiB system RAM; a node runs the 32 GiB CP VM + the LXC with
 ~33 GiB still free). **Heavyweight validation (2026-06-14) confirmed both fit the current carve:**
 - gpt-oss-120B (63 GB) loads **entirely in the 64 GiB VRAM heap** (59 GiB used), ~0.6 GiB GTT.
-- Qwen3.5-122B (76.5 GB) **maxes VRAM (64 GiB) and spills ~8 GiB to GTT** (system RAM); it runs alongside
+- Qwen3.5-122B — **NO LONGER SERVED HERE (moved to cloudlab/cloud3 2026-09-08, where it is fully
+  VRAM-resident at 60.6-66.2 tok/s).** Kept below as the worked example of a model that does not
+  fit: it (76.5 GB) **maxed VRAM (64 GiB) and spilled ~8 GiB to GTT** (system RAM); it ran alongside
   a 32 GiB CP VM but pushes `free`→0. For **large contexts** on the 122B, give that node headroom: downsize
   its CP VM (`kubernetes/infra/variables.tf` `control_planes{}`, rolling reboot via `talosctl shutdown` — HA
   tolerates one CP down) or reduce the BIOS UMA carve (manual, per-node) + set kernel `amdgpu.gttsize=131072

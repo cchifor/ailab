@@ -47,7 +47,9 @@ spec:
     matchNames: [ai]
   selector:
     matchLabels:
-      app.kubernetes.io/component: llama-server # matches all llama-server Services (llm/llm-gemma4/llm-qwen35)
+      app.kubernetes.io/component: llama-server # matches all llama-server Services (llm/llm-gemma4;
+        # llm-qwen35 removed 2026-09-08 with the 122b's move to cloudlab. .46 still appears in the
+        # node_exporter endpoints below -- that is the LXC's own host metrics and is unrelated.)
   endpoints:
     - port: http
       path: /metrics
