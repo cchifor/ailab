@@ -54,18 +54,49 @@ resource "terraform_data" "enable_guest_agent" {
       # those, but the reboot was NOT: it would have bounced five live CI runners to re-apply a
       # setting they already had. A provisioner whose only job is "enable the agent" has no business
       # rebooting a VM on which it changed nothing.
-      CUR="$(curl -fsS $PVE_K "$EP/api2/json/nodes/$PVE_NODE/qemu/$VMID/config" \
-        -H "Authorization: PVEAPIToken=$PVE_TOKEN" | tr ',' '\n' | grep -o '"agent":[^,}]*' | head -1)"
+      # Read the whole config document, then extract the agent value WITHOUT splitting on commas.
+      # PVE's `agent` is an option STRING, not a bool: it can be "1", or "enabled=1", or a compound
+      # like "fstrim_cloned_disks=0,enabled=1". An earlier version of this guard piped through
+      # `tr ',' '\n'` and matched any "1", which is wrong in BOTH directions -- the compound form
+      # loses the enabled= token (so an already-enabled agent got rebooted, the exact thing this
+      # guard exists to prevent), and "enabled=0,fstrim_cloned_disks=1" would have matched and
+      # skipped. Capture the quoted value whole, or the bare numeric form.
+      CFG="$(curl -fsS $PVE_K "$EP/api2/json/nodes/$PVE_NODE/qemu/$VMID/config" \
+        -H "Authorization: PVEAPIToken=$PVE_TOKEN")" || {
+        echo "FATAL: could not read config for $PVE_NODE/$VMID -- refusing to touch it" >&2
+        exit 1
+      }
+      # An unreadable/!JSON response must ABORT, never fall through to the reboot branch: a transient
+      # API error is not evidence that the agent is disabled.
+      case "$CFG" in
+        *'"data"'*) : ;;
+        *) echo "FATAL: unexpected config response for $PVE_NODE/$VMID" >&2; exit 1 ;;
+      esac
+      CUR="$(printf '%s' "$CFG" | sed -n 's/.*"agent"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+      if [ -z "$CUR" ]; then
+        CUR="$(printf '%s' "$CFG" | sed -n 's/.*"agent"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)"
+      fi
       curl -fsS $PVE_K -X PUT "$EP/api2/json/nodes/$PVE_NODE/qemu/$VMID/config" \
         -H "Authorization: PVEAPIToken=$PVE_TOKEN" --data-urlencode "agent=1" >/dev/null
       # Only the FIRST enable needs the cold reboot: PVE attaches the virtio-serial channel the guest
       # agent needs on a full stop/start, which a soft ACPI reboot would not do. If the agent was
       # already on, that channel is already attached and a reboot buys nothing.
+      # Interpret the option string independently of ordering. PVE treats a leading bare "1" as
+      # enabled (agent: 1 / agent: 1,fstrim_cloned_disks=1), and otherwise the explicit enabled= key
+      # decides. An ABSENT agent field leaves CUR empty -> not enabled -> enable + reboot, which is
+      # the correct behaviour for a freshly created VM.
       case "$CUR" in
-        *1*) echo "guest agent already enabled on $PVE_NODE/$VMID - skipping reboot" ;;
-        *)   curl -fsS $PVE_K -X POST "$EP/api2/json/nodes/$PVE_NODE/qemu/$VMID/status/reboot" \
-               -H "Authorization: PVEAPIToken=$PVE_TOKEN" >/dev/null ;;
+        *enabled=1*) AGENT_ON=yes ;;
+        *enabled=0*) AGENT_ON=no ;;
+        1|1,*)       AGENT_ON=yes ;;
+        *)           AGENT_ON=no ;;
       esac
+      if [ "$AGENT_ON" = yes ]; then
+        echo "guest agent already enabled on $PVE_NODE/$VMID (agent=$CUR) - skipping reboot"
+      else
+        curl -fsS $PVE_K -X POST "$EP/api2/json/nodes/$PVE_NODE/qemu/$VMID/status/reboot" \
+          -H "Authorization: PVEAPIToken=$PVE_TOKEN" >/dev/null
+      fi
     EOT
   }
 }
