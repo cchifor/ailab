@@ -190,7 +190,12 @@ group_alive() {
   local want=${1:-} d line rest
   [ -n "$want" ] || return 1
   for d in "$PROC_ROOT"/[0-9]*; do
-    read -r line < "$d/stat" 2>/dev/null || continue   # exited mid-scan: skip, never conclude "dead"
+    # Braces so 2>/dev/null covers the REDIRECTION failure too. Bash reports a failed input
+    # redirect on its own stderr before the command's own redirections apply, so the trailing
+    # form still printed "/proc/<pid>/stat: No such file or directory" for every process that
+    # exited mid-scan — noise from the one tool whose job is to be trustworthy during an
+    # incident. The skip itself was always correct.
+    { read -r line < "$d/stat"; } 2>/dev/null || continue   # exited mid-scan: skip, never "dead"
     [ -n "$line" ] || continue
     rest=${line##*') '}
     set -- $rest
