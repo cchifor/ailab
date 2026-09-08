@@ -87,29 +87,13 @@ models:
   # the retire step in docs/runbooks/ai-model-swap.md; :8082 on node1 is now free.
   # ---- node3 llama-swap SINGLE-MODEL — qwen3.5-122b on demand (ctid 5003 / .46) ----
   # Deploy via a single-MODEL provision call (SWAP=true, no MODELS_JSON) — see docs/runbooks/ai-model-swap.md.
-  qwen3.5-122b:
-    node: ai-node3
-    alias: qwen3.5-122b
-    gguf: /models-local/qwen3.5-122b-a10b/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf
-    stage_from: /models/qwen3.5-122b-a10b
-    ctx: 32768                # a SINGLE 32K-token window (was 16384 total / 8192 per slot). The interactive
-                              # "waits 45s-4min between messages" was NOT slot contention — it was Open WebUI's
-                              # title/tags/follow-up task calls (re-enabled in OWUI's DB despite env, the
-                              # PersistentConfig gotcha) hitting 122b after every message, filling both slots
-                              # and EVICTING the prefix cache. Fixed at the source (open-webui.yaml:
-                              # ENABLE_PERSISTENT_CONFIG=false + TASK_MODEL_EXTERNAL=qwen3.6). With the extra
-                              # calls gone, a single deep-reasoning user needs ONE slot, so we spend the KV on a
-                              # BIGGER window instead of a 2nd slot: max context + best prefix reuse across turns.
-    parallel: 1               # single slot => the full 32K window serves each request (best for max context +
-                              # sequential reasoning). Tradeoff: if you fire a 2nd chat while a long 122b answer
-                              # is still generating it queues (rare for single-user). q8_0 KV for 32K adds only
-                              # ~2 GiB GTT (weights ~70 GiB dominate); node3 host stays within its ~18 GiB free.
-    cache_type: q8_0          # q8_0 K/V (needs flash-attn, which --flash-attn auto engages). At ctx 16384 this
-                              # keeps KV GTT ~= the original f16-@-8192 footprint; near-lossless.
-    extra: "--no-mmap"
-    swap: true                # MANAGED on node3's llama-swap (sole model; loads on request, idle-unloads)
-    ttl: 1800                 # 30 min idle (raised from 900 to keep a Q&A session warm)
-
-  # gpt-oss-120b: RETIRED from node3 on 2026-07-08 to end the two-heavyweight swap-thrash (see the
-  # "Why node3 is SINGLE-MODEL" note above). The GGUF stays staged on node3's /models-local for a fast
-  # bring-back, but it is intentionally NOT registered here or in llama-swap: node3 cannot serve both.
+  # qwen3.5-122b REMOVED 2026-09-08 — moved to the cloudlab estate (cloud3, llama-swap on
+  # 192.168.0.26). node3's iGPU LXC could not hold it, so MoE experts spilled to host RAM and it
+  # measured 16.6 tok/s; on cloud3 the 72 GiB of Q4_K_M weights fit entirely in 96 GiB of VRAM
+  # across four RTX 3090s and it measures 60.6-66.2 tok/s. ~4x, from residency alone.
+  #
+  # ai-node3 therefore has NO managed model. The LXC (ai-llm-3, vmid 5003, .46) is kept, empty.
+  # The "node3 is SINGLE-MODEL" constraint in the header above no longer binds anything: it existed
+  # because qwen3.5-122b (~71 GiB) and gpt-oss-120b (~59 GiB) could not co-reside. That slot is now
+  # free, so gpt-oss-120b COULD return here — a capacity decision, not a correctness one, and
+  # deliberately not taken in this change.
