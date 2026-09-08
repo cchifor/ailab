@@ -42,8 +42,19 @@ spec:
 # which put .credentials.yaml, settings.yaml and profiles/ inside the agent's reach. The Deployment
 # now pins workingDir here.
 #
-# ReadWriteOnce/local-path matches dsh-home: one replica, and produced files are node-local. Sized
-# larger than dsh-home because this is where the agent's actual output accumulates.
+# ReadWriteOnce/local-path deliberately MATCHES dsh-home (declared above in this same file), not
+# dsh-app. Reviewed question worth answering in place: does this newly node-lock the Deployment?
+# No. dsh-home is already ReadWriteOnce/local-path, and a local-path PV carries node affinity, so
+# the pod is pinned wherever dsh-home was first provisioned. VERIFIED on the live cluster
+# 2026-09-08: dsh-home is bound to pvc-329c5297 with node affinity talos-cp1, and the pod already
+# runs on talos-cp1. This claim therefore adds no constraint that did not already exist $E the
+# Deployment could not reschedule to another node before this change either.
+#
+# The consequence is real but pre-existing: if that node is lost, dsh stays down until it returns.
+# Moving BOTH volumes to nfs-csi/RWX would lift it, at the cost of putting the agent's working
+# directory and its session state on NFS. That is a separate decision, not this change.
+#
+# Sized larger than dsh-home because this is where the agent's actual output accumulates.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
