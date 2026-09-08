@@ -48,10 +48,10 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/component: llama-server # matches all llama-server Services (llm/llm-gemma4;
-        # llm-qwen35 is RETAINED for one reconcile while the 122b moves to cloudlab -- see the gate
-        # in llm-service.yaml -- so it still matches this selector and is still scraped. It drops
-        # out on its own when that follow-up deletes it; no change is needed here. .46 also appears
-        # in the node_exporter endpoints below -- that is the LXC's own host metrics, unrelated.)
+        # llm-qwen35 was retained for one reconcile during the 122b's move to cloudlab and is now
+        # DELETED (2026-09-08, gate results in llm-service.yaml), so it no longer matches this
+        # selector and is no longer scraped. .46 still appears in the node_exporter endpoints below
+        # -- that is the LXC's own host metrics and is unrelated to the removed Service.)
   endpoints:
     - port: http
       path: /metrics

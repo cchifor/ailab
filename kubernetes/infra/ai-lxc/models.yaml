@@ -19,12 +19,12 @@
 #   node3         : no managed model in this file. llama-swap served ONLY qwen3.5-122b on demand
 #                   until 2026-09-08, when it moved to the cloudlab estate (cloud3) where it is
 #                   fully VRAM-resident; gpt-oss-120b had been RETIRED on 2026-07-08.
-#                   DO NOT REPURPOSE THE SLOT YET. Removing the entry here does not stop the running
-#                   unit: node3's llama-swap must keep serving the 122b until the four gates in
-#                   llm-service.yaml pass, because gateway pods still on the old config resolve
-#                   llm-qwen35 and route to it. Taking node3's capacity before then breaks those
-#                   draining pods. The slot is free only once those gates pass AND the follow-up
-#                   has removed the retained Service and stopped the node3 unit.
+#                   The slot is now GENUINELY FREE: the four gates in llm-service.yaml passed on
+#                   2026-09-08, the retained llm-qwen35 Service was deleted, and node3's llama-swap
+#                   model config was removed, so nothing routes to or runs on .46:8080 any more.
+#                   Its 72 GiB of staged weights under /models-local were reclaimed (the copy of
+#                   record stays on the QNAP NFS store at /models/qwen3.5-122b-a10b), together with
+#                   the 60 GiB of gpt-oss-120b retired back in July.
 # This replaced the earlier "gpt-oss pinned on node2" layout, which over-subscribed node2 (59 GiB model
 # + 2 runners + 2 dev-workers -> OOM). qwen3.6 (~24 GiB) frees ~35 GiB on node2 for its runners/workers.
 #
