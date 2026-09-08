@@ -105,10 +105,13 @@ subsets:
 # per the container's --config arg — an earlier draft of this gate named a path that does not exist,
 # and a `|| echo 0` fallback turned that mistake into a silent pass.)
 #
-# ai-llm-3 (vmid 5003, .46) is deliberately KEPT, now genuinely empty and reclaimable: node3 was
-# documented SINGLE-MODEL because qwen3.5-122b and gpt-oss-120b could not co-reside. The LXC still
-# owns its address and its out-of-band /models-local mount (added by `pct set`, not tofu), which is
-# why removing the model is cheap and destroying the container would not be.
+# ai-llm-3 (vmid 5003, .46) is deliberately KEPT. Its ROUTING slot is free as of this commit, but
+# the container is NOT yet empty: llama-swap is still running and 72 GiB of qwen3.5-122b weights are
+# still staged under /models-local, both pending the manual step described in check 4. It becomes
+# empty only after that. node3 was documented SINGLE-MODEL because qwen3.5-122b and gpt-oss-120b
+# could not co-reside; gpt-oss's 60 GiB is already gone. The LXC still owns its address and its
+# out-of-band /models-local mount (added by `pct set`, not tofu), which is why removing a model is
+# cheap and destroying the container would not be.
 # NOTE .46 still appears in monitoring.yaml's node_exporter endpoints — that is the LXC's own
 # host metrics and is unrelated to this Service; it stays.
 ---
