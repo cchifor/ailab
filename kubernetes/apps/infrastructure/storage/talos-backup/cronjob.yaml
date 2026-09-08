@@ -13,6 +13,17 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      # Hard wall-clock bound on the whole Job, retries included. 2026-09-08: a USB stall on the QNAP
+      # wedged versitygw so it ACCEPTED TCP but never answered; anything writing to it blocked
+      # indefinitely. This CronJob had backoffLimit + concurrencyPolicy but NO deadline, so a hung
+      # snapshot upload had nothing to stop it -- it would simply sit there, and with
+      # concurrencyPolicy: Forbid every subsequent night's run would be skipped, silently.
+      # 30m is well above a healthy run (an etcd snapshot is ~100s of MB, compressed and encrypted
+      # locally before upload). Past that the Job is killed and reported, which is the requirement:
+      # a dead backup target must cost us backups and an alert, never an unbounded hang.
+      # NOTE this is jobTemplate.spec.activeDeadlineSeconds (bounds the Job); the identically named
+      # field under template.spec would bound the POD and interacts differently with restartPolicy.
+      activeDeadlineSeconds: 1800
       backoffLimit: 2
       template:
         spec:
