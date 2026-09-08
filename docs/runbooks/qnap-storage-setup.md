@@ -327,7 +327,7 @@ A `disk-wedged` status means **storage intervention**, not a restart: the USB br
 answering and only re-seating the device (or a NAS reboot, which is an operator decision) clears it.
 
 This supervisor is **not** what pages you. Detection and alerting are cluster-side: the
-`versitygw-probe` CronJob (§ `kubernetes/apps/infrastructure/storage/talos-backup/versitygw-probe.yaml`)
+`versitygw-probe` CronJob (§ `kubernetes/apps/backup/talos-backup/versitygw-probe.yaml`)
 does an authenticated PUT → GET → verify → DELETE every 10 minutes and raises `VersitygwProbeFailed`.
 The split is deliberate — cluster-side answers *"is the object store usable?"*, the NAS-side answers
 *"can a local restart fix it?"*. The NAS-side check stops short of a signed S3 round-trip on purpose:

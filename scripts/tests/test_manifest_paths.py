@@ -53,9 +53,9 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 #: each name a path in a DIFFERENT repo that does not exist in this checkout at all.
 #:
 #: PR C-P0-05's spec (tests_first) describes this as "the 24 Flux Kustomization paths listed in
-#: clusters/ai" — the anchor has moved since the plan was written: clusters/ai currently holds 25
-#: Kustomization documents total (23 locally-sourced + the 2 externally-sourced ones above), not
-#: 24+2. The 23-path set below is independently re-derived (every path checked for a real
+#: clusters/ai" — the anchor has moved since the plan was written: clusters/ai currently holds 26
+#: Kustomization documents total (24 locally-sourced + the 2 externally-sourced ones above), not
+#: 24+2. The 24-path set below is independently re-derived (every path checked for a real
 #: kustomization.yaml, every exclusion checked against its manifest's own sourceRef) rather than
 #: hand-copied from the spec text; see deviations_from_spec in the implement report. The 2
 #: exclusions are not just "not local", either — mp.EXPECTED_EXTERNAL_SOURCES is a closed,
@@ -76,6 +76,7 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/agentforge-tenants-bootstrap",
         "./kubernetes/apps/infrastructure/agentforge-workers",
         "./kubernetes/apps/apps",
+        "./kubernetes/apps/backup",
         "./kubernetes/apps/infrastructure/cert-manager-config",
         "./kubernetes/apps/databases",
         "./kubernetes/apps/edge-connector",

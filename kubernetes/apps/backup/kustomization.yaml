@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Backup layer (W6). Deliberately NOT part of `infrastructure`: see clusters/ai/backup.yaml for why
+# these three moved out of infrastructure/storage/.
+resources:
+  - velero # filesystem backup (Kopia via node-agent) -> versitygw S3 on the QNAP (ADR 0010)
+  - talos-backup # daily age-encrypted etcd snapshot -> versitygw, + retention prune + the W4 round-trip probe
+  - backup-offsite # nightly encrypted rclone sync of the versitygw buckets -> Google Drive (copy #3)

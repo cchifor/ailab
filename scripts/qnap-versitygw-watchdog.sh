@@ -45,7 +45,7 @@
 # This script does not perform an authenticated S3 round-trip. Signing SigV4 in bash 3.2 (the
 # NAS ships bash 3.2.57, with no flock/timeout/pgrep) would be fragile in exactly the code path
 # that must never fail. The authoritative end-to-end check is the in-cluster CronJob
-# `versitygw-probe` (kubernetes/apps/infrastructure/storage/talos-backup/versitygw-probe.yaml),
+# `versitygw-probe` (kubernetes/apps/backup/talos-backup/versitygw-probe.yaml),
 # which does a real PUT/GET/verify/DELETE every 10 minutes and raises VersitygwProbeFailed.
 # The split is intentional:
 #     cluster-side    -> "is the object store USABLE?"           (detection + alerting)

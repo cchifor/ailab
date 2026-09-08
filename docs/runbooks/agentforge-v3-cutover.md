@@ -177,7 +177,7 @@ ls -l "$DUMP"   # byte size MUST equal the in-pod ls -l size from step 1
 #    fails exit 60). curl >= 7.75 signs S3 requests natively:
 eval "$(SOPS_AGE_KEY_FILE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out/age.agekey" \
   sops -d --extract '["stringData"]["cloud"]' \
-    kubernetes/apps/infrastructure/storage/velero/secret.sops.yaml \
+    kubernetes/apps/backup/velero/secret.sops.yaml \
   | awk -F' *= *' '/aws_access_key_id/{print "AK="$2} /aws_secret_access_key/{print "SK="$2}')"
 curl -k --fail --aws-sigv4 "aws:amz:us-east-1:s3" --user "$AK:$SK" \
   -T "$DUMP" "https://192.168.1.225:7070/velero/manual-dumps/$DUMP"
