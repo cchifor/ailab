@@ -1,0 +1,36 @@
+# Local storage for Gitea Actions artifacts and logs (W1 of the USB failure-domain plan).
+#
+# WHY THIS EXISTS. Gitea's Actions artifacts and logs live in versitygw S3 on a USB disk attached to
+# the QNAP. On 2026-09-08 that disk stalled and the forge went down for ~4.5 h. Gitea could not cold
+# start: it opens its Actions storage during initialisation, and versitygw was ACCEPTING TCP while
+# never answering, so the connection did not fail — it hung. A backup dependency took down the forge.
+#
+# The plan's requirement is blunt: the USB disk must not be able to block Gitea. Backups may stop and
+# report an error; the forge must keep serving. Moving Actions storage onto the same iSCSI fabric the
+# rest of Gitea already depends on removes the USB from Gitea's critical path entirely.
+#
+# SIZE. 40Gi against 11 GB of current data (9.2 G artifacts + 1.5 G logs across 57,714 objects,
+# measured on the versitygw POSIX backend). The headroom is deliberate and NOT generosity:
+#
+#   * ARTIFACT_RETENTION_DAYS / LOG_RETENTION_DAYS are both 14, but retention deletes what Gitea
+#     still has a database record for. Objects orphaned by earlier cleanups are never revisited, so
+#     the migrated set is an upper bound that will not shrink on its own.
+#   * This is a thin QuTS hero LUN, and that backend does NOT honour SCSI UNMAP — verified
+#     2026-07-20, ~1.1 GB trimmed released <8 MiB at the zvol. Space freed inside ext4 is never
+#     returned, so the zvol only ever grows toward the LUN size. Sizing for the high-water mark is
+#     the only thing that works here; the same reasoning is why the main PVC went 10Gi -> 20Gi.
+#
+# RECLAIM POLICY. storageClass qnap-iscsi is Retain, so deleting this PVC leaves the PV and its zvol
+# behind. That is the estate default and it is the safe direction for data, but it does mean an
+# orphaned zvol needs manual cleanup on the NAS if this is ever torn down.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitea-actions-storage
+  namespace: gitea
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: qnap-iscsi
+  resources:
+    requests:
+      storage: 40Gi
