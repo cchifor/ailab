@@ -35,7 +35,12 @@ echo "cron line:  $CRON_LINE"
 [ "$DRY_RUN" = 1 ] && echo "== DRY RUN: nothing will be changed =="
 echo
 
-python scripts/qnap-ssh.py --sudo "
+# Build the remote command in a VARIABLE and feed it on STDIN rather than as an argument.
+# The base64 payload is ~25 KB and Windows caps a process command line at 32767 characters, so
+# passing it in argv fails with "Argument list too long" before the SSH connection is even made.
+# qnap-ssh.py reads its command from stdin when none is given in argv, and `printf` is a bash
+# builtin, so nothing here is bounded by argv limits.
+REMOTE_CMD="
   set -eu
   DRY=$DRY_RUN
 
@@ -138,5 +143,6 @@ python scripts/qnap-ssh.py --sudo "
     tail -5 '$BASE/watchdog.log' 2>/dev/null || true
   fi
 "
+printf '%s' "$REMOTE_CMD" | python scripts/qnap-ssh.py --sudo
 echo
 echo "done."
