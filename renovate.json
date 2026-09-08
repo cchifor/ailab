@@ -24,6 +24,11 @@
   ],
   "packageRules": [
     {
+      "description": "Do NOT track the AgentForge images in the self-hosted Zot registry. They are pinned by `just pin-workloads` / the CI pin bot, not by Renovate, and Zot garbage-collects them faster than a PR can be reviewed: on 2026-09-08 three such PRs (#540 orchestrator, #541 p1-worker, #544 sandbox) all proposed digests that already returned 404, while their CURRENT pins still resolved 200 -- so merging any of them would have pointed live workloads (five brokers, the OpenBao bootstrap Jobs, the reaper/dispatcher/worker deployments) at an unpullable image. Every PR Renovate opens for these is a 404 waiting to happen. Scoped to agentforge/* deliberately: registry.chifor.me/verdaccio digests survive fine (#545 verified 200), so the registry as a whole is still worth tracking.",
+      "matchPackageNames": ["registry.chifor.me/agentforge/**"],
+      "enabled": false
+    },
+    {
       "description": "Group kube-prometheus-stack + its CRDs",
       "matchPackageNames": ["/kube-prometheus-stack/"],
       "groupName": "kube-prometheus-stack"
