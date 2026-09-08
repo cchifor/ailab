@@ -20,12 +20,25 @@
 # Gitea afterwards — a copy owned by root would leave the forge unable to write new artifacts, which
 # would only surface after the cutover.
 #
-# RWO. This PVC is ReadWriteOnce and Gitea will eventually mount it. While this Job's pod exists it
-# holds the attachment, so the pod must be gone before Gitea is started on local storage. It carries
-# no ttlSecondsAfterFinished on purpose: a completed Job that Flux keeps recreating would rescan
-# 11 GB on every interval. It stays Completed; to run the delta sync, delete it and let Flux
-# recreate it (`kubectl -n gitea delete job gitea-actions-migrate`), then delete it again before the
-# cutover.
+# LIFECYCLE — and the thing that is easy to get wrong. `kubectl delete job` does NOT disable this:
+# the Job is in Flux's desired state, so Flux recreates it on the next reconcile. That is how the
+# delta sync is run, and it is also why the CUTOVER PR must DELETE this manifest from
+# kustomization.yaml rather than relying on deleting the object. The order is:
+#
+#   1. merge this PR                     -> pre-copy runs
+#   2. `kubectl -n gitea delete job gitea-actions-migrate` -> Flux recreates it, delta sync runs
+#   3. cutover PR removes this file      -> Flux PRUNES the Job; confirm no pod remains
+#   4. only then start Gitea on local storage
+#
+# Running it out of order is survivable rather than destructive precisely because the transfer is a
+# `copy` and not a `sync` (see below), but step 3 is what actually takes it out of the picture.
+#
+# No ttlSecondsAfterFinished, on purpose: a completed Job that Flux keeps recreating would rescan
+# 11 GB every interval. It stays Completed until pruned.
+#
+# RWO is NOT a safety mechanism here. ReadWriteOnce restricts the volume to one NODE, not one pod —
+# a second pod scheduled to the same node mounts it happily. So "Gitea holds the PVC" would not have
+# prevented this Job from running against the same data.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -58,14 +71,22 @@ spec:
               rclone size VGW:gitea-actions/actions_artifacts || true
               rclone size VGW:gitea-actions/actions_log || true
 
+              # `copy`, NEVER `sync`. sync deletes destination files absent from the source, and this
+              # Job stays in Flux's desired state — so if it were ever recreated AFTER Gitea is cut
+              # over to local storage, a sync would DELETE every artifact Gitea had written locally,
+              # because none of them exist in S3 any more. RWO does not save us: it permits multiple
+              # pods on the SAME node, so this could run alongside Gitea rather than being blocked by
+              # it. `copy` makes a stray re-run inert — it restores S3 objects missing locally (old
+              # artifacts, harmless) and touches nothing else.
+              #
               # --checksum, not the default mtime+size: versitygw's POSIX backend does not preserve
               # S3 mtimes faithfully, so a size-and-time comparison would silently re-copy (or worse,
-              # skip) objects. This is a one-shot migration of data with no second source of truth,
-              # so it is compared by content.
+              # skip) objects. Where no common hash exists rclone degrades to size, still stronger
+              # than trusting an mtime this backend does not keep.
               for p in actions_artifacts actions_log; do
-                echo "=== sync $p -> /data/$p (prefix NOT duplicated) ==="
+                echo "=== copy $p -> /data/$p (prefix NOT duplicated) ==="
                 mkdir -p "/data/$p"
-                rclone sync "VGW:gitea-actions/$p" "/data/$p" \
+                rclone copy "VGW:gitea-actions/$p" "/data/$p" \
                   --checksum --transfers 8 --checkers 16 \
                   --stats 30s --stats-one-line -v
               done
@@ -75,6 +96,11 @@ spec:
               # printf, not a heredoc: this whole script is a YAML block scalar, so every line keeps
               # its indentation and an indented terminator would never end the heredoc.
               field() { printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p"; }
+              # The assertion is CONTAINMENT (source ⊆ destination), not equality. Because this
+              # copies and never deletes, the destination may legitimately hold MORE than the
+              # source: retention deletes from S3 between the pre-copy and the delta run, and those
+              # objects stay behind locally as orphans. Demanding equality would fail the Job for
+              # that entirely normal case and block a cutover that is actually fine.
               fail=0
               for p in actions_artifacts actions_log; do
                 sj=$(rclone size "VGW:gitea-actions/$p" --json)
@@ -83,10 +109,10 @@ spec:
                 dc=$(field "$dj" count); db=$(field "$dj" bytes)
                 echo "  $p: source=${sc} objects / ${sb} bytes | destination=${dc} objects / ${db} bytes"
                 [ -n "$sc" ] && [ -n "$dc" ] || { echo "  could not read sizes for $p" >&2; fail=1; continue; }
-                [ "$sc" = "$dc" ] || { echo "  OBJECT COUNT MISMATCH in $p" >&2; fail=1; }
-                [ "$sb" = "$db" ] || { echo "  BYTE COUNT MISMATCH in $p" >&2; fail=1; }
+                [ "$dc" -ge "$sc" ] || { echo "  DESTINATION IS MISSING OBJECTS in $p" >&2; fail=1; }
+                [ "$db" -ge "$sb" ] || { echo "  DESTINATION IS SHORT ON BYTES in $p" >&2; fail=1; }
               done
-              [ "$fail" = 0 ] || { echo "FAIL: source and destination disagree — do NOT cut over" >&2; exit 1; }
+              [ "$fail" = 0 ] || { echo "FAIL: destination does not contain the source — do NOT cut over" >&2; exit 1; }
 
               # Per-file existence + size, NOT checksums. versitygw returns S3 ETags, and for a
               # multipart upload an ETag is an md5-of-md5s, not the object's MD5 — so a checksum
