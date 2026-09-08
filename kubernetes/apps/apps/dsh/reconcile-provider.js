@@ -54,10 +54,27 @@ const isBlank = (l) => l.trim() === '';
 
 // Match `<exactly depth spaces><key>:` within [from, to). Exact depth is what confines the walk
 // to direct children (rule 1); anything nested is deeper and therefore skipped.
+//
+// A trailing inline comment is VALID YAML for a block header (`litellm: # custom provider`) and
+// must match, or resolution reports the key absent and the insertion branch splices a SECOND
+// `litellm` key beside the real one -- duplicate mapping keys, which either fail to parse or
+// leave the stale provider effective. Anything else after the colon (a value, an anchor, a flow
+// mapping) is a shape this script does not handle; KEY_PRESENT below detects that case so the
+// caller can decline rather than duplicate.
+const KEY_HEADER = (key, depth) => new RegExp('^ {' + depth + '}' + key + ':[ \\t]*(#.*)?$');
+const KEY_PRESENT = (key, depth) => new RegExp('^ {' + depth + '}' + key + ':');
+
 function findKeyAt(lines, key, depth, from, to) {
-  const re = new RegExp('^ {' + depth + '}' + key + ':[ \\t]*$');
+  const re = KEY_HEADER(key, depth);
   for (let i = from; i < to; i++) if (re.test(lines[i])) return i;
   return -1;
+}
+
+// True if the key is present at this depth in ANY form -- including one findKeyAt cannot parse.
+function keyPresentAt(lines, key, depth, from, to) {
+  const re = KEY_PRESENT(key, depth);
+  for (let i = from; i < to; i++) if (re.test(lines[i])) return true;
+  return false;
 }
 
 // End (exclusive) of the block headed at `start`. A deeper-indented line continues the block.
@@ -169,6 +186,20 @@ if (live.range) {
   const sib = childIndent(liveLines, parent.range[0], parent.range[1]);
   const step = parent.depth > 0 ? parent.depth : 2;
   const target = sib !== null && sib > parent.depth ? sib : parent.depth + step;
+
+  // NEVER splice a second copy of a key that is already there. resolve() only recognises a plain
+  // block header, so a provider written in a shape it cannot walk would otherwise be reported
+  // missing and duplicated -- and duplicate mapping keys either fail to parse or silently leave
+  // the stale provider in effect, both worse than the stale-model bug. Declining is safe: dsh
+  // keeps whatever it has, and the warning says what to fix.
+  if (keyPresentAt(liveLines, 'litellm', target, parent.range[0], parent.range[1])) {
+    console.warn('WARNING: a litellm key already exists under llm-pi-ai.providers in a form this');
+    console.warn('         script cannot parse (a value, anchor or flow mapping on the header');
+    console.warn('         line). Leaving settings.yaml untouched rather than inserting a');
+    console.warn('         duplicate key. Rewrite it as a plain `litellm:` block to re-enable');
+    console.warn('         reconciliation.');
+    process.exit(0);
+  }
   const block = reindent(seedBlock, target - seed.depth);
   console.log('litellm provider missing from llm-pi-ai.providers; inserting it from the seed');
   console.log('  at indent', target);
