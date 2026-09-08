@@ -89,7 +89,17 @@ spec:
 
                   # Leave nothing behind. If this is ever non-zero the probe is littering a backup
                   # bucket, which must be caught here rather than discovered later.
-                  LEFT="$(rclone lsf GT:talos-etcd-backups/_healthcheck/ -q | wc -l)"
+                  # Assign FIRST, then count. In `rclone lsf ... | wc -l` the pipeline's exit status
+                  # is wc's, so `set -e` cannot see an rclone failure — and a listing that errored
+                  # out produces no stdout, so LEFT would be 0 and the probe would report "nothing
+                  # left behind" precisely when it failed to check. That is the same shape of blind
+                  # spot this whole CronJob exists to remove, so it must not be reintroduced here.
+                  if ! LISTING="$(rclone lsf GT:talos-etcd-backups/_healthcheck/ -q)"; then
+                    echo "FAIL: could not list _healthcheck/ to verify cleanup" >&2
+                    exit 1
+                  fi
+                  # grep -c exits 1 on zero matches, which is the normal case here.
+                  LEFT="$(printf '%s' "$LISTING" | grep -c . || true)"
                   if [ "$LEFT" != "0" ]; then
                     echo "FAIL: $LEFT object(s) left under _healthcheck/" >&2
                     exit 1

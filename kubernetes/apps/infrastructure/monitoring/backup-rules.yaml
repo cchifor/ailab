@@ -174,7 +174,30 @@ spec:
         # couple of minutes, while Stale catches the probe not running AT ALL (suspended CronJob,
         # unschedulable, image pull failure) — a broken probe must never read as healthy.
         - alert: VersitygwProbeFailed
-          expr: max by (namespace) (kube_job_status_failed{namespace="talos-backup", job_name=~"versitygw-probe-.*"}) > 0
+          # Fires when the most recent FAILURE is newer than the most recent SUCCESS.
+          #
+          # The obvious form — `max(kube_job_status_failed{...}) > 0` — is wrong, and wrong in the
+          # direction that matters: kube_job_status_failed is a per-Job gauge that stays 1 for as
+          # long as the failed Job object is retained. With failedJobsHistoryLimit: 6 and
+          # ttlSecondsAfterFinished: 3600 that is up to an hour, so a single failed probe would keep
+          # a CRITICAL alert firing for an hour after the object store recovered. An alert that
+          # reports an outage that is over is training to ignore it.
+          #
+          # Comparing timestamps makes recovery self-clearing: kube_job_status_completion_time is
+          # only set on SUCCESS, so as soon as one probe passes, the right-hand side moves past the
+          # stale failure and the alert resolves — while the failed Jobs stay in place for triage.
+          #
+          # If a probe has NEVER succeeded the right-hand side has no series and this cannot fire.
+          # That gap is deliberate and covered by VersitygwProbeStale's absent() clause below, which
+          # is the alert designed for "no successful round-trip", including the never case.
+          expr: |
+            max(
+              kube_job_status_start_time{namespace="talos-backup", job_name=~"versitygw-probe-.*"}
+              and on (namespace, job_name)
+              (kube_job_status_failed{namespace="talos-backup", job_name=~"versitygw-probe-.*"} > 0)
+            )
+            >
+            max(kube_job_status_completion_time{namespace="talos-backup", job_name=~"versitygw-probe-.*"})
           for: 2m
           labels: { severity: critical }
           annotations:
