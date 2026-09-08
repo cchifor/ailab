@@ -7,7 +7,10 @@ resources:
   - qnap-csi.yaml
   - snapshot-controller # external-snapshotter v8 (CRDs + controller) — enables the VolumeSnapshot API
   - volumesnapshotclass-nfs.yaml # nfs.csi.k8s.io class; without it every nfs-csi PVC failed to snapshot, so each scheduled backup was PartiallyFailed with the volume DATA uncaptured
-  - velero # Velero filesystem backup (Kopia via node-agent) -> versitygw S3 on the QNAP (ADR 0010); CSI snapshot data movement was dropped after its clone path orphaned QNAP LUNs
-  - talos-backup # daily age-encrypted etcd snapshot -> versitygw (control-plane DR)
-  - backup-offsite # nightly encrypted rclone sync of the versitygw buckets -> Google Drive (copy #3)
   - iscsi-recovery-tmo.yaml # pins live iSCSI recovery_tmo to 120s; the QNAP Trident driver writes "2m0s" where open-iscsi wants an integer, so the kernel reads it as 2
+# NOTE: velero, talos-backup and backup-offsite used to be here. They now live in
+# kubernetes/apps/backup/, reconciled by their own `backup` Kustomization — see
+# clusters/ai/backup.yaml. They were moved OUT because `apps` (which contains Gitea) and nine other
+# Kustomizations dependOn `infrastructure` with wait:true, so a backup failure could gate the
+# reconciliation that repairs the forge. Storage prerequisites that `apps` genuinely needs — the CSI
+# drivers, storage classes and the snapshot controller — stay here.

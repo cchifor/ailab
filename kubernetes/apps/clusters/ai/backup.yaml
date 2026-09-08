@@ -1,0 +1,42 @@
+# The backup layer, reconciled INDEPENDENTLY of everything that serves traffic (W6).
+#
+# WHY THIS EXISTS. These three components used to live in infrastructure/storage/. `apps` declares
+# `dependsOn: infrastructure` with `wait: true`, and nine other Kustomizations do the same — so while
+# backups sat inside `infrastructure`, an unhealthy Velero or a failing backup CronJob could hold the
+# whole layer Not-Ready and gate the reconciliation of everything downstream.
+#
+# GITEA LIVES IN `apps`. That is the part that matters: it made "the backup system is unhealthy" able
+# to block "reconcile the fix for the forge". The 2026-09-08 outage did not exercise this path (all
+# Kustomizations stayed True, because Velero's Deployment does not touch S3 at startup), but the
+# coupling was real and pointing Flux at the GitHub mirror would NOT have broken it — that loop is in
+# the dependency graph, not in the source.
+#
+# The direction of dependency is deliberate and one-way: this layer depends on `infrastructure` (it
+# needs the vmware-tanzu HelmRepository from infrastructure/sources, and the storage classes), but
+# NOTHING depends on this layer. A backup failure is now visible and alertable without being able to
+# gate anything that serves.
+#
+# `wait: true` is kept ON PURPOSE. It is not a gate any more, since nothing dependsOn `backup`, so it
+# costs nothing — and it preserves the signal: an unhealthy backup layer still shows up as
+# Ready=False on this Kustomization instead of silently reporting success.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: backup
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 10m # Velero's Helm install (CRDs + deployment + node-agent DaemonSet) on a cold start
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/backup
+  prune: true
+  wait: true
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
