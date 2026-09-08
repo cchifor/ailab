@@ -1,7 +1,7 @@
 # LiteLLM proxy: one OpenAI-compatible endpoint (litellm.ai.svc:4000/v1) that routes by
-# model name to the per-node llama-server backends. node3 (llama-swap) now serves ONLY qwen3.5-122b —
-# the sole local heavyweight — which loads on first request (multi-minute cold start covered by
-# request_timeout below) and idle-unloads after its ttl. gpt-oss-120b is retired locally (it thrashed
+# model name to the per-node llama-server backends. node3 (llama-swap) served ONLY qwen3.5-122b until
+# 2026-09-08; that model moved to the cloudlab estate (cloud3), so node3 now carries NO managed model
+# and the local heavyweight tier is empty. gpt-oss-120b is retired locally (it thrashed
 # node3's single iGPU against qwen3.5-122b) and its model_name is shimmed to the pinned qwen3.6 (below).
 # See kubernetes/infra/ai-lxc + docs/runbooks/ai-model-swap.md.
 apiVersion: v1
@@ -67,7 +67,7 @@ data:
       # The per-model --parallel values live in cchifor/cloudlab host/llama-swap.yaml — pinned at
       # commit 9907877, which is the change that moved the 122B off a single slot. Verify there, not here.
       #
-      # The three models total ~145 GiB against 72 GiB of VRAM, so llama-swap holds ONE at a time and
+      # The three models total ~145 GiB against cloud3's 96 GiB of VRAM, so llama-swap holds ONE at a time and
       # unloads on TTL — a model switch costs a cold load from local NVMe. llama-swap always answers
       # :8080, so the router never sees a down backend while the cluster is awake.
       #
@@ -155,7 +155,8 @@ data:
         model_info: { max_input_tokens: 81920 }
       # ---- COGNITIVE TIER: cloud3 ---------------------------------------------------------------
       # qwen3-coder-next REPOINTED 2026-09-07: that model_name no longer exists. cloud3's llama-swap
-      # serves exactly two models (qwen3-coder-30b-a3b, qwen3.8-27b) and the weights for a
+      # then served exactly two models (qwen3-coder-30b-a3b, qwen3.8-27b) — a THIRD, qwen3.5-122b,
+      # was added 2026-09-08 when it moved off ailab — and the weights for a
       # "qwen3-coder-next" are not on the store at all, so every request under the old name 404'd at
       # the backend. Registered here under the name llama-swap actually answers to.
       # 30B MoE with 3B ACTIVE -- decode speed tracks ACTIVE parameters, not total, which is what makes
@@ -363,7 +364,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "dc6304502734"
+        checksum/config: "b2f935c5322b"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
