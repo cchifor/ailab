@@ -39,3 +39,122 @@
   config:
     trustedHosts: !!js ctx.webRuntime.trustedHosts
     cookieMaxAgeDays: 3650
+
+# ---------------------------------------------------------------------------
+# CAPABILITIES ENABLED 2026-09-08.
+#
+# `dsh --profile web --dump-config` showed 27 of 145 rows disabled, including context compaction,
+# plan mode, web access and skills. That is upstream's default for this profile rather than a
+# fault, but it leaves the harness unable to look anything up and unable to survive a long
+# session: with compaction off the context window fills and the run ends.
+#
+# EVERY ROW BELOW CARRIES ITS FULL CONFIG, copied verbatim out of --dump-config rather than
+# retyped. That is required, not tidiness: a patch REPLACES a row's config instead of merging into
+# it, so enabling a row with a bare `disabled: false` would silently erase whatever config it had
+# -- the same trap the connection row above documents for trustedHosts. plan-mode is where it
+# would have bitten hardest: its config is a 37-line system-prompt section, and losing it would
+# leave plan mode enabled but mute.
+#
+# NOT enabled, deliberately: tool-bash, tool-fs, tool-fs-search, tool-str-replace-editor. The
+# running agent already exposes Bash/Write/Read (visible in the session UI) even though those rows
+# read disabled here, so enabling them risks two registrations colliding on one tool name. Settle
+# what the agent actually registers before touching them.
+#
+# MCP (dsh-mcp-client) is installed but stays OFF: upstream enables no MCP server by default
+# because each server command is trusted executable code running OUTSIDE the agent sandbox.
+# ---------------------------------------------------------------------------
+
+# context compaction: without it a long session simply runs out of window
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  disabled: false
+
+# the /compact command that drives the above on demand
+- id: command-compact
+  name: '@deepseek-ai/dsh-command-compact'
+  disabled: false
+
+# project instruction files (AGENTS.md and friends)
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+  disabled: false
+
+# plan mode, kept verbatim including its 37-line prompt section
+- id: plan-mode
+  name: '@deepseek-ai/dsh-plan-mode'
+  config:
+    section: >
+      You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or
+      the user switches the session mode. Imperative language to implement
+      changes means plan the implementation, not execute it. A user's
+      conversational agreement — including an answer confirming something you
+      asked — approves nothing and does not end plan mode; fold the confirmed
+      decision into the plan and submit it through exit_plan_mode.
+
+
+      Explore first. Use non-mutating reads, searches, static analysis, and
+      checks to ground the plan in the actual repository. Do not edit or write
+      files, change configuration, run formatters or code generation that
+      rewrites tracked files, commit, or otherwise carry out the plan. Prefer
+      existing functions and patterns over new machinery.
+
+
+      The tool catalog stays the same across modes for request-cache stability.
+      These plan-mode rules override any later tool description or guidance that
+      suggests using mutation tools; those tools remain listed only to keep the
+      request shape stable. Do not use todo_write to track this planning phase:
+      it tracks implementation after an approved plan, while the plan itself
+      belongs in exit_plan_mode.
+
+
+      Resolve discoverable facts by inspection. Use ask_user_question only for
+      user-owned choices or material ambiguity that inspection cannot answer. Do
+      not ask the user where code lives or how current behavior works when you
+      can find out.
+
+
+      Make the plan decision-complete: state the goal and success criteria;
+      group implementation changes by subsystem; identify public API, schema,
+      and data-flow changes; cover edge cases, failure modes, tests, acceptance
+      criteria, and explicit assumptions. Keep it concise enough to review but
+      detailed enough that another engineer can implement it without making
+      design decisions.
+
+
+      When ready, call exit_plan_mode with the complete plan markdown, starting
+      with a # title. Make exit_plan_mode the only and final tool call in that
+      assistant response: it presents the plan for approval, and implementation
+      begins only in a later step after approval. Do not paste the final plan as
+      a plain reply or ask "should I proceed?" through prose or
+      ask_user_question. If review rejects it, incorporate the feedback and
+      present again. If the review channel is unavailable or aborted, stay in
+      plan mode and ask the user to switch modes manually; do not proceed with
+      implementation.
+  disabled: false
+
+# task list the agent maintains across a long task
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+  disabled: false
+
+# web fetch + search; without it the model cannot look anything up
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+  disabled: false
+
+# skills
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+  disabled: false
+
+# skill discovery from the filesystem
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  disabled: false

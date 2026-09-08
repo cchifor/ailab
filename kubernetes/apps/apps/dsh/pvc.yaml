@@ -33,3 +33,23 @@ spec:
   accessModes: [ReadWriteMany]
   storageClassName: nfs-csi
   resources: { requests: { storage: 4Gi } }
+---
+# The agent's working directory, deliberately SEPARATE from dsh-home.
+#
+# dsh-base derives the sandbox root from the process working directory
+# (`sandbox-policy.workspaceRoot: !!js process.cwd()`), so whatever the container's cwd is becomes
+# the tree the agent may write under in the default `workspace-write` mode. It used to be `/`,
+# which put .credentials.yaml, settings.yaml and profiles/ inside the agent's reach. The Deployment
+# now pins workingDir here.
+#
+# ReadWriteOnce/local-path matches dsh-home: one replica, and produced files are node-local. Sized
+# larger than dsh-home because this is where the agent's actual output accumulates.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dsh-workspace
+  namespace: dsh
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources: { requests: { storage: 10Gi } }

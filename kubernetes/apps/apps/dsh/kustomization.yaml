@@ -30,10 +30,22 @@ configMapGenerator:
 replacements:
   - source:
       kind: Job
-      name: dsh-install-0-1-2-rc-1
+      name: dsh-install-0-1-2-rc-1-glibc
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_VERSION].value
     targets:
       - select: { kind: Deployment, name: dsh }
         fieldPaths:
           - spec.template.spec.initContainers.[name=wait-for-install].env.[name=DSH_VERSION].value
           - spec.template.spec.containers.[name=dsh].env.[name=DSH_VERSION].value
+  # DSH_BUILD travels the same way, for the same reason. The install directory is
+  # /app/${DSH_VERSION}-${DSH_BUILD}, so a Deployment carrying a different build tag than the Job
+  # would wait forever on a path the installer never creates. One source, three copies, derived.
+  - source:
+      kind: Job
+      name: dsh-install-0-1-2-rc-1-glibc
+      fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_BUILD].value
+    targets:
+      - select: { kind: Deployment, name: dsh }
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=wait-for-install].env.[name=DSH_BUILD].value
+          - spec.template.spec.containers.[name=dsh].env.[name=DSH_BUILD].value

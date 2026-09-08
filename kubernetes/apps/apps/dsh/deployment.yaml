@@ -30,17 +30,18 @@ spec:
         # Fail loudly if the install Job has not populated the app volume, rather than letting the
         # main container crash-loop on a missing binary.
         - name: wait-for-install
-          image: mirror.gcr.io/library/node:22-alpine
+          image: mirror.gcr.io/library/node:22
           env:
             - { name: DSH_VERSION, value: "0.1.2-rc.1" }
+            - { name: DSH_BUILD, value: "glibc" }
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
-              BIN="/app/${DSH_VERSION}/node_modules/.bin/dsh"
+              BIN="/app/${DSH_VERSION}-${DSH_BUILD}/node_modules/.bin/dsh"
               for i in $(seq 1 60); do
                 [ -x "$BIN" ] && { echo "dsh ${DSH_VERSION} present"; exit 0; }
-                echo "waiting for the dsh-install Job to populate /app/${DSH_VERSION} ($i/60)"; sleep 5
+                echo "waiting for the dsh-install Job to populate /app/${DSH_VERSION}-${DSH_BUILD} ($i/60)"; sleep 5
               done
               echo "ERROR: $BIN missing -- is the dsh-install-* Job for this version complete?" >&2
               exit 1
@@ -50,7 +51,7 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
         - name: seed-settings
-          image: mirror.gcr.io/library/node:22-alpine
+          image: mirror.gcr.io/library/node:22
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -91,7 +92,17 @@ spec:
             capabilities: { drop: [ALL] }
       containers:
         - name: dsh
-          image: mirror.gcr.io/library/node:22-alpine
+          image: mirror.gcr.io/library/node:22
+          # The agent's sandbox root is process.cwd(): dsh-base sets
+          #     sandbox-policy.workspaceRoot: !!js process.cwd()
+          # with mode `workspace-write` by default. The container's cwd was `/`, so the sandbox
+          # root was the WHOLE FILESYSTEM and model-executed tool calls could read and rewrite
+          # /dsh-home/.credentials.yaml (the browser cookie SIGNING SECRET), settings.yaml, and the
+          # cordis.patch.yml that defines trustedHosts. Confirmed on the live pod: the recorded
+          # workspace was /dsh-home itself. Pinning workingDir to a dedicated volume moves the
+          # sandbox root off the config directory, using the supported mechanism rather than
+          # hand-editing storages/workspace.json (which carries workspace UUIDs and session ids).
+          workingDir: /workspace
           # --trusted-host is what makes the public authority acceptable to the /api trust fence:
           # a non-loopback deployment must declare the names it is reached by, or every proxied
           # request is refused 403. It must match the cloudflared hostname exactly.
@@ -102,9 +113,10 @@ spec:
           # wait-for-install initContainer fails loudly rather than silently running the old one.
           command: ["/bin/sh", "-c"]
           args:
-            - exec "/app/${DSH_VERSION}/node_modules/.bin/dsh" web --no-open --port 3080 --trusted-host dsh.chifor.me
+            - exec "/app/${DSH_VERSION}-${DSH_BUILD}/node_modules/.bin/dsh" web --no-open --port 3080 --trusted-host dsh.chifor.me
           env:
             - { name: DSH_VERSION, value: "0.1.2-rc.1" }
+            - { name: DSH_BUILD, value: "glibc" }
             # The LiteLLM credential, synced from OpenBao by External Secrets (openbao-eso.yaml).
             # settings.yaml references it as `apiKeyEnv: LITELLM_API_KEY` rather than embedding a
             # value, so the secret never lands in git and never lands in the seed ConfigMap either.
@@ -118,6 +130,7 @@ spec:
             - { name: app,  mountPath: /app, readOnly: true }
             - { name: home, mountPath: /dsh-home }
             - { name: tmp,  mountPath: /tmp }
+            - { name: workspace, mountPath: /workspace }
           # Probes are exec, not httpGet: unauthenticated / returns 401 once routes mount, which a
           # standard HTTP probe reads as failure, and the listener is on loopback where a Pod-IP
           # probe cannot reach it at all. A TCP connect to 127.0.0.1 proves the listener is up
@@ -138,7 +151,7 @@ spec:
             requests: { cpu: 250m, memory: 512Mi }
             limits:   { cpu: "2",  memory: 4Gi }
         - name: relay
-          image: mirror.gcr.io/library/node:22-alpine
+          image: mirror.gcr.io/library/node:22
           command: ["node", "/relay/relay.js"]
           env:
             - { name: RELAY_PORT, value: "8080" }
@@ -158,5 +171,6 @@ spec:
       volumes:
         - { name: app,  persistentVolumeClaim: { claimName: dsh-app } }
         - { name: home, persistentVolumeClaim: { claimName: dsh-home } }
+        - { name: workspace, persistentVolumeClaim: { claimName: dsh-workspace } }
         - { name: tmp,  emptyDir: { sizeLimit: 1Gi } }
         - { name: relay, configMap: { name: dsh-relay, defaultMode: 0444 } }
