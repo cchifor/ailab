@@ -209,6 +209,8 @@ spec:
               - 192.168.0.0/16
               - 169.254.0.0/16
               - 127.0.0.0/8
+      # 443 ONLY. Cleartext 80 was in the first draft and is dropped: every metasearch engine
+      # SearXNG reaches is HTTPS, so allowing plain HTTP bought nothing and widened what a hostile
+      # redirect from an engine could reach from the one pod in this namespace with a route out.
       ports:
         - { port: 443, protocol: TCP }
-        - { port: 80, protocol: TCP }
