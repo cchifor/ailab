@@ -17,6 +17,12 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      # Same wall-clock bound as the snapshot CronJob, for the same reason: this rclone prune talks to
+      # versitygw on the QNAP, and on 2026-09-08 that gateway ACCEPTED TCP while never answering, so
+      # anything speaking to it blocked indefinitely. With concurrencyPolicy: Forbid and no deadline,
+      # one hung prune would silently suppress every subsequent night's run.
+      # Shorter than the snapshot job's 30m: pruning is a listing + deletes, not an upload.
+      activeDeadlineSeconds: 900
       backoffLimit: 2
       template:
         spec:

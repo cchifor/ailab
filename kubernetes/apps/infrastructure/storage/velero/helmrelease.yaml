@@ -118,6 +118,18 @@ spec:
       # Dropping EnableCSI would cost us the ability to restore ~30 days of existing backups while
       # buying nothing: the snapshot path is already closed twice over, below.
       features: EnableCSI
+      # Bound how long a filesystem backup may hang. 2026-09-08: a USB stall on the QNAP wedged
+      # versitygw (it kept ACCEPTING TCP but never answered), and the 02:00 daily sat InProgress for
+      # ~4 HOURS before failing -- the only thing bounding it was the 4h ItemOperationTimeout.
+      # `fsBackupTimeout` is the knob that actually applies here: this estate has used filesystem
+      # backup (Kopia) since 2026-08-30, and ItemOperationTimeout bounds ASYNC item operations
+      # (CSI snapshot / data mover), not the pod-volume transfers fs-backup performs. Tuning that one
+      # instead would have looked right and changed nothing.
+      # 90m is comfortably above observed healthy runs (the 09-06 weekly completed well inside an
+      # hour) while ensuring a wedged object store is REPORTED as a failed backup inside its own
+      # window rather than straddling the next one. The requirement is that a dead USB disk costs us
+      # backups and an alert -- not four silent hours.
+      fsBackupTimeout: 90m
       # Every backup defaults to filesystem backup (Kopia reads the mounted pod volume and streams to
       # the object store). This is also the primary snapshot suppressor, and it is why ad-hoc
       # `velero backup create` runs are safe too: Velero's ShouldPerformSnapshot consults the
