@@ -321,3 +321,110 @@ matches git.
 <!-- codex: HIGH — Credential rotation and residual app.ini cleanup are now outstanding closure tasks. Rotate the exposed key and update the retained rollback secret through a path that does not print values; verify the old key is rejected. Remove the obsolete named section while preserving database/metrics settings and then prove the effective configuration and cold-start behavior. An unreferenced section is not, by itself, evidence that the required failure-mode tests pass. -->
 
 <!-- codex-review-status: complete -->
+
+
+## RESULTS — everything executed, 2026-09-08
+
+Run after the codex review, against the live estate. Where the review changed the method, the
+method changed.
+
+### W1 — verified THROUGH GITEA, not by file counts
+
+The review's objection to counting files was right: extra local objects can mask missing source
+keys. So both directions were proved by fetching through the forge:
+
+| | |
+|---|---|
+| migrated history | job 189125 (run #1507, **2026-09-07**, i.e. pre-cutover) — 14,558 bytes, 172 lines |
+| new writes | a post-cutover run's log (15:34Z) — 14,127 bytes |
+
+A wrong prefix mapping would 404 rather than return bytes, so this also proves the mapping.
+
+### A1 — Gitea cold-starts with the gateway unreachable
+
+My first attempt broke cluster DNS and crashlooped Gitea for ~5 minutes: an `ipBlock` allow-except
+NetworkPolicy does not permit in-cluster traffic under Cilium, which matches cluster destinations by
+IDENTITY, not CIDR. Redone with the review's shape — a `CiliumNetworkPolicy` with `egressDeny` and
+`enableDefaultDeny.egress: false`, scoped to TCP/7070 — and validated on a disposable canary first:
+
+```
+DNS PASS · postgres:5432 PASS · NAS:22 PASS (control) · NAS:7070 BLOCKED
+```
+
+NAS:22 is the control that proves only the port is denied, not the host. Then, on Gitea:
+**Ready in 22s**, healthz `pass`, external 200, and the migrated log served byte-identically
+(14,558 bytes) while blocked.
+
+### A2 — Gitea cold-starts with versitygw genuinely STOPPED
+
+The review reproduced the malformed `sed` from this plan locally (`unknown option to s`) and pointed
+out that editing cron leaves the gateway unwatched if the session dies. Replaced with an **expiring
+maintenance lease** in the watchdog (`feat/watchdog-maintenance-lease`): while valid the watchdog
+reports `maintenance` and remediates nothing; it expires on its own, so a lost session self-heals,
+and the cron entry is never touched.
+
+versitygw stopped — refused from both the NAS and the cluster. **Gitea Ready in 47s**, healthz
+`pass`, external 200, migrated history readable.
+
+Restored by the watchdog itself: lease cleared, it detected down + disk-ok and restarted the
+gateway (`restarted`, http=403) — which incidentally proved its restart path in production.
+
+**Blast radius was exactly as documented**: 9 Velero Kopia maintenance jobs failed with
+`connection refused` to `:7070`, and the BackupStorageLocation returned to `Available` on its own
+afterwards. The backup layer degraded; the forge did not. As the review predicted, a short A2 does
+NOT exercise `VersitygwProbeFailed` — the probe is 10-minutely with `for: 2m`, so ~14 minutes are
+needed. Not claimed as proven.
+
+### B — repair works with the forge down
+
+Rather than deleting every production source artifact, the review's narrower proof: a **brand new**
+GitRepository, created while Gitea was confirmed absent (0 pods, endpoints empty, external 502).
+Nothing cached can serve a name that never existed.
+
+```
+fetched in 20s, Ready=True, revision ca2c843905ab… == GitHub HEAD exactly
+```
+
+And application, not just fetch: a Kustomization reconcile requested while the forge was down was
+handled (`lastHandledReconcileAt` advanced, `Ready=True`) at the GitHub revision.
+
+### The stale config section — the fix was not where I first looked
+
+`[storage.actions_s3]`, with credentials, survived the cutover in the on-PVC `app.ini`. Editing the
+file was not enough: it came back on the next start. The cause is that the chart stores **each config
+section as a KEY** in the `gitea-inline-config` Secret, and Helm did not prune the key when the value
+was removed from the HelmRelease — the live HelmRelease no longer declares it, yet the Secret still
+did. Removing the key, then re-cleaning `app.ini` with Gitea stopped, made it durable:
+
+```
+after restart:        7070 refs 0 · actions_s3 sections 0 · MINIO_SECRET 0
+after Helm reconcile: 0 stale keys
+```
+
+The excision is section-aware and atomic, with a backup kept — `app.ini` also holds generated
+application secrets and must never be regenerated wholesale.
+
+### Credential rotation
+
+The versitygw `gitea` secret was exposed in a session transcript and has been rotated: new value
+generated locally, sent over the SSH channel's STDIN (never argv, which is visible in the NAS
+process table), verified by authenticating and listing 48,831 objects. The access key is unchanged —
+it is an identifier and it owns the bucket under versitygw's ownership-based authorisation.
+
+### Final state
+
+`0` Kustomizations not Ready · `0` unhealthy pods · BSL `Available` · watchdog `healthy` · no
+maintenance lease outstanding · no `Versitygw*` alert firing · forge serving internally and
+externally.
+
+### Still open, stated rather than skipped
+
+- **The true "TCP accepted but silent" mode is not reproduced.** A1 denies packets (timeout) and A2
+  refuses. Reproducing the 2026-09-08 shape needs a proxy that accepts, completes TLS, then withholds
+  the response. The structural argument is now stronger than any single fault though: `app.ini`
+  contains **zero** references to `:7070`, so Gitea cannot reach it in any mode.
+- **`VersitygwProbeFailed` firing and clearing** was not observed (A2 was shorter than the ~14 minute
+  detection path).
+- **Applying a revision authored while the forge is down** still requires a direct GitHub push; no
+  GitHub remote or credential is configured here, and the emergency-write policy requires pausing the
+  mirror first.
