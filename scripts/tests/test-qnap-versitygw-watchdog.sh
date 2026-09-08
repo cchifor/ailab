@@ -196,6 +196,100 @@ kill -9 -"$SPGID" 2>/dev/null; wait $SURVIVOR 2>/dev/null
 run abandoned
 check "…and is reclaimed once that group finally dies" "healthy" "$(status_of)"
 
+# Group detection must tolerate OTHER processes exiting during the scan. Reading /proc is inherently
+# racy on a busy NAS: an implementation that globs /proc/[0-9]*/stat and hands the list to one awk
+# fails to open a vanished entry and exits non-zero, which the caller reads as "the group is gone" —
+# releasing an abandoned probe's lock while its D-state descendant is still alive.
+#
+# Tested as a UNIT rather than end-to-end. A supervisor run calls group_alive only a handful of
+# times, so an end-to-end test would have to win a timing race to observe the bug; calling the
+# function directly, hundreds of times, under continuous churn turns a rare race into a certainty.
+sed -n '/^group_alive() {/,/^}/p' "$SCRIPT" > "$ROOT/group_alive.sh"
+# shellcheck disable=SC1090
+. "$ROOT/group_alive.sh"
+PROC_ROOT=/proc   # the function reads it; the script sets it, the sourced fragment does not
+# The race is made DETERMINISTIC with a synthetic /proc (PROC_ROOT): entry 050 is a directory with
+# no stat file, which is exactly what the kernel leaves behind for a process that exited between the
+# shell expanding the glob and the scanner opening the file. It sorts BEFORE the entry holding the
+# target, so any implementation that aborts the whole scan on one unreadable entry never reaches the
+# live member. No timing, no flakiness.
+FAKE="$ROOT/fakeproc"
+rm -rf "$FAKE"; mkdir -p "$FAKE/050" "$FAKE/100" "$FAKE/200"
+printf '100 (sleep) S 1 4242 4242 0 -1 0 0 0 0 0 0 0 20 0 1 0 999 0 0\n' > "$FAKE/100/stat"
+printf '200 (bash) S 1 7777 7777 0 -1 0 0 0 0 0 0 0 20 0 1 0 999 0 0\n'  > "$FAKE/200/stat"
+if PROC_ROOT="$FAKE" group_alive 4242; then
+  ok "a vanished /proc entry does not hide a live group member"
+else
+  bad "vanished /proc entry tolerated" \
+      "reported group 4242 gone because entry 050 had no stat file — a routine event on a busy NAS, and it would release an abandoned probe's lock"
+fi
+# It must still report a genuinely absent group as absent, or the lock would never be reclaimed.
+PROC_ROOT="$FAKE" group_alive 999999 \
+  && bad "an absent group is reported absent" "reported alive — a stale lock would never be reclaimed" \
+  || ok "an absent group is still reported absent"
+
+# Belt and braces against the real /proc, which churns constantly on a NAS.
+setsid sleep 30 & SURVIVOR=$!
+sleep 0.3
+SPGID=$(sed 's/.*) //' /proc/$SURVIVOR/stat | awk '{print $3}')
+( for i in $(seq 1 2000); do /bin/true & done; wait ) >/dev/null 2>&1 &
+CHURN=$!
+MISSES=0
+for i in $(seq 1 200); do
+  group_alive "$SPGID" || MISSES=$((MISSES + 1))
+done
+kill -9 $CHURN 2>/dev/null; wait $CHURN 2>/dev/null
+[ "$MISSES" = 0 ] && ok "and never reports a live group as gone against the real /proc under churn" \
+  || bad "live group under real churn" "$MISSES/200 calls said the group was gone"
+kill -9 -"$SPGID" 2>/dev/null; wait $SURVIVOR 2>/dev/null
+
+# Stale-lock reclamation must be SERIALISED. The dangerous interleaving is not two runs racing to
+# delete, it is the second deleting the FIRST run's freshly created lock. That window is microseconds
+# wide, so it is tested through the guard that closes it rather than by trying to win the race:
+# while another run holds the reclaim guard, a run facing a stale lock must back off entirely.
+CASE=reclaimguard; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/reclaimguard" no
+mkdir -p "$ROOT/$CASE/state/lock" "$ROOT/$CASE/state/reclaim"
+echo 999999 > "$ROOT/$CASE/state/lock/pid"      # a holder that is definitively dead
+echo 1 > "$ROOT/$CASE/state/lock/starttime"
+run reclaimguard
+[ ! -f "$ROOT/$CASE/state/status" ] && ok "a held reclaim guard stops a second run reclaiming" \
+  || bad "held reclaim guard" "reclaimed anyway: $(status_of) — reclamation is not serialised"
+
+# ...but a guard left behind by a run that died inside it must be broken, or reclamation deadlocks.
+CASE=guardstale; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/guardstale" no
+mkdir -p "$ROOT/$CASE/state/lock" "$ROOT/$CASE/state/reclaim"
+echo 999999 > "$ROOT/$CASE/state/lock/pid"
+echo 1 > "$ROOT/$CASE/state/lock/starttime"
+touch -d '2 hours ago' "$ROOT/$CASE/state/reclaim" 2>/dev/null || touch -t 200001010000 "$ROOT/$CASE/state/reclaim"
+run guardstale
+check "an abandoned reclaim guard is broken rather than deadlocking" "healthy" "$(status_of)"
+
+# Smoke test on top of the guard: many runs, one stale lock, exactly one gets through. The curl stub
+# is called only AFTER the lock is acquired, so counting its invocations counts winners.
+CASE=reclaimrace; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/reclaimrace" no
+mkdir -p "$ROOT/$CASE/state/lock" "$ROOT/slowbin"
+echo 999999 > "$ROOT/$CASE/state/lock/pid"
+echo 1 > "$ROOT/$CASE/state/lock/starttime"
+cat > "$ROOT/slowbin/curl" <<'STUB'
+#!/usr/bin/env bash
+echo x >> "$CTL_DIR/acquired"
+sleep 2
+printf '%s' "$(cat "$CTL_DIR/http_code" 2>/dev/null || echo 000)"
+STUB
+chmod +x "$ROOT/slowbin/curl"
+rm -f "$ROOT/acquired"
+for i in 1 2 3 4 5; do
+  env CTL_DIR="$ROOT" CURL="$ROOT/slowbin/curl" VGW_SUPERVISOR_BASE="$ROOT/$CASE" \
+      VGW_DIR="$USBROOT/reclaimrace" DISK_TIMEOUT=5 bash "$SCRIPT" >/dev/null 2>&1 &
+done
+wait
+WINNERS=$(wc -l < "$ROOT/acquired" 2>/dev/null || echo 0)
+[ "$WINNERS" = 1 ] && ok "exactly one of 5 concurrent runs reclaims a stale lock" \
+  || bad "concurrent stale-lock reclaim" "$WINNERS runs got past the lock — reclamation is racy"
+
 echo
 echo "== the gateway's own log stays bounded while it holds the fd open =="
 # rotate() must COPY-then-TRUNCATE. `mv` would leave the running gateway appending to the renamed
@@ -233,6 +327,36 @@ CASE=restartfail; reset_case $CASE
 echo 000 > "$ROOT/http_code"; mk_start "$USBROOT/restartfail" no   # never comes up
 run restartfail
 check "a restart that does not come up is reported" "restart-failed" "$(status_of)"
+
+# A startup that never answers must not be left running. start.sh reads the gateway binary from the
+# USB, so it can wedge exactly as a probe can — and `ps | grep 'versitygw --port'` cannot see a
+# process stuck BEFORE exec. Without reaping its process group, every failed attempt would leave a
+# blocked startup behind and they would accumulate across cron runs.
+CASE=startorphan; reset_case $CASE
+echo 000 > "$ROOT/http_code"
+mkdir -p "$USBROOT/startorphan"
+cat > "$USBROOT/startorphan/start.sh" <<STUB
+#!/usr/bin/env bash
+echo started >> "$ROOT/started"
+echo \$\$ >> "$ROOT/start_pids"
+exec sleep 300
+STUB
+chmod +x "$USBROOT/startorphan/start.sh"
+rm -f "$ROOT/start_pids"
+run startorphan
+check "a startup that never answers is reported" "restart-" "$(status_of)"
+SP_PID=$(head -1 "$ROOT/start_pids" 2>/dev/null)
+if [ -z "$SP_PID" ]; then
+  bad "the failed startup is reaped with its group" "precondition not met: start.sh never recorded a pid"
+else
+  sleep 1
+  if kill -0 "$SP_PID" 2>/dev/null; then
+    bad "the failed startup is reaped with its group" "pid $SP_PID survived — failed startups would accumulate"
+    kill -9 "$SP_PID" 2>/dev/null
+  else
+    ok "the failed startup is reaped with its whole process group"
+  fi
+fi
 
 echo
 echo "== bounded restarts: alert rather than spin =="

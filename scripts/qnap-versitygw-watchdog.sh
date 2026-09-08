@@ -64,15 +64,20 @@ MAX_RESTARTS="${MAX_RESTARTS:-3}"
 RESTART_WINDOW="${RESTART_WINDOW:-1800}"   # seconds (30 min)
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-20971520}" # 20 MiB, then copy-truncate; keep 1 saved generation
 STALE_LOCK_SECS="${STALE_LOCK_SECS:-3600}" # backstop for a lock that never got an ownership stamp
+RECLAIM_GUARD_SECS="${RECLAIM_GUARD_SECS:-300}" # the reclaim mutex is held for ms; older = a run died in it
 
 STATE="$BASE/state"
 LOCK="$STATE/lock"
+RECLAIM="$STATE/reclaim"   # second mutex: serialises stale-lock reclamation only
 STATUS="$STATE/status"
 ATTEMPTS="$STATE/attempts"
 WD_LOG="$BASE/watchdog.log"
 VGW_LOG="$BASE/versitygw.log"   # versitygw's OWN stdout, moved OFF the USB (see redirect below)
 
 CURL="${CURL:-/sbin/curl}"
+# Overridable ONLY so the /proc scanners below can be unit-tested against a synthetic tree.
+# Nothing in normal operation should ever set this.
+PROC_ROOT="${PROC_ROOT:-/proc}"
 
 #--- logging ------------------------------------------------------------------------------------
 rotate() {  # $1 = logfile. Size-capped so an unbounded log can never fill the internal pool.
@@ -130,7 +135,7 @@ dev_of_path() {
       if (length(mp) > n) { n = length(mp); d = dev }
     }
     END { print d }
-  ' /proc/mounts 2>/dev/null
+  ' "$PROC_ROOT/mounts" 2>/dev/null
 }
 
 # Prove the base is on a different block device than the gateway's disk. A symlink or a remount
@@ -162,35 +167,47 @@ rotate "$VGW_LOG"
 #                         the subshell while the command actually blocked on the disk survives.
 #                         Watching only the subshell would conclude "killable", release the lock,
 #                         and let probes accumulate again -- which is the original bug.
-proc_starttime() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+proc_starttime() { awk '{print $22}' "$PROC_ROOT/$1/stat" 2>/dev/null; }
 
-# Is ANY process still in process group $1? One awk pass over /proc; never touches the USB.
-# /proc/<pid>/stat field 5 is pgrp, but the comm field can contain spaces and parentheses, so strip
-# everything through the LAST ')' first; the remainder starts "state ppid pgrp session ...".
+# Is ANY process still in process group $1? Pure bash over /proc; never touches the USB.
+#
+# TOLERANT BY CONSTRUCTION, and that is the whole point. An earlier version passed the glob to a
+# single `awk /proc/[0-9]*/stat`, but the glob is expanded by the SHELL before awk opens anything, so
+# any process exiting in that window makes awk fail to open a file and exit non-zero. The caller
+# reads that as "the group is gone" and would reclaim an abandoned probe's lock while its D-state
+# descendant is still alive -- turning a routine event on a busy NAS into a breach of the
+# single-probe invariant. Here an unreadable or vanished entry is skipped, and only a genuine
+# absence of every member returns failure.
+#
+# No forks: `read < file` and ${...} expansions are builtins, so this stays cheap enough to call
+# once a second against ~500 processes. /proc/<pid>/stat field 5 is pgrp, but comm can contain
+# spaces and parentheses, so strip through the LAST ") " -- greedy, which is correct even for a comm
+# containing ") ". The remainder starts "state ppid pgrp session ...", none of which can glob.
 group_alive() {
-  [ -n "${1:-}" ] || return 1
-  awk -v want="$1" '
-    FNR == 1 {
-      line = $0
-      sub(/.*\) /, "", line)
-      split(line, f, " ")
-      if (f[3] == want) { found = 1; exit }
-    }
-    END { exit !found }
-  ' /proc/[0-9]*/stat 2>/dev/null
+  local want=${1:-} d line rest
+  [ -n "$want" ] || return 1
+  for d in "$PROC_ROOT"/[0-9]*; do
+    read -r line < "$d/stat" 2>/dev/null || continue   # exited mid-scan: skip, never conclude "dead"
+    [ -n "$line" ] || continue
+    rest=${line##*') '}
+    set -- $rest
+    [ "${3:-}" = "$want" ] && return 0
+  done
+  return 1
 }
 
 holder_alive() {
   local kind pid st
   kind=$(cat "$LOCK/kind" 2>/dev/null)
-  if [ "$kind" = abandoned-probe ]; then
-    group_alive "$(cat "$LOCK/pgid" 2>/dev/null)"
-    return $?
-  fi
+  case "$kind" in
+    abandoned-*)   # abandoned-probe or abandoned-start: both are owned by a process GROUP
+      group_alive "$(cat "$LOCK/pgid" 2>/dev/null)"
+      return $? ;;
+  esac
   [ -f "$LOCK/pid" ] || return 1
   pid=$(cat "$LOCK/pid" 2>/dev/null)
   [ -n "${pid:-}" ] || return 1
-  [ -d "/proc/$pid" ] || return 1
+  [ -d "$PROC_ROOT/$pid" ] || return 1
   st=$(proc_starttime "$pid")
   # No stored start-time (older lock) -> fall back to pid liveness alone.
   [ -f "$LOCK/starttime" ] || return 0
@@ -214,12 +231,33 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   if [ ! -f "$LOCK/kind" ] && [ ! -f "$LOCK/pid" ] && [ "$lock_age" -lt "$STALE_LOCK_SECS" ]; then
     exit 0
   fi
-  # Reclaim ATOMICALLY, and lose gracefully if a concurrent run gets there first. The earlier
-  # version cleared the lock's CONTENTS and fell straight through without ever re-running mkdir, so
-  # two runs that both observed a dead holder could both proceed -- breaking the single-probe
-  # ceiling in precisely the situation where it matters most.
-  rm -rf "$LOCK" 2>/dev/null
-  mkdir "$LOCK" 2>/dev/null || exit 0
+  # Reclaim under a SECOND mutex, and re-check ownership once we hold it.
+  #
+  # Neither a bare `rm -rf` + `mkdir` nor a rename is sufficient here, because the dangerous
+  # interleaving is not two runs racing to delete -- it is the second run deleting the FIRST run's
+  # freshly created lock. Two runs both observe a dead holder; A removes and recreates; B, still
+  # acting on its earlier observation, removes A's new lock and creates its own. Both proceed, and
+  # either one's cleanup then deletes the other's lock. Serialising reclamation is what closes it:
+  # only one run reclaims at a time, and it RE-CHECKS under the guard, so the loser sees A's live
+  # ownership and backs off instead of acting on a stale observation.
+  if ! mkdir "$RECLAIM" 2>/dev/null; then
+    # The guard is held for milliseconds, so an old one means a run died inside it.
+    reclaim_age=$(( $(date +%s) - $(stat -c %Y "$RECLAIM" 2>/dev/null || date +%s) ))
+    [ "$reclaim_age" -lt "$RECLAIM_GUARD_SECS" ] && exit 0
+    log "breaking abandoned reclaim guard (age ${reclaim_age}s)"
+    rm -rf "$RECLAIM" 2>/dev/null
+    mkdir "$RECLAIM" 2>/dev/null || exit 0
+  fi
+  if mkdir "$LOCK" 2>/dev/null; then
+    :                                   # the holder vanished entirely; the lock is simply ours now
+  elif holder_alive; then
+    rm -rf "$RECLAIM" 2>/dev/null       # another run reclaimed while we waited -- it owns it
+    exit 0
+  else
+    rm -rf "$LOCK" 2>/dev/null
+    mkdir "$LOCK" 2>/dev/null || { rm -rf "$RECLAIM" 2>/dev/null; exit 0; }
+  fi
+  rm -rf "$RECLAIM" 2>/dev/null
   log "reclaimed stale lock (age ${lock_age}s)"
 fi
 # The lock is ours. It is released on every exit EXCEPT deliberate abandonment (see below).
@@ -373,7 +411,11 @@ printf '%s\n' "$now" >> "$ATTEMPTS"
 # stdout goes to the INTERNAL log. The old watchdog appended to $VGW_DIR/versitygw.log on the USB,
 # which had grown to 478 MB unrotated and -- worse -- made the gateway block on its own logging the
 # moment the disk stalled. `ls -l /proc/<pid>/fd/1` confirmed that fd pointing at the USB.
+# Monitor mode is OFF here, so `setsid` does not need to fork: it calls setsid(2) and execs, making
+# $! both the new session leader and its process-group id. That is what lets a wedged STARTUP be
+# tracked the same way a wedged probe is, below.
 setsid "$VGW_DIR/start.sh" < /dev/null >> "$VGW_LOG" 2>&1 &
+start_pgid=$!
 log "restart issued (attempt $((recent + 1))/$MAX_RESTARTS in the last $((RESTART_WINDOW / 60))m)"
 
 waited=0
@@ -392,6 +434,27 @@ if [ "$started" = yes ]; then
   set_status restarted "gateway answering again (http=$code) after attempt $((recent + 1))/$MAX_RESTARTS"
   event 1 "versitygw was unresponsive and has been restarted successfully"
 else
+  # The startup reads start.sh and the gateway binary FROM THE USB, so it can wedge exactly as a
+  # probe can -- a disk probe that passed seconds ago is not a guarantee the disk still answers.
+  # `ps | grep 'versitygw --port'` cannot see a process stuck BEFORE exec, so without this a blocked
+  # startup would be invisible, the lock would be released, and the next run would stack another one
+  # behind it. Same treatment as a wedged probe: reap the group; if anything survives SIGKILL, keep
+  # the lock in that group's name so nothing can accumulate behind it.
+  if group_alive "$start_pgid"; then
+    kill -TERM -"$start_pgid" 2>/dev/null
+    sleep 2
+    kill -9 -"$start_pgid" 2>/dev/null
+    sleep 1
+    if group_alive "$start_pgid"; then
+      RELEASE_LOCK=no
+      printf '%s' abandoned-start > "$LOCK/kind"
+      printf '%s' "$start_pgid"   > "$LOCK/pgid"
+      set_status start-wedged \
+        "restart attempt $((recent + 1))/$MAX_RESTARTS never answered and its startup group $start_pgid is unkillable in D-state -- the disk wedged after the probe passed. Lock held until that group clears. Storage intervention required."
+      event 2 "versitygw startup wedged in D-state (group $start_pgid); lock held so no further restarts stack behind it"
+      exit 0
+    fi
+  fi
   set_status restart-failed "restart attempt $((recent + 1))/$MAX_RESTARTS did not come up within ${START_TIMEOUT}s (disk=ok)"
   event 2 "versitygw restart attempt $((recent + 1))/$MAX_RESTARTS failed to come up"
 fi
