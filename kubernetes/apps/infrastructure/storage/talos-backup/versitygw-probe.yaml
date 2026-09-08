@@ -1,0 +1,132 @@
+# versitygw round-trip health probe (W4 of the USB failure-domain plan).
+#
+# WHY THIS EXISTS. On 2026-09-08 a USB stall on the QNAP wedged versitygw and took the git forge down
+# for ~4.5 hours. Nothing alerted on versitygw itself — the first alert was GiteaForgeDown, 1.5h into
+# the outage, i.e. a downstream symptom rather than the cause.
+#
+# The reason the existing checks stayed silent is the important part, and it is why this probe writes
+# data instead of just connecting:
+#
+#   * versitygw kept ACCEPTING TCP the whole time. `netstat` showed LISTEN with Recv-Q 1256 — a
+#     backed-up accept queue — because its POSIX backend was blocked on hung USB I/O (ext4's jbd2
+#     journal thread was in D-state). So a TCP connect SUCCEEDED against a gateway that could not
+#     serve a single byte. `storage-fabric-probe` uses a blackbox `tcp_connect` module, so it was
+#     GREEN for the entire incident.
+#   * versitygw's own watchdog.sh checks that the PROCESS EXISTS, so it never restarted it either.
+#     Same blind spot, twice.
+#   * Even an HTTPS check is not enough: an unauthenticated request returns 403 from the auth layer
+#     WITHOUT touching the backend, so a plain HTTP probe would also have been green.
+#
+# Only a real object round-trip proves the disk underneath is readable and writable, which is what
+# every consumer (Velero, talos-backup, the off-site sync) actually depends on.
+#
+# BUCKET CHOICE. Ideally this would use a dedicated health bucket. It does not, because the
+# talos-backup key CANNOT create one — verified live: CreateBucket returns
+# `403 AccessDenied`. Granting it would mean editing versitygw's --iam-dir on the QNAP, which is
+# outside this repo's control (versitygw is not managed by IaC — see the plan's residual risks). So
+# the probe writes under an obvious `_healthcheck/` prefix in the bucket this key already owns.
+# Deliberately NOT Velero's bucket. This is safe against the prune CronJob, which deletes by
+# `--min-age 30d`: the probe removes its own object within seconds of writing it, and the final
+# listing below asserts nothing was left behind.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: versitygw-probe
+  namespace: talos-backup
+spec:
+  # Every 10 minutes. Frequent enough that "the object store is unusable" is reported in minutes
+  # rather than inferred hours later from a failed backup, but far below the cost of a real backup.
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  # Keep failures around longer than successes: the alert below reads kube_job_status_failed, and a
+  # failed probe is the artefact an operator will want to open.
+  failedJobsHistoryLimit: 6
+  jobTemplate:
+    spec:
+      # A probe MUST fail fast — bounding it is the entire point. 120s is generous for a ~20 byte
+      # round-trip; a wedged gateway will simply hang, and this is what converts that hang into a
+      # reported failure.
+      activeDeadlineSeconds: 120
+      # No retries. For a probe a failure IS the signal; retrying would only delay the alert and
+      # could mask a genuinely intermittent backend.
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: rclone
+              image: rclone/rclone:1.74.3
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  # Unique payload per run: proves we read back THIS run's write, not a cached or
+                  # stale object left by a previous probe.
+                  STAMP="probe-$(date +%s)-$$"
+                  echo "$STAMP" > /tmp/probe.txt
+                  OBJ="GT:talos-etcd-backups/_healthcheck/probe"
+
+                  echo "PUT   $OBJ"
+                  rclone copyto /tmp/probe.txt "$OBJ" -q
+
+                  echo "GET   $OBJ"
+                  GOT="$(rclone cat "$OBJ" -q)"
+                  if [ "$GOT" != "$STAMP" ]; then
+                    echo "FAIL: content mismatch — wrote '$STAMP', read '$GOT'" >&2
+                    exit 1
+                  fi
+                  echo "VERIFIED content matches"
+
+                  echo "DELETE $OBJ"
+                  rclone deletefile "$OBJ" -q
+
+                  # Leave nothing behind. If this is ever non-zero the probe is littering a backup
+                  # bucket, which must be caught here rather than discovered later.
+                  LEFT="$(rclone lsf GT:talos-etcd-backups/_healthcheck/ -q | wc -l)"
+                  if [ "$LEFT" != "0" ]; then
+                    echo "FAIL: $LEFT object(s) left under _healthcheck/" >&2
+                    exit 1
+                  fi
+                  echo "versitygw round-trip OK (put/get/verify/delete)"
+              env:
+                - { name: HOME, value: /tmp }
+                # rclone otherwise issues a CreateBucket pre-flight even for an existing bucket, and
+                # this key is not allowed to create buckets — verified: without this the probe fails
+                # with 403 AccessDenied on CreateBucket and never reaches the actual round-trip.
+                - { name: RCLONE_S3_NO_CHECK_BUCKET, value: "true" }
+                # Trust versitygw's self-signed CA. RCLONE_CA_CERT is rclone's GLOBAL --ca-cert; the
+                # s3 backend has no per-remote no_check_certificate option (same note as the prune job).
+                - { name: RCLONE_CA_CERT, value: /etc/ssl/versitygw/ca.pem }
+                - { name: RCLONE_CONFIG_GT_TYPE, value: s3 }
+                - { name: RCLONE_CONFIG_GT_PROVIDER, value: Other }
+                - { name: RCLONE_CONFIG_GT_ENDPOINT, value: "https://192.168.1.225:7070" }
+                - { name: RCLONE_CONFIG_GT_REGION, value: us-east-1 }
+                - { name: RCLONE_CONFIG_GT_FORCE_PATH_STYLE, value: "true" }
+                - name: RCLONE_CONFIG_GT_ACCESS_KEY_ID
+                  valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_ACCESS_KEY_ID } }
+                - name: RCLONE_CONFIG_GT_SECRET_ACCESS_KEY
+                  valueFrom: { secretKeyRef: { name: talos-backup-garage, key: AWS_SECRET_ACCESS_KEY } }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { cpu: 200m, memory: 128Mi }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+                - { name: versitygw-ca, mountPath: /etc/ssl/versitygw, readOnly: true }
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: versitygw-ca
+              configMap:
+                name: versitygw-ca

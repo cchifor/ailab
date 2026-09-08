@@ -7,3 +7,4 @@ resources:
   - versitygw-ca.yaml # self-signed CA -> AWS_CA_BUNDLE for the AWS SDK
   - cronjob.yaml # daily age-encrypted etcd snapshot -> versitygw
   - prune-cronjob.yaml # retention: delete snapshots older than 30d (talos-backup has no pruning)
+  - versitygw-probe.yaml # 10-min authenticated PUT/GET/verify/DELETE round-trip against versitygw (W4) — a tcp_connect check stayed GREEN through the 2026-09-08 outage
