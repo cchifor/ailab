@@ -86,7 +86,15 @@ subsets:
 #      current checksum/config, no old-checksum pod left of either.
 #   2. no api_base naming llm-qwen35 in either gateway's config.
 #   3. qwen3.5-122b-cloud returned HTTP 200 via the gateway, finish_reason=stop, correct content.
-#   4. node3's llama-server was still UP and serving throughout, and is stopped in this same change.
+#   4. node3's llama-server was still UP and serving throughout, which is what checks 1-3 required.
+#      STOPPING IT IS A SEPARATE, MANUAL STEP THAT THIS DIFF DOES NOT PERFORM. Deleting a k8s
+#      Service cannot halt a systemd unit inside an LXC, and the models.yaml entry is INTENT, read
+#      by ai-lxc/provision.sh only on a deliberate run. At the time of writing node3 is still
+#      serving on .46:8080. The operator step that accompanies this merge is: stop llama-swap on
+#      ai-llm-3, then reclaim the staged weights. Sequence it AFTER this merge, not before: while
+#      the Service still exists it remains a ServiceMonitor target (component=llama-server), so
+#      stopping the backend first produces exactly the permanent TargetDown this file records
+#      having been bitten by on .44.
 #
 # CAVEAT worth keeping, learned while running check 2: you CANNOT verify what a running proxy
 # loaded by reading its config file. The ConfigMap is mounted through a `..data` symlink that the
