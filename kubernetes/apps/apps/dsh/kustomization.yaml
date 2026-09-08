@@ -20,6 +20,7 @@ configMapGenerator:
       - settings.seed.yaml
       - fix-profile.js
       - reconcile-provider.js
+      - cordis.patch.yml
 
 # ONE source of truth for the version. It has to appear in the Deployment twice (the initContainer
 # that waits for the tree, and the container that execs it), and a hand-maintained triplicate is a
