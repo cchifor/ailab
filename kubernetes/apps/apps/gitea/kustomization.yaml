@@ -18,3 +18,20 @@ resources:
 # mounts the PVC, because the Job's pod holds the same RWO volume. (ReadWriteOnce restricts a volume
 # to one NODE, not one pod, so co-scheduling would not have been blocked.) The gitea-actions-s3
 # secret is deliberately KEPT: it is what makes the rollback to S3 a one-file revert.
+#
+# CUTOVER ORDER — and the reason it is not the obvious one.
+# The final copy MUST run with Gitea STOPPED. Running it while Gitea still serves from S3 leaves a
+# write window: every artifact or log written between the copy finishing and the pod rolling onto
+# the PVC exists only in S3, and becomes invisible the moment the backend switches. Draining the
+# runners is not sufficient either — Gitea's own offload and cleanup paths write to Actions storage.
+#
+#   1. `flux suspend kustomization apps`      (so merging does not apply the switch yet)
+#   2. merge the cutover PR                   (Gitea is still up; it hosts the git being merged)
+#   3. back up the gitea database             (infra-pg; the plan asks for this before the window)
+#   4. scale the Gitea deployment to 0        <- ALL writers stop here
+#   5. run the FINAL delta copy and verify it (no writers, so the copy is a true final state)
+#   6. confirm no migrate pod remains         (it holds the RWO volume Gitea is about to mount)
+#   7. `flux resume kustomization apps`       (prunes the Job, rolls Gitea onto local storage)
+#
+# Step 1 before step 2 is what makes this possible at all: Gitea is the git host, so the merge has
+# to happen while it is running, and suspending is what stops that merge from being applied early.
