@@ -11,3 +11,6 @@ resources:
     # GITEA__database__PASSWD and by the one-shot pgloader migration Job.
   - servicemonitor.yaml # Prometheus scrape of Gitea /metrics (gitea_* app metrics) with bearer auth
   - gitea.yaml # HelmRepository + HelmRelease (SQLite on qnap-iscsi, OIDC login, Actions on S3)
+  - versitygw-ca.yaml # self-signed CA -> rclone --ca-cert for the one-shot Actions migration Job
+  - actions-storage.yaml # 40Gi qnap-iscsi PVC for Actions artifacts/logs (W1) — takes the USB disk off Gitea's critical path
+  - actions-migrate-job.yaml # one-shot PRE-COPY of the 11 GB from versitygw S3 onto that PVC; re-run = delta sync
