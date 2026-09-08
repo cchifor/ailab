@@ -8,6 +8,14 @@ pr_reviewer_user: c4
 pr_reviewer_listen: "0.0.0.0"
 pr_reviewer_port: 8477
 pr_reviewer_gitea_url: "https://git.chifor.me"
+pr_reviewer_org: cchifor
+# Must match EVENTS in files/reviewbot.py — the handler drops anything without a pull_request key,
+# so a hook subscribed to `push` delivers nothing and the reconcile poll silently covers for it.
+pr_reviewer_required_hook_events:
+  - pull_request
+  - pull_request_sync
+  - pull_request_label
+  - pull_request_review_request
 # Central allowlist — the ONLY thing that admits a repo. Real repos joined 2026-09-02
 # (operator-directed rollout); posting stays COMMENT-only, statuses off until the soak.
 pr_reviewer_repos:
