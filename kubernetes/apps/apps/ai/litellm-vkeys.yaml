@@ -41,8 +41,9 @@ metadata:
 data:
   # Declarative per-org virtual-key spec. models MUST be a subset of litellm-local's local-only model_list
   # (qwen3.6-35b-a3b) — NEVER a cloud model. qwen3.5-122b was dropped 2026-09-08 when it moved to
-  # the cloudlab estate, which powers off nightly; see litellm-local.yaml for why it was not repointed. max_budget is in synthetic credit units
-  # (1 ~= 1M tokens; see litellm-local.yaml). key_env names the VKEY_ var in the litellm-vkeys Secret.
+  # the cloudlab estate, which powers off nightly; see litellm-local.yaml for why it was not repointed.
+  # max_budget is in synthetic credit units (1 ~= 1M tokens; see litellm-local.yaml). key_env names
+  # the VKEY_ var in the litellm-vkeys Secret.
   orgs.json: |
     [
       {

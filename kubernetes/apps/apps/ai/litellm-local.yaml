@@ -1,5 +1,6 @@
 # litellm-local: a SECOND, stripped LiteLLM deployment that serves ONLY the local llama.cpp models
-# (qwen3.6-35b-a3b on node1/node2, qwen3.5-122b on node3). It exists so the agentforge workers
+# (qwen3.6-35b-a3b on node2; node1's copy was disabled 2026-08-15 and the 122b left node3 for the
+# cloudlab estate 2026-09-08, so node2 is the only local backend left). It exists so the agentforge workers
 # (ADR 0018) get a LAN endpoint that is local-only STRUCTURALLY, not by app-side filtering: this
 # deployment's ConfigMap lists no cloud models and its pod carries NO cloud credentials
 # (no OPENAI_API_KEY / ANTHROPIC_API_KEY env) — a leaked litellm-local master key can spend zero
@@ -63,7 +64,8 @@ data:
       #   * The header above states the property this deployment exists to hold: local-only
       #     STRUCTURALLY, no cloud credentials, "a leaked litellm-local master key can spend zero
       #     cloud dollars". Reaching across to a separate estate erodes that boundary.
-      # Tenants keep qwen3.6-35b-a3b, which is pinned on node1/node2 and always on.
+      # Tenants keep qwen3.6-35b-a3b, pinned on node2 and always on. (It was a node1+node2 pair until
+      # node1's llama-server was disabled 2026-08-15; llm-node1 was probed at 000 and retired 2026-09-07.)
       # The user-facing route lives on the cloud-enabled `litellm` gateway as qwen3.5-122b-cloud.
       # qwen3.8-27b REMOVED 2026-08-25 — the node1 on-demand instance it pointed at
       # (llm-qwen38:8082) is retired to release its 31.4 GiB reservation for ci-runner-7/-8.
@@ -94,7 +96,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "67257091ab7a"
+        checksum/config: "f59983cff9c8"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux
