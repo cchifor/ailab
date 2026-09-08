@@ -16,7 +16,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dsh-install-0-1-2-rc-1
+  name: dsh-install-0-1-2-rc-1-glibc
   annotations:
     # A Job's spec.template is IMMUTABLE, so any edit Flux applies to this object under the SAME
     # name is rejected with "field is immutable" — which fails the whole dsh Kustomization, not
@@ -47,9 +47,21 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: install
-          image: mirror.gcr.io/library/node:22-alpine
+          # node:22 (Debian bookworm), NOT alpine. The alpine image has no bash, and dsh's shell
+          # backends spawn the literal binary "bash" -- every Bash tool call failed with
+          # `spawn bash ENOENT`. It also had no python3/git/curl, so the agent had essentially no
+          # toolchain. MEASURED in-cluster on 2026-09-08: alpine has none of bash/git/curl/python3;
+          # node:22-slim adds only bash; node:22 has bash, git, curl, python3 AND make/g++, which
+          # also lets npm build a native module from source when no prebuilt matches this platform.
+          image: mirror.gcr.io/library/node:22
           env:
             - { name: DSH_VERSION, value: "0.1.2-rc.1" }
+            # The install directory is keyed on version AND libc. Moving alpine -> Debian changes
+            # musl -> glibc, and the existing /app/0.1.2-rc.1 tree was resolved by npm for musl;
+            # reusing it would run platform-specific prebuilds against the wrong libc. The marker
+            # check below is per-directory, so without a distinct path npm would simply skip the
+            # reinstall and the mismatch would be silent. Bump this on any base-image libc change.
+            - { name: DSH_BUILD, value: "glibc" }
             - { name: npm_config_cache, value: /app/.npm }   # shared across versions; harmless
           command: ["/bin/sh", "-c"]
           args:
@@ -60,7 +72,7 @@ spec:
               # node_modules under a live process. Each version gets its own tree, and the Deployment
               # names the version it wants -- so an upgrade lands beside the running one and only
               # takes effect when the pod rolls.
-              DEST="/app/${DSH_VERSION}"
+              DEST="/app/${DSH_VERSION}-${DSH_BUILD}"
               mkdir -p "$DEST"
               MARKER="${DEST}/.installed"
               # The marker is written LAST and only after the binary is proven present. An earlier
