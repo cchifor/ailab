@@ -39,8 +39,14 @@ spec:
             - |
               set -eu
               BIN="/app/${DSH_VERSION}-${DSH_BUILD}/node_modules/.bin/dsh"
+              MARK="/app/${DSH_VERSION}-${DSH_BUILD}/.installed"
               for i in $(seq 1 60); do
-                [ -x "$BIN" ] && { echo "dsh ${DSH_VERSION} present"; exit 0; }
+                # Both conditions, not just the binary. npm creates node_modules/.bin/dsh part-way
+                # through the install; the Job writes .installed only after it completes AND
+                # verifies the binary. Waiting on the executable alone can therefore start dsh
+                # against a half-populated tree -- a race the forced glibc reinstall makes real,
+                # because this path is empty on first roll rather than already complete.
+                [ -x "$BIN" ] && [ -f "$MARK" ] && { echo "dsh ${DSH_VERSION} present"; exit 0; }
                 echo "waiting for the dsh-install Job to populate /app/${DSH_VERSION}-${DSH_BUILD} ($i/60)"; sleep 5
               done
               echo "ERROR: $BIN missing -- is the dsh-install-* Job for this version complete?" >&2
@@ -102,6 +108,18 @@ spec:
           # workspace was /dsh-home itself. Pinning workingDir to a dedicated volume moves the
           # sandbox root off the config directory, using the supported mechanism rather than
           # hand-editing storages/workspace.json (which carries workspace UUIDs and session ids).
+          #
+          # WHAT THIS DOES AND DOES NOT DO. It changes the cwd-derived sandbox root, which is what
+          # confines writes under the default `workspace-write` mode. It does NOT rewrite the
+          # existing workspace record: storages/workspace.json still names /dsh-home, with one
+          # session attached. Rewriting that file was reviewed and rejected as high-risk -- it keys
+          # workspaces by UUID and lists attached session ids, so an edit can orphan a session.
+          # The supported way to move an existing workspace is the UI's directory picker
+          # (dsh-client-ui-directory-picker-browse is enabled), pointing it at /workspace.
+          # VERIFY AFTER ROLLOUT rather than assuming: create a session and confirm the agent can
+          # write under /workspace and CANNOT write to /dsh-home/.credentials.yaml. If an old
+          # session still resolves its root from its own recorded cwd, that session keeps the old
+          # behaviour until it is replaced.
           workingDir: /workspace
           # --trusted-host is what makes the public authority acceptable to the /api trust fence:
           # a non-loopback deployment must declare the names it is reached by, or every proxied

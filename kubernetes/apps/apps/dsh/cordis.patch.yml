@@ -141,14 +141,6 @@
     allowParallelInProgress: true
   disabled: false
 
-# web fetch + search; without it the model cannot look anything up
-- id: tool-web
-  name: '@deepseek-ai/dsh-tool-web'
-  config:
-    fetch: true
-    searchTimeoutMs: 60000
-  disabled: false
-
 # skills
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
@@ -158,3 +150,11 @@
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
   disabled: false
+
+# NOT enabled: tool-web. The web tool needs outbound HTTP, and this namespace's NetworkPolicy
+# permits egress to DNS and the LiteLLM service ONLY -- deliberately, because this pod executes
+# model-authored code. Enabling the row without opening egress would hand the model a tool that
+# always fails, which is the same defect as the missing bash: a capability that appears available
+# and is not. Web search additionally defaults to DeepSeek's provider and needs its own credential,
+# which this deployment does not hold. Opening general egress from a model-executed sandbox is a
+# security decision, not a config tweak, so it is left to a deliberate follow-up.
