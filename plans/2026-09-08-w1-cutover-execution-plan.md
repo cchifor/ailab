@@ -1,5 +1,13 @@
 # Execution plan — W1 Actions cutover + W5/W1 acceptance
 
+## Codex Review
+
+- **Do not execute unchanged.** The added execution report says cutover already occurred; steps 1–7 must now be treated as historical. Approval-triggered auto-merge defeated the intended suspension barrier.
+- HelmRelease suspension is conditional: the checked-in release does not enable drift correction. If retained, resume Helm only after the intended backend configuration is staged.
+- Pin the verified post-#568 migration manifest; `gitea/main~1` is unreliable. Require source-revision, writer-quiescence and database consistency gates, plus recovery that works with Gitea down.
+- The watchdog pause command is malformed and lacks recovery that survives session loss. A1 does not reproduce TCP-accepted-but-silent behavior; the reported catch-up counts do not alone prove recovery.
+- Steps 8–9 remain disruptive. For the original full procedure, provisionally allow **90–120 minutes**; with cutover already reported complete, allow **45–60 minutes** for remaining acceptance/cleanup and recovery, subject to timed checks. The 11-second copy is not the maintenance-window duration.
+
 ## Context
 
 W2, W3, W4, W5 and W6 of `plans/2026-09-08-usb-failure-domain-plan.md` are shipped and live.
@@ -66,6 +74,8 @@ Wait for #567 CI green. Do NOT merge yet.
 **Checkpoint:** `apps` reconciles #568 and replaces the Job with the `--size-only` version. Confirm
 the live Job's args contain `--size-only` before continuing — this is what keeps step 6 short.
 
+<!-- codex: HIGH — Mere presence of the size-only flag is insufficient: the pre-#568 manifest already uses it for rclone check, while rclone copy still uses checksum comparison. Inspect the copy command itself and require the replacement Job to complete. Time a repeat against the populated PVC; #568 records a projected two-hour run with the old copy command. -->
+
 ## Step 2 — suspend, so merging does not apply early
 
 ```bash
@@ -77,6 +87,8 @@ Both: the Kustomization stops re-applying the HelmRelease, and suspending the He
 helm-controller reverting a manual `scale` as drift. Suspending only one leaves a path to a surprise
 roll mid-window.
 
+<!-- codex: HIGH — This necessity claim is too broad. kubernetes/apps/apps/gitea/gitea.yaml has no spec.driftDetection; an unchanged healthy release does not automatically correct replica drift unless correction is enabled. Check the live release and pending Helm actions. Suspending apps is the merge barrier; also suspending Helm is a precaution against upgrades/remediation, not an unconditional requirement for scaling. The checked-in HelmRelease CRD states that suspension does not cancel already-started reconciliations, so establish controller quiescence before merging. See [Flux drift detection](https://fluxcd.io/flux/components/helm/helmreleases/#drift-detection). -->
+
 **Verify** both report `suspend: true` before proceeding.
 
 ## Step 3 — merge #567 (Gitea still up, change not yet applied)
@@ -87,6 +99,8 @@ python <scratchpad>/merge.py 567
 
 **Verify:** `apps` `lastAppliedRevision` is UNCHANGED — proving the suspend held. If it moved, the
 switch has been applied while Gitea was still writing to S3: go to Rollback R1.
+
+<!-- codex: CRITICAL — An unchanged lastAppliedRevision does not exclude a partial/in-progress apply or independent Helm action. Record the baseline before suspension and verify live HelmRelease values, the Deployment template and effective backend remain on S3. Before shutdown, require the exact merged cutover SHA on GitHub and in flux-system GitRepository's Ready artifact: Gitea's mirror cannot deliver a missing commit while Gitea is stopped. Annotating apps alone does not fetch a newer source artifact. The execution report also shows the hold must precede any approval that can auto-merge. -->
 
 ## Step 4 — database backup
 
@@ -102,7 +116,11 @@ $K -n databases exec "$PRIMARY" -c postgres -- pg_dump -U postgres -d gitea -Fc 
 Confirm the dump is non-trivial in size and readable (`pg_restore --list | head`). `_out/` is
 gitignored. Discover the exact DB/role names in step 0 rather than assuming.
 
+<!-- codex: CRITICAL — This dump precedes writer shutdown. Although pg_dump is internally consistent, subsequent Gitea metadata changes, deletions and offloads make it an unmatched cutover recovery point. Take and validate a final dump after Gitea has stopped and before the copy/backend change. Preserve corresponding Gitea data/repository volume state if database rollback is intended. Check dump exit status and the complete archive listing, rather than relying on size or a pipeline ending in head. -->
+
 ## Step 5 — stop the writers  ← OUTAGE BEGINS
+
+<!-- codex: HIGH — Drain or explicitly cancel Actions and pause new submissions before scaling down; failed runner requests do not prove external jobs have stopped or cannot retry when Gitea returns. Maintain that admission hold through acceptance, allowing only controlled test runs. Pre-stage migration, cutover and rollback payloads outside Gitea before this point. -->
 
 ```bash
 $K -n gitea scale deployment gitea --replicas=0
@@ -113,7 +131,11 @@ Runners will fail their jobs; that is expected and is why this is a window.
 
 ## Step 6 — final delta copy, with nothing writing
 
+<!-- codex: HIGH — Step 5 stops Gitea only. The independent backup Kustomization leaves Velero and talos-backup active. Their separate buckets mean they need not stop merely to freeze Actions data, but gateway-wide writer quiescence is unproved. If required, pause Velero schedules and backup/prune CronJobs, prevent controllers from re-enabling them, and verify no active Backups, PodVolumeBackups, maintenance Jobs or talos-backup/prune pods remain. Coordinate the probe and off-site sync too. Suspending reconciliation or schedules does not stop existing work; save prior states for restoration. See [CronJob suspension](https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/#schedule-suspension). -->
+
 `apps` is suspended, so Flux will not recreate the Job. Apply it from the merge-base of #567:
+
+<!-- codex: CRITICAL — gitea/main is a local remote-tracking ref, and step 3 does not refresh it. Its first parent may therefore be the pre-#568 checksum version; after fetching, the answer still depends on merge strategy and intervening commits. A first parent is not generally the PR's merge-base. After #568 lands and before #567 merges, pin verified main as PRE_CUTOVER_SHA and save its migration manifest locally. Validate its copy command and apply that saved file with explicit error handling. See [Git revision syntax](https://git-scm.com/docs/gitrevisions). -->
 
 ```bash
 $K -n gitea delete job gitea-actions-migrate --ignore-not-found
@@ -127,12 +149,16 @@ fails, go to Rollback R2 — do not continue.
 
 Then release the volume:
 
+<!-- codex: HIGH — Job deletion can precede dependent Pod termination. Require bounded waits for migration pods to disappear before recreation and before Gitea mounts the PVC. A kubectl wait timeout does not cancel the Job; explicitly stop it and verify exit before rollback/resume. The current Job has retries and no activeDeadlineSeconds, so the 1800-second client wait does not bound its lifetime. Every failed gate must prevent later commands. -->
+
 ```bash
 $K -n gitea delete job gitea-actions-migrate
 $K -n gitea get pods -l job-name=gitea-actions-migrate      # expect: none
 ```
 
 ## Step 7 — resume; Gitea comes up on local storage
+
+<!-- codex: CRITICAL — Resuming Helm first permits a pending action or enabled drift correction to restart Gitea on S3 after the final copy. Keep Helm suspended while apps applies the verified cutover artifact; confirm the live HelmRelease has the local paths/mount and no migration pods remain, then resume and request Helm reconciliation. Do not wait for apps' overall Ready before releasing Helm, because apps has wait:true. Require Helm Ready for the new generation and the intended apps revision before test writes. -->
 
 ```bash
 $K -n gitea patch helmrelease gitea --type=merge -p '{"spec":{"suspend":false}}'
@@ -149,6 +175,8 @@ $K -n flux-system annotate kustomization apps reconcile.fluxcd.io/requestedAt="$
 
 **OUTAGE ENDS.**
 
+<!-- codex: HIGH — This ends the outage too early: A1/A2 delete the sole Gitea pod and B scales it to zero again. Keep acceptance inside the announced window; restore normal admissions afterward. The parent plan requires B's independent-repair proof before the storage cutover. For the original procedure, 3 minutes shutdown + 30 copy wait + 15 Helm rollout + roughly 20 acceptance + 20 rollback already total 88 minutes, excluding dump time. Reserve 90–120 minutes provisionally. Given the reported completed cutover, budget the remaining tests separately: approximately 25–40 minutes testing/cleanup plus 20 recovery gives a provisional 45–60-minute window. Neither estimate is a measured bound; establish per-phase deadlines and a latest rollback-start time. -->
+
 ## Step 8 — acceptance A: Gitea does not need the USB disk
 
 The plan's headline requirement: *Gitea starts and serves with `:7070` unreachable*, from a COLD
@@ -163,6 +191,8 @@ $K -n gitea exec deploy/gitea -c gitea -- grep -c 7070 /data/gitea/conf/app.ini 
 **A1 — silent hang** (the actual 2026-09-08 failure: TCP accepted, never answered). Blackhole the
 endpoint from the gitea namespace, then cold-start:
 
+<!-- codex: HIGH — Dropping egress typically prevents TCP establishment; it does not reproduce TCP accepted followed by silence. Pre-stage a reversible fault that proves an established connection followed by stalled TLS/HTTP, and verify it from the Gitea pod network. The placeholder policy is not executable; standard NetworkPolicies are additive allow rules, so an existing allow can defeat the exclusion. Scope the fault to port 7070, preserve required DNS/database/NAS access, and provide cleanup that survives session loss. See [NetworkPolicy behavior](https://kubernetes.io/docs/concepts/services-networking/network-policies/). -->
+
 ```bash
 $K apply -f <a NetworkPolicy in ns gitea denying egress to 192.168.1.225/32>
 $K -n gitea delete pod -l app.kubernetes.io/name=gitea      # cold start
@@ -171,6 +201,10 @@ Expect: pod Ready, UI serves, artifacts still listed. Then remove the policy.
 
 **A2 — connection refused.** versitygw genuinely stopped. The W3 watchdog would restart it within
 3 minutes, so pause its cron first:
+
+<!-- codex: CRITICAL — The sed expression below is malformed: the # before PAUSED terminates the replacement, leaving invalid substitution flags. Reproduced locally: unknown option to s. Appending a trailing comment would not disable the schedule either; comment out the exact cron entry at its beginning and verify durable and installed crontabs. Pre-stage tested stop/start/restore commands instead of the placeholder. -->
+
+<!-- codex: CRITICAL — Restoration must survive SSH/session loss; a local EXIT trap is insufficient. Before pausing, arm and verify an independent, time-bounded recovery task on the NAS internal pool that restores the original watchdog entry and gateway service. Preserve unrelated cron entries, drain already-running watchdog invocations, then stop the gateway and prove port 7070 refuses connections. Disarm recovery only after durable/live cron state, a watchdog execution and an authenticated S3 round-trip pass. -->
 
 ```bash
 python scripts/qnap-ssh.py --sudo "sed -i 's#^\*/3 .*versitygw-supervisor.*#\0 # PAUSED#' /etc/config/crontab && crontab /etc/config/crontab"
@@ -181,10 +215,14 @@ python scripts/qnap-ssh.py --sudo "sed -i 's#^\*/3 .*versitygw-supervisor.*#\0 #
 expected and is itself a check that the alerting works — `VersitygwProbeFailed` should fire and then
 clear. Keep A2 short. **Restoring the watchdog cron is mandatory** and must be verified, not assumed.
 
+<!-- codex: HIGH — A short A2 may miss the probe: it runs every 10 minutes, has a 120-second deadline, and the alert has for:2m. Scheduled failure detection can take about 14 minutes plus scrape/evaluation delay, followed by another probe to clear it. Use non-overlapping manual probe Jobs named versitygw-probe-.*, establish baseline success, observe the alert firing, then restore and require a newer success. Include this in the recovery deadline. Paused backup jobs cannot demonstrate failure behavior; that requires a separately controlled test if intended. -->
+
 ## Step 9 — acceptance B: repair works with the forge down (W5)
 
 The plan: *demonstrate a fresh GitHub fetch and application with Gitea stopped; reconciling from a
 cached artifact does not count.*
+
+<!-- codex: HIGH — Scaling to zero is asynchronous and does not prove Gitea stays down. Apply necessary reconciliation holds, wait for all Gitea pods to terminate and the endpoint to become unavailable, and maintain that condition through fetch/apply. The checked-in source-controller uses emptyDir, supporting cache loss; verify the live mount and new pod UID, and record a post-restart GitHub fetch/artifact revision. Stale Ready alone is insufficient. Replace the comment-only reconcile step with a concrete request for a named safe Kustomization and evidence that it handled the request and applied the expected resource. Restore saved replicas/holds and wait for Gitea Ready. -->
 
 ```bash
 $K -n gitea scale deployment gitea --replicas=0             # forge down
@@ -204,6 +242,8 @@ the mirror first. Recorded as a residual gap rather than silently skipped.
 
 ## Rollback
 
+<!-- codex: CRITICAL — R2/R3 require reverting on Gitea while it is stopped or unhealthy; the stated lack of GitHub write credentials leaves that path unavailable. Pre-stage a tested direct Kubernetes/Helm restoration from saved S3 manifests, retaining reconciliation holds until Gitea is restored and the revert is merged, mirrored and fetched. Preserve the Actions PVC and prevent recreation of the migration Job. Specify how to resume the intended Helm action without apps reapplying the failed cutover. -->
+
 - **R1 — cutover applied too early.** Revert #567 on `main`; Gitea returns to S3 (the
   `gitea-actions-s3` secret was deliberately kept). The PVC copy is untouched.
 - **R2 — final copy fails.** Do not resume. Revert #567, resume `apps` and the HelmRelease; Gitea
@@ -212,6 +252,8 @@ the mirror first. Recorded as a residual gap rather than silently skipped.
 - **R3 — Gitea unhealthy on local storage.** Revert #567 and reconcile. If the pod cannot start at
   all, `kubectl scale` it to 0, revert, then resume.
 - **R4 — database.** Restore the step-4 dump into `infra-pg`.
+
+<!-- codex: CRITICAL — R1/R3 can occur after local writes, and step 7 explicitly creates one. Reverting configuration then exposes stale S3 data. Stop writers again, retain both stores, and reconcile/verify post-cutover changes before switching back, or use an explicitly accepted recovery point with matching database/filesystem state. R4 must target only the gitea database in shared infra-pg, use the quiesced dump and include a verified restore procedure. The parent plan already warns rollback is asymmetric after local writes; retaining the old bucket does not make every rollback cheap. -->
 
 The S3 data is never deleted by any step here, which is what makes every rollback cheap.
 
@@ -226,6 +268,8 @@ The S3 data is never deleted by any step here, which is what makes every rollbac
 - [ ] A fresh GitHub fetch + apply succeeds with Gitea stopped (B)
 - [ ] All Kustomizations Ready at the end; `backup` layer healthy
 
+<!-- codex: HIGH — Ready alone does not prove reconciliation/schedules were restored: suspended resources can retain earlier Ready conditions. Compare suspension flags, replicas, schedules and cron entries with saved states, remove fault rules/recovery tasks, and verify current source/Helm generations, successful probe recovery and resumed backup operation. -->
+
 ## WHAT ACTUALLY HAPPENED — this plan was overtaken by events
 
 Recorded before the remaining steps, because it changes them.
@@ -235,6 +279,8 @@ estate **auto-merges on approval**, so it merged at 14:49:09Z and Flux applied i
 suspend-then-merge ordering in steps 2-3 below never ran. This is a process finding, not a one-off:
 a PR that must not take effect on merge cannot be protected by intending to merge it later — it has
 to be held as a DRAFT, or its Kustomization suspended *before* the PR is opened.
+
+<!-- codex: CRITICAL — This report supersedes steps 1–7; do not rerun their old-state assumptions against the live local backend. Before remaining work, capture actual backend/revisions and validate auto-merge behavior for the chosen hold: a draft must demonstrably block the estate's automation. Any future cutover needs the hold in place before requesting reviews, plus the source-artifact and controller-quiescence gates above. -->
 
 **Consequence: the write window this plan existed to prevent actually opened.** Measured immediately
 after:
@@ -254,6 +300,8 @@ After recovery: artifacts 8,982 = 8,982, logs 48,836 >= 48,831. The destination 
 than the source, which is correct — those are new logs Gitea has written locally since the cutover,
 and they are the proof that local writes work.
 
+<!-- codex: HIGH — Aggregate count equality/inequality does not prove no objects were lost, correct prefix mapping, readable contents or database consistency; extra local objects can hide missing source keys. Record per-key containment/size verification for both prefixes, preserve the immutable-key assumption behind size-only copy, and verify old/new artifacts and logs through Gitea. The catch-up ran alongside local writes, so retain both stores and account for concurrent cleanup. Eleven seconds measures this catch-up only, not cold starts, alerting, cleanup or rollback. -->
+
 **Imperative work disclosed:** the catch-up Job was applied with `kubectl`, not through git, because
 the cutover had already (correctly) pruned the migration manifest. It is deleted again; the estate
 matches git.
@@ -270,4 +318,6 @@ matches git.
    `gitea` S3 key must be rotated. It is LAN-scoped and now unused except for rollback, but a leaked
    credential is a leaked credential.
 
-<!-- codex-review-status: pending -->
+<!-- codex: HIGH — Credential rotation and residual app.ini cleanup are now outstanding closure tasks. Rotate the exposed key and update the retained rollback secret through a path that does not print values; verify the old key is rejected. Remove the obsolete named section while preserving database/metrics settings and then prove the effective configuration and cold-start behavior. An unreferenced section is not, by itself, evidence that the required failure-mode tests pass. -->
+
+<!-- codex-review-status: complete -->
