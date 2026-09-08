@@ -65,6 +65,7 @@ RESTART_WINDOW="${RESTART_WINDOW:-1800}"   # seconds (30 min)
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-20971520}" # 20 MiB, then copy-truncate; keep 1 saved generation
 STALE_LOCK_SECS="${STALE_LOCK_SECS:-3600}" # backstop for a lock that never got an ownership stamp
 RECLAIM_GUARD_SECS="${RECLAIM_GUARD_SECS:-300}" # the reclaim mutex is held for ms; older = a run died in it
+ABANDONED_LOCK_SECS="${ABANDONED_LOCK_SECS:-86400}" # backstop so a recycled pgid cannot disable the watchdog forever
 
 STATE="$BASE/state"
 LOCK="$STATE/lock"
@@ -201,8 +202,25 @@ holder_alive() {
   kind=$(cat "$LOCK/kind" 2>/dev/null)
   case "$kind" in
     abandoned-*)   # abandoned-probe or abandoned-start: both are owned by a process GROUP
-      group_alive "$(cat "$LOCK/pgid" 2>/dev/null)"
-      return $? ;;
+      local pgid lead_st age
+      pgid=$(cat "$LOCK/pgid" 2>/dev/null)
+      group_alive "$pgid" || return 1
+      # The group looks alive -- but a pgid is just a number, and it can be RECYCLED by an unrelated
+      # group. Without a check, that would keep the supervisor exiting on every run, forever, with
+      # nothing running. Two independent guards:
+      #   a) if the group LEADER still exists, its /proc start-time must match what was recorded at
+      #      abandonment. A different start-time means a different process wearing the same number.
+      #   b) a wall-clock backstop, because when the leader is gone the members cannot be checked
+      #      that way. Being wrong here costs one extra probe (which simply wedges and re-abandons
+      #      if the disk is still bad); never being able to run again costs the whole watchdog.
+      lead_st=$(cat "$LOCK/pgid_starttime" 2>/dev/null)
+      if [ -n "${lead_st:-}" ] && [ -d "$PROC_ROOT/$pgid" ]; then
+        [ "$(proc_starttime "$pgid")" = "$lead_st" ] || return 1
+      fi
+      age=$(( $(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || date +%s) ))
+      [ "$age" -lt "$ABANDONED_LOCK_SECS" ]
+      return $? ;;   # explicit: without it, execution falls past esac into the supervisor checks,
+                     # which look for a pid file an abandoned lock does not have and report "dead"
   esac
   [ -f "$LOCK/pid" ] || return 1
   pid=$(cat "$LOCK/pid" 2>/dev/null)
@@ -214,32 +232,54 @@ holder_alive() {
   [ "$st" = "$(cat "$LOCK/starttime" 2>/dev/null)" ]
 }
 
-if ! mkdir "$LOCK" 2>/dev/null; then
+# Publishing ownership is part of ACQUIRING the lock, not something that happens afterwards. An
+# unstamped lock is indistinguishable from a dead one, so any gap between `mkdir` and these writes is
+# a window in which a concurrent run can delete a lock that was just legitimately taken. Every
+# successful mkdir below is followed immediately by this, and when reclaiming it happens while the
+# RECLAIM guard is still held.
+claim_ownership() {
+  printf '%s' supervisor             > "$LOCK/kind"
+  printf '%s' "$$"                   > "$LOCK/pid"
+  printf '%s' "$(proc_starttime $$)" > "$LOCK/starttime"
+}
+
+# A lock that exists but carries NO ownership stamp belongs to a run caught between mkdir and
+# claim_ownership. It must be left alone, not reclaimed. The age is re-read at each call site rather
+# than reused, because a snapshot taken before another run recreated the lock describes a directory
+# that no longer exists -- which is precisely how a "fresh" lock gets mistaken for an ancient one.
+lock_being_claimed() {
+  local age
+  [ -f "$LOCK/kind" ] && return 1
+  [ -f "$LOCK/pid" ]  && return 1
+  age=$(( $(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || date +%s) ))
+  [ "$age" -lt "$STALE_LOCK_SECS" ]
+}
+
+if mkdir "$LOCK" 2>/dev/null; then
+  claim_ownership
+else
   if holder_alive; then
     # THE pile-up guard. This is the normal, healthy response while a probe is outstanding -- and
     # the load-bearing one while a probe is wedged in D-state. Exit silently: at 3-minute cron
     # granularity, logging here would itself become the noise.
     exit 0
   fi
-  # Stale: holder is gone, or the lock was created by a run that died before stamping itself.
+  # Stale: the holder is gone. But a lock still being claimed is not stale -- back off.
+  # (A lock carrying a pid but no kind is one left by the PREVIOUS version of this script;
+  # holder_alive has already established it is dead, so it is reclaimable immediately rather than
+  # stalling every run for STALE_LOCK_SECS after an upgrade.)
+  lock_being_claimed && exit 0
   lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || date +%s) ))
-  # Back off ONLY for a lock with no ownership stamp at all AND recent: that is a run caught in the
-  # microsecond window between mkdir and its first write. A lock that carries a pid but no kind is
-  # one left by the PREVIOUS version of this script; holder_alive has already established it is
-  # dead, so it must be reclaimable immediately rather than stalling every run for STALE_LOCK_SECS
-  # after an upgrade.
-  if [ ! -f "$LOCK/kind" ] && [ ! -f "$LOCK/pid" ] && [ "$lock_age" -lt "$STALE_LOCK_SECS" ]; then
-    exit 0
-  fi
-  # Reclaim under a SECOND mutex, and re-check ownership once we hold it.
+
+  # Reclaim under a SECOND mutex, held until ownership is PUBLISHED.
   #
-  # Neither a bare `rm -rf` + `mkdir` nor a rename is sufficient here, because the dangerous
-  # interleaving is not two runs racing to delete -- it is the second run deleting the FIRST run's
-  # freshly created lock. Two runs both observe a dead holder; A removes and recreates; B, still
-  # acting on its earlier observation, removes A's new lock and creates its own. Both proceed, and
-  # either one's cleanup then deletes the other's lock. Serialising reclamation is what closes it:
-  # only one run reclaims at a time, and it RE-CHECKS under the guard, so the loser sees A's live
-  # ownership and backs off instead of acting on a stale observation.
+  # Neither a bare `rm -rf` + `mkdir` nor a rename is sufficient, because the dangerous interleaving
+  # is not two runs racing to delete -- it is the second run deleting the FIRST run's freshly created
+  # lock, acting on an observation it made before that lock existed. Serialising reclamation closes
+  # it only if the guard is still held when the winner becomes identifiable: releasing RECLAIM before
+  # claim_ownership would leave the winner's lock unstamped and therefore deletable by the next run
+  # through the guard. So RECLAIM spans mkdir AND the ownership writes, and the guarded re-check
+  # additionally refuses to delete a lock that is mid-claim.
   if ! mkdir "$RECLAIM" 2>/dev/null; then
     # The guard is held for milliseconds, so an old one means a run died inside it.
     reclaim_age=$(( $(date +%s) - $(stat -c %Y "$RECLAIM" 2>/dev/null || date +%s) ))
@@ -249,26 +289,25 @@ if ! mkdir "$LOCK" 2>/dev/null; then
     mkdir "$RECLAIM" 2>/dev/null || exit 0
   fi
   if mkdir "$LOCK" 2>/dev/null; then
-    :                                   # the holder vanished entirely; the lock is simply ours now
+    claim_ownership                     # the holder vanished entirely; the lock is simply ours now
   elif holder_alive; then
     rm -rf "$RECLAIM" 2>/dev/null       # another run reclaimed while we waited -- it owns it
+    exit 0
+  elif lock_being_claimed; then
+    rm -rf "$RECLAIM" 2>/dev/null       # a run took it between our first check and this one
     exit 0
   else
     rm -rf "$LOCK" 2>/dev/null
     mkdir "$LOCK" 2>/dev/null || { rm -rf "$RECLAIM" 2>/dev/null; exit 0; }
+    claim_ownership
   fi
   rm -rf "$RECLAIM" 2>/dev/null
   log "reclaimed stale lock (age ${lock_age}s)"
 fi
-# The lock is ours. It is released on every exit EXCEPT deliberate abandonment (see below).
+# The lock is ours and stamped. It is released on every exit EXCEPT deliberate abandonment (below).
 RELEASE_LOCK=yes
 cleanup() { [ "$RELEASE_LOCK" = yes ] && rm -rf "$LOCK" 2>/dev/null; }
 trap cleanup EXIT INT TERM
-# Claim ownership BEFORE any work, so a concurrent run can never mistake this for a dead lock --
-# including during the stop/restart sequence, long after the probe child has exited.
-printf '%s' supervisor             > "$LOCK/kind"
-printf '%s' "$$"                   > "$LOCK/pid"
-printf '%s' "$(proc_starttime $$)" > "$LOCK/starttime"
 
 #--- probe A: does the gateway ANSWER? ------------------------------------------------------------
 # Runs in the parent: curl bounds itself with --max-time and is blocked on a socket, not on disk,
@@ -342,7 +381,8 @@ if group_alive "$probe_pgid"; then
     # can fix this: not a restart, not a kill. Hand the lock to the abandoned group so no successor
     # ever stacks on top of it, and leave. The lock is reclaimed automatically once the group dies.
     RELEASE_LOCK=no
-    printf '%s' abandoned-probe > "$LOCK/kind"
+    printf '%s' abandoned-probe            > "$LOCK/kind"
+    printf '%s' "$(proc_starttime "$probe_pgid")" > "$LOCK/pgid_starttime"
     set_status disk-wedged \
       "disk probe group $probe_pgid unkillable in D-state after ${DISK_TIMEOUT}s (http=${http_code:-none}); NOT restarting -- a restart cannot repair hung I/O. Lock held until every member of that group clears. Storage intervention required."
     event 2 "USB disk wedged: probe group $probe_pgid stuck in D-state; versitygw NOT restarted (restart cannot fix hung I/O)"
@@ -447,8 +487,9 @@ else
     sleep 1
     if group_alive "$start_pgid"; then
       RELEASE_LOCK=no
-      printf '%s' abandoned-start > "$LOCK/kind"
-      printf '%s' "$start_pgid"   > "$LOCK/pgid"
+      printf '%s' abandoned-start            > "$LOCK/kind"
+      printf '%s' "$start_pgid"              > "$LOCK/pgid"
+      printf '%s' "$(proc_starttime "$start_pgid")" > "$LOCK/pgid_starttime"
       set_status start-wedged \
         "restart attempt $((recent + 1))/$MAX_RESTARTS never answered and its startup group $start_pgid is unkillable in D-state -- the disk wedged after the probe passed. Lock held until that group clears. Storage intervention required."
       event 2 "versitygw startup wedged in D-state (group $start_pgid); lock held so no further restarts stack behind it"

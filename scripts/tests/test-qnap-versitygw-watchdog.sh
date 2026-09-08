@@ -196,6 +196,36 @@ kill -9 -"$SPGID" 2>/dev/null; wait $SURVIVOR 2>/dev/null
 run abandoned
 check "…and is reclaimed once that group finally dies" "healthy" "$(status_of)"
 
+# A pgid is only a number and can be RECYCLED by an unrelated group. Without a backstop the
+# supervisor would exit on every run forever, with nothing actually running — the watchdog silently
+# disabled. Guard (a): the recorded leader start-time must still match.
+CASE=pgidrecycled; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/pgidrecycled" no
+mkdir -p "$ROOT/$CASE/state/lock"
+setsid sleep 60 & IMPOSTOR=$!
+sleep 0.3
+IPGID=$(sed 's/.*) //' /proc/$IMPOSTOR/stat | awk '{print $3}')
+echo abandoned-probe > "$ROOT/$CASE/state/lock/kind"
+echo "$IPGID" > "$ROOT/$CASE/state/lock/pgid"
+echo "111111111" > "$ROOT/$CASE/state/lock/pgid_starttime"   # not this leader's start-time
+run pgidrecycled
+check "a recycled pgid cannot hold an abandoned lock forever" "healthy" "$(status_of)"
+kill -9 -"$IPGID" 2>/dev/null; wait $IMPOSTOR 2>/dev/null
+
+# Guard (b): the wall-clock backstop, for when the leader is gone and only members remain.
+CASE=abandonedold; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/abandonedold" no
+mkdir -p "$ROOT/$CASE/state/lock"
+setsid sleep 60 & OLDSURV=$!
+sleep 0.3
+OPGID=$(sed 's/.*) //' /proc/$OLDSURV/stat | awk '{print $3}')
+echo abandoned-probe > "$ROOT/$CASE/state/lock/kind"
+echo "$OPGID" > "$ROOT/$CASE/state/lock/pgid"
+touch -d '2 days ago' "$ROOT/$CASE/state/lock" 2>/dev/null || touch -t 200001010000 "$ROOT/$CASE/state/lock"
+run abandonedold
+check "an abandoned lock older than the backstop is reclaimed" "healthy" "$(status_of)"
+kill -9 -"$OPGID" 2>/dev/null; wait $OLDSURV 2>/dev/null
+
 # Group detection must tolerate OTHER processes exiting during the scan. Reading /proc is inherently
 # racy on a busy NAS: an implementation that globs /proc/[0-9]*/stat and hands the list to one awk
 # fails to open a vanished entry and exits non-zero, which the caller reads as "the group is gone" —
