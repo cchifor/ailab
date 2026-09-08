@@ -61,8 +61,16 @@ const isBlank = (l) => l.trim() === '';
 // leave the stale provider effective. Anything else after the colon (a value, an anchor, a flow
 // mapping) is a shape this script does not handle; KEY_PRESENT below detects that case so the
 // caller can decline rather than duplicate.
-const KEY_HEADER = (key, depth) => new RegExp('^ {' + depth + '}' + key + ':[ \\t]*(#.*)?$');
-const KEY_PRESENT = (key, depth) => new RegExp('^ {' + depth + '}' + key + ':');
+//
+// A key may also be QUOTED (`"litellm":`, `'litellm':`) or carry whitespace before the colon.
+// Those are the SAME YAML key, so both patterns must recognise them: if the presence check does
+// not, an existing quoted provider is reported absent and an unquoted duplicate is spliced beside
+// it -- duplicate mapping keys in a file that was valid before this script touched it.
+const KEYPAT = (key) => '(?:' + key + '|"' + key + '"|\'' + key + '\')';
+const KEY_HEADER = (key, depth) =>
+  new RegExp('^ {' + depth + '}' + KEYPAT(key) + '[ \\t]*:[ \\t]*(#.*)?$');
+const KEY_PRESENT = (key, depth) =>
+  new RegExp('^ {' + depth + '}' + KEYPAT(key) + '[ \\t]*:');
 
 function findKeyAt(lines, key, depth, from, to) {
   const re = KEY_HEADER(key, depth);
