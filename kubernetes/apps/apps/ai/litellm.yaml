@@ -322,7 +322,16 @@ data:
           model: openai/qwen3.6-35b-a3b
           api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
           api_key: "sk-noauth"
-        model_info: { supports_vision: true, max_input_tokens: 114688 }
+        # supports_vision is FALSE, measured against the live endpoint rather than copied:
+        #   POST /v1/chat/completions with an image_url part ->
+        #     500 "image input is not supported - hint: ... you may need to provide the mmproj"
+        # mmproj-F16.gguf IS present in /models/qwen3.6-35b-a3b/, but node2's llama-server ExecStart
+        # does not pass --mmproj, so the projector is never loaded and the model is text-only at
+        # runtime. Advertising vision here would send any image request that fails over from the
+        # vision-capable cloud route straight into a 500 -- i.e. the fallback would silently not
+        # cover multimodal traffic, which is the exact class of outage this chain exists to close.
+        # (reviewer-claude on #606.)
+        model_info: { supports_vision: false, max_input_tokens: 114688 }
     litellm_settings:
       drop_params: true
       # 900s to cover a llama-swap COLD START: the first request to an idle-unloaded heavyweight
@@ -421,7 +430,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "b80dc26b298c"
+        checksum/config: "4e42a61e7c35"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

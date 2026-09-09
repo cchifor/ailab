@@ -113,9 +113,16 @@ spec:
         # pod that is Ready but exports no cnpg_collector_up is unmonitored, whatever the reason.
         # (codex impl-review #14; same shape as agentforge-coverage-rules.yaml for ailab#284.)
         - alert: PostgresMetricsMissing
+          #
+          # `== 1` on the right-hand side is load-bearing: `unless` matches on series PRESENCE, not
+          # value, so a collector reporting cnpg_collector_up=0 -- scrape succeeds, collection fails
+          # -- would still suppress this alert. And because the HTTP scrape succeeded,
+          # PostgresMetricsTargetDown (up == 0) stays inactive too. The replication metrics are gone,
+          # both pods read Ready, and NOTHING fires. Comparing the value closes that hole.
+          # (codex review of #606.)
           expr: |
             kube_pod_status_ready{condition="true", namespace="databases", pod=~"infra-pg-[0-9]+"} == 1
-              unless on(namespace, pod) cnpg_collector_up
+              unless on(namespace, pod) (cnpg_collector_up == 1)
           for: 15m
           labels: { severity: warning }
           annotations:

@@ -332,3 +332,44 @@ tests:
       - eval_time: 20m
         alertname: PostgresReplicaNotStreaming
         exp_alerts: []
+
+  # ---------------------------------------------- codex review of #606: presence != health
+  # `unless` matches on series PRESENCE, not value. A collector reporting cnpg_collector_up=0 --
+  # the HTTP scrape succeeds, the collection inside it fails -- would suppress PostgresMetricsMissing
+  # while PostgresMetricsTargetDown ALSO stays quiet, because up == 1. The replication metrics are
+  # gone, both pods read Ready, and nothing fires. Drop the `== 1` and this case fails.
+  - interval: 1m
+    name: a collector reporting zero is not mistaken for coverage
+    input_series:
+      - series: 'kube_pod_status_ready{condition="true", namespace="databases", pod="infra-pg-3"}'
+        values: "1+0x40"
+      # Scrape SUCCEEDS...
+      - series: 'up{job="databases/infra-pg-metrics", instance="10.244.2.191:9187"}'
+        values: "1+0x40"
+      # ...but the collector itself is failing, so no replication metrics are produced.
+      - series: 'cnpg_collector_up{namespace="databases", pod="infra-pg-3"}'
+        values: "0+0x40"
+    alert_rule_test:
+      # The target-down rule cannot see this: up is 1.
+      - eval_time: 16m
+        alertname: PostgresMetricsTargetDown
+        exp_alerts: []
+      # The coverage rule must.
+      - eval_time: 16m
+        alertname: PostgresMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              condition: "true"
+              namespace: databases
+              pod: infra-pg-3
+            exp_annotations:
+              summary: "infra-pg-3 is Ready but exports no CNPG metrics"
+              description: >-
+                databases/infra-pg-3 has been Ready for >15m with no cnpg_collector_up series, so
+                PostgresReplicaNotStreaming, PostgresReplicationLagHigh and PostgresMetricsTargetDown
+                are all BLIND for it -- and blind here looks exactly like healthy. Check that the
+                databases/infra-pg-metrics PodMonitor still selects this pod and still carries the
+                release label Prometheus selects on; a monitor whose labels stop matching
+                podMonitorSelector disappears silently, which is the live state of strive-pg
+                (ailab#594).

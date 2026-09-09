@@ -103,3 +103,8 @@ spec:
               this was 24 containers across 10 namespaces with no alert at all. Correlate with etcd
               latency (`talosctl -n <cp> etcd status`, and the apply-request-took-too-long lines in
               the Talos service log) before looking at any individual pod.
+              EXPECTED DURING PLANNED MAINTENANCE: a Talos upgrade or a deliberate control-plane
+              reboot restarts these controllers together and will trip this by design. Silence it
+              for the maintenance window rather than dismissing it — an operator who learns to
+              ignore this alert has lost the only signal that distinguishes a planned roll from an
+              etcd stall.
