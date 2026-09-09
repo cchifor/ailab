@@ -31,6 +31,13 @@ kind: PersistentVolumeClaim
 metadata:
   name: postgres-dumps
   namespace: databases
+  annotations:
+    # The `databases` Kustomization runs prune: true. Without this, reverting this commit or moving
+    # the file would make Flux DELETE the claim — and since the PV is reclaimPolicy: Retain, that
+    # leaves an orphaned PV holding the only independent backup of the estate's database, which is
+    # exactly the class of un-deletable stranded volume already tracked in #601.
+    # Removing this PVC deliberately means: remove the annotation first, in its own commit.
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: qnap-iscsi
@@ -50,10 +57,18 @@ metadata:
     app.kubernetes.io/name: postgres-dumps-holder
 spec:
   replicas: 1
+  # Recreate, not RollingUpdate: with a ReadWriteOnce volume a surge pod would sit Pending forever
+  # waiting for a mount the outgoing pod still holds.
+  #
+  # KNOWN RESIDUAL RISK (codex impl-review #7): if the holder is replaced WHILE a dump is running,
+  # the writer still holds the RWO attachment on its node, so the new holder can be unschedulable
+  # until that Job ends. `progressDeadlineSeconds` below bounds how long that can look like a
+  # failing rollout rather than hanging indefinitely, and the dump's own activeDeadlineSeconds
+  # (5400) bounds the writer. The window is narrow — the holder only moves on node drain or an image
+  # change — but it is real, and the honest mitigation is bounding it rather than claiming it cannot
+  # happen. Drain the node outside 01:30-03:00, or scale the holder to 0 first.
+  progressDeadlineSeconds: 900
   strategy:
-    # Recreate, not RollingUpdate: with a ReadWriteOnce volume a surge pod would sit Pending forever
-    # waiting for a mount the outgoing pod still holds, and a permanently Pending pod in this
-    # namespace blocks the `databases` Flux Kustomization (wait: true) and everything downstream.
     type: Recreate
   selector:
     matchLabels:
@@ -68,6 +83,7 @@ spec:
         backup.velero.io/backup-volumes: dumps
     spec:
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -145,7 +161,10 @@ spec:
                 - |
                   set -uo pipefail
                   # NOT `set -e`: a single failed database must not abort the run before the
-                  # verification and retention logic below decides what to keep.
+                  # verification and retention logic below decides what to keep. Every step that
+                  # publication depends on is therefore checked EXPLICITLY with `|| exit 1` —
+                  # without `set -e` an unchecked failure would otherwise fall through to the
+                  # rename and the prune, which is how a broken run deletes a good backup.
 
                   HOST=infra-pg-rw.databases.svc.cluster.local   # -rw: never the replica, which
                                                                  # on 2026-09-02..09 was 7 days stale
@@ -155,8 +174,20 @@ spec:
                   KEEP=7
                   export PGPASSWORD="$PGPASS"
 
+                  # Remove our own staging on any abnormal exit. Without this an OOM or a deadline
+                  # kill leaves a partial directory consuming the volume until the next sweep.
+                  cleanup() { [ -n "${STAGE:-}" ] && rm -rf "$STAGE" 2>/dev/null; }
+                  trap cleanup EXIT INT TERM
+
                   echo "=== infra-pg logical dump ${STAMP} -> ${FINAL} ==="
-                  rm -rf "$STAGE"; mkdir -p "$STAGE" || exit 1
+
+                  # Sweep abandoned staging FIRST, before the space check. Doing it after publication
+                  # (the original order) meant that once interrupted runs had eaten the free space,
+                  # every subsequent run failed at the space check and never reached the sweep —
+                  # a wedge that repairs itself only by hand. >6h old cannot be a live writer:
+                  # activeDeadlineSeconds is 5400 (1.5h) and concurrencyPolicy is Forbid.
+                  find /dumps -maxdepth 1 -name '.staging-*' -type d -mmin +360 \
+                    -exec rm -rf {} + 2>/dev/null
 
                   # Free space BEFORE starting: a partial generation that fills the volume would
                   # also block the next one, and pruning first would destroy the last good copy.
@@ -167,6 +198,7 @@ spec:
                     exit 1
                   fi
 
+                  mkdir -p "$STAGE" || exit 1
                   rc=0
 
                   # Globals FIRST: roles, ownership and ACLs. Without these a restore produces
@@ -182,16 +214,34 @@ spec:
                   # Enumerate databases from the server rather than hardcoding a list, so a database
                   # added later is captured without anyone remembering to edit this file. That is the
                   # defect that left agentforge_broker and postgres out of the 2026-09-08 dump.
-                  DBS=$(psql -h "$HOST" -U "$PGUSER" -d postgres -tAc \
-                    "select datname from pg_database where datallowconn and not datistemplate order by 1")
-                  if [ -z "$DBS" ]; then
-                    echo "FATAL: could not enumerate databases"; exit 1
+                  if ! psql -h "$HOST" -U "$PGUSER" -d postgres -tAc \
+                       "select datname from pg_database where datallowconn and not datistemplate order by 1" \
+                       > "$STAGE/.dblist" 2>"$STAGE/.dblist.err"; then
+                    echo "FATAL: could not enumerate databases:"; sed 's/^/      /' "$STAGE/.dblist.err"
+                    exit 1
                   fi
-                  echo "--- databases: $(echo $DBS | tr '\n' ' ')"
+                  if [ ! -s "$STAGE/.dblist" ]; then
+                    echo "FATAL: database enumeration returned nothing"; exit 1
+                  fi
+                  echo "--- databases: $(wc -l < "$STAGE/.dblist")"
 
-                  for db in $DBS; do
+                  # `while IFS= read -r`, NOT `for db in $DBS`: word splitting would turn a database
+                  # named `sales archive` into two dump targets and glob expansion would mangle any
+                  # name containing * or ?. Postgres permits both.
+                  while IFS= read -r db; do
+                    [ -z "$db" ] && continue
+                    # A name containing / would escape $STAGE when used as a filename. Postgres
+                    # allows it; refuse rather than write outside the staging directory.
+                    case "$db" in
+                      */*|.|..) echo "    REFUSING unsafe database name: $db"; rc=1; continue ;;
+                    esac
                     echo "--- $db"
-                    if ! pg_dump -h "$HOST" -U "$PGUSER" -d "$db" -Fc --no-owner --no-acl \
+                    # ACLs are KEPT (no --no-acl): grants and revocations ARE the security model
+                    # here — separate app, broker and reaper roles per database — and a restore
+                    # without them silently reopens access. --no-owner is also dropped: it is a
+                    # pg_restore-time flag and has no effect on a -Fc archive, so passing it here
+                    # only implied a guarantee this file does not make.
+                    if ! pg_dump -h "$HOST" -U "$PGUSER" -d "$db" -Fc \
                            -f "$STAGE/$db.dump" 2>"$STAGE/$db.err"; then
                       echo "    FAILED:"; sed 's/^/      /' "$STAGE/$db.err"; rc=1; continue
                     fi
@@ -202,40 +252,44 @@ spec:
                     else
                       echo "    FAILED: pg_restore --list could not read $db.dump"; rc=1
                     fi
-                  done
+                  done < "$STAGE/.dblist"
 
                   if [ "$rc" != 0 ]; then
                     echo "=== generation INCOMPLETE — discarding staging, keeping previous generations ==="
-                    rm -rf "$STAGE"
-                    exit 1
+                    exit 1        # trap removes $STAGE
                   fi
 
-                  # Checksums + a completion marker. The marker is written LAST and is what the
-                  # retention pass below treats as "this generation is real".
-                  ( cd "$STAGE" && sha256sum ./*.dump ./globals.sql > SHA256SUMS )
-                  date -u +%Y-%m-%dT%H:%M:%SZ > "$STAGE/COMPLETE"
+                  # ---- publication. EVERY step below is checked: an unchecked failure here is how
+                  # ---- a half-written generation gets published and then prunes a good one.
+                  rm -f "$STAGE/.dblist" "$STAGE/.dblist.err" "$STAGE"/*.err || exit 1
+                  ( cd "$STAGE" && sha256sum ./*.dump ./globals.sql > SHA256SUMS ) || {
+                    echo "FATAL: could not write SHA256SUMS — not publishing"; exit 1; }
+                  date -u +%Y-%m-%dT%H:%M:%SZ > "$STAGE/COMPLETE" || {
+                    echo "FATAL: could not write COMPLETE marker — not publishing"; exit 1; }
+                  sync || { echo "FATAL: sync failed — not publishing"; exit 1; }
 
-                  # Publish atomically. Same filesystem, so this is a rename, not a copy: no window
-                  # in which a consumer can observe a half-written generation.
-                  mv "$STAGE" "$FINAL" || exit 1
-                  sync
+                  # Atomic rename on the same filesystem: no window in which a consumer can observe
+                  # a half-written generation. After this succeeds the trap must NOT delete it.
+                  mv "$STAGE" "$FINAL" || { echo "FATAL: publish rename failed"; exit 1; }
+                  STAGE=""
+                  sync || true
                   echo "=== published ${FINAL} ($(du -sh "$FINAL" | cut -f1)) ==="
 
-                  # Prune ONLY complete generations, and ONLY after this run published one. A failed
-                  # run above exits before here, so a bad night can never delete a good backup.
-                  ls -1d /dumps/[0-9]* 2>/dev/null | sort | head -n -"$KEEP" | while read -r old; do
-                    if [ -f "$old/COMPLETE" ]; then
-                      echo "    pruning $old"; rm -rf "$old"
-                    else
-                      echo "    leaving $old (no COMPLETE marker — inspect by hand)"
-                    fi
+                  # Prune ONLY complete generations, and ONLY after this run published one. The
+                  # COMPLETE filter is applied BEFORE the retention count, not after: filtering
+                  # afterwards let incomplete or unrelated directories consume the 7 slots, so a run
+                  # of failures could push good generations out of retention without deleting them.
+                  for d in /dumps/[0-9]*; do
+                    [ -d "$d" ] && [ -f "$d/COMPLETE" ] && printf '%s\n' "$d"
+                  done | sort | head -n -"$KEEP" | while IFS= read -r old; do
+                    echo "    pruning $old"; rm -rf "$old"
                   done
 
-                  # Sweep abandoned staging from earlier crashed runs (>1 day old).
-                  find /dumps -maxdepth 1 -name '.staging-*' -type d -mtime +1 -exec rm -rf {} + 2>/dev/null
-
                   echo "=== generations on disk ==="
-                  ls -1d /dumps/[0-9]* 2>/dev/null | sed 's/^/    /'
+                  for d in /dumps/[0-9]*; do
+                    [ -d "$d" ] || continue
+                    if [ -f "$d/COMPLETE" ]; then echo "    $d"; else echo "    $d  (INCOMPLETE — inspect)"; fi
+                  done
                   echo "    free after: $(df -Pm /dumps | awk 'NR==2{print $4}') MiB"
                   echo "DUMP_OK"
               env:

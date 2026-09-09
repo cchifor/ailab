@@ -33,19 +33,33 @@ spec:
         # Generic across the namespace on purpose: Prometheus is the pod that prompted it, but Loki,
         # Alertmanager and kube-state-metrics share the same LimitRange and the same blind spot.
         #
-        # The `* on(...) group_left` join carries the limit onto the working-set series. Containers
-        # with NO limit are excluded by construction — kube_pod_container_resource_limits simply has
-        # no series for them — which is the behaviour we want: an unlimited container cannot be "near
-        # its limit", and dividing by a zero/absent limit would produce +Inf and page forever.
+        # Containers with NO limit fall out of the join by construction —
+        # kube_pod_container_resource_limits simply has no series for them — which is the behaviour
+        # we want: an unlimited container cannot be "near its limit".
         #
         # container!="" drops the pod-level cgroup rollup that cAdvisor also exports; without it every
         # pod is double-counted and the ratio is computed against a limit that does not apply.
         - alert: MonitoringContainerNearMemoryLimit
+          #
+          # `max by (...)` on BOTH sides, not a bare division: `/ on(...)` requires exactly one
+          # series per (namespace,pod,container) on each side, and duplicate cAdvisor identities
+          # during a pod replacement (old and new container IDs briefly coexist) make the
+          # evaluation fail outright rather than alert. Collapsing first is cheap and removes the
+          # whole class.
+          #
+          # `> 0` on the DENOMINATOR is load-bearing, not decoration: a limit reported as 0 divides
+          # to +Inf, which passes `> 0.9` forever and can never resolve — a permanently-firing
+          # alert nobody can silence except by deleting the rule. Filtering the denominator drops
+          # those series instead. (codex impl-review #12, #13)
           expr: |
             (
-              container_memory_working_set_bytes{namespace="monitoring", container!=""}
+              max by (namespace, pod, container) (
+                container_memory_working_set_bytes{namespace="monitoring", container!=""}
+              )
                 / on(namespace, pod, container)
-              kube_pod_container_resource_limits{namespace="monitoring", resource="memory"}
+              max by (namespace, pod, container) (
+                kube_pod_container_resource_limits{namespace="monitoring", resource="memory"} > 0
+              )
             ) > 0.9
           for: 15m
           labels:

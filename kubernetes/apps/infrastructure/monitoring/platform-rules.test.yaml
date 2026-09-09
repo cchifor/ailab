@@ -145,3 +145,47 @@ tests:
       - eval_time: 20m
         alertname: MonitoringContainerNearMemoryLimit
         exp_alerts: []
+
+  # codex impl-review #13: a limit reported as ZERO divides to +Inf, which passes > 0.9 forever and
+  # can never resolve. Distinct from the absent-limit case above — absent drops out of the join,
+  # zero does not. Remove the `> 0` on the denominator and this case fires.
+  - interval: 1m
+    name: a container whose memory limit reads zero never pages
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="zero-0", container="app"}'
+        values: "500000000+0x30"
+      - series: 'kube_pod_container_resource_limits{namespace="monitoring", pod="zero-0", container="app", resource="memory"}'
+        values: "0+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MonitoringContainerNearMemoryLimit
+        exp_alerts: []
+
+  # codex impl-review #12: duplicate cAdvisor series for one container (old and new container IDs
+  # briefly coexist during a replacement) make a bare `/ on(...)` fail to evaluate rather than
+  # alert. With max by(...) on both sides the alert still fires correctly.
+  - interval: 1m
+    name: duplicate cadvisor series for one container still evaluate
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="dup-0", container="app", id="/a"}'
+        values: "2000000000+0x30"
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="dup-0", container="app", id="/b"}'
+        values: "1900000000+0x30"
+      - series: 'kube_pod_container_resource_limits{namespace="monitoring", pod="dup-0", container="app", resource="memory"}'
+        values: "2147483648+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MonitoringContainerNearMemoryLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: monitoring
+              pod: dup-0
+              container: app
+            exp_annotations:
+              summary: "dup-0/app is near its memory limit"
+              description: >-
+                monitoring/dup-0 container app has been above 90% of its memory limit for 15m. If
+                this is Prometheus, the alerting plane is about to OOM and take every other alert
+                with it — raise the limit in kube-prometheus-stack.yaml rather than waiting for the
+                restart. Check `kubectl -n monitoring top pod` and the container's resources block.

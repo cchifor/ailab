@@ -14,10 +14,17 @@ kind: Secret
 metadata:
     name: infra-pg-dumper
     namespace: databases
+    labels:
+        # CNPG reloads a role's password Secret ONLY when it carries this label. Without it a rotated
+        # password sits in the Secret while the server still has the old one, so the CronJob
+        # authenticates with a credential the database was never told about and the backup fails on the
+        # next rotation -- silently, which is the class of failure this change exists to remove.
+        # (codex impl-review #9)
+        cnpg.io/reload: "true"
 type: kubernetes.io/basic-auth
 stringData:
-    username: ENC[AES256_GCM,data:voMwjAQU/5TGfqDyyQ==,iv:ypC2hfkq4lW/lTX91zTgkntop0Q+XG2X6vMrRMwPwug=,tag:43wGpePHTQ3Ed4YhNFu0wA==,type:str]
-    password: ENC[AES256_GCM,data:qsXgqxEmYOwbcrq9y3JYeztbMZCVW4R29lnXjHdJfKjXJUqRe4zI4w==,iv:+S368OS/6OWfMHJw+3AyBP4ZScc/T1xu5M5bw1xcglw=,tag:jpfbvi4YjNx5dnsMc7fY4A==,type:str]
+    username: ENC[AES256_GCM,data:b+neQYaYjmt7IcE4dw==,iv:sfZI72cSK2N6SBzEAuARs00NdeQ8fNXsoxVa71vN03U=,tag:Reff8KqpJRETC5l1pk8p3Q==,type:str]
+    password: ENC[AES256_GCM,data:rPPZLYSgYsOpqgtjnl0VVrBT+I6Ffuiz0nbzZ+5b+xJJVIQ5G3XSaw==,iv:m2pv0dRrq4HuvkCpXU4PsDO5+7rVHb6qxz1UXOaB5eY=,tag:pyuyqg63oPxfYOjq6XxGtQ==,type:str]
 sops:
     kms: []
     gcp_kms: []
@@ -27,14 +34,14 @@ sops:
         - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
           enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBwQllWNGVsS1Jmc3FiczdG
-            U0FYNk1ycFA5VWdpcGd0UytCSEQvL1h3TVF3CkVUbkxUTzBFS1VjVGd4N2NqN1NI
-            c3h5NWVncU9lMlVnLzluVTlDWThYbDQKLS0tIFo0akdmZ0ZVV2YyYUpCZTlublc1
-            VXk4di9zVFBET0NZbXJFSkt0NjlkL2cKQeyRM5OUuh5tRR8lWMO+8TX5Y6auJKRL
-            K6D55QjBpp1uCm2/GjKItMj9IHsNT/wcOBvL+PMP+A3Fvp1puGJubg==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBwSmx6Z21kS3l4czlLaUtj
+            THBpb2t6N3ZydGtRbGNDOUNjR1pyU2ltMXg4CnBrc1ZTTnRyYVpLUFRHOGlOUlRn
+            TDJuYmgvTytsUFl0RVN5bEtxNTM0ckkKLS0tIGZONFZac2ovK2VIRVM3WEpITDZn
+            QmhEcnptTlQ2aWJlbU9KOFJpNGxDeWsKmnn2dpOGo2GPt5ZJFrqiDGcvuK82/uW7
+            TXyKaXJLLf76hnAqXtKdVqABH4ZUzyRYlE3QaGdgYCf41wYTk1PtlA==
             -----END AGE ENCRYPTED FILE-----
-    lastmodified: "2026-09-09T12:19:08Z"
-    mac: ENC[AES256_GCM,data:MEEORkCf3tCtHIMe+qNNCvT9+ITTjOKz5EraMq6nLjrf3I5o7FKvNEmU8wAC6QPoxxutafquoa1rJykiyrUvWHcDhY7Jc/CN2aMmRf6Yc16hGKlMwMdPkE5SbLU7zBEdMXL67X5Ql+3x99whHNXGAhUCH/8SJ/zwCMoxwcgX5ww=,iv:HhBVBPaUKI1UTEygAdDUXjildh8Xodr5OgaFVl8G05o=,tag:4IuZpuCmEoBFec6MQkxVoA==,type:str]
+    lastmodified: "2026-09-09T12:43:16Z"
+    mac: ENC[AES256_GCM,data:ajYibFaCprCfn61EdiYCsd6CH6m4xOag1iQ1N4RbZMTb/rkE04n2TBw4rAIauKBEUxlxQwFRI7ivNvz/gtFNeSEku4I1HXLbZ46IMIbF7YmuNax6Dmd94y1lP6QgM1UN5shda9hVf15RZWBqncgf1EHZgo3sjuVj4HYJZ+YvG4s=,iv:YvE9e7y8XQQOmWhKzv2PnNQ2Z+e1jjulYUBvui0rlbk=,tag:HyKJtPZlfgnBq883IEWuBw==,type:str]
     pgp: []
     encrypted_regex: ^(data|stringData)$
     version: 3.9.4
