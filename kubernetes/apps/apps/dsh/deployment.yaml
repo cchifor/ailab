@@ -181,8 +181,19 @@ spec:
           env:
             - { name: RELAY_PORT, value: "8080" }
             - { name: DSH_PORT,   value: "3080" }
+            # The authority the relay mints a session FOR, and the only Host it will inject on.
+            # Must match the cloudflared hostname and the container's --trusted-host exactly: the
+            # cookie name is a hash of this string, so a mismatch mints a cookie dsh never looks for.
+            - { name: DSH_AUTHORITY, value: "dsh.chifor.me" }
           ports: [{ name: relay, containerPort: 8080, protocol: TCP }]
-          volumeMounts: [{ name: relay, mountPath: /relay, readOnly: true }]
+          # home, READ-ONLY, purely for .credentials.yaml: the relay signs a dsh session with the
+          # same secret dsh verifies against. This does widen where that secret is readable, from one
+          # container to two -- accepted because both are in this pod, the relay mounts it read-only
+          # and never writes, and the agent's sandbox root was moved to /workspace precisely so
+          # model-executed tool calls cannot reach /dsh-home at all.
+          volumeMounts:
+            - { name: relay, mountPath: /relay, readOnly: true }
+            - { name: home,  mountPath: /dsh-home, readOnly: true }
           readinessProbe:
             tcpSocket: { port: relay }
             periodSeconds: 10
