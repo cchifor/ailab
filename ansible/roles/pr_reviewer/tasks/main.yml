@@ -202,7 +202,7 @@
     url: "{{ pr_reviewer_gitea_url }}/api/v1/orgs/{{ pr_reviewer_org }}/hooks"
     method: GET
     headers:
-      Authorization: "token {{ pr_reviewer_hook_check_token | default(_reviewbot_pat, true) }}"
+      Authorization: "token {{ pr_reviewer_hook_check_token }}"
       # Default python/curl UAs get a Cloudflare 403 (code 1010) on this forge.
       User-Agent: "git/2.47.0"
     status_code: [200]
@@ -254,6 +254,7 @@
       with {"active": true, "events": {{ pr_reviewer_required_hook_events | to_json }}}
     success_msg: "org webhook subscribes to pull-request events"
   when:
+    - pr_reviewer_assert_hook_config | bool
     - _reviewbot_pat | length > 0
     - not ansible_check_mode
     # Safe to gate on now: an unreadable API is caught by the assertion above rather than
