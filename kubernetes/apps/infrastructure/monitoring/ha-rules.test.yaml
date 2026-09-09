@@ -1,0 +1,189 @@
+# `promtool test rules` fixtures for ha-rules.yaml. Run by scripts/rules-lint.sh on every PR,
+# after `promtool check rules`.
+#
+# WHY THIS FILE EXISTS. The 2026-09-09 estate audit found that InfraPostgresSingleInstance --
+# the alert written specifically to catch an infra-pg HA loss -- counted READY PODS. A standby
+# whose WAL receiver is dead is still Ready, so the expression evaluated to 2 and read `inactive`
+# for the entire seven days that replication was down. `promtool check rules` passes on that rule.
+# Only evaluating expressions against a timeline can catch it, so every replication alert added in
+# its place is pinned here, including the cases that make each one NOT fire.
+#
+# The three traps these tests exist to freeze:
+#   1. A healthy PRIMARY has no WAL receiver, so is_wal_receiver_up == 0 is its NORMAL state.
+#      Without the `and on(...) in_recovery == 1` join, PostgresReplicaNotStreaming pages on every
+#      healthy cluster in the estate. Test `healthy primary does not page` is that finding.
+#   2. `absent(x) or vector(0)` as a whole alert expression NEVER RESOLVES -- it returns an
+#      unlabelled 0-valued series forever, and Prometheus fires on any returned series regardless
+#      of value. Per-target `up == 0` is used instead; `target recovers` proves it resolves.
+#   3. An alert that only fires is half-tested. Every case below asserts the resolved state too.
+#
+# `rule_files` is the extracted spec name, because rules-lint.sh hands promtool the `spec:` body of
+# each PrometheusRule (the CRD wrapper is not a promtool rules file) under the manifest's basename.
+rule_files:
+  - ha-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------ the real 2026-09-02 shape, frozen
+  - interval: 1m
+    name: a standby whose WAL receiver is dead pages, and the pod-count alert stays quiet
+    input_series:
+      # infra-pg-3: in recovery, receiver DOWN. This is the outage.
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="databases", pod="infra-pg-3"}'
+        values: "0+0x30"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="databases", pod="infra-pg-3"}'
+        values: "1+0x30"
+      # Both pods stayed READY throughout -- the exact reason the old alert was silent.
+      - series: 'kube_pod_status_ready{condition="true", namespace="databases", pod="infra-pg-2"}'
+        values: "1+0x30"
+      - series: 'kube_pod_status_ready{condition="true", namespace="databases", pod="infra-pg-3"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PostgresReplicaNotStreaming
+        exp_alerts: []          # still inside for: 10m
+      - eval_time: 11m
+        alertname: PostgresReplicaNotStreaming
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: databases
+              pod: infra-pg-3
+            exp_annotations:
+              summary: "infra-pg-3 is a standby with no WAL receiver"
+              description: >-
+                databases/infra-pg-3 is in recovery but its WAL receiver has been down for >10m — it
+                is NOT replicating, however Ready it looks. Left alone this ends in an invalidated
+                slot and a replica that can only be re-cloned; CNPG does NOT re-clone it for you.
+                Check `kubectl cnpg status <cluster> -n databases` and
+                pg_replication_slots.wal_status on the primary.
+      # THE POINT OF THE RENAME: with both pods Ready, the pod-count alert is correctly inactive.
+      # It was never lying -- it was answering a different question than its name implied.
+      - eval_time: 30m
+        alertname: InfraPostgresPodCountLow
+        exp_alerts: []
+
+  # ------------------------------------------------------ trap 1: primaries must not page
+  - interval: 1m
+    name: a healthy primary has no WAL receiver and must not page
+    input_series:
+      # A primary reports receiver_up == 0 and in_recovery == 0. Drop the join and this fires.
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="databases", pod="infra-pg-2"}'
+        values: "0+0x30"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="databases", pod="infra-pg-2"}'
+        values: "0+0x30"
+      # ...alongside a perfectly healthy streaming standby.
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="databases", pod="infra-pg-3"}'
+        values: "1+0x30"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="databases", pod="infra-pg-3"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PostgresReplicaNotStreaming
+        exp_alerts: []
+
+  # ------------------------------------------------------ recovery must actually resolve
+  - interval: 1m
+    name: replication recovering resolves the alert
+    input_series:
+      # Receiver down for 15m, then back up.
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="databases", pod="infra-pg-3"}'
+        values: "0+0x15 1+0x20"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="databases", pod="infra-pg-3"}'
+        values: "1+0x35"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: PostgresReplicaNotStreaming
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: databases, pod: infra-pg-3 }
+            exp_annotations:
+              summary: "infra-pg-3 is a standby with no WAL receiver"
+              description: >-
+                databases/infra-pg-3 is in recovery but its WAL receiver has been down for >10m — it
+                is NOT replicating, however Ready it looks. Left alone this ends in an invalidated
+                slot and a replica that can only be re-cloned; CNPG does NOT re-clone it for you.
+                Check `kubectl cnpg status <cluster> -n databases` and
+                pg_replication_slots.wal_status on the primary.
+      - eval_time: 20m
+        alertname: PostgresReplicaNotStreaming
+        exp_alerts: []
+
+  # ------------------------------------------------------ lag threshold and its boundary
+  - interval: 1m
+    name: lag over 300s pages after 10m, and healthy lag never does
+    input_series:
+      - series: 'cnpg_pg_replication_lag{namespace="databases", pod="infra-pg-3"}'
+        values: "301+0x30"
+      # A busy-but-fine standby sitting just under the threshold must stay quiet.
+      - series: 'cnpg_pg_replication_lag{namespace="databases", pod="strive-pg-1"}'
+        values: "299+0x30"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: PostgresReplicationLagHigh
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: PostgresReplicationLagHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: databases, pod: infra-pg-3 }
+            exp_annotations:
+              summary: "infra-pg-3 replication lag is high"
+              description: >-
+                databases/infra-pg-3 has been more than 300s behind for 10m. Act before the slot
+                passes max_slot_wal_keep_size — past that the WAL is gone and the only repair is a
+                full re-clone.
+
+  # ------------------------------------------------------ trap 2: the flapping exporter
+  - interval: 1m
+    name: one exporter target down pages while the other still reports, and recovery resolves
+    input_series:
+      # The measured failure: ONE target EOFs while the other keeps scraping. A single absent()
+      # over the metric would see the surviving series and stay silent -- this is why the rule is
+      # per-target up == 0.
+      - series: 'up{job="databases/infra-pg-metrics", instance="10.244.2.191:9187"}'
+        values: "0+0x15 1+0x20"
+      - series: 'up{job="databases/infra-pg-metrics", instance="10.244.1.118:9187"}'
+        values: "1+0x35"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: PostgresMetricsTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: databases/infra-pg-metrics
+              instance: 10.244.2.191:9187
+            exp_annotations:
+              summary: "infra-pg metrics target 10.244.2.191:9187 is down"
+              description: >-
+                The CNPG exporter on 10.244.2.191:9187 has been unscrapeable for >10m, so
+                PostgresReplicaNotStreaming and PostgresReplicationLagHigh are BLIND for that pod.
+                Treat this as loss of replication coverage, not as a metrics nuisance.
+      # Resolves rather than latching -- the defect `absent(...) or vector(0)` would have shipped.
+      - eval_time: 20m
+        alertname: PostgresMetricsTargetDown
+        exp_alerts: []
+
+  # ------------------------------------------------------ the pod-count alert still works
+  - interval: 1m
+    name: a genuinely lost pod still pages the pod-count alert
+    input_series:
+      - series: 'kube_pod_status_ready{condition="true", namespace="databases", pod="infra-pg-2"}'
+        values: "1+0x30"
+      - series: 'kube_pod_status_ready{condition="true", namespace="databases", pod="infra-pg-3"}'
+        values: "1x10 0+0x25"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: InfraPostgresPodCountLow
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: InfraPostgresPodCountLow
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "infra-pg has fewer than 2 ready POD instances"
+              description: >-
+                Fewer than 2 infra-pg PODS are Ready for >10m. This counts pods, NOT replication: a
+                pod can be Ready while its WAL receiver is dead, which is exactly what happened
+                2026-09-02..09. For replication health see PostgresReplicaNotStreaming. Check
+                `kubectl cnpg status infra-pg -n databases`; if a node is hard-down, see
+                docs/runbooks/node-maintenance.md (out-of-service taint).
