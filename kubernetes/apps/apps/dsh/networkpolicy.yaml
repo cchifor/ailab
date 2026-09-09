@@ -57,3 +57,36 @@ spec:
     - to:
         - podSelector: { matchLabels: { app: searxng } }
       ports: [{ port: 8080, protocol: TCP }]
+    # THE INTERNET, for web_fetch. This is a deliberate posture change, made 2026-09-09, and the
+    # reasoning belongs here rather than in a commit message nobody re-reads.
+    #
+    # This namespace previously allowed NO internet egress, on the grounds that this pod executes
+    # model-authored code. That is the correct posture for a MULTI-TENANT sandbox running submitted
+    # code. It is the wrong one here, and the inconsistency was ours: the dev-worker VMs beside this
+    # cluster run Claude Code and Codex with passwordless sudo and unrestricted internet, and this
+    # pod holds strictly less (a LiteLLM key and its own cookie secret, against a VM with sudo and
+    # SSH keys). Current guidance splits the two cases explicitly — allow-first/default-deny for
+    # regulated and multi-tenant, deny-first for INTERACTIVE DEVELOPER USE, which is what this is.
+    #
+    # What this does NOT give up: the private-range exclusions below. The agent still cannot reach
+    # the home LAN on 192.168.0.0/16, the Proxmox hosts, the cluster pod/service network, or
+    # link-local (169.254.0.0/16 covers cloud-metadata). Those protect against a mistake or a prompt
+    # injection pointing INWARD, which is the realistic failure here, and they cost nothing.
+    #
+    # What it honestly does give up: outbound HTTP(S) is now a channel the agent controls. No
+    # network rule can distinguish "fetch a docs page" from "POST the workspace somewhere", and the
+    # same is true of every console agent already in use here. dsh's own fetch provider still
+    # refuses non-public addresses and pins the connection, so the guard is not gone — it just is
+    # not the network any more.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - { port: 443, protocol: TCP }
+        - { port: 80, protocol: TCP }

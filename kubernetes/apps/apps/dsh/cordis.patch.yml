@@ -197,14 +197,20 @@
     searchProvider: searxng
     fetchProvider: http
 
-# web_search ON, web_fetch OFF. Not an oversight: this pod's only egress is DNS, LiteLLM and
-# SearXNG, so the http fetch provider cannot reach any public URL and every web_fetch call would
-# fail. Advertising a tool that always fails is the exact defect this whole series has been
-# removing -- the model burns turns discovering it does not work. Search genuinely works, because
-# SearXNG does the reaching out. Flip fetch back on only together with a way for fetch to egress.
+# Both ON as of 2026-09-09. fetch was off while this pod had no egress — the http provider fetches
+# from HERE, so every call would have failed, and advertising a tool that always fails just burns
+# the model's turns. networkpolicy.yaml now allows outbound 443/80 (private ranges still excluded),
+# so the built-in provider works. It is a plugin like any other, ships with dsh, and its guards are
+# verified live: WEB_BLOCKED_URL on 192.168.0.1, on 127.0.0.1 and on 169.254.169.254, with a real
+# page returning kind:'html' and a JSON API returning kind:'text'.
+#
+# Binary is refused by design (WEB_UNSUPPORTED_CONTENT_TYPE), because WebFetchBody is a closed
+# union of html|text. DOCUMENT DOWNLOADS therefore go through the agent's own shell instead:
+#     curl -L -o /workspace/doc.pdf https://example.com/doc.pdf
+# which the same egress rule permits.
 - id: tool-web
   name: '@deepseek-ai/dsh-tool-web'
   config:
-    fetch: false
+    fetch: true
     searchTimeoutMs: 60000
   disabled: false
