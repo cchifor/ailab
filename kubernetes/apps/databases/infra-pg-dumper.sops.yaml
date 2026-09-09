@@ -1,0 +1,40 @@
+# Credential for the `backup_dumper` role that infra-pg-dump-cronjob.yaml uses.
+#
+# The role itself is declared in infra-pg.yaml under spec.managed.roles, so CNPG creates and
+# reconciles it -- the 2026-09-08 emergency dump used a HAND-MADE role whose creation was recorded
+# nowhere, which is precisely the kind of artefact that does not survive a rebuild.
+#
+# It needs BOTH pg_read_all_data AND bypassrls: per-owner dumps on 2026-09-08 silently missed
+# RLS-protected rows in agentforge_platform, and pg_read_all_data alone does NOT imply BYPASSRLS.
+#
+# Encrypted by the catch-all .sops.yaml rule (encrypted_regex ^(data|stringData)$), so the payload
+# must live under stringData -- a top-level key would be committed in the clear.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-dumper
+    namespace: databases
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:voMwjAQU/5TGfqDyyQ==,iv:ypC2hfkq4lW/lTX91zTgkntop0Q+XG2X6vMrRMwPwug=,tag:43wGpePHTQ3Ed4YhNFu0wA==,type:str]
+    password: ENC[AES256_GCM,data:qsXgqxEmYOwbcrq9y3JYeztbMZCVW4R29lnXjHdJfKjXJUqRe4zI4w==,iv:+S368OS/6OWfMHJw+3AyBP4ZScc/T1xu5M5bw1xcglw=,tag:jpfbvi4YjNx5dnsMc7fY4A==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBwQllWNGVsS1Jmc3FiczdG
+            U0FYNk1ycFA5VWdpcGd0UytCSEQvL1h3TVF3CkVUbkxUTzBFS1VjVGd4N2NqN1NI
+            c3h5NWVncU9lMlVnLzluVTlDWThYbDQKLS0tIFo0akdmZ0ZVV2YyYUpCZTlublc1
+            VXk4di9zVFBET0NZbXJFSkt0NjlkL2cKQeyRM5OUuh5tRR8lWMO+8TX5Y6auJKRL
+            K6D55QjBpp1uCm2/GjKItMj9IHsNT/wcOBvL+PMP+A3Fvp1puGJubg==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-09T12:19:08Z"
+    mac: ENC[AES256_GCM,data:MEEORkCf3tCtHIMe+qNNCvT9+ITTjOKz5EraMq6nLjrf3I5o7FKvNEmU8wAC6QPoxxutafquoa1rJykiyrUvWHcDhY7Jc/CN2aMmRf6Yc16hGKlMwMdPkE5SbLU7zBEdMXL67X5Ql+3x99whHNXGAhUCH/8SJ/zwCMoxwcgX5ww=,iv:HhBVBPaUKI1UTEygAdDUXjildh8Xodr5OgaFVl8G05o=,tag:4IuZpuCmEoBFec6MQkxVoA==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

@@ -1,0 +1,258 @@
+# Nightly logical backup of infra-pg — the estate's independent recovery path.
+#
+# WHY THIS EXISTS. Until 2026-09-09 infra-pg had NO backup of any kind: spec.backup empty,
+# lastSuccessfulBackup empty, firstRecoverabilityPoint empty, and `get scheduledbackups` returning
+# nothing, for the single Postgres behind Gitea, Authelia, Grafana, Open WebUI, LiteLLM and the
+# AgentForge platform. The one dump that existed was hand-applied on 2026-09-08 by two ownerless
+# Jobs, so it could never repeat.
+#
+# WHY LOGICAL AND NOT WAL ARCHIVING. barmanObjectStore was the first proposal and was dropped.
+# The only S3 endpoint in this estate is versitygw on a USB-attached disk that has failed twice in
+# two days (#595). If an archive destination stalls, unarchived WAL accumulates in pg_wal REGARDLESS
+# of max_slot_wal_keep_size; /var/lib/postgresql/data measured 12 G free, which at the observed
+# 9.7-12.9 MiB/s peak WAL rate is ~16 minutes before the PRIMARY goes down. Trading "no replica" for
+# "no primary" is not a remediation. PITR stays open on #592 until #595 is resolved; this buys daily
+# logical recovery, which touches neither pg_wal nor the USB path.
+#
+# WHY A HOLDER POD. Velero here is filesystem backup (Kopia) with defaultVolumesToFsBackup: true,
+# and it only backs up volumes of RUNNING pods. The 2026-09-08 dump PVC is unmounted, so it has ZERO
+# PodVolumeBackups in any retained backup — the only copy of the only backup was itself unprotected.
+# The holder Deployment below exists solely to keep the volume mounted so Velero can see it.
+#
+# postgres-dumps is ReadWriteOnce (verified: 30Gi, qnap-iscsi, Bound), so the writer and the holder
+# CANNOT attach from different nodes. The CronJob is pinned to the holder's node with podAffinity
+# rather than hoping the scheduler agrees.
+---
+# Adopts the PVC created by hand on 2026-09-08. Declared with the SAME name, size and class so
+# Flux takes ownership of the existing bound volume instead of provisioning a second one — the
+# existing generation must survive this becoming GitOps-managed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-dumps
+  namespace: databases
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: qnap-iscsi
+  resources:
+    requests:
+      storage: 30Gi
+---
+# Keeps postgres-dumps mounted so Velero's fs-backup can capture it. It does nothing else, and is
+# deliberately given nothing else: no database credential, no cloud credential, no service-account
+# token. Read-only mount — the CronJob is the only writer.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-dumps-holder
+  namespace: databases
+  labels:
+    app.kubernetes.io/name: postgres-dumps-holder
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: with a ReadWriteOnce volume a surge pod would sit Pending forever
+    # waiting for a mount the outgoing pod still holds, and a permanently Pending pod in this
+    # namespace blocks the `databases` Flux Kustomization (wait: true) and everything downstream.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-dumps-holder
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-dumps-holder
+      annotations:
+        # Belt and braces: fs-backup is the default, but naming the volume makes the intent explicit
+        # and survives a future flip of defaultVolumesToFsBackup.
+        backup.velero.io/backup-volumes: dumps
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: holder
+          image: mirror.gcr.io/library/busybox:1.37.0
+          command: ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done"]
+          resources:
+            requests: { cpu: 5m, memory: 16Mi }
+            limits: { memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: dumps
+              mountPath: /dumps
+              readOnly: true
+      volumes:
+        - name: dumps
+          persistentVolumeClaim:
+            claimName: postgres-dumps
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: infra-pg-dump
+  namespace: databases
+spec:
+  # 01:30, ahead of Velero's 02:00 daily so the night's dump is on disk before the backup that must
+  # capture it runs. Ordering matters more than spindle contention here: a dump written after the
+  # backup is a dump that waits 24h for protection.
+  schedule: "30 1 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 5400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: infra-pg-dump
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          affinity:
+            # REQUIRED, not preferred: postgres-dumps is ReadWriteOnce, so if this lands on a
+            # different node than the holder the pod sits in ContainerCreating until the deadline
+            # and the dump silently does not happen.
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: postgres-dumps-holder
+                  topologyKey: kubernetes.io/hostname
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 26          # postgres uid in the CNPG image
+            runAsGroup: 26
+            fsGroup: 26
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: dump
+              # The SAME image the cluster runs, so pg_dump and the server are the identical build.
+              # A newer pg_dump can read an older server but not the reverse; matching removes the
+              # question entirely. Bump this WITH the Cluster's imageName, never independently.
+              image: ghcr.io/cloudnative-pg/postgresql:17.10
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -uo pipefail
+                  # NOT `set -e`: a single failed database must not abort the run before the
+                  # verification and retention logic below decides what to keep.
+
+                  HOST=infra-pg-rw.databases.svc.cluster.local   # -rw: never the replica, which
+                                                                 # on 2026-09-02..09 was 7 days stale
+                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                  STAGE="/dumps/.staging-${STAMP}"
+                  FINAL="/dumps/${STAMP}"
+                  KEEP=7
+                  export PGPASSWORD="$PGPASS"
+
+                  echo "=== infra-pg logical dump ${STAMP} -> ${FINAL} ==="
+                  rm -rf "$STAGE"; mkdir -p "$STAGE" || exit 1
+
+                  # Free space BEFORE starting: a partial generation that fills the volume would
+                  # also block the next one, and pruning first would destroy the last good copy.
+                  AVAIL_MB=$(df -Pm /dumps | awk 'NR==2{print $4}')
+                  echo "    free on /dumps: ${AVAIL_MB} MiB"
+                  if [ "${AVAIL_MB:-0}" -lt 4096 ]; then
+                    echo "FATAL: <4 GiB free — refusing to start rather than half-write a generation"
+                    exit 1
+                  fi
+
+                  rc=0
+
+                  # Globals FIRST: roles, ownership and ACLs. Without these a restore produces
+                  # tables owned by nobody. --no-role-passwords so this needs no superuser.
+                  echo "--- globals"
+                  if pg_dumpall -h "$HOST" -U "$PGUSER" --globals-only --no-role-passwords \
+                       > "$STAGE/globals.sql" 2>"$STAGE/globals.err"; then
+                    echo "    ok: $(stat -c %s "$STAGE/globals.sql") bytes"
+                  else
+                    echo "    FAILED:"; sed 's/^/      /' "$STAGE/globals.err"; rc=1
+                  fi
+
+                  # Enumerate databases from the server rather than hardcoding a list, so a database
+                  # added later is captured without anyone remembering to edit this file. That is the
+                  # defect that left agentforge_broker and postgres out of the 2026-09-08 dump.
+                  DBS=$(psql -h "$HOST" -U "$PGUSER" -d postgres -tAc \
+                    "select datname from pg_database where datallowconn and not datistemplate order by 1")
+                  if [ -z "$DBS" ]; then
+                    echo "FATAL: could not enumerate databases"; exit 1
+                  fi
+                  echo "--- databases: $(echo $DBS | tr '\n' ' ')"
+
+                  for db in $DBS; do
+                    echo "--- $db"
+                    if ! pg_dump -h "$HOST" -U "$PGUSER" -d "$db" -Fc --no-owner --no-acl \
+                           -f "$STAGE/$db.dump" 2>"$STAGE/$db.err"; then
+                      echo "    FAILED:"; sed 's/^/      /' "$STAGE/$db.err"; rc=1; continue
+                    fi
+                    # A dump that cannot be listed is not a backup. This checks the TOC, not the
+                    # data — the only real proof is a restore, which is the drill in #596.
+                    if pg_restore --list "$STAGE/$db.dump" > "$STAGE/$db.toc" 2>/dev/null; then
+                      echo "    ok: $(stat -c %s "$STAGE/$db.dump") bytes, $(wc -l < "$STAGE/$db.toc") TOC entries"
+                    else
+                      echo "    FAILED: pg_restore --list could not read $db.dump"; rc=1
+                    fi
+                  done
+
+                  if [ "$rc" != 0 ]; then
+                    echo "=== generation INCOMPLETE — discarding staging, keeping previous generations ==="
+                    rm -rf "$STAGE"
+                    exit 1
+                  fi
+
+                  # Checksums + a completion marker. The marker is written LAST and is what the
+                  # retention pass below treats as "this generation is real".
+                  ( cd "$STAGE" && sha256sum ./*.dump ./globals.sql > SHA256SUMS )
+                  date -u +%Y-%m-%dT%H:%M:%SZ > "$STAGE/COMPLETE"
+
+                  # Publish atomically. Same filesystem, so this is a rename, not a copy: no window
+                  # in which a consumer can observe a half-written generation.
+                  mv "$STAGE" "$FINAL" || exit 1
+                  sync
+                  echo "=== published ${FINAL} ($(du -sh "$FINAL" | cut -f1)) ==="
+
+                  # Prune ONLY complete generations, and ONLY after this run published one. A failed
+                  # run above exits before here, so a bad night can never delete a good backup.
+                  ls -1d /dumps/[0-9]* 2>/dev/null | sort | head -n -"$KEEP" | while read -r old; do
+                    if [ -f "$old/COMPLETE" ]; then
+                      echo "    pruning $old"; rm -rf "$old"
+                    else
+                      echo "    leaving $old (no COMPLETE marker — inspect by hand)"
+                    fi
+                  done
+
+                  # Sweep abandoned staging from earlier crashed runs (>1 day old).
+                  find /dumps -maxdepth 1 -name '.staging-*' -type d -mtime +1 -exec rm -rf {} + 2>/dev/null
+
+                  echo "=== generations on disk ==="
+                  ls -1d /dumps/[0-9]* 2>/dev/null | sed 's/^/    /'
+                  echo "    free after: $(df -Pm /dumps | awk 'NR==2{print $4}') MiB"
+                  echo "DUMP_OK"
+              env:
+                - name: PGUSER
+                  valueFrom: { secretKeyRef: { name: infra-pg-dumper, key: username } }
+                - name: PGPASS
+                  valueFrom: { secretKeyRef: { name: infra-pg-dumper, key: password } }
+              resources:
+                requests: { cpu: 200m, memory: 256Mi }
+                limits: { memory: 1Gi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - name: dumps
+                  mountPath: /dumps
+          volumes:
+            - name: dumps
+              persistentVolumeClaim:
+                claimName: postgres-dumps
