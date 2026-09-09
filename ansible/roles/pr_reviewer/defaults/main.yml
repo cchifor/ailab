@@ -102,7 +102,14 @@ pr_reviewer_textfile: /var/lib/prometheus/node-exporter/reviewbot.prom
 # are benign: the second merge attempt gets a 405).
 pr_reviewer_automerge: true
 pr_reviewer_merge_personas: [claude, codex]
-pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot]
+# renovate-bot added 2026-09-09 (operator-directed): its PRs automerge on the SAME gate as
+# everyone else's — every persona clean at the current head, CI green, no `no-automerge`
+# label. Deliberately NOT added to pr_reviewer_pin_authors: the pin-lane rubric is written
+# for digest-only bumps of images this estate builds, and renovate also moves base-image
+# tags and major versions, which that rubric does not describe. It reviews under the
+# general rubric instead. `no-automerge` remains the per-PR brake for a bump that wants a
+# human — a major runtime bump touching something load-bearing, say.
+pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot, renovate-bot]
 pr_reviewer_allow_cidr: "{{ lan_cidr | default('192.168.0.0/24') }}"
 
 # Fail the play when the Gitea org-webhook configuration cannot be READ or is wrong.
