@@ -284,31 +284,79 @@ function serveFile(req, res) {
   catch { return refuse(res, 400, 'unparsable request'); }
   if (requested === null || requested === '') return refuse(res, 400, 'missing ?path');
 
-  let real;
-  try { real = fs.realpathSync(requested); } catch { return refuse(res, 404, 'no such file'); }
-  if (!FILE_ROOTS.some((root) => within(real, root))) {
-    return refuse(res, 403, 'path is outside the served roots');
-  }
-  let stat;
-  try { stat = fs.statSync(real); } catch { return refuse(res, 404, 'no such file'); }
-  if (stat.isDirectory()) return refuse(res, 403, 'that is a directory');
-  if (!stat.isFile()) return refuse(res, 403, 'not a regular file');
+  // OPEN FIRST, then judge the descriptor actually held. Checking a pathname and reopening it to
+  // stream is a time-of-check/time-of-use race: swap a parent directory for a symlink between the
+  // two and the second open follows it, serving a file the check already approved by another name.
+  // Resolving /proc/self/fd/N names the inode THIS descriptor is pinned to, so the containment
+  // decision and the bytes served cannot disagree.
+  let fd;
+  try { fd = fs.openSync(requested, fs.constants.O_RDONLY); }
+  catch { return refuse(res, 404, 'no such file'); }
+  const give = (status, message) => { fs.closeSync(fd); refuse(res, status, message); };
 
-  // Quotes and backslashes are stripped from the filename rather than escaped: the name is only a
-  // download-save hint, and a header this small is not worth a quoting bug.
-  const name = nodePath.basename(real).replace(/["\\]/g, '');
+  // /proc/self/fd is the Linux mechanism and the one that actually closes the race; the pod always
+  // has it. The fallback exists so this file is runnable (and testable) off Linux, and it resolves
+  // the PATHNAME instead, which reopens the TOCTOU window -- acceptable only because nothing but a
+  // developer workstation ever takes that branch.
+  let real, stat;
+  try {
+    stat = fs.fstatSync(fd);
+    try { real = fs.realpathSync('/proc/self/fd/' + fd); }
+    catch { real = fs.realpathSync(requested); }
+  } catch { return give(404, 'no such file'); }
+  if (stat.isDirectory()) return give(403, 'that is a directory');
+  if (!stat.isFile()) return give(403, 'not a regular file');
+  if (!FILE_ROOTS.some((root) => within(real, root))) {
+    return give(403, 'path is outside the served roots');
+  }
+
+  // A filename is attacker-shaped data: a newline or any non-ASCII byte makes writeHead throw
+  // ERR_INVALID_CHAR, and nothing here would have caught it -- one emoji in a filename would have
+  // taken down the relay for every session on the pod. The quoted form is reduced to safe ASCII and
+  // the real name rides filename* (RFC 5987), which is where non-ASCII belongs.
+  const raw = nodePath.basename(real);
+  const ascii = raw.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '');
   const type = CONTENT_TYPES[nodePath.extname(real).toLowerCase()] || 'application/octet-stream';
-  res.writeHead(200, {
-    'content-type': type.startsWith('text/') || type === 'image/svg+xml' || type === 'application/json'
-      ? type + '; charset=utf-8' : type,
-    'content-length': stat.size,
-    'content-disposition': 'inline; filename="' + name + '"',
+  const charset = type.startsWith('text/') || type === 'image/svg+xml' || type === 'application/json';
+
+  // Range, because this route advertises video/audio types and browsers will not seek -- often will
+  // not start playback at all -- without it. One range only; a multipart/byteranges response is not
+  // worth carrying for a file viewer.
+  let start = 0;
+  let end = stat.size - 1;
+  let status = 200;
+  const range = req.headers.range;
+  if (typeof range === 'string' && stat.size > 0) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+    if (m !== null && !(m[1] === '' && m[2] === '')) {
+      if (m[1] === '') start = Math.max(0, stat.size - Number(m[2]));
+      else { start = Number(m[1]); if (m[2] !== '') end = Math.min(end, Number(m[2])); }
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= stat.size) {
+        fs.closeSync(fd);
+        res.writeHead(416, { 'content-range': 'bytes */' + stat.size, 'cache-control': 'no-store' });
+        return res.end();
+      }
+      status = 206;
+    }
+  }
+
+  const headers = {
+    'content-type': charset ? type + '; charset=utf-8' : type,
+    'content-length': end - start + 1,
+    'content-disposition': 'inline; filename="' + ascii + '"; filename*=UTF-8\'\'' + encodeURIComponent(raw),
+    'accept-ranges': 'bytes',
     'x-content-type-options': 'nosniff',
     'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:",
     'cache-control': 'no-store',
-  });
-  if (req.method === 'HEAD') return res.end();
-  const stream = fs.createReadStream(real);
+  };
+  if (status === 206) headers['content-range'] = 'bytes ' + start + '-' + end + '/' + stat.size;
+
+  // Even sanitised, header assembly is not worth betting the process on.
+  try { res.writeHead(status, headers); }
+  catch { fs.closeSync(fd); if (!res.destroyed) res.destroy(); return; }
+
+  if (req.method === 'HEAD') { fs.closeSync(fd); return res.end(); }
+  const stream = fs.createReadStream(null, { fd, start, end, autoClose: true });
   stream.on('error', () => { if (!res.destroyed) res.destroy(); });
   res.on('close', () => { if (!res.writableFinished) stream.destroy(); });
   stream.pipe(res);
