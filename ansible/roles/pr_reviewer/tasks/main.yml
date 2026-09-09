@@ -188,12 +188,21 @@
 # `write:organization`, which the reviewer PATs do not carry (they are scoped to
 # write:repository). Minting a privileged org-admin token and parking it on two VMs to fix a
 # one-line config is a worse trade than failing loudly. The remediation is in the message.
+#
+# READING the hooks needs `read:organization` plus org-owner rights, which the reviewer PATs
+# ALSO do not carry -- measured 2026-09-09: this endpoint returns 403
+# `required=[read:organization]`. So the read below is EXPECTED to fail here today.
+#
+# That is exactly why the assertion must not be gated on the read succeeding. It was, and the
+# result was a check that could never once run while reading as coverage -- the same silent
+# blind spot the check exists to prevent, one level up. `failed_when: false` makes MISSING and
+# UNREADABLE indistinguishable, so the two conditions are asserted SEPARATELY below.
 - name: Read the Gitea org webhooks
   ansible.builtin.uri:
     url: "{{ pr_reviewer_gitea_url }}/api/v1/orgs/{{ pr_reviewer_org }}/hooks"
     method: GET
     headers:
-      Authorization: "token {{ _reviewbot_pat }}"
+      Authorization: "token {{ pr_reviewer_hook_check_token | default(_reviewbot_pat, true) }}"
       # Default python/curl UAs get a Cloudflare 403 (code 1010) on this forge.
       User-Agent: "git/2.47.0"
     status_code: [200]
@@ -201,6 +210,25 @@
   changed_when: false
   failed_when: false
   when:
+    - _reviewbot_pat | length > 0
+    - not ansible_check_mode
+
+- name: Assert the org-webhook check could actually run
+  ansible.builtin.assert:
+    that:
+      - _reviewbot_org_hooks.status | default(0) == 200
+    fail_msg: >-
+      Could not READ the Gitea org webhooks (HTTP {{ _reviewbot_org_hooks.status | default('no response') }}),
+      so this host's webhook delivery is UNVERIFIED -- not verified-good. Reviews would still
+      appear to work via the 5-minute reconcile poll while push-time delivery is dead, which is
+      the 7-day outage this whole check exists to catch.
+      GET /api/v1/orgs/{{ pr_reviewer_org }}/hooks needs `read:organization` AND org-owner rights;
+      the reviewer PATs are scoped write:issue,write:repository. Supply an owner credential in
+      `pr_reviewer_hook_check_token`, or set `pr_reviewer_assert_hook_config: false` to accept the
+      blind spot deliberately and on the record.
+    success_msg: "org webhooks are readable, config assertion below is meaningful"
+  when:
+    - pr_reviewer_assert_hook_config | bool
     - _reviewbot_pat | length > 0
     - not ansible_check_mode
 
@@ -228,4 +256,6 @@
   when:
     - _reviewbot_pat | length > 0
     - not ansible_check_mode
+    # Safe to gate on now: an unreadable API is caught by the assertion above rather than
+    # skipping this one in silence. This gate only suppresses a cascade, never the finding.
     - _reviewbot_org_hooks.status | default(0) == 200

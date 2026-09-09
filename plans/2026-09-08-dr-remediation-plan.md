@@ -84,7 +84,12 @@ Two options, and the plan deliberately picks the second:
 so it can never catch up on its own. It will sit there reporting healthy forever, and `infra-pg-ro`
 routes reads to it.
 
-Delete `infra-pg-3`'s PVC and pod so CNPG re-bootstraps it from the primary via `pg_basebackup`.
+Re-clone the dead standby with `kubectl cnpg destroy infra-pg 3 --keep-pvc`, so CNPG re-bootstraps
+it from the primary via `pg_basebackup`. Use the plugin, NOT a hand-deleted PVC: `--keep-pvc`
+leaves the PVC in place and marked for reuse, so the instance comes back as the same member
+instead of the cluster losing a replica while a new PV is provisioned. (This step previously
+read "delete the PVC and pod", which contradicted the review that mandated the plugin — the
+wording is corrected here so an operator executing 3b verbatim does the safe thing.)
 Only after 3a, so a full dump exists before touching the cluster. Expect load on the primary during
 the re-clone. Verify afterwards that the slot returns to `active=t, wal_status=reserved` and that
 `pg_stat_replication` shows a streaming standby.
