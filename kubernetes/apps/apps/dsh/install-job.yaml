@@ -71,6 +71,47 @@ spec:
           args:
             - |
               set -eu
+              # ---- uv, the agent's package manager -------------------------------------------
+              # BEFORE the dsh install and its early exit, deliberately: the block below returns
+              # early when the requested version is already present, which is the normal case, so
+              # anything appended after it would never run on an existing estate.
+              #
+              # WHY THIS EXISTS. The agent could not install a single library. Debian ships python3
+              # WITHOUT ensurepip, so there is no pip and `python3 -m venv` cannot bootstrap one
+              # either, and `npm i -g` fails because the default prefix /usr/local is not writable
+              # by uid 1000. It hit this trying to render an SVG: it wanted cairosvg, found no pip,
+              # and gave up. uv is one static binary that needs neither root nor apt.
+              #
+              # INSTALLED HERE, not in the Deployment: this Job already has egress, so pod startup
+              # never depends on reaching the internet. It goes on the /app volume rather than the
+              # home PVC because this Job only mounts /app -- and dsh-home is ReadWriteOnce on
+              # local-path, so mounting it here could pin the Job to a different node than the
+              # Deployment and deadlock the volume. /app/tools is OUTSIDE the versioned prefix, so
+              # it survives a DSH_VERSION bump.
+              #
+              # NOT fatal on failure. The primary duty of this Job is installing dsh; refusing to
+              # upgrade dsh because astral.sh was unreachable would be the wrong trade. It retries,
+              # then warns loudly and continues, and the next Job run tries again.
+              if [ -x /app/tools/bin/uv ]; then
+                echo "uv already present: $(/app/tools/bin/uv --version)"
+              else
+                mkdir -p /app/tools/bin
+                n=0
+                while [ $n -lt 3 ]; do
+                  if curl -LsSf https://astral.sh/uv/install.sh \
+                       | env UV_INSTALL_DIR=/app/tools/bin INSTALLER_NO_MODIFY_PATH=1 sh; then
+                    break
+                  fi
+                  n=$((n+1)); echo "uv install attempt $n failed; retrying"; sleep 5
+                done
+                if [ -x /app/tools/bin/uv ]; then
+                  echo "uv installed: $(/app/tools/bin/uv --version)"
+                else
+                  echo "WARNING: uv could not be installed -- the agent will have no way to install"
+                  echo "WARNING: Python packages. dsh itself is unaffected. Re-run this Job to retry."
+                fi
+              fi
+
               # Versioned prefix, NOT a shared /app. dsh-app is ReadWriteMany, so the Job and the
               # RUNNING Deployment can mount it simultaneously; installing in place would rewrite
               # node_modules under a live process. Each version gets its own tree, and the Deployment

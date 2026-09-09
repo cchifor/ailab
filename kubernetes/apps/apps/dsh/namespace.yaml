@@ -3,6 +3,34 @@ kind: Namespace
 metadata:
   name: dsh
   labels:
-    pod-security.kubernetes.io/enforce: restricted
-    pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/warn: restricted
+    # BASELINE, not restricted, since 2026-09-09 -- and only because `restricted` forbids
+    # `runAsUser: 0` outright, which left the agent unable to work with its own files.
+    #
+    # dsh's read_image chmods its storage root. The dsh-home and dsh-workspace PVCs are
+    # `local-path` (rancher.io/local-path), which is hostPath-backed, and kubelet applies no fsGroup
+    # ownership management to those -- verified live: both mount points were still root:root mode
+    # 777 despite `fsGroup: 1000` being set. chmod(2) requires OWNERSHIP (or CAP_FOWNER), not write
+    # permission, so uid 1000 was refused on every image the agent tried to read back, and fsGroup
+    # could never have fixed it: it sets the GROUP, never the owner.
+    #
+    # Fixing that needs one chown at startup, which needs root, which `restricted` forbids. The
+    # refusal was verified rather than assumed -- a server-side dry-run under `restricted` reported:
+    #   unrestricted capabilities (container "fix-ownership" must not include "CHOWN" ...),
+    #   runAsNonRoot != true (... must not set securityContext.runAsNonRoot=false),
+    #   runAsUser=0 (... must not set runAsUser=0)
+    # and the same dry-run passes clean under `baseline`.
+    #
+    # Only the tiny `fix-ownership` initContainer runs as root; it chowns two directories and exits.
+    # Every long-lived container now declares runAsNonRoot: true, runAsUser: 1000 and
+    # capabilities.drop: [ALL] individually, so the surface that actually stays running is unchanged
+    # from `restricted`. `baseline` still forbids privileged containers, host namespaces, hostPath
+    # volumes and privilege escalation.
+    #
+    # The alternative that keeps `restricted` is to move DSH_HOME to a node-owned subdirectory of
+    # the volume (a subdir created by uid 1000 IS owned by it -- verified live). It was rejected for
+    # now because it requires migrating ~71 MiB of live state, including sessions/, storages/ and
+    # the browser-cookie signing secret the relay reads through its own path. Revisit if this
+    # namespace ever holds anything that is not a single-user development tool.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
