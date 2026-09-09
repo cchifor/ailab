@@ -321,6 +321,77 @@ WINNERS=$(wc -l < "$ROOT/acquired" 2>/dev/null || echo 0)
   || bad "concurrent stale-lock reclaim" "$WINNERS runs got past the lock — reclamation is racy"
 
 echo
+echo "== operator maintenance lease =="
+# The lease exists so a deliberate outage (proving Gitea does not need the gateway) is not undone by
+# this watchdog restarting it. Its whole point is that it EXPIRES: editing cron instead would leave
+# the gateway unwatched if the operator's session died before restoring it.
+CASE=leasevalid; reset_case $CASE
+echo 000 > "$ROOT/http_code"; mk_start "$USBROOT/leasevalid" up   # gateway down: would normally restart
+mkdir -p "$ROOT/$CASE/state"
+echo $(( $(date +%s) + 900 )) > "$ROOT/$CASE/state/maintenance"
+run leasevalid
+check "a valid lease suspends remediation" "maintenance" "$(status_of)"
+[ ! -f "$ROOT/started" ] && ok "…and the gateway is NOT restarted under a lease"   || bad "no restart under a lease" "start.sh ran — the deliberate outage would have been undone"
+
+# Expiry is what makes it safe: a lost session must not leave the gateway unwatched forever.
+CASE=leaseexpired; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/leaseexpired" no
+mkdir -p "$ROOT/$CASE/state"
+echo $(( $(date +%s) - 60 )) > "$ROOT/$CASE/state/maintenance"
+run leaseexpired
+check "an expired lease resumes remediation by itself" "healthy" "$(status_of)"
+[ ! -f "$ROOT/$CASE/state/maintenance" ] && ok "…and the expired lease is removed"   || bad "expired lease removed" "still present"
+
+# A fat-fingered expiry must not disable the watchdog for a week.
+CASE=leasecapped; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/leasecapped" no
+mkdir -p "$ROOT/$CASE/state"
+echo $(( $(date +%s) + 864000 )) > "$ROOT/$CASE/state/maintenance"   # 10 days
+run leasecapped
+check "a lease beyond the cap is discarded, not honoured" "healthy" "$(status_of)"
+
+# Garbage must fail safe (remediate), never fail open (suspend).
+CASE=leasejunk; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/leasejunk" no
+mkdir -p "$ROOT/$CASE/state"
+echo "not-a-number" > "$ROOT/$CASE/state/maintenance"
+run leasejunk
+check "a malformed lease is discarded, not honoured" "healthy" "$(status_of)"
+
+# All-digits is not the same as safe for $(( )). A leading zero makes bash read the operand as
+# OCTAL: `08` is a fatal "value too great for base", which aborts the cap comparison and drops
+# through to test(1) -- and test parses base 10, sees a far-future expiry, and suspends
+# remediation. Before the 10# fix these two cases FAILED OPEN, which is strictly worse than the
+# junk case above: the watchdog would have stopped remediating indefinitely and silently.
+CASE=leaseoctal; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/leaseoctal" no
+mkdir -p "$ROOT/$CASE/state"
+echo "08" > "$ROOT/$CASE/state/maintenance"          # octal-invalid, and long expired in base 10
+run leaseoctal
+check "a leading-zero lease is not read as octal" "healthy" "$(status_of)"
+[ ! -f "$ROOT/$CASE/state/maintenance" ] && ok "…and the leading-zero lease is removed"   || bad "leading-zero lease removed" "still present — the next run would trip on it again"
+
+CASE=leaseoctalbig; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/leaseoctalbig" no
+mkdir -p "$ROOT/$CASE/state"
+echo "09999999999" > "$ROOT/$CASE/state/maintenance"   # 11 digits: passes the width bound, so
+                                                      # this genuinely reaches $(( )). Leading zero
+                                                      # + a 9 => octal-invalid, and ~1e10 is far
+                                                      # beyond the cap in base 10.
+run leaseoctalbig
+check "a leading-zero lease beyond the cap still fails SAFE" "healthy" "$(status_of)"
+[ ! -f "$ROOT/$CASE/state/maintenance" ] && ok "…and that lease is removed too"   || bad "over-cap leading-zero lease removed" "still present"
+
+# An operand wide enough to overflow int64 can wrap NEGATIVE and sail under the cap check.
+CASE=leasewide; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/leasewide" no
+mkdir -p "$ROOT/$CASE/state"
+echo "99999999999999999999999" > "$ROOT/$CASE/state/maintenance"
+run leasewide
+check "an implausibly wide lease is discarded, not honoured" "healthy" "$(status_of)"
+grep -q "implausibly large" "$ROOT/$CASE/watchdog.log" 2>/dev/null   && ok "…and it is rejected as implausible, not wrapped into a plausible lease"   || bad "wide lease rejected by width" "no 'implausibly large' in the log — the value reached \$(( )) and wrapped int64"
+
+echo
 echo "== the gateway's own log stays bounded while it holds the fd open =="
 # rotate() must COPY-then-TRUNCATE. `mv` would leave the running gateway appending to the renamed
 # inode forever: unbounded, and never size-checked again because rotate only stats the live path.

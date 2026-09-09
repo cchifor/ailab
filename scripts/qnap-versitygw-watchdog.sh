@@ -65,6 +65,7 @@ RESTART_WINDOW="${RESTART_WINDOW:-1800}"   # seconds (30 min)
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-20971520}" # 20 MiB, then copy-truncate; keep 1 saved generation
 STALE_LOCK_SECS="${STALE_LOCK_SECS:-3600}" # backstop for a lock that never got an ownership stamp
 RECLAIM_GUARD_SECS="${RECLAIM_GUARD_SECS:-300}" # the reclaim mutex is held for ms; older = a run died in it
+MAX_MAINT_SECS="${MAX_MAINT_SECS:-3600}"    # a maintenance lease can never suspend remediation for longer
 ABANDONED_LOCK_SECS="${ABANDONED_LOCK_SECS:-86400}" # backstop so a recycled pgid cannot disable the watchdog forever
 
 STATE="$BASE/state"
@@ -72,6 +73,7 @@ LOCK="$STATE/lock"
 RECLAIM="$STATE/reclaim"   # second mutex: serialises stale-lock reclamation only
 STATUS="$STATE/status"
 ATTEMPTS="$STATE/attempts"
+MAINT_LEASE="$STATE/maintenance"   # operator lease: an absolute epoch expiry; see below
 WD_LOG="$BASE/watchdog.log"
 VGW_LOG="$BASE/versitygw.log"   # versitygw's OWN stdout, moved OFF the USB (see redirect below)
 
@@ -188,7 +190,12 @@ group_alive() {
   local want=${1:-} d line rest
   [ -n "$want" ] || return 1
   for d in "$PROC_ROOT"/[0-9]*; do
-    read -r line < "$d/stat" 2>/dev/null || continue   # exited mid-scan: skip, never conclude "dead"
+    # Braces so 2>/dev/null covers the REDIRECTION failure too. Bash reports a failed input
+    # redirect on its own stderr before the command's own redirections apply, so the trailing
+    # form still printed "/proc/<pid>/stat: No such file or directory" for every process that
+    # exited mid-scan — noise from the one tool whose job is to be trustworthy during an
+    # incident. The skip itself was always correct.
+    { read -r line < "$d/stat"; } 2>/dev/null || continue   # exited mid-scan: skip, never "dead"
     [ -n "$line" ] || continue
     rest=${line##*') '}
     set -- $rest
@@ -308,6 +315,57 @@ fi
 RELEASE_LOCK=yes
 cleanup() { [ "$RELEASE_LOCK" = yes ] && rm -rf "$LOCK" 2>/dev/null; }
 trap cleanup EXIT INT TERM
+
+#--- operator maintenance lease -------------------------------------------------------------------
+# Deliberately breaking the gateway (to prove Gitea no longer depends on it, say) means stopping
+# versitygw — and this watchdog would restart it within 3 minutes. The obvious workaround, editing
+# root's crontab, is wrong twice over: the sed for it is easy to get subtly wrong, and if the
+# operator's session dies between pausing and restoring, the gateway is left UNWATCHED with nothing
+# to notice.
+#
+# A lease inverts that failure mode. It is a file holding an absolute expiry, checked here; while it
+# is valid the watchdog reports `maintenance` and remediates nothing. It EXPIRES ON ITS OWN, so a
+# lost session, a killed terminal or a closed laptop all end in the watchdog resuming by itself. The
+# cron entry is never touched, so nothing has to be put back.
+#
+# MAX_MAINT_SECS caps it: a lease further out than the cap is discarded rather than honoured, so a
+# fat-fingered expiry cannot disable remediation for a week. Create one with:
+#     expr $(date +%s) + 1200 > <BASE>/state/maintenance
+if [ -f "$MAINT_LEASE" ]; then
+  lease_raw=$(cat "$MAINT_LEASE" 2>/dev/null)
+  lease_now=$(date +%s)
+  # All-digits is NOT sufficient to make a value safe for $(( )). Bash reads a leading-zero operand
+  # as OCTAL, so `08` and `099999999999` are a FATAL "value too great for base". That error aborts
+  # the cap comparison below, and because a failed condition just moves to the elif, execution
+  # reaches `[ "$lease_now" -lt "$lease_exp" ]` -- where test(1) parses the SAME string as base 10,
+  # sees an expiry ~1e11 seconds away, and suspends remediation. A malformed, over-cap lease would
+  # therefore fail OPEN and silently stop the watchdog forever: precisely the outcome the cap exists
+  # to prevent. Width is bounded first (an over-long value overflows int64 and can wrap NEGATIVE,
+  # sailing under the cap), then base 10 is forced explicitly.
+  lease_exp=""
+  lease_bad=""
+  case "${lease_raw:-x}" in
+    ''|*[!0-9]*)          lease_bad="is not an integer" ;;
+    *) if [ "${#lease_raw}" -gt 11 ]; then
+         lease_bad="is implausibly large (${#lease_raw} digits)"
+       else
+         lease_exp=$((10#$lease_raw))
+       fi ;;
+  esac
+  if [ -n "$lease_bad" ]; then
+    rm -f "$MAINT_LEASE"
+    log "maintenance lease $lease_bad -- discarded, remediation resumes"
+  elif [ $((lease_exp - lease_now)) -gt "$MAX_MAINT_SECS" ]; then
+    rm -f "$MAINT_LEASE"
+    log "maintenance lease expiry is beyond the ${MAX_MAINT_SECS}s cap -- discarded, remediation resumes"
+  elif [ "$lease_now" -lt "$lease_exp" ]; then
+    set_status maintenance           "remediation SUSPENDED by an operator lease for $(( (lease_exp - lease_now + 59) / 60 ))m more -- the gateway is deliberately not being watched, and this clears itself when the lease expires"
+    exit 0
+  else
+    rm -f "$MAINT_LEASE"
+    log "maintenance lease expired -- remediation resumes"
+  fi
+fi
 
 #--- probe A: does the gateway ANSWER? ------------------------------------------------------------
 # Runs in the parent: curl bounds itself with --max-time and is blocked on a socket, not on disk,
