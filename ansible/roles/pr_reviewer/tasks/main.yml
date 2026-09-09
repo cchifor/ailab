@@ -169,3 +169,63 @@
     - not ansible_check_mode
     - _reviewbot_pat | length > 0
     - _reviewbot_webhook_secret | length > 0
+
+# ---------------------------------------------------------------------------------------------
+# ASSERT the org webhook actually subscribes to pull-request events.
+#
+# WHY THIS EXISTS. On 2026-09-08 both org hooks (38 -> reviewer-1, 39 -> reviewer-2) were found
+# subscribed to `push` ONLY, while reviewbot.py's EVENTS set is
+# {pull_request, pull_request_sync, pull_request_label, pull_request_review_request} and its
+# handler requires a `pull_request` key that a push payload never carries. Result: ZERO webhook
+# deliveries in 7 days. Reviews still happened — the 5-minute reconcile poll masked it entirely —
+# so every PR silently waited up to 5 minutes, and nothing anywhere said why.
+#
+# The hooks were created by hand and were codified NOWHERE: this role installs the webhook SECRET
+# and opens the firewall port, but nothing asserted the hook's events, which is exactly how it
+# drifted unnoticed. This task closes that gap.
+#
+# DETECTION, not enforcement, and deliberately so: creating or editing an org hook needs
+# `write:organization`, which the reviewer PATs do not carry (they are scoped to
+# write:repository). Minting a privileged org-admin token and parking it on two VMs to fix a
+# one-line config is a worse trade than failing loudly. The remediation is in the message.
+- name: Read the Gitea org webhooks
+  ansible.builtin.uri:
+    url: "{{ pr_reviewer_gitea_url }}/api/v1/orgs/{{ pr_reviewer_org }}/hooks"
+    method: GET
+    headers:
+      Authorization: "token {{ _reviewbot_pat }}"
+      # Default python/curl UAs get a Cloudflare 403 (code 1010) on this forge.
+      User-Agent: "git/2.47.0"
+    status_code: [200]
+  register: _reviewbot_org_hooks
+  changed_when: false
+  failed_when: false
+  when:
+    - _reviewbot_pat | length > 0
+    - not ansible_check_mode
+
+- name: Assert this persona's webhook subscribes to pull-request events
+  vars:
+    _my_hook: >-
+      {{ (_reviewbot_org_hooks.json | default([]))
+         | selectattr('config.url', 'search', ansible_default_ipv4.address ~ ':' ~ pr_reviewer_port)
+         | list | first | default({}) }}
+    _missing: "{{ pr_reviewer_required_hook_events | difference(_my_hook.events | default([])) }}"
+  ansible.builtin.assert:
+    that:
+      - _my_hook | length > 0
+      - _missing | length == 0
+      - _my_hook.active | default(false)
+    fail_msg: >-
+      The Gitea org webhook for {{ ansible_default_ipv4.address }}:{{ pr_reviewer_port }} is wrong.
+      events={{ _my_hook.events | default('<no hook found>') }},
+      missing={{ _missing }}, active={{ _my_hook.active | default('n/a') }}.
+      Reviews will still happen via the 5-minute reconcile poll, so this fails SILENTLY in
+      production — that is why it is asserted here. Fix with an org-admin credential:
+      PATCH {{ pr_reviewer_gitea_url }}/api/v1/orgs/{{ pr_reviewer_org }}/hooks/<id>
+      with {"active": true, "events": {{ pr_reviewer_required_hook_events | to_json }}}
+    success_msg: "org webhook subscribes to pull-request events"
+  when:
+    - _reviewbot_pat | length > 0
+    - not ansible_check_mode
+    - _reviewbot_org_hooks.status | default(0) == 200

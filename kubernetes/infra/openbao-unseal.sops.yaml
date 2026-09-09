@@ -8,7 +8,10 @@
 # NOT in any Flux kustomization â†’ Flux never applies it. git history is its off-machine home; the
 # decrypting age key (kubernetes/infra/_out/age.agekey) MUST be kept OFFLINE, plus a Vaultwarden copy.
 # RESTORE:  sops -d kubernetes/infra/openbao-unseal.sops.yaml | kubectl apply -f -
-# ROTATE after exposure:  bao operator rekey -init -key-shares=1 -key-threshold=1 â†’ update Secret
+# ROTATE after exposure: NOTE - `bao operator rekey` and `generate-root` are COMPILED OUT of
+#           OpenBao 2.5.5 and return HTTP 405, so rotating the seal in place is NOT possible.
+#           The only path is a wipe + re-bootstrap (docs/runbooks/openbao-recovery.md), which
+#           issues a NEW cluster_id and LOSES un-round-tripped KV. Original instruction:  bao operator rekey -init -key-shares=1 -key-threshold=1 â†’ update Secret
 #           openbao-keys AND re-run this escrow.
 # ============================================================================================
 apiVersion: v1
@@ -18,8 +21,8 @@ metadata:
     namespace: openbao
 type: Opaque
 stringData:
-    cluster_id: ENC[AES256_GCM,data:4SZel+d+lfy5+4GSBZpMS9HE6XlucqDCJQayt67vTe2RcZzL,iv:17k0h7c+OdkWxwGXMdGYmjHXFNx+hqyzvWxIJ66QYFI=,tag:vbZULFKfomjTy/rUiC5Dpg==,type:str]
-    unseal_key: ENC[AES256_GCM,data:ApX4nGvyS2lMol3oaqg3JMYyaXn9fALerJwCRHbn+MyQ+pKxlay5ch2WCac=,iv:BH7ynu8SkA/CeWhP86CTjOfQ2YJWZwjkoIS/qXoH43k=,tag:RxEMCwcgKSnGdgdsb5N2Ig==,type:str]
+    cluster_id: ENC[AES256_GCM,data:15SBOfYPYgqkBsGKtaynWdDQyqW1gbHjsvQekGzSVwZSJvNo,iv:4M01UZ0EGe6wNwpHgb84m26VVathAcd2F1zNGfbsxg0=,tag:TGswR4kRuaWBmQyVjtyWfg==,type:str]
+    unseal_key: ENC[AES256_GCM,data:X08YAtknY3TIHN1HkCeXcG+UwyQsNBFV+n3QXxcqT3nMYxw3zo3rH9fedyw=,iv:a2TDgNUxgzcv3M1by996WX49X1jCKpsHKRQN2F5slLw=,tag:HgGA8Bqi+GdSy/Mbr3hnOQ==,type:str]
 sops:
     kms: []
     gcp_kms: []
@@ -29,14 +32,14 @@ sops:
         - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
           enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB0K3dvdzZlT1JXN3FwZ0NL
-            QXpWZkNGdk5JRDBscFRTSi95VFgyV0JIUGdFCjl1ZkM2SEN4bXYvQjVKUHQ3TmR1
-            bUhOSHpzNENPQW8rNHZPNTRrQVRXS0EKLS0tIE95Ty9QVTc3cjJwMGlVeGVicG1z
-            S0hDWjVWRmRhQXZyT2dpdXpyZ0ltQ1UKF0hGgpo6y2r9nCwzqenI9ke9x9HVmJcF
-            X9ZvZalhUEt9Tut5s4fUMo+AsBU/qeTdGTW2Xw+e8z6gGHzVPOb5hA==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBFbDBqZDRBRzJES2dMVFBW
+            STlHR2ZpSUxyUnl6WFZaMFRkaGJ2VVl4Ym40Ckd5YXA0S0M0TjVZdkxmYU1RWVNh
+            MjJoSjJhZTZNdGh1clZWbmlORmF5NlUKLS0tIG8yaW5EOU5UV3lqYXVkNWh5YWxr
+            STFlbjhNdlgrZi91b0NwTnlLbGdlQWcKoxsVyX/PYzEz+RZ4c73pbomuaigjgSQv
+            TJgiUYW11127T5bO+olY2qxKlyAso7gzZbLaXzzG4D+L0aSo3UKOhw==
             -----END AGE ENCRYPTED FILE-----
-    lastmodified: "2026-07-24T07:26:26Z"
-    mac: ENC[AES256_GCM,data:asAPD0vYvAOAbma2i2xcVVq2aO0skJVxtMgkwh+P22W5QpZnunuwqPGUyY4tj5xVzgjkHUqHu8DvdN4MCfysy5b786yiZy0qBFDZoeQyCUrbFRjmqN1Wzx4Om44O5ClN1G2SLGfH0sfBStmRU27roL0lIIK7NWHRnRoEPfbMV/Q=,iv:yHdy4yP5pE2oySlq3tqeNV/beUmoVT2z1pzCg+bZIYs=,tag:1n+RffhKRMTO4rWehIH6qQ==,type:str]
+    lastmodified: "2026-09-08T18:20:07Z"
+    mac: ENC[AES256_GCM,data:ziPHsuVrHOjHDEidP3I5PnnhaEkU3B9v358BGsALVRKDmC0wy2JtHCsbWwgTHIXDiiSuVNi8wHEUVibAcdPvB9IWTfSwEOWys6kVDm/vq1VAZeomIa2wlt6/oyQR5KNHdfNeCVBStXiDaw8MNISFbExb7XB4nHkS1aCqbeFzfIw=,iv:5GSFK3KiR8+lbbkDGWf56TUepHReyZD8UXXeJQO2ra4=,tag:bPK80rVcZX4rOcJvHBjryA==,type:str]
     pgp: []
     encrypted_regex: ^(data|stringData)$
     version: 3.9.4
