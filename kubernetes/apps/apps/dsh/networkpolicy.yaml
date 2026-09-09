@@ -78,15 +78,33 @@ spec:
     # same is true of every console agent already in use here. dsh's own fetch provider still
     # refuses non-public addresses and pins the connection, so the guard is not gone — it just is
     # not the network any more.
+    #
+    # IPv4 ONLY, deliberately. This ipBlock does not match IPv6, so v6 egress stays default-denied.
+    # That is safe rather than a gap (the inward exclusions below cannot be bypassed over v6), but
+    # it does mean fetching a v6-only host fails. Left as-is: nothing here needs v6, and adding
+    # ::/0 would require restating every exclusion in v6 form to stay equivalent.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.0.0.0/8
+              - 10.0.0.0/8          # cluster pods 10.244/16, services 10.96/12, QNAP NFS 10.55.0.254
               - 172.16.0.0/12
-              - 192.168.0.0/16
-              - 169.254.0.0/16
+              - 192.168.0.0/16      # the home LAN: Proxmox hosts, k8s nodes, cloudlab, everything
+              - 169.254.0.0/16      # link-local, which is also cloud-metadata
               - 127.0.0.0/8
+              # CGNAT — and on this estate that means TAILSCALE. The tailnet addresses every device
+              # on the mesh out of 100.64.0.0/10, and ts-ailab-subnet is a SUBNET ROUTER, so this
+              # range is a second path to the same private networks excluded above. Without this
+              # line the agent reached it: 100.64.0.1:443 answered from the dsh pod. Found by
+              # review after the egress change had already merged, which is the argument for
+              # listing special-purpose ranges explicitly rather than assuming RFC1918 covers
+              # "private".
+              - 100.64.0.0/10
+              # Not routable, but excluded so a resolver returning one cannot become a probe.
+              - 0.0.0.0/8
+              - 224.0.0.0/4         # multicast
+              - 240.0.0.0/4         # reserved
+              - 198.18.0.0/15       # benchmarking (RFC 2544)
       ports:
         - { port: 443, protocol: TCP }
         - { port: 80, protocol: TCP }
