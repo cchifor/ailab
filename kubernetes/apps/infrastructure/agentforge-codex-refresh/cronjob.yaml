@@ -294,7 +294,7 @@ spec:
               # agentforge-codex-refresh surfaces as "codex-refresh FAILED: FileNotFoundError", and none
               # was observed. 4afa915d was live for minutes only and is reverted for a provisioner()
               # regression, not for anything in this path.
-              image: registry.chifor.me/agentforge/orchestrator@sha256:95509acb7a82a8d790b5c5c24c16f63f78d37109aff31e7eb74981f36e61ac20
+              image: registry.chifor.me/agentforge/orchestrator@sha256:138f43887addcee7ab24c1e37f1c66f3cd8db425bde1923ccf93b276a0893b94
               command: ["python3", "/scripts/refresh.py"]
               volumeMounts:
                 - { name: work, mountPath: /work }
