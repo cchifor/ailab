@@ -230,6 +230,13 @@ const server = http.createServer((req, res) => {
     { host: '127.0.0.1', port: TARGET, method: req.method, path: req.url, headers: withSession(req.headers) },
     (upstreamRes) => {
       res.writeHead(upstreamRes.statusCode, endToEnd(upstreamRes.headers));
+      // pipe() does NOT forward errors. Without this, dsh resetting the connection mid-body raises
+      // an unhandled 'error' on the response stream, which takes the whole relay process down and
+      // with it every other session on this pod.
+      upstreamRes.on('error', () => {
+        upstreamRes.destroy();
+        if (!res.destroyed) res.destroy();
+      });
       // pipe with `end: false` so trailers can still be attached: addTrailers() must land before
       // end(), and a plain pipe() calls end() the instant the body finishes. Backpressure is still
       // pipe's. dsh does not currently send trailers, but a proxy that silently ate them would be
@@ -242,8 +249,31 @@ const server = http.createServer((req, res) => {
       });
     },
   );
+
+  // The byte relay bounded inactivity on both sockets and destroyed the peer on close. Piping HTTP
+  // silently dropped both halves of that discipline; these restore it.
+  //
+  // Inactivity: a dsh that accepts a request and then stalls would hold its upstream socket open
+  // indefinitely, long after cloudflared gave up on the client side, and they accumulate.
+  upstream.setTimeout(IDLE_MS, () => upstream.destroy());
+  // Peer teardown: a client that disconnects mid-response -- a tab navigating away, or any SSE
+  // stream -- must stop dsh streaming into a response nobody will ever read. For an open-ended
+  // stream that upstream socket would otherwise leak for the life of the process. `close` fires on
+  // normal completion too, so only a PREMATURE close (nothing finished writing) is an abandonment.
+  const abandon = () => { if (!upstream.destroyed) upstream.destroy(); };
+  res.on('close', () => { if (!res.writableFinished) abandon(); });
+  res.on('error', abandon);
+  req.on('error', abandon);
+
   upstream.on('error', () => {
-    if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+    // Past the headers there is no way to say 502 -- the status is already on the wire -- so the
+    // only honest signal left is to destroy the response and let the client see a truncated body
+    // rather than a silently short one presented as complete.
+    if (res.headersSent) {
+      if (!res.destroyed) res.destroy();
+      return;
+    }
+    res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
     res.end('relay: upstream unavailable\n');
   });
   req.pipe(upstream);
