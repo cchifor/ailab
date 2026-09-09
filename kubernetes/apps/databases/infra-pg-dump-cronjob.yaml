@@ -91,7 +91,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: holder
-          image: mirror.gcr.io/library/busybox:1.37.0
+          image: mirror.gcr.io/library/busybox:1.38.0
           command: ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done"]
           resources:
             requests: { cpu: 5m, memory: 16Mi }
