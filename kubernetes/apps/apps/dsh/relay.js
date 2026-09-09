@@ -40,6 +40,7 @@
 // its token) rather than failing shut and taking the UI offline.
 const http = require('http');
 const fs = require('fs');
+const nodePath = require('path');
 const { createHash, createHmac, timingSafeEqual } = require('crypto');
 
 const LISTEN = Number(process.env.RELAY_PORT || 8080);
@@ -225,7 +226,153 @@ function statusLines(res, extra) {
   return lines.join('\r\n') + '\r\n\r\n';
 }
 
+// ---------------------------------------------------------------------------------------------
+// FILE ROUTE. Clicking a produced file in the transcript used to raise
+//     path open failed: path open failed: spawn xdg-open ENOENT
+// because dsh answers that click by RPC-ing the HOST to run a desktop opener:
+//   ui-deliverables producedFileMentions() -> openFile() -> session.openWorkspacePath()
+//   -> openNativePath() -> spawn("xdg-open")
+// all of which happens SERVER-SIDE, in this pod. Installing xdg-utils would not have helped: at
+// best it would open the file on a machine in the cluster, never in the browser that clicked. dsh
+// does carry a capability probe (canOpenWorkspacePath), and the "Produced" chip row honours it,
+// but the inline filename mention in the message text calls openFile unconditionally and the
+// server's openWorkspacePath never consults its own canOpenPath() either -- so no setting could
+// switch it off.
+//
+// So the click is repointed at this route instead (kubernetes/apps/apps/dsh/patch-open-file.js
+// rewrites the client bundle), and the browser fetches the bytes over the tunnel it already has.
+//
+// SCOPE. Only files under DSH_FILE_ROOTS are served, compared after realpath on BOTH sides, so a
+// symlink pointing out of the volume is refused rather than followed. Traversal is not filtered
+// by pattern -- ../ is allowed to resolve and is then rejected by the containment check, which is
+// the check that actually holds.
+//
+// Everything reaching this port has already passed Cloudflare Access, and the NetworkPolicy
+// admits cloudflared alone, so this exposes the agent's own files to the one person already
+// authenticated to the agent. Responses carry a sandbox CSP and nosniff so that an SVG or HTML
+// artefact opened in a tab cannot script against the dsh origin it was served from.
+const FILE_ROUTE = '/__dsh-file';
+const FILE_ROOTS = (process.env.DSH_FILE_ROOTS || '/workspace:/dsh-home')
+  .split(':').filter((entry) => entry !== '');
+
+const CONTENT_TYPES = {
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.ico': 'image/x-icon',
+  '.pdf': 'application/pdf', '.json': 'application/json', '.txt': 'text/plain',
+  '.md': 'text/plain', '.csv': 'text/plain', '.log': 'text/plain', '.yaml': 'text/plain',
+  '.yml': 'text/plain', '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css',
+  '.js': 'text/plain', '.ts': 'text/plain', '.py': 'text/plain', '.sh': 'text/plain',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+};
+
+function refuse(res, status, message) {
+  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(message + '\n');
+}
+
+/** True when `real` is the root itself or genuinely beneath it (never a "/dsh-home-evil" prefix). */
+function within(real, root) {
+  let base;
+  try { base = fs.realpathSync(root); } catch { return false; }
+  return real === base || real.startsWith(base.endsWith(nodePath.sep) ? base : base + nodePath.sep);
+}
+
+function serveFile(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return refuse(res, 405, 'method not allowed');
+  let requested;
+  try { requested = new URL(req.url, 'http://dsh.invalid').searchParams.get('path'); }
+  catch { return refuse(res, 400, 'unparsable request'); }
+  if (requested === null || requested === '') return refuse(res, 400, 'missing ?path');
+
+  // OPEN FIRST, then judge the descriptor actually held. Checking a pathname and reopening it to
+  // stream is a time-of-check/time-of-use race: swap a parent directory for a symlink between the
+  // two and the second open follows it, serving a file the check already approved by another name.
+  // Resolving /proc/self/fd/N names the inode THIS descriptor is pinned to, so the containment
+  // decision and the bytes served cannot disagree.
+  let fd;
+  // O_NONBLOCK because a FIFO under /workspace -- which the agent can create -- would otherwise
+  // block this synchronous open until a writer appeared, freezing the single-threaded relay for
+  // every session on the pod. The refusal below only gets to run if the open returns at all.
+  try { fd = fs.openSync(requested, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK); }
+  catch { return refuse(res, 404, 'no such file'); }
+  const give = (status, message) => { fs.closeSync(fd); refuse(res, status, message); };
+
+  // FAILS CLOSED. An earlier revision fell back to resolving the PATHNAME when /proc/self/fd was
+  // unavailable, which authorised this descriptor using a name resolved separately from it -- the
+  // very race the descriptor exists to close, and reachable on Linux too (an unlinked file
+  // resolves to "... (deleted)"). If the inode cannot be named, the request is refused rather than
+  // approved by another route. This costs the ability to run the file off Linux; it is tested in
+  // the pod instead, which is where it runs.
+  let real, stat;
+  try { stat = fs.fstatSync(fd); real = fs.realpathSync('/proc/self/fd/' + fd); }
+  catch { return give(404, 'no such file'); }
+  if (stat.isDirectory()) return give(403, 'that is a directory');
+  if (!stat.isFile()) return give(403, 'not a regular file');
+  if (!FILE_ROOTS.some((root) => within(real, root))) {
+    return give(403, 'path is outside the served roots');
+  }
+
+  // A filename is attacker-shaped data: a newline or any non-ASCII byte makes writeHead throw
+  // ERR_INVALID_CHAR, and nothing here would have caught it -- one emoji in a filename would have
+  // taken down the relay for every session on the pod. The quoted form is reduced to safe ASCII and
+  // the real name rides filename* (RFC 5987), which is where non-ASCII belongs.
+  const raw = nodePath.basename(real);
+  const ascii = raw.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '');
+  const type = CONTENT_TYPES[nodePath.extname(real).toLowerCase()] || 'application/octet-stream';
+  const charset = type.startsWith('text/') || type === 'image/svg+xml' || type === 'application/json';
+
+  // Range, because this route advertises video/audio types and browsers will not seek -- often will
+  // not start playback at all -- without it. One range only; a multipart/byteranges response is not
+  // worth carrying for a file viewer.
+  let start = 0;
+  let end = stat.size - 1;
+  let status = 200;
+  const range = req.headers.range;
+  if (typeof range === 'string' && stat.size > 0) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+    if (m !== null && !(m[1] === '' && m[2] === '')) {
+      if (m[1] === '') start = Math.max(0, stat.size - Number(m[2]));
+      else { start = Number(m[1]); if (m[2] !== '') end = Math.min(end, Number(m[2])); }
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= stat.size) {
+        fs.closeSync(fd);
+        res.writeHead(416, { 'content-range': 'bytes */' + stat.size, 'cache-control': 'no-store' });
+        return res.end();
+      }
+      status = 206;
+    }
+  }
+
+  const headers = {
+    'content-type': charset ? type + '; charset=utf-8' : type,
+    'content-length': end - start + 1,
+    'content-disposition': 'inline; filename="' + ascii + '"; filename*=UTF-8\'\'' + encodeURIComponent(raw),
+    'accept-ranges': 'bytes',
+    'x-content-type-options': 'nosniff',
+    'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+    'cache-control': 'no-store',
+  };
+  if (status === 206) headers['content-range'] = 'bytes ' + start + '-' + end + '/' + stat.size;
+
+  // Even sanitised, header assembly is not worth betting the process on.
+  try { res.writeHead(status, headers); }
+  catch { fs.closeSync(fd); if (!res.destroyed) res.destroy(); return; }
+
+  if (req.method === 'HEAD') { fs.closeSync(fd); return res.end(); }
+  // A zero-byte file leaves end at -1, and createReadStream rejects that SYNCHRONOUSLY with
+  // ERR_OUT_OF_RANGE -- thrown out of the request listener, past the stream error handler below,
+  // into uncaughtException. An empty produced file is entirely ordinary (touch, an empty log) and
+  // clicking one would have taken the relay down for every session.
+  if (stat.size === 0) { fs.closeSync(fd); return res.end(); }
+  const stream = fs.createReadStream(null, { fd, start, end, autoClose: true });
+  stream.on('error', () => { if (!res.destroyed) res.destroy(); });
+  res.on('close', () => { if (!res.writableFinished) stream.destroy(); });
+  stream.pipe(res);
+}
+
 const server = http.createServer((req, res) => {
+  // Served HERE, not proxied: dsh has no such route, and the whole point is to answer the browser
+  // directly with bytes it can render.
+  if (req.url === FILE_ROUTE || req.url.startsWith(FILE_ROUTE + '?')) return serveFile(req, res);
   const upstream = http.request(
     { host: '127.0.0.1', port: TARGET, method: req.method, path: req.url, headers: withSession(req.headers) },
     (upstreamRes) => {
