@@ -332,24 +332,39 @@ trap cleanup EXIT INT TERM
 # fat-fingered expiry cannot disable remediation for a week. Create one with:
 #     expr $(date +%s) + 1200 > <BASE>/state/maintenance
 if [ -f "$MAINT_LEASE" ]; then
-  lease_exp=$(cat "$MAINT_LEASE" 2>/dev/null)
+  lease_raw=$(cat "$MAINT_LEASE" 2>/dev/null)
   lease_now=$(date +%s)
-  case "${lease_exp:-x}" in
-    ''|*[!0-9]*)
-      rm -f "$MAINT_LEASE"
-      log "maintenance lease is not an integer -- discarded, remediation resumes" ;;
-    *)
-      if [ $((lease_exp - lease_now)) -gt "$MAX_MAINT_SECS" ]; then
-        rm -f "$MAINT_LEASE"
-        log "maintenance lease expiry is beyond the ${MAX_MAINT_SECS}s cap -- discarded, remediation resumes"
-      elif [ "$lease_now" -lt "$lease_exp" ]; then
-        set_status maintenance           "remediation SUSPENDED by an operator lease for $(( (lease_exp - lease_now + 59) / 60 ))m more -- the gateway is deliberately not being watched, and this clears itself when the lease expires"
-        exit 0
-      else
-        rm -f "$MAINT_LEASE"
-        log "maintenance lease expired -- remediation resumes"
-      fi ;;
+  # All-digits is NOT sufficient to make a value safe for $(( )). Bash reads a leading-zero operand
+  # as OCTAL, so `08` and `099999999999` are a FATAL "value too great for base". That error aborts
+  # the cap comparison below, and because a failed condition just moves to the elif, execution
+  # reaches `[ "$lease_now" -lt "$lease_exp" ]` -- where test(1) parses the SAME string as base 10,
+  # sees an expiry ~1e11 seconds away, and suspends remediation. A malformed, over-cap lease would
+  # therefore fail OPEN and silently stop the watchdog forever: precisely the outcome the cap exists
+  # to prevent. Width is bounded first (an over-long value overflows int64 and can wrap NEGATIVE,
+  # sailing under the cap), then base 10 is forced explicitly.
+  lease_exp=""
+  lease_bad=""
+  case "${lease_raw:-x}" in
+    ''|*[!0-9]*)          lease_bad="is not an integer" ;;
+    *) if [ "${#lease_raw}" -gt 11 ]; then
+         lease_bad="is implausibly large (${#lease_raw} digits)"
+       else
+         lease_exp=$((10#$lease_raw))
+       fi ;;
   esac
+  if [ -n "$lease_bad" ]; then
+    rm -f "$MAINT_LEASE"
+    log "maintenance lease $lease_bad -- discarded, remediation resumes"
+  elif [ $((lease_exp - lease_now)) -gt "$MAX_MAINT_SECS" ]; then
+    rm -f "$MAINT_LEASE"
+    log "maintenance lease expiry is beyond the ${MAX_MAINT_SECS}s cap -- discarded, remediation resumes"
+  elif [ "$lease_now" -lt "$lease_exp" ]; then
+    set_status maintenance           "remediation SUSPENDED by an operator lease for $(( (lease_exp - lease_now + 59) / 60 ))m more -- the gateway is deliberately not being watched, and this clears itself when the lease expires"
+    exit 0
+  else
+    rm -f "$MAINT_LEASE"
+    log "maintenance lease expired -- remediation resumes"
+  fi
 fi
 
 #--- probe A: does the gateway ANSWER? ------------------------------------------------------------
