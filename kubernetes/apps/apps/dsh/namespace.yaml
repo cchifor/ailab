@@ -13,12 +13,24 @@ metadata:
     # permission, so uid 1000 was refused on every image the agent tried to read back, and fsGroup
     # could never have fixed it: it sets the GROUP, never the owner.
     #
-    # Fixing that needs one chown at startup, which needs root, which `restricted` forbids. The
-    # refusal was verified rather than assumed -- a server-side dry-run under `restricted` reported:
-    #   unrestricted capabilities (container "fix-ownership" must not include "CHOWN" ...),
-    #   runAsNonRoot != true (... must not set securityContext.runAsNonRoot=false),
-    #   runAsUser=0 (... must not set runAsUser=0)
-    # and the same dry-run passes clean under `baseline`.
+    # Fixing that needs one chown at startup, which needs root, which `restricted` forbids. That
+    # was verified at the level it is actually enforced. PodSecurity gates POD creation, and a
+    # Deployment is admitted at the object level whatever its template holds, so a dry-run of the
+    # Deployment proves nothing either way. Dry-running the rendered POD decides it:
+    #
+    #   enforce=restricted -> Error from server (Forbidden): pods "psa-probe" is forbidden:
+    #                         violates PodSecurity "restricted:latest": unrestricted capabilities
+    #                         (container "fix-ownership" must not include "CHOWN" ...),
+    #                         runAsNonRoot != true ..., runAsUser=0 ...
+    #   enforce=baseline   -> pod/psa-probe created
+    #
+    # CHOWN is permitted because the baseline Capabilities control allows the default set
+    # (AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, MKNOD, NET_BIND_SERVICE, SETFCAP,
+    # SETGID, SETPCAP, SETUID, SYS_CHROOT). It is `restricted` that narrows `add` to
+    # NET_BIND_SERVICE alone -- which is why the message above carries a "restricted:latest"
+    # prefix even when it appears beside a successful baseline admission. `drop: [ALL],
+    # add: [CHOWN]` is kept rather than omitting the block, because it grants exactly the one
+    # capability the chown needs instead of inheriting the whole default set.
     #
     # Only the tiny `fix-ownership` initContainer runs as root; it chowns two directories and exits.
     # Every long-lived container now declares runAsNonRoot: true, runAsUser: 1000 and
