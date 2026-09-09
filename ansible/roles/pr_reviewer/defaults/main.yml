@@ -104,3 +104,21 @@ pr_reviewer_automerge: true
 pr_reviewer_merge_personas: [claude, codex]
 pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot]
 pr_reviewer_allow_cidr: "{{ lan_cidr | default('192.168.0.0/24') }}"
+
+# Fail the play when the Gitea org-webhook configuration cannot be READ or is wrong.
+# On by default: an unverifiable delivery path is the precise condition that let reviews die
+# unnoticed for 7 days (2026-09-01..08). Set false only to accept that blind spot knowingly.
+# Governs BOTH assertions -- the readable-check and the config-check. It has to: an opt-out
+# that silenced only the first would still fail the play on a wrong hook, which is not what
+# "accept the blind spot" means to anyone reading this line.
+pr_reviewer_assert_hook_config: true
+
+# Org-OWNER credential used SOLELY for the webhook read. The reviewer PATs cannot do it
+# (write:issue,write:repository); GET /orgs/<org>/hooks needs read:organization AND org-owner.
+# Minted 2026-09-09 for `chifor` (the org owner) scoped to read:organization ONLY -- it can
+# enumerate org metadata and nothing else; it cannot create, edit or delete a hook, push, or
+# read repository contents. Lives in ansible/secrets/reviewbot.sops.yaml, named to match that
+# file's encrypted_regex ^(reviewbot_[a-z0-9]+_pat|...)$ so SOPS actually encrypts it.
+# Falls back to '' (not the reviewer PAT) so a missing credential fails the readable-check
+# loudly instead of silently 403ing under a token that was never going to work.
+pr_reviewer_hook_check_token: "{{ lookup('vars', 'reviewbot_hookcheck_pat', default='') }}"
