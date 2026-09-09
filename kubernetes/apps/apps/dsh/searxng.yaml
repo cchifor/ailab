@@ -158,7 +158,7 @@ spec:
         # else. Generating it here rather than storing a Secret keeps key material out of git and
         # out of the API server for a value nothing else needs to know.
         - name: seed-settings
-          image: docker.io/searxng/searxng@sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759
+          image: docker.io/searxng/searxng@sha256:3547509b419cd6a67333d6d68bd1ffad8d46d3669d82e7a7bd538f7b45827432
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -183,7 +183,7 @@ spec:
             limits:   { cpu: 200m, memory: 128Mi }
       containers:
         - name: searxng
-          image: docker.io/searxng/searxng@sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759
+          image: docker.io/searxng/searxng@sha256:3547509b419cd6a67333d6d68bd1ffad8d46d3669d82e7a7bd538f7b45827432
           env:
             - { name: SEARXNG_BASE_URL, value: "http://searxng.dsh.svc.cluster.local:8080/" }
             # One client, so the upstream worker count (which scales with host CPUs) would
