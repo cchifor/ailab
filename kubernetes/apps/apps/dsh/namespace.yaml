@@ -3,6 +3,46 @@ kind: Namespace
 metadata:
   name: dsh
   labels:
-    pod-security.kubernetes.io/enforce: restricted
-    pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/warn: restricted
+    # BASELINE, not restricted, since 2026-09-09 -- and only because `restricted` forbids
+    # `runAsUser: 0` outright, which left the agent unable to work with its own files.
+    #
+    # dsh's read_image chmods its storage root. The dsh-home and dsh-workspace PVCs are
+    # `local-path` (rancher.io/local-path), which is hostPath-backed, and kubelet applies no fsGroup
+    # ownership management to those -- verified live: both mount points were still root:root mode
+    # 777 despite `fsGroup: 1000` being set. chmod(2) requires OWNERSHIP (or CAP_FOWNER), not write
+    # permission, so uid 1000 was refused on every image the agent tried to read back, and fsGroup
+    # could never have fixed it: it sets the GROUP, never the owner.
+    #
+    # Fixing that needs one chown at startup, which needs root, which `restricted` forbids. That
+    # was verified at the level it is actually enforced. PodSecurity gates POD creation, and a
+    # Deployment is admitted at the object level whatever its template holds, so a dry-run of the
+    # Deployment proves nothing either way. Dry-running the rendered POD decides it:
+    #
+    #   enforce=restricted -> Error from server (Forbidden): pods "psa-probe" is forbidden:
+    #                         violates PodSecurity "restricted:latest": unrestricted capabilities
+    #                         (container "fix-ownership" must not include "CHOWN" ...),
+    #                         runAsNonRoot != true ..., runAsUser=0 ...
+    #   enforce=baseline   -> pod/psa-probe created
+    #
+    # CHOWN is permitted because the baseline Capabilities control allows the default set
+    # (AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, MKNOD, NET_BIND_SERVICE, SETFCAP,
+    # SETGID, SETPCAP, SETUID, SYS_CHROOT). It is `restricted` that narrows `add` to
+    # NET_BIND_SERVICE alone -- which is why the message above carries a "restricted:latest"
+    # prefix even when it appears beside a successful baseline admission. `drop: [ALL],
+    # add: [CHOWN]` is kept rather than omitting the block, because it grants exactly the one
+    # capability the chown needs instead of inheriting the whole default set.
+    #
+    # Only the tiny `fix-ownership` initContainer runs as root; it chowns two directories and exits.
+    # Every long-lived container now declares runAsNonRoot: true, runAsUser: 1000 and
+    # capabilities.drop: [ALL] individually, so the surface that actually stays running is unchanged
+    # from `restricted`. `baseline` still forbids privileged containers, host namespaces, hostPath
+    # volumes and privilege escalation.
+    #
+    # The alternative that keeps `restricted` is to move DSH_HOME to a node-owned subdirectory of
+    # the volume (a subdir created by uid 1000 IS owned by it -- verified live). It was rejected for
+    # now because it requires migrating ~71 MiB of live state, including sessions/, storages/ and
+    # the browser-cookie signing secret the relay reads through its own path. Revisit if this
+    # namespace ever holds anything that is not a single-user development tool.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline

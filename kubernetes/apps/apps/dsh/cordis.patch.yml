@@ -214,3 +214,30 @@
     fetch: true
     searchTimeoutMs: 60000
   disabled: false
+
+# Clicking a file in the web UI raised `path open failed: spawn xdg-open ENOENT`.
+#
+# dsh already knows better than to offer this. canOpenNativePath() is
+#     isWsl() || present(env.DISPLAY) || present(env.WAYLAND_DISPLAY)
+# and none of those are set here, so it answers false -- which its own comment says is what
+# "lets a surface show a path as text instead of offering a button that would spawn xdg-open
+# into nothing". The surface asked anyway, and the spawn failed because a container image has no
+# xdg-open. Installing xdg-utils would NOT help: the opener runs SERVER-SIDE, in this pod, so
+# even a working one could never put a file in front of a browser on someone else's machine.
+#
+# nativeOpen is the documented override ("Override platform desktop-opener detection"), and
+# settings-controller reads it as `config.nativeOpen ?? (... || canOpenNativePath())` -- so
+# false short-circuits the whole expression and the affordance stops being offered.
+#
+# Files are still reachable, by the routes that actually work remotely: the agent renders images
+# inline with read_image (fixed by the fix-ownership initContainer in deployment.yaml), and the
+# UI's own file surfaces and directory picker read the volume directly.
+#
+# Verified before writing this: settings-controller is declared exactly ONCE in the closure
+# (@deepseek-ai/dsh-web-app/cordis.patch.yml) and carries NO config block, so this override
+# replaces nothing -- which matters, because a cordis patch REPLACES a row's config, never
+# merges into it.
+- id: settings-controller
+  name: '@deepseek-ai/dsh-api-settings-controller'
+  config:
+    nativeOpen: false

@@ -71,6 +71,58 @@ spec:
           args:
             - |
               set -eu
+              # ---- uv, the agent's package manager -------------------------------------------
+              # BEFORE the dsh install and its early exit, deliberately: the block below returns
+              # early when the requested version is already present, which is the normal case, so
+              # anything appended after it would never run on an existing estate.
+              #
+              # WHY THIS EXISTS. The agent could not install a single library. Debian ships python3
+              # WITHOUT ensurepip, so there is no pip and `python3 -m venv` cannot bootstrap one
+              # either, and `npm i -g` fails because the default prefix /usr/local is not writable
+              # by uid 1000. It hit this trying to render an SVG: it wanted cairosvg, found no pip,
+              # and gave up. uv is one static binary that needs neither root nor apt.
+              #
+              # INSTALLED HERE, not in the Deployment: this Job already has egress, so pod startup
+              # never depends on reaching the internet. It goes on the /app volume rather than the
+              # home PVC because this Job only mounts /app -- and dsh-home is ReadWriteOnce on
+              # local-path, so mounting it here could pin the Job to a different node than the
+              # Deployment and deadlock the volume. /app/tools is OUTSIDE the versioned prefix, so
+              # it survives a DSH_VERSION bump.
+              #
+              # NOT fatal on failure. The primary duty of this Job is installing dsh; refusing to
+              # upgrade dsh because astral.sh was unreachable would be the wrong trade. It retries,
+              # then warns loudly and continues, and the next Job run tries again.
+              if [ -x /app/tools/bin/uv ]; then
+                echo "uv already present: $(/app/tools/bin/uv --version)"
+              else
+                mkdir -p /app/tools/bin
+                # The loop condition is the OUTCOME, not a command status. `curl ... | sh` is a
+                # pipeline whose status is sh's, and on a DNS or HTTP failure curl writes nothing
+                # while sh reads that empty input and exits 0 -- so the pipeline "succeeded", the
+                # first pass broke out, and the retry never happened on the one failure it exists
+                # to survive. dash has no `set -o pipefail` to lean on, so the download is a
+                # separate, checked step and the loop asks whether the binary actually appeared.
+                n=0
+                while [ ! -x /app/tools/bin/uv ] && [ $n -lt 3 ]; do
+                  n=$((n+1))
+                  if curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh; then
+                    env UV_INSTALL_DIR=/app/tools/bin INSTALLER_NO_MODIFY_PATH=1 sh /tmp/uv-install.sh || true
+                  else
+                    echo "uv download attempt ${n} failed"
+                  fi
+                  if [ ! -x /app/tools/bin/uv ] && [ $n -lt 3 ]; then
+                    echo "uv attempt ${n} produced no binary; retrying"; sleep 5
+                  fi
+                done
+                rm -f /tmp/uv-install.sh
+                if [ -x /app/tools/bin/uv ]; then
+                  echo "uv installed: $(/app/tools/bin/uv --version)"
+                else
+                  echo "WARNING: uv could not be installed -- the agent will have no way to install"
+                  echo "WARNING: Python packages. dsh itself is unaffected. Re-run this Job to retry."
+                fi
+              fi
+
               # Versioned prefix, NOT a shared /app. dsh-app is ReadWriteMany, so the Job and the
               # RUNNING Deployment can mount it simultaneously; installing in place would rewrite
               # node_modules under a live process. Each version gets its own tree, and the Deployment

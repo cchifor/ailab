@@ -20,13 +20,48 @@ spec:
     spec:
       terminationGracePeriodSeconds: 30   # SIGTERM starts root disposal on a 5s budget; give it room
       automountServiceAccountToken: false # it executes model-generated code; do not hand it the API
+      # runAsNonRoot is deliberately ABSENT here and set per-container instead. The
+      # fix-ownership initContainer below must run as root, and a pod-level runAsNonRoot: true
+      # would forbid that. fsGroup stays, but note it does NOT solve the ownership problem it
+      # looks like it should: these PVCs are local-path (hostPath-backed) and kubelet applies no
+      # fsGroup ownership management to them, and fsGroup sets the GROUP rather than the owner.
       securityContext:
-        runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
         seccompProfile: { type: RuntimeDefault }
       initContainers:
+        # The agent could not read back a single file it produced: every read_image ended in
+        #     EPERM: operation not permitted, chmod '/dsh-home'
+        # dsh chmods its storage root, and these mount points are created root:root mode 777 by
+        # the local-path provisioner. Mode 777 is not enough -- chmod(2) needs OWNERSHIP or
+        # CAP_FOWNER, so uid 1000 was refused on a directory it could otherwise write freely.
+        #
+        # NON-RECURSIVE on purpose. Only the two mount-point directories are root-owned; every
+        # entry inside them is already node:node (verified live), so recursion would walk ~71 MiB
+        # of session history on every pod start to change nothing.
+        - name: fix-ownership
+          image: mirror.gcr.io/library/node:22
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              chown 1000:1000 /dsh-home /workspace
+              echo "owner now: $(stat -c %U:%G /dsh-home) /dsh-home, $(stat -c %U:%G /workspace) /workspace"
+          volumeMounts:
+            - { name: home, mountPath: /dsh-home }
+            - { name: workspace, mountPath: /workspace }
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            # CHOWN only. Root with everything else dropped is still a far smaller surface than
+            # the default capability set this would otherwise inherit.
+            capabilities: { drop: [ALL], add: [CHOWN] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
         # Fail loudly if the install Job has not populated the app volume, rather than letting the
         # main container crash-loop on a missing binary.
         - name: wait-for-install
@@ -53,6 +88,8 @@ spec:
               exit 1
           volumeMounts: [{ name: app, mountPath: /app, readOnly: true }]
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
@@ -100,6 +137,8 @@ spec:
             - { name: home, mountPath: /dsh-home }
             - { name: relay, mountPath: /seed, readOnly: true }
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
@@ -151,6 +190,17 @@ spec:
             - { name: HOME, value: /dsh-home }
             # Feedback submission can export session data. Off for a private deployment.
             - { name: DSH_TELEMETRY_DISABLED, value: "1" }
+            # Lets the agent install its own tools, which it could not do at all before.
+            # Debian strips ensurepip from python3, so there was no pip AND no working
+            # `python3 -m venv`; npm i -g failed because the default prefix /usr/local is not
+            # writable by uid 1000. uv (installed to /app/tools/bin by the install Job) covers
+            # Python, and a writable npm prefix on the home PVC covers node tooling.
+            # Verified on the live pod before shipping: uv venv on the system python3, then
+            # `uv pip install cairosvg`, then cairosvg rendering the agent's own SVG to PNG.
+            - { name: npm_config_prefix, value: /dsh-home/.npm-global }
+            # PATH is spelled out in full because a container env var cannot reference the
+            # image's own PATH. The tail is node:22's default, verified live -- do not trim it.
+            - { name: PATH, value: "/dsh-home/.local/bin:/dsh-home/.npm-global/bin:/app/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
           volumeMounts:
             - { name: app,  mountPath: /app, readOnly: true }
             - { name: home, mountPath: /dsh-home }
@@ -169,6 +219,8 @@ spec:
             periodSeconds: 30
             failureThreshold: 3
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
@@ -198,6 +250,8 @@ spec:
             tcpSocket: { port: relay }
             periodSeconds: 10
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
