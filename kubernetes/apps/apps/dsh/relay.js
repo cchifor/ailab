@@ -281,14 +281,28 @@ const server = http.createServer((req, res) => {
 
 // WebSocket. /api/remote.mux carries the whole UI, so this has to work as well as the byte pipe did.
 server.on('upgrade', (req, clientSocket, head) => {
-  // Armed BEFORE the handshake resolves. Everything below used to be installed only inside the
-  // 'upgrade' callback, so an upstream that never answered left this descriptor open forever.
+  // Armed BEFORE the handshake resolves, on BOTH halves. An earlier version armed only the client
+  // socket here and its comment claimed the leak was closed; it was not. Everything that destroys
+  // the UPSTREAM -- the kill() pairs and the two-socket timeout -- lives inside the 'upgrade'
+  // callback, so until a 101 arrives none of it exists, and destroying the client descriptor
+  // reaches nothing upstream. An abandoned handshake -- a tab closed or reloaded mid-reconnect, or
+  // a dsh that accepts the connection and never answers -- therefore held its socket to dsh for
+  // the life of the process. /api/remote.mux carries the whole UI and reconnects constantly, so
+  // those accumulate until the relay runs out of descriptors, in the one process serving every
+  // session on this pod.
+  let settled = false;
   clientSocket.setTimeout(IDLE_MS, () => clientSocket.destroy());
   clientSocket.on('error', () => clientSocket.destroy());
 
   const upstream = http.request({
     host: '127.0.0.1', port: TARGET, method: req.method, path: req.url, headers: withSession(req.headers),
   });
+
+  // settled is set ONLY by the 101 branch, where the kill() pairs take ownership of both sockets.
+  // The rejection branch deliberately leaves these armed: it streams a body to clientSocket, so a
+  // client that goes away mid-rejection must still take the upstream down with it.
+  upstream.setTimeout(IDLE_MS, () => { if (!settled) upstream.destroy(); });
+  clientSocket.on('close', () => { if (!settled && !upstream.destroyed) upstream.destroy(); });
 
   // dsh answered the handshake with an ORDINARY response instead of 101 -- the 401/403 its trust
   // fence is designed to return, or any 5xx. http.request emits 'response', not 'upgrade' or
@@ -308,6 +322,7 @@ server.on('upgrade', (req, clientSocket, head) => {
   });
 
   upstream.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+    settled = true;
     clientSocket.write(statusLines(upstreamRes, []));
     if (upstreamHead !== undefined && upstreamHead.length > 0) clientSocket.write(upstreamHead);
     if (head !== undefined && head.length > 0) upstreamSocket.write(head);
