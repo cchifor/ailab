@@ -155,7 +155,7 @@ spec:
               # The SAME image the cluster runs, so pg_dump and the server are the identical build.
               # A newer pg_dump can read an older server but not the reverse; matching removes the
               # question entirely. Bump this WITH the Cluster's imageName, never independently.
-              image: ghcr.io/cloudnative-pg/postgresql:17.10
+              image: ghcr.io/cloudnative-pg/postgresql:17.11
               command: ["/bin/bash", "-c"]
               args:
                 - |
