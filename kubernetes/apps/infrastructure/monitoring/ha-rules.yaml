@@ -103,6 +103,31 @@ spec:
               {{ $labels.namespace }}/{{ $labels.pod }} has been more than 300s behind for 10m. Act
               before the slot passes max_slot_wal_keep_size — past that the WAL is gone and the only
               repair is a full re-clone.
+        # `up == 0` catches a target that FAILS. It cannot catch a target that DISAPPEARS: if the
+        # PodMonitor stops selecting these pods -- a renamed label, a selector edit, the monitor
+        # deleted -- the `up` series vanish with it, every rule above then evaluates over nothing,
+        # and both pods sit Ready while nothing is watched. Absence looks identical to health.
+        #
+        # `unless on(...)` against kube-state-metrics is the only way to see that: kube_pod_status_ready
+        # comes from a DIFFERENT exporter, so it survives the CNPG monitor going away. Any infra-pg
+        # pod that is Ready but exports no cnpg_collector_up is unmonitored, whatever the reason.
+        # (codex impl-review #14; same shape as agentforge-coverage-rules.yaml for ailab#284.)
+        - alert: PostgresMetricsMissing
+          expr: |
+            kube_pod_status_ready{condition="true", namespace="databases", pod=~"infra-pg-[0-9]+"} == 1
+              unless on(namespace, pod) cnpg_collector_up
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.pod }} is Ready but exports no CNPG metrics"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.pod }} has been Ready for >15m with no
+              cnpg_collector_up series, so PostgresReplicaNotStreaming, PostgresReplicationLagHigh and
+              PostgresMetricsTargetDown are all BLIND for it -- and blind here looks exactly like
+              healthy. Check that the databases/infra-pg-metrics PodMonitor still selects this pod and
+              still carries the release label Prometheus selects on; a monitor whose labels stop
+              matching podMonitorSelector disappears silently, which is the live state of strive-pg
+              (ailab#594).
         - alert: PostgresMetricsTargetDown
           # The audit measured this exporter FLAPPING (`Get ".../metrics": EOF`). Without this rule the
           # two alerts above go silent exactly when the database is unhealthy enough to stall its own

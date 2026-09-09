@@ -16,7 +16,17 @@ spec:
       rules:
         - alert: GatusEndpointDown
           # gatus_results_endpoint_success is a 0/1 gauge of the last check per endpoint.
-          expr: gatus_results_endpoint_success == 0
+          #
+          # `vllm-cloud2` is excluded BY NAME because it is expected-red for part of every day:
+          # the cloudlab GPU hosts power off nightly by design, and this rule has no notion of a
+          # maintenance window, so including it would page every night at 21:00 and train everyone
+          # to ignore the alert. Omitting the endpoint's own native `alerts:` block does NOT
+          # suppress this rule -- that was the mistake, caught in codex impl-review #10.
+          #
+          # The endpoint still exists and still shows red on the Gatus dashboard, which is what it
+          # is for. Anything added here that is deliberately down part of the day needs the same
+          # treatment, and a NEW exclusion needs its own justification on this comment.
+          expr: gatus_results_endpoint_success{name!="vllm-cloud2"} == 0
           for: 5m
           labels:
             severity: warning
