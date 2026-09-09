@@ -67,7 +67,7 @@ spec:
         - name: wait-for-install
           image: mirror.gcr.io/library/node:22
           env:
-            - { name: DSH_VERSION, value: "0.1.2-rc.1" }
+            - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
             - { name: DSH_BUILD, value: "glibc" }
           command: ["/bin/sh", "-c"]
           args:
@@ -179,7 +179,7 @@ spec:
           args:
             - exec "/app/${DSH_VERSION}-${DSH_BUILD}/node_modules/.bin/dsh" web --no-open --port 3080 --trusted-host dsh.chifor.me
           env:
-            - { name: DSH_VERSION, value: "0.1.2-rc.1" }
+            - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
             - { name: DSH_BUILD, value: "glibc" }
             # The LiteLLM credential, synced from OpenBao by External Secrets (openbao-eso.yaml).
             # settings.yaml references it as `apiKeyEnv: LITELLM_API_KEY` rather than embedding a
