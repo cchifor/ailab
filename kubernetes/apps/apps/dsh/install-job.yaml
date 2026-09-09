@@ -96,14 +96,25 @@ spec:
                 echo "uv already present: $(/app/tools/bin/uv --version)"
               else
                 mkdir -p /app/tools/bin
+                # The loop condition is the OUTCOME, not a command status. `curl ... | sh` is a
+                # pipeline whose status is sh's, and on a DNS or HTTP failure curl writes nothing
+                # while sh reads that empty input and exits 0 -- so the pipeline "succeeded", the
+                # first pass broke out, and the retry never happened on the one failure it exists
+                # to survive. dash has no `set -o pipefail` to lean on, so the download is a
+                # separate, checked step and the loop asks whether the binary actually appeared.
                 n=0
-                while [ $n -lt 3 ]; do
-                  if curl -LsSf https://astral.sh/uv/install.sh \
-                       | env UV_INSTALL_DIR=/app/tools/bin INSTALLER_NO_MODIFY_PATH=1 sh; then
-                    break
+                while [ ! -x /app/tools/bin/uv ] && [ $n -lt 3 ]; do
+                  n=$((n+1))
+                  if curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh; then
+                    env UV_INSTALL_DIR=/app/tools/bin INSTALLER_NO_MODIFY_PATH=1 sh /tmp/uv-install.sh || true
+                  else
+                    echo "uv download attempt ${n} failed"
                   fi
-                  n=$((n+1)); echo "uv install attempt $n failed; retrying"; sleep 5
+                  if [ ! -x /app/tools/bin/uv ] && [ $n -lt 3 ]; then
+                    echo "uv attempt ${n} produced no binary; retrying"; sleep 5
+                  fi
                 done
+                rm -f /tmp/uv-install.sh
                 if [ -x /app/tools/bin/uv ]; then
                   echo "uv installed: $(/app/tools/bin/uv --version)"
                 else
