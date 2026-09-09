@@ -123,3 +123,50 @@ tests:
       - eval_time: 11m
         alertname: VersitygwProbeStale
         exp_alerts: []
+
+  # ------------------------------------------------------------------ Failed, not PartiallyFailed
+  # The 2026-09-09 audit found that PartiallyFailed was alerted and FAILED was not.
+  # velero-daily-20260908020031 finished phase=Failed with 55 errors and zero objects stored, and
+  # raised no dedicated alert — only VeleroBackupStale, 37 hours later.
+  #
+  # The second case is why this uses increase(...[6h]) and not `> 0` on the lifetime counter: a raw
+  # counter never returns to zero, so the alert would latch forever after one failure and be
+  # silenced within the week. Flip the expression to `velero_backup_failure_total > 0` and that
+  # case fails.
+  - interval: 1m
+    name: a failed scheduled backup pages, and the alert clears once the failure ages out
+    input_series:
+      # One failure at t=0, then no further failures. increase() over 6h must decay to 0.
+      - series: 'velero_backup_failure_total{schedule="velero-daily"}'
+        values: "0 1+0x600"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: VeleroBackupFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              schedule: velero-daily
+            exp_annotations:
+              summary: "A scheduled Velero backup FAILED in the last 6h"
+              description: >-
+                A scheduled backup finished phase=Failed — not PartiallyFailed. Nothing usable was
+                written for that run, so the restore point does not exist. Check `kubectl -n velero
+                get backups.velero.io --sort-by=.status.startTimestamp` and the stored results
+                object; on 2026-09-08 the cause was the object store being unreachable, which
+                VersitygwProbeFailed should catch first.
+      # 6h+ after the single failure the window is empty again and the alert must resolve.
+      - eval_time: 400m
+        alertname: VeleroBackupFailing
+        exp_alerts: []
+
+  # An AD-HOC backup that fails is the operator's business, not a page. Drop the {schedule!=""}
+  # filter and this fires — the same trap already recorded for VeleroBackupValidationFailing.
+  - interval: 1m
+    name: an ad-hoc backup failure does not page
+    input_series:
+      - series: 'velero_backup_failure_total{schedule=""}'
+        values: "0 1+0x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: VeleroBackupFailing
+        exp_alerts: []

@@ -125,6 +125,30 @@ spec:
               labelled velero.io/exclude-from-backup and recorded in ADR 0010, not left to fail
               nightly.
 
+        # PartiallyFailed is alerted above; FAILED was not, which is the gap the 2026-09-09 audit
+        # found. velero-daily-20260908020031 finished phase=Failed with 55 errors and zero objects on
+        # the store, and raised no dedicated alert at all — the only rule that eventually caught it was
+        # VeleroBackupStale, at 36h + for:1h, i.e. 37 HOURS after the backup that did not happen.
+        # The counter is scraped and live (3 series); nothing referenced it.
+        #
+        # `increase(...[6h])`, not `> 0` on the lifetime counter: a raw counter stays non-zero forever
+        # after one failure, so the alert would never resolve and would be silenced within a week.
+        # {schedule!=""} for the same reason as the two rules around it — an ad-hoc `velero backup
+        # create` that fails is the operator's business, not a page.
+        - alert: VeleroBackupFailing
+          expr: increase(velero_backup_failure_total{schedule!=""}[6h]) > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "A scheduled Velero backup FAILED in the last 6h"
+            description: >-
+              A scheduled backup finished phase=Failed — not PartiallyFailed. Nothing usable was
+              written for that run, so the restore point does not exist. Check
+              `kubectl -n velero get backups.velero.io --sort-by=.status.startTimestamp` and the
+              stored results object; on 2026-09-08 the cause was the object store being unreachable,
+              which VersitygwProbeFailed should catch first.
+
         # Catches a BSL that fails validation while an older success keeps the staleness rule quiet.
         # {schedule!=""} matches the other rules in this group: the metric also carries a series
         # with an EMPTY schedule label for ad-hoc backups, so without the filter a hand-run
