@@ -259,14 +259,17 @@ The S3 data is never deleted by any step here, which is what makes every rollbac
 
 ## Acceptance criteria
 
-- [ ] Gitea serves, and Actions history from before the cutover is readable
-- [ ] A new CI run's artifact and log land on the PVC, not in S3
-- [ ] `app.ini` contains no `:7070` reference
-- [ ] Gitea cold-starts and serves with the endpoint blackholed (A1)
-- [ ] Gitea cold-starts and serves with versitygw stopped (A2), and the watchdog cron is restored
-- [ ] `VersitygwProbeFailed` fires during A2 and clears afterwards
-- [ ] A fresh GitHub fetch + apply succeeds with Gitea stopped (B)
-- [ ] All Kustomizations Ready at the end; `backup` layer healthy
+- [x] Gitea serves, and Actions history from before the cutover is readable
+- [x] A new CI run's artifact and log land on the PVC, not in S3
+- [x] `app.ini` contains no `:7070` reference
+- [x] Gitea cold-starts and serves with the endpoint blackholed (A1) — 22s
+- [x] Gitea cold-starts and serves with versitygw stopped (A2), and the watchdog cron is restored — 47s
+- [ ] `VersitygwProbeFailed` fires during A2 and clears afterwards — **NOT OBSERVED, accepted gap.**
+      A2 was deliberately shorter than the alert's ~14-minute detection path, so the window closed
+      before the rule could fire. Not evidence the rule is broken, and not evidence it works either:
+      the rule remains unexercised end-to-end. Tracked rather than silently ticked.
+- [x] A fresh GitHub fetch + apply succeeds with Gitea stopped (B) — 20s
+- [x] All Kustomizations Ready at the end; `backup` layer healthy
 
 <!-- codex: HIGH — Ready alone does not prove reconciliation/schedules were restored: suspended resources can retain earlier Ready conditions. Compare suspension flags, replicas, schedules and cron entries with saved states, remove fault rules/recovery tasks, and verify current source/Helm generations, successful probe recovery and resumed backup operation. -->
 
@@ -340,6 +343,26 @@ keys. So both directions were proved by fetching through the forge:
 
 A wrong prefix mapping would 404 rather than return bytes, so this also proves the mapping.
 
+**Both reviewers were still right that this was not enough**: two log samples say nothing about the
+8,982 artifacts, which were only count-matched — and the acceptance criterion above is specifically
+about an *artifact*. Count-equality is not retrievability, and extra destination objects can mask a
+missing source key in exactly the way the review said. So the artifacts were fetched back through
+the forge and checked, on 2026-09-09:
+
+| artifact | via | result |
+|---|---|---|
+| `live-ailab-e2e-26413` (id 19170, written **2026-09-09 07:01**, post-cutover) | `GET /repos/cchifor/platform/actions/artifacts/19170/zip` | HTTP 200, 2,889 bytes, valid zip, 2 entries / 19,532 bytes uncompressed, **CRC OK on every entry** |
+| `e2e-coverage-harvest` (id 19160) | `GET .../artifacts/19160/zip` | HTTP 200, 6,306,292 bytes, valid zip, **920 entries / 52,152,815 bytes uncompressed, CRC OK on every entry** |
+
+The zips decompress and every entry passes its CRC, so this is retrievability and integrity through
+Gitea, not a count. On the PVC itself: 7,808 artifact files, 8.4 GB, oldest 2026-08-08 (migrated
+history), newest 2026-09-09 07:01 (post-cutover writes landing locally) — which is the acceptance
+criterion, now dated rather than asserted.
+
+Still not claimed: per-key containment over the full 8,982-object set. Two artifacts and two logs
+are samples, chosen to cover both a migrated object and a new write. The 43 objects the pre-window
+write gap missed are **not** individually verified.
+
 ### A1 — Gitea cold-starts with the gateway unreachable
 
 My first attempt broke cluster DNS and crashlooped Gitea for ~5 minutes: an `ipBlock` allow-except
@@ -410,6 +433,23 @@ The versitygw `gitea` secret was exposed in a session transcript and has been ro
 generated locally, sent over the SSH channel's STDIN (never argv, which is visible in the NAS
 process table), verified by authenticating and listing 48,831 objects. The access key is unchanged —
 it is an identifier and it owns the bucket under versitygw's ownership-based authorisation.
+
+**On the sops version recorded in that file** (review finding): re-encrypting moved
+`gitea-actions-s3.sops.yaml` from `version: 3.13.1` to `3.9.4`, which does look like a regression.
+It is not skew this change introduced — the estate was *already* mixed, and there is no pinned sops
+version anywhere in the repo to have violated. Measured across every `*.sops.yaml` on `main`:
+
+| sops `version:` | files |
+|---|---|
+| 3.9.4 | 30 |
+| 3.13.1 | 25 |
+| 3.12.2 | 1 |
+
+So this file moved between two populations that already coexist, written by whichever operator host
+last touched each file. Nothing is broken by it: sops decrypts older and newer formats alike, every
+one of these files is decrypting in-cluster today, and the estate is running. The reviewer's
+underlying point still stands and is recorded here as a real follow-up — **pin a sops version and
+normalise all 56 files** — rather than being closed by asserting a pin that does not exist.
 
 ### Final state
 
