@@ -130,6 +130,29 @@ spec:
       # window rather than straddling the next one. The requirement is that a dead USB disk costs us
       # backups and an alert -- not four silent hours.
       fsBackupTimeout: 90m
+      # Raised from the `velero server` defaults (qps=20, burst=30) because those defaults are what
+      # made the 2026-09-09 post-recovery backup PartiallyFailed. Every one of its 37 errors was the
+      # same message -- "failed to list node-<n> pods: client rate limiter Wait returned an error:
+      # context deadline exceeded" -- and the cost was NOT cosmetic: 14 pods, including openbao-0 and
+      # tempo-0, had NO PodVolumeBackup created at all, so their volumes were silently absent from a
+      # backup that still reported 4090/4090 items.
+      #
+      # Velero issues one `list pods (fieldSelector spec.nodeName=...)` per pod volume to locate the
+      # node-agent, and those lists are NOT cached -- they queue behind the same client-side limiter
+      # as the 4090-item walk. At 20 qps the queue wait outlived the ItemBlock context. This estate is
+      # 7 nodes and a single apiserver VIP; 100/200 is far below anything the control plane notices,
+      # and rate limiting the BACKUP is never the behaviour we want -- a slow backup beats a silently
+      # incomplete one.
+      clientQPS: 100
+      clientBurst: 200
+      # Kopia's velero default is 1h, which on 27 BackupRepositories means 648 maintenance Jobs a day,
+      # every one of them doing real I/O against versitygw on the USB disk that wedged on 2026-09-08.
+      # Daily still keeps the repos compacted (Kopia's own full-maintenance cadence is 24h) at 1/24th
+      # the churn against the weakest component in the chain.
+      #
+      # NOTE: this is applied by the BackupRepository controller at repo INITIALISATION, so the 27
+      # repositories that already exist keep maintenanceFrequency=1h until patched; see the runbook.
+      defaultRepoMaintainFrequency: 24h
       # Every backup defaults to filesystem backup (Kopia reads the mounted pod volume and streams to
       # the object store). This is also the primary snapshot suppressor, and it is why ad-hoc
       # `velero backup create` runs are safe too: Velero's ShouldPerformSnapshot consults the
