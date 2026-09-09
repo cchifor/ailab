@@ -304,6 +304,25 @@ data:
         litellm_params:
           model: openai/gpt-5-mini
           api_key: os.environ/OPENAI_API_KEY
+      # --------------------------------------------------------------- always-on fallback route
+      # Added 2026-09-09. Both cloud routes above live on cloudlab hosts that POWER OFF NIGHTLY, so
+      # neither can back the other after hours -- .26 shares .28's outage window by design. node2 is
+      # an on-prem LXC that is always up, so it is the only honest terminal fallback in the estate.
+      #
+      # Registered here (it already exists in litellm-local for the agentforge workers) because
+      # fallbacks resolve against THIS proxy's model_list -- a name this router cannot see is not a
+      # fallback. Same family, different engine: llama.cpp, not vLLM, so it deliberately carries NONE
+      # of :18020's vLLM-only sampling (chat_template_kwargs / enable_thinking would 400 here).
+      #
+      # It is smaller and, with node2's ttl idle-unload, a first request may pay a cold model load.
+      # That is the correct trade against the alternative, which on 2026-09-08 was a 500 in the
+      # user's chat window with no second route to try.
+      - model_name: qwen3.6-35b-a3b-local
+        litellm_params:
+          model: openai/qwen3.6-35b-a3b
+          api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
+          api_key: "sk-noauth"
+        model_info: { supports_vision: true, max_input_tokens: 114688 }
     litellm_settings:
       drop_params: true
       # 900s to cover a llama-swap COLD START: the first request to an idle-unloaded heavyweight
@@ -333,6 +352,18 @@ data:
       # tokens on node1 while node2 sat idle). Per-replica in-memory view (2 litellm replicas each track
       # their own), so it is best-effort across the pair — still strictly better than random.
       routing_strategy: least-busy
+      # 2026-09-09: DEFAULT_MODELS and TASK_MODEL_EXTERNAL both resolved to :18020, which was
+      # ConnectionRefused from 2026-09-08T17:20Z with NO fallback configured -- so the estate's
+      # default chat model and its title/tag generation were both simply broken for a day. The host
+      # pinged and :22 was open; only the vLLM unit was down, and nothing watched it.
+      #
+      # Ordered deliberately: the daytime cloud route first (same family, comparable quality), then
+      # the always-on local route. Both cloud hosts power off nightly, so without the local entry the
+      # chain is empty exactly overnight. A fallback list whose members share an outage window is not
+      # a fallback list.
+      fallbacks:
+        - qwen3.8-27b-vllm-cloud: ["qwen3.5-122b-cloud", "qwen3.6-35b-a3b-local"]
+        - qwen3.8-27b-vllm-fast-cloud: ["qwen3.6-35b-a3b-local"]
       num_retries: 2
       allowed_fails: 2
       cooldown_time: 30
@@ -390,7 +421,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "1bf3ad1c4fb9"
+        checksum/config: "b80dc26b298c"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

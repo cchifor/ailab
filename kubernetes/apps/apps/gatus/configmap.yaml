@@ -105,6 +105,24 @@ data:
         url: http://litellm.ai.svc.cluster.local:4000/health/liveliness
         interval: 60s
         conditions: ["[STATUS] == 200"]
+      # The estate's DEFAULT chat model backend. Added 2026-09-09 after it sat ConnectionRefused
+      # from 2026-09-08T17:20Z and was discovered by a user, not by monitoring: DEFAULT_MODELS and
+      # TASK_MODEL_EXTERNAL both resolve here, LiteLLM had no fallback, and nothing probed the port.
+      # The two checks above cannot see it -- both gateways were perfectly healthy while the model
+      # behind them was not.
+      #
+      # /v1/models, not a TCP connect: the host stayed up and answered pings throughout: only the
+      # vLLM unit was down. A listener check would have passed the whole time.
+      #
+      # 300s, and no native `alerts:` block. This is a cloudlab host that POWERS OFF NIGHTLY by
+      # design, so it is expected-red for part of every day and must not page. It is here to make
+      # the state visible on the dashboard and to give the derived GatusEndpointDown path something
+      # to see during working hours -- deliberately not to wake anyone at 03:00.
+      - name: vLLM cloud2 (default chat model)
+        group: AI
+        url: http://192.168.0.28:18020/v1/models
+        interval: 300s
+        conditions: ["[STATUS] == 200"]
       # --- Observability ---
       # These four ARE the alerting pipeline, so each carries a native `alerts:` block that reaches
       # ntfy without Prometheus in the loop. Every other endpoint on this page relies on the derived
