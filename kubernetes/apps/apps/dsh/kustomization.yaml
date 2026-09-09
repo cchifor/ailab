@@ -23,8 +23,6 @@ configMapGenerator:
       - reconcile-provider.js
       - cordis.patch.yml
       - searxng-search.mjs   # the web SEARCH provider itself (see the file for why not npm)
-      # Rewrites the chat bundle's file-open action; run by the install Job, not the pod.
-      - patch-open-file.js
 
 # ONE source of truth for the version. It has to appear in the Deployment twice (the initContainer
 # that waits for the tree, and the container that execs it), and a hand-maintained triplicate is a
@@ -34,7 +32,7 @@ configMapGenerator:
 replacements:
   - source:
       kind: Job
-      name: dsh-install-0-1-2-rc-1-glibc
+      name: dsh-install-0-1-5-alpha-2-glibc
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_VERSION].value
     targets:
       - select: { kind: Deployment, name: dsh }
@@ -46,7 +44,7 @@ replacements:
   # would wait forever on a path the installer never creates. One source, three copies, derived.
   - source:
       kind: Job
-      name: dsh-install-0-1-2-rc-1-glibc
+      name: dsh-install-0-1-5-alpha-2-glibc
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_BUILD].value
     targets:
       - select: { kind: Deployment, name: dsh }

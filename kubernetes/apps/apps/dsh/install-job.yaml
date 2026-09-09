@@ -16,7 +16,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dsh-install-0-1-2-rc-1-glibc
+  name: dsh-install-0-1-5-alpha-2-glibc
   annotations:
     # A Job's spec.template is IMMUTABLE, so any edit Flux applies to this object under the SAME
     # name is rejected with "field is immutable" — which fails the whole dsh Kustomization, not
@@ -59,7 +59,7 @@ spec:
           # also lets npm build a native module from source when no prebuilt matches this platform.
           image: mirror.gcr.io/library/node:22
           env:
-            - { name: DSH_VERSION, value: "0.1.2-rc.1" }
+            - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
             # The install directory is keyed on version AND libc. Moving alpine -> Debian changes
             # musl -> glibc, and the existing /app/0.1.2-rc.1 tree was resolved by npm for musl;
             # reusing it would run platform-specific prebuilds against the wrong libc. The marker
@@ -135,15 +135,8 @@ spec:
               # version wrote it beside the install, which meant an OOM-killed or evicted Job could
               # leave a marker over a half-written node_modules and every later run would skip the
               # repair. Verify-then-mark, never mark-then-verify.
-              # ---- the chat bundle patch ----------------------------------------------------
-              # Applied on BOTH paths, and before the early exit can return. It is per-version,
-              # because it edits a file inside ${DEST}, so a fresh install needs it and an
-              # existing one may predate it. The patcher is idempotent and exits non-zero if its
-              # anchor is gone, which fails this Job rather than leaving a pod whose file links
-              # silently do nothing. See patch-open-file.js for why the click has to be rewritten.
               if [ -f "$MARKER" ] && [ -x "${DEST}/node_modules/.bin/dsh" ]; then
                 echo "already installed: ${DSH_VERSION}"
-                node /seed/patch-open-file.js "$DEST" || exit 1
                 exit 0
               fi
               [ -f "$MARKER" ] && echo "marker present but binary missing -- reinstalling" && rm -f "$MARKER"
@@ -151,11 +144,9 @@ spec:
               npm install --prefix "$DEST" --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}"
               test -x "${DEST}/node_modules/.bin/dsh"
               touch "$MARKER"
-              node /seed/patch-open-file.js "$DEST" || exit 1
               echo "installed:"; "${DEST}/node_modules/.bin/dsh" --version || true
           volumeMounts:
             - { name: app, mountPath: /app }
-            - { name: seed, mountPath: /seed, readOnly: true }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
@@ -165,7 +156,3 @@ spec:
             limits:   { cpu: "2",  memory: 2Gi }
       volumes:
         - { name: app, persistentVolumeClaim: { claimName: dsh-app } }
-        # The same generated ConfigMap the Deployment mounts, for patch-open-file.js. Its name
-        # carries a content hash, so editing the patcher re-runs this Job rather than leaving a
-        # stale copy behind.
-        - { name: seed, configMap: { name: dsh-relay, defaultMode: 0444 } }
