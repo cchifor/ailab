@@ -53,7 +53,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: authelia
-          image: ghcr.io/authelia/authelia:4.39.23
+          image: ghcr.io/authelia/authelia:4.39.24
           command: ["authelia"] # bypass the image entrypoint wrapper (it does `exec "$@"`)
           args:
             - "--config=/config/configuration.yml"
