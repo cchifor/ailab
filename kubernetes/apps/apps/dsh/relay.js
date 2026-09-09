@@ -40,6 +40,7 @@
 // its token) rather than failing shut and taking the UI offline.
 const http = require('http');
 const fs = require('fs');
+const nodePath = require('path');
 const { createHash, createHmac, timingSafeEqual } = require('crypto');
 
 const LISTEN = Number(process.env.RELAY_PORT || 8080);
@@ -225,7 +226,98 @@ function statusLines(res, extra) {
   return lines.join('\r\n') + '\r\n\r\n';
 }
 
+// ---------------------------------------------------------------------------------------------
+// FILE ROUTE. Clicking a produced file in the transcript used to raise
+//     path open failed: path open failed: spawn xdg-open ENOENT
+// because dsh answers that click by RPC-ing the HOST to run a desktop opener:
+//   ui-deliverables producedFileMentions() -> openFile() -> session.openWorkspacePath()
+//   -> openNativePath() -> spawn("xdg-open")
+// all of which happens SERVER-SIDE, in this pod. Installing xdg-utils would not have helped: at
+// best it would open the file on a machine in the cluster, never in the browser that clicked. dsh
+// does carry a capability probe (canOpenWorkspacePath), and the "Produced" chip row honours it,
+// but the inline filename mention in the message text calls openFile unconditionally and the
+// server's openWorkspacePath never consults its own canOpenPath() either -- so no setting could
+// switch it off.
+//
+// So the click is repointed at this route instead (kubernetes/apps/apps/dsh/patch-open-file.js
+// rewrites the client bundle), and the browser fetches the bytes over the tunnel it already has.
+//
+// SCOPE. Only files under DSH_FILE_ROOTS are served, compared after realpath on BOTH sides, so a
+// symlink pointing out of the volume is refused rather than followed. Traversal is not filtered
+// by pattern -- ../ is allowed to resolve and is then rejected by the containment check, which is
+// the check that actually holds.
+//
+// Everything reaching this port has already passed Cloudflare Access, and the NetworkPolicy
+// admits cloudflared alone, so this exposes the agent's own files to the one person already
+// authenticated to the agent. Responses carry a sandbox CSP and nosniff so that an SVG or HTML
+// artefact opened in a tab cannot script against the dsh origin it was served from.
+const FILE_ROUTE = '/__dsh-file';
+const FILE_ROOTS = (process.env.DSH_FILE_ROOTS || '/workspace:/dsh-home')
+  .split(':').filter((entry) => entry !== '');
+
+const CONTENT_TYPES = {
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.ico': 'image/x-icon',
+  '.pdf': 'application/pdf', '.json': 'application/json', '.txt': 'text/plain',
+  '.md': 'text/plain', '.csv': 'text/plain', '.log': 'text/plain', '.yaml': 'text/plain',
+  '.yml': 'text/plain', '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css',
+  '.js': 'text/plain', '.ts': 'text/plain', '.py': 'text/plain', '.sh': 'text/plain',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+};
+
+function refuse(res, status, message) {
+  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(message + '\n');
+}
+
+/** True when `real` is the root itself or genuinely beneath it (never a "/dsh-home-evil" prefix). */
+function within(real, root) {
+  let base;
+  try { base = fs.realpathSync(root); } catch { return false; }
+  return real === base || real.startsWith(base.endsWith(nodePath.sep) ? base : base + nodePath.sep);
+}
+
+function serveFile(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return refuse(res, 405, 'method not allowed');
+  let requested;
+  try { requested = new URL(req.url, 'http://dsh.invalid').searchParams.get('path'); }
+  catch { return refuse(res, 400, 'unparsable request'); }
+  if (requested === null || requested === '') return refuse(res, 400, 'missing ?path');
+
+  let real;
+  try { real = fs.realpathSync(requested); } catch { return refuse(res, 404, 'no such file'); }
+  if (!FILE_ROOTS.some((root) => within(real, root))) {
+    return refuse(res, 403, 'path is outside the served roots');
+  }
+  let stat;
+  try { stat = fs.statSync(real); } catch { return refuse(res, 404, 'no such file'); }
+  if (stat.isDirectory()) return refuse(res, 403, 'that is a directory');
+  if (!stat.isFile()) return refuse(res, 403, 'not a regular file');
+
+  // Quotes and backslashes are stripped from the filename rather than escaped: the name is only a
+  // download-save hint, and a header this small is not worth a quoting bug.
+  const name = nodePath.basename(real).replace(/["\\]/g, '');
+  const type = CONTENT_TYPES[nodePath.extname(real).toLowerCase()] || 'application/octet-stream';
+  res.writeHead(200, {
+    'content-type': type.startsWith('text/') || type === 'image/svg+xml' || type === 'application/json'
+      ? type + '; charset=utf-8' : type,
+    'content-length': stat.size,
+    'content-disposition': 'inline; filename="' + name + '"',
+    'x-content-type-options': 'nosniff',
+    'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+    'cache-control': 'no-store',
+  });
+  if (req.method === 'HEAD') return res.end();
+  const stream = fs.createReadStream(real);
+  stream.on('error', () => { if (!res.destroyed) res.destroy(); });
+  res.on('close', () => { if (!res.writableFinished) stream.destroy(); });
+  stream.pipe(res);
+}
+
 const server = http.createServer((req, res) => {
+  // Served HERE, not proxied: dsh has no such route, and the whole point is to answer the browser
+  // directly with bytes it can render.
+  if (req.url === FILE_ROUTE || req.url.startsWith(FILE_ROUTE + '?')) return serveFile(req, res);
   const upstream = http.request(
     { host: '127.0.0.1', port: TARGET, method: req.method, path: req.url, headers: withSession(req.headers) },
     (upstreamRes) => {
