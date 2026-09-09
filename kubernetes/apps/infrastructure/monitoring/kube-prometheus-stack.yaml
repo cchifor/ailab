@@ -159,9 +159,28 @@ spec:
               - name: prometheus-kube-prometheus-stack-prometheus-db
                 mountPath: /prometheus
                 subPath: prometheus-db # operator mounts the data here via this subPath; chmod THIS dir
+        # 2026-09-09 estate audit: this pod sat at 1.87-1.93 GiB against the old 2Gi limit (93-96%),
+        # with liveness probes ALREADY timing out — `Liveness probe failed: /-/healthy context
+        # deadline exceeded` x16 over 4h18m, and readiness x13 over 138m. failureThreshold 6 on a 5s
+        # period means ~30s of unresponsiveness restarts the alerting plane. Nothing alerted on it:
+        # of 213 rules, the only two mentioning container_memory are scoped to container="gitea" and
+        # namespace="strive-ailab". MonitoringContainerNearMemoryLimit (platform-rules.yaml) closes
+        # that; this gives the headroom.
+        #
+        # requests 1Gi -> 2Gi as well as the limit, per review: a 3Gi limit against a 1Gi request
+        # only ever SCHEDULES 1Gi, so the pod can be placed somewhere it cannot actually grow.
+        # talos-cp2 measured 11510Mi/21772Mi requested (55%) before this, so +1Gi lands ~60%.
+        #
+        # The explicit cpu LIMIT exists to defeat monitoring/limitrange.yaml, which defaults
+        # `cpu: 500m` onto every container in the namespace. The HelmRelease never asked for a CPU
+        # limit, and the injected one throttled this pod 7.6-19.5% CONTINUOUSLY over 12h against
+        # 0.109 cores of actual use — i.e. the LimitRange was throttling the component whose liveness
+        # probe was already failing. A LimitRange default only applies when the container sets none,
+        # so setting one here is the supported way out; 2 is generous against measured use and still
+        # bounds a runaway.
         resources:
-          requests: { cpu: 200m, memory: 1Gi }
-          limits: { memory: 2Gi }
+          requests: { cpu: 200m, memory: 2Gi }
+          limits: { cpu: 2, memory: 3Gi }
         # Per-node storage-fabric reachability: scrape each storage-fabric-probe DaemonSet pod's /probe
         # against the QNAP NFS(2049)+iSCSI(3260) ports → probe_success{job=storage-fabric-*, node=...}.
         # (See storage-fabric-probe.yaml + storage-fabric-rules.yaml.)

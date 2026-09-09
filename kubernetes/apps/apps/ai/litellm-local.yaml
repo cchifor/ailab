@@ -49,7 +49,12 @@ data:
           input_cost_per_token: 0.000001
           output_cost_per_token: 0.000001
         model_info:
-          supports_vision: true
+          # PRE-EXISTING and wrong, corrected 2026-09-09 while verifying the same backend for the
+          # main proxy's fallback chain. node2's llama-server does not pass --mmproj, so the live
+          # endpoint answers an image_url part with 500 "image input is not supported". The
+          # mmproj-F16.gguf file is on disk; it is simply never loaded. Advertising vision here made
+          # the gateway route image requests to a backend that cannot serve them.
+          supports_vision: false
           max_input_tokens: 114688
       # qwen3.5-122b REMOVED 2026-09-08. It moved to the cloudlab estate (cloud3, llama-swap on
       # 192.168.0.26) where 72 GiB of Q4_K_M weights fit entirely in 96 GiB of VRAM -- MEASURED
@@ -96,7 +101,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "f59983cff9c8"
+        checksum/config: "821ec1e003f5"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux

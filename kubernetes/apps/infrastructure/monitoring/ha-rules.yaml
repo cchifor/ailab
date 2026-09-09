@@ -2,7 +2,7 @@
 # ruleSelector picks it up. All alerts route to ntfy (catch-all receiver).
 #
 # Staging: CriticalWorkloadSingleReplica's regex lists only the workloads that are ALREADY multi-replica
-# — each app's HA PR extends it (grafana, authelia) and the infra-pg PR adds InfraPostgresSingleInstance.
+# — each app's HA PR extends it (grafana, authelia) and the infra-pg PR adds InfraPostgresPodCountLow.
 # Listing a workload before it runs >=2 replicas would page from day one.
 #
 # The singleton INVENTORY is a recording rule, NOT an alert: with repeat_interval 4h a permanently-firing
@@ -40,7 +40,16 @@ spec:
         # pods named <cluster>-<n> (no StatefulSet, so kube_statefulset_* is blind), and the cnpg_*
         # exporter metrics come from the PRIMARY's exporter (absent exactly when the primary is down).
         # `or on() vector(0)` so total absence (cluster deleted / all pods gone) still fires.
-        - alert: InfraPostgresSingleInstance
+        # RENAMED from InfraPostgresSingleInstance (2026-09-09). The name claimed more than the
+        # expression delivers, and that gap hid a 7-day outage: a standby whose WAL receiver is dead
+        # is still READY -- Postgres is up and serving read-only -- so this sum stayed at 2 while
+        # replication had been stopped since 2026-09-02 (slot wal_status=lost, 228 GB behind). The old
+        # annotation "authelia/grafana lose their DB if the survivor's node dies" described the
+        # estate's exact live state while the rule read `inactive`.
+        #
+        # This is a POD-COUNT alert and nothing more. Replication is covered by the three rules below,
+        # which watch the thing itself. Do not re-widen this name.
+        - alert: InfraPostgresPodCountLow
           expr: |
             (
               sum(kube_pod_status_ready{condition="true", namespace="databases", pod=~"infra-pg-[0-9]+"})
@@ -49,12 +58,98 @@ spec:
           for: 10m
           labels: { severity: critical }
           annotations:
-            summary: "infra-pg has fewer than 2 ready instances"
+            summary: "infra-pg has fewer than 2 ready POD instances"
             description: >-
-              The infra-pg CNPG cluster has had <2 ready instances for >10m — authelia/grafana lose
-              their DB if the survivor's node dies. Check `kubectl get cluster -n databases` /
+              Fewer than 2 infra-pg PODS are Ready for >10m. This counts pods, NOT replication: a pod
+              can be Ready while its WAL receiver is dead, which is exactly what happened
+              2026-09-02..09. For replication health see PostgresReplicaNotStreaming. Check
               `kubectl cnpg status infra-pg -n databases`; if a node is hard-down, see
               docs/runbooks/node-maintenance.md (out-of-service taint).
+
+        # ------------------------------------------------------------------ replication, for real
+        # These metrics were ALREADY SCRAPED and ALREADY LIVE throughout the 7-day outage --
+        # cnpg_pg_replication_lag{pod="infra-pg-3"} read 614312 seconds. Of 213 alerting rules, not one
+        # referenced them. The gap was never data; it was that nothing looked.
+        #
+        # The job label is `databases/infra-pg-metrics` -- the PodMonitor's own name. VERIFY IT before
+        # changing: an assumed `kube-prometheus-stack-cnpg` selector matches nothing in this estate and
+        # would reproduce the same silent blindness one level up.
+        - alert: PostgresReplicaNotStreaming
+          # The `and on(...) in_recovery == 1` join is load-bearing: a PRIMARY has no WAL receiver by
+          # definition, so without it this pages on every healthy cluster.
+          expr: |
+            cnpg_pg_replication_is_wal_receiver_up == 0
+              and on(namespace, pod) cnpg_pg_replication_in_recovery == 1
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: "{{ $labels.pod }} is a standby with no WAL receiver"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.pod }} is in recovery but its WAL receiver has been
+              down for >10m — it is NOT replicating, however Ready it looks. Left alone this ends in an
+              invalidated slot and a replica that can only be re-cloned; CNPG does NOT re-clone it for
+              you. Check `kubectl cnpg status <cluster> -n {{ $labels.namespace }}` and
+              pg_replication_slots.wal_status on the primary.
+        - alert: PostgresReplicationLagHigh
+          # 300s/10m, deliberately tighter than slot retention: at the measured 9.7-12.9 MiB/s peak WAL
+          # rate, max_slot_wal_keep_size=1GB is ~80 SECONDS of headroom. An alert that takes 30 minutes
+          # to fire cannot protect a slot that dies in 80 seconds.
+          expr: cnpg_pg_replication_lag > 300
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.pod }} replication lag is high"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.pod }} has been more than 300s behind for 10m. Act
+              before the slot passes max_slot_wal_keep_size — past that the WAL is gone and the only
+              repair is a full re-clone.
+        # `up == 0` catches a target that FAILS. It cannot catch a target that DISAPPEARS: if the
+        # PodMonitor stops selecting these pods -- a renamed label, a selector edit, the monitor
+        # deleted -- the `up` series vanish with it, every rule above then evaluates over nothing,
+        # and both pods sit Ready while nothing is watched. Absence looks identical to health.
+        #
+        # `unless on(...)` against kube-state-metrics is the only way to see that: kube_pod_status_ready
+        # comes from a DIFFERENT exporter, so it survives the CNPG monitor going away. Any infra-pg
+        # pod that is Ready but exports no cnpg_collector_up is unmonitored, whatever the reason.
+        # (codex impl-review #14; same shape as agentforge-coverage-rules.yaml for ailab#284.)
+        - alert: PostgresMetricsMissing
+          #
+          # `== 1` on the right-hand side is load-bearing: `unless` matches on series PRESENCE, not
+          # value, so a collector reporting cnpg_collector_up=0 -- scrape succeeds, collection fails
+          # -- would still suppress this alert. And because the HTTP scrape succeeded,
+          # PostgresMetricsTargetDown (up == 0) stays inactive too. The replication metrics are gone,
+          # both pods read Ready, and NOTHING fires. Comparing the value closes that hole.
+          # (codex review of #606.)
+          expr: |
+            kube_pod_status_ready{condition="true", namespace="databases", pod=~"infra-pg-[0-9]+"} == 1
+              unless on(namespace, pod) (cnpg_collector_up == 1)
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.pod }} is Ready but exports no CNPG metrics"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.pod }} has been Ready for >15m with no
+              cnpg_collector_up series, so PostgresReplicaNotStreaming, PostgresReplicationLagHigh and
+              PostgresMetricsTargetDown are all BLIND for it -- and blind here looks exactly like
+              healthy. Check that the databases/infra-pg-metrics PodMonitor still selects this pod and
+              still carries the release label Prometheus selects on; a monitor whose labels stop
+              matching podMonitorSelector disappears silently, which is the live state of strive-pg
+              (ailab#594).
+        - alert: PostgresMetricsTargetDown
+          # The audit measured this exporter FLAPPING (`Get ".../metrics": EOF`). Without this rule the
+          # two alerts above go silent exactly when the database is unhealthy enough to stall its own
+          # exporter — failing open, which is the failure mode this group exists to remove. Per-target
+          # `up == 0`, NOT a single absent(): one target failing while another still exports would slip
+          # past absent() entirely.
+          expr: up{job="databases/infra-pg-metrics"} == 0
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "infra-pg metrics target {{ $labels.instance }} is down"
+            description: >-
+              The CNPG exporter on {{ $labels.instance }} has been unscrapeable for >10m, so
+              PostgresReplicaNotStreaming and PostgresReplicationLagHigh are BLIND for that pod. Treat
+              this as loss of replication coverage, not as a metrics nuisance.
         # The drain-blocker signal (the strive-pg-primary allowed-disruptions=0 burn from the 2026-07-06
         # reboots): any PDB that cannot tolerate a single eviction for >1h will wedge `talosctl
         # shutdown`'s drain. `.*-primary` is excluded BY DESIGN: CloudNativePG's per-cluster primary PDB

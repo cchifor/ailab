@@ -54,3 +54,4 @@ resources:
   - gitea-rules.yaml # alerts on the Gitea forge (down / memory / restart) — critical master forge
   - ha-rules.yaml # ADR 0016 guardrails: Tier-A replica loss, PDB drain-blockers, unaccepted-singleton inventory
   - backup-rules.yaml # ADR 0010 chain: staleness of the off-site sync, Velero, and the Talos etcd snapshot — all three were unmonitored, and two were silently dead for 41d/5d
+  - platform-rules.yaml # 2026-09-09 audit: the two blind spots that were not workload-specific — the alerting plane OOMing unnoticed (of 213 rules, the only container_memory ones are scoped to gitea/strive-ailab), and a control-plane RESTART WAVE, which KubePodCrashLooping structurally cannot express because each container restarts once and recovers. Fixtures in platform-rules.test.yaml (NOT a resource — promtool only)

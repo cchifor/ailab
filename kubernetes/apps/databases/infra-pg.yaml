@@ -56,8 +56,29 @@ spec:
       # Default is -1 (unlimited): a stalled/diverged replica slot pins WAL until the volume fills —
       # the exact strive-pg 2026-07-21 near-crash, which got this cap in platform#120 while infra-pg
       # got nothing. 1GB (not strive-pg's 2GB) because data+WAL still share one volume here. Cost of
-      # hitting the cap: the lagging replica's slot is invalidated and CNPG re-clones it — strictly
-      # better than the primary running out of disk. Reload-only, no restart.
+      # hitting the cap: the lagging replica's slot is invalidated. Reload-only, no restart.
+      #
+      # CORRECTED 2026-09-09. This comment used to continue "...and CNPG re-clones it — strictly
+      # better than the primary running out of disk." The first clause is true; THE RE-CLONE IS NOT,
+      # and believing it is why a dead replica went unexamined for seven days.
+      #
+      # What actually happened: infra-pg-3 fell behind on 2026-09-02, the slot passed this cap and
+      # went wal_status=lost (228 GB behind), and CNPG 1.24.1 did NOT re-clone it. It sat
+      # FATAL-looping on "requested WAL segment ... has already been removed" while the cluster
+      # reported `readyInstances: 2, Cluster in healthy state` and the pod stayed 1/1 Ready. Seven
+      # days later there had been no re-clone and no operator action of any kind. Re-cloning is a
+      # MANUAL operation: `kubectl cnpg destroy <cluster> <n> --keep-pvc`.
+      #
+      # The cap itself is still right — losing a replica really is better than losing the primary —
+      # but it is NOT self-healing, and hitting it is an INCIDENT. PostgresReplicaNotStreaming
+      # (monitoring/ha-rules.yaml) is what makes that visible; before 2026-09-09 nothing did.
+      #
+      # DELIBERATELY NOT RAISED. 4GB was proposed and dropped: at the measured 9.7-12.9 MiB/s peak
+      # WAL rate it buys 5.3-7.0 minutes against ~13-minute documented node recovery paths, so it
+      # does not cover the case it would be justified by, while spending headroom on a volume that
+      # also holds the data. The real fix is WAL archiving, and that is blocked on #595 — archiving
+      # to the failing USB-backed gateway would let a stalled archive fill pg_wal and take the
+      # PRIMARY down, which is strictly worse than the current degraded-but-serving state.
       max_slot_wal_keep_size: 1GB
       # Default 100 was hit live 2026-08-07 ~17:45Z: the v3 broker rolling update's surge pods
       # (4 deployments × pools, old+new replicas concurrently) spiked past the cap and the last
@@ -133,6 +154,30 @@ spec:
         - CREATE DATABASE agentforge_broker OWNER agentforge_broker_admin;
   managed:
     roles:
+      # Read-only role for the nightly logical dump (infra-pg-dump-cronjob.yaml). Declared here so
+      # CNPG creates and reconciles it: the 2026-09-08 emergency dump used a HAND-MADE role whose
+      # creation was recorded nowhere, and an undocumented role is not a backup path that survives a
+      # rebuild.
+      #
+      # bypassrls is NOT optional and NOT redundant with inRoles. On 2026-09-08 the first attempt
+      # dumped each database as its OWNER and silently produced short dumps for agentforge_platform,
+      # because row-level security filtered rows the owner could not see. pg_read_all_data (PG14+)
+      # grants SELECT on everything but does NOT imply BYPASSRLS — both are required for a dump to
+      # be complete, and "complete" is the only property that matters here.
+      #
+      # login + read-only only: no superuser, no createdb, no createrole. It can read every row and
+      # change nothing.
+      - name: backup_dumper
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        bypassrls: true
+        inRoles:
+          - pg_read_all_data
+        passwordSecret:
+          name: infra-pg-dumper
       - name: authelia
         ensure: present
         login: true

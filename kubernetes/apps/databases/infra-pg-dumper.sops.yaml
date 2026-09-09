@@ -1,0 +1,47 @@
+# Credential for the `backup_dumper` role that infra-pg-dump-cronjob.yaml uses.
+#
+# The role itself is declared in infra-pg.yaml under spec.managed.roles, so CNPG creates and
+# reconciles it -- the 2026-09-08 emergency dump used a HAND-MADE role whose creation was recorded
+# nowhere, which is precisely the kind of artefact that does not survive a rebuild.
+#
+# It needs BOTH pg_read_all_data AND bypassrls: per-owner dumps on 2026-09-08 silently missed
+# RLS-protected rows in agentforge_platform, and pg_read_all_data alone does NOT imply BYPASSRLS.
+#
+# Encrypted by the catch-all .sops.yaml rule (encrypted_regex ^(data|stringData)$), so the payload
+# must live under stringData -- a top-level key would be committed in the clear.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-dumper
+    namespace: databases
+    labels:
+        # CNPG reloads a role's password Secret ONLY when it carries this label. Without it a rotated
+        # password sits in the Secret while the server still has the old one, so the CronJob
+        # authenticates with a credential the database was never told about and the backup fails on the
+        # next rotation -- silently, which is the class of failure this change exists to remove.
+        # (codex impl-review #9)
+        cnpg.io/reload: "true"
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:b+neQYaYjmt7IcE4dw==,iv:sfZI72cSK2N6SBzEAuARs00NdeQ8fNXsoxVa71vN03U=,tag:Reff8KqpJRETC5l1pk8p3Q==,type:str]
+    password: ENC[AES256_GCM,data:rPPZLYSgYsOpqgtjnl0VVrBT+I6Ffuiz0nbzZ+5b+xJJVIQ5G3XSaw==,iv:m2pv0dRrq4HuvkCpXU4PsDO5+7rVHb6qxz1UXOaB5eY=,tag:pyuyqg63oPxfYOjq6XxGtQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBwSmx6Z21kS3l4czlLaUtj
+            THBpb2t6N3ZydGtRbGNDOUNjR1pyU2ltMXg4CnBrc1ZTTnRyYVpLUFRHOGlOUlRn
+            TDJuYmgvTytsUFl0RVN5bEtxNTM0ckkKLS0tIGZONFZac2ovK2VIRVM3WEpITDZn
+            QmhEcnptTlQ2aWJlbU9KOFJpNGxDeWsKmnn2dpOGo2GPt5ZJFrqiDGcvuK82/uW7
+            TXyKaXJLLf76hnAqXtKdVqABH4ZUzyRYlE3QaGdgYCf41wYTk1PtlA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-09T12:43:16Z"
+    mac: ENC[AES256_GCM,data:ajYibFaCprCfn61EdiYCsd6CH6m4xOag1iQ1N4RbZMTb/rkE04n2TBw4rAIauKBEUxlxQwFRI7ivNvz/gtFNeSEku4I1HXLbZ46IMIbF7YmuNax6Dmd94y1lP6QgM1UN5shda9hVf15RZWBqncgf1EHZgo3sjuVj4HYJZ+YvG4s=,iv:YvE9e7y8XQQOmWhKzv2PnNQ2Z+e1jjulYUBvui0rlbk=,tag:HyKJtPZlfgnBq883IEWuBw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

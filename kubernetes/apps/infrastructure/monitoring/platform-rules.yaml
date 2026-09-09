@@ -1,0 +1,110 @@
+# Platform-health alerts from the 2026-09-09 estate audit — the two blind spots that were not
+# specific to any one workload.
+#
+# Both exist because an existing rule family COULD NOT express the failure, not because a threshold
+# was wrong. That distinction matters: retuning the existing rules would not have caught either.
+#
+#   1. The alerting plane can OOM without warning. Prometheus sat at 93-96% of its 2Gi limit with
+#      liveness probes already timing out, and of 213 alerting rules the only two mentioning
+#      container_memory are scoped `container="gitea"` and `namespace="strive-ailab"`. If Prometheus
+#      dies, the thing that would have told you is the thing that died.
+#
+#   2. At 2026-09-09 00:10-00:11Z, 24 containers across 10 namespaces terminated together — all four
+#      Flux controllers, all four Kyverno controllers, both cert-manager pods, cilium-operator,
+#      kube-controller-manager, kube-scheduler, cnpg-operator, keda, kro, the csi-nfs sidecars,
+#      snapshot-controller and kube-state-metrics. Every leader-elected controller in the cluster
+#      restarted at once, and NOT ONE alert in the 00:00-01:30Z window relates to it.
+#      KubePodCrashLooping structurally cannot catch this: each container restarted ONCE and came
+#      back, so nothing ever entered CrashLoopBackOff. Nothing in the estate expressed "many
+#      distinct things restarted at the same time".
+#
+# Fixtures in platform-rules.test.yaml (NOT a resource — promtool only).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-rules
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack # the operator's ruleSelector — without this the file is inert
+spec:
+  groups:
+    - name: platform-health
+      rules:
+        # Generic across the namespace on purpose: Prometheus is the pod that prompted it, but Loki,
+        # Alertmanager and kube-state-metrics share the same LimitRange and the same blind spot.
+        #
+        # Containers with NO limit fall out of the join by construction —
+        # kube_pod_container_resource_limits simply has no series for them — which is the behaviour
+        # we want: an unlimited container cannot be "near its limit".
+        #
+        # container!="" drops the pod-level cgroup rollup that cAdvisor also exports; without it every
+        # pod is double-counted and the ratio is computed against a limit that does not apply.
+        - alert: MonitoringContainerNearMemoryLimit
+          #
+          # `max by (...)` on BOTH sides, not a bare division: `/ on(...)` requires exactly one
+          # series per (namespace,pod,container) on each side, and duplicate cAdvisor identities
+          # during a pod replacement (old and new container IDs briefly coexist) make the
+          # evaluation fail outright rather than alert. Collapsing first is cheap and removes the
+          # whole class.
+          #
+          # `> 0` on the DENOMINATOR is load-bearing, not decoration: a limit reported as 0 divides
+          # to +Inf, which passes `> 0.9` forever and can never resolve — a permanently-firing
+          # alert nobody can silence except by deleting the rule. Filtering the denominator drops
+          # those series instead. (codex impl-review #12, #13)
+          expr: |
+            (
+              max by (namespace, pod, container) (
+                container_memory_working_set_bytes{namespace="monitoring", container!=""}
+              )
+                / on(namespace, pod, container)
+              max by (namespace, pod, container) (
+                kube_pod_container_resource_limits{namespace="monitoring", resource="memory"} > 0
+              )
+            ) > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }}/{{ $labels.container }} is near its memory limit"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.pod }} container {{ $labels.container }} has been
+              above 90% of its memory limit for 15m. If this is Prometheus, the alerting plane is
+              about to OOM and take every other alert with it — raise the limit in
+              kube-prometheus-stack.yaml rather than waiting for the restart. Check
+              `kubectl -n monitoring top pod` and the container's resources block.
+
+        # count(... > 0), NOT sum(...): a sum over restart counts is satisfied by ONE container
+        # restarting nine times, which is a crashloop and is already covered by KubePodCrashLooping.
+        # The condition this alert exists for is many DISTINCT containers restarting once each, so
+        # the thing to count is containers, not restarts.
+        #
+        # Namespaces are enumerated rather than matched on node, because "control-plane namespace" is
+        # the property that matters here and these nodes also run application workloads. Scope is
+        # deliberately the cluster-critical controllers observed in the 00:10Z wave.
+        - alert: ControlPlaneRestartWave
+          expr: |
+            count(
+              increase(
+                kube_pod_container_status_restarts_total{
+                  namespace=~"kube-system|flux-system|cert-manager|cnpg-system|kyverno|keda|kro-system|monitoring|trident|velero"
+                }[10m]
+              ) > 0
+            ) > 8
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $value }} control-plane containers restarted within 10 minutes"
+            description: >-
+              More than 8 DISTINCT control-plane containers restarted inside a 10-minute window. This
+              is the signature of an infrastructure-level event — an etcd stall, an apiserver
+              blackout, or a node blip — not of any one workload failing, and the per-pod crashloop
+              alerts cannot see it because each container restarts once and recovers. On 2026-09-09
+              this was 24 containers across 10 namespaces with no alert at all. Correlate with etcd
+              latency (`talosctl -n <cp> etcd status`, and the apply-request-took-too-long lines in
+              the Talos service log) before looking at any individual pod.
+              EXPECTED DURING PLANNED MAINTENANCE: a Talos upgrade or a deliberate control-plane
+              reboot restarts these controllers together and will trip this by design. Silence it
+              for the maintenance window rather than dismissing it — an operator who learns to
+              ignore this alert has lost the only signal that distinguishes a planned roll from an
+              etcd stall.

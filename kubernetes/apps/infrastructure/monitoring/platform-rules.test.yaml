@@ -1,0 +1,195 @@
+# `promtool test rules` fixtures for platform-rules.yaml. Run by scripts/rules-lint.sh on every PR.
+#
+# Both alerts here replace a rule family that COULD NOT express the failure, so the cases that
+# matter most are the ones asserting each alert does NOT fire for the shape the existing rules
+# already cover. If ControlPlaneRestartWave fired on a single crashlooping pod it would be a
+# duplicate of KubePodCrashLooping with a worse name.
+#
+# `rule_files` is the extracted spec name, because rules-lint.sh hands promtool the `spec:` body of
+# each PrometheusRule under the manifest's basename.
+rule_files:
+  - platform-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------- the 2026-09-09 00:10Z wave, frozen
+  - interval: 1m
+    name: many distinct containers restarting once each pages
+    input_series:
+      # Nine distinct containers across several control-plane namespaces, each restarting exactly
+      # ONCE. This is the real incident shape: nothing enters CrashLoopBackOff, so the per-pod
+      # crashloop rules stay silent.
+      - series: 'kube_pod_container_status_restarts_total{namespace="flux-system", pod="source-controller-1", container="manager"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="flux-system", pod="kustomize-controller-1", container="manager"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="flux-system", pod="helm-controller-1", container="manager"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="kyverno", pod="kyverno-admission-1", container="kyverno"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="kyverno", pod="kyverno-background-1", container="kyverno"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="cert-manager", pod="cert-manager-1", container="cert-manager"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="cnpg-system", pod="cnpg-operator-1", container="manager"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="keda", pod="keda-operator-1", container="keda"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="kube-system", pod="kube-scheduler-cp1", container="kube-scheduler"}'
+        values: "0x5 1+0x40"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ControlPlaneRestartWave
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "9 control-plane containers restarted within 10 minutes"
+              description: >-
+                More than 8 DISTINCT control-plane containers restarted inside a 10-minute window.
+                This is the signature of an infrastructure-level event — an etcd stall, an apiserver
+                blackout, or a node blip — not of any one workload failing, and the per-pod crashloop
+                alerts cannot see it because each container restarts once and recovers. On 2026-09-09
+                this was 24 containers across 10 namespaces with no alert at all. Correlate with etcd
+                latency (`talosctl -n <cp> etcd status`, and the apply-request-took-too-long lines in
+                the Talos service log) before looking at any individual pod. EXPECTED DURING PLANNED
+                MAINTENANCE: a Talos upgrade or a deliberate control-plane reboot restarts these
+                controllers together and will trip this by design. Silence it for the maintenance
+                window rather than dismissing it — an operator who learns to ignore this alert has
+                lost the only signal that distinguishes a planned roll from an etcd stall.
+      # The wave passes; once the restarts fall out of the 10m window this must resolve.
+      - eval_time: 40m
+        alertname: ControlPlaneRestartWave
+        exp_alerts: []
+
+  # ------------------------------------------------------- the trap: sum() vs count()
+  - interval: 1m
+    name: one container crashlooping many times does NOT page as a wave
+    input_series:
+      # A single container restarting 20 times, 2/min. sum(increase(...)) sits at ~20 for the whole
+      # window and fires; count of DISTINCT containers is 1 and must not. KubePodCrashLooping owns
+      # this case. The ramp is deliberately steep and the eval late enough to clear `for: 5m` --
+      # a shallower ramp passes under both aggregations and proves nothing.
+      - series: 'kube_pod_container_status_restarts_total{namespace="kube-system", pod="broken-1", container="app"}'
+        values: "0+2x10 20+0x30"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: ControlPlaneRestartWave
+        exp_alerts: []
+
+  # A normal rollout touching a handful of containers must also stay quiet.
+  - interval: 1m
+    name: a small rollout does not page
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="monitoring", pod="a-1", container="c"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="monitoring", pod="b-1", container="c"}'
+        values: "0x5 1+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="monitoring", pod="c-1", container="c"}'
+        values: "0x5 1+0x40"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ControlPlaneRestartWave
+        exp_alerts: []
+
+  # ------------------------------------------------------- memory headroom
+  - interval: 1m
+    name: a container over 90 percent of its limit pages, and drops out when it recovers
+    input_series:
+      # 1.95 GiB against a 2 GiB limit = 97.5%, i.e. the measured Prometheus state, then relieved
+      # by the limit being raised to 3 GiB (1.95/3 = 65%).
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="prometheus-0", container="prometheus"}'
+        values: "2093796557+0x40"
+      - series: 'kube_pod_container_resource_limits{namespace="monitoring", pod="prometheus-0", container="prometheus", resource="memory"}'
+        values: "2147483648x20 3221225472+0x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: MonitoringContainerNearMemoryLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: monitoring
+              pod: prometheus-0
+              container: prometheus
+            exp_annotations:
+              summary: "prometheus-0/prometheus is near its memory limit"
+              description: >-
+                monitoring/prometheus-0 container prometheus has been above 90% of its memory limit
+                for 15m. If this is Prometheus, the alerting plane is about to OOM and take every
+                other alert with it — raise the limit in kube-prometheus-stack.yaml rather than
+                waiting for the restart. Check `kubectl -n monitoring top pod` and the container's
+                resources block.
+      - eval_time: 39m
+        alertname: MonitoringContainerNearMemoryLimit
+        exp_alerts: []
+
+  # A container with NO limit must be excluded, not treated as infinitely over. Drop the join and
+  # this divides by nothing; use `or vector()` anywhere here and it pages forever.
+  - interval: 1m
+    name: a container with no memory limit never pages
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="unlimited-0", container="app"}'
+        values: "8000000000+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MonitoringContainerNearMemoryLimit
+        exp_alerts: []
+
+  # The pod-level cgroup rollup (container="") must not be counted: it has no matching limit series
+  # and would otherwise double-count every pod.
+  - interval: 1m
+    name: the pod-level cgroup rollup is excluded
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="prometheus-0", container=""}'
+        values: "2093796557+0x30"
+      - series: 'kube_pod_container_resource_limits{namespace="monitoring", pod="prometheus-0", container="prometheus", resource="memory"}'
+        values: "2147483648+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MonitoringContainerNearMemoryLimit
+        exp_alerts: []
+
+  # codex impl-review #13: a limit reported as ZERO divides to +Inf, which passes > 0.9 forever and
+  # can never resolve. Distinct from the absent-limit case above — absent drops out of the join,
+  # zero does not. Remove the `> 0` on the denominator and this case fires.
+  - interval: 1m
+    name: a container whose memory limit reads zero never pages
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="zero-0", container="app"}'
+        values: "500000000+0x30"
+      - series: 'kube_pod_container_resource_limits{namespace="monitoring", pod="zero-0", container="app", resource="memory"}'
+        values: "0+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MonitoringContainerNearMemoryLimit
+        exp_alerts: []
+
+  # codex impl-review #12: duplicate cAdvisor series for one container (old and new container IDs
+  # briefly coexist during a replacement) make a bare `/ on(...)` fail to evaluate rather than
+  # alert. With max by(...) on both sides the alert still fires correctly.
+  - interval: 1m
+    name: duplicate cadvisor series for one container still evaluate
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="dup-0", container="app", id="/a"}'
+        values: "2000000000+0x30"
+      - series: 'container_memory_working_set_bytes{namespace="monitoring", pod="dup-0", container="app", id="/b"}'
+        values: "1900000000+0x30"
+      - series: 'kube_pod_container_resource_limits{namespace="monitoring", pod="dup-0", container="app", resource="memory"}'
+        values: "2147483648+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MonitoringContainerNearMemoryLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: monitoring
+              pod: dup-0
+              container: app
+            exp_annotations:
+              summary: "dup-0/app is near its memory limit"
+              description: >-
+                monitoring/dup-0 container app has been above 90% of its memory limit for 15m. If
+                this is Prometheus, the alerting plane is about to OOM and take every other alert
+                with it — raise the limit in kube-prometheus-stack.yaml rather than waiting for the
+                restart. Check `kubectl -n monitoring top pod` and the container's resources block.

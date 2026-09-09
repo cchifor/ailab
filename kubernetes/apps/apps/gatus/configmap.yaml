@@ -105,6 +105,32 @@ data:
         url: http://litellm.ai.svc.cluster.local:4000/health/liveliness
         interval: 60s
         conditions: ["[STATUS] == 200"]
+      # The estate's DEFAULT chat model backend. Added 2026-09-09 after it sat ConnectionRefused
+      # from 2026-09-08T17:20Z and was discovered by a user, not by monitoring: DEFAULT_MODELS and
+      # TASK_MODEL_EXTERNAL both resolve here, LiteLLM had no fallback, and nothing probed the port.
+      # The two checks above cannot see it -- both gateways were perfectly healthy while the model
+      # behind them was not.
+      #
+      # /v1/models, not a TCP connect: the host stayed up and answered pings throughout -- only the
+      # vLLM unit was down -- so a listener check would have passed for the entire outage.
+      #
+      # It is NOT a completion request, which was raised in review as the stronger check and is
+      # deliberately not done: a completion every 300s occupies a shared GPU that real users are
+      # waiting on, and the failure this exists to catch was the process not serving at all
+      # (ConnectionRefused), which /v1/models detects. The residual gap is real and stated rather
+      # than hidden: a backend that answers /v1/models while completions fail will NOT be caught
+      # here. The LiteLLM fallback chain is what covers that case for users.
+      #
+      # `name: vllm-cloud2` is matcher-friendly on purpose -- prometheusrule.yaml excludes this
+      # endpoint from GatusEndpointDown by that exact string. Renaming it re-enables nightly pages.
+      #
+      # 300s and no native `alerts:` block, because this cloudlab host POWERS OFF NIGHTLY by design.
+      # It is here to make the state visible on the dashboard, not to wake anyone at 03:00.
+      - name: vllm-cloud2
+        group: AI
+        url: http://192.168.0.28:18020/v1/models
+        interval: 300s
+        conditions: ["[STATUS] == 200"]
       # --- Observability ---
       # These four ARE the alerting pipeline, so each carries a native `alerts:` block that reaches
       # ntfy without Prometheus in the loop. Every other endpoint on this page relies on the derived

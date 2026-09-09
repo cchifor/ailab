@@ -19,6 +19,8 @@ resources:
   - infra-pg-afp-admin.sops.yaml # basic-auth creds for afp_admin (DB owner, BYPASSRLS — admin_dsn)
   - infra-pg-afp-app.sops.yaml # basic-auth creds for afp_app (non-owner, NOBYPASSRLS — app_dsn)
   - infra-pg.yaml
+  - infra-pg-dumper.sops.yaml # credential for the backup_dumper role declared in infra-pg.yaml (spec.managed.roles) — needs pg_read_all_data AND bypassrls, because per-owner dumps silently missed RLS-protected rows on 2026-09-08
+  - infra-pg-dump-cronjob.yaml # the estate's independent recovery path: nightly pg_dump of EVERY database + globals, atomically published, plus the holder Deployment that keeps the PVC mounted so Velero's fs-backup can actually see it (an unmounted PVC is skipped, which is why the 2026-09-08 dump had zero PodVolumeBackups)
   # NB: do NOT add a `postgresql.cnpg.io/v1 Database` resource here. That CRD ships in CNPG >= 1.25 and
   # the estate operator is 1.24.1, so it fails dry-run — which fails the apply of this ENTIRE layer, not
   # just that one resource. That happened (00dd55a, 2026-07-16): `databases` wedged for 5 days, 27
