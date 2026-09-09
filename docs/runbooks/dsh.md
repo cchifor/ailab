@@ -67,8 +67,10 @@ monthly.
 **To get a fresh login URL:**
 
 ```bash
-P=$(kubectl -n dsh get pods --no-headers | grep -v install | grep Running | awk '{print $1}')
-TOK=$(kubectl -n dsh logs "$P" -c dsh | grep -oE 'token=[A-Za-z0-9_-]+' | head -1 | cut -d= -f2)
+# `deploy/dsh`, NOT a filtered pod list: searxng runs in this SAME namespace, is also Running
+# and has no "install" in its name, so a `grep -v install | grep Running` selector matches BOTH
+# and the resulting two-name $P breaks the very next command.
+TOK=$(kubectl -n dsh logs deploy/dsh -c dsh | grep -oE 'token=[A-Za-z0-9_-]+' | head -1 | cut -d= -f2)
 echo "https://dsh.chifor.me/?token=$TOK"
 ```
 
@@ -198,8 +200,11 @@ compatible, and **cannot be used here**:
 
 dsh resolves a row's `name:` from the **profile directory**, not the dsh install tree. That
 directory's `node_modules` is a symlink farm holding dsh's *own dependency closure* and nothing else
-— verified: 195 packages in `/app`, 193 in the farm, and the three absent ones are exactly those dsh
-does not depend on. An npm-installed sibling therefore throws `MODULE_NOT_FOUND`, `boot()` rethrows,
+— verified against the running pod: 195 entries in `/app/0.1.2-rc.1-glibc/node_modules`, 193 in the
+farm at `/dsh-home/profiles/node_modules`. Do not read 195 − 193 as the difference: the two sets are
+**not nested**. Three entries are in the install tree and absent from the farm (`@emnapi`,
+`@koromix`, `node-addon-require-builtin-linux-x64-gnu` — all native-addon plumbing dsh does not
+depend on), and one, `react-dom`, is in the farm but not the install tree. 195 − 3 + 1 = 193. An npm-installed sibling therefore throws `MODULE_NOT_FOUND`, `boot()` rethrows,
 and **the pod crash-loops**. It does not degrade to "search is broken"; the web UI goes down.
 
 A relative specifier resolves against that same directory, so a file works. It also removes the
@@ -296,8 +301,8 @@ The highest-value habit in this runbook. Resolve the patch against the running i
 throwaway `DSH_HOME`, which is non-destructive:
 
 ```bash
-P=$(kubectl -n dsh get pods --no-headers | grep -v install | grep Running | awk '{print $1}')
-kubectl -n dsh exec $P -c dsh -- sh -c '
+# Same reason as the login snippet: address the deployment, never a filtered pod list.
+kubectl -n dsh exec deploy/dsh -c dsh -- sh -c '
   mkdir -p /tmp/t/profiles/web
   cp /dsh-home/settings.yaml /tmp/t/settings.yaml
   cp /dsh-home/profiles/web/package.json /tmp/t/profiles/web/
