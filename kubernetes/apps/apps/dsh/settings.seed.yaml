@@ -22,6 +22,23 @@ llm-pi-ai:
       # "No connected db", verified from this pod 2026-09-07. Without it the provider is
       # registered but every model call fails, which is exactly how it behaved before.
       apiKeyEnv: LITELLM_API_KEY
+      # Bounds the BYTES of images carried in one request, not the count -- say that plainly,
+      # because it is the difference between this helping and this being theatre. dsh re-sends
+      # every image in the conversation on every turn, and when this budget is exceeded
+      # offloadRequestImagesWithPolicy (dsh-llm) replaces the OLDEST images with placeholders,
+      # front-only and in fixed quanta so the pruned prefix stays byte-stable and vLLM's prefix
+      # cache survives. Pruning from the tail instead would invalidate the cache every turn.
+      #
+      # WHAT IT DOES NOT DO: bound the COUNT. Attachments measured on this deployment run
+      # 2 KB-100 KB with a 40 KB median, so 64 images is ~2.6 MB and this budget never binds
+      # first at those sizes. The count is bounded by the server instead (MM_IMAGES=64 on cloud2,
+      # which is max_model_len/2048 and therefore the ceiling). This value exists for the other
+      # shape of the problem: a handful of large screenshots, where 8 x 1 MiB would otherwise eat
+      # the context before the image cap noticed.
+      #
+      # 8 MiB, down from the 20 MiB default. The adapter also caps each image at 1 MiB inside the
+      # request (requestImagePolicy.maxBytes), so this is ~8 worst-case images and ~200 typical.
+      maxRequestImageBytes: 8388608
       api: openai-completions
       baseURL: http://litellm.ai.svc.cluster.local:4000/v1
       models:

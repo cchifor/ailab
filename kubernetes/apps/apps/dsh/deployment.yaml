@@ -115,6 +115,10 @@ spec:
                 # later edit through the app. Observed: EACCES on the live volume, and the file
                 # sat at -r--r--r-- until it was chmod-ed by hand.
                 install -m 0644 /seed/settings.seed.yaml /dsh-home/settings.yaml
+              # $DSH_HOME/AGENTS.md is the user-global instruction file the agent-instructions
+              # row reads (USER_GLOBAL_FILE = "AGENTS.md"). Installed unconditionally like the
+              # settings above, so the deployment owns it rather than the volume.
+              install -m 0644 /seed/agents.seed.md /dsh-home/AGENTS.md
               fi
               # patchReload MUST NOT be "live" in a container or dsh crash-loops on FIRST boot.
               # MEASURED, not guessed -- see fix-profile.js for the mechanism and the evidence.

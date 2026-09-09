@@ -23,6 +23,8 @@ configMapGenerator:
       - reconcile-provider.js
       - cordis.patch.yml
       - searxng-search.mjs   # the web SEARCH provider itself (see the file for why not npm)
+      # User-global agent instructions, installed to $DSH_HOME/AGENTS.md.
+      - agents.seed.md
 
 # ONE source of truth for the version. It has to appear in the Deployment twice (the initContainer
 # that waits for the tree, and the container that execs it), and a hand-maintained triplicate is a
