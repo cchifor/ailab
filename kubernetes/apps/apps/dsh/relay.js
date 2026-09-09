@@ -290,20 +290,22 @@ function serveFile(req, res) {
   // Resolving /proc/self/fd/N names the inode THIS descriptor is pinned to, so the containment
   // decision and the bytes served cannot disagree.
   let fd;
-  try { fd = fs.openSync(requested, fs.constants.O_RDONLY); }
+  // O_NONBLOCK because a FIFO under /workspace -- which the agent can create -- would otherwise
+  // block this synchronous open until a writer appeared, freezing the single-threaded relay for
+  // every session on the pod. The refusal below only gets to run if the open returns at all.
+  try { fd = fs.openSync(requested, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK); }
   catch { return refuse(res, 404, 'no such file'); }
   const give = (status, message) => { fs.closeSync(fd); refuse(res, status, message); };
 
-  // /proc/self/fd is the Linux mechanism and the one that actually closes the race; the pod always
-  // has it. The fallback exists so this file is runnable (and testable) off Linux, and it resolves
-  // the PATHNAME instead, which reopens the TOCTOU window -- acceptable only because nothing but a
-  // developer workstation ever takes that branch.
+  // FAILS CLOSED. An earlier revision fell back to resolving the PATHNAME when /proc/self/fd was
+  // unavailable, which authorised this descriptor using a name resolved separately from it -- the
+  // very race the descriptor exists to close, and reachable on Linux too (an unlinked file
+  // resolves to "... (deleted)"). If the inode cannot be named, the request is refused rather than
+  // approved by another route. This costs the ability to run the file off Linux; it is tested in
+  // the pod instead, which is where it runs.
   let real, stat;
-  try {
-    stat = fs.fstatSync(fd);
-    try { real = fs.realpathSync('/proc/self/fd/' + fd); }
-    catch { real = fs.realpathSync(requested); }
-  } catch { return give(404, 'no such file'); }
+  try { stat = fs.fstatSync(fd); real = fs.realpathSync('/proc/self/fd/' + fd); }
+  catch { return give(404, 'no such file'); }
   if (stat.isDirectory()) return give(403, 'that is a directory');
   if (!stat.isFile()) return give(403, 'not a regular file');
   if (!FILE_ROOTS.some((root) => within(real, root))) {
@@ -356,6 +358,11 @@ function serveFile(req, res) {
   catch { fs.closeSync(fd); if (!res.destroyed) res.destroy(); return; }
 
   if (req.method === 'HEAD') { fs.closeSync(fd); return res.end(); }
+  // A zero-byte file leaves end at -1, and createReadStream rejects that SYNCHRONOUSLY with
+  // ERR_OUT_OF_RANGE -- thrown out of the request listener, past the stream error handler below,
+  // into uncaughtException. An empty produced file is entirely ordinary (touch, an empty log) and
+  // clicking one would have taken the relay down for every session.
+  if (stat.size === 0) { fs.closeSync(fd); return res.end(); }
   const stream = fs.createReadStream(null, { fd, start, end, autoClose: true });
   stream.on('error', () => { if (!res.destroyed) res.destroy(); });
   res.on('close', () => { if (!res.writableFinished) stream.destroy(); });
