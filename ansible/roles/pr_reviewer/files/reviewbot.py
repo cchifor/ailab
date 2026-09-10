@@ -712,17 +712,28 @@ RATE_LIMIT_RE = re.compile(r"\b(session|usage|rate|weekly|daily|monthly)[ _-]?li
 # weekly limit`, which is account-scoped, and would silently convert a correct park back
 # into the doomed-fallback loop this whole change exists to remove.
 #
-# Kept to the two words COMMON to both observed phrasings, because the estate has already
-# produced two and will produce more:
-#   "...Run /usage-credits to continue or switch models with /model."   (2026-09-06)
-#   "...Run /usage-credits to keep using Fable 5 or /model to switch models."  (2026-09-10)
-# An earlier cut of this pattern required the literal `switch models with /model` and missed
-# the second one within hours of being written.
+# TWO tokens, both required, because ONE of them is not evidence. reviewer-claude on
+# ailab#634 caught the exposure this closes: this pattern is searched against
+# llm_error_text(), whose detail is built from the envelope's `subtype`/`error`/`result` -
+# and `result` is where MODEL-AUTHORED text lands. A bare `switch models` can therefore
+# arrive as review prose rather than as the CLI's remedy, and since the predicate reads
+# `not MODEL and RATE`, a spurious match SUPPRESSES a legitimate park, reopening the exact
+# incident this change exists to fix. That is the mirror image of the "rate limiter" false
+# positive closed on RATE_LIMIT_RE above, and it deserved the same care.
+#
+# `/usage-credits` is the discriminator: a slash command the CLI emits, present in BOTH
+# observed phrasings, and absent from ordinary prose about switching models.
+#   "...Run /usage-credits to continue or switch models with /model."         (2026-09-06)
+#   "...Run /usage-credits to keep using Fable 5 or /model to switch models." (2026-09-10)
+# Requiring both in EITHER order keeps every real message matching while making an accidental
+# match need two distinctive tokens in one 300-char envelope rather than two ordinary words.
+# The order is deliberately not fixed: an earlier cut required the literal `switch models
+# with /model` and missed the second phrasing within hours of being written.
 #
 # Getting this backwards is not symmetric. Treating a model limit as account-scoped parks a
 # persona that could still review (the fallback rescued all 463 occurrences measured over
 # 4 days from 2026-09-06); treating an account limit as model-scoped is what just happened.
-MODEL_LIMIT_RE = re.compile(r"\bswitch models?\b", re.I)
+MODEL_LIMIT_RE = re.compile(r"(?=.*\bswitch models?\b)(?=.*/usage-credits\b)", re.I | re.S)
 # "…resets 4:20pm (UTC)" / "resets 11:20am (UTC)" / "resets 2am (UTC)"
 # MINUTES ARE OPTIONAL: the weekly-limit message renders a whole hour with no `:00`, so the
 # original pattern parsed nothing and the park fell back to DEFAULT_PARK_S - a 15-minute

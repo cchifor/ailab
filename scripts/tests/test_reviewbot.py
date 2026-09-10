@@ -880,11 +880,44 @@ class LimitScopeTest(unittest.TestCase):
     def test_model_scope_wins_over_account_scope(self):
         """Precedence, pinned on its own: if a message ever matched BOTH, falling back is the
         recoverable choice and parking is not."""
-        both = "You've reached your weekly limit - switch models with /model"
+        # Must carry BOTH remedy tokens, or it is not the CLI's remedy at all - that is
+        # what the tightening in ailab#634 established, and a weaker example here would
+        # assert the precedence against a message that no longer matches MODEL_LIMIT_RE.
+        both = ("You've reached your weekly limit. Run /usage-credits to continue "
+                "or switch models with /model.")
         self.assertTrue(self.m.MODEL_LIMIT_RE.search(both))
         self.assertTrue(self.m.RATE_LIMIT_RE.search(both))
         self.assertFalse((not self.m.MODEL_LIMIT_RE.search(both))
                          and bool(self.m.RATE_LIMIT_RE.search(both)))
+
+    def test_review_prose_cannot_SUPPRESS_a_real_park(self):
+        """reviewer-claude on ailab#634, and the mirror of the test below.
+
+        MODEL_LIMIT_RE is searched against llm_error_text(), whose detail includes the
+        envelope's `result` - i.e. MODEL-AUTHORED text. Since the predicate is `not MODEL and
+        RATE`, a spurious MODEL match suppresses a park that should happen, which is how this
+        incident started. A genuine account-limit message that merely happens to carry the
+        words `switch models` - a review of THIS file would - must still park."""
+        text = ("llm exit 1: subtype=success result=You've hit your weekly limit \u00b7 resets "
+                "2am (UTC). The reviewer suggested we switch models for the next run. "
+                "[stderr: empty]")
+        self.assertTrue(self.m.RATE_LIMIT_RE.search(text))
+        self.assertIsNone(self.m.MODEL_LIMIT_RE.search(text),
+                          "bare 'switch models' prose must not read as the CLI's remedy")
+        self.assertTrue((not self.m.MODEL_LIMIT_RE.search(text))
+                        and bool(self.m.RATE_LIMIT_RE.search(text)),
+                        "a real account limit must still park")
+
+    def test_the_remedy_needs_both_tokens_in_either_order(self):
+        """Both observed phrasings carry `/usage-credits` AND `switch models`, in opposite
+        orders - so neither order may be hard-coded, and neither token alone may qualify."""
+        for text in (LIMIT_MESSAGES[2][1], LIMIT_MESSAGES[3][1]):
+            with self.subTest(text=text[:52]):
+                self.assertIsNotNone(self.m.MODEL_LIMIT_RE.search(text))
+        for half in ("Run /usage-credits to continue.", "you could switch models instead"):
+            with self.subTest(half=half):
+                self.assertIsNone(self.m.MODEL_LIMIT_RE.search(half),
+                                  "one token alone is not the CLI's remedy")
 
     def test_ordinary_review_prose_does_not_park_the_persona(self):
         """A park is GLOBAL to the persona - it stops every repo, not one PR - so a false
