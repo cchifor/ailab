@@ -53,7 +53,23 @@ Secret.
 
 **KV layout** (mount `af`, KV v2 — the same mount ADR 0019 uses):
 
-- `af/dev-workers/common` — shared across all six. First field: `gitea_pat`.
+- `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `proxmox_ssh_key`.
+
+  `proxmox_ssh_key` is an Ed25519 PRIVATE key (comment `agent@dev-workers`) whose public half is in
+  `/root/.ssh/authorized_keys` on cloud1/cloud2/cloud3. It exists because an agent had no way to
+  reach a Proxmox host: `scripts/node-ssh.py` tries key auth and falls back to `NODE_ROOT_PASSWORD`
+  from a gitignored `.env`, and that password lives at `af/estate/proxmox`, which NO dev-worker
+  policy can read — deliberately (see `openbao-estate-credentials.md` § Access).
+
+  A key rather than that password, on purpose: revoking it is one line out of `authorized_keys` on
+  three hosts, where revoking the shared root password means rotating every home in the estate
+  table — `.env` plus five gitignored tfvars files plus the values typed into the root@pam gate.
+  It is still root on the hypervisors; it is the blast radius of a compromise that differs, not the
+  privilege.
+
+  NOT installed on the ailab Proxmox nodes (192.168.0.2/.3/.4). Those accept no operator key either
+  — `authorized_keys` there holds only inter-node RSA keys — so anything reaching them still uses
+  the password fallback. Extending this key to them is a separate decision.
 - `af/dev-workers/<inventory_hostname>` — per-worker. Empty today; this is where per-worker Gitea bot
   PATs land (ADR 0020 follow-up).
 
