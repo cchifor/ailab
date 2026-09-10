@@ -83,6 +83,16 @@ never has to print a secret value in order to use it.
    untouched. This is what makes the subtree self-heal after a wipe, and it is why rotating a seeded
    value only in the vault gets reverted on the next daily run.
 
+   *Amendment (2026-09-10, ADR 0021) — the "self-heals after a wipe" half no longer covers the whole
+   subtree.* `af/dev-workers/<hostname>.tep_kubeconfig` and `.helmtest_kubeconfig` are **sync-owned**:
+   written by the `openbao-k8stoken-sync` CronJob and deliberately **absent from the seed**, because
+   a seeded copy of a bearer token would be re-applied daily by this seed-wins loop and revert every
+   worker to a stale credential. They are cluster-derived, so no operator action re-creates them —
+   but they ARE lost until a successful sync, and the workers' agents fail-exit on a missing field,
+   so the post-wipe order is: vault + auth role → sync → AppRole re-mint → restart agents. The
+   seed-wins contract above is unchanged for every field that IS seeded; canonical statement of all
+   four precedences: `docs/runbooks/openbao-recovery.md` § "Post-wipe handling, by path class".
+
    *Correction of record (documentation only — the decision above is unchanged and still live):* this
    was written as "the same contract as `operator-seeds.sops.yaml`". That parity has since been
    broken on the **operator** side, not here. `_apply_operator_seeds` is now **create-if-absent** — a

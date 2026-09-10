@@ -1,5 +1,15 @@
 # testpool — the leasable test-environment pool
 
+> **This namespace is for LEASING, not deploying.** `tep-worker` grants sandboxclaim CRUD,
+> read-only pods/sandboxes, and exec/attach/portforward — no create on secrets, deployments or pods,
+> so `helm install` cannot work here and is not meant to. That is deliberate: pod-create in this
+> namespace would let an agent schedule a plain pod alongside the Kata-isolated leases and bypass
+> the boundary the pool exists to provide.
+>
+> **To deploy a chart, use `helmtest-dw<N>`** — six per-worker namespaces with PSA `restricted`, a
+> quota, and a Helm-capable Role: `kubernetes/apps/infrastructure/helmtest/`,
+> `docs/runbooks/helmtest.md`, ADR 0021. Agents reach it with `~/.helmtest/kubeconfig`.
+
 Design: agentforge repo, `plans/2026-09-01-test-env-pool-k8s-plan.md` (codex-finalized; spikes
 0-4 PASSED — see `kubernetes/infra/env-pool/SPIKE-REPORT.md`). Agents on the dev-workers lease a
 pristine Kata DinD environment (`tep lease`), sync a worktree over exec, run suites *inside* it,
