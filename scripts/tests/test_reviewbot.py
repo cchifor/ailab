@@ -822,6 +822,116 @@ REAL_LIMIT_TEXT = ("llm exit 1: subtype=success result=You've hit your session l
                    "resets 4:20pm (UTC) [stderr: empty]")
 
 
+# The three limit messages this estate has actually produced, verbatim from the journal, with
+# the action each one REQUIRES. They are not interchangeable: two are account-scoped and must
+# park, one is model-scoped and must fall back. Table-driven precisely because the previous
+# code had a single regex and therefore a single answer for all three.
+LIMIT_MESSAGES = [
+    # (label, error text, expect_park)
+    ("weekly/account",
+     "llm exit 1: subtype=success result=You've hit your weekly limit \u00b7 "
+     "resets 2am (UTC) [stderr: empty]", True),
+    ("session/account",
+     "llm exit 1: subtype=success result=You've hit your session limit \u00b7 "
+     "resets 4:20pm (UTC) [stderr: empty]", True),
+    ("Fable 5/model (2026-09-06 wording)",
+     "llm exit 1: subtype=success result=You've reached your Fable 5 limit. Run "
+     "/usage-credits to continue or switch models with /model. [stderr: empty]", False),
+    # Found live on 2026-09-10 while repointing reviewer-1 at an account with quota. Same
+    # meaning, different sentence - and it did NOT match a pattern written for the first one
+    # hours earlier, which is why MODEL_LIMIT_RE is anchored on the two words they share.
+    ("Fable 5/model (2026-09-10 wording)",
+     "llm exit 1: subtype=success result=You're out of usage credits. Run /usage-credits "
+     "to keep using Fable 5 or /model to switch models. [stderr: empty]", False),
+]
+
+
+class LimitScopeTest(unittest.TestCase):
+    """Park or fall back is decided by the SCOPE of the limit, never by the word "limit".
+
+    THE INCIDENT (2026-09-10, ailab#633): reviewer-1's account hit `You've hit your weekly
+    limit \u00b7 resets 2am (UTC)`. RATE_LIMIT_RE matched only session/usage/rate, so instead
+    of parking, _run_llm() took the fallback branch and ran `opus` on the SAME exhausted
+    account - 45 times, zero parks, and jobs quarantined at attempt 5 against a limit 13 hours
+    from resetting.
+
+    THE TRAP IN FIXING IT: the obvious repair - match any "...limit" - is worse than the bug.
+    `You've reached your Fable 5 limit ... switch models with /model` is MODEL-scoped, was seen
+    463 times over 4 days from 2026-09-06, and the fallback rescued every single review. Parking
+    on it would convert a non-incident into an outage. Hence MODEL_LIMIT_RE, checked first, and
+    anchored on the CLI's own remedy ("switch models with /model") rather than on "reached your
+    ... limit" - which would also match "reached your weekly limit" and reintroduce the bug."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_each_real_message_selects_the_right_action(self):
+        for label, text, expect_park in LIMIT_MESSAGES:
+            with self.subTest(label=label):
+                model = bool(self.m.MODEL_LIMIT_RE.search(text))
+                account = bool(self.m.RATE_LIMIT_RE.search(text))
+                # This is the exact predicate _run_llm() uses.
+                parks = (not model) and account
+                self.assertEqual(expect_park, parks,
+                                 "%s: model=%s account=%s" % (label, model, account))
+
+    def test_model_scope_wins_over_account_scope(self):
+        """Precedence, pinned on its own: if a message ever matched BOTH, falling back is the
+        recoverable choice and parking is not."""
+        both = "You've reached your weekly limit - switch models with /model"
+        self.assertTrue(self.m.MODEL_LIMIT_RE.search(both))
+        self.assertTrue(self.m.RATE_LIMIT_RE.search(both))
+        self.assertFalse((not self.m.MODEL_LIMIT_RE.search(both))
+                         and bool(self.m.RATE_LIMIT_RE.search(both)))
+
+    def test_ordinary_review_prose_does_not_park_the_persona(self):
+        """A park is GLOBAL to the persona - it stops every repo, not one PR - so a false
+        positive is expensive. These are the near-misses the word boundaries exist for."""
+        for text in ("This PR adds a rate limiter; the daily limitation is documented.",
+                     "raise the concurrency limits for the weekly digest job",
+                     "delimit the field with a comma"):
+            with self.subTest(text=text[:34]):
+                self.assertFalse(
+                    (not self.m.MODEL_LIMIT_RE.search(text))
+                    and bool(self.m.RATE_LIMIT_RE.search(text)),
+                    "would have parked the whole persona on: %s" % text)
+
+    def test_a_bare_hour_reset_is_parsed_not_discarded(self):
+        """`resets 2am (UTC)` carries a real reset time. RESET_RE used to require HH:MM, so it
+        parsed nothing and park() fell back to DEFAULT_PARK_S - a 15-minute retry loop against
+        a limit 13 hours out."""
+        at = self.m.parse_reset("You've hit your weekly limit \u00b7 resets 2am (UTC)")
+        self.assertIsNotNone(at, "a whole-hour reset must still parse")
+        self.assertEqual((2, 0), real_time.gmtime(at)[3:5])
+        self.assertGreater(at, real_time.time())
+
+    def test_optional_minutes_did_not_break_the_HH_MM_form(self):
+        for text, hhmm in (("resets 4:20pm (UTC)", (16, 20)),
+                           ("resets 11:20am (UTC)", (11, 20)),
+                           ("resets 12:30am (UTC)", (0, 30)),
+                           ("resets 9am (UTC)", (9, 0)),
+                           ("resets 12pm (UTC)", (12, 0)),
+                           ("resets 12am (UTC)", (0, 0))):
+            with self.subTest(text=text):
+                self.assertEqual(hhmm, real_time.gmtime(self.m.parse_reset(text))[3:5])
+
+    def test_a_bare_hour_reset_does_not_raise(self):
+        """int(None) on the now-optional minutes group would surface as an ordinary failure and
+        defeat the park on exactly the messages RESET_RE was widened to read."""
+        for text in ("resets 2am (UTC)", "resets 2 (UTC)", "resets 23 (UTC)"):
+            with self.subTest(text=text):
+                self.m.parse_reset(text)  # must not raise
+
+    def test_a_parked_persona_still_never_consumes_an_attempt(self):
+        """The property the whole park exists for, re-asserted for the weekly wording."""
+        text = LIMIT_MESSAGES[0][1]
+        e = self.m.RateLimited(text, self.m.parse_reset(text))
+        state, attempts, timeouts, note = self.m.next_failure_state(e, 4, 1)
+        self.assertEqual(("retry", 4, 1), (state, attempts, timeouts))
+
+
 class RateLimitTest(unittest.TestCase):
     """A subscription rate limit is an ACCOUNT condition, not a PR failure.
 
