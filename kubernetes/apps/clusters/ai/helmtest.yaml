@@ -1,0 +1,26 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: helmtest
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  # Six per-worker Helm deploy namespaces (ADR 0021). No dependsOn: these are plain core objects plus
+  # one CiliumNetworkPolicy and one Kyverno ClusterPolicy, whose CRDs are established long before this
+  # layer. wait:false matches testpool/openbao — a namespace tree has no meaningful readiness, and a
+  # Kustomization that waits on one can only wedge the layer.
+  #
+  # ORDERING vs the token sync: openbao-k8stoken-sync (in the `openbao` Kustomization) mints tokens
+  # against the ServiceAccounts this tree creates. Neither Kustomization waits, so nothing here proves
+  # the SAs exist when the sync first runs — deliberately NOT solved with a dependsOn (that would
+  # couple the vault layer to this one and invites a cycle). The sync retries on a missing SA and only
+  # reports success once all twelve fields validate; Phase 3's rollout gate consumes that success. The
+  # sequencer is the gate, not Flux.
+  path: ./kubernetes/apps/infrastructure/helmtest
+  prune: true
+  wait: false

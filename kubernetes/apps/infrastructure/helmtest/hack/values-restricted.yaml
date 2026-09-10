@@ -1,0 +1,69 @@
+# Reusable PSA-`restricted` overlay for charts installed into helmtest-dw<N>.
+#
+#   helm --kubeconfig ~/.helmtest/kubeconfig upgrade --install <rel> <chart> \
+#        -f values-restricted.yaml --history-max 3 --wait
+#
+# WHY THIS FILE EXISTS: `restricted` does not merely reject privileged pods — it rejects any container
+# that fails to OPT IN to all four settings below, which most upstream charts do not do by default.
+# The four are: runAsNonRoot, allowPrivilegeEscalation:false, capabilities.drop:[ALL], and
+# seccompProfile RuntimeDefault. They must be set on EVERY container, including initContainers and
+# Helm hook pods — a chart that sets them on its Deployment but not its test hook installs fine and
+# then fails `helm test` with a PodSecurity error, which reads like a broken test rather than a
+# broken values file.
+#
+# CAVEAT: chart authors do not agree on where these keys live. The block below covers the two common
+# conventions (`podSecurityContext` + `containerSecurityContext`, and `securityContext` nested under a
+# component). For anything else, read the chart's values.yaml — there is no universal shape, and this
+# file is a starting point rather than a guarantee. `helm template <chart> -f values-restricted.yaml`
+# then grepping the rendered output for the four settings is the check that actually proves it.
+
+# --- convention A: top-level pod + container security contexts -------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+# --- convention B: a single `securityContext` key (many Bitnami-style charts) ----------------------
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+# --- service type is quota-enforced, not merely discouraged ----------------------------------------
+# services.nodeports and services.loadbalancers are BOTH quota'd to 0 in these namespaces, so a chart
+# defaulting to LoadBalancer (Bitnami's nginx does) is rejected at admission with a quota error.
+service:
+  type: ClusterIP
+
+# --- charts that ship their own NetworkPolicy ------------------------------------------------------
+# helmtest-deployer cannot create NetworkPolicies (the boundary is platform-owned), so a chart that
+# ships one fails to install. Disable it; same-namespace traffic is already allowed by the platform
+# CiliumNetworkPolicy.
+networkPolicy:
+  enabled: false
+
+# --- charts that ship RBAC or CRDs -----------------------------------------------------------------
+# Namespaced Roles/RoleBindings ARE permitted, but only granting permissions helmtest-deployer itself
+# holds (the API server's escalation check). A chart Role wanting `events` create, `endpoints` get, or
+# coordination.k8s.io leases will be REJECTED. Nothing cluster-scoped works at all.
+rbac:
+  create: false
+serviceAccount:
+  create: true

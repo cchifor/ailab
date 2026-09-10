@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/name: smoke-chart
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: smoke-chart
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: smoke-chart
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        # Changing the pod template on every `--set rev=N` is what makes the upgrade loop produce
+        # real new revisions rather than no-ops, so history pruning is genuinely exercised.
+        helmtest.chifor.me/rev: {{ .Values.rev | quote }}
+    spec:
+      # PSA `restricted` demands all four of these on the POD and on EVERY container. A Deployment
+      # that omits them is ACCEPTED as an object and then produces no pods — the rejection surfaces
+      # on the ReplicaSet, which is why "the Deployment was created" proves nothing.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: httpd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              mkdir -p /tmp/www
+              echo "smoke ok rev={{ .Values.rev }}" > /tmp/www/index.html
+              exec httpd -f -p 8080 -h /tmp/www
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /index.html, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        # readOnlyRootFilesystem means httpd needs a writable /tmp for its docroot. emptyDir is
+        # charged against the namespace's ephemeral-storage quota via the LimitRange defaults.
+        - name: tmp
+          emptyDir: {}

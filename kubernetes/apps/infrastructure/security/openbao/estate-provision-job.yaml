@@ -66,13 +66,43 @@ data:
     # "after a wipe, nothing to do" claim depends on not having. Adding a path/field means adding
     # it HERE as well as to the seeds file (and the runbook table). Stdout goes to /dev/null — the
     # probe must never print a value.
-    for pair in \
-      "proxmox:root_password" "proxmox:api_token" \
-      "qnap:admin_user" "qnap:admin_password" \
-      "cloudflare:api_token" \
-      "registry:ci_password" "registry:oidc_client_secret" \
-      "gitea:runner_registration_token" \
-      "github:app_private_key"; do
+    MATRIX="proxmox:root_password proxmox:api_token \
+      qnap:admin_user qnap:admin_password \
+      cloudflare:api_token \
+      registry:ci_password registry:oidc_client_secret \
+      gitea:runner_registration_token \
+      github:app_private_key \
+      restic:nextcloud_password \
+      platform:hatchet_encryption_master_keyset platform:hatchet_jwt_public_keyset \
+      platform:hatchet_jwt_private_keyset platform:hatchet_client_token platform:sendgrid_key \
+      oauth:gcloud_client_id oauth:gcloud_client_secret \
+      oauth:github_client_id oauth:github_client_secret"
+
+    # PASS 1 — the SEED must contain every matrix field, non-empty. This is NOT redundant with pass
+    # 2: pass 2 probes LIVE KV after seeding, so a stale live value happily masks a seed that never
+    # carried the field, and the "after a wipe there is nothing to do" claim then rests on a check
+    # that cannot see the gap. It also catches an empty-string value, which `kv get -field` reports
+    # as success.
+    #
+    # grep, not jq or python: the openbao image ships neither (verified against
+    # quay.io/openbao/openbao:2.6.2 — busybox sh, sed and grep only). The seeds are single-line
+    # JSON objects (json.dumps escapes newlines, so even the GitHub App private key is one line),
+    # so `"<field>": "<non-quote>` is a sound present-and-non-empty test. The leading quote anchors
+    # the name, which is what keeps "client_id" from matching inside "gcloud_client_id".
+    for pair in $MATRIX; do
+      path="${pair%%:*}"
+      field="${pair##*:}"
+      seed="$SEED_DIR/${path}.json"
+      [ -f "$seed" ] || { echo "seed ${path}.json is missing but the matrix requires ${field}" >&2; exit 1; }
+      grep -q "\"${field}\": *\"[^\"]" "$seed" || {
+        echo "seed ${path}.json has no non-empty field '${field}'" >&2
+        exit 1
+      }
+    done
+
+    # PASS 2 — and it actually landed in the vault. Stdout to /dev/null: the probe must never print
+    # a value.
+    for pair in $MATRIX; do
       path="${pair%%:*}"
       field="${pair##*:}"
       bao kv get -mount=af -field="$field" "estate/${path}" >/dev/null || {

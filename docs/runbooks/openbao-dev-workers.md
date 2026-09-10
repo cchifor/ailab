@@ -87,8 +87,26 @@ Secret.
   NOT installed on the ailab Proxmox nodes (192.168.0.2/.3/.4). Those accept no operator key either
   — `authorized_keys` there holds only inter-node RSA keys — so anything reaching them still uses
   the password fallback. Extending this key to them is a separate decision.
-- `af/dev-workers/<inventory_hostname>` — per-worker. Empty today; this is where per-worker Gitea bot
-  PATs land (ADR 0020 follow-up).
+- `af/dev-workers/<inventory_hostname>` — per-worker. Fields: `tep_kubeconfig`,
+  `helmtest_kubeconfig` (ADR 0021). Also where per-worker Gitea bot PATs will land (ADR 0020
+  follow-up, still outstanding).
+
+  These two are **SYNC-OWNED, and that is a FOURTH precedence in this repo — not the seed-wins
+  contract the rest of this page describes.** They are written by the `openbao-k8stoken-sync`
+  CronJob (`kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml`), which mints a
+  bound token per worker via the Kubernetes TokenRequest API and publishes a complete rendered
+  kubeconfig. They are deliberately **absent from `devworker-seeds.sops.yaml`**: a seeded copy would
+  be re-applied by the daily seed-wins loop and revert every worker to a stale bearer token.
+
+  > **Consequence, stated plainly: a vault wipe LOSES these two fields until a successful sync.**
+  > They are cluster-derived, so no operator action re-creates them — but "no action needed" is not
+  > the same as "instant". The recovery ordering is in `openbao-recovery.md` § the *sync-owned* path
+  > class, and it matters: the workers' agents exit on a missing field, so they must be restarted
+  > **after** the sync completes, not before.
+
+  Both are readable with `cred get <hostname> tep_kubeconfig` — the per-worker policy already
+  granted `read` on this subtree, so ADR 0021 needed no policy change. The agents consume them as
+  rendered files (`~/.tep/kubeconfig`, `~/.helmtest/kubeconfig`), not via `cred`.
 
 **Worker → IP → role** (the provision script's list must mirror this and
 `kubernetes/infra/dev-workers/variables.tf`):
@@ -372,6 +390,73 @@ git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD >/dev/null && echo "f
 
 `cred get … | wc -c` is the standard smoke test: it proves the whole chain (sink token → LAN NodePort
 → TLS → AppRole policy → KV read) without a value reaching the terminal.
+
+## kubeconfig cutover (ADR 0021) — one host at a time
+
+Moves a worker's `~/.tep/kubeconfig` off the ansible+SOPS writer and onto `bao agent`, and adds
+`~/.helmtest/kubeconfig`. **This is the step that can brick every worker**, so it is gated and
+serial rather than a fleet run.
+
+Why it is dangerous: `error_on_missing_key = true` plus `template_config.exit_on_retry_failure =
+true` mean a template stanza pointing at a KV field that is not populated yet **exits the whole
+agent** — and `~/.git-credentials` stops being maintained on every host that received the config.
+
+**Prerequisite — the sync has published all twelve fields:**
+
+```bash
+kubectl --context admin@ai -n openbao create job --from=cronjob/openbao-k8stoken-sync sync-$(date +%s)
+kubectl --context admin@ai -n openbao get job -l app.kubernetes.io/name=openbao-k8stoken-sync
+kubectl --context admin@ai -n openbao logs job/<name> | grep 'validated 12/12 fields'
+```
+
+**Then, per host, in order — dev-worker-1 first:**
+
+```bash
+cd ansible && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
+  ansible-playbook dev-workers.yml -l dev-worker-1 -t openbao \
+  -e dev_worker_openbao_kubeconfig_cutover=true
+```
+
+The role does the gating itself — you do not have to run a checklist:
+
+1. Reads **both** fields on that host, under **that host's own AppRole**, and requires each to parse
+   as a kubeconfig pointing at `dev_worker_tep_server` with >72h of token life. It captures `cred`'s
+   own exit status, not the pipeline's (`cred get … | python3` reports python's).
+2. Writes `/etc/openbao-agent/renders-kubeconfigs` — the durable marker that both emits the agent
+   stanzas and makes `tep.yml` stand its SOPS writer down. One state, two consumers, so the two
+   writers can never both own the file.
+3. Flushes handlers so the restart happens *before* verification (otherwise the check inspects the
+   old, still-healthy process and passes regardless), then requires: the running process newer than
+   `agent.hcl`, `NRestarts` unchanged across a 20s settle, `~/.git-credentials` still rendered, both
+   kubeconfigs at 0600 owned by the user, and each one **actually authenticating**.
+4. On any failure: restores the previous `agent.hcl`, removes the marker so the SOPS writer resumes,
+   restarts, and fails the play. **Stop the rollout there.**
+
+Verify by hand before moving to the next host, then repeat for `-l dev-worker-2` … `-6`.
+
+```bash
+ssh c4@192.168.0.8
+helm --kubeconfig ~/.helmtest/kubeconfig upgrade --install smoke \
+  ~/ailab/kubernetes/apps/infrastructure/helmtest/hack/smoke-chart \
+  -f ~/ailab/kubernetes/apps/infrastructure/helmtest/hack/values-restricted.yaml --wait --history-max 3
+helm --kubeconfig ~/.helmtest/kubeconfig test smoke --logs   # must RUN and PASS
+helm --kubeconfig ~/.helmtest/kubeconfig uninstall smoke
+tep lease -t 10 && tep run -- true && tep release            # the migrated tep path still works
+```
+
+**Rollback for one host:** `rm /etc/openbao-agent/renders-kubeconfigs`, restore `agent.hcl` from its
+`.bak`, `systemctl restart openbao-agent`, then re-run the role without the cutover flag.
+
+**Retiring the legacy tep tokens — a git change, not a `kubectl delete`.** The six
+`tep-dw<N>-token` Secrets are *declared* in `kubernetes/apps/infrastructure/testpool/tep-access.yaml`,
+so deleting the live object just lets Flux recreate it. After a worker's cutover is verified, remove
+**its** Secret block from that file, merge, let Flux reconcile, then confirm the object is gone and
+the old token is rejected. Keep the six ServiceAccounts — TokenRequest mints against them.
+
+Only once all six are done: delete `ansible/secrets/tep-tokens.sops.yaml`,
+`scripts/tep-render-kubeconfigs.py` and `templates/tep-kubeconfig.j2`. **After that,
+`dev_worker_enable_openbao: false` no longer provisions a kubeconfig at all** — the flag is a
+staged-rollout switch, not a supported steady state (ADR 0021).
 
 ## Rotation
 

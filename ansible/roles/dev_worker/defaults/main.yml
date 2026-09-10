@@ -240,3 +240,26 @@ dev_worker_openbao_credentials: {}
 dev_worker_tep_enabled: true
 dev_worker_tep_server: "https://192.168.0.40:6443"
 dev_worker_tep_namespace: testpool
+
+# ---- kubeconfig cutover (ADR 0021) ---------------------------------------------------------------
+# Flip to true FOR ONE HOST AT A TIME to move that worker's ~/.tep/kubeconfig — and add
+# ~/.helmtest/kubeconfig — from the ansible+SOPS writer to openbao-agent rendering from
+# af/dev-workers/<host>. It is not a fleet switch:
+#
+#   ansible-playbook dev-workers.yml -l dev-worker-1 -t openbao \
+#     -e dev_worker_openbao_kubeconfig_cutover=true
+#
+# The role refuses to cut over until it has read BOTH KV fields on that host, under that host's own
+# AppRole identity, and confirmed each parses as a kubeconfig pointing at dev_worker_tep_server with
+# >72h of token life. It then writes the durable marker /etc/openbao-agent/renders-kubeconfigs, which
+# is what makes the agent emit the stanzas AND what makes tep.yml stand its writer down. Deleting
+# that marker (and restarting the agent) is the rollback; the role does it automatically if the
+# post-restart health check fails.
+#
+# Once a host has the marker this flag is a no-op there, so it is safe to leave set — but leave it
+# false by default so a routine full run can never cut a host over as a side effect.
+dev_worker_openbao_kubeconfig_cutover: false
+
+# The per-worker Helm deploy namespace (kubernetes/apps/infrastructure/helmtest). Documentation for
+# the CLAUDE.md block below; the authoritative value is inside the kubeconfig the sync mints.
+dev_worker_helmtest_namespace: "helmtest-{{ inventory_hostname | regex_replace('^dev-worker-', 'dw') }}"

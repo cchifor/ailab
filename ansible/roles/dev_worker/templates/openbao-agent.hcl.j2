@@ -53,3 +53,34 @@ template {
   error_on_missing_key = true
 }
 {% endfor %}
+{% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
+
+// ---- Kubernetes credentials (ADR 0021) ---------------------------------------------------------
+// EMITTED ONLY once this host has cut over — gated on the durable marker
+// /etc/openbao-agent/renders-kubeconfigs, not on an in-play variable. Two reasons:
+//
+//   1. error_on_missing_key + exit_on_retry_failure mean a stanza pointing at a KV field that does
+//      not exist yet EXITS THE WHOLE AGENT, taking ~/.git-credentials rendering down with it on
+//      every worker that gets the config. The marker is only written after this host's own
+//      twelve-field pre-flight passes (tasks/openbao.yml).
+//   2. The marker is also what tep.yml reads to stand down its SOPS writer. One durable state, two
+//      consumers, so the ansible writer and the agent can never both own ~/.tep/kubeconfig — an
+//      in-play fact would be re-evaluated by a later tag-limited run and could hand the file back.
+{% for user in dev_worker_users %}
+template {
+  source      = "/etc/openbao-agent/tep-kubeconfig.ctmpl"
+  destination = "{{ user.home }}/.tep/kubeconfig"
+  perms       = "0600"
+  command     = "chown {{ user.name }}:{{ user.name }} {{ user.home }}/.tep/kubeconfig"
+  error_on_missing_key = true
+}
+
+template {
+  source      = "/etc/openbao-agent/helmtest-kubeconfig.ctmpl"
+  destination = "{{ user.home }}/.helmtest/kubeconfig"
+  perms       = "0600"
+  command     = "chown {{ user.name }}:{{ user.name }} {{ user.home }}/.helmtest/kubeconfig"
+  error_on_missing_key = true
+}
+{% endfor %}
+{% endif %}

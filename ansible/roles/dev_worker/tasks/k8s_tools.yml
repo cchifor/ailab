@@ -54,29 +54,29 @@
     mode: "0644"
     force: false
 
-- name: Install claude-grant-write helper (opt-in RW kubeconfig escalation)
-  ansible.builtin.copy:
-    dest: /usr/local/bin/claude-grant-write
-    mode: "0755"
-    content: |
-      #!/bin/bash
-      # Managed by ansible (role: dev_worker). Opt-in escalation: switch the current shell's
-      # KUBECONFIG to a root-readable RW config (requires sudo, so the operator must type a password).
-      set -euo pipefail
-      RW=/etc/claude-agent/kube-rw-config
-      if [ ! -r "$RW" ]; then
-        if ! sudo test -r "$RW"; then
-          echo "claude-grant-write: $RW does not exist yet (RW kubeconfig not provisioned)." >&2
-          exit 1
-        fi
-        STAGED="/run/user/$(id -u)/kube-rw-config"
-        install -d -m 0700 "$(dirname "$STAGED")"
-        sudo install -m 0400 -o "$(id -u)" -g "$(id -g)" "$RW" "$STAGED"
-      else
-        STAGED="$RW"
-      fi
-      echo "claude-grant-write: KUBECONFIG=$STAGED exported for this shell (edit-level RBAC)."
-      exec env KUBECONFIG="$STAGED" "$SHELL"
+# REMOVED, not merely un-installed (ADR 0021). claude-grant-write promised an opt-in escalation to
+# `edit` on the WHOLE CLUSTER behind a sudo prompt — a prompt an interactive agent can talk its
+# operator into. It was also a dead end here: nothing in this repo ever provisioned
+# /etc/claude-agent/kube-rw-config (that came from the homelab repo's platform/main.tf, for
+# claude-worker VMs), so on an ailab dev-worker it only ever printed "not provisioned" and exited 1.
+#
+# The replacement is a namespace-scoped credential with no escalation hatch at all:
+# ~/.helmtest/kubeconfig, rendered by openbao-agent (tasks/openbao.yml).
+#
+# `state: absent` rather than deleting the install task, because deleting the task would leave the
+# helper sitting on every worker that already has it. The staged copies are cleaned up too — they are
+# under /run so they die on reboot anyway, but a long-uptime worker can be holding one right now.
+- name: Remove the claude-grant-write cluster-wide escalation helper
+  ansible.builtin.file:
+    path: /usr/local/bin/claude-grant-write
+    state: absent
+
+- name: Remove any staged RW kubeconfig left by claude-grant-write
+  ansible.builtin.shell: |
+    set -eu
+    rm -f /run/user/*/kube-rw-config 2>/dev/null || true
+    ls /run/user/*/kube-rw-config >/dev/null 2>&1 && exit 1 || exit 0
+  changed_when: false
 
 - name: Ensure /etc/skel/.kube placeholder
   ansible.builtin.file:

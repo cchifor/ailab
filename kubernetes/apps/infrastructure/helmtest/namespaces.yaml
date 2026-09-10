@@ -1,0 +1,360 @@
+# helmtest — six per-worker, Helm-capable DEPLOY namespaces (ADR 0021).
+#
+# WHY SIX AND NOT ONE: `testpool` is a LEASE namespace (claim a Kata sandbox, exec into it); it is
+# deliberately not a deploy target, and widening tep-worker there would let an agent schedule a plain
+# pod alongside the Kata-isolated leases and bypass the boundary the pool exists to provide. These are
+# the deploy target instead, one per dev-worker, so six concurrent agents cannot collide on a release
+# name and one runaway chart is contained to one worker's quota.
+#
+# PSA enforce=restricted is THE control that makes `create pods` here safe: without it, pod-create in
+# a namespace is a node-compromise primitive (hostPath / privileged / hostNetwork). Note this is the
+# OPPOSITE of testpool's enforce=privileged — testpool needs privileged for DinD and confines it with
+# Kata; nothing here runs under Kata, so nothing here may be privileged.
+#
+# Consequence, documented in docs/runbooks/helmtest.md: `restricted` rejects ORDINARY charts, not just
+# privileged ones. Any container — init containers and Helm hook pods included — that omits
+# runAsNonRoot / allowPrivilegeEscalation:false / capabilities.drop:[ALL] / seccompProfile
+# RuntimeDefault is refused. hack/values-restricted.yaml is the reusable overlay that sets them.
+#
+# QUOTA NOTES (the three that are easy to get wrong):
+#   - `services.loadbalancers` / `services.nodeports` are FIRST-CLASS quota keys. `count/services.
+#     loadbalancers` is NOT one and silently enforces nothing — a test chart could then publish a
+#     NodePort, i.e. make an estate-wide exposure change with no git commit.
+#   - `pods` counts only NON-TERMINAL pods, so completed helm-test hook pods accumulate against etcd
+#     without ever touching it. `count/pods` bounds the total. Both are needed.
+#   - count/secrets is sized for a DECLARED ceiling of 10 concurrent releases x 3 revisions
+#     (--history-max 3, which the runbook instructs) + headroom for chart/hook Secrets. Helm 3.16.3
+#     defaults history to 10, NOT unbounded — the bound that matters is concurrency, not loop length.
+#
+# GENERATED SHAPE: the six blocks are identical by construction. rbac.yaml, networkpolicy.yaml,
+# k8stoken-sync.yaml and inventory/hosts.yml are the other copies of the worker list — change together.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: helmtest-dw1
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: helmtest
+    helmtest.chifor.me/worker: dev-worker-1
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: helmtest-quota
+  namespace: helmtest-dw1
+spec:
+  hard:
+    requests.cpu: "4"
+    limits.cpu: "8"
+    requests.memory: 8Gi
+    limits.memory: 16Gi
+    requests.ephemeral-storage: 8Gi
+    limits.ephemeral-storage: 16Gi
+    requests.storage: 50Gi
+    persistentvolumeclaims: "10"
+    pods: "30"
+    count/pods: "60"
+    services: "20"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+    count/secrets: "120"
+    count/configmaps: "60"
+    count/jobs.batch: "30"
+    count/cronjobs.batch: "10"
+    count/deployments.apps: "20"
+    count/statefulsets.apps: "10"
+    count/replicasets.apps: "60"
+    count/serviceaccounts: "20"
+    count/roles.rbac.authorization.k8s.io: "20"
+    count/rolebindings.rbac.authorization.k8s.io: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: helmtest-limits
+  namespace: helmtest-dw1
+spec:
+  limits:
+    - type: Container
+      max: { cpu: "4", memory: 8Gi, ephemeral-storage: 4Gi }
+      default: { cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi }
+      defaultRequest: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: helmtest-dw2
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: helmtest
+    helmtest.chifor.me/worker: dev-worker-2
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: helmtest-quota
+  namespace: helmtest-dw2
+spec:
+  hard:
+    requests.cpu: "4"
+    limits.cpu: "8"
+    requests.memory: 8Gi
+    limits.memory: 16Gi
+    requests.ephemeral-storage: 8Gi
+    limits.ephemeral-storage: 16Gi
+    requests.storage: 50Gi
+    persistentvolumeclaims: "10"
+    pods: "30"
+    count/pods: "60"
+    services: "20"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+    count/secrets: "120"
+    count/configmaps: "60"
+    count/jobs.batch: "30"
+    count/cronjobs.batch: "10"
+    count/deployments.apps: "20"
+    count/statefulsets.apps: "10"
+    count/replicasets.apps: "60"
+    count/serviceaccounts: "20"
+    count/roles.rbac.authorization.k8s.io: "20"
+    count/rolebindings.rbac.authorization.k8s.io: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: helmtest-limits
+  namespace: helmtest-dw2
+spec:
+  limits:
+    - type: Container
+      max: { cpu: "4", memory: 8Gi, ephemeral-storage: 4Gi }
+      default: { cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi }
+      defaultRequest: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: helmtest-dw3
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: helmtest
+    helmtest.chifor.me/worker: dev-worker-3
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: helmtest-quota
+  namespace: helmtest-dw3
+spec:
+  hard:
+    requests.cpu: "4"
+    limits.cpu: "8"
+    requests.memory: 8Gi
+    limits.memory: 16Gi
+    requests.ephemeral-storage: 8Gi
+    limits.ephemeral-storage: 16Gi
+    requests.storage: 50Gi
+    persistentvolumeclaims: "10"
+    pods: "30"
+    count/pods: "60"
+    services: "20"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+    count/secrets: "120"
+    count/configmaps: "60"
+    count/jobs.batch: "30"
+    count/cronjobs.batch: "10"
+    count/deployments.apps: "20"
+    count/statefulsets.apps: "10"
+    count/replicasets.apps: "60"
+    count/serviceaccounts: "20"
+    count/roles.rbac.authorization.k8s.io: "20"
+    count/rolebindings.rbac.authorization.k8s.io: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: helmtest-limits
+  namespace: helmtest-dw3
+spec:
+  limits:
+    - type: Container
+      max: { cpu: "4", memory: 8Gi, ephemeral-storage: 4Gi }
+      default: { cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi }
+      defaultRequest: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: helmtest-dw4
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: helmtest
+    helmtest.chifor.me/worker: dev-worker-4
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: helmtest-quota
+  namespace: helmtest-dw4
+spec:
+  hard:
+    requests.cpu: "4"
+    limits.cpu: "8"
+    requests.memory: 8Gi
+    limits.memory: 16Gi
+    requests.ephemeral-storage: 8Gi
+    limits.ephemeral-storage: 16Gi
+    requests.storage: 50Gi
+    persistentvolumeclaims: "10"
+    pods: "30"
+    count/pods: "60"
+    services: "20"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+    count/secrets: "120"
+    count/configmaps: "60"
+    count/jobs.batch: "30"
+    count/cronjobs.batch: "10"
+    count/deployments.apps: "20"
+    count/statefulsets.apps: "10"
+    count/replicasets.apps: "60"
+    count/serviceaccounts: "20"
+    count/roles.rbac.authorization.k8s.io: "20"
+    count/rolebindings.rbac.authorization.k8s.io: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: helmtest-limits
+  namespace: helmtest-dw4
+spec:
+  limits:
+    - type: Container
+      max: { cpu: "4", memory: 8Gi, ephemeral-storage: 4Gi }
+      default: { cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi }
+      defaultRequest: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: helmtest-dw5
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: helmtest
+    helmtest.chifor.me/worker: dev-worker-5
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: helmtest-quota
+  namespace: helmtest-dw5
+spec:
+  hard:
+    requests.cpu: "4"
+    limits.cpu: "8"
+    requests.memory: 8Gi
+    limits.memory: 16Gi
+    requests.ephemeral-storage: 8Gi
+    limits.ephemeral-storage: 16Gi
+    requests.storage: 50Gi
+    persistentvolumeclaims: "10"
+    pods: "30"
+    count/pods: "60"
+    services: "20"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+    count/secrets: "120"
+    count/configmaps: "60"
+    count/jobs.batch: "30"
+    count/cronjobs.batch: "10"
+    count/deployments.apps: "20"
+    count/statefulsets.apps: "10"
+    count/replicasets.apps: "60"
+    count/serviceaccounts: "20"
+    count/roles.rbac.authorization.k8s.io: "20"
+    count/rolebindings.rbac.authorization.k8s.io: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: helmtest-limits
+  namespace: helmtest-dw5
+spec:
+  limits:
+    - type: Container
+      max: { cpu: "4", memory: 8Gi, ephemeral-storage: 4Gi }
+      default: { cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi }
+      defaultRequest: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: helmtest-dw6
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: helmtest
+    helmtest.chifor.me/worker: dev-worker-6
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: helmtest-quota
+  namespace: helmtest-dw6
+spec:
+  hard:
+    requests.cpu: "4"
+    limits.cpu: "8"
+    requests.memory: 8Gi
+    limits.memory: 16Gi
+    requests.ephemeral-storage: 8Gi
+    limits.ephemeral-storage: 16Gi
+    requests.storage: 50Gi
+    persistentvolumeclaims: "10"
+    pods: "30"
+    count/pods: "60"
+    services: "20"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+    count/secrets: "120"
+    count/configmaps: "60"
+    count/jobs.batch: "30"
+    count/cronjobs.batch: "10"
+    count/deployments.apps: "20"
+    count/statefulsets.apps: "10"
+    count/replicasets.apps: "60"
+    count/serviceaccounts: "20"
+    count/roles.rbac.authorization.k8s.io: "20"
+    count/rolebindings.rbac.authorization.k8s.io: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: helmtest-limits
+  namespace: helmtest-dw6
+spec:
+  limits:
+    - type: Container
+      max: { cpu: "4", memory: 8Gi, ephemeral-storage: 4Gi }
+      default: { cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi }
+      defaultRequest: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }

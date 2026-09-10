@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/name: smoke-chart
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  # ClusterIP is not a preference here: services.nodeports and services.loadbalancers are both
+  # quota'd to 0 in helmtest-dw<N>, so any other type is refused at admission.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: smoke-chart
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - { name: http, port: {{ .Values.service.port }}, targetPort: http }

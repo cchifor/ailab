@@ -1,0 +1,560 @@
+# openbao-k8stoken-sync — mints per-worker Kubernetes credentials and publishes them into each
+# worker's own OpenBao KV path, replacing the hand-run operator ceremony (ADR 0021).
+#
+# WHAT IT REPLACES: scripts/tep-render-kubeconfigs.py + ansible/secrets/tep-tokens.sops.yaml +
+# `just dev-workers`. That path gave a k8s bearer token a SECOND durable home (a SOPS file in git)
+# and made rotation a three-step manual ceremony. Here the token never leaves the cluster except as
+# a KV value the worker's own AppRole can read.
+#
+# WHY TokenRequest AND NOT A TOKEN SECRET: helmtest-deployer must be able to delete Secrets for Helm
+# to work, and RBAC cannot carve one Secret out by name, so a standing
+# kubernetes.io/service-account-token Secret in the namespace is deletable by an ordinary chart
+# collision. TokenRequest leaves no standing object, and re-issuing daily gives rotation for free.
+# The counterpart hazard — deleting the ServiceAccount itself, which invalidates every token ever
+# minted for it — is closed by helmtest/kyverno-protect-reserved.yaml, not by RBAC.
+#
+# TTL IS A REQUEST, NOT A GUARANTEE: the API server caps expirationSeconds at
+# --service-account-max-token-expiration and silently returns something shorter. So the job reads
+# status.expirationTimestamp off EVERY minted token and FAILS if the real lifetime is under
+# TOKEN_FLOOR_SECONDS (72h = two missed daily runs plus the agent's KV refresh). A shortened cap
+# therefore turns this Job red instead of quietly producing credentials that expire before the next
+# run.
+#
+# MEASURED on this cluster 2026-09-10: a 720h request is granted IN FULL (exp-iat = 2592000s), so the
+# 30d below is real and the daily re-issue leaves ~29d of margin. Re-measure after a Talos/k8s
+# upgrade rather than assuming it holds — that is exactly the kind of change that silently lowers it:
+#   kubectl --context admin@ai -n testpool create token tep-dw1 --duration=720h
+# then decode exp-iat. The audience comes back as https://192.168.0.40:6443, which is why the script
+# omits `audiences` — the default is already the API server's own, i.e. what a kubeconfig needs.
+#
+# ORDERING: this needs (a) the `af` KV mount and the `kubernetes` auth mount that provision-job.yaml
+# creates, (b) the k8stoken-sync auth role that devworker-provision-job.yaml creates, and (c) the
+# ServiceAccounts in helmtest-dw<N>/testpool. Nothing sequences those, exactly as devworker-provision
+# is unsequenced against provision-job today. That is self-healing rather than a manual step: a run
+# that loses the race fails, the Job is reaped by ttlSecondsAfterFinished, and Flux recreates it. The
+# job is the sequencer for Phase 3 — its "validated 12/12" line is what the rollout gate consumes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao-k8stoken-sync
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-k8stoken-sync
+    app.kubernetes.io/component: credential-sync
+    app.kubernetes.io/part-of: agentforge
+---
+# TokenReview is CLUSTER-scoped, so the namespaced Roles below cannot authorize it and every
+# validation would 403. This is deliberately NARROWER than system:auth-delegator (which the OpenBao
+# server SA holds): tokenreviews only, no subjectaccessreviews. It confers no read access to any
+# object — only the ability to ask "is this token valid, and whose is it?".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openbao-k8stoken-sync-tokenreview
+  labels:
+    app.kubernetes.io/name: openbao-k8stoken-sync
+    app.kubernetes.io/part-of: agentforge
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openbao-k8stoken-sync-tokenreview
+  labels:
+    app.kubernetes.io/name: openbao-k8stoken-sync
+    app.kubernetes.io/part-of: agentforge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openbao-k8stoken-sync-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: openbao-k8stoken-sync
+    namespace: openbao
+---
+# Minting rights, one namespace at a time, restricted by resourceNames to the single SA the sync is
+# allowed to impersonate there. No `list`, no `watch`, no `get` on ServiceAccounts, and no Secret
+# access anywhere — the script issues direct named POSTs so it never needs collection verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-k8stoken-sync
+  namespace: testpool
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    # All six tep SAs live in this ONE namespace, so they are enumerated here.
+    resourceNames: ["tep-dw1", "tep-dw2", "tep-dw3", "tep-dw4", "tep-dw5", "tep-dw6"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-k8stoken-sync
+  namespace: testpool
+subjects:
+  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
+roleRef:
+  kind: Role
+  name: openbao-k8stoken-sync
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw1 }
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["helmtest-dw1"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw1 }
+subjects:
+  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
+roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw2 }
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["helmtest-dw2"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw2 }
+subjects:
+  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
+roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw3 }
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["helmtest-dw3"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw3 }
+subjects:
+  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
+roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw4 }
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["helmtest-dw4"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw4 }
+subjects:
+  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
+roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw5 }
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["helmtest-dw5"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw5 }
+subjects:
+  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
+roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw6 }
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["helmtest-dw6"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw6 }
+subjects:
+  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
+roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-k8stoken-sync-script
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-k8stoken-sync
+    app.kubernetes.io/component: credential-sync
+    app.kubernetes.io/part-of: agentforge
+data:
+  sync.py: |
+    #!/usr/bin/env python3
+    """Mint per-worker k8s credentials and publish them to af/dev-workers/dev-worker-<N>.
+
+    NEVER prints a token, a kubeconfig, or any KV value: only names, counts and remaining lifetimes.
+    Fail-closed everywhere — a partial run must leave the previous KV values untouched.
+    """
+    import base64
+    import json
+    import os
+    import ssl
+    import sys
+    import time
+    import urllib.error
+    import urllib.request
+
+    SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+    K8S = "https://kubernetes.default.svc"
+    BAO = os.environ["BAO_ADDR"]
+    BAO_ROLE = os.environ.get("BAO_ROLE", "k8stoken-sync")
+    MOUNT = os.environ.get("BAO_KV_MOUNT", "af")
+    PUBLIC_SERVER = os.environ["KUBE_PUBLIC_SERVER"]
+    TTL = int(os.environ.get("TOKEN_TTL_SECONDS", "2592000"))
+    FLOOR = int(os.environ.get("TOKEN_FLOOR_SECONDS", "259200"))
+
+    # worker -> (field, namespace, serviceaccount). The other copies of this list: helmtest/rbac.yaml,
+    # testpool/tep-access.yaml, devworker-provision-job.yaml, inventory/hosts.yml.
+    TARGETS = []
+    for _n in range(1, 7):
+        TARGETS.append((f"dev-worker-{_n}", "tep_kubeconfig", "testpool", f"tep-dw{_n}"))
+        TARGETS.append((f"dev-worker-{_n}", "helmtest_kubeconfig", f"helmtest-dw{_n}", f"helmtest-dw{_n}"))
+
+    k8s_ctx = ssl.create_default_context(cafile=f"{SA_DIR}/ca.crt")
+    bao_ctx = ssl.create_default_context(cafile=os.environ["BAO_CACERT"])
+    with open(f"{SA_DIR}/token", encoding="utf-8") as fh:
+        SA_JWT = fh.read().strip()
+    with open(f"{SA_DIR}/ca.crt", "rb") as fh:
+        CA_B64 = base64.b64encode(fh.read()).decode()
+
+
+    def call(url, ctx, method="GET", body=None, token=None, ctype="application/json"):
+        """Returns (status, parsed_json). Raises on transport errors; 4xx/5xx come back as status."""
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Accept", "application/json")
+        if data:
+            req.add_header("Content-Type", ctype)
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else {})
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            try:
+                return exc.code, json.loads(raw) if raw else {}
+            except ValueError:
+                return exc.code, {"raw": "<unparseable>"}
+
+
+    def bao_call(path, method="GET", body=None, ctype="application/json"):
+        return call(f"{BAO}/v1/{path}", bao_ctx, method, body, BAO_TOKEN, ctype)
+
+
+    def jwt_exp(tok):
+        payload = tok.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return int(json.loads(base64.urlsafe_b64decode(payload))["exp"])
+
+
+    def mint(ns, sa):
+        """TokenRequest for ns/sa. Returns (token, remaining_seconds)."""
+        status, body = call(
+            f"{K8S}/api/v1/namespaces/{ns}/serviceaccounts/{sa}/token",
+            k8s_ctx, "POST",
+            # No `audiences`: defaults to the API server's own audience, which is what a kubeconfig needs.
+            {"apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest",
+             "spec": {"expirationSeconds": TTL}},
+            SA_JWT,
+        )
+        if status == 404:
+            raise RuntimeError(f"serviceaccount {ns}/{sa} does not exist yet "
+                               "(helmtest/testpool tree not applied? this run will be retried)")
+        if status not in (200, 201):
+            raise RuntimeError(f"TokenRequest for {ns}/{sa} failed: HTTP {status}")
+        tok = body["status"]["token"]
+
+        # The API server MAY return less than we asked for (--service-account-max-token-expiration).
+        # Trust the returned timestamp, never the requested TTL.
+        remaining = jwt_exp(tok) - int(time.time())
+        if remaining < FLOOR:
+            raise RuntimeError(
+                f"{ns}/{sa}: minted token lives {remaining // 3600}h, under the {FLOOR // 3600}h floor. "
+                "The API server is capping expirationSeconds; lower TOKEN_TTL_SECONDS is not the fix — "
+                "raise the cap or shorten the sync interval, else workers expire between runs.")
+
+        # Prove the token authenticates AS the SA we think it does before publishing it.
+        status, review = call(f"{K8S}/apis/authentication.k8s.io/v1/tokenreviews", k8s_ctx, "POST",
+                              {"apiVersion": "authentication.k8s.io/v1", "kind": "TokenReview",
+                               "spec": {"token": tok}}, SA_JWT)
+        if status not in (200, 201):
+            raise RuntimeError(f"TokenReview for {ns}/{sa} failed: HTTP {status}")
+        rs = review.get("status", {})
+        want = f"system:serviceaccount:{ns}:{sa}"
+        if not rs.get("authenticated") or rs.get("user", {}).get("username") != want:
+            raise RuntimeError(f"TokenReview identity mismatch for {ns}/{sa}: "
+                               f"authenticated={rs.get('authenticated')} user={rs.get('user', {}).get('username')}")
+        return tok, remaining
+
+
+    def kubeconfig(ns, sa, tok):
+        """JSON is valid YAML, so this needs no YAML library and kubectl/helm parse it as-is."""
+        doc = {
+            "apiVersion": "v1", "kind": "Config", "current-context": ns,
+            # The WORKER-reachable endpoint, not kubernetes.default.svc — the dev-workers are outside
+            # the cluster and cannot resolve or route to a ClusterIP.
+            "clusters": [{"name": "ai", "cluster": {"server": PUBLIC_SERVER,
+                                                    "certificate-authority-data": CA_B64}}],
+            "contexts": [{"name": ns, "context": {"cluster": "ai", "user": sa, "namespace": ns}}],
+            "users": [{"name": sa, "user": {"token": tok}}],
+        }
+        rendered = json.dumps(doc, indent=2)
+        # Validate the shape we just built rather than assuming it: a malformed kubeconfig published to
+        # KV becomes a bao-agent render that exits the agent on every worker that consumes it.
+        parsed = json.loads(rendered)
+        ctx = next(c for c in parsed["contexts"] if c["name"] == parsed["current-context"])["context"]
+        assert ctx["namespace"] == ns and ctx["user"] == sa
+        cl = next(c for c in parsed["clusters"] if c["name"] == ctx["cluster"])["cluster"]
+        assert cl["server"] == PUBLIC_SERVER
+        assert base64.b64decode(cl["certificate-authority-data"]).startswith(b"-----BEGIN CERTIFICATE")
+        assert next(u for u in parsed["users"] if u["name"] == ctx["user"])["user"]["token"]
+        return rendered
+
+
+    # ---- OpenBao login -------------------------------------------------------------------------------
+    status, body = call(f"{BAO}/v1/auth/kubernetes/login", bao_ctx, "POST",
+                        {"role": BAO_ROLE, "jwt": SA_JWT})
+    if status != 200:
+        sys.exit(f"OpenBao k8s-auth login failed as role '{BAO_ROLE}': HTTP {status}. "
+                 "Is the role created (devworker-provision-job) and the vault unsealed?")
+    BAO_TOKEN = body["auth"]["client_token"]
+
+    # ---- Mint everything BEFORE writing anything -----------------------------------------------------
+    # Both fields for a worker are written in one patch, so a partial mint cannot leave a worker with a
+    # fresh tep kubeconfig and a stale helmtest one.
+    pending, lifetimes = {}, {}
+    for worker, field, ns, sa in TARGETS:
+        tok, remaining = mint(ns, sa)
+        pending.setdefault(worker, {})[field] = kubeconfig(ns, sa, tok)
+        lifetimes[f"{worker}/{field}"] = remaining
+        print(f"minted {ns}/{sa} -> {worker}.{field} ({remaining // 3600}h remaining)", flush=True)
+
+    # ---- Publish -------------------------------------------------------------------------------------
+    written = 0
+    for worker, fields in sorted(pending.items()):
+        path = f"{MOUNT}/data/dev-workers/{worker}"
+        status, _ = bao_call(path)
+        if status == 200:
+            st, resp = bao_call(path, "PATCH", {"data": fields}, "application/merge-patch+json")
+            if st not in (200, 204):
+                sys.exit(f"patch of {worker} failed: HTTP {st} — existing fields left untouched")
+        elif status == 404:
+            # Create-only CAS. A plain write would race openbao-devworker-provision: both can observe
+            # absence and the second one's document replaces the first's. concurrencyPolicy:Forbid does
+            # NOT help — it only serialises this CronJob against itself, not against a separate Job.
+            st, _ = bao_call(path, "POST", {"data": fields, "options": {"cas": 0}})
+            if st in (400, 409):
+                st, _ = bao_call(path, "PATCH", {"data": fields}, "application/merge-patch+json")
+                if st not in (200, 204):
+                    sys.exit(f"{worker}: lost the create race and the follow-up patch failed: HTTP {st}")
+            elif st not in (200, 204):
+                sys.exit(f"create of {worker} failed: HTTP {st}")
+        else:
+            # NEVER treat an auth/network error as "absent" — that path writes a fresh document and
+            # erases every seeded field in the worker's subtree.
+            sys.exit(f"probe of {worker} returned HTTP {status}; refusing to guess whether it exists")
+        written += len(fields)
+        print(f"wrote {worker}: {sorted(fields)}", flush=True)
+
+    low = min(lifetimes.values())
+    worst = min(lifetimes, key=lifetimes.get)
+    print(f"minimum remaining lifetime {low // 3600}h ({worst})", flush=True)
+    if written != len(TARGETS):
+        sys.exit(f"expected {len(TARGETS)} fields, wrote {written}")
+    print(f"validated {written}/{len(TARGETS)} fields", flush=True)
+---
+# STEADY STATE: re-mint daily. The tokens are valid far longer than a day, so a missed run is not an
+# outage — TOKEN_FLOOR_SECONDS is what guarantees that.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: openbao-k8stoken-sync
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-k8stoken-sync
+    app.kubernetes.io/component: credential-sync
+    app.kubernetes.io/part-of: agentforge
+spec:
+  schedule: "17 3 * * *"
+  timeZone: Etc/UTC
+  # Forbid serialises this CronJob against ITSELF only — it does nothing about the separate
+  # openbao-devworker-provision Job, which is why the script uses create-only CAS instead of
+  # check-then-write.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 4
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: openbao-k8stoken-sync
+            app.kubernetes.io/part-of: agentforge
+        spec:
+          restartPolicy: OnFailure
+          enableServiceLinks: false
+          serviceAccountName: openbao-k8stoken-sync
+          # MUST be true, unlike the sibling openbao Jobs: this one authenticates to BOTH the
+          # kube-apiserver (TokenRequest/TokenReview) and to OpenBao (k8s auth) using its own
+          # projected SA token. Nothing here reads a Secret.
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: sync
+              image: mirror.gcr.io/library/python:3.14-slim
+              command: ["python3", "-u", "/scripts/sync.py"]
+              env:
+                # Headless per-pod name, matching the sibling Jobs: it resolves even when the pod is
+                # up but SEALED, so this fails with a real error instead of a DNS miss.
+                - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+                - { name: BAO_CACERT, value: "/tls/ca.crt" }
+                - { name: BAO_ROLE, value: "k8stoken-sync" }
+                - { name: BAO_KV_MOUNT, value: "af" }
+                # The endpoint a DEV-WORKER can reach — .40 is the Talos API VIP. Must match
+                # ansible dev_worker_tep_server; a ClusterIP here would render kubeconfigs that
+                # work nowhere.
+                - { name: KUBE_PUBLIC_SERVER, value: "https://192.168.0.40:6443" }
+                - { name: TOKEN_TTL_SECONDS, value: "2592000" } # 30d REQUESTED; the API server may cap it
+                - { name: TOKEN_FLOOR_SECONDS, value: "259200" } # 72h — fail rather than publish below this
+              volumeMounts:
+                - { name: tls, mountPath: /tls, readOnly: true }
+                - { name: script, mountPath: /scripts, readOnly: true }
+              resources:
+                requests: { cpu: 10m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                readOnlyRootFilesystem: true
+                seccompProfile: { type: RuntimeDefault }
+          volumes:
+            - name: tls
+              secret:
+                secretName: openbao-tls
+                items: [{ key: ca.crt, path: ca.crt }]
+            - name: script
+              configMap:
+                name: openbao-k8stoken-sync-script
+                defaultMode: 0555
+---
+# BOOTSTRAP / RECOVERY RUN. Applying or updating a CronJob does NOT execute its job template, so
+# without this object a fresh cluster (or a re-seeded vault) would wait until the next 03:17 for its
+# first credential — and Phase 3's rollout gate would have nothing to consume.
+#
+# The kustomize force annotation is the same wedge guard the sibling provision Jobs use: a Job's
+# spec.template is immutable, so any edit to the script or image would otherwise fail "field is
+# immutable" and take the whole `openbao` Kustomization False. With it, an edit deletes+recreates
+# THIS Job — which is also how a script change gets applied immediately rather than at 03:17.
+#
+# ttlSecondsAfterFinished reaps it (Failed as well as Complete), and Flux re-applies it on the next
+# reconcile. That is the retry path when the SAs or the vault auth role are not there yet: no
+# operator action, no manifest edit — the reconcile loop is the retry.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-k8stoken-sync-bootstrap
+  namespace: openbao
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: openbao-k8stoken-sync
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-k8stoken-sync
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      serviceAccountName: openbao-k8stoken-sync
+      # MUST be true, unlike the sibling openbao Jobs: this one authenticates to BOTH the
+      # kube-apiserver (TokenRequest/TokenReview) and to OpenBao (k8s auth) using its own
+      # projected SA token. Nothing here reads a Secret.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sync
+          image: mirror.gcr.io/library/python:3.14-slim
+          command: ["python3", "-u", "/scripts/sync.py"]
+          env:
+            # Headless per-pod name, matching the sibling Jobs: it resolves even when the pod is
+            # up but SEALED, so this fails with a real error instead of a DNS miss.
+            - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: BAO_CACERT, value: "/tls/ca.crt" }
+            - { name: BAO_ROLE, value: "k8stoken-sync" }
+            - { name: BAO_KV_MOUNT, value: "af" }
+            # The endpoint a DEV-WORKER can reach — .40 is the Talos API VIP. Must match
+            # ansible dev_worker_tep_server; a ClusterIP here would render kubeconfigs that
+            # work nowhere.
+            - { name: KUBE_PUBLIC_SERVER, value: "https://192.168.0.40:6443" }
+            - { name: TOKEN_TTL_SECONDS, value: "2592000" } # 30d REQUESTED; the API server may cap it
+            - { name: TOKEN_FLOOR_SECONDS, value: "259200" } # 72h — fail rather than publish below this
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items: [{ key: ca.crt, path: ca.crt }]
+        - name: script
+          configMap:
+            name: openbao-k8stoken-sync-script
+            defaultMode: 0555

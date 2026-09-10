@@ -1,0 +1,59 @@
+# A REAL test hook. Two details here are load-bearing and both were review findings:
+#
+# 1. NO `helm.sh/hook-delete-policy: hook-succeeded`. In Helm 3.16.3 that policy deletes the pod as
+#    soon as it succeeds — BEFORE `helm test --logs` fetches its logs — so the logs come back empty
+#    and the check silently proves nothing. The pod is left behind deliberately and deleted by name
+#    afterwards (see docs/runbooks/helmtest.md). `before-hook-creation` only cleans up the PREVIOUS
+#    run's pod, which is what makes repeated `helm test` invocations work.
+#
+# 2. The pod NAME is fixed (`<release>-test`), not generated. Asserting cleanup with
+#    `-l 'helm.sh/hook'` does not work: `helm.sh/hook` is an ANNOTATION, not a label, so that
+#    selector matches nothing and would report "clean" whether or not the pod is there.
+#
+# It also proves the same-namespace CiliumNetworkPolicy allowance actually works — without it this
+# hook cannot reach the Service it is testing, which is the most common way a locked-down test
+# namespace turns out to be unusable.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test
+  labels:
+    app.kubernetes.io/name: smoke-chart
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    helmtest.chifor.me/hook: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -e
+          url="http://{{ .Release.Name }}:{{ .Values.service.port }}/index.html"
+          echo "probing $url"
+          body=$(wget -qO- "$url")
+          echo "got: $body"
+          echo "$body" | grep -q '^smoke ok rev={{ .Values.rev }}$'
+          echo "SMOKE-TEST-PASSED"
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 200m, memory: 64Mi }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault

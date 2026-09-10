@@ -81,6 +81,10 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/databases",
         "./kubernetes/apps/edge-connector",
         "./kubernetes/apps/infrastructure/security/external-secrets",
+        # ADR 0021 — the six per-worker Helm deploy namespaces. Added deliberately, which is the
+        # point of this allowlist: a new locally-buildable Kustomization path is a review decision,
+        # not something the discovery should silently absorb.
+        "./kubernetes/apps/infrastructure/helmtest",
         "./kubernetes/apps/infrastructure",
         "./kubernetes/apps/infrastructure/autoscaling/keda",
         "./kubernetes/apps/infrastructure/autoscaling/kro",

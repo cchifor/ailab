@@ -21,6 +21,21 @@
           if dev_worker_agent_user != dev_worker_admin_user else []) }}
   when: dev_worker_users is not defined
 
+# ---- kubeconfig ownership (ADR 0021) -------------------------------------------------------------
+# DURABLE per-host state, deliberately not an in-play variable. It answers one question — "does the
+# bao agent own this host's kubeconfigs, or does the SOPS writer in tep.yml?" — and BOTH sides read
+# it, so the two writers are mutually exclusive by construction rather than by task ordering. An
+# in-play fact would be re-derived by a later tag-limited run and could hand the file back to the
+# SOPS writer while the agent is still rendering it, which is a silent flapping-credential bug.
+- name: Check whether this host has cut over to agent-rendered kubeconfigs
+  ansible.builtin.stat:
+    path: /etc/openbao-agent/renders-kubeconfigs
+  register: dev_worker_kubeconfig_marker
+
+- name: Record kubeconfig ownership for this host
+  ansible.builtin.set_fact:
+    dev_worker_openbao_renders_kubeconfigs: "{{ dev_worker_kubeconfig_marker.stat.exists }}"
+
 # Fails the play rather than deploying an agent that cannot log in: an empty secret-id would leave
 # openbao-agent crash-looping and ~/.git-credentials unwritten, which reads as "git broke".
 # no_log is deliberately NOT set — assert reports the expressions, never the values.
@@ -162,6 +177,101 @@
   no_log: true
   notify: Restart openbao-agent
 
+# Destination directories for the kubeconfig templates, for EVERY dev_worker_users entry — tep.yml
+# only ever created ~/.tep for dev_worker_agent_user, while the agent renders for all of them. These
+# must exist BEFORE the agent starts or restarts: a template whose destination directory is missing
+# is a render failure, and exit_on_retry_failure turns that into a dead agent.
+- name: Ensure the kubeconfig destination directories exist
+  ansible.builtin.file:
+    path: "{{ item.0.home }}/{{ item.1 }}"
+    state: directory
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0700"
+  loop: "{{ dev_worker_users | product(['.tep', '.helmtest']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}:{{ item.1 }}"
+
+- name: Lay down the kubeconfig render templates
+  ansible.builtin.template:
+    src: "{{ item }}.ctmpl.j2"
+    dest: "/etc/openbao-agent/{{ item }}.ctmpl"
+    owner: root
+    group: openbao-agent
+    mode: "0640"
+  loop:
+    - tep-kubeconfig
+    - helmtest-kubeconfig
+  notify: Restart openbao-agent
+
+# ---- the per-host cutover gate -------------------------------------------------------------------
+# Adding the template stanzas is the one genuinely dangerous step in ADR 0021: a stanza pointing at a
+# KV field that is not populated yet exits the agent, and Restart=always then holds it in a restart
+# loop with ~/.git-credentials no longer maintained — on every host that got the config. So the
+# marker is written ONLY after this host proves, under its own AppRole identity, that both fields are
+# present, parseable, and carry a usable token.
+#
+# Deliberately re-run on THIS host immediately before ITS cutover rather than once for all six up
+# front: a serial rollout takes time and the fields can change underneath it.
+- name: Pre-flight the KV fields before handing kubeconfigs to the agent
+  ansible.builtin.shell: |
+    set -o pipefail
+    host="$(hostname -s)"
+    for field in tep_kubeconfig helmtest_kubeconfig; do
+      # `cred` exit status, NOT the pipeline's — `cred get ... | python3` reports python's status,
+      # so a permission error would read as success.
+      kc="$(/usr/local/bin/cred get "$host" "$field")" || { echo "cred get $host/$field FAILED" >&2; exit 91; }
+      printf '%s' "$kc" | python3 -c '
+    import base64, json, sys, time
+    d = json.loads(sys.stdin.read())          # the sync writes JSON, which is valid YAML
+    ctx = next(c for c in d["contexts"] if c["name"] == d["current-context"])["context"]
+    cl = next(c for c in d["clusters"] if c["name"] == ctx["cluster"])["cluster"]
+    assert cl["server"] == "{{ dev_worker_tep_server }}", cl["server"]
+    assert base64.b64decode(cl["certificate-authority-data"]).startswith(b"-----BEGIN CERTIFICATE")
+    tok = next(u for u in d["users"] if u["name"] == ctx["user"])["user"]["token"]
+    p = tok.split(".")[1]; p += "=" * (-len(p) % 4)
+    left = json.loads(base64.urlsafe_b64decode(p))["exp"] - time.time()
+    assert left > 72 * 3600, f"token has only {left/3600:.1f}h left"
+    ' || { echo "$field is present but not a usable kubeconfig" >&2; exit 92; }
+    done
+    echo "preflight-ok"
+  args:
+    executable: /bin/bash
+  register: dev_worker_kubeconfig_preflight
+  changed_when: false
+  when:
+    - dev_worker_openbao_kubeconfig_cutover | bool
+    - not dev_worker_openbao_renders_kubeconfigs | bool
+    - not ansible_check_mode
+
+- name: Hand kubeconfig ownership to the bao agent
+  register: dev_worker_marker_written
+  ansible.builtin.copy:
+    content: |
+      # Written by ansible (role: dev_worker, ADR 0021) after this host's KV pre-flight passed.
+      # PRESENT  -> openbao-agent renders ~/.tep/kubeconfig and ~/.helmtest/kubeconfig, and
+      #             tasks/tep.yml stands its SOPS writer down.
+      # ABSENT   -> the legacy SOPS path owns ~/.tep/kubeconfig and the agent emits no kubeconfig
+      #             stanzas. Deleting this file is the rollback.
+      cutover={{ ansible_date_time.iso8601 }}
+    dest: /etc/openbao-agent/renders-kubeconfigs
+    owner: root
+    group: openbao-agent
+    mode: "0640"
+  when:
+    - dev_worker_openbao_kubeconfig_cutover | bool
+    - not dev_worker_openbao_renders_kubeconfigs | bool
+    - not ansible_check_mode
+    - dev_worker_kubeconfig_preflight is succeeded
+
+- name: Re-read kubeconfig ownership after a cutover
+  ansible.builtin.set_fact:
+    dev_worker_openbao_renders_kubeconfigs: true
+  when:
+    - dev_worker_openbao_kubeconfig_cutover | bool
+    - not ansible_check_mode
+    - dev_worker_kubeconfig_preflight is succeeded
+
 - name: Lay down the bao agent config
   ansible.builtin.template:
     src: openbao-agent.hcl.j2
@@ -169,6 +279,8 @@
     owner: root
     group: openbao-agent
     mode: "0640"
+    backup: true # the rollback target if the post-restart health check fails
+  register: dev_worker_agent_hcl
   notify: Restart openbao-agent
 
 - name: Lay down the git-credentials render template
@@ -208,6 +320,85 @@
     state: started
     daemon_reload: true
   when: not ansible_check_mode
+
+# Handlers are queued until the END of the play, so ANY check written after the template task above
+# would inspect the OLD, still-healthy process and pass regardless of whether the new config works.
+# Flushing here is what makes the serial rollout boundary mean something: the restart happens now,
+# and everything below observes the agent that is actually running the new config.
+- name: Apply the pending openbao-agent restart before verifying it
+  ansible.builtin.meta: flush_handlers
+
+# The verification and its rollback are ONE block/rescue: the rescue fires only if a task inside the
+# block fails, so the check has to live inside it. (A `block: []` with a rescue never triggers.)
+# The verification and its rollback are ONE block/rescue: a rescue fires only when a task INSIDE the
+# block fails, so the check has to live in the block. (`block: []` with a rescue never triggers.)
+- name: Verify the agent, and roll this host back if it is unhealthy
+  when: not ansible_check_mode
+  block:
+    - name: Verify the agent restarted onto the new config and rendered everything
+      ansible.builtin.shell: |
+        set -euo pipefail
+        # 1. the RUNNING process must be newer than the config it is meant to have loaded
+        [ "$(systemctl is-active openbao-agent)" = active ] || { echo "openbao-agent not active" >&2; exit 1; }
+        started=$(date -d "$(systemctl show openbao-agent -p ExecMainStartTimestamp --value)" +%s)
+        written=$(stat -c %Y /etc/openbao-agent/agent.hcl)
+        [ "$started" -ge "$written" ] || { echo "agent started BEFORE agent.hcl was written - stale process" >&2; exit 1; }
+        # 2. still up after a settle window, i.e. not in a crash/restart loop
+        before=$(systemctl show openbao-agent -p NRestarts --value)
+        sleep 20
+        [ "$(systemctl is-active openbao-agent)" = active ] || { echo "openbao-agent died after start" >&2; exit 1; }
+        [ "$(systemctl show openbao-agent -p NRestarts --value)" = "$before" ] || { echo "openbao-agent is restart-looping" >&2; exit 1; }
+        # 3. the credential the agent has always owned is still being rendered. This is the check
+        #    that catches "the new stanzas killed the agent and took git auth with them".
+        {% for user in dev_worker_users %}
+        [ -s "{{ user.home }}/.git-credentials" ] || { echo "{{ user.home }}/.git-credentials missing/empty" >&2; exit 1; }
+        {% endfor %}
+        {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
+        # 4. post-cutover only. Mode and existence alone would happily accept the OLD SOPS-written
+        #    ~/.tep/kubeconfig sitting at the same path, so each one is also used for a live call.
+        {% for user in dev_worker_users %}
+        for kc in {{ user.home }}/.tep/kubeconfig {{ user.home }}/.helmtest/kubeconfig; do
+          [ -s "$kc" ] || { echo "$kc not rendered" >&2; exit 1; }
+          [ "$(stat -c '%a %U' "$kc")" = "600 {{ user.name }}" ] || { echo "$kc wrong mode/owner" >&2; exit 1; }
+        done
+        kubectl --kubeconfig {{ user.home }}/.tep/kubeconfig get sandboxclaims >/dev/null           || { echo "tep kubeconfig does not authenticate" >&2; exit 1; }
+        kubectl --kubeconfig {{ user.home }}/.helmtest/kubeconfig auth can-i create secrets >/dev/null           || { echo "helmtest kubeconfig does not authenticate" >&2; exit 1; }
+        {% endfor %}
+        {% endif %}
+        echo agent-healthy
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+  rescue:
+    # Without this, a failed cutover leaves the host with NO kubeconfig writer at all: the agent is
+    # dead and tep.yml has already stood down.
+    # The marker is removed ONLY IF THIS RUN CREATED IT. Removing it unconditionally is wrong on an
+    # already-migrated host: a routine `-t openbao` run that trips the health check for an unrelated
+    # reason (a briefly sealed vault, say) would hand ownership back to a SOPS writer whose
+    # tep-tokens.sops.yaml has since been DELETED, leaving the host with no kubeconfig writer at all
+    # and no obvious sign of it. On an already-cut-over host the correct rollback is the agent config
+    # alone — ownership is not in question there.
+    - name: Restore the previous agent config, and ownership only if this run took it
+      ansible.builtin.shell: |
+        set -eu
+        BAK="{{ dev_worker_agent_hcl.backup_file | default('') }}"
+        if [ -n "$BAK" ] && [ -f "$BAK" ]; then
+          cp "$BAK" /etc/openbao-agent/agent.hcl
+        fi
+        {% if dev_worker_marker_written.changed | default(false) | bool %}
+        rm -f /etc/openbao-agent/renders-kubeconfigs
+        {% endif %}
+        systemctl restart openbao-agent
+      changed_when: true
+
+    - name: Fail loudly after rolling back
+      ansible.builtin.fail:
+        msg: >-
+          openbao-agent did not come up healthy on {{ inventory_hostname }}. The previous agent.hcl
+          was restored and kubeconfig ownership returned to the SOPS writer. STOP the rollout - do
+          not run the remaining workers until this is understood
+          (docs/runbooks/openbao-dev-workers.md, "kubeconfig cutover").
 
 # Duplicated from git_forge.yml on purpose: that file yields ~/.git-credentials to the agent when
 # this plumbing is on (and skips itself entirely), but the file is useless without the store helper
@@ -261,6 +452,36 @@
 
       NEVER print credential values into the conversation, logs, or files — use names/lengths when
       discussing them. Git credentials for git.chifor.me are already provisioned; just use git.
+      {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
+
+      ## Kubernetes: two kubeconfigs, two different jobs
+
+      Both are rendered by the local bao agent and refresh themselves — never edit or copy them.
+
+      - `~/.tep/kubeconfig` — namespace `testpool`. LEASE a sandbox (`tep lease`, `tep run`,
+        `tep release`). It can claim sandboxes and exec into them; it CANNOT deploy.
+      - `~/.helmtest/kubeconfig` — namespace `{{ dev_worker_helmtest_namespace }}`, yours alone.
+        This is where you `helm install`. The namespace is already the current context:
+
+            helm --kubeconfig ~/.helmtest/kubeconfig upgrade --install <rel> <chart> \
+              -f values-restricted.yaml --history-max 3 --wait
+
+      Four things about that namespace, so a failure reads correctly:
+
+      1. `--history-max` is an `upgrade` flag; `helm install` does not accept it. Use
+         `upgrade --install`.
+      2. Pod Security Admission enforces `restricted`. EVERY container — init containers and
+         `helm test` hook pods included — needs runAsNonRoot, allowPrivilegeEscalation:false,
+         capabilities.drop:[ALL] and seccompProfile RuntimeDefault. Most upstream charts do not set
+         these by default; start from the values overlay in the helmtest runbook.
+      3. NodePort and LoadBalancer Services are quota'd to zero, and you cannot create Ingresses,
+         NetworkPolicies, DaemonSets, CRDs or anything cluster-scoped. A chart whose own Role asks
+         for permissions you lack (events, endpoints, leases) is REJECTED by the RBAC escalation
+         check — that is a chart-compatibility problem, not a broken cluster.
+      4. You cannot deploy into `testpool`, into another worker's namespace, or anywhere else.
+         If you need more than this namespace allows, say so — do not go looking for a wider
+         credential.
+      {% endif %}
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"

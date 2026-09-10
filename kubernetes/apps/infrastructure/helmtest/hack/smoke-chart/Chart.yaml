@@ -1,0 +1,10 @@
+apiVersion: v2
+name: smoke-chart
+description: >-
+  Minimal PSA-restricted chart with a real `helm test` hook, used to prove a helmtest-dw<N>
+  kubeconfig can actually install, upgrade, test and uninstall. In-repo and version-pinned on
+  purpose: an upstream chart's defaults drift, and Bitnami's nginx in particular defaults
+  service.type to LoadBalancer, which these namespaces quota to zero.
+type: application
+version: 0.1.0
+appVersion: "1.37"

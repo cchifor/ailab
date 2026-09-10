@@ -23,6 +23,12 @@ resources:
   - openbao-lan.yaml # LAN NodePort :30820 for the dev-worker bao agents (ADR 0020)
   - devworker-seeds.sops.yaml # SOPS seed values for af/dev-workers/* (seed-wins contract)
   - devworker-provision-job.yaml # approle + per-worker policies/roles + KV seed (breakglass-auth)
+  # SYNC-OWNED fields, and a FOURTH precedence alongside the three seeders above: af/dev-workers/
+  # <host>.{tep,helmtest}_kubeconfig are written by this CronJob and deliberately NOT seeded — a seed
+  # copy would fight the sync and revert to a stale bearer token. They are cluster-derived, so a wipe
+  # loses them until the next successful sync rather than until an operator acts. Recovery ordering:
+  # docs/runbooks/openbao-recovery.md § the *sync-owned* path class.
+  - k8stoken-sync.yaml # TokenRequest -> per-worker kubeconfigs in af/dev-workers/* (k8s-auth, ADR 0021)
   - estate-seeds.sops.yaml # SOPS seed values for af/estate/* (proxmox/qnap/cloudflare/... — seed-wins)
   - estate-provision-job.yaml # seeds the af/estate/* operator-credential escrow (breakglass-auth)
   # NB: the Stage-1 k8s-auth canary (SecretStore/ExternalSecret) lives in ../openbao-canary/ — a SEPARATE

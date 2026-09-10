@@ -1,0 +1,18 @@
+# busybox httpd, non-root on 8080 — the standard nginx image cannot run under PSA `restricted`
+# (it runs as root and binds :80), which is exactly the trap this chart exists to avoid falling into.
+image:
+  repository: busybox
+  tag: "1.37"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Bumped by the verification loop (`--set rev=N`) to force real upgrades past --history-max.
+rev: 1
+
+resources:
+  requests: { cpu: 10m, memory: 16Mi }
+  limits: { cpu: 200m, memory: 64Mi }
+
+service:
+  port: 8080

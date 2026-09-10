@@ -39,11 +39,51 @@ Mount `af` (KV v2), prefix `estate/`, one path per system:
 | `af/estate/registry` | `ci_password`, `oidc_client_secret` | `ansible/secrets/registry.sops.yaml` | same SOPS file (zot htpasswd + OIDC); the OIDC secret's pbkdf2 **hash** is separately committed in `kubernetes/apps/apps/auth/authelia-config.yaml` |
 | `af/estate/gitea` | `runner_registration_token` | `ansible/secrets/gitea-runner.sops.yaml` | same SOPS file (5 VM act_runners); the KEDA pool uses its own `operator/ci/runner-registration` |
 | `af/estate/github` | `app_private_key` | `ansible/secrets/github-runner.sops.yaml` | same SOPS file (`github_runner` role → runner VMs) |
+| `af/estate/restic` | `nextcloud_password` | `~/work/keys/nextcloud-restic-password.txt` | that file only — it was in **no** SOPS file anywhere (ADR 0021 Step 0) |
+| `af/estate/platform` | `hatchet_encryption_master_keyset`, `hatchet_jwt_public_keyset`, `hatchet_jwt_private_keyset`, `hatchet_client_token`, `sendgrid_key` | `~/work/keys/platform.env` | that file only. **NOT** the OpenAI/Anthropic keys in the same file — see the rejected list below |
+| `af/estate/oauth` | `gcloud_client_id`, `gcloud_client_secret`, `github_client_id`, `github_client_secret` | `~/work/keys.txt` | that file only |
+
+**Verified-and-REJECTED candidates (2026-09-10, ADR 0021).** Every `*.sops.yaml` in the repo (57
+files) was decrypted and value-hashed before anything was seeded. Three candidates that *looked*
+workstation-only turned out not to be, and escrowing them would have created the rotation
+split-brain this page exists to prevent:
+
+| Candidate | Why it is NOT here |
+|---|---|
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` (`platform.env`) | **Byte-identical** to `kubernetes/apps/apps/ai/litellm-cloud-keys.sops.yaml`. Flux+SOPS is their system of record. |
+| rclone crypt password + salt (`rclone-crypt-escrow.txt`) | The **same secret** that `kubernetes/apps/backup/backup-offsite/rclone-config.sops.yaml` already holds in `rclone obscure` form. Obscure is reversible AES-CTR, not a hash — verified by implementing `reveal`. The plaintext file stays as an **offline** DR artifact. |
+| talos-backup age key | **Tier C, not Tier B.** It decrypts etcd snapshots, and etcd holds every k8s Secret — including `openbao-breakglass-token` and `openbao-estate-seeds`. Escrowing it puts, inside the online boundary, a key that decrypts historical copies of that boundary's own root token. General rule: *a credential that decrypts a backup of the boundary is classified by what the backup contains, not by what the credential is for.* |
+
+> **⚠ The workstation copy `~/work/keys/talos-backup-age.key` is ORPHANED.** Its public key is
+> `age1te3n4lf…`, but `kubernetes/apps/backup/talos-backup/cronjob.yaml` encrypts to
+> `age13ruz38k…` — the key in `kubernetes/infra/_out/talos-backup-age.key`. The workstation copy
+> **decrypts nothing**, so it is not a DR artifact and must not be treated as one. Before deleting
+> it, establish whether any *retained* snapshot predates a key change and was encrypted to it.
 
 **Access:** no policy grants `estate/*` to anything — not the dev-worker AppRoles, not ESO. The
 dev-worker `cred` helper gets a permission error here by design. Readers are root-level tokens only
 (the ceremony below). Widening access (e.g. a scoped operator token, an ESO consumer) is a
 deliberate follow-up decision, not a default.
+
+> **The vault policy is not the whole boundary, and the difference matters (ADR 0021).** Flux
+> decrypts `estate-seeds.sops.yaml` into a **live `openbao-estate-seeds` Secret in ns `openbao`**, so
+> anyone who can read Secrets in that namespace — or schedule a workload that mounts one — holds
+> every value on this page regardless of what the vault policy says. The real boundary is the
+> **union** of (a) the vault policy, (b) Secret-read RBAC in `openbao`, and (c) the root-capable
+> vault logins: the never-expiring breakglass token, and the undocumented `auth/userpass` `root`
+> user this page already flags below. Treat "no policy grants `estate/*`" as one of three locks, not
+> as the lock.
+>
+> **Testing the denial correctly.** `cred get estate/platform openai_api_key` proves nothing: `cred`
+> prefixes every lookup with `dev-workers/`, so that probes `af/dev-workers/estate/platform` and
+> fails as *not found* rather than *forbidden*. Ask for the real path with the sink token, and
+> distinguish 403 from 404:
+>
+> ```bash
+> BAO_ADDR=https://openbao.lan.chifor.me:30820 BAO_TOKEN="$(cat /run/openbao-agent/token)" \
+>   bao kv get -mount=af -format=json estate/platform >/dev/null
+> echo "exit=$?"   # non-zero, and stderr must say permission denied — NOT "no value found"
+> ```
 
 ## How it converges
 
@@ -92,6 +132,58 @@ BAO_TOKEN="$(kubectl --context admin@ai -n openbao get secret openbao-breakglass
 ```
 
 Pipe the field straight into its consumer; `wc -c` it if you only need to confirm it exists.
+
+## Workstation cleanup ceremony (ADR 0021 Phase 5)
+
+**Deliberately not automated.** Every step here deletes or revokes key material, and several depend
+on a judgement no playbook can make. Run it **after** confirming the new paths are live in the vault
+(`estate provision complete` in the Job log, and the pass-1/pass-2 matrix green).
+
+**Escrow does not remove the original.** Every source file listed in the table above still exists on
+the workstation after seeding, so it still needs a mode and still counts as a credential home.
+
+### 1. Tighten what stays
+
+```bash
+chmod 700 ~/work/keys
+chmod 600 ~/work/keys/* ~/work/keys.txt \
+          ~/.kube/config ~/.kube/ailab.config \
+          ~/.git-credentials ~/.gitea_tok ~/.cc_gitea_issue_token \
+          ~/work/home/ProxmoxApiToken.md
+chmod 600 ~/work/home/ailab/.env
+find ~/work/home/ailab -name '*.tfvars' -exec chmod 600 {} +
+```
+
+All of the above were **0644** as of 2026-09-10.
+
+### 2. Delete the redundant copies — each with its own precondition
+
+| File | Precondition — do NOT skip | Then |
+|---|---|---|
+| `~/work/keys/kubeconfig.txt` | Confirm it is still byte-identical to `~/.kube/ailab.config` (`sha256sum` both). It is a **cluster-admin** credential. | Delete. Recovery is `talosctl kubeconfig`, not this file. |
+| `~/work/keys/age.agekey` | Confirm a recoverable **offline** copy of the SOPS age key exists (removable media / password manager). `kubernetes/infra/_out/age.agekey` is on the *same disk* and gitignored — `.gitignore` is not access control, and a same-disk copy is not a backup. | Delete the `~/work/keys` copy only. |
+| `~/work/keys/talos-backup-age.key` | **Orphaned — see the warning above.** First establish whether any retained snapshot was encrypted to `age1te3n4lf…`. Separately, verify an offline copy of the *live* key (`kubernetes/infra/_out/talos-backup-age.key`, public `age13ruz38k…`) exists. | Delete only once both are answered. |
+| `~/.gitea_cred_tmp`, `~/.cutover_cookie`, `~/.cutover_sess_secret`, `~/.cutover_dump_name` | Grep the estate for each name; these look like 2026-08 cutover scratch. | Delete individually. |
+
+### 3. Reconcile the two Gitea tokens
+
+`~/.gitea_tok` and `~/.cc_gitea_issue_token` hold **different** values (sha256 `bdeea7df…` vs
+`3b19e2e6…`). Different is not redundant. In Gitea, identify each token's owner and scopes, and
+compare both against the shared `dev_worker_gitea_token`. Update every consumer **before** revoking
+anything.
+
+### 4. Rotate what the audit exposed
+
+The reconciliation in ADR 0021 Step 0 had to read `~/work/keys.txt`, and its Google
+(`GOCSPX-…`) and GitHub OAuth client secrets were printed to a terminal in the process. They were
+already sitting at mode 0644 in plaintext, but treat both as **exposed and due for rotation** — in
+the provider console, then in `estate-seeds.sops.yaml` in the same change (seed-wins: rotating one
+without the other is reverted within a day).
+
+### 5. Delete `SSO_PASSWORD` from `.env`
+
+Confirm with a repo-wide grep that it still has zero consumers, then remove it rather than escrowing
+it.
 
 ## Known gaps / follow-ups
 
