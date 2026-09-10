@@ -694,3 +694,62 @@ tests:
       - eval_time: 60m
         alertname: ReviewbotReconcileStale
         exp_alerts: []
+
+  # ------------------------------------------------ merge held by the verdict gate
+  # INTERVAL IS 1m AND LOAD-BEARING: an instant selector goes stale 5m after its last sample,
+  # so a 10m fixture leaves the series absent for half of every window and `for: 30m` can
+  # never accumulate 30 continuous minutes. The first cut of this fixture used 10m and the
+  # rule reported NO alert on a series 25h over the threshold.
+  - interval: 1m
+    name: a PR held a full day by the verdict gate pages, the normal merge tail does not
+    input_series:
+      # 25h - the ailab#616 shape (12h and still climbing when a human found it by hand).
+      - series: 'reviewbot_merge_blocked_seconds{job="reviewer-node",instance="192.168.0.24:9100",persona="claude"}'
+        values: "90000x60"
+      # 11.1h - the MEASURED p99 of the healthy last-review-to-merge lag over 78 merged PRs.
+      # Must stay silent, or the rule pages on roughly one merge in every hundred.
+      - series: 'reviewbot_merge_blocked_seconds{job="reviewer-node",instance="192.168.0.25:9100",persona="codex"}'
+        values: "40045x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: ReviewbotMergeBlocked
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+              persona: claude
+            exp_annotations:
+              summary: "reviewbot (claude) has a PR held >24h by the verdict gate"
+              description: >-
+                A PR on 192.168.0.24:9100 is merge-eligible in every respect except that the personas are not all clean at its current head, and has been for over 24h. This is the shape that has NO self-healing path: the severity ladder relaxes only from round 3, review_round() counts distinct fully-reviewed HEADS, and a bot author (renovate-bot, agentforge-ci-bot) never pushes a new one — so a round-1 `important` holds the merge forever. Find it with `journalctl -u reviewbot | grep 'held at'`, then either fix the finding, or merge over it if it is a false positive, or set `no-automerge` to say a human owns it (which clears this alert).
+      # Not yet at the 30m hold.
+      - eval_time: 20m
+        alertname: ReviewbotMergeBlocked
+        exp_alerts: []
+
+  # ------------------------------------------------------- primary model exhausted
+  # 10m is fine HERE, unlike the fixture above: increase() reads a range vector, which does not
+  # depend on the instant-staleness window the way `series > threshold` does.
+  - interval: 10m
+    name: continuous fallback use pages, a blip does not
+    input_series:
+      # One fallback every 10m - the reviewer-1 shape, where the primary never recovers.
+      - series: 'reviewbot_llm_fallback_used_total{job="reviewer-node",instance="192.168.0.24:9100",persona="claude"}'
+        values: "0+1x60"
+      # Three in one burst, then nothing: a transient upstream wobble, not a dead model.
+      - series: 'reviewbot_llm_fallback_used_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex"}'
+        values: "0x20 3x41"
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: ReviewbotPrimaryModelDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+              persona: claude
+            exp_annotations:
+              summary: "reviewbot (claude) is running on its fallback model"
+              description: >-
+                The pinned primary model on 192.168.0.24:9100 has failed often enough in 6h that the fallback is carrying the service. Reviews still land, which is exactly why this needs an alert: nothing else changes. `llm_failures_total` counts whole reviews and a rescued review is not a failed one, so reviewer-1 served 463 reviews on its fallback over 4 days (`claude-fable-5` quota, from 2026-09-06 19:17) with no signal but a per-run journal line. Check `journalctl -u reviewbot | grep 'primary model failed'`; if the quota is gone for good, repoint `pr_reviewer_llm_model` rather than leaving every review to pay a doomed first attempt.

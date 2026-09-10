@@ -285,3 +285,35 @@ spec:
               errors" — maybe_merge() swallows most of its own failures and never reaches this
               boundary. The other repos are unaffected (the sweep is fault-isolated per repo).
               Fix the allowlist in ansible/roles/pr_reviewer/defaults/main.yml and redeploy.
+        # NO SELF-HEALING PATH, which is why this is worth a page rather than a dashboard.
+        # THRESHOLD IS MEASURED (see the header): over the 78 most recently merged PRs across
+        # ailab + platform, the lag from the last clean persona review to the merge ran median
+        # 426s, p90 5070s, p99 40045s, MAX 45536s (12.6h) — merges legitimately trail by half a
+        # day here, so the intuitive "a few hours" would page on healthy ones. 86400 sits clear
+        # of that entire observed tail. Scope is narrow on purpose: maybe_merge() reports only
+        # the VERDICT gate, so a PR held by `no-automerge`, by a non-allowlisted author, or by
+        # pending CI never reaches this gauge — those are deliberate or transient states with
+        # their own signals. ailab#616 (12h) and #619 (8h) are the founding incidents.
+        - alert: ReviewbotMergeBlocked
+          expr: reviewbot_merge_blocked_seconds > 86400
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) has a PR held >24h by the verdict gate"
+            description: >-
+              A PR on {{ $labels.instance }} is merge-eligible in every respect except that the personas are not all clean at its current head, and has been for over 24h. This is the shape that has NO self-healing path: the severity ladder relaxes only from round 3, review_round() counts distinct fully-reviewed HEADS, and a bot author (renovate-bot, agentforge-ci-bot) never pushes a new one — so a round-1 `important` holds the merge forever. Find it with `journalctl -u reviewbot | grep 'held at'`, then either fix the finding, or merge over it if it is a false positive, or set `no-automerge` to say a human owns it (which clears this alert).
+        # A safety net in CONTINUOUS use means the thing it protects is gone. Deliberately reads
+        # the fallback counter and not llm_primary_failed_total: a primary failure the fallback
+        # rescues produces correct reviews, so nothing else in this group can see it.
+        # THRESHOLD IS MEASURED: reviewbot_reviews_full_total peaked at 57 (claude) / 68 (codex)
+        # per 6h over 7d, typical 44 — so a dead primary yields roughly one fallback per review,
+        # ~44 per 6h (reviewer-1's real rate was 463 over 4 days = ~29 per 6h). 10 is far above
+        # any plausible blip and far below either figure.
+        - alert: ReviewbotPrimaryModelDown
+          expr: increase(reviewbot_llm_fallback_used_total[6h]) >= 10
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) is running on its fallback model"
+            description: >-
+              The pinned primary model on {{ $labels.instance }} has failed often enough in 6h that the fallback is carrying the service. Reviews still land, which is exactly why this needs an alert: nothing else changes. `llm_failures_total` counts whole reviews and a rescued review is not a failed one, so reviewer-1 served 463 reviews on its fallback over 4 days (`claude-fable-5` quota, from 2026-09-06 19:17) with no signal but a per-run journal line. Check `journalctl -u reviewbot | grep 'primary model failed'`; if the quota is gone for good, repoint `pr_reviewer_llm_model` rather than leaving every review to pay a doomed first attempt.

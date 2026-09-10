@@ -213,6 +213,44 @@ class SharedBudgetTest(unittest.TestCase):
         self.assertAlmostEqual(600, self.calls[1]["timeout"], delta=2,
                                msg="fallback must inherit the REMAINING budget, not a fresh one")
 
+    def test_a_rescued_primary_failure_is_still_counted(self):
+        """THE 4-DAY BLIND SPOT: a primary failure the fallback RESCUES raises nothing and
+        increments no failure counter, because the review succeeded. reviewer-1 served 463
+        reviews that way after its `claude-fable-5` quota went on 2026-09-06 - correct output
+        the whole time, and no series anywhere said the pinned model had stopped being used."""
+        self.m.subprocess.run = self._fake_run(10, 0, self._ok_stdout())
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual({}, {k: v for k, v in _meta(self.m).items()
+                              if k in ("llm_primary_failed_total", "llm_fallback_used_total")},
+                         "a healthy primary must not touch either counter")
+
+        # Primary fails fast, fallback succeeds -> the review is fine, the counters still fire.
+        calls = []
+
+        def run(args, **kw):
+            calls.append(args)
+            type(self.clock).now += 10
+            if len(calls) == 1:
+                return self.m.subprocess.CompletedProcess(args, 1, "quota gone", "")
+            return self.m.subprocess.CompletedProcess(args, 0, self._ok_stdout(), "")
+        self.m.subprocess.run = run
+        self.m.run_llm("t", "d", "diff")
+        meta = _meta(self.m)
+        self.assertEqual("1.0", meta["llm_primary_failed_total"])
+        self.assertEqual("1.0", meta["llm_fallback_used_total"])
+        self.assertNotIn("llm_failures_total", meta,
+                         "the review SUCCEEDED - it must not be billed as a failed review")
+
+    def test_a_primary_failure_counts_even_when_the_fallback_is_skipped(self):
+        """Otherwise the counter measures the net rather than the thing it is catching."""
+        self.m.subprocess.run = self._fake_run(880, 1, "{}")
+        with self.assertRaises(self.m.ExpensiveFailure):
+            self.m.run_llm("t", "d", "diff")
+        meta = _meta(self.m)
+        self.assertEqual("1.0", meta["llm_primary_failed_total"])
+        self.assertNotIn("llm_fallback_used_total", meta,
+                         "the fallback never ran; it must not be counted as used")
+
     def test_fallback_skipped_when_budget_is_nearly_spent(self):
         self.m.subprocess.run = self._fake_run(880, 1, "{}")
         with self.assertRaises(self.m.ExpensiveFailure):
@@ -2014,6 +2052,171 @@ class ReconcileAdmissionTest(unittest.TestCase):
     def test_enqueue_accepts_an_allowlisted_repo(self):
         self.m.enqueue("o/kept", 1, "b" * 40, "webhook")
         self.assertEqual(_jobs(self.m, "o/kept"), 1)
+
+
+def _held_sweep(m, prs, failing=(), verdict_blocked=()):
+    """One reconciler() pass where every PR already HAS this persona's marker, so the body
+    reaches maybe_merge() instead of enqueue(). `verdict_blocked` are the PR numbers whose
+    maybe_merge reports the verdict gate."""
+    def api(path, *a, **kw):
+        repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
+        if repo in failing:
+            raise RuntimeError("HTTP Error 404: " + repo)
+        return [_pr(n) for n in prs.get(repo, ())]
+
+    def maybe_merge(repo, pr):
+        return "verdicts" if pr in verdict_blocked else None
+
+    def sleep(secs):
+        if secs == m.CFG["reconcile_s"]:
+            raise _StopLoop
+
+    with mock.patch.object(m, "api", api), \
+            mock.patch.object(m, "existing_marker", lambda *a: True), \
+            mock.patch.object(m, "maybe_merge", maybe_merge), \
+            mock.patch.object(m, "retire_closed_quarantines", lambda: None), \
+            mock.patch("time.sleep", sleep):
+        try:
+            m.reconciler()
+        except _StopLoop:
+            pass
+
+
+class MergeBlockedVisibilityTest(unittest.TestCase):
+    """A PR held by the verdict gate must be visible in the log AND in a series.
+
+    THE INCIDENT SHAPE THIS PINS (2026-09-10, ailab#616 + #619): maybe_merge()'s verdict gate
+    returned with no log() and no metric, while the branch-protection path right below it has
+    always logged its 405. So a PR that was merge-ready except for one persona's verdict was
+    indistinguishable from a PR nobody had looked at - nothing to grep, nothing to alert on.
+    Both sat (12 h and 8 h) with the peer persona approved and CI green while 19 sibling
+    renovate PRs merged around them, and were found only by reading the PR list by hand.
+
+    The convergence ladder cannot rescue these: it relaxes from round 3, review_round() counts
+    distinct fully-reviewed HEADS, and a renovate PR keeps one head for life."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.head = "e" * 40
+
+    def _pr_api(self, m, verdicts, labels=(), author="renovate-bot"):
+        marks = ["ok\n\n<!-- review-bot:v1 persona=%s head=%s verdict=%s -->" % (p, self.head, v)
+                 for p, v in verdicts.items()]
+
+        def api(path, method="GET", body=None, raw=False):
+            if path == "/repos/o/r/pulls/7":
+                return {"state": "open", "draft": False, "mergeable": True,
+                        "user": {"login": author},
+                        "labels": [{"name": n} for n in labels],
+                        "head": {"sha": self.head}}
+            if path.startswith("/repos/o/r/pulls/7/reviews"):
+                return [{"id": i, "body": b, "user": {"login": "reviewer-" + p}}
+                        for i, (p, b) in enumerate(zip(verdicts, marks))]
+            if path.endswith("/status"):
+                return {"state": "success"}
+            self.fail("unexpected call: %s %s" % (method, path))
+        m.api = api
+        return api
+
+    def test_a_held_pr_names_the_persona_that_is_short(self):
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude", "codex"], persona="claude")
+        self._pr_api(m, {"claude": "findings", "codex": "clean"})
+        logged = []
+        with mock.patch.object(m, "log", lambda *a: logged.append(" ".join(map(str, a)))):
+            self.assertEqual("verdicts", m.maybe_merge("o/r", 7))
+        line = " ".join(logged)
+        self.assertIn("o/r#7", line)
+        self.assertIn("claude=findings", line)
+        self.assertNotIn("codex", line, "only the personas actually short belong in the line")
+
+    def test_a_persona_that_never_reviewed_is_named_too(self):
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude", "codex"], persona="claude")
+        self._pr_api(m, {"claude": "clean"})
+        logged = []
+        with mock.patch.object(m, "log", lambda *a: logged.append(" ".join(map(str, a)))):
+            self.assertEqual("verdicts", m.maybe_merge("o/r", 7))
+        self.assertIn("codex=no review", " ".join(logged))
+
+    def test_a_pr_held_for_a_DIFFERENT_reason_is_not_reported_as_a_verdict_block(self):
+        """no-automerge is a deliberate human brake, not a stall - counting it would make the
+        gauge fire on exactly the PRs somebody has already taken responsibility for."""
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude"], persona="claude")
+        self._pr_api(m, {"claude": "findings"}, labels=["no-automerge"])
+        self.assertIsNone(m.maybe_merge("o/r", 7))
+
+    def test_a_third_party_pr_is_not_reported_either(self):
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude"], persona="claude")
+        self._pr_api(m, {"claude": "findings"}, author="a-stranger")
+        self.assertIsNone(m.maybe_merge("o/r", 7))
+
+    def test_the_sweep_publishes_the_count_and_the_age(self):
+        m = load(self.tmp.name, repos=["o/r"])
+        c = m.db()
+        try:
+            c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated) "
+                      "VALUES('o/r',7,?,'done',?,?)",
+                      (_pr(7)["head"]["sha"], real_time.time() - 7200,
+                       real_time.time() - 7200))
+            c.commit()
+        finally:
+            c.close()
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7})
+        meta = _meta(m)
+        self.assertEqual("1", meta["merge_blocked_prs"])
+        self.assertGreater(float(meta["merge_blocked_seconds"]), 7000,
+                           "age must run from the review that landed on the current head")
+
+    def test_the_gauge_falls_when_the_block_clears(self):
+        """NON-LATCHING is the whole design. A cumulative counter would keep firing forever
+        after a single stuck PR merged - the trap reviewbot_quarantined_recent_jobs already
+        exists to dodge."""
+        m = load(self.tmp.name, repos=["o/r"])
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7})
+        self.assertEqual("1", _meta(m)["merge_blocked_prs"])
+        _held_sweep(m, {"o/r": [7]})          # same PR, now clean
+        self.assertEqual("0", _meta(m)["merge_blocked_prs"])
+        self.assertEqual("0", _meta(m)["merge_blocked_seconds"])
+
+    def test_a_pr_that_vanishes_clears_the_gauge_with_no_reaper(self):
+        m = load(self.tmp.name, repos=["o/r"])
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7})
+        self.assertEqual("1", _meta(m)["merge_blocked_prs"])
+        _held_sweep(m, {"o/r": []})           # merged or closed
+        self.assertEqual("0", _meta(m)["merge_blocked_prs"])
+
+    def test_a_failed_repo_does_not_publish_a_partial_count(self):
+        """A repo whose sweep died was only partly enumerated. Publishing what it managed to
+        see shrinks the gauge on exactly the cycles that went wrong, which reads as recovery."""
+        m = load(self.tmp.name, repos=["o/good", "o/bad"])
+        _held_sweep(m, {"o/good": [1], "o/bad": [2]}, verdict_blocked={1, 2})
+        self.assertEqual("2", _meta(m)["merge_blocked_prs"])
+        _held_sweep(m, {"o/good": [1], "o/bad": [2]}, failing={"o/bad"},
+                    verdict_blocked={1, 2})
+        meta = _meta(m)
+        self.assertEqual("1", meta["merge_blocked_prs"],
+                         "only the repo that completed may contribute")
+        self.assertEqual("1", meta[m.REPO_FAILED_PREFIX + "o/bad"],
+                         "and the undercount must be accompanied by its repo-failed series")
+
+    def test_the_new_series_reach_the_textfile(self):
+        """write_metrics() builds `gauges` from an explicit `WHERE k IN (...)` whitelist AND a
+        separate render list. A key added to only one of the two exports 0 forever - the exact
+        trap ReconcileMetricsTest was written for."""
+        m = load(self.tmp.name, repos=["o/r"])
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7})
+        m.bump_meta("llm_primary_failed_total", 3)
+        m.bump_meta("llm_fallback_used_total", 2)
+        exported = _exported(m)
+        self.assertEqual(1.0, exported['reviewbot_merge_blocked_prs{persona="test"}'])
+        self.assertIn('reviewbot_merge_blocked_seconds{persona="test"}', exported)
+        self.assertEqual(3.0, exported['reviewbot_llm_primary_failed_total{persona="test"}'])
+        self.assertEqual(2.0, exported['reviewbot_llm_fallback_used_total{persona="test"}'])
+
 
 if __name__ == "__main__":
     unittest.main()
