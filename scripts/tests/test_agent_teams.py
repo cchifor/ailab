@@ -50,6 +50,22 @@ REQUIRED_BOUNDS = {
 # 9-GPU estate; this is the ceiling this repo will accept.
 MAX_RALPH_ROUNDS = 8
 
+# Rows whose provider cannot authenticate yet. Enabling one does not grant a
+# capability -- it advertises a tool the agent will choose and that will then
+# fail, repeatedly, because nothing in the tool description says it is broken.
+# An unusable tool is worse than an absent one.
+#
+# This is NOT the old dormancy gate returning. The native delegation rows are
+# live; these are held on a specific, checkable fact about credentials:
+#   tool-subagent-codex -- codex 0.153.4 builds its auth manager with
+#     enable_codex_api_key_env: false, so CODEX_API_KEY never reaches the child;
+#     it needs native auth under its own CODEX_HOME.
+#   tool-subagent-claude-code -- its Bundle is not in DSH_PLUGINS at all.
+# Remove an entry here in the same commit that provisions its credential and
+# verifies one successful delegation. The pairing is the point: the flag in the
+# composition cannot be flipped without also editing this list.
+CREDENTIAL_GATED = {"tool-subagent-codex", "tool-subagent-claude-code"}
+
 
 def teams():
     return sorted(p.name[: -len(".preset.yml")] for p in TEAMS.glob("*.preset.yml"))
@@ -229,6 +245,14 @@ def check():
                 )
         else:
             fails.extend(_bounds_problems(team, ctext, found))
+
+        live_gated = [r for r, dis in found if r in CREDENTIAL_GATED and not dis]
+        if live_gated:
+            fails.append(
+                f"{team}: {sorted(live_gated)} is ENABLED but listed in CREDENTIAL_GATED -- "
+                f"its provider cannot authenticate, so the agent would choose a tool that "
+                f"always fails. Provision the credential and verify one delegation first."
+            )
 
         # Every row must name a module; a row with an id and no name mounts nothing.
         for i, line in enumerate(ctext.splitlines()):

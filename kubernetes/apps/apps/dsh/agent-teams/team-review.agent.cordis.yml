@@ -53,11 +53,24 @@
 #   * The workspace contract is a contract: children run in the parent's cwd and nothing
 #     stops two writers.
 ##
-# subagent_codex IS ENABLED and WILL FAIL until Codex auth exists. The tool registers because
-# the provider is installed, but codex 0.153.4 builds its auth manager with
-# enable_codex_api_key_env: false, so CODEX_API_KEY does not reach it. The child needs native
-# auth state under its own CODEX_HOME. Delegating before that returns an authentication
-# failure -- visibly, in the parent session, not silently.
+# subagent_codex IS HELD DISABLED, and NOT as a fan-out gate -- the native rows above are live.
+# It is disabled because it CANNOT WORK YET: codex 0.153.4 builds its app-server auth manager
+# with `enable_codex_api_key_env: false` (codex-rs/app-server/src/lib.rs, both entry points at
+# rust-v0.153.4), so CODEX_API_KEY never reaches the child. The CLI needs native auth state
+# under its own CODEX_HOME, which in a pod is a persistence and token-refresh problem.
+#
+# An earlier revision enabled it and documented the failure here instead. Review was right to
+# push back: a comment in a composition file does not stop the parent agent from CHOOSING the
+# tool. It would pick it, burn a turn, and get an authentication error -- repeatedly, because
+# nothing in the tool description says it is broken. An unusable tool is worse than an absent
+# one; dsh-tool-subagent removes the tool when its provider is gone, and that is the honest
+# state to present until auth exists.
+#
+# TO ENABLE: provision Codex auth for the child (see the plan's WP-4), verify ONE successful
+# delegation, then remove `disabled` here and drop the row from CREDENTIAL_GATED in
+# scripts/tests/test_agent_teams.py -- the test enforces this pairing so the flag cannot be
+# flipped on its own.
+
 #
 # The `standard` agent preset: the full coding agent, mounted once per process.
 #
@@ -266,6 +279,7 @@
     # alone grants no tool.
     - id: tool-subagent-codex
       name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
       config:
         provider: codex
         toolName: subagent_codex
