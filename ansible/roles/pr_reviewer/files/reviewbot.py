@@ -694,9 +694,51 @@ def coverage_table(dropped, kept_bytes, kept_files, raw_bytes, total_files):
 # is a category error: no number of retries on that PR can help, and retrying at all just burns
 # the next PR's budget against the same wall. It is now handled by WAITING - visibly, with the
 # queue intact - until the reset the error itself names.
-RATE_LIMIT_RE = re.compile(r"\b(session|usage|rate)[ _-]?limit", re.I)
-# "…resets 4:20pm (UTC)" / "resets 11:20am (UTC)"
-RESET_RE = re.compile(r"resets?\s+(\d{1,2}):(\d{2})\s*([ap]m)?\s*\(?\s*UTC\s*\)?", re.I)
+# ACCOUNT-scoped limits: the whole subscription is spent, so the fallback model - which
+# runs on that same subscription - cannot rescue the review either. These park.
+# `weekly` was added 2026-09-10 after reviewer-1 sat on `You've hit your weekly limit ·
+# resets 2am (UTC)` for hours: it matched nothing here, so instead of parking, the bot ran
+# 45 doomed fallback attempts and quarantined 5 jobs. `daily`/`monthly` are the same family
+# and are cheaper to add now than to diagnose later. `limits?` keeps the plural the original
+# accepted; the trailing \b stops `limitation` and friends.
+RATE_LIMIT_RE = re.compile(r"\b(session|usage|rate|weekly|daily|monthly)[ _-]?limits?\b", re.I)
+# MODEL-scoped limits: ONE model is spent and a different one still works, so the right
+# response is the opposite - take the fallback, do NOT park. Checked FIRST, because the
+# account-scoped pattern above must never win on a message that is really model-scoped.
+#
+# ANCHORED ON THE CLI'S OWN REMEDY, not on the word `limit`: when it tells us to switch
+# models, it is saying in so many words that another model will serve. Matching the looser
+# `reached your .* limit` instead would be actively wrong - it also matches `reached your
+# weekly limit`, which is account-scoped, and would silently convert a correct park back
+# into the doomed-fallback loop this whole change exists to remove.
+#
+# TWO tokens, both required, because ONE of them is not evidence. reviewer-claude on
+# ailab#634 caught the exposure this closes: this pattern is searched against
+# llm_error_text(), whose detail is built from the envelope's `subtype`/`error`/`result` -
+# and `result` is where MODEL-AUTHORED text lands. A bare `switch models` can therefore
+# arrive as review prose rather than as the CLI's remedy, and since the predicate reads
+# `not MODEL and RATE`, a spurious match SUPPRESSES a legitimate park, reopening the exact
+# incident this change exists to fix. That is the mirror image of the "rate limiter" false
+# positive closed on RATE_LIMIT_RE above, and it deserved the same care.
+#
+# `/usage-credits` is the discriminator: a slash command the CLI emits, present in BOTH
+# observed phrasings, and absent from ordinary prose about switching models.
+#   "...Run /usage-credits to continue or switch models with /model."         (2026-09-06)
+#   "...Run /usage-credits to keep using Fable 5 or /model to switch models." (2026-09-10)
+# Requiring both in EITHER order keeps every real message matching while making an accidental
+# match need two distinctive tokens in one 300-char envelope rather than two ordinary words.
+# The order is deliberately not fixed: an earlier cut required the literal `switch models
+# with /model` and missed the second phrasing within hours of being written.
+#
+# Getting this backwards is not symmetric. Treating a model limit as account-scoped parks a
+# persona that could still review (the fallback rescued all 463 occurrences measured over
+# 4 days from 2026-09-06); treating an account limit as model-scoped is what just happened.
+MODEL_LIMIT_RE = re.compile(r"(?=.*\bswitch models?\b)(?=.*/usage-credits\b)", re.I | re.S)
+# "…resets 4:20pm (UTC)" / "resets 11:20am (UTC)" / "resets 2am (UTC)"
+# MINUTES ARE OPTIONAL: the weekly-limit message renders a whole hour with no `:00`, so the
+# original pattern parsed nothing and the park fell back to DEFAULT_PARK_S - a 15-minute
+# retry loop against a limit 13 hours from resetting. parse_reset() defaults the group to 0.
+RESET_RE = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?\s*\(?\s*UTC\s*\)?", re.I)
 # Never park longer than this, whatever the text says: a misparse must not wedge the worker.
 MAX_PARK_S = 6 * 3600
 DEFAULT_PARK_S = 900
@@ -721,7 +763,10 @@ def parse_reset(text):
     m = RESET_RE.search(text or "")
     if not m:
         return None
-    hour, minute, ampm = int(m.group(1)), int(m.group(2)), (m.group(3) or "").lower()
+    # `or 0` is LOAD-BEARING since minutes became optional in RESET_RE: `int(None)` raises
+    # TypeError, which run_llm's wrapper would re-raise as an ordinary failure - defeating
+    # the very park this parses for, on exactly the messages it was widened to read.
+    hour, minute, ampm = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower()
     if ampm == "pm" and hour != 12:
         hour += 12
     elif ampm == "am" and hour == 12:
@@ -916,11 +961,14 @@ def _run_llm(title, desc, diff_text, rubric, started):
                     pass
         else:
             fb = CFG.get("llm_fallback_model") or ""
-            if r.returncode != 0 and RATE_LIMIT_RE.search(llm_error_text(r.returncode, r.stdout, r.stderr)):
-                # The fallback model runs on the SAME subscription, so retrying it just burns
-                # more of a budget that is already gone. Fail straight through to the parker.
+            if r.returncode != 0:
                 detail = llm_error_text(r.returncode, r.stdout, r.stderr)
-                raise RateLimited(detail, parse_reset(detail))
+                # ORDER IS THE WHOLE POINT. A model-scoped limit falls through to the
+                # fallback below (a different model on the same account still serves); only
+                # an account-scoped one parks, because there the fallback shares the budget
+                # that is already gone and retrying it just burns more of it.
+                if not MODEL_LIMIT_RE.search(detail) and RATE_LIMIT_RE.search(detail):
+                    raise RateLimited(detail, parse_reset(detail))
             if r.returncode != 0:
                 # A primary failure that the fallback RESCUES is invisible today:
                 # llm_failures_total counts whole reviews, and a rescued review is not a
