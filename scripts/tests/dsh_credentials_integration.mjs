@@ -2,6 +2,7 @@
 // @0.1.5-alpha.2 and its real cordis, reached through ctx.credentials -- the actual service
 // dispatch path, shadow receiver and all.
 import { Context } from '@deepseek-ai/cordis';
+import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment';
 import Provider from './openbao-credentials.mjs';
 import { mkdtempSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -57,6 +58,48 @@ t('set is rejected for an openbao-held reference', threw);
 writeFileSync(join(mount, 'LITELLM_API_KEY'), 'rotated');
 r = await creds.resolve('LITELLM_API_KEY');
 t('a rotation is visible to the next operation', r?.value === 'rotated', JSON.stringify(r));
+
+// --- the .env fallback layers, against the REAL launch-environment snapshot ------------------
+// The stub suite asserts that a stale `.env` value does not block OpenBao. That assertion is only
+// worth anything if the real base class really does report those layers as 'user-env'/'project-env'
+// rather than 'env' -- so it is checked here against the shipped snapshot implementation.
+{
+  const h = mkdtempSync(join(tmpdir(), 'dotenv-home-'));
+  writeFileSync(join(h, '.credentials.yaml'), 'version: 1\n');
+  chmodSync(join(h, '.credentials.yaml'), 0o600);
+  writeFileSync(join(mount, 'DOTENV_KEY'), 'from-openbao');
+  const c2 = new Context();
+  c2.provide(
+    'launchEnvironment',
+    createLaunchEnvironmentSnapshot([
+      { source: 'process', values: {} },
+      { source: 'user-env', path: '/x/.env', values: { DOTENV_KEY: 'stale-dotenv' } },
+    ]),
+  );
+  c2.plugin(Provider, { path: join(h, '.credentials.yaml'), dir: mount, watch: false });
+  await new Promise((r) => setTimeout(r, 200));
+  const got = await c2.credentials.resolve('DOTENV_KEY');
+  t('openbao wins over a stale .env fallback', got?.value === 'from-openbao', JSON.stringify(got));
+}
+
+// --- the EXACT production config -------------------------------------------------------------
+// The cordis insert supplies only `dir`; `path` and `dshHome` are absent, so the document is
+// resolved from $DSH_HOME. Every case above passes `path` explicitly, which means the config shape
+// the pod actually runs was never exercised. It is now, watcher and all (watch defaults true).
+{
+  const h = mkdtempSync(join(tmpdir(), 'prod-home-'));
+  writeFileSync(join(h, '.credentials.yaml'), doc);
+  chmodSync(join(h, '.credentials.yaml'), 0o600);
+  process.env.DSH_HOME = h;
+  const c3 = new Context();
+  c3.plugin(Provider, { dir: mount });
+  await new Promise((r) => setTimeout(r, 300));
+  t('the production config registers the service', !!c3.credentials);
+  const got = await c3.credentials?.resolve('NEW_CREDENTIAL');
+  t('the production config resolves from the mount', got?.value === 'appeared-without-config', JSON.stringify(got));
+  const rec = await c3.credentials?.readRecord('client-connection/browser-session');
+  t('the production config finds the document under $DSH_HOME', rec?.payload?.secret === 'preexisting-secret', JSON.stringify(rec));
+}
 
 let bad = 0;
 for (const x of out) { if (!x.ok) bad++; console.log(`${x.ok ? 'ok  ' : 'FAIL'} ${x.n}${x.ok ? '' : '  <- ' + x.d}`); }

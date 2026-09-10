@@ -62,6 +62,23 @@ const cases = [
     want: (r) => r?.value === 'env-value' && r?.source === 'env',
   },
   {
+    // The precedence that matters most for rotation: a stale value in <cwd>/.env or
+    // $DSH_HOME/.env must NOT block OpenBao. Only the INHERITED PROCESS environment outranks it,
+    // and the base distinguishes them by source name -- 'env' for process, 'user-env'/'project-env'
+    // for the dotenv fallbacks. Keying the yield on `source === 'env'` alone is therefore correct,
+    // and this case is what stops that from silently becoming a precedence inversion.
+    name: 'a stale .env fallback does not block openbao',
+    extra: { __dotenv: { LITELLM_API_KEY: 'stale-dotenv' } },
+    run: (p) => p.resolve('LITELLM_API_KEY'),
+    want: (r) => r?.value === 'bao-value' && r?.source === 'openbao',
+  },
+  {
+    name: 'a .env fallback still answers when openbao carries nothing',
+    extra: { __dotenv: { NOT_IN_MOUNT: 'from-dotenv' } },
+    run: (p) => p.resolve('NOT_IN_MOUNT'),
+    want: (r) => r?.value === 'from-dotenv' && r?.source === 'user-env',
+  },
+  {
     name: 'absent in mount falls through to the file layer',
     extra: { __file: { OTHER_KEY: 'file-value' } },
     run: (p) => p.resolve('OTHER_KEY'),
