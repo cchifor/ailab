@@ -129,7 +129,7 @@ A name in `dsh.profile.bundles` whose package is absent throws during profile lo
 preset is evaluated — the same crash-loop class the runbook already documents. **Therefore bundle
 activation must be atomic: the name enters `dsh.profile.bundles` only after the closure is proven
 present, and leaves it whenever the closure is not.** This drives the design of WP-3 and is the
-reason WP-2 ships first.
+reason WP-1 — which installs nothing — ships first.
 
 ### F4 — the credential problem is already solved in this estate, by AgentForge
 
@@ -207,7 +207,8 @@ sandbox:
 The real containment is what it has always been: the pod, its NetworkPolicy, and the workspace root.
 The presets decide **what the model is told it can do**, which is worth a great deal for steering and
 nothing for containment. If the operator wants a genuine boundary on the user root, set
-`includeUserRoot: false` on the `agent-presets` row — a one-line decision recorded in WP-2.
+`includeUserRoot: false` on the `agent-presets` row — a one-line decision recorded in WP-1, which is
+where that row is amended.
 
 ### Why not the obvious alternatives
 
@@ -293,20 +294,40 @@ Two mechanics already scarred into this repo:
   `trustedHosts` on the `connection` row.
 - **The shipped root is prepended and wins duplicate ids.** Prefix every team `team-`.
 
-**Teams shipped in this WP (native delegation only)**
+**Staging is not activation, and a preset has no off switch.** Projecting a `preset.yml` into
+`/dsh-teams` makes that preset *selectable* — the roster has no per-preset `disabled` flag. So
+"ship the files now, activate later" is not available at preset granularity, and an earlier draft of
+this plan quietly assumed it was.
+
+What *is* available is the row-level `disabled:` flag inside `agent.cordis.yml` — the same mechanism
+the shipped `standard` preset uses to keep `tool-subagent-codex` and `tool-subagent-claude-code`
+dormant. The staging/activation split therefore lives **inside** each team file, and a team's
+directory does not ship until that team is meant to be selectable at all.
+
+**Teams shipped in this WP**
 
 | id | composition | the case for it |
 |---|---|---|
-| `team-solo` | `standard` copied verbatim, model pinned, no cross-framework rows | The migration target for WP-0 and the control in every comparison. Copying it puts today's behaviour under git, which it currently is not. |
-| `team-swarm` | `subagent` + `subagent_fork` + `tool-workflow` + `tool-ralph` | Parallel local fan-out on the qwen routes. `tool-ralph`'s shipped `maxRounds: 64` is far too high for a shared 9-GPU estate — **pin it to 8** and say so in the file. |
+| `team-solo` | `standard` copied verbatim, model pinned, **every delegation row `disabled: true`** | The migration target for WP-0 and the control in every comparison. Copying it puts today's behaviour under git, which it currently is not. |
 
+`team-solo` is a copy of `standard`, and `standard` carries `tool-subagent` (`subagent`) and
+`tool-subagent-fork` (`subagent_fork`). **Copied verbatim it is a fan-out-capable team**, so WP-1
+ships it with those rows `disabled: true`. What WP-1 proves is the roster, the trust root, the mount
+and the `system`-root precedence — with no delegation reachable, and therefore no dependency on the
+bounds, night-window or workspace gates.
+
+`team-swarm`'s directory does **not** ship here; it lands in WP-1b (step 6) behind those gates.
 `team-review` needs L2 and lands in WP-4.
+
+**WP-1b (step 6)** removes `disabled:` from `team-solo`'s delegation rows and adds `team-swarm`
+(`subagent` + `subagent_fork` + `tool-workflow` + `tool-ralph`; `tool-ralph`'s shipped
+`maxRounds: 64` is far too high for a shared 9-GPU estate — **pin it to 8** and say so in the file).
 
 Every team file states inline: model pin, `maxDepth`, `backgroundMode`, whether it can reach a
 `-cloud` route (WP-2), and its concurrency posture (WP-5). `tool-ask-user` stays in every team — a
 team that cannot ask is a team that guesses.
 
-**Files:** `kubernetes/apps/apps/dsh/agent-teams/team-{solo,swarm}/{preset.yml,agent.cordis.yml}`,
+**Files (WP-1):** `kubernetes/apps/apps/dsh/agent-teams/team-solo/{preset.yml,agent.cordis.yml}`,
 `cordis.patch.yml`, `deployment.yaml` (seed step), `kustomization.yaml` (`configMapGenerator` — content-
 hashed, so editing a team rolls the pod, the property `relay.js` already relies on).
 
@@ -525,14 +546,30 @@ fan out is activated:
 | width | team composition — the tool set a preset exposes and its prompt | the only lever dsh gives; state the intended team size in each preset and treat it as guidance, not enforcement |
 | runtime | `tool-call-timeout-policy` (already in the host composition) | set an explicit per-delegation deadline |
 | **process/CPU/memory** | the dsh container's `resources` **and a PID limit** | bounds the *local* workload — every codex/claude child is a process in this pod. Size it before WP-4. It does **not** bound inference |
-| **inference admission** | **rpm/tpm on dsh's LiteLLM key**, at the gateway | the only *enforced* ceiling on fan-out. In-process native children are cheap locally and expensive remotely: they can issue many concurrent requests without approaching any CPU or PID limit. `litellm-vkeys.yaml` already establishes the idiom (per-key rpm/tpm + budget); it is applied there to the **litellm-local** gateway, so this is the same pattern applied to dsh's key on the cloud-capable `litellm` gateway, not that file reused |
+| **inference CONCURRENCY** | **`max_parallel_requests` on dsh's LiteLLM key** | the in-flight ceiling, and the one that corresponds to CL-1's measured envelope. In-process native children are locally cheap and remotely expensive: they can hold many concurrent requests without approaching any CPU or PID limit |
+| **inference RATE and BUDGET** | **`rpm_limit` / `tpm_limit` (+ budget) on the same key** | bounds sustained load and spend over time. Complementary to the row above, **not** a substitute for it |
 | ralph | `maxRounds: 8` | down from 64 |
 | GPU | CL-1's measured team capability map | WP-1 pins team sizes to it; **rpm/tpm is what makes the pin enforceable** rather than advisory |
 
+**Rate limits are not concurrency limits, and an earlier draft conflated them.** `rpm_limit` and
+`tpm_limit` bound admission *over a window*: a permitted burst at the top of the minute, or a handful
+of overlapping long streams, can sit far above CL-1's measured concurrent-stream envelope while
+violating neither. The knob that bounds in-flight requests is a separate one — LiteLLM's key and
+budget parameters carry `max_parallel_requests` alongside `rpm_limit` and `tpm_limit` (read in
+`litellm/proxy/_types.py`, not assumed).
+
+So the team size CL-1 measures is an **enforced** ceiling only if `max_parallel_requests` is set to it
+**and proven enforced on the deployed image**: a gating test that fires N+1 concurrent requests on
+dsh's key and asserts the extra is rejected or queued rather than served. Until that test passes,
+team sizes are advisory, and this plan says so rather than implying a bound it does not have.
+`litellm-vkeys.yaml` establishes the per-key idiom (applied there to the **litellm-local** gateway);
+this is the same pattern applied to dsh's key on the cloud-capable `litellm` gateway, not that file
+reused.
+
 **Metrics need a producer.** dsh has no ServiceMonitor and this plan does not invent one. What is
 actually available without new code: LiteLLM's per-key request/token series, and container CPU/
-memory/PID from cAdvisor. Alert on those — and on the rpm/tpm rejections above, which are the signal
-that a team is exceeding its envelope.
+memory/PID from cAdvisor. Alert on those — and on the rate-limit and parallel-request rejections
+above, which are the signal that a team is exceeding its envelope.
 
 **Per-*team* virtual keys stay descoped**, and for a reason the rpm/tpm row does not change: dsh's
 LiteLLM provider is host-level in `settings.yaml` with a single `apiKeyEnv`, so there is no
@@ -570,11 +607,21 @@ a parent and a foreground child overlap by construction.
    cross-session query surface, and that "the Activation inbox and ownership graph do not coordinate
    two harness processes". With two browser sessions open, assert session A cannot list, resume, or
    cancel session B's children.
-4. **Convention propagation.** A child CLI running in this workspace inherits none of the estate's
-   habits. Explicit-path staging, Gitea-not-GitHub, and **no AI attribution in commits or PRs** must
-   reach the child — via the workspace `AGENTS.md` (note `origin/fix/dsh-image-bytes-and-agents-md`
-   is already adding `agents.seed.md`) and, for claude-code, via the settings sources it reads
-   relative to the parent cwd. Assert it with one delegated commit.
+4. **Convention propagation — asserted read-only.** A child CLI running in this workspace inherits
+   none of the estate's habits. Explicit-path staging, Gitea-not-GitHub, and **no AI attribution in
+   commits or PRs** must reach the child — via the workspace `AGENTS.md` (note
+   `origin/fix/dsh-image-bytes-and-agents-md` is already adding `agents.seed.md`) and, for
+   claude-code, via the settings sources it reads relative to the parent cwd.
+
+   **Assert it without writing.** Delegate a task that requires the child to *report* the conventions
+   it resolved — which forge it would push to, how it would stage, what it would put in a trailer —
+   and check the answer. An earlier draft called for "one delegated commit", which contradicts rule 1:
+   an external child must not write to the shared workspace, and a test that requires it to is a test
+   that breaks the contract it exists to protect.
+
+   If a *mutation* test is genuinely wanted, it runs in a disposable scratch repo created outside
+   `/workspace` for that purpose and deleted afterwards — never in the production workspace, and
+   never against a real remote.
 
 ---
 
@@ -630,22 +677,28 @@ land before the capability they bound.
 |---|---|---|---|
 | G0 | Land `fix/dsh-image-bytes-and-agents-md` first | — | existing PR |
 | G1 | **WP-0** evidence + runbook narrowing | cluster access | ailab PR 1 |
-| 1 | **WP-1** — preset root + `team-solo` (native only) | G1 | ailab PR 2 |
+| 1 | **WP-1** — preset root + `team-solo`, **delegation rows disabled** | G1 | ailab PR 2 |
 | 2 | **CL-1** — measure (parallel from day 1) | — | cloudlab PR 1 |
 | 3 | **WP-2** — night-window routing + acceptance test | — (parallel) | ailab PR 3 |
 | 4 | **WP-5** — bounds: timeouts, pod resources, PID limit, ralph 8 | 1 | ailab PR 4 |
 | 5 | **WP-6** — workspace contract + cancellation/two-session tests | 1, 4 | ailab PR 5 |
-| 6 | **WP-1b** — `team-swarm` activated | 2, **3**, 4, 5 | ailab PR 6 |
+| 6 | **WP-1b** — enable `team-solo`'s delegation rows; add `team-swarm` | 2, **3**, 4, 5 | ailab PR 6 |
 | G2 | **WP-3 spike** — packaging (parallel from day 1, no dependency on G1) | — | note in `plans/` |
 | 7 | **WP-3 build** — install path (Option B or A) | G2 go | ailab PR 7 |
 | 8 | **WP-4 phase 1** probes + `team-review` | 7, 5, **3**, probes pass | ailab PR 8 |
 | 9 | **CL-3** — ADR 0002 | 2, 3 | cloudlab PR 2 |
 | 10 | **WP-4 phase 2** — broker-backed | AgentForge prerequisites **and** operator approval | ailab PR 9 |
 
-**No team is activated before WP-2's fallback acceptance test passes.** Steps 6 and 8 both depend on
+**No delegation is reachable before WP-2's fallback acceptance test passes.** Steps 6 and 8 depend on
 step 3 for that reason: the work is deliberately parallel, and without the edge an engineer following
 the graph could switch on fan-out while the overnight routing is still the empty chain `litellm.yaml`
-already documents. Activation means the preset is selectable, not merely that its files are merged.
+already documents.
+
+Step 1 is exempt **only because it ships no reachable delegation.** A preset is selectable the moment
+its files land — the roster has no per-preset off switch — so this gate cannot live at the file level.
+It lives at the row level: `team-solo` ships with `disabled: true` on every delegation row, and step 6
+is what removes it. Drop that flag from WP-1's PR and step 1 inherits steps 3, 4 and 5 as
+dependencies, collapsing the ordering.
 
 **G0 is real.** `origin/fix/dsh-image-bytes-and-agents-md` touches `deployment.yaml`,
 `kustomization.yaml` and `settings.seed.yaml` and adds `agents.seed.md` — the same files WP-1 and
@@ -663,7 +716,7 @@ first half with it.
 |---|---|---|
 | **A declared-but-absent bundle crash-loops a single-replica UI** | Verified in `loadProfileDirectory`: unguarded `resolveBundleDir` + `readFileSync` (F3a) | WP-3 rules 1–5: verify-then-mark, advisory (never blocking) plugin marker, last-good-closure fallback, declarative bundle list, fail-closed on the name |
 | **A failed plugin install takes the UI down instead of the providers** | The obvious design — gate `wait-for-install` on the plugin marker — converts a degraded feature into an outage on a 1-replica `Recreate` Deployment | WP-3 rule 2: the plugin marker is advisory; `wait-for-install` is untouched |
-| **Fan-out is unbounded in *inference*** | Native in-process children are locally cheap and remotely expensive; no CPU or PID limit sees a burst of concurrent model requests | rpm/tpm on dsh's LiteLLM key at the gateway (WP-5) — the only enforced ceiling |
+| **Fan-out is unbounded in *inference*** | Native in-process children are locally cheap and remotely expensive; no CPU or PID limit sees a burst of concurrent model requests | `max_parallel_requests` on dsh's LiteLLM key bounds in-flight requests; `rpm_limit`/`tpm_limit` bound rate and spend (WP-5). **Team sizes stay advisory until the N+1 gating test proves enforcement on the deployed image** |
 | **Two framework instances load and the provider registers into a dead registry** | pnpm's isolated layout vs. a hoisted copy; realpath resolution | Spike asserts single-instance `require.resolve` for every peer, and runs a real delegation |
 | **A patch erases config it looks like it merges** | Bitten twice already: `trustedHosts`, and `plan-mode`'s 37-line prompt | Every amended row restates its full config, generated from `--dump-config`, not retyped |
 | **WP-0 removes a load-bearing row** | Compaction is the difference between a long session and a dead one; a tool-name diff cannot see it | Behavioural check per row; three-way exit criteria; nothing removed on reasoning alone |
@@ -706,8 +759,12 @@ path still fails as expected by injecting the name directly into the profile `pa
 the guard is what is protecting the pod.
 
 **Per-provider end-to-end (WP-4):** one delegation returning a result; one *cancelled* delegation with
-no orphaned processes; one delegated commit proving the estate's Gitea / explicit-staging /
-no-attribution conventions reached the child.
+no orphaned processes; one **read-only** convention check per WP-6 rule 4 — the child reports the
+forge, staging rule and trailer policy it resolved, and writes nothing.
+
+**Concurrency ceiling (WP-5), gating:** fire N+1 concurrent requests on dsh's LiteLLM key and assert
+the extra is rejected or queued. Until this passes, `max_parallel_requests` is unproven on the
+deployed image and every team size in this plan is advisory, not enforced.
 
 **Concurrency (WP-6):** two browser sessions; assert no cross-session listing, resumption or
 cancellation.
@@ -765,10 +822,29 @@ have overstated closure. It was right. Every partial and both defects are addres
 |---|---|
 | `approve-for-me` is not auto-deny; `auto_review` can allow | claim corrected; characterising the reviewer is now a gate on activating `team-review` (WP-4) |
 | degraded boot conflicts with the startup gate; a failed install leaves the UI down | WP-3 rule 2 makes the plugin marker **advisory** — `wait-for-install` is untouched — plus rule 3's last-good-closure fallback and a new install-failure test (§6) |
-| CPU/memory/PID do not bound remote inference | new **inference-admission** row in WP-5: rpm/tpm on dsh's LiteLLM key, the estate's own `litellm-vkeys` idiom applied to the cloud-capable gateway |
+| CPU/memory/PID do not bound remote inference | new inference rows in WP-5 on dsh's LiteLLM key, the estate's own `litellm-vkeys` idiom applied to the cloud-capable gateway. *(The round-1 fix named rpm/tpm; the PR review below corrected that to `max_parallel_requests` for the in-flight bound.)* |
 | worktrees do not place children in them | WP-6 now **commits to single-writer** for external providers and says why a parent-created worktree is theatre when the provider exposes no `cwd` |
 | the graph permits activation before overnight routing is ready | steps 6 and 8 now depend on step 3, with the reason stated in §4 |
 | the singleton assertion has a false-positive case | the WP-3 spike now compares against the realpaths in the **running host's** live module registry, not across the new packages only |
 
-**Not carried:** none. The plan has not been re-reviewed since these edits — round 2 was the last
-round this workflow allows, so the remaining judgement is the operator's.
+**Not carried:** none.
+
+### PR review round (Gitea PR #622, `reviewer-codex` + `reviewer-claude`)
+
+Six findings on the pushed plan, all accepted and fixed in one commit:
+
+| finding | what changed |
+|---|---|
+| codex: step 1 activates a team before the gates the plan itself requires | **The real defect: a preset has no off switch.** Projecting `preset.yml` makes it selectable, so a file-level staging split does not exist. `team-solo` is a copy of `standard`, which carries `subagent`/`subagent_fork` — verbatim it is fan-out-capable. WP-1 now ships it with `disabled: true` on every delegation row, and WP-1b removes it (WP-1, §4) |
+| claude: `team-swarm`'s files in WP-1 make it selectable before its bounds land | same root cause; `team-swarm`'s directory no longer ships in WP-1 at all |
+| codex: the delegated-commit test contradicts WP-6's single-writer rule | convention propagation is now asserted **read-only** — the child reports what it resolved; any mutation test moves to a disposable scratch repo outside `/workspace` (WP-6 rule 4, §6) |
+| codex: rpm/tpm bound rate, not concurrency | corrected and split into two rows: `max_parallel_requests` is the in-flight ceiling, `rpm_limit`/`tpm_limit` bound rate and spend. Team sizes are **advisory until** a gating test proves `max_parallel_requests` is enforced on the deployed image (WP-5, §6) |
+| claude: stale "WP-2 ships first" in F3a | → WP-1, the package that installs nothing |
+| claude: stale "recorded in WP-2" for `includeUserRoot` | → WP-1, where the `agent-presets` row is amended |
+
+Two of these were the same defect seen from different angles, and it was a real one: the plan's
+central sequencing promise — no fan-out before its bounds — rested on a staging/activation split that
+the preset roster does not offer. The gate now lives at the row level, where the mechanism actually
+exists.
+
+The plan has not been re-reviewed since this round. Merge judgement is the operator's.
