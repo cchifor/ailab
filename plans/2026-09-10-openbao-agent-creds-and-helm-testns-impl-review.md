@@ -1,6 +1,6 @@
 # Implementation review — openbao-agent-creds-and-helm-testns — round 1
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
