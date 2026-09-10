@@ -2100,7 +2100,7 @@ class MergeBlockedVisibilityTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.head = "e" * 40
 
-    def _pr_api(self, m, verdicts, labels=(), author="renovate-bot"):
+    def _pr_api(self, m, verdicts, labels=(), author="renovate-bot", ci="success"):
         marks = ["ok\n\n<!-- review-bot:v1 persona=%s head=%s verdict=%s -->" % (p, self.head, v)
                  for p, v in verdicts.items()]
 
@@ -2114,10 +2114,31 @@ class MergeBlockedVisibilityTest(unittest.TestCase):
                 return [{"id": i, "body": b, "user": {"login": "reviewer-" + p}}
                         for i, (p, b) in enumerate(zip(verdicts, marks))]
             if path.endswith("/status"):
-                return {"state": "success"}
+                return {"state": ci}
             self.fail("unexpected call: %s %s" % (method, path))
         m.api = api
         return api
+
+    def test_a_pr_whose_CI_is_not_green_is_not_a_verdict_block(self):
+        """reviewer-codex, round 1: the verdict check used to run BEFORE the status check, so
+        a PR with red or pending CI *and* a non-clean verdict landed in the gauge - and
+        ReviewbotMergeBlocked would then page with a remedy ("fix the finding, or merge over
+        it") that is not the blocker. Both are bare early returns, so the order cannot change
+        what merges; it decides only what a held PR is reported as. "verdicts" has to mean the
+        verdict gate is the SOLE remaining blocker, or the alert's whole premise is wrong."""
+        for ci in ("pending", "failure", "error"):
+            with self.subTest(ci=ci):
+                m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                         merge_personas=["claude"], persona="claude")
+                self._pr_api(m, {"claude": "findings"}, ci=ci)
+                self.assertIsNone(m.maybe_merge("o/r", 7))
+
+    def test_the_verdict_block_still_reports_when_CI_IS_green(self):
+        """The other half - moving the status check earlier must not silence the real case."""
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude"], persona="claude")
+        self._pr_api(m, {"claude": "findings"}, ci="success")
+        self.assertEqual("verdicts", m.maybe_merge("o/r", 7))
 
     def test_a_held_pr_names_the_persona_that_is_short(self):
         m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],

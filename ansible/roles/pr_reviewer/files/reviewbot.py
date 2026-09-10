@@ -1050,9 +1050,10 @@ def maybe_merge(repo, pr):
     the author is allowlisted, and no no-automerge label is set. One persona alone never
     merges; third-party PRs are never merged.
 
-    Returns "verdicts" when the PR is merge-eligible in every other respect but the personas
-    are not all clean at this head - the reconciler tallies those into the merge_blocked
-    gauges. Every other outcome (merged, or ineligible for any other reason) returns None."""
+    Returns "verdicts" when the personas are not all clean at this head AND nothing else is
+    holding the PR - CI green, author allowlisted, no no-automerge label. The reconciler
+    tallies those into the merge_blocked gauges, so that "sole remaining blocker" reading is
+    what ReviewbotMergeBlocked pages on. Every other outcome returns None."""
     if not CFG.get("automerge") or posting_disabled():
         return
     try:
@@ -1065,6 +1066,20 @@ def maybe_merge(repo, pr):
         if any((l.get("name") or "").lower() == "no-automerge" for l in d.get("labels") or []):
             return
         head = d["head"]["sha"]
+        # CI IS CHECKED BEFORE THE VERDICT GATE, and the order is the whole point of the
+        # "verdicts" signal (reviewer-codex, round 1 of this PR). These two are both bare
+        # early returns, so swapping them cannot change what merges - but it decides what a
+        # held PR is REPORTED as. Classifying on verdicts first would put every PR with red
+        # or pending CI *and* a non-clean verdict into the merge_blocked gauge, and
+        # ReviewbotMergeBlocked would then page with a remedy ("fix the finding, or merge
+        # over it") that is not the actual blocker. Checked second, "verdicts" means the
+        # verdict gate is the SOLE remaining blocker, which is the only claim worth paging on:
+        # a red check is already visible in Gitea and owned by whoever broke it, whereas the
+        # verdict gate is the one that was invisible. Costs one extra status call per held PR
+        # per sweep - bounded, since only marker-bearing mergeable allowlisted PRs get here.
+        st = api(f"/repos/{repo}/commits/{head}/status")
+        if st.get("state") != "success":
+            return
         verdicts = persona_verdicts(repo, pr, head)
         needed = CFG.get("merge_personas", [])
         short = [p for p in needed if verdicts.get(p) != "clean"]
@@ -1081,9 +1096,6 @@ def maybe_merge(repo, pr):
                 + (", ".join(f"{p}={verdicts.get(p) or 'no review'}" for p in short)
                    if needed else "no merge_personas configured"))
             return "verdicts"
-        st = api(f"/repos/{repo}/commits/{head}/status")
-        if st.get("state") != "success":
-            return
         try:
             api(f"/repos/{repo}/pulls/{pr}/merge", "POST",
                 {"Do": "merge", "head_commit_id": head})
