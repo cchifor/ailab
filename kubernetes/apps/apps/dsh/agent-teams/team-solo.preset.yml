@@ -1,0 +1,6 @@
+name: Solo
+description: >-
+  The estate baseline: full coding agent — file editing, shell, file and web
+  search, skills, plan mode, goals. Delegation is present but dormant; the
+  agent works alone.
+order: 10
