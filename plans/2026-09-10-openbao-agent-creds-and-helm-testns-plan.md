@@ -1,5 +1,13 @@
 # Agent credentials in OpenBao + Helm-capable isolated test namespaces
 
+## Codex Review
+
+- Phase 3 does not yet protect all six workers: verify both fields under every worker identity before rollout, add per-host health gates and rollback, and cover recovery after fields disappear.
+- Phase 1 has containment blockers: wildcard RBAC grants the supposedly excluded escalation verbs, writable NetworkPolicies undermine isolation, and the Service quota keys are incorrect.
+- PSA `restricted` is usable with compatible workloads and test hooks, but requires documented chart values and a reproducible smoke chart with an actual test.
+- Leaving cluster-derived tokens unseeded fits the seed-wins contract; scoped sync authentication, safe KV merging, bounded recovery, and rotation sequencing remain unspecified.
+- Tiering needs an explicit cluster-admin kubeconfig disposition, independent recovery-key custody, reconciliation of existing credential homes, and a denial test that actually addresses `af/estate/*`.
+
 ## Context
 
 Two gaps found in the 2026-09-10 credential audit, with one shared root cause.
@@ -38,8 +46,10 @@ and the boundary is load-bearing:
 
 - **Tier A — agent-readable** (`af/dev-workers/*`, read by the per-worker AppRole via `cred`).
   Namespace-scoped k8s tokens, Gitea PATs. Blast radius of a worker compromise is already this set.
+  <!-- codex: The Helm token adds deployment authority that workers currently lack, so the blast radius increases even though its distribution stays in Tier A. Existing tep tokens also reach every worker's pods in testpool, and the shared hypervisor key remains a separate broad privilege; six Helm namespaces do not establish six isolated worker identities end to end. -->
 - **Tier B — operator escrow only** (`af/estate/*`; no policy grants read to any AppRole or ESO).
   The unescrowed workstation credentials above.
+  <!-- codex: Vault policies describe only one access path: Flux decrypts these seeds into openbao-estate-seeds, which is accessible through Kubernetes Secret reads or workloads allowed to mount it. Include that namespace's Kubernetes permissions and existing root-capable vault logins in the operator-only boundary. -->
 - **Tier C — must never enter the vault at all.** The SOPS age master key, the unseal key, the
   breakglass token. The age key in particular is chicken-and-egg: it decrypts the seed files that
   populate the vault *and* `ansible/secrets/dev-worker.sops.yaml`, which holds every worker's
@@ -48,6 +58,8 @@ and the boundary is load-bearing:
 The `admin@ai` cluster-admin kubeconfig is Tier B, never Tier A. Putting it where a dev-worker
 AppRole can read it would convert any single-worker compromise into full cluster-admin — on top of
 the root-on-three-hypervisors that the shared `proxmox_ssh_key` already grants.
+
+<!-- codex: Phase 4 contains no destination or recovery procedure for this Tier B credential, while Phase 5 deletes one copy. State whether the retained kubeconfig is independently backed up or reproducibly regenerated, or add its escrow and rotation requirements explicitly. -->
 
 ## Approach
 
@@ -65,16 +77,24 @@ Per namespace `helmtest-dw1` … `helmtest-dw6`:
   at the same level). This is the single most important control in the phase: `create pods` in a
   namespace without PSA is a node-compromise primitive (hostPath, privileged, hostNetwork). Charts
   that need more than `restricted` are out of scope — they belong in a leased Kata sandbox.
+  <!-- codex: Restricted rejects ordinary workloads and test hooks that omit required security settings, not just charts requesting privileged access: provide compatible images and values covering runAsNonRoot, allowPrivilegeEscalation=false, dropped capabilities, and seccomp for every container, including init containers. Validate rendered hooks as well as Deployments, and document the supported chart profile. [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) -->
+  <!-- codex: The existing testpool provides Kata DinD environments, not a documented Kubernetes API for installing charts. If that is the fallback for incompatible charts, specify and verify the nested-cluster workflow or mark it as an additional dependency. -->
 - **ResourceQuota** (starting point, tunable): `requests.cpu: "4"`, `requests.memory: 8Gi`,
   `limits.cpu: "8"`, `limits.memory: 16Gi`, `pods: "30"`, `count/persistentvolumeclaims: "10"`,
   `requests.storage: 50Gi`, `count/services.loadbalancers: "0"`, `count/services.nodeports: "0"`.
   The last two matter: a NodePort or LoadBalancer from a test chart is an estate-wide exposure
   change made without a git commit.
+  <!-- codex: These two quota keys are incorrect: use services.loadbalancers and services.nodeports without the count/ prefix. The written keys describe generic resource counts in different API groups and do not enforce the intended Service-type restrictions. [Resource quotas](https://kubernetes.io/docs/concepts/policy/resource-quotas/) -->
+  <!-- codex: CPU, memory, and PVC quotas leave node ephemeral storage and control-plane object growth unbounded, including Secrets, ConfigMaps, Jobs, and completed Pods. Add appropriate storage defaults/limits and object-count budgets, accounting for Helm release history and cleanup. -->
 - **LimitRange** with default requests/limits, so a chart that omits them cannot evade the quota.
 - **NetworkPolicy** default-deny both directions, plus a CiliumNetworkPolicy mirroring the
   `agentforge-sandbox` posture: allow kube-dns and the in-cluster registry, `egressDeny` on
   `world`, `host`, `remote-node`, `169.254.169.254/32`, `169.254.0.0/16`, `::/0`. A test deployment
   has no business reaching the LAN, the node IPs, or — critically — `openbao-lan:30820`.
+  <!-- codex: Granting workers NetworkPolicy writes lets them delete the baseline or add permissive policies; the listed Cilium denies still leave other cluster pods, including OpenBao's ClusterIP, outside the explicit deny set. Remove that grant or enforce an administrator-owned boundary that worker policies cannot widen, selecting every pod independently of worker-controlled labels. [NetworkPolicy semantics](https://kubernetes.io/docs/concepts/services-networking/network-policies/) -->
+  <!-- codex: With only the stated allowances, test hooks cannot contact their own application's Service and multi-component charts cannot communicate. Define same-namespace ingress and egress allowances for the supported tests while retaining cross-namespace isolation. -->
+  <!-- codex: The estate registry is a LAN LXC at 192.168.0.36, not an in-cluster endpoint, according to kubernetes/infra/registry/README.md. Distinguish worker-side chart downloads and node-side image pulls from pod egress, and specify any actual runtime registry access without contradicting the LAN deny. -->
+  <!-- codex: An unrestricted kube-dns allowance can forward external queries and provide an exfiltration channel despite world egress denial. Specify permitted DNS names and the necessary UDP/TCP rules, following the sandbox's DNS restrictions where applicable. -->
 - **ServiceAccount** `helmtest-dw<N>` + a `kubernetes.io/service-account-token` Secret
   `helmtest-dw<N>-token`, the same shape `tep-access.yaml` already uses.
 - **Role** `helmtest-deployer` + RoleBinding, granting `["*"]` verbs **only** on the namespaced
@@ -83,12 +103,17 @@ Per namespace `helmtest-dw1` … `helmtest-dw6`:
   `endpoints`, plus `apps` (deployments, statefulsets, daemonsets, replicasets), `batch` (jobs,
   cronjobs), `networking.k8s.io` (ingresses, networkpolicies), `policy`
   (poddisruptionbudgets), `autoscaling` (horizontalpodautoscalers), and
-  `rbac.authorization.k8s.io` (roles, rolebindings — namespaced only).
+  `rbac.authorization.k8s.io` (roles, rolebindings).
+  <!-- codex: Blocker: wildcard verbs on roles include escalate and bind, allowing a worker to manufacture broader namespaced permissions and then remove controls such as quotas or CiliumNetworkPolicies. Replace wildcards with explicit resource-appropriate verbs before relying on Kubernetes' escalation checks. [RBAC authorization](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) -->
+  <!-- codex: This covers conventional Helm release storage and Pod/Job tests, but Helm has no universal chart permission set; chart resources and hook Roles can additionally require unsupported APIs such as leases or custom resources. Define supported charts and explicit CRUD/watch permissions, keep pods/log read-only, and justify optional powers such as exec, endpoint writes, and DaemonSets separately. -->
+  <!-- codex: Ingress creation can reconfigure a shared controller and expose or collide with estate hostnames despite zero NodePort/LoadBalancer quotas. Exclude it initially or constrain ingress classes, hosts, and controller-sensitive annotations through admission. -->
+  <!-- codex: Namespace-wide Secret, ServiceAccount, and RBAC mutation also lets a chart or worker delete or replace its own standing access objects. Define how bootstrap objects are protected and recovered so an ordinary release collision cannot invalidate the credential being synchronized. -->
 
 Two deliberate non-grants, both of which need to be documented where an agent will read them:
 
 - **No cluster-scoped rights, so no CRD installation.** `helm install` of a chart with a `crds/`
   directory will fail. This is intentional — a CRD is a cluster-wide schema change.
+  <!-- codex: Document other unsupported cluster-scoped manifests, especially ClusterRoles, ClusterRoleBindings, and Namespace objects. Skipping CRD installation can support pre-provisioned schemas, but their namespaced custom resources still need an explicitly reviewed grant absent from this list. [Helm CRD handling](https://docs.helm.sh/docs/chart_best_practices/custom_resource_definitions/) -->
 - **No `escalate` / `bind` verb.** Kubernetes' built-in RBAC escalation check already confines
   `create rolebindings` to permissions the grantor holds, so the `rbac` grant above cannot exceed
   `helmtest-deployer` itself. Worth stating explicitly because it looks scarier than it is.
@@ -99,11 +124,17 @@ New CronJob `openbao-k8stoken-sync` (ns `openbao`, daily, plus a Job for immedia
 reads the twelve SA token Secrets (`testpool/tep-dw<N>-token`, `helmtest-dw<N>/helmtest-dw<N>-token`)
 and writes a **fully rendered kubeconfig** into each worker's own KV path:
 
+<!-- codex: The sync's OpenBao authentication and write policy are missing; Kubernetes Secret-read RBAC does not provide either. Specify a declaratively restored Kubernetes-auth role bound to this Job's exact ServiceAccount/namespace and a short-lived token scoped to the six destination paths, without reusing the breakglass token. -->
+
+<!-- codex: Daily scheduling alone allows nearly a day of outage after token replacement or a wipe, and failed runs can extend that indefinitely. Define immediate recovery triggers, bounded retries/deadlines, overlap handling for scheduled and manual Jobs, and alerting on incomplete or stale synchronization. -->
+
 ```
 af/dev-workers/dev-worker-<N>
   tep_kubeconfig       # ns testpool,       SA tep-dw<N>
   helmtest_kubeconfig  # ns helmtest-dw<N>, SA helmtest-dw<N>
 ```
+
+<!-- codex: Patch both owned fields together while preserving unrelated per-worker fields, using conflict-safe creation for a genuinely absent path. A whole-document put, or treating authorization/network errors as absence, can erase seeded credentials or race the daily provisioner. -->
 
 The per-worker subtree is where ADR 0020 already says per-worker material belongs, and the existing
 per-worker policy already grants `read` on `af/data/dev-workers/<host>` and `/*` — **no policy
@@ -112,14 +143,22 @@ change is required**.
 Storing the rendered kubeconfig rather than the raw token keeps the `bao agent` template a
 one-liner and keeps the CA bundle next to the token it authenticates.
 
+<!-- codex: Generate the worker-reachable API endpoint currently configured as https://192.168.0.40:6443, not the Job's in-cluster endpoint, and validate CA data, token identity, namespace, and current-context before publishing. Token Secrets are populated asynchronously, so retry absent or empty token/CA fields without replacing a valid kubeconfig with incomplete data. -->
+
 RBAC for the CronJob: a Role in `testpool` and one per `helmtest-dw<N>`, each granting `get` on
 **only** the named token Secret — not `list`, not namespace-wide `get`.
+
+<!-- codex: Specify RoleBindings to the sync ServiceAccount in openbao; the testpool Role must enumerate all six tep Secret names. Implement direct named GETs so the Job does not accidentally require list/watch permissions beyond this design. -->
 
 **These two fields are deliberately NOT added to `devworker-seeds.sops.yaml`.** The seed contract
 in this subtree is *seed-wins on every daily run*, so a seeded copy would fight the sync job and
 revert to a stale token. They are cluster-derived state: after an OpenBao wipe the sync job
 repopulates them on its next run with no operator action, which is strictly better than the seed
 path. `docs/runbooks/openbao-recovery.md` § path classes gains a row saying so.
+
+<!-- codex: Excluding these fields is correct because the current seeder patches existing paths and preserves absent keys, but the fields themselves are lost on a wipe until a successful sync restores them. Amend ADR 0020 and the dev-worker runbook's blanket durability guidance to identify the sync as their recovery authority, and test that future seeds never include them. -->
+
+<!-- codex: Recovery is not wholly automatic: the KV mount and sync auth policy/role must be restored, and every worker's AppRole secret-id must still be re-minted after a wipe as ADR 0020 requires. Order recovery as vault/auth restoration, complete twelve-field sync, then worker reauthentication and rendering; a daily eventual retry is insufficient for the fail-exiting agents. -->
 
 ### Phase 3 — `bao agent` renders both kubeconfigs; retire the SOPS channel
 
@@ -131,6 +170,8 @@ the existing `git-credentials` one, with matching `.ctmpl` files:
 | `tep-kubeconfig.ctmpl` | `{{ user.home }}/.tep/kubeconfig` | 0600, chowned to the user |
 | `helmtest-kubeconfig.ctmpl` | `{{ user.home }}/.helmtest/kubeconfig` | 0600, chowned to the user |
 
+<!-- codex: Add deployment tasks in openbao.yml for both source templates and user-owned 0700 destination directories before any agent start/restart, including tag-limited runs. tep.yml currently creates only the agent user's .tep directory, whereas these stanzas cover every dev_worker_users entry. -->
+
 **This is the hazardous step and it must be sequenced, not merged-and-hoped.** The agent config
 sets `error_on_missing_key = true` and `template_config.exit_on_retry_failure = true`. If a
 template references a KV field that does not exist yet, the **whole agent exits** — taking
@@ -138,16 +179,20 @@ template references a KV field that does not exist yet, the **whole agent exits*
 
 1. Merge Phases 1–2. Force the sync Job. Verify with
    `cred get dev-worker-1 helmtest_kubeconfig | wc -c` on one worker — length only, never the value.
+   <!-- codex: This checks only one of twelve required fields and does not establish readiness for the other five AppRoles or even dev-worker-1's tep template. Require successful, nonempty, parseable reads of both fields under each worker's own identity, with asserted command exit statuses, before enabling its templates. -->
 2. Only then merge Phase 3, and roll it with `-l dev-worker-1` first.
 3. After that worker verifies, roll the remaining five.
+   <!-- codex: Roll the remaining workers serially with the same preflight and sustained health checks, and define rollback to the previous agent config before proceeding on failure. The initial gate cannot prevent a later missing-field write from terminating every agent that consumes it, so include a controlled failure/recovery rehearsal and preservation checks for subsequent sync/seed runs. -->
 
 Then retire the old channel, in this order and not before step 3 is green:
 
 - Delete `ansible/secrets/tep-tokens.sops.yaml`, `scripts/tep-render-kubeconfigs.py`,
   `roles/dev_worker/templates/tep-kubeconfig.j2`, and the token-rendering half of
   `roles/dev_worker/tasks/tep.yml` (the `tep` CLI install and the `~/.tep` directory stay).
+  <!-- codex: Disable the Ansible tep kubeconfig writer as soon as Bao takes ownership on each migrated host; waiting until the whole rollout finishes leaves two writers able to restore different token generations. Keep deletion of the fallback assets as the final cleanup, and define behavior for hosts where dev_worker_enable_openbao remains false. -->
 - Rotate the six `tep-dw<N>` tokens afterwards (delete + recreate the token Secrets, let the sync
   job repopulate). The old values were in a SOPS file and on six disks; treat them as burned.
+  <!-- codex: Deleting each Secret invalidates the old credential before its replacement reaches the worker, and both daily sync latency and the agent's KV polling interval extend the outage. Rotate one worker at a time, wait for token-controller population, force sync, verify the rendered replacement works and the old token fails, and document the interruption or an overlap-based rotation procedure. [Agent refresh behavior](https://openbao.org/docs/agent-and-proxy/agent/template/) -->
 
 Update the managed `~/.claude/CLAUDE.md` block so agents are told the new path:
 `helm --kubeconfig ~/.helmtest/kubeconfig …`, namespace already current-context.
@@ -165,6 +210,10 @@ New paths, each a `<name>.json` key in `estate-seeds.sops.yaml`:
 | `af/estate/platform` | `hatchet_encryption_master_keyset`, `hatchet_jwt_public_keyset`, `hatchet_jwt_private_keyset`, `hatchet_client_token`, `sendgrid_key`, `openai_api_key`, `anthropic_api_key` | `~/work/keys/platform.env` |
 | `af/estate/oauth` | `gcloud_client_secret`, `github_client_secret` | `~/work/keys.txt` |
 
+<!-- codex: The Talos backup manifest already documents an offline private-key home at kubernetes/infra/_out/talos-backup-age.key; reconcile it with this source and retain an independently accessible recovery copy. This key decrypts etcd snapshots that may contain Tier C material, so classify that transitive privilege and verify recovery without a running cluster or vault. -->
+
+<!-- codex: Compare these sources with existing Flux/SOPS homes, particularly backup-offsite/rclone-config.sops.yaml and apps/ai/litellm-cloud-keys.sops.yaml, before declaring them unescrowed. The estate runbook explicitly excludes duplicating Kubernetes-native credentials, so establish identity, ownership, and rotation authority for any overlap. -->
+
 Every one of these is Tier B: **no policy grant is added**, so `cred` returns a permission error on
 them by design, exactly as it does for `af/estate/proxmox` today.
 
@@ -173,6 +222,7 @@ Two couplings this repo enforces, both of which must move in the same commit:
 - Each new `path:field` pair goes into the **completeness matrix** in `estate-provision-job.yaml`
   (the `for pair in \` list). The Job fails closed on any matrix entry a seed did not restore, so a
   seed without a matrix row is a silent post-wipe gap and a matrix row without a seed is a red Job.
+  <!-- codex: The matrix checks current KV field presence, not whether the seed contains that field or whether its value is nonempty; an old live value can hide a missing seed until a wipe. Validate seed keys and values directly without logging them, and verify restoration into an empty disposable vault or mount. -->
 - The multi-home table in `docs/runbooks/openbao-estate-credentials.md` gains a row per path.
 
 ### Phase 5 — workstation cleanup (operator ceremony, documented not automated)
@@ -183,10 +233,13 @@ Once Phase 4 is verified in the vault:
   already holds it.
 - Delete `~/work/keys/age.agekey` — redundant with `kubernetes/infra/_out/age.agekey`, and outside
   any repo so no `.gitignore` protects it.
+  <!-- codex: A gitignored file on the same workstation is not an independent backup of this Tier C recovery root. Verify a recoverable offline copy and restrictive permissions on the retained key before deletion; .gitignore does not provide access control. -->
 - `chmod 600 ~/.kube/config ~/.kube/ailab.config ~/.git-credentials ~/.gitea_tok
   ~/.cc_gitea_issue_token` and delete the stale `~/.gitea_cred_tmp` and `~/.cutover_*` scratch files.
+  <!-- codex: Escrow leaves the original Phase 4 source files in place, but this permissions cleanup does not cover them or their parent directory. Include those retained credential homes and identify scratch files individually before deletion, preserving any files still needed by consumers or recovery. -->
 - Reconcile the two **different** Gitea tokens in `~/.gitea_tok` and `~/.cc_gitea_issue_token`
   (hashes differ — `bdeea7df…` vs `3b19e2e6…`); keep one, revoke the other in Gitea.
+  <!-- codex: Different hashes do not establish that these tokens have interchangeable scopes, owners, or consumers. Identify those properties and compare against the shared worker PAT and seeded homes before revocation, updating every affected consumer first. -->
 - Delete `.env`'s `SSO_PASSWORD` rather than escrowing it —
   `docs/runbooks/openbao-estate-credentials.md` already records that it has zero consumers.
 
@@ -207,6 +260,8 @@ Once Phase 4 is verified in the vault:
 | `docs/runbooks/openbao-dev-workers.md`, `openbao-estate-credentials.md`, `openbao-recovery.md` | New KV fields, new estate rows, new path class for sync-owned fields |
 | `kubernetes/apps/infrastructure/testpool/README.md` | Point at `helmtest` for deploys; state that `testpool` stays lease-only |
 
+<!-- codex: Add openbao.yml, the existing OpenBao kustomization.yaml, and the provisioning owner of the sync's Bao auth/policy to this inventory. Flux openbao and testpool both use wait:false, so Kustomization readiness alone does not prove auth bootstrap, token population, or sync completion; specify those dependencies without introducing a reconciliation cycle. -->
+
 ## Verification
 
 **Phase 1 — RBAC is exactly as wide as intended, and no wider.**
@@ -224,6 +279,10 @@ kubectl --context admin@ai auth can-i '*' '*' --all-namespaces --as=$SA         
 kubectl --context admin@ai auth can-i get secrets -n openbao --as=$SA                      # no
 ```
 
+<!-- codex: Add explicit negative checks for escalate/bind, control-policy/quota mutation, and access to every sibling helmtest namespace, using all six actual kubeconfigs as well as impersonation. A wildcard authorization query returning no does not prove the absence of individual dangerous permissions, and impersonation without the ServiceAccount's groups may miss group-based grants. -->
+
+<!-- codex: Authorization probes do not exercise admission or networking: test actual NodePort/LoadBalancer rejection, quota exhaustion, allowed same-namespace traffic, and denied sibling/OpenBao ClusterIP/NodePort/LAN traffic. Repeat boundary probes after attempting a permissive NetworkPolicy and changing pod labels to establish that workers cannot widen the boundary. -->
+
 PSA actually enforcing, not just labelled:
 
 ```bash
@@ -231,6 +290,8 @@ kubectl --context admin@ai -n helmtest-dw1 run psa-probe --image=busybox --resta
   --overrides='{"spec":{"containers":[{"name":"c","image":"busybox","securityContext":{"privileged":true}}]}}'
 # must be REJECTED by the admission webhook, not created
 ```
+
+<!-- codex: Run a valid restricted Pod and a separately privileged variant with the worker credential, asserting a PodSecurity-specific rejection rather than any failure; this admin probe can be affected by configured exemptions. Also test controller-created Pods and Helm hook Pods, because admission of a Deployment object does not establish that its Pods can run. -->
 
 **Phase 2 — the sync populated KV without printing anything.**
 
@@ -240,6 +301,10 @@ kubectl --context admin@ai -n openbao logs job/sync-now | tail -3     # counts o
 # on a worker:
 cred get dev-worker-1 helmtest_kubeconfig | wc -c                     # non-zero length, no value
 ```
+
+<!-- codex: Wait for Job completion and assert all twelve validated writes; a log tail and a successful wc process do not establish that the sync or cred command succeeded. Use a unique manual Job name or an explicit cleanup procedure so the verification remains repeatable. -->
+
+<!-- codex: Exercise sync failure paths for an unpopulated Secret, a sealed/unavailable vault, and concurrent seeding, verifying that existing fields survive and failures expose no tokens. Re-run both provisioners and the sync to prove seeded fields and sync-owned fields preserve each other. -->
 
 **Phase 3 — end-to-end, the actual thing the user asked for.**
 
@@ -254,8 +319,16 @@ helm --kubeconfig ~/.helmtest/kubeconfig uninstall smoke
 git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD >/dev/null && echo "git creds still ok"
 ```
 
+<!-- codex: The inspected upstream nginx chart defaults service.type to LoadBalancer, so the intended corrected quota rejects this command unless values override it. Pin the chart and image versions and commit explicit ClusterIP, security-context, and network-policy values rather than relying on changing defaults. [Bitnami nginx values](https://raw.githubusercontent.com/bitnami/charts/main/bitnami/nginx/values.yaml) -->
+
+<!-- codex: Require an identified test hook to run and succeed; invoking helm test on a release without tests does not verify Pod/Job execution or service connectivity. Include hook deletion policies or explicit cleanup, because uninstall does not reliably remove hook resources. [Helm hooks](https://helm.sh/docs/topics/charts_hooks/) -->
+
+<!-- codex: This omits the migrated tep consumption path: exercise lease, exec, and release with ~/.tep/kubeconfig before removing SOPS and again after rotation. Verify both kubeconfig files, their parent-directory access, and successful consumption for every intended user on all six workers. -->
+
 The last line is not incidental — it proves the new template stanzas did not take the agent down
 and strand `~/.git-credentials`.
+
+<!-- codex: A successful Git read does not prove ongoing rendering: an old credential file survives agent failure, and an anonymously readable repository may not require it at all. Check authenticated rendering and stable process/restart counters over a retry/polling window, then restart the canary and verify all templates render successfully. -->
 
 **Phase 4 — seeds and matrix agree, and Tier B stayed sealed.**
 
@@ -267,8 +340,12 @@ kubectl --context admin@ai -n openbao logs job/openbao-estate-provision | tail -
 cred get estate/platform openai_api_key ; echo "exit=$? (non-zero expected)"
 ```
 
+<!-- codex: This denial test never requests af/estate/platform: cred resolves both candidates beneath af/dev-workers/ and suppresses Bao's permission diagnostics. Use the worker's sink token to request the exact estate path through Bao, discard successful response contents, and distinguish an authorization denial from a missing path, invalid token, or network failure. -->
+
 **Idempotency.** Re-run `just dev-workers` twice; the second run reports near-zero `changed`
 (the role's standing contract).
+
+<!-- codex: Ansible idempotency does not prove disaster recovery or credential convergence. Add an isolated wipe/re-bootstrap rehearsal that restores sync authentication, reconstructs all twelve fields, reissues AppRole logins, and verifies the workers recover before declaring the migration complete. -->
 
 ## Rejected
 
@@ -281,6 +358,7 @@ cred get estate/platform openai_api_key ; echo "exit=$? (non-zero expected)"
   hands out `edit` on the *whole cluster*, gated only by a sudo prompt an agent can be talked into.
   A namespace-scoped credential with no escalation hatch is the correct shape; `claude-grant-write`
   should be removed from `k8s_tools.yml` in Phase 3 rather than fixed.
+  <!-- codex: Removing the installation task leaves the already-installed helper on existing workers. Include an explicit absent-state task and verification, and inventory any previously staged kube-rw-config files before cleaning them up. -->
 - **Keeping the tep kubeconfig in SOPS and only adding helmtest to OpenBao.** Two credentials of the
   same kind on two channels is how rotation split-brains start; the audit already found several.
 - **Putting the age key or the `admin@ai` kubeconfig in `af/dev-workers/*`.** See the tiering note.
@@ -288,5 +366,6 @@ cred get estate/platform openai_api_key ; echo "exit=$? (non-zero expected)"
   expire and nothing on a worker renews them without a broker — the same problem ADR 0020 solved for
   vault tokens with periodic auth. Legacy tokens match what `tep-access.yaml` already does; the
   broker is a follow-up.
+  <!-- codex: The new sync Job already provides an in-cluster renewal/distribution point, so worker-side renewal is no longer the only possible design. Legacy tokens can remain the initial choice, but justify that trade against a scoped TokenRequest-based sync with suitable TTL and outage margin rather than assuming a separate broker is mandatory. -->
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
