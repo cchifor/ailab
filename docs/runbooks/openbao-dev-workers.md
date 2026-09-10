@@ -64,8 +64,17 @@ Secret.
   A key rather than that password, on purpose: revoking it is one line out of `authorized_keys` on
   three hosts, where revoking the shared root password means rotating every home in the estate
   table — `.env` plus five gitignored tfvars files plus the values typed into the root@pam gate.
-  It is still root on the hypervisors; it is the blast radius of a compromise that differs, not the
-  privilege.
+  It is still root on the hypervisors; it is the COST OF REVOCATION that differs, not the privilege.
+
+  **It is SHARED, and that is the limit of the above.** It sits in `common`, so all six dev-worker
+  AppRoles read the same key: compromise of any ONE worker yields root on all three hypervisors,
+  every worker presents the same identity so `auth.log` cannot attribute an action to one of them,
+  and the single `authorized_keys` line that revokes it revokes it FOR ALL SIX AT ONCE. Cheap to
+  revoke is not the same as selectively revocable, and the first version of this note elided that.
+  Per-worker keys at `af/dev-workers/<hostname>` — a shape this layout already supports — would buy
+  attribution and selective revocation for six keys of bookkeeping. Not done: the consumer today is
+  one agent plane treated as a unit, and six keys nobody rotates would be worse than one that is
+  understood.
 
   NOT installed on the ailab Proxmox nodes (192.168.0.2/.3/.4). Those accept no operator key either
   — `authorized_keys` there holds only inter-node RSA keys — so anything reaching them still uses
