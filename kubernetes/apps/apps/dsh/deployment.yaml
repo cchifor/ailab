@@ -132,10 +132,32 @@ spec:
               # package installed next to dsh is not in that closure, so a bare specifier throws
               # MODULE_NOT_FOUND and boot() rethrows -- crash-looping the pod, not degrading it.
               install -m 0644 /seed/searxng-search.mjs /dsh-home/profiles/web/searxng-search.mjs
+              # Agent teams (WP-1): project the GitOps-owned preset root.
+              #
+              # RECREATED FROM SCRATCH each boot, not merged into. A team removed from git
+              # must disappear from the roster, and a roster has no per-preset off switch --
+              # a stale team directory left behind stays SELECTABLE. Same discipline as
+              # cordis.patch.yml being reinstalled unconditionally above.
+              #
+              # ConfigMap keys cannot contain "/", so the teams ship flattened as
+              # <team>.<file> and the directory tree is rebuilt here. Mode 0644/0755 for the
+              # same 0444-ConfigMap-mode reason as settings.yaml: the projected tree is read
+              # by dsh as uid 1000 and must not inherit the mount's read-only bits.
+              rm -rf /dsh-teams
+              mkdir -p /dsh-teams
+              for f in /seed/team-*.preset.yml; do
+                [ -e "$f" ] || continue
+                b=$(basename "$f" .preset.yml)
+                mkdir -m 0755 -p "/dsh-teams/$b"
+                install -m 0644 "$f" "/dsh-teams/$b/preset.yml"
+                install -m 0644 "/seed/$b.agent.cordis.yml" "/dsh-teams/$b/agent.cordis.yml"
+                echo "projected team: $b"
+              done
               node /seed/fix-profile.js
           volumeMounts:
             - { name: home, mountPath: /dsh-home }
             - { name: relay, mountPath: /seed, readOnly: true }
+            - { name: teams, mountPath: /dsh-teams }
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
@@ -206,6 +228,11 @@ spec:
             - { name: home, mountPath: /dsh-home }
             - { name: tmp,  mountPath: /tmp }
             - { name: workspace, mountPath: /workspace }
+            # readOnly: a `system`-trust preset root is deployment-owned. dsh-agent-presets
+            # already suppresses write-back to a mounted preset file, but the agent runs in
+            # THIS container with a shell -- and /dsh-teams sits outside /workspace precisely
+            # so model-authored code cannot rewrite the compositions it runs under.
+            - { name: teams, mountPath: /dsh-teams, readOnly: true }
           # Probes are exec, not httpGet: unauthenticated / returns 401 once routes mount, which a
           # standard HTTP probe reads as failure, and the listener is on loopback where a Pod-IP
           # probe cannot reach it at all. A TCP connect to 127.0.0.1 proves the listener is up
@@ -264,3 +291,7 @@ spec:
         - { name: workspace, persistentVolumeClaim: { claimName: dsh-workspace } }
         - { name: tmp,  emptyDir: { sizeLimit: 1Gi } }
         - { name: relay, configMap: { name: dsh-relay, defaultMode: 0444 } }
+        # Agent-team preset root. emptyDir, not a PVC: seed-settings rebuilds it from the
+        # content-hashed dsh-relay ConfigMap on every boot, so it holds nothing durable and a
+        # team deleted from git cannot survive as a stale, still-selectable directory.
+        - { name: teams, emptyDir: { sizeLimit: 16Mi } }

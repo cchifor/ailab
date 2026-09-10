@@ -241,3 +241,36 @@
   name: '@deepseek-ai/dsh-api-settings-controller'
   config:
     nativeOpen: false
+
+# ---------------------------------------------------------------------------
+# AGENT TEAMS (WP-1). Registers /dsh-teams as a deployment-owned preset root.
+#
+# WHY A CONFIGURED ROOT AND NOT $DSH_HOME/.agent-presets. The user root is on the
+# PVC, which is exactly the unmanaged-state failure the header of this file
+# documents: a volume rebuild silently reverts it. /dsh-teams is projected from
+# the content-hashed ConfigMap by the seed-settings initContainer on every boot,
+# so it is GitOps-owned and a team edit rolls the pod.
+#
+# `default:` IS RESTATED DELIBERATELY. dsh-web-app inserts this row with
+# `config: {default: standard}`, and a patch REPLACES a row's config rather than
+# merging into it -- omitting `default` here would not "keep standard", it would
+# erase the roster's default and leave sessions with no preset to compose. Same
+# trap as trustedHosts on the connection row above.
+#
+# TRUST: the shipped root is prepended before every configured root and wins
+# duplicate ids, so a team id can never shadow `standard`/`ptc`/`cordis`/
+# `minimal` -- hence the `team-` prefix on ours. `includeUserRoot` keeps its
+# default (true), so a person can still author a preset live on the PVC; that
+# root is `user` trust and sits AFTER ours, so it cannot shadow a team either.
+#
+# A PRESET IS NOT A SECURITY BOUNDARY. It decides what the model is TOLD it can
+# do, which is worth a great deal for steering and nothing for containment: the
+# agent has Bash, and the user root is writable. Containment is the pod, its
+# NetworkPolicy and the workspace root. See the plan's §1.
+- id: agent-presets
+  name: '@deepseek-ai/dsh-agent-presets'
+  config:
+    default: standard
+    roots:
+      - path: /dsh-teams
+        trust: system
