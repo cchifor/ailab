@@ -1,40 +1,117 @@
 # Plan — an OpenBao-backed credential store for dsh
 
-**Date:** 2026-09-10 · **Status:** DRAFT, aligned with a codex cross-analysis
+**Date:** 2026-09-10 · **Status:** DRAFT — §0 revised after an operator constraint and a second codex round
 **Repo:** `cchifor/ailab` · **Subject:** `kubernetes/apps/apps/dsh/`
 
 ---
 
-## 0. Read this first: you may not need the plugin
+## 0. Read this first: the choice is not "OpenBao or a file"
 
-The ask was "a credential-store plugin based on the OpenBao agent". Working the design through with
-codex surfaced a cheaper answer that meets most of the goal with **no plugin at all**, and it would
-be dishonest to bury it under an 11-method implementation.
+**Operator constraint (2026-09-10), which governs everything below.** OpenBao is the estate's single
+place to manage credentials. A credential that is *rotated* — or *newly added* — must become
+available to every agent on every machine without any per-machine synchronisation step. That is why
+the OpenBao agent exists.
 
-dsh's existing provider, `dsh-credentials-local`, already reads a **provider-managed writable
-document** at `$DSH_HOME/.credentials.yaml`, and hot-publishes external edits to that file through
-the seam. An OpenBao **agent sidecar can render exactly that file** from a template.
+**Both surviving options are the OpenBao agent.** The earlier draft of this section invited the
+reading that the no-plugin option means "write a static file". It does not, and that framing was
+wrong:
 
-| | agent renders `.credentials.yaml` | plugin + sink token + per-operation GET |
+- **A — the agent renders the credentials document.** The bao agent authenticates, polls OpenBao,
+  and re-renders the local projection when the stored value changes. No manual step on any machine.
+  This is the estate's existing, proven path: every dev-worker's `~/.git-credentials` is rendered
+  this way, and `git-credentials.ctmpl.j2` says so in its own header — *"rotating the PAT in OpenBao
+  reaches every worker without a playbook run."*
+- **B — the agent renders a sink token, and a dsh plugin does KV-v2 GETs at credential resolution.**
+
+Neither is "static files", and neither weakens OpenBao's role as the source of truth. Note the
+mechanism precisely, though: KV template updates are **polled**, not pushed. OpenBao does not
+invalidate anything; the agent refreshes the projection.
+
+### The enumeration question — verified, and it does not force the plugin
+
+The requirement that could have decided this is *"a **new** credential added"*. A template naming one
+path per stanza would need editing and redeploying for each new name — a per-machine synchronisation
+step, exactly what the constraint forbids.
+
+**It does not have to name paths.** OpenBao 2.5.5 pins `openbao-template@v1.0.1`, which registers the
+`secrets` template function over `NewVaultListQuery` — a KV LIST. So a template can range over a
+KV-v2 metadata prefix and render whatever is under it, and a credential added under that prefix
+appears at the next render with no manifest change on any machine.
+
+Caveats, since this is load-bearing:
+
+- **One level per LIST.** Directory entries come back suffixed `/` and must be excluded or descended
+  into; a template *can* issue successive LISTs, so a flat layout is convenient, not required.
+  OpenBao's recursive `SCAN` is a different operation and there is no evidence `secrets` uses it.
+- **Policy, not just capability.** This needs `list` on the metadata prefix and `read` covering
+  *future* data paths under it. Today's GET access to one path establishes neither.
+- **Absence needs its own treatment.** Ranging over returned names asserts nothing about an expected
+  name existing. Deletion, an empty prefix, and permission loss each need specified behaviour;
+  `error_on_missing_key` and `exit_on_retry_failure` govern *template* errors and agent exit, and do
+  not by themselves erase a rendered destination or stop dsh using credentials it has already loaded.
+
+### The variant I proposed to dodge the write conflict is dead
+
+Rendering into the read-only `$DSH_HOME/.env` fallback layer would have left `.credentials.yaml`
+writable for the UI. **It does not work.** In the pinned `@deepseek-ai/dsh-credentials-local@0.1.5-alpha.2`,
+`dotenvFallback()` resolves through `launchEnvironmentOf(ctx)` — documented in
+`@deepseek-ai/dsh-launch-environment` as an *"immutable launch-time environment snapshot"* filled
+*"before any config entry mounts"*. Re-rendering `$DSH_HOME/.env` therefore **never reaches a running
+dsh**; it needs a restart, which fails the operator's constraint outright.
+
+Only the managed document is watched: `watch` defaults true, chokidar watches `spec.filename`, and
+`notifyUpdated` fires per changed reference. **So option A must render `.credentials.yaml` itself.**
+
+Two process notes, because both are recurrences of the mistake that has cost this session most:
+codex found this, not me. And I first inspected `@latest` (0.0.1-rc.1), which is **not** the version
+dsh 0.1.5-alpha.2 loads — checking one version and generalising to another is the same error as
+checking one inference route and generalising to another.
+
+### The price of A, stated plainly
+
+`.credentials.yaml` is the **provider-managed writable** document. `describe()` returns
+`writable: true` for anything not supplied by the inherited environment, so the Settings → Models
+page still offers a write, accepts it, and loses it at the **next successful render**. Not an error,
+not a conflict — the renderer compares bytes and atomically replaces; it does not merge, and it does
+not take dsh's writer lock.
+
+The operator's constraint arguably says the UI *should not* be a competing writer. But silent loss is
+not the way to express that: A needs the UI write path closed or clearly marked read-only, which is
+work this plan does not currently specify. B gets it for free — §3 already rejects writes loudly.
+
+### What is actually left to decide
+
+| | A — agent renders `.credentials.yaml` | B — sink token + read at resolution |
 |---|---|---|
+| OpenBao is the source of truth | yes | yes |
+| rotation reaches every machine, no manual step | yes | yes |
+| a newly added credential appears | yes, via prefix LIST | yes |
+| reaches a **running** dsh | yes — the document is watched | yes |
 | plugin code | **none** | 11 abstract methods, alpha interface |
-| what the pod holds | **only the rendered credential** | a **Bao token** that can fetch every path its role allows |
-| freshness | the agent's template refresh interval | **per operation**, genuinely live |
-| blast radius if the agent's shell is abused | one secret | anything the AppRole permits |
-| Settings → Models page | keeps working (the file stays writable) | breaks unless writes are handled |
+| what the **dsh container** holds | only the rendered credentials | a **Bao token** for every path its role allows |
+| rotation latency | agent's poll/render interval | per credential resolution |
+| behaviour during an OpenBao outage | last render keeps working | fails unless cached (§5) |
+| UI writes | accepted, then silently lost | rejected loudly |
+| §7 prerequisites (SA token, egress, role) | required | required |
 
-**The plugin earns its place only if "live" must mean *per operation*.** If a refresh interval
-measured in seconds-to-minutes is acceptable, agent rendering is better on every axis that matters
-here — less code, smaller blast radius, and no new failure mode in the credential path of a pod that
-executes model-authored code.
+**The discriminator is freshness at credential resolution, not centralisation** — the constraint is
+met by both. Three corrections to how I previously argued that gap:
 
-This also retires an argument I made earlier and got wrong. I claimed the objection to an agent was
-that it puts a sink token in the pod. The correct response is not "no agent" — it is **have the agent
-render the secret rather than hand over a token**.
+- **B does not revoke anything.** Changing or deleting a KV entry alters stored data; it does not
+  invalidate the key at Gitea, a model provider, or any other issuer. B stops a cooperating consumer
+  fetching the stale value on its next uncached read. A copy already taken stays valid until the
+  *issuer* kills it.
+- **"Per operation" holds only for consumers that go through the store.** Upstream code exists that
+  captures a key from config or the launch environment at registration and bypasses the credentials
+  service (`web-search-exa` is the upstream example). Replacing the provider does not give those
+  routes per-call freshness. Which consumers are in scope has to be enumerated, not assumed.
+- **A does not mean "no Bao token in the pod".** An in-pod agent authenticates and holds a token.
+  The defensible claim is narrower: the **dsh container** — the one running model-authored code —
+  need not receive a sink token, provided it cannot read the agent's auth material or sink.
 
-The rest of this plan specifies the plugin, because that is what was asked for and because the
-per-operation property is a real requirement if rotation must land inside a single session. But
-§0 is the recommendation.
+So the recommendation stays conditional, and deliberately so: **A is viable only once the UI write
+path is closed; B is viable only once its consumer coverage is enumerated.** The rest of this plan
+specifies B, because that is what was asked for.
 
 ---
 
@@ -116,9 +193,15 @@ logic out of the model's process.
 
 Two shapes, and the choice is the §0 decision:
 
-- **Agent renders the secret** → dsh never holds a Bao token. Preferred.
-- **Agent renders a sink token, plugin does KV-v2 GETs** → true per-operation freshness, at the cost
-  of a token in the pod.
+- **A — agent renders `.credentials.yaml`** → the dsh container receives no sink token, and the
+  document's watcher carries rotations and additions into a running process. Requires closing the
+  UI write path, which would otherwise accept a write and lose it at the next render.
+- **B — agent renders a sink token, plugin reads KV-v2 at credential resolution** → freshness at
+  every resolution, at the cost of a token inside the container that runs model-authored code.
+
+In both, the agent authenticates and holds a token; the difference is whether the **dsh container**
+gets one. Keeping the agent's sink and auth material unreadable from that container is what makes
+A's claim true, and it is a deployment property, not a plugin property.
 
 ---
 
@@ -185,6 +268,11 @@ exact dsh version.
 
 Largely codex's list; each is a thing that has to be shown, not argued:
 
+- the prefix-LIST template renders every key under `af/dsh/` and picks up a **newly added** one with
+  no template edit — the operator constraint, shown rather than argued
+- **consumer coverage enumerated**: every credential user that goes through the service, and every
+  one that captures a value at registration and bypasses it (§0). Whatever freshness is promised is
+  promised only for the first set.
 - exactly **one** credentials service after a **cold** boot on a fresh home
 - rotation reaches the **next operation** under the chosen freshness promise
 - env override, remote deletion, and stale fallback each behave deliberately
@@ -197,8 +285,19 @@ Largely codex's list; each is a thing that has to be shown, not argued:
 
 ## 9. Sequence
 
-1. **Decide §0.** Agent-rendered file, or plugin with per-operation reads. Everything else follows.
-2. Land the prerequisites in §7 — they are needed either way.
-3. If agent-rendering: template `.credentials.yaml`, stop populating the env var, done.
-4. If plugin: spike the seam on a fresh home first (row override + `resolve` + cold boot), then
-   implement the reference half, keep records local, then §8.
+1. **Decide §0 — A or B.** The operator constraint is met by both; the discriminator is freshness at
+   credential resolution versus the agent's render interval, priced against closing dsh's UI write
+   path (A) or 11 methods against an alpha interface (B). Everything else follows.
+2. Land the prerequisites in §7 — needed either way. The bao agent sidecar needs the same
+   ServiceAccount token, egress and OpenBao role the plugin would, plus `list` on the metadata
+   prefix and `read` covering future data paths under it.
+3. **Enumerate the consumers.** Which credential users actually go through the credentials service,
+   and which capture a value at registration and bypass it. This bounds what either option can
+   promise and is required before B can be specified, not after.
+4. Prove the prefix-LIST template renders an `af/dsh/*` layout and picks up an added key, with
+   deletion, empty-prefix and permission-loss behaviour observed rather than assumed. Both options
+   need this layout, so it is not throwaway work.
+5. If A: template `.credentials.yaml`, stop populating `LITELLM_API_KEY`, close or visibly disable
+   the UI write path, then the §8 items that apply.
+6. If B: spike the seam on a fresh home first (row override + `resolve` + cold boot), then implement
+   the reference half, keep records local, then §8.
