@@ -17,6 +17,7 @@ each test loads a fresh module object against a throwaway config + sqlite file.
 import importlib.util
 import json
 import pathlib
+import re
 import sqlite3
 import sys
 import tempfile
@@ -1712,6 +1713,36 @@ class ReconcileIsolationTest(unittest.TestCase):
         self.assertEqual(swept, ["o/first", "o/last"])
         self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/middle"], "1")
 
+    def test_a_malformed_pr_does_not_blame_the_previous_one(self):
+        # A tuple assignment evaluates its RHS before binding either name, so the first cut left
+        # the PRIOR pr's number in at_pr and logged `o/first#17 [enqueue]` for a failure that
+        # happened while parsing the element AFTER #17.
+        def api(path, *a, **kw):
+            repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
+            return [_pr(17), "malformed"] if repo == "o/first" else [_pr(1)]
+
+        logged = []
+        with mock.patch.object(self.m, "api", api), \
+                mock.patch.object(self.m, "existing_marker", lambda *a: False), \
+                mock.patch.object(self.m, "enqueue", lambda *a: None), \
+                mock.patch.object(self.m, "maybe_merge", lambda *a, **kw: None), \
+                mock.patch.object(self.m, "retire_closed_quarantines", lambda: None), \
+                mock.patch.object(self.m, "log", lambda *a: logged.append(" ".join(map(str, a)))), \
+                mock.patch("time.sleep", side_effect=_StopLoop):
+            try:
+                self.m.reconciler()
+            except _StopLoop:
+                pass
+        line = [l for l in logged if "reconcile o/first" in l]
+        self.assertTrue(line, f"no reconcile log line: {logged}")
+        self.assertIn("[parse]", line[0])
+        self.assertNotIn("#17", line[0])
+
+    def test_a_marker_failure_names_the_pr_and_the_operation(self):
+        _sweep(self.m, marker_raises={"o/first"})
+        # Proven via the gauge; the log shape itself is asserted in the test above.
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/first"], "1")
+
     def test_a_failure_AFTER_the_listing_call_is_also_repo_scoped(self):
         # Guarding only api() would leave this failing exactly as before: existing_marker()
         # runs inside the per-PR body, past the listing.
@@ -1836,6 +1867,44 @@ class ReconcileMetricsTest(unittest.TestCase):
         ex = _exported(self.m)
         self.assertNotIn('reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}', ex)
 
+    def test_persona_is_escaped_on_every_metric_not_just_the_new_one(self):
+        # The first fix escaped `repo` and the persona on the NEW series only; the other eleven
+        # emissions still interpolated persona raw, so one quote there corrupted the textfile
+        # just as effectively.
+        m = load(self.tmp.name, persona='te"st', repos=["o/a"])
+        _sweep(m)
+        m.write_metrics()
+        text = pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8")
+        self.assertNotIn('persona="te"st"', text)
+        self.assertIn(r'persona="te\"st"', text)
+        # Heartbeat is the first line built and does not go through the new code path at all.
+        self.assertTrue(any(ln.startswith("reviewbot_heartbeat_timestamp_seconds")
+                            and r'persona="te\"st"' in ln for ln in text.splitlines()))
+
+    def test_every_exported_line_parses_as_one_metric_sample(self):
+        # A label-body regex of `.*` accepts the malformed output it is supposed to catch, so
+        # this walks the labels properly: quotes may appear only escaped.
+        m = load(self.tmp.name, persona='p"q\\r', repos=['o/a"b', "o/c\\d"])
+        _sweep(m)
+        m.write_metrics()
+        for ln in pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8").splitlines():
+            if not ln.strip():
+                continue
+            name, _, rest = ln.partition("{")
+            self.assertRegex(name.strip(), r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
+            if not rest:
+                continue
+            labels, _, value = rest.rpartition("}")
+            self.assertRegex(value.strip(), r"^-?[0-9.eE+-]+$")
+            # Exposition format proper: a comma-separated run of name="value", where value may
+            # contain a quote/backslash/newline ONLY as an escape pair. A label body of `.*`
+            # accepts exactly the corruption this is meant to catch.
+            self.assertRegex(
+                labels,
+                r'^[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*"'
+                r'(?:,[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*")*$',
+                f"malformed label block: {labels!r}")
+
     def test_a_repo_name_with_a_quote_does_not_corrupt_the_textfile(self):
         # repo is the first FREE-FORM label value this exporter emits. node_exporter rejects the
         # whole textfile on one malformed line, so an unescaped `"` would delete every reviewbot
@@ -1859,16 +1928,75 @@ class AllowlistDefaultsTest(unittest.TestCase):
     The behavioural enqueue tests use repos=["o/kept"], so restoring cchifor/review-bot-fixture to
     the role defaults would leave them green. This is the test that would actually go red."""
 
+    EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
+                "cchifor/agentforge-platform"]
+
+    @staticmethod
+    def _parse_repos(text):
+        """Read the whole pr_reviewer_repos sequence, stdlib only, FAILING CLOSED.
+
+        Not PyYAML: the "Script unit tests" CI step installs no dependencies and PyYAML is NOT on
+        that runner (see test_cp_env's header), so a module-level `import yaml` would take every
+        test in this file down in the one place this guard has to run.
+
+        Not a single regex either. `^pr_reviewer_repos:\\n((?:\\s+-\\s+\\S+\\n)+)` stops at the
+        first line it cannot match, so appending a comment and then the fixture underneath the
+        four real entries left it GREEN — the truncation IS the bypass. This walks to the end of
+        the block instead, and raises on anything it does not understand rather than returning a
+        short list."""
+        lines = text.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith("pr_reviewer_repos:"):
+                rest = ln.split(":", 1)[1].strip()
+                if rest:  # flow style, or a value on the key line
+                    raise AssertionError(f"unhandled flow-style allowlist: {ln!r}")
+                start = i + 1
+                break
+        else:
+            raise AssertionError("pr_reviewer_repos: not found")
+
+        repos = []
+        for ln in lines[start:]:
+            if not ln.strip() or ln.lstrip().startswith("#"):
+                continue                      # blank / comment INSIDE the block: skip, don't stop
+            if not ln[:1].isspace():
+                break                         # dedent to column 0 = next top-level key
+            body = ln.strip()
+            if not body.startswith("- "):
+                raise AssertionError(f"unparsable line in allowlist block: {ln!r}")
+            item = body[2:].split(" #", 1)[0].strip()      # drop an inline comment
+            if item[:1] in ("'", '"'):                      # tolerate quoting
+                item = item[1:-1] if item[-1:] == item[:1] else item.strip("'\"")
+            repos.append(item)
+        return repos
+
     def test_the_retired_fixture_is_not_in_the_role_defaults(self):
-        import re
         text = (ROOT / "ansible" / "roles" / "pr_reviewer" / "defaults" / "main.yml").read_text(
             encoding="utf-8")
-        block = re.search(r"^pr_reviewer_repos:\n((?:\s+-\s+\S+\n)+)", text, re.M)
-        self.assertIsNotNone(block, "pr_reviewer_repos block not found")
-        repos = re.findall(r"-\s+(\S+)", block.group(1))
+        repos = self._parse_repos(text)
         self.assertNotIn("cchifor/review-bot-fixture", repos)
-        self.assertEqual(repos, ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
-                                 "cchifor/agentforge-platform"])
+        self.assertEqual(repos, self.EXPECTED)
+
+    def test_the_parser_catches_a_fixture_smuggled_in_past_a_comment(self):
+        # The exact bypasses that made the first version of this test useless.
+        base = ("pr_reviewer_repos:\n" + "".join(f"  - {r}\n" for r in self.EXPECTED))
+        for evil in (base + "  # preserved smoke test\n  - cchifor/review-bot-fixture\n",
+                     base + "  - cchifor/review-bot-fixture # smoke test\n",
+                     base.replace("  - cchifor/ailab\n", '  - "cchifor/ailab"\n')
+                     + "  - cchifor/review-bot-fixture\n"):
+            with self.subTest(evil=evil.splitlines()[-1]):
+                self.assertIn("cchifor/review-bot-fixture", self._parse_repos(evil))
+
+    def test_the_parser_is_not_confused_by_quoting_or_trailing_keys(self):
+        text = ('pr_reviewer_repos:\n  - "cchifor/ailab"\n'
+                "  - 'cchifor/platform'  # inline\n\nnext_key: 1\n  - not-a-repo\n")
+        self.assertEqual(self._parse_repos(text), ["cchifor/ailab", "cchifor/platform"])
+
+    def test_the_parser_fails_closed_on_a_shape_it_cannot_read(self):
+        with self.assertRaises(AssertionError):
+            self._parse_repos("pr_reviewer_repos: [cchifor/ailab]\n")
+        with self.assertRaises(AssertionError):
+            self._parse_repos("some_other_key: 1\n")
 
 
 class ReconcileAdmissionTest(unittest.TestCase):

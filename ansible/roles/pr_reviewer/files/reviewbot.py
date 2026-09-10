@@ -1371,18 +1371,22 @@ def write_metrics():
                 "SELECT k,v FROM meta WHERE k LIKE ?", (REPO_FAILED_PREFIX + "%",))}
             c.close()
         now = time.time()
+        # Escape ONCE for every emission. persona is operator-set config like repo,
+        # and one malformed line makes node_exporter drop the WHOLE textfile - so an
+        # unescaped quote in EITHER label deletes every reviewbot metric on the host.
+        _persona = _label(CFG["persona"])
         lines = [
-            f'reviewbot_heartbeat_timestamp_seconds{{persona="{CFG["persona"]}"}} {now:.0f}',
-            f'reviewbot_queue_depth{{persona="{CFG["persona"]}"}} {depth}',
-            f'reviewbot_oldest_job_age_seconds{{persona="{CFG["persona"]}"}} {(now - oldest) if oldest else 0:.0f}',
-            f'reviewbot_quarantined_jobs{{persona="{CFG["persona"]}"}} {quar}',
-            f'reviewbot_quarantined_recent_jobs{{persona="{CFG["persona"]}"}} {quar_recent}',
-            f'reviewbot_jobs_done{{persona="{CFG["persona"]}"}} {done}',
-            f'reviewbot_job_running{{persona="{CFG["persona"]}"}} {running}',
-            f'reviewbot_running_job_age_seconds{{persona="{CFG["persona"]}"}} '
+            f'reviewbot_heartbeat_timestamp_seconds{{persona="{_persona}"}} {now:.0f}',
+            f'reviewbot_queue_depth{{persona="{_persona}"}} {depth}',
+            f'reviewbot_oldest_job_age_seconds{{persona="{_persona}"}} {(now - oldest) if oldest else 0:.0f}',
+            f'reviewbot_quarantined_jobs{{persona="{_persona}"}} {quar}',
+            f'reviewbot_quarantined_recent_jobs{{persona="{_persona}"}} {quar_recent}',
+            f'reviewbot_jobs_done{{persona="{_persona}"}} {done}',
+            f'reviewbot_job_running{{persona="{_persona}"}} {running}',
+            f'reviewbot_running_job_age_seconds{{persona="{_persona}"}} '
             f'{(now - run_since) if run_since else 0:.0f}',
         ]
-        lines.append(f'reviewbot_rate_limited_seconds_remaining{{persona="{CFG["persona"]}"}} '
+        lines.append(f'reviewbot_rate_limited_seconds_remaining{{persona="{_persona}"}} '
                      f'{max(0.0, RATE_LIMITED_UNTIL - now):.0f}')
         for key, metric in (("llm_rate_limited_total", "reviewbot_llm_rate_limited_total"),
                             ("reviews_full_total", "reviewbot_reviews_full_total"),
@@ -1396,14 +1400,14 @@ def write_metrics():
                             ("llm_output_tokens", "reviewbot_llm_output_tokens_last"),
                             ("llm_output_tokens_max", "reviewbot_llm_output_tokens_max")):
             try:
-                lines.append(f'{metric}{{persona="{CFG["persona"]}"}} '
+                lines.append(f'{metric}{{persona="{_persona}"}} '
                              f'{float(gauges.get(key, 0)):.0f}')
             except (TypeError, ValueError):
                 pass
         if last_ok:
-            lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_ok[0]):.0f}')
+            lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{_persona}"}} {float(last_ok[0]):.0f}')
         if last_rec:
-            lines.append(f'reviewbot_last_reconcile_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_rec[0]):.0f}')
+            lines.append(f'reviewbot_last_reconcile_timestamp_seconds{{persona="{_persona}"}} {float(last_rec[0]):.0f}')
         # Iterate the CONFIGURED repos, not the stored keys: a repo removed from the allowlist must
         # stop being exported rather than freeze at its last value. A configured repo with no row
         # yet (fresh database, first sweep still running) is omitted rather than reported clean -
@@ -1415,7 +1419,7 @@ def write_metrics():
         for repo in CFG["repos"]:
             if repo in repo_failed:
                 try:
-                    lines.append(f'reviewbot_reconcile_repo_failed{{persona="{_label(CFG["persona"])}",'
+                    lines.append(f'reviewbot_reconcile_repo_failed{{persona="{_persona}",'
                                  f'repo="{_label(repo)}"}} {float(repo_failed[repo]):.0f}')
                 except (TypeError, ValueError):
                     pass
@@ -1636,18 +1640,26 @@ def reconciler():
                 op, at_pr = "list", None
                 try:
                     for pr in api(f"/repos/{repo}/pulls?state=open&limit=50"):
-                        op, at_pr = "parse", (pr or {}).get("number")
+                        # Reset in SEPARATE statements before touching `pr`. A tuple assignment
+                        # evaluates its whole right-hand side FIRST, so `op, at_pr = "parse",
+                        # pr.get(...)` raising on a malformed element left the PREVIOUS PR's
+                        # number in at_pr and blamed it — the log said `o/a#17 [enqueue]` for a
+                        # failure that happened while parsing the element after #17.
+                        op = "parse"
+                        at_pr = None
+                        number = pr["number"]          # missing/!dict fails here, as "parse"
+                        at_pr = number
                         author = ((pr.get("user") or {}).get("login") or "").lower()
                         if pr.get("draft") or author in [b.lower() for b in CFG["ignore_authors"]]:
                             continue
                         sha = pr["head"]["sha"]
                         op = "marker"
-                        if not existing_marker(repo, pr["number"], sha):
+                        if not existing_marker(repo, number, sha):
                             op = "enqueue"
-                            enqueue(repo, pr["number"], sha, "reconcile")
+                            enqueue(repo, number, sha, "reconcile")
                         else:
                             op = "merge"
-                            maybe_merge(repo, pr["number"])
+                            maybe_merge(repo, number)
                 # ORDER IS LOAD-BEARING: sqlite3.Error must be caught ABOVE Exception. The state
                 # store is not repo-scoped, so its failure is fatal to the CYCLE - swallowing it
                 # here would file a dead database as "one repo is sad" and let the sweep stamp a
