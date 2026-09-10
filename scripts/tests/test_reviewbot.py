@@ -1565,5 +1565,226 @@ class SizeCapTest(unittest.TestCase):
             self.assertEqual(m.api("/x", raw=True), b"\xff\xfe not utf-8")
 
 
+
+class _StopLoop(Exception):
+    """Breaks reconciler()'s `while True` after exactly one pass."""
+
+
+def _pr(number, sha="a" * 40, login="human", draft=False):
+    return {"number": number, "draft": draft, "user": {"login": login},
+            "head": {"sha": sha}}
+
+
+def _sweep(m, failing=(), marker_raises=(), cleanup_raises=False, enqueue_exc=None):
+    """Run ONE reconciler() pass. `failing` repos raise on their pulls listing; repos in
+    `marker_raises` instead fail later in the body (existing_marker), which is the case a
+    guard around the listing call ALONE would miss."""
+    def api(path, *a, **kw):
+        repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
+        if repo in failing:
+            raise RuntimeError(f"HTTP Error 404: {repo}")
+        return [_pr(1)]
+
+    def existing_marker(repo, pr, sha):
+        if repo in marker_raises:
+            raise RuntimeError("marker read blew up")
+        return False
+
+    def enqueue(repo, pr, sha, source):
+        if enqueue_exc is not None:
+            raise enqueue_exc
+        calls.append(repo)
+
+    def cleanup():
+        if cleanup_raises:
+            raise RuntimeError("quarantine sweep failed")
+
+    def sleep(secs):
+        if secs == m.CFG["reconcile_s"]:
+            raise _StopLoop
+
+    calls = []
+    with mock.patch.object(m, "api", api), \
+            mock.patch.object(m, "existing_marker", existing_marker), \
+            mock.patch.object(m, "enqueue", enqueue), \
+            mock.patch.object(m, "maybe_merge", lambda *a, **kw: None), \
+            mock.patch.object(m, "retire_closed_quarantines", cleanup), \
+            mock.patch("time.sleep", sleep):
+        try:
+            m.reconciler()
+        except _StopLoop:
+            pass
+    return calls
+
+
+def _meta(m):
+    # m.db() rather than a bare connect: it creates the schema idempotently, so this works even
+    # on a database no code path has touched yet. Closed in `finally` because an open handle
+    # blocks TemporaryDirectory cleanup on Windows.
+    c = m.db()
+    try:
+        return dict(c.execute("SELECT k,v FROM meta"))
+    finally:
+        c.close()
+
+
+def _jobs(m, repo):
+    c = m.db()
+    try:
+        return c.execute("SELECT COUNT(*) FROM jobs WHERE repo=?", (repo,)).fetchone()[0]
+    finally:
+        c.close()
+
+
+def _exported(m):
+    """write_metrics() output as {metric_line_key: value}, keyed by the full labelled name."""
+    m.write_metrics()
+    out = {}
+    for line in pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        name, _, val = line.rpartition(" ")
+        out[name] = float(val)
+    return out
+
+
+class ReconcileIsolationTest(unittest.TestCase):
+    """The sweep must survive one unreachable repo.
+
+    THE INCIDENT SHAPE THIS PINS: reconciler() used to wrap the whole `for repo` loop in ONE
+    try/except, and api() is a bare urlopen that raises HTTPError on 404. So deleting a repo
+    that was still in the allowlist aborted the ENTIRE sweep every cycle - every repo after it
+    was never polled, retire_closed_quarantines() never ran, and last_reconcile never advanced.
+    Nothing alerted on any of that (2026-09-10 audit)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repos = ["o/first", "o/middle", "o/last"]
+        self.m = load(self.tmp.name, repos=self.repos)
+
+    def test_a_failing_first_repo_does_not_stop_the_rest(self):
+        swept = _sweep(self.m, failing={"o/first"})
+        self.assertEqual(swept, ["o/middle", "o/last"])
+        meta = _meta(self.m)
+        self.assertEqual(meta[self.m.REPO_FAILED_PREFIX + "o/first"], "1")
+        self.assertEqual(meta[self.m.REPO_FAILED_PREFIX + "o/middle"], "0")
+        self.assertEqual(meta[self.m.REPO_FAILED_PREFIX + "o/last"], "0")
+        self.assertIn("last_reconcile", meta)
+
+    def test_a_failing_middle_repo_does_not_stop_the_rest(self):
+        swept = _sweep(self.m, failing={"o/middle"})
+        self.assertEqual(swept, ["o/first", "o/last"])
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/middle"], "1")
+
+    def test_a_failure_AFTER_the_listing_call_is_also_repo_scoped(self):
+        # Guarding only api() would leave this failing exactly as before: existing_marker()
+        # runs inside the per-PR body, past the listing.
+        swept = _sweep(self.m, marker_raises={"o/first"})
+        self.assertEqual(swept, ["o/middle", "o/last"])
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/first"], "1")
+
+    def test_every_repo_failing_still_records_a_completed_sweep(self):
+        _sweep(self.m, failing=set(self.repos))
+        meta = _meta(self.m)
+        self.assertIn("last_reconcile", meta)
+        for r in self.repos:
+            self.assertEqual(meta[self.m.REPO_FAILED_PREFIX + r], "1")
+
+    def test_recovery_clears_the_failure_flag(self):
+        _sweep(self.m, failing={"o/first"})
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/first"], "1")
+        _sweep(self.m)
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/first"], "0")
+
+
+class ReconcileAtomicityTest(unittest.TestCase):
+    """A cycle publishes all-or-nothing.
+
+    Writing each repo's result as it is produced exports a HALF-FINISHED sweep: a recovered
+    repo's gauge drops to 0 while last_reconcile still names the older, completed cycle - an
+    operator watches an alert clear with no sweep behind it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, repos=["o/a", "o/b"])
+        # A completed snapshot to protect: o/a failed, and a known completion time.
+        _sweep(self.m, failing={"o/a"})
+        self.before = _meta(self.m)
+
+    def test_a_sqlite_failure_is_fatal_to_the_cycle_and_changes_nothing(self):
+        # o/a would have recovered this cycle; the state store dies partway. The previous
+        # snapshot must survive INTACT rather than publishing a/0 under the old timestamp.
+        _sweep(self.m, enqueue_exc=sqlite3.OperationalError("database is locked"))
+        self.assertEqual(_meta(self.m), self.before)
+
+    def test_a_cleanup_failure_is_fatal_to_the_cycle_and_changes_nothing(self):
+        _sweep(self.m, cleanup_raises=True)
+        self.assertEqual(_meta(self.m), self.before)
+
+    def test_a_sqlite_failure_is_not_filed_as_a_repo_failure(self):
+        # The specific mis-classification: a dead database is not "one repo is sad".
+        _sweep(self.m, enqueue_exc=sqlite3.OperationalError("database is locked"))
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/a"], "1")  # unchanged
+        self.assertEqual(_meta(self.m)["last_reconcile"], self.before["last_reconcile"])
+
+
+class ReconcileMetricsTest(unittest.TestCase):
+    """The gauge has to actually reach the textfile.
+
+    write_metrics() builds its `gauges` dict from an explicit `WHERE k IN (...)` whitelist, so a
+    metric added only to the render list exports 0 forever. These pin the separate prefix read."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, repos=["o/a", "o/b"])
+
+    def test_exports_one_labelled_series_per_configured_repo(self):
+        _sweep(self.m, failing={"o/a"})
+        ex = _exported(self.m)
+        self.assertEqual(ex['reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}'], 1.0)
+        self.assertEqual(ex['reviewbot_reconcile_repo_failed{persona="test",repo="o/b"}'], 0.0)
+        self.assertIn('reviewbot_last_reconcile_timestamp_seconds{persona="test"}', ex)
+
+    def test_a_repo_dropped_from_the_allowlist_stops_being_exported(self):
+        # The retirement case: the row lingers in `meta`, but a de-configured repo must not keep
+        # exporting its last value - that would alert forever on a repo removed on purpose.
+        _sweep(self.m, failing={"o/a"})
+        m2 = load(self.tmp.name, repos=["o/b"])
+        ex = _exported(m2)
+        self.assertNotIn('reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}', ex)
+        self.assertEqual(ex['reviewbot_reconcile_repo_failed{persona="test",repo="o/b"}'], 0.0)
+
+    def test_results_survive_a_restart(self):
+        # meta is on disk, so a redeploy restart must not blank the failure state.
+        _sweep(self.m, failing={"o/a"})
+        m2 = load(self.tmp.name, repos=["o/a", "o/b"])
+        ex = _exported(m2)
+        self.assertEqual(ex['reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}'], 1.0)
+
+    def test_a_repo_never_swept_is_omitted_rather_than_reported_clean(self):
+        # Fresh database, no sweep yet: absent is honest, 0 would be a lie that reads "clean".
+        ex = _exported(self.m)
+        self.assertNotIn('reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}', ex)
+
+
+class ReconcileAdmissionTest(unittest.TestCase):
+    """CFG["repos"] has TWO consumers - the sweep and the webhook admission gate."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, repos=["o/kept"])
+
+    def test_enqueue_drops_a_repo_outside_the_allowlist(self):
+        self.m.enqueue("o/retired", 1, "b" * 40, "webhook")
+        self.assertEqual(_jobs(self.m, "o/retired"), 0)
+
+    def test_enqueue_accepts_an_allowlisted_repo(self):
+        self.m.enqueue("o/kept", 1, "b" * 40, "webhook")
+        self.assertEqual(_jobs(self.m, "o/kept"), 1)
+
 if __name__ == "__main__":
     unittest.main()

@@ -358,3 +358,188 @@ tests:
                 (measured: 369 minutes of an ungated 6h version over one 48h window). Check whether
                 the LLM CLI still authenticates — a subscription re-login invalidates the seeded
                 credentials, which are NOT ansible-managed.
+
+  # ------------------------------------------------- reconcile sweep: staleness
+  # Every branch of ReviewbotReconcileStale gets BOTH assertions (fires on the incident shape,
+  # silent on the healthy one), per this file's header rule. .25 stays healthy throughout so a
+  # per-instance regression cannot hide behind a global one.
+  - interval: 1m
+    name: a stalled reconcile sweep pages, a ticking one does not
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "1x60"
+      - series: 'up{job="reviewer-node",instance="192.168.0.25:9100"}'
+        values: "1x60"
+      # Frozen at 1 while time() advances => age grows past 1800s. Dead sweep.
+      # Deliberately NOT frozen at 0: a zero would match the structural-zero branch from the very
+      # first sample and fire on the 15m hold alone, so it would never exercise the 1800s
+      # staleness threshold this case exists to pin. (Caught by promtool on the first run.)
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="claude",instance="192.168.0.24:9100"}'
+        values: "1+0x60"
+      # Tracks wall clock => age stays ~0. Healthy sweep.
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="codex",instance="192.168.0.25:9100"}'
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ReviewbotReconcileStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot reconcile sweep on 192.168.0.24:9100 is not completing"
+              description: >-
+                The reconcile sweep on 192.168.0.24:9100 has not completed in >30m, has never
+                completed, or stopped exporting its timestamp. Webhook-driven reviews may still be
+                working — this is the safety-net that heals MISSED deliveries, so its death is
+                silent from the outside. Check `journalctl -u reviewbot | grep reconcile`, then
+                whether the PAT still reads every repo in `/etc/reviewbot/config.json`.
+      # 1800s threshold not yet crossed at 20m, so nothing fires for either instance.
+      - eval_time: 20m
+        alertname: ReviewbotReconcileStale
+        exp_alerts: []
+
+  # The branch a bare `time() - metric` cannot see: a reviewer that is UP and exporting no
+  # timestamp at all (fresh database, first sweep never completed). Without the `unless` branch
+  # this is silence forever.
+  - interval: 1m
+    name: a reviewer exporting no reconcile timestamp at all pages
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "1x60"
+      - series: 'up{job="reviewer-node",instance="192.168.0.25:9100"}'
+        values: "1x60"
+      # .25 exports one; .24 exports none.
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="codex",instance="192.168.0.25:9100"}'
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ReviewbotReconcileStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot reconcile sweep on 192.168.0.24:9100 is not completing"
+              description: >-
+                The reconcile sweep on 192.168.0.24:9100 has not completed in >30m, has never
+                completed, or stopped exporting its timestamp. Webhook-driven reviews may still be
+                working — this is the safety-net that heals MISSED deliveries, so its death is
+                silent from the outside. Check `journalctl -u reviewbot | grep reconcile`, then
+                whether the PAT still reads every repo in `/etc/reviewbot/config.json`.
+      # Inside the 15m hold, which is also the startup grace for a fresh install.
+      - eval_time: 10m
+        alertname: ReviewbotReconcileStale
+        exp_alerts: []
+
+  # ------------------------------------------- reconcile sweep: per-repo skips
+  - interval: 1m
+    name: a repo the sweep keeps skipping pages, a clean one does not
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "1x60"
+      # Sweep COMPLETES throughout (tracks wall clock) — this is the case the stale rule
+      # deliberately stays silent on, which is why this companion rule has to exist.
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="claude",instance="192.168.0.24:9100"}'
+        values: "0+60x60"
+      - series: 'reviewbot_reconcile_repo_failed{job="reviewer-node",persona="claude",instance="192.168.0.24:9100",repo="cchifor/ailab"}'
+        values: "0x60"
+      - series: 'reviewbot_reconcile_repo_failed{job="reviewer-node",persona="claude",instance="192.168.0.24:9100",repo="cchifor/gone"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ReviewbotReconcileRepoFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+              persona: claude
+              repo: cchifor/gone
+            exp_annotations:
+              summary: "reviewbot (claude) cannot sweep cchifor/gone"
+              description: >-
+                The sweep on 192.168.0.24:9100 completes but cchifor/gone did not finish — most
+                often a deleted or renamed repo still in the allowlist, or a PAT that lost its
+                grant. Scope: this means "this repo's sweep did not complete", NOT "merge errors"
+                — maybe_merge() swallows most of its own failures and never reaches this boundary.
+                The other repos are unaffected (the sweep is fault-isolated per repo). Fix the
+                allowlist in ansible/roles/pr_reviewer/defaults/main.yml and redeploy.
+      # A single blip inside the 15m hold must not page.
+      - eval_time: 10m
+        alertname: ReviewbotReconcileRepoFailing
+        exp_alerts: []
+
+  # The freshness gate: a HUNG sweep freezes the gauge at 1, and this rule must go quiet and hand
+  # over to ReviewbotReconcileStale rather than double-page. Asserts the documented seam.
+  - interval: 1m
+    name: a frozen repo gauge behind a hung sweep is left to the stale rule
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "1x90"
+      # Frozen at a NON-zero value => sweep age grows past the 1800s gate via the staleness
+      # branch, which is the realistic hung-sweep shape (a zero would take the other branch).
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="claude",instance="192.168.0.24:9100"}'
+        values: "1+0x90"
+      - series: 'reviewbot_reconcile_repo_failed{job="reviewer-node",persona="claude",instance="192.168.0.24:9100",repo="cchifor/gone"}'
+        values: "1x90"
+    alert_rule_test:
+      # Past 1800s the gate has emptied, so the repo rule is silent...
+      - eval_time: 60m
+        alertname: ReviewbotReconcileRepoFailing
+        exp_alerts: []
+      # ...and the stale rule has taken over by then.
+      - eval_time: 60m
+        alertname: ReviewbotReconcileStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot reconcile sweep on 192.168.0.24:9100 is not completing"
+              description: >-
+                The reconcile sweep on 192.168.0.24:9100 has not completed in >30m, has never
+                completed, or stopped exporting its timestamp. Webhook-driven reviews may still be
+                working — this is the safety-net that heals MISSED deliveries, so its death is
+                silent from the outside. Check `journalctl -u reviewbot | grep reconcile`, then
+                whether the PAT still reads every repo in `/etc/reviewbot/config.json`.
+
+  # The third branch, and the one the `> 0` guard exists for: a timestamp EXPORTED as zero rather
+  # than absent. Without the `== 0` branch the `> 0` filter drops the series and this is silent
+  # forever; with a naive `time() - metric` and no filter it would instead read as an epoch-sized
+  # age and alert from the first scrape on every fresh install. It fires on the hold alone (no
+  # 1800s wait), which is correct — a zero is never a real completion time.
+  - interval: 1m
+    name: a reconcile timestamp exported as zero pages on the hold alone
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "1x60"
+      - series: 'up{job="reviewer-node",instance="192.168.0.25:9100"}'
+        values: "1x60"
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="claude",instance="192.168.0.24:9100"}'
+        values: "0x60"
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="codex",instance="192.168.0.25:9100"}'
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReviewbotReconcileStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot reconcile sweep on 192.168.0.24:9100 is not completing"
+              description: >-
+                The reconcile sweep on 192.168.0.24:9100 has not completed in >30m, has never
+                completed, or stopped exporting its timestamp. Webhook-driven reviews may still be
+                working — this is the safety-net that heals MISSED deliveries, so its death is
+                silent from the outside. Check `journalctl -u reviewbot | grep reconcile`, then
+                whether the PAT still reads every repo in `/etc/reviewbot/config.json`.
+      # Still inside the 15m hold.
+      - eval_time: 10m
+        alertname: ReviewbotReconcileStale
+        exp_alerts: []

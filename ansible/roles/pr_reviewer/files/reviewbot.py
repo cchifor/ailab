@@ -41,6 +41,11 @@ PAT = _read(CFG["pat_file"])
 HOOK_SECRET = _read(CFG["webhook_secret_file"]).encode()
 MARKER_RE = re.compile(r"<!-- review-bot:v1 persona=(\S+) head=([0-9a-f]{40})(?: verdict=(\S+))? -->")
 EVENTS = {"pull_request", "pull_request_sync", "pull_request_label", "pull_request_review_request"}
+# `meta` key prefix for the per-repo last-sweep result (0 = swept clean, 1 = sweep incomplete).
+# A PREFIX rather than a fixed key list because the repo set is config, not code - write_metrics()
+# reads it with a LIKE scan and then renders only the CURRENTLY configured repos, so a repo dropped
+# from the allowlist stops being exported instead of latching its last value forever.
+REPO_FAILED_PREFIX = "reconcile_repo_failed:"
 
 db_lock = threading.Lock()
 
@@ -1350,6 +1355,13 @@ def write_metrics():
                 "'llm_seconds','llm_seconds_max','llm_output_tokens','llm_output_tokens_max',"
                 "'reviews_full_total','reviews_partial_total','reviews_skipped_total',"
                 "'findings_dropped_total','llm_rate_limited_total')")}
+            # SEPARATE read, deliberately: the dict above is an explicit key whitelist, so a new
+            # metric added only to the (key, metric) render list below would export 0 forever.
+            # The per-repo results are keyed by repo name, which is config - hence a prefix scan.
+            # Read in the SAME locked section as last_reconcile so the pair can never be observed
+            # torn (commit_sweep writes both in one transaction).
+            repo_failed = {r[0][len(REPO_FAILED_PREFIX):]: r[1] for r in c.execute(
+                "SELECT k,v FROM meta WHERE k LIKE ?", (REPO_FAILED_PREFIX + "%",))}
             c.close()
         now = time.time()
         lines = [
@@ -1385,6 +1397,17 @@ def write_metrics():
             lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_ok[0]):.0f}')
         if last_rec:
             lines.append(f'reviewbot_last_reconcile_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_rec[0]):.0f}')
+        # Iterate the CONFIGURED repos, not the stored keys: a repo removed from the allowlist must
+        # stop being exported rather than freeze at its last value. A configured repo with no row
+        # yet (fresh database, first sweep still running) is omitted rather than reported clean -
+        # ReviewbotReconcileStale's missing-series branch is what covers that window.
+        for repo in CFG["repos"]:
+            if repo in repo_failed:
+                try:
+                    lines.append(f'reviewbot_reconcile_repo_failed{{persona="{CFG["persona"]}",'
+                                 f'repo="{repo}"}} {float(repo_failed[repo]):.0f}')
+                except (TypeError, ValueError):
+                    pass
         tmp = CFG["textfile"] + ".tmp"
         with open(tmp, "w") as f:
             f.write("\n".join(lines) + "\n")
@@ -1565,26 +1588,65 @@ def retire_closed_quarantines():
             log(f"retired {n} quarantine(s) for closed {repo}#{pr}")
 
 
+def commit_sweep(results, now):
+    """Publish ONE sweep atomically: every repo's 0/1 result AND `last_reconcile`, in a single
+    transaction. Errors PROPAGATE - unlike bump_meta()/record_gauge(), which swallow everything
+    because they run inside a worker exception handler and a `finally`. Here a swallowed failure
+    would advance the completion stamp over writes that never landed.
+
+    Why one transaction rather than a write per repo: a per-repo write publishes a HALF-FINISHED
+    cycle. With repo A failed at last_reconcile=100, letting A recover and then dying inside repo
+    B exports A's gauge as 0 while the stamp stays 100 - an operator watches a repo alert clear
+    with no completed sweep behind it. Same for a cleanup failure, which would land every gauge
+    under the old stamp. So a cycle is all-or-nothing: on any failure the PREVIOUS completed
+    snapshot survives intact and the outer handler retries."""
+    with db_lock:
+        c = db()
+        try:
+            for repo, failed in results.items():
+                c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)",
+                          (REPO_FAILED_PREFIX + repo, str(int(failed))))
+            c.execute("INSERT OR REPLACE INTO meta VALUES('last_reconcile',?)", (str(now),))
+            c.commit()
+        finally:
+            c.close()
+
+
 def reconciler():
     while True:
         try:
+            # repo -> 0/1, IN MEMORY until the whole sweep succeeds (see commit_sweep).
+            results = {}
             for repo in CFG["repos"]:
-                for pr in api(f"/repos/{repo}/pulls?state=open&limit=50"):
-                    author = ((pr.get("user") or {}).get("login") or "").lower()
-                    if pr.get("draft") or author in [b.lower() for b in CFG["ignore_authors"]]:
-                        continue
-                    sha = pr["head"]["sha"]
-                    if not existing_marker(repo, pr["number"], sha):
-                        enqueue(repo, pr["number"], sha, "reconcile")
-                    else:
-                        maybe_merge(repo, pr["number"])
+                failed = 0
+                try:
+                    for pr in api(f"/repos/{repo}/pulls?state=open&limit=50"):
+                        author = ((pr.get("user") or {}).get("login") or "").lower()
+                        if pr.get("draft") or author in [b.lower() for b in CFG["ignore_authors"]]:
+                            continue
+                        sha = pr["head"]["sha"]
+                        if not existing_marker(repo, pr["number"], sha):
+                            enqueue(repo, pr["number"], sha, "reconcile")
+                        else:
+                            maybe_merge(repo, pr["number"])
+                # ORDER IS LOAD-BEARING: sqlite3.Error must be caught ABOVE Exception. The state
+                # store is not repo-scoped, so its failure is fatal to the CYCLE - swallowing it
+                # here would file a dead database as "one repo is sad" and let the sweep stamp a
+                # completion it never achieved. enqueue() propagates sqlite errors unchanged and
+                # existing_marker() touches no database, so this is reachable, not decorative.
+                except sqlite3.Error:
+                    raise
+                except Exception as e:
+                    failed = 1
+                    # One bad repo no longer decapitates the sweep: every repo AFTER this one in
+                    # CFG["repos"] used to be skipped for the cycle, silently (nothing alerted on
+                    # last_reconcile). Repo isolation is NOT PR isolation - the remaining PRs of
+                    # THIS repo are still skipped until the next cycle, which is why the log
+                    # names the repo.
+                    log(f"reconcile {repo}: {e}")
+                results[repo] = failed
             retire_closed_quarantines()
-            with db_lock:
-                c = db()
-                c.execute("INSERT OR REPLACE INTO meta VALUES('last_reconcile',?)",
-                          (str(time.time()),))
-                c.commit()
-                c.close()
+            commit_sweep(results, time.time())
         except Exception as e:
             log("reconcile error:", e)
         time.sleep(CFG["reconcile_s"])
