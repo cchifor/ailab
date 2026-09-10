@@ -55,6 +55,14 @@ spec:
               names:
                 - helmtest-dw? # the per-worker ServiceAccount
                 - helmtest-deployer # the Role and its RoleBinding
+                # The TOKEN-RENEWAL grant, and it belongs here for the same reason as the SA itself.
+                # helmtest-deployer holds delete on roles/rolebindings with NO resourceNames
+                # restriction (it has to — charts ship their own RBAC), so without this entry a
+                # worker can delete the Role that lets openbao-k8stoken-sync mint its token. Nothing
+                # breaks immediately: the existing token keeps working, and the credential simply
+                # fails to renew and dies at its 30-day expiry. A self-inflicted, delayed-action DoS,
+                # and it defeats the whole point of protecting the ServiceAccount.
+                - openbao-k8stoken-sync
               operations: [DELETE, UPDATE]
       exclude:
         any:

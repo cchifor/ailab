@@ -245,6 +245,7 @@
     - not ansible_check_mode
 
 - name: Hand kubeconfig ownership to the bao agent
+  register: dev_worker_marker_written
   ansible.builtin.copy:
     content: |
       # Written by ansible (role: dev_worker, ADR 0021) after this host's KV pre-flight passed.
@@ -372,13 +373,22 @@
   rescue:
     # Without this, a failed cutover leaves the host with NO kubeconfig writer at all: the agent is
     # dead and tep.yml has already stood down.
-    - name: Restore the previous agent config and return kubeconfig ownership to the SOPS writer
+    # The marker is removed ONLY IF THIS RUN CREATED IT. Removing it unconditionally is wrong on an
+    # already-migrated host: a routine `-t openbao` run that trips the health check for an unrelated
+    # reason (a briefly sealed vault, say) would hand ownership back to a SOPS writer whose
+    # tep-tokens.sops.yaml has since been DELETED, leaving the host with no kubeconfig writer at all
+    # and no obvious sign of it. On an already-cut-over host the correct rollback is the agent config
+    # alone — ownership is not in question there.
+    - name: Restore the previous agent config, and ownership only if this run took it
       ansible.builtin.shell: |
         set -eu
-        if [ -n "{{ dev_worker_agent_hcl.backup_file | default('') }}" ]            && [ -f "{{ dev_worker_agent_hcl.backup_file | default('/nonexistent') }}" ]; then
-          cp "{{ dev_worker_agent_hcl.backup_file }}" /etc/openbao-agent/agent.hcl
+        BAK="{{ dev_worker_agent_hcl.backup_file | default('') }}"
+        if [ -n "$BAK" ] && [ -f "$BAK" ]; then
+          cp "$BAK" /etc/openbao-agent/agent.hcl
         fi
+        {% if dev_worker_marker_written.changed | default(false) | bool %}
         rm -f /etc/openbao-agent/renders-kubeconfigs
+        {% endif %}
         systemctl restart openbao-agent
       changed_when: true
 
