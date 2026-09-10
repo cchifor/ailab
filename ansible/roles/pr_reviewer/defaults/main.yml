@@ -16,10 +16,16 @@ pr_reviewer_required_hook_events:
   - pull_request_sync
   - pull_request_label
   - pull_request_review_request
-# Central allowlist — the ONLY thing that admits a repo. Real repos joined 2026-09-02
-# (operator-directed rollout); posting stays COMMENT-only, statuses off until the soak.
+# Central allowlist — the ONLY thing that admits a repo. Joined 2026-09-02 (operator-directed
+# rollout); posting stays COMMENT-only, statuses off until the soak. TWO consumers, not one:
+# reconciler() sweeps these, and enqueue() (the webhook path) drops anything not listed — so
+# removing an entry rejects its deliveries as well as stopping its sweep.
+# cchifor/review-bot-fixture was removed 2026-09-10 when that repo was retired
+# (plans/2026-09-10-retire-review-bot-fixture-plan.md). Removing it from here BEFORE the repo
+# stops answering is no longer load-bearing for availability — the sweep is fault-isolated per
+# repo since the same change — but it still stops admission and keeps
+# ReviewbotReconcileRepoFailing from firing on a repo we deleted on purpose.
 pr_reviewer_repos:
-  - cchifor/review-bot-fixture
   - cchifor/ailab
   - cchifor/agentforge
   - cchifor/platform

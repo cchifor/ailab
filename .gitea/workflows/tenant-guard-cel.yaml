@@ -55,7 +55,7 @@ jobs:
     # runner slot.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Evaluate tenant-guard.yaml + brokerseat-admission.yaml against their admit/deny fixture tables
         shell: bash

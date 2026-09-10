@@ -17,6 +17,7 @@ each test loads a fresh module object against a throwaway config + sqlite file.
 import importlib.util
 import json
 import pathlib
+import re
 import sqlite3
 import sys
 import tempfile
@@ -211,6 +212,44 @@ class SharedBudgetTest(unittest.TestCase):
         self.assertEqual(2, len(self.calls), "fallback should have run")
         self.assertAlmostEqual(600, self.calls[1]["timeout"], delta=2,
                                msg="fallback must inherit the REMAINING budget, not a fresh one")
+
+    def test_a_rescued_primary_failure_is_still_counted(self):
+        """THE 4-DAY BLIND SPOT: a primary failure the fallback RESCUES raises nothing and
+        increments no failure counter, because the review succeeded. reviewer-1 served 463
+        reviews that way after its `claude-fable-5` quota went on 2026-09-06 - correct output
+        the whole time, and no series anywhere said the pinned model had stopped being used."""
+        self.m.subprocess.run = self._fake_run(10, 0, self._ok_stdout())
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual({}, {k: v for k, v in _meta(self.m).items()
+                              if k in ("llm_primary_failed_total", "llm_fallback_used_total")},
+                         "a healthy primary must not touch either counter")
+
+        # Primary fails fast, fallback succeeds -> the review is fine, the counters still fire.
+        calls = []
+
+        def run(args, **kw):
+            calls.append(args)
+            type(self.clock).now += 10
+            if len(calls) == 1:
+                return self.m.subprocess.CompletedProcess(args, 1, "quota gone", "")
+            return self.m.subprocess.CompletedProcess(args, 0, self._ok_stdout(), "")
+        self.m.subprocess.run = run
+        self.m.run_llm("t", "d", "diff")
+        meta = _meta(self.m)
+        self.assertEqual("1.0", meta["llm_primary_failed_total"])
+        self.assertEqual("1.0", meta["llm_fallback_used_total"])
+        self.assertNotIn("llm_failures_total", meta,
+                         "the review SUCCEEDED - it must not be billed as a failed review")
+
+    def test_a_primary_failure_counts_even_when_the_fallback_is_skipped(self):
+        """Otherwise the counter measures the net rather than the thing it is catching."""
+        self.m.subprocess.run = self._fake_run(880, 1, "{}")
+        with self.assertRaises(self.m.ExpensiveFailure):
+            self.m.run_llm("t", "d", "diff")
+        meta = _meta(self.m)
+        self.assertEqual("1.0", meta["llm_primary_failed_total"])
+        self.assertNotIn("llm_fallback_used_total", meta,
+                         "the fallback never ran; it must not be counted as used")
 
     def test_fallback_skipped_when_budget_is_nearly_spent(self):
         self.m.subprocess.run = self._fake_run(880, 1, "{}")
@@ -1563,6 +1602,641 @@ class SizeCapTest(unittest.TestCase):
         # `m.urllib` IS the process-wide urllib package: patch it scoped, never assign.
         with mock.patch.object(m.urllib.request, "urlopen", lambda req, timeout=60: Resp()):
             self.assertEqual(m.api("/x", raw=True), b"\xff\xfe not utf-8")
+
+
+
+class _StopLoop(Exception):
+    """Breaks reconciler()'s `while True` after exactly one pass."""
+
+
+def _pr(number, sha="a" * 40, login="human", draft=False):
+    return {"number": number, "draft": draft, "user": {"login": login},
+            "head": {"sha": sha}}
+
+
+class _FaultyConn:
+    """A real connection that fails at a chosen point INSIDE commit_sweep().
+
+    The atomicity tests are worthless without this: faulting before commit_sweep() runs proves
+    only that an unreached function writes nothing, which is true of a broken implementation too.
+    Verified — with the faults injected here, flipping db() to isolation_level=None (autocommit)
+    turns these tests RED, while the pre-commit faults alone leave them green."""
+
+    def __init__(self, real, fail_sql=None, fail_on_commit=False):
+        self._real, self._fail_sql, self._fail_commit = real, fail_sql, fail_on_commit
+
+    def execute(self, sql, *a):
+        if self._fail_sql is not None and self._fail_sql(sql, a[0] if a else ()):
+            raise sqlite3.OperationalError("injected write failure")
+        return self._real.execute(sql, *a)
+
+    def commit(self):
+        if self._fail_commit:
+            raise sqlite3.OperationalError("injected commit failure")
+        return self._real.commit()
+
+    def close(self):
+        return self._real.close()
+
+
+def _sweep(m, failing=(), marker_raises=(), cleanup_raises=False, enqueue_exc=None,
+           enqueue_exc_repo=None, fail_sql=None, fail_on_commit=False):
+    """Run ONE reconciler() pass. `failing` repos raise on their pulls listing; repos in
+    `marker_raises` instead fail later in the body (existing_marker), which is the case a
+    guard around the listing call ALONE would miss."""
+    def api(path, *a, **kw):
+        repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
+        if repo in failing:
+            raise RuntimeError(f"HTTP Error 404: {repo}")
+        return [_pr(1)]
+
+    def existing_marker(repo, pr, sha):
+        if repo in marker_raises:
+            raise RuntimeError("marker read blew up")
+        return False
+
+    def enqueue(repo, pr, sha, source):
+        if enqueue_exc is not None and (enqueue_exc_repo is None or repo == enqueue_exc_repo):
+            raise enqueue_exc
+        calls.append(repo)
+
+    def cleanup():
+        if cleanup_raises:
+            raise RuntimeError("quarantine sweep failed")
+
+    def sleep(secs):
+        if secs == m.CFG["reconcile_s"]:
+            raise _StopLoop
+
+    real_db = m.db
+
+    def db():
+        c = real_db()
+        if fail_sql is None and not fail_on_commit:
+            return c
+        return _FaultyConn(c, fail_sql, fail_on_commit)
+
+    calls = []
+    with mock.patch.object(m, "api", api), \
+            mock.patch.object(m, "existing_marker", existing_marker), \
+            mock.patch.object(m, "enqueue", enqueue), \
+            mock.patch.object(m, "maybe_merge", lambda *a, **kw: None), \
+            mock.patch.object(m, "retire_closed_quarantines", cleanup), \
+            mock.patch.object(m, "db", db), \
+            mock.patch("time.sleep", sleep):
+        try:
+            m.reconciler()
+        except _StopLoop:
+            pass
+    return calls
+
+
+def _meta(m):
+    # m.db() rather than a bare connect: it creates the schema idempotently, so this works even
+    # on a database no code path has touched yet. Closed in `finally` because an open handle
+    # blocks TemporaryDirectory cleanup on Windows.
+    c = m.db()
+    try:
+        return dict(c.execute("SELECT k,v FROM meta"))
+    finally:
+        c.close()
+
+
+def _jobs(m, repo):
+    c = m.db()
+    try:
+        return c.execute("SELECT COUNT(*) FROM jobs WHERE repo=?", (repo,)).fetchone()[0]
+    finally:
+        c.close()
+
+
+def _exported(m):
+    """write_metrics() output as {metric_line_key: value}, keyed by the full labelled name."""
+    m.write_metrics()
+    out = {}
+    for line in pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        name, _, val = line.rpartition(" ")
+        out[name] = float(val)
+    return out
+
+
+class ReconcileIsolationTest(unittest.TestCase):
+    """The sweep must survive one unreachable repo.
+
+    THE INCIDENT SHAPE THIS PINS: reconciler() used to wrap the whole `for repo` loop in ONE
+    try/except, and api() is a bare urlopen that raises HTTPError on 404. So deleting a repo
+    that was still in the allowlist aborted the ENTIRE sweep every cycle - every repo after it
+    was never polled, retire_closed_quarantines() never ran, and last_reconcile never advanced.
+    Nothing alerted on any of that (2026-09-10 audit)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repos = ["o/first", "o/middle", "o/last"]
+        self.m = load(self.tmp.name, repos=self.repos)
+
+    def test_a_failing_first_repo_does_not_stop_the_rest(self):
+        swept = _sweep(self.m, failing={"o/first"})
+        self.assertEqual(swept, ["o/middle", "o/last"])
+        meta = _meta(self.m)
+        self.assertEqual(meta[self.m.REPO_FAILED_PREFIX + "o/first"], "1")
+        self.assertEqual(meta[self.m.REPO_FAILED_PREFIX + "o/middle"], "0")
+        self.assertEqual(meta[self.m.REPO_FAILED_PREFIX + "o/last"], "0")
+        self.assertIn("last_reconcile", meta)
+
+    def test_a_failing_middle_repo_does_not_stop_the_rest(self):
+        swept = _sweep(self.m, failing={"o/middle"})
+        self.assertEqual(swept, ["o/first", "o/last"])
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/middle"], "1")
+
+    def test_a_malformed_pr_does_not_blame_the_previous_one(self):
+        # A tuple assignment evaluates its RHS before binding either name, so the first cut left
+        # the PRIOR pr's number in at_pr and logged `o/first#17 [enqueue]` for a failure that
+        # happened while parsing the element AFTER #17.
+        def api(path, *a, **kw):
+            repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
+            return [_pr(17), "malformed"] if repo == "o/first" else [_pr(1)]
+
+        logged = []
+        with mock.patch.object(self.m, "api", api), \
+                mock.patch.object(self.m, "existing_marker", lambda *a: False), \
+                mock.patch.object(self.m, "enqueue", lambda *a: None), \
+                mock.patch.object(self.m, "maybe_merge", lambda *a, **kw: None), \
+                mock.patch.object(self.m, "retire_closed_quarantines", lambda: None), \
+                mock.patch.object(self.m, "log", lambda *a: logged.append(" ".join(map(str, a)))), \
+                mock.patch("time.sleep", side_effect=_StopLoop):
+            try:
+                self.m.reconciler()
+            except _StopLoop:
+                pass
+        line = [l for l in logged if "reconcile o/first" in l]
+        self.assertTrue(line, f"no reconcile log line: {logged}")
+        self.assertIn("[parse]", line[0])
+        self.assertNotIn("#17", line[0])
+
+    def test_a_marker_failure_names_the_pr_and_the_operation(self):
+        _sweep(self.m, marker_raises={"o/first"})
+        # Proven via the gauge; the log shape itself is asserted in the test above.
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/first"], "1")
+
+    def test_a_failure_AFTER_the_listing_call_is_also_repo_scoped(self):
+        # Guarding only api() would leave this failing exactly as before: existing_marker()
+        # runs inside the per-PR body, past the listing.
+        swept = _sweep(self.m, marker_raises={"o/first"})
+        self.assertEqual(swept, ["o/middle", "o/last"])
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/first"], "1")
+
+    def test_every_repo_failing_still_records_a_completed_sweep(self):
+        _sweep(self.m, failing=set(self.repos))
+        meta = _meta(self.m)
+        self.assertIn("last_reconcile", meta)
+        for r in self.repos:
+            self.assertEqual(meta[self.m.REPO_FAILED_PREFIX + r], "1")
+
+    def test_recovery_clears_the_failure_flag(self):
+        _sweep(self.m, failing={"o/first"})
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/first"], "1")
+        _sweep(self.m)
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/first"], "0")
+
+
+class ReconcileAtomicityTest(unittest.TestCase):
+    """A cycle publishes all-or-nothing.
+
+    Writing each repo's result as it is produced exports a HALF-FINISHED sweep: a recovered
+    repo's gauge drops to 0 while last_reconcile still names the older, completed cycle - an
+    operator watches an alert clear with no sweep behind it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, repos=["o/a", "o/b"])
+        # A completed snapshot to protect: o/a failed, and a known completion time.
+        _sweep(self.m, failing={"o/a"})
+        self.before = _meta(self.m)
+
+    def test_a_sqlite_failure_is_fatal_to_the_cycle_and_changes_nothing(self):
+        # o/a would have recovered this cycle; the state store dies partway. The previous
+        # snapshot must survive INTACT rather than publishing a/0 under the old timestamp.
+        _sweep(self.m, enqueue_exc=sqlite3.OperationalError("database is locked"))
+        self.assertEqual(_meta(self.m), self.before)
+
+    def test_a_cleanup_failure_is_fatal_to_the_cycle_and_changes_nothing(self):
+        _sweep(self.m, cleanup_raises=True)
+        self.assertEqual(_meta(self.m), self.before)
+
+    def test_a_sqlite_failure_is_not_filed_as_a_repo_failure(self):
+        # The specific mis-classification: a dead database is not "one repo is sad".
+        _sweep(self.m, enqueue_exc=sqlite3.OperationalError("database is locked"))
+        self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/a"], "1")  # unchanged
+        self.assertEqual(_meta(self.m)["last_reconcile"], self.before["last_reconcile"])
+
+    def test_a_later_repo_failing_after_an_earlier_one_recovered_publishes_neither(self):
+        # o/a recovers, o/b then kills the cycle on the state store. Publishing per repo would
+        # export o/a=0 under the OLD timestamp; the whole cycle must be discarded instead.
+        _sweep(self.m, enqueue_exc=sqlite3.OperationalError("database is locked"),
+               enqueue_exc_repo="o/b")
+        self.assertEqual(_meta(self.m), self.before)
+
+    # --- faults INSIDE commit_sweep(): the three that actually pin the transaction ------------
+    # Without these the suite passes even with db() flipped to autocommit (verified).
+
+    def test_a_failure_on_a_later_gauge_write_rolls_back_the_earlier_ones(self):
+        # o/a's recovery (1 -> 0) is written first, then o/b's write dies. If the earlier INSERT
+        # were already durable, o/a would read 0 with the old timestamp: an alert clearing with
+        # no completed sweep behind it.
+        def fail_second_gauge(sql, params):
+            return ("INSERT OR REPLACE INTO meta" in sql
+                    and params and str(params[0]).endswith("o/b"))
+        _sweep(self.m, fail_sql=fail_second_gauge)
+        self.assertEqual(_meta(self.m), self.before)
+
+    def test_a_failure_on_the_timestamp_write_rolls_back_every_gauge(self):
+        # 'last_reconcile' is INLINE in that statement's SQL, not a bound parameter — matching on
+        # params[0] silently never fires and the test passes while injecting nothing.
+        def fail_timestamp(sql, params):
+            return "INSERT OR REPLACE INTO meta VALUES('last_reconcile'" in sql
+        _sweep(self.m, fail_sql=fail_timestamp)
+        self.assertEqual(_meta(self.m), self.before)
+
+    def test_a_failure_at_commit_leaves_the_previous_snapshot_intact(self):
+        _sweep(self.m, fail_on_commit=True)
+        self.assertEqual(_meta(self.m), self.before)
+
+
+class ReconcileMetricsTest(unittest.TestCase):
+    """The gauge has to actually reach the textfile.
+
+    write_metrics() builds its `gauges` dict from an explicit `WHERE k IN (...)` whitelist, so a
+    metric added only to the render list exports 0 forever. These pin the separate prefix read."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, repos=["o/a", "o/b"])
+
+    def test_exports_one_labelled_series_per_configured_repo(self):
+        _sweep(self.m, failing={"o/a"})
+        ex = _exported(self.m)
+        self.assertEqual(ex['reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}'], 1.0)
+        self.assertEqual(ex['reviewbot_reconcile_repo_failed{persona="test",repo="o/b"}'], 0.0)
+        self.assertIn('reviewbot_last_reconcile_timestamp_seconds{persona="test"}', ex)
+
+    def test_a_repo_dropped_from_the_allowlist_stops_being_exported(self):
+        # The retirement case: the row lingers in `meta`, but a de-configured repo must not keep
+        # exporting its last value - that would alert forever on a repo removed on purpose.
+        _sweep(self.m, failing={"o/a"})
+        m2 = load(self.tmp.name, repos=["o/b"])
+        ex = _exported(m2)
+        self.assertNotIn('reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}', ex)
+        self.assertEqual(ex['reviewbot_reconcile_repo_failed{persona="test",repo="o/b"}'], 0.0)
+
+    def test_results_survive_a_restart(self):
+        # meta is on disk, so a redeploy restart must not blank the failure state.
+        _sweep(self.m, failing={"o/a"})
+        m2 = load(self.tmp.name, repos=["o/a", "o/b"])
+        ex = _exported(m2)
+        self.assertEqual(ex['reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}'], 1.0)
+
+    def test_a_repo_never_swept_is_omitted_rather_than_reported_clean(self):
+        # Fresh database, no sweep yet: absent is honest, 0 would be a lie that reads "clean".
+        ex = _exported(self.m)
+        self.assertNotIn('reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}', ex)
+
+    def test_persona_is_escaped_on_every_metric_not_just_the_new_one(self):
+        # The first fix escaped `repo` and the persona on the NEW series only; the other eleven
+        # emissions still interpolated persona raw, so one quote there corrupted the textfile
+        # just as effectively.
+        m = load(self.tmp.name, persona='te"st', repos=["o/a"])
+        _sweep(m)
+        m.write_metrics()
+        text = pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8")
+        self.assertNotIn('persona="te"st"', text)
+        self.assertIn(r'persona="te\"st"', text)
+        # Heartbeat is the first line built and does not go through the new code path at all.
+        self.assertTrue(any(ln.startswith("reviewbot_heartbeat_timestamp_seconds")
+                            and r'persona="te\"st"' in ln for ln in text.splitlines()))
+
+    def test_every_exported_line_parses_as_one_metric_sample(self):
+        # A label-body regex of `.*` accepts the malformed output it is supposed to catch, so
+        # this walks the labels properly: quotes may appear only escaped.
+        m = load(self.tmp.name, persona='p"q\\r', repos=['o/a"b', "o/c\\d"])
+        _sweep(m)
+        m.write_metrics()
+        for ln in pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8").splitlines():
+            if not ln.strip():
+                continue
+            name, _, rest = ln.partition("{")
+            self.assertRegex(name.strip(), r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
+            if not rest:
+                continue
+            labels, _, value = rest.rpartition("}")
+            self.assertRegex(value.strip(), r"^-?[0-9.eE+-]+$")
+            # Exposition format proper: a comma-separated run of name="value", where value may
+            # contain a quote/backslash/newline ONLY as an escape pair. A label body of `.*`
+            # accepts exactly the corruption this is meant to catch.
+            self.assertRegex(
+                labels,
+                r'^[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*"'
+                r'(?:,[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*")*$',
+                f"malformed label block: {labels!r}")
+
+    def test_a_repo_name_with_a_quote_does_not_corrupt_the_textfile(self):
+        # repo is the first FREE-FORM label value this exporter emits. node_exporter rejects the
+        # whole textfile on one malformed line, so an unescaped `"` would delete every reviewbot
+        # metric on the host — not merely this series.
+        odd = 'o/we"ird\\slash'
+        m = load(self.tmp.name, repos=[odd])
+        _sweep(m)
+        m.write_metrics()
+        text = pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8")
+        line = [ln for ln in text.splitlines() if "reconcile_repo_failed" in ln][0]
+        self.assertIn(r'repo="o/we\"ird\\slash"', line)
+        # Every emitted line must still be one metric with exactly one value.
+        for ln in text.splitlines():
+            if ln.strip():
+                self.assertRegex(ln, r"^[a-zA-Z_:][a-zA-Z0-9_:]*(\{.*\})? -?[0-9.eE+]+$")
+
+
+class AllowlistDefaultsTest(unittest.TestCase):
+    """Guards the SHIPPED allowlist, not a synthetic one.
+
+    The behavioural enqueue tests use repos=["o/kept"], so restoring cchifor/review-bot-fixture to
+    the role defaults would leave them green. This is the test that would actually go red."""
+
+    EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
+                "cchifor/agentforge-platform"]
+
+    @staticmethod
+    def _parse_repos(text):
+        """Read the whole pr_reviewer_repos sequence, stdlib only, FAILING CLOSED.
+
+        Not PyYAML: the "Script unit tests" CI step installs no dependencies and PyYAML is NOT on
+        that runner (see test_cp_env's header), so a module-level `import yaml` would take every
+        test in this file down in the one place this guard has to run.
+
+        Not a single regex either. `^pr_reviewer_repos:\\n((?:\\s+-\\s+\\S+\\n)+)` stops at the
+        first line it cannot match, so appending a comment and then the fixture underneath the
+        four real entries left it GREEN — the truncation IS the bypass. This walks to the end of
+        the block instead, and raises on anything it does not understand rather than returning a
+        short list."""
+        lines = text.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith("pr_reviewer_repos:"):
+                rest = ln.split(":", 1)[1].strip()
+                if rest:  # flow style, or a value on the key line
+                    raise AssertionError(f"unhandled flow-style allowlist: {ln!r}")
+                start = i + 1
+                break
+        else:
+            raise AssertionError("pr_reviewer_repos: not found")
+
+        repos = []
+        for ln in lines[start:]:
+            if not ln.strip() or ln.lstrip().startswith("#"):
+                continue                      # blank / comment INSIDE the block: skip, don't stop
+            if not ln[:1].isspace():
+                break                         # dedent to column 0 = next top-level key
+            body = ln.strip()
+            if not body.startswith("- "):
+                raise AssertionError(f"unparsable line in allowlist block: {ln!r}")
+            item = body[2:].split(" #", 1)[0].strip()      # drop an inline comment
+            if item[:1] in ("'", '"'):                      # tolerate quoting
+                item = item[1:-1] if item[-1:] == item[:1] else item.strip("'\"")
+            repos.append(item)
+        return repos
+
+    def test_the_retired_fixture_is_not_in_the_role_defaults(self):
+        text = (ROOT / "ansible" / "roles" / "pr_reviewer" / "defaults" / "main.yml").read_text(
+            encoding="utf-8")
+        repos = self._parse_repos(text)
+        self.assertNotIn("cchifor/review-bot-fixture", repos)
+        self.assertEqual(repos, self.EXPECTED)
+
+    def test_the_parser_catches_a_fixture_smuggled_in_past_a_comment(self):
+        # The exact bypasses that made the first version of this test useless.
+        base = ("pr_reviewer_repos:\n" + "".join(f"  - {r}\n" for r in self.EXPECTED))
+        for evil in (base + "  # preserved smoke test\n  - cchifor/review-bot-fixture\n",
+                     base + "  - cchifor/review-bot-fixture # smoke test\n",
+                     base.replace("  - cchifor/ailab\n", '  - "cchifor/ailab"\n')
+                     + "  - cchifor/review-bot-fixture\n"):
+            with self.subTest(evil=evil.splitlines()[-1]):
+                self.assertIn("cchifor/review-bot-fixture", self._parse_repos(evil))
+
+    def test_the_parser_is_not_confused_by_quoting_or_trailing_keys(self):
+        text = ('pr_reviewer_repos:\n  - "cchifor/ailab"\n'
+                "  - 'cchifor/platform'  # inline\n\nnext_key: 1\n  - not-a-repo\n")
+        self.assertEqual(self._parse_repos(text), ["cchifor/ailab", "cchifor/platform"])
+
+    def test_the_parser_fails_closed_on_a_shape_it_cannot_read(self):
+        with self.assertRaises(AssertionError):
+            self._parse_repos("pr_reviewer_repos: [cchifor/ailab]\n")
+        with self.assertRaises(AssertionError):
+            self._parse_repos("some_other_key: 1\n")
+
+
+class ReconcileAdmissionTest(unittest.TestCase):
+    """CFG["repos"] has TWO consumers - the sweep and the webhook admission gate."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, repos=["o/kept"])
+
+    def test_enqueue_drops_a_repo_outside_the_allowlist(self):
+        self.m.enqueue("o/retired", 1, "b" * 40, "webhook")
+        self.assertEqual(_jobs(self.m, "o/retired"), 0)
+
+    def test_enqueue_accepts_an_allowlisted_repo(self):
+        self.m.enqueue("o/kept", 1, "b" * 40, "webhook")
+        self.assertEqual(_jobs(self.m, "o/kept"), 1)
+
+
+def _held_sweep(m, prs, failing=(), verdict_blocked=()):
+    """One reconciler() pass where every PR already HAS this persona's marker, so the body
+    reaches maybe_merge() instead of enqueue(). `verdict_blocked` are the PR numbers whose
+    maybe_merge reports the verdict gate."""
+    def api(path, *a, **kw):
+        repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
+        if repo in failing:
+            raise RuntimeError("HTTP Error 404: " + repo)
+        return [_pr(n) for n in prs.get(repo, ())]
+
+    def maybe_merge(repo, pr):
+        return "verdicts" if pr in verdict_blocked else None
+
+    def sleep(secs):
+        if secs == m.CFG["reconcile_s"]:
+            raise _StopLoop
+
+    with mock.patch.object(m, "api", api), \
+            mock.patch.object(m, "existing_marker", lambda *a: True), \
+            mock.patch.object(m, "maybe_merge", maybe_merge), \
+            mock.patch.object(m, "retire_closed_quarantines", lambda: None), \
+            mock.patch("time.sleep", sleep):
+        try:
+            m.reconciler()
+        except _StopLoop:
+            pass
+
+
+class MergeBlockedVisibilityTest(unittest.TestCase):
+    """A PR held by the verdict gate must be visible in the log AND in a series.
+
+    THE INCIDENT SHAPE THIS PINS (2026-09-10, ailab#616 + #619): maybe_merge()'s verdict gate
+    returned with no log() and no metric, while the branch-protection path right below it has
+    always logged its 405. So a PR that was merge-ready except for one persona's verdict was
+    indistinguishable from a PR nobody had looked at - nothing to grep, nothing to alert on.
+    Both sat (12 h and 8 h) with the peer persona approved and CI green while 19 sibling
+    renovate PRs merged around them, and were found only by reading the PR list by hand.
+
+    The convergence ladder cannot rescue these: it relaxes from round 3, review_round() counts
+    distinct fully-reviewed HEADS, and a renovate PR keeps one head for life."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.head = "e" * 40
+
+    def _pr_api(self, m, verdicts, labels=(), author="renovate-bot", ci="success"):
+        marks = ["ok\n\n<!-- review-bot:v1 persona=%s head=%s verdict=%s -->" % (p, self.head, v)
+                 for p, v in verdicts.items()]
+
+        def api(path, method="GET", body=None, raw=False):
+            if path == "/repos/o/r/pulls/7":
+                return {"state": "open", "draft": False, "mergeable": True,
+                        "user": {"login": author},
+                        "labels": [{"name": n} for n in labels],
+                        "head": {"sha": self.head}}
+            if path.startswith("/repos/o/r/pulls/7/reviews"):
+                return [{"id": i, "body": b, "user": {"login": "reviewer-" + p}}
+                        for i, (p, b) in enumerate(zip(verdicts, marks))]
+            if path.endswith("/status"):
+                return {"state": ci}
+            self.fail("unexpected call: %s %s" % (method, path))
+        m.api = api
+        return api
+
+    def test_a_pr_whose_CI_is_not_green_is_not_a_verdict_block(self):
+        """reviewer-codex, round 1: the verdict check used to run BEFORE the status check, so
+        a PR with red or pending CI *and* a non-clean verdict landed in the gauge - and
+        ReviewbotMergeBlocked would then page with a remedy ("fix the finding, or merge over
+        it") that is not the blocker. Both are bare early returns, so the order cannot change
+        what merges; it decides only what a held PR is reported as. "verdicts" has to mean the
+        verdict gate is the SOLE remaining blocker, or the alert's whole premise is wrong."""
+        for ci in ("pending", "failure", "error"):
+            with self.subTest(ci=ci):
+                m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                         merge_personas=["claude"], persona="claude")
+                self._pr_api(m, {"claude": "findings"}, ci=ci)
+                self.assertIsNone(m.maybe_merge("o/r", 7))
+
+    def test_the_verdict_block_still_reports_when_CI_IS_green(self):
+        """The other half - moving the status check earlier must not silence the real case."""
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude"], persona="claude")
+        self._pr_api(m, {"claude": "findings"}, ci="success")
+        self.assertEqual("verdicts", m.maybe_merge("o/r", 7))
+
+    def test_a_held_pr_names_the_persona_that_is_short(self):
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude", "codex"], persona="claude")
+        self._pr_api(m, {"claude": "findings", "codex": "clean"})
+        logged = []
+        with mock.patch.object(m, "log", lambda *a: logged.append(" ".join(map(str, a)))):
+            self.assertEqual("verdicts", m.maybe_merge("o/r", 7))
+        line = " ".join(logged)
+        self.assertIn("o/r#7", line)
+        self.assertIn("claude=findings", line)
+        self.assertNotIn("codex", line, "only the personas actually short belong in the line")
+
+    def test_a_persona_that_never_reviewed_is_named_too(self):
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude", "codex"], persona="claude")
+        self._pr_api(m, {"claude": "clean"})
+        logged = []
+        with mock.patch.object(m, "log", lambda *a: logged.append(" ".join(map(str, a)))):
+            self.assertEqual("verdicts", m.maybe_merge("o/r", 7))
+        self.assertIn("codex=no review", " ".join(logged))
+
+    def test_a_pr_held_for_a_DIFFERENT_reason_is_not_reported_as_a_verdict_block(self):
+        """no-automerge is a deliberate human brake, not a stall - counting it would make the
+        gauge fire on exactly the PRs somebody has already taken responsibility for."""
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude"], persona="claude")
+        self._pr_api(m, {"claude": "findings"}, labels=["no-automerge"])
+        self.assertIsNone(m.maybe_merge("o/r", 7))
+
+    def test_a_third_party_pr_is_not_reported_either(self):
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude"], persona="claude")
+        self._pr_api(m, {"claude": "findings"}, author="a-stranger")
+        self.assertIsNone(m.maybe_merge("o/r", 7))
+
+    def test_the_sweep_publishes_the_count_and_the_age(self):
+        m = load(self.tmp.name, repos=["o/r"])
+        c = m.db()
+        try:
+            c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated) "
+                      "VALUES('o/r',7,?,'done',?,?)",
+                      (_pr(7)["head"]["sha"], real_time.time() - 7200,
+                       real_time.time() - 7200))
+            c.commit()
+        finally:
+            c.close()
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7})
+        meta = _meta(m)
+        self.assertEqual("1", meta["merge_blocked_prs"])
+        self.assertGreater(float(meta["merge_blocked_seconds"]), 7000,
+                           "age must run from the review that landed on the current head")
+
+    def test_the_gauge_falls_when_the_block_clears(self):
+        """NON-LATCHING is the whole design. A cumulative counter would keep firing forever
+        after a single stuck PR merged - the trap reviewbot_quarantined_recent_jobs already
+        exists to dodge."""
+        m = load(self.tmp.name, repos=["o/r"])
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7})
+        self.assertEqual("1", _meta(m)["merge_blocked_prs"])
+        _held_sweep(m, {"o/r": [7]})          # same PR, now clean
+        self.assertEqual("0", _meta(m)["merge_blocked_prs"])
+        self.assertEqual("0", _meta(m)["merge_blocked_seconds"])
+
+    def test_a_pr_that_vanishes_clears_the_gauge_with_no_reaper(self):
+        m = load(self.tmp.name, repos=["o/r"])
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7})
+        self.assertEqual("1", _meta(m)["merge_blocked_prs"])
+        _held_sweep(m, {"o/r": []})           # merged or closed
+        self.assertEqual("0", _meta(m)["merge_blocked_prs"])
+
+    def test_a_failed_repo_does_not_publish_a_partial_count(self):
+        """A repo whose sweep died was only partly enumerated. Publishing what it managed to
+        see shrinks the gauge on exactly the cycles that went wrong, which reads as recovery."""
+        m = load(self.tmp.name, repos=["o/good", "o/bad"])
+        _held_sweep(m, {"o/good": [1], "o/bad": [2]}, verdict_blocked={1, 2})
+        self.assertEqual("2", _meta(m)["merge_blocked_prs"])
+        _held_sweep(m, {"o/good": [1], "o/bad": [2]}, failing={"o/bad"},
+                    verdict_blocked={1, 2})
+        meta = _meta(m)
+        self.assertEqual("1", meta["merge_blocked_prs"],
+                         "only the repo that completed may contribute")
+        self.assertEqual("1", meta[m.REPO_FAILED_PREFIX + "o/bad"],
+                         "and the undercount must be accompanied by its repo-failed series")
+
+    def test_the_new_series_reach_the_textfile(self):
+        """write_metrics() builds `gauges` from an explicit `WHERE k IN (...)` whitelist AND a
+        separate render list. A key added to only one of the two exports 0 forever - the exact
+        trap ReconcileMetricsTest was written for."""
+        m = load(self.tmp.name, repos=["o/r"])
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7})
+        m.bump_meta("llm_primary_failed_total", 3)
+        m.bump_meta("llm_fallback_used_total", 2)
+        exported = _exported(m)
+        self.assertEqual(1.0, exported['reviewbot_merge_blocked_prs{persona="test"}'])
+        self.assertIn('reviewbot_merge_blocked_seconds{persona="test"}', exported)
+        self.assertEqual(3.0, exported['reviewbot_llm_primary_failed_total{persona="test"}'])
+        self.assertEqual(2.0, exported['reviewbot_llm_fallback_used_total{persona="test"}'])
 
 
 if __name__ == "__main__":

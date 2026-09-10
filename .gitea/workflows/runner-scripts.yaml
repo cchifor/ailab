@@ -43,7 +43,7 @@ jobs:
     # that still fails fast if a case regresses into the hang these tests are meant to prevent.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: cleanup-script behaviour (mocked docker/df/systemctl)
         shell: bash

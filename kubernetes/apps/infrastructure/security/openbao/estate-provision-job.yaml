@@ -112,8 +112,9 @@ spec:
       enableServiceLinks: false
       automountServiceAccountToken: false # talks only to the OpenBao API, never to kube-apiserver
       securityContext:
-        # uid 100 / gid 1000 is the `openbao` user baked into the image (no USER directive, so this
-        # must be explicit) — same identity the server StatefulSet runs under.
+        # uid 100 / gid 1000 is the `openbao` user baked into the image — same identity the server
+        # StatefulSet runs under. These NUMERIC values stay explicit: 2.6.x images added `USER openbao`
+        # (2.5.5 had none), and a NAMED image user cannot satisfy `runAsNonRoot: true`.
         runAsNonRoot: true
         runAsUser: 100
         runAsGroup: 1000
@@ -121,7 +122,7 @@ spec:
       containers:
         - name: provision
           # Official OpenBao image (bao CLI + busybox sh), pinned to the server's version.
-          image: quay.io/openbao/openbao:2.5.5
+          image: quay.io/openbao/openbao:2.6.2
           command: ["/bin/sh", "/scripts/provision.sh"]
           env:
             # The headless per-pod name publishes not-ready addresses: a sealed-but-up pod yields a

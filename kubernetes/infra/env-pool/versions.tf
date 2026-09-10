@@ -3,7 +3,7 @@ terraform {
   required_providers {
     proxmox = {
       source  = "bpg/proxmox"
-      version = "~> 0.111" # same pin as infra/, ai-lxc, runners, dev-workers, agent-nodes
+      version = "~> 0.112" # same pin as infra/, ai-lxc, runners, dev-workers, agent-nodes
     }
     talos = {
       source  = "siderolabs/talos"

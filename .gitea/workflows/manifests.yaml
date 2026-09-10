@@ -50,7 +50,7 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: kustomize build + kubeconform over every Flux Kustomization path
         shell: bash

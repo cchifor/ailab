@@ -53,7 +53,40 @@ Secret.
 
 **KV layout** (mount `af`, KV v2 — the same mount ADR 0019 uses):
 
-- `af/dev-workers/common` — shared across all six. First field: `gitea_pat`.
+- `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `proxmox_ssh_key`.
+
+  `proxmox_ssh_key` is an Ed25519 PRIVATE key (comment `agent@dev-workers`) whose public half is in
+  `/root/.ssh/authorized_keys` on cloud1/cloud2/cloud3. It exists because an agent had no way to
+  reach a Proxmox host: `scripts/node-ssh.py` tries key auth and falls back to `NODE_ROOT_PASSWORD`
+  from a gitignored `.env`, and that password lives at `af/estate/proxmox`, which NO dev-worker
+  policy can read — deliberately (see `openbao-estate-credentials.md` § Access).
+
+  A key rather than that password, on purpose: revoking it is one line out of `authorized_keys` on
+  three hosts, where revoking the shared root password means rotating every home in the estate
+  table — `.env` plus five gitignored tfvars files plus the values typed into the root@pam gate.
+  It is still root on the hypervisors; it is the **cost of revocation** that differs, not the privilege.
+
+  **It is shared, and that is the limit of the above.** It sits in `common`, so all six dev-worker
+  AppRoles read the same key: compromise of any **one** worker yields root on all three hypervisors,
+  every worker presents the same identity so `auth.log` cannot attribute an action to one of them,
+  and the single `authorized_keys` line that revokes it revokes it **for all six at once**. Cheap to
+  revoke is not the same as selectively revocable, and the first version of this note elided that.
+  Where that bites is incident response: a suspect worker, no attribution, and only an all-or-nothing
+  lever — pull the line and all six lose SSH, or leave it and the suspect keeps root while you scope
+  the incident. Per-worker keys at `af/dev-workers/<hostname>`, a shape this layout already supports,
+  would buy both the attribution and that lever.
+
+  Not done — and the reason is narrower than "it would be a lot of work", because it would not be.
+  The ceremony is identical for six keys and for one (edit the seed, let the daily provision Job
+  converge — **Rotation** below), and secret-ids are already rotated per worker, so the estate does
+  per-worker credential operations elsewhere. What actually decides it is lifecycle: the six workers
+  are built and destroyed as one plane, so there is no per-worker lifetime for a per-worker key to
+  track. Revisit when that stops holding — a worker that outlives its cohort, or an incident needing
+  one revoked and five kept, is the signal, and the second of those is a matter of when, not if.
+
+  NOT installed on the ailab Proxmox nodes (192.168.0.2/.3/.4). Those accept no operator key either
+  — `authorized_keys` there holds only inter-node RSA keys — so anything reaching them still uses
+  the password fallback. Extending this key to them is a separate decision.
 - `af/dev-workers/<inventory_hostname>` — per-worker. Empty today; this is where per-worker Gitea bot
   PATs land (ADR 0020 follow-up).
 

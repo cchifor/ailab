@@ -37,7 +37,7 @@ spec:
   chart:
     spec:
       chart: openbao
-      version: "0.28.4" # appVersion OpenBao v2.5.5
+      version: "0.29.4" # appVersion OpenBao v2.6.2
       sourceRef:
         kind: HelmRepository
         name: openbao
@@ -46,7 +46,7 @@ spec:
     # HTTPS everywhere: flip the chart off its HTTP default so BAO_ADDR + the readiness/liveness probes use
     # https (the probe is `bao status -tls-skip-verify`, so it tolerates the SAN-mismatched 127.0.0.1 loop-
     # back). The listener TLS files themselves come from server.ha.raft.config below. VERIFIED against the
-    # openbao-helm 0.28.4 values.yaml: `global.tlsDisable` (default true) exists (vault-helm parity holds).
+    # openbao-helm 0.29.4 values.yaml: `global.tlsDisable` (default true) exists (vault-helm parity holds).
     global:
       tlsDisable: false
     # ESO reads secrets over the API — the Vault Agent injector sidecar is not needed.
@@ -66,7 +66,7 @@ spec:
       # Mount the cert-manager-issued openbao-tls Secret so the listener HCL below can reference it. Using
       # explicit volumes/volumeMounts (NOT server.extraVolumes) to pin the EXACT mountPath /openbao/tls that
       # the tls_*_file paths reference (extraVolumes forces /openbao/userconfig/<name>). VERIFIED against
-      # openbao-helm 0.28.4 values.yaml: server.volumes/volumeMounts/extraEnvironmentVars/ha.raft.config exist.
+      # openbao-helm 0.29.4 values.yaml: server.volumes/volumeMounts/extraEnvironmentVars/ha.raft.config exist.
       volumes:
         - name: openbao-tls
           secret:
