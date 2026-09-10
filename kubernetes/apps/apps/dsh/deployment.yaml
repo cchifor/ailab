@@ -105,8 +105,14 @@ spec:
                 # repo owns, and leaving that stale broke every model in dsh when #547 renamed the
                 # local routes to their -cloud names. reconcile-provider.js rewrites only that
                 # block and preserves the rest byte-for-byte. See the header there.
-                echo "settings.yaml exists -- reconciling only the litellm provider block"
+                echo "settings.yaml exists -- reconciling the provider blocks this repo owns"
                 node /seed/reconcile-provider.js
+                # Once per provider. The seed alone cannot introduce a NEW provider to an
+                # existing volume: settings.yaml is seeded only when ABSENT, and it has existed
+                # here since 2026-09-07, so a provider added to the seed file would ship inert.
+                # Reconciling it explicitly is what makes the codex route (architecture B --
+                # dsh's own agent loop on the Codex model) actually reach the pod.
+                DSH_PROVIDER=codex node /seed/reconcile-provider.js
               else
                 echo "seeding settings.yaml with the LiteLLM provider"
                 # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp
@@ -170,11 +176,99 @@ spec:
                 install -m 0644 "/seed/$b.agent.cordis.yml" "/dsh-teams/$b/agent.cordis.yml"
                 echo "projected team: $b"
               done
+              # Profile plugin closure (WP-3): project what the install Job staged, and set
+              # dsh.profile.bundles to exactly what actually landed.
+              #
+              # THE BUNDLES LIST IS THE DANGEROUS PART. A name in dsh.profile.bundles whose
+              # package is absent throws in loadProfileDirectory -- an unhandled throw at boot,
+              # which on a 1-replica Recreate Deployment is an outage, not a missing feature.
+              # Verified in a container. So: SET the list from what is present on disk, never
+              # merge into it (a git revert would otherwise leave a stale name behind), and if
+              # the closure is missing entirely, ship the shipped bundles alone and log loudly.
+              #
+              # The marker is ADVISORY here, deliberately. wait-for-install gates on the DSH
+              # install marker only; gating pod start on this one would turn "no codex provider"
+              # into "no dsh".
+              STAGE="/app/profiles/${DSH_VERSION}-${DSH_BUILD}-${DSH_PLUGINSET}/web"
+              P=/dsh-home/profiles/web
+              # STAGE-THEN-SWAP, and NEVER fatal. The obvious shape -- rm -rf the live closure
+              # then cp the new one -- has a hole big enough to lose the harness through: under
+              # `set -eu` a failed copy exits this container with the old modules already gone
+              # AND the bundles list still naming them, which is precisely the crash-loop this
+              # whole design exists to avoid. So the copy lands beside the live tree, is proven,
+              # and only then replaces it; and every step is guarded so a projection failure
+              # degrades to "no providers" instead of "no dsh".
+              #
+              # reconcile-bundles.js runs UNCONDITIONALLY afterwards, whatever happened above:
+              # it is what makes the bundles list agree with what is actually on disk, so it
+              # must never be skipped by an early exit.
+              if [ -f "${STAGE}/.installed" ] && [ -d "${STAGE}/node_modules" ]; then
+                ok=1
+                rm -rf "$P/node_modules.new" || ok=0
+                [ "$ok" = 1 ] && { cp -a "${STAGE}/node_modules" "$P/node_modules.new" || ok=0; }
+                # Prove the copy before trusting it: a marker can outlive its closure, and an
+                # empty directory copies successfully.
+                [ "$ok" = 1 ] && [ -z "$(ls -A "$P/node_modules.new" 2>/dev/null)" ] && {
+                  echo "WARNING: staged closure copied EMPTY -- discarding"; ok=0; }
+                if [ "$ok" = 1 ]; then
+                  # EVERY step guarded. `set -e` also fires on a failing command at the right of
+                  # `&&`, so `[ -d X ] && mv ...` is NOT safe here -- that shape is exactly how
+                  # an aborted swap would skip the reconciler and leave the bundles list naming
+                  # packages that are no longer on disk.
+                  rm -rf "$P/node_modules.old" || ok=0
+                  if [ "$ok" = 1 ] && [ -d "$P/node_modules" ]; then
+                    mv "$P/node_modules" "$P/node_modules.old" || ok=0
+                  fi
+                  [ "$ok" = 1 ] && { mv "$P/node_modules.new" "$P/node_modules" || ok=0; }
+                fi
+                if [ "$ok" = 1 ]; then
+                  # pnpm settings travel with the closure: nodeLinker: hoisted is what made it
+                  # relocatable, and minimumReleaseAgeExclude is what lets pnpm accept the
+                  # -alpha bundles if the supported CLI is ever run here by hand. Non-fatal:
+                  # a missing settings file does not invalidate the closure itself.
+                  install -m 0644 "${STAGE}/pnpm-workspace.yaml" "$P/pnpm-workspace.yaml" \
+                    || echo "WARNING: could not install pnpm-workspace.yaml"
+                  rm -rf "$P/node_modules.old" || true
+                  echo "projected profile plugin closure from ${STAGE}"
+                else
+                  # Put back whatever was working before rather than leaving nothing.
+                  rm -rf "$P/node_modules.new" || true
+                  if [ -d "$P/node_modules.old" ] && [ ! -d "$P/node_modules" ]; then
+                    mv "$P/node_modules.old" "$P/node_modules" || true
+                  fi
+                  rm -rf "$P/node_modules.old" || true
+                  echo "WARNING: projecting the plugin closure FAILED -- keeping the previous"
+                  echo "WARNING: closure if there was one. reconcile-bundles will list only what"
+                  echo "WARNING: is actually present, so dsh still boots."
+                fi
+              else
+                echo "WARNING: no staged plugin closure at ${STAGE} -- dsh will boot with the"
+                echo "WARNING: shipped bundles only. A team's delegation tool is then simply"
+                echo "WARNING: ABSENT -- dsh-tool-subagent registers its tool only while the named"
+                echo "WARNING: provider exists -- rather than the preset listing as broken."
+                rm -rf "$P/node_modules" || true
+              fi
+              # ORDER MATTERS, and the obvious order is wrong. fix-profile.js CREATES the
+              # profile manifest when it is absent (a fresh dsh-home), so running the bundle
+              # reconcile first means that on a first boot there is no manifest to reconcile:
+              # it exits early, fix-profile then writes the manifest with the SHIPPED bundles
+              # only, and the closure that was just projected is never listed. Observed
+              # end-to-end in a container -- the providers were on disk and absent from
+              # dsh.profile.bundles. fix-profile first, then reconcile against a manifest that
+              # is guaranteed to exist.
               node /seed/fix-profile.js
+              node /seed/reconcile-bundles.js
+          env:
+            - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
+            - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_PLUGINSET, value: "ps1" }
           volumeMounts:
             - { name: home, mountPath: /dsh-home }
             - { name: relay, mountPath: /seed, readOnly: true }
             - { name: teams, mountPath: /dsh-teams }
+            # read-only: this container reads the staged closure the install Job built, and
+            # must never write to the shared app volume.
+            - { name: app, mountPath: /app, readOnly: true }
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
@@ -225,6 +319,26 @@ spec:
             # value, so the secret never lands in git and never lands in the seed ConfigMap either.
             - name: LITELLM_API_KEY
               valueFrom: { secretKeyRef: { name: dsh-litellm, key: api_key } }
+            # The Codex credential for the `codex` PROVIDER ROUTE -- dsh's own agent loop on
+            # the Codex model, read via settings.yaml's `apiKeyEnv` (architecture B).
+            #
+            # IT DOES NOT AUTHENTICATE THE CLI CHILD, and an earlier revision of this comment
+            # wrongly said it did. codex 0.153.4 constructs its app-server auth manager as
+            #     AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
+            # (codex-rs/app-server/src/lib.rs, both entry points at rust-v0.153.4), so the CLI
+            # ignores CODEX_API_KEY entirely. The dsh-subagent-codex child therefore needs
+            # NATIVE Codex auth state under its own CODEX_HOME -- which is a persistence and
+            # token-refresh question in a pod, not an env var -- and that is an open item
+            # blocking architecture A's activation, recorded in the team-review header.
+            #
+            # optional: true, DELIBERATELY. The OpenBao path behind dsh-codex does not exist
+            # yet: creating it is an operator write through the agentforge-provisioner, because
+            # OpenBao 2.5.5 has no root-token recovery (ADR 0019 finding (c)). Without
+            # `optional` a missing key would fail the pod outright -- turning an unconfigured
+            # OPTIONAL feature into an outage of the whole harness. Unset simply means the
+            # codex route reports the honest "Provider is not configured" refusal.
+            - name: CODEX_API_KEY
+              valueFrom: { secretKeyRef: { name: dsh-codex, key: api_key, optional: true } }
             - { name: DSH_HOME, value: /dsh-home }
             - { name: HOME, value: /dsh-home }
             # Feedback submission can export session data. Off for a private deployment.

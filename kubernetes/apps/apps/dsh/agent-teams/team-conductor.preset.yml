@@ -1,0 +1,6 @@
+name: Conductor
+description: >-
+  Codex conducts, qwen3.8 does the work. Select the `codex` provider for the
+  session; delegated workers are routed to the estate's qwen3.8 route
+  explicitly. Delegation is dormant until the fan-out bounds land.
+order: 20

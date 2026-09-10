@@ -1,0 +1,7 @@
+name: Review
+description: >-
+  qwen3.8 implements; a real Codex CLI session reviews via subagent_codex.
+  The reviewer is INTENDED to read and report rather than write — that is the
+  team's contract, not something the sandbox enforces. Delegation is dormant
+  until the fan-out bounds land.
+order: 30

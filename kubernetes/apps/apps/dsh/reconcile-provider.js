@@ -45,8 +45,23 @@ const fs = require('fs');
 const LIVE = process.env.DSH_SETTINGS || '/dsh-home/settings.yaml';
 const SEED = process.env.DSH_SEED || '/seed/settings.seed.yaml';
 
+// WHICH provider block to reconcile. Defaults to `litellm`, so an invocation with no env is
+// byte-for-byte the behaviour this script has always had. `codex` (architecture B, the harness
+// running on the Codex model route) is reconciled by a SECOND invocation with DSH_PROVIDER set,
+// for the reason the seed alone is not enough: settings.yaml is only SEEDED when it is absent,
+// and it has existed on this deployment since 2026-09-07 -- so a provider added to the seed file
+// would never reach the live volume. That is exactly how #613's AGENTS.md shipped inert.
+//
 // Plain identifiers by construction (letters and hyphens only), so they need no regex escaping.
-const PATH = ['llm-pi-ai', 'providers', 'litellm'];
+// Validated rather than trusted: this string is interpolated into a RegExp below, and a value
+// carrying regex metacharacters would silently match the wrong block.
+const PROVIDER = process.env.DSH_PROVIDER || 'litellm';
+if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(PROVIDER)) {
+  console.warn(`WARNING: DSH_PROVIDER ${JSON.stringify(PROVIDER)} is not a plain identifier;`);
+  console.warn('         leaving settings.yaml untouched.');
+  process.exit(0);
+}
+const PATH = ['llm-pi-ai', 'providers', PROVIDER];
 
 const indentOf = (l) => l.length - l.trimStart().length;
 const isComment = (l) => l.trimStart().startsWith('#');
@@ -158,6 +173,21 @@ const seedLines = fs.readFileSync(SEED, 'utf8').split('\n');
 
 // FATAL by design: the seed is ours, and silently skipping would reintroduce the stale bug.
 const seed = resolve(seedLines, PATH);
+// A provider the seed does not carry is not an error: this script is invoked once per provider
+// this repo owns, and one may legitimately be absent from a given seed revision.
+//
+// ONLY THE LEAF. An earlier version exited on any `!seed.range`, which also swallowed a seed
+// whose `llm-pi-ai` or `providers` block is missing or unwalkable -- previously FATAL, and
+// rightly so: that is a broken seed, and treating it as "provider not offered" would silently
+// preserve stale live configuration for `litellm` too. resolve() reports the full path it
+// failed at, so the two cases are distinguishable.
+if (!seed.range) {
+  if (seed.failedAt === PATH.join(' > ')) {
+    console.log(`${PROVIDER} provider is absent from the seed; nothing to reconcile`);
+    process.exit(0);
+  }
+  // fall through to the pre-existing fatal handling for a broken ancestor
+}
 if (!seed.range) {
   console.error('FATAL: seed has no ' + seed.failedAt + ' -- refusing to guess');
   process.exit(1);
@@ -171,22 +201,22 @@ if (live.range) {
   const block = reindent(seedBlock, live.depth - seed.depth);
   const liveBlock = liveLines.slice(live.range[0], live.range[1]);
   if (liveBlock.join('\n') === block.join('\n')) {
-    console.log('litellm provider already matches the seed');
+    console.log(`${PROVIDER} provider already matches the seed`);
     process.exit(0);
   }
-  console.log('reconciling litellm provider from the seed');
+  console.log(`reconciling ${PROVIDER} provider from the seed`);
   console.log('  was:', ids(liveBlock).join(', ') || '(none)');
   console.log('  now:', ids(block).join(', ') || '(none)');
   if (live.depth !== seed.depth) console.log('  re-indented seed block by', live.depth - seed.depth);
   out = [...liveLines.slice(0, live.range[0]), ...block, ...liveLines.slice(live.range[1])];
 } else {
-  // No litellm provider. Insert under the CORRECT providers block -- the one inside llm-pi-ai --
+  // No such provider. Insert under the CORRECT providers block -- the one inside llm-pi-ai --
   // at that block's own child indent, not the seed's.
   const parent = resolve(liveLines, PATH.slice(0, -1));
   if (!parent.range) {
     // WARN, not fatal: see rule 3. dsh boots with whatever it already has.
     console.warn('WARNING: settings.yaml has no ' + parent.failedAt + '; leaving it untouched.');
-    console.warn('         The litellm provider was NOT reconciled. If dsh lists stale models,');
+    console.warn(`         The ${PROVIDER} provider was NOT reconciled. If dsh lists stale models,`);
     console.warn('         this file has a shape this script cannot walk -- fix it by hand.');
     process.exit(0);
   }
@@ -200,16 +230,16 @@ if (live.range) {
   // missing and duplicated -- and duplicate mapping keys either fail to parse or silently leave
   // the stale provider in effect, both worse than the stale-model bug. Declining is safe: dsh
   // keeps whatever it has, and the warning says what to fix.
-  if (keyPresentAt(liveLines, 'litellm', target, parent.range[0], parent.range[1])) {
-    console.warn('WARNING: a litellm key already exists under llm-pi-ai.providers in a form this');
+  if (keyPresentAt(liveLines, PROVIDER, target, parent.range[0], parent.range[1])) {
+    console.warn(`WARNING: a ${PROVIDER} key already exists under llm-pi-ai.providers in a form this`);
     console.warn('         script cannot parse (a value, anchor or flow mapping on the header');
     console.warn('         line). Leaving settings.yaml untouched rather than inserting a');
-    console.warn('         duplicate key. Rewrite it as a plain `litellm:` block to re-enable');
+    console.warn(`         duplicate key. Rewrite it as a plain \`${PROVIDER}:\` block to re-enable`);
     console.warn('         reconciliation.');
     process.exit(0);
   }
   const block = reindent(seedBlock, target - seed.depth);
-  console.log('litellm provider missing from llm-pi-ai.providers; inserting it from the seed');
+  console.log(`${PROVIDER} provider missing from llm-pi-ai.providers; inserting it from the seed`);
   console.log('  at indent', target);
   const at = parent.range[0];
   out = [...liveLines.slice(0, at + 1), ...block, ...liveLines.slice(at + 1)];

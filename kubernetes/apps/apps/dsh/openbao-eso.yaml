@@ -64,3 +64,38 @@ spec:
   data:
     - secretKey: api_key
       remoteRef: { key: estate/litellm, property: master_key }
+---
+# The Codex credential, same store and same pattern as the LiteLLM key above.
+#
+# WHY NOT AN OPENBAO AGENT IN THE POD. The dev-workers run a bao agent plus the `cred` helper,
+# and the obvious move is to do the same here. It would be a serious regression: an agent writes
+# a sink token into the pod, and THIS pod executes model-authored code and offers
+# `danger-full-access` in its UI -- the agent has a shell, so the sink becomes a credential-
+# minting oracle for whatever the role allows. External Secrets keeps the token out of the
+# workload entirely: ESO mints its own token in its own namespace and writes only the resolved
+# value, which is why the dsh-eso ServiceAccount above carries
+# automountServiceAccountToken: false. dsh has no first-party OpenBao/Vault plugin either
+# (checked: dsh-credentials-vault, dsh-credentials-openbao, dsh-openbao, dsh-plugin-vault all
+# absent from npm), so there is nothing to install in-process even if we wanted it.
+#
+# NOT YET RESOLVABLE, and that is expected. The OpenBao side does not exist:
+#   af/estate/codex             field `api_key`
+#   policy af-app-dsh           must gain read on af/data/estate/codex (today: litellm only)
+# Both are OPERATOR writes through the agentforge-provisioner -- OpenBao 2.5.5 disabled
+# `generate-root`, so there is no root-token path (ADR 0019 finding (c)). Until they land this
+# ExternalSecret reports NotReady and the dsh-codex Secret is absent, which the Deployment
+# tolerates: CODEX_API_KEY is declared `optional: true` precisely so an unconfigured optional
+# feature cannot take the harness down.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: dsh-codex
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { name: dsh-store, kind: SecretStore }
+  target:
+    name: dsh-codex
+    creationPolicy: Owner
+  data:
+    - secretKey: api_key
+      remoteRef: { key: estate/codex, property: api_key }
