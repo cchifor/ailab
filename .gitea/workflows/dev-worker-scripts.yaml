@@ -38,7 +38,7 @@ jobs:
     # The suite spawns a private tmux server and a handful of `sleep` panes; it finishes in seconds.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Asserted rather than installed: the runner images already carry tmux (3.4), and an apt install
       # here would turn "the tool this gate needs is gone" into a slow, network-dependent pass.

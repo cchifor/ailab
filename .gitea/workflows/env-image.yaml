@@ -27,7 +27,7 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Registry login
         run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login registry.chifor.me -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
       - name: Build + push
