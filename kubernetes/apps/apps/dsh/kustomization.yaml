@@ -26,6 +26,22 @@ configMapGenerator:
       - reconcile-bundles.js
       - cordis.patch.yml
       - searxng-search.mjs   # the web SEARCH provider itself (see the file for why not npm)
+      # User-global agent instructions, installed to $DSH_HOME/AGENTS.md. COMPLEMENTARY to the
+      # agent teams below, not in competition with them: this is instruction CONTENT, read by
+      # dsh-agent-instructions from $DSH_HOME (its `dshHome` default, and DSH_HOME=/dsh-home
+      # here); a team is a COMPOSITION, read by dsh-agent-presets from /dsh-teams. Different
+      # path, different plugin, no shared state, so both can land.
+      #
+      # WHAT THE UPSTREAM DOCS ESTABLISH, per @deepseek-ai/dsh-agent-instructions: the global
+      # file is rendered FIRST, followed by the project chain broad-to-specific; duplicate
+      # sibling content renders once; and `maxBytes` caps the whole rendered baseline. So
+      # ordering, de-duplication and the budget are defined WITHIN one agent.
+      #
+      # WHAT THEY DO NOT: anything about AGGREGATE cost once a team fans out. Every child
+      # agent whose composition carries an agent-instructions row renders this same baseline
+      # into its own context, so the per-agent budget is bounded and the per-TEAM cost is
+      # not. That is a sizing input for WP-5's bounds, not a reason to withhold either file.
+      - agents.seed.md
       # Agent teams (WP-1). Flattened as <team>.<file> because a ConfigMap key cannot
       # contain "/"; seed-settings rebuilds the directory tree at /dsh-teams. They ride the
       # content hash like everything else here, so editing a team rolls the pod -- which is

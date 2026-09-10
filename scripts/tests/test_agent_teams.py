@@ -41,6 +41,22 @@ def teams():
     return sorted(p.name[: -len(".preset.yml")] for p in TEAMS.glob("*.preset.yml"))
 
 
+def orphan_compositions():
+    """Compositions with no matching preset.yml.
+
+    Everything else here is driven by the *.preset.yml glob -- the same shape the
+    initContainer's projection loop uses -- so a lone agent.cordis.yml is invisible
+    to both: it ships in the ConfigMap, occupies a content hash, and mounts nothing,
+    with no signal anywhere. An asymmetric guard only catches the half you thought of.
+    """
+    have = set(teams())
+    return sorted(
+        p.name[: -len(".agent.cordis.yml")]
+        for p in TEAMS.glob("*.agent.cordis.yml")
+        if p.name[: -len(".agent.cordis.yml")] not in have
+    )
+
+
 def rows(text):
     """(id, disabled) for every row, in file order."""
     found, lines = [], text.splitlines()
@@ -66,6 +82,12 @@ def check():
     names = teams()
     if not names:
         fails.append("no teams found -- did the directory move?")
+
+    for orphan in orphan_compositions():
+        fails.append(
+            f"{orphan}: has {orphan}.agent.cordis.yml but no {orphan}.preset.yml -- it would "
+            f"ship in the ConfigMap and mount nothing"
+        )
 
     for team in names:
         preset = TEAMS / f"{team}.preset.yml"

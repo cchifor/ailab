@@ -122,6 +122,29 @@ spec:
                 # sat at -r--r--r-- until it was chmod-ed by hand.
                 install -m 0644 /seed/settings.seed.yaml /dsh-home/settings.yaml
               fi
+              # $DSH_HOME/AGENTS.md is the user-global instruction file the agent-instructions
+              # row reads, and DSH_HOME is /dsh-home here (see the container env), so this is the
+              # path the plugin actually looks at.
+              #
+              # OUTSIDE the if/else ON PURPOSE. This line first shipped INSIDE the else branch,
+              # which runs only when settings.yaml is absent OR EMPTY (`-s` tests for a non-empty
+              # file) -- in practice, a first boot onto a fresh volume. On this deployment
+              # settings.yaml has existed since 2026-09-07, so that branch never runs and
+              # AGENTS.md would never have been installed at all: the feature would have been
+              # inert on the one estate it was written for, silently, while its own comment
+              # claimed it was unconditional. It is unconditional now, which is what the comment
+              # always said.
+              #
+              # UNCONDITIONAL rather than seed-once, for the same reason cordis.patch.yml is
+              # reinstalled every boot: it is deployment-owned, and leaving it to the volume is
+              # the unmanaged-state trap this directory has already been bitten by twice.
+              #
+              # THIS OVERWRITES the file each time the initContainer runs -- which is on pod
+              # creation, NOT on a container restart. The agent CAN edit /dsh-home with its own
+              # shell, so a hand-edit there survives until the next pod roll and is then lost.
+              # That is the intended trade (git owns this file), but it is a trade, not an
+              # impossibility: /dsh-home is writable by uid 1000 by design.
+              install -m 0644 /seed/agents.seed.md /dsh-home/AGENTS.md
               # patchReload MUST NOT be "live" in a container or dsh crash-loops on FIRST boot.
               # MEASURED, not guessed -- see fix-profile.js for the mechanism and the evidence.
               mkdir -p /dsh-home/profiles/web
@@ -161,12 +184,10 @@ spec:
               for f in /seed/team-*.preset.yml; do
                 [ -e "$f" ] || continue
                 b=$(basename "$f" .preset.yml)
-                # Both halves or neither. A team whose composition is missing from the
-                # ConfigMap would otherwise fail mid-projection, and `install`'s own
-                # "cannot stat" says nothing about which team or why. scripts/tests/
-                # test_agent_teams.py gates this in CI; this is the runtime backstop, and
-                # it fails the initContainer deliberately rather than leaving a half-built
-                # directory that the roster would happily list as a broken preset.
+                # A team whose composition is missing would otherwise fail mid-projection,
+                # and `install`'s own "cannot stat" names neither the team nor the cause in
+                # pod logs. Fails the initContainer deliberately rather than leaving a
+                # half-built directory the roster would list as a broken preset.
                 if [ ! -e "/seed/$b.agent.cordis.yml" ]; then
                   echo "ERROR: team $b has a preset.yml but no agent.cordis.yml in the ConfigMap" >&2
                   exit 1
@@ -175,6 +196,19 @@ spec:
                 install -m 0644 "$f" "/dsh-teams/$b/preset.yml"
                 install -m 0644 "/seed/$b.agent.cordis.yml" "/dsh-teams/$b/agent.cordis.yml"
                 echo "projected team: $b"
+              done
+              # The loop above is driven by *.preset.yml, so a composition with NO matching
+              # preset.yml is simply never visited -- it ships in the ConfigMap, occupies a
+              # content hash, and mounts nothing, with no signal anywhere. Asymmetric guards
+              # only catch the half you thought of, so check the other direction too.
+              for c in /seed/team-*.agent.cordis.yml; do
+                [ -e "$c" ] || continue
+                b=$(basename "$c" .agent.cordis.yml)
+                if [ ! -d "/dsh-teams/$b" ]; then
+                  echo "ERROR: team $b has an agent.cordis.yml but no preset.yml -- it would" >&2
+                  echo "ERROR: ship in the ConfigMap and mount nothing" >&2
+                  exit 1
+                fi
               done
               # Profile plugin closure (WP-3): project what the install Job staged, and set
               # dsh.profile.bundles to exactly what actually landed.
