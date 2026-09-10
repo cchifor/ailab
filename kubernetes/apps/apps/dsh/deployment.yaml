@@ -521,4 +521,12 @@ spec:
         # turning an unconfigured, additive feature into an outage of the whole harness on a
         # 1-replica Recreate Deployment. Absent simply means the plugin finds nothing and every
         # reference resolves exactly as it does now.
-        - { name: credentials, secret: { secretName: dsh-credentials, defaultMode: 0400, optional: true } }
+        #
+        # 0440, NOT 0400. kubelet mounts a Secret volume owned by ROOT with the group set to the
+        # pod's fsGroup (verified on a live broker pod: `-r--r----- 1 0 65532`). This container runs
+        # as uid 1000, so with 0400 the group bits are empty and every read fails EACCES -- which
+        # this provider correctly treats as a FAILURE rather than absence, so every credential
+        # resolution would throw. The failure would only appear once the operator provisioned the
+        # OpenBao side, long after this merged. 0440 matches every other secret volume in this
+        # estate that runs as a non-root uid.
+        - { name: credentials, secret: { secretName: dsh-credentials, defaultMode: 0440, optional: true } }

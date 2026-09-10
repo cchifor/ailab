@@ -28,6 +28,7 @@ Run:
 
     python3 -m unittest discover -s scripts/tests -p "test_*.py" -v
 """
+import os
 import pathlib
 import shutil
 import subprocess
@@ -53,6 +54,12 @@ TESTS = pathlib.Path(__file__).resolve().parent
 
 PLUGIN = DSH / "openbao-credentials.mjs"
 HARNESS = TESTS / "dsh_credentials_harness.mjs"
+INTEGRATION = TESTS / "dsh_credentials_integration.mjs"
+
+#: The shipped closure the integration check runs against. Pinned: checking one
+#: version and generalising to another is how the `@latest` inspection of this
+#: same package produced a wrong conclusion earlier in its design.
+REAL_PACKAGE = "@deepseek-ai/dsh-credentials-local@0.1.5-alpha.2"
 STUBS = TESTS / "fixtures" / "dsh-credentials-stubs"
 
 #: The relative specifier the cordis row must name, and the basename the
@@ -100,6 +107,55 @@ class PluginBehaviour(unittest.TestCase):
         passed, total = summary.split()[0].split("/")
         self.assertEqual(passed, total, summary)
         self.assertGreaterEqual(int(total), 15, f"harness lost cases: {summary}")
+
+
+class RealClosureCompatibility(unittest.TestCase):
+    """Run the provider against the SHIPPED base class and real cordis.
+
+    The stub suite above establishes this file's own logic; it cannot establish
+    that the real LocalCredentialProvider and the real cordis loader behave the
+    way the stubs do. This check closes that gap: it registers the provider with
+    a real Context and drives it through `ctx.credentials`, which is the actual
+    service-dispatch path, shadow receiver included.
+
+    OPT-IN, because it needs the npm registry. Enable with:
+
+        DSH_REAL_CLOSURE=1 python3 -m unittest discover -s scripts/tests -p "test_*.py"
+
+    It has already earned its place: it is what showed the base class refuses to
+    start on a credentials document readable beyond its owner (mode 0600
+    required), a behaviour this subclass inherits.
+    """
+
+    def test_against_the_shipped_provider(self):
+        if not os.environ.get("DSH_REAL_CLOSURE"):
+            self.skipTest("set DSH_REAL_CLOSURE=1 to run against the shipped closure (needs npm)")
+        node = _node()
+        npm = shutil.which("npm")
+        if node is None or npm is None:
+            self.skipTest("node and npm are both required")
+        with tempfile.TemporaryDirectory() as tmp:
+            work = pathlib.Path(tmp)
+            (work / "package.json").write_text('{"name":"c","type":"module","private":true}\n')
+            install = subprocess.run(
+                [npm, "i", "--silent", "--no-audit", "--no-fund", REAL_PACKAGE],
+                cwd=work,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            shutil.copy(PLUGIN, work / BASENAME)
+            shutil.copy(INTEGRATION, work / "integration.mjs")
+            proc = subprocess.run(
+                [node, "integration.mjs"], cwd=work, capture_output=True, text=True, timeout=300
+            )
+        self.assertEqual(
+            proc.returncode, 0, f"real-closure check failed:\n{proc.stdout}\n{proc.stderr}"
+        )
+        summary = proc.stdout.strip().splitlines()[-1]
+        passed, rest = summary.split()[0].split("/")
+        self.assertEqual(passed, rest, summary)
 
 
 class Wiring(unittest.TestCase):
@@ -188,6 +244,16 @@ class Wiring(unittest.TestCase):
 
     def test_mount_is_read_only(self):
         self.assertIn("mountPath: /dsh-credentials, readOnly: true", self.deployment)
+
+    def test_secret_mode_is_group_readable(self):
+        # kubelet mounts a Secret volume owned by ROOT with the group set to the
+        # pod's fsGroup (verified live: `-r--r----- 1 0 65532`). This container
+        # runs as uid 1000, so an owner-only mode makes every read fail EACCES --
+        # which the provider treats as failure rather than absence, so every
+        # resolution would throw. The break would only surface once the operator
+        # provisioned OpenBao, long after the change merged.
+        self.assertRegex(self.deployment, r"secretName: dsh-credentials, defaultMode: 0440")
+        self.assertNotIn("secretName: dsh-credentials, defaultMode: 0400", self.deployment)
 
 
 if __name__ == "__main__":
