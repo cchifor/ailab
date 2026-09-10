@@ -107,12 +107,19 @@ spec:
                 # block and preserves the rest byte-for-byte. See the header there.
                 echo "settings.yaml exists -- reconciling the provider blocks this repo owns"
                 node /seed/reconcile-provider.js
-                # Once per provider. The seed alone cannot introduce a NEW provider to an
-                # existing volume: settings.yaml is seeded only when ABSENT, and it has existed
-                # here since 2026-09-07, so a provider added to the seed file would ship inert.
-                # Reconciling it explicitly is what makes the codex route (architecture B --
-                # dsh's own agent loop on the Codex model) actually reach the pod.
-                DSH_PROVIDER=codex node /seed/reconcile-provider.js
+                # REMOVE the broken `codex` provider, do not reconcile it. It was seeded with
+                # `api: openai-codex-responses`, which the profile schema does not accept, and
+                # schema validation covers the WHOLE providers dict -- so that one value failed
+                # the entire section and took litellm down with it. No models, dead composer.
+                #
+                # Dropping it from the seed is not enough: settings.yaml lives on the PVC, so an
+                # already-written block survives every boot. This actively unwrites it.
+                #
+                # SAFE TO KEEP INDEFINITELY: with the provider absent it prints "not present;
+                # nothing to remove" and exits 0. Remove this line only when the codex route is
+                # re-added in its correct form (see settings.seed.yaml), and in that case it must
+                # be replaced by a reconcile of the new provider name, not simply deleted.
+                DSH_PROVIDER=codex DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
               else
                 echo "seeding settings.yaml with the LiteLLM provider"
                 # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp

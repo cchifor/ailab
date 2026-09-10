@@ -56,6 +56,17 @@ const SEED = process.env.DSH_SEED || '/seed/settings.seed.yaml';
 // Validated rather than trusted: this string is interpolated into a RegExp below, and a value
 // carrying regex metacharacters would silently match the wrong block.
 const PROVIDER = process.env.DSH_PROVIDER || 'litellm';
+// REMOVE mode. A provider this repo once wrote and now must UNWRITE cannot simply
+// be dropped from the seed: settings.yaml lives on the PVC and reconcile only
+// rewrites the block it is told to, so a stale block survives every boot.
+//
+// This exists because of a real outage. A `codex` provider was seeded with
+// `api: openai-codex-responses`, which is NOT an accepted value -- the schema
+// takes only openai-completions | openai-responses | anthropic-messages. The
+// whole `providers` dict then failed validation, so NO provider resolved,
+// including litellm, and the composer went dead with no models. Removing it from
+// the seed would have fixed new volumes and left every existing one broken.
+const REMOVE = process.env.DSH_PROVIDER_REMOVE === '1';
 if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(PROVIDER)) {
   console.warn(`WARNING: DSH_PROVIDER ${JSON.stringify(PROVIDER)} is not a plain identifier;`);
   console.warn('         leaving settings.yaml untouched.');
@@ -172,6 +183,18 @@ const liveLines = fs.readFileSync(LIVE, 'utf8').split('\n');
 const seedLines = fs.readFileSync(SEED, 'utf8').split('\n');
 
 // FATAL by design: the seed is ours, and silently skipping would reintroduce the stale bug.
+if (REMOVE) {
+  const live = resolve(liveLines, PATH);
+  if (!live.range) {
+    console.log(`${PROVIDER} provider is not present; nothing to remove`);
+    process.exit(0);
+  }
+  const out = [...liveLines.slice(0, live.range[0]), ...liveLines.slice(live.range[1])];
+  fs.writeFileSync(LIVE, out.join('\n'));
+  console.log(`removed the ${PROVIDER} provider block from settings.yaml`);
+  process.exit(0);
+}
+
 const seed = resolve(seedLines, PATH);
 // A provider the seed does not carry is not an error: this script is invoked once per provider
 // this repo owns, and one may legitimately be absent from a given seed revision.
