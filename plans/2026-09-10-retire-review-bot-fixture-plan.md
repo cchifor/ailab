@@ -1,26 +1,5 @@
 # Retire cchifor/review-bot-fixture without decapitating the reviewbot sweep
 
-## Codex Review
-
-- Accepted the `reconcile_s` pushback: the deployed IaC supplies the integer 300 without host
-  overrides. Startup validation is a separate follow-up; both disputed markers are removed.
-- The prefix read and configured-repo rendering work with exact full-key lookups.
-  `sqlite3.Error` must precede `Exception`:
-  `enqueue()` propagates database errors unchanged, `existing_marker()` does no database work,
-  and the LLM exception wrappers are outside this call path. Skipping the result write on a fatal
-  SQLite error correctly preserves the completion timestamp.
-- The proposed per-repo writes drop round 1's requirement to publish results atomically:
-  committing them individually can leave partial recovery results paired with the old timestamp.
-  The new result writer also needs an explicit contract to propagate write failures.
-- The alert design is expressible, but needs explicit label matching and a defined handoff between
-  repo failure and staleness. Numeric thresholds and holds remain unspecified. Round 1's
-  `maybe_merge()` swallowed-error limitation, PR/operation log context, and explicit restart/series-gap
-  cases were also dropped rather than addressed.
-- Scope is proportionate to the generic sweep defect; one results dictionary and one completion
-  transaction suffice. Six existing metrics/concurrency tests passed, and isolated candidate-code
-  probes confirmed the findings below. Promtool was unavailable (Docker unavailable, WSL access
-  denied); live estate observations were not independently verified.
-
 ## Context
 
 Operator decision (2026-09-10): `cchifor/review-bot-fixture` is to be removed from the Gitea
@@ -103,35 +82,65 @@ sit outside. The new guard must wrap the **whole** PR-processing body, because t
 mode reaches `existing_marker()`, `enqueue()` and response parsing, not just the listing call.
 
 ```python
+results = {}                                   # repo -> 0/1, in memory only
 for repo in CFG["repos"]:
-    failed = False
+    failed = 0
     try:
         for pr in api(f"/repos/{repo}/pulls?state=open&limit=50"):
             ...unchanged body...
     except sqlite3.Error:
         raise                      # shared state store — fatal to the cycle, see below
     except Exception as e:
-        failed = True
-        log(f"reconcile {repo}: {e}")
-    record_repo_sweep_result(repo, failed)
+        failed = 1
+        log(f"reconcile {repo}: {e}")           # include PR number + operation where known
+    results[repo] = failed
+retire_closed_quarantines()
+commit_sweep(results, time.time())              # ONE transaction: gauges + timestamp
 ```
 
-<!-- codex: round-2: The new per-repo write placement can publish an unfinished cycle if each helper call commits. A probe implementing that shape started with repo A failed and last_reconcile=100, let A recover, then failed inside repo B's actual enqueue()/db() path: A's exported gauge became 0 while the timestamp stayed 100. A cleanup failure similarly leaves every new gauge committed under the old timestamp. This can clear an existing repo alert before any replacement sweep completes, contrary to round 1's requested snapshot semantics. Collect results in memory, then after successful cleanup commit all results and last_reconcile in one transaction under db_lock; read both within write_metrics()'s existing locked database section. Keep API calls outside the lock. Test metrics observed mid-sweep and after later-repo/cleanup failures, asserting that the entire previous completed snapshot survives. -->
+**Nothing is published until the sweep finishes.** Writing each repo's result as it is produced
+would export a half-finished cycle. Codex probed exactly that shape: with repo A failed and
+`last_reconcile=100`, letting A recover and then failing inside repo B's `enqueue()`/`db()` path
+left A's gauge exported as `0` while the timestamp stayed at `100` — i.e. an operator would see a
+repo alert clear with no replacement sweep behind it. A cleanup failure does the same to every
+gauge at once.
+
+So results are collected in memory and `commit_sweep()` writes **all** per-repo gauges plus
+`last_reconcile` in a single transaction under `db_lock`, after `retire_closed_quarantines()`
+succeeds. `write_metrics()` reads both inside its existing locked DB section, so it can never
+observe a torn snapshot. API calls stay outside the lock.
+
+**`commit_sweep()` propagates DB failures — deliberately unlike its neighbours.** `bump_meta()`
+(`:106`) and `record_gauge()` (`:128`) both swallow every exception on purpose, because they are
+called from a worker exception handler and a `finally` block where raising would kill the worker
+thread. Copying that convention here would let `last_reconcile` advance after its own write failed.
+`commit_sweep()` must therefore let the error reach the outer cycle handler, and a failure in
+either the gauge writes or the final commit must roll back **both** — leaving the entire previous
+completed snapshot intact. (Avoiding `record_gauge()` because of its lifetime `_max` companion is a
+true but secondary reason; this contract is the real one.)
 
 **Why `sqlite3.Error` re-raises.** A bare `except Exception` would classify a shared-state failure
 as a per-repo failure and let the sweep stamp `last_reconcile` as if it had completed. Codex probed
 exactly this: with `enqueue()` raising `sqlite3.OperationalError`, the naive loop still stamped
 completion. The state store is not repo-scoped, so its failure must stay fatal to the cycle and let
-the outer handler retry without advancing the timestamp.
+the outer handler retry without advancing the timestamp. Ordering is load-bearing: `sqlite3.Error`
+must precede `except Exception`. Verified reachable — `enqueue()` propagates DB errors unchanged,
+`existing_marker()` does no DB work, and the LLM exception wrappers are not on this call path.
 
 No `continue` — the `except` is already the end of the loop body.
 
-**Two limitations this deliberately does NOT fix**, documented rather than expanded into scope:
+**Three limitations this deliberately does NOT fix**, documented rather than expanded into scope:
 
 - Repo isolation is not PR isolation: a failure on one PR still skips the remaining PRs of that
-  repo for that cycle. The next cycle picks them up.
+  repo for that cycle. The next cycle picks them up. The log line carries the PR number and the
+  operation where known, so the journal can distinguish "this repo is unreachable" from "one PR
+  keeps failing".
 - The listing is still `limit=50`, so a completed sweep does not prove every open PR was seen.
   Pre-existing; a pagination redesign is not part of retiring a fixture repo.
+- `maybe_merge()` (`:1034-1087`) swallows most of its own failures internally, so those never reach
+  this boundary and never set the flag. The metric therefore means **"this repo's sweep did not
+  complete"**, not "all reconcile or merge errors" — its annotation must say so, or it will be
+  read as a merge-health signal it is not.
 
 ### 2. Make a skipped repo visible (`reviewbot.py` + rules)
 
@@ -150,11 +159,9 @@ Isolation without telemetry trades a loud failure for a silent one. The instrume
 
 Implementation:
 
-- `record_repo_sweep_result(repo, failed)` writes `reconcile_repo_failed:<repo>` = 0/1 into `meta`.
-  Written for **every currently-configured repo on every sweep** — recovered zeros alongside
-  failures — so the series is a current statement, not a latch. Not via `record_gauge()`, which
-  would add an unwanted lifetime `_max` companion.
-  <!-- codex: round-2: Specify that the new result writer propagates database failures to the outer cycle handler. The nearby bump_meta() and record_gauge() deliberately swallow all exceptions; copying that convention would let last_reconcile advance even though the result write failed. Excluding record_gauge() only because of its _max companion does not establish this contract. In the single completion transaction requested above, a result-write or final-commit failure must roll back both gauges and timestamp; add those failure-injection cases. -->
+- `commit_sweep(results, now)` writes `reconcile_repo_failed:<repo>` = 0/1 into `meta` for **every
+  currently-configured repo**, plus `last_reconcile`, in one transaction (see §1) — recovered zeros
+  alongside failures, so the series is a current statement rather than a latch.
 - `write_metrics()` renders it as `reviewbot_reconcile_repo_failed{persona,repo}`, iterating
   `CFG["repos"]` so a de-configured repo's stale row is simply not emitted.
 - **The rendering fix that the tuple list alone would miss:** `gauges` is populated by an explicit
@@ -172,24 +179,65 @@ Two alerts, complementary rather than redundant — a caught repo failure advanc
 (so the stale alert stays silent), while a hung sweep freezes the gauge at its last value (so the
 repo alert must not be the only signal):
 
-- **`ReviewbotReconcileStale`** — the sweep is not completing. Needs three branches, per instance:
-  a stale timestamp, a **structural zero**, and a **missing series**. The `> 0` guard is kept, but
-  the earlier justification mis-cited `agentforge-rules.yaml:28`: that precedent concerns an
-  exported zero. Here `reviewbot.py:1386` omits the line entirely until the key exists, so a
-  reconciler that has never completed a first sweep produces *no series at all* and scalar
-  arithmetic yields nothing to alert on. The missing branch must be anchored to the expected
-  reviewer targets (`up{job="reviewer-node"}`) with a startup grace period.
-- **`ReviewbotReconcileRepoFailing`** — `reviewbot_reconcile_repo_failed == 1`, gated on a recent
-  completed sweep so a frozen gauge is reported by the stale alert instead of double-paging here.
+**`ReviewbotReconcileStale`** — the sweep is not completing. Three branches in one rule, with `up`
+kept on the LEFT so every branch carries the same target labels even when the timestamp series
+disappears entirely (`N` = 1800):
 
-<!-- codex: round-2: Resolve the new label mismatch explicitly: up lacks persona, and the timestamp lacks repo. For textual shorthands T = reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"}, U = (up{job="reviewer-node"} == 1), and threshold N, the three-branch stale expression can be U and on(job,instance) (((time() - (T > 0)) > N) or (T == 0) or (U unless on(job,instance) T)). Expand the shorthands inline; no recording-rule framework is needed. Keeping U on the left gives every branch the same target labels, including when the timestamp disappears; annotations must identify instance rather than assume persona exists. The repo gate can be (reviewbot_reconcile_repo_failed{job="reviewer-node"} == 1) and on(job,instance,persona) (time() - (T > 0) <= N). Default matching would silently empty that gate and misclassify healthy targets as missing. Set operators need no group_left. Using up == 1 leaves node-down reporting to ReviewerNodeDown. See [Prometheus vector matching](https://prometheus.io/docs/prometheus/latest/querying/operators/#vector-matching). -->
+```yaml
+expr: >-
+  (up{job="reviewer-node"} == 1)
+  and on (job, instance) (
+        ((time() - (reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"} > 0)) > 1800)
+     or (reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"} == 0)
+     or ((up{job="reviewer-node"} == 1)
+         unless on (job, instance) reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"})
+  )
+for: 15m
+labels: { severity: warning }
+```
 
-<!-- codex: round-2: The new freshness gate has a handoff delay: once age exceeds N the repo alert stops matching, while the stale branch must then satisfy its own for duration. Thus a previously firing repo alert can resolve before the stale alert fires. Choose concrete N/for values and document the resulting detection gap, or arrange overlap if continuous coverage is required; do not imply an immediate replacement. A rule-level for can supply startup grace for missing/zero series. Test the handoff and missing/zero/stale transitions with stable labels on one reviewer while the other stays healthy. The prose below still promises thresholds and holds without specifying them. See [Prometheus alert timing](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/#defining-alerting-rules). -->
+The branches are a stale timestamp, a **structural zero**, and a **missing series** — all three are
+needed. The `> 0` guard stays, but the earlier justification mis-cited `agentforge-rules.yaml:28`:
+that precedent concerns an *exported* zero. Here `reviewbot.py:1386` omits the line entirely until
+the key exists, so a reconciler that has never completed a first sweep produces no series at all
+and scalar arithmetic yields nothing to alert on — hence the `unless` branch anchored to the
+expected reviewer targets. Gating on `up == 1` leaves node-down reporting to `ReviewerNodeDown`
+rather than double-paging. **Annotations must identify `instance`, not `persona`** — the missing
+branch has no `persona` label to interpolate. Set operators need no `group_left`, and no recording
+rules are required.
 
-Thresholds are set from **sweep runtime + `reconcile_s` sleep + metrics tick + scrape interval**,
-not from `reconcile_s` alone: the deployed interval is 300 s (`config.json.j2:33`, no host
-override), the sleep happens *after* serial API work, and each request carries a 60 s timeout. Both
-alerts specify threshold, `for`, severity and an actionable annotation.
+**`ReviewbotReconcileRepoFailing`** — a repo is being skipped, gated on a recent completed sweep so
+that a frozen gauge is reported by the stale alert instead of double-paging here. Explicit matching
+on `(job, instance, persona)` is load-bearing: default matching would also try to match `repo`,
+which the timestamp series does not carry, silently emptying the gate and misclassifying healthy
+targets.
+
+```yaml
+expr: >-
+  (reviewbot_reconcile_repo_failed{job="reviewer-node"} == 1)
+  and on (job, instance, persona) (
+    (time() - (reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"} > 0)) <= 1800
+  )
+for: 15m
+labels: { severity: warning }
+```
+
+Its annotation says **"this repo's sweep did not complete"** — not "merge errors" — because
+`maybe_merge()` swallows most of its own failures and never reaches this boundary.
+
+**Threshold derivation.** `N = 1800 s` is six `reconcile_s` cycles plus slack: the deployed interval
+is 300 s (`config.json.j2:33`, no host override), the sleep happens *after* serial API work whose
+requests each carry a 60 s timeout, the metrics ticker writes every 15 s, and the scrape interval is
+30 s. `for: 15m` on the stale rule doubles as the startup grace its missing/zero branches need (a
+fresh install completes its first sweep within ~300 s + runtime). Worst-case detection is ~45 min,
+proportionate for a safety-net sitting behind webhook delivery.
+
+**Documented handoff gap.** Both rules use the same `N`, so once a hung sweep's age passes 1800 s
+the repo alert stops matching while the stale alert has yet to satisfy its own 15 m hold — a
+previously firing repo alert can therefore resolve up to 15 minutes *before* the stale alert fires.
+This is a deliberate trade: widening the repo gate would buy continuous coverage at the price of
+double-paging every hung sweep. The seam is stated here rather than implied away, and the promtool
+cases assert the transition explicitly.
 
 Both need cases in `kubernetes/apps/infrastructure/monitoring/reviewbot-rules.test.yaml`, which
 currently covers all **ten** alerts in the manifest (an earlier draft said seven — stale, taken
@@ -298,4 +346,4 @@ for the staleness-gate precedent and its limits.
    includes skipped and marker-deduplicated jobs. Use an already-intended PR, or the protected
    scratch-PR setup from §4, so verification cannot accidentally merge a test change.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
