@@ -125,13 +125,17 @@ data:
     # the read-modify-write that gives the seed-wins-others-survive contract; it needs an existing
     # version, so a never-written path is created with `kv put` of the same file.
     seeded=0
-    probe_err=/tmp/kv-probe.err
     for seed in "$SEED_DIR"/*.json; do
       [ -f "$seed" ] || continue
       name="$(basename "$seed" .json)"
-      if bao kv get -mount=af "dev-workers/${name}" >/dev/null 2>"$probe_err"; then
+      # Stderr is captured into a VARIABLE, not a temp file: this container runs with
+      # readOnlyRootFilesystem: true, so /tmp is not writable and a `2>/tmp/...` redirect fails
+      # before the probe even runs. `2>&1 >/dev/null` keeps stderr and discards stdout (the order
+      # matters). The assignment sits in an `if` condition so `set -e` does not abort on a non-zero
+      # probe, which is the expected case for an absent path.
+      if probe_err="$(bao kv get -mount=af "dev-workers/${name}" 2>&1 >/dev/null)"; then
         bao kv patch -mount=af "dev-workers/${name}" "@${seed}"
-      elif grep -qiE 'no value found|not found' "$probe_err"; then
+      elif printf '%s' "$probe_err" | grep -qiE 'no value found|not found'; then
         # GENUINELY absent. Create-only (cas=0), never a bare put: openbao-k8stoken-sync writes
         # sync-owned fields into these same paths, and both jobs can observe absence at once — the
         # loser of a bare-put race REPLACES the winner's document and silently erases the other's
@@ -142,12 +146,11 @@ data:
         # An auth/network failure is NOT absence. Treating it as absence is how a transient error
         # turns into a destructive full-document write.
         echo "probe of dev-workers/${name} failed and was not a not-found; aborting" >&2
-        cat "$probe_err" >&2
+        echo "$probe_err" >&2
         exit 1
       fi
       seeded=$((seeded + 1))
     done
-    rm -f "$probe_err"
     [ "$seeded" -gt 0 ] || { echo "no *.json under $SEED_DIR; aborting" >&2; exit 1; }
 
     echo "devworker provision complete"
