@@ -59,8 +59,15 @@ TEAM SPIKE: GO
 3. **`koffi` is a red herring.** `pnpm add` reports `ERR_PNPM_IGNORED_BUILDS` for `koffi@3.2.1` and
    exits non-zero **after completing the install**. It arrives transitively via
    `session-persistence-jsonl`, which the profile does not need — installing only the two team
-   packages removes it. Note dsh's own `initProfile` already writes `onlyBuiltDependencies: [koffi]`
-   and pnpm 12.3.4 gates it anyway, so the allowlist is not the lever it looks like.
+   packages removes it entirely, and the run confirms it (`who needs koffi:` prints empty).
+
+   > **An earlier draft of this note claimed dsh's `initProfile` "already writes
+   > `onlyBuiltDependencies: [koffi]`". That was false**, and it reached both this document and the
+   > PR description before review caught the contradiction it implied. Checked against a fresh
+   > profile: `initProfile` writes `packages`, `nodeLinker: hoisted` and `autoInstallPeers: false`
+   > — **no allowlist at all**. The key I had seen was my own script's append, and the
+   > "duplicate mapping key" failure came from state left by a previous run rather than from
+   > upstream. The spike script no longer touches `pnpm-workspace.yaml`.
 4. **Adoption is small**: add both packages to `DSH_PLUGINS`, bump `DSH_PLUGINSET`, add two rows to a
    team preset. No new machinery.
 

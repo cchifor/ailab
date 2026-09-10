@@ -26,26 +26,18 @@ corepack enable pnpm >/dev/null 2>&1 || true
 (cd "$D" && ./node_modules/.bin/dsh --profile web --dump-config >/dev/null 2>&1) || true
 
 echo "== install the team packages into the PROFILE (the path a row name resolves from) =="
-printf "\nonlyBuiltDependencies:\n  - koffi\n" >> "$P/pnpm-workspace.yaml"
-# koffi (an FFI library, pulled in transitively) ships a build script, and pnpm
-# blocks those by default -- the same allowBuilds gate dsh's own plugin CLI warns
-# about. Allow it explicitly rather than globally.
-echo "  profile pnpm-workspace.yaml as dsh writes it:"; sed 's/^/    /' "$P/pnpm-workspace.yaml"
-# dsh's initProfile already writes onlyBuiltDependencies, so APPEND to that list
-# rather than adding a second key (pnpm rejects duplicate mapping keys).
-python3 - "$P/pnpm-workspace.yaml" <<'PY'
-import sys, pathlib
-f = pathlib.Path(sys.argv[1]); lines = f.read_text().splitlines()
-out, done = [], False
-for i, l in enumerate(lines):
-    out.append(l)
-    if l.strip() == 'onlyBuiltDependencies:' and not done:
-        out.append('  - koffi'); done = True
-if not done:
-    out += ['onlyBuiltDependencies:', '  - koffi']
-f.write_text('\n'.join(out) + '\n')
-print('    -> koffi allowed')
-PY
+# NO koffi HANDLING, deliberately. An earlier revision of this script appended an
+# `onlyBuiltDependencies: [koffi]` block here, and a comment claiming dsh's
+# initProfile already writes that key. BOTH WERE WRONG. Verified against a fresh
+# profile: initProfile writes only `packages`, `nodeLinker: hoisted` and
+# `autoInstallPeers: false` -- no allowlist at all. The key I saw was this
+# script's own append, and the "duplicate mapping key" failure came from state
+# left by a previous run.
+#
+# It is moot anyway: koffi arrives transitively via dsh-session-persistence-jsonl,
+# which this profile does NOT need -- the web composition already ships it. With
+# only the two team packages, koffi never appears, which the run below confirms
+# by printing an empty "who needs koffi".
 (cd "$P" && pnpm add \
   "@deepseek-ai/dsh-experimental-agent-team@${V}" \
   "@deepseek-ai/dsh-experimental-tool-agent-team@${V}" >/tmp/pn.log 2>&1) || true
@@ -100,4 +92,12 @@ else
   no "boot: exit=$ST elapsed=${EL}s"; head -8 /tmp/w.err
 fi
 echo
-[ "$FAILED" = 0 ] && echo "TEAM SPIKE: GO" || echo "TEAM SPIKE: NO-GO"
+# EXIT NON-ZERO ON FAILURE. Both branches used to end in a successful echo, so a
+# failed resolve or boot still exited 0 and the documented docker invocation
+# looked like a pass. A gate that cannot fail verifies nothing.
+if [ "$FAILED" = 0 ]; then
+  echo "TEAM SPIKE: GO"
+else
+  echo "TEAM SPIKE: NO-GO"
+fi
+exit "$FAILED"
