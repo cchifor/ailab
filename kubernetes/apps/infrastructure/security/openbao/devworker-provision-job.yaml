@@ -142,9 +142,11 @@ spec:
       enableServiceLinks: false
       automountServiceAccountToken: false # talks only to the OpenBao API, never to kube-apiserver
       securityContext:
-        # uid 100 / gid 1000 is the `openbao` user baked into the image (the image itself sets no
-        # USER, so this must be explicit) — the same identity the server StatefulSet runs under,
-        # there via the chart's own default rather than anything helmrelease.yaml sets.
+        # uid 100 / gid 1000 is the `openbao` user baked into the image — the same identity the
+        # server StatefulSet runs under, there via the chart's own default rather than anything
+        # helmrelease.yaml sets. These NUMERIC values stay explicit: 2.6.x images added `USER openbao`
+        # (2.5.5 had none), and a NAMED image user cannot satisfy `runAsNonRoot: true` — the kubelet
+        # cannot prove a name is not uid 0 and refuses to start the container.
         runAsNonRoot: true
         runAsUser: 100
         runAsGroup: 1000
