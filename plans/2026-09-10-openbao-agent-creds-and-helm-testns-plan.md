@@ -1,5 +1,13 @@
 # Agent credentials in OpenBao + Helm-capable isolated test namespaces
 
+## Codex Review
+
+- TokenRequest needs an enforced lifetime/refresh budget and protected ServiceAccounts; requesting 30 days does not guarantee 29 days of outage margin.
+- The sync policy lacks permissions required by its own validation and write workflow, and concurrent first writes can still erase fields.
+- Serial rollout helps contain failures, but the gate, restart verification, persistent writer ownership, and disabled-OpenBao cleanup path need correction.
+- The corrected quota keys are valid; the 60-object budgets need workload evidence. The restricted RBAC supports ordinary Helm operations but needs a broader chart compatibility contract.
+- Offline escrow breaks the backup-key DR dependency, while its online placement conflicts with the stated Tier C rule. The convergence concern is narrowed to isolated testing of the new bootstrap dependencies.
+
 ## Context
 
 Two gaps found in the 2026-09-10 credential audit, with one shared root cause.
@@ -118,9 +126,13 @@ count/jobs.batch: "30"     count/cronjobs.batch: "10"
 count/deployments.apps: "20"  count/statefulsets.apps: "10"
 ```
 
+<!-- codex: `pods: 30` excludes Succeeded/Failed Pods, so retained standalone Helm test Pods can accumulate beyond the advertised object bound; directly writable ReplicaSets and ServiceAccounts also have no count cap here. Add `count/pods` and appropriate bounds for the remaining writable object kinds if the quota is intended to contain etcd object growth. [Resource quotas](https://kubernetes.io/docs/concepts/policy/resource-quotas/) -->
+
 The object counts are not padding: Helm keeps one release Secret **per revision**, so an agent
 looping `helm upgrade` is an unbounded Secret generator against etcd. `docs/runbooks/helmtest.md`
 tells agents to run with `--history-max 3`.
+
+<!-- codex: The corrected Service keys and `count/secrets`/`count/configmaps` are valid literal object limits, but 60 is not justified by a declared largest chart or concurrent-release limit: twenty releases retaining three revisions already consume all sixty Secrets before application or hook Secrets. Measure install/upgrade/rollback/test peaks for the supported workload, and correct the unbounded-upgrade claim because the pinned Helm 3.16.3 defaults upgrade history to ten unless overridden. [Resource quotas](https://kubernetes.io/docs/concepts/policy/resource-quotas/), [Helm upgrade implementation](https://raw.githubusercontent.com/helm/helm/v3.16.3/cmd/helm/upgrade.go) -->
 
 **LimitRange** with default requests/limits (CPU, memory, ephemeral-storage) so a chart that omits
 them cannot evade the quota.
@@ -151,6 +163,10 @@ destroy the credential being synced. Instead the SA has **no token Secret at all
 calls the `TokenRequest` API (`serviceaccounts/token`) for a bound token with a 30-day TTL and
 re-issues it daily, leaving ~29 days of outage margin. This also gives automatic rotation and makes
 the credential unrevocable-by-chart.
+
+<!-- codex: The API server can shorten a requested lifetime, so a 24h grant would leave no overlap for a daily sync plus Agent's default five-minute KV refresh, and the 36h alert would fire after expiry. Validate every returned `status.expirationTimestamp`, budget retries/rendering/outage margin inside the actual lifetime, and verify the cap on every API server before claiming 29 days of headroom. [API-server expiration cap](https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver/), [Agent refresh behavior](https://openbao.org/docs/2.5.x/agent-and-proxy/agent/template/) -->
+
+<!-- codex: The Role still permits deleting the worker's ServiceAccount, which invalidates both old and newly minted tokens; deleting its platform Role or RoleBinding similarly removes access. Protect those reserved identities and RBAC objects with admission policy, because removing the token Secret alone does not make this credential immune to chart collisions. [ServiceAccount token lifecycle](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/) -->
 
 **Role `helmtest-deployer` + RoleBinding.** Explicit verbs — **no wildcards**, because `["*"]`
 includes `escalate` and `bind`, which is exactly the escalation the earlier draft claimed to
@@ -183,6 +199,8 @@ Dropped from the earlier draft, each for a reason worth recording:
 built-in escalation check confines them to permissions `helmtest-deployer` itself holds — a
 guarantee that is only true because the wildcard is gone.
 
+<!-- codex: Retaining Role CRUD does not guarantee chart RBAC can be installed: a namespaced Role granting event creation/patching, Endpoint reads, or leader-election Lease access is rejected because this deployer lacks those permissions. Extend the supported-chart profile to inspect rendered resources, hooks, lookups, and Role rules, with explicit settings to disable unsupported components or reviewed narrow additions; none of the five dropped resources is universally required by Helm itself. [RBAC escalation checks](https://kubernetes.io/docs/reference/access-authn-authz/rbac/), [Helm test implementation](https://raw.githubusercontent.com/helm/helm/v3.16.3/pkg/action/release_testing.go) -->
+
 **Two documented non-grants**, in `docs/runbooks/helmtest.md` where an agent will read them: no
 cluster-scoped rights at all — so charts with a `crds/` directory, or that ship ClusterRoles,
 ClusterRoleBindings, or Namespace objects, will fail — and no grant on any custom resource. A chart
@@ -210,11 +228,15 @@ carrying a new policy that grants `create`+`update` on exactly
 `af/data/dev-workers/dev-worker-{1..6}` and nothing else — no read of `common`, no estate, no
 delete. Declarative, so it is restored by the same daily Job after a wipe.
 
+<!-- codex: `create`+`update` cannot execute the specified `kv get`/`kv patch` workflow: the existence probe requires `read`, HTTP PATCH requires `patch`, and the CLI fallback also needs `read`. Grant the required capabilities on the six exact data paths and explicitly select the write method, or redesign the workflow to avoid reads; the current policy prevents any successful sync. [OpenBao KV-v2 ACLs and patch behavior](https://openbao.org/docs/secrets/kv/kv-v2/) -->
+
 **How it writes.** `bao kv patch` per path, never `put`: patch preserves any unrelated field in that
 worker's subtree, `put` would erase it. A genuinely absent path is created with `put` **only** when
 a `kv get` returns a real not-found; an authorization or network error must abort the run, never be
 treated as absence. The two owned fields are written together so a partial run cannot leave a worker
 with a fresh tep kubeconfig and a stale helmtest one.
+
+<!-- codex: A genuine not-found followed by an unconditional `put` still races the seed provisioner: both can observe absence, then the second write replaces the first document. Use create-only CAS (`cas=0`) with conflict retry into the merge path in both writers, and fix the existing provisioner's any-read-error-to-`put` branch; CronJob `Forbid` does not serialize it with the separate provisioner Job. -->
 
 **What goes in the kubeconfig.** The `server:` is the **worker-reachable** endpoint
 `https://192.168.0.40:6443` (matching `dev_worker_tep_server`), not the Job's in-cluster
@@ -228,11 +250,15 @@ target namespace granting `create` on `serviceaccounts/token` with `resourceName
 single SA in that namespace. The `testpool` Role enumerates all six `tep-dw<N>` names. No `list`,
 no `watch`, no Secret access anywhere — the TokenRequest design removes the need for it.
 
+<!-- codex: The named TokenRequest restriction is valid, but these namespace Roles do not authorize the planned TokenReview validation. Add a narrowly scoped ClusterRole and binding granting `create` on `authentication.k8s.io/tokenreviews`, or use a different authenticated validation method; otherwise every validation attempt is forbidden and nothing is published. [TokenReview request scope](https://www.kubernetes.dev/resources/keps/1040/) -->
+
 **Scheduling and recovery.** Daily is the steady-state cadence, but daily alone would mean up to a
 day of outage after a wipe. So: `concurrencyPolicy: Forbid`, `startingDeadlineSeconds`,
 `backoffLimit` with `activeDeadlineSeconds`, a Flux-triggered immediate run on manifest change, and
 a Prometheus alert on "no successful sync in 36h" wired into `testpool-rules.yaml`'s sibling. The
 runbook documents the one-liner to force a run.
+
+<!-- codex: Applying or updating a CronJob does not itself execute its job template, so the promised Flux-triggered immediate run needs an explicit mechanism and manifest. Define that trigger and its retry behavior when bootstrap dependencies arrive after the initial Job exhausts its deadline, including recovery without a manifest change. -->
 
 **These two fields are deliberately NOT added to `devworker-seeds.sops.yaml`.** The seed contract in
 this subtree is *seed-wins on every daily run*, so a seeded copy would fight the sync and revert to a
@@ -277,9 +303,13 @@ for n in 1 2 3 4 5 6; do
 done
 ```
 
+<!-- codex: This still reports only Python's pipeline status, and a YAML document containing merely `current-context: anything` passes without being a usable kubeconfig. Assert the `cred` exit status in the remote shell and validate context references, expected namespace/server, CA, bearer token and remaining lifetime, then repeat the host's checks immediately before its cutover. -->
+
 *Rollout.* Serially, one worker at a time: apply → `systemctl is-active openbao-agent` stable across
 a 2-minute window with an unchanged `NRestarts` counter → both files present at 0600 → next worker.
 On failure, roll that host back to the previous `agent.hcl` (kept as `.bak` by the role) and stop.
+
+<!-- codex: Make the serial boundary include the actual restart and completed renders: the current role queues its restart handler, so checks inside the role can inspect the old healthy process unless handlers are flushed first. Require the applied process/config generation and both rendered kubeconfigs to match the validated KV values, with correct ownership, before advancing; file existence and mode alone can accept the old SOPS token. [Ansible handler timing](https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html) -->
 
 *Rehearsal, on dev-worker-1 only, before touching the other five:* delete one field from KV, confirm
 the agent exits and systemd restarts it, restore the field, confirm it recovers unattended. The gate
@@ -292,8 +322,12 @@ token generations. `tep.yml`'s render task therefore gains
 installs the stanzas). Hosts with `dev_worker_enable_openbao: false` keep the ansible path
 unchanged and must keep working — that combination is asserted in the role's idempotency run.
 
+<!-- codex: A flag flipped only as an in-play fact is not durable ownership: a later full or tag-limited run can restore the SOPS writer while the running agent still owns the file. Persist one per-host ownership state, use it consistently for both template stanzas and the SOPS guard, assert its compatibility with `dev_worker_enable_openbao`, and restore ownership plus restart the previous config on rollback. -->
+
 Only after all six are green: delete `ansible/secrets/tep-tokens.sops.yaml`,
 `scripts/tep-render-kubeconfigs.py`, `templates/tep-kubeconfig.j2`, and the flag itself.
+
+<!-- codex: Deleting the SOPS input/template and then revoking legacy tokens contradicts the promise that `dev_worker_enable_openbao: false` continues to provision working kubeconfigs. Define a retained alternative for that mode, or explicitly retire its kubeconfig support and change the convergence acceptance criterion before removing these files and the ownership guard. -->
 
 **Burning the old tep tokens.** The legacy `tep-dw<N>-token` Secrets are what the SOPS file and six
 disks held, so they must die — but deleting one invalidates it *before* its replacement lands. Per
@@ -301,6 +335,8 @@ worker, in order: confirm the TokenRequest-minted kubeconfig is rendered and wor
 (`kubectl --kubeconfig ~/.tep/kubeconfig get sandboxclaims`), *then* delete that worker's legacy
 Secret, then confirm the old token is rejected. One worker at a time; no window where a worker has
 neither.
+
+<!-- codex: The six legacy Secrets remain declared in `kubernetes/apps/infrastructure/testpool/tep-access.yaml`, which is missing from the change list, so deleting only live objects lets Flux recreate the standing credential source. Remove each declaration only after its worker's verified cutover, retain the ServiceAccounts, and check revocation after reconciliation. -->
 
 `claude-grant-write` is removed with an explicit `state: absent` task (not merely by deleting the
 install task, which would leave the helper in place on every existing worker), and the role checks
@@ -335,6 +371,8 @@ decrypts a backup that contains the vault's own root token. It is escrowed anywa
 is one workstation copy), but it is labelled in the runbook as a Tier-C-equivalent, and its
 authoritative recovery copy stays **offline and outside both the cluster and the vault** — DR must
 work with neither running. This is recorded in `openbao-recovery.md` alongside the unseal key.
+
+<!-- codex: An independently recoverable offline copy breaks the DR dependency, provided snapshot retrieval credentials and decryption prerequisites are also available without the cluster/vault; escrowing an additional copy is therefore not inherently a recovery deadlock. However, online escrow still contradicts the stated Tier C exclusion and exposes historical etcd secrets to that online boundary, so keep the key offline-only or explicitly justify an exception in the tiering rule rather than treating a runbook label as equivalent protection. -->
 
 Every path is Tier B: no policy grant is added, so `cred` cannot reach them by design.
 
@@ -429,6 +467,8 @@ for c in "escalate roles" "bind rolebindings" "create networkpolicies" "create i
 done
 ```
 
+<!-- codex: `bind rolebindings` probes the wrong resource: binding authorization checks `bind` on the referenced Role or ClusterRole, and echoing `can-i` output does not assert the expected result. Check those resources explicitly and exercise rejection of an overprivileged Role and a RoleBinding to `cluster-admin`, with failures distinguished from connectivity errors. [Binding restrictions](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) -->
+
 Admission and networking are not covered by authorization probes, so also, **using the worker
 kubeconfig**: a `type: NodePort` and a `type: LoadBalancer` Service are both rejected by quota; a
 valid `restricted` pod is admitted; a privileged variant is rejected with a `PodSecurity`-specific
@@ -469,6 +509,10 @@ kubectl --kubeconfig $KC get pods -l 'helm.sh/hook'   # hook pods cleaned up (de
 tep lease -t 10 && tep run -- true && tep release
 ```
 
+<!-- codex: The pinned Helm v3.16.3 `install` command has no `--history-max` flag, so this smoke test stops before deploying anything. Use `upgrade --install --history-max 3` or omit that flag from install, then exercise actual upgrades past the retention limit so upgrade permissions and release-history pruning are verified. [Install flags](https://raw.githubusercontent.com/helm/helm/v3.16.3/cmd/helm/install.go), [History pruning](https://raw.githubusercontent.com/helm/helm/v3.16.3/pkg/storage/storage.go) -->
+
+<!-- codex: In Helm 3.16.3, a `hook-succeeded` delete policy removes the test Pod before `helm test --logs` fetches its logs, while `helm.sh/hook` is normally an annotation and the label selector can falsely report no leftovers. Retain a named Pod hook until logs are collected, then explicitly delete and assert its absence using its name or a chart-defined label. [Hook deletion](https://raw.githubusercontent.com/helm/helm/v3.16.3/pkg/action/hooks.go), [Test log retrieval](https://raw.githubusercontent.com/helm/helm/v3.16.3/pkg/action/release_testing.go) -->
+
 Agent health is checked by **rendering**, not by a git read — an anonymous `git ls-remote` can
 succeed with no credential at all, and a stale credential file survives an agent crash:
 
@@ -479,6 +523,8 @@ sudo systemctl restart openbao-agent                        # forces a full re-r
 ls -l ~/.git-credentials ~/.tep/kubeconfig ~/.helmtest/kubeconfig   # all three present, 0600
 git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD >/dev/null   # now meaningful
 ```
+
+<!-- codex: Restart-based checks do not prove steady-state rotation: Agent polls these kubeconfigs as static KV values and does not renew or detect expiry of their embedded Kubernetes tokens. Run a second sync without restarting Agent, verify each user's files adopt the new validated generation within the configured refresh bound, and check remaining on-disk token lifetime independently of service health and sync success. [Agent static-secret refresh](https://openbao.org/docs/2.5.x/agent-and-proxy/agent/template/) -->
 
 Repeated for every user in `dev_worker_users`, on all six workers.
 
@@ -498,7 +544,7 @@ field arrives non-empty — the live-KV probe alone cannot distinguish a good se
 
 **Convergence.** Re-run `just dev-workers` twice; the second reports near-zero `changed`, including
 on a host with `dev_worker_enable_openbao: false`.
-<!-- codex: Ansible idempotency does not prove disaster recovery or credential convergence. Add an isolated wipe/re-bootstrap rehearsal that restores sync authentication, reconstructs all twelve fields, reissues AppRole logins, and verifies the workers recover before declaring the migration complete. -->
+<!-- codex: round-2: Agreed that the live vault must not be wiped and the unchanged AppRole re-mint ceremony can remain covered by ADR 0020; the new sync auth role/policy and empty-path write branch are changed bootstrap dependencies that deleting fields from an already-configured vault does not test. Bootstrap those dependencies and reconstruct all twelve fields in a disposable isolated OpenBao instance, plus perform the scoped worker recovery test: the executable plan currently deletes/restores only one field manually, not the twelve-field reconstruction claimed in the pushback. -->
 <!-- opus-pushback: A full vault wipe + re-bootstrap rehearsal is owned by openbao-recovery.md and would put the live estate's only vault through a destructive drill to validate a credential migration. The scoped substitute is in the plan: delete the twelve sync-owned fields from KV, prove the sync reconstructs and validates all twelve, and prove a worker's agent recovers unattended — which exercises every step of the recovery ordering except the parts (KV mount, AppRole re-mint) that ADR 0020 already covers and that this plan does not change. -->
 
 ## Rejected
