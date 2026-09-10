@@ -214,7 +214,8 @@ where that row is amended.
 
 | Alternative | Why not |
 |---|---|
-| Write a bespoke `agent-teams` cordis plugin as a file, like `searxng-search.mjs` | The delegation machinery already exists; a file plugin would reimplement `dsh-subagent` badly and own a supply-chain surface for no gain. The file idiom is right for a provider dsh has no equivalent of (SearXNG); wrong for something the harness ships. |
+| Write a bespoke `agent-teams` cordis plugin as a file, like `searxng-search.mjs` | The delegation machinery already exists; a file plugin would reimplement `dsh-subagent` badly and own a supply-chain surface for no gain. |
+| **Adopt the first-party experimental Agent Teams packages** | **NOT EVALUATED IN THIS PLAN, AND THAT WAS AN ERROR.** `@deepseek-ai/dsh-experimental-agent-team` and `-tool-agent-team` exist and became installable in `0.1.5-alpha.2`; this plan asserted no such package existed. They give named members, a durable peer mailbox and a shared task DAG — things preset composition cannot. Spiked separately (`plans/2026-09-10-dsh-experimental-agent-teams-spike.md`): they install and boot here. Not adopted, because members share one checkout with only advisory write scopes, which is the hazard WP-6 exists to contain. |
 | Put team definitions in `$DSH_HOME/.agent-presets` | Exactly the unmanaged-state failure `cordis.patch.yml`'s header documents: it lived only on the PVC until 2026-09-08 and a volume rebuild would have silently reverted it. |
 | Delegate by shelling out to `claude`/`codex` from Bash | No child accounting, no cancellation, no structured result, no depth handling. The providers exist to avoid this. |
 | Reuse `platform`'s `deepagent` subagent machinery | Different runtime and process. A legitimate ACP *target* later; not a way to give dsh teams. |
@@ -536,6 +537,27 @@ set**, and trying to add one breaks the mount rather than tightening it.
 **`dsh-tool-subagent` exposes no sibling-concurrency knob at all.** Depth is not width; `one-shot`
 bounds continuation, not runtime, tokens, or grandchildren.
 
+> **CORRECTED 2026-09-10.** The sentence above is true of `dsh-tool-subagent` and was then wrongly
+> generalised below into "the only lever dsh gives". dsh exposes **several scoped** fan-out
+> controls; none is a process-wide agent ceiling:
+>
+> | control | scope | default |
+> |---|---|---|
+> | `workflow-worker-thread.maxConcurrentAgents` | concurrent `agent()` calls, **per workflow run** | `0` → `min(16, max(1, availableParallelism() - 2))` |
+> | `workflow-worker-thread.maxTotalAgents` | cumulative `agent()` budget per run — a runaway backstop, **not** a second concurrency knob | `1000` |
+> | `agent-loop.maxParallelToolCalls` | parallel tool executions per agent step; foreground `subagent` calls await, so it indirectly caps overlapping foreground children | `10` |
+> | `jobs-local.maxConcurrentJobsPerOwner` | running+stopping jobs per owner; one-shot **background** subagents enter here before spawning (continuable ones bypass it) | `10` |
+>
+> Three things follow. The `0` default is **not** unlimited and **not** fixed at 1 — it resolves
+> between 1 and 16, so an unset value on a large node permits 16 concurrent agents per run, which
+> nobody reads out of "0". The workflow ceilings are **per run**, so K overlapping runs permit K×C
+> — enforcement lives in per-session `WorkflowExecution` instance state (`activeSlots`,
+> `slotWaiters`), not a shared semaphore. And **none of these bounds live agents process-wide**;
+> they bound tool steps, job slots, and per-run workflow children respectively.
+>
+> WP-1b (#639) has since set `maxConcurrentAgents`/`maxTotalAgents` to 3/48 (4/64 on the conductor),
+> so for those rows WP-5's job is now to **verify against CL-1's envelope**, not to design a bound.
+
 So the bounds have to come from outside the tool config, and they land **before** any team that can
 fan out is activated:
 
@@ -543,13 +565,15 @@ fan out is activated:
 |---|---|---|
 | depth, native providers | `maxDepth` on `tool-subagent` rows | default 3; pin explicitly per team |
 | depth, external providers | **not settable** | forced `provider-managed`; compensate with width and resources |
-| width | team composition — the tool set a preset exposes and its prompt | the only lever dsh gives; state the intended team size in each preset and treat it as guidance, not enforcement |
+| width, workflow path | `workflow-worker-thread.maxConcurrentAgents` (+ `maxTotalAgents` as a cumulative backstop) | per **run**, so K runs permit K×C; the `0` default resolves to up to 16, not 1 |
+| width, direct path | `agent-loop.maxParallelToolCalls` (10) and, for one-shot background children, `jobs-local.maxConcurrentJobsPerOwner` (10) | indirect and partial: continuable background children bypass the job registry entirely |
+| width, process-wide | **nothing** | no dsh setting bounds live agents across the process; prompted team size remains guidance |
 | runtime | `tool-call-timeout-policy` (already in the host composition) | set an explicit per-delegation deadline |
 | **process/CPU/memory** | the dsh container's `resources` **and a PID limit** | bounds the *local* workload — every codex/claude child is a process in this pod. Size it before WP-4. It does **not** bound inference |
 | **inference CONCURRENCY** | **`max_parallel_requests` on dsh's LiteLLM key** | the in-flight ceiling, and the one that corresponds to CL-1's measured envelope. In-process native children are locally cheap and remotely expensive: they can hold many concurrent requests without approaching any CPU or PID limit |
 | **inference RATE and BUDGET** | **`rpm_limit` / `tpm_limit` (+ budget) on the same key** | bounds sustained load and spend over time. Complementary to the row above, **not** a substitute for it |
 | ralph | `maxRounds: 8` | down from 64 |
-| GPU | CL-1's measured team capability map | WP-1 pins team sizes to it; **rpm/tpm is what makes the pin enforceable** rather than advisory |
+| GPU | CL-1's measured team capability map | WP-1 pins team sizes to it; the gateway limits are what make the pin enforceable rather than advisory |
 
 **Rate limits are not concurrency limits, and an earlier draft conflated them.** `rpm_limit` and
 `tpm_limit` bound admission *over a window*: a permitted burst at the top of the minute, or a handful
@@ -558,8 +582,15 @@ violating neither. The knob that bounds in-flight requests is a separate one —
 budget parameters carry `max_parallel_requests` alongside `rpm_limit` and `tpm_limit` (read in
 `litellm/proxy/_types.py`, not assumed).
 
-So the team size CL-1 measures is an **enforced** ceiling only if `max_parallel_requests` is set to it
-**and proven enforced on the deployed image**: a gating test that fires N+1 concurrent requests on
+**And a gateway limit bounds REQUESTS, not agents.** A second correction: `max_parallel_requests` is
+documented as **per deployment**, while `global_max_parallel_requests` is the proxy-wide one — and
+neither counts live *agents*, only routed requests. An agent waiting on a tool call, or executing
+one, holds no request and is invisible to both. So a gateway limit protects the *backend* from
+concurrent inference; it does not cap how many agents exist. Earlier drafts called it "the only
+global ceiling", which conflated the two.
+
+So the team size CL-1 measures is an **enforced** ceiling on concurrent inference only if the
+correctly-scoped gateway limit is set **and proven enforced on the deployed image**: a gating test that fires N+1 concurrent requests on
 dsh's key and asserts the extra is rejected or queued rather than served. Until that test passes,
 team sizes are advisory, and this plan says so rather than implying a bound it does not have.
 `litellm-vkeys.yaml` establishes the per-key idiom (applied there to the **litellm-local** gateway);
