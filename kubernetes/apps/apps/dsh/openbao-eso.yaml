@@ -88,8 +88,9 @@ spec:
 #     `GET /v1/auth/token/lookup-self` returns the token itself at `data.id`, while
 #     `POST /v1/auth/token/renew-self` returns it at `auth.client_token`.
 # So "no sink file" does NOT mean "no token in the pod". Denying those two endpoints to the
-# identity is not a fix: the agent renews with the same token, so denying renewal breaks the
-# agent. The sinkless design is the same regression wearing a better costume.
+# identity does not rescue it either: it breaks the agent's renewal path, leaving auto-auth to
+# re-authenticate from scratch instead, and it is a narrow patch over a premise that was already
+# wrong. The sinkless design is the same regression wearing a better costume.
 #
 # WHAT DID CHANGE. The gap the agent was being considered FOR -- a credential added in OpenBao
 # needing a manifest edit here before dsh could use it -- is real, and is now closed by the
@@ -162,6 +163,13 @@ spec:
   # Deliberately shorter than the 1h above. This is the path a rotation travels, and the pod also
   # has to wait for kubelet to propagate the change into the mounted volume afterwards; an hour of
   # staleness on top of that is not a credential store, it is a cache.
+  #
+  # A POLLING PERIOD, NOT A STALENESS BOUND. Freshness here is eventual and bounded by nothing in
+  # particular: this interval, plus kubelet's own sync period, plus -- if OpenBao is unreachable --
+  # however long the failure lasts, because a successful sync leaves the previous values in the
+  # Secret and readable indefinitely. The default deletionPolicy (Retain) likewise keeps the whole
+  # Secret if the remote document is deleted; removing a FIELD from a document that still fetches
+  # does propagate. Anything needing a hard revocation guarantee must revoke at the ISSUER.
   refreshInterval: 5m
   secretStoreRef: { name: dsh-store, kind: SecretStore }
   target:

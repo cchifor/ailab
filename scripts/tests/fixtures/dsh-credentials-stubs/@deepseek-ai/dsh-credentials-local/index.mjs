@@ -25,7 +25,7 @@ export class LocalCredentialProvider {
   async unset(ref) { this.calls.push(['unset', ref]); this.values.delete(ref); }
   async readRecord(key) { this.calls.push(['readRecord', key]); return this.records.get(key); }
   async describeRecord(key) { return { configured: this.records.has(key), writable: true }; }
-  async listRecords() { return [...this.records.keys()].map((k) => ({ key: k, kind: 'api-key' })); }
+  async listRecords() { return [...this.records.keys()].map((k) => ({ key: k, kind: this.records.get(k)?.kind ?? 'grant' })); }
   async modifyRecord(key, mutate) {
     this.calls.push(['modifyRecord', key]);
     const current = this.records.get(key);

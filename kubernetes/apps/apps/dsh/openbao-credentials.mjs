@@ -59,8 +59,6 @@ import { join } from 'node:path';
 
 /** Where the ESO-managed Secret is mounted. One file per credential, named by its reference. */
 const DEFAULT_DIR = '/dsh-credentials';
-/** The JSON field carrying the secret when a mounted document holds JSON rather than a bare value. */
-const DEFAULT_FIELD = 'value';
 /** Reported as `source` when a value came from OpenBao. */
 const SOURCE = 'openbao';
 
@@ -70,26 +68,31 @@ const SOURCE = 'openbao';
  * This is the containment check that matters for THIS file: a reference becomes a path segment
  * under the mount, so anything outside the grammar is REFUSED rather than escaped or normalised.
  * `credentialRef` would already have rejected it upstream; re-checking here means a future caller
- * that skips that constructor still cannot walk out of the directory.
+ * that skips that constructor still cannot walk out of the directory. Deleting this check makes
+ * the provider return the contents of an arbitrary file -- which is what a mutation test does.
  */
 const REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** Absence, distinguished from failure. `undefined` means "OpenBao does not have this". */
+/** Absence, distinguished from failure. `undefined` means "the mount does not carry this". */
 const ABSENT = undefined;
 
 /**
  * Read one credential from the mount.
  *
+ * The value is returned VERBATIM. `dataFrom.extract` has already pulled the individual field out
+ * of the KV document, so what lands in the file is the credential itself with no envelope left to
+ * strip -- and trimming it, or reinterpreting a value that happens to begin with `{` as JSON,
+ * would corrupt legitimate opaque secrets. Only the empty file is special, and it means absent.
+ *
  * @param dir - the mount directory.
- * @param field - the JSON field carrying the value when the document is JSON.
  * @param ref - the reference, already grammar-checked.
- * @returns the value, or {@link ABSENT} when the mount confirms it has no such credential.
- * @throws when the mount is unreadable or malformed -- a FAILURE, which must NOT be reported as
- *   absence: "unconfigured" and "I could not tell" are different answers, and only the first may
- *   fall through to a lower layer. Falling through on a failure would silently resolve a stale
- *   local value while OpenBao held a rotated one.
+ * @returns the value, or {@link ABSENT} when the mount does not carry this credential.
+ * @throws when the mount is unreadable -- a FAILURE, which must NOT be reported as absence:
+ *   "not carried here" and "I could not tell" are different answers, and only the first may fall
+ *   through to a lower layer. Falling through on a failure would silently resolve a stale local
+ *   value while OpenBao held a rotated one.
  */
-async function readFromMount(dir, field, ref) {
+async function readFromMount(dir, ref) {
   let text;
   try {
     // Reopened by pathname every time, never a retained descriptor: kubelet updates a Secret
@@ -97,91 +100,72 @@ async function readFromMount(dir, field, ref) {
     // rotated credential would read as unchanged forever.
     text = await readFile(join(dir, ref), 'utf8');
   } catch (error) {
-    // ENOENT: no such credential. ENOTDIR: the mount is absent entirely, which is the normal
-    // state before the ExternalSecret first syncs and must not be an error.
-    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return ABSENT;
+    // ENOENT ONLY. An absent optional Secret still mounts as an EMPTY DIRECTORY, and a removed
+    // volume leaves the directory itself missing, so both arrive here as ENOENT. ENOTDIR means a
+    // path component is a regular file -- broken configuration, not absence -- and is propagated.
+    if (error && error.code === 'ENOENT') return ABSENT;
     throw error;
   }
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return ABSENT;
-  // `dataFrom.extract` writes each field of the KV document as its own Secret key, so the file is
-  // normally the bare value. It is JSON only when the KV field itself holds JSON.
-  if (trimmed.startsWith('{')) {
-    let parsed;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      return trimmed;
-    }
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const value = parsed[field];
-      if (typeof value === 'string' && value.length > 0) return value;
-      throw new Error(
-        `openbao-credentials: "${ref}" is a JSON document without a non-empty "${field}" field`,
-      );
-    }
-  }
-  return trimmed;
+  return text.length === 0 ? ABSENT : text;
 }
 
 /**
  * The provider. Only the REFERENCE half is overridden; every record method, the watcher, the
  * document lock and the launch-environment layering come from the base class unchanged.
+ *
+ * NO NATIVE `#private` MEMBERS, AND THAT IS LOAD-BEARING. cordis hands a service call a SHADOW
+ * receiver: `createShadowMethod` substitutes `thisArg` for a Proxy over the instance before
+ * applying the method. Native private fields are branded to the instance, so `this.#anything`
+ * inside a method reached through `ctx.credentials` throws
+ *     TypeError: Cannot read private member #x from an object whose class did not declare it
+ * -- which would make every resolution fail even when the value comes from the environment and
+ * the mount is absent. Upstream's TypeScript `private` compiles to ordinary properties and does
+ * not have this problem. Ordinary `openbao`-prefixed properties are used instead, prefixed
+ * because the base class owns `config`, `spec`, `text`, `values`, `records` and `operations`.
  */
 export class OpenBaoCredentialProvider extends LocalCredentialProvider {
-  // The base class's own schema plus this file's two keys. It has to be RESTATED rather than
-  // extended: schemastery has no inheritance here, and a subclass whose `static Config` omits
-  // `path`/`dshHome`/`watch`/`debounceMs` would drop them before resolveSpec() ever sees them --
-  // silently relocating the credentials document and disabling the watcher.
+  // The base class's schema plus this file's key. Restated rather than composed with
+  // `z.intersect([LocalCredentialProvider.Config, ...])`, which would also work: one literal is
+  // easier to read against the base than an intersection, and this is the surface an operator
+  // checks when asking where a credential comes from. Restating means the base keys must stay in
+  // step with dsh-credentials-local across upgrades.
   static Config = z.object({
     path: z.string(),
     dshHome: z.string(),
     watch: z.boolean().default(true),
     debounceMs: z.number().min(0).default(100),
     dir: z.string().default(DEFAULT_DIR),
-    field: z.string().default(DEFAULT_FIELD),
   });
-
-  /** Mount directory, resolved once. */
-  #dir;
-  /** JSON field name, resolved once. */
-  #field;
 
   constructor(ctx, config = {}) {
     super(ctx, config);
-    this.#dir = typeof config.dir === 'string' && config.dir !== '' ? config.dir : DEFAULT_DIR;
-    this.#field =
-      typeof config.field === 'string' && config.field !== '' ? config.field : DEFAULT_FIELD;
+    this.openbaoDir = typeof config.dir === 'string' && config.dir !== '' ? config.dir : DEFAULT_DIR;
   }
 
   /**
-   * Whether the inherited environment supplies this reference.
+   * The OpenBao value for a reference, or {@link ABSENT} when a lower layer should answer.
    *
-   * Asked through `super.describe`, which resolves the launch-time SNAPSHOT rather than the live
-   * `process.env`, and which reads an in-memory map rather than touching disk. The base class's
-   * own layer name is the test, so the documented precedence is preserved by construction instead
-   * of being restated -- and `inherited()` itself is private, so this is also the supported way in.
+   * The environment is checked through `super.describe`, which resolves the launch-time SNAPSHOT
+   * rather than the live `process.env` and reads an in-memory map rather than touching disk. The
+   * base class's own layer name is the test, so the documented precedence is preserved by
+   * construction instead of being restated -- and `inherited()` is private upstream, so this is
+   * also the supported way in.
    */
-  async #suppliedByEnvironment(ref) {
-    const info = await super.describe(ref);
-    return info.configured && info.source === 'env';
-  }
-
-  /** Whether OpenBao should be consulted for this reference at all. */
-  async #openbao(ref) {
+  async openbaoLookup(ref) {
     if (!REF_PATTERN.test(ref)) return ABSENT;
-    if (await this.#suppliedByEnvironment(ref)) return ABSENT;
-    return readFromMount(this.#dir, this.#field, ref);
+    const info = await super.describe(ref);
+    if (info.configured && info.source === 'env') return ABSENT;
+    return readFromMount(this.openbaoDir, ref);
   }
 
   async resolve(ref) {
-    const value = await this.#openbao(ref);
+    const value = await this.openbaoLookup(ref);
     if (value !== ABSENT) return { value, source: SOURCE };
     return super.resolve(ref);
   }
 
   async describe(ref) {
-    const value = await this.#openbao(ref);
+    const value = await this.openbaoLookup(ref);
     // writable: false, and it is not a courtesy. The Settings UI reads this to decide whether to
     // offer an edit box; accepting a write that OpenBao then shadows on the next resolve is the
     // exact "appears to succeed while resolution keeps returning the shadowing value" failure the
@@ -191,9 +175,9 @@ export class OpenBaoCredentialProvider extends LocalCredentialProvider {
   }
 
   async set(ref, value) {
-    // Checked, not assumed: a reference OpenBao does not currently hold is still writable to the
-    // local document, and refusing it wholesale would break a legitimate local override.
-    if ((await this.#openbao(ref)) !== ABSENT) {
+    // Checked, not assumed: a reference the mount does not carry is still writable to the local
+    // document, and refusing it wholesale would break a legitimate local override.
+    if ((await this.openbaoLookup(ref)) !== ABSENT) {
       throw new Error(
         `openbao-credentials: "${ref}" is supplied by OpenBao and is read-only here; ` +
           'change it in OpenBao instead',
@@ -203,7 +187,7 @@ export class OpenBaoCredentialProvider extends LocalCredentialProvider {
   }
 
   async unset(ref) {
-    if ((await this.#openbao(ref)) !== ABSENT) {
+    if ((await this.openbaoLookup(ref)) !== ABSENT) {
       throw new Error(
         `openbao-credentials: "${ref}" is supplied by OpenBao and cannot be unset here; ` +
           'remove it in OpenBao instead',

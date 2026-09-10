@@ -34,6 +34,19 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
+
+class _TolerantLoader(yaml.SafeLoader):
+    """cordis.patch.yml carries `!!js` tags this test has no need to evaluate."""
+
+
+_TolerantLoader.add_multi_constructor("", lambda loader, suffix, node: None)
+
+
+def _rows(text):
+    return [r for r in yaml.load(text, Loader=_TolerantLoader) if isinstance(r, dict)]
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DSH = ROOT / "kubernetes" / "apps" / "apps" / "dsh"
 TESTS = pathlib.Path(__file__).resolve().parent
@@ -105,10 +118,48 @@ class Wiring(unittest.TestCase):
         # which holds dsh's own closure only, and throw at boot.
         self.assertIn(f"name: '{SPECIFIER}'", self.patch)
 
-    def test_row_overrides_the_credentials_id(self):
-        # The service name is a singleton: this must REPLACE dsh-base's row.
-        # A different id would register a second provider and collide.
-        self.assertIn("- id: credentials", self.patch)
+    def test_replacement_is_disable_then_insert_not_a_rename(self):
+        # applyEntryPatches() treats `name` as an ASSERTION and destructures it
+        # out of the overrides, so a patch can never change a row's
+        # implementation -- and a patch whose name does not match the target is
+        # SKIPPED ENTIRELY, config and all, with only a warning. Patching
+        # `- id: credentials` with the new name would therefore leave the
+        # shipped provider active and make provisioning OpenBao a no-op, while
+        # the pod booted perfectly. The shipped row must be disabled and the
+        # replacement inserted under its own loader id.
+        rows = _rows(self.patch)
+        shipped = [r for r in rows if r.get("id") == "credentials"]
+        self.assertEqual(len(shipped), 1, "expected exactly one patch of the shipped row")
+        self.assertIs(shipped[0].get("disabled"), True)
+        self.assertNotIn(
+            "name",
+            shipped[0],
+            "a name on this patch is an assertion against the SHIPPED implementation; "
+            "supplying the replacement's name skips the patch",
+        )
+        inserted = [
+            e
+            for r in rows
+            for e in (r.get("insert") or [])
+            if e.get("name") == SPECIFIER
+        ]
+        self.assertEqual(len(inserted), 1, "the replacement must be inserted, not renamed")
+        self.assertNotEqual(
+            inserted[0].get("id"),
+            "credentials",
+            "the inserted row needs its own loader id; the singleton constraint is on the "
+            "SERVICE name, not the row id",
+        )
+
+    def test_disable_and_insert_never_ship_apart(self):
+        # Disabling without inserting leaves dsh with no credentials service at
+        # all; inserting without disabling registers two on one service name.
+        rows = _rows(self.patch)
+        disabled = any(r.get("id") == "credentials" and r.get("disabled") is True for r in rows)
+        inserted = any(
+            e.get("name") == SPECIFIER for r in rows for e in (r.get("insert") or [])
+        )
+        self.assertEqual(disabled, inserted, "the disable and the insert must move together")
 
     def test_configmap_ships_the_file(self):
         self.assertIn(f"- {BASENAME}", self.kustomization)

@@ -311,31 +311,53 @@
       CODEX_API_KEY: !!js process.env.CODEX_API_KEY
 
 # ---------------------------------------------------------------------------
-# OPENBAO-BACKED CREDENTIAL RESOLUTION. Replaces dsh-base's `credentials` row.
+# OPENBAO-BACKED CREDENTIAL RESOLUTION.
 #
-# REPLACES, and it has to. CredentialProvider is a cordis Service constructed
-# as `super(ctx, "credentials")` -- a SINGLETON service name -- so a second row
-# would collide rather than layer. This is an override of the same id, and the
-# file it names SUBCLASSES the shipped provider: the record half (which stores
-# `client-connection/browser-session`, the browser cookie signing secret), the
-# document lock, the watcher and the launch-environment layering are all
-# inherited unchanged. Only reference resolution is overridden. See the header
-# of openbao-credentials.mjs.
+# DISABLE-THEN-INSERT, NOT A RENAME, and this is the whole reason the first
+# attempt would have been a silent no-op. In applyEntryPatches() (verified in
+# the running pod at
+# /dsh-home/profiles/node_modules/@deepseek-ai/cordis-plugin-include/lib/index.js)
+# `name` is an ASSERTION, not an override:
 #
-# A FILE, not an npm package, for the reason searxng-search.mjs documents at
-# length: a row's `name:` resolves against /dsh-home/profiles/web/, whose
-# node_modules is a symlink farm of dsh's OWN closure. Naming a package that is
-# not in that closure is a FAIL-LOUD boot crash on a 1-replica Recreate
-# Deployment, not a degraded feature.
+#     const { id, insert, name, ...overrides } = patch;
+#     ...
+#     if (name && name !== target.name) {
+#       warn("patch: name mismatch for %C (expected %C, got %C), skipping");
+#       continue;
+#     }
 #
-# CONFIG IS RESTATED IN FULL. A patch REPLACES a row's config rather than
-# merging into it, so `dir` and `field` here do not "add to" whatever dsh-base
-# set -- they are the whole config. dsh-base's row carries none, so nothing is
-# lost; both keys are given explicitly anyway rather than relying on the file's
-# own defaults, because this is the layer an operator reads to find out where
-# the credentials come from.
+# `name` is destructured OUT of `overrides`, so a patch can NEVER change a
+# row's implementation -- and a patch that tries is skipped ENTIRELY, taking
+# its `config` with it. The pod would boot perfectly, the shipped file-backed
+# provider would stay active, and provisioning the OpenBao side would silently
+# change nothing. That is the same class of failure as the DSH_PLUGINSET
+# replacement in kustomization.yaml: correct-looking, quiet, and wrong.
+#
+# So the shipped row is DISABLED and the replacement is INSERTED under its own
+# loader id. The singleton constraint is on the SERVICE name ("credentials"),
+# which CredentialProvider passes to super(ctx, ...) -- not on the loader row
+# id -- so two rows are fine as long as only one is enabled. Both halves must
+# move together: disabling without inserting leaves dsh with no credentials
+# service at all.
 - id: credentials
-  name: './openbao-credentials.mjs'
-  config:
-    dir: /dsh-credentials
-    field: value
+  disabled: true
+
+# The replacement. A FILE, not an npm package, for the reason
+# searxng-search.mjs documents at length: a row's `name:` resolves against
+# /dsh-home/profiles/web/, whose node_modules is a symlink farm of dsh's OWN
+# closure. Naming a package that is not in that closure is a FAIL-LOUD boot
+# crash on a 1-replica Recreate Deployment, not a degraded feature.
+#
+# It SUBCLASSES the shipped provider, so the record half (which stores
+# `client-connection/browser-session`, the browser cookie signing secret this
+# file's header describes), the document lock, the watcher and the
+# launch-environment layering are all inherited unchanged. Only reference
+# resolution is overridden. See the header of openbao-credentials.mjs.
+#
+# `dir` is given explicitly rather than relying on the file's default, because
+# this is the layer an operator reads to find out where credentials come from.
+- insert:
+    - id: credentials-openbao
+      name: './openbao-credentials.mjs'
+      config:
+        dir: /dsh-credentials

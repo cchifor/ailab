@@ -442,10 +442,11 @@ spec:
             # the seam by openbao-credentials.mjs. readOnly, and OUTSIDE /workspace so the sandbox
             # root does not contain it.
             #
-            # NO subPath, deliberately: a subPath mount is a point-in-time copy that kubelet never
-            # updates, so a rotated credential would never arrive. The whole volume is mounted so
-            # the atomic symlink swap kubelet uses is visible, which is also why the plugin reopens
-            # by pathname on every read instead of holding a descriptor.
+            # NO subPath, deliberately: a subPath mount pins a bind mount, and kubelet does not
+            # propagate Secret updates into one, so a rotated credential would never arrive. The
+            # whole volume is mounted so the atomic symlink swap kubelet uses is visible, which is
+            # also why the plugin reopens by pathname on every read instead of holding a
+            # descriptor.
             #
             # Not readable by the dsh USER only -- the agent runs in THIS container and can read
             # this directory. That is the same exposure LITELLM_API_KEY already has as an env var,
