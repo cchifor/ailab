@@ -143,11 +143,28 @@ spec:
               # <team>.<file> and the directory tree is rebuilt here. Mode 0644/0755 for the
               # same 0444-ConfigMap-mode reason as settings.yaml: the projected tree is read
               # by dsh as uid 1000 and must not inherit the mount's read-only bits.
-              rm -rf /dsh-teams
-              mkdir -p /dsh-teams
+              # NOT `rm -rf /dsh-teams`: this path is the emptyDir MOUNT POINT, so rm
+              # clears the contents and then rmdir()s the mount itself, which the kernel
+              # refuses with EBUSY -- `rm: cannot remove '/dsh-teams': Device or resource
+              # busy`, exit 1. Under the `set -eu` at the top of this script that aborts
+              # the initContainer on EVERY boot, including the first empty one, and
+              # crash-loops the pod. Verified in a container before this line was written.
+              # -mindepth 1 resets the CONTENTS and leaves the mount alone; -delete also
+              # takes hidden entries, which a `rm -rf /dsh-teams/*` glob would miss.
+              find /dsh-teams -mindepth 1 -delete
               for f in /seed/team-*.preset.yml; do
                 [ -e "$f" ] || continue
                 b=$(basename "$f" .preset.yml)
+                # Both halves or neither. A team whose composition is missing from the
+                # ConfigMap would otherwise fail mid-projection, and `install`'s own
+                # "cannot stat" says nothing about which team or why. scripts/tests/
+                # test_agent_teams.py gates this in CI; this is the runtime backstop, and
+                # it fails the initContainer deliberately rather than leaving a half-built
+                # directory that the roster would happily list as a broken preset.
+                if [ ! -e "/seed/$b.agent.cordis.yml" ]; then
+                  echo "ERROR: team $b has a preset.yml but no agent.cordis.yml in the ConfigMap" >&2
+                  exit 1
+                fi
                 mkdir -m 0755 -p "/dsh-teams/$b"
                 install -m 0644 "$f" "/dsh-teams/$b/preset.yml"
                 install -m 0644 "/seed/$b.agent.cordis.yml" "/dsh-teams/$b/agent.cordis.yml"

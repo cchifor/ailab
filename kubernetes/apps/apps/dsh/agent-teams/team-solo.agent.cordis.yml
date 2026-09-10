@@ -1,10 +1,25 @@
 # team-solo -- the estate's baseline agent team.
 #
-# A VERBATIM COPY of the shipped `standard` preset, with one change: every
-# model-facing DELEGATION row carries `disabled: true`. Generated from
-# @deepseek-ai/dsh-agent-presets@0.1.5-alpha.2 presets/standard/agent.cordis.yml
-# by scripts/gen-agent-team.py -- not retyped, for the same reason
-# cordis.patch.yml's rows are generated from --dump-config.
+# GENERATED. A VERBATIM COPY of the shipped `standard` preset with exactly one
+# transformation: every model-facing DELEGATION row carries `disabled: true`.
+# Do not hand-edit -- including the comments above each inserted flag, which the
+# generator emits so this file REGENERATES BYTE-FOR-BYTE. A comment typed in by
+# hand would produce comment-only diffs on every row at the next dsh bump, and
+# the "a dsh bump is a reviewable diff" property would die in that noise.
+#
+# REGENERATE (verified to reproduce this file exactly at dsh 0.1.5-alpha.2):
+#
+#   docker run --rm mirror.gcr.io/library/node:22 sh -c \
+#     'npm i --prefix /a --no-fund --no-audit @deepseek-ai/dsh@0.1.5-alpha.2 >/dev/null 2>&1;
+#      cat /a/node_modules/@deepseek-ai/dsh-agent-presets/presets/standard/agent.cordis.yml' \
+#     > /tmp/upstream-standard.yml
+#   python3 scripts/gen-agent-team.py \
+#     --source /tmp/upstream-standard.yml \
+#     --header <this file's comment block, through the line above the upstream banner> \
+#     --out kubernetes/apps/apps/dsh/agent-teams/team-solo.agent.cordis.yml \
+#     --disable tool-subagent-control,tool-subagent-list-agents,tool-subagent,tool-subagent-fork,workflow-worker-thread,tool-workflow,tool-ralph \
+#     --note 'WP-1 ships this dormant. WP-1b removes `disabled` once the bounds' \
+#     --note '(WP-5), night-window routing (WP-2) and workspace contract (WP-6) land.'
 #
 # WHY A COPY AT ALL. `standard` is upstream's file and changes when dsh is
 # bumped; today's dsh behaviour is not under this repo's control at all. Copying

@@ -22,8 +22,8 @@ import argparse
 import re
 import sys
 
-def disable_rows(text, targets):
-    """Insert `disabled: true` after each target row's `name:` line.
+def disable_rows(text, targets, note=()):
+    """Insert `disabled: true` (preceded by `note`) after each target row's `name:` line.
 
     Row shape in these files is always:
         - id: <id>
@@ -47,12 +47,27 @@ def disable_rows(text, targets):
         if i < n and re.match(r"^\s+name:", src[i]):
             out.append(src[i])
             i += 1
-        # Already dormant upstream (tool-subagent-codex and friends)? leave it.
+        # Already dormant upstream (tool-subagent-codex and friends)? leave it
+        # exactly as upstream wrote it -- including its own comment, which sits
+        # ABOVE the row and is therefore already in `out`.
         if i < n and re.match(r"^\s+disabled:\s*true", src[i]):
             out.append(src[i])
             i += 1
             hit.add(rid)
             continue
+        # The note is emitted by the GENERATOR, not hand-added afterwards. A
+        # comment typed into the output by hand makes the file unreproducible:
+        # re-running against a bumped upstream then yields comment-only diffs on
+        # every row, and the "a dsh bump is a reviewable diff" premise dies in
+        # the noise.
+        # Split on physical lines: a note carrying an embedded newline would
+        # otherwise emit its second line UNCOMMENTED, straight into the YAML.
+        # `--note 'text\nbroken: ['` is a legal shell argument and would produce a
+        # parse error in the composition -- which surfaces as a broken preset
+        # card, not as a failure anywhere anyone is watching.
+        for entry in note:
+            for line in entry.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+                out.append(f"{indent}  # {line}\n" if line.strip() else f"{indent}  #\n")
         out.append(f"{indent}  disabled: true\n")
         hit.add(rid)
     return "".join(out), hit
@@ -63,10 +78,16 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--disable", default="", help="comma-separated row ids")
     ap.add_argument("--header", default="", help="file whose contents are prepended")
+    ap.add_argument(
+        "--note",
+        action="append",
+        default=[],
+        help="comment line emitted above each inserted `disabled: true`; repeatable",
+    )
     a = ap.parse_args()
     targets = {t for t in a.disable.split(",") if t}
     text = open(a.source, encoding="utf-8").read()
-    body, hit = disable_rows(text, targets)
+    body, hit = disable_rows(text, targets, a.note)
     missing = targets - hit
     if missing:
         # Fail loud: a row id that no longer exists upstream means the team is
