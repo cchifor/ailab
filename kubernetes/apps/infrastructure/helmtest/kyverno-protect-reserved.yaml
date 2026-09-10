@@ -1,0 +1,102 @@
+# Protect the objects that MAKE helmtest a boundary, from the credential that lives inside it.
+#
+# WHY THIS EXISTS: moving to TokenRequest removed the standing token Secret a chart could delete, but
+# it did NOT make the credential safe. helmtest-deployer must be able to delete `serviceaccounts`
+# (Helm uninstall removes chart-created SAs) and RBAC cannot express "all ServiceAccounts EXCEPT this
+# one" for `delete`. So an ordinary release collision — a chart whose SA happens to be named
+# `helmtest-dw3`, or a `helm uninstall` of a release that adopted it — would delete the worker's own
+# identity and invalidate every token ever minted for it, old and new. Deleting the Role or
+# RoleBinding does the same to authorization.
+#
+# The same argument covers the ResourceQuota, the LimitRange and both NetworkPolicies: they are not
+# granted to the deployer, but "not granted" only holds while nobody widens the Role. This policy
+# makes them non-removable rather than merely un-granted, which is what turns them into a boundary.
+#
+# Flux's controllers are excluded so GitOps still owns these objects; everything else — including the
+# helmtest-dw<N> ServiceAccounts themselves — is denied DELETE and UPDATE.
+#
+# Kyverno 1.13.4: failureAction lives on the RULE (spec.validationFailureAction is deprecated).
+#
+# EXPECTED WARNING on apply, do not "fix" it by widening Kyverno's RBAC:
+#   Warning: system:serviceaccount:kyverno:kyverno-reports-controller requires permissions
+#            get,list,watch for resource Role / CiliumNetworkPolicy
+# That controller only needs those verbs for BACKGROUND SCANNING, which `background: false` disables.
+# Enforcement here happens in the ADMISSION controller, which needs no such grant. Verified by the
+# runbook's negative test (attempt a delete with a worker kubeconfig and confirm it is refused) —
+# a passing warning is not evidence the policy works, and an absent one would not be either.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: helmtest-protect-reserved
+  annotations:
+    policies.kyverno.io/title: helmtest reserved-object protection
+    policies.kyverno.io/category: helmtest
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: ServiceAccount,Role,RoleBinding,ResourceQuota,LimitRange,NetworkPolicy
+    policies.kyverno.io/description: >-
+      Denies DELETE/UPDATE of the per-worker identity, its RBAC, and the quota/network controls in the
+      helmtest-dw* namespaces by any principal other than the Flux controllers. Without this, the
+      helmtest-deployer Role — which must be able to delete ServiceAccounts for Helm to work — can
+      destroy the very credential the token sync maintains.
+  labels:
+    app.kubernetes.io/part-of: helmtest
+spec:
+  background: false # admission-time only; these are DELETE/UPDATE guards, not a scan
+  rules:
+    - name: deny-mutate-reserved-identity
+      match:
+        any:
+          - resources:
+              kinds:
+                - ServiceAccount
+                - Role
+                - RoleBinding
+              namespaces: ["helmtest-dw?"]
+              names:
+                - helmtest-dw? # the per-worker ServiceAccount
+                - helmtest-deployer # the Role and its RoleBinding
+              operations: [DELETE, UPDATE]
+      exclude:
+        any:
+          - subjects:
+              - kind: ServiceAccount
+                name: kustomize-controller
+                namespace: flux-system
+              - kind: ServiceAccount
+                name: helm-controller
+                namespace: flux-system
+      validate:
+        failureAction: Enforce
+        message: >-
+          {{ request.operation }} of {{ request.kind.kind }}/{{ request.name }} in {{ request.namespace }}
+          is denied: this is the dev-worker's own identity/authorization, maintained by
+          openbao-k8stoken-sync. Deleting it invalidates every token minted for that worker. If a chart
+          collides with this name, rename the chart's object — see docs/runbooks/helmtest.md.
+        deny: {}
+    - name: deny-mutate-reserved-controls
+      match:
+        any:
+          - resources:
+              kinds:
+                - ResourceQuota
+                - LimitRange
+                - NetworkPolicy
+                - CiliumNetworkPolicy
+              namespaces: ["helmtest-dw?"]
+              operations: [DELETE, UPDATE]
+      exclude:
+        any:
+          - subjects:
+              - kind: ServiceAccount
+                name: kustomize-controller
+                namespace: flux-system
+              - kind: ServiceAccount
+                name: helm-controller
+                namespace: flux-system
+      validate:
+        failureAction: Enforce
+        message: >-
+          {{ request.operation }} of {{ request.kind.kind }}/{{ request.name }} in {{ request.namespace }}
+          is denied: the quota and network boundary for helmtest are platform-owned. These are the
+          controls that make `create pods` in this namespace safe.
+        deny: {}

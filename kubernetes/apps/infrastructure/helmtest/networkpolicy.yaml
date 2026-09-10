@@ -1,0 +1,292 @@
+# helmtest network boundary — platform-owned, and NOT writable by the worker.
+#
+# `networkpolicies` is deliberately absent from helmtest-deployer (rbac.yaml): a worker able to write
+# NetworkPolicies can delete the default-deny baseline or union-add a permissive rule, which is the
+# isolation boundary deleting itself. Kyverno additionally denies delete/update on these objects
+# (kyverno-protect-reserved.yaml), so they cannot be removed even by a chart that ships its own.
+#
+# Layer 1 — default-deny (vanilla NetworkPolicy, both directions, no rules).
+# Layer 2 — CiliumNetworkPolicy union-adds exactly two flows and denies the rest:
+#   (a) SAME-NAMESPACE ingress+egress. Without it `helm test` hooks cannot reach the Service they are
+#       testing and no multi-component chart works — the single most common reason a locked-down test
+#       namespace is unusable.
+#   (b) kube-dns, L7-locked to cluster-local names. An unrestricted kube-dns allowance is an
+#       exfiltration channel even with world egress denied, because CoreDNS forwards upstream.
+# egressDeny (deny wins over any allow in Cilium) covers world/host/remote-node, metadata + IPv6, and
+# the openbao namespace — the earlier draft denied openbao's NodePort path but left the ClusterIP
+# `openbao.openbao.svc:8200` reachable.
+#
+# NO REGISTRY ALLOWANCE, on purpose: registry.chifor.me is a LAN LXC at 192.168.0.36
+# (kubernetes/infra/registry/README.md), not an in-cluster endpoint. Image pulls are performed by
+# containerd ON THE NODE and are unaffected by pod egress policy; `helm pull` runs on the worker,
+# also outside these policies. So the LAN deny stands unqualified and nothing here needs to reach it.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: helmtest-dw1
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: helmtest-boundary
+  namespace: helmtest-dw1
+spec:
+  # Empty selector: EVERY pod in the namespace, chosen independently of any label a chart controls.
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw1
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw1
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*.helmtest-dw1.svc.cluster.local"
+              - matchPattern: "*.svc.cluster.local"
+              - matchPattern: "*.cluster.local"
+  egressDeny:
+    - toEntities: [world, host, remote-node]
+    - toCIDR: ["169.254.169.254/32", "169.254.0.0/16", "::/0"]
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: helmtest-dw2
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: helmtest-boundary
+  namespace: helmtest-dw2
+spec:
+  # Empty selector: EVERY pod in the namespace, chosen independently of any label a chart controls.
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw2
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw2
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*.helmtest-dw2.svc.cluster.local"
+              - matchPattern: "*.svc.cluster.local"
+              - matchPattern: "*.cluster.local"
+  egressDeny:
+    - toEntities: [world, host, remote-node]
+    - toCIDR: ["169.254.169.254/32", "169.254.0.0/16", "::/0"]
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: helmtest-dw3
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: helmtest-boundary
+  namespace: helmtest-dw3
+spec:
+  # Empty selector: EVERY pod in the namespace, chosen independently of any label a chart controls.
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw3
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw3
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*.helmtest-dw3.svc.cluster.local"
+              - matchPattern: "*.svc.cluster.local"
+              - matchPattern: "*.cluster.local"
+  egressDeny:
+    - toEntities: [world, host, remote-node]
+    - toCIDR: ["169.254.169.254/32", "169.254.0.0/16", "::/0"]
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: helmtest-dw4
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: helmtest-boundary
+  namespace: helmtest-dw4
+spec:
+  # Empty selector: EVERY pod in the namespace, chosen independently of any label a chart controls.
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw4
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw4
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*.helmtest-dw4.svc.cluster.local"
+              - matchPattern: "*.svc.cluster.local"
+              - matchPattern: "*.cluster.local"
+  egressDeny:
+    - toEntities: [world, host, remote-node]
+    - toCIDR: ["169.254.169.254/32", "169.254.0.0/16", "::/0"]
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: helmtest-dw5
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: helmtest-boundary
+  namespace: helmtest-dw5
+spec:
+  # Empty selector: EVERY pod in the namespace, chosen independently of any label a chart controls.
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw5
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw5
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*.helmtest-dw5.svc.cluster.local"
+              - matchPattern: "*.svc.cluster.local"
+              - matchPattern: "*.cluster.local"
+  egressDeny:
+    - toEntities: [world, host, remote-node]
+    - toCIDR: ["169.254.169.254/32", "169.254.0.0/16", "::/0"]
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: helmtest-dw6
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: helmtest-boundary
+  namespace: helmtest-dw6
+spec:
+  # Empty selector: EVERY pod in the namespace, chosen independently of any label a chart controls.
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw6
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: helmtest-dw6
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*.helmtest-dw6.svc.cluster.local"
+              - matchPattern: "*.svc.cluster.local"
+              - matchPattern: "*.cluster.local"
+  egressDeny:
+    - toEntities: [world, host, remote-node]
+    - toCIDR: ["169.254.169.254/32", "169.254.0.0/16", "::/0"]
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao

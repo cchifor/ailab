@@ -1,0 +1,335 @@
+# helmtest RBAC — the identity a dev-worker's kubeconfig authenticates as (ADR 0021).
+#
+# EXPLICIT VERBS, NO WILDCARDS. `verbs: ["*"]` matches `escalate` and `bind`, which would let a worker
+# manufacture broader namespaced permissions and then remove the controls containing it. Because the
+# wildcard is gone, the API server's built-in RBAC escalation check genuinely confines
+# `create rolebindings` to permissions helmtest-deployer itself holds.
+#
+# THE FLIP SIDE, documented in docs/runbooks/helmtest.md: that same check REJECTS a chart whose Role
+# grants something this deployer lacks — commonly `events` create/patch, `endpoints` get, or
+# coordination.k8s.io `leases` for leader election. Such a chart fails to install even though it is
+# otherwise restricted-compatible. Run the pre-flight in the runbook before blaming the cluster.
+#
+# DELIBERATELY NOT GRANTED (each was considered and dropped):
+#   networkpolicies — the isolation boundary deleting itself (see networkpolicy.yaml).
+#   ingresses       — reconfigures the shared Traefik controller and can shadow an estate hostname,
+#                     which zero NodePort/LoadBalancer quota does not prevent. Re-grant once a Kyverno
+#                     policy constrains ingressClassName + host suffix.
+#   daemonsets      — places a pod on every node; nothing about a namespaced test needs it.
+#   endpoints       — writable Endpoints let a pod hijack the address a Service resolves to.
+#   pods/attach     — pods/exec covers the debugging need.
+# Nothing cluster-scoped at all, so charts with a crds/ directory, or shipping ClusterRoles,
+# ClusterRoleBindings or Namespaces, will fail. That is intentional: a CRD is a cluster-wide schema
+# change. Namespaced CRs of a PRE-PROVISIONED CRD need a reviewed addition to the rules below.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helmtest-dw1
+  namespace: helmtest-dw1
+# No token Secret, deliberately: the Role below can delete Secrets (Helm needs it) and RBAC cannot
+# carve one out by name, so a standing token Secret would be destroyable by an ordinary chart
+# collision. Tokens are minted via TokenRequest by openbao-k8stoken-sync instead.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw1
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "serviceaccounts", "persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw1
+subjects:
+  - { kind: ServiceAccount, name: helmtest-dw1, namespace: helmtest-dw1 }
+roleRef:
+  kind: Role
+  name: helmtest-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helmtest-dw2
+  namespace: helmtest-dw2
+# No token Secret, deliberately: the Role below can delete Secrets (Helm needs it) and RBAC cannot
+# carve one out by name, so a standing token Secret would be destroyable by an ordinary chart
+# collision. Tokens are minted via TokenRequest by openbao-k8stoken-sync instead.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw2
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "serviceaccounts", "persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw2
+subjects:
+  - { kind: ServiceAccount, name: helmtest-dw2, namespace: helmtest-dw2 }
+roleRef:
+  kind: Role
+  name: helmtest-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helmtest-dw3
+  namespace: helmtest-dw3
+# No token Secret, deliberately: the Role below can delete Secrets (Helm needs it) and RBAC cannot
+# carve one out by name, so a standing token Secret would be destroyable by an ordinary chart
+# collision. Tokens are minted via TokenRequest by openbao-k8stoken-sync instead.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw3
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "serviceaccounts", "persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw3
+subjects:
+  - { kind: ServiceAccount, name: helmtest-dw3, namespace: helmtest-dw3 }
+roleRef:
+  kind: Role
+  name: helmtest-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helmtest-dw4
+  namespace: helmtest-dw4
+# No token Secret, deliberately: the Role below can delete Secrets (Helm needs it) and RBAC cannot
+# carve one out by name, so a standing token Secret would be destroyable by an ordinary chart
+# collision. Tokens are minted via TokenRequest by openbao-k8stoken-sync instead.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw4
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "serviceaccounts", "persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw4
+subjects:
+  - { kind: ServiceAccount, name: helmtest-dw4, namespace: helmtest-dw4 }
+roleRef:
+  kind: Role
+  name: helmtest-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helmtest-dw5
+  namespace: helmtest-dw5
+# No token Secret, deliberately: the Role below can delete Secrets (Helm needs it) and RBAC cannot
+# carve one out by name, so a standing token Secret would be destroyable by an ordinary chart
+# collision. Tokens are minted via TokenRequest by openbao-k8stoken-sync instead.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw5
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "serviceaccounts", "persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw5
+subjects:
+  - { kind: ServiceAccount, name: helmtest-dw5, namespace: helmtest-dw5 }
+roleRef:
+  kind: Role
+  name: helmtest-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helmtest-dw6
+  namespace: helmtest-dw6
+# No token Secret, deliberately: the Role below can delete Secrets (Helm needs it) and RBAC cannot
+# carve one out by name, so a standing token Secret would be destroyable by an ordinary chart
+# collision. Tokens are minted via TokenRequest by openbao-k8stoken-sync instead.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw6
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "serviceaccounts", "persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helmtest-deployer
+  namespace: helmtest-dw6
+subjects:
+  - { kind: ServiceAccount, name: helmtest-dw6, namespace: helmtest-dw6 }
+roleRef:
+  kind: Role
+  name: helmtest-deployer
+  apiGroup: rbac.authorization.k8s.io

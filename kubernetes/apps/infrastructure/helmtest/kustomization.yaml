@@ -1,0 +1,10 @@
+# helmtest — the per-worker Helm deploy namespaces (ADR 0021).
+# hack/ is deliberately NOT listed: it holds the operator-run values overlay and the smoke chart,
+# which are consumed by `helm` on a dev-worker, never applied by Flux. Same convention as testpool/.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespaces.yaml
+  - networkpolicy.yaml
+  - rbac.yaml
+  - kyverno-protect-reserved.yaml
