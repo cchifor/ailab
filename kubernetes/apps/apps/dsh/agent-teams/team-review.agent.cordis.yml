@@ -34,9 +34,30 @@
 # scrubs credential-shaped ambient variables before applying its `env`, so nothing leaks in by
 # accident either. Resolve this before removing any `disabled` below.
 #
-# STILL DORMANT. Every delegation row carries `disabled: true`, including tool-subagent-codex --
-# which upstream also ships disabled. A preset has no off switch, so merging these files makes
-# the team selectable immediately, and the bounds that make fan-out safe (WP-5) have not landed.
+# ACTIVE. Delegation is ON in this team. It shipped dormant while the fan-out bounds were
+# unknown; those are now set here, in the rows themselves:
+#
+#   maxDepth: 2                on every native delegation row -- depth, not width
+#   maxRounds: 8               on tool-ralph, down from the shipped 64
+#   maxConcurrentAgents / maxTotalAgents  on workflow-worker-thread -- the ONLY declarative
+#                              fan-out ceilings dsh exposes, and the pair the plan wrongly
+#                              said did not exist
+#
+# WHAT IS STILL NOT BOUNDED, said plainly rather than left to be discovered:
+#   * `tool-subagent` has no sibling-concurrency knob. maxDepth caps recursion, not width, so
+#     an agent may start many siblings at one depth. Only the workflow engine is bounded.
+#   * Inference concurrency is bounded at the GATEWAY or not at all --
+#     `max_parallel_requests` on dsh's LiteLLM key. That is NOT set here and has never been
+#     proven enforced on the deployed image, so CL-1's measured envelope (4 concurrent on
+#     cloud2) is ADVISORY. Treat the numbers above as the estate's intent, not a guarantee.
+#   * The workspace contract is a contract: children run in the parent's cwd and nothing
+#     stops two writers.
+##
+# subagent_codex IS ENABLED and WILL FAIL until Codex auth exists. The tool registers because
+# the provider is installed, but codex 0.153.4 builds its auth manager with
+# enable_codex_api_key_env: false, so CODEX_API_KEY does not reach it. The child needs native
+# auth state under its own CODEX_HOME. Delegating before that returns an authentication
+# failure -- visibly, in the parent session, not silently.
 #
 # The `standard` agent preset: the full coding agent, mounted once per process.
 #
@@ -214,44 +235,37 @@
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
 
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
 
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
       config:
         provider: spawn
         toolName: subagent
         modelSelectionSettings: true
         backgroundMode: continuable
 
+        maxDepth: 2
     # Fork omits model selection so provider/model stay equal to the parent and
     # the inherited history remains eligible for KV Cache reuse. This preset
     # keeps fork continuable; parent and child inherit the same messaging tool,
     # while the parent id and return guidance follow the inherited history.
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
       config:
         provider: fork
         toolName: subagent_fork
         backgroundMode: continuable
 
+        maxDepth: 2
     # Production dsh does not install these optional providers. Install the
     # matching Bundle in this Profile and restart the Host, then copy this
     # preset and remove `disabled` from the matching tool row. Host availability
     # alone grants no tool.
     - id: tool-subagent-codex
       name: '@deepseek-ai/dsh-tool-subagent'
-      disabled: true
       config:
         provider: codex
         toolName: subagent_codex
@@ -269,23 +283,19 @@
 
     - id: workflow-worker-thread
       name: '@deepseek-ai/dsh-workflow-worker-thread'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
       config:
         provider: spawn
 
+        maxConcurrentAgents: 3
+        maxTotalAgents: 48
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
 
     - id: tool-ralph
       name: '@deepseek-ai/dsh-tool-ralph'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
       config:
         subagentProvider: spawn
-        maxRounds: 64
+        maxRounds: 8
 
 # ── remaining model-facing rows ─────────────────────────────────────────────
 

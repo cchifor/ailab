@@ -24,17 +24,31 @@ PATCH = ROOT / "kubernetes" / "apps" / "apps" / "dsh" / "cordis.patch.yml"
 # ids, so a team taking one of these names would be silently unreachable.
 SHIPPED_IDS = {"standard", "ptc", "cordis", "minimal"}
 
-# Rows that hand an agent a delegation tool. Until the plan's steps 2-5 land
-# (bounds, night-window routing, workspace contract) every one of these must be
-# dormant -- a preset has no off switch, so merging a team's files makes it
-# selectable immediately.
+# Rows that hand an agent a delegation tool.
 DELEGATION_ROWS = {
     "tool-subagent", "tool-subagent-fork", "tool-subagent-control",
     "tool-subagent-list-agents", "tool-subagent-codex", "tool-subagent-claude-code",
     "tool-workflow", "workflow-worker-thread", "tool-ralph",
 }
-# Flip to True in the WP-1b PR that also removes the flags.
-DELEGATION_ACTIVATED = False
+# ACTIVATED. Delegation is live, so the "everything must be dormant" gate is gone
+# and a different one takes its place: an enabled row must carry its BOUNDS.
+# Dormancy was never the safety property -- it was a placeholder for bounds that
+# had not been decided yet.
+DELEGATION_ACTIVATED = True
+
+# Bounds required on an ENABLED row, by row id. A row absent from this map needs
+# none (tool-subagent-control and tool-subagent-list-agents take no config; the
+# out-of-process providers reject a numeric maxDepth and must stay
+# 'provider-managed', so requiring a number there would fail the mount).
+REQUIRED_BOUNDS = {
+    "tool-subagent": ["maxDepth"],
+    "tool-subagent-fork": ["maxDepth"],
+    "tool-ralph": ["maxRounds"],
+    "workflow-worker-thread": ["maxConcurrentAgents", "maxTotalAgents"],
+}
+# tool-ralph ships maxRounds: 64 upstream, which is far too high for a shared
+# 9-GPU estate; this is the ceiling this repo will accept.
+MAX_RALPH_ROUNDS = 8
 
 
 def teams():
@@ -77,6 +91,85 @@ def rows(text):
     return found
 
 
+def _duplicate_keys(path):
+    """Duplicate mapping keys anywhere in a composition, via a strict loader."""
+    try:
+        import yaml
+    except ImportError:                                    # pragma: no cover
+        return None
+    found = []
+
+    class Strict(yaml.SafeLoader):
+        pass
+
+    # `!!js` is dsh's own tag; the value is irrelevant here, only the shape.
+    Strict.add_constructor("tag:yaml.org,2002:js", lambda l, n: None)
+
+    def mapping(loader, node, deep=False):
+        seen = set()
+        for k, _ in node.value:
+            key = loader.construct_object(k, deep=True)
+            if key in seen:
+                found.append(key)
+            seen.add(key)
+        return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+    Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    try:
+        yaml.load(path.read_text(encoding="utf-8"), Loader=Strict)
+    except Exception:                                      # noqa: BLE001
+        return None                                        # parse errors are another test's job
+    return sorted(set(found))
+
+
+def _row_config(text, row_id):
+    """The `key: value` scalars in one row's config block, as a dict of strings."""
+    lines, out, seen = text.splitlines(), {}, False
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*)- id: (\S+)\s*$", line)
+        if not m or m.group(2) != row_id:
+            continue
+        seen = True
+        indent = m.group(1)
+        for nxt in lines[i + 1:]:
+            if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= len(indent):
+                break
+            km = re.match(r"^\s+([A-Za-z][A-Za-z0-9_]*):\s*(\S.*)$", nxt)
+            if km:
+                out.setdefault(km.group(1), km.group(2).strip())
+        break
+    return out if seen else None
+
+
+def _bounds_problems(team, text, found):
+    """An ENABLED delegation row must carry the bounds this repo requires.
+
+    Replaces the dormancy gate. Dormancy stopped fan-out by making it
+    unreachable; now that it is reachable, what stops it running away is the
+    bounds, and a bound nobody asserts is a bound that quietly disappears in a
+    regeneration.
+    """
+    problems = []
+    for rid, keys in REQUIRED_BOUNDS.items():
+        enabled = [(r, dis) for r, dis in found if r == rid and not dis]
+        if not enabled:
+            continue                       # absent or dormant: nothing to bound
+        cfg = _row_config(text, rid) or {}
+        for key in keys:
+            if key not in cfg:
+                problems.append(f"{team}: row '{rid}' is ENABLED without a '{key}' bound")
+        if rid == "tool-ralph" and "maxRounds" in cfg:
+            try:
+                if int(cfg["maxRounds"]) > MAX_RALPH_ROUNDS:
+                    problems.append(
+                        f"{team}: tool-ralph maxRounds={cfg['maxRounds']} exceeds "
+                        f"{MAX_RALPH_ROUNDS} -- upstream ships 64, too high for this estate"
+                    )
+            except ValueError:
+                problems.append(f"{team}: tool-ralph maxRounds is not a number")
+    return problems
+
+
 def check():
     fails = []
     names = teams()
@@ -108,6 +201,16 @@ def check():
                 fails.append(f"{team}: preset.yml has no {field.rstrip(':')} -- the picker card needs it")
 
         ctext = comp.read_text(encoding="utf-8")
+
+        # DUPLICATE MAPPING KEYS. The generator appends config keys, and an
+        # append beside an existing key rather than a replacement produced
+        # `maxRounds: 64` followed by `maxRounds: 8` -- two values for one bound,
+        # which YAML resolves last-wins and no reader notices. Cheap to assert,
+        # and it is the shape a regeneration bug takes.
+        dup = _duplicate_keys(comp)
+        if dup:
+            fails.append(f"{team}: duplicate mapping key(s) in the composition: {dup}")
+
         found = rows(ctext)
         if not found:
             fails.append(f"{team}: composition parses as no rows at all")
@@ -124,6 +227,8 @@ def check():
                     f"DELEGATION_ACTIVATED is False. A preset is selectable the moment "
                     f"it merges -- this would expose fan-out before its bounds exist."
                 )
+        else:
+            fails.extend(_bounds_problems(team, ctext, found))
 
         # Every row must name a module; a row with an id and no name mounts nothing.
         for i, line in enumerate(ctext.splitlines()):

@@ -26,16 +26,25 @@
 # it puts the estate's baseline in git, where a dsh upgrade becomes a reviewable
 # diff instead of a silent behaviour change.
 #
-# WHY THE DELEGATION ROWS ARE OFF. A preset has NO off switch -- projecting
-# preset.yml into /dsh-teams makes it selectable immediately, so "ship the files,
-# activate later" does not exist at preset granularity. The gate lives here, at
-# the row level, which is the same mechanism upstream uses to keep
-# tool-subagent-codex dormant below. `standard` carries tool-subagent and
-# tool-subagent-fork, so copied verbatim this would be a fan-out-capable team the
-# moment it merged -- before the bounds that make fan-out safe exist.
+# ACTIVE. Delegation is ON in this team. It shipped dormant while the fan-out bounds were
+# unknown; those are now set here, in the rows themselves:
 #
-# DO NOT remove `disabled` here without steps 2-5 of the plan's sequencing
-# (plans/2026-09-10-dsh-agent-teams-and-cross-framework-delegation-plan.md).
+#   maxDepth: 2                on every native delegation row -- depth, not width
+#   maxRounds: 8               on tool-ralph, down from the shipped 64
+#   maxConcurrentAgents / maxTotalAgents  on workflow-worker-thread -- the ONLY declarative
+#                              fan-out ceilings dsh exposes, and the pair the plan wrongly
+#                              said did not exist
+#
+# WHAT IS STILL NOT BOUNDED, said plainly rather than left to be discovered:
+#   * `tool-subagent` has no sibling-concurrency knob. maxDepth caps recursion, not width, so
+#     an agent may start many siblings at one depth. Only the workflow engine is bounded.
+#   * Inference concurrency is bounded at the GATEWAY or not at all --
+#     `max_parallel_requests` on dsh's LiteLLM key. That is NOT set here and has never been
+#     proven enforced on the deployed image, so CL-1's measured envelope (4 concurrent on
+#     cloud2) is ADVISORY. Treat the numbers above as the estate's intent, not a guarantee.
+#   * The workspace contract is a contract: children run in the parent's cwd and nothing
+#     stops two writers.
+#
 #
 # The `standard` agent preset: the full coding agent, mounted once per process.
 #
@@ -213,41 +222,31 @@
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
-      # WP-1 ships this dormant. WP-1b removes `disabled` once the bounds
-      # (WP-5), night-window routing (WP-2) and workspace contract (WP-6) land.
-      disabled: true
 
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-      # WP-1 ships this dormant. WP-1b removes `disabled` once the bounds
-      # (WP-5), night-window routing (WP-2) and workspace contract (WP-6) land.
-      disabled: true
 
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
-      # WP-1 ships this dormant. WP-1b removes `disabled` once the bounds
-      # (WP-5), night-window routing (WP-2) and workspace contract (WP-6) land.
-      disabled: true
       config:
         provider: spawn
         toolName: subagent
         modelSelectionSettings: true
         backgroundMode: continuable
 
+        maxDepth: 2
     # Fork omits model selection so provider/model stay equal to the parent and
     # the inherited history remains eligible for KV Cache reuse. This preset
     # keeps fork continuable; parent and child inherit the same messaging tool,
     # while the parent id and return guidance follow the inherited history.
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'
-      # WP-1 ships this dormant. WP-1b removes `disabled` once the bounds
-      # (WP-5), night-window routing (WP-2) and workspace contract (WP-6) land.
-      disabled: true
       config:
         provider: fork
         toolName: subagent_fork
         backgroundMode: continuable
 
+        maxDepth: 2
     # Production dsh does not install these optional providers. Install the
     # matching Bundle in this Profile and restart the Host, then copy this
     # preset and remove `disabled` from the matching tool row. Host availability
@@ -272,26 +271,19 @@
 
     - id: workflow-worker-thread
       name: '@deepseek-ai/dsh-workflow-worker-thread'
-      # WP-1 ships this dormant. WP-1b removes `disabled` once the bounds
-      # (WP-5), night-window routing (WP-2) and workspace contract (WP-6) land.
-      disabled: true
       config:
         provider: spawn
 
+        maxConcurrentAgents: 3
+        maxTotalAgents: 48
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
-      # WP-1 ships this dormant. WP-1b removes `disabled` once the bounds
-      # (WP-5), night-window routing (WP-2) and workspace contract (WP-6) land.
-      disabled: true
 
     - id: tool-ralph
       name: '@deepseek-ai/dsh-tool-ralph'
-      # WP-1 ships this dormant. WP-1b removes `disabled` once the bounds
-      # (WP-5), night-window routing (WP-2) and workspace contract (WP-6) land.
-      disabled: true
       config:
         subagentProvider: spawn
-        maxRounds: 64
+        maxRounds: 8
 
 # ── remaining model-facing rows ─────────────────────────────────────────────
 

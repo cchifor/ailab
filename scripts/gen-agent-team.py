@@ -93,6 +93,34 @@ def route_rows(text, targets, provider, model):
     return "".join(out), hit
 
 
+def enable_rows(text, targets):
+    """Remove `disabled: true` from named rows, and the comment line above it.
+
+    Upstream ships some rows dormant (tool-subagent-codex and friends), so a team
+    that wants one must actively clear the flag rather than merely not setting it.
+    """
+    src = text.splitlines(keepends=True)
+    out, i, n, hit = [], 0, len(src), set()
+    while i < n:
+        m = re.match(r"^(\s*)- id: (\S+)\s*$", src[i])
+        if not m or m.group(2) not in targets:
+            out.append(src[i]); i += 1
+            continue
+        indent, rid = m.group(1), m.group(2)
+        out.append(src[i]); i += 1
+        # Walk the row body, dropping any `disabled: true` at the row's own key depth.
+        while i < n:
+            line = src[i]
+            if line.strip() != "" and len(line) - len(line.lstrip()) <= len(indent):
+                break
+            if re.match(r"^" + indent + r"  disabled:\s*true\s*$", line):
+                hit.add(rid)
+                i += 1
+                continue
+            out.append(line); i += 1
+    return "".join(out), hit
+
+
 def set_keys(text, assignments):
     """Append scalar `key: value` entries to named rows' config blocks.
 
@@ -109,6 +137,7 @@ def set_keys(text, assignments):
             out.append(src[i]); i += 1
             continue
         indent, rid = m.group(1), m.group(2)
+        start_of_row = len(out)
         out.append(src[i]); i += 1
         body_indent = indent + "  "
         has_config = False
@@ -123,8 +152,23 @@ def set_keys(text, assignments):
             out.append(line); i += 1
         if not has_config:
             out.append(f"{body_indent}config:\n")
+        # REPLACE an existing key rather than appending beside it. Appending
+        # produces a duplicate mapping key, which YAML either rejects or resolves
+        # last-wins -- and either way the file then shows two values for one
+        # bound, which is exactly the kind of thing nobody reads twice.
+        # tool-ralph ships `maxRounds: 64`, so this path is the normal case, not
+        # the exception.
+        key_pat = {k: re.compile(r"^\s*" + re.escape(k) + r":\s") for k, _ in assignments[rid]}
         for key, value in assignments[rid]:
-            out.append(f"{body_indent}  {key}: {value}\n")
+            replaced = False
+            for idx in range(start_of_row, len(out)):
+                if key_pat[key].match(out[idx]):
+                    lead = len(out[idx]) - len(out[idx].lstrip())
+                    out[idx] = " " * lead + f"{key}: {value}\n"
+                    replaced = True
+                    break
+            if not replaced:
+                out.append(f"{body_indent}  {key}: {value}\n")
         hit.add(rid)
     return "".join(out), hit
 
@@ -185,6 +229,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--disable", default="", help="comma-separated row ids")
     ap.add_argument("--drop", default="", help="comma-separated row ids to REMOVE entirely")
+    ap.add_argument("--enable", default="", help="comma-separated row ids to clear `disabled` from")
     ap.add_argument("--route", default="", help="comma-separated row ids to give an explicit child route")
     ap.add_argument("--route-provider", default="", help="settings.yaml provider name for --route rows")
     ap.add_argument("--route-model", default="", help="model id for --route rows")
@@ -214,6 +259,11 @@ def main():
             return 1
         text, hit_r = route_rows(text, routed, a.route_provider, a.route_model)
         missing |= routed - hit_r
+
+    enabled = {t for t in a.enable.split(",") if t}
+    if enabled:
+        text, hit_e = enable_rows(text, enabled)
+        missing |= enabled - hit_e
 
     assignments = {}
     for item in getattr(a, "set"):
