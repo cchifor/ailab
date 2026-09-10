@@ -44,11 +44,25 @@
 # this team MUST name the qwen route on its `agent()` calls, or it inherits Codex like anything
 # else.
 #
-# STILL DORMANT. Every delegation row carries `disabled: true`, exactly as team-solo does: a
-# preset has no off switch, so merging these files makes the team selectable immediately, and
-# the bounds that make fan-out safe (WP-5) have not landed. Activation is one flag per row plus
-# scripts/tests/test_agent_teams.py's DELEGATION_ACTIVATED, and it should not happen before
-# WP-2, WP-5 and WP-6.
+# ACTIVE. Delegation is ON in this team. It shipped dormant while the fan-out bounds were
+# unknown; those are now set here, in the rows themselves:
+#
+#   maxDepth: 2                on every native delegation row -- depth, not width
+#   maxRounds: 8               on tool-ralph, down from the shipped 64
+#   maxConcurrentAgents / maxTotalAgents  on workflow-worker-thread -- the ONLY declarative
+#                              fan-out ceilings dsh exposes, and the pair the plan wrongly
+#                              said did not exist
+#
+# WHAT IS STILL NOT BOUNDED, said plainly rather than left to be discovered:
+#   * `tool-subagent` has no sibling-concurrency knob. maxDepth caps recursion, not width, so
+#     an agent may start many siblings at one depth. Only the workflow engine is bounded.
+#   * Inference concurrency is bounded at the GATEWAY or not at all --
+#     `max_parallel_requests` on dsh's LiteLLM key. That is NOT set here and has never been
+#     proven enforced on the deployed image, so CL-1's measured envelope (4 concurrent on
+#     cloud2) is ADVISORY. Treat the numbers above as the estate's intent, not a guarantee.
+#   * The workspace contract is a contract: children run in the parent's cwd and nothing
+#     stops two writers.
+#
 #
 # The `standard` agent preset: the full coding agent, mounted once per process.
 #
@@ -226,18 +240,12 @@
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
 
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
 
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
       config:
         provider: spawn
         toolName: subagent
@@ -246,6 +254,7 @@
         agentOptions:
           provider: litellm
           model: qwen3.8-27b-vllm-cloud
+        maxDepth: 2
     # Production dsh does not install these optional providers. Install the
     # matching Bundle in this Profile and restart the Host, then copy this
     # preset and remove `disabled` from the matching tool row. Host availability
@@ -270,8 +279,6 @@
 
     - id: workflow-worker-thread
       name: '@deepseek-ai/dsh-workflow-worker-thread'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
       config:
         provider: spawn
 
@@ -279,8 +286,6 @@
         maxTotalAgents: 64
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
 # ── remaining model-facing rows ─────────────────────────────────────────────
 
 - id: tool-ask-user

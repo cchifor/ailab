@@ -24,17 +24,47 @@ PATCH = ROOT / "kubernetes" / "apps" / "apps" / "dsh" / "cordis.patch.yml"
 # ids, so a team taking one of these names would be silently unreachable.
 SHIPPED_IDS = {"standard", "ptc", "cordis", "minimal"}
 
-# Rows that hand an agent a delegation tool. Until the plan's steps 2-5 land
-# (bounds, night-window routing, workspace contract) every one of these must be
-# dormant -- a preset has no off switch, so merging a team's files makes it
-# selectable immediately.
+# Rows that hand an agent a delegation tool.
 DELEGATION_ROWS = {
     "tool-subagent", "tool-subagent-fork", "tool-subagent-control",
     "tool-subagent-list-agents", "tool-subagent-codex", "tool-subagent-claude-code",
     "tool-workflow", "workflow-worker-thread", "tool-ralph",
 }
-# Flip to True in the WP-1b PR that also removes the flags.
-DELEGATION_ACTIVATED = False
+# ACTIVATED. Delegation is live, so the "everything must be dormant" gate is gone
+# and a different one takes its place: an enabled row must carry its BOUNDS.
+# Dormancy was never the safety property -- it was a placeholder for bounds that
+# had not been decided yet.
+DELEGATION_ACTIVATED = True
+
+# Bounds required on an ENABLED row, by row id. A row absent from this map needs
+# none (tool-subagent-control and tool-subagent-list-agents take no config; the
+# out-of-process providers reject a numeric maxDepth and must stay
+# 'provider-managed', so requiring a number there would fail the mount).
+REQUIRED_BOUNDS = {
+    "tool-subagent": ["maxDepth"],
+    "tool-subagent-fork": ["maxDepth"],
+    "tool-ralph": ["maxRounds"],
+    "workflow-worker-thread": ["maxConcurrentAgents", "maxTotalAgents"],
+}
+# tool-ralph ships maxRounds: 64 upstream, which is far too high for a shared
+# 9-GPU estate; this is the ceiling this repo will accept.
+MAX_RALPH_ROUNDS = 8
+
+# Rows whose provider cannot authenticate yet. Enabling one does not grant a
+# capability -- it advertises a tool the agent will choose and that will then
+# fail, repeatedly, because nothing in the tool description says it is broken.
+# An unusable tool is worse than an absent one.
+#
+# This is NOT the old dormancy gate returning. The native delegation rows are
+# live; these are held on a specific, checkable fact about credentials:
+#   tool-subagent-codex -- codex 0.153.4 builds its auth manager with
+#     enable_codex_api_key_env: false, so CODEX_API_KEY never reaches the child;
+#     it needs native auth under its own CODEX_HOME.
+#   tool-subagent-claude-code -- its Bundle is not in DSH_PLUGINS at all.
+# Remove an entry here in the same commit that provisions its credential and
+# verifies one successful delegation. The pairing is the point: the flag in the
+# composition cannot be flipped without also editing this list.
+CREDENTIAL_GATED = {"tool-subagent-codex", "tool-subagent-claude-code"}
 
 
 def teams():
@@ -77,6 +107,85 @@ def rows(text):
     return found
 
 
+def _duplicate_keys(path):
+    """Duplicate mapping keys anywhere in a composition, via a strict loader."""
+    try:
+        import yaml
+    except ImportError:                                    # pragma: no cover
+        return None
+    found = []
+
+    class Strict(yaml.SafeLoader):
+        pass
+
+    # `!!js` is dsh's own tag; the value is irrelevant here, only the shape.
+    Strict.add_constructor("tag:yaml.org,2002:js", lambda l, n: None)
+
+    def mapping(loader, node, deep=False):
+        seen = set()
+        for k, _ in node.value:
+            key = loader.construct_object(k, deep=True)
+            if key in seen:
+                found.append(key)
+            seen.add(key)
+        return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+    Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    try:
+        yaml.load(path.read_text(encoding="utf-8"), Loader=Strict)
+    except Exception:                                      # noqa: BLE001
+        return None                                        # parse errors are another test's job
+    return sorted(set(found))
+
+
+def _row_config(text, row_id):
+    """The `key: value` scalars in one row's config block, as a dict of strings."""
+    lines, out, seen = text.splitlines(), {}, False
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*)- id: (\S+)\s*$", line)
+        if not m or m.group(2) != row_id:
+            continue
+        seen = True
+        indent = m.group(1)
+        for nxt in lines[i + 1:]:
+            if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= len(indent):
+                break
+            km = re.match(r"^\s+([A-Za-z][A-Za-z0-9_]*):\s*(\S.*)$", nxt)
+            if km:
+                out.setdefault(km.group(1), km.group(2).strip())
+        break
+    return out if seen else None
+
+
+def _bounds_problems(team, text, found):
+    """An ENABLED delegation row must carry the bounds this repo requires.
+
+    Replaces the dormancy gate. Dormancy stopped fan-out by making it
+    unreachable; now that it is reachable, what stops it running away is the
+    bounds, and a bound nobody asserts is a bound that quietly disappears in a
+    regeneration.
+    """
+    problems = []
+    for rid, keys in REQUIRED_BOUNDS.items():
+        enabled = [(r, dis) for r, dis in found if r == rid and not dis]
+        if not enabled:
+            continue                       # absent or dormant: nothing to bound
+        cfg = _row_config(text, rid) or {}
+        for key in keys:
+            if key not in cfg:
+                problems.append(f"{team}: row '{rid}' is ENABLED without a '{key}' bound")
+        if rid == "tool-ralph" and "maxRounds" in cfg:
+            try:
+                if int(cfg["maxRounds"]) > MAX_RALPH_ROUNDS:
+                    problems.append(
+                        f"{team}: tool-ralph maxRounds={cfg['maxRounds']} exceeds "
+                        f"{MAX_RALPH_ROUNDS} -- upstream ships 64, too high for this estate"
+                    )
+            except ValueError:
+                problems.append(f"{team}: tool-ralph maxRounds is not a number")
+    return problems
+
+
 def check():
     fails = []
     names = teams()
@@ -108,6 +217,16 @@ def check():
                 fails.append(f"{team}: preset.yml has no {field.rstrip(':')} -- the picker card needs it")
 
         ctext = comp.read_text(encoding="utf-8")
+
+        # DUPLICATE MAPPING KEYS. The generator appends config keys, and an
+        # append beside an existing key rather than a replacement produced
+        # `maxRounds: 64` followed by `maxRounds: 8` -- two values for one bound,
+        # which YAML resolves last-wins and no reader notices. Cheap to assert,
+        # and it is the shape a regeneration bug takes.
+        dup = _duplicate_keys(comp)
+        if dup:
+            fails.append(f"{team}: duplicate mapping key(s) in the composition: {dup}")
+
         found = rows(ctext)
         if not found:
             fails.append(f"{team}: composition parses as no rows at all")
@@ -124,6 +243,16 @@ def check():
                     f"DELEGATION_ACTIVATED is False. A preset is selectable the moment "
                     f"it merges -- this would expose fan-out before its bounds exist."
                 )
+        else:
+            fails.extend(_bounds_problems(team, ctext, found))
+
+        live_gated = [r for r, dis in found if r in CREDENTIAL_GATED and not dis]
+        if live_gated:
+            fails.append(
+                f"{team}: {sorted(live_gated)} is ENABLED but listed in CREDENTIAL_GATED -- "
+                f"its provider cannot authenticate, so the agent would choose a tool that "
+                f"always fails. Provision the credential and verify one delegation first."
+            )
 
         # Every row must name a module; a row with an id and no name mounts nothing.
         for i, line in enumerate(ctext.splitlines()):
