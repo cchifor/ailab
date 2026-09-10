@@ -775,4 +775,4 @@ empty.
 - **Granting `ingresses` now.** Deferred until a Kyverno policy constrains `ingressClassName` and
   host suffix; Kyverno is already running in this cluster.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
