@@ -14,8 +14,8 @@ access was needed or used.
 | criterion | result |
 |---|---|
 | Provider rows resolve; `--dump-config` clean, **stderr read** | **PASS** — exit 0, **0 bytes stderr**, `subagent-codex` and `subagent-claude-code` both present |
-| **Host boots and stays up** (not just a clean dump) | **PASS** — `dsh web` ran to the 30 s timeout and printed its launch token; stderr empty |
-| Single-instance resolution of shared peers | **PASS** — exactly **one** on-disk copy of `@deepseek-ai/cordis`, `dsh-subagent`, `dsh-llm`, `dsh-session`. Two instances are impossible when only one exists |
+| **Host boots and stays up** (not just a clean dump) | **PASS** — `dsh web` was **killed by `timeout` (exit 124)** after printing its launch token, with empty stderr |
+| Single-instance resolution of shared peers | **PASS** — a **recursive** search of both trees finds exactly **one** distinct realpath for `@deepseek-ai/cordis`, `dsh-subagent`, `dsh-llm`, `dsh-session` |
 | Platform payloads executable | **PASS** — see below |
 | Interaction with the supported CLI | **Characterised** — see "What `dsh plugin` owns" |
 
@@ -100,6 +100,35 @@ NFS volume where the dsh install tree lives. Consequences for WP-3:
   (RWX NFS, cheap) plus one projected copy on `dsh-home` (expensive). Retention matters more than
   the plan implied.
 - A projection is a 566 MB copy at pod start. Measure it against the `wait-for-install` budget.
+
+## Five weak assertions, found in review (round 1 + codex)
+
+Both reviewers found the same pair, and both were right. The verdict is unchanged, but it now rests
+on checks that prove what they say:
+
+- **The boot check discarded its own evidence.** `[ "$?" = 124 ] || true` is dead code, so the PASS
+  required only *some* non-zero exit plus the launch line plus empty stderr — which is exactly what
+  a host that prints its URL and then crashes looks like. The exit status **is** the assertion: only
+  124 (killed by `timeout`) proves it was still serving when the clock ran out.
+- **The peer check could not see the copies that matter, and counted zero as one.** `find -maxdepth 0`
+  over two named paths cannot see a nested `node_modules` — precisely where a hoisted tree puts a
+  second copy of a conflicting version — and testing `> 1` meant a peer missing from *both* trees
+  passed as "single instance". Now recursive, realpath-deduplicated, and exactly-one.
+
+Both were mutation-tested afterwards: a **nested** duplicate `cordis` (invisible to the old check) is
+caught, and a simulated print-then-crash-with-empty-stderr is rejected.
+
+A codex cross-review of *those fixes* then found three more, all folded in before pushing:
+
+- **`-type d` skips a peer reached through a symlink.** A hoisted tree still uses a few, and skipping
+  one would count a real duplicate as a single instance. Now `\( -type d -o -type l \)`, with
+  `readlink -f` collapsing a link and its target back to one entry.
+- **`find`'s status was discarded.** An unreadable subtree could hide a second copy while the
+  pipeline still reported success — a pipeline's status is `wc`'s, and dash has no `pipefail`. The
+  search now writes to a file and its status is checked.
+- **124 does not prove a timeout.** `timeout` forwards a child's own exit status, so a host that
+  printed its launch line and then called `exit(124)` was indistinguishable. Elapsed time is the
+  independent evidence, and the assertion now requires ≥ 28 s of the 30 s window (observed: 31 s).
 
 ## Recommendation
 

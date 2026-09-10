@@ -72,21 +72,61 @@ echo "== 4. assertions =="
   || no "dump-config: exit/stderr not clean -- $(head -3 /tmp/dump.err)"
 grep -q 'subagent-codex' /tmp/dump.yml && grep -q 'subagent-claude-code' /tmp/dump.yml \
   && ok "both provider rows resolved" || no "provider rows missing from the resolved tree"
-if (cd "$D" && timeout 30 ./node_modules/.bin/dsh web >/tmp/web.out 2>/tmp/web.err); then
-  no "host exited on its own -- it should stay up"
+# The exit status IS the assertion: only 124 (killed by `timeout`) proves the host
+# was still running when the clock ran out. Printing the launch line and then
+# crashing with empty stderr looks identical in the output files, so an earlier
+# version of this check -- which discarded the status with `|| true` -- reported
+# "stayed up" for exactly the failure it existed to catch.
+BOOT_STATUS=0
+BOOT_T0=$(date +%s)
+(cd "$D" && timeout 30 ./node_modules/.bin/dsh web >/tmp/web.out 2>/tmp/web.err) || BOOT_STATUS=$?
+BOOT_ELAPSED=$(( $(date +%s) - BOOT_T0 ))
+# 124 alone is NOT proof: `timeout` forwards a child's own exit status, so a host
+# that printed its launch line and then called exit(124) is indistinguishable by
+# status. Elapsed time is the independent evidence -- a process killed AT the
+# deadline ran for the full window; one that exited early did not.
+if [ "$BOOT_STATUS" = 124 ] && [ "$BOOT_ELAPSED" -ge 28 ] \
+   && grep -q "dsh web: http" /tmp/web.out && [ ! -s /tmp/web.err ]; then
+  ok "host BOOTED and stayed up ${BOOT_ELAPSED}s until killed by timeout, stderr empty"
+elif [ "$BOOT_STATUS" = 0 ]; then
+  no "host exited 0 on its own -- it should still be serving"
+elif [ "$BOOT_STATUS" = 124 ]; then
+  no "exit 124 after only ${BOOT_ELAPSED}s -- the host returned that itself, it was not killed"
 else
-  [ "$?" = 124 ] || true
-  grep -q "dsh web: http" /tmp/web.out && [ ! -s /tmp/web.err ] \
-    && ok "host BOOTED and stayed up, stderr empty" \
-    || no "host did not boot cleanly: $(head -3 /tmp/web.err)"
+  no "host did not stay up: exit=$BOOT_STATUS after ${BOOT_ELAPSED}s $(head -3 /tmp/web.err)"
 fi
-DUPES=0
+# RECURSIVE, and exactly-one. Two earlier bugs lived here. Naming the two
+# top-level paths with -maxdepth 0 cannot see a nested node_modules, which is
+# precisely where a hoisted tree puts a second copy of a conflicting version. And
+# testing only `> 1` let ZERO pass -- a peer that resolved into neither tree was
+# reported as "single instance". Realpaths are deduplicated because a hoisted
+# tree still uses a few symlinks, and two names for one directory are one copy.
+PEERS_OK=1
 for pkg in @deepseek-ai/cordis @deepseek-ai/dsh-subagent @deepseek-ai/dsh-llm @deepseek-ai/dsh-session; do
-  n=$(find "$D/node_modules/$pkg" "$PROF/node_modules/$pkg" -maxdepth 0 2>/dev/null | wc -l)
-  [ "$n" -gt 1 ] && { DUPES=1; echo "    $pkg has $n copies"; }
+  owner=$(basename "$pkg"); scope=$(dirname "$pkg")
+  # -type d OR -type l: a hoisted tree still uses a few symlinks, and `-type d`
+  # alone silently skips a peer reached through one -- which would count a real
+  # duplicate as a single instance. readlink -f then collapses the two names for
+  # one directory back to one entry, so a link and its target never inflate n.
+  #
+  # find's status is CHECKED rather than discarded: an unreadable subtree could
+  # otherwise hide a second copy while the pipeline still reported success,
+  # because a pipeline's status is `wc`'s and dash has no pipefail.
+  if ! find "$D/node_modules" "$PROF/node_modules" \
+        \( -type d -o -type l \) -path "*/$scope/$owner" \
+        -exec readlink -f {} \; > /tmp/peer.raw 2>/tmp/peer.err; then
+    PEERS_OK=0; echo "    $pkg: search FAILED -- $(head -1 /tmp/peer.err)"; continue
+  fi
+  sort -u /tmp/peer.raw > /tmp/peer.uniq
+  n=$(wc -l < /tmp/peer.uniq)
+  if [ "$n" -ne 1 ]; then
+    PEERS_OK=0
+    [ "$n" = 0 ] && echo "    $pkg: NOT FOUND in either tree" \
+                 || { echo "    $pkg: $n distinct copies --"; sed "s/^/      /" /tmp/peer.uniq; }
+  fi
 done
-[ "$DUPES" = 0 ] && ok "single on-disk instance of every shared framework peer" \
-                 || no "a shared peer is duplicated -- a provider may register into a registry nobody reads"
+[ "$PEERS_OK" = 1 ] && ok "exactly one on-disk instance of every shared framework peer" \
+                    || no "a shared peer is missing or duplicated -- a provider may register into a registry nobody reads"
 CODEX=$(find "$PROF/node_modules/@openai" -type f -name codex -perm -u+x 2>/dev/null | head -1)
 CLAUDE="$PROF/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude"
 [ -n "$CODEX" ] && timeout 20 "$CODEX" --version >/dev/null 2>&1 \
