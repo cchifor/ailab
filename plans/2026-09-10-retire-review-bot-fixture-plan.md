@@ -1,5 +1,26 @@
 # Retire cchifor/review-bot-fixture without decapitating the reviewbot sweep
 
+## Codex Review
+
+- Accepted the `reconcile_s` pushback: the deployed IaC supplies the integer 300 without host
+  overrides. Startup validation is a separate follow-up; both disputed markers are removed.
+- The prefix read and configured-repo rendering work with exact full-key lookups.
+  `sqlite3.Error` must precede `Exception`:
+  `enqueue()` propagates database errors unchanged, `existing_marker()` does no database work,
+  and the LLM exception wrappers are outside this call path. Skipping the result write on a fatal
+  SQLite error correctly preserves the completion timestamp.
+- The proposed per-repo writes drop round 1's requirement to publish results atomically:
+  committing them individually can leave partial recovery results paired with the old timestamp.
+  The new result writer also needs an explicit contract to propagate write failures.
+- The alert design is expressible, but needs explicit label matching and a defined handoff between
+  repo failure and staleness. Numeric thresholds and holds remain unspecified. Round 1's
+  `maybe_merge()` swallowed-error limitation, PR/operation log context, and explicit restart/series-gap
+  cases were also dropped rather than addressed.
+- Scope is proportionate to the generic sweep defect; one results dictionary and one completion
+  transaction suffice. Six existing metrics/concurrency tests passed, and isolated candidate-code
+  probes confirmed the findings below. Promtool was unavailable (Docker unavailable, WSL access
+  denied); live estate observations were not independently verified.
+
 ## Context
 
 Operator decision (2026-09-10): `cchifor/review-bot-fixture` is to be removed from the Gitea
@@ -95,6 +116,8 @@ for repo in CFG["repos"]:
     record_repo_sweep_result(repo, failed)
 ```
 
+<!-- codex: round-2: The new per-repo write placement can publish an unfinished cycle if each helper call commits. A probe implementing that shape started with repo A failed and last_reconcile=100, let A recover, then failed inside repo B's actual enqueue()/db() path: A's exported gauge became 0 while the timestamp stayed 100. A cleanup failure similarly leaves every new gauge committed under the old timestamp. This can clear an existing repo alert before any replacement sweep completes, contrary to round 1's requested snapshot semantics. Collect results in memory, then after successful cleanup commit all results and last_reconcile in one transaction under db_lock; read both within write_metrics()'s existing locked database section. Keep API calls outside the lock. Test metrics observed mid-sweep and after later-repo/cleanup failures, asserting that the entire previous completed snapshot survives. -->
+
 **Why `sqlite3.Error` re-raises.** A bare `except Exception` would classify a shared-state failure
 as a per-repo failure and let the sweep stamp `last_reconcile` as if it had completed. Codex probed
 exactly this: with `enqueue()` raising `sqlite3.OperationalError`, the naive loop still stamped
@@ -109,9 +132,6 @@ No `continue` — the `except` is already the end of the loop body.
   repo for that cycle. The next cycle picks them up.
 - The listing is still `limit=50`, so a completed sweep does not prove every open PR was seen.
   Pre-existing; a pagination redesign is not part of retiring a fixture repo.
-
-<!-- codex: time.sleep(CFG["reconcile_s"]) remains outside both handlers; a missing, invalid, or negative interval can kill the reconciler thread while the HTTP server and metrics ticker survive. Validate a positive numeric interval at startup; systemd's process restart policy does not restart a dead thread. -->
-<!-- opus-pushback: Real but unrelated to this change: reconcile_s is templated from pr_reviewer_reconcile_s (300, int, no host override) through config.json.j2:33, so the failure needs a bad IaC edit to reach production, and the fix is generic startup-config validation. Recorded as a follow-up rather than smuggled into a fixture retirement. -->
 
 ### 2. Make a skipped repo visible (`reviewbot.py` + rules)
 
@@ -134,6 +154,7 @@ Implementation:
   Written for **every currently-configured repo on every sweep** — recovered zeros alongside
   failures — so the series is a current statement, not a latch. Not via `record_gauge()`, which
   would add an unwanted lifetime `_max` companion.
+  <!-- codex: round-2: Specify that the new result writer propagates database failures to the outer cycle handler. The nearby bump_meta() and record_gauge() deliberately swallow all exceptions; copying that convention would let last_reconcile advance even though the result write failed. Excluding record_gauge() only because of its _max companion does not establish this contract. In the single completion transaction requested above, a result-write or final-commit failure must roll back both gauges and timestamp; add those failure-injection cases. -->
 - `write_metrics()` renders it as `reviewbot_reconcile_repo_failed{persona,repo}`, iterating
   `CFG["repos"]` so a de-configured repo's stale row is simply not emitted.
 - **The rendering fix that the tuple list alone would miss:** `gauges` is populated by an explicit
@@ -160,6 +181,10 @@ repo alert must not be the only signal):
   reviewer targets (`up{job="reviewer-node"}`) with a startup grace period.
 - **`ReviewbotReconcileRepoFailing`** — `reviewbot_reconcile_repo_failed == 1`, gated on a recent
   completed sweep so a frozen gauge is reported by the stale alert instead of double-paging here.
+
+<!-- codex: round-2: Resolve the new label mismatch explicitly: up lacks persona, and the timestamp lacks repo. For textual shorthands T = reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"}, U = (up{job="reviewer-node"} == 1), and threshold N, the three-branch stale expression can be U and on(job,instance) (((time() - (T > 0)) > N) or (T == 0) or (U unless on(job,instance) T)). Expand the shorthands inline; no recording-rule framework is needed. Keeping U on the left gives every branch the same target labels, including when the timestamp disappears; annotations must identify instance rather than assume persona exists. The repo gate can be (reviewbot_reconcile_repo_failed{job="reviewer-node"} == 1) and on(job,instance,persona) (time() - (T > 0) <= N). Default matching would silently empty that gate and misclassify healthy targets as missing. Set operators need no group_left. Using up == 1 leaves node-down reporting to ReviewerNodeDown. See [Prometheus vector matching](https://prometheus.io/docs/prometheus/latest/querying/operators/#vector-matching). -->
+
+<!-- codex: round-2: The new freshness gate has a handoff delay: once age exceeds N the repo alert stops matching, while the stale branch must then satisfy its own for duration. Thus a previously firing repo alert can resolve before the stale alert fires. Choose concrete N/for values and document the resulting detection gap, or arrange overlap if continuous coverage is required; do not imply an immediate replacement. A rule-level for can supply startup grace for missing/zero series. Test the handoff and missing/zero/stale transitions with stable labels on one reviewer while the other stays healthy. The prose below still promises thresholds and holds without specifying them. See [Prometheus alert timing](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/#defining-alerting-rules). -->
 
 Thresholds are set from **sweep runtime + `reconcile_s` sleep + metrics tick + scrape interval**,
 not from `reconcile_s` alone: the deployed interval is 300 s (`config.json.j2:33`, no host
