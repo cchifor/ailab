@@ -217,3 +217,71 @@ spec:
               (measured: 369 minutes of an ungated 6h version over one 48h window). Check
               whether the LLM CLI still authenticates — a subscription re-login invalidates the
               seeded credentials, which are NOT ansible-managed.
+        # The reconcile sweep — the safety-net that heals lost webhook deliveries — had NO alert
+        # at all until 2026-09-10, while its metric was exported all along. Neither neighbour
+        # covers it: ReviewbotHeartbeatStale watches the metrics ticker, which runs on its own
+        # thread and keeps ticking through a dead reconciler, and ReviewbotStalled is gated on
+        # queue_depth > 0, which a webhook-fed queue drains to zero. So a sweep could die and
+        # page nobody — which is exactly what deleting an allowlisted repo used to cause.
+        #
+        # THREE branches, because "not completing" has three shapes and only one is a stale
+        # number. `up` is kept on the LEFT of the outer `and` so every branch carries the same
+        # target labels even in the branch where the timestamp series does not exist — a bare
+        # `time() - metric` yields NOTHING to alert on when the series is absent, which is the
+        # fresh-database case. Note this differs from the agentforge precedent
+        # (agentforge-rules.yaml:28): that one guards an EXPORTED zero, and the `> 0` filter here
+        # still does, but reviewbot.py omits the line entirely until the key exists.
+        # Annotations name `instance`, NOT `persona`: the missing-series branch has no persona
+        # label to interpolate. Gating on `up == 1` leaves node-down to ReviewerNodeDown.
+        # 1800s = 6 reconcile_s cycles (300s) plus slack for sweep runtime (serial API calls,
+        # 60s timeout each), the 15s metrics tick and the 30s scrape. `for: 15m` doubles as the
+        # startup grace the missing/zero branches need. Worst-case detection ~45m, proportionate
+        # for a safety-net sitting behind webhook delivery.
+        - alert: ReviewbotReconcileStale
+          expr: >-
+            (up{job="reviewer-node"} == 1)
+            and on (job, instance) (
+                  ((time() - (reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"} > 0)) > 1800)
+               or (reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"} == 0)
+               or ((up{job="reviewer-node"} == 1)
+                   unless on (job, instance) reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"})
+            )
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot reconcile sweep on {{ $labels.instance }} is not completing"
+            description: >-
+              The reconcile sweep on {{ $labels.instance }} has not completed in >30m, has never
+              completed, or stopped exporting its timestamp. Webhook-driven reviews may still be
+              working — this is the safety-net that heals MISSED deliveries, so its death is
+              silent from the outside. Check `journalctl -u reviewbot | grep reconcile`, then
+              whether the PAT still reads every repo in `/etc/reviewbot/config.json`.
+        # Companion to the rule above: that one says the sweep is not finishing, this one says it
+        # IS finishing but skipping a repo. Both are needed — a caught repo failure ADVANCES the
+        # timestamp (so the stale rule stays silent), while a hung sweep freezes this gauge at its
+        # last value (so this rule cannot be the only signal).
+        # The freshness gate keeps a frozen gauge from double-paging alongside the stale rule.
+        # Matching on (job, instance, persona) is explicit and load-bearing: the default would
+        # also try to match `repo`, which the timestamp series does not carry, silently emptying
+        # the gate. Set operators need no group_left.
+        # DOCUMENTED SEAM: both rules use 1800s, so once a hung sweep passes that age this rule
+        # stops matching while the stale rule has yet to satisfy its own 15m hold — a firing repo
+        # alert can resolve up to 15m BEFORE the stale one fires. Deliberate: widening this gate
+        # would buy continuous coverage at the price of double-paging every hung sweep.
+        - alert: ReviewbotReconcileRepoFailing
+          expr: >-
+            (reviewbot_reconcile_repo_failed{job="reviewer-node"} == 1)
+            and on (job, instance, persona) (
+              (time() - (reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node"} > 0)) <= 1800
+            )
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) cannot sweep {{ $labels.repo }}"
+            description: >-
+              The sweep on {{ $labels.instance }} completes but {{ $labels.repo }} did not finish
+              — most often a deleted or renamed repo still in the allowlist, or a PAT that lost
+              its grant. Scope: this means "this repo's sweep did not complete", NOT "merge
+              errors" — maybe_merge() swallows most of its own failures and never reaches this
+              boundary. The other repos are unaffected (the sweep is fault-isolated per repo).
+              Fix the allowlist in ansible/roles/pr_reviewer/defaults/main.yml and redeploy.

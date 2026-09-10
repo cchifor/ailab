@@ -41,6 +41,18 @@ PAT = _read(CFG["pat_file"])
 HOOK_SECRET = _read(CFG["webhook_secret_file"]).encode()
 MARKER_RE = re.compile(r"<!-- review-bot:v1 persona=(\S+) head=([0-9a-f]{40})(?: verdict=(\S+))? -->")
 EVENTS = {"pull_request", "pull_request_sync", "pull_request_label", "pull_request_review_request"}
+# `meta` key prefix for the per-repo last-sweep result (0 = swept clean, 1 = sweep incomplete).
+# A PREFIX rather than a fixed key list because the repo set is config, not code - write_metrics()
+# reads it with a LIKE scan and then renders only the CURRENTLY configured repos, so a repo dropped
+# from the allowlist stops being exported instead of latching its last value forever.
+REPO_FAILED_PREFIX = "reconcile_repo_failed:"
+
+
+def _label(v):
+    """Escape a Prometheus label VALUE (backslash, double quote, newline — that is the whole set
+    the text format defines). One malformed line makes node_exporter reject the ENTIRE textfile,
+    so a repo name carrying a quote would silently delete every reviewbot metric on the host."""
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 db_lock = threading.Lock()
 
@@ -1350,20 +1362,31 @@ def write_metrics():
                 "'llm_seconds','llm_seconds_max','llm_output_tokens','llm_output_tokens_max',"
                 "'reviews_full_total','reviews_partial_total','reviews_skipped_total',"
                 "'findings_dropped_total','llm_rate_limited_total')")}
+            # SEPARATE read, deliberately: the dict above is an explicit key whitelist, so a new
+            # metric added only to the (key, metric) render list below would export 0 forever.
+            # The per-repo results are keyed by repo name, which is config - hence a prefix scan.
+            # Read in the SAME locked section as last_reconcile so the pair can never be observed
+            # torn (commit_sweep writes both in one transaction).
+            repo_failed = {r[0][len(REPO_FAILED_PREFIX):]: r[1] for r in c.execute(
+                "SELECT k,v FROM meta WHERE k LIKE ?", (REPO_FAILED_PREFIX + "%",))}
             c.close()
         now = time.time()
+        # Escape ONCE for every emission. persona is operator-set config like repo,
+        # and one malformed line makes node_exporter drop the WHOLE textfile - so an
+        # unescaped quote in EITHER label deletes every reviewbot metric on the host.
+        _persona = _label(CFG["persona"])
         lines = [
-            f'reviewbot_heartbeat_timestamp_seconds{{persona="{CFG["persona"]}"}} {now:.0f}',
-            f'reviewbot_queue_depth{{persona="{CFG["persona"]}"}} {depth}',
-            f'reviewbot_oldest_job_age_seconds{{persona="{CFG["persona"]}"}} {(now - oldest) if oldest else 0:.0f}',
-            f'reviewbot_quarantined_jobs{{persona="{CFG["persona"]}"}} {quar}',
-            f'reviewbot_quarantined_recent_jobs{{persona="{CFG["persona"]}"}} {quar_recent}',
-            f'reviewbot_jobs_done{{persona="{CFG["persona"]}"}} {done}',
-            f'reviewbot_job_running{{persona="{CFG["persona"]}"}} {running}',
-            f'reviewbot_running_job_age_seconds{{persona="{CFG["persona"]}"}} '
+            f'reviewbot_heartbeat_timestamp_seconds{{persona="{_persona}"}} {now:.0f}',
+            f'reviewbot_queue_depth{{persona="{_persona}"}} {depth}',
+            f'reviewbot_oldest_job_age_seconds{{persona="{_persona}"}} {(now - oldest) if oldest else 0:.0f}',
+            f'reviewbot_quarantined_jobs{{persona="{_persona}"}} {quar}',
+            f'reviewbot_quarantined_recent_jobs{{persona="{_persona}"}} {quar_recent}',
+            f'reviewbot_jobs_done{{persona="{_persona}"}} {done}',
+            f'reviewbot_job_running{{persona="{_persona}"}} {running}',
+            f'reviewbot_running_job_age_seconds{{persona="{_persona}"}} '
             f'{(now - run_since) if run_since else 0:.0f}',
         ]
-        lines.append(f'reviewbot_rate_limited_seconds_remaining{{persona="{CFG["persona"]}"}} '
+        lines.append(f'reviewbot_rate_limited_seconds_remaining{{persona="{_persona}"}} '
                      f'{max(0.0, RATE_LIMITED_UNTIL - now):.0f}')
         for key, metric in (("llm_rate_limited_total", "reviewbot_llm_rate_limited_total"),
                             ("reviews_full_total", "reviewbot_reviews_full_total"),
@@ -1377,14 +1400,29 @@ def write_metrics():
                             ("llm_output_tokens", "reviewbot_llm_output_tokens_last"),
                             ("llm_output_tokens_max", "reviewbot_llm_output_tokens_max")):
             try:
-                lines.append(f'{metric}{{persona="{CFG["persona"]}"}} '
+                lines.append(f'{metric}{{persona="{_persona}"}} '
                              f'{float(gauges.get(key, 0)):.0f}')
             except (TypeError, ValueError):
                 pass
         if last_ok:
-            lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_ok[0]):.0f}')
+            lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{_persona}"}} {float(last_ok[0]):.0f}')
         if last_rec:
-            lines.append(f'reviewbot_last_reconcile_timestamp_seconds{{persona="{CFG["persona"]}"}} {float(last_rec[0]):.0f}')
+            lines.append(f'reviewbot_last_reconcile_timestamp_seconds{{persona="{_persona}"}} {float(last_rec[0]):.0f}')
+        # Iterate the CONFIGURED repos, not the stored keys: a repo removed from the allowlist must
+        # stop being exported rather than freeze at its last value. A configured repo with no row
+        # yet (fresh database, first sweep still running) is omitted rather than reported clean -
+        # ReviewbotReconcileStale's missing-series branch is what covers that window.
+        # Labels are ESCAPED: this is the first metric here whose label value is free-form config
+        # rather than a fixed persona string, and node_exporter rejects the WHOLE textfile on one
+        # malformed line - so an unescaped `"` in a repo name would take out every reviewbot metric
+        # on the host, not just this series.
+        for repo in CFG["repos"]:
+            if repo in repo_failed:
+                try:
+                    lines.append(f'reviewbot_reconcile_repo_failed{{persona="{_persona}",'
+                                 f'repo="{_label(repo)}"}} {float(repo_failed[repo]):.0f}')
+                except (TypeError, ValueError):
+                    pass
         tmp = CFG["textfile"] + ".tmp"
         with open(tmp, "w") as f:
             f.write("\n".join(lines) + "\n")
@@ -1565,26 +1603,82 @@ def retire_closed_quarantines():
             log(f"retired {n} quarantine(s) for closed {repo}#{pr}")
 
 
+def commit_sweep(results, now):
+    """Publish ONE sweep atomically: every repo's 0/1 result AND `last_reconcile`, in a single
+    transaction. Errors PROPAGATE - unlike bump_meta()/record_gauge(), which swallow everything
+    because they run inside a worker exception handler and a `finally`. Here a swallowed failure
+    would advance the completion stamp over writes that never landed.
+
+    Why one transaction rather than a write per repo: a per-repo write publishes a HALF-FINISHED
+    cycle. With repo A failed at last_reconcile=100, letting A recover and then dying inside repo
+    B exports A's gauge as 0 while the stamp stays 100 - an operator watches a repo alert clear
+    with no completed sweep behind it. Same for a cleanup failure, which would land every gauge
+    under the old stamp. So a cycle is all-or-nothing: on any failure the PREVIOUS completed
+    snapshot survives intact and the outer handler retries."""
+    with db_lock:
+        c = db()
+        try:
+            for repo, failed in results.items():
+                c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)",
+                          (REPO_FAILED_PREFIX + repo, str(int(failed))))
+            c.execute("INSERT OR REPLACE INTO meta VALUES('last_reconcile',?)", (str(now),))
+            c.commit()
+        finally:
+            c.close()
+
+
 def reconciler():
     while True:
         try:
+            # repo -> 0/1, IN MEMORY until the whole sweep succeeds (see commit_sweep).
+            results = {}
             for repo in CFG["repos"]:
-                for pr in api(f"/repos/{repo}/pulls?state=open&limit=50"):
-                    author = ((pr.get("user") or {}).get("login") or "").lower()
-                    if pr.get("draft") or author in [b.lower() for b in CFG["ignore_authors"]]:
-                        continue
-                    sha = pr["head"]["sha"]
-                    if not existing_marker(repo, pr["number"], sha):
-                        enqueue(repo, pr["number"], sha, "reconcile")
-                    else:
-                        maybe_merge(repo, pr["number"])
+                failed = 0
+                # WHERE the repo died, for the log line below. Reset per repo, and narrowed as the
+                # body advances, so "list" (repo unreachable — the deleted/renamed/no-grant case)
+                # is distinguishable from a single malformed PR, which otherwise look identical.
+                op, at_pr = "list", None
+                try:
+                    for pr in api(f"/repos/{repo}/pulls?state=open&limit=50"):
+                        # Reset in SEPARATE statements before touching `pr`. A tuple assignment
+                        # evaluates its whole right-hand side FIRST, so `op, at_pr = "parse",
+                        # pr.get(...)` raising on a malformed element left the PREVIOUS PR's
+                        # number in at_pr and blamed it — the log said `o/a#17 [enqueue]` for a
+                        # failure that happened while parsing the element after #17.
+                        op = "parse"
+                        at_pr = None
+                        number = pr["number"]          # missing/!dict fails here, as "parse"
+                        at_pr = number
+                        author = ((pr.get("user") or {}).get("login") or "").lower()
+                        if pr.get("draft") or author in [b.lower() for b in CFG["ignore_authors"]]:
+                            continue
+                        sha = pr["head"]["sha"]
+                        op = "marker"
+                        if not existing_marker(repo, number, sha):
+                            op = "enqueue"
+                            enqueue(repo, number, sha, "reconcile")
+                        else:
+                            op = "merge"
+                            maybe_merge(repo, number)
+                # ORDER IS LOAD-BEARING: sqlite3.Error must be caught ABOVE Exception. The state
+                # store is not repo-scoped, so its failure is fatal to the CYCLE - swallowing it
+                # here would file a dead database as "one repo is sad" and let the sweep stamp a
+                # completion it never achieved. enqueue() propagates sqlite errors unchanged and
+                # existing_marker() touches no database, so this is reachable, not decorative.
+                except sqlite3.Error:
+                    raise
+                except Exception as e:
+                    failed = 1
+                    # One bad repo no longer decapitates the sweep: every repo AFTER this one in
+                    # CFG["repos"] used to be skipped for the cycle, silently (nothing alerted on
+                    # last_reconcile). Repo isolation is NOT PR isolation - the remaining PRs of
+                    # THIS repo are still skipped until the next cycle, which is why the log
+                    # carries the operation and the PR it stopped at, not just the repo.
+                    where = f"{repo}#{at_pr}" if at_pr is not None else repo
+                    log(f"reconcile {where} [{op}]: {e}")
+                results[repo] = failed
             retire_closed_quarantines()
-            with db_lock:
-                c = db()
-                c.execute("INSERT OR REPLACE INTO meta VALUES('last_reconcile',?)",
-                          (str(time.time()),))
-                c.commit()
-                c.close()
+            commit_sweep(results, time.time())
         except Exception as e:
             log("reconcile error:", e)
         time.sleep(CFG["reconcile_s"])
