@@ -467,10 +467,94 @@ tests:
                 — maybe_merge() swallows most of its own failures and never reaches this boundary.
                 The other repos are unaffected (the sweep is fault-isolated per repo). Fix the
                 allowlist in ansible/roles/pr_reviewer/defaults/main.yml and redeploy.
-      # A single blip inside the 15m hold must not page.
+      # Not yet at the 15m hold.
       - eval_time: 10m
         alertname: ReviewbotReconcileRepoFailing
         exp_alerts: []
+      # A sweep that COMPLETES while skipping a repo must leave the stale rule silent — that
+      # separation is the whole reason both rules exist.
+      - eval_time: 30m
+        alertname: ReviewbotReconcileStale
+        exp_alerts: []
+
+  # A genuine blip: failed for 5m, then clean. Distinct from the case above, whose series never
+  # returns to 0 — an uninterrupted 1 does not test the hold at all.
+  - interval: 1m
+    name: a repo that fails once and recovers never pages
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "1x60"
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="claude",instance="192.168.0.24:9100"}'
+        values: "0+60x60"
+      - series: 'reviewbot_reconcile_repo_failed{job="reviewer-node",persona="claude",instance="192.168.0.24:9100",repo="cchifor/blip"}'
+        values: "1x4 0x55"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ReviewbotReconcileRepoFailing
+        exp_alerts: []
+
+  # Firing, then fixed: the alert must actually clear once the gauge returns to 0, or an operator
+  # who repairs the allowlist keeps being paged.
+  - interval: 1m
+    name: a firing repo alert resolves once the repo sweeps clean again
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "1x60"
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="claude",instance="192.168.0.24:9100"}'
+        values: "0+60x60"
+      # Failing long enough to fire (>15m hold), then repaired at 25m.
+      - series: 'reviewbot_reconcile_repo_failed{job="reviewer-node",persona="claude",instance="192.168.0.24:9100",repo="cchifor/fixed"}'
+        values: "1x24 0x35"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReviewbotReconcileRepoFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+              persona: claude
+              repo: cchifor/fixed
+            exp_annotations:
+              summary: "reviewbot (claude) cannot sweep cchifor/fixed"
+              description: >-
+                The sweep on 192.168.0.24:9100 completes but cchifor/fixed did not finish — most
+                often a deleted or renamed repo still in the allowlist, or a PAT that lost its
+                grant. Scope: this means "this repo's sweep did not complete", NOT "merge errors"
+                — maybe_merge() swallows most of its own failures and never reaches this boundary.
+                The other repos are unaffected (the sweep is fault-isolated per repo). Fix the
+                allowlist in ansible/roles/pr_reviewer/defaults/main.yml and redeploy.
+      - eval_time: 40m
+        alertname: ReviewbotReconcileRepoFailing
+        exp_alerts: []
+
+  # A down node must not ALSO page as a stale sweep — its series are gone, not stale, and
+  # ReviewerNodeDown is the rule that owns that condition. This is what `up == 1` buys.
+  - interval: 1m
+    name: a down reviewer does not double-page as a stale sweep
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ReviewbotReconcileStale
+        exp_alerts: []
+      # ...and the rule that SHOULD own it does fire.
+      - eval_time: 50m
+        alertname: ReviewerNodeDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "Reviewer VM 192.168.0.24:9100 is down (no node_exporter scrape)"
+              description: >-
+                node_exporter on reviewer 192.168.0.24:9100 has been unscrapeable for >10m. .24 =
+                reviewer-1 (claude persona), .25 = reviewer-2 (codex persona); both are on ai-node3
+                (vmid 4501/4502). While a reviewer is down its persona posts no verdicts, so every
+                PR needing "all personas clean" stops merging. Note the reviewbot_* alerts in this
+                group CANNOT fire while this one is active — their series are gone, not stale.
 
   # The freshness gate: a HUNG sweep freezes the gauge at 1, and this rule must go quiet and hand
   # over to ReviewbotReconcileStale rather than double-page. Asserts the documented seam.
@@ -486,11 +570,45 @@ tests:
       - series: 'reviewbot_reconcile_repo_failed{job="reviewer-node",persona="claude",instance="192.168.0.24:9100",repo="cchifor/gone"}'
         values: "1x90"
     alert_rule_test:
-      # Past 1800s the gate has emptied, so the repo rule is silent...
+      # The seam, asserted at all THREE points rather than only after it closes. With the
+      # timestamp frozen at 1: the gate holds while age <= 1800s, so the repo rule fires at 15m
+      # and stops matching at 31m; the stale branch first goes true at ~31m and clears its own
+      # 15m hold at 46m. Between 31m and 46m NEITHER fires — that is the documented gap.
+      # 1) before the seam: repo rule firing, stale silent.
+      - eval_time: 20m
+        alertname: ReviewbotReconcileRepoFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+              persona: claude
+              repo: cchifor/gone
+            exp_annotations:
+              summary: "reviewbot (claude) cannot sweep cchifor/gone"
+              description: >-
+                The sweep on 192.168.0.24:9100 completes but cchifor/gone did not finish — most
+                often a deleted or renamed repo still in the allowlist, or a PAT that lost its
+                grant. Scope: this means "this repo's sweep did not complete", NOT "merge errors"
+                — maybe_merge() swallows most of its own failures and never reaches this boundary.
+                The other repos are unaffected (the sweep is fault-isolated per repo). Fix the
+                allowlist in ansible/roles/pr_reviewer/defaults/main.yml and redeploy.
+      - eval_time: 20m
+        alertname: ReviewbotReconcileStale
+        exp_alerts: []
+      # 2) INSIDE the gap: both silent. This is the cost being accepted, pinned so it cannot
+      #    widen unnoticed.
+      - eval_time: 35m
+        alertname: ReviewbotReconcileRepoFailing
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: ReviewbotReconcileStale
+        exp_alerts: []
+      # 3) after the stale hold: the repo rule stays quiet...
       - eval_time: 60m
         alertname: ReviewbotReconcileRepoFailing
         exp_alerts: []
-      # ...and the stale rule has taken over by then.
+      # ...and the stale rule has taken over.
       - eval_time: 60m
         alertname: ReviewbotReconcileStale
         exp_alerts:
@@ -541,5 +659,38 @@ tests:
                 whether the PAT still reads every repo in `/etc/reviewbot/config.json`.
       # Still inside the 15m hold.
       - eval_time: 10m
+        alertname: ReviewbotReconcileStale
+        exp_alerts: []
+
+  # Startup transition: a reviewer comes up exporting nothing, then completes its first sweep.
+  # The missing-series branch must stop matching once the timestamp appears — otherwise every
+  # fresh install pages forever and the rule gets silenced, which is how alerts die.
+  - interval: 1m
+    name: a fresh reviewer stops alerting once its first sweep lands
+    input_series:
+      - series: 'up{job="reviewer-node",instance="192.168.0.24:9100"}'
+        values: "1x80"
+      # Absent for the first 40 samples, then present and tracking wall clock.
+      - series: 'reviewbot_last_reconcile_timestamp_seconds{job="reviewer-node",persona="claude",instance="192.168.0.24:9100"}'
+        values: "_x40 2400+60x39"
+    alert_rule_test:
+      # Still absent and past the 15m grace => firing.
+      - eval_time: 30m
+        alertname: ReviewbotReconcileStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+            exp_annotations:
+              summary: "reviewbot reconcile sweep on 192.168.0.24:9100 is not completing"
+              description: >-
+                The reconcile sweep on 192.168.0.24:9100 has not completed in >30m, has never
+                completed, or stopped exporting its timestamp. Webhook-driven reviews may still be
+                working — this is the safety-net that heals MISSED deliveries, so its death is
+                silent from the outside. Check `journalctl -u reviewbot | grep reconcile`, then
+                whether the PAT still reads every repo in `/etc/reviewbot/config.json`.
+      # First sweep has landed and the timestamp tracks wall clock => resolved.
+      - eval_time: 60m
         alertname: ReviewbotReconcileStale
         exp_alerts: []

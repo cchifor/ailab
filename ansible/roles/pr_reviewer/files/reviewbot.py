@@ -47,6 +47,13 @@ EVENTS = {"pull_request", "pull_request_sync", "pull_request_label", "pull_reque
 # from the allowlist stops being exported instead of latching its last value forever.
 REPO_FAILED_PREFIX = "reconcile_repo_failed:"
 
+
+def _label(v):
+    """Escape a Prometheus label VALUE (backslash, double quote, newline — that is the whole set
+    the text format defines). One malformed line makes node_exporter reject the ENTIRE textfile,
+    so a repo name carrying a quote would silently delete every reviewbot metric on the host."""
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
 db_lock = threading.Lock()
 
 
@@ -1401,11 +1408,15 @@ def write_metrics():
         # stop being exported rather than freeze at its last value. A configured repo with no row
         # yet (fresh database, first sweep still running) is omitted rather than reported clean -
         # ReviewbotReconcileStale's missing-series branch is what covers that window.
+        # Labels are ESCAPED: this is the first metric here whose label value is free-form config
+        # rather than a fixed persona string, and node_exporter rejects the WHOLE textfile on one
+        # malformed line - so an unescaped `"` in a repo name would take out every reviewbot metric
+        # on the host, not just this series.
         for repo in CFG["repos"]:
             if repo in repo_failed:
                 try:
-                    lines.append(f'reviewbot_reconcile_repo_failed{{persona="{CFG["persona"]}",'
-                                 f'repo="{repo}"}} {float(repo_failed[repo]):.0f}')
+                    lines.append(f'reviewbot_reconcile_repo_failed{{persona="{_label(CFG["persona"])}",'
+                                 f'repo="{_label(repo)}"}} {float(repo_failed[repo]):.0f}')
                 except (TypeError, ValueError):
                     pass
         tmp = CFG["textfile"] + ".tmp"
@@ -1619,15 +1630,23 @@ def reconciler():
             results = {}
             for repo in CFG["repos"]:
                 failed = 0
+                # WHERE the repo died, for the log line below. Reset per repo, and narrowed as the
+                # body advances, so "list" (repo unreachable — the deleted/renamed/no-grant case)
+                # is distinguishable from a single malformed PR, which otherwise look identical.
+                op, at_pr = "list", None
                 try:
                     for pr in api(f"/repos/{repo}/pulls?state=open&limit=50"):
+                        op, at_pr = "parse", (pr or {}).get("number")
                         author = ((pr.get("user") or {}).get("login") or "").lower()
                         if pr.get("draft") or author in [b.lower() for b in CFG["ignore_authors"]]:
                             continue
                         sha = pr["head"]["sha"]
+                        op = "marker"
                         if not existing_marker(repo, pr["number"], sha):
+                            op = "enqueue"
                             enqueue(repo, pr["number"], sha, "reconcile")
                         else:
+                            op = "merge"
                             maybe_merge(repo, pr["number"])
                 # ORDER IS LOAD-BEARING: sqlite3.Error must be caught ABOVE Exception. The state
                 # store is not repo-scoped, so its failure is fatal to the CYCLE - swallowing it
@@ -1642,8 +1661,9 @@ def reconciler():
                     # CFG["repos"] used to be skipped for the cycle, silently (nothing alerted on
                     # last_reconcile). Repo isolation is NOT PR isolation - the remaining PRs of
                     # THIS repo are still skipped until the next cycle, which is why the log
-                    # names the repo.
-                    log(f"reconcile {repo}: {e}")
+                    # carries the operation and the PR it stopped at, not just the repo.
+                    where = f"{repo}#{at_pr}" if at_pr is not None else repo
+                    log(f"reconcile {where} [{op}]: {e}")
                 results[repo] = failed
             retire_closed_quarantines()
             commit_sweep(results, time.time())

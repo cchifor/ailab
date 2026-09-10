@@ -1575,7 +1575,33 @@ def _pr(number, sha="a" * 40, login="human", draft=False):
             "head": {"sha": sha}}
 
 
-def _sweep(m, failing=(), marker_raises=(), cleanup_raises=False, enqueue_exc=None):
+class _FaultyConn:
+    """A real connection that fails at a chosen point INSIDE commit_sweep().
+
+    The atomicity tests are worthless without this: faulting before commit_sweep() runs proves
+    only that an unreached function writes nothing, which is true of a broken implementation too.
+    Verified — with the faults injected here, flipping db() to isolation_level=None (autocommit)
+    turns these tests RED, while the pre-commit faults alone leave them green."""
+
+    def __init__(self, real, fail_sql=None, fail_on_commit=False):
+        self._real, self._fail_sql, self._fail_commit = real, fail_sql, fail_on_commit
+
+    def execute(self, sql, *a):
+        if self._fail_sql is not None and self._fail_sql(sql, a[0] if a else ()):
+            raise sqlite3.OperationalError("injected write failure")
+        return self._real.execute(sql, *a)
+
+    def commit(self):
+        if self._fail_commit:
+            raise sqlite3.OperationalError("injected commit failure")
+        return self._real.commit()
+
+    def close(self):
+        return self._real.close()
+
+
+def _sweep(m, failing=(), marker_raises=(), cleanup_raises=False, enqueue_exc=None,
+           enqueue_exc_repo=None, fail_sql=None, fail_on_commit=False):
     """Run ONE reconciler() pass. `failing` repos raise on their pulls listing; repos in
     `marker_raises` instead fail later in the body (existing_marker), which is the case a
     guard around the listing call ALONE would miss."""
@@ -1591,7 +1617,7 @@ def _sweep(m, failing=(), marker_raises=(), cleanup_raises=False, enqueue_exc=No
         return False
 
     def enqueue(repo, pr, sha, source):
-        if enqueue_exc is not None:
+        if enqueue_exc is not None and (enqueue_exc_repo is None or repo == enqueue_exc_repo):
             raise enqueue_exc
         calls.append(repo)
 
@@ -1603,12 +1629,21 @@ def _sweep(m, failing=(), marker_raises=(), cleanup_raises=False, enqueue_exc=No
         if secs == m.CFG["reconcile_s"]:
             raise _StopLoop
 
+    real_db = m.db
+
+    def db():
+        c = real_db()
+        if fail_sql is None and not fail_on_commit:
+            return c
+        return _FaultyConn(c, fail_sql, fail_on_commit)
+
     calls = []
     with mock.patch.object(m, "api", api), \
             mock.patch.object(m, "existing_marker", existing_marker), \
             mock.patch.object(m, "enqueue", enqueue), \
             mock.patch.object(m, "maybe_merge", lambda *a, **kw: None), \
             mock.patch.object(m, "retire_closed_quarantines", cleanup), \
+            mock.patch.object(m, "db", db), \
             mock.patch("time.sleep", sleep):
         try:
             m.reconciler()
@@ -1729,6 +1764,38 @@ class ReconcileAtomicityTest(unittest.TestCase):
         self.assertEqual(_meta(self.m)[self.m.REPO_FAILED_PREFIX + "o/a"], "1")  # unchanged
         self.assertEqual(_meta(self.m)["last_reconcile"], self.before["last_reconcile"])
 
+    def test_a_later_repo_failing_after_an_earlier_one_recovered_publishes_neither(self):
+        # o/a recovers, o/b then kills the cycle on the state store. Publishing per repo would
+        # export o/a=0 under the OLD timestamp; the whole cycle must be discarded instead.
+        _sweep(self.m, enqueue_exc=sqlite3.OperationalError("database is locked"),
+               enqueue_exc_repo="o/b")
+        self.assertEqual(_meta(self.m), self.before)
+
+    # --- faults INSIDE commit_sweep(): the three that actually pin the transaction ------------
+    # Without these the suite passes even with db() flipped to autocommit (verified).
+
+    def test_a_failure_on_a_later_gauge_write_rolls_back_the_earlier_ones(self):
+        # o/a's recovery (1 -> 0) is written first, then o/b's write dies. If the earlier INSERT
+        # were already durable, o/a would read 0 with the old timestamp: an alert clearing with
+        # no completed sweep behind it.
+        def fail_second_gauge(sql, params):
+            return ("INSERT OR REPLACE INTO meta" in sql
+                    and params and str(params[0]).endswith("o/b"))
+        _sweep(self.m, fail_sql=fail_second_gauge)
+        self.assertEqual(_meta(self.m), self.before)
+
+    def test_a_failure_on_the_timestamp_write_rolls_back_every_gauge(self):
+        # 'last_reconcile' is INLINE in that statement's SQL, not a bound parameter — matching on
+        # params[0] silently never fires and the test passes while injecting nothing.
+        def fail_timestamp(sql, params):
+            return "INSERT OR REPLACE INTO meta VALUES('last_reconcile'" in sql
+        _sweep(self.m, fail_sql=fail_timestamp)
+        self.assertEqual(_meta(self.m), self.before)
+
+    def test_a_failure_at_commit_leaves_the_previous_snapshot_intact(self):
+        _sweep(self.m, fail_on_commit=True)
+        self.assertEqual(_meta(self.m), self.before)
+
 
 class ReconcileMetricsTest(unittest.TestCase):
     """The gauge has to actually reach the textfile.
@@ -1768,6 +1835,40 @@ class ReconcileMetricsTest(unittest.TestCase):
         # Fresh database, no sweep yet: absent is honest, 0 would be a lie that reads "clean".
         ex = _exported(self.m)
         self.assertNotIn('reviewbot_reconcile_repo_failed{persona="test",repo="o/a"}', ex)
+
+    def test_a_repo_name_with_a_quote_does_not_corrupt_the_textfile(self):
+        # repo is the first FREE-FORM label value this exporter emits. node_exporter rejects the
+        # whole textfile on one malformed line, so an unescaped `"` would delete every reviewbot
+        # metric on the host — not merely this series.
+        odd = 'o/we"ird\\slash'
+        m = load(self.tmp.name, repos=[odd])
+        _sweep(m)
+        m.write_metrics()
+        text = pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8")
+        line = [ln for ln in text.splitlines() if "reconcile_repo_failed" in ln][0]
+        self.assertIn(r'repo="o/we\"ird\\slash"', line)
+        # Every emitted line must still be one metric with exactly one value.
+        for ln in text.splitlines():
+            if ln.strip():
+                self.assertRegex(ln, r"^[a-zA-Z_:][a-zA-Z0-9_:]*(\{.*\})? -?[0-9.eE+]+$")
+
+
+class AllowlistDefaultsTest(unittest.TestCase):
+    """Guards the SHIPPED allowlist, not a synthetic one.
+
+    The behavioural enqueue tests use repos=["o/kept"], so restoring cchifor/review-bot-fixture to
+    the role defaults would leave them green. This is the test that would actually go red."""
+
+    def test_the_retired_fixture_is_not_in_the_role_defaults(self):
+        import re
+        text = (ROOT / "ansible" / "roles" / "pr_reviewer" / "defaults" / "main.yml").read_text(
+            encoding="utf-8")
+        block = re.search(r"^pr_reviewer_repos:\n((?:\s+-\s+\S+\n)+)", text, re.M)
+        self.assertIsNotNone(block, "pr_reviewer_repos block not found")
+        repos = re.findall(r"-\s+(\S+)", block.group(1))
+        self.assertNotIn("cchifor/review-bot-fixture", repos)
+        self.assertEqual(repos, ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
+                                 "cchifor/agentforge-platform"])
 
 
 class ReconcileAdmissionTest(unittest.TestCase):
