@@ -46,6 +46,19 @@
     group: "{{ dev_worker_agent_user }}"
     mode: "0700"
 
+# ---- who owns ~/.tep/kubeconfig (ADR 0021) -------------------------------------------------------
+# The SOPS writer below and openbao-agent's template stanza write the SAME path, and two writers of
+# one credential file is a silent flapping bug: whichever ran last wins, and they can hold different
+# token generations. The durable marker /etc/openbao-agent/renders-kubeconfigs is the single answer,
+# written by tasks/openbao.yml only after that host's KV pre-flight passed.
+#
+# Stat'ed here rather than reusing openbao.yml's fact on purpose: this file has its own tag, so a
+# `-t tep` run would not have that fact and would silently fall through to writing the file.
+- name: Check whether openbao-agent owns this host's kubeconfigs
+  ansible.builtin.stat:
+    path: /etc/openbao-agent/renders-kubeconfigs
+  register: tep_kubeconfig_marker
+
 - name: Render the namespace-scoped tep kubeconfig
   ansible.builtin.template:
     src: tep-kubeconfig.j2
@@ -54,6 +67,7 @@
     group: "{{ dev_worker_agent_user }}"
     mode: "0600"
   when:
+    - not tep_kubeconfig_marker.stat.exists # openbao-agent owns it once this host has cut over
     - tep_tokens_stat.stat.exists
     - tep_tokens is defined
     - inventory_hostname in tep_tokens
