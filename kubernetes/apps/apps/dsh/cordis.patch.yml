@@ -309,3 +309,33 @@
     permissionMode: approve-for-me
     env:
       CODEX_API_KEY: !!js process.env.CODEX_API_KEY
+
+# ---------------------------------------------------------------------------
+# OPENBAO-BACKED CREDENTIAL RESOLUTION. Replaces dsh-base's `credentials` row.
+#
+# REPLACES, and it has to. CredentialProvider is a cordis Service constructed
+# as `super(ctx, "credentials")` -- a SINGLETON service name -- so a second row
+# would collide rather than layer. This is an override of the same id, and the
+# file it names SUBCLASSES the shipped provider: the record half (which stores
+# `client-connection/browser-session`, the browser cookie signing secret), the
+# document lock, the watcher and the launch-environment layering are all
+# inherited unchanged. Only reference resolution is overridden. See the header
+# of openbao-credentials.mjs.
+#
+# A FILE, not an npm package, for the reason searxng-search.mjs documents at
+# length: a row's `name:` resolves against /dsh-home/profiles/web/, whose
+# node_modules is a symlink farm of dsh's OWN closure. Naming a package that is
+# not in that closure is a FAIL-LOUD boot crash on a 1-replica Recreate
+# Deployment, not a degraded feature.
+#
+# CONFIG IS RESTATED IN FULL. A patch REPLACES a row's config rather than
+# merging into it, so `dir` and `field` here do not "add to" whatever dsh-base
+# set -- they are the whole config. dsh-base's row carries none, so nothing is
+# lost; both keys are given explicitly anyway rather than relying on the file's
+# own defaults, because this is the layer an operator reads to find out where
+# the credentials come from.
+- id: credentials
+  name: './openbao-credentials.mjs'
+  config:
+    dir: /dsh-credentials
+    field: value
