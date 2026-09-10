@@ -85,9 +85,9 @@ work this plan does not currently specify. B gets it for free — §3 already re
 |---|---|---|
 | OpenBao is the source of truth | yes | yes |
 | rotation reaches every machine, no manual step | yes | yes |
-| a newly added credential appears | yes, via prefix LIST | yes |
+| a newly added credential appears | yes, via prefix LIST | yes — **only** under §2's prefix scoping |
 | reaches a **running** dsh | yes — the document is watched | yes |
-| plugin code | **none** | 11 abstract methods, alpha interface |
+| plugin code | **none** | 9 abstract methods, alpha interface |
 | what the **dsh container** holds | only the rendered credentials | a **Bao token** for every path its role allows |
 | rotation latency | agent's poll/render interval | per credential resolution |
 | behaviour during an OpenBao outage | last render keeps working | fails unless cached (§5) |
@@ -127,9 +127,12 @@ No community equivalent.
 `- id: credentials / name: '@deepseek-ai/dsh-credentials-local'`. Adding a provider therefore means
 **overriding that row**, never inserting a second one; two would collide on the service name.
 
-**Eleven abstract methods**: `resolve`, `describe`, `set`, `unset` (reference half); `readRecord`,
-`describeRecord`, `listRecords`, `modifyRecord`, `deleteRecord` (record half); plus the protected
-`notifyUpdated` / `notifyRecordUpdated`.
+**Nine abstract methods**, verified against `@deepseek-ai/dsh-credentials@0.1.5-alpha.2`
+(`lib/types/index.d.ts` declares exactly nine `abstract` members): `resolve`, `describe`, `set`,
+`unset` (reference half); `readRecord`, `describeRecord`, `listRecords`, `modifyRecord`,
+`deleteRecord` (record half). `notifyUpdated` / `notifyRecordUpdated` are **protected concrete**
+helpers the subclass calls, not members it must implement — eleven members in total, nine of them
+to write.
 
 ---
 
@@ -154,14 +157,41 @@ provider-managed layer; `-e` still overrides for debugging; OpenBao is the norma
 independently arrived at the same shape — *"env override → explicitly mapped, read-only OpenBao
 references"*.
 
-**Mapping is explicit, never inferred.** A reference name maps to a path and field in config:
+**Scope is declared; names are not.** The draft mapped each reference to one path and field:
 
 ```yaml
 map:
-  LITELLM_API_KEY: estate/litellm#master_key
+  LITELLM_API_KEY: estate/litellm#master_key          # REJECTED -- see below
 ```
 
-Deriving a path from a reference name would let a settings edit reach an arbitrary OpenBao path.
+**That form cannot satisfy the operator constraint**, and the contradiction was mine: a credential
+added in OpenBao would still need this mapping distributed to every machine before any agent could
+resolve it — the per-machine synchronisation step the constraint exists to remove. §0's table
+promised B automatic discovery while §2 made it impossible.
+
+The security property that per-name mapping was protecting is *"a settings edit must not be able to
+reach an arbitrary OpenBao path"*. **Prefix scoping preserves it without freezing the names.**
+Config declares authorised prefixes, and a reference resolves to a path derived **inside** one:
+
+```yaml
+scopes:
+  - prefix: af/dsh          # KV-v2 mount + prefix; data/ and metadata/ segments implied
+    field: value            # which field of the document carries the secret
+```
+
+`LITELLM_API_KEY` resolves at `af/data/dsh/LITELLM_API_KEY`, field `value`. Derivation is confined to
+operator-declared prefixes, so a settings edit still reaches nothing outside them, and a credential
+added under a declared prefix is resolvable everywhere with no config change. Constraints this
+carries:
+
+- **Reference names become path segments.** They must be validated against the KV path grammar and
+  rejected — never escaped, never silently rewritten — so a crafted reference cannot traverse out of
+  its prefix.
+- **Prefix order must be total and declared**, since two scopes could otherwise both offer a name.
+- **B's discovery is the resolver's, not the template's.** `listRecords`/`describe` need `list` on
+  `af/metadata/dsh/` at request time; the §9 template test exercises the agent's LIST, which is a
+  *different* code path and does not establish the resolver's. Both need testing.
+- **A uses the same layout**, so this is shared groundwork rather than B-only cost.
 
 ---
 
@@ -270,6 +300,8 @@ Largely codex's list; each is a thing that has to be shown, not argued:
 
 - the prefix-LIST template renders every key under `af/dsh/` and picks up a **newly added** one with
   no template edit — the operator constraint, shown rather than argued
+- for B, the **resolver** discovers the same added key with no config change, and a reference name
+  crafted to traverse outside its declared prefix is rejected rather than escaped
 - **consumer coverage enumerated**: every credential user that goes through the service, and every
   one that captures a value at registration and bypasses it (§0). Whatever freshness is promised is
   promised only for the first set.
@@ -296,7 +328,9 @@ Largely codex's list; each is a thing that has to be shown, not argued:
    promise and is required before B can be specified, not after.
 4. Prove the prefix-LIST template renders an `af/dsh/*` layout and picks up an added key, with
    deletion, empty-prefix and permission-loss behaviour observed rather than assumed. Both options
-   need this layout, so it is not throwaway work.
+   need this layout, so it is not throwaway work. For B this is **not sufficient**: the resolver's
+   own discovery (§2) is a separate code path and needs its own test, including a reference name
+   that tries to traverse out of its declared prefix.
 5. If A: template `.credentials.yaml`, stop populating `LITELLM_API_KEY`, close or visibly disable
    the UI write path, then the §8 items that apply.
 6. If B: spike the seam on a fresh home first (row override + `resolve` + cold boot), then implement
