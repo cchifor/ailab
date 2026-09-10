@@ -274,3 +274,38 @@
     roots:
       - path: /dsh-teams
         trust: system
+
+# ---------------------------------------------------------------------------
+# THE CODEX CLI PROVIDER (architecture A). The dsh-subagent-codex Bundle the install Job stages
+# inserts this row DORMANT on the host plane; this configures it. Registering a provider grants
+# no agent anything -- a preset is what exposes the matching tool (see agent-teams/team-review),
+# and every such row currently ships `disabled: true`.
+#
+# permissionMode: approve-for-me, NOT `never`. This is the correction a review round forced, and
+# it is worth stating plainly: `never` governs APPROVAL PROMPTING, not sandboxing -- it sets
+# approvalPolicy: never and OMITS the sandbox field, leaving codex's own default. Only
+# `approve-for-me` PINS one (`sandbox: workspace-write`, approvalPolicy: on-request,
+# approvalsReviewer: auto_review).
+#
+# BUT auto_review IS NOT AUTO-DENY. It routes permission requests through codex's own automatic
+# reviewer WITHOUT a human, and that reviewer can ALLOW. Nobody should read this row as a
+# containment boundary: containment here is the pod, its NetworkPolicy and the workspace root.
+# Before any team enables the tool, characterise what auto_review actually grants under
+# workspace-write by delegating a task that deliberately requests an out-of-sandbox operation.
+# `dangerously-bypass-approvals-and-sandbox` is never selected.
+#
+# model: pinned to the estate's codex model. ADR 0019 finding (b): gpt-6-astra needs codex
+# >= 0.153.0, and the Bundle vendors 0.153.4 -- verified executing in a container, so the child
+# and the estate's sandbox images agree on the CLI version for once.
+#
+# env: the credential must be listed EXPLICITLY. The provider scrubs credential-shaped ambient
+# variables from the parent environment before applying this block, so CODEX_API_KEY does not
+# leak in by accident -- and does not arrive at all unless named here.
+- id: subagent-codex
+  name: '@deepseek-ai/dsh-subagent-codex'
+  config:
+    providerName: codex
+    model: gpt-6-astra
+    permissionMode: approve-for-me
+    env:
+      CODEX_API_KEY: !!js process.env.CODEX_API_KEY

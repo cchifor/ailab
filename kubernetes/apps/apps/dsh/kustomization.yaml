@@ -21,6 +21,9 @@ configMapGenerator:
       - settings.seed.yaml
       - fix-profile.js
       - reconcile-provider.js
+      # Sets dsh.profile.bundles from the closure actually projected. NOT a merge: a bundle
+      # named there but absent throws at profile load and crash-loops the pod.
+      - reconcile-bundles.js
       - cordis.patch.yml
       - searxng-search.mjs   # the web SEARCH provider itself (see the file for why not npm)
       # User-global agent instructions, installed to $DSH_HOME/AGENTS.md. COMPLEMENTARY to the
@@ -46,6 +49,10 @@ configMapGenerator:
       # composition file's stamp, and sessions already joined keep the generation they run.
       - agent-teams/team-solo.preset.yml
       - agent-teams/team-solo.agent.cordis.yml
+      - agent-teams/team-conductor.preset.yml
+      - agent-teams/team-conductor.agent.cordis.yml
+      - agent-teams/team-review.preset.yml
+      - agent-teams/team-review.agent.cordis.yml
 
 # ONE source of truth for the version. It has to appear in the Deployment twice (the initContainer
 # that waits for the tree, and the container that execs it), and a hand-maintained triplicate is a
@@ -55,22 +62,38 @@ configMapGenerator:
 replacements:
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc
+      name: dsh-install-0-1-5-alpha-2-glibc-ps1
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_VERSION].value
     targets:
       - select: { kind: Deployment, name: dsh }
         fieldPaths:
           - spec.template.spec.initContainers.[name=wait-for-install].env.[name=DSH_VERSION].value
+          - spec.template.spec.initContainers.[name=seed-settings].env.[name=DSH_VERSION].value
           - spec.template.spec.containers.[name=dsh].env.[name=DSH_VERSION].value
+  # DSH_PLUGINSET travels the same way, and for a sharper reason than the other two. It selects
+  # the STAGING PATH (/app/profiles/${DSH_VERSION}-${DSH_BUILD}-${DSH_PLUGINSET}/web) that the
+  # Job writes and seed-settings reads. Hand-maintained on both sides, bumping it in the Job
+  # alone would leave the Deployment looking for a closure nobody staged -- and that failure is
+  # SILENT: the pod takes the no-closure branch, reconciles to shipped bundles only, and boots
+  # perfectly well with the providers simply absent. One source, derived copies.
+  - source:
+      kind: Job
+      name: dsh-install-0-1-5-alpha-2-glibc-ps1
+      fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_PLUGINSET].value
+    targets:
+      - select: { kind: Deployment, name: dsh }
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=seed-settings].env.[name=DSH_PLUGINSET].value
   # DSH_BUILD travels the same way, for the same reason. The install directory is
   # /app/${DSH_VERSION}-${DSH_BUILD}, so a Deployment carrying a different build tag than the Job
   # would wait forever on a path the installer never creates. One source, three copies, derived.
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc
+      name: dsh-install-0-1-5-alpha-2-glibc-ps1
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_BUILD].value
     targets:
       - select: { kind: Deployment, name: dsh }
         fieldPaths:
           - spec.template.spec.initContainers.[name=wait-for-install].env.[name=DSH_BUILD].value
+          - spec.template.spec.initContainers.[name=seed-settings].env.[name=DSH_BUILD].value
           - spec.template.spec.containers.[name=dsh].env.[name=DSH_BUILD].value

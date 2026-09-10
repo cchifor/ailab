@@ -16,7 +16,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dsh-install-0-1-5-alpha-2-glibc
+  name: dsh-install-0-1-5-alpha-2-glibc-ps1
   annotations:
     # A Job's spec.template is IMMUTABLE, so any edit Flux applies to this object under the SAME
     # name is rejected with "field is immutable" — which fails the whole dsh Kustomization, not
@@ -66,6 +66,16 @@ spec:
             # check below is per-directory, so without a distinct path npm would simply skip the
             # reinstall and the mismatch would be silent. Bump this on any base-image libc change.
             - { name: DSH_BUILD, value: "glibc" }
+            # The profile-plugin set, hashed into the staging path. WITHOUT IT a provider change
+            # silently overwrites the same directory and a rollback has nowhere to roll back to:
+            # the closure this revision names and the closure on disk would be the same path with
+            # different contents. Bump whenever DSH_PLUGINS below changes.
+            - { name: DSH_PLUGINSET, value: "ps1" }
+            # The Profile Bundles installed into the web profile. Each registers a DORMANT
+            # provider on the host plane; a preset is what grants any agent the matching tool
+            # (see agent-teams/). Space-separated, version-pinned to DSH_VERSION deliberately --
+            # these ship against one harness release and the peer set is not independent.
+            - { name: DSH_PLUGINS, value: "@deepseek-ai/dsh-subagent-codex@0.1.5-alpha.2" }
             - { name: npm_config_cache, value: /app/.npm }   # shared across versions; harmless
           command: ["/bin/sh", "-c"]
           args:
@@ -135,16 +145,172 @@ spec:
               # version wrote it beside the install, which meant an OOM-killed or evicted Job could
               # leave a marker over a half-written node_modules and every later run would skip the
               # repair. Verify-then-mark, never mark-then-verify.
+              # SKIP THE INSTALL, DO NOT EXIT. This used to `exit 0` when the version was
+              # already present -- the normal case on an existing estate -- and the plugin
+              # staging phase below was appended after it, so a plugins-only change could never
+              # re-stage: the Job would exit before reaching it. That is the THIRD time this
+              # file family has been bitten by work placed after an early return (the uv block
+              # above is deliberately placed BEFORE this branch for the same reason, and #613's
+              # AGENTS.md install shipped inert inside a first-boot-only branch). Structure it
+              # so nothing important lives downstream of a conditional exit.
               if [ -f "$MARKER" ] && [ -x "${DEST}/node_modules/.bin/dsh" ]; then
                 echo "already installed: ${DSH_VERSION}"
-                exit 0
+              else
+                [ -f "$MARKER" ] && echo "marker present but binary missing -- reinstalling" && rm -f "$MARKER"
+                echo "installing @deepseek-ai/dsh@${DSH_VERSION} into ${DEST}"
+                npm install --prefix "$DEST" --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}"
+                test -x "${DEST}/node_modules/.bin/dsh"
+                touch "$MARKER"
+                echo "installed:"; "${DEST}/node_modules/.bin/dsh" --version || true
               fi
-              [ -f "$MARKER" ] && echo "marker present but binary missing -- reinstalling" && rm -f "$MARKER"
-              echo "installing @deepseek-ai/dsh@${DSH_VERSION} into ${DEST}"
-              npm install --prefix "$DEST" --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}"
-              test -x "${DEST}/node_modules/.bin/dsh"
-              touch "$MARKER"
-              echo "installed:"; "${DEST}/node_modules/.bin/dsh" --version || true
+
+              # ---- profile plugin closure (WP-3) ---------------------------------------------
+              # Builds the Profile Bundles on THIS volume, which has egress and is RWX. The
+              # runtime pod's seed-settings then PROJECTS the result onto the profile directory,
+              # which lives on dsh-home (RWO local-path) and is NOT mounted here -- deliberately,
+              # see the header: mounting it could pin this Job to a different node than the
+              # Deployment and deadlock the volume.
+              #
+              # WHY NOT `dsh plugin --profile web add`, the supported CLI: it runs pnpm with cwd =
+              # the profile directory, which is exactly the volume this Job must not mount. The
+              # CLI is a thin pnpm forwarder plus a bundles-list reconcile, so this reproduces
+              # both halves against a staged copy. VERIFIED end to end in a container
+              # (plans/2026-09-10-wp3-profile-bundle-spike.md, SPIKE: GO).
+              #
+              # A FAILURE HERE IS NOT FATAL. dsh must boot without the providers -- a bundle
+              # named in dsh.profile.bundles but absent throws at profile load and crash-loops a
+              # 1-replica Recreate Deployment. seed-settings only lists what it actually
+              # projected, so the worst case is "no codex tool", not "no dsh".
+              STAGE="/app/profiles/${DSH_VERSION}-${DSH_BUILD}-${DSH_PLUGINSET}/web"
+              # The TERMINAL staging signal, read by seed-settings. It lives in the parent of
+              # STAGE because a re-stage does `rm -rf "$STAGE"`, and a signal that vanishes
+              # mid-flight is worse than none: the Deployment could not tell "still working"
+              # from "never started".
+              #
+              # WHY IT EXISTS. wait-for-install gates on the DSH install marker, which this Job
+              # writes BEFORE staging. Without a second signal, the first rollout of a new
+              # plugin set can reach seed-settings while staging is still running, project
+              # nothing, and never learn that staging later succeeded -- that pod stays without
+              # its providers until something else rolls it. Three states, all terminal:
+              #   ok     -- closure staged and verified; project it
+              #   failed -- staging ran and did not work; stop WAITING immediately. A closure
+              #             from an earlier good run is still marked and still valid, so the
+              #             Deployment projects that rather than nothing; only a run with no
+              #             usable closure at all degrades to shipped bundles.
+              #   none   -- this revision declares no plugins; retire and degrade
+              SIGNAL="/app/profiles/${DSH_VERSION}-${DSH_BUILD}-${DSH_PLUGINSET}/.staging-state"
+              mkdir -p "$(dirname "$SIGNAL")" || true
+              if [ -z "${DSH_PLUGINS:-}" ]; then
+                # RETIRE, do not just skip. An empty plugin list means "no deployment bundles",
+                # and leaving a previously marked closure in place would let the Deployment go on
+                # projecting it -- the pod would run providers this revision does not name.
+                if [ -f "${STAGE}/.installed" ]; then
+                  echo "DSH_PLUGINS is empty -- retiring the staged closure at ${STAGE}"
+                  rm -f "${STAGE}/.installed" "${STAGE}/.specs" || true
+                fi
+                printf 'none' > "$SIGNAL" || true
+              else
+                SMARK="${STAGE}/.installed"
+                # RE-VERIFY a marked closure rather than trusting the marker. The staging path
+                # is keyed on DSH_VERSION/BUILD/PLUGINSET, NOT on DSH_PLUGINS -- so editing the
+                # plugin list without bumping DSH_PLUGINSET would leave an old marked closure
+                # eligible for projection, and the pod would run providers this revision does
+                # not name. Cheap to check, and it turns that mistake into a re-stage instead of
+                # silent drift.
+                # The recorded spec list IS the identity of a staged closure. Testing only that
+                # each package name exists misses three real changes -- a VERSION bump on an
+                # existing name, a package REMOVED from the set, and an emptied DSH_PLUGINS --
+                # all of which leave the old marked closure eligible, and the reconciler would
+                # then happily republish bundles this revision no longer asks for, because they
+                # are still on disk. Comparing the exact requested spec string catches all of
+                # them, and costs one file.
+                stale=0
+                SPECFILE="${STAGE}/.specs"
+                if [ -f "$SMARK" ]; then
+                  if [ ! -f "$SPECFILE" ] || [ "$(cat "$SPECFILE")" != "$DSH_PLUGINS" ]; then
+                    stale=1
+                    echo "staged closure was built for a different plugin set -- re-staging"
+                  else
+                    for spec in $DSH_PLUGINS; do
+                      name="${spec%@*}"
+                      [ -f "${STAGE}/node_modules/${name}/package.json" ] || stale=1
+                    done
+                    [ "$stale" = 1 ] && echo "staged closure is incomplete -- re-staging"
+                  fi
+                fi
+                if [ -f "$SMARK" ] && [ "$stale" = 0 ]; then
+                  echo "profile plugin closure already staged: ${STAGE}"
+                  printf 'ok' > "$SIGNAL" || true
+                else
+                  # Clear the signal for the duration of the re-stage, so a pod that starts
+                  # while this runs waits rather than projecting a closure being rewritten.
+                  rm -f "$SIGNAL" || true
+                  echo "staging profile plugins into ${STAGE}: ${DSH_PLUGINS}"
+                  # EVERY step is guarded into `ok`. Under `set -eu` an unguarded rm/mkdir/cp/
+                  # touch aborts the whole Job, and this phase is OPTIONAL by design: its only
+                  # duty is the providers, and refusing to install dsh because a scratch copy
+                  # failed would be the wrong trade -- the same reasoning the uv block above
+                  # already applies to itself.
+                  ok=1
+                  rm -rf "$STAGE" || ok=0
+                  [ "$ok" = 1 ] && { mkdir -p "$STAGE" || ok=0; }
+                  # The profile's OWN manifest and pnpm settings, copied VERBATIM from a scratch
+                  # profile this Job initialises. pnpm-workspace.yaml carries nodeLinker: hoisted
+                  # (which is what makes the closure relocatable at all) AND
+                  # minimumReleaseAgeExclude, which pnpm needs to accept -alpha builds. Writing
+                  # our own would work today and fail on the next alpha bump.
+                  if [ "$ok" = 1 ]; then
+                    rm -rf /app/.scratch-home || true
+                    DSH_HOME=/app/.scratch-home "${DEST}/node_modules/.bin/dsh" \
+                      --profile web --dump-config >/dev/null 2>&1 || true
+                    SP=/app/.scratch-home/profiles/web
+                    # BOTH files, checked together: an earlier version tested only
+                    # pnpm-workspace.yaml and then copied package.json unguarded, so a
+                    # half-initialised scratch profile killed the Job outright.
+                    if [ -f "$SP/pnpm-workspace.yaml" ] && [ -f "$SP/package.json" ]; then
+                      cp "$SP/package.json" "$STAGE/package.json" || ok=0
+                      [ "$ok" = 1 ] && { cp "$SP/pnpm-workspace.yaml" "$STAGE/pnpm-workspace.yaml" || ok=0; }
+                      corepack enable pnpm >/dev/null 2>&1 || true
+                      # shellcheck disable=SC2086
+                      [ "$ok" = 1 ] && { (cd "$STAGE" && pnpm add $DSH_PLUGINS) || ok=0; }
+                    else
+                      echo "WARNING: could not initialise a scratch profile to copy pnpm settings from"
+                      ok=0
+                    fi
+                  fi
+                  # VERIFY-THEN-MARK, the same discipline as .installed above: prove every
+                  # declared bundle resolved before the marker exists, or a half-written closure
+                  # gets projected as if complete.
+                  if [ "$ok" = 1 ]; then
+                    for spec in $DSH_PLUGINS; do
+                      # Strip the version: %@* removes the SHORTEST @-suffix, which is right for
+                      # both `pkg@1.2.3` and the scoped `@scope/pkg@1.2.3` this estate uses.
+                      name="${spec%@*}"
+                      if [ ! -f "${STAGE}/node_modules/${name}/package.json" ]; then
+                        echo "WARNING: ${name} did not resolve in the staged closure"; ok=0
+                      fi
+                    done
+                  fi
+                  # Record the exact spec list beside the marker, BEFORE the marker exists, so
+                  # a crash between the two leaves an unmarked (therefore unusable) closure
+                  # rather than a marked one with no identity.
+                  if [ "$ok" = 1 ]; then
+                    printf '%s' "$DSH_PLUGINS" > "$SPECFILE" || ok=0
+                  fi
+                  if [ "$ok" = 1 ]; then
+                    touch "$SMARK" || ok=0
+                  fi
+                  if [ "$ok" = 1 ]; then
+                    printf 'ok' > "$SIGNAL" || true
+                    echo "profile plugin closure staged: $(ls "${STAGE}/node_modules" | wc -l) entries"
+                  else
+                    printf 'failed' > "$SIGNAL" || true
+                    echo "WARNING: profile plugin staging FAILED -- dsh will boot WITHOUT these"
+                    echo "WARNING: providers -- their delegation tools simply do not register."
+                    rm -f "$SMARK" || true
+                  fi
+                fi
+              fi
           volumeMounts:
             - { name: app, mountPath: /app }
           securityContext:

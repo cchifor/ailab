@@ -51,3 +51,43 @@ llm-pi-ai:
         - id: qwen3-coder-30b-a3b-cloud
         - id: qwen3.5-122b-cloud
         - id: qwen3.8-flash-next-cloud
+    # ---------------------------------------------------------------------------------------
+    # THE CODEX ROUTE (architecture B) -- dsh's own agent loop running on the Codex model.
+    #
+    # This is NOT the Codex CLI. `dsh-subagent-codex` (a delegation provider, architecture A)
+    # spawns the real CLI as a one-shot leaf; this is the harness driving the Codex MODEL
+    # through its own loop, so the agent keeps dsh's tools, session lifecycle and delegation
+    # machinery. That is what makes "codex as conductor, qwen as workers" possible at all --
+    # the CLI provider cannot conduct anything (it rejects agentOptions, personas, tool
+    # filtering and depth, and returns final text only).
+    #
+    # `openai-codex` IS A SHIPPED CATALOG PROVIDER. dsh-llm-pi-ai depends on
+    # @earendil-works/pi-ai ^0.85.1, whose catalog ships it, spoken over
+    # `openai-codex-responses`.
+    #
+    # WHY apiKeyEnv WORKS ON AN OAUTH-ONLY PROVIDER. The catalog provider offers no api-key
+    # method, and pi-ai's resolveProviderAuth honours an explicit key only when the provider
+    # declares one -- so a naive profile is refused with `Provider is not configured` before
+    # any request goes out. dsh's adapter handles exactly this case: routeAuth() adds the
+    # harness api-key method BESIDE the catalog provider's own whenever the profile names a
+    # credential. A profile that names none still gets the honest refusal, because this
+    # adapter holds no OAuth store to fall back on. So naming a credential is REQUIRED here,
+    # not optional.
+    #
+    # CREDENTIAL + baseURL ARE DELIBERATELY UNSET. Two estate decisions have to be made first
+    # and neither belongs in a seed file:
+    #   * WHICH UPSTREAM. Straight to OpenAI, or through the AgentForge codex broker, which
+    #     already fronts the operator's Codex subscription and injects OAuth after verifying a
+    #     capability JWT (ADR 0019). The broker is the estate's answer to "a token must not sit
+    #     in a pod that executes model-authored code" -- which this pod does.
+    #   * THE WIRE DETAIL. ADR 0019 finding (b): codex POSTs {base_url}/responses WITHOUT
+    #     prepending /v1, so a broker/gateway base URL must itself END IN /v1 or every request
+    #     404s. That lesson was paid for once already.
+    # Until both are settled this provider is registered but unusable, which is the honest
+    # state -- exactly as the litellm provider above shipped before its key existed.
+    codex:
+      # apiKeyEnv: CODEX_API_KEY      # populated by the dsh-codex ExternalSecret; see openbao-eso.yaml
+      # baseURL: <broker or upstream, MUST end in /v1>
+      api: openai-codex-responses
+      models:
+        - id: gpt-6-astra
