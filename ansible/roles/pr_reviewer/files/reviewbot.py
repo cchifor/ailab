@@ -921,6 +921,13 @@ def _run_llm(title, desc, diff_text, rubric, started):
                 # more of a budget that is already gone. Fail straight through to the parker.
                 detail = llm_error_text(r.returncode, r.stdout, r.stderr)
                 raise RateLimited(detail, parse_reset(detail))
+            if r.returncode != 0:
+                # A primary failure that the fallback RESCUES is invisible today:
+                # llm_failures_total counts whole reviews, and a rescued review is not a
+                # failed one. reviewer-1 ran 4 days and 463 reviews entirely on its fallback
+                # (the `claude-fable-5` quota went at 2026-09-06 19:17 and never came back)
+                # with no metric, no alert and nothing but a per-run journal line to say so.
+                bump_meta("llm_primary_failed_total")
             if r.returncode != 0 and fb:
                 left = max(0.0, deadline - time.monotonic())
                 if left < CFG.get("llm_fallback_min_s", 60):
@@ -931,6 +938,7 @@ def _run_llm(title, desc, diff_text, rubric, started):
                 else:
                     log(f"primary model failed ({llm_error_text(r.returncode, r.stdout, r.stderr)}); "
                         f"retrying with fallback '{fb}' in the remaining {left:.0f}s")
+                    bump_meta("llm_fallback_used_total")
                     r = subprocess.run(wrap_sudo(claude_args(fb)), input=prompt,
                                        capture_output=True, text=True,
                                        timeout=left, cwd=workdir, env=env)
@@ -1040,7 +1048,12 @@ def maybe_merge(repo, pr):
     """Merge authority (operator-directed 2026-09-02): the reviewer SYSTEM merges only when
     every configured persona's review at the CURRENT head is verdict=clean, CI is green,
     the author is allowlisted, and no no-automerge label is set. One persona alone never
-    merges; third-party PRs are never merged."""
+    merges; third-party PRs are never merged.
+
+    Returns "verdicts" when the personas are not all clean at this head AND nothing else is
+    holding the PR - CI green, author allowlisted, no no-automerge label. The reconciler
+    tallies those into the merge_blocked gauges, so that "sole remaining blocker" reading is
+    what ReviewbotMergeBlocked pages on. Every other outcome returns None."""
     if not CFG.get("automerge") or posting_disabled():
         return
     try:
@@ -1053,13 +1066,36 @@ def maybe_merge(repo, pr):
         if any((l.get("name") or "").lower() == "no-automerge" for l in d.get("labels") or []):
             return
         head = d["head"]["sha"]
-        verdicts = persona_verdicts(repo, pr, head)
-        needed = CFG.get("merge_personas", [])
-        if not needed or any(verdicts.get(p) != "clean" for p in needed):
-            return
+        # CI IS CHECKED BEFORE THE VERDICT GATE, and the order is the whole point of the
+        # "verdicts" signal (reviewer-codex, round 1 of this PR). These two are both bare
+        # early returns, so swapping them cannot change what merges - but it decides what a
+        # held PR is REPORTED as. Classifying on verdicts first would put every PR with red
+        # or pending CI *and* a non-clean verdict into the merge_blocked gauge, and
+        # ReviewbotMergeBlocked would then page with a remedy ("fix the finding, or merge
+        # over it") that is not the actual blocker. Checked second, "verdicts" means the
+        # verdict gate is the SOLE remaining blocker, which is the only claim worth paging on:
+        # a red check is already visible in Gitea and owned by whoever broke it, whereas the
+        # verdict gate is the one that was invisible. Costs one extra status call per held PR
+        # per sweep - bounded, since only marker-bearing mergeable allowlisted PRs get here.
         st = api(f"/repos/{repo}/commits/{head}/status")
         if st.get("state") != "success":
             return
+        verdicts = persona_verdicts(repo, pr, head)
+        needed = CFG.get("merge_personas", [])
+        short = [p for p in needed if verdicts.get(p) != "clean"]
+        if not needed or short:
+            # VISIBILITY ONLY - the gate itself is unchanged. This return used to be silent,
+            # so a PR that was merge-ready but for a verdict was indistinguishable in the
+            # journal from one nobody had looked at: no line to grep, no series to alert on.
+            # ailab#616 and #619 each sat half a day that way while 19 sibling renovate PRs
+            # merged around them, and were found only by reading the PR list by hand. The
+            # branch-protection path below has always logged its 405; this is the same
+            # courtesy for the gate that actually holds most of them. One line per sweep,
+            # matching the `still needs approvals beyond ours` idiom directly below.
+            log(f"merge {repo}#{pr} held at {head[:9]}: "
+                + (", ".join(f"{p}={verdicts.get(p) or 'no review'}" for p in short)
+                   if needed else "no merge_personas configured"))
+            return "verdicts"
         try:
             api(f"/repos/{repo}/pulls/{pr}/merge", "POST",
                 {"Do": "merge", "head_commit_id": head})
@@ -1361,7 +1397,8 @@ def write_metrics():
                 "SELECT k,v FROM meta WHERE k IN ('llm_timeouts_total','llm_failures_total',"
                 "'llm_seconds','llm_seconds_max','llm_output_tokens','llm_output_tokens_max',"
                 "'reviews_full_total','reviews_partial_total','reviews_skipped_total',"
-                "'findings_dropped_total','llm_rate_limited_total')")}
+                "'findings_dropped_total','llm_rate_limited_total','merge_blocked_prs',"
+                "'merge_blocked_seconds','llm_primary_failed_total','llm_fallback_used_total')")}
             # SEPARATE read, deliberately: the dict above is an explicit key whitelist, so a new
             # metric added only to the (key, metric) render list below would export 0 forever.
             # The per-repo results are keyed by repo name, which is config - hence a prefix scan.
@@ -1398,7 +1435,18 @@ def write_metrics():
                             ("llm_seconds", "reviewbot_llm_seconds_last"),
                             ("llm_seconds_max", "reviewbot_llm_seconds_max"),
                             ("llm_output_tokens", "reviewbot_llm_output_tokens_last"),
-                            ("llm_output_tokens_max", "reviewbot_llm_output_tokens_max")):
+                            ("llm_output_tokens_max", "reviewbot_llm_output_tokens_max"),
+                            # A PR the reviewer system could merge except that the personas
+                            # are not all clean at the current head, and how long the oldest
+                            # such block has stood. Both are recomputed per sweep, so they
+                            # fall on their own - see commit_sweep.
+                            ("merge_blocked_prs", "reviewbot_merge_blocked_prs"),
+                            ("merge_blocked_seconds", "reviewbot_merge_blocked_seconds"),
+                            # The fallback model is a safety net, and a net in CONTINUOUS use
+                            # means the primary is gone. Counted apart from llm_failures_total,
+                            # which by design does not see a review the fallback rescued.
+                            ("llm_primary_failed_total", "reviewbot_llm_primary_failed_total"),
+                            ("llm_fallback_used_total", "reviewbot_llm_fallback_used_total")):
             try:
                 lines.append(f'{metric}{{persona="{_persona}"}} '
                              f'{float(gauges.get(key, 0)):.0f}')
@@ -1603,7 +1651,7 @@ def retire_closed_quarantines():
             log(f"retired {n} quarantine(s) for closed {repo}#{pr}")
 
 
-def commit_sweep(results, now):
+def commit_sweep(results, now, merge_blocked=None):
     """Publish ONE sweep atomically: every repo's 0/1 result AND `last_reconcile`, in a single
     transaction. Errors PROPAGATE - unlike bump_meta()/record_gauge(), which swallow everything
     because they run inside a worker exception handler and a `finally`. Here a swallowed failure
@@ -1614,13 +1662,42 @@ def commit_sweep(results, now):
     B exports A's gauge as 0 while the stamp stays 100 - an operator watches a repo alert clear
     with no completed sweep behind it. Same for a cleanup failure, which would land every gauge
     under the old stamp. So a cycle is all-or-nothing: on any failure the PREVIOUS completed
-    snapshot survives intact and the outer handler retries."""
+    snapshot survives intact and the outer handler retries.
+
+    `merge_blocked` is {repo: [(pr, head_sha)]} for the PRs this sweep found held by the
+    verdict gate. RECOMPUTED FROM SCRATCH EVERY SWEEP rather than accumulated, which is what
+    keeps it from latching the way a cumulative counter would: a PR that merges, closes or
+    gets a new head simply stops appearing, with no reaper to write. Passing None leaves both
+    gauges untouched (the sweep did not measure them); passing {} publishes a clean zero."""
     with db_lock:
         c = db()
         try:
             for repo, failed in results.items():
                 c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)",
                           (REPO_FAILED_PREFIX + repo, str(int(failed))))
+            if merge_blocked is not None:
+                n, oldest = 0, 0.0
+                for repo, held in merge_blocked.items():
+                    for pr, head in held:
+                        n += 1
+                        # Age is measured from when THIS persona's review landed on the head
+                        # that is still current - the only "blocked since" the state store
+                        # actually knows. It is a lower bound (the peer may have finished
+                        # earlier), and it resets on its own when the author pushes, because
+                        # a new head has no done row yet. A PR held with no done row of ours
+                        # (the peer reviewed, we have not) counts toward n but contributes no
+                        # age, which is right: we cannot date a block we have not reached.
+                        row = c.execute(
+                            "SELECT MAX(updated) FROM jobs WHERE repo=? AND pr=? "
+                            "AND head_sha=? AND state='done'", (repo, pr, head)).fetchone()
+                        if row and row[0]:
+                            try:
+                                oldest = max(oldest, now - float(row[0]))
+                            except (TypeError, ValueError):
+                                pass
+                c.execute("INSERT OR REPLACE INTO meta VALUES('merge_blocked_prs',?)", (str(n),))
+                c.execute("INSERT OR REPLACE INTO meta VALUES('merge_blocked_seconds',?)",
+                          (str(int(oldest)),))
             c.execute("INSERT OR REPLACE INTO meta VALUES('last_reconcile',?)", (str(now),))
             c.commit()
         finally:
@@ -1632,8 +1709,11 @@ def reconciler():
         try:
             # repo -> 0/1, IN MEMORY until the whole sweep succeeds (see commit_sweep).
             results = {}
+            # repo -> [(pr, head_sha)] held by the verdict gate, same deferred publication.
+            blocked = {}
             for repo in CFG["repos"]:
                 failed = 0
+                held = []
                 # WHERE the repo died, for the log line below. Reset per repo, and narrowed as the
                 # body advances, so "list" (repo unreachable — the deleted/renamed/no-grant case)
                 # is distinguishable from a single malformed PR, which otherwise look identical.
@@ -1659,7 +1739,8 @@ def reconciler():
                             enqueue(repo, number, sha, "reconcile")
                         else:
                             op = "merge"
-                            maybe_merge(repo, number)
+                            if maybe_merge(repo, number) == "verdicts":
+                                held.append((number, sha))
                 # ORDER IS LOAD-BEARING: sqlite3.Error must be caught ABOVE Exception. The state
                 # store is not repo-scoped, so its failure is fatal to the CYCLE - swallowing it
                 # here would file a dead database as "one repo is sad" and let the sweep stamp a
@@ -1677,8 +1758,14 @@ def reconciler():
                     where = f"{repo}#{at_pr}" if at_pr is not None else repo
                     log(f"reconcile {where} [{op}]: {e}")
                 results[repo] = failed
+                # A repo whose sweep died was only PARTIALLY enumerated, so its held list is an
+                # undercount - publishing it would shrink the gauge on exactly the cycles that
+                # went wrong, which reads as recovery. Drop the repo instead; its own
+                # reviewbot_reconcile_repo_failed series is what covers the window.
+                if not failed:
+                    blocked[repo] = held
             retire_closed_quarantines()
-            commit_sweep(results, time.time())
+            commit_sweep(results, time.time(), merge_blocked=blocked)
         except Exception as e:
             log("reconcile error:", e)
         time.sleep(CFG["reconcile_s"])
