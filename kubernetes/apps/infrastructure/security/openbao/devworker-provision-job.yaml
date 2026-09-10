@@ -92,20 +92,62 @@ data:
         secret_id_num_uses=0
     done
 
+    # openbao-k8stoken-sync (ADR 0021) — the in-cluster job that mints per-worker kubeconfigs and
+    # writes them to af/dev-workers/<host>.{tep,helmtest}_kubeconfig. It authenticates with the
+    # KUBERNETES auth mount, NOT the breakglass token: a daily credential-writer must not hold root.
+    #
+    # CAPABILITIES: `read` and `patch` are NOT optional extras. KV-v2's patch is an HTTP PATCH that
+    # requires the `patch` capability, and the existence probe that decides patch-vs-create requires
+    # `read`. A create+update-only policy looks tighter and makes every sync fail.
+    #
+    # This grants nothing on dev-workers/common (the shared gitea_pat / proxmox_ssh_key), nothing on
+    # af/estate/*, and no delete anywhere.
+    bao policy write k8stoken-sync - <<'EOF'
+    path "af/data/dev-workers/dev-worker-1" { capabilities = ["read", "create", "update", "patch"] }
+    path "af/data/dev-workers/dev-worker-2" { capabilities = ["read", "create", "update", "patch"] }
+    path "af/data/dev-workers/dev-worker-3" { capabilities = ["read", "create", "update", "patch"] }
+    path "af/data/dev-workers/dev-worker-4" { capabilities = ["read", "create", "update", "patch"] }
+    path "af/data/dev-workers/dev-worker-5" { capabilities = ["read", "create", "update", "patch"] }
+    path "af/data/dev-workers/dev-worker-6" { capabilities = ["read", "create", "update", "patch"] }
+    EOF
+    # The kubernetes auth mount itself is created by provision-job.yaml (AF_OB_K8S_HOST, with
+    # token_reviewer_jwt deliberately unset so the OpenBao SERVER pod's own SA does the TokenReview).
+    # If that has not run yet this write fails and the Job is retried — the same benign ordering race
+    # this Job already has with the `af` KV mount, self-healed by ttlSecondsAfterFinished + Flux.
+    bao write auth/kubernetes/role/k8stoken-sync \
+      bound_service_account_names=openbao-k8stoken-sync \
+      bound_service_account_namespaces=openbao \
+      token_policies=k8stoken-sync \
+      token_ttl=15m \
+      token_max_ttl=30m
+
     # Seed the KV subtree: one file per path, `<name>.json` -> af/dev-workers/<name>. `kv patch` is
     # the read-modify-write that gives the seed-wins-others-survive contract; it needs an existing
     # version, so a never-written path is created with `kv put` of the same file.
     seeded=0
+    probe_err=/tmp/kv-probe.err
     for seed in "$SEED_DIR"/*.json; do
       [ -f "$seed" ] || continue
       name="$(basename "$seed" .json)"
-      if bao kv get -mount=af "dev-workers/${name}" >/dev/null 2>&1; then
+      if bao kv get -mount=af "dev-workers/${name}" >/dev/null 2>"$probe_err"; then
         bao kv patch -mount=af "dev-workers/${name}" "@${seed}"
+      elif grep -qiE 'no value found|not found' "$probe_err"; then
+        # GENUINELY absent. Create-only (cas=0), never a bare put: openbao-k8stoken-sync writes
+        # sync-owned fields into these same paths, and both jobs can observe absence at once — the
+        # loser of a bare-put race REPLACES the winner's document and silently erases the other's
+        # fields. On a CAS conflict the path now exists, so fall through to the merge path.
+        bao kv put -cas=0 -mount=af "dev-workers/${name}" "@${seed}" \
+          || bao kv patch -mount=af "dev-workers/${name}" "@${seed}"
       else
-        bao kv put -mount=af "dev-workers/${name}" "@${seed}"
+        # An auth/network failure is NOT absence. Treating it as absence is how a transient error
+        # turns into a destructive full-document write.
+        echo "probe of dev-workers/${name} failed and was not a not-found; aborting" >&2
+        cat "$probe_err" >&2
+        exit 1
       fi
       seeded=$((seeded + 1))
     done
+    rm -f "$probe_err"
     [ "$seeded" -gt 0 ] || { echo "no *.json under $SEED_DIR; aborting" >&2; exit 1; }
 
     echo "devworker provision complete"
