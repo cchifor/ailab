@@ -22,6 +22,113 @@ import argparse
 import re
 import sys
 
+def drop_rows(text, targets):
+    """Remove whole rows (header, comments above it, and its body).
+
+    A row a team must NOT have cannot be expressed by disabling it: `disabled`
+    still documents the row as part of the composition, and `subagent_fork` in
+    particular exists to preserve the parent's route -- keeping it disabled in a
+    team whose whole point is re-routing children invites someone to enable it.
+    """
+    src = text.splitlines(keepends=True)
+    out, i, n, hit = [], 0, len(src), set()
+    while i < n:
+        m = re.match(r"^(\s*)- id: (\S+)\s*$", src[i])
+        if not m or m.group(2) not in targets:
+            out.append(src[i]); i += 1
+            continue
+        indent, rid = m.group(1), m.group(2)
+        hit.add(rid)
+        # Drop the comment block immediately above this row, which describes it.
+        while out and re.match(r"^\s*#", out[-1]):
+            out.pop()
+        while out and out[-1].strip() == "":
+            out.pop()
+        i += 1
+        # Drop the body: everything indented deeper than the row header.
+        while i < n and (src[i].strip() == "" or len(src[i]) - len(src[i].lstrip()) > len(indent)):
+            if src[i].strip() != "" and re.match(r"^" + indent + r"- id: ", src[i]):
+                break
+            i += 1
+    return "".join(out), hit
+
+
+def route_rows(text, targets, provider, model):
+    """Give named rows an explicit child route via `agentOptions`.
+
+    Spawn children INHERIT the parent's provider/model when nothing overrides
+    it, so on a conductor running a different route than its workers this is the
+    difference between the team doing what it says and quietly running every
+    child on the conductor's model.
+    """
+    src = text.splitlines(keepends=True)
+    out, i, n, hit = [], 0, len(src), set()
+    while i < n:
+        m = re.match(r"^(\s*)- id: (\S+)\s*$", src[i])
+        if not m or m.group(2) not in targets:
+            out.append(src[i]); i += 1
+            continue
+        indent, rid = m.group(1), m.group(2)
+        out.append(src[i]); i += 1
+        body_indent = indent + "  "
+        has_config = False
+        # Copy the row body, noting whether it already carries a `config:` block.
+        while i < n:
+            line = src[i]
+            if line.strip() == "":
+                out.append(line); i += 1; continue
+            cur = len(line) - len(line.lstrip())
+            if cur <= len(indent):
+                break
+            if re.match(r"^" + body_indent + r"config:\s*$", line):
+                has_config = True
+            out.append(line); i += 1
+        if not has_config:
+            out.append(f"{body_indent}config:\n")
+        key = body_indent + "  "
+        out.append(f"{key}agentOptions:\n")
+        out.append(f"{key}  provider: {provider}\n")
+        out.append(f"{key}  model: {model}\n")
+        hit.add(rid)
+    return "".join(out), hit
+
+
+def set_keys(text, assignments):
+    """Append scalar `key: value` entries to named rows' config blocks.
+
+    `assignments` maps row id -> list of (key, value). Used for real per-row
+    policy that is NOT a child route: workflow-worker-thread's
+    maxConcurrentAgents / maxTotalAgents, for instance, which are the only
+    fan-out ceilings dsh exposes declaratively.
+    """
+    src = text.splitlines(keepends=True)
+    out, i, n, hit = [], 0, len(src), set()
+    while i < n:
+        m = re.match(r"^(\s*)- id: (\S+)\s*$", src[i])
+        if not m or m.group(2) not in assignments:
+            out.append(src[i]); i += 1
+            continue
+        indent, rid = m.group(1), m.group(2)
+        out.append(src[i]); i += 1
+        body_indent = indent + "  "
+        has_config = False
+        while i < n:
+            line = src[i]
+            if line.strip() == "":
+                out.append(line); i += 1; continue
+            if len(line) - len(line.lstrip()) <= len(indent):
+                break
+            if re.match(r"^" + body_indent + r"config:\s*$", line):
+                has_config = True
+            out.append(line); i += 1
+        if not has_config:
+            out.append(f"{body_indent}config:\n")
+        for key, value in assignments[rid]:
+            out.append(f"{body_indent}  {key}: {value}\n")
+        hit.add(rid)
+    return "".join(out), hit
+
+
 def disable_rows(text, targets, note=()):
     """Insert `disabled: true` (preceded by `note`) after each target row's `name:` line.
 
@@ -77,6 +184,12 @@ def main():
     ap.add_argument("--source", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--disable", default="", help="comma-separated row ids")
+    ap.add_argument("--drop", default="", help="comma-separated row ids to REMOVE entirely")
+    ap.add_argument("--route", default="", help="comma-separated row ids to give an explicit child route")
+    ap.add_argument("--route-provider", default="", help="settings.yaml provider name for --route rows")
+    ap.add_argument("--route-model", default="", help="model id for --route rows")
+    ap.add_argument("--set", action="append", default=[], metavar="ID:KEY=VALUE",
+                    help="append a scalar config key to a row; repeatable")
     ap.add_argument("--header", default="", help="file whose contents are prepended")
     ap.add_argument(
         "--note",
@@ -87,8 +200,36 @@ def main():
     a = ap.parse_args()
     targets = {t for t in a.disable.split(",") if t}
     text = open(a.source, encoding="utf-8").read()
+    missing = set()
+
+    dropped = {t for t in a.drop.split(",") if t}
+    if dropped:
+        text, hit_d = drop_rows(text, dropped)
+        missing |= dropped - hit_d
+
+    routed = {t for t in a.route.split(",") if t}
+    if routed:
+        if not a.route_provider or not a.route_model:
+            print("ERROR: --route needs --route-provider and --route-model", file=sys.stderr)
+            return 1
+        text, hit_r = route_rows(text, routed, a.route_provider, a.route_model)
+        missing |= routed - hit_r
+
+    assignments = {}
+    for item in getattr(a, "set"):
+        try:
+            rid, kv = item.split(":", 1)
+            key, value = kv.split("=", 1)
+        except ValueError:
+            print(f"ERROR: --set expects ID:KEY=VALUE, got {item!r}", file=sys.stderr)
+            return 1
+        assignments.setdefault(rid, []).append((key, value))
+    if assignments:
+        text, hit_s = set_keys(text, assignments)
+        missing |= set(assignments) - hit_s
+
     body, hit = disable_rows(text, targets, a.note)
-    missing = targets - hit
+    missing |= targets - hit
     if missing:
         # Fail loud: a row id that no longer exists upstream means the team is
         # shipping a capability it believes it disabled.

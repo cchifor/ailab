@@ -190,7 +190,35 @@ spec:
               # install marker only; gating pod start on this one would turn "no codex provider"
               # into "no dsh".
               STAGE="/app/profiles/${DSH_VERSION}-${DSH_BUILD}-${DSH_PLUGINSET}/web"
+              SIGNAL="/app/profiles/${DSH_VERSION}-${DSH_BUILD}-${DSH_PLUGINSET}/.staging-state"
               P=/dsh-home/profiles/web
+              # WAIT FOR A TERMINAL STAGING STATE, bounded. wait-for-install gates on the DSH
+              # install marker, which the Job writes BEFORE it stages plugins -- so on the first
+              # rollout of a new plugin set this container can arrive while staging is still
+              # running. Projecting then would drop the live closure and finish with shipped
+              # bundles only, and the Job succeeding a minute later would never revisit this
+              # pod: it would sit without its providers until something unrelated rolled it.
+              #
+              # The signal is terminal by construction (ok|failed|none), so this waits for a
+              # DECISION, not for success -- a completed failure degrades immediately instead of
+              # burning the budget.
+              #
+              # AND IT IS BOUNDED, because the alternative is worse. If the Job is absent,
+              # crashed, or predates this mechanism, no signal ever appears; blocking forever
+              # would convert a missing OPTIONAL feature into a dead harness. 120s against a
+              # staging step measured at ~5s, then degrade loudly.
+              waited=0
+              while [ ! -f "$SIGNAL" ] && [ "$waited" -lt 120 ]; do
+                [ "$waited" = 0 ] && echo "waiting for the install Job to finish staging plugins..."
+                sleep 5
+                waited=$((waited + 5))
+              done
+              if [ -f "$SIGNAL" ]; then
+                echo "staging state: $(cat "$SIGNAL") (after ${waited}s)"
+              else
+                echo "WARNING: no staging state after ${waited}s -- is the dsh-install Job for this"
+                echo "WARNING: plugin set present and complete? Continuing WITHOUT the providers."
+              fi
               # STAGE-THEN-SWAP, and NEVER fatal. The obvious shape -- rm -rf the live closure
               # then cp the new one -- has a hole big enough to lose the harness through: under
               # `set -eu` a failed copy exits this container with the old modules already gone

@@ -182,6 +182,24 @@ spec:
               # 1-replica Recreate Deployment. seed-settings only lists what it actually
               # projected, so the worst case is "no codex tool", not "no dsh".
               STAGE="/app/profiles/${DSH_VERSION}-${DSH_BUILD}-${DSH_PLUGINSET}/web"
+              # The TERMINAL staging signal, read by seed-settings. It lives in the parent of
+              # STAGE because a re-stage does `rm -rf "$STAGE"`, and a signal that vanishes
+              # mid-flight is worse than none: the Deployment could not tell "still working"
+              # from "never started".
+              #
+              # WHY IT EXISTS. wait-for-install gates on the DSH install marker, which this Job
+              # writes BEFORE staging. Without a second signal, the first rollout of a new
+              # plugin set can reach seed-settings while staging is still running, project
+              # nothing, and never learn that staging later succeeded -- that pod stays without
+              # its providers until something else rolls it. Three states, all terminal:
+              #   ok     -- closure staged and verified; project it
+              #   failed -- staging ran and did not work; stop WAITING immediately. A closure
+              #             from an earlier good run is still marked and still valid, so the
+              #             Deployment projects that rather than nothing; only a run with no
+              #             usable closure at all degrades to shipped bundles.
+              #   none   -- this revision declares no plugins; retire and degrade
+              SIGNAL="/app/profiles/${DSH_VERSION}-${DSH_BUILD}-${DSH_PLUGINSET}/.staging-state"
+              mkdir -p "$(dirname "$SIGNAL")" || true
               if [ -z "${DSH_PLUGINS:-}" ]; then
                 # RETIRE, do not just skip. An empty plugin list means "no deployment bundles",
                 # and leaving a previously marked closure in place would let the Deployment go on
@@ -190,6 +208,7 @@ spec:
                   echo "DSH_PLUGINS is empty -- retiring the staged closure at ${STAGE}"
                   rm -f "${STAGE}/.installed" "${STAGE}/.specs" || true
                 fi
+                printf 'none' > "$SIGNAL" || true
               else
                 SMARK="${STAGE}/.installed"
                 # RE-VERIFY a marked closure rather than trusting the marker. The staging path
@@ -221,7 +240,11 @@ spec:
                 fi
                 if [ -f "$SMARK" ] && [ "$stale" = 0 ]; then
                   echo "profile plugin closure already staged: ${STAGE}"
+                  printf 'ok' > "$SIGNAL" || true
                 else
+                  # Clear the signal for the duration of the re-stage, so a pod that starts
+                  # while this runs waits rather than projecting a closure being rewritten.
+                  rm -f "$SIGNAL" || true
                   echo "staging profile plugins into ${STAGE}: ${DSH_PLUGINS}"
                   # EVERY step is guarded into `ok`. Under `set -eu` an unguarded rm/mkdir/cp/
                   # touch aborts the whole Job, and this phase is OPTIONAL by design: its only
@@ -278,8 +301,10 @@ spec:
                     touch "$SMARK" || ok=0
                   fi
                   if [ "$ok" = 1 ]; then
+                    printf 'ok' > "$SIGNAL" || true
                     echo "profile plugin closure staged: $(ls "${STAGE}/node_modules" | wc -l) entries"
                   else
+                    printf 'failed' > "$SIGNAL" || true
                     echo "WARNING: profile plugin staging FAILED -- dsh will boot WITHOUT these"
                     echo "WARNING: providers -- their delegation tools simply do not register."
                     rm -f "$SMARK" || true

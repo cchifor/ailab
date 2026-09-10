@@ -19,13 +19,30 @@
 # use this team as intended, select the `codex` provider for the session. Pinning a route inside
 # a preset is not something dsh-agent-presets does.
 #
-# THE INHERITANCE TRAP, and the reason the child rows below are spelled out. Spawn children
-# INHERIT the parent's provider/model when nothing overrides it, and `subagent_fork` preserves
-# the parent route DELIBERATELY so the inherited history stays eligible for KV-cache reuse. So
-# on a Codex-routed conductor, an unconfigured child is ANOTHER Codex agent -- the opposite of
-# the intent, and billed accordingly. The qwen workers therefore carry an explicit
-# `agentOptions` route, and fork is left out of this team entirely: it cannot be re-routed
-# without discarding the cache-reuse property that is its whole purpose.
+# THE INHERITANCE TRAP, and what this file does about it. Spawn children INHERIT the parent's
+# provider/model when nothing overrides it, so on a Codex-routed conductor an unconfigured child
+# is ANOTHER Codex agent -- the opposite of the intent, and billed accordingly. Three rows had
+# to be handled differently, because they do not all support the same thing:
+#
+#   * `tool-subagent` (spawn) carries an explicit `agentOptions` route to the estate's qwen
+#     model. This is the worker path, and it is the only delegation row that accepts a
+#     configured child route at all.
+#   * `subagent_fork` is DROPPED, not disabled. It preserves the parent route deliberately, so
+#     the inherited history stays eligible for KV-cache reuse -- it cannot be re-routed without
+#     discarding the property that is its whole purpose. Leaving it present-but-disabled would
+#     invite someone to enable it.
+#   * `tool-ralph` is DROPPED for a blunter reason: its config accepts only `subagentProvider`,
+#     `maxRounds`, `maxHandoffChars` and `maxResultChars`. There is NO route knob, so its
+#     children would silently run on the conductor's Codex route. A row that cannot be aimed
+#     does not belong in a team defined by where its children point.
+#
+# `workflow-worker-thread` stays, with bounds rather than a route: it builds `agentOptions` from
+# each `agent()` call's own provider/model INSIDE the workflow script, so the route is the
+# script's to choose and cannot be pinned here. What it does accept is the only pair of
+# declarative fan-out ceilings dsh exposes -- `maxConcurrentAgents` and `maxTotalAgents`
+# (default 1000, the runaway-loop backstop) -- set here to 4 and 64. A workflow script used with
+# this team MUST name the qwen route on its `agent()` calls, or it inherits Codex like anything
+# else.
 #
 # STILL DORMANT. Every delegation row carries `disabled: true`, exactly as team-solo does: a
 # preset has no off switch, so merging these files makes the team selectable immediately, and
@@ -226,20 +243,9 @@
         toolName: subagent
         modelSelectionSettings: true
         backgroundMode: continuable
-
-    # Fork omits model selection so provider/model stay equal to the parent and
-    # the inherited history remains eligible for KV Cache reuse. This preset
-    # keeps fork continuable; parent and child inherit the same messaging tool,
-    # while the parent id and return guidance follow the inherited history.
-    - id: tool-subagent-fork
-      name: '@deepseek-ai/dsh-tool-subagent'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
-      config:
-        provider: fork
-        toolName: subagent_fork
-        backgroundMode: continuable
-
+        agentOptions:
+          provider: litellm
+          model: qwen3.8-27b-vllm-cloud
     # Production dsh does not install these optional providers. Install the
     # matching Bundle in this Profile and restart the Host, then copy this
     # preset and remove `disabled` from the matching tool row. Host availability
@@ -269,19 +275,12 @@
       config:
         provider: spawn
 
+        maxConcurrentAgents: 4
+        maxTotalAgents: 64
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
       # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
       disabled: true
-
-    - id: tool-ralph
-      name: '@deepseek-ai/dsh-tool-ralph'
-      # Dormant until WP-2/WP-5/WP-6 land -- see this file's header.
-      disabled: true
-      config:
-        subagentProvider: spawn
-        maxRounds: 64
-
 # ── remaining model-facing rows ─────────────────────────────────────────────
 
 - id: tool-ask-user
