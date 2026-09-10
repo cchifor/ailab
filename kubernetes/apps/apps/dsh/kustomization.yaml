@@ -26,6 +26,11 @@ configMapGenerator:
       - reconcile-bundles.js
       - cordis.patch.yml
       - searxng-search.mjs   # the web SEARCH provider itself (see the file for why not npm)
+      # The credentials provider. Same reason as searxng-search.mjs for being a file, and
+      # the same consequence from the content hash: editing it rolls the pod, which is
+      # required -- the profile is installed at boot, so a changed provider that did not
+      # roll would leave the old one resolving credentials.
+      - openbao-credentials.mjs
       # User-global agent instructions, installed to $DSH_HOME/AGENTS.md. COMPLEMENTARY to the
       # agent teams below, not in competition with them: this is instruction CONTENT, read by
       # dsh-agent-instructions from $DSH_HOME (its `dshHome` default, and DSH_HOME=/dsh-home

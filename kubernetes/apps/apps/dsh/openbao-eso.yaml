@@ -78,6 +78,25 @@ spec:
 # (checked: dsh-credentials-vault, dsh-credentials-openbao, dsh-openbao, dsh-plugin-vault all
 # absent from npm), so there is nothing to install in-process even if we wanted it.
 #
+# RE-EXAMINED 2026-09-10 and the answer held, on a stronger argument than the one above. The
+# obvious rescue is a SINKLESS agent -- a listener on 127.0.0.1 with `use_auto_auth_token`, so
+# there is no token FILE for the pod to read. That does not work, for two reasons found in
+# cross-review rather than by inspection:
+#   * containers in a pod share localhost, so model-authored code in the dsh container reaches
+#     that listener on exactly the same terms this plugin would; and
+#   * the listener attaches the agent's token to whatever is asked, and
+#     `GET /v1/auth/token/lookup-self` returns the token itself at `data.id`, while
+#     `POST /v1/auth/token/renew-self` returns it at `auth.client_token`.
+# So "no sink file" does NOT mean "no token in the pod". Denying those two endpoints to the
+# identity does not rescue it either: it breaks the agent's renewal path, leaving auto-auth to
+# re-authenticate from scratch instead, and it is a narrow patch over a premise that was already
+# wrong. The sinkless design is the same regression wearing a better costume.
+#
+# WHAT DID CHANGE. The gap the agent was being considered FOR -- a credential added in OpenBao
+# needing a manifest edit here before dsh could use it -- is real, and is now closed by the
+# discovery ExternalSecret at the bottom of this file plus openbao-credentials.mjs. ESO stays the
+# transport; only the shape of what it syncs changed.
+#
 # NOT YET RESOLVABLE, and that is expected. The OpenBao side does not exist:
 #   af/estate/codex             field `api_key`
 #   policy af-app-dsh           must gain read on af/data/estate/codex (today: litellm only)
@@ -99,3 +118,66 @@ spec:
   data:
     - secretKey: api_key
       remoteRef: { key: estate/codex, property: api_key }
+---
+# EVERY OTHER dsh CREDENTIAL, discovered rather than enumerated.
+#
+# THE PROBLEM THIS SOLVES. The two ExternalSecrets above each name ONE OpenBao path and project it
+# into ONE env var declared in the Deployment. That means adding a credential to OpenBao is not
+# enough for dsh to see it: it needs a new ExternalSecret, a new env var, a commit, a review and a
+# Flux reconcile. OpenBao is meant to be the one place a credential is managed, so that rotating or
+# ADDING one reaches every agent on every machine with no per-machine step. dsh was the exception.
+#
+# `dataFrom.extract` closes it. Every FIELD of the single KV-v2 document `af/dsh/credentials`
+# becomes a KEY of the `dsh-credentials` Secret, so a field added in OpenBao appears in the pod at
+# the next refresh with no change to this repo. The credentials are then read through the seam by
+# openbao-credentials.mjs -- see that file for why a plugin is needed and not just a mount.
+#
+# WHY `extract` OVER ONE DOCUMENT RATHER THAN `find` OVER A PREFIX. `find` would discover
+# per-credential documents under a prefix and is the better shape if these ever need separate
+# OpenBao ACLs. It also needs `list` on the metadata prefix plus `read` covering paths that do not
+# exist yet. `extract` needs `read` on exactly ONE path, which is a materially smaller grant for
+# the same "no per-machine step" property, and this pod runs model-authored code. Start narrow.
+#
+# WHY NOT AN OPENBAO AGENT SIDECAR. The comment above says no; a 2026-09-10 cross-review made the
+# answer stronger. Containers in a pod SHARE localhost, so an agent listener with
+# `use_auto_auth_token` is reachable by model-authored code exactly as it is by the plugin, and
+# `GET /v1/auth/token/lookup-self` returns the token at `data.id` (`renew-self` returns it at
+# `auth.client_token`) -- so "no sink file" does not mean "no token in the pod". Denying those
+# endpoints does not fix it either: the agent renews with the same token, so the denial breaks the
+# agent. ESO keeps the OpenBao identity in ESO's own namespace and hands this pod only values.
+#
+# NOT YET RESOLVABLE, and that is expected and SAFE. The OpenBao side does not exist:
+#   af/dsh/credentials          one field per credential, the field NAME being the dsh reference
+#                               (a POSIX identifier, e.g. LITELLM_API_KEY)
+#   policy af-app-dsh           must gain read on af/data/dsh/credentials
+# Both are OPERATOR writes through the agentforge-provisioner (OpenBao 2.5.5 has no root recovery,
+# ADR 0019 finding (c)). Until they land, this ExternalSecret reports NotReady, the Secret is
+# absent, and the Deployment mounts it `optional: true` -- so the harness runs exactly as it does
+# today, resolving LITELLM_API_KEY from its env var. The plugin treats an absent mount as "OpenBao
+# has nothing", not as an error.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: dsh-credentials
+spec:
+  # Deliberately shorter than the 1h above. This is the path a rotation travels, and the pod also
+  # has to wait for kubelet to propagate the change into the mounted volume afterwards; an hour of
+  # staleness on top of that is not a credential store, it is a cache.
+  #
+  # A POLLING PERIOD, NOT A STALENESS BOUND. Freshness here is eventual and bounded by nothing in
+  # particular: this interval, plus kubelet's own sync period, plus -- if OpenBao is unreachable --
+  # however long the failure lasts, because a successful sync leaves the previous values in the
+  # Secret and readable indefinitely. The default deletionPolicy (Retain) likewise keeps the whole
+  # Secret if the remote document is deleted; removing a FIELD from a document that still fetches
+  # does propagate. Anything needing a hard revocation guarantee must revoke at the ISSUER.
+  refreshInterval: 5m
+  secretStoreRef: { name: dsh-store, kind: SecretStore }
+  target:
+    name: dsh-credentials
+    creationPolicy: Owner
+    # Owner + no `template`: the Secret's keys are exactly the document's field names, which is
+    # what makes discovery work. Do not add a `template` here -- it would pin the key set and
+    # reintroduce the per-credential edit this exists to remove.
+  dataFrom:
+    - extract:
+        key: dsh/credentials

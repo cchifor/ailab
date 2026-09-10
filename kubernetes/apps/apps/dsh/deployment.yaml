@@ -168,6 +168,11 @@ spec:
               # package installed next to dsh is not in that closure, so a bare specifier throws
               # MODULE_NOT_FOUND and boot() rethrows -- crash-looping the pod, not degrading it.
               install -m 0644 /seed/searxng-search.mjs /dsh-home/profiles/web/searxng-search.mjs
+              # The OpenBao credentials provider, beside it and for the same resolution reason.
+              # Installed UNCONDITIONALLY on every boot, like cordis.patch.yml: the row that names
+              # it is in that patch, and a profile carrying the row without the file is a
+              # MODULE_NOT_FOUND at boot -- so these two must never be able to drift apart.
+              install -m 0644 /seed/openbao-credentials.mjs /dsh-home/profiles/web/openbao-credentials.mjs
               # Agent teams (WP-1): project the GitOps-owned preset root.
               #
               # RECREATED FROM SCRATCH each boot, not merged into. A team removed from git
@@ -433,6 +438,21 @@ spec:
             # THIS container with a shell -- and /dsh-teams sits outside /workspace precisely
             # so model-authored code cannot rewrite the compositions it runs under.
             - { name: teams, mountPath: /dsh-teams, readOnly: true }
+            # OpenBao-managed credentials, projected by ESO (openbao-eso.yaml) and read through
+            # the seam by openbao-credentials.mjs. readOnly, and OUTSIDE /workspace so the sandbox
+            # root does not contain it.
+            #
+            # NO subPath, deliberately: a subPath mount pins a bind mount, and kubelet does not
+            # propagate Secret updates into one, so a rotated credential would never arrive. The
+            # whole volume is mounted so the atomic symlink swap kubelet uses is visible, which is
+            # also why the plugin reopens by pathname on every read instead of holding a
+            # descriptor.
+            #
+            # Not readable by the dsh USER only -- the agent runs in THIS container and can read
+            # this directory. That is the same exposure LITELLM_API_KEY already has as an env var,
+            # and it is why the OpenBao document behind it must hold ONLY credentials dsh is meant
+            # to have. Containment here is the OpenBao ACL, not the filesystem.
+            - { name: credentials, mountPath: /dsh-credentials, readOnly: true }
           # Probes are exec, not httpGet: unauthenticated / returns 401 once routes mount, which a
           # standard HTTP probe reads as failure, and the listener is on loopback where a Pod-IP
           # probe cannot reach it at all. A TCP connect to 127.0.0.1 proves the listener is up
@@ -495,3 +515,18 @@ spec:
         # content-hashed dsh-relay ConfigMap on every boot, so it holds nothing durable and a
         # team deleted from git cannot survive as a stale, still-selectable directory.
         - { name: teams, emptyDir: { sizeLimit: 16Mi } }
+        # optional: true is REQUIRED, not defensive. The OpenBao path and policy behind
+        # dsh-credentials are operator writes that do not exist yet (see openbao-eso.yaml), so this
+        # Secret is absent today. Without `optional` the kubelet would refuse to start the pod --
+        # turning an unconfigured, additive feature into an outage of the whole harness on a
+        # 1-replica Recreate Deployment. Absent simply means the plugin finds nothing and every
+        # reference resolves exactly as it does now.
+        #
+        # 0440, NOT 0400. kubelet mounts a Secret volume owned by ROOT with the group set to the
+        # pod's fsGroup (verified on a live broker pod: `-r--r----- 1 0 65532`). This container runs
+        # as uid 1000, so with 0400 the group bits are empty and every read fails EACCES -- which
+        # this provider correctly treats as a FAILURE rather than absence, so every credential
+        # resolution would throw. The failure would only appear once the operator provisioned the
+        # OpenBao side, long after this merged. 0440 matches every other secret volume in this
+        # estate that runs as a non-root uid.
+        - { name: credentials, secret: { secretName: dsh-credentials, defaultMode: 0440, optional: true } }
