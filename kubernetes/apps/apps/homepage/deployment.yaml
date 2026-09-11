@@ -58,8 +58,16 @@ spec:
             - { name: config-src, mountPath: /config-src, readOnly: true }
       containers:
         - name: homepage
-          image: ghcr.io/gethomepage/homepage:v1.13.2
+          # v2 added a built-in auth gate (the v2.0.0 "breaking change"). It is deliberately NOT used
+          # here: `isAuthEnabled()` is `HOMEPAGE_AUTH_ENABLED === "true"`, so leaving the var unset
+          # keeps it off, and the gate in front of this pod stays the oauth2-proxy sidecar below ->
+          # Authelia (admins_only). Setting it would put a SECOND, weaker login in series with SSO.
+          # If it is ever turned on it also needs HOMEPAGE_AUTH_SECRET (32+ chars) and
+          # HOMEPAGE_EXTERNAL_URL. `/api/healthcheck` stays public either way, so the probes below
+          # are unaffected by that choice.
+          image: ghcr.io/gethomepage/homepage:v2.3.0
           env:
+            # Still honoured in v2 (middleware host check) — without it v2 rejects the proxied Host.
             - { name: HOMEPAGE_ALLOWED_HOSTS, value: "home.chifor.me" }
             - { name: PORT, value: "3000" }
           ports:
