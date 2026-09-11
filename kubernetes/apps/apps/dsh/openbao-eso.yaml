@@ -97,32 +97,42 @@ spec:
 # discovery ExternalSecret at the bottom of this file plus openbao-credentials.mjs. ESO stays the
 # transport; only the shape of what it syncs changed.
 #
-# NOT YET RESOLVABLE, and that is expected. The OpenBao side does not exist:
-#   af/estate/codex             field `api_key`
-#   policy af-app-dsh           must gain read on af/data/estate/codex (today: litellm only)
-# Both are OPERATOR writes through the agentforge-provisioner -- OpenBao 2.5.5 disabled
-# `generate-root`, so there is no root-token path (ADR 0019 finding (c)). Until they land this
-# ExternalSecret reports NotReady and the dsh-codex Secret is absent, which the Deployment
-# tolerates: CODEX_API_KEY is declared `optional: true` precisely so an unconfigured optional
-# feature cannot take the harness down.
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: dsh-codex
-spec:
-  refreshInterval: 1h
-  secretStoreRef: { name: dsh-store, kind: SecretStore }
-  target:
-    name: dsh-codex
-    creationPolicy: Owner
-  data:
-    - secretKey: api_key
-      remoteRef: { key: estate/codex, property: api_key }
----
+# NOT DECLARED, DELIBERATELY: the dsh-codex ExternalSecret was removed on 2026-09-11. The OpenBao
+# side does not exist --
+#   af/estate/codex             field `api_key`   (verified absent: `bao kv metadata get` -> no value)
+#   policy af-app-dsh           has no estate/codex grant, and the policy is OWNED by
+#                               security/openbao/dsh-provision-job.yaml, whose drift guard REFUSES
+#                               a hand-added grant -- it changes there, in git, or not at all
+# -- and an ExternalSecret that can never sync is NotReady FOREVER. The `apps` Flux Kustomization
+# runs wait:true, so from 2026-09-10T15:44Z this one object failed the whole apps health check every
+# 5 minutes (lastAppliedRevision stuck at d965063 while newer manifests were still being applied)
+# and held edge-connector (cloudflared) and agentforge-tenants in DependencyNotReady for a day.
+# That is exactly the "a not-Ready thing must never wedge the layer" rule openbao.yaml,
+# agentforge-tenants.yaml and agentforge/db-migrate.yaml already state.
+#
+# Nothing consumes the Secret: deployment.yaml keeps CODEX_API_KEY as an `optional: true`
+# secretKeyRef on dsh-codex (left unchanged, so this removal is inert to the pod), and codex
+# 0.153.4 ignores CODEX_API_KEY anyway (see the env comment there). Flux prunes the in-cluster
+# object on the next reconcile after this merges.
+#
+# RE-ADD ONLY after both OpenBao writes have landed and `bao kv get -mount=af estate/codex`
+# succeeds under the af-app-dsh policy -- and then it will sync on its first refresh instead of
+# wedging the layer:
+#   apiVersion: external-secrets.io/v1
+#   kind: ExternalSecret
+#   metadata: { name: dsh-codex }
+#   spec:
+#     refreshInterval: 1h
+#     secretStoreRef: { name: dsh-store, kind: SecretStore }
+#     target: { name: dsh-codex, creationPolicy: Owner }
+#     data:
+#       - secretKey: api_key
+#         remoteRef: { key: estate/codex, property: api_key }
+#
 # EVERY OTHER dsh CREDENTIAL, discovered rather than enumerated.
 #
-# THE PROBLEM THIS SOLVES. The two ExternalSecrets above each name ONE OpenBao path and project it
-# into ONE env var declared in the Deployment. That means adding a credential to OpenBao is not
+# THE PROBLEM THIS SOLVES. The dsh-litellm ExternalSecret above (and the parked dsh-codex one) each
+# name ONE OpenBao path and project it into ONE env var declared in the Deployment. That means adding a credential to OpenBao is not
 # enough for dsh to see it: it needs a new ExternalSecret, a new env var, a commit, a review and a
 # Flux reconcile. OpenBao is meant to be the one place a credential is managed, so that rotating or
 # ADDING one reaches every agent on every machine with no per-machine step. dsh was the exception.
