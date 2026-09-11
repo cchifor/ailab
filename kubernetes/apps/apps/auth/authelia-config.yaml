@@ -23,15 +23,28 @@ data:
       # (it replaces nothing), and a passkey satisfies the `one_factor` default policy on its own.
       # On Windows the platform authenticator is Windows Hello, so this is the face/PIN login.
       #
-      # The Relying Party ID is derived from the session cookie domain (`chifor.me`), so ONE
-      # registered credential covers every *.chifor.me app. Credentials live in infra-pg (see
-      # `storage` below), not on a pod — both replicas see them and a reschedule keeps them.
+      # The Relying Party ID is the PORTAL's own hostname, `sso.chifor.me` — Authelia derives it from
+      # the origin of the request carrying the ceremony, NOT from the cookie domain below. ONE
+      # registered credential still covers every *.chifor.me app, but by a different mechanism than
+      # the RP ID: every WebAuthn ceremony happens on the portal, and what reaches the apps is the
+      # `chifor.me` session cookie. Credentials live in infra-pg (see `storage` below), not on a pod
+      # — both replicas see them and a reschedule keeps them.
       #
-      # selection_criteria is left at defaults on purpose: `discoverability: preferred` is what makes
-      # Windows Hello mint a DISCOVERABLE credential (required for passwordless login) while still
-      # accepting a roaming key that can't store one. Forcing `required` would reject those.
+      # `discoverability` stays at its default `preferred`: that is what makes Windows Hello mint a
+      # DISCOVERABLE credential (required for passwordless login) while still accepting a roaming key
+      # that can't store one. Forcing `discoverability: required` would reject those.
+      #
+      # `user_verification` is a SEPARATE knob, and it is pinned to `required` rather than left at its
+      # `preferred` default. `preferred` lets an authenticator skip user verification — and since a
+      # passkey satisfies `one_factor` on its own here, a PIN-less roaming key could then complete a
+      # full passwordless login on possession alone, verifying no factor at all. `required` makes the
+      # authenticator prove a PIN or biometric first. Windows Hello always verifies, so it is
+      # unaffected; a roaming key just has to have a PIN set. Pinned before any credential was
+      # registered (webauthn_credentials was empty), so nothing had to be re-enrolled.
       enable_passkey_login: true
       display_name: 'chifor.me'
+      selection_criteria:
+        user_verification: 'required'
     identity_validation:
       reset_password:
         jwt_lifespan: '5 minutes'
@@ -66,13 +79,25 @@ data:
           default_redirection_url: 'https://home.chifor.me'
           name: 'authelia_session'
           same_site: 'lax'
-          # A workday: idle out after 8h, hard-expire at 12h. The old 5-minute `inactivity` was the
-          # dominant source of estate-wide re-logins — five idle minutes in a Grafana tab logged you
-          # out — and `remember_me` does NOT rescue it: remember_me overrides `expiration` only, and
-          # `inactivity` is an independent timer that applies to remembered sessions too.
+          # A workday, binding on EVERY login: idle out after 8h, hard-expire at 12h. The old
+          # 5-minute `inactivity` was the dominant source of estate-wide re-logins — five idle
+          # minutes in a Grafana tab logged you out.
+          #
+          # `remember_me: -1` disables the "remember me" box, and that is what makes the two bounds
+          # above actually mean something. Authelia exempts a remembered session from `inactivity`
+          # outright — it skips the idle check and stops stamping last-activity — and hands the cookie
+          # the `remember_me` lifetime in place of `expiration`. Keeping the former '1 month' would
+          # therefore have made a month-long, idle-immune session the real ceiling rather than 12h,
+          # and would have meant deleting a passkey cut no existing access. With the box gone, 12h is
+          # the true worst case, and re-auth is a Windows Hello face scan rather than a typed password.
+          #
+          # The -1 is UNQUOTED on purpose, unlike every other duration here: Authelia reads a bare
+          # integer as seconds, and -1s is its disable sentinel. Quoting it ('-1') is a hard config
+          # error — "could not parse '-1' as a duration" — and '0' is worse, because 0 silently falls
+          # back to the 1-month DEFAULT instead of disabling. Both verified against v4.39.25.
           expiration: '12 hours'
           inactivity: '8 hours'
-          remember_me: '1 month'
+          remember_me: -1
     regulation:
       max_retries: 3
       find_time: '2 minutes'

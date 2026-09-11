@@ -15,9 +15,17 @@ A passkey is a WebAuthn credential. On Windows the platform authenticator **is W
 *in place of* the username+password (`webauthn.enable_passkey_login`), and because the default policy
 is `one_factor`, a passkey alone is a complete login.
 
-The Relying Party ID is the **session cookie domain, `chifor.me`** — so a single registered credential
-covers every app in the estate. Credentials are stored in infra-pg (`webauthn_credentials`), not on a
-pod, so both Authelia replicas see them and a reschedule doesn't lose them.
+Because a passkey is the *whole* login here, `selection_criteria.user_verification` is pinned to
+`required`: the authenticator has to prove a PIN or biometric, not merely that it is present. Windows
+Hello always verifies, so nothing changes for it; a roaming security key must have a PIN set. Left at
+the `preferred` default, a PIN-less key could have logged in on possession alone.
+
+The Relying Party ID is the **portal hostname, `sso.chifor.me`** — Authelia takes it from the origin of
+the request, not from the cookie domain. A single registered credential still covers every app in the
+estate, but through the session cookie rather than the RP ID: every WebAuthn ceremony happens on the
+portal, and what the apps see afterwards is the `chifor.me` cookie. Credentials are stored in infra-pg
+(`webauthn_credentials`), not on a pod, so both Authelia replicas see them and a reschedule doesn't
+lose them.
 
 | Gate | Hosts | Login after this change |
 |---|---|---|
@@ -74,9 +82,11 @@ kubectl --context admin@ai -n databases exec "$PG" -c postgres -- \
 #   delete from webauthn_credentials where id = <id>;
 ```
 
-A revoked passkey does not end an existing session — the cookie lives until `expiration` (12h). To
-cut sessions estate-wide, bounce the session store: `kubectl --context admin@ai -n auth rollout
-restart deploy/auth-valkey` (accepted-ephemeral; costs everyone one re-login).
+A revoked passkey does not end an existing session — the cookie lives out its own clock, so worst case
+is **12h** (see Session lifetimes below). Deleting the credential is therefore not a containment step on
+its own. To cut sessions immediately, bounce the session store: `kubectl --context admin@ai -n auth
+rollout restart deploy/auth-valkey` (accepted-ephemeral; costs everyone one re-login). Do both whenever
+a device is actually lost.
 
 ## Session lifetimes
 
@@ -86,11 +96,15 @@ restart deploy/auth-valkey` (accepted-ephemeral; costs everyone one re-login).
 |---|---|---|
 | `inactivity` | 8 hours | idle time before the session dies |
 | `expiration` | 12 hours | hard cap regardless of activity |
-| `remember_me` | 1 month | only if you tick the box — and it overrides **`expiration` only** |
+| `remember_me` | `-1` | **disabled** — there is no "remember me" box on the login form |
 
-The trap worth knowing: `remember_me` does **not** suspend `inactivity`. They are independent timers,
-which is why the old `inactivity: 5 minutes` logged you out of a remembered session after five idle
-minutes.
+Why remember-me is off rather than at its old `1 month`: Authelia does **not** treat `remember_me` as a
+longer version of the same clock. A remembered session is exempt from the inactivity check altogether
+(Authelia skips it and stops stamping last-activity) and takes `remember_me` as its cookie lifetime in
+place of `expiration`. Ticking the box would therefore have produced a month-long session with no idle
+timeout at all, which would have made the 8h/12h pair above a fiction and left credential revocation
+unable to cut existing access. With the box gone, **12h is the true worst case for any estate session**,
+and the cost — one login a day — is a Hello face scan rather than a typed password.
 
 ## Troubleshooting
 
@@ -100,4 +114,5 @@ minutes.
 | `notification.txt` missing or stale | You read the wrong replica — loop over both (above). The file is a per-pod `emptyDir` and is lost on restart. |
 | "elevation has expired" | More than 10 minutes passed since the code. Start over at step 2. |
 | Hello prompt never appears | The browser must reach `sso.chifor.me` over **HTTPS** with the real hostname — WebAuthn is origin-bound and will not fire on an IP or a port-forward. |
+| Roaming key refused at registration or login | `user_verification: required` — the key needs a PIN. Set one in the vendor tool (or Windows *Settings → Passkeys*) and retry. Windows Hello is never affected. |
 | Locked out after 3 tries | `regulation`: 3 retries in 2 minutes = a 5-minute ban. Wait it out; the ban is in `banned_user`. |
