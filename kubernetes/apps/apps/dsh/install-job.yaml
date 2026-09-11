@@ -57,7 +57,7 @@ spec:
           # toolchain. MEASURED in-cluster on 2026-09-08: alpine has none of bash/git/curl/python3;
           # node:22-slim adds only bash; node:22 has bash, git, curl, python3 AND make/g++, which
           # also lets npm build a native module from source when no prebuilt matches this platform.
-          image: mirror.gcr.io/library/node:22
+          image: mirror.gcr.io/library/node:24
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
             # The install directory is keyed on version AND libc. Moving alpine -> Debian changes
