@@ -160,7 +160,18 @@ variable "dev_worker_ssh_public_key" {
 #   dev-worker-1   node1  12 GiB   ~40M / 13d     230.1M     <- panicked 2026-08-11 22:32
 #   dev-worker-4   node1  12 GiB   3.1M / 10d       2.0M
 #   dev-worker-2   node2  (float)  70k / 21d      150k
-#   dev-worker-3   node3  16 GiB   0               11k
+#   dev-worker-3   node3  16 GiB   0               11k       <- NO LONGER TRUE, see 2026-09-11 below
+#
+# UPDATE 2026-09-11 — node3 followed node1 and node2; that last row is now the WORST in the fleet.
+# dw3 re-measured at pswpout 35.2M / pgmajfault 46.5M (it was 0 / 11k a month ago), ballooned down to
+# 4.49 GiB of its 16 GiB ceiling with 145 MiB free inside the guest — sshd could not finish a banner
+# exchange. Nothing about dw3 changed; ai-node3's BUDGET did. Since that measurement the node gained
+# ~69 GiB of configured memory: ci-runner-6 + ci-runner-7 (24 GiB each, started 2026-08-25),
+# dev-worker-6 (12 GiB, 2026-09-01) and reviewer-1 + reviewer-2 (4 GiB each, 2026-09-02). Configured
+# total is now 152 GiB on 125 GiB physical (122%), so the node sits at PVE's 80% auto-balloon
+# threshold and every balloonable guest there is pinned at its floor — exactly the node1 story above.
+# Host PSI stayed 0.00 throughout, because the host was healthy AT dw3's expense: the pain is only
+# ever visible inside the guest, never in host pressure. Do not use host PSI to rule this out.
 #
 # So somebody had already raised node1's two workers to a 12 GiB floor BY HAND, live, to keep them off
 # the swap cliff — and because `memory` was not in lifecycle.ignore_changes, the next plain
@@ -169,9 +180,13 @@ variable "dev_worker_ssh_public_key" {
 # ignore_changes would not: ignoring the block would stop tofu managing memory at all and hide the
 # next divergence too.
 #
-# THIS IS A MITIGATION, NOT THE FIX. The fix is node1 capacity — cap ai-llm-1's 96 GiB limit or move a
-# guest to node3 (a rebuild, not a live migration: per-node local-lvm and cpu: host). When that lands,
-# delete these two overrides and let all six share the uniform floor again.
+# THIS IS A MITIGATION, NOT THE FIX. The fix is node capacity — for node1, cap ai-llm-1's 96 GiB limit.
+# "Move a guest to node3" was the advice here until 2026-09-11 and is now WRONG: node3 is the most
+# overcommitted host in the fleet (122%), which is what starved dw3. There is no longer a slack node to
+# move work to — every one of the three is at or above PVE's 80% auto-balloon threshold, so the real
+# fix is reducing total configured memory (the three 24 GiB ci-runners on node3 are the largest single
+# block) rather than rebalancing it. When that lands, delete these overrides and let all six share the
+# uniform floor again.
 variable "dev_worker_nodes" {
   type = map(object({
     node_name = string
@@ -189,7 +204,14 @@ variable "dev_worker_nodes" {
   default = {
     "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.8", hostname = "dev-worker-1", memory_floating_mib = 12288 }
     "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.9", hostname = "dev-worker-2" }
-    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.10", hostname = "dev-worker-3" }
+    # dw3 floor: 2026-09-11 starvation — ai-node3 crossed the auto-balloon threshold when ~69 GiB of
+    # new guests landed on it (see the UPDATE above), so dw3 was pinned at the uniform 4 GiB floor with
+    # 145 MiB free and 46.5M major faults. 12288 (not 8192) because the measured working set was
+    # ~7.6 GiB and still climbing as swap drained — an 8 GiB floor would have re-thrashed. Hand-applied
+    # during recovery (`qm set 4203 --balloon 12288` + `balloon 12288` over the QEMU monitor, because
+    # `qm set` alone does NOT inflate a running guest); codified here so the next apply keeps it.
+    # Shrink back to the uniform floor only once node3's budget has real balloon headroom again.
+    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.10", hostname = "dev-worker-3", memory_floating_mib = 12288 }
     "dev-worker-4" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.11", hostname = "dev-worker-4", memory_floating_mib = 12288 }
     # dw5 floor: 2026-09-01 swap-death incident — ai-node2 sits ~93% used since talos-env-node-1
     # (16 GiB fixed, env pool) joined it, so ballooning never inflates dw5 and a 4 GiB floor
