@@ -67,28 +67,50 @@ data:
 
     # ---- 1. Drift guard, BEFORE replacing anything ------------------------------------------
     # `bao policy write` replaces the document, so the failure mode that matters is silently
-    # DROPPING a grant somebody added since this file was reviewed. Losing the estate/litellm grant
-    # stops dsh-litellm syncing, and because a Secret change does not reach an already-running
+    # DROPPING a permission somebody added since this file was reviewed. Losing the estate/litellm
+    # grant stops dsh-litellm syncing, and because a Secret change does not reach an already-running
     # container's environment, dsh would keep working on a stale credential until it is revoked --
-    # an outage detached from its cause by days. So: enumerate the live grants and refuse to
-    # proceed if any of them is not in the set this file is about to write.
-    PREV="$(bao policy read "$POLICY" 2>/dev/null || true)"
-    if [ -n "$PREV" ]; then
+    # an outage detached from its cause by days.
+    #
+    # The guard compares the WHOLE DOCUMENT, normalised by stripping every whitespace character,
+    # against the two forms it is allowed to find. Comparing extracted path NAMES is not enough and
+    # was the first version's bug: a capability ADDED to an already-allowed path is invisible to a
+    # name check and would be silently removed by the rewrite, and a path written with tabs or
+    # double spaces evades any fixed `path "..."` pattern entirely. Whole-document equality has
+    # neither hole -- any difference at all, in paths or capabilities or both, stops the Job.
+    #
+    # BASELINE is the policy exactly as the 2026-09-07 breakglass ceremony left it, captured from
+    # the live vault. DESIRED is what section 2 writes. Before the first run the live policy is
+    # BASELINE; after it, DESIRED; anything else is drift this file has not reviewed.
+    BASELINE='path"af/data/estate/litellm"{capabilities=["read"]}path"af/metadata/estate/litellm"{capabilities=["read","list"]}'
+    DESIRED='path"af/data/estate/litellm"{capabilities=["read"]}path"af/metadata/estate/litellm"{capabilities=["read","list"]}path"af/data/dsh/credentials"{capabilities=["read"]}'
+
+    # An unreadable policy must NOT look like an absent one. `|| true` on the read was the second
+    # bug: a transient failure produced an empty PREV, the guard skipped itself, and the write went
+    # ahead against a document it had never inspected. So absence is established from the policy
+    # LIST, and once the policy is known to exist the read must succeed or the Job stops.
+    POLICY_LIST="$(bao policy list -format=json)" || {
+      echo "cannot list policies; aborting rather than writing blind" >&2
+      exit 1
+    }
+    if echo "$POLICY_LIST" | grep -q "\"${POLICY}\""; then
+      PREV="$(bao policy read "$POLICY")" || {
+        echo "policy $POLICY exists but could not be read; aborting rather than writing blind" >&2
+        exit 1
+      }
       echo "--- existing policy $POLICY (replaced below; kept here as the audit trail) ---"
       echo "$PREV"
       echo "--- end existing policy ---"
-      UNKNOWN=0
-      for p in $(echo "$PREV" | grep -oE 'path "[^"]+"' | sed 's/^path "//; s/"$//' | sort -u); do
-        case "$p" in
-          af/data/estate/litellm|af/metadata/estate/litellm|af/data/dsh/credentials) ;;
-          *)
-            echo "REFUSING: live policy grants '$p', which this Job would drop." >&2
-            echo "Reconcile the desired policy in dsh-provision-job.yaml first." >&2
-            UNKNOWN=1
-            ;;
-        esac
-      done
-      [ "$UNKNOWN" -eq 0 ] || exit 1
+      PREV_NORM="$(echo "$PREV" | tr -d '[:space:]')"
+      if [ "$PREV_NORM" != "$BASELINE" ] && [ "$PREV_NORM" != "$DESIRED" ]; then
+        echo "REFUSING: policy $POLICY does not match the reviewed baseline or the desired" >&2
+        echo "document. Something changed it outside git. Reconcile dsh-provision-job.yaml" >&2
+        echo "with the policy printed above before letting this Job run again." >&2
+        exit 1
+      fi
+      echo "policy $POLICY matches a reviewed form; safe to replace"
+    else
+      echo "policy $POLICY absent (fresh vault?); creating it"
     fi
 
     # ---- 2. The policy ------------------------------------------------------------------------
