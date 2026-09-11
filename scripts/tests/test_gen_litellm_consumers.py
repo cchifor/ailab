@@ -164,6 +164,40 @@ class SelectionRule(unittest.TestCase):
         self.assertIn("beta-hidden", proc.stdout)
         self.assertNotIn("Traceback", proc.stderr)
 
+    def test_non_boolean_hidden_is_checked_on_every_entry_before_the_other_filters(self):
+        # The rule's wording ("hidden must be a YAML boolean") holds for EVERY entry that carries
+        # model_info, not only for the self-hosted chat routes the other filters let through: a
+        # paid provider (no api_base), a public host, an embedding route.
+        for label, api_base, extra in (
+            ("no api_base", None, {}),
+            ("public host", "https://api.example.com/v1", {}),
+            ("embedding mode", "http://10.0.0.5:8080/v1", {"mode": "embedding"}),
+        ):
+            for bad in ("true", 1):
+                with self.subTest(entry=label, hidden=bad):
+                    with self.assertRaises(glc.SourceError) as cm:
+                        self._visible(api_base, hidden=bad, **extra)
+                    self.assertIn("'x'", str(cm.exception))
+                    self.assertIn("model_info.hidden", str(cm.exception))
+
+    def test_non_boolean_hidden_on_a_paid_provider_entry_fails_the_cli(self):
+        # gpt-4.1 in the fixture has no api_base: it is never listed, and STILL a quoted "true" on
+        # it is a failure naming the entry, not something the api_base filter skips over.
+        with Sandbox() as sb:
+            text = sb.read(LITELLM_REL)
+            before = "          api_key: os.environ/OPENAI_API_KEY\n      - model_name: text-embedding-3-small\n"
+            self.assertIn(before, text)
+            sb.write(LITELLM_REL, text.replace(
+                before,
+                "          api_key: os.environ/OPENAI_API_KEY\n        model_info: { hidden: \"true\" }\n"
+                "      - model_name: text-embedding-3-small\n", 1))
+            proc = sb.run("--check")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("ERROR", proc.stdout)
+        self.assertIn("gpt-4.1", proc.stdout)
+        self.assertIn("model_info.hidden", proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
+
     def test_non_chat_mode_excluded(self):
         base = "http://10.0.0.5:8080/v1"
         self.assertTrue(self._visible(base, mode="chat"))
@@ -209,6 +243,62 @@ class SelectionRule(unittest.TestCase):
         self.assertFalse(by_name["epsilon-local"].vision)  # supports_vision: false
 
 
+class ModelNames(unittest.TestCase):
+    """A model_name is written verbatim into a dsh `- id: <name>` row and into the JSON inside Open
+    WebUI's single-quoted YAML scalar, so it must survive both: yaml.safe_load(name) must be the
+    same str, the rendered row must parse back to it, and it must not carry a single quote."""
+
+    @staticmethod
+    def _config(name):
+        # The name is JSON-quoted so it always reaches the parser as a STRING model_name: the
+        # subject here is the round-trip rule, not "model_name must be a string".
+        return (
+            "model_list:\n"
+            f"  - model_name: {json.dumps(name)}\n"
+            "    litellm_params: { model: openai/x, api_base: http://10.0.0.5:8080/v1, api_key: k }\n"
+        )
+
+    def test_names_that_do_not_round_trip_are_an_error_naming_the_entry(self):
+        # Decided by the rule, not a list: an int, a null, a bool, a mapping key, a comment start,
+        # an empty scalar, a reserved indicator.
+        for bad in ("123", "null", "true", "foo:", "x #y", "", "@x", "0x1f", "1.5", "[a]", "a\tb"):
+            with self.subTest(name=bad):
+                with self.assertRaises(glc.SourceError) as cm:
+                    glc.models_from_config(self._config(bad))
+                self.assertIn(repr(bad), str(cm.exception))
+                self.assertIn("model_name", str(cm.exception))
+
+    def test_names_that_round_trip_are_accepted_as_they_are(self):
+        # A space is fine when the scalar comes back unchanged: the rule, not a character list.
+        # (`1e3` is a STRING to PyYAML's YAML 1.1 resolver -- a float needs a dot -- so it passes.)
+        for good in ("a b", "foo#bar", "-x", "qwen3.5-122b-cloud", "a/b:c.d_e", "1e3"):
+            with self.subTest(name=good):
+                models = glc.models_from_config(self._config(good))
+                self.assertEqual([m.name for m in models], [good])
+                self.assertEqual(yaml.safe_load(f"- id: {good}"), [{"id": good}])
+
+    def test_a_single_quote_cannot_sit_inside_the_open_webui_scalar(self):
+        # "it's" round-trips in YAML, but the OPENAI_API_CONFIGS value is a single-quoted YAML
+        # scalar and json.dumps does not escape a quote, so the name would end the scalar early.
+        with self.assertRaises(glc.SourceError) as cm:
+            glc.models_from_config(self._config("it's"))
+        self.assertIn("it's", str(cm.exception))
+        self.assertIn("single quote", str(cm.exception))
+
+    def test_the_cli_names_the_entry_without_a_traceback(self):
+        for mode in ("--check", "--write"):
+            with self.subTest(mode=mode), Sandbox() as sb:
+                sb.write(LITELLM_REL, sb.read(LITELLM_REL).replace("- model_name: alpha-cloud", '- model_name: "123"'))
+                before = {rel: sb.read(rel) for rel in ALL_REL}
+                proc = sb.run(mode)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertIn("ERROR", proc.stdout)
+                self.assertIn("'123'", proc.stdout)
+                self.assertNotIn("Traceback", proc.stderr)
+                for rel in ALL_REL:
+                    self.assertEqual(sb.read(rel), before[rel], f"{rel} must not be touched")
+
+
 # ---------------------------------------------------------------------------
 # the rewrites
 # ---------------------------------------------------------------------------
@@ -237,21 +327,90 @@ class OpenWebUIRewrite(unittest.TestCase):
         self.assertEqual(cfg["0"]["tags"], ["keep me"])
         self.assertEqual(cfg["1"], {"enable": True, "connection_type": "external"})
 
-    def test_rewrite_that_yields_invalid_json_is_a_clean_error(self):
-        # A committed model_ids string containing ']' ends the array match early, so the textual
-        # rewrite leaves a dangling tail: the post-rewrite validation must report it, not crash.
+    def test_a_committed_id_containing_a_bracket_is_simply_rewritten(self):
+        # The rewrite is structural (json.loads, replace model_ids, json.dumps), so a stale id
+        # with ']' in it is just a stale id: no array-matching regex to end early.
         with Sandbox() as sb:
             sb.write(OPEN_WEBUI_REL, sb.read(OPEN_WEBUI_REL).replace('"stale-a"', '"sta]le-a"'))
-            text = sb.read(OPEN_WEBUI_REL)
-            with self.assertRaises(glc.SourceError) as cm:
-                glc.render_open_webui(text, glc.load_models(sb.root))
-            self.assertIn("rewritten OPENAI_API_CONFIGS is not valid JSON", str(cm.exception))
+            proc = sb.run("--check")
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("sta]le-a", proc.stdout)
+            proc = sb.run("--write")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            line = next(l for l in _lines(sb.read(OPEN_WEBUI_REL)) if "- { name: OPENAI_API_CONFIGS" in l)
+            self.assertEqual(line, EXPECTED_WEBUI_LINE)
+            self.assertEqual(sb.run("--check").returncode, 0)
+
+    def _webui_with_value(self, sb, value):
+        lines = _lines(sb.read(OPEN_WEBUI_REL))
+        i = next(k for k, l in enumerate(lines) if "- { name: OPENAI_API_CONFIGS" in l)
+        lines[i] = f"            - {{ name: OPENAI_API_CONFIGS, value: '{value}' }}"
+        sb.write(OPEN_WEBUI_REL, "\n".join(lines))
+        return i
+
+    def test_a_nested_decoy_in_another_connection_is_not_touched(self):
+        # Connection "1" carries its own {"0":{"model_ids":[...]}} object: only the TOP-LEVEL "0"
+        # is the span, whichever order the connections are written in.
+        decoy = {"0": {"model_ids": ["decoy-a", "decoy-b"]}, "note": "keep"}
+        for order in (("0", "1"), ("1", "0")):
+            with self.subTest(order=order), Sandbox() as sb:
+                cfg = {
+                    "0": {"enable": True, "connection_type": "local", "model_ids": ["stale-a"], "tags": ["keep me"]},
+                    "1": {"enable": True, "connection_type": "external", "nested": decoy},
+                }
+                cfg = {k: cfg[k] for k in order}
+                i = self._webui_with_value(sb, json.dumps(cfg, separators=(",", ":")))
+                proc = sb.run("--write")
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                line = _lines(sb.read(OPEN_WEBUI_REL))[i]
+                got = json.loads(line.split("value: '", 1)[1].rsplit("' }", 1)[0])
+                self.assertEqual(list(got), list(order), "connection order is preserved")
+                self.assertEqual(got["0"]["model_ids"], EXPECTED_IDS)
+                self.assertEqual(list(got["0"]), ["enable", "connection_type", "model_ids", "tags"])
+                self.assertEqual(got["1"]["nested"], decoy, "the decoy is byte-for-byte what it was")
+                self.assertEqual(sb.run("--check").returncode, 0)
+
+    def test_non_canonical_json_is_a_source_error(self):
+        # The file's form is canonical compact JSON (json.dumps with separators (",", ":")); a value
+        # written any other way is refused with an instruction, never normalised silently.
+        msg = "OPENAI_API_CONFIGS is not canonical compact JSON; normalise it once by hand"
+        for label, value in (
+            ("space after a colon outside the array",
+             '{"0":{"enable": true,"connection_type":"local","model_ids":["stale-a"]},"1":{"enable":true}}'),
+            ("space inside the model_ids array",
+             '{"0":{"enable":true,"connection_type":"local","model_ids":["stale-a", "stale-b"]},"1":{"enable":true}}'),
+            ("trailing space before the closing brace",
+             '{"0":{"enable":true,"connection_type":"local","model_ids":["stale-a"]},"1":{"enable":true} }'),
+        ):
             for mode in ("--check", "--write"):
-                with self.subTest(mode=mode):
+                with self.subTest(case=label, mode=mode), Sandbox() as sb:
+                    self._webui_with_value(sb, value)
+                    text = sb.read(OPEN_WEBUI_REL)
+                    with self.assertRaises(glc.SourceError) as cm:
+                        glc.render_open_webui(text, glc.load_models(sb.root))
+                    self.assertIn(msg, str(cm.exception))
                     proc = sb.run(mode)
                     self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
                     self.assertIn("ERROR", proc.stdout)
-                    self.assertIn("rewritten OPENAI_API_CONFIGS is not valid JSON", proc.stdout)
+                    self.assertIn(msg, proc.stdout)
+                    self.assertNotIn("Traceback", proc.stderr)
+                    self.assertEqual(sb.read(OPEN_WEBUI_REL), text, "nothing is written")
+
+    def test_connection_0_without_model_ids_is_a_source_error(self):
+        for label, value in (
+            ('"0" lacks model_ids', '{"0":{"enable":true,"connection_type":"local"},"1":{"enable":true}}'),
+            ('"0" is not an object', '{"0":["stale-a"],"1":{"enable":true}}'),
+            ('no "0" at all', '{"1":{"enable":true,"model_ids":["stale-a"]}}'),
+            ('model_ids is not a list of strings', '{"0":{"enable":true,"model_ids":"stale-a"}}'),
+        ):
+            for mode in ("--check", "--write"):
+                with self.subTest(case=label, mode=mode), Sandbox() as sb:
+                    self._webui_with_value(sb, value)
+                    text = sb.read(OPEN_WEBUI_REL)
+                    proc = sb.run(mode)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertIn("ERROR", proc.stdout)
+                    self.assertIn("model_ids", proc.stdout)
                     self.assertNotIn("Traceback", proc.stderr)
                     self.assertEqual(sb.read(OPEN_WEBUI_REL), text, "nothing is written")
 
@@ -330,6 +489,78 @@ class SeedRewrite(unittest.TestCase):
         self.assertEqual(spliced["ui"], {"theme": "light"})
 
 
+class SeedSpanGuards(unittest.TestCase):
+    """Between `models:` and the first generated row only comments and blank lines may appear, and
+    the WHOLE parsed list (not just the anchored rows) must equal the derived one for OK."""
+
+    ROGUE_FORMS = ("        - { id: rogue-model }", "        - name: rogue", "        rogue-model")
+
+    def test_rogue_row_before_the_anchor_is_an_error_naming_the_line(self):
+        for rogue in self.ROGUE_FORMS:
+            for where in ("right after the header", "between the comments and the first row"):
+                for mode in ("--check", "--write"):
+                    with self.subTest(rogue=rogue.strip(), where=where, mode=mode), Sandbox() as sb:
+                        lines = _lines(sb.read(SEED_REL))
+                        at = lines.index("      models:") + 1 if where == "right after the header" \
+                            else lines.index("        - id: stale-a")
+                        lines.insert(at, rogue)
+                        sb.write(SEED_REL, "\n".join(lines))
+                        before = {rel: sb.read(rel) for rel in ALL_REL}
+                        proc = sb.run(mode)
+                        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                        self.assertIn("ERROR", proc.stdout)
+                        self.assertNotIn("DRIFT", proc.stdout)
+                        self.assertIn(f"{SEED_REL}:{at + 1}:", proc.stdout, "the offending line is named")
+                        self.assertIn(rogue.strip(), proc.stdout)
+                        self.assertNotIn("Traceback", proc.stderr)
+                        self.assertNotIn("wrote", proc.stdout)
+                        for rel in ALL_REL:
+                            self.assertEqual(sb.read(rel), before[rel], f"{rel} must not be touched")
+
+    def test_rogue_row_after_the_last_generated_row_is_drift(self):
+        with Sandbox() as sb:
+            self.assertEqual(sb.run("--write").returncode, 0)
+            clean = sb.read(SEED_REL)
+            lines = _lines(clean)
+            lines.insert(lines.index("        - id: epsilon-local") + 1, "        - { id: rogue-model }")
+            sb.write(SEED_REL, "\n".join(lines))
+            proc = sb.run("--check")
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertNotIn("ERROR", proc.stdout)
+            drift = [l for l in proc.stdout.splitlines() if l.startswith("DRIFT ")]
+            self.assertEqual(len(drift), 1, proc.stdout)
+            self.assertIn(SEED_REL, drift[0])
+            # The committed side is the PARSED list, so the rogue id is named in the message.
+            self.assertIn("rogue-model", drift[0])
+            self.assertIn("->", drift[0])
+            self.assertEqual(sb.run("--write").returncode, 0)
+            self.assertEqual(sb.read(SEED_REL), clean, "--write normalises the rogue away")
+            self.assertEqual(sb.run("--check").returncode, 0)
+
+    def test_committed_side_is_the_parsed_list(self):
+        # The description of what is committed comes from yaml.safe_load of the whole file, the
+        # way dsh will read it, including a name that carries a space.
+        with Sandbox() as sb:
+            self.assertEqual(sb.run("--write").returncode, 0)
+            text = sb.read(SEED_REL).replace("        - id: delta-172\n", "        - id: delta 172\n          input: [text, image]\n")
+            sb.write(SEED_REL, text)
+            span = glc.render_seed(text, glc.load_models(sb.root))
+        self.assertEqual(span.committed, "[alpha-cloud (vision), delta 172 (vision), epsilon-local]")
+        self.assertEqual(span.derived, "[alpha-cloud (vision), delta-172, epsilon-local]")
+        self.assertFalse(span.clean)
+
+    def test_a_models_value_that_is_not_a_row_list_is_an_error(self):
+        with Sandbox() as sb:
+            self.assertEqual(sb.run("--write").returncode, 0)
+            text = sb.read(SEED_REL).replace("        - id: delta-172\n", "        - delta-172\n")
+            sb.write(SEED_REL, text)
+            proc = sb.run("--check")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("ERROR", proc.stdout)
+        self.assertIn("models", proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
+
+
 class Checksum(unittest.TestCase):
     def test_annotation_matches_check_inline_hashes_derivation(self):
         with Sandbox() as sb:
@@ -355,6 +586,42 @@ class Checksum(unittest.TestCase):
         self.assertEqual(len(before), len(after))
         self.assertEqual(len(changed), 1)
         self.assertIn('checksum/config: "', after[changed[0]])
+
+    REAL = '        checksum/config: "000000000000"'
+    COMMENTED = '        # checksum/config: "deadbeefcafe"  (the previous value, kept as a note)'
+
+    def test_a_commented_out_annotation_is_not_the_anchor(self):
+        with Sandbox() as sb:
+            lines = _lines(sb.read(LITELLM_REL))
+            i = lines.index(self.REAL)
+            lines.insert(i, self.COMMENTED)
+            sb.write(LITELLM_REL, "\n".join(lines))
+            proc = sb.run("--write")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            after = _lines(sb.read(LITELLM_REL))
+            self.assertEqual(after[i], self.COMMENTED, "the commented line is untouched")
+            self.assertRegex(after[i + 1], r'^        checksum/config: "[0-9a-f]{12}"$')
+            self.assertNotIn("000000000000", after[i + 1])
+            self.assertEqual(sb.run("--check").returncode, 0)
+
+    def test_only_a_commented_annotation_is_an_error(self):
+        for mode in ("--check", "--write"):
+            with self.subTest(mode=mode), Sandbox() as sb:
+                sb.write(LITELLM_REL, sb.read(LITELLM_REL).replace(self.REAL, "        # " + self.REAL.strip()))
+                before = sb.read(LITELLM_REL)
+                proc = sb.run(mode)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertIn("ERROR", proc.stdout)
+                self.assertIn("expected exactly one checksum/config annotation, found 0", proc.stdout)
+                self.assertNotIn("Traceback", proc.stderr)
+                self.assertEqual(sb.read(LITELLM_REL), before)
+
+    def test_two_uncommented_annotations_is_an_error(self):
+        with Sandbox() as sb:
+            sb.write(LITELLM_REL, sb.read(LITELLM_REL).replace(self.REAL, self.REAL + "\n" + self.REAL))
+            proc = sb.run("--check")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("expected exactly one checksum/config annotation, found 2", proc.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -427,12 +694,20 @@ class CheckMode(unittest.TestCase):
             "        - id: delta-172\n          temperature: 0.2\n",
         )
 
-    def test_webui_spacing_is_formatting_drift(self):
-        self._formatting_drift(
-            OPEN_WEBUI_REL,
-            '"model_ids":["alpha-cloud","delta-172",',
-            '"model_ids":["alpha-cloud", "delta-172",',
-        )
+    def test_webui_spacing_is_a_source_error_not_drift(self):
+        # The OPENAI_API_CONFIGS value must be canonical compact JSON, model_ids array included:
+        # spacing there is refused with an instruction (see OpenWebUIRewrite), not reported as
+        # formatting drift for --write to normalise.
+        with Sandbox() as sb:
+            sb.run("--write")
+            text = sb.read(OPEN_WEBUI_REL)
+            sb.write(OPEN_WEBUI_REL, text.replace('"model_ids":["alpha-cloud","delta-172",',
+                                                  '"model_ids":["alpha-cloud", "delta-172",', 1))
+            proc = sb.run("--check")
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertNotIn("DRIFT", proc.stdout)
+            self.assertIn("ERROR", proc.stdout)
+            self.assertIn("not canonical compact JSON", proc.stdout)
 
     def test_clean_tree_passes_and_check_does_not_write(self):
         with Sandbox() as sb:

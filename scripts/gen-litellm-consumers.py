@@ -21,18 +21,30 @@ byte):
                                             — apps/ai/open-webui.yaml (one env line)
      Open WebUI does NOT call /v1/models for a connection that carries a non-empty model_ids, and
      there is no wildcard upstream, so the static allowlist is the only way to put a route under
-     the picker's Local group. Only that one JSON array on that one line is rewritten; every other
-     key and value in the JSON keeps its order, and the YAML line keeps its exact prefix/suffix.
+     the picker's Local group. The rewrite is structural: the value is parsed with json.loads,
+     `"0".model_ids` is replaced, and the object is serialised back as canonical compact JSON
+     (json.dumps with separators (",", ":"), the form the file uses), so every other key and
+     value keeps its order and a same-named key nested anywhere else is never touched. The
+     committed value must already BE that canonical form, byte for byte, else it is a FAILURE
+     telling you to normalise it once by hand; the YAML line keeps its exact prefix/suffix.
   2. the rows of the litellm provider's `models:` list  — apps/dsh/settings.seed.yaml
      kubernetes/apps/apps/dsh/reconcile-provider.js splices EXACTLY this block into the live
      settings.yaml on every pod boot, line-based, so the block's shape (plain `litellm:` header,
      direct-child indentation) is left alone: the owned span runs from the first `- id:` row to
-     the end of the list, and the explanatory comment lines above the first row stay. A row gets
-     `input: [text, image]` only when the LiteLLM entry declares `model_info.supports_vision: true`
-     — a hand-entered dsh model is text-only until it says otherwise.
+     the end of the list, and the explanatory comment lines above the first row stay. Between
+     `models:` and that first row ONLY comment and blank lines may appear; any other line (a
+     hand-added `- { id: x }` row, say) is a FAILURE naming the line, never a preserved prefix.
+     After the span is located the WHOLE list is also parsed (yaml.safe_load of the file, the
+     way dsh reads it) and its ids and input flags must equal the derived list for the span to
+     count as OK. A row gets `input: [text, image]` only when the LiteLLM entry declares
+     `model_info.supports_vision: true` — a hand-entered dsh model is text-only until it says
+     otherwise.
   3. the `checksum/config` pod-template annotation  — apps/ai/litellm.yaml
      The value the documented recipe produces (`yq -r ... | sha256sum | cut -c1-12`), derived with
-     check-inline-hashes' own function so the generator and the CI gate are one derivation.
+     check-inline-hashes' own function so the generator and the CI gate are one derivation. The
+     anchor is the ONE uncommented `checksum/config: "<12 hex>"` line (leading whitespace, then
+     the key); a `#`-prefixed mention is never the anchor, and zero or several real lines is a
+     FAILURE.
 
 SELECTION RULE — a route is consumer-visible when ALL THREE hold:
   * `litellm_params.api_base` is present and its host is a private IPv4 address (10/8,
@@ -49,10 +61,15 @@ SELECTION RULE — a route is consumer-visible when ALL THREE hold:
     NOT leave Open WebUI altogether — connection "1" has no model_ids, so it still discovers the
     route from /v1/models and shows it under External, because `hidden` is not a key LiteLLM
     knows (model_info is free-form) and the router keeps advertising the name. The value must be
-    a YAML boolean: `hidden: "true"`, `hidden: 1` and the like are a FAILURE naming the entry,
-    never silently visible.
+    a YAML boolean on EVERY entry that carries model_info, self-hosted or not, checked before the
+    other two filters: `hidden: "true"`, `hidden: 1` and the like are a FAILURE naming the entry,
+    never silently visible and never skipped because another filter excluded the entry first.
 Order is model_list order, de-duplicated on model_name (LiteLLM allows several deployments under
-one name; a consumer lists the name once). An EMPTY selection is refused in both modes: a rule
+one name; a consumer lists the name once). A selected model_name must round-trip as a plain YAML
+scalar string — yaml.safe_load(name) is the same str, and the rendered `- id: <name>` row parses
+back to it — and must not carry a single quote (it is written inside a single-quoted YAML
+scalar in open-webui.yaml); `123`, `null`, `true`, `foo:` are FAILURES naming the entry, decided
+by that rule rather than by a character list. An EMPTY selection is refused in both modes: a rule
 that matches nothing is a broken source, not an instruction to blank two pickers.
 
 USAGE
@@ -63,8 +80,9 @@ USAGE
 `--check` renders every span into memory and compares it byte for byte with what is on disk, so
 "the check passes" and "running --write changes nothing" are the same statement; both modes are
 idempotent. A span whose id list already matches but whose text differs (a hand-added comment
-inside the generated rows, an extra key on a row, spacing in the JSON array) is reported as
-DRIFT too, with a message saying so, and --write normalises it. Files are read and written with
+inside the generated rows, an extra key on a row) is reported as DRIFT too, with a message
+saying so, and --write normalises it; non-canonical JSON in open-webui.yaml is the one shape
+that is refused instead (see span 1). Files are read and written with
 their line endings intact (newline=""), so a CRLF checkout is rewritten only inside the owned
 spans and compared as real bytes. Any parse failure is a FAILURE, never a skip. Stdlib + PyYAML,
 which is the CI runner's system package (the same assumption scripts/tests/test_worker_probes.py
@@ -98,16 +116,12 @@ PRIVATE_V4 = (
 )
 CLUSTER_SUFFIX = ".svc.cluster.local"
 
-#: A model_name is written verbatim into a JSON string inside a single-quoted YAML scalar and into
-#: a plain YAML list row, so it must be a bounded, quote-free, whitespace-free token.
-_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
-
 _CONFIG_MARKER = re.compile(r"^[ ]*config\.yaml:\s*\|\s*$")
-_CHECKSUM = re.compile(r'(checksum/config:\s*")([0-9a-f]{12})(")')
+#: The annotation line itself: leading whitespace, the key, the quoted 12-hex value. Matched per
+#: line, so a `#`-prefixed mention of the key is never the anchor.
+_CHECKSUM = re.compile(r'^[ \t]*checksum/config:[ \t]*"([0-9a-f]{12})"')
 _WEBUI_LINE = re.compile(r"^(\s*- \{ name: OPENAI_API_CONFIGS, value: ')(.*)(' \}\s*)$")
-_WEBUI_MODEL_IDS = re.compile(r'("0"\s*:\s*\{[^{}]*?"model_ids"\s*:\s*)\[[^\]]*\]')
-_SEED_ROW = re.compile(r"^(\s*)- id:\s*(\S+)\s*$")
-_SEED_INPUT = re.compile(r"^\s*input:\s*\[(.*)\]\s*$")
+_SEED_ROW = re.compile(r"^(\s*)- id:\s*(\S.*?)\s*$")
 
 
 class SourceError(RuntimeError):
@@ -176,9 +190,16 @@ def _private_host(host: str) -> bool:
 def consumer_visible(entry: dict) -> bool:
     """The selection rule, over one model_list entry (see the module docstring).
 
-    Raises SourceError for a `model_info.hidden` that is not a YAML boolean: the opt-out must
-    never fail open because of a quoted "true" or a 1.
+    Raises SourceError for a `model_info.hidden` that is not a YAML boolean, on EVERY entry that
+    carries model_info and before the other filters look at it: the opt-out must never fail open
+    because of a quoted "true" or a 1, and its type rule must not depend on which entry it is on.
     """
+    info = entry.get("model_info") or {}
+    if isinstance(info, dict) and "hidden" in info and not isinstance(info["hidden"], bool):
+        raise SourceError(
+            f"{LITELLM_REL}: model_list entry {entry.get('model_name')!r}: model_info.hidden must be "
+            f"a YAML boolean (true/false), got {info['hidden']!r}"
+        )
     params = entry.get("litellm_params") or {}
     api_base = params.get("api_base") if isinstance(params, dict) else None
     if not isinstance(api_base, str) or not api_base:
@@ -186,22 +207,39 @@ def consumer_visible(entry: dict) -> bool:
     host = urlsplit(api_base).hostname
     if not host or not _private_host(host):
         return False
-    info = entry.get("model_info") or {}
     if not isinstance(info, dict):
         return True
     mode = info.get("mode")
     if mode is not None and mode != "chat":
         return False
-    if "hidden" in info:
-        hidden = info["hidden"]
-        if not isinstance(hidden, bool):
-            raise SourceError(
-                f"{LITELLM_REL}: model_list entry {entry.get('model_name')!r}: model_info.hidden must be "
-                f"a YAML boolean (true/false), got {hidden!r}"
-            )
-        if hidden:
-            return False
+    if info.get("hidden") is True:
+        return False
     return True
+
+
+def check_model_name(name: str) -> None:
+    """The name must survive both places it is written verbatim (see the module docstring).
+
+    Raises SourceError naming the entry when yaml.safe_load(name) is not the same str, when the
+    rendered `- id: <name>` row does not parse back to it, or when it carries a single quote.
+    """
+    try:
+        scalar = yaml.safe_load(name)
+        row = yaml.safe_load(f"- id: {name}")
+    except yaml.YAMLError as exc:
+        raise SourceError(
+            f"{LITELLM_REL}: model_name {name!r} is not a plain YAML scalar string: {exc}"
+        ) from exc
+    if not isinstance(scalar, str) or scalar != name or row != [{"id": name}]:
+        raise SourceError(
+            f"{LITELLM_REL}: model_name {name!r} does not round-trip as a plain YAML scalar string "
+            f"(it reads back as {scalar!r})"
+        )
+    if "'" in name:
+        raise SourceError(
+            f"{LITELLM_REL}: model_name {name!r} carries a single quote, which would end the "
+            f"single-quoted OPENAI_API_CONFIGS scalar in {OPEN_WEBUI_REL}"
+        )
 
 
 def models_from_config(config_text: str) -> list[Model]:
@@ -220,8 +258,7 @@ def models_from_config(config_text: str) -> list[Model]:
         if not consumer_visible(entry):
             continue
         name = entry["model_name"]
-        if not _MODEL_NAME.match(name):
-            raise SourceError(f"{LITELLM_REL}: model_name {name!r} is not a plain token")
+        check_model_name(name)
         if name in seen:
             continue
         seen.add(name)
@@ -254,7 +291,9 @@ class Span:
 
     @property
     def clean(self) -> bool:
-        return self.current == self.rendered
+        # Both must hold: the bytes are what --write would produce AND what the file parses to
+        # (`committed`, read the way its consumer reads it) is the derived list.
+        return self.current == self.rendered and self.committed == self.derived
 
 
 def _read(path: Path) -> str:
@@ -269,6 +308,11 @@ def _read(path: Path) -> str:
 
 def _ids_text(items: list[str]) -> str:
     return "[" + ", ".join(items) + "]"
+
+
+def _compact(obj) -> str:
+    """The one JSON form open-webui.yaml uses: json.dumps, no whitespace, key order kept."""
+    return json.dumps(obj, separators=(",", ":"))
 
 
 def _describe(models: list[Model]) -> str:
@@ -286,29 +330,23 @@ def render_open_webui(text: str, models: list[Model]) -> Span:
     m = _WEBUI_LINE.match(lines[hits[0]])
     prefix, json_text, suffix = m.group(1), m.group(2), m.group(3)
     try:
-        current_cfg = json.loads(json_text)
-        current_ids = list(current_cfg["0"]["model_ids"])
-    except (ValueError, KeyError, TypeError) as exc:
-        raise SourceError(f'{OPEN_WEBUI_REL}: OPENAI_API_CONFIGS has no parseable "0".model_ids: {exc}') from exc
+        cfg = json.loads(json_text)
+    except ValueError as exc:
+        raise SourceError(f"{OPEN_WEBUI_REL}: OPENAI_API_CONFIGS is not valid JSON: {exc}") from exc
+    # The value is rewritten by re-serialising the parsed object, so the committed text must
+    # already be that serialisation: otherwise "the ids match" and "the bytes match" would part.
+    if _compact(cfg) != json_text:
+        raise SourceError(f"{OPEN_WEBUI_REL}: OPENAI_API_CONFIGS is not canonical compact JSON; normalise it once by hand")
+    conn0 = cfg.get("0") if isinstance(cfg, dict) else None
+    if not isinstance(conn0, dict) or "model_ids" not in conn0:
+        raise SourceError(f'{OPEN_WEBUI_REL}: OPENAI_API_CONFIGS has no object at "0" carrying "model_ids"')
+    current_ids = conn0["model_ids"]
+    if not isinstance(current_ids, list) or not all(isinstance(x, str) for x in current_ids):
+        raise SourceError(f'{OPEN_WEBUI_REL}: OPENAI_API_CONFIGS "0".model_ids is not a list of strings')
 
     ids = [mo.name for mo in models]
-    new_array = json.dumps(ids, separators=(",", ":"))
-    new_json, n = _WEBUI_MODEL_IDS.subn(lambda mm: mm.group(1) + new_array, json_text, count=1)
-    if n != 1:
-        raise SourceError(f'{OPEN_WEBUI_REL}: could not locate "0".model_ids inside OPENAI_API_CONFIGS')
-    # Prove the textual rewrite did what it claims before anything is written. A committed id
-    # containing `]` ends the array match early and leaves a dangling tail, which this catches.
-    try:
-        rewritten = json.loads(new_json)
-    except ValueError as exc:
-        raise SourceError(f"{OPEN_WEBUI_REL}: rewritten OPENAI_API_CONFIGS is not valid JSON: {exc}") from exc
-    try:
-        carried = rewritten["0"]["model_ids"]
-    except (KeyError, TypeError) as exc:
-        raise SourceError(f'{OPEN_WEBUI_REL}: rewritten OPENAI_API_CONFIGS lost "0".model_ids: {exc}') from exc
-    if carried != ids:
-        raise SourceError(f"{OPEN_WEBUI_REL}: rewritten OPENAI_API_CONFIGS does not carry the derived model_ids")
-    lines[hits[0]] = prefix + new_json + suffix
+    conn0["model_ids"] = ids
+    lines[hits[0]] = prefix + _compact(cfg) + suffix
     return Span(
         rel=OPEN_WEBUI_REL,
         what='OPENAI_API_CONFIGS "0".model_ids',
@@ -388,15 +426,28 @@ def _resolve(lines: list[str], path: list[str]) -> tuple[int, int, int]:
     return start, end, depth
 
 
-def _describe_rows(rows: list[str]) -> str:
-    items: list[str] = []
-    for l in rows:
-        m = _SEED_ROW.match(l)
-        if m:
-            items.append(m.group(2))
-        elif items and _SEED_INPUT.match(l) and "image" in _SEED_INPUT.match(l).group(1):
-            items[-1] += " (vision)"
-    return _ids_text(items)
+def _parsed_seed_models(text: str) -> list[Model]:
+    """The litellm provider's models list as dsh will read it: yaml.safe_load of the whole file.
+
+    This is the committed truth the span is judged against, independently of where the anchored
+    rows were found: a row the line-based walk could not see is still a row dsh loads.
+    """
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise SourceError(f"{SEED_REL}: does not parse: {exc}") from exc
+    node = doc
+    for key in ("llm-pi-ai", "providers", "litellm", "models"):
+        node = node.get(key) if isinstance(node, dict) else None
+    if not isinstance(node, list):
+        raise SourceError(f"{SEED_REL}: llm-pi-ai > providers > litellm > models does not parse to a list")
+    out: list[Model] = []
+    for i, row in enumerate(node):
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            raise SourceError(f"{SEED_REL}: litellm models[{i}] is not a row with a string `id`: {row!r}")
+        inp = row.get("input")
+        out.append(Model(name=row["id"], vision=isinstance(inp, list) and "image" in inp))
+    return out
 
 
 def render_seed(text: str, models: list[Model]) -> Span:
@@ -409,6 +460,15 @@ def render_seed(text: str, models: list[Model]) -> Span:
     )
     if first is None:
         raise SourceError(f"{SEED_REL}: the litellm `models:` list has no `- id:` row to anchor the generated span")
+    # The prefix the rewrite preserves is comments and blank lines ONLY: anything else there is a
+    # row (or worse) that --write would carry forward outside the span it owns.
+    for i in range(start + 1, first):
+        if not (_is_blank(lines[i]) or _is_comment(lines[i])):
+            raise SourceError(
+                f"{SEED_REL}:{i + 1}: only comment and blank lines may appear between `models:` and the "
+                f"first `- id:` row; found {lines[i].strip()!r}"
+            )
+    committed = _parsed_seed_models(text)
     row_indent = _indent(lines[first])
     # The generated rows take the line ending of the row they replace (CRLF checkouts stay CRLF).
     nl = "\r\n" if lines[first].endswith("\r\n") else "\n"
@@ -422,7 +482,7 @@ def render_seed(text: str, models: list[Model]) -> Span:
     return Span(
         rel=SEED_REL,
         what="llm-pi-ai > providers > litellm > models",
-        committed=_describe_rows(lines[first:end]),
+        committed=_describe(committed),
         derived=_describe(models),
         current=text,
         rendered=rendered,
@@ -430,12 +490,15 @@ def render_seed(text: str, models: list[Model]) -> Span:
 
 
 def render_litellm(text: str) -> Span:
-    hits = _CHECKSUM.findall(text)
+    lines = text.splitlines(keepends=True)
+    hits = [(i, m) for i, l in enumerate(lines) if (m := _CHECKSUM.match(l))]
     if len(hits) != 1:
         raise SourceError(f"{LITELLM_REL}: expected exactly one checksum/config annotation, found {len(hits)}")
-    committed = hits[0][1]
+    i, m = hits[0]
+    committed = m.group(1)
     derived = config_checksum(text)
-    rendered = _CHECKSUM.sub(lambda m: m.group(1) + derived + m.group(3), text, count=1)
+    lines[i] = lines[i][:m.start(1)] + derived + lines[i][m.end(1):]
+    rendered = "".join(lines)
     return Span(
         rel=LITELLM_REL,
         what="checksum/config",
