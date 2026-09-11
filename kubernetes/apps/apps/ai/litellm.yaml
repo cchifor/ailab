@@ -93,14 +93,102 @@ data:
       # cloud2 now runs ONE vLLM engine across all four cards (qwen3.8-27b-vllm below), which is both
       # faster per request and larger in aggregate than the three pinned instances ever were.
       # ---- cloud2 vLLM (W4A16 + MTP), TENSOR-PARALLEL over ALL FOUR RTX 3090s, VISION ON ---
-      # syv-ai/qwen38-27b-rtx3090 recipe: int4 AutoRound body, int8 lm_head/embed, MTP n=4 drafts.
+      # syv-ai/qwen38-27b-rtx3090 recipe: int4 AutoRound body, MTP n=4 drafts.
+      # CORRECTED 2026-09-10 -- this line used to read "int4 AutoRound body, int8 lm_head/embed",
+      # which describes the BASE checkpoint. It is not what runs. /v1/models on :18020 reports the
+      # served root as `.../Qwen3.8-27B-W4A16-AutoRound-fast` (verified 2026-09-10): same int4
+      # AutoRound body, but an int4 GPTQ lm_head and an int4 MTP drafter, NOT int8 ones.
+      # NOBODY CHOSE THE -fast VARIANT. The host launcher's MODEL default is "the `-fast` directory
+      # if present, else the base dir", so cloud2 serves it because it happens to be on disk. The
+      # repo's record and the box had drifted apart on this since the recipe was first written.
+      # The recipe's OWN single-user quality table prices the two variants (its numbers, not ours):
+      #   base requantization   : int8 lm_head : PPL 8.045          : GSM8K 95.5% : ~107-109 tok/s
+      #   -fast (WHAT WE SERVE) : int4 lm_head : PPL 8.095 (+0.6%)  : GSM8K 96.5% : ~114-124 tok/s
+      # So the variant we ended up on is the FASTER and slightly worse-perplexity one, by accident.
+      # A switch to the base dir is a TWO-variable change, not a clean lm_head A/B: lm_head and the
+      # MTP drafter are exported as one artefact and move int4 -> int8 together.
+      # Do NOT act on this from here. MODEL lives on the cloud2 host, not in this ConfigMap, and
+      # the checkpoint choice is Phase C of cloudlab plans/2026-09-10-vllm-svg-fidelity-plan.md --
+      # a gated ladder to run, not a change to ship. This comment is the RECORD, not a proposal.
+      #
+      # ⚠️ FAULT 2026-09-10 -- HTTP 200 IS NOT HEALTH FOR THIS ROUTE. Read this before you
+      # trust anything :18020 returns, and before you trust the fallbacks block far below.
+      # TWO SEPARATE FAULTS on that day, kept apart here because the plan keeps them apart and
+      # because only ONE of them has an alert -- which is the caveat spelled out in that block.
+      #
+      # FAULT 1 -- THE DRAFTER WAS ALREADY DEAD before anything was run against the engine. The first
+      # serve.log metrics line covering the 10:36 traffic (07:37:17 UTC = 10:37:17 local -- the LXC
+      # logs in UTC, the hosts run EEST) already reads "Mean acceptance length: 1.00, Accepted: 0
+      # tokens". Cumulatively: between 10:35 and 11:05, +123,810 draft rounds yielded +72 accepted
+      # tokens, i.e. **0.014%** against ~25% position-0 acceptance read off /metrics at 10:35.
+      # Rejection sampling makes a useless drafter SLOW BUT LOSSLESS, so output was still CORRECT
+      # while this fault ran alone: fault 1 is what the **52.7 tok/s** (against the 200.4 recorded
+      # below) measures, not the `!`.
+      #
+      # FAULT 2 -- TOKEN 0 FOREVER. At **10:37:57 local** a request carrying
+      # `response_format: {type: json_schema}` hit xgrammar's IN-PLACE logits mask
+      # (`apply_token_bitmask_inplace_kernel`); the FSM failed to advance, "grammar rejected tokens
+      # [0]", and THAT request returned **HTTP 500**. From then on the engine answered with HTTP 200,
+      # a well-formed OpenAI body, and **token id 0 (`!`)** as the entire content -- cold, idle,
+      # single-stream, greedy included (T=0 reproduced it bit-identically 3/3, so this was destroyed
+      # logits, not a sampler wandering). NOT literally every request 200'd -- the triggering one
+      # 500'd -- and the three xhigh streams already in flight stayed COHERENT for ~4 more minutes,
+      # collapsing to `!` only at ~10:42, within ~12 s of each other. The pelican SVG prompt returned
+      # ZERO content in three attempts (finish_reason=length, all `!`).
+      #
+      # THE LINK BETWEEN THE TWO IS STRONG BUT NOT PROVEN, and the plan says so in those words: same
+      # token id, an in-place mask on a shared buffer, and a known vLLM bug class (structured outputs
+      # + speculative decoding failing to advance the FSM). The ~4 coherent minutes after 10:37:57
+      # are a gap no evidence in either repo closes. Do NOT write this up as established cause, and
+      # do not treat fault 1 as a symptom of fault 2 -- it preceded it.
+      #
+      # It does NOT self-heal: the unit sets Restart=no, and switching it to Restart=on-failure would
+      # NOT help either, because the process never dies -- it keeps serving 200s. Only a restart or a
+      # CONTENT-validating check ends it. RECOVERY -- note WHERE it runs: the engine is LXC 5103
+      # (192.168.0.28), so the command is `pct exec 5103 -- systemctl restart vllm-qwen38` on the
+      # cloud2 HOST (192.168.0.21), i.e. `python scripts/node-ssh.py 192.168.0.21 "pct exec 5103 --
+      # systemctl restart vllm-qwen38"` from cloudlab. Run against .28 it does not exist. THE RESTART
+      # IS NOT THE FIRST ACTION: runbook §11 makes the capture mandatory first (serve.log tail,
+      # `nvidia-smi -q | grep -iE 'Xid|Pending|Retired|Remapp'`, `dmesg -T | grep -iE 'xid|nvrm'`),
+      # because the restart destroys the only record of whether this was an illegal memory access, an
+      # Xid or a silent NaN -- and if that capture is NOT clean a restart is the wrong tool entirely.
+      # RESTORED 2026-09-10 12:54:53 EEST by exactly that command, after capture: answering again in
+      # **105 s**, then greedy "Reply with exactly: OK" 3/3 and **158.6 tok/s** single-stream (plan
+      # restore table; runbook §11 timeline row 12:54:53). THIS RECORD ASSERTS NOTHING ABOUT THE
+      # ENGINE'S STATE AT ANY LATER TIME -- the restore cleared the latch, it did not fix the trigger.
+      # CONSEQUENCE FOR THIS ROUTE, not yet mitigated: LiteLLM passes `response_format` straight
+      # through, so any Open WebUI / dsh / tool-calling caller can put the estate's default chat
+      # model into this state with one request. Rejecting `response_format`/`tools` here is the only
+      # fix that needs no engine change -- it is a FOLLOW-UP awaiting operator sign-off and is
+      # deliberately NOT done in this commit, which is record-correction only.
+      # Full record: cloudlab plans/2026-09-10-vllm-svg-fidelity-plan.md and runbook
+      # docs/runbooks/cloud-gpu-cluster.md §11.
+      #
       # Kept under its OWN model_name (not pooled with qwen3.8-27b-cloud) because the backends are
       # not interchangeable: different engine and different throughput, so pooling them would let
       # LiteLLM silently route a request to a 3x slower backend with no way to tell which answered.
       #
-      # TP=4 across all four cards since 2026-09-07. Measured against TP=2 on the same harness:
-      #   single-stream 179.5 -> 200.4 tok/s | xhigh C=1 158.8 -> 176.8 | C=4 284.7 -> 367.7
+      # TP=4 across all four cards since 2026-09-07. Measured against TP=2 on the same harness.
+      # ⚠️ MEASURED 2026-09-07 -- and only PARTLY re-measured since. Treat the TP=2 -> TP=4 pairs
+      # below as the last FULL measurement; they are kept rather than deleted because they are the
+      # only complete measured anchor there is, and they are NOT replaced with estimates. The full
+      # re-baseline is Phase B of the cloudlab plan.
+      #   single-stream 179.5 -> 200.4 tok/s | xhigh C=1 158.8 -> 176.8
+      #   C=4 284.7 -> 367.7 -- PENDING RE-MEASUREMENT: not re-run since 2026-09-07, and the plan
+      #     bars the harness above C=1 until its A5 concurrency question is resolved.
       #   KV pool 385,074 -> 1,010,719 tokens, concurrency 2.94x -> 7.71x at 131072.
+      # WHAT WAS RE-MEASURED, on 2026-09-10 AFTER the 12:54:53 restore (same engine that read
+      # 52.7 tok/s while faulted), so a reader of this route is not left with only 2026-09-07:
+      #   single-stream  **158.6 tok/s** (scripts/vllm-test.sh verdict: healthy) against the 200.4
+      #                  above -- runbook §11 restore table and the plan's restore table.
+      #   xhigh C=1      **~185 tok/s** against the 176.8 above -- plan B4, n=3, 26,259-30,692
+      #                  completion tokens in 143.7-165.8 s, finish_reason=stop on all three.
+      #   KV pool        1,011,940 tokens, **7.72x** at 131072 -- the 1,010,719 / 7.71x above, re-read
+      #                  on a restored engine and +1,221 tokens against it.
+      # Neither throughput figure is a like-for-like re-run of the 2026-09-07 harness (one is the
+      # smoke script, one is the SVG eval), so they REPLACE nothing above -- they are what a restored
+      # engine actually did on 2026-09-10, and they are recorded because "no fresh number exists"
+      # would be false.
       # Chosen over TWO independent TP=2 engines: those pay for the weights twice, so their
       # two 385,074 pools total LESS than TP=4's single 1,010,719 -- and a split prefix cache
       # makes every agent turn a cold prefill. Measured on a 10-turn loop over a 22k seed:
@@ -122,11 +210,45 @@ data:
       # artifact of comparing batches run under different caps and client timeouts.
       #
       # reasoning_effort xhigh -- the model's own template default, and MEASURED better here on
-      # "Generate an SVG of a pelican riding a bicycle" at constant temperature:
+      # "Generate an SVG of a pelican riding a bicycle" at constant temperature.
+      # ⚠️ THE TWO LINES BELOW WERE MEASURED 2026-09-07 AND ARE PENDING RE-MEASUREMENT:
       #   medium -> 47-50 SVG elements, consistently flat: bird not seated, legs off the pedals
       #   xhigh  -> 75-110 elements, correct saddle/crank geometry, legs articulated to pedals
-      # The cost is real (xhigh ~20-30K tokens vs ~4K) but there is no decode cliff: a 28,177-token
-      # single-stream generation held 158.8 tok/s. Callers can still override per request.
+      # The element-count contrast is not in doubt. The "correct saddle/crank geometry" half IS: a
+      # deterministic stroke-aware scorer re-ran the same prompt and sampling on 2026-09-10 ON THE
+      # RESTORED ENGINE (plan C0 baseline, n=3, C=1) and scored 0/3 on the joint verdict. Check 1
+      # (no leg painted above the saddle surface) failed on all three, at 4.0 / 6 / 7.0 px overshoot.
+      # Check 2 failed on 2 of 3; s11 is the sample where the WHOLE pelican group is demonstrably
+      # painted after the WHOLE bicycle group (elements 46-66 against 22-45), while s12's check-2
+      # failure came via the label path and is recorded only as a failed check 2, not as
+      # whole-bird-after-whole-bicycle. Element counts on 2026-09-10 were 67 / 75 / 84 -- ONE OF THE
+      # THREE BELOW the 75-110 band recorded above, and none of them counted the way the plan's gate
+      # defines it (RENDERED elements only, no padding), so that band is UNVERIFIED rather than
+      # confirmed.
+      #
+      # SUPERSEDED THE SAME DAY, and the update matters more than the baseline: the C0 baseline was
+      # extended to n=8 and the first Phase C rung was RUN AND RULED OUT.
+      #   C0  (-fast, int4 lm_head)  joint pass 0/8   check1 fail 6/8   check2 fail 4/8, 2 unscorable
+      #   C2  (base,  int8 lm_head)  joint pass 0/8   check1 fail 6/8   check2 fail 3/8, 2 unscorable
+      # Same eight seeds, same prompt, same sampling, C=1. Paired, check 1 improved on 0 samples and
+      # regressed on 1; check 2 improved on 1 and regressed on 2 -- exact McNemar p=1.000 on both.
+      # That is NO DETECTED DIFFERENCE in these paired samples; at n=8 it is not a claim of
+      # equivalence, and a real effect smaller than this design can see is not excluded.
+      # So moving the target model's output projection from int4 to int8 changes NEITHER defect, and
+      # the hypothesis that the -fast variant's int4 lm_head was blunting long-range structural
+      # consistency is not supported. cloud2 was restored to C0.
+      # Two side findings worth keeping: C2 cost no throughput at TP=4 (180.5 vs 180.9 tok/s -- the
+      # recipe's ~107-109 vs ~114-124 figure is single-GPU and does not survive the lm_head being
+      # sharded four ways), and a checkpoint change is a ~285 s outage rather than ~105 s because
+      # changing MODEL= invalidates the torch.compile cache.
+      # n=8 screens a rung out; the plan's n=20 is what would be needed to ACCEPT one. Chasing this
+      # is Phase C of the cloudlab plan, not
+      # a change to make here.
+      # The cost is real (xhigh ~20-30K tokens vs ~4K). No decode cliff was seen on 2026-09-07: a
+      # 28,177-token single-stream generation held 158.8 tok/s. The 52.7 tok/s of 2026-09-10 is NOT
+      # a decode cliff either -- the drafter was dead (acceptance 0.014%), which makes rejection
+      # sampling slow but lossless, so it is 5x slow for a reason that has nothing to do with length.
+      # Callers can still override per request.
       # VISION: images work (host VISION=1). Verified with distinct-image probe 2026-09-07 --
       # red/blue/green -> RED/Blue/Green, 3/3 distinct AND correct. VIDEO IS UNTESTED: this
       # INT4 export ships no video_preprocessor_config.json, so do not advertise video.
@@ -155,6 +277,10 @@ data:
       #   400 "Unexpected reasoning effort off. Supported types are xhigh (default), medium, and low."
       # Verified against the live endpoint 2026-09-07: enable_thinking:false -> reasoning_tokens=0.
       # No extra VRAM: same engine, same weights, different sampling.
+      # ⚠️ SAME ENGINE AS qwen3.8-27b-vllm-cloud (:18020), so the 2026-09-10 HTTP-200/token-0 fault
+      # note on that route applies here IDENTICALLY -- `enable_thinking:false` isolates nothing, it
+      # only changes sampling on the same process. On 2026-09-10 this alias, the Open WebUI default,
+      # its TASK_MODEL_EXTERNAL and dsh's default provider were ALL returning `!`.
       - model_name: qwen3.8-27b-vllm-fast-cloud
         litellm_params:
           model: openai/qwen3.8-27b
@@ -453,6 +579,51 @@ data:
       # the always-on local route. Both cloud hosts power off nightly, so without the local entry the
       # chain is empty exactly overnight. A fallback list whose members share an outage window is not
       # a fallback list.
+      #
+      # ⚠️ THIS CHAIN DOES NOT COVER THE 2026-09-10 FAILURE MODE. Do not read its presence as
+      # "the qwen3.8-27b-vllm-cloud route is covered" -- it is covered for ONE of the two OUTAGES
+      # this route has actually had (2026-09-08 and 2026-09-10). (Full incident in the model_list
+      # comment on that route.)
+      # Fallbacks fire on ERRORS: an exception, a 5xx, a timeout, a connection refusal. That is
+      # exactly the 2026-09-08 outage this chain was built for (ConnectionRefused), and it covers it.
+      # The 2026-09-10 fault is the opposite shape: :18020 returned HTTP 200 with a well-formed body
+      # whose content was `!!!!...`. Nothing raised, so num_retries never retried, no fallback ever
+      # fired, and LiteLLM served the garbage to users for hours. Gatus's status-only `vllm-cloud2`
+      # endpoint (group `AI`) missed it for the same reason -- a /v1/models STATUS probe passes while
+      # the model behind it is emitting token 0. A well-formed 200 defeats every error-shaped defence
+      # by construction.
+      # WHAT COVERS IT, so the next reader does not re-derive this -- and what each one does NOT:
+      #   1. `VLLMSpecDecodeAcceptanceCollapse` -- cloudlab
+      #      kubernetes/apps/infrastructure/monitoring/cloud-vllm-rules.yaml. Fires when
+      #      rate(vllm:spec_decode_num_accepted_tokens_total[10m]) /
+      #      rate(vllm:spec_decode_num_draft_tokens_total[10m]) stays BELOW 0.02 (2%) for 10m, ANDed
+      #      with a >1 draft-token/s guard on the same window so an idle or stopped engine (0/0)
+      #      cannot fire it. Cheapest signal there is -- already on /metrics, no request of its own.
+      #      It did NOT catch the 2026-09-10 incident: the rule POSTDATES it and was written from its
+      #      counters. It would have, by a wide margin -- 2% sits ~9x below that day's 18.1%
+      #      cumulative healthy acceptance and ~138x above its broken 0.0145% (the rule's own two
+      #      measured points).
+      #      ITS OWN ANNOTATION CARRIES THE CAVEAT AND SO DOES THIS LINE: it proves the drafter and
+      #      the target model no longer agree, NOT that the output is garbage. Those were TWO
+      #      SEPARATE faults on 2026-09-10 (see the route comment above). A token-0 latch with a
+      #      HEALTHY drafter would not fire it at all, so a quiet acceptance alert is not evidence
+      #      that this route's output is fine. Only a content check can say that.
+      #   2. The content-validating Gatus endpoint landed on this branch alongside this change --
+      #      kubernetes/apps/apps/gatus/configmap.yaml, `name: vllm-cloud2` in group `AI (content)`
+      #      (the status-only endpoint of the same name stays in group `AI`). It POSTs
+      #      scripts/vllm-test.sh's smoke request straight at :18020 -- fixed prompt, temperature 0,
+      #      enable_thinking false, max_tokens 12 -- and asserts on the RESPONSE BODY:
+      #      `[BODY].choices[0].message.content == pat(*OK*)` plus `!= pat(*!!!!!!!!!*)`, a LITERAL
+      #      run of nine `!` (token id 0). That is the only check in the estate that reads what a
+      #      user would have seen.
+      #      ITS LIMIT IS STATED THERE AND IS NOT RESTATED AS COVERAGE HERE: Gatus conditions have no
+      #      regex and no repetition operator, so vllm-test.sh's GENERAL degenerate-output rules --
+      #      any character repeated more than 8 times, and the distinct-character floor -- are NOT
+      #      expressible in it. A reply that starts "OK" and then degenerates onto some other
+      #      character passes both conditions.
+      # Keep the chain -- it is correct for what it covers, and it is still the only thing standing
+      # between a user and a 500 when the unit is actually down. Just do not mistake it for health
+      # monitoring of the model's OUTPUT.
       fallbacks:
         - qwen3.8-27b-vllm-cloud: ["qwen3.5-122b-cloud", "qwen3.6-35b-a3b-local"]
         - qwen3.8-27b-vllm-fast-cloud: ["qwen3.6-35b-a3b-local"]
@@ -518,7 +689,24 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "369ac5bdabbc"
+        #
+        # BUMPED 2026-09-11, 369ac5bdabbc -> 2eeb80186320, for the qwen3.8-27b-vllm-cloud record
+        # correction: the -fast-vs-base checkpoint comment, the 2026-09-10 two-fault note (drafter
+        # collapse and the token-0 latch, recorded separately, with the 12:54:53 restore), the
+        # 2026-09-07 measurements and what was re-measured after the restore, the C0 scorer result,
+        # a pointer from the -fast route onto the same engine, and the warning that the fallbacks
+        # chain does not cover a well-formed-200 failure. Those are ALL comments, so the
+        # config LiteLLM parses is byte-identical in effect, so no ROUTING, sampling or limit changes.
+        # It is not free, though, and 'changes no behaviour' would be too broad: the bump rolls the
+        # Deployment, and a rollout terminates in-flight streams on the replaced replica. It is
+        # taken anyway because the estate's rule is that this annotation tracks the ConfigMap: a
+        # reader who diffs config.yaml and finds an unbumped checksum concludes the ConfigMap did not
+        # change, which is exactly the drift the 2026-08-15/19 notes above were spent closing. The
+        # cost is one rolling restart of a 2-replica maxUnavailable:0 Deployment.
+        # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
+        # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
+        # is the same extraction as the previous value, not a new one).
+        checksum/config: "2eeb80186320"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

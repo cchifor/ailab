@@ -2,7 +2,13 @@
 # failure signal now that the per-check success logs are silenced (GATUS_LOG_LEVEL=WARN).
 # Routes to ntfy via the existing Alertmanager config (all alerts -> ntfy). release label so the
 # operator's ruleSelector (release=kube-prometheus-stack) discovers it from the gatus namespace.
-# NOTE: the exact metric/label names are verified live after metrics: true takes effect.
+# TWO alerts live here: GatusEndpointDown, the broad derived path over every endpoint, and
+# VLLMContentProbeFailing, which exists precisely because GatusEndpointDown must exclude the vLLM
+# rows and would otherwise leave the 2026-09-10 silent-garbage mode unnotified. Read both comments
+# together -- the exclusion in one is what makes the other mandatory.
+# Metric and label names verified live against Gatus v5.36.0 (the deployment's pinned image) on
+# 2026-09-10: gatus_results_endpoint_success{group,key,name,type}. Both alerts below match on
+# `name`, and one also on `group`, so those two label names are load-bearing.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -23,8 +29,18 @@ spec:
           # to ignore the alert. Omitting the endpoint's own native `alerts:` block does NOT
           # suppress this rule -- that was the mistake, caught in codex impl-review #10.
           #
-          # The endpoint still exists and still shows red on the Gatus dashboard, which is what it
-          # is for. Anything added here that is deliberately down part of the day needs the same
+          # AS OF 2026-09-10 THAT ONE STRING EXCLUDES TWO ENDPOINTS, deliberately. configmap.yaml
+          # now carries two endpoints both named `vllm-cloud2` in DIFFERENT groups -- `AI`
+          # (/v1/models) and `AI (content)` (a content-validating completion of the same engine) --
+          # and Gatus's metric labels are group/key/name/type, so `name!="vllm-cloud2"` drops BOTH
+          # series. Both are expected-red every night and neither may page from here.
+          # NARROWING THIS MATCHER (adding `group="AI"`, say) OR RENAMING EITHER ENDPOINT silently
+          # re-enables the nightly page for a check whoever makes that edit never knew depended on
+          # this literal. The alternative -- distinct names plus `name!~"vllm-cloud2.*"` here -- is
+          # equally valid and NOT taken, because it splits one guarantee across two files.
+          #
+          # The endpoints still exist and still show red on the Gatus dashboard, which is what they
+          # are for. Anything added here that is deliberately down part of the day needs the same
           # treatment, and a NEW exclusion needs its own justification on this comment.
           expr: gatus_results_endpoint_success{name!="vllm-cloud2"} == 0
           for: 5m
@@ -33,3 +49,144 @@ spec:
           annotations:
             summary: "Gatus endpoint {{ $labels.name }} ({{ $labels.group }}) is failing"
             description: "Health check '{{ $labels.name }}' in group '{{ $labels.group }}' (key {{ $labels.key }}) has reported failure for 5m."
+        # ── The one endpoint the exclusion above must NOT leave silent ──────────────────────────
+        # WHY THIS EXISTS. On 2026-09-10 the engine at 192.168.0.28:18020 answered every request
+        # with HTTP 200 and token id 0 ('!') from 10:37:57 to 12:54:53 EEST -- 2h20m, the plan's
+        # own figure for it -- while
+        # /v1/models stayed green, LiteLLM's fallback chain stayed quiet (it fires on errors, not
+        # on garbage content) and NOTHING NOTICED; a human reading a reply is what found it. The
+        # `AI (content)` endpoint added to configmap.yaml in this change is the sensor that would
+        # have seen it. THIS RULE IS WHAT MAKES THAT SENSOR REACH ANYONE: it is excluded from
+        # GatusEndpointDown above by `name`, and it carries no native `alerts:` block of its own
+        # (Gatus v5.36.0 does have per-endpoint `maintenance-windows`, but a window is a CLOCK
+        # LITERAL and the shutdown hour is operator-driven -- configmap.yaml has the full argument;
+        # the guard below suppresses on EVIDENCE instead). Shipping the probe without this rule
+        # would have left a dashboard nobody was watching during the incident -- the same silence
+        # in a new colour.
+        #
+        # SELECTED BY name AND group, both literals load-bearing. Both vLLM endpoints are named
+        # `vllm-cloud2`; only the `AI (content)` one asserts on the response body, and only it
+        # should page. Renaming the endpoint or its group disarms this alert with no error
+        # anywhere; configmap.yaml's comment says the same thing from its side.
+        #
+        # NIGHT GUARD: the estate's idiom from cloudlab
+        # kubernetes/apps/infrastructure/monitoring/cloud-vllm-rules.yaml -- EVIDENCE that the
+        # cloud hosts are off, never a clock (nothing in either repo fixes the hour the cluster
+        # goes down; it is operator-driven). `unless` FAILS CLOSED: `sum()` over a job with no
+        # series returns NOTHING, so the obvious `and on () (sum(...) > 0)` form would suppress
+        # this alert forever and silently if cloud-node.yaml were ever deleted, renamed or
+        # unselected, whereas with `unless` an empty right-hand side removes nothing and the alert
+        # still fires. THE CROSS-ESTATE JOIN IS REAL, NOT ASSUMED: cloud-node.yaml lives in
+        # cloudlab but its header records that "the ai-cluster Prometheus scrapes them over the
+        # shared mgmt LAN" -- the same Prometheus that evaluates this file.
+        # WHOLE-CLUSTER ON PURPOSE: cloud2 alone going dark is the estate's default chat model
+        # going away, not a maintenance window, so that still pages. Only all three dark is night.
+        # IT SUPPRESSES, SO SOMETHING ELSE MUST PAGE on that condition --
+        # CloudClusterAllHostsUnreachable in the same cloudlab file is that handoff.
+        #
+        # `for: 20m`, the same bound cloudlab's VLLMEngineDown uses, for the same two transitions
+        # the guard cannot cover and NOBODY HAS MEASURED: at shutdown the vLLM guest stops before
+        # its host goes dark, so this probe goes red while `up{job="cloud-node"}` still has series
+        # (cluster-power.sh shuts guests sequentially at `pct shutdown --timeout 120` each, and
+        # nothing in either repo records how many guests cloud2 runs); in the morning the host is
+        # scrapeable before the engine has loaded weights and captured CUDA graphs. 20m is a
+        # deliberately generous bound, not a measurement -- capture both at plan item A2 and
+        # tighten this and VLLMEngineDown together.
+        # 20m ALSO MEANS >= 5 CONSECUTIVE FAILED CHECKS, which is the right property against the
+        # endpoint's 300s interval: the gauge holds its last result between checks, so one red
+        # check holds 0 for only 300s and can never reach 20m. A single probe timing out behind
+        # ordinary load therefore cannot page -- which matters, because that probe's 20s client
+        # timeout is itself headroom rather than a measured bound.
+        #
+        # SEVERITY critical, unlike GatusEndpointDown's warning: this is the estate's default chat
+        # model serving garbage to Open WebUI, dsh and every agentforge workflow, not one dashboard
+        # row going red. Both route to ntfy identically today (all alerts -> ntfy, per this file's
+        # header), so the label is documentation until routing splits by severity.
+        #
+        # COVERED BY THE GATE AS OF 2026-09-10. It was not before: scripts/rules-lint.sh scanned
+        # one directory for one filename pattern and this file matched NEITHER, so a critical alert
+        # shipped with no promtool ever run over it. Discovery is now by `kind: PrometheusRule`
+        # repo-wide, and prometheusrule.test.yaml beside this file is executed by that gate on every
+        # push and PR -- six cases: the nightly power-off silent on both vLLM alerts, a failing probe
+        # paging only after for: 20m, a healthy engine paging from nothing, the probe series
+        # disappearing being alerted in its own right (and not before for: 45m), and GatusEndpointDown
+        # still paging for an unrelated endpoint while never paging for either vllm-cloud2 row.
+        - alert: VLLMContentProbeMissing
+          expr: absent(gatus_results_endpoint_success{name="vllm-cloud2", group="AI (content)"})
+          # Longer than the probe's own 20m: Gatus needs a scrape cycle to publish a new series
+          # after a rollout, and this must not fire during an ordinary redeploy of the gatus pod.
+          #
+          # NO NIGHT GUARD, deliberately, and it does not need one (asked in review 2026-09-11):
+          # Gatus runs in the ailab cluster, which is up 24/7, so when the cloud hosts power off it
+          # keeps probing and keeps EXPORTING this series with a failing value. The series going
+          # ABSENT means Gatus itself stopped publishing it -- a removed endpoint, a rejected config,
+          # or a dead gatus pod -- which is worth paging on at any hour. The night fixture below
+          # supplies the series and therefore exercises the FAILING alert's guard, not this one.
+          for: 45m
+          labels: { severity: warning }
+          annotations:
+            summary: "The vLLM content probe series has disappeared — VLLMContentProbeFailing cannot fire"
+            description: >-
+              `gatus_results_endpoint_success{name="vllm-cloud2", group="AI (content)"}` has been
+              absent for >45m, so the alert that catches a well-formed-200 garbage engine has no
+              input and will never fire. Check the endpoint still exists in
+              kubernetes/apps/apps/gatus/configmap.yaml under EXACTLY that name and group — both
+              strings are load-bearing and are matched literally here and in GatusEndpointDown —
+              and check the gatus pod actually accepted its config: `skip-invalid-config-update`
+              keeps the last good config running on a bad edit, so a typo removes the probe
+              SILENTLY and the pod stays Ready. `kubectl --context admin@ai -n gatus logs deploy/gatus`
+              shows the reload error. Until this resolves, cloudlab's
+              VLLMSpecDecodeAcceptanceCollapse is the only remaining signal for that failure mode.
+        - alert: VLLMContentProbeFailing
+          expr: |
+            (gatus_results_endpoint_success{name="vllm-cloud2", group="AI (content)"} == 0)
+            # `count(...) >= 3` is not decoration -- codex pre-merge review, 2026-09-10.
+            # `sum(up) == 0` alone is ALSO true when two of the three targets have vanished from
+            # discovery and the one remaining is down. That is a monitoring-plane failure, and the
+            # bare guard would have SUPPRESSED this alert through it: the estate would be blind to a
+            # dead engine precisely when it had least reason to trust its own telemetry. Requiring
+            # the full expected inventory means suppression happens only for the state it was
+            # written for -- all three hosts present and deliberately powered off -- and any
+            # partial-inventory case FAILS OPEN and pages. cloud1/2/3 is the documented inventory
+            # (README); a fourth cloud host must raise this number in both repos.
+            #
+            # The inner `count by (instance)` counts HOSTS, not series (raised in review
+            # 2026-09-11). A bare count() would reach 3 on three series from fewer than three hosts
+            # -- today cloud-node.yaml scrapes exactly one target per host so the two agree, but
+            # "three series means three hosts" is an assumption about a file in the OTHER repo, and
+            # a second scraped port per host would silently turn this guard back into the
+            # partial-inventory bug it was written to fix.
+            unless on () (sum(up{job="cloud-node"}) == 0 and count(count by (instance) (up{job="cloud-node"})) >= 3)
+          for: 20m
+          labels:
+            severity: critical
+          annotations:
+            summary: "vLLM cloud2's content probe is failing and the nightly-shutdown guard did not suppress it"
+            description: >-
+              Gatus's content probe of 192.168.0.28:18020/v1/chat/completions (group 'AI (content)')
+              has been failing for 20m without sufficient evidence that this is the nightly
+              power-off. That is NOT the same as "a cloud host is up": suppression requires the
+              FULL expected inventory of three hosts, all reporting down, so this alert also fires
+              when the inventory is incomplete and nothing is scrapeable at all -- it fails open by
+              design. Check whether the hosts are actually powered off before reading it as a fault. WHAT THE EXPRESSION ACTUALLY OBSERVES is that the check
+              failed — which is a well-formed 200 carrying a non-answer (the 2026-09-10 mode)
+              OR a connection failure, a timeout, a non-200, a 401, or a body this probe could
+              not parse. It cannot tell them apart, so CONFIRM WHICH before acting; the
+              distinction decides whether the engine needs a restart or the probe needs fixing. The probe sends cloudlab scripts/vllm-test.sh's smoke
+              request -- greedy, max_tokens 12, prompt 'Reply with exactly: OK' -- and asserts the
+              reply contains OK and is at most 4 characters long. (It does NOT carry a negative
+              pattern for a run of '!' -- Gatus conditions have no such operator; the length bound
+              is what rejects the 12-character run this engine actually produced.) HTTP 200 IS NOT HEALTH FOR THIS ROUTE:
+              on 2026-09-10 this engine returned a well-formed 200 whose entire completion was token
+              id 0 ('!') for 2h20m while serving qwen3.8-27b-vllm-cloud, the Open WebUI default, its
+              TASK_MODEL_EXTERNAL and dsh's default provider, and nothing noticed. CONFIRM BY HAND
+              first -- `scripts/vllm-test.sh` smoke must return OK, not '!' -- then CAPTURE THE
+              EVIDENCE BEFORE RESTARTING, because the restart is the fix and it destroys the only
+              record of whether this was an illegal memory access, an Xid or a silent NaN:
+              `pct exec 5103 -- tail -80 /models-local/vllm/serve.log`, `nvidia-smi -q | grep -iE
+              'Xid|Pending|Retired|Remapp'` and `dmesg -T | grep -iE 'xid|nvrm'` on 192.168.0.21.
+              A 401 here is NOT this fault: it means the engine was given --api-key and the probe in
+              gatus configmap.yaml needs one too. Root cause on 2026-09-10 was an xgrammar FSM
+              failure on a single response_format request, so check for one before blaming the
+              hardware; cloudlab's VLLMSpecDecodeAcceptanceCollapse is the earlier, cheaper signal
+              for the same fault. See cloudlab plans/2026-09-10-vllm-svg-fidelity-plan.md.

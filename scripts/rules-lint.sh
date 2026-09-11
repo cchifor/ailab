@@ -58,14 +58,24 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 PROMETHEUS_IMAGE="quay.io/prometheus/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996"
-RULES_DIR="kubernetes/apps/infrastructure/monitoring"
-
-RULE_FILES=("$RULES_DIR"/*-rules.yaml)
-if [ "${#RULE_FILES[@]}" -eq 0 ] || [ ! -f "${RULE_FILES[0]}" ]; then
-  echo "no $RULES_DIR/*-rules.yaml found — failing closed (expected > 0)" >&2
+# DISCOVERY IS BY CONTENT, REPO-WIDE, not by a directory plus a filename glob.
+# 2026-09-10, codex pre-merge review: the gate used to scan only
+# kubernetes/apps/infrastructure/monitoring/*-rules.yaml, and a CRITICAL alert added at
+# kubernetes/apps/apps/gatus/prometheusrule.yaml was excluded TWICE OVER -- wrong directory and
+# wrong filename pattern -- so nothing ever ran promtool over it. A gate whose coverage depends on
+# where someone chose to put a file, and what they chose to call it, is the "coverage that watches
+# nothing" defect this repo keeps writing headers about, one level up. Every object that declares
+# `kind: PrometheusRule` anywhere under kubernetes/ is now checked, so a new rule file cannot be
+# silently outside the gate no matter where it lands. Both spellings of the extension, because
+# kubernetes/ already carries `.yml` files and an extension is just another naming convention.
+RULES_ROOT="kubernetes"
+mapfile -t RULE_FILES < <(grep -rl --include='*.yaml' --include='*.yml' '^kind: PrometheusRule' "$RULES_ROOT" | sort)
+if [ "${#RULE_FILES[@]}" -eq 0 ]; then
+  echo "no PrometheusRule manifests found under $RULES_ROOT/ — failing closed (expected > 0)" >&2
   exit 1
 fi
-echo "found ${#RULE_FILES[@]} PrometheusRule manifests under $RULES_DIR"
+echo "found ${#RULE_FILES[@]} PrometheusRule manifests under $RULES_ROOT/ (discovered by kind:, not by path)"
+printf '  %s\n' "${RULE_FILES[@]}"
 
 # A scratch dir (not a repo path) so nothing has to be gitignored; removed on every exit path.
 # mktemp -d is 0700 and the prometheus image runs promtool as `nobody`, which then cannot even
@@ -81,7 +91,7 @@ chmod 755 "$OUT_DIR"
 LOG_DIR="$(mktemp -d)"
 trap 'rm -rf "$OUT_DIR" "$LOG_DIR"' EXIT
 "$PY" scripts/promrule-spec.py --out "$OUT_DIR" "${RULE_FILES[@]}" | tee "$LOG_DIR/extract.log"
-chmod 644 "$OUT_DIR"/*.yaml
+chmod 644 "$OUT_DIR"/*.y*ml
 EXPECTED_RULES="$(sed -n 's/^promrule-spec: \([0-9][0-9]*\) rules across .*$/\1/p' "$LOG_DIR/extract.log")"
 if ! [[ "$EXPECTED_RULES" =~ ^[0-9]+$ ]] || [ "$EXPECTED_RULES" -eq 0 ]; then
   echo "promrule-spec did not report a positive total rule count (got '${EXPECTED_RULES}') — failing closed" >&2
@@ -89,7 +99,7 @@ if ! [[ "$EXPECTED_RULES" =~ ^[0-9]+$ ]] || [ "$EXPECTED_RULES" -eq 0 ]; then
 fi
 
 CONTAINER_FILES=()
-for f in "$OUT_DIR"/*.yaml; do
+for f in "$OUT_DIR"/*.y*ml; do
   CONTAINER_FILES+=("/rules/$(basename "$f")")
 done
 if [ "${#CONTAINER_FILES[@]}" -ne "${#RULE_FILES[@]}" ]; then
@@ -110,8 +120,14 @@ fi
 
 # `promtool test rules` resolves each fixture's `rule_files:` RELATIVE TO THE FIXTURE, so the
 # tests are copied in beside the extracted specs they name.
-TEST_FILES=("$RULES_DIR"/*-rules.test.yaml)
-if [ -f "${TEST_FILES[0]}" ]; then
+# A fixture is the sibling <rule-file-basename>.test.yaml, so discovery follows the rules rather
+# than a second glob that could drift away from them.
+TEST_FILES=()
+for rf in "${RULE_FILES[@]}"; do
+  cand="${rf%.*}.test.yaml"
+  [ -f "$cand" ] && TEST_FILES+=("$cand")
+done
+if [ "${#TEST_FILES[@]}" -gt 0 ]; then
   CONTAINER_TESTS=()
   for f in "${TEST_FILES[@]}"; do
     cp "$f" "$OUT_DIR/$(basename "$f")"
@@ -148,7 +164,7 @@ if [ -f "${TEST_FILES[0]}" ]; then
   docker run --rm -v "$OUT_DIR:/rules:ro" --entrypoint promtool "$PROMETHEUS_IMAGE" \
     test rules "${CONTAINER_TESTS[@]}"
 else
-  echo "no $RULES_DIR/*-rules.test.yaml fixtures — skipping promtool test rules"
+  echo "no <rule>.test.yaml fixtures beside any discovered PrometheusRule — skipping promtool test rules"
 fi
 
 echo "rules-lint: OK (${#RULE_FILES[@]} PrometheusRule specs, ${FOUND_RULES} rules checked by promtool)"

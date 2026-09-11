@@ -114,15 +114,26 @@ data:
       # /v1/models, not a TCP connect: the host stayed up and answered pings throughout -- only the
       # vLLM unit was down -- so a listener check would have passed for the entire outage.
       #
-      # It is NOT a completion request, which was raised in review as the stronger check and is
-      # deliberately not done: a completion every 300s occupies a shared GPU that real users are
-      # waiting on, and the failure this exists to catch was the process not serving at all
-      # (ConnectionRefused), which /v1/models detects. The residual gap is real and stated rather
-      # than hidden: a backend that answers /v1/models while completions fail will NOT be caught
-      # here. The LiteLLM fallback chain is what covers that case for users.
+      # THIS endpoint is not a completion request: a completion every 300s occupies a shared GPU
+      # that real users are waiting on, and the failure it exists to catch was the process not
+      # serving at all (ConnectionRefused), which /v1/models detects. Its residual gap -- a backend
+      # that answers /v1/models while completions fail -- is real, and was stated here rather than
+      # hidden.
+      #
+      # AMENDED 2026-09-10. That gap stopped being hypothetical one day after it was written: this
+      # engine answered /v1/models with 200 while EVERY completion came back as token id 0 ('!')
+      # for 2h20m. The completion check is now done, by the `AI (content)` endpoint immediately
+      # below, which carries the incident record and the reasoning for paying that GPU cost.
+      # What this paragraph used to end with -- "the LiteLLM fallback chain is what covers that case
+      # for users" -- is WRONG, and is deleted rather than softened: cloudlab
+      # plans/2026-09-10-vllm-svg-fidelity-plan.md records that the chain "fires on errors, not on
+      # garbage content" and "does not cover the garbage-output mode at all". It absorbs the
+      # 2026-09-08 ConnectionRefused mode; it did not absorb this one, and nothing did.
       #
       # `name: vllm-cloud2` is matcher-friendly on purpose -- prometheusrule.yaml excludes this
-      # endpoint from GatusEndpointDown by that exact string. Renaming it re-enables nightly pages.
+      # endpoint from GatusEndpointDown by that exact string, and since 2026-09-10 that one string
+      # excludes the `AI (content)` endpoint below as well. Renaming either re-enables the nightly
+      # page for both.
       #
       # 300s and no native `alerts:` block, because this cloudlab host POWERS OFF NIGHTLY by design.
       # It is here to make the state visible on the dashboard, not to wake anyone at 03:00.
@@ -131,6 +142,228 @@ data:
         url: http://192.168.0.28:18020/v1/models
         interval: 300s
         conditions: ["[STATUS] == 200"]
+      # --- AI (content) ---
+      # SECOND probe of the SAME engine as vllm-cloud2 above, added 2026-09-10. It exists because
+      # that endpoint's own stated residual gap -- "a backend that answers /v1/models while
+      # completions fail will NOT be caught here" -- became a 2h20m production incident one day
+      # after it was written.
+      #
+      # 2026-09-10, 10:37:57 to 12:54:53 EEST: 192.168.0.28:18020 answered EVERY request with HTTP
+      # 200 and a well-formed OpenAI body whose entire completion was token id 0 ('!'). The start
+      # is the xgrammar FSM failure the plan's root-cause section timestamps at 07:37:57 UTC -- the
+      # LXC logs in UTC and the hosts run EEST, so local = UTC + 3h -- and it is from that request
+      # onward that EVERY request came back as token 0; the end is the 12:54:53 restore. The plan
+      # states that duration as 2h20m and it is QUOTED, not recomputed: its own two timestamps span
+      # 2h16m56s, so 2h20m is the plan's rounding and this file does not silently "correct" it.
+      # (10:42 is a different event: the three already-running streams stayed coherent ~4 more
+      # minutes and only then collapsed, so 10:42-12:54, ~2h12m, is the IN-FLIGHT-STREAM window,
+      # not the every-request one this sentence is about.) Greedy (T=0, x3) returned a
+      # BIT-IDENTICAL 24-character run of '!' on the diagnostic battery -- a larger token budget
+      # than this probe's 12; the plan does not record which. Spec-decode acceptance fell from
+      # 25.5% to 0.014% (+123,810 draft rounds bought +72 accepted tokens between 10:35 and 11:05)
+      # and throughput to 52.7 tok/s against a documented 200.4. It backs qwen3.8-27b-vllm-cloud,
+      # the Open WebUI default, its TASK_MODEL_EXTERNAL and dsh's default provider -- all of them
+      # served '!' for 2h20m and NOTHING NOTICED. /v1/models above was green throughout. LiteLLM's
+      # fallback chain fires on errors, not on content. Audit item A6's proposed "HTTP completion
+      # check" would have PASSED: the body was well-formed and the status was 200. A human reading a
+      # reply is what found it.
+      #
+      # So this endpoint asserts on the RESPONSE BODY. HTTP 200 IS NOT HEALTH FOR THIS ROUTE.
+      #
+      # THE REQUEST is the smoke check from cloudlab/scripts/vllm-test.sh, field for field (its
+      # VLLM_SMOKE_* defaults: prompt 'Reply with exactly: OK', expect OK, max_tokens 12,
+      # temperature 0, enable_thinking false), so the scheduled probe and the operator's hand-run
+      # script cannot disagree about what healthy means. temperature 0 is what makes an equality
+      # test meaningful -- a greedy decode of a fixed prompt is reproducible -- and the plan's
+      # restore table records THIS exact request (greedy, prompt 'Reply with exactly: OK')
+      # returning a 12-character run of '!' during the fault and "OK" 3/3 after the 12:54:53
+      # restore. The 24-character run quoted higher up is a DIFFERENT row of the diagnostic
+      # battery at a different token budget -- corroboration, not this request's output.
+      # THE GREEN PATH IS EXERCISED, not assumed: on 2026-09-10, after the 12:54:53 restore, this
+      # endpoint was run byte-for-byte through Gatus v5.36.0 (the image deployment.yaml pins)
+      # against the live engine and all three conditions passed, content "OK". Measured latency
+      # was 0.1-0.6 s across two runs -- two samples of an idle engine, not a bound, but far enough
+      # inside the 20s client timeout below to say that timeout is headroom and not a fit.
+      # `model` is the served name, vllm-test.sh's VLLM_MODEL default and what
+      # litellm.yaml sends as openai/qwen3.8-27b; a wrong name is a 404 and fails condition 1.
+      # enable_thinking:false because the production route runs reasoning_effort xhigh, which spends
+      # 15,996-38,897 reasoning tokens per answer (litellm.yaml) -- a probe must not.
+      #
+      # It posts STRAIGHT AT THE ENGINE, never through LiteLLM: that proxy carries num_retries: 2
+      # and a fallback chain to qwen3.5-122b-cloud, so a probe sent there could be answered by a
+      # DIFFERENT model and score green while :18020 served '!'. The plan flags the same trap for
+      # the eval harness (Phase B1).
+      #
+      # NO api_key and NO Authorization header, and none should be added. TWO sources, kept apart
+      # because neither evidences the other half:
+      #   - kubernetes/apps/apps/ai/litellm.yaml, read 2026-09-10, is the source for the CLIENT
+      #     side: both routes onto this engine (qwen3.8-27b-vllm-cloud and
+      #     qwen3.8-27b-vllm-fast-cloud, both api_base http://192.168.0.28:18020/v1) send
+      #     api_key: "sk-noauth", a placeholder the OpenAI client library demands. That file says
+      #     NOTHING about how the engine was started, and must not be cited for it.
+      #   - that the ENGINE enforces nothing is a dated live observation, 2026-09-10: an
+      #     unauthenticated POST to :18020/v1/chat/completions returned HTTP 200. vLLM only asks
+      #     for a key when started with --api-key, so it is not set. The unit and the cmdline exist
+      #     in NEITHER repo -- capturing them into cloudlab `host/` is plan item A2 -- so this
+      #     stays an observation until that lands, not a citation to a file.
+      # A token added here would be ignored by the engine while
+      # implying an authentication this route does not have. If the engine is ever given --api-key
+      # this probe starts getting 401 and goes red, which is the correct failure: fix it then with a
+      # Secret expanded as ${...} like NTFY_TOKEN above, never by inlining one in this ConfigMap.
+      #
+      # THE NIGHTLY POWER-OFF, and why this endpoint deliberately cannot page.
+      # The whole `pve` cluster powers off every night (cloudlab README "Day/night":
+      # scripts/cluster-power.sh down stops the guests, arms an RTC alarm, powers cloud1/2/3 off),
+      # so this target is red for roughly 11 of every 24 hours BY DESIGN -- from 21:00, the hour
+      # prometheusrule.yaml's exclusion comment records, to the 08:00 default both RTC-arming paths
+      # use. Exactly ONE of those two hours is soft, and it is the shutdown. 08:00 IS fixed in
+      # cloudlab, twice: scripts/cluster-power.sh takes it as its second positional argument and
+      # defaults to 08:00, and scripts/cloud-arm-rtc-wake.sh sets CLOUD_WAKE_AT=08:00 (overridable
+      # in /etc/default/cloud-power). 21:00 is fixed NOWHERE -- cloudlab cloud-vllm-rules.yaml
+      # rejects a clock guard for precisely that reason: nothing in either repo fixes the hour the
+      # cluster goes DOWN, which is operator-driven (the ailab homepage ON/OFF buttons, or
+      # `cluster-power.sh down` by hand). So "roughly 11 hours" rests on that one soft number and
+      # is an observed habit, not a bound -- and a clock literal still does not belong in this file.
+      #
+      # Gatus DOES have per-endpoint maintenance windows -- `endpoints[].maintenance-windows` in
+      # v5.36.0, the version deployment.yaml pins. (An earlier revision of this comment claimed it
+      # did not and that only the instance-global `maintenance:` block existed; that was wrong,
+      # corrected 2026-09-11 against the pinned release's own README.) The reason not to use one is
+      # the paragraph above, not a missing feature: a maintenance window is a CLOCK LITERAL, and
+      # these hosts go down when an operator presses a button, not at a fixed time. A window wide
+      # enough to cover the habit blinds the probe for hours it did not need to, and a window that
+      # tracks the habit is a number in this file that nobody updates when the habit changes.
+      # Failure thresholds are no substitute either -- at this 300s interval the night is ~132
+      # consecutive failures, so any threshold small enough to be useful by day pages at 21:00 every
+      # night. So, exactly like vllm-cloud2 above: NO NATIVE `alerts:` block. There is no threshold
+      # to set because there is no alert HERE. This endpoint is the SENSOR; the paging path is
+      # VLLMContentProbeFailing in prometheusrule.yaml, shipped in the same change, which can be
+      # night-safe in a way this file cannot because PromQL can guard on evidence that the cloud
+      # hosts are off. See below.
+      #
+      # `name: vllm-cloud2` -- the SAME name as the endpoint above, in a DIFFERENT group. Deliberate
+      # and load-bearing, not a copy-paste: prometheusrule.yaml excludes vLLM from GatusEndpointDown
+      # by the EXACT string `name!="vllm-cloud2"`, and an endpoint named anything else pages every
+      # night through the DERIVED path. Gatus keys an endpoint on group+name, so a distinct group
+      # keeps the key and the metric series unique while the `name` label stays inside the existing
+      # exclusion -- this change therefore cannot introduce a nightly page even if nothing else in
+      # the estate is touched. (The group MUST differ: a duplicate group+name is an invalid config,
+      # and skip-invalid-config-update above would then silently keep the last-known-good file, i.e.
+      # this endpoint would never exist.) The alternative -- a distinct name plus widening that
+      # matcher to a regex -- is one line in prometheusrule.yaml and equally valid; it is not taken
+      # here only because it splits one guarantee across two files.
+      #
+      # WHAT MAKES A CONTENT FAILURE PAGE, and it is NOT a follow-up: VLLMContentProbeFailing in
+      # prometheusrule.yaml, added 2026-09-10 in this same change. A dashboard-only signal would
+      # not have caught the incident above either -- nobody was watching the dashboard during it --
+      # so shipping the sensor without the alert would have left the gap open.
+      #     gatus_results_endpoint_success{name="vllm-cloud2", group="AI (content)"} == 0
+      #       unless on () (sum(up{job="cloud-node"}) == 0 and count(count by (instance) (up{job="cloud-node"})) >= 3)
+      # The guard is the estate's night-safe idiom, from cloudlab cloud-vllm-rules.yaml: EVIDENCE
+      # that the hosts are off, never a clock. `unless` fails CLOSED (an empty right-hand side
+      # removes nothing); the `and on ()` form would suppress forever if the cloud-node job were
+      # ever renamed or deleted. The `count(...) >= 3` half makes suppression require the FULL
+      # three-host inventory, so a partial inventory with nothing scrapeable fails OPEN and pages
+      # (the reasoning is on the rule itself). It must match on `group` as well as `name`: `name`
+      # alone selects BOTH vLLM endpoints, on purpose. BOTH LITERALS ARE LOAD-BEARING -- renaming
+      # this endpoint or its group disarms that alert silently, and prometheusrule.yaml says so
+      # from its side.
+      #
+      # THE CONDITIONS, and what each is for:
+      #   [STATUS] == 200            necessary, never sufficient -- the fault WAS a 200.
+      #   content == pat(*OK*)       the positive assertion. pat() is Gatus's glob matcher, so this
+      #                              tolerates surrounding whitespace or a full stop but NOT a case
+      #                              change; it is tighter than vllm-test.sh, which upper-cases
+      #                              before comparing. If a legitimate engine change ever makes the
+      #                              reply "Ok", this goes red and wants a hand-verified update --
+      #                              not a quietly loosened pattern.
+      #   len(content) <= 4          the length bound, and the condition that actually rejects the
+      #                              incident body. '!' is TOKEN ID 0 in the Qwen BPE vocabulary,
+      #                              and a greedy decode emitting id 0 forever is the canonical
+      #                              vLLM signature of destroyed logits; the plan's restore table
+      #                              records THIS request returning `!!!!!!!!!!!!` during the
+      #                              fault -- 12 characters, which is also the ceiling, since
+      #                              max_tokens is 12. That fails BOTH conditions (no "OK", and
+      #                              12 > 4). Gatus conditions have no regex and no repetition
+      #                              operator -- pat() is glob ('*' and '?') only -- so there is
+      #                              no way to say "a run of more than 8 '!'" here; the length
+      #                              bound is what stands in for vllm-test.sh's
+      #                              VLLM_DEGEN_RUN_MAX=8 rule on this fixed 2-3 character answer.
+      #                              The per-condition comment below records what the bound still
+      #                              lets through, and the len() type caveat.
+      #
+      # VERIFIED 2026-09-11 against Gatus v5.36.0 itself (the pinned image, run locally against the
+      # live engine and a mock returning canned bodies): live engine -> all three conditions pass;
+      # `!!!!!!!!!!!!` -> pat() false AND len() false (12); `BROKEN`, `NOT OK`, `OK: sure!` -> pat()
+      # true, len() false (6/6/9); `OK`, `OK.`, `OK\n` -> pass; `content: null` -> pat() false, and
+      # NOTE len() evaluates TRUE there (an unresolvable path counts as length 0), so the null case
+      # is caught by pat() alone. The two content conditions guard different failures and neither
+      # is sufficient on its own.
+      #
+      # RESIDUAL GAP, stated rather than hidden. Nothing expressible here covers vllm-test.sh's two
+      # GENERAL rules -- "any character repeated more than 8 times" and the distinct-character ratio
+      # floor -- because Gatus has no regex. What this pair does NOT reject is any reply of at most
+      # four characters that contains "OK" (`NOK`, `OK!!`, `OKOK`); none is a plausible output of a
+      # token-0 latch, which repeats one character to the token budget. A degeneration onto some
+      # other token, an alternation between two characters, or a reply that begins "OK" and then
+      # degenerates are all caught -- the first two by pat(), the last by the length bound. The
+      # general guards are in cloudlab/scripts/vllm-test.sh `health`, and the earliest, cheapest
+      # signal (accepted tokens flat while drafts climb) lives in cloudlab
+      # kubernetes/apps/infrastructure/monitoring/cloud-vllm-rules.yaml. This is the third leg,
+      # and the only one that reads what a user would actually have seen.
+      - name: vllm-cloud2
+        group: AI (content)
+        url: http://192.168.0.28:18020/v1/chat/completions
+        method: POST
+        headers:
+          Content-Type: application/json
+        body: |
+          {"model": "qwen3.8-27b",
+           "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+           "max_tokens": 12,
+           "temperature": 0,
+           "chat_template_kwargs": {"enable_thinking": false}}
+        # 300s, matching vllm-cloud2 above. The GPU cost of a completion probe is the stated
+        # reason that endpoint makes none; at 12 output tokens this is 144 tokens/hour, so a
+        # full 24h of probing costs less than ONE xhigh answer on the production route
+        # (15,996-38,897 reasoning tokens, litellm.yaml). Catching the 2026-09-10 failure mode
+        # is what that request buys.
+        interval: 300s
+        # 20s, not the 10s default. The reply is 12 greedy tokens -- a fraction of a second at the
+        # 158.6 tok/s measured post-restore on 2026-09-10 -- but this engine's real traffic is xhigh
+        # generations of 15,996-38,897 tokens and NO measurement of queueing delay under continuous
+        # batching exists in either repo, so 20s is headroom and deliberately not a measured bound.
+        # A probe that times out behind ordinary load would produce exactly the false red that
+        # teaches people to ignore this row. It does not cover a cold engine (105s to answer after
+        # the 12:54:53 restart), which SHOULD read red.
+        client:
+          timeout: 20s
+        conditions:
+          - "[STATUS] == 200"
+          # `pat(*OK*)` ALONE IS NOT ENOUGH and the two conditions below are not redundant.
+          # Verified 2026-09-10 against Gatus's glob semantics: `*OK*` also matches "BROKEN"
+          # (it contains O-K), "NOT OK", and "OK!!!!" — so a model answering BROKEN would have
+          # reported this endpoint healthy, which defeats the probe's entire purpose. The length
+          # bound rejects those: the engine answers "OK" or " OK" (2-3 chars) to this fixed greedy
+          # request, while each of those near-misses is 6+.
+          #
+          # WHAT STILL PASSES, stated because the bound is narrower than it looks and an earlier
+          # revision of this comment implied it closed everything: any answer of 4 characters or
+          # fewer containing "OK" — "NOK", "OK!!", "OKOK" (raised in review 2026-09-11). None is a
+          # plausible output of THIS failure mode, which repeats one token ('!' x12 on the day, all
+          # of which this rejects on both conditions, and 12 > 4 on length alone). The bound is not
+          # tightened to <= 3 because the measured green answers run 2-3 characters and a trailing
+          # newline would sit at the edge: a probe that pages on a healthy engine gets muted, and a
+          # muted probe is worse than a slightly loose one.
+          #
+          # TYPE NOTE: `len()` returns ARRAY LENGTH when the path resolves to an array, and string
+          # length otherwise. `content` is a string on this route (exercised live 2026-09-10,
+          # content "OK"), but a future multimodal-style content array would make `len()` count
+          # PARTS, not characters — a 2-element array holding a long garbage string containing "OK"
+          # would satisfy both conditions. If `content` ever stops being a string here, this pair
+          # stops meaning what it says.
+          - "[BODY].choices[0].message.content == pat(*OK*)"
+          - "len([BODY].choices[0].message.content) <= 4"
       # --- Observability ---
       # These four ARE the alerting pipeline, so each carries a native `alerts:` block that reaches
       # ntfy without Prometheus in the loop. Every other endpoint on this page relies on the derived

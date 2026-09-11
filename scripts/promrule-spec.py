@@ -2,17 +2,18 @@
 """Extract the `spec:` of a single-document PrometheusRule manifest as a promtool rules file.
 
 `promtool check rules` reads a plain `groups:` document, not the PrometheusRule CRD wrapper Flux
-applies, so scripts/rules-lint.sh runs this first over monitoring/*-rules.yaml and hands promtool the
-extracted specs. STDLIB ONLY, deliberately: the CI runner installs no dependency (no PyYAML), and
-this repo's rule files are single-document manifests whose `spec:` is a top-level key with a
-2-space-indented body, which a textual cut handles exactly. Comment lines are transparent wherever
-they sit (these files are comment-heavy and a column-0 `#` inside spec is legal YAML); the cut
-ends only at the next top-level KEY. Everything else FAILS CLOSED rather than guessing: more than
-one document, a kind that is not PrometheusRule, no `spec:` at column 0, a spec body that is not
-uniformly 2-space-indented, any other column-0 line inside the spec, a spec without `groups:`, or
-an extracted spec that carries fewer `- alert:`/`- record:` entries than the manifest is a
-SpecError and a non-zero exit — a rules file this cannot extract is a rules file the gate has not
-checked, and a rules file it truncated would be one the gate only pretended to check.
+applies, so scripts/rules-lint.sh runs this first over every `kind: PrometheusRule` manifest under
+kubernetes/ and hands promtool the extracted specs. STDLIB ONLY, deliberately: the CI runner
+installs no dependency (no PyYAML), and this repo's rule files are single-document manifests whose
+`spec:` is a top-level key with a 2-space-indented body, which a textual cut handles exactly.
+Comment lines are transparent wherever they sit (these files are comment-heavy and a column-0 `#`
+inside spec is legal YAML); the cut ends only at the next top-level KEY. Everything else FAILS
+CLOSED rather than guessing: more than one document, a kind that is not PrometheusRule, no `spec:`
+at column 0, a spec body that is not uniformly 2-space-indented, any other column-0 line inside the
+spec, a spec without `groups:`, or an extracted spec that carries fewer `- alert:`/`- record:`
+entries than the manifest is a SpecError and a non-zero exit — a rules file this cannot extract is a
+rules file the gate has not checked, and a rules file it truncated would be one the gate only
+pretended to check.
 
     python3 scripts/promrule-spec.py --out <dir> <rules.yaml>...
 
