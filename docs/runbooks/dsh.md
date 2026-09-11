@@ -157,6 +157,22 @@ contents**; the fields are operator-owned by design.
    `patch`, not `put` — `put` drops the canary and every other field. (A trailing newline in the
    file is tolerated by the helper; an embedded one, or any whitespace, is refused.)
 
+   **As executed on 2026-09-11.** The shared dev-worker PAT is not admin-capable (scope
+   `read:organization,write:issue,write:repository`; `/admin/*` answers 403 naming the missing
+   `read:admin`/`write:admin`), and human accounts are Authelia/OIDC with no local password, so the
+   account was created by API with `gitea_admin` HTTP Basic auth, the password read from the
+   SOPS-managed Secret `gitea/gitea-admin` into a 0600 curl config (the same route
+   `agentforge-platform-activation.md` uses to mint bot tokens; OpenBao holds no Gitea admin
+   credential). `POST /api/v1/admin/users` with `restricted: true`, `visibility: private`,
+   `must_change_password: false`, `send_notify: false`; then `PATCH /api/v1/admin/users/dsh` for
+   `max_repo_creation: 0` and `allow_create_organization: false` — that endpoint **requires
+   `login_name` (and `source_id`) in the body or answers 422 `[LoginName]: Required`**. The token was
+   minted *as dsh* (`POST /api/v1/users/dsh/tokens`, Basic auth from a 0600 file) with scope
+   `read:repository` only: `read:organization` is inert for a non-member of the private org.
+   Collaborator grants went through the shared PAT (repo admin suffices). Proven before the vault
+   write: `info/refs?service=git-upload-pack` 200 on `platform`, `permissions: pull only` on the
+   three repos, 404 on another private repo, 403 on an issue create.
+
 3. **Verify, polling rather than trusting intervals** — 5m is ESO's refresh *period*, and kubelet's
    Secret-volume sync is "sync period plus cache propagation"; neither is a deadline:
 
@@ -425,6 +441,30 @@ If `wait-for-install` is genuinely waiting, look at the install Job, which gates
 kubectl -n dsh get job
 kubectl -n dsh logs job/dsh-install-<version>-<build>
 ```
+
+### A team's delegation tool is absent (`subagent_codex` never registers)
+
+The providers in `DSH_PLUGINS` reach the profile through the install Job's **staging** step, and
+`seed-settings` projects whatever that step produced at pod creation. First read the two signals:
+
+```bash
+kubectl -n dsh logs deploy/dsh -c seed-settings | grep -E 'staging state|closure'
+kubectl -n dsh logs job/dsh-install-0-1-5-alpha-2-glibc-ps1 | tail -5
+```
+
+`staging state: failed` with `/bin/sh: pnpm: not found` in the Job log was the 2026-09-11 shape:
+the step ran `corepack enable pnpm` and a bare `pnpm add`, but as uid 1000 `corepack enable`
+cannot write its shims into `/usr/local/bin` (true on node:22 and node:24 alike), so it only worked
+where a shim already existed, and the node:24 image ships none. The Job now runs a **pinned** pnpm
+through corepack (`corepack "$PNPM" add`, cache at `/app/.corepack`); `scripts/tests/test_dsh_install_job.py`
+pins that shape. Two things to know when it recurs:
+
+- The Job re-runs on its own only when Flux re-applies it (daily TTL) or its template changes; a
+  fixed Job leaves the **running** pod without the closure until the next pod creation, because
+  `seed-settings` projects at boot and nothing revisits a live pod. Roll the Deployment after the
+  Job reports `ok`.
+- Renovate bumps the `node` image under this Job without exercising staging. Anything the step needs
+  must be pinned in the script, never inherited from the image.
 
 ### Web search returns nothing
 

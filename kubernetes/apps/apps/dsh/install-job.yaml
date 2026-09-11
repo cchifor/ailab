@@ -270,9 +270,20 @@ spec:
                     if [ -f "$SP/pnpm-workspace.yaml" ] && [ -f "$SP/package.json" ]; then
                       cp "$SP/package.json" "$STAGE/package.json" || ok=0
                       [ "$ok" = 1 ] && { cp "$SP/pnpm-workspace.yaml" "$STAGE/pnpm-workspace.yaml" || ok=0; }
-                      corepack enable pnpm >/dev/null 2>&1 || true
+                      # A PINNED pnpm, run THROUGH corepack, never a `pnpm` shim. `corepack enable`
+                      # writes its shims into /usr/local/bin, which uid 1000 cannot do -- verified in
+                      # docker on node:22 AND node:24 -- so it was always a silent no-op here, and a
+                      # bare `pnpm` only resolves where a shim already exists. node:24 ships none:
+                      # the 2026-09-11 run ended in `/bin/sh: pnpm: not found`, staging reported
+                      # `failed`, and dsh booted without the codex provider. `corepack <pm>@<ver>`
+                      # downloads that exact version into COREPACK_HOME and runs it; the cache
+                      # lives on the app volume so a re-run does not fetch again. Pinned rather than
+                      # corepack's "last known good", which moves under our feet (12.4.1 today).
+                      # scripts/tests/test_dsh_install_job.py pins this shape.
+                      PNPM=pnpm@12.4.1
+                      mkdir -p /app/.corepack || ok=0
                       # shellcheck disable=SC2086
-                      [ "$ok" = 1 ] && { (cd "$STAGE" && pnpm add $DSH_PLUGINS) || ok=0; }
+                      [ "$ok" = 1 ] && { (cd "$STAGE" && COREPACK_HOME=/app/.corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack "$PNPM" add $DSH_PLUGINS) || ok=0; }
                     else
                       echo "WARNING: could not initialise a scratch profile to copy pnpm settings from"
                       ok=0
