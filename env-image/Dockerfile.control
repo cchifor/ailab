@@ -39,7 +39,7 @@
 # Re-pin by bumping the docker:28.3-cli digest for both COPY --from lines together (and re-check
 # the plugin versions/paths it carries — `docker run --rm --entrypoint sh <digest> -c "ls
 # /usr/local/libexec/docker/cli-plugins/"`).
-FROM docker.io/library/node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+FROM docker.io/library/node:24-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
 
 COPY --from=docker.io/library/docker:29.8-cli@sha256:eccaacfeed644c7de222ff047483568cb988dde95476fbaaf10ea2d04921bb66 \
      /usr/local/bin/docker /usr/local/bin/docker
