@@ -456,11 +456,38 @@ kubectl -n dsh logs deploy/dsh -c dsh | grep -i 'patch:'
 Then open a NEW session in a private window: the coordinator only runs on a blank session, so that
 is the state in which the modal used to appear.
 
-### Pod stuck in `Init:0/2`
+### Pod stuck in `Init:0/3` with NO events
 
-**Usually it is not stuck.** The init sequence mounts NFS and runs two init containers; a slow start
-looks identical to a stall in `kubectl get pods`. Read the pod *status* before acting — a healthy pod
-was once deleted for no reason because the summary column lagged:
+**The cause that hid for days, and how to tell it apart.** A dsh pod that sits in `Init:0/3` with
+`PodReadyToStartContainers=False` and no pod events, while other pods on the same node start
+normally, *may* be kubelet chowning the whole `/app` NFS volume. The `nfs.csi.k8s.io` CSIDriver is
+registered with `fsGroupPolicy: File`, so a pod that sets `fsGroup` gets a recursive ownership walk
+over every file of the volume after `NodePublishVolume` returns and before the sandbox is created.
+The walk emits no pod event (kubelet logs a "still applying ownership" warning after 30 s, which
+only `talosctl logs kubelet` shows), and `PodReadyToStartContainers=False` by itself only says the
+sandbox is not up -- so corroborate before concluding:
+
+```bash
+# completed-walk totals for the NFS plugin on the node. The metric is recorded AFTER a walk
+# returns, so it does NOT move while a pod is stalled: compare count/sum before the rollout and
+# after the pod starts. On 2026-09-11 that delta was one apply of ~25 min; the day's average
+# over 39 applies was ~6.6 min, growing with the file count under /app.
+kubectl get --raw /api/v1/nodes/talos-cp1/proxy/metrics | grep 'volume_apply_access_control' | grep 'nfs.csi'
+```
+
+Both pod specs now set `fsGroupChangePolicy: OnRootMismatch`, which skips the walk when the volume
+root already has gid 1000, the setgid bit and group `rwx`. Verify that precondition on the live
+mount after the first rollout that follows the change -- it is what the skip depends on:
+
+```bash
+kubectl -n dsh exec deploy/dsh -c dsh -- stat -c '%A %U:%G %n' /app    # expect drwxrws... node:node
+```
+
+**Do not delete the pod while it walks** -- the replacement starts the walk from zero.
+
+**Otherwise it is usually not stuck.** The init sequence mounts NFS and runs three init containers; a
+slow start looks identical to a stall in `kubectl get pods`. Read the pod *status* before acting -- a
+healthy pod was once deleted for no reason because the summary column lagged:
 
 ```bash
 kubectl -n dsh get pod <pod> -o jsonpath='{range .status.initContainerStatuses[*]}{.name}: {.state}{"\n"}{end}'

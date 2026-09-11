@@ -29,6 +29,25 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        # OnRootMismatch, NOT the default (Always). This is what made every rollout of this
+        # Deployment look frozen: the nfs.csi.k8s.io CSIDriver is registered with
+        # fsGroupPolicy: File, so with fsGroup set kubelet chowns EVERY file of the /app NFS
+        # volume (the install tree, the npm cache at /app/.npm, the corepack cache, the staged
+        # closures) before it will create the pod sandbox -- and it emits no event while it
+        # walks. Measured on talos-cp1 on 2026-09-11 from kubelet's own metrics:
+        #     storage_operation_duration_seconds{operation_name="volume_apply_access_control",
+        #       volume_plugin="kubernetes.io/csi:nfs.csi.k8s.io"}: 39 applies, 15438 s total
+        # -- ~6.6 min on average and ~25 min for each of the day's last rollouts, growing with the
+        # file count. Recreate strategy means dsh is DOWN for the whole walk. With
+        # OnRootMismatch kubelet skips the walk when the volume ROOT already has gid 1000, the
+        # setgid bit and group rwx (pkg/volume/volume_linux.go, skipPermissionChange). A
+        # previous apply leaves it that way; the NFS driver's mountPermissions chmod must not
+        # strip setgid on remount -- verified on the live mount after this shipped (runbook,
+        # "Pod stuck in Init:0/3").
+        # fsGroup itself stays: it is what makes the 0440 dsh-credentials Secret volume readable
+        # by uid 1000 (see the `credentials` volume below). The install Job carries the same
+        # setting for the same volume.
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile: { type: RuntimeDefault }
       initContainers:
         # The agent could not read back a single file it produced: every read_image ended in
