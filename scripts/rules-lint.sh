@@ -66,9 +66,10 @@ PROMETHEUS_IMAGE="quay.io/prometheus/prometheus:v3.5.0@sha256:63805ebb8d2b392019
 # where someone chose to put a file, and what they chose to call it, is the "coverage that watches
 # nothing" defect this repo keeps writing headers about, one level up. Every object that declares
 # `kind: PrometheusRule` anywhere under kubernetes/ is now checked, so a new rule file cannot be
-# silently outside the gate no matter where it lands.
+# silently outside the gate no matter where it lands. Both spellings of the extension, because
+# kubernetes/ already carries `.yml` files and an extension is just another naming convention.
 RULES_ROOT="kubernetes"
-mapfile -t RULE_FILES < <(grep -rl --include='*.yaml' '^kind: PrometheusRule' "$RULES_ROOT" | sort)
+mapfile -t RULE_FILES < <(grep -rl --include='*.yaml' --include='*.yml' '^kind: PrometheusRule' "$RULES_ROOT" | sort)
 if [ "${#RULE_FILES[@]}" -eq 0 ]; then
   echo "no PrometheusRule manifests found under $RULES_ROOT/ — failing closed (expected > 0)" >&2
   exit 1
@@ -90,7 +91,7 @@ chmod 755 "$OUT_DIR"
 LOG_DIR="$(mktemp -d)"
 trap 'rm -rf "$OUT_DIR" "$LOG_DIR"' EXIT
 "$PY" scripts/promrule-spec.py --out "$OUT_DIR" "${RULE_FILES[@]}" | tee "$LOG_DIR/extract.log"
-chmod 644 "$OUT_DIR"/*.yaml
+chmod 644 "$OUT_DIR"/*.y*ml
 EXPECTED_RULES="$(sed -n 's/^promrule-spec: \([0-9][0-9]*\) rules across .*$/\1/p' "$LOG_DIR/extract.log")"
 if ! [[ "$EXPECTED_RULES" =~ ^[0-9]+$ ]] || [ "$EXPECTED_RULES" -eq 0 ]; then
   echo "promrule-spec did not report a positive total rule count (got '${EXPECTED_RULES}') — failing closed" >&2
@@ -98,7 +99,7 @@ if ! [[ "$EXPECTED_RULES" =~ ^[0-9]+$ ]] || [ "$EXPECTED_RULES" -eq 0 ]; then
 fi
 
 CONTAINER_FILES=()
-for f in "$OUT_DIR"/*.yaml; do
+for f in "$OUT_DIR"/*.y*ml; do
   CONTAINER_FILES+=("/rules/$(basename "$f")")
 done
 if [ "${#CONTAINER_FILES[@]}" -ne "${#RULE_FILES[@]}" ]; then
@@ -123,7 +124,7 @@ fi
 # than a second glob that could drift away from them.
 TEST_FILES=()
 for rf in "${RULE_FILES[@]}"; do
-  cand="${rf%.yaml}.test.yaml"
+  cand="${rf%.*}.test.yaml"
   [ -f "$cand" ] && TEST_FILES+=("$cand")
 done
 if [ "${#TEST_FILES[@]}" -gt 0 ]; then

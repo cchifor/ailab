@@ -258,13 +258,16 @@ data:
       # not have caught the incident above either -- nobody was watching the dashboard during it --
       # so shipping the sensor without the alert would have left the gap open.
       #     gatus_results_endpoint_success{name="vllm-cloud2", group="AI (content)"} == 0
-      #       unless on () (sum(up{job="cloud-node"}) == 0)
+      #       unless on () (sum(up{job="cloud-node"}) == 0 and count(count by (instance) (up{job="cloud-node"})) >= 3)
       # The guard is the estate's night-safe idiom, from cloudlab cloud-vllm-rules.yaml: EVIDENCE
       # that the hosts are off, never a clock. `unless` fails CLOSED (an empty right-hand side
       # removes nothing); the `and on ()` form would suppress forever if the cloud-node job were
-      # ever renamed or deleted. It must match on `group` as well as `name`: `name` alone selects
-      # BOTH vLLM endpoints, on purpose. BOTH LITERALS ARE LOAD-BEARING -- renaming this endpoint
-      # or its group disarms that alert silently, and prometheusrule.yaml says so from its side.
+      # ever renamed or deleted. The `count(...) >= 3` half makes suppression require the FULL
+      # three-host inventory, so a partial inventory with nothing scrapeable fails OPEN and pages
+      # (the reasoning is on the rule itself). It must match on `group` as well as `name`: `name`
+      # alone selects BOTH vLLM endpoints, on purpose. BOTH LITERALS ARE LOAD-BEARING -- renaming
+      # this endpoint or its group disarms that alert silently, and prometheusrule.yaml says so
+      # from its side.
       #
       # THE CONDITIONS, and what each is for:
       #   [STATUS] == 200            necessary, never sufficient -- the fault WAS a 200.
@@ -274,26 +277,37 @@ data:
       #                              before comparing. If a legitimate engine change ever makes the
       #                              reply "Ok", this goes red and wants a hand-verified update --
       #                              not a quietly loosened pattern.
-      #   content != pat(*!!!!!!!!!*)  the negative assertion: a run of NINE '!'. '!' is TOKEN ID 0
-      #                              in the Qwen BPE vocabulary, and a greedy decode emitting id 0
-      #                              forever is the canonical vLLM signature of destroyed logits.
-      #                              Nine matches vllm-test.sh's VLLM_DEGEN_RUN_MAX=8 ("more than
-      #                              8") and the sampled 11:05 reply "6!!!!!!!!!" (a run of exactly
-      #                              9). The margin is measured on THIS request: the plan's restore
-      #                              table records it returning `!!!!!!!!!!!!`, a 12-character run,
-      #                              which is 3 characters clear of the nine-'!' literal -- and 12
-      #                              is also the ceiling, since max_tokens is 12. The battery's
-      #                              24-character greedy run corroborates at a larger budget; it is
-      #                              not what this request returns.
+      #   len(content) <= 4          the length bound, and the condition that actually rejects the
+      #                              incident body. '!' is TOKEN ID 0 in the Qwen BPE vocabulary,
+      #                              and a greedy decode emitting id 0 forever is the canonical
+      #                              vLLM signature of destroyed logits; the plan's restore table
+      #                              records THIS request returning `!!!!!!!!!!!!` during the
+      #                              fault -- 12 characters, which is also the ceiling, since
+      #                              max_tokens is 12. That fails BOTH conditions (no "OK", and
+      #                              12 > 4). Gatus conditions have no regex and no repetition
+      #                              operator -- pat() is glob ('*' and '?') only -- so there is
+      #                              no way to say "a run of more than 8 '!'" here; the length
+      #                              bound is what stands in for vllm-test.sh's
+      #                              VLLM_DEGEN_RUN_MAX=8 rule on this fixed 2-3 character answer.
+      #                              The per-condition comment below records what the bound still
+      #                              lets through, and the len() type caveat.
       #
-      # RESIDUAL GAP, stated rather than hidden. Gatus conditions have no regex and no repetition
-      # operator -- pat() is glob ('*' and '?') only -- so that run length is a LITERAL string of
-      # nine '!', and nothing expressible here covers vllm-test.sh's two GENERAL rules: "any
-      # character repeated more than 8 times" and the distinct-character ratio floor. A degeneration
-      # onto some other token, or an alternation between two characters, is still caught -- by the
-      # POSITIVE assertion, since neither contains "OK" -- but a reply that begins "OK" and then
-      # degenerates onto a character other than '!' passes both conditions and is NOT covered here.
-      # The general guards are in cloudlab/scripts/vllm-test.sh `health`, and the earliest, cheapest
+      # VERIFIED 2026-09-11 against Gatus v5.36.0 itself (the pinned image, run locally against the
+      # live engine and a mock returning canned bodies): live engine -> all three conditions pass;
+      # `!!!!!!!!!!!!` -> pat() false AND len() false (12); `BROKEN`, `NOT OK`, `OK: sure!` -> pat()
+      # true, len() false (6/6/9); `OK`, `OK.`, `OK\n` -> pass; `content: null` -> pat() false, and
+      # NOTE len() evaluates TRUE there (an unresolvable path counts as length 0), so the null case
+      # is caught by pat() alone. The two content conditions guard different failures and neither
+      # is sufficient on its own.
+      #
+      # RESIDUAL GAP, stated rather than hidden. Nothing expressible here covers vllm-test.sh's two
+      # GENERAL rules -- "any character repeated more than 8 times" and the distinct-character ratio
+      # floor -- because Gatus has no regex. What this pair does NOT reject is any reply of at most
+      # four characters that contains "OK" (`NOK`, `OK!!`, `OKOK`); none is a plausible output of a
+      # token-0 latch, which repeats one character to the token budget. A degeneration onto some
+      # other token, an alternation between two characters, or a reply that begins "OK" and then
+      # degenerates are all caught -- the first two by pat(), the last by the length bound. The
+      # general guards are in cloudlab/scripts/vllm-test.sh `health`, and the earliest, cheapest
       # signal (accepted tokens flat while drafts climb) lives in cloudlab
       # kubernetes/apps/infrastructure/monitoring/cloud-vllm-rules.yaml. This is the third leg,
       # and the only one that reads what a user would actually have seen.
