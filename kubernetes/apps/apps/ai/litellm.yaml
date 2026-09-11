@@ -325,11 +325,15 @@ data:
       # checkpoint different, and the operator asked for the name to say "uncensored". A route is
       # not renamed (runbook model-registration.md §5: Open WebUI stores the model id per chat and
       # has no alias layer, so a rename strands every chat on the old id). Instead the ORIGINAL
-      # name is kept as a hidden alias -- `model_info.hidden: true` takes it out of both pickers
-      # while LiteLLM keeps answering to it (the runbook's documented hide) -- and the name the
-      # pickers show is the entry below. The two entries MUST keep identical litellm_params: they
-      # are one deployment under two names, and a drift between them would make "which name did
-      # you use" a behavioural question.
+      # name is kept as a hidden alias -- `model_info.hidden: true` drops it from the dsh picker
+      # and from Open WebUI's Local group, while LiteLLM keeps answering to it (the runbook's
+      # documented hide; note it is PARTIAL: Open WebUI's External connection discovers every
+      # name from /v1/models, so the old id still shows there, as open-webui.yaml says) -- and
+      # the name the generated consumers advertise is the entry below. The two entries MUST keep
+      # identical litellm_params: they are one deployment under two names, and a drift between
+      # them would make "which name did you use" a behavioural question. The `alias_of` key on
+      # the new entry is what scripts/tests/test_litellm_aliases.py checks that invariant from;
+      # it is free-form model_info to LiteLLM and ignored by the consumer generator.
       - model_name: qwen3.8-27b-fp8-cloud
         litellm_params:
           model: openai/qwen3.8-27b-fp8
@@ -354,7 +358,7 @@ data:
           extra_body:
             top_k: 20
             chat_template_kwargs: { reasoning_effort: xhigh }
-        model_info: { max_input_tokens: 81920 }
+        model_info: { max_input_tokens: 81920, alias_of: qwen3.8-27b-fp8-cloud }
       # ---- COGNITIVE TIER: cloud3 ---------------------------------------------------------------
       # qwen3-coder-next REPOINTED 2026-09-07: that model_name no longer exists. cloud3's llama-swap
       # then served exactly two models (qwen3-coder-30b-a3b, qwen3.8-27b) — a THIRD, qwen3.5-122b,
@@ -731,7 +735,7 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "63bd300f1ce6"
+        checksum/config: "a838466a2829"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

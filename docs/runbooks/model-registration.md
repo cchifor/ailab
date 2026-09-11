@@ -118,11 +118,13 @@ not from a dev-worker.
   prefix or alias layer by design; a renamed route strands every existing chat on that id.
 - **Rename without stranding anyone -- two names, one backend**: keep the old entry and mark it
   `model_info: { hidden: true }`, add a second entry under the new `model_name` with **identical**
-  `litellm_params`, then `just af-gen-litellm`. The pickers show only the new name; the old one
-  keeps answering for every chat and session pinned to it. Done for `qwen3.8-27b-fp8-cloud` →
-  `qwen3.8-27b-fp8-unc-cloud` on 2026-09-11 (the comment on those entries says why).
-  The two `litellm_params` blocks must stay byte-identical: they are one deployment, and any
-  drift makes "which name did you use" a behavioural question.
+  `litellm_params` and `model_info.alias_of: <old name>`, then `just af-gen-litellm`. dsh and Open
+  WebUI's Local group show only the new name (the hide is partial: the old id still surfaces under
+  Open WebUI's External group, see above); the old one keeps answering for every chat and session
+  pinned to it. Done for `qwen3.8-27b-fp8-cloud` → `qwen3.8-27b-fp8-unc-cloud` on 2026-09-11 (the
+  comment on those entries says why). The two `litellm_params` blocks must stay identical: they
+  are one deployment, and any drift makes "which name did you use" a behavioural question --
+  `scripts/tests/test_litellm_aliases.py` diffs every `alias_of` pair, so a drift fails CI.
 
 ## 6. Traps this procedure was written against
 
