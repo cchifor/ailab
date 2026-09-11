@@ -21,7 +21,7 @@ metadata:
   namespace: databases
 spec:
   instances: 2
-  imageName: ghcr.io/cloudnative-pg/postgresql:17.10
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.11
   primaryUpdateStrategy: unsupervised
   priorityClassName: platform-critical
   storage:
