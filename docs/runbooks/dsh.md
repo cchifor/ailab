@@ -163,10 +163,12 @@ contents**; the fields are operator-owned by design.
    ```bash
    # Each step names its own failure: a loop that runs out of retries says so and exits non-zero,
    # rather than ending on a successful `sleep`. Key NAMES only, never values.
-   both() { grep -q GITEA_USER && grep -q GITEA_PAT; }
+   # ONE process reads stdin and succeeds only when it has seen both names. Two chained `grep -q`
+   # calls do not work here: the first one drains the (small) input and the second reads EOF.
+   both() { awk '/GITEA_USER/ { u = 1 } /GITEA_PAT/ { p = 1 } END { exit !(u && p) }'; }
    # a. the Secret gains BOTH keys (ESO)
    ok=; for i in $(seq 1 80); do
-     kubectl -n dsh get secret dsh-credentials -o jsonpath='{.data}' | tee /dev/null | both && { ok=1; break; }; sleep 5
+     kubectl -n dsh get secret dsh-credentials -o jsonpath='{.data}' | both && { ok=1; break; }; sleep 5
    done; [ -n "$ok" ] || { echo "ESO did not sync both fields within ~7 min: kubectl -n dsh describe externalsecret dsh-credentials" >&2; exit 1; }
    # b. the mount gains BOTH files (kubelet)
    ok=; for i in $(seq 1 40); do
@@ -177,8 +179,8 @@ contents**; the fields are operator-owned by design.
    git ls-remote https://git.chifor.me/cchifor/platform.git > /dev/null && echo "forge auth OK"
    ```
 
-   `grep -q GITEA_USER` on the Secret's `.data` and on `ls` output matches the key name in both
-   shapes (`"GITEA_USER":"..."` and a bare filename); nothing prints a value.
+   `both` matches the key names in both shapes (`"GITEA_USER":"..."` in the Secret's `.data`, a bare
+   filename in `ls` output); nothing prints a value.
 
 **Rotation:** mint the new PAT, `bao kv patch` it in, then prove the **new** value is what the pod
 holds before revoking the old one — step (c) alone proves only that *some* valid PAT is mounted,
@@ -188,12 +190,13 @@ prints neither value:
 ```bash
 # d. the mounted bytes are the bytes you patched in (identical digests; the local file is the same
 #    one `@file` read, so a trailing newline, if any, is on both sides)
-for i in $(seq 1 80); do
-  m=$(kubectl -n dsh exec deploy/dsh -c dsh -- sh -c 'sha256sum < /dsh-credentials/GITEA_PAT' | cut -c1-64)
-  l=$(sha256sum < /path/to/pat | cut -c1-64)
-  [ "$m" = "$l" ] && { echo "mounted PAT is the new one"; break; }; sleep 5
+l=$(sha256sum < /path/to/pat | cut -c1-64); [ ${#l} -eq 64 ] || { echo "cannot hash the local pat file" >&2; exit 1; }
+m=; for i in $(seq 1 80); do
+  m=$(kubectl -n dsh exec deploy/dsh -c dsh -- sh -c 'sha256sum < /dsh-credentials/GITEA_PAT' 2>/dev/null | cut -c1-64)
+  # a FAILED hash (exec error, file missing) is an empty string, which must never compare equal
+  [ ${#m} -eq 64 ] && [ "$m" = "$l" ] && { echo "mounted PAT is the new one"; break; }; sleep 5
 done
-[ "$m" = "$l" ] || { echo "mounted PAT is STILL the old one -- do not revoke" >&2; exit 1; }
+[ ${#m} -eq 64 ] && [ "$m" = "$l" ] || { echo "mounted PAT is STILL the old one (or unreadable) -- do not revoke" >&2; exit 1; }
 ```
 
 Then (c) from a session — which now proves the **new** PAT authenticates, since (d) proved it is

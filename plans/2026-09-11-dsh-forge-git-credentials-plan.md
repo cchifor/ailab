@@ -268,6 +268,10 @@ access (persistently, if the new PAT is bad). Resolutions, all in the follow-up 
 | D2 | verification loops ended on `sleep` (exit 0 after exhausting retries), checked only `GITEA_PAT`, and `git ... \| head` hid git's exit status | loops check both fields and fail loudly on timeout; no pipe after git |
 | D3 (nit) | dash's `$(...)` drops NUL bytes, so `abc<NUL>def` passed the single-word check as `abcdef` | bytes are judged before expansion (`tr -d '[:graph:]' \| wc -c`, one trailing newline tolerated); tests for NUL, double newline, lone newline, non-ASCII |
 | R1 #7 | plan §2.1 still said "≤5m / ≤~1m" | reworded as periods, not bounds |
+| reviewer-codex round 2 (important, on 8a0aee8) | runbook `both()` chained two `grep -q` on one stdin; the second read EOF | one `awk` process that succeeds only after seeing both names; proven against the JSON and `ls` shapes |
+| codex delta (should-fix) | runbook digest compare: two FAILED hashes are two empty strings, which compare equal | both digests must be 64 chars before they may compare equal; local digest computed once, guarded |
+| codex delta (nit) | validate-then-read through the key symlink: a kubelet swap in between emits unvalidated bytes | resolve each key once (`readlink -f`), validate and read that target; a vanished target is refused; tests pin it |
+| reviewer-claude (nit, on 526a968) | helper drained stdin unread, so scoping relied on gitconfig alone | helper parses the request and answers only for `https` + `git.chifor.me` (silent otherwise); wiring test pins the helper's authority to the gitconfig section |
 
 Round-1 dispositions from the diff review: #1, #3, #4, #5, #6, #8 resolved; #2 fully resolved by D3;
 #7 by D1/D2.

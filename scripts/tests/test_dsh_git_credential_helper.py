@@ -232,6 +232,51 @@ class HelperBehaviour(unittest.TestCase):
         self.addCleanup(real.chmod, 0o600)
         self.assertRefused(_run("get", self.mount), must_not_contain=(PAT,))
 
+    def test_other_authorities_are_refused_silently(self):
+        # Defense in depth under the gitconfig scoping: even if the helper were
+        # attached to a wider section, it answers for ONE authority. A wrong
+        # authority is not a provisioning problem, so there is no hint either.
+        for desc in (
+            "protocol=https\nhost=example.com\n\n",
+            "protocol=http\nhost=git.chifor.me\n\n",
+            "protocol=https\nhost=git.chifor.me:8443\n\n",
+            "protocol=https\nhost=evil.git.chifor.me\n\n",
+            "host=git.chifor.me\n\n",  # no protocol at all
+            "",  # no description at all
+        ):
+            with self.subTest(desc=desc):
+                proc = _run("get", self.mount, stdin=desc)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout, "")
+                self.assertEqual(proc.stderr, "")
+
+    def test_extra_request_keys_do_not_matter(self):
+        # git also sends path=, username= (when the URL carries one), wwwauth[]=
+        # and more. None of it changes the answer for the right authority.
+        desc = "capability[]=authtype\nprotocol=https\nhost=git.chifor.me\npath=cchifor/platform.git\nusername=whoever\n\n"
+        proc = _run("get", self.mount, stdin=desc)
+        self.assertEqual(proc.stdout, f"username=dsh\npassword={PAT}\n")
+
+    def test_dangling_key_symlink_is_refused(self):
+        # kubelet removes the previous ..data directory after a swap; a key whose
+        # resolved target is gone must be a value-free refusal, not a crash.
+        mount = _project(pathlib.Path(self.tmp.name) / "dangle", {USER_FIELD: b"dsh", PAT_FIELD: PAT.encode()})
+        (mount / "..2026_09_11_10_01_12.1" / PAT_FIELD).unlink()
+        self.assertRefused(_run("get", mount), must_not_contain=(PAT,))
+
+    def test_check_and_read_use_the_same_resolved_file(self):
+        # The helper resolves each key symlink once and validates+reads that
+        # target, so a rotation between the two steps cannot emit unvalidated
+        # bytes. Pinned structurally: both the byte check and the read name the
+        # resolved variables, never the symlink path.
+        helper = HELPER.read_text(encoding="utf-8")
+        self.assertIn('USER_REAL=$(readlink -f "$USER_FILE"', helper)
+        self.assertIn('PAT_REAL=$(readlink -f "$PAT_FILE"', helper)
+        self.assertIn('single_word_file "$PAT_REAL"', helper)
+        self.assertIn('pat=$(cat "$PAT_REAL"', helper)
+        self.assertNotIn('cat "$PAT_FILE"', helper)
+        self.assertNotIn('single_word_file "$PAT_FILE"', helper)
+
     def test_store_erase_and_unknown_operations_are_ignored(self):
         # gitcredentials(7): a helper must ignore operations it does not handle,
         # so future extensions of the protocol do not turn into failures.
@@ -378,6 +423,15 @@ class Wiring(unittest.TestCase):
         self.assertIn(f"helper = {INSTALLED_HELPER}", seeded)
         # One scoped section, no unscoped `[credential]` that would widen it.
         self.assertNotIn("\n[credential]\n", seeded)
+
+    def test_helper_authority_matches_the_gitconfig_scope(self):
+        # Two scoping layers, one authority: the gitconfig section and the
+        # helper's own guard must name the same host and protocol.
+        helper = HELPER.read_text(encoding="utf-8")
+        seeded = GITCONFIG.read_text(encoding="utf-8")
+        self.assertIn("AUTHORITY_PROTOCOL=https\n", helper)
+        self.assertIn("AUTHORITY_HOST=git.chifor.me\n", helper)
+        self.assertIn('[credential "https://git.chifor.me"]', seeded)
 
     def test_helper_reads_the_mount_the_deployment_projects(self):
         # deployment.yaml mounts the ESO Secret at MOUNT; the helper's default
