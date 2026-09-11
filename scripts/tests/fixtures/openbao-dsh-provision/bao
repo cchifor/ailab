@@ -35,14 +35,26 @@ case "$1 ${2:-}" in
     ;;
   "read -field=token_policies")
     [ "${FAKE_ROLE_MISSING:-0}" = 1 ] && exit 1
-    printf '%s\n' "${FAKE_ROLE_POLICIES:-af-app-dsh}"
+    # The real CLI prints a bracketed, space-separated list on one line with NO trailing newline.
+    printf '[%s]' "${FAKE_ROLE_POLICIES:-af-app-dsh}"
     exit 0
     ;;
   "kv get")
-    [ "${FAKE_KV_EXISTS:-0}" = 1 ] && { printf '{}\n'; exit 0; }
+    # A SOFT-DELETED current version returns exit 0 with "data": null -- the real CLI's behaviour,
+    # verified against the live vault. The script must not read that as healthy.
+    [ "${FAKE_KV_DELETED:-0}" = 1 ] && {
+      printf '{\n  "data": {\n    "data": null,\n    "metadata": {\n      "deletion_time": "2026-01-01T00:00:00Z"\n    }\n  }\n}\n'
+      exit 0
+    }
+    [ -f "$FAKE_STATE/kv-created" ] && { printf '{\n  "data": {\n    "data": {}\n  }\n}\n'; exit 0; }
+    [ "${FAKE_KV_EXISTS:-0}" = 1 ] && { printf '{\n  "data": {\n    "data": {}\n  }\n}\n'; exit 0; }
     exit 1
     ;;
   "kv put")
+    # -cas=0 fails once version history exists -- measured exit 2 against the live vault. A
+    # soft-deleted path HAS history, so it must fail here too; without this the shim would let the
+    # script "create" a path the real CLI would refuse.
+    [ "${FAKE_KV_DELETED:-0}" = 1 ] && exit 2
     [ "${FAKE_KV_PUT_FAIL:-0}" = 1 ] && exit 1
     # A successful create makes the path exist for any later probe in the same run.
     printf '1' > "$FAKE_STATE/kv-created"

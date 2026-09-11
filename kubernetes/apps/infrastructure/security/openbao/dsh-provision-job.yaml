@@ -139,7 +139,13 @@ data:
     # ---- 3. The auth role is ASSERTED, not written --------------------------------------------
     # A role's NAME does not attach the same-named policy: token_policies does. Assert both the
     # role's existence and that it actually carries this policy, then leave it alone.
-    bao read -field=token_policies "$ROLE" 2>/dev/null | grep -q "$POLICY" || {
+    #
+    # EXACT LIST-ELEMENT MATCH, not a substring. `grep -q "$POLICY"` would accept a role carrying
+    # only `af-app-dsh-ro`, which authenticates fine and then cannot read anything this Job grants.
+    # `grep -w` does NOT fix it either -- `-` is not a word constituent, so af-app-dsh-ro still
+    # matches; verified. The field prints a bracketed, space-separated list on ONE line with no
+    # trailing newline (`[af-app-dsh]`), so it is unwrapped into lines before an anchored match.
+    bao read -field=token_policies "$ROLE" 2>/dev/null | tr -d '[]' | tr ' ' '\n' | grep -qx "$POLICY" || {
       echo "$ROLE missing or does not carry policy $POLICY; this Job does not create roles." >&2
       echo "See kubernetes/apps/apps/dsh/openbao-eso.yaml for the role's expected shape." >&2
       exit 1
@@ -154,17 +160,31 @@ data:
     # Deliberately NO `kv patch` fallback (devworker-provision-job.yaml has one because its seeds
     # are git-owned; these contents are not) and no blanket `|| true`, which would hide a real
     # provisioning failure.
-    if bao kv get -mount=af -format=json "$KV_PATH" >/dev/null 2>&1; then
+    # A SOFT-DELETED current version is not an absent one, and `bao kv get` does not distinguish
+    # them by exit code: VERIFIED against this vault, a `kv delete`d path still returns exit 0, with
+    # "data": null and a non-empty deletion_time. Treating that as healthy would make this Job
+    # report success while ESO's dataFrom.extract reads nothing -- the silent, delayed failure the
+    # loud branch below exists to catch. So readability is decided on the DATA, not the exit code.
+    kv_current_readable() {
+      out="$(bao kv get -mount=af -format=json "$1" 2>/dev/null)" || return 1
+      case "$out" in
+        *'"data": null'*) return 1 ;;
+      esac
+      return 0
+    }
+
+    if kv_current_readable "$KV_PATH"; then
       echo "af/$KV_PATH already exists; contents are operator-owned and left untouched"
     elif bao kv put -cas=0 -mount=af "$KV_PATH" "${CANARY_NAME}=${CANARY_VALUE}" >/dev/null 2>&1; then
       echo "af/$KV_PATH created with the $CANARY_NAME marker"
-    elif bao kv get -mount=af -format=json "$KV_PATH" >/dev/null 2>&1; then
-      # Lost a race with a concurrent creator. The path exists; that is the goal.
+    elif kv_current_readable "$KV_PATH"; then
+      # Lost a race with a concurrent creator. The path exists and is readable; that is the goal.
       echo "af/$KV_PATH created concurrently; leaving it alone"
     else
-      # Reached when the path has version history but no readable current version -- a soft-deleted
-      # or destroyed document. -cas=0 will never succeed again and this needs a human.
-      echo "af/$KV_PATH is neither readable nor creatable (deleted/destroyed?); operator action needed" >&2
+      # Version history exists but no readable current version: soft-deleted, destroyed, or
+      # metadata-only. -cas=0 can never succeed again (it returns exit 2 once history exists), so
+      # this needs a human rather than a silent skip.
+      echo "af/$KV_PATH is neither readable nor creatable (soft-deleted or destroyed?); operator action needed" >&2
       exit 1
     fi
 ---

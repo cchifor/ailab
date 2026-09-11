@@ -308,6 +308,31 @@ class GuardBehaviour(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertNotIn("kv put", log)
 
+    def test_soft_deleted_kv_path_fails_loudly(self):
+        # `bao kv get` returns exit 0 for a soft-deleted current version, with
+        # "data": null -- verified against the live vault. Reading that as
+        # healthy would report success while ESO can read nothing.
+        proc, log = self._run(FAKE_KV_DELETED=1)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("operator action needed", proc.stderr)
+        # Attempting `-cas=0` here is correct and harmless: version history
+        # exists, so the real CLI refuses with exit 2 and nothing is written.
+        # What must not happen is reporting success.
+        self.assertIn("kv put", log)
+        self.assertNotIn("created", proc.stdout)
+
+    def test_role_carrying_only_a_similarly_named_policy_aborts(self):
+        # `af-app-dsh-ro` authenticates fine and then reads nothing this Job
+        # grants. A substring match -- and `grep -w`, since `-` is not a word
+        # constituent -- both accept it.
+        proc, log = self._run(FAKE_ROLE_POLICIES="af-app-dsh-ro")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertNotIn("kv put", log)
+
+    def test_role_carrying_the_policy_among_others_proceeds(self):
+        proc, log = self._run(FAKE_ROLE_POLICIES="default af-app-dsh", FAKE_KV_EXISTS=1)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
     def test_undeletable_kv_path_fails_loudly(self):
         # Version history but no readable version: -cas=0 can never succeed
         # again, so this needs a human rather than a silent skip.
