@@ -61,5 +61,19 @@ issuer `https://sso.chifor.me` + authorization/token/userinfo/jwks endpoints + P
     identifiers export --file /tmp/ids.yml --config /config/configuration.yml`, then `kubectl cp` it
     out. AFTER the new pods are up and BEFORE anyone logs in: `kubectl cp` it into a new pod and run
     `authelia storage user identifiers import --file ... --config /config/configuration.yml`.
-- Future: raise to `two_factor` (TOTP/WebAuthn); codify Cloudflare Access (CF Terraform provider);
-  add more apps as OIDC clients; revisit Authentik only if central RBAC/passkeys/outpost are needed.
+- **Passkeys + session lifetimes (2026-09-11).** `webauthn.enable_passkey_login` — a WebAuthn credential
+  (on Windows: **Windows Hello**, face/PIN) is accepted *instead of* username+password and satisfies the
+  `one_factor` default policy on its own; the password form stays as the fallback, so this adds a login
+  method rather than replacing one. RP ID = the cookie domain `chifor.me`, so ONE credential covers every
+  app; credentials live in `webauthn_credentials` on infra-pg (the ADR 0016 move to Postgres is what makes
+  them replica-safe). Registration needs an elevated session whose One-Time Code goes out through the
+  `notifier` — which is `filesystem`, there being no SMTP relay — hence `code_lifespan: 15 minutes` and the
+  read-it-out-of-the-pod ceremony in `docs/runbooks/passkeys.md`.
+  The session cookie moved from `1 hour` / `inactivity: 5 minutes` to **12h / 8h idle**: five idle minutes
+  was logging the operator out several times a day, and `remember_me` did not help because it overrides
+  `expiration` only — `inactivity` is an independent timer that applies to remembered sessions too.
+  This also retires the "revisit Authentik if passkeys are needed" clause: 4.39 has them natively.
+- Future: raise to `two_factor` where it is worth the friction (passkeys make this cheap now); add more
+  apps as OIDC clients; **wire Authelia as the Cloudflare Access OIDC IdP** so the Access-gated hosts stop
+  falling back to emailed one-time PINs and inherit the same passkey (ADR 0007 hardening step; Access
+  itself is already codified in `kubernetes/infra/cloudflare/access.tf`).

@@ -17,9 +17,32 @@ data:
       disable_startup_check: true
     totp:
       issuer: 'chifor.me'
+    webauthn:
+      # Passkeys — closes the ADR 0012 "future: raise to two_factor (TOTP/WebAuthn)" line. With
+      # `enable_passkey_login` the portal offers "Sign in with a passkey" ALONGSIDE the password form
+      # (it replaces nothing), and a passkey satisfies the `one_factor` default policy on its own.
+      # On Windows the platform authenticator is Windows Hello, so this is the face/PIN login.
+      #
+      # The Relying Party ID is derived from the session cookie domain (`chifor.me`), so ONE
+      # registered credential covers every *.chifor.me app. Credentials live in infra-pg (see
+      # `storage` below), not on a pod — both replicas see them and a reschedule keeps them.
+      #
+      # selection_criteria is left at defaults on purpose: `discoverability: preferred` is what makes
+      # Windows Hello mint a DISCOVERABLE credential (required for passwordless login) while still
+      # accepting a roaming key that can't store one. Forcing `required` would reject those.
+      enable_passkey_login: true
+      display_name: 'chifor.me'
     identity_validation:
       reset_password:
         jwt_lifespan: '5 minutes'
+      elevated_session:
+        # Registering a credential needs an elevated session, and the One-Time Code is delivered via
+        # the `notifier` — which is `filesystem` here (no SMTP relay in the estate), so the code must
+        # be read out of the pod by hand:
+        #   kubectl --context admin@ai -n auth exec <pod> -- cat /data/notification.txt
+        # With 2 replicas the code lands on WHICHEVER pod served the request, so check both. 5 minutes
+        # (the default) is not enough for that dance — 15 gives room. See docs/runbooks/passkeys.md.
+        code_lifespan: '15 minutes'
     authentication_backend:
       password_reset:
         disable: false
@@ -43,8 +66,12 @@ data:
           default_redirection_url: 'https://home.chifor.me'
           name: 'authelia_session'
           same_site: 'lax'
-          expiration: '1 hour'
-          inactivity: '5 minutes'
+          # A workday: idle out after 8h, hard-expire at 12h. The old 5-minute `inactivity` was the
+          # dominant source of estate-wide re-logins — five idle minutes in a Grafana tab logged you
+          # out — and `remember_me` does NOT rescue it: remember_me overrides `expiration` only, and
+          # `inactivity` is an independent timer that applies to remembered sessions too.
+          expiration: '12 hours'
+          inactivity: '8 hours'
           remember_me: '1 month'
     regulation:
       max_retries: 3
