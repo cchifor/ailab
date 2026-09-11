@@ -2,7 +2,7 @@
 # (it runs as root and binds :80), which is exactly the trap this chart exists to avoid falling into.
 image:
   repository: busybox
-  tag: "1.37"
+  tag: "1.38"
   pullPolicy: IfNotPresent
 
 replicaCount: 1
