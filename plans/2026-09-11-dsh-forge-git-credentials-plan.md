@@ -271,6 +271,8 @@ access (persistently, if the new PAT is bad). Resolutions, all in the follow-up 
 | reviewer-codex round 2 (important, on 8a0aee8) | runbook `both()` chained two `grep -q` on one stdin; the second read EOF | one `awk` process that succeeds only after seeing both names; proven against the JSON and `ls` shapes |
 | codex delta (should-fix) | runbook digest compare: two FAILED hashes are two empty strings, which compare equal | both digests must be 64 chars before they may compare equal; local digest computed once, guarded |
 | codex delta (nit) | validate-then-read through the key symlink: a kubelet swap in between emits unvalidated bytes | resolve each key once (`readlink -f`), validate and read that target; a vanished target is refused; tests pin it |
+| codex delta 2 (nit N5) | helper comment claimed git omits default ports; git keeps an explicit `:443`, which the guard refused | `git.chifor.me:443` accepted as the same authority, comment corrected, test added |
+| codex delta 2 (nit N4) | "one version for this call" overstated per-file pinning | comment now states per-file pinning and the both-fields-rotate window it leaves |
 | reviewer-claude (nit, on 526a968) | helper drained stdin unread, so scoping relied on gitconfig alone | helper parses the request and answers only for `https` + `git.chifor.me` (silent otherwise); wiring test pins the helper's authority to the gitconfig section |
 
 Round-1 dispositions from the diff review: #1, #3, #4, #5, #6, #8 resolved; #2 fully resolved by D3;
