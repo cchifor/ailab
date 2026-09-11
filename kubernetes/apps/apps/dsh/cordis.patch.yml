@@ -361,3 +361,55 @@
       name: './openbao-credentials.mjs'
       config:
         dir: /dsh-credentials
+
+# ---------------------------------------------------------------------------
+# THE "INTERNAL TESTING NOTICE" MODAL (zh: 内测声明) IS OFF.
+#
+# It is WelcomeNotice in @deepseek-ai/dsh-client-ui-settings-models, registered
+# as the first settings.onboarding step. Its acknowledgement is durable ONLY
+# from a loopback page: ui-settings picks persistence = isLoopback ? "host" :
+# "memory", isLoopback is computed IN THE BROWSER from the page hostname
+# (dsh-client-connection), so dsh.chifor.me is never loopback, and in memory
+# mode acknowledge() only sets a process-local flag. Behind Cloudflare the
+# notice therefore returned on every reload, for every browser, and no config
+# field exists for it on this row, ui-settings or ui-settings-general; upstream
+# documents the limitation ("Non-loopback pages get no durable settings") and
+# 0.1.5-rc.2 behaves the same.
+#
+# DISABLING THE ROW removes it at the source with the documented row switch,
+# not a vendor patch: the loader creates no fiber for a disabled row,
+# client-modules skips it, the package never enters the served boot graph, and
+# the settings shell finds no onboarding step. Upstream ships a browser row
+# exactly this way (ui-schedule, `disabled: true` in dsh-web-app's own
+# cordis.patch.yml), and that package is absent from the served index.
+#
+# WHAT GOES WITH IT, and why that costs nothing here: the same package is the
+# Settings > Models section and the DeepSeek first-run credential dialog. Both
+# are INERT for a non-loopback browser -- the Models store fails with
+# "settings are unavailable in this browser" and the DeepSeek dialog completes
+# itself without rendering. Providers are GitOps-owned on this deployment
+# anyway (settings.seed.yaml + reconcile-provider.js), and the /model picker is
+# a different plugin (ui-model-selection), untouched.
+#
+# REJECTED ALTERNATIVES, for the record: a deployment-local client plugin that
+# shadows the onboarding step is feasible (client-modules serves path-like rows
+# from a subdirectory package) but would put JavaScript that every operator
+# browser executes on the agent-writable home PVC, which client-hmr hot-swaps
+# into open browsers within 500 ms -- a new agent-to-browser channel for a
+# cosmetic fix. Treating dsh.chifor.me as loopback would make the whole
+# Settings UI writable from every browser past Access; that is a trust-posture
+# decision, declined on 2026-09-11. If it is ever taken, REMOVE this row.
+#
+# `name` is the ASSERTION the credentials row documents: if a release moves
+# the id to another package the patch is skipped with a warning rather than
+# disabling the wrong row. No `config:` on purpose -- the shipped row carries
+# none, and an override assigns only the keys it lists.
+#
+# ON A VERSION BUMP this is the failure to look for: a row that no longer
+# exists is skipped with one stderr line,
+#     patch: entry "ui-settings-models" not found
+# and the notice comes back. The runbook's "Verifying a config change" dry run
+# and its served-index check cover it.
+- id: ui-settings-models
+  name: '@deepseek-ai/dsh-client-ui-settings-models'
+  disabled: true
