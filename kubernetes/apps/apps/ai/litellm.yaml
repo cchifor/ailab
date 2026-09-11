@@ -156,6 +156,43 @@ data:
             top_k: 20
             chat_template_kwargs: { enable_thinking: false }
         model_info: { max_input_tokens: 81920 }
+      # ---- cloud3 vLLM: qwen3.8-27b-fp8 — the UNCENSORED FP8 checkpoint, TP=4 over all four RTX 3090s ---
+      # orcarouter/Qwen3.8-27B-Uncensored-FP8 at HF 0f3cdb83, served by vLLM 0.28.0 (cu129 wheel: cloud3
+      # runs driver 550 / CUDA 12.4) UNDER llama-swap on 192.168.0.26:8080 as a swap target, beside the
+      # llama.cpp entries below, and carrying that host's `default` alias since 2026-09-11 (cloudlab
+      # issue #7, PR #11, runbook §13). NOT the same engine as qwen3.8-27b-vllm-cloud on cloud2, and
+      # kept under its own model_name for the same reason that entry gives: different checkpoint,
+      # different box, a THIRD of the throughput, and a swap host -- pooling would hide which answered.
+      #
+      # FP8 on Ampere is WEIGHT-ONLY (Marlin W8A16): the memory of an 8-bit checkpoint, bf16 compute,
+      # no FP8 speedup. MEASURED 2026-09-11 on this checkpoint, CUDA graphs on, no MTP: 66.8 tok/s
+      # single stream, 149.6 tok/s aggregate at 4 streams (gate checkpoint, same config), KV pool
+      # 775,637 tokens. Cold start through llama-swap ~100 s (173 s the first time a checkpoint
+      # compiles); request_timeout below covers it, and every request may pay it after the 7200 s TTL
+      # or after another cloud3 model has been swapped in -- cloud3 holds ONE model at a time.
+      #
+      # CONTEXT: host --max-model-len 131072 (raised from the 65536 the gates ran at, same pool, 5.9x
+      # concurrency at full length). max_input_tokens = 131072 - 49152 = 81920, the same output
+      # headroom as cloud2's route: xhigh reasoning measured 16-39k tokens per answer there, and an
+      # under-budgeted reasoning model returns finish_reason=length with EMPTY content.
+      # SAMPLING as on the cloud2 route -- Qwen3.8's thinking-mode recipe; the template of this
+      # checkpoint accepts reasoning_effort (checked in its chat_template.jinja). Thinking termination,
+      # tool calls and streaming through THIS proxy have not yet been exercised end to end from a
+      # dev-worker (ClusterIP-only); the direct-to-backend probes are in cloudlab runbook §13.
+      # VISION: the checkpoint keeps its vision tower (882 unconverted modules) and vLLM loads it, but
+      # no image probe was run here -- supports_vision is deliberately NOT claimed. No fallbacks yet:
+      # a fallback chain for this route is a routing decision for the operator, not a default.
+      - model_name: qwen3.8-27b-fp8-cloud
+        litellm_params:
+          model: openai/qwen3.8-27b-fp8
+          api_base: http://192.168.0.26:8080/v1
+          api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+          extra_body:
+            top_k: 20
+            chat_template_kwargs: { reasoning_effort: xhigh }
+        model_info: { max_input_tokens: 81920 }
       # ---- COGNITIVE TIER: cloud3 ---------------------------------------------------------------
       # qwen3-coder-next REPOINTED 2026-09-07: that model_name no longer exists. cloud3's llama-swap
       # then served exactly two models (qwen3-coder-30b-a3b, qwen3.8-27b) — a THIRD, qwen3.5-122b,
@@ -464,7 +501,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "6733c6637a00"
+        checksum/config: "db151291b0bb"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
