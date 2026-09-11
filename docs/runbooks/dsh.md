@@ -424,6 +424,38 @@ check that script's output:
 kubectl -n dsh logs deploy/dsh -c seed-settings
 ```
 
+### The "Internal Testing Notice" modal comes back on every reload
+
+The modal (zh: 内测声明) is `WelcomeNotice` in `@deepseek-ai/dsh-client-ui-settings-models`. Its
+acknowledgement persists only from a **loopback** page: the browser computes `isLoopback` from its
+own page hostname, `ui-settings` therefore keeps every settings scope in memory mode on
+`dsh.chifor.me`, and in memory mode `acknowledge()` sets a process-local flag only. Upstream states
+the limitation outright ("Non-loopback pages get no durable settings", ui-settings README) and
+there is no config field for it, so nothing per browser or per machine can fix it.
+
+`cordis.patch.yml` therefore **disables the `ui-settings-models` row** -- the documented row
+switch, the same form upstream uses for `ui-schedule`. That removes the notice at the source, and
+with it the Settings > Models section and the DeepSeek first-run dialog, both inert for a remote
+browser anyway ("settings are unavailable in this browser"). Providers are GitOps-owned
+(`settings.seed.yaml` + `reconcile-provider.js`) and the `/model` picker is a different plugin, so
+nothing usable is lost. The alternative -- making `dsh.chifor.me` count as loopback -- would make
+the whole Settings UI writable from every browser past Access; it was declined on 2026-09-11, and
+if it is ever adopted this row must go in the same change.
+
+Check after the rollout, and **on every dsh version bump** -- an override whose row id vanished is
+skipped with `patch: entry "ui-settings-models" not found` on stderr and the notice returns:
+
+```bash
+# 0 = the package is out of the served boot graph (it was 5 before the row was disabled)
+kubectl -n dsh exec deploy/dsh -c dsh -- sh -c \
+  "curl -s -H 'Host: dsh.chifor.me' http://127.0.0.1:8080/ | grep -c dsh-client-ui-settings-models"
+# nothing here may name ui-settings-models
+kubectl -n dsh logs deploy/dsh -c dsh | grep -i 'patch:'
+```
+
+Then open a NEW session in a private window: the coordinator only runs on a blank session, so that
+is the state in which the modal used to appear.
+
 ### Pod stuck in `Init:0/2`
 
 **Usually it is not stuck.** The init sequence mounts NFS and runs two init containers; a slow start
