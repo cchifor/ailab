@@ -14,6 +14,15 @@
   },
   "customManagers": [
     {
+      "description": "Track the CloudNativePG Cluster's `imageName:`. Renovate's kubernetes manager only reads `image:` keys inside pod specs, so a CNPG `Cluster.spec.imageName` is INVISIBLE to it. That is why infra-pg sat at 17.10 while the four satellite tool containers drifted to 17.11, and why Renovate then proposed 18.6 for the tools alone (#649) -- a pg_dump major skew against a live 17 server. With the Cluster tracked here and grouped by the packageRule below, the server and its tools can only move together. The optional quotes are deliberate: YAML allows `imageName: \"ghcr.io/...\"`, and without them the quote would be captured into depName, the datasource lookup would fail, and the Cluster would drop out of tracking with no failure signal -- the exact blind spot this manager exists to close.",
+      "customType": "regex",
+      "managerFilePatterns": ["/kubernetes/apps/databases/.+\\.ya?ml$/"],
+      "matchStrings": [
+        "imageName:\\s*[\"']?(?<depName>[^:\\s\"']+):(?<currentValue>[^\\s@\"']+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?[\"']?"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
       "description": "Track tool versions annotated with `# renovate:` in Ansible vars (e.g. the live zot binary on the registry LXC)",
       "customType": "regex",
       "managerFilePatterns": ["/ansible/.+\\.ya?ml$/"],
@@ -32,6 +41,16 @@
       "description": "Group kube-prometheus-stack + its CRDs",
       "matchPackageNames": ["/kube-prometheus-stack/"],
       "groupName": "kube-prometheus-stack"
+    },
+    {
+      "description": "The infra-pg Cluster and the four containers carrying its psql/pg_dump binaries (agentforge db-migrate, litellm wait-for-db, litellm-db-bootstrap, the infra-pg pg_dump cronjob) must move as ONE unit -- every one of those files says so in a comment, and infra-pg-dump-cronjob.yaml depends on it: a newer pg_dump can read an older server, but its output is not guaranteed to restore into that older major, so a tools-ahead-of-server bump silently invalidates the documented recovery path without failing anything. Grouping makes a split bump impossible to open; the customManager above is what lets the Cluster join the group at all. Matched by regex rather than an exact packageName so a future `postgresql-gis`-style variant, or any image the docker datasource resolves to a slightly different name, cannot silently fall outside the group and reintroduce the split bump. All five current references resolve to exactly `ghcr.io/cloudnative-pg/postgresql`.",
+      "matchPackageNames": ["/^ghcr\\.io\\/cloudnative-pg\\/postgresql(-[a-z0-9]+)?$/"],
+      "groupName": "cloudnative-pg postgresql (infra-pg cluster + its tool images)"
+    },
+    {
+      "description": "Hold ghcr.io/cloudnative-pg/postgresql at 17.x. A PostgreSQL MAJOR upgrade is not an image swap: it needs a pg_upgrade of the on-disk data, a restore rehearsal against the new major, and a maintenance window -- none of which Renovate can perform or verify, and a grouped PR would look deceptively complete. #649 proposed exactly that (17.11 -> 18.6) against a live 17.10 server and was closed. 17.x minors still flow normally. Written as a regex rather than a `<18` range because this is the docker versioning scheme, where range syntax is not dependable. Lift this bound in the same change that performs the 17 -> 18 upgrade.",
+      "matchPackageNames": ["/^ghcr\\.io\\/cloudnative-pg\\/postgresql(-[a-z0-9]+)?$/"],
+      "allowedVersions": "/^17\\./"
     }
   ]
 }
