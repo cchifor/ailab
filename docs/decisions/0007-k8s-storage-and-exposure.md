@@ -40,8 +40,19 @@ L3 reach for SSH / kubectl / API.
 **Hardening roadmap (tracked here; partially codified):**
 1. **MFA** for the no-native-auth UIs — wire an IdP that enforces MFA (e.g. Authelia-as-Access-IdP, see
    `docs/runbooks/cloudflare-access-apps.md`) and add a `require` rule, or move Alertmanager back onto
-   the Tailscale admin mesh. *Not codified yet:* email OTP is the only login method until an IdP exists,
-   so a `require` rule now would lock out the sole identity.
+   the Tailscale admin mesh.
+   **Update (2026-09-11): the IdP half is codified** — `cloudflare_zero_trust_access_identity_provider.authelia`
+   in `access.tf` registers Authelia as a generic OIDC login method, so Access can authenticate the
+   operator with a **passkey (Windows Hello)** instead of an emailed PIN (ADR 0012). Two things this
+   does **not** yet do, deliberately:
+   - **No `require` rule.** Authelia's own policy for this client is `one_factor`, so the passkey is a
+     strong *single* factor, not enforced MFA. A `require` rule still has nothing to require.
+   - **One-time PIN stays enabled**, and `allowed_idps` is left unset on every application, so both
+     login methods are offered. Authelia runs *inside* the cluster that `proxmox`/`qnap` exist to
+     repair; making it the only way in would put the recovery path behind the thing being recovered.
+     OTP is the break-glass login and should not be removed.
+   The session windows above are unchanged and should stay: with a live Authelia session an expiring
+   30m Access token now re-authenticates as a silent redirect, so shortness costs nothing.
 2. **Origin TLS** — replace `noTLSVerify: true` on the Proxmox/QNAP tunnel origins with the pinned LAN
    CA via `originRequest.caPool` + `originServerName`, so cloudflared verifies the origin before
    forwarding admin credentials. *Needs the origins' CA material extracted + mounted into cloudflared.*

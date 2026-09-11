@@ -236,3 +236,39 @@ data:
             # Put groups+email in the id_token (the CP reads id_token claims, not the userinfo endpoint).
             claims_policy: 'agentforge_id_token'
             token_endpoint_auth_method: 'client_secret_basic'
+          - client_id: 'cloudflare-access'
+            client_name: 'Cloudflare Access'
+            # THE EDGE GATE ITSELF is the relying party here — this is the inversion that makes the
+            # estate single-sign-on. Cloudflare Access (kubernetes/infra/cloudflare/access.tf) gates the
+            # hosts that have no SSO of their own (dw1-6 shells, dsh, k8s, hubble, proxmox, qnap,
+            # prometheus, alertmanager, openbao, vault/admin), and until now its only login method was an
+            # emailed one-time PIN. With this client, Access delegates to Authelia instead, so those
+            # hosts inherit the passkey — and because the Authelia session cookie outlives the per-app
+            # Access token, a 30m Access re-auth becomes a SILENT redirect rather than a new login.
+            #
+            # Secret HASH only here; the plaintext lives in kubernetes/infra/cloudflare/terraform.tfvars
+            # (gitignored) as `authelia_access_client_secret`, and is escrowed at af/estate/cloudflare
+            # (field `access_oidc_client_secret`) in OpenBao. Regenerate the pair with:
+            #   authelia crypto hash generate pbkdf2 --variant sha512 --iterations 310000 --random \
+            #            --random.length 72 --random.charset rfc3986
+            #
+            # The redirect_uri is the Zero Trust TEAM domain (chifor.cloudflareaccess.com), NOT a
+            # chifor.me host — Cloudflare terminates the OIDC flow on its own edge. It must match the
+            # `redirect_url` the provider computes; `tofu output access_idp_redirect_url` prints it.
+            client_secret: '$pbkdf2-sha512$310000$uPKxUQ.EmVUcNffrR1S1Lw$1S7Gshqx7RS/jsJO34BB2bPq.3ChIIHd7jedul0JjX1BoLH7c.VSNrNLqCml8eUBmlA23jSyDV88Zh3i/JdvGg'
+            public: false
+            # one_factor, NOT admins_only: this client fronts proxmox/qnap — the "the cluster is broken,
+            # go fix it" path — and an authorization policy that can deny is one more thing between the
+            # operator and recovery. The per-host allow-list (access.tf `allow_me`) is the real gate and
+            # is unchanged; Access still applies it AFTER Authelia returns an identity.
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit' # first-party: no consent prompt between the two gates
+            require_pkce: true
+            pkce_challenge_method: 'S256'
+            redirect_uris:
+              - 'https://chifor.cloudflareaccess.com/cdn-cgi/access/callback'
+            scopes: ['openid', 'profile', 'groups', 'email']
+            # Cloudflare's generic-OIDC connector reads claims from a JSON userinfo response; it cannot
+            # parse a signed JWT there (same reason zot and grafana set this).
+            userinfo_signed_response_alg: 'none'
+            token_endpoint_auth_method: 'client_secret_basic'

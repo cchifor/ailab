@@ -9,3 +9,10 @@ zone_id               = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # chifor.me
 
 # Cloudflare Access allow-list email for the dev-worker terminals (access.tf):
 allow_email = "you@example.com"
+
+# Plaintext OIDC client secret for the `cloudflare-access` client in Authelia (access.tf creates the
+# Access identity provider only when this is non-empty). Generate the pair with:
+#   kubectl --context admin@ai -n auth exec deploy/authelia -- authelia crypto hash generate pbkdf2 \
+#     --variant sha512 --iterations 310000 --random --random.length 72 --random.charset rfc3986
+# -> put "Random Password" here, put "Digest" in authelia-config.yaml as the client's client_secret.
+# authelia_access_client_secret = "xxxxxxxx"

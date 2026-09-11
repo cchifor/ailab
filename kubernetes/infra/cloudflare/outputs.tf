@@ -17,3 +17,12 @@ output "api_access_client_secret" {
   value       = one(cloudflare_zero_trust_access_service_token.api[*].client_secret)
   sensitive   = true
 }
+
+# The callback Cloudflare will use for the Authelia IdP. It MUST match a redirect_uri on the
+# `cloudflare-access` client in kubernetes/apps/apps/auth/authelia-config.yaml, or Authelia rejects the
+# authorization request. Null until var.authelia_access_client_secret is set. Not sensitive — it is the
+# public team domain.
+output "access_idp_redirect_url" {
+  description = "Cloudflare's OIDC callback for the Authelia IdP; must match the client's redirect_uris in Authelia."
+  value       = one(cloudflare_zero_trust_access_identity_provider.authelia[*].config.redirect_url)
+}

@@ -23,6 +23,51 @@ resource "cloudflare_zero_trust_access_policy" "allow_me" {
   include    = [{ email = { email = var.allow_email } }]
 }
 
+# ─── Identity: Authelia as a generic OIDC IdP for Access ──────────────────────────────────────────
+#
+# Inverts the usual relationship: the EDGE GATE becomes a relying party of the in-cluster IdP. Until
+# now Access's only login method was an emailed one-time PIN (verified against the API: the account had
+# exactly one identity provider, type `onetimepin`), so every Access re-auth meant fetching a PIN out of
+# a mailbox — several times a day, because the sensitive apps below deliberately hold 30m sessions.
+#
+# With this IdP the Access-gated hosts delegate to Authelia and inherit its passkey (Windows Hello) —
+# and, more importantly, they inherit its SESSION: the Authelia cookie outlives the per-app Access
+# token, so an expiring 30m Access session becomes a silent redirect through sso.chifor.me instead of a
+# fresh login. That is what makes it safe to KEEP the short windows on Prometheus/Alertmanager/OpenBao
+# rather than buying comfort by lengthening them.
+#
+# DELIBERATELY NOT SET: `allowed_idps` / `auto_redirect_to_identity` on the applications below. Leaving
+# them unset means Access offers BOTH this IdP and One-time PIN, costing one click on the login page and
+# buying the recovery path: Authelia runs in the very cluster that `proxmox`/`qnap` exist to repair. If
+# it were the only way in, a dead Authelia (or a dead infra-pg under it) would lock the operator out of
+# the hypervisor UI needed to revive it — the same bootstrap loop that cost 4.5h when Flux sourced from
+# the forge it was needed to repair (ADR 0017). One-time PIN stays as the break-glass login, always.
+#
+# `sso.chifor.me` must therefore STILL never get an Access application — doubly so now, since Access
+# itself calls its authorization/token/jwks endpoints. See the per-host table in
+# docs/runbooks/cloudflare-access-apps.md.
+#
+# Gated on var.authelia_access_client_secret being non-empty so `tofu plan` stays clean until the
+# operator opts in (same pattern as var.enable_api_access_gate). The endpoints below are not guesses —
+# they are Authelia's own discovery document (`/.well-known/openid-configuration`, issuer
+# `https://sso.chifor.me`).
+resource "cloudflare_zero_trust_access_identity_provider" "authelia" {
+  count = var.authelia_access_client_secret != "" ? 1 : 0
+
+  account_id = var.cloudflare_account_id
+  name       = "Authelia" # shown on the Access login page as "Sign in with Authelia"
+  type       = "oidc"
+  config = {
+    client_id     = "cloudflare-access" # the client registered in authelia-config.yaml
+    client_secret = var.authelia_access_client_secret
+    auth_url      = "https://sso.chifor.me/api/oidc/authorization"
+    token_url     = "https://sso.chifor.me/api/oidc/token"
+    certs_url     = "https://sso.chifor.me/jwks.json"
+    scopes        = ["openid", "profile", "email", "groups"]
+    pkce_enabled  = true # Authelia's client sets require_pkce: true — both sides must agree
+  }
+}
+
 # self_hosted Access apps are DEFAULT-DENY: a request only reaches the origin (tunnel -> Caddy -> ttyd)
 # if it matches an attached allow policy. Everything else gets the Access login page and never the
 # shell. The single allow_me policy is the whole allow-list — do not add a `bypass`/`allow` policy here
@@ -81,11 +126,12 @@ resource "cloudflare_zero_trust_access_application" "dsh" {
 # as partial mitigation. All gated to allow_me. dns.tf `depends_on` these so Access enforces BEFORE the
 # hostnames resolve.
 #
-# HARDENING ROADMAP (ADR 0007): allow_me is single-factor (email OTP). For real MFA on the
-# no-native-auth UIs, wire an IdP that enforces MFA (e.g. Authelia-as-Access-IdP — see
-# docs/runbooks/cloudflare-access-apps.md Part 1/3) and add a `require` rule, OR keep Alertmanager on
-# the Tailscale admin mesh. Not codified here: email OTP is the only login method until an IdP exists,
-# so adding a `require` now would lock out the sole identity.
+# HARDENING ROADMAP (ADR 0007): allow_me is single-factor. The IdP half is now codified — see
+# `cloudflare_zero_trust_access_identity_provider.authelia` above — so the login can be a passkey
+# (Windows Hello) instead of an emailed PIN. Still NOT enforced MFA: Authelia's policy for this client
+# is `one_factor`, i.e. a strong single factor, so a `require` rule still has nothing to require. Raise
+# the client to `two_factor` in authelia-config.yaml first, then add `require` here — or keep
+# Alertmanager on the Tailscale admin mesh.
 resource "cloudflare_zero_trust_access_application" "admin_uis" {
   for_each = {
     proxmox      = "Proxmox VE"
