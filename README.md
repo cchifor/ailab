@@ -121,8 +121,8 @@ Run `just` with no args to list all tasks — the K8s-era recipes live there too
 |---|---|
 | Full design / architecture | [`docs/architecture.md`](docs/architecture.md), [`docs/k8s-architecture.md`](docs/k8s-architecture.md) |
 | Authoritative IP plan | [`docs/network-plan.md`](docs/network-plan.md) |
-| **Decisions (source of truth)** | [`docs/decisions/`](docs/decisions/) — 16+ ADRs, living documents |
-| Operations | [`docs/runbooks/`](docs/runbooks/) — node maintenance & node loss, AI host setup, [dsh agent UI](docs/runbooks/dsh.md), internet exposure, CI runners, dev workers, QNAP storage, registry cache |
+| **Decisions (source of truth)** | [`docs/decisions/`](docs/decisions/) — ADRs 0001–0022, living documents; the newest, [0022](docs/decisions/0022-model-registration-single-source.md), makes `litellm.yaml`'s `model_list` the one place a model is registered and derives dsh and Open WebUI from it |
+| Operations | [`docs/runbooks/`](docs/runbooks/) — node maintenance & node loss, AI host setup, [model registration](docs/runbooks/model-registration.md) (LiteLLM → dsh, Open WebUI), [dsh agent UI](docs/runbooks/dsh.md), internet exposure, CI runners, dev workers, QNAP storage, registry cache |
 | Operator cheat-sheet (paths, contexts, gotchas) | [`CLAUDE.md`](CLAUDE.md) |
 | K8s follow-ups / backlog | [`docs/k8s-followups.md`](docs/k8s-followups.md) |
 
