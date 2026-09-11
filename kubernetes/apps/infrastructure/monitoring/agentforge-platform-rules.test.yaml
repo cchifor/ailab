@@ -1,0 +1,138 @@
+# `promtool test rules` fixtures for agentforge-platform-rules.yaml. Run by scripts/rules-lint.sh on
+# every PR, after `promtool check rules`.
+#
+# WHY THIS FILE EXISTS. `check rules` proves an expression PARSES; it cannot prove the expression can
+# ever be true. This estate has shipped both failure modes — a threshold that could not fire during
+# the incident it was written for (reviewbot-rules.yaml), and five rules pinned to a job with zero
+# targets (agentforge-rules.yaml's header). The pair here is especially easy to get wrong in that
+# direction, because one of the two rules is DEFINED by the absence of a series: get the anti-join
+# backwards and it is an empty vector forever, which looks exactly like a healthy estate.
+#
+# So the four cases below are the four states the CP can be in, and each asserts BOTH rules, not one:
+# discovered-but-refused (TargetDown fires, Unscraped must not), a good rollout (neither), the
+# pre-PR blind spot of Ready-and-undiscovered (Unscraped fires, TargetDown structurally cannot), and
+# the state this PR is meant to produce (neither). The 9m/15m and 19m/25m pairs hold the `for:`
+# boundaries explicitly, so shortening a hold cannot pass silently.
+#
+# THE ANNOTATIONS BELOW WERE COPIED MECHANICALLY OUT OF THE RULES FILE, NOT RETYPED. promtool
+# compares the WHOLE alert, annotations included, and a `>-` block folds its newlines into single
+# spaces — so a description transcribed by hand fails this gate on whitespace rather than on
+# behaviour, which teaches everyone to distrust it. If you edit a summary or description in
+# agentforge-platform-rules.yaml, copy the folded text across rather than reflowing it here.
+#
+# `rule_files` is the extracted spec basename, because rules-lint.sh hands promtool the `spec:` body
+# of each PrometheusRule under the manifest's name (the CRD wrapper is not a promtool rules file).
+rule_files:
+  - agentforge-platform-rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    name: 'discovered but refused: the scrape fails while the pod is Ready (a reverted netpol clause)'
+    input_series:
+      - series: up{job="agentforge-platform", namespace="agentforge", pod="agentforge-platform-69479ddc75-dbxdg"}
+        values: 0+0x40
+      - series: kube_pod_container_status_ready{namespace="agentforge", pod="agentforge-platform-69479ddc75-dbxdg",
+          container="platform"}
+        values: 1+0x40
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ForgePlatformTargetDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ForgePlatformTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: agentforge-platform
+              namespace: agentforge
+              pod: agentforge-platform-69479ddc75-dbxdg
+            exp_annotations:
+              summary: AgentForge control plane agentforge-platform-69479ddc75-dbxdg is failing to scrape
+              description: The control plane's metrics endpoint (:8080/metrics, ns agentforge) has been
+                unscrapeable for >10m while Prometheus still discovers the pod. Since /metrics is served
+                by the same FastAPI app and the same port as the API, this is not a metrics-only failure
+                - if the scrape is refused the API almost certainly is too, and agentforge.chifor.me is
+                down with it. THE TWO LIKELY CAUSES, in order. (1) The pod is unhealthy - `kubectl --context
+                admin@ai -n agentforge describe pod agentforge-platform-69479ddc75-dbxdg` then `logs deploy/agentforge-platform
+                --tail=100`; if /readyz is failing the platform Postgres is the first thing to check,
+                because that probe is a DB SELECT-1 and nothing else. (2) The network path was closed
+                - the scrape is admitted by ONE `from:` clause in kubernetes/apps/apps/agentforge/networkpolicy.yaml
+                (namespaceSelector monitoring, port 8080) and that file is namespace-wide ingress default-deny,
+                so reverting or narrowing that clause takes the target down while leaving the pod perfectly
+                healthy. Note the blast radius beyond metrics - the `apps` Flux Kustomization is wait:true
+                and gates on this Deployment's readiness, so a CP stuck unready also stalls every other
+                app in that layer.
+      - eval_time: 30m
+        alertname: ForgePlatformUnscraped
+        exp_alerts: []
+  - interval: 1m
+    name: 'a good rollout is silent: the surge pod is unscrapeable for 5m, then serves'
+    input_series:
+      - series: up{job="agentforge-platform", namespace="agentforge", pod="agentforge-platform-69479ddc75-dbxdg"}
+        values: 1+0x40
+      - series: up{job="agentforge-platform", namespace="agentforge", pod="agentforge-platform-7c4b9f8d55-q2xkm"}
+        values: 0+0x5 1+0x34
+      - series: kube_pod_container_status_ready{namespace="agentforge", pod="agentforge-platform-7c4b9f8d55-q2xkm",
+          container="platform"}
+        values: 0+0x5 1+0x34
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ForgePlatformTargetDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ForgePlatformTargetDown
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ForgePlatformUnscraped
+        exp_alerts: []
+  - interval: 1m
+    name: 'the pre-PR blind spot: Ready and serving, discovered by nobody'
+    input_series:
+      - series: kube_pod_container_status_ready{namespace="agentforge", pod="agentforge-platform-69479ddc75-dbxdg",
+          container="platform"}
+        values: 1+0x40
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: ForgePlatformUnscraped
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ForgePlatformUnscraped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: agentforge
+              pod: agentforge-platform-69479ddc75-dbxdg
+            exp_annotations:
+              summary: AgentForge control plane agentforge-platform-69479ddc75-dbxdg is unscraped (no
+                afp_* target)
+              description: This control-plane pod has been Ready for >20m and Prometheus has discovered
+                no scrape target for it, so every afp_* series is missing and ForgePlatformTargetDown
+                is an empty vector rather than a quiet one - the CP is unobserved without anything saying
+                so. MOST LIKELY CAUSE - kubernetes/apps/apps/agentforge/servicemonitor.yaml was removed
+                or unlisted from that directory's kustomization.yaml, its selector no longer matches the
+                Service's `app.kubernetes.io/name` label, or the Service's port stopped being named `http`;
+                all three live in this repo, in the same directory. Triage - `kubectl --context admin@ai
+                -n agentforge get servicemonitor agentforge-platform -o yaml`, compare its selector against
+                `kubectl --context admin@ai -n agentforge get svc agentforge-platform -o jsonpath={.metadata.labels}`,
+                and check the Prometheus /targets page for job=agentforge-platform.
+      - eval_time: 25m
+        alertname: ForgePlatformTargetDown
+        exp_alerts: []
+  - interval: 1m
+    name: 'what this PR is supposed to produce: Ready, discovered, scraped — both rules silent'
+    input_series:
+      - series: up{job="agentforge-platform", namespace="agentforge", pod="agentforge-platform-69479ddc75-dbxdg"}
+        values: 1+0x40
+      - series: kube_pod_container_status_ready{namespace="agentforge", pod="agentforge-platform-69479ddc75-dbxdg",
+          container="platform"}
+        values: 1+0x40
+      - series: afp_ingest_events_total{job="agentforge-platform", namespace="agentforge", pod="agentforge-platform-69479ddc75-dbxdg",
+          result="heartbeat_applied"}
+        values: 40+1x40
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ForgePlatformTargetDown
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ForgePlatformUnscraped
+        exp_alerts: []

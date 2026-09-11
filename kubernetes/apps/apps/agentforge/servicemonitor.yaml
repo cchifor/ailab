@@ -1,0 +1,64 @@
+# Prometheus scrape of the CP's own /metrics — the `afp_*` application metrics (ingest events by
+# result, board telemetry) plus the Python process/GC families. Until this file, NOTHING scraped the
+# control plane: measured 2026-09-11 against the live Prometheus, `up{namespace="agentforge"}` is
+# exactly ONE series (job=agentforge-dispatcher, up=1) and `afp_*` is ZERO series — while the CP
+# itself answers `GET :8080/metrics` with 8 afp_* series, 1220 bytes, HTTP 200. The data has been
+# there the whole time with no collector.
+#
+# WHY IT WAS DENIED, since "add a ServiceMonitor" is only half the fix and the other half lives in a
+# different file. networkpolicy.yaml's `agentforge-allow-tunnel-only` is `podSelector: {}` +
+# `policyTypes: [Ingress]`, i.e. ingress default-deny for EVERY pod in the namespace, and it admitted
+# only cloudflared and CP-managed tenant namespaces. The dispatcher is scraped today in that same
+# namespace ONLY because it carries its own CiliumNetworkPolicy admitting
+# `k8s:io.kubernetes.pod.namespace: monitoring` on 9464 — Cilium unions k8s NetworkPolicies with CNPs,
+# so its own allow rule covers it. The CP has no CNP of its own, so the namespace-wide policy is the
+# only one selecting it and the scrape is dropped. The third `from:` clause added to networkpolicy.yaml
+# in this same PR is what makes this file work; shipped alone, either half is inert (no clause = a
+# permanently-down target; no monitor = the clause admits nobody).
+#
+# SHAPE mirrors gitea/servicemonitor.yaml — the in-repo precedent for an `apps`-layer workload: the
+# ServiceMonitor lives in the workload's OWN namespace (kube-prometheus's Prometheus selects
+# ServiceMonitors across all namespaces via `serviceMonitorNamespaceSelector: {}`), carries
+# `release: kube-prometheus-stack` (the label its `serviceMonitorSelector` matches — without it this
+# file is inert), and states its namespaceSelector explicitly rather than leaning on the own-namespace
+# default. `port: http` is the SERVICE port name (serviceaccount-service.yaml), not the container port.
+#
+# NO bearerTokenSecret, and that is a DIVERGENCE from gitea's SM worth reading: gitea's /metrics is
+# token-protected because it is internet-reachable through the CF tunnel, and the CP is reachable the
+# same way — but the CP serves /metrics UNAUTHENTICATED, which is not a property of this file to fix.
+# Verified 2026-09-11: `curl https://agentforge.chifor.me/metrics` returns 200 with the same 8 afp_*
+# series from the public internet, no Authelia redirect (the CP is an OIDC RP with no CF Access in
+# front, and /metrics sits outside its auth middleware). That is a control-plane defect to fix in
+# cchifor/agentforge-platform — this PR does not change the endpoint's exposure either way, it only
+# adds the in-cluster collector that should have existed for it. If the CP later puts /metrics behind
+# a token, this file needs the matching `bearerTokenSecret` in the SAME change or the target goes down.
+#
+# 30s, matching gitea and the mirrored default — NOT the dispatcher/broker 15s, which is sized off the
+# KEDA cold-start path. Nothing in this estate scales or gates on an afp_* series.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agentforge-platform
+  namespace: agentforge
+  labels:
+    release: kube-prometheus-stack # the operator's serviceMonitorSelector — without this the file is inert
+spec:
+  namespaceSelector:
+    matchNames: [agentforge]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-platform
+  endpoints:
+    # The Service publishes ONE port, `http` (8080 -> containerPort http), so the API and /metrics
+    # share it. There is no separate metrics port to target.
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 30s
+      relabelings:
+        # A PIN, NOT A RENAME: the operator already derives job from the Service name, so this
+        # writes the value it would have had anyway. It is here so agentforge-platform-rules.yaml's
+        # `up{job="agentforge-platform"}` selector cannot be silently broken by a jobLabel default
+        # changing under it — the same reason the dispatcher and broker SMs carry one.
+        - targetLabel: job
+          replacement: agentforge-platform
