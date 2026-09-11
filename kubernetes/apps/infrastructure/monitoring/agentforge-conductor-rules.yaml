@@ -143,3 +143,42 @@ spec:
               forge_conduct_writes_total advanced. At AF_CONDUCT_TIER=observe the write door refuses
               before reaching the forge, so this means the deployed tier is no longer observe. Confirm
               the Deployment's AF_CONDUCT_TIER and whether an arming rung landed.
+        # THE OTHER HALF OF A FIX THAT WOULD OTHERWISE BE HALF-DONE (agentforge #365). The engine
+        # counts per-sensor incompleteness under a CLOSED label vocabulary — an undeclared child
+        # appears mid-flight and is invisible to the pre-touch, which is how a closed vocabulary
+        # stops being one. Until #365 an undeclared sensor's count was DISCARDED, so a sensor
+        # nobody had declared reported nothing at all and the gap was unreadable from outside.
+        # #365 routes those counts to one reserved value instead; this is the rule that makes the
+        # reserved value mean something. A bucket nothing alerts on is the same defect one layer
+        # down — see this file's ForgeConductDown note on instruments that read healthy because
+        # nothing watches them.
+        #
+        # WHAT A FIRING HERE MEANS, precisely: the conductor observed a sensor coming back short,
+        # and CONDUCT_SENSORS does not declare that sensor, so its count cannot be attributed. T0's
+        # exit criterion asks for `forge_conduct_sensor_incomplete_total` to be EXPLAINED PER
+        # SENSOR, and an unattributable count is exactly what cannot be explained. The engine also
+        # pins this shut in CI (a test derives conduct_pass's sensor keys from its AST and fails if
+        # the vocabulary omits one), so reaching this rule means the pin was bypassed — a sensor key
+        # computed rather than written as a literal is the case it cannot see.
+        #
+        # `> 0` on an increase() over 30m, not on the raw counter: the counter is pre-touched to 0
+        # at construction, so `forge_conduct_sensor_incomplete_total > 0` would be satisfied forever
+        # by a single historical occurrence. The window asks "is this happening now".
+        - alert: ForgeConductSensorUnrecognised
+          expr: |-
+            sum(increase(forge_conduct_sensor_incomplete_total{sensor="unrecognised"}[30m])) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor counted an incomplete read it cannot attribute to a sensor"
+            description: >-
+              forge_conduct_sensor_incomplete_total advanced on the reserved `unrecognised` label,
+              which means a pass came back short on a sensor that CONDUCT_SENSORS
+              (agentforge infra/conduct_metrics.py) does not declare. The count is real; the
+              attribution is missing, so T0's "sensor_incomplete explained per sensor" cannot be
+              satisfied while this fires. Fix in the ENGINE, not here - add the sensor to
+              CONDUCT_SENSORS and add its own case to this file in the same change, so a declared
+              sensor never lacks a rule and a rule never lacks a declared sensor. The engine's own
+              AST pin should have caught this before it shipped, so also check why it did not: it
+              reads sensor keys written as string literals in conduct_pass and cannot see one that
+              is computed.
