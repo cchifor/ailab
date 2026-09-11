@@ -127,6 +127,16 @@ data:
         claims_policies:
           agentforge_id_token:
             id_token: ['groups', 'email', 'name', 'preferred_username']
+          # Cloudflare Access needs the SAME escape hatch, for a blunter reason: per Authelia's own
+          # integration guide it "does not support OpenID Connect 1.0 as it does not honor the expected
+          # process to retrieve the claims it needs" — it never calls the userinfo endpoint and reads
+          # identity straight off the id_token. Without this the id_token carries no `email`, and the
+          # Access allow-policy matches on EMAIL (access.tf `allow_me`), so every gated host would deny
+          # the Authelia login while looking correctly configured. `userinfo_signed_response_alg: 'none'`
+          # on the client does NOT cover this — that fixes the format of a userinfo response Cloudflare
+          # never asks for.
+          cloudflare_id_token:
+            id_token: ['groups', 'email', 'email_verified', 'preferred_username', 'name']
         # Named client policies (Authelia >= 4.38). `admins_only` denies every authenticated user outside
         # the `admins` group at the OIDC authorization step (Authelia shows "access denied", no app session
         # is created). Applied to the first-party admin surfaces — Homepage (oauth2-proxy) and the
@@ -235,4 +245,44 @@ data:
             scopes: ['openid', 'profile', 'groups', 'email']
             # Put groups+email in the id_token (the CP reads id_token claims, not the userinfo endpoint).
             claims_policy: 'agentforge_id_token'
+            token_endpoint_auth_method: 'client_secret_basic'
+          - client_id: 'cloudflare-access'
+            client_name: 'Cloudflare Access'
+            # THE EDGE GATE ITSELF is the relying party here — this is the inversion that makes the
+            # estate single-sign-on. Cloudflare Access (kubernetes/infra/cloudflare/access.tf) gates the
+            # hosts that have no SSO of their own (dw1-6 shells, dsh, k8s, hubble, proxmox, qnap,
+            # prometheus, alertmanager, openbao, vault/admin), and until now its only login method was an
+            # emailed one-time PIN. With this client, Access delegates to Authelia instead, so those
+            # hosts inherit the passkey — and because the Authelia session cookie outlives the per-app
+            # Access token, a 30m Access re-auth becomes a SILENT redirect rather than a new login.
+            #
+            # Secret HASH only here; the plaintext lives in kubernetes/infra/cloudflare/terraform.tfvars
+            # (gitignored) as `authelia_access_client_secret`, and is escrowed at af/estate/cloudflare
+            # (field `access_oidc_client_secret`) in OpenBao. Regenerate the pair with:
+            #   authelia crypto hash generate pbkdf2 --variant sha512 --iterations 310000 --random \
+            #            --random.length 72 --random.charset rfc3986
+            #
+            # The redirect_uri is the Zero Trust TEAM domain (chifor.cloudflareaccess.com), NOT a
+            # chifor.me host — Cloudflare terminates the OIDC flow on its own edge. It must match the
+            # `redirect_url` the provider computes; `tofu output access_idp_redirect_url` prints it.
+            client_secret: '$pbkdf2-sha512$310000$uPKxUQ.EmVUcNffrR1S1Lw$1S7Gshqx7RS/jsJO34BB2bPq.3ChIIHd7jedul0JjX1BoLH7c.VSNrNLqCml8eUBmlA23jSyDV88Zh3i/JdvGg'
+            public: false
+            # one_factor, NOT admins_only: this client fronts proxmox/qnap — the "the cluster is broken,
+            # go fix it" path — and an authorization policy that can deny is one more thing between the
+            # operator and recovery. The per-host allow-list (access.tf `allow_me`) is the real gate and
+            # is unchanged; Access still applies it AFTER Authelia returns an identity.
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit' # first-party: no consent prompt between the two gates
+            require_pkce: true
+            pkce_challenge_method: 'S256'
+            redirect_uris:
+              - 'https://chifor.cloudflareaccess.com/cdn-cgi/access/callback'
+            scopes: ['openid', 'profile', 'groups', 'email']
+            # Puts email/groups in the ID TOKEN — mandatory for this client, see cloudflare_id_token
+            # above. Cloudflare never calls userinfo, so without it the login yields no email and the
+            # email-matching Access policy denies.
+            claims_policy: 'cloudflare_id_token'
+            # Belt and braces: if a future Cloudflare release does start calling userinfo, it expects
+            # JSON there rather than a signed JWT (same reason zot and grafana set this).
+            userinfo_signed_response_alg: 'none'
             token_endpoint_auth_method: 'client_secret_basic'

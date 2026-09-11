@@ -31,3 +31,15 @@ variable "enable_api_access_gate" {
   type        = bool
   default     = false
 }
+
+variable "authelia_access_client_secret" {
+  description = "PLAINTEXT OIDC client secret for the `cloudflare-access` client in Authelia (kubernetes/apps/apps/auth/authelia-config.yaml carries only its pbkdf2 hash). Set it in terraform.tfvars (gitignored); it is also escrowed at af/estate/cloudflare, field access_oidc_client_secret. EMPTY (the default) leaves the Authelia identity provider uncreated so `tofu plan` stays clean until you opt in — the same pattern as enable_api_access_gate. Access keeps One-time PIN either way."
+  type        = string
+  sensitive   = true
+  default     = ""
+  # nullable = false, because the gate is `!= ""` and an explicit `null` would pass it: `null != ""`
+  # is true, so a null would select one instance and hand the provider an empty client secret. With a
+  # non-null default, `nullable = false` makes an explicit null resolve to "" and disable the IdP,
+  # which is the safe reading of "no secret".
+  nullable = false
+}

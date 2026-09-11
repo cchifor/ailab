@@ -31,7 +31,11 @@ terraform apply
 ```
 
 Token scopes (least privilege): `Access: Apps and Policies` (Account, Edit), `Access: Service Tokens`
-(Account, Edit), `DNS` (Zone=chifor.me, Edit). **No** Cloudflare Tunnel scope.
+(Account, Edit), `Access: Organizations, Identity Providers, and Groups` (Account, Edit — required by the
+Authelia IdP in `access.tf`), `DNS` (Zone=chifor.me, Edit). **No** Cloudflare Tunnel scope.
+
+> The Organizations/IdPs/Groups scope is easy to omit: **read** on it is enough to `plan` the identity
+> provider, so a token missing it produces a clean plan and then fails at `apply`.
 
 ## DNS
 

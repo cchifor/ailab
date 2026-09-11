@@ -54,7 +54,7 @@ an interactive Access app on top of it.
 Do this once. It defines *how* a human proves who they are at the Access prompt. You can enable more
 than one method and select per-app which are accepted.
 
-### Recommended for a single user: One-time PIN (email OTP)
+### Baseline / break-glass: One-time PIN (email OTP)
 
 For one operator this is the simplest, lowest-maintenance choice: **no IdP wiring, no client secret,
 no exposed service.** The user types their email on the Access login page, clicks **"Send login code"**
@@ -67,38 +67,58 @@ only configuration is putting your email into an Access policy (Part 2).
   **Settings > Authentication > Login methods**, or **Integrations > Identity providers**) - you
   should see **One-time PIN** listed as an accepted login method *(verify in your dashboard)*.
 
-### Optional upgrade: Authelia as a generic OIDC IdP
+### Authelia as a generic OIDC IdP — CODIFIED (2026-09-11)
 
-Only adopt this if you want **one unified SSO prompt** shared across the edge (Access) and your origin
-apps - i.e. so the user logs into Authelia once and Access silently passes through. For a solo
-operator it is usually **not worth it**: it requires a publicly reachable Authelia, a managed client
-secret, and PKCE config, just to avoid typing an emailed code. (See Part 3 for where it genuinely pays
-off: `home.chifor.me`.)
+This is no longer a dashboard exercise: `cloudflare_zero_trust_access_identity_provider.authelia` in
+`kubernetes/infra/cloudflare/access.tf` creates it. The earlier advice here ("usually not worth it for
+a solo operator, just to avoid typing an emailed code") **was wrong about the cost side** and is
+withdrawn. Two things changed it:
 
-Broad steps if you do it:
+- Authelia now accepts **passkeys** (Windows Hello) — ADR 0012 — so the shared prompt is a face scan,
+  not another password.
+- The Authelia session (12h hard cap, 8h idle) **outlives the short Access windows** — 30m
+  (`prometheus`, `alertmanager`, `openbao`) and 8h (`dw1`–`dw6`, `dsh`, `proxmox`, `qnap`) — so those
+  re-auths become a **silent redirect** rather than a login. That is what lets the sensitive apps keep
+  their 30m windows instead of buying comfort by lengthening them.
+  The **24h** apps (`k8s`, `hubble`, `vault/admin`) are the exception: 24h outlasts the 12h Authelia
+  session, so they do prompt — about once a day, for one passkey scan rather than an emailed PIN. Do
+  not read "silent" as "never prompts"; nothing here is longer-lived than the 12h Authelia cap.
 
-1. In Authelia, register an OIDC client for Cloudflare with redirect URI
-   `https://<your-team-name>.cloudflareaccess.com/cdn-cgi/access/callback`
-   (`require_pkce: true`, `pkce_challenge_method: S256`, scopes `openid profile email`). Your team name
-   is under **Settings > Custom Pages / Team domain** *(verify the exact label in your dashboard)*.
-2. In Cloudflare: **Settings > Authentication > Login methods > Add new > OpenID Connect** (newer:
-   **Integrations > Identity providers > Add new**), then fill:
+The plaintext client secret lives in `terraform.tfvars` (gitignored) as `authelia_access_client_secret`
+and is escrowed at `af/estate/cloudflare` (field `access_oidc_client_secret`) in OpenBao; Authelia holds
+only its pbkdf2 hash. Leaving the variable empty leaves the IdP uncreated.
 
-   | Field | Value |
-   |---|---|
-   | Name | `Authelia` |
-   | App ID (client_id) | `cloudflare` |
-   | Client secret | the plaintext secret (Authelia stores its hash) |
-   | Auth URL | `https://sso.chifor.me/api/oidc/authorization` |
-   | Token URL | `https://sso.chifor.me/api/oidc/token` |
-   | Certificate (JWKS) URL | `https://sso.chifor.me/api/oidc/jwks` |
-   | Proof Key for Code Exchange (PKCE) | **Enable** |
-   | OIDC Claims | `preferred_username`, `email` |
+| Field | Value | Source |
+|---|---|---|
+| Name | `Authelia` | — |
+| App ID (client_id) | `cloudflare-access` | must match the client in `authelia-config.yaml` |
+| Client secret | plaintext (Authelia stores the hash) | `var.authelia_access_client_secret` |
+| Auth URL | `https://sso.chifor.me/api/oidc/authorization` | discovery doc |
+| Token URL | `https://sso.chifor.me/api/oidc/token` | discovery doc |
+| Certificate (JWKS) URL | **`https://sso.chifor.me/jwks.json`** | discovery doc |
+| PKCE | **Enabled** | client sets `require_pkce: true` |
+| Redirect URI (on the Authelia side) | `https://chifor.cloudflareaccess.com/cdn-cgi/access/callback` | team domain |
 
-   **Hard requirement:** Cloudflare's servers must reach those `sso.chifor.me` endpoints over the
-   public internet, and `sso.chifor.me` must **never** have an Access app in front of it (see Part 3).
+> **Correction:** an earlier revision of this runbook gave the JWKS URL as `…/api/oidc/jwks`. That path
+> does not exist. Authelia's own `/.well-known/openid-configuration` reports **`/jwks.json`**, and the
+> wrong value fails at login, not at configuration time. Re-derive all three endpoints from the
+> discovery document rather than from memory:
+>
+> ```bash
+> kubectl --context admin@ai -n auth exec deploy/authelia -- \
+>   wget -qO- --header='Host: sso.chifor.me' \
+>   'http://127.0.0.1:9091/.well-known/openid-configuration'
+> ```
+>
+> (The `Host` header is required — Authelia answers 400 to a bare `127.0.0.1` request.)
 
-You can keep One-time PIN enabled alongside Authelia, so OTP remains a fallback.
+**Hard requirement:** Cloudflare's servers must reach those `sso.chifor.me` endpoints over the public
+internet, and `sso.chifor.me` must **never** have an Access app in front of it (see Part 3).
+
+**One-time PIN stays enabled, and `allowed_idps` is left unset on every application** — so the login
+page offers both methods. This costs one click and buys the break-glass path: Authelia runs inside the
+cluster that `proxmox`/`qnap` exist to repair, so it must never become the only way in. Do not set
+`auto_redirect_to_identity` on the admin or shell hosts for the same reason.
 
 ---
 
@@ -201,7 +221,7 @@ below covers the original app surface; the rows after it cover the apps that `ac
 | `vault.chifor.me` | Vaultwarden | master-password + 2FA; `/admin*` Access-gated (`vault_admin`) | Bitwarden native clients can't do Access SSO; only the dangerous `/admin` surface is gated. |
 | `ntfy.chifor.me` | ntfy | ntfy token auth (deny-all default); **no Access app** | The mobile app's persistent connection would break under the Access browser flow. |
 | `proxmox` / `qnap` **(#24)** | Proxmox VE / QNAP | **own login** + `allow_email` Access, **8h** session (`admin_uis`) | Hypervisor/NAS have their own auth → Access is defense-in-depth. Origin `noTLSVerify` → pin the LAN CA (ADR 0007 follow-up). |
-| `prometheus` / `alertmanager` **(#24)** | Prometheus / Alertmanager | **NO native auth** → `allow_email` Access is the **sole** gate, **30m** session (`admin_uis`) | An Access compromise reads metrics + can silence all alerts. Single-factor (email OTP) today; **IdP-backed MFA is the ADR 0007 hardening step.** |
+| `prometheus` / `alertmanager` **(#24)** | Prometheus / Alertmanager | **NO native auth** → `allow_email` Access is the **sole** gate, **30m** session (`admin_uis`) | An Access compromise reads metrics + can silence all alerts. Single-factor today, but the factor is now a **passkey** via the Authelia IdP (OTP retained as break-glass); enforced MFA still needs the Authelia client raised to `two_factor` first — ADR 0007. |
 
 ### Explicit DO-NOT list
 
