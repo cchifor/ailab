@@ -1,0 +1,46 @@
+# Bearer token protecting the AgentForge control-plane /metrics endpoint (Prometheus scrape).
+# agentforge.chifor.me is published through the CF tunnel and the CP is its own OIDC RP with no CF
+# Access in front, so every route authenticates itself — except /metrics, which until 2026-09-11
+# had no authentication at all: `curl https://agentforge.chifor.me/metrics` answered 200 with the
+# full afp_* payload from the public internet. /metrics shares port 8080 with the API, so there is
+# no internal-only listener to hide behind and this token is the whole boundary.
+#
+# EXACTLY the shape of gitea-metrics.sops.yaml next door, which exists for the same reason on the
+# same tunnel (ADR 0017) and whose scrape is green today. CONSUMED TWICE, from this ONE Secret so
+# the two sides cannot drift: deployment.yaml -> AFP_METRICS_TOKEN (settings.metrics_token), and
+# servicemonitor.yaml -> endpoints[].bearerTokenSecret (Prometheus sends 'Authorization: Bearer').
+#
+# A SEPARATE Secret rather than another key in agentforge-runtime, deliberately: the
+# prometheus-operator reads whatever Secret bearerTokenSecret names, and agentforge-runtime holds
+# the session secret and two bot tokens. Single-purpose keeps that reach as small as the job.
+#
+# ORDERING: this Secret and the ServiceMonitor's bearerTokenSecret must be LIVE BEFORE the CP image
+# that enforces the token is pinned. Both halves are harmless early — the old image ignores an extra
+# env var (Settings is extra="ignore") and an unread Authorization header — and a pin that lands
+# first would take the scrape down until this arrives (ForgePlatformTargetDown, 10m).
+#
+# ROTATION: `sops --set` this key, then restart the CP (the env is captured at startup) — Prometheus
+# re-reads the Secret on its own. Nothing else consumes it.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: agentforge-metrics
+    namespace: agentforge
+type: Opaque
+stringData:
+    token: ENC[AES256_GCM,data:4z0wpfHQp7znzV23I66w4jo2W8AUDJX2wvnWAHtht7dRYQw1cbe1tn5DRlAn3lS8,iv:GWcn5/rWtglJAIx7isKGkpcL5qL6OD3lYFVlYiwrtEg=,tag:VefSZ6I70BqYI7a3OujFNg==,type:str]
+sops:
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBWRjhOa2lodnJhNGl3emp4
+            UHZaSmQwcGhTYXc0U2Y4Tm05d29vK3hQdTJvCnExMUhCcEkrWmJOaUhXL1RCYUM2
+            VFc3K3I1aGcvNzV3eks1ZTJxK25rRnMKLS0tIEFJMnUxRXVGbC8vYmlKclhrSDBy
+            aG1FLy9CWERDTld6MEZOcUFzWU1lTk0KkxrM9k8Hx1MV4Sfq3V3RpiC2+0pWD/AP
+            4izlo5MRNYQTo1kv9XU6QR7NuceulEOBmDCgJ37WjYmJBnjNUh5aKw==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-11T16:50:12Z"
+    mac: ENC[AES256_GCM,data:oesBtlei/sGkK2vPK3VxazkBuVHep1KbkSNgsv9T8Se9oioXFnHVMTj+Y61Mi6Q67mey7b2ynYx3B8PNHTe1wLTWFwUNIrztObnLBDf4jJLwyUbyD2af2fKS0l5c8bhzrNSEmFUKJwy/0zuL036vC5BqpTtwIvy+xB8ofTRJz2Q=,iv:0v8C1ks3g5SVi83FkGRjv0d6EnBsOB7GlMyWKFW6iZE=,tag:mYBz1SaKmE81Op2A0JtUKw==,type:str]
+    encrypted_regex: ^(data|stringData)$
+    version: 3.12.2

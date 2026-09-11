@@ -141,6 +141,16 @@ spec:
             - name: AFP_ADMIN_DSN
               valueFrom:
                 secretKeyRef: { name: agentforge-db, key: AFP_ADMIN_DSN }
+            # -- /metrics scrape credential --
+            # settings.metrics_token. EMPTY MEANS THE ENDPOINT REFUSES (503), not that it serves
+            # openly: /metrics shares this container's 8080 with the API, cloudflared publishes
+            # 8080 to the internet, and until 2026-09-11 that route had no authentication on it at
+            # all. Key `token` (not AFP_-named like its neighbours) because the SAME Secret key is
+            # read by the ServiceMonitor's bearerTokenSecret, and Prometheus knows nothing about
+            # this app's env-var naming — one value, two readers, no drift.
+            - name: AFP_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef: { name: agentforge-metrics, key: token }
             # -- sessions: build_app() refuses to serve without a strong, non-placeholder key --
             - name: AFP_SESSION_SECRET
               valueFrom:
