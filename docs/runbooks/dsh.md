@@ -392,8 +392,17 @@ kubectl -n dsh exec deploy/dsh -c dsh -- sh -c 'for t in bash python3 git curl; 
 
 `settings.yaml` lives on the PVC and is **owned by dsh** (the Settings UI writes it). The
 `reconcile-provider.js` init script rewrites only the `litellm` provider block from the seed on every
-boot, preserving everything else. If model ids were renamed in LiteLLM and dsh still lists the old
-ones, check that script's output:
+boot, preserving everything else. The `models:` rows of that seed block are not hand-written:
+`scripts/gen-litellm-consumers.py` derives them (together with Open WebUI's `model_ids` and
+litellm.yaml's `checksum/config`) from litellm.yaml's `model_list`, listing every route whose
+`api_base` is a private IPv4 or a `.svc.cluster.local` name and whose `model_info.mode` is unset
+or `chat`, unless the entry sets `model_info.hidden: true` (which drops it from dsh and from Open
+WebUI's Local group only; Open WebUI's second connection still shows it under External), with
+`input: [text, image]` on the routes that declare `supports_vision: true`. After editing
+`model_list`, run `just af-gen-litellm` (`python3 scripts/gen-litellm-consumers.py --write` where
+just is not installed) and commit the three files together — CI runs `just af-verify-litellm`'s
+check and fails on drift. If model ids were renamed in LiteLLM and dsh still lists the old ones,
+check that script's output:
 
 ```bash
 kubectl -n dsh logs deploy/dsh -c seed-settings

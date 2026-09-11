@@ -203,6 +203,16 @@ af-verify-brokers:
 af-gen-brokers:
     python scripts/gen-broker-inventory.py --write
 
+# Verify the three LiteLLM consumer spans (Open WebUI's Local-group model_ids, the dsh seed's
+# provider models rows, litellm.yaml's checksum/config annotation) still agree with litellm.yaml's
+# model_list that derives them. Static-only; this is what .gitea/workflows/manifests.yaml runs.
+af-verify-litellm:
+    python scripts/gen-litellm-consumers.py --check
+
+# Regenerate those three spans from model_list after adding/removing/hiding a route.
+af-gen-litellm:
+    python scripts/gen-litellm-consumers.py --write
+
 # Re-record which KV paths the SOPS operator seeds file actually declares (KEY NAMES ONLY — never
 # a value), and stamp the SHA-256 of that file's CIPHERTEXT so the record cannot go stale in
 # silence. Needed after adding a seat — the KV garbage collector (agentforge #69) refuses to start

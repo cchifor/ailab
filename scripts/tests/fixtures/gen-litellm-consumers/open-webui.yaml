@@ -1,0 +1,19 @@
+# FIXTURE for scripts/tests/test_gen_litellm_consumers.py — the OPENAI_API_CONFIGS line shape
+# from kubernetes/apps/apps/ai/open-webui.yaml. NOT the real file. Connection "0" carries an
+# extra key AFTER model_ids and a stale allowlist, so a rewrite that reorders or drops keys shows.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: ai
+spec:
+  template:
+    spec:
+      containers:
+        - name: open-webui
+          env:
+            - { name: OPENAI_API_BASE_URLS, value: "http://litellm.ai.svc.cluster.local:4000/v1;http://litellm.ai.svc.cluster.local:4000/v1" }
+            # a comment that mentions OPENAI_API_CONFIGS must not be mistaken for the line itself
+            - { name: OPENAI_API_CONFIGS, value: '{"0":{"enable":true,"connection_type":"local","model_ids":["stale-a","stale-b"],"tags":["keep me"]},"1":{"enable":true,"connection_type":"external"}}' }
+            # trailing comment, kept verbatim
+            - { name: ENABLE_OLLAMA_API, value: "False" }

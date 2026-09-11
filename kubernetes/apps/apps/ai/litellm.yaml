@@ -15,6 +15,17 @@ metadata:
 data:
   config.yaml: |
     model_list:
+      # THE CONSUMERS ARE GENERATED FROM THIS LIST. scripts/gen-litellm-consumers.py derives Open
+      # WebUI's Local-group model_ids (open-webui.yaml), dsh's provider models (dsh/settings.seed.yaml)
+      # and the checksum/config annotation below from every entry whose api_base host is a private
+      # IPv4 or a .svc.cluster.local name and whose model_info.mode is unset or chat (an embedding or
+      # rerank route is never a picker entry). `model_info: { hidden: true }` (a YAML boolean; a quoted
+      # "true" fails the check) removes a route from the Local group in Open WebUI and from dsh while
+      # it stays routable by name -- Open WebUI's connection "1" still discovers it under External,
+      # because LiteLLM does not know the key and keeps advertising the name on /v1/models. The
+      # generator locates this block the way scripts/check-inline-hashes.py does (the first
+      # `config.yaml: |` literal block in the file), so litellm-config must stay the first such
+      # ConfigMap in this file. Run `just af-gen-litellm` after editing here; CI runs the check.
       # max_input_tokens = the per-request context window the llama-server
       # actually serves (n_ctx / --parallel), with output headroom. LiteLLM
       # fails fast with a clean ContextWindowExceededError above this instead of
@@ -402,7 +413,8 @@ data:
         # vision-capable cloud route straight into a 500 -- i.e. the fallback would silently not
         # cover multimodal traffic, which is the exact class of outage this chain exists to close.
         # (reviewer-claude on #606.)
-        model_info: { supports_vision: false, max_input_tokens: 114688 }
+        # hidden: the always-on fallback route is reachable by name and as a fallback target, not advertised in pickers.
+        model_info: { supports_vision: false, max_input_tokens: 114688, hidden: true }
     litellm_settings:
       drop_params: true
       # 900s to cover a llama-swap COLD START: the first request to an idle-unloaded heavyweight
@@ -478,6 +490,11 @@ spec:
         # every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm.yaml | sha256sum | cut -c1-12
+        # Or let the generator stamp it: `just af-gen-litellm` (`python3 scripts/gen-litellm-consumers.py
+        # --write` where just is not installed) writes this annotation with the same derivation
+        # (scripts/check-inline-hashes.py's) and, in the same run, regenerates Open WebUI's model_ids
+        # and the dsh seed's models rows from model_list. CI runs `just af-verify-litellm`'s command
+        # (--check), so a hand edit to any of those three spans fails the manifests workflow.
         # NOTE (2026-08-14): the previous value was the sha256 of the MOUNTED file, which the yq
         # recipe above does not reproduce (yq appends a trailing newline). Standardised on the
         # documented recipe so the value is reproducible from the command as written.
@@ -501,7 +518,7 @@ spec:
         # in the cluster, so this annotation is the ONLY rollout trigger. LiteLLM reads its config at
         # process start — without a bump Flux updates the ConfigMap, the pod template hash does not
         # move, no new ReplicaSet is created, and the running pods keep serving the OLD model list.
-        checksum/config: "1809c33b052f"
+        checksum/config: "5ab8e0f39adf"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

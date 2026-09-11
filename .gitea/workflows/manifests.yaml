@@ -63,3 +63,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/check-inline-hashes.py
+
+      # The three spans derived from litellm.yaml's model_list — Open WebUI's Local-group model_ids,
+      # the dsh seed's provider models rows, and litellm.yaml's own checksum/config — must match what
+      # the generator renders. Same fail-closed shape as the step above: a drifted span, a missing
+      # interpreter or an unparseable source is a non-zero exit, never a skip. PyYAML is the runner's
+      # system package (the same assumption broker-inventory.yaml's unit-test step already makes).
+      - name: LiteLLM consumer drift (Open WebUI model_ids, dsh seed models, checksum/config)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/gen-litellm-consumers.py --check

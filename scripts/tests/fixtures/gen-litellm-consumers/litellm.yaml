@@ -1,0 +1,77 @@
+# FIXTURE for scripts/tests/test_gen_litellm_consumers.py — a cut-down litellm.yaml carrying
+# every shape the selection rule must decide on. NOT the real file; the real one is
+# kubernetes/apps/apps/ai/litellm.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: ai
+data:
+  config.yaml: |
+    model_list:
+      # head comment, kept verbatim by the generator
+      - model_name: alpha-cloud
+        litellm_params:
+          model: openai/alpha
+          api_base: http://192.168.0.26:8080/v1
+          api_key: "sk-noauth"
+        model_info: { supports_vision: true, max_input_tokens: 81920 }
+      - model_name: beta-hidden
+        litellm_params:
+          model: openai/beta
+          api_base: http://10.0.0.5:8080/v1
+          api_key: "sk-noauth"
+        model_info: { hidden: true, max_input_tokens: 4096 }
+      - model_name: gpt-4.1
+        litellm_params:
+          model: openai/gpt-4.1
+          api_key: os.environ/OPENAI_API_KEY
+      - model_name: text-embedding-3-small
+        litellm_params:
+          model: openai/text-embedding-3-small
+          api_key: os.environ/OPENAI_API_KEY
+        model_info: { mode: embedding }
+      - model_name: gamma-public
+        litellm_params:
+          model: openai/gamma
+          api_base: https://api.example.com/v1
+          api_key: os.environ/GAMMA_KEY
+      - model_name: delta-172
+        litellm_params:
+          model: openai/delta
+          api_base: http://172.16.4.2:18020/v1
+          api_key: "sk-noauth"
+        model_info: { max_input_tokens: 81920 }
+      - model_name: zeta-embed-local
+        # a SELF-HOSTED embedding route: private api_base, but not a chat model -> never listed
+        litellm_params:
+          model: openai/zeta-embed
+          api_base: http://10.0.0.9:8080/v1
+          api_key: "sk-noauth"
+        model_info: { mode: embedding }
+      - model_name: epsilon-local
+        litellm_params:
+          model: openai/epsilon
+          api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
+          api_key: "sk-noauth"
+        model_info: { supports_vision: false, max_input_tokens: 114688 }
+    litellm_settings:
+      drop_params: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: ai
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: litellm
+      annotations:
+        # Rolls the pod when config.yaml changes. Deliberately STALE in the fixture.
+        checksum/config: "000000000000"
+    spec:
+      containers:
+        - name: litellm
+          image: example.invalid/litellm:1
