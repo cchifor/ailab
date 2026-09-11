@@ -18,11 +18,12 @@
 # change, which is the property the OpenBao credential store exists to provide.
 #
 # ABSENCE AND MALFORMATION ARE NOT ERRORS, AND NEVER LEAK. When either field is missing, empty,
-# unreadable, or not a single opaque word, this prints ONE stderr line that never contains the
-# value, emits nothing on stdout, and exits 0 -- so git falls through to exactly the failure it has
-# today, with a cause attached. A wrapped or CR-terminated value is refused rather than repaired:
-# the credential protocol is line-based and git 2.39 echoes malformed lines in a warning, which
-# would put fragments of a token into the agent's transcript.
+# unreadable, or not a single ASCII word (one trailing newline tolerated), this prints ONE stderr
+# line that never contains the value, emits nothing on stdout, and exits 0 -- so git falls through
+# to exactly the failure it has today, with a cause attached. A wrapped, CR-terminated or
+# NUL-containing value is refused rather than repaired: the credential protocol is line-based and
+# git 2.39 echoes malformed lines in a warning, which would put fragments of a token into the
+# agent's transcript. The bytes are checked BEFORE command substitution, which is lossy (see below).
 #
 # HOST SCOPING IS NOT DONE HERE. gitconfig.seed attaches this helper to `https://git.chifor.me`
 # only; git consults it for nothing else. Keeping that in git's own config, rather than re-checking
@@ -56,20 +57,38 @@ refuse() {
 
 [ -e "$USER_FILE" ] && [ -e "$PAT_FILE" ] || refuse "no GITEA_USER/GITEA_PAT under $DIR"
 
-# Command substitution strips trailing newlines and nothing else: a value written with a trailing
-# newline is accepted, everything else about the bytes is preserved.
+# The BYTES are judged before any shell expansion touches them, because `$(cat ...)` is lossy:
+# dash discards NUL bytes inside a command substitution, so a value like `abc<NUL>def` would arrive
+# as `abcdef` and sail past a check on the expanded string. The rule: every byte is ASCII printable
+# and non-blank ([:graph:] in the C locale), except that ONE trailing newline is tolerated -- that is
+# what `bao kv patch KEY=@file` stores when the file was written with echo. Empty is refused here
+# too (zero bytes, or a lone newline). Non-ASCII is refused as a consequence and that is fine: a
+# forge username and a PAT are ASCII words.
+single_word_file() { # <file>
+  bad=$(LC_ALL=C tr -d '[:graph:]' < "$1" 2>/dev/null | wc -c | tr -d ' ') || return 1
+  case "$bad" in
+    0) [ -s "$1" ] ;;
+    # exactly one non-graph byte, and it is the LAST byte, and it is a newline
+    1) [ "$(tail -c 1 "$1" 2>/dev/null | tr -d '\n' | wc -c | tr -d ' ')" = 0 ] && [ "$(wc -c < "$1" | tr -d ' ')" != 1 ] ;;
+    *) return 1 ;;
+  esac
+}
+[ -r "$USER_FILE" ] || refuse "cannot read $USER_FILE"
+[ -r "$PAT_FILE" ] || refuse "cannot read $PAT_FILE"
+single_word_file "$USER_FILE" || refuse "GITEA_USER is empty or not a single ASCII word"
+single_word_file "$PAT_FILE" || refuse "GITEA_PAT is empty or not a single ASCII word"
+
+# Now the expansion is lossless for what is left (only the tolerated trailing newline is stripped).
 user=$(cat "$USER_FILE" 2>/dev/null) || refuse "cannot read $USER_FILE"
 pat=$(cat "$PAT_FILE" 2>/dev/null) || refuse "cannot read $PAT_FILE"
 
-# A single opaque word, or nothing: no whitespace and no control characters anywhere in either
-# value. This is what stops a wrapped PAT from becoming extra protocol lines.
+# Belt and braces on the expanded strings: nothing above should let these fire, and if a future
+# edit ever does, the refusal is still value-free.
 case "$user" in
-  '') refuse "GITEA_USER is empty" ;;
-  *[[:space:][:cntrl:]]*) refuse "GITEA_USER is not a single word" ;;
+  '' | *[[:space:][:cntrl:]]*) refuse "GITEA_USER failed the post-expansion check" ;;
 esac
 case "$pat" in
-  '') refuse "GITEA_PAT is empty" ;;
-  *[[:space:][:cntrl:]]*) refuse "GITEA_PAT is not a single word" ;;
+  '' | *[[:space:][:cntrl:]]*) refuse "GITEA_PAT failed the post-expansion check" ;;
 esac
 
 printf 'username=%s\npassword=%s\n' "$user" "$pat"

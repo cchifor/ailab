@@ -161,16 +161,44 @@ contents**; the fields are operator-owned by design.
    Secret-volume sync is "sync period plus cache propagation"; neither is a deadline:
 
    ```bash
-   # a. the Secret gains both keys (ESO)
-   for i in $(seq 1 80); do kubectl -n dsh get secret dsh-credentials -o jsonpath='{.data}' | grep -q GITEA_PAT && break; sleep 5; done
-   # b. the mount gains both files (kubelet) -- names only, never contents
-   for i in $(seq 1 40); do kubectl -n dsh exec deploy/dsh -c dsh -- ls /dsh-credentials | grep -q GITEA_PAT && break; sleep 5; done
-   # c. git, in a dsh session (the Landlock-confined shell is the thing under test, not kubectl exec)
-   git ls-remote https://git.chifor.me/cchifor/platform.git | head -3
+   # Each step names its own failure: a loop that runs out of retries says so and exits non-zero,
+   # rather than ending on a successful `sleep`. Key NAMES only, never values.
+   both() { grep -q GITEA_USER && grep -q GITEA_PAT; }
+   # a. the Secret gains BOTH keys (ESO)
+   ok=; for i in $(seq 1 80); do
+     kubectl -n dsh get secret dsh-credentials -o jsonpath='{.data}' | tee /dev/null | both && { ok=1; break; }; sleep 5
+   done; [ -n "$ok" ] || { echo "ESO did not sync both fields within ~7 min: kubectl -n dsh describe externalsecret dsh-credentials" >&2; exit 1; }
+   # b. the mount gains BOTH files (kubelet)
+   ok=; for i in $(seq 1 40); do
+     kubectl -n dsh exec deploy/dsh -c dsh -- ls /dsh-credentials | both && { ok=1; break; }; sleep 5
+   done; [ -n "$ok" ] || { echo "kubelet did not project both files within ~3.5 min" >&2; exit 1; }
+   # c. git, in a dsh session (the Landlock-confined shell is the thing under test, not kubectl
+   #    exec). No pipe after git: a pipe would replace git's exit status with the reader's.
+   git ls-remote https://git.chifor.me/cchifor/platform.git > /dev/null && echo "forge auth OK"
    ```
 
-**Rotation:** mint the new PAT, `bao kv patch` it in, confirm (c) from a session, and only then
-revoke the old one at the forge. Nothing restarts.
+   `grep -q GITEA_USER` on the Secret's `.data` and on `ls` output matches the key name in both
+   shapes (`"GITEA_USER":"..."` and a bare filename); nothing prints a value.
+
+**Rotation:** mint the new PAT, `bao kv patch` it in, then prove the **new** value is what the pod
+holds before revoking the old one — step (c) alone proves only that *some* valid PAT is mounted,
+and until ESO and kubelet have both propagated, that is still the old one. Compare digests, which
+prints neither value:
+
+```bash
+# d. the mounted bytes are the bytes you patched in (identical digests; the local file is the same
+#    one `@file` read, so a trailing newline, if any, is on both sides)
+for i in $(seq 1 80); do
+  m=$(kubectl -n dsh exec deploy/dsh -c dsh -- sh -c 'sha256sum < /dsh-credentials/GITEA_PAT' | cut -c1-64)
+  l=$(sha256sum < /path/to/pat | cut -c1-64)
+  [ "$m" = "$l" ] && { echo "mounted PAT is the new one"; break; }; sleep 5
+done
+[ "$m" = "$l" ] || { echo "mounted PAT is STILL the old one -- do not revoke" >&2; exit 1; }
+```
+
+Then (c) from a session — which now proves the **new** PAT authenticates, since (d) proved it is
+the one mounted — and only then revoke the old PAT at the forge. If (d) times out, ESO or kubelet
+has not propagated yet: nothing has been revoked, so wait and re-run (d). Nothing restarts.
 
 ### Diagnosing "could not read Username"
 
@@ -179,7 +207,7 @@ That line alone says only that git obtained no username. What accompanies it dec
 | also printed | meaning | fix |
 |---|---|---|
 | `git-credential-openbao: no GITEA_USER/GITEA_PAT under /dsh-credentials ...` | helper ran; document not provisioned | step 2 above |
-| `git-credential-openbao: GITEA_PAT is not a single word ...` (or `is empty`, `cannot read`) | provisioned, but the value is wrapped/empty/unreadable | re-patch with `@file` and no embedded newline |
+| `git-credential-openbao: GITEA_PAT is empty or not a single ASCII word ...` (or `cannot read`) | provisioned, but the value is wrapped, NUL-containing, non-ASCII, empty or unreadable | re-patch with `@file` from a file holding exactly the token (one trailing newline is tolerated) |
 | nothing | git never reached the helper | in the container: `git config --global -l` must show `credential.https://git.chifor.me.helper=/dsh-home/.local/bin/git-credential-openbao` and that path must be `-rwxr-xr-x`; check the `seed-settings` log |
 
 `scripts/tests/test_dsh_git_credential_helper.py` runs the real helper against a kubelet-shaped

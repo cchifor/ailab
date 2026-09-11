@@ -92,8 +92,10 @@ Mechanics, each one checked against the running pod rather than assumed:
   under `/dsh-home/.local/bin` are the same class of access. The mount is `0440` + fsGroup 1000 —
   the fix in `43b9199` — so uid 1000 can read it.
 - The helper reads the file **at every `get`**, reopening by pathname, so a rotated PAT reaches
-  the next `git` invocation after ESO (≤5m) and kubelet (≤~1m) propagate it. **No pod restart**
-  and no manifest change for rotation, which is the property #645 exists to provide.
+  the next `git` invocation once ESO (5m refresh *period*) and kubelet (sync period plus cache
+  propagation; eventually consistent, no deadline) have propagated it — which is why the rotation
+  ceremony in §3 proves the mounted bytes are the new ones before anything is revoked. **No pod
+  restart** and no manifest change for rotation, which is the property #645 exists to provide.
 - `store`, `erase` and any operation the helper does not know are accepted and ignored (exit 0):
   git calls `store` after a successful auth and `erase` after a 401, and gitcredentials(7) says
   unknown operations must be ignored so helpers survive future extensions.
@@ -253,3 +255,19 @@ validation details."* Findings and what changed:
 | 6 | bare `kubeconform` cannot validate ESO CRDs | §6 names `scripts/manifest-lint.sh` and what it does not validate |
 | 7 | propagation intervals stated as bounds | §3.3 polls with bounded waits; keep the old PAT until the new one works |
 | 8 | unknown op → exit 2 contradicts gitcredentials(7) | §2.1: ignored, exit 0 |
+
+## 9. Cross-review of the diff (codex, read-only, pinned `526a968`) and the PR reviewer bot
+
+Both reviewers found the same gap independently: after `bao kv patch`, a successful `git ls-remote`
+proves only that *some* valid PAT is mounted, so revoking the old one on that evidence can cut
+access (persistently, if the new PAT is bad). Resolutions, all in the follow-up commit:
+
+| # | finding | resolution |
+|---|---|---|
+| D1 / bot | rotation could revoke the PAT still mounted | runbook step (d): compare sha256 of the mounted file with the patched file (neither value printed), bounded poll, explicit refusal to proceed on timeout; then (c); then revoke |
+| D2 | verification loops ended on `sleep` (exit 0 after exhausting retries), checked only `GITEA_PAT`, and `git ... \| head` hid git's exit status | loops check both fields and fail loudly on timeout; no pipe after git |
+| D3 (nit) | dash's `$(...)` drops NUL bytes, so `abc<NUL>def` passed the single-word check as `abcdef` | bytes are judged before expansion (`tr -d '[:graph:]' \| wc -c`, one trailing newline tolerated); tests for NUL, double newline, lone newline, non-ASCII |
+| R1 #7 | plan §2.1 still said "≤5m / ≤~1m" | reworded as periods, not bounds |
+
+Round-1 dispositions from the diff review: #1, #3, #4, #5, #6, #8 resolved; #2 fully resolved by D3;
+#7 by D1/D2.

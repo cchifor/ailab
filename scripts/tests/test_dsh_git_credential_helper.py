@@ -165,6 +165,34 @@ class HelperBehaviour(unittest.TestCase):
         )
         self.assertRefused(_run("get", mount), must_not_contain=(PAT,))
 
+    def test_embedded_nul_is_refused_before_the_shell_can_drop_it(self):
+        # dash discards NUL bytes inside `$(...)`, so a check on the expanded
+        # string would see `abcdef` for `abc<NUL>def` and accept it. The helper
+        # judges the file's bytes first; this pins that.
+        nul = PAT[:20].encode() + b"\x00" + PAT[20:].encode()
+        mount = _project(pathlib.Path(self.tmp.name) / "nul", {USER_FIELD: b"dsh", PAT_FIELD: nul})
+        proc = _run("get", mount)
+        self.assertRefused(proc, must_not_contain=(PAT[:20], PAT[20:]))
+        self.assertNotIn(f"password={PAT}", proc.stdout)
+
+    def test_more_than_one_trailing_newline_is_refused(self):
+        mount = _project(
+            pathlib.Path(self.tmp.name) / "nlnl",
+            {USER_FIELD: b"dsh", PAT_FIELD: PAT.encode() + b"\n\n"},
+        )
+        self.assertRefused(_run("get", mount), must_not_contain=(PAT,))
+
+    def test_lone_newline_is_empty(self):
+        mount = _project(pathlib.Path(self.tmp.name) / "lone", {USER_FIELD: b"dsh", PAT_FIELD: b"\n"})
+        self.assertRefused(_run("get", mount))
+
+    def test_non_ascii_is_refused(self):
+        mount = _project(
+            pathlib.Path(self.tmp.name) / "utf8",
+            {USER_FIELD: "dsh\u00e9".encode("utf-8"), PAT_FIELD: PAT.encode()},
+        )
+        self.assertRefused(_run("get", mount), must_not_contain=(PAT,))
+
     def test_whitespace_in_a_value_is_refused(self):
         mount = _project(
             pathlib.Path(self.tmp.name) / "ws",
