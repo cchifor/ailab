@@ -116,6 +116,13 @@ not from a dev-worker.
   the reverse — a local regeneration changes nothing live.
 - **Rename**: don't, if chats reference it. Open WebUI stores the model id per chat and there is no
   prefix or alias layer by design; a renamed route strands every existing chat on that id.
+- **Rename without stranding anyone -- two names, one backend**: keep the old entry and mark it
+  `model_info: { hidden: true }`, add a second entry under the new `model_name` with **identical**
+  `litellm_params`, then `just af-gen-litellm`. The pickers show only the new name; the old one
+  keeps answering for every chat and session pinned to it. Done for `qwen3.8-27b-fp8-cloud` →
+  `qwen3.8-27b-fp8-unc-cloud` on 2026-09-11 (the comment on those entries says why).
+  The two `litellm_params` blocks must stay byte-identical: they are one deployment, and any
+  drift makes "which name did you use" a behavioural question.
 
 ## 6. Traps this procedure was written against
 

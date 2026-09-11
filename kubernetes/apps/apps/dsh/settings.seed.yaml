@@ -51,7 +51,7 @@ llm-pi-ai:
         - id: qwen3.8-27b-vllm-cloud
           input: [text, image]
         - id: qwen3.8-27b-vllm-fast-cloud
-        - id: qwen3.8-27b-fp8-cloud
+        - id: qwen3.8-27b-fp8-unc-cloud
         - id: qwen3-coder-30b-a3b-cloud
         - id: qwen3.8-flash-next-cloud
         - id: qwen3.8-flash-next-q6-cloud
