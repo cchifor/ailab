@@ -28,6 +28,18 @@
 # after start, and /search?format=json returned 32 results for a real query. That run also showed
 # why metasearch beats a single provider here — DuckDuckGo answered with a CAPTCHA and Startpage
 # with malformed JSON, and the query still succeeded from the other engines.
+#
+# A SECOND CONSUMER since 2026-09-12 (ADR 0023): the strive platform in `strive-ailab` backs its
+# "Platform Search" connection with THIS instance. Its workflow `web_search` steps (the Topic News
+# app, and any search step bound to that connection) query /search?format=json here instead of a
+# paid vendor. Nothing about the containment above changes for that. The admitted callers are the
+# platform's own service pods -- workflow-worker, workflow and integration, picked out by the
+# chart's strive.io/service label. They hold platform service identities; toward SearXNG, which
+# has no auth of its own, they are admitted by pod label under searxng-allow exactly as dsh is.
+# The Service stays ClusterIP-only (no Ingress, no cloudflared). And SearXNG
+# has no page-fetch surface: a caller hands it a query string, never a URL to GET (image_proxy is
+# off), so it cannot be turned into a fetcher for arbitrary pages and the egress policy at the
+# bottom of this file is untouched. The admission is the one extra `from` element on searxng-allow.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -49,8 +61,8 @@ data:
       # count_exception() and count_error() RETURN IMMEDIATELY when metrics are off, so error
       # recording is skipped entirely rather than merely unaggregated: /stats/errors answers a
       # literal {} and monitoring would report "no engines failing" forever. There is no privacy
-      # cost on a pod only dsh can reach, and /metrics stays 404 unless open_metrics is given a
-      # password.
+      # cost on a pod only dsh and the platform's search steps can reach, and /metrics stays 404
+      # unless open_metrics is given a password.
       enable_metrics: true
       open_metrics: ""
 
@@ -61,9 +73,10 @@ data:
       # on the branch where it copies its template, which it skips when settings.yml already
       # exists, so seeding a file means taking responsibility for the key.
       secret_key: "__SECRET_KEY__"
-      # No bot-limiting, still. Both clients are authenticated before they arrive: dsh reaches the
-      # ClusterIP under a NetworkPolicy that admits nothing else, and every browser request has
-      # already cleared Authelia at oauth2-proxy-searxng. There is no anonymous caller for a limiter
+      # No bot-limiting, still. Every client is authenticated before it arrives: dsh and the strive
+      # platform's search steps (ADR 0023) reach the ClusterIP under a NetworkPolicy that admits
+      # nothing else, and every browser request has already cleared Authelia at
+      # oauth2-proxy-searxng. There is no anonymous caller for a limiter
       # to rate-limit, and switching it on logs a missing limiter.toml and wants a Valkey/Redis for
       # its counters — a dependency bought for nothing. This is also why public_instance stays
       # false: that flag turns on the bot-detection suite this instance has no untrusted traffic for.
@@ -207,7 +220,8 @@ spec:
             # with 32 parsed results and no redirect. base_url is not enforced against the request
             # Host, so the in-cluster JSON path is indifferent to what this says.
             - { name: SEARXNG_BASE_URL, value: "https://search.chifor.me/" }
-            # One client, so the upstream worker count (which scales with host CPUs) would
+            # A handful of low-volume clients (dsh, the platform's search steps, an occasional
+            # browser), so the upstream worker count (which scales with host CPUs) would
             # over-allocate on a 32-thread node for no benefit.
             - { name: SEARXNG_UWSGI_WORKERS, value: "2" }
             - { name: SEARXNG_UWSGI_THREADS, value: "2" }
@@ -249,8 +263,9 @@ spec:
   ports: [{ name: http, port: 8080, targetPort: http, protocol: TCP }]
 ---
 # SearXNG is the one component here that MAY reach the internet, so it carries its own policy
-# rather than inheriting dsh's. Ingress is restricted to the two clients that have reason to query
-# it: the dsh pod, and the oauth2-proxy that fronts search.chifor.me.
+# rather than inheriting dsh's. Ingress is restricted to the three clients that have reason to
+# query it, each admitted by pod identity: the dsh pod, the oauth2-proxy that fronts
+# search.chifor.me, and the strive platform's search services in `strive-ailab` (ADR 0023).
 #
 # It became reachable FROM the internet through cloudflared on 2026-09-12, reversing the
 # "deliberately NOT exposed" posture this comment used to state. What made that safe is that the tunnel does NOT
@@ -274,6 +289,29 @@ spec:
         # The SSO gate in front of the web UI. A separate `from` item, i.e. OR'ed with dsh above,
         # which is what is wanted here: two independent clients, not a conjunction.
         - podSelector: { matchLabels: { app: oauth2-proxy-searxng } }
+        # The strive platform's search consumers (ADR 0023). `web_search` workflow steps bound to
+        # the Platform Search connection run in workflow-worker; `workflow` (the API) executes the
+        # same step when it dry-runs a workflow; `integration` is admitted for its connection
+        # health probe, which is passive today and so does not dial yet.
+        #
+        # The two selectors sit in ONE `from` element on purpose: that is an AND -- a pod that
+        # carries the chart's strive.io/service label AND lives in strive-ailab. As two list items
+        # they would be OR'ed, and a bare namespaceSelector would admit every pod in that
+        # namespace (the same trap dsh-allow documents for `edge`). kubernetes.io/metadata.name is
+        # stamped by the API server and cannot be relabelled, so the namespace half cannot be
+        # spoofed; the platform's sandboxes run in strive-sandboxes-ailab and are not admitted.
+        #
+        # What this grants is search queries against public engines through this pod -- exactly
+        # what dsh already has -- and nothing toward the internet that the platform's own
+        # policies do not already give those pods. SearXNG has no page-fetch surface (image_proxy
+        # off), so a caller cannot make it GET an arbitrary URL; the egress rules below are
+        # unchanged, and dsh-allow is untouched (strive-ailab still cannot reach dsh itself).
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: strive-ailab } }
+          podSelector:
+            matchExpressions:
+              - key: strive.io/service
+                operator: In
+                values: [workflow-worker, workflow, integration]
       ports: [{ port: 8080, protocol: TCP }]
   egress:
     - to:
