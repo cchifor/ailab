@@ -37,4 +37,9 @@ variable "authelia_access_client_secret" {
   type        = string
   sensitive   = true
   default     = ""
+  # nullable = false, because the gate is `!= ""` and an explicit `null` would pass it: `null != ""`
+  # is true, so a null would select one instance and hand the provider an empty client secret. With a
+  # non-null default, `nullable = false` makes an explicit null resolve to "" and disable the IdP,
+  # which is the safe reading of "no secret".
+  nullable = false
 }

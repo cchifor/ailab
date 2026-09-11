@@ -31,10 +31,13 @@ resource "cloudflare_zero_trust_access_policy" "allow_me" {
 # a mailbox — several times a day, because the sensitive apps below deliberately hold 30m sessions.
 #
 # With this IdP the Access-gated hosts delegate to Authelia and inherit its passkey (Windows Hello) —
-# and, more importantly, they inherit its SESSION: the Authelia cookie outlives the per-app Access
-# token, so an expiring 30m Access session becomes a silent redirect through sso.chifor.me instead of a
-# fresh login. That is what makes it safe to KEEP the short windows on Prometheus/Alertmanager/OpenBao
-# rather than buying comfort by lengthening them.
+# and, more importantly, they inherit its SESSION: the Authelia cookie (12h cap / 8h idle) outlives the
+# SHORT Access windows — the 30m ones here and the 8h ones above — so those expiries become a silent
+# redirect through sso.chifor.me instead of a fresh login. That is what makes it safe to KEEP the short
+# windows on Prometheus/Alertmanager/OpenBao rather than buying comfort by lengthening them.
+# Not universal: the 24h apps (k8s/hubble, vault_admin) OUTLAST the 12h Authelia session, so they do
+# prompt roughly daily. That is a passkey scan, not an emailed PIN, so it is still the cheaper outcome —
+# but do not state anywhere that Access re-auth is always silent, because for those three it is not.
 #
 # DELIBERATELY NOT SET: `allowed_idps` / `auto_redirect_to_identity` on the applications below. Leaving
 # them unset means Access offers BOTH this IdP and One-time PIN, costing one click on the login page and
@@ -52,6 +55,15 @@ resource "cloudflare_zero_trust_access_policy" "allow_me" {
 # they are Authelia's own discovery document (`/.well-known/openid-configuration`, issuer
 # `https://sso.chifor.me`).
 resource "cloudflare_zero_trust_access_identity_provider" "authelia" {
+  # A sensitive variable in `count` is FINE — do not "fix" this with nonsensitive() or a second
+  # enable-flag variable. Two independent reviewers flagged it as a plan-time blocker, quoting
+  # "Sensitive values ... cannot be used as count arguments"; that restriction is real but belongs to
+  # `for_each`, NOT `count`. OpenTofu documents it only on the for_each page, and for a reason that
+  # does not apply here: for_each values become visible INSTANCE KEYS (`res["secret"]`), whereas count
+  # yields an integer index (`res[0]`) that reveals one bit — whether the secret is set — which the
+  # operator already knows. Verified empirically on OpenTofu v1.12.2 with this exact config: secret set
+  # -> "Plan: 1 to add"; secret empty -> "No changes"; no error and no warning either way, and
+  # `client_secret` still renders as "(sensitive value)", so sensitivity is preserved where it matters.
   count = var.authelia_access_client_secret != "" ? 1 : 0
 
   account_id = var.cloudflare_account_id

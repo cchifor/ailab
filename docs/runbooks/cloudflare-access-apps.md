@@ -76,8 +76,13 @@ withdrawn. Two things changed it:
 
 - Authelia now accepts **passkeys** (Windows Hello) — ADR 0012 — so the shared prompt is a face scan,
   not another password.
-- The Authelia session (12h) **outlives** the per-app Access token (30m–24h), so Access re-auth becomes
-  a **silent redirect** rather than a login. That is what lets the sensitive apps keep 30m windows.
+- The Authelia session (12h hard cap, 8h idle) **outlives the short Access windows** — 30m
+  (`prometheus`, `alertmanager`, `openbao`) and 8h (`dw1`–`dw6`, `dsh`, `proxmox`, `qnap`) — so those
+  re-auths become a **silent redirect** rather than a login. That is what lets the sensitive apps keep
+  their 30m windows instead of buying comfort by lengthening them.
+  The **24h** apps (`k8s`, `hubble`, `vault/admin`) are the exception: 24h outlasts the 12h Authelia
+  session, so they do prompt — about once a day, for one passkey scan rather than an emailed PIN. Do
+  not read "silent" as "never prompts"; nothing here is longer-lived than the 12h Authelia cap.
 
 The plaintext client secret lives in `terraform.tfvars` (gitignored) as `authelia_access_client_secret`
 and is escrowed at `af/estate/cloudflare` (field `access_oidc_client_secret`) in OpenBao; Authelia holds

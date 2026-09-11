@@ -22,6 +22,13 @@ output "api_access_client_secret" {
 # `cloudflare-access` client in kubernetes/apps/apps/auth/authelia-config.yaml, or Authelia rejects the
 # authorization request. Null until var.authelia_access_client_secret is set. Not sensitive — it is the
 # public team domain.
+#
+# `config.redirect_url` is the right traversal for provider v5 (there is no top-level attribute; it has
+# been nested since v4.52.0, where the difference was only block-list `config[0]` vs object `config`).
+# It may still come back NULL: `config` is one combined schema across every IdP type, and Cloudflare's
+# documented OIDC response does not include a callback. If it is null, that is not a failure — compare
+# against the expected team-domain callback by hand:
+#   https://chifor.cloudflareaccess.com/cdn-cgi/access/callback
 output "access_idp_redirect_url" {
   description = "Cloudflare's OIDC callback for the Authelia IdP; must match the client's redirect_uris in Authelia."
   value       = one(cloudflare_zero_trust_access_identity_provider.authelia[*].config.redirect_url)
