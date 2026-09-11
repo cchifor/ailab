@@ -1,0 +1,22 @@
+# FIXTURE for scripts/tests/test_gen_litellm_consumers.py — the provider-block shape of
+# kubernetes/apps/apps/dsh/settings.seed.yaml. NOT the real file. The rows are stale on purpose.
+llm-pi-ai:
+  providers:
+    litellm:
+      # provider comment, kept verbatim
+      apiKeyEnv: LITELLM_API_KEY
+      api: openai-completions
+      baseURL: http://litellm.ai.svc.cluster.local:4000/v1
+      models:
+        # explanatory comment BEFORE the first row: preserved byte for byte
+        # (two lines of it, to prove the whole run survives)
+        - id: stale-a
+          input: [text, image]
+        - id: stale-b
+    # A column-4 comment right after the models list: the span must stop BEFORE it.
+    other-provider:
+      api: openai-responses
+      models:
+        - id: untouched-model
+ui:
+  theme: dark
