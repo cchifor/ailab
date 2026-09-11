@@ -19,7 +19,9 @@ metadata:
   name: agentforge-allow-tunnel-only
   namespace: agentforge
 spec:
-  podSelector: {} # every pod in the agentforge namespace (just the CP)
+  podSelector: {} # EVERY pod in ns agentforge — no longer just the CP: the dispatcher, the
+                  # reaper and (unlisted) the conductor live here too, and each is in ingress
+                  # default-deny from this policy whether or not it has one of its own.
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -38,3 +40,31 @@ spec:
               app.kubernetes.io/managed-by: agentforge-cp
       ports:
         - { protocol: TCP, port: 8080 } # the CP container/http port
+    - from:
+        # The conductor (conductor program row 7), for the findings emitter PR-14 ships. Admitted
+        # here rather than with that rung so the reach is declared alongside the workload.
+        #
+        # ONE peer with BOTH selectors, not two peers. A `from:` list is OR and the AND lives inside a
+        # single list item — split these into two `-` entries and this would admit every pod in ns
+        # agentforge OR every pod anywhere labelled agentforge-conductor, which is silent
+        # over-admission of exactly what this file exists to prevent.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agentforge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentforge-conductor
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        # Prometheus, so the CP's own ServiceMonitor has something it can open.
+        #
+        # THE PLAN CALLED FOR TWO CLAUSES AND THIS IS THE THIRD. Prometheus -> CP is a separate
+        # direction from conductor -> CP, and it is denied today by the `podSelector: {}` above —
+        # which is why nothing scrapes the CP. Ship the ServiceMonitor without this and the only
+        # visible effect is a new permanently-down target.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - { protocol: TCP, port: 8080 }
