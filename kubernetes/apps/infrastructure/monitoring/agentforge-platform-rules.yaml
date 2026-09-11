@@ -80,10 +80,13 @@ spec:
               unhealthy - `kubectl --context admin@ai -n agentforge describe pod {{ $labels.pod }}`
               then `logs deploy/agentforge-platform --tail=100`; if /readyz is failing the platform
               Postgres is the first thing to check, because that probe is a DB SELECT-1 and nothing
-              else. (2) The network path was closed - the scrape is admitted by ONE `from:` clause in
-              kubernetes/apps/apps/agentforge/networkpolicy.yaml (namespaceSelector monitoring, port
-              8080) and that file is namespace-wide ingress default-deny, so reverting or narrowing
-              that clause takes the target down while leaving the pod perfectly healthy. Note the
+              else. (2) The network path was closed - ns agentforge is ingress default-deny, and the
+              scrape is admitted by exactly one peer of one policy,
+              agentforge-platform-allow-scrape-and-conductor in
+              kubernetes/apps/apps/agentforge/networkpolicy.yaml, which matches Prometheus by BOTH
+              its namespace and its pod labels. A kube-prometheus-stack upgrade that renames
+              app.kubernetes.io/name or app.kubernetes.io/instance on that pod closes the path while
+              leaving the CP perfectly healthy, and looks identical from here to a crash. Note the
               blast radius beyond metrics - the `apps` Flux Kustomization is wait:true and gates on
               this Deployment's readiness, so a CP stuck unready also stalls every other app in that
               layer.

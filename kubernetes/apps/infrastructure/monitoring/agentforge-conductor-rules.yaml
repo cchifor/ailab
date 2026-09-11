@@ -86,7 +86,26 @@ spec:
         # exception and backs off, so a raising pass is invisible in the process's health — it looks
         # like a conductor that is simply quiet.
         #
-        # [30m] is six pass intervals, so this needs several real failures rather than one transient.
+        # [2h], NOT the six-pass-interval [30m] this shipped with. Both reviewers of PR #674 caught
+        # that window, and they were right for a reason the rule's OWN ANNOTATION states: a sustained
+        # failure run backs the loop off to a quarter rate. `backoff_seconds` (conductor/loop.py) is
+        # `interval * 2 ** min(consecutive_failures, 2)`, so at the 300s default the failures land at
+        # t=0, +600s, then +1200s forever. A 30-minute window can hold at most TWO of them — 1800/1200
+        # = 1.5 — so `> 2` was not merely hard to reach in the backed-off regime, it was UNREACHABLE
+        # in it, and the rule was structurally silent in exactly the condition it exists to catch.
+        # That is the same defect class as the delta() form recorded in agentforge-rules.yaml's header:
+        # not mis-tuned, mis-shaped. [2h] holds ~6 failures at the backed-off cadence while still
+        # needing three of them, so one transient (or two) stays quiet. The fixture now asserts both
+        # ends rather than only the quiet one.
+        #
+        # ⚠️ DEPENDS ON AN ENGINE FIX THAT IS NOT YET IN A RELEASED IMAGE. `forge_conduct_passes_total`
+        # was never incremented by anything: `ConductMetrics.record_pass` and `record_pass_failure`
+        # each documented the conduct loop as their caller and neither had a production call site, so
+        # the endpoint served construction-time zeros. `main::_conduct_loop` now records on both arms
+        # (agentforge, "fix(conduct): the loop publishes the passes it survives"). Until that image is
+        # the one the conductor runs, this rule and ForgeConductBlind are inert — which is harmless
+        # while the workload stays unlisted, and is a BLOCKER for PR-7b (arming). Check before arming:
+        # `forge_conduct_passes_total` must be non-zero on a conductor that has run a pass.
         #
         # sum() is not decoration: an un-aggregated increase() carries the series' own labels onto the
         # alert, so the day passes_total gains a dimension this becomes one alert per value of it. The
@@ -94,15 +113,17 @@ spec:
         # redundant with the alert's own name and would not have stayed redundant.
         - alert: ForgeConductPassesFailing
           expr: |-
-            sum(increase(forge_conduct_passes_total{outcome="failed"}[30m])) > 2
+            sum(increase(forge_conduct_passes_total{outcome="failed"}[2h])) > 2
           for: 5m
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge conductor: {{ $value | printf \"%.0f\" }} passes raised in the last 30m"
+            summary: "AgentForge conductor: {{ $value | printf \"%.0f\" }} passes raised in the last 2h"
             description: >-
               Passes are raising rather than returning incomplete, which the loop absorbs into its
-              backoff. Check the conductor's logs for the traceback; the backoff is a multiple of
-              AF_CONDUCT_INTERVAL_S, so a sustained failure run slows observation to a quarter rate.
+              backoff. Check the conductor's logs for the traceback. The window is 2h BECAUSE of that
+              backoff: a sustained run settles at one failed pass per four intervals (1200s at the
+              300s default), so three failures take roughly 50 minutes to accrue and a shorter window
+              could not hold enough of them to fire at all.
         # T0's standing invariant, and the one rule here that is a POSTURE check rather than a health
         # check. At AF_CONDUCT_TIER=observe the write door refuses before its first forge call, so any
         # movement on this counter means the tier is no longer observe — an arming that was not meant

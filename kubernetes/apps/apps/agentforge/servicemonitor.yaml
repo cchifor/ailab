@@ -12,9 +12,13 @@
 # namespace ONLY because it carries its own CiliumNetworkPolicy admitting
 # `k8s:io.kubernetes.pod.namespace: monitoring` on 9464 — Cilium unions k8s NetworkPolicies with CNPs,
 # so its own allow rule covers it. The CP has no CNP of its own, so the namespace-wide policy is the
-# only one selecting it and the scrape is dropped. The third `from:` clause added to networkpolicy.yaml
-# in this same PR is what makes this file work; shipped alone, either half is inert (no clause = a
-# permanently-down target; no monitor = the clause admits nobody).
+# only one selecting it and the scrape is dropped. The second policy added to networkpolicy.yaml in
+# this same PR (agentforge-platform-allow-scrape-and-conductor, CP-scoped, matching Prometheus by both
+# its namespace AND its pod labels) is what makes this file work; shipped alone, either half is inert
+# (no policy = a permanently-down target; no monitor = the policy admits nobody). It is a POLICY and
+# not another clause on the existing one deliberately: a clause there would have inherited
+# `podSelector: {}` and admitted the whole monitoring namespace to every pod in ns agentforge on the
+# CP's full API port, which is what both reviewers of PR #674 caught in the first version.
 #
 # SHAPE mirrors gitea/servicemonitor.yaml — the in-repo precedent for an `apps`-layer workload: the
 # ServiceMonitor lives in the workload's OWN namespace (kube-prometheus's Prometheus selects

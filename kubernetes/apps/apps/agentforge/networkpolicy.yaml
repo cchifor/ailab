@@ -10,6 +10,13 @@
 #     CiliumNetworkPolicy fromEntities:[host] so the probes aren't denied.
 #   * confirm https://agentforge.chifor.me loads through the tunnel.
 #
+# TWO POLICIES LIVE IN THIS FILE, and the second one is why: NetworkPolicies are additive-allow, so
+# the only way to grant a reach that lands on ONE pod is a second policy whose podSelector names it.
+# This first policy is namespace-wide (podSelector: {}), so every `from:` clause in it is a grant to
+# EVERY pod in ns agentforge on the named port — which is the right shape for the tunnel and the
+# tenant workers, and the wrong shape for "let Prometheus scrape the CP". Put CP-only reaches in the
+# second policy below, not here.
+#
 # Ingress = the cloudflared tunnel (public SSO path) + tenant workers. In P1 the shadow worker must
 # GET /api/v1/.../config and POST /api/ingest/events from its tenant namespace, so the worker->CP path
 # is admitted here (not deferred to P2) — scoped to CP-managed tenant namespaces + the CP http port.
@@ -40,14 +47,55 @@ spec:
               app.kubernetes.io/managed-by: agentforge-cp
       ports:
         - { protocol: TCP, port: 8080 } # the CP container/http port
+---
+# THE CP-ONLY INGRESS. Everything above is namespace-wide; everything here lands on the control-plane
+# pod alone, because `agentforge-platform` is the only pod these two callers have any business
+# reaching and 8080 is not a metrics port — it is the CP's FULL API, sharing one listener with
+# /metrics. A grant on 8080 is a grant to the API.
+#
+# WHY A SECOND POLICY RATHER THAN TWO MORE `from:` CLAUSES ABOVE. Both reviewers of PR #674 caught the
+# first version of this: a clause added to the policy above inherits its `podSelector: {}`, so
+# "admit Prometheus to the CP" silently became "admit the whole monitoring namespace to every pod in
+# ns agentforge on 8080". k8s NetworkPolicies are additive-allow and a policy's destination is fixed
+# by its own podSelector, so narrowing the destination is not something a clause can do — it takes a
+# policy. The dispatcher's precedent is not a counter-example: it admits monitoring to a DEDICATED
+# metrics port (9464) on one workload, which is this shape, not the namespace-wide one.
+#
+# EACH PEER CARRIES BOTH SELECTORS. A `from:` list is OR and the AND lives inside a single list item,
+# so splitting either peer's namespaceSelector and podSelector into two `-` entries would admit every
+# pod in that namespace OR every pod anywhere carrying the label — silent over-admission of exactly
+# what this file exists to prevent.
+#
+# ⚠️ THE LABELS ARE LOAD-BEARING AND WERE READ OFF THE LIVE CLUSTER (2026-09-11), not guessed: the
+# kube-prometheus-stack Prometheus pod carries `app.kubernetes.io/name: prometheus` +
+# `app.kubernetes.io/instance: kube-prometheus-stack-prometheus` (set by prometheus-operator). If a
+# chart upgrade changes them this policy stops admitting the scrape and the CP target goes down —
+# ForgePlatformTargetDown (monitoring/agentforge-platform-rules.yaml) is the alert that says so, and
+# its description names this file first.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentforge-platform-allow-scrape-and-conductor
+  namespace: agentforge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-platform # the CP pod ALONE — not the namespace
+  policyTypes: [Ingress]
+  ingress:
     - from:
-        # The conductor (conductor program row 7), for the findings emitter PR-14 ships. Admitted
-        # here rather than with that rung so the reach is declared alongside the workload.
-        #
-        # ONE peer with BOTH selectors, not two peers. A `from:` list is OR and the AND lives inside a
-        # single list item — split these into two `-` entries and this would admit every pod in ns
-        # agentforge OR every pod anywhere labelled agentforge-conductor, which is silent
-        # over-admission of exactly what this file exists to prevent.
+        # Prometheus, so the CP's ServiceMonitor has something it can open. Without this nothing
+        # scrapes the CP: measured 2026-09-11, `up{namespace="agentforge"}` is one series (the
+        # dispatcher's, which is admitted by its own CiliumNetworkPolicy) and `afp_*` is zero.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/instance: kube-prometheus-stack-prometheus
+        # The conductor (conductor program row 7), for the findings emitter PR-14 ships. Declared
+        # alongside the workload it reaches rather than with that rung.
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: agentforge
@@ -55,16 +103,4 @@ spec:
             matchLabels:
               app.kubernetes.io/name: agentforge-conductor
       ports:
-        - { protocol: TCP, port: 8080 }
-    - from:
-        # Prometheus, so the CP's own ServiceMonitor has something it can open.
-        #
-        # THE PLAN CALLED FOR TWO CLAUSES AND THIS IS THE THIRD. Prometheus -> CP is a separate
-        # direction from conductor -> CP, and it is denied today by the `podSelector: {}` above —
-        # which is why nothing scrapes the CP. Ship the ServiceMonitor without this and the only
-        # visible effect is a new permanently-down target.
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: monitoring
-      ports:
-        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8080 } # the CP container/http port
