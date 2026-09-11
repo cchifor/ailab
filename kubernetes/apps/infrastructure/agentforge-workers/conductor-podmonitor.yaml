@@ -1,0 +1,39 @@
+# Prometheus scrape of the conductor's own metrics. A PodMonitor and not a ServiceMonitor: the
+# conductor has no Service and needs none — nothing calls it, it calls the forge. (The provisioner's
+# monitor records the same reasoning for the same shape.)
+#
+# THE PORT IS NAMED, NEVER NUMBERED. `portNumber: 9464` is accepted by the CRD and is forbidden here:
+# it hard-codes a number that agrees with the container only by luck, and every one of this repo's
+# monitor endpoint blocks uses the name. `port: metrics` binds the containerPort NAMED `metrics` in
+# conductor-deployment.yaml — which is 9464, the conductor's OWN CollectorRegistry.
+#
+# Naming `probe` instead would select the pod and produce a target that scrapes /metrics on a server
+# serving only /healthz + /readyz: a parse error that reads like an application bug.
+#
+# `release: kube-prometheus-stack` is LOAD-BEARING AND UNENFORCED. It is what podMonitorSelector
+# matches on; without it this object applies cleanly, is never adopted, and reports nothing at all —
+# no target, no error, no event. No CI check covers it.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: agentforge-conductor
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: agentforge-conductor
+    app.kubernetes.io/part-of: agentforge
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - agentforge
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-conductor
+  podMetricsEndpoints:
+    # 30s against a 300s pass cadence: ten scrapes per pass, so a counter that advances once per pass
+    # is never read as flat by a rate() over a sane window. The pass interval — not the scrape — is
+    # what alert windows must be sized from; see agentforge-conductor-rules.yaml.
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

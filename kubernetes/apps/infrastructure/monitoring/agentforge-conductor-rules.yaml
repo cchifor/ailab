@@ -1,0 +1,145 @@
+# Alerts over the conductor (`agentforge conduct`, conductor program row 7). The conductor is a
+# fleet-wide OBSERVER: at T0 it reads the estate, classifies parked issues and writes nothing. Its
+# whole value is that it notices things, so the failure that matters most is the one where it stops
+# noticing and nothing says so.
+#
+# THE SERIES NAMES HERE KEEP `_total`, AND THAT IS NOT COSMETIC. A counter's SAMPLE name — what PromQL
+# matches — is `forge_conduct_passes_total`; `registry.collect()` reports the FAMILY name with the
+# suffix stripped. A rule written against the stripped spelling parses, type-checks, evaluates to an
+# empty vector forever, and never fires. `promtool check rules` cannot catch it because an expression
+# over a non-existent series is not an error.
+#
+# EVERY WINDOW IS SIZED OFF THE 300-SECOND PASS CADENCE (AF_CONDUCT_INTERVAL_S), never off a scrape
+# interval. A `[5m]` window can legitimately contain ZERO increments on a perfectly healthy conductor,
+# so any `increase(...) == 0` over a short window is a false positive by construction. The scrape is
+# 30s (conductor-podmonitor.yaml) purely so a per-pass counter is never read as flat.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up. Without it this file
+# applies cleanly and is never loaded — no rule, no error, no event.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentforge-conductor
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: agentforge-conductor
+    app.kubernetes.io/part-of: agentforge
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: agentforge-conductor
+      rules:
+        # FIRST, deliberately: a conductor nobody is scraping is indistinguishable from a quiet estate,
+        # and every other rule in this file is an empty vector while it is unscraped. This is the rule
+        # that makes the others trustworthy.
+        #
+        # The PER-POD ANTI-JOIN, not `absent()`. The idiom is ForgeOrchestratorUnscraped's: join
+        # kube-state-metrics' view of a ready container against a series only the workload itself can
+        # publish, and alert on the difference. `absent()` is the form this estate has already measured
+        # as wrong — over 24h the naive absent() form would have fired 1270 times where the guarded
+        # form fired zero.
+        #
+        # forge_conduct_writes_total is the marker because it is UNLABELLED, which means prometheus_client
+        # emits it at 0.0 the instant the registry is constructed — before any pass runs. So it is
+        # present from the first scrape of a healthy conductor and absent only when nothing is scraped
+        # at all. A labelled series would be absent until its first child was touched, which at T0
+        # (where the conductor writes nothing) might be never.
+        #
+        # `for: 20m` matches the orchestrator rule and clears a rollout plus Prometheus' 5m staleness
+        # window, which is already ForgeTargetDown's business.
+        - alert: ForgeConductDown
+          expr: |-
+            max by (namespace, pod) (
+              kube_pod_container_status_ready{namespace="agentforge", container="conductor"} == 1
+            )
+            unless on (namespace, pod) forge_conduct_writes_total
+          for: 20m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor {{ $labels.namespace }}/{{ $labels.pod }} is unscraped (no forge_conduct_* metrics)"
+            description: >-
+              The conductor container is Ready but publishes no forge_conduct_* series, so every other
+              conductor alert is an empty vector and the estate is unobserved without saying so. Check
+              the PodMonitor binds the container port NAMED metrics (9464, the conductor's own
+              registry) and not probe (8720, which serves /healthz and /readyz only), and that the
+              CiliumNetworkPolicy admits the monitoring namespace to 9464.
+        # A conductor that is scraped, running, and not observing anything. The stamp is set ONLY on a
+        # pass that actually read the estate (`listings_complete and not any(incomplete.values())`), so
+        # this fires on a conductor whose passes are all coming back short — a forge outage, a spent
+        # budget, an auth failure — while its process stays perfectly healthy.
+        #
+        # 1800s = six pass intervals. At 300s a conductor misses five consecutive passes before this
+        # fires, which is past any single transient and well inside the time a human would want to know.
+        - alert: ForgeConductBlind
+          expr: |-
+            (time() - forge_conduct_last_pass_timestamp) > 1800
+              and on() (sum(forge_conduct_passes_total) > 0)
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor has not completed a pass in {{ $value | printf \"%.0f\" }}s"
+            description: >-
+              The conductor is up and its passes are returning, but none has observed the estate
+              completely in over six pass intervals. The per-sensor counter
+              forge_conduct_sensor_incomplete_total says which read is coming back short.
+        # Passes that RAISED, as opposed to passes that came back incomplete. The loop catches every
+        # exception and backs off, so a raising pass is invisible in the process's health — it looks
+        # like a conductor that is simply quiet.
+        #
+        # [2h], NOT the six-pass-interval [30m] this shipped with. Both reviewers of PR #674 caught
+        # that window, and they were right for a reason the rule's OWN ANNOTATION states: a sustained
+        # failure run backs the loop off to a quarter rate. `backoff_seconds` (conductor/loop.py) is
+        # `interval * 2 ** min(consecutive_failures, 2)`, so at the 300s default the failures land at
+        # t=0, +600s, then +1200s forever. A 30-minute window can hold at most TWO of them — 1800/1200
+        # = 1.5 — so `> 2` was not merely hard to reach in the backed-off regime, it was UNREACHABLE
+        # in it, and the rule was structurally silent in exactly the condition it exists to catch.
+        # That is the same defect class as the delta() form recorded in agentforge-rules.yaml's header:
+        # not mis-tuned, mis-shaped. [2h] holds ~6 failures at the backed-off cadence while still
+        # needing three of them, so one transient (or two) stays quiet. The fixture now asserts both
+        # ends rather than only the quiet one.
+        #
+        # ⚠️ DEPENDS ON AN ENGINE FIX THAT IS NOT YET IN A RELEASED IMAGE. `forge_conduct_passes_total`
+        # was never incremented by anything: `ConductMetrics.record_pass` and `record_pass_failure`
+        # each documented the conduct loop as their caller and neither had a production call site, so
+        # the endpoint served construction-time zeros. `main::_conduct_loop` now records on both arms
+        # (agentforge, "fix(conduct): the loop publishes the passes it survives"). Until that image is
+        # the one the conductor runs, this rule and ForgeConductBlind are inert — which is harmless
+        # while the workload stays unlisted, and is a BLOCKER for PR-7b (arming). Check before arming:
+        # `forge_conduct_passes_total` must be non-zero on a conductor that has run a pass.
+        #
+        # sum() is not decoration: an un-aggregated increase() carries the series' own labels onto the
+        # alert, so the day passes_total gains a dimension this becomes one alert per value of it. The
+        # fixture caught that — the first version produced an alert labelled outcome="failed", which is
+        # redundant with the alert's own name and would not have stayed redundant.
+        - alert: ForgeConductPassesFailing
+          expr: |-
+            sum(increase(forge_conduct_passes_total{outcome="failed"}[2h])) > 2
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor: {{ $value | printf \"%.0f\" }} passes raised in the last 2h"
+            description: >-
+              Passes are raising rather than returning incomplete, which the loop absorbs into its
+              backoff. Check the conductor's logs for the traceback. The window is 2h BECAUSE of that
+              backoff: a sustained run settles at one failed pass per four intervals (1200s at the
+              300s default), so three failures take roughly 50 minutes to accrue and a shorter window
+              could not hold enough of them to fire at all.
+        # T0's standing invariant, and the one rule here that is a POSTURE check rather than a health
+        # check. At AF_CONDUCT_TIER=observe the write door refuses before its first forge call, so any
+        # movement on this counter means the tier is no longer observe — an arming that was not meant
+        # to happen, or a knob edited in place.
+        #
+        # This is deliberately NOT the proof that T0 is write-free: the engine pins that with an AST
+        # writer pin, because `writes == 0` at observe is a tautology rather than a measurement. This
+        # rule catches the CONFIGURATION changing, not the code.
+        - alert: ForgeConductUnexpectedWrites
+          expr: |-
+            sum(increase(forge_conduct_writes_total[30m])) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor wrote to the forge while T0 expects none"
+            description: >-
+              forge_conduct_writes_total advanced. At AF_CONDUCT_TIER=observe the write door refuses
+              before reaching the forge, so this means the deployed tier is no longer observe. Confirm
+              the Deployment's AF_CONDUCT_TIER and whether an arming rung landed.

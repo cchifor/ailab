@@ -1,0 +1,126 @@
+# Liveness alerts for the AgentForge v2 CONTROL PLANE (Deployment agentforge-platform, ns agentforge)
+# — the workload behind agentforge.chifor.me. New coverage, not a re-pointing: until the
+# ServiceMonitor added in this same PR (kubernetes/apps/apps/agentforge/servicemonitor.yaml) the CP
+# had no scrape target at all. Measured 2026-09-11 against the live Prometheus:
+# `up{namespace="agentforge"}` = exactly ONE series (job=agentforge-dispatcher), and `afp_*` = ZERO
+# series, while the CP itself answers :8080/metrics with 8 afp_* families.
+#
+# NOT TO BE CONFUSED WITH platform-rules.yaml in this same directory, which is about the CLUSTER's
+# control plane (Prometheus OOM headroom, controller restart waves) and has nothing to do with
+# AgentForge. The neighbours this file actually belongs with are agentforge-conductor-rules.yaml and
+# agentforge-provisioner-rules.yaml — one liveness file per AgentForge component.
+#
+# WHY THE PAIR, AND WHY NOT A THIRD JOB IN ForgeTargetDown. agentforge-rules.yaml's ForgeTargetDown is
+# `up{job=~"agentforge-worker|agentforge-dispatcher"} == 0` with `for: 5m`, and its description is
+# written for those two roles specifically ("If this is the DISPATCHER … If it is a WORKER"). Widening
+# its regex would have made the annotation wrong for the third job and imposed a 5m hold on a
+# SINGLE-replica workload whose readiness gate is a database round-trip. A separate rule with its own
+# hold and its own triage text is the same call agentforge-provisioner-rules.yaml made, for the same
+# reason.
+#
+# THE PAIR IS NOT REDUNDANT. `up` is synthesised by Prometheus for every DISCOVERED target whether or
+# not the scrape succeeds, so it cannot distinguish "no target" from "no series" — a pod nothing
+# selects produces no `up` at all and there is nothing for a rule to be absent of. TargetDown owns
+# discovered-but-failing; Unscraped joins against kube-state-metrics to own not-discovered-at-all,
+# which is precisely the state this PR is fixing and therefore the state most worth guarding against
+# a silent return. That split is ForgeProvisionerTargetDown/ForgeProvisionerUnscraped's shape
+# (ailab#293) and ForgeOrchestratorUnscraped's before it (agentforge-coverage-rules.yaml).
+#
+# DEPLOY ORDERING, because these rules and their target land in DIFFERENT Flux Kustomizations. The
+# rules are under `infrastructure` (./kubernetes/apps/infrastructure, 10m); the ServiceMonitor and the
+# NetworkPolicy clause that admits the scrape are under `apps` (./kubernetes/apps/apps, 10m). Merged
+# together they can still reconcile up to one interval apart, so between the two there is a window in
+# which the CP container is Ready and unscraped. `for: 20m` on Unscraped is 2× that skew, which is why
+# it is not tighter. Verify after the merge rather than assuming: `up{job="agentforge-platform"}`
+# should be 1 series at 1, and `afp_ingest_events_total` should exist.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks this up, and the file is
+# LISTED in kustomization.yaml — a rules file Flux never applies is the same defect as a rule that
+# cannot fire, and agentforge-rules.yaml's header records the 2026-08-10 case where this file's
+# siblings were both. Fixtures in agentforge-platform-rules.test.yaml (NOT a resource — promtool only).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentforge-platform
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack # the operator's ruleSelector — without this the file is inert
+spec:
+  groups:
+    - name: agentforge-platform
+      rules:
+        # `for: 10m`, twice ForgeTargetDown's hold, sized off what a NORMAL restart costs here. The
+        # Deployment is replicas:1 with no `strategy:` block, i.e. the default RollingUpdate — for one
+        # replica that is maxSurge 1 / maxUnavailable 0, so a roll ADDS a second, not-yet-ready pod as
+        # a discovered target while the old one keeps serving. This rule therefore CAN fire on the new
+        # pod during a bad rollout, which is the point; the hold is what keeps it off a good one. The
+        # startup budget it has to clear: readinessProbe /readyz is a DB SELECT-1 at
+        # initialDelaySeconds 5 + periodSeconds 10 × failureThreshold 6 (up to ~65s of unready), on top
+        # of an image pull that is cold on a fresh agent node.
+        #
+        # critical, matching ForgeTargetDown / ForgeProvisionerTargetDown / ForgeBrokerTargetDown. What
+        # is actually lost while the CP is down: agentforge.chifor.me serves nothing; the CP-RENDERED
+        # tenant pools (af-orch-platform-dev-delivery runs AF_CONFIG_SOURCE=control_plane) cannot
+        # refresh config or POST ingest events, so the delivery half of the fleet runs on whatever it
+        # last held and reports nothing; and because the `apps` Kustomization is wait:true and the CP's
+        # readiness gates it, a CP that stays unready wedges the reconcile of every other app in that
+        # layer — a blast radius well outside AgentForge.
+        - alert: ForgePlatformTargetDown
+          expr: up{job="agentforge-platform"} == 0
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: "AgentForge control plane {{ $labels.pod }} is failing to scrape"
+            description: >-
+              The control plane's metrics endpoint (:8080/metrics, ns agentforge) has been
+              unscrapeable for >10m while Prometheus still discovers the pod. Since /metrics is served
+              by the same FastAPI app and the same port as the API, this is not a metrics-only
+              failure - if the scrape is refused the API almost certainly is too, and
+              agentforge.chifor.me is down with it. THE TWO LIKELY CAUSES, in order. (1) The pod is
+              unhealthy - `kubectl --context admin@ai -n agentforge describe pod {{ $labels.pod }}`
+              then `logs deploy/agentforge-platform --tail=100`; if /readyz is failing the platform
+              Postgres is the first thing to check, because that probe is a DB SELECT-1 and nothing
+              else. (2) The network path was closed - ns agentforge is ingress default-deny, and the
+              scrape is admitted by exactly one peer of one policy,
+              agentforge-platform-allow-scrape-and-conductor in
+              kubernetes/apps/apps/agentforge/networkpolicy.yaml, which matches Prometheus by BOTH
+              its namespace and its pod labels. A kube-prometheus-stack upgrade that renames
+              app.kubernetes.io/name or app.kubernetes.io/instance on that pod closes the path while
+              leaving the CP perfectly healthy, and looks identical from here to a crash. Note the
+              blast radius beyond metrics - the `apps` Flux Kustomization is wait:true and gates on
+              this Deployment's readiness, so a CP stuck unready also stalls every other app in that
+              layer.
+        # THE REGRESSION GUARD FOR THIS PR ITSELF. LEFT: what Kubernetes says exists (kube-state-metrics,
+        # scraped estate-wide, no agentforge exporter involved). RIGHT: the targets Prometheus actually
+        # discovered. A Service that no ServiceMonitor selects is never scraped and produces NO series,
+        # so `up` is absent rather than 0 and the rule above is structurally blind to it - which is the
+        # state the CP has been in since it went live, with 8 afp_* families being computed and
+        # collected by nobody.
+        #
+        # `== 1` on the left drops a pod that is not yet Ready, so a rollout does not trip this while
+        # the new pod is still starting. `for: 20m` rides out the cross-Kustomization skew described in
+        # the header, a Prometheus restart, and ServiceMonitor discovery + the first scrape.
+        # warning, not critical: the CP is serving fine in this state - what is lost is the ability to
+        # see it, and the alert above going quiet for the wrong reason.
+        - alert: ForgePlatformUnscraped
+          expr: |-
+            max by (namespace, pod) (
+              kube_pod_container_status_ready{namespace="agentforge", container="platform"} == 1
+            )
+            unless on (namespace, pod) up{job="agentforge-platform"}
+          for: 20m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge control plane {{ $labels.pod }} is unscraped (no afp_* target)"
+            description: >-
+              This control-plane pod has been Ready for >20m and Prometheus has discovered no scrape
+              target for it, so every afp_* series is missing and ForgePlatformTargetDown is an empty
+              vector rather than a quiet one - the CP is unobserved without anything saying so. MOST
+              LIKELY CAUSE - kubernetes/apps/apps/agentforge/servicemonitor.yaml was removed or
+              unlisted from that directory's kustomization.yaml, its selector no longer matches the
+              Service's `app.kubernetes.io/name` label, or the Service's port stopped being named
+              `http`; all three live in this repo, in the same directory. Triage - `kubectl --context
+              admin@ai -n agentforge get servicemonitor agentforge-platform -o yaml`, compare its
+              selector against `kubectl --context admin@ai -n agentforge get svc agentforge-platform
+              -o jsonpath={.metadata.labels}`, and check the Prometheus /targets page for
+              job=agentforge-platform.
