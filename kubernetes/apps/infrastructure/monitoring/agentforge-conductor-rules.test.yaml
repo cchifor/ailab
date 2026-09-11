@@ -163,3 +163,56 @@ tests:
       - eval_time: 35m
         alertname: ForgeConductUnexpectedWrites
         exp_alerts: []
+
+  # ── ForgeConductSensorUnrecognised ────────────────────────────────────────────────────────────
+  #
+  # The reserved bucket only means something if a rule reads it, and the rule only means something
+  # if it can tell "this is happening" from "this happened once, ever" — the counter is pre-touched
+  # to 0 at construction, so a bare `> 0` on the raw series would latch on the first occurrence and
+  # never clear.
+  - interval: 1m
+    name: an unattributable incomplete read fires
+    input_series:
+      - series: 'forge_conduct_sensor_incomplete_total{sensor="unrecognised"}'
+        values: "0+0x10 1+1x40"
+      - series: 'forge_conduct_sensor_incomplete_total{sensor="issue"}'
+        values: "0+0x50"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ForgeConductSensorUnrecognised
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor counted an incomplete read it cannot attribute to a sensor"
+              description: "forge_conduct_sensor_incomplete_total advanced on the reserved `unrecognised` label, which means a pass came back short on a sensor that CONDUCT_SENSORS (agentforge infra/conduct_metrics.py) does not declare. The count is real; the attribution is missing, so T0's "sensor_incomplete explained per sensor" cannot be satisfied while this fires. Fix in the ENGINE, not here - add the sensor to CONDUCT_SENSORS and add its own case to this file in the same change, so a declared sensor never lacks a rule and a rule never lacks a declared sensor. The engine's own AST pin should have caught this before it shipped, so also check why it did not: it reads sensor keys written as string literals in conduct_pass and cannot see one that is computed."
+
+  - interval: 1m
+    name: a declared sensor coming back short is not this alert
+    input_series:
+      # the ordinary case this rule must stay out of: `parked` is DECLARED, so its count is
+      # attributable and ForgeConductBlind/the per-sensor view own it
+      - series: 'forge_conduct_sensor_incomplete_total{sensor="parked"}'
+        values: "0+2x40"
+      - series: 'forge_conduct_sensor_incomplete_total{sensor="unrecognised"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ForgeConductSensorUnrecognised
+        exp_alerts: []
+
+  - interval: 1m
+    name: a single historical occurrence does not latch the alert forever
+    input_series:
+      - series: 'forge_conduct_sensor_incomplete_total{sensor="unrecognised"}'
+        values: "0+0x5 3+0x90"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ForgeConductSensorUnrecognised
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor counted an incomplete read it cannot attribute to a sensor"
+              description: "forge_conduct_sensor_incomplete_total advanced on the reserved `unrecognised` label, which means a pass came back short on a sensor that CONDUCT_SENSORS (agentforge infra/conduct_metrics.py) does not declare. The count is real; the attribution is missing, so T0's "sensor_incomplete explained per sensor" cannot be satisfied while this fires. Fix in the ENGINE, not here - add the sensor to CONDUCT_SENSORS and add its own case to this file in the same change, so a declared sensor never lacks a rule and a rule never lacks a declared sensor. The engine's own AST pin should have caught this before it shipped, so also check why it did not: it reads sensor keys written as string literals in conduct_pass and cannot see one that is computed."
+      - eval_time: 90m
+        alertname: ForgeConductSensorUnrecognised
+        exp_alerts: [] # the step has aged out of the window; a raw `> 0` would still be firing
