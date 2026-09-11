@@ -250,6 +250,12 @@ class HelperBehaviour(unittest.TestCase):
                 self.assertEqual(proc.stdout, "")
                 self.assertEqual(proc.stderr, "")
 
+    def test_explicit_default_port_is_the_same_authority(self):
+        # git copies an explicitly written port into host=; `:443` on https is
+        # this authority spelled differently, not a different one.
+        proc = _run("get", self.mount, stdin="protocol=https\nhost=git.chifor.me:443\n\n")
+        self.assertEqual(proc.stdout, f"username=dsh\npassword={PAT}\n")
+
     def test_extra_request_keys_do_not_matter(self):
         # git also sends path=, username= (when the URL carries one), wwwauth[]=
         # and more. None of it changes the answer for the right authority.

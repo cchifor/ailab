@@ -53,9 +53,10 @@ case "${1:-}" in
 esac
 
 # git writes the request description to stdin (key=value lines, blank line, EOF). Read it all --
-# so a fast exit never races the writer -- and keep the two keys that name the authority. git puts
-# a port in `host=` only when it is not the protocol's default, so `git.chifor.me:8443` is,
-# correctly, not this authority.
+# so a fast exit never races the writer -- and keep the two keys that name the authority. git
+# copies the port into `host=` exactly as the URL spelled it (git-credential(1) "host"), so
+# `https://git.chifor.me:443/...` arrives as `git.chifor.me:443`: the same authority, accepted.
+# `git.chifor.me:8443` is a different one and is, correctly, refused.
 req_protocol=
 req_host=
 while IFS= read -r line; do
@@ -66,7 +67,11 @@ while IFS= read -r line; do
   esac
 done
 cat >/dev/null
-[ "$req_protocol" = "$AUTHORITY_PROTOCOL" ] && [ "$req_host" = "$AUTHORITY_HOST" ] || exit 0
+[ "$req_protocol" = "$AUTHORITY_PROTOCOL" ] || exit 0
+case "$req_host" in
+  "$AUTHORITY_HOST" | "$AUTHORITY_HOST:443") ;;
+  *) exit 0 ;;
+esac
 
 # One line, no values, exit 0. The path named is the OpenBao one because that is where the fix is.
 refuse() {
@@ -76,10 +81,13 @@ refuse() {
 
 [ -e "$USER_FILE" ] && [ -e "$PAT_FILE" ] || refuse "no GITEA_USER/GITEA_PAT under $DIR"
 
-# Resolve the kubelet symlinks ONCE and use the resolved files for both the check and the read.
+# Resolve each kubelet symlink ONCE and use the resolved file for both the check and the read.
 # Otherwise a rotation landing between the two (kubelet swaps `..data` atomically) would validate
-# the old bytes and emit the new, unvalidated ones. Resolving pins one version for this call; if
-# kubelet removes that version before the read, the read fails and is refused -- closed, not open.
+# the old bytes and emit the new, unvalidated ones. This pins ONE version PER FILE for this call --
+# not one generation for the pair: the two resolutions below can straddle a swap, so a rotation
+# that changes BOTH fields at once can, in that window, pair the old username with the new PAT
+# (each still validated; the auth fails once and the next call is consistent). If kubelet removes
+# a pinned version before the read, the read fails and is refused -- closed, not open.
 # `readlink -f` on a regular file is the file itself, so a non-symlink mount works the same way.
 USER_REAL=$(readlink -f "$USER_FILE" 2>/dev/null) || refuse "cannot resolve $USER_FILE"
 PAT_REAL=$(readlink -f "$PAT_FILE" 2>/dev/null) || refuse "cannot resolve $PAT_FILE"
