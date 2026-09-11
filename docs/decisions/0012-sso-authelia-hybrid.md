@@ -61,5 +61,30 @@ issuer `https://sso.chifor.me` + authorization/token/userinfo/jwks endpoints + P
     identifiers export --file /tmp/ids.yml --config /config/configuration.yml`, then `kubectl cp` it
     out. AFTER the new pods are up and BEFORE anyone logs in: `kubectl cp` it into a new pod and run
     `authelia storage user identifiers import --file ... --config /config/configuration.yml`.
-- Future: raise to `two_factor` (TOTP/WebAuthn); codify Cloudflare Access (CF Terraform provider);
-  add more apps as OIDC clients; revisit Authentik only if central RBAC/passkeys/outpost are needed.
+- **Passkeys + session lifetimes (2026-09-11).** `webauthn.enable_passkey_login` — a WebAuthn credential
+  (on Windows: **Windows Hello**, face/PIN) is accepted *instead of* username+password and satisfies the
+  `one_factor` default policy on its own; the password form stays as the fallback, so this adds a login
+  method rather than replacing one. RP ID = the PORTAL hostname `sso.chifor.me` (Authelia derives it from
+  the request origin, not from the cookie domain); ONE credential still covers every app, but via the
+  `chifor.me` session cookie the portal issues, not via the RP ID. Credentials live in
+  `webauthn_credentials` on infra-pg (the ADR 0016 move to Postgres is what makes them replica-safe).
+  Registration needs an elevated session whose One-Time Code goes out through the `notifier` — which is
+  `filesystem`, there being no SMTP relay — hence `code_lifespan: 15 minutes` and the
+  read-it-out-of-the-pod ceremony in `docs/runbooks/passkeys.md`.
+  Because a passkey is now the whole login, `selection_criteria.user_verification` is pinned to `required`
+  — at the `preferred` default an authenticator may skip user verification, so a PIN-less roaming key could
+  have satisfied `one_factor` on possession alone, verifying no factor at all. Pinned while
+  `webauthn_credentials` was still empty, so no credential had to be re-enrolled.
+  The session cookie moved from `1 hour` / `inactivity: 5 minutes` to **12h / 8h idle**: five idle minutes
+  was logging the operator out several times a day. `remember_me` went to **`-1` (disabled)** in the same
+  change, because Authelia exempts a remembered session from `inactivity` altogether and gives it the
+  `remember_me` lifetime in place of `expiration` — leaving it at the old `1 month` would have made a
+  month-long, idle-immune session the real ceiling instead of 12h, and would have left credential
+  revocation unable to cut existing access. Disabling it is what makes 12h true for every session; the
+  cost is one login a day, which passkeys reduce to a face scan. To cut sessions immediately, bounce
+  auth-valkey.
+  This also retires the "revisit Authentik if passkeys are needed" clause: 4.39 has them natively.
+- Future: raise to `two_factor` where it is worth the friction (passkeys make this cheap now); add more
+  apps as OIDC clients; **wire Authelia as the Cloudflare Access OIDC IdP** so the Access-gated hosts stop
+  falling back to emailed one-time PINs and inherit the same passkey (ADR 0007 hardening step; Access
+  itself is already codified in `kubernetes/infra/cloudflare/access.tf`).
