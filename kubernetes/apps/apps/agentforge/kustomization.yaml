@@ -13,6 +13,7 @@ resources:
   - agentforge-db.sops.yaml # platform Postgres DSNs (AFP_APP_DSN + AFP_ADMIN_DSN, consumer copy)
   - agentforge-runtime.sops.yaml # session secret + tenants/bootstrap tokens (AFP_ runtime secrets)
   - agentforge-infra-bot.sops.yaml # WS4 infra-bot Gitea token (AFP_INFRA_BOT_TOKEN); wired via envFrom (WS4)
+  - agentforge-metrics.sops.yaml # SOPS: bearer protecting the CP's /metrics (Prometheus scrape); read by BOTH the CP (AFP_METRICS_TOKEN) and servicemonitor.yaml's bearerTokenSecret, from one key so they cannot drift. Mirrors gitea-metrics.sops.yaml, which exists for the same reason on the same tunnel
   - openbao-ca-cert.yaml # ns-local openbao-tls ca.crt (ailab-ca) for the WS4 OpenBao clients
   # GO-LIVE: the CP Deployment. Image is now a real pinned @sha256 (deployment.yaml header) and its
   # readiness probe is /readyz (DB SELECT-1), so under the wait:true `apps` Kustomization it only

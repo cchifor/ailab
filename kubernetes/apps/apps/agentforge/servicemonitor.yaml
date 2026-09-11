@@ -27,15 +27,17 @@
 # file is inert), and states its namespaceSelector explicitly rather than leaning on the own-namespace
 # default. `port: http` is the SERVICE port name (serviceaccount-service.yaml), not the container port.
 #
-# NO bearerTokenSecret, and that is a DIVERGENCE from gitea's SM worth reading: gitea's /metrics is
-# token-protected because it is internet-reachable through the CF tunnel, and the CP is reachable the
-# same way — but the CP serves /metrics UNAUTHENTICATED, which is not a property of this file to fix.
-# Verified 2026-09-11: `curl https://agentforge.chifor.me/metrics` returns 200 with the same 8 afp_*
-# series from the public internet, no Authelia redirect (the CP is an OIDC RP with no CF Access in
-# front, and /metrics sits outside its auth middleware). That is a control-plane defect to fix in
-# cchifor/agentforge-platform — this PR does not change the endpoint's exposure either way, it only
-# adds the in-cluster collector that should have existed for it. If the CP later puts /metrics behind
-# a token, this file needs the matching `bearerTokenSecret` in the SAME change or the target goes down.
+# bearerTokenSecret, exactly as gitea's SM does next door and for the same reason: /metrics is
+# internet-reachable through the CF tunnel. When this file first landed the CP served /metrics
+# UNAUTHENTICATED — verified 2026-09-11, `curl https://agentforge.chifor.me/metrics` returned 200
+# with the full afp_* payload from the public internet, no Authelia redirect — and the fix is in
+# cchifor/agentforge-platform (settings.metrics_token; unconfigured FAILS CLOSED with a 503).
+#
+# ORDERING, and it only works one way round: this Secret and this header must be live BEFORE the CP
+# image that enforces the token is pinned. Both are harmless early (the old image ignores an unread
+# Authorization header), while a pin that landed first would 401 every scrape until this caught up.
+# The Secret is agentforge-metrics.sops.yaml in this directory, read by BOTH sides from one key so
+# they cannot drift — the prometheus-operator resolves bearerTokenSecret against ns agentforge.
 #
 # 30s, matching gitea and the mirrored default — NOT the dispatcher/broker 15s, which is sized off the
 # KEDA cold-start path. Nothing in this estate scales or gates on an afp_* series.
@@ -59,6 +61,9 @@ spec:
       path: /metrics
       scheme: http
       interval: 30s
+      bearerTokenSecret:
+        name: agentforge-metrics
+        key: token
       relabelings:
         # A PIN, NOT A RENAME: the operator already derives job from the Service name, so this
         # writes the value it would have had anyway. It is here so agentforge-platform-rules.yaml's
