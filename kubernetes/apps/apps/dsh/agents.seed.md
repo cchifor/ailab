@@ -29,3 +29,23 @@ The vision route accepts at most 64 images in a single request, and every image 
 conversation is re-sent on every turn. Rendering a file and then reading back the render plus
 several crops spends that budget quickly. Prefer one look at a full render over many crops of it,
 and re-render at a larger size instead of re-cropping the same image repeatedly.
+
+## Git access to git.chifor.me is automatic
+
+`git clone`, `fetch`, `pull` and `push` over **HTTPS** to `https://git.chifor.me/...` authenticate
+by themselves: `~/.gitconfig` attaches a credential helper to that authority, and the helper reads
+the credential this deployment is provisioned with. Do not look for tokens in the environment (the
+shell environment is scrubbed of credential-shaped variables on purpose), do not ask the user to
+paste one, and do not suggest making a repository public. Just run git.
+
+If a git command still fails with `could not read Username for 'https://git.chifor.me'`, look at
+what else it printed, because that line alone does not say why:
+
+- A line starting with `git-credential-openbao:` means the helper ran and the deployment has not
+  been provisioned (or is mis-provisioned) with `GITEA_USER`/`GITEA_PAT` in OpenBao. That is an
+  operator task, not something you can fix from here; report the helper's line verbatim.
+- No such line means git never reached the helper: check that `git config --global -l` shows
+  `credential.https://git.chifor.me.helper` and that the helper it names is executable. Do not
+  print the contents of credential files.
+
+The Gitea **REST API** (`/api/v1/...`) is not covered by this: the helper answers git, not curl.

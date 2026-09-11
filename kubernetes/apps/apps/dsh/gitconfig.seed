@@ -1,0 +1,13 @@
+# Managed by ailab: kubernetes/apps/apps/dsh/gitconfig.seed, installed to /dsh-home/.gitconfig by the
+# seed-settings initContainer on EVERY pod creation. A hand edit here survives until the next pod
+# roll and is then lost; the file is deployment-owned, like AGENTS.md beside it.
+#
+# One thing only: for git.chifor.me over HTTPS, ask git-credential-openbao, which reads the OpenBao
+# credentials External Secrets projects into /dsh-credentials. Scoped to that one authority so the
+# helper is consulted for nothing else -- see the helper's header for the whole story.
+#
+# Named by ABSOLUTE PATH, deliberately. gitcredentials(7) runs an absolute path as-is, so this does
+# not depend on PATH surviving the sandbox's environment scrub. It must equal the install path in
+# deployment.yaml's seed-settings script; scripts/tests/test_dsh_git_credential_helper.py pins that.
+[credential "https://git.chifor.me"]
+	helper = /dsh-home/.local/bin/git-credential-openbao
