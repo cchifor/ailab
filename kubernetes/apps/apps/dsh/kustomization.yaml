@@ -31,6 +31,15 @@ configMapGenerator:
       # required -- the profile is installed at boot, so a changed provider that did not
       # roll would leave the old one resolving credentials.
       - openbao-credentials.mjs
+      # The agent's git identity for git.chifor.me. openbao-credentials.mjs feeds dsh's own
+      # credentials SERVICE; the agent's shell never sees that (dsh-subprocess scrubs every
+      # KEY/PASSWORD/SECRET/TOKEN-shaped and DSH_* variable before bash starts), so `git clone`
+      # of a private repo failed with "could not read Username" (session 3d381759, 2026-09-11).
+      # A git credential helper reading the SAME ESO mount, scoped by gitconfig.seed to
+      # https://git.chifor.me, is the bridge. Both ride the content hash: a changed helper rolls
+      # the pod, which is required because seed-settings installs it at boot.
+      - git-credential-openbao.sh
+      - gitconfig.seed
       # User-global agent instructions, installed to $DSH_HOME/AGENTS.md. COMPLEMENTARY to the
       # agent teams below, not in competition with them: this is instruction CONTENT, read by
       # dsh-agent-instructions from $DSH_HOME (its `dshHome` default, and DSH_HOME=/dsh-home

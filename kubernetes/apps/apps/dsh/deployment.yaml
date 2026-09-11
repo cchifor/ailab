@@ -152,6 +152,20 @@ spec:
               # That is the intended trade (git owns this file), but it is a trade, not an
               # impossibility: /dsh-home is writable by uid 1000 by design.
               install -m 0644 /seed/agents.seed.md /dsh-home/AGENTS.md
+              # The agent's git identity for git.chifor.me: a credential helper that reads the
+              # ESO mount at /dsh-credentials at USE time, and the ~/.gitconfig that scopes it to
+              # that one authority. HOME is /dsh-home in the dsh container, so /dsh-home/.gitconfig
+              # is the file git reads; the helper is named there by absolute path, so PATH does not
+              # matter. UNCONDITIONAL, same reason as AGENTS.md and cordis.patch.yml above: both are
+              # deployment-owned, and the agent (uid 1000, with a shell) can edit them until the
+              # next pod roll -- a trade, not an impossibility. 0755 on the helper is what makes it
+              # a helper at all: git execs it. The ESO mount is optional and may be empty, in which
+              # case the helper prints one stderr hint and git fails as it did before this existed.
+              # Why a helper and not an env var: dsh-subprocess scrubs every variable matching
+              # KEY|PASSWORD|SECRET|TOKEN and every DSH_* one from the agent's shell, by design.
+              mkdir -p /dsh-home/.local/bin
+              install -m 0755 /seed/git-credential-openbao.sh /dsh-home/.local/bin/git-credential-openbao
+              install -m 0644 /seed/gitconfig.seed /dsh-home/.gitconfig
               # patchReload MUST NOT be "live" in a container or dsh crash-loops on FIRST boot.
               # MEASURED, not guessed -- see fix-profile.js for the mechanism and the evidence.
               mkdir -p /dsh-home/profiles/web

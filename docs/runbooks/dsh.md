@@ -83,6 +83,111 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 
 ---
 
+## Git access to the forge
+
+The agent's shell can clone, fetch and push `https://git.chifor.me/...` repositories **without
+being handed a token**, once the operator has provisioned one in OpenBao. Everything on the forge
+is private (`REQUIRE_SIGNIN_VIEW` is on: even the API answers 403 anonymously), so without this an
+"analyse repository X" request ends the way session `3d381759` did on 2026-09-11:
+
+```
+fatal: could not read Username for 'https://git.chifor.me': No such device or address
+```
+
+### How it is wired
+
+```
+OpenBao af/dsh/credentials {GITEA_USER, GITEA_PAT, ...}
+   │  ExternalSecret dsh-credentials (dataFrom.extract, refresh 5m)
+   ▼
+Secret dsh-credentials  ──kubelet──▶  /dsh-credentials/GITEA_USER, /dsh-credentials/GITEA_PAT
+                                            ▲ read at every `get`
+/dsh-home/.gitconfig ── [credential "https://git.chifor.me"] helper = /dsh-home/.local/bin/git-credential-openbao
+```
+
+Two files in the `dsh-relay` ConfigMap, installed by `seed-settings` on every pod creation
+(`git-credential-openbao.sh` → `/dsh-home/.local/bin/git-credential-openbao`, 0755;
+`gitconfig.seed` → `/dsh-home/.gitconfig`). The helper reopens the mount **at use time**, so a
+rotation reaches the next git command with no pod restart and no manifest change.
+
+> **Why not the credentials plugin, an env var, or a bao agent.** `openbao-credentials.mjs`
+> teaches dsh's own `credentials` *service* to read the same mount — that is what `apiKeyEnv:`
+> resolves through. The agent's shell is a different world: `@deepseek-ai/dsh-subprocess` builds
+> it with `scrubbedParentEnv()`, which drops every variable matching `/KEY|PASSWORD|SECRET|TOKEN/i`
+> and every `DSH_*` variable before bash starts. So nothing the service resolves reaches git, and
+> an env var never could. A bao agent in the pod is rejected at length in `openbao-eso.yaml` (a
+> token in a pod that runs model-authored code). SSH is out: `gitea-ssh` is an in-cluster Service
+> in the excluded `10.0.0.0/8`, and Cloudflare does not proxy it. HTTPS + helper is the only path.
+
+### Provisioning (operator ceremony — vault and forge writes, not GitOps)
+
+`dsh-provision-job.yaml` creates `af/dsh/credentials` with the canary and then **never touches the
+contents**; the fields are operator-owned by design.
+
+1. **Forge identity: a dedicated `dsh` Gitea account, not the shared `chifor` dev-worker PAT.**
+   Separate revocation and audit trail, repository-level blast radius through collaborator/team
+   grants, and no second home for the dev-worker secret (the rotation split-brain
+   `openbao-estate-credentials.md` forbids). Mark it *restricted* if org-wide visibility is not
+   wanted; grant **read** on the repos dsh should analyse (or a `dsh-readers` team); mint a PAT with
+   `read:repository` (+ `read:organization` for org listing).
+
+   > **The account's repo grants are the bound, not the PAT scope.** This forge runs Gitea
+   > **1.26.1**; [GHSA-cc8w-r4qh-3v65](https://github.com/go-gitea/gitea/security/advisories/GHSA-cc8w-r4qh-3v65)
+   > (CVSS 8.1, fixed in **1.26.2**) skips repository-scope enforcement on Git Smart HTTP when the
+   > token arrives as a *Bearer* header. The helper speaks Basic, but the agent can read the PAT
+   > from the mount and `curl` with Bearer, so on this version a read-scoped PAT on an account
+   > that *could* write, would. An account holding only read grants has nothing to unlock.
+   > **Follow-up:** upgrade the `gitea` app to ≥ 1.26.2.
+
+   Enabling pushes later is **two** changes — write grants on the repos and a `write:repository`
+   PAT — plus the vault patch below. Commit identity (`user.name`/`user.email`) is deliberately not
+   seeded; set it with the same ceremony when write arrives.
+
+2. **Vault write**, with the breakglass token inline (never exported, never echoed) — the ceremony
+   in `openbao-estate-credentials.md`:
+
+   ```bash
+   # PAT in a 0600 file with NO trailing newline (printf '%s' "$PAT" > file, not echo). `@file`
+   # keeps the secret out of the argument list; the guard stops an empty file becoming an empty field.
+   [ -s /path/to/pat ] || { echo "empty pat file" >&2; exit 1; }
+   BAO_TOKEN="$(kubectl --context admin@ai -n openbao get secret openbao-breakglass-token -o jsonpath='{.data.root_token}' | base64 -d)" \
+     bao kv patch -mount=af dsh/credentials GITEA_USER=dsh GITEA_PAT=@/path/to/pat
+   ```
+
+   `patch`, not `put` — `put` drops the canary and every other field. (A trailing newline in the
+   file is tolerated by the helper; an embedded one, or any whitespace, is refused.)
+
+3. **Verify, polling rather than trusting intervals** — 5m is ESO's refresh *period*, and kubelet's
+   Secret-volume sync is "sync period plus cache propagation"; neither is a deadline:
+
+   ```bash
+   # a. the Secret gains both keys (ESO)
+   for i in $(seq 1 80); do kubectl -n dsh get secret dsh-credentials -o jsonpath='{.data}' | grep -q GITEA_PAT && break; sleep 5; done
+   # b. the mount gains both files (kubelet) -- names only, never contents
+   for i in $(seq 1 40); do kubectl -n dsh exec deploy/dsh -c dsh -- ls /dsh-credentials | grep -q GITEA_PAT && break; sleep 5; done
+   # c. git, in a dsh session (the Landlock-confined shell is the thing under test, not kubectl exec)
+   git ls-remote https://git.chifor.me/cchifor/platform.git | head -3
+   ```
+
+**Rotation:** mint the new PAT, `bao kv patch` it in, confirm (c) from a session, and only then
+revoke the old one at the forge. Nothing restarts.
+
+### Diagnosing "could not read Username"
+
+That line alone says only that git obtained no username. What accompanies it decides the cause:
+
+| also printed | meaning | fix |
+|---|---|---|
+| `git-credential-openbao: no GITEA_USER/GITEA_PAT under /dsh-credentials ...` | helper ran; document not provisioned | step 2 above |
+| `git-credential-openbao: GITEA_PAT is not a single word ...` (or `is empty`, `cannot read`) | provisioned, but the value is wrapped/empty/unreadable | re-patch with `@file` and no embedded newline |
+| nothing | git never reached the helper | in the container: `git config --global -l` must show `credential.https://git.chifor.me.helper=/dsh-home/.local/bin/git-credential-openbao` and that path must be `-rwxr-xr-x`; check the `seed-settings` log |
+
+`scripts/tests/test_dsh_git_credential_helper.py` runs the real helper against a kubelet-shaped
+fixture (including a `..data` symlink swap for rotation) and fills through the seeded gitconfig
+with git itself, isolated from the host's configuration.
+
+---
+
 ## The image, and why it is what it is
 
 **`node:22` (Debian), not alpine and not slim.** Measured in-cluster:

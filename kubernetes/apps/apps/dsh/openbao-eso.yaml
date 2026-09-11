@@ -146,15 +146,23 @@ spec:
 # endpoints does not fix it either: the agent renews with the same token, so the denial breaks the
 # agent. ESO keeps the OpenBao identity in ESO's own namespace and hands this pod only values.
 #
-# NOT YET RESOLVABLE, and that is expected and SAFE. The OpenBao side does not exist:
+# THE OPENBAO SIDE is owned by kubernetes/apps/infrastructure/security/openbao/dsh-provision-job.yaml:
 #   af/dsh/credentials          one field per credential, the field NAME being the dsh reference
-#                               (a POSIX identifier, e.g. LITELLM_API_KEY)
-#   policy af-app-dsh           must gain read on af/data/dsh/credentials
-# Both are OPERATOR writes through the agentforge-provisioner (OpenBao 2.5.5 has no root recovery,
-# ADR 0019 finding (c)). Until they land, this ExternalSecret reports NotReady, the Secret is
-# absent, and the Deployment mounts it `optional: true` -- so the harness runs exactly as it does
-# today, resolving LITELLM_API_KEY from its env var. The plugin treats an absent mount as "OpenBao
-# has nothing", not as an error.
+#                               (a POSIX identifier). The Job CREATES it with the DSH_OPENBAO_CANARY
+#                               marker and never touches the contents again; every real field is
+#                               an operator write (docs/runbooks/dsh.md, "Git access to the forge").
+#   policy af-app-dsh           read on af/data/dsh/credentials, written by that Job.
+# Until the Job has run, this ExternalSecret reports NotReady, the Secret is absent, and the
+# Deployment mounts it `optional: true` -- so the harness runs exactly as before, resolving
+# LITELLM_API_KEY from its env var. The plugin treats an absent mount as "OpenBao has nothing".
+#
+# FIELDS IN USE, and who reads them -- because "discovered, not enumerated" is about the
+# transport, not about documentation:
+#   GITEA_USER, GITEA_PAT       read by git-credential-openbao.sh (the agent's git identity for
+#                               git.chifor.me), NOT through openbao-credentials.mjs: the shell
+#                               that runs git never sees dsh's credentials service.
+# Whatever else lands here is readable by the agent, which is why the document must hold only
+# credentials dsh is meant to have (see the volume comment in deployment.yaml).
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
