@@ -48,6 +48,12 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        # OnRootMismatch for the same reason deployment.yaml gives at length: with the NFS
+        # CSIDriver's fsGroupPolicy: File, fsGroup makes kubelet chown every file under /app
+        # before this container starts -- the "idle" minutes every run of this Job has shown
+        # before its first log line. kubelet skips the walk when the volume root already has
+        # gid 1000, the setgid bit and group rwx, which a previous apply leaves in place.
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: install
