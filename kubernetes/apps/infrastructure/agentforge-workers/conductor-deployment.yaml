@@ -1,0 +1,163 @@
+# af-conductor — the fleet-wide OBSERVER (`agentforge conduct`, conductor program PR-7).
+#
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# DELIBERATELY UNLISTED. This file is NOT in kustomization.yaml's `resources:`, mirroring the
+# dispatcher/reaper precedent in this same tree. Nothing here deploys until the arming rung (PR-7b)
+# adds the line, and that rung is gated on human acts the engine cannot do: the Gitea `conductor-bot`
+# principal and its PAT, the collaborator grants, and the SOPS operator-seeds fragment that puts the
+# PAT at `operator/conductor/forge`.
+#
+# ⚠ UNLISTED ALSO MEANS UNVALIDATED. scripts/manifest-lint.sh runs `kustomize build` + kubeconform over
+# the paths Flux declares, and `kustomize build` renders only what a kustomization LISTS — so CI never
+# parses this file. It was validated by hand against the same two images CI uses, through a scratch
+# kustomization that does list it. Anyone editing it before PR-7b must do the same, or a typo ships
+# green and is found at arm time.
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+#
+# Modelled on the DISPATCHER, not the reaper: the reaper mounts a service-account token and has RBAC
+# because it GCs k8s objects, and an observer has no use for an apiserver identity.
+#
+# TWO PORTS, AND THEY ARE NOT INTERCHANGEABLE — this is the one thing about this workload that fails
+# silently in both directions:
+#   9464 `metrics` — the conductor's OWN CollectorRegistry (infra/conduct_metrics.py), carrying the
+#                    forge_conduct_* families and NONE of the shared forge_* ones. The PodMonitor
+#                    scrapes THIS.
+#   8720 `probe`   — /healthz + /readyz ONLY, no metrics at all. The kubelet probes THIS.
+# A PodMonitor on 8720 scrapes a server with no /metrics; a probe on 9464 gets a Prometheus exposition
+# page where it expects JSON, i.e. a CrashLoopBackOff that reads like an application bug.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentforge-conductor
+  namespace: agentforge   # trusted home (baseline PSA); NOT a tenant ns, NOT agentforge-sandbox
+  labels:
+    app.kubernetes.io/name: agentforge-conductor
+    app.kubernetes.io/component: conductor
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two conductors would both read the estate and — from the acting rungs
+  # on — both propose writes against the same parked issues.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-conductor
+  template:
+    metadata:
+      # THREE keys, not four. `managed-by` is deliberately absent from the POD TEMPLATE, following the
+      # dispatcher — and conductor-netpol.yaml's endpointSelector keys on `name` alone because of it.
+      # The worker does the opposite (managed-by ON the template, selector keys on the pair); copying
+      # the worker's selector here would match nothing, silently.
+      labels:
+        app.kubernetes.io/name: agentforge-conductor
+        app.kubernetes.io/component: conductor
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      serviceAccountName: agentforge-conductor
+      automountServiceAccountToken: false   # an observer needs no kube-apiserver access
+      enableServiceLinks: false
+      nodeSelector:
+        ailab.io/agent-pool: "true"
+      tolerations:
+        - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532   # so the 0440 mounted forge-PAT Secret is group-readable by uid 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: conductor
+          # Pinned by digest, never a tag; rewritten only by `just pin-workloads p1-worker=sha256:…`.
+          # Placeholder until PR-7b: unpullable on purpose, so an accidental listing cannot start a
+          # conductor before its credentials exist.
+          image: registry.chifor.me/agentforge/p1-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # The image ENTRYPOINT is ["tini","--"] and `agentforge` is a console script, so argv must be
+          # the full two-element form — a bare subcommand crash-loops.
+          args: ["agentforge", "conduct"]
+          env:
+            # Settings (env_prefix AF_) requires worker_name even though the conduct path uses it only
+            # as the claim-service worker identity.
+            - name: AF_WORKER_NAME
+              value: "af-conductor"
+            - name: AF_WORKER_INSTANCE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: AF_CONFIG_SOURCE
+              value: "gitea"
+            - name: AF_GITEA_URL
+              value: "http://gitea-http.gitea.svc.cluster.local:3000"
+            # `observe` is the ONLY value T0 runs at, and it is the declared Tier member. "shadow" is
+            # this rollout tier's NICKNAME and is REFUSED at construction — Settings.conduct_tier is a
+            # Literal over Tier's five members and shadow is not one of them.
+            - name: AF_CONDUCT_TIER
+              value: "observe"
+            - name: AF_CONDUCT_BOT
+              value: "conductor-bot"
+            # Findings are filed in ailab — decision 1. Asserted DISJOINT from every repo the tenant
+            # config binds, because a finding filed into a lifecycle-managed repo feeds the live
+            # ops-triage digest. main::_require_conduct_wiring refuses the overlap at startup, folding
+            # case, so a differently-capitalised spelling is refused too.
+            - name: AF_CONDUCT_FILING_REPOS
+              value: "cchifor/ailab"
+            # The probe port. Distinct from AF_METRICS_PORT — see the header.
+            - name: AF_CONDUCT_PORT
+              value: "8720"
+            # Declared explicitly rather than left to the engine default, so port, containerPort and
+            # PodMonitor are ONE contract read from one place — the provisioner's precedent
+            # (AF_PROVISIONER_METRICS_PORT beside its containerPort), not the dispatcher's silence.
+            - name: AF_METRICS_PORT
+              value: "9464"
+          envFrom:
+            # The conductor-bot PAT map. REQUIRED, not optional: a conductor with no forge identity has
+            # nothing to do, and failing at pod creation is the honest place to say so.
+            - secretRef:
+                name: agentforge-conductor-forge
+          ports:
+            - { name: metrics, containerPort: 9464, protocol: TCP }
+            - { name: probe, containerPort: 8720, protocol: TCP }
+          # Probes name the PROBE port, never the metrics one. Liveness stays on /healthz, which reads
+          # NO loop state: a conductor in a forge outage is backing off on a bounded schedule, not
+          # wedged, and a liveness probe that killed it would buy a CrashLoopBackOff whose replacement
+          # fails identically. /readyz is where a stalled loop is reported, and de-registering a
+          # conductor costs nothing because nothing routes traffic to it.
+          #
+          # failureThreshold on readiness is generous against a 300s pass cadence: ConductHealth reports
+          # not-ready after 2 consecutive failed passes, which is already ~10 minutes of real time.
+          livenessProbe:
+            httpGet: { path: /healthz, port: probe }
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: probe }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 25m, memory: 64Mi, ephemeral-storage: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi, ephemeral-storage: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            # state_dir: holds config-lastgood.json, and the `conduct-paused` flag file the write door
+            # derives its posting-disabled state from (a file rather than a knob, because state_dir
+            # already exists and a second env var is a second thing to get wrong).
+            - { name: state, mountPath: /var/lib/agentforge }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        # Required because readOnlyRootFilesystem: true.
+        - name: state
+          emptyDir: { sizeLimit: 128Mi }
+        - name: tmp
+          emptyDir: { sizeLimit: 128Mi }

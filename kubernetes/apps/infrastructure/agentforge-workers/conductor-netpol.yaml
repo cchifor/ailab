@@ -1,0 +1,101 @@
+# The conductor's network boundary. Cilium is the CNI, and SELECTING this endpoint for ingress AND
+# egress puts it in both-direction default-deny — so these rules are its COMPLETE allowed reach:
+#   ingress — metrics 9464 from monitoring. Nothing else: the conductor serves no receiver, and its
+#             :8720 probe port is reached by the kubelet, which is node-local and not an endpoint.
+#   egress  — DNS; the forge (gitea:3000); Prometheus (:9090); the control plane (:8080).
+#
+# THE ENDPOINT SELECTOR KEYS ON `name` ALONE, and that is not a shortcut. The two templates in this
+# directory genuinely differ: worker-deployment.yaml puts `app.kubernetes.io/managed-by` on its POD
+# TEMPLATE (so cilium-egress.yaml can key on the pair), while dispatcher-deployment.yaml puts it on the
+# Deployment and NOT on the pod template. The conductor follows the dispatcher, so a selector copied
+# from the worker would match NOTHING — and a CNP that selects nothing fails in two opposite directions
+# at once: the endpoint falls out of egress default-deny entirely (wide open, since the namespace policy
+# is Ingress-only) while STILL being ingress-denied by that namespace policy. Neither produces an error.
+#
+# WHY THE INGRESS RULE IS NOT OPTIONAL. Every pod in ns `agentforge` is already in ingress default-deny
+# from `apps/apps/agentforge/networkpolicy.yaml` (`podSelector: {}`). Ship the PodMonitor without this
+# rule and Prometheus selects a pod it cannot reach: `up == 0` forever, no manifest error, pod healthy.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: agentforge-conductor
+  namespace: agentforge
+  labels:
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentforge-conductor
+  ingress:
+    # (1) Prometheus metrics scrape — the METRICS port only. 9464 serves the conductor's own
+    #     CollectorRegistry (forge_conduct_*); 8720 serves /healthz + /readyz and no metrics at all, so
+    #     naming it here would admit a scrape that finds nothing to parse.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+      toPorts:
+        - ports:
+            - { port: "9464", protocol: TCP }
+  egress:
+    # (1) DNS. An L7 `matchPattern: "*"` and not a narrower one: Cilium's "*" does not cross a dot, and
+    #     a narrowed pattern REFUSES the qualified in-cluster names (SERVFAIL, then EAI_AGAIN at the
+    #     client) — which has taken a live pod down in this estate before (npm-cache.yaml records it).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # (2) the FORGE — in-cluster Gitea. Everything the conductor does begins here: its config, the
+    #     parked/blocked listings, every issue snapshot, and (from a later rung) its findings.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: gitea
+            app.kubernetes.io/name: gitea
+      toPorts:
+        - ports:
+            - { port: "3000", protocol: TCP }
+    # (3) Prometheus query API — the estate detectors read forge_* gauges and /api/v1/rules rather than
+    #     re-deriving what the fleet already measures. Not used until PR-8a ships the reader; allowed
+    #     here so that rung is a code change rather than a code change plus a policy change.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - { port: "9090", protocol: TCP }
+    # (4) the control plane — PR-14's findings emitter. Same reasoning as (3): the reach is declared
+    #     with the workload, so the rung that uses it does not also have to edit the boundary.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: agentforge
+            app.kubernetes.io/name: agentforge-platform
+      toPorts:
+        - ports:
+            - { port: "8080", protocol: TCP }
+  egressDeny:
+    # No direct internet / node-local / metadata-via-node. Pod-to-pod above is identity-based, so these
+    # never block (1)-(4).
+    #
+    # `host` and `remote-node` are safe HERE and only because the conductor has no kube-apiserver leg:
+    # cilium-egress.yaml records that exactly this pair once beat a kube-apiserver allow and produced
+    # "Cannot connect to host 10.96.0.1:443". The investigator rung (PR-16), which DOES need the
+    # apiserver, must drop them.
+    - toEntities:
+        - world
+        - host
+        - remote-node
+    # metadata (169.254.169.254), link-local, and ALL IPv6 — explicit direct-IP belt. The ::/0 deny is
+    # harmless only while every destination above resolves v4; a service that starts answering AAAA
+    # would silently stop being reachable.
+    - toCIDR:
+        - 169.254.169.254/32
+        - 169.254.0.0/16
+        - ::/0
