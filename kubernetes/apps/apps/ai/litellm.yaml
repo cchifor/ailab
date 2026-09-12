@@ -590,6 +590,43 @@ data:
           model: openai/gpt-6-astra
           api_key: os.environ/OPENAI_API_KEY
         model_info: { supports_vision: true, dsh_only: true }
+      # ------------------------------------------------- the ON-PREM Qwen3.8-27B (ailab, always on)
+      # Added 2026-09-12. Every other qwen3.8 route above lives on a cloudlab host (.26 / .28) and
+      # those POWER OFF NIGHTLY: measured `avg_over_time(up[7d])` = 0.34-0.38 per host, and all three
+      # were down at the time of writing. So the estate had no Qwen3.8 route at all roughly two-thirds
+      # of the time. This is the on-prem one, on ai-node1's iGPU, which is always up.
+      #
+      # `-ailab` rather than `-local`: `-local` is already taken by qwen3.6-35b-a3b-local below and
+      # means "the always-on terminal fallback". This is a different thing -- a quality tier on a
+      # different node, different engine build and different checkpoint -- so it gets the estate name.
+      # The suffix is carried end to end: llama-server is launched with `-a qwen3.8-27b-ailab`
+      # (models.yaml `alias`), so /v1/models on :8082 advertises exactly this id and the name here is
+      # not a rename that only LiteLLM knows about.
+      #
+      # NOT A FALLBACK TARGET FOR THE CLOUD ROUTES, and that is deliberate rather than an omission.
+      # It is ~14x slower (11.49 tok/s measured on-prem vs 158.6-200.4 on cloud2's 4x RTX 3090 --
+      # a memory-bandwidth ratio, 256 GB/s against ~3,744 GB/s aggregate, not an engine defect), and
+      # llama.cpp here rejects the vLLM-only sampling those routes carry (chat_template_kwargs /
+      # reasoning_effort would 400). Silently demoting a caller from 200 tok/s to 11 mid-conversation
+      # is worse than an honest error. Adding it to a chain is a routing decision for the operator.
+      #
+      # max_input_tokens 49152 = per-slot n_ctx 65536 (ctx 131072 / parallel 2) less 16K output and
+      # reasoning headroom. `ctx` is TOTAL KV shared across slots in llama.cpp, so changing either
+      # `ctx` or `parallel` in kubernetes/infra/ai-lxc/models.yaml without changing this number
+      # silently breaks the context limit -- that is exactly how qwen3.6-35b-a3b-local below ended up
+      # advertising 114688 against a host serving 8192.
+      #
+      # supports_vision: the unit DOES pass --mmproj (unlike node2's, which is why that route declares
+      # false). Not re-probed since the re-provision, so it is claimed on the launch flags rather than
+      # on a fresh measurement -- probe it before relying on images here.
+      - model_name: qwen3.8-27b-ailab
+        litellm_params:
+          model: openai/qwen3.8-27b-ailab
+          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1
+          api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+        model_info: { supports_vision: true, max_input_tokens: 49152 }
       # --------------------------------------------------------------- always-on fallback route
       # Added 2026-09-09. Both cloud routes above live on cloudlab hosts that POWER OFF NIGHTLY, so
       # neither can back the other after hours -- .26 shares .28's outage window by design. node2 is
@@ -784,7 +821,7 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "2b4c2719ab38"
+        checksum/config: "d0fb1cce71c7"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

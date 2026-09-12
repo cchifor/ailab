@@ -115,9 +115,40 @@ subsets:
 # NOTE .46 still appears in monitoring.yaml's node_exporter endpoints — that is the LXC's own
 # host metrics and is unrelated to this Service; it stays.
 ---
-# llm-qwen38 (node1 :8082) REMOVED 2026-08-25 — the qwen3.8-27b on-demand instance is retired;
-# its 31.4 GiB node1 reservation funds ci-runner-7/-8.
-# CORRECTION 2026-09-07: ":8082 on .44 is now free" was already false when written and is corrected
-# here -- ai-llm-1 runs llama-swap-qwen38.service on :8082 today (probed: HTTP 200 on /v1/models).
-# What IS free on .44 is :8080: the llama-server unit does not exist there at all, which is why .44
-# was removed from the `llm` Endpoints above.
+# llm-qwen38 (node1 :8082) RESTORED 2026-09-12, after being removed on 2026-08-25 to fund
+# ci-runner-7/-8. That runner trade is unwound (ci-runner-8 destroyed; ai-node1 went 24.99 -> 34 GiB
+# available), and the backing service never actually stopped: the 2026-09-07 correction below already
+# recorded that ai-llm-1 has been running llama-swap-qwen38.service on :8082 the whole time, probed
+# HTTP 200 on /v1/models. Only this routing was missing, which is why nothing could reach it.
+#
+# WHAT THIS UNBLOCKS. Every qwen3.8 route in litellm.yaml points at a cloudlab host (.26/.28), and
+# those power off nightly -- measured `up` over 7d is 0.34-0.38, so the estate had NO Qwen3.8 route
+# roughly two-thirds of the time, including every night. This is the always-on on-prem one.
+#
+# Still ON-DEMAND: llama-swap holds :8082 open and loads the model on first request (~24 s cold start
+# from NFS, measured), then idle-unloads after ttl 1800. So this Endpoint is always up even when the
+# model is not resident -- the router never sees a down backend, it sees a slow first request.
+# The port differs from every other entry here (8082, not 8080) because it is a SECOND llama.cpp
+# instance in the same LXC; :8080 on .44 genuinely has no unit at all, which is why .44 is absent
+# from the `llm` Endpoints above and must stay absent.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-qwen38
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-qwen38, app.kubernetes.io/component: llama-swap }
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - { name: http, port: 8082, targetPort: 8082, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llm-qwen38
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-qwen38 }
+subsets:
+  - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
+    ports: [{ name: http, port: 8082, protocol: TCP }]

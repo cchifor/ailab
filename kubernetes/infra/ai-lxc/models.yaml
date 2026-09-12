@@ -88,14 +88,64 @@ models:
     # exists only to bound a future pathological loop. Raise/clear REASONING_BUDGET if a hard task gets clipped.
 
   # ---- Quality tier: ON-DEMAND (llama-swap) as a SECOND instance on node1 :8082 (ctid 5001 / .44) ----
-  # RETIRED 2026-08-25 — qwen3.8-27b (the node1 dense quality tier, INSTANCE=qwen38, :8082).
-  # Removed to release its 31.4 GiB on-demand reservation on node1 for two additional CI runners
-  # (ci-runner-7/-8): node1 was sitting at 24.9 GiB free, i.e. BELOW this model's own load cost, so
-  # the on-demand slot could no longer be satisfied anyway. The cloud2 executor tier registered in
-  # litellm.yaml as `qwen3.8-27b-cloud` (192.168.0.28, one instance per GPU) is UNAFFECTED and still
-  # serves the model — only the node1 local instance is gone. Its llama-swap unit
-  # (llama-swap-qwen38.service) and config dir (/etc/llama-swap-qwen38/) are removed on the host by
-  # the retire step in docs/runbooks/ai-model-swap.md; :8082 on node1 is now free.
+  # UN-RETIRED 2026-09-12, at a FULL WINDOW, and renamed `qwen3.8-27b-ailab`.
+  #
+  # IT WAS NEVER ACTUALLY GONE. The 2026-08-25 retirement (commit 1acd59cc) removed the k8s/LiteLLM
+  # routing and said the unit and config dir "are removed on the host by the retire step". They were
+  # not: `llama-swap-qwen38.service` has been active and listening on 0.0.0.0:8082 continuously since
+  # 2026-08-18, idle-unloaded by its own ttl. Only the routing was gone, so the memory it was retired
+  # to release was never actually released either. This entry stops the file disagreeing with the host.
+  #
+  # THE RETIREMENT WAS ARGUED AGAINST A NUMBER THAT WAS ALREADY STALE. 1acd59cc cites "31.4 GiB on a
+  # node measured at 24.9 GiB free". That 31.4 GiB is the Q6_K @ ctx 262144 figure from 6c17046c.
+  # b25953b1 had already cut the quant to UD-Q4_K_XL ten days earlier ("32115 -> 27288 MiB loaded",
+  # docs/runbooks/ai-model-swap.md), and an unrecorded re-provision on 2026-08-18 had dropped ctx to
+  # 65536. The real cost is ~2/3 of the number that retired it.
+  #
+  # SIZING, derived from GGUF metadata and checked against two measured GTT anchors (Q6_K 32,115 MiB
+  # and UD-Q4_K_XL 27,288 MiB, both at ctx 262144; residuals agree within 100 MiB):
+  #   16 full-attention layers (block_count 65, 1 nextn_predict layer, full_attention_interval 4)
+  #   x 4 KV heads x (256 + 256) x 1.0625 B (q8_0) = 34,816 B/token
+  #   fixed  = weights 16.69 + mmproj 0.86 + compute ~0.65      = 18.20 GiB
+  #   ctx 131072 KV                                              =  4.25 GiB
+  #                                                        total = 22.45 GiB
+  # ai-node1 measured 34 GiB available right after ci-runner-8 was destroyed (was 24.99), so this
+  # fits with ~11 GiB of headroom instead of the -1.67 GiB it would have had before. That runner's
+  # retirement is what pays for this; see kubernetes/infra/runners/variables.tf.
+  #
+  # parallel: 2, NOT 1, and the reason is routing rather than throughput. `ctx` is TOTAL KV shared
+  # across slots, so per-slot n_ctx = 131072/2 = 65536 and litellm max_input_tokens = 65536 - 16K
+  # headroom = 49152. The second slot costs only another copy of the recurrent state (bounded by the
+  # ~0.65 GiB measured residual), and it exists because LiteLLM 1.91.0 does not propagate a client
+  # disconnect: on --parallel 1 an abandoned request kept decoding 7+ minutes with no client attached
+  # and only a systemctl restart freed the slot (measured 2026-08-15, litellm.yaml carries the full
+  # note). Two slots means one orphan cannot wedge the route. It REDUCES the odds, it does not
+  # eliminate them -- two concurrent orphans still block both.
+  #
+  # SPEC DECODE IS CONFIGURED AND HAS NEVER RUN. The live unit has carried
+  # `--spec-type draft-mtp --spec-draft-n-max 2 --spec-draft-type-k/-v q8_0` since 2026-08-18 and the
+  # journal shows not one model load since -- 158,359 lines, all health polls. The checkpoint has an
+  # MTP head (`qwen35.nextn_predict_layers` in the GGUF header) and build b10456 accepts the flag, so
+  # it should work; upstream measures ~1.81x on a 27B dense Q4 on this exact silicon. It is carried
+  # through here via EXTRA_ARGS because provision.sh has no SPEC_* knob. UNMEASURED on this estate:
+  # the 11.49 tok/s figure in the runbook predates these flags and describes a different config.
+  # Benchmark it before quoting a number.
+  qwen3.8-27b:
+    nodes: [ai-node1]             # ctid 5001 / .44, second instance on :8082
+    instance: qwen38              # INSTANCE=qwen38 -> its own unit + /etc/llama-swap-qwen38/
+    port: 8082                    # the daily driver's :8080 is untouched (it does not exist on node1)
+    alias: qwen3.8-27b-ailab      # -ailab distinguishes this on-prem route from the -cloud ones
+    build: b10456                 # per-instance build, installed alongside; supports --spec-type
+    gguf: /models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf   # NFS; NOT Q6_K -- see the runbook
+    mmproj: /models/qwen3.8-27b/mmproj-F16.gguf             # vision; node1 DOES pass it, unlike node2
+    ctx: 131072               # TOTAL KV across slots; per-slot = ctx/parallel = 65536
+    parallel: 2               # keep litellm max_input_tokens (49152 = 65536 - 16K) in sync
+    cache_type: q8_0          # K + V
+    swap: true                # llama-swap, so it idle-unloads rather than holding 22.45 GiB
+    ttl: 1800                 # idle-unload after 30 min -- REQUIRED, this node cannot hold it pinned
+    # PRESENCE_PENALTY=0.0 is REQUIRED (provision.sh defaults to 1.5, Qwen3.8's INSTRUCT profile;
+    # this runs in thinking mode, whose card specifies 0.0). REASONING_BUDGET=16384 matches the live
+    # unit, not the runbook's stale 3000.
   # ---- node3 llama-swap SINGLE-MODEL — qwen3.5-122b on demand (ctid 5003 / .46) ----
   # Deploy via a single-MODEL provision call (SWAP=true, no MODELS_JSON) — see docs/runbooks/ai-model-swap.md.
   # qwen3.5-122b REMOVED 2026-09-08 — moved to the cloudlab estate (cloud3, llama-swap on

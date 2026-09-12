@@ -57,6 +57,8 @@ llm-pi-ai:
         - id: qwen3.8-flash-next-q6-cloud
         - id: gpt-6-astra
           input: [text, image]
+        - id: qwen3.8-27b-ailab
+          input: [text, image]
     # THE CODEX MODEL ARRIVES THROUGH THE `litellm` PROVIDER ABOVE, as `gpt-6-astra` (2026-09-12).
     # That row is not decoration: it is what makes the `Conductor` team routable. The team pins no
     # model of its own -- a preset composes plugins -- so its conductor runs on whatever the session
