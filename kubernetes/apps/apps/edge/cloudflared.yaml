@@ -36,6 +36,15 @@ data:
         service: http://dsh.dsh.svc.cluster.local:80
       - hostname: api.chifor.me
         service: http://litellm.ai.svc.cluster.local:4000
+      # SearXNG web UI — the estate's own metasearch instance, which exists for dsh (apps/dsh/searxng.yaml)
+      # and now also answers a browser. NOT behind Cloudflare Access, and NOT pointed at the searxng
+      # Service: it terminates on that namespace's oauth2-proxy, which is an OIDC client of Authelia and
+      # completes the SSO flow before proxying anything. Same Access-free convention as the other
+      # own-gate surfaces above and below (git, agentforge, vault) — and as home.chifor.me itself, which
+      # this UI is linked from. Sending the tunnel at searxng:8080 directly would publish an
+      # unauthenticated search engine, so the port here (:4180) is the load-bearing detail.
+      - hostname: search.chifor.me
+        service: http://oauth2-proxy-searxng.dsh.svc.cluster.local:4180
       # Dev-worker web terminals: tunnel -> each VM's Caddy (LAN HTTPS, local-CA self-signed).
       # GATED by Cloudflare Access (kubernetes/infra/cloudflare/access.tf) — a passwordless-sudo shell.
       # Access enforces at the CF edge for ALL paths/methods incl. the ttyd /ws WebSocket upgrade,
@@ -160,7 +169,7 @@ spec:
         # routes until something restarts them. A new hostname then looks deployed but 404s at the
         # edge. Bump this whenever the ingress list changes -- it is the rollout trigger. (Same trap
         # cloud-power's kustomization documents for app code.)
-        chifor.me/config-revision: "2026-09-07-dsh"
+        chifor.me/config-revision: "2026-09-12-searxng"
       labels:
         app.kubernetes.io/name: cloudflared
     spec:

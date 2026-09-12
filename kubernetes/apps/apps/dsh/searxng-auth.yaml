@@ -1,0 +1,145 @@
+# oauth2-proxy — the SSO gate in front of SearXNG's web UI at search.chifor.me. SearXNG has NO
+# authentication of its own, so this is the only thing between the internet and the one pod in this
+# namespace that holds a route out. It is an OIDC client of Authelia (sso.chifor.me); unauthenticated
+# requests are redirected to the Authelia login, then proxied to the searxng Service.
+#
+# THIS DOES NOT SIT IN dsh's PATH, which is the whole reason it is a separate Deployment with its own
+# Service rather than a gate bolted onto `searxng`:
+#
+#     browser ──▶ cloudflared ──▶ oauth2-proxy-searxng:4180 ──▶ searxng:8080
+#     dsh ───────────────────────────────────────────────────▶ searxng:8080
+#
+# dsh keeps calling searxng.dsh.svc:8080 directly for /search?format=json. It could not do otherwise:
+# its session carries no SSO identity and nothing in it can complete an OIDC browser flow, so routing
+# the JSON client through here would break web_search outright.
+#
+# WHY NOT REUSE THE homepage PROXY (apps/homepage/oauth2-proxy.yaml, same image and flags). Its cookie
+# and redirect_uri are scoped to home.chifor.me, so a second hostname would have to arrive either on a
+# shared parent-domain cookie or as a path-mounted upstream under home.chifor.me/search/ — and SearXNG
+# builds absolute URLs from ONE base_url that dsh's in-cluster client shares. A separate proxy keeps
+# the two surfaces, and their two cookies, independent.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy-searxng
+  namespace: dsh
+  labels: { app: oauth2-proxy-searxng }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: oauth2-proxy-searxng }
+  template:
+    metadata:
+      labels: { app: oauth2-proxy-searxng }
+    spec:
+      priorityClassName: platform-normal
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 2000
+        runAsGroup: 2000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
+          args:
+            - --provider=oidc
+            - --oidc-issuer-url=https://sso.chifor.me
+            - --client-id=searxng
+            - --redirect-url=https://search.chifor.me/oauth2/callback
+            - --upstream=http://searxng.dsh.svc.cluster.local:8080
+            # Deliberately NO --pass-user-headers (the homepage proxy sets it so cloud-power can log
+            # who pressed OFF). SearXNG has no per-user state to attribute and no header it reads;
+            # forwarding an identity it ignores would only widen what a compromised engine response
+            # could see reflected.
+            - --http-address=0.0.0.0:4180
+            - --email-domain=* # authorization is Authelia's job — `searxng` is admins_only there
+            - --scope=openid profile email groups
+            - --code-challenge-method=S256 # PKCE (Authelia client requires it)
+            - --cookie-secure=true
+            - --reverse-proxy=true # behind cloudflared: trust X-Forwarded-Proto
+            - --skip-provider-button=true # straight to Authelia, no interstitial
+            - --whitelist-domain=sso.chifor.me
+            - --insecure-oidc-allow-unverified-email=true # Authelia may not set email_verified
+            - --cookie-expire=8h
+            - --cookie-refresh=1h
+          env:
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: oauth2-proxy-searxng, key: OAUTH2_PROXY_CLIENT_SECRET } }
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom: { secretKeyRef: { name: oauth2-proxy-searxng, key: OAUTH2_PROXY_COOKIE_SECRET } }
+          ports:
+            - { name: http, containerPort: 4180 }
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy-searxng
+  namespace: dsh
+  labels: { app: oauth2-proxy-searxng }
+spec:
+  type: ClusterIP
+  selector: { app: oauth2-proxy-searxng }
+  ports: [{ name: http, port: 4180, targetPort: http, protocol: TCP }]
+---
+# This pod is a gate, so its policy has to be as tight as the thing it guards. Ingress from
+# cloudflared only — a pod-network client that could reach :4180 directly would be talking to an
+# upstream-forwarding proxy, i.e. to SearXNG, with no login.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: oauth2-proxy-searxng-allow
+  namespace: dsh
+spec:
+  podSelector:
+    matchLabels: { app: oauth2-proxy-searxng }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Both selectors in ONE `from` element, exactly as dsh-allow does it and for the same reason:
+    # as two list items they are OR'ed, which would re-admit the whole `edge` namespace — including
+    # cloudflared-strive, a separate tunnel for another domain. VERIFIED in-cluster that the strive
+    # connectors carry app.kubernetes.io/name=cloudflared-strive, so this value excludes them.
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: cloudflared } }
+      ports: [{ port: 4180, protocol: TCP }]
+  egress:
+    # CoreDNS specifically, not every pod in kube-system (same narrowing as dsh-allow).
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    # The gated upstream.
+    - to:
+        - podSelector: { matchLabels: { app: searxng } }
+      ports: [{ port: 8080, protocol: TCP }]
+    # The OIDC back-channel to Authelia: discovery, the token redeem, and JWKS. It has to leave the
+    # cluster and come back through the tunnel, because --oidc-issuer-url MUST equal the `iss` claim
+    # Authelia mints (https://sso.chifor.me) and oauth2-proxy verifies that match; pointing it at
+    # authelia.auth.svc would fail issuer validation on every login. Private ranges are excluded for
+    # the same reason searxng's own egress excludes them — this pod resolves and dials a name whose
+    # answer it does not control, so it must not be able to pivot into the cluster or the home LAN.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - { port: 443, protocol: TCP }

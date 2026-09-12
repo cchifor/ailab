@@ -52,8 +52,18 @@ data:
           show: true
           cpu: true
           memory: true
+    # The search bar queries the estate's OWN SearXNG (apps/dsh/searxng.yaml) rather than DuckDuckGo.
+    # `custom` is the only route: Homepage's built-in provider list is google/duckduckgo/bing/baidu/
+    # brave, with no searxng entry, and `custom` appends the URL-encoded query to `url` verbatim.
+    #
+    # TWO THINGS TO EXPECT, neither a fault. The first query of a session lands on the Authelia login
+    # (search.chifor.me is gated by its own oauth2-proxy) and continues to the results after sign-in —
+    # in the new tab, since target is _blank, so this page is never navigated away from. And there are
+    # no type-ahead suggestions: that would need showSearchSuggestions plus a reachable
+    # /autocompleter, and the instance ships `autocomplete: ""` (off).
     - search:
-        provider: duckduckgo
+        provider: custom
+        url: https://search.chifor.me/search?q=
         target: _blank
     - datetime:
         format: { timeStyle: short, dateStyle: short }
@@ -211,6 +221,19 @@ data:
             href: https://openbao.chifor.me
             description: Secrets manager · CF Access + own token
             icon: mdi-shield-key
+        # SearXNG — the estate's own metasearch instance. It is also what the search bar at the top of
+        # this page queries (see widgets.yaml above) and what dsh's web_search calls in-cluster.
+        # No siteMonitor, on the precedent set for dsh in apps/dsh/networkpolicy.yaml: a homepage
+        # exception was added there once so a dot could go green, and removed because it was a second
+        # path to the app that went AROUND the auth gate. Same trade here — the searxng NetworkPolicy
+        # admits the oauth2-proxy and dsh, and a status dot is not worth a third door. The tile links;
+        # it does not probe. (Pointing siteMonitor at the proxy's own unauthenticated /ping was the
+        # other option, and was dropped because a green dot there proves the gate is up, not that
+        # search works — which is precisely the thing a reader would assume it proved.)
+        - SearXNG:
+            href: https://search.chifor.me
+            description: Metasearch · SSO login · dsh's web_search
+            icon: searxng.png
     # Native Homepage iframe widget, NOT an injected script. The earlier custom.js approach
     # fought React for placement and, worse, was served from /api/config/custom.js - which
     # Cloudflare caches by file extension (Homepage sends no Cache-Control), so edits stayed

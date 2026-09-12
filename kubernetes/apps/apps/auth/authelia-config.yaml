@@ -139,10 +139,11 @@ data:
             id_token: ['groups', 'email', 'email_verified', 'preferred_username', 'name']
         # Named client policies (Authelia >= 4.38). `admins_only` denies every authenticated user outside
         # the `admins` group at the OIDC authorization step (Authelia shows "access denied", no app session
-        # is created). Applied to the first-party admin surfaces — Homepage (oauth2-proxy) and the
-        # registry web UI — so a plain SSO user (Gitea + chat + Grafana viewer) cannot reach them. Every
-        # client left on 'one_factor' is open to any Authelia user by design (Gitea, Grafana, Open WebUI;
-        # the AgentForge CP fails shut on its own without an `af:*` group).
+        # is created). Applied to the first-party admin surfaces — Homepage (oauth2-proxy), the SearXNG
+        # web UI behind its own oauth2-proxy, and the registry web UI — so a plain SSO user (Gitea + chat
+        # + Grafana viewer) cannot reach them. Every client left on 'one_factor' is open to any Authelia
+        # user by design (Gitea, Grafana, Open WebUI; the AgentForge CP fails shut on its own without an
+        # `af:*` group).
         authorization_policies:
           admins_only:
             default_policy: 'deny'
@@ -185,6 +186,24 @@ data:
             pkce_challenge_method: 'S256'
             redirect_uris:
               - 'https://home.chifor.me/oauth2/callback'
+            scopes: ['openid', 'profile', 'groups', 'email']
+            token_endpoint_auth_method: 'client_secret_basic'
+          - client_id: 'searxng'
+            client_name: 'SearXNG'
+            # oauth2-proxy gates search.chifor.me (SearXNG has NO native auth — it is the only gate
+            # in front of the one pod in the dsh namespace with a route to the internet). Secret hash
+            # only here; plaintext is in the SOPS secret oauth2-proxy-searxng (dsh ns).
+            client_secret: '$pbkdf2-sha512$310000$A2fbdNSBYBAKa0MJKZxeHQ$6pndIAkrs4YScZxjZdE9r1yzpEIbwVOX9SHLdck2BX2xmJqF4tMGlWD98BR0n3NdOo/G6aZS5mU47/cN8XdUaw'
+            public: false
+            # admins_only, matching Homepage: this is reached from the home.chifor.me dashboard and
+            # its search bar, which are themselves admins_only, so a plain SSO user gains nothing by
+            # being let in here. Relax to 'one_factor' if the instance should be shared lab-wide.
+            authorization_policy: 'admins_only' # admin surface — see authorization_policies above
+            consent_mode: 'implicit' # first-party app: auto-grant consent (no prompt) for seamless SSO
+            require_pkce: true
+            pkce_challenge_method: 'S256'
+            redirect_uris:
+              - 'https://search.chifor.me/oauth2/callback'
             scopes: ['openid', 'profile', 'groups', 'email']
             token_endpoint_auth_method: 'client_secret_basic'
           - client_id: 'registry'
