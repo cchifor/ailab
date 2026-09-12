@@ -3,10 +3,18 @@
 # GENERATED from the shipped `standard` preset; see team-solo.agent.cordis.yml's header for the
 # regeneration command and why these files are generated rather than typed.
 #
-# WHAT THIS IS. dsh's OWN agent loop running on the Codex model route (`codex` provider in
-# settings.yaml, api: openai-codex-responses), delegating to qwen3.8 children. The conductor
-# keeps dsh's tools, session lifecycle and delegation machinery, because it IS a dsh agent --
-# only its model route is Codex.
+# WHAT THIS IS. dsh's OWN agent loop running on the Codex model route, delegating to qwen3.8
+# children. The conductor keeps dsh's tools, session lifecycle and delegation machinery, because
+# it IS a dsh agent -- only its model route is Codex.
+#
+# THE ROUTE IS `gpt-6-astra` ON THE `litellm` PROVIDER (2026-09-12). Not a `codex` provider: one
+# was seeded with `api: openai-codex-responses`, which is not a schema value, and because
+# validation covers the WHOLE providers dict it took litellm down with it -- the init container
+# still unwrites that block on every boot (dsh/deployment.yaml). The Codex model is served instead
+# as an ordinary LiteLLM route on the key that already serves gpt-5.4, which needs no dsh provider,
+# no OpenBao path and no CODEX_API_KEY. A `-codex` id could not have been used from here anyway:
+# that family is Responses-API only (404 on /v1/chat/completions, measured 2026-09-12), and this
+# provider speaks openai-completions.
 #
 # WHAT THIS IS NOT: the Codex CLI. That is `dsh-subagent-codex` (architecture A, team-review
 # below), and it CANNOT conduct anything -- the provider rejects agentOptions, personas, tool
@@ -15,9 +23,15 @@
 # through dsh's loop is what makes the conductor role reachable at all.
 #
 # THE MODEL ROUTE IS NOT PINNED HERE. A preset composes plugins; the session's provider/model
-# comes from the route the operator selects (Settings -> Models) or the deployment default. To
-# use this team as intended, select the `codex` provider for the session. Pinning a route inside
-# a preset is not something dsh-agent-presets does.
+# comes from the route the operator selects (Settings -> Models) or the deployment default.
+# Pinning a route inside a preset is not something dsh-agent-presets does.
+#
+# SO SELECTING THIS TEAM IS HALF THE JOB: also select `gpt-6-astra` for the session. The
+# deployment default is `agent-default-model: litellm/qwen3.8-27b-vllm-cloud` and is deliberately
+# left there (gpt-6-astra is paid, and it would otherwise become the default for every session),
+# so a Conductor session left on the default is qwen conducting qwen -- the team's topology
+# without its point. That is not a hypothetical: it is how this team behaved from the day it
+# shipped until the route existed.
 #
 # THE INHERITANCE TRAP, and what this file does about it. Spawn children INHERIT the parent's
 # provider/model when nothing overrides it, so on a Codex-routed conductor an unconfigured child

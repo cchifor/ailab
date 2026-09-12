@@ -1,6 +1,7 @@
 name: Conductor
 description: >-
-  Codex conducts, qwen3.8 does the work. Select the `codex` provider for the
-  session; delegated workers are routed to the estate's qwen3.8 route
-  explicitly. Delegation is dormant until the fan-out bounds land.
+  Codex conducts, qwen3.8 does the work. Selecting this team is half the job:
+  also pick the `gpt-6-astra` model, or the conductor runs on the qwen default
+  and this is qwen conducting qwen. Delegated workers are routed to the
+  estate's qwen3.8 route explicitly, so they need cloudlab powered on.
 order: 20

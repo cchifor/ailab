@@ -55,8 +55,24 @@ llm-pi-ai:
         - id: qwen3-coder-30b-a3b-cloud
         - id: qwen3.8-flash-next-cloud
         - id: qwen3.8-flash-next-q6-cloud
-    # THE CODEX ROUTE (architecture B) IS NOT CONFIGURED HERE, and the reason is a live
-    # outage rather than a decision deferred.
+        - id: gpt-6-astra
+          input: [text, image]
+    # THE CODEX MODEL ARRIVES THROUGH THE `litellm` PROVIDER ABOVE, as `gpt-6-astra` (2026-09-12).
+    # That row is not decoration: it is what makes the `Conductor` team routable. The team pins no
+    # model of its own -- a preset composes plugins -- so its conductor runs on whatever the session
+    # selects, and until that row existed the only selectable routes were qwen, i.e. qwen conducting
+    # qwen. Select `gpt-6-astra` for a Conductor session; workers stay on qwen3.8 by the explicit
+    # agentOptions in the team's own `tool-subagent` row.
+    #
+    # It is served as an ORDINARY LiteLLM route on the key that already serves gpt-5.4, so it needs
+    # none of the machinery the rest of this comment describes: no dsh provider, no OpenBao path, no
+    # CODEX_API_KEY. `-codex` ids could not have been used here in any case -- they are Responses-API
+    # only (404 on /v1/chat/completions, measured), and this provider speaks openai-completions.
+    # Full rationale lives on the entry in kubernetes/apps/apps/ai/litellm.yaml.
+    #
+    # A SEPARATE `codex` PROVIDER IS STILL NOT CONFIGURED HERE, and the reason is a live
+    # outage rather than a decision deferred. It remains the only way to reach the Responses-shaped
+    # Codex API, so this stays recorded rather than deleted:
     #
     # A `codex` provider was seeded with `api: openai-codex-responses`. That is NOT an accepted
     # value: the profile schema takes only

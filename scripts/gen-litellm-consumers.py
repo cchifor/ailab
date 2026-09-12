@@ -46,11 +46,15 @@ byte):
      the key); a `#`-prefixed mention is never the anchor, and zero or several real lines is a
      FAILURE.
 
-SELECTION RULE — a route is consumer-visible when ALL THREE hold:
+SELECTION RULE — the BASE rule, and exactly what Open WebUI's Local group takes. dsh takes a
+SUPERSET of it: one route opts past the first bullet (see THE dsh OPT-IN below), so "all three"
+below is the Local-group rule, not a claim about both consumers.
+A route is consumer-visible when ALL THREE hold:
   * `litellm_params.api_base` is present and its host is a private IPv4 address (10/8,
     172.16/12, 192.168/16) or ends with `.svc.cluster.local`. Entries with no api_base (the paid
-    providers, their embedding model) are never listed: they are what connection "1" discovers as
-    External, and dsh is not offered them.
+    providers, their embedding model) are never listed BY DEFAULT: they are what connection "1"
+    discovers as External, and dsh is not offered them — unless the entry opts in with
+    `model_info.dsh_only` (below), which is the ONE documented exception.
   * `model_info.mode` is unset or `chat`. Both consumers are chat pickers, so a self-hosted
     embedding / rerank / transcription route (mode is LiteLLM's own key for that) is never
     listed even though its api_base is private.
@@ -64,6 +68,23 @@ SELECTION RULE — a route is consumer-visible when ALL THREE hold:
     a YAML boolean on EVERY entry that carries model_info, self-hosted or not, checked before the
     other two filters: `hidden: "true"`, `hidden: 1` and the like are a FAILURE naming the entry,
     never silently visible and never skipped because another filter excluded the entry first.
+
+THE dsh OPT-IN — `model_info.dsh_only: true`. The private-api_base rule above encodes a policy
+("dsh is not offered the paid routes"), and this key is how ONE named route is exempted from it
+without loosening the rule for gpt-5.4, claude-sonnet-5 and the embedding model along with it.
+WHAT IT DOES, precisely: the route is written into dsh's model list even with no api_base at all,
+and is kept OUT of Open WebUI's Local-group `model_ids`. What it does NOT do: hide it from Open
+WebUI altogether — connection "1" carries no model_ids, so it still discovers the route from
+/v1/models and lists it under External, exactly as it would without this key. The two consumers
+are therefore no longer the same list: dsh takes a SUPERSET of the Local group.
+Same type discipline as `hidden` (a YAML boolean, validated on every entry carrying model_info,
+before any filter reads it), and the two are mutually exclusive — `hidden` withdraws a route from
+dsh while `dsh_only` offers it there, so carrying both is a FAILURE naming the entry rather than a
+silent precedence rule. `mode` still applies: a paid EMBEDDING route cannot reach a chat picker
+through this key.
+IT COSTS MONEY, which is the whole reason it is explicit and per-entry. A route reachable from
+dsh's picker is a route an agent can be pointed at for every turn of a delegating session, and
+litellm_settings.max_budget is a single global ceiling across all third-party spend.
 Order is model_list order, de-duplicated on model_name (LiteLLM allows several deployments under
 one name; a consumer lists the name once). A selected model_name must round-trip as a plain YAML
 scalar string — yaml.safe_load(name) is the same str, and the rendered `- id: <name>` row parses
@@ -176,6 +197,10 @@ def config_checksum(text: str) -> str:
 class Model:
     name: str
     vision: bool
+    # True when the route is offered to dsh but kept OUT of Open WebUI's Local group. It is not
+    # part of a row's identity: `_describe` ignores it, so a seed file (which cannot express the
+    # flag) still compares equal to the derived list.
+    dsh_only: bool = False
 
 
 def _private_host(host: str) -> bool:
@@ -187,34 +212,58 @@ def _private_host(host: str) -> bool:
     return any(addr in net for net in PRIVATE_V4)
 
 
-def consumer_visible(entry: dict) -> bool:
-    """The selection rule, over one model_list entry (see the module docstring).
+def _bool_opt(entry: dict, info, key: str) -> bool:
+    """One of the boolean opt keys (`hidden`, `dsh_only`), validated before any filter reads it.
 
-    Raises SourceError for a `model_info.hidden` that is not a YAML boolean, on EVERY entry that
-    carries model_info and before the other filters look at it: the opt-out must never fail open
-    because of a quoted "true" or a 1, and its type rule must not depend on which entry it is on.
+    Raises SourceError when the key is present but is not a YAML boolean, on EVERY entry that
+    carries model_info: an opt key must never fail open because of a quoted "true" or a 1, and its
+    type rule must not depend on which entry it is on or on which filter would have excluded it.
+    """
+    if isinstance(info, dict) and key in info and not isinstance(info[key], bool):
+        raise SourceError(
+            f"{LITELLM_REL}: model_list entry {entry.get('model_name')!r}: model_info.{key} must be "
+            f"a YAML boolean (true/false), got {info[key]!r}"
+        )
+    return isinstance(info, dict) and info.get(key) is True
+
+
+def _select(entry: dict) -> tuple[bool, bool, bool]:
+    """(eligible, private_base, dsh_only) for one model_list entry — see the module docstring.
+
+    `eligible` folds the two rules both consumers share (not opted out, and a chat route);
+    `private_base` and `dsh_only` are what the per-consumer rules then combine differently.
     """
     info = entry.get("model_info") or {}
-    if isinstance(info, dict) and "hidden" in info and not isinstance(info["hidden"], bool):
+    hidden = _bool_opt(entry, info, "hidden")
+    dsh_only = _bool_opt(entry, info, "dsh_only")
+    if hidden and dsh_only:
         raise SourceError(
-            f"{LITELLM_REL}: model_list entry {entry.get('model_name')!r}: model_info.hidden must be "
-            f"a YAML boolean (true/false), got {info['hidden']!r}"
+            f"{LITELLM_REL}: model_list entry {entry.get('model_name')!r}: model_info.hidden and "
+            f"model_info.dsh_only are contradictory — hidden withdraws the route from dsh, dsh_only "
+            f"offers it there. Set at most one."
         )
     params = entry.get("litellm_params") or {}
     api_base = params.get("api_base") if isinstance(params, dict) else None
-    if not isinstance(api_base, str) or not api_base:
-        return False
-    host = urlsplit(api_base).hostname
-    if not host or not _private_host(host):
-        return False
-    if not isinstance(info, dict):
-        return True
-    mode = info.get("mode")
+    host = urlsplit(api_base).hostname if isinstance(api_base, str) and api_base else None
+    private_base = bool(host) and _private_host(host)
+    if hidden:
+        return False, private_base, dsh_only
+    mode = info.get("mode") if isinstance(info, dict) else None
     if mode is not None and mode != "chat":
-        return False
-    if info.get("hidden") is True:
-        return False
-    return True
+        return False, private_base, dsh_only
+    return True, private_base, dsh_only
+
+
+def consumer_visible(entry: dict) -> bool:
+    """The Open WebUI Local-group rule: an eligible SELF-HOSTED route, not held back for dsh."""
+    eligible, private_base, dsh_only = _select(entry)
+    return eligible and private_base and not dsh_only
+
+
+def dsh_visible(entry: dict) -> bool:
+    """The dsh rule: an eligible route that is either self-hosted or explicitly offered to dsh."""
+    eligible, private_base, dsh_only = _select(entry)
+    return eligible and (private_base or dsh_only)
 
 
 def check_model_name(name: str) -> None:
@@ -255,7 +304,9 @@ def models_from_config(config_text: str) -> list[Model]:
     for i, entry in enumerate(model_list):
         if not isinstance(entry, dict) or not isinstance(entry.get("model_name"), str):
             raise SourceError(f"{LITELLM_REL}: model_list[{i}] has no string model_name")
-        if not consumer_visible(entry):
+        # dsh takes a superset of Open WebUI's Local group, so selecting on the wider rule and
+        # recording which consumer each row is for keeps ONE pass and ONE de-duplication.
+        if not dsh_visible(entry):
             continue
         name = entry["model_name"]
         check_model_name(name)
@@ -263,10 +314,23 @@ def models_from_config(config_text: str) -> list[Model]:
             continue
         seen.add(name)
         info = entry.get("model_info") or {}
-        out.append(Model(name=name, vision=isinstance(info, dict) and info.get("supports_vision") is True))
+        out.append(
+            Model(
+                name=name,
+                vision=isinstance(info, dict) and info.get("supports_vision") is True,
+                dsh_only=not consumer_visible(entry),
+            )
+        )
     if not out:
         raise SourceError(
             f"{LITELLM_REL}: no consumer-visible route in model_list; refusing to render empty consumer lists"
+        )
+    # Checked separately from `out`: a config whose every self-hosted route became dsh_only would
+    # leave Open WebUI's Local group empty, which is the same failure the guard above exists to stop.
+    if not any(not m.dsh_only for m in out):
+        raise SourceError(
+            f"{LITELLM_REL}: every selected route is model_info.dsh_only; refusing to render an empty "
+            f"Open WebUI Local group"
         )
     return out
 
@@ -513,7 +577,7 @@ def render_all(repo: Path) -> tuple[list[Model], list[Span]]:
     litellm_text = _read(repo / LITELLM_REL)
     models = models_from_config(litellm_config_text(litellm_text))
     spans = [
-        render_open_webui(_read(repo / OPEN_WEBUI_REL), models),
+        render_open_webui(_read(repo / OPEN_WEBUI_REL), [m for m in models if not m.dsh_only]),
         render_seed(_read(repo / SEED_REL), models),
         render_litellm(litellm_text),
     ]
