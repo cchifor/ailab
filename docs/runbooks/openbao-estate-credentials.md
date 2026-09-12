@@ -5,7 +5,7 @@ runner registration, the GitHub App key — escrowed in OpenBao under a **seed-w
 contract: the same one the dev-worker subtree uses, and **not** the one the AgentForge `operator/*`
 paths use (those are create-if-absent — the live vault wins there; canonical side-by-side in
 `docs/runbooks/openbao-recovery.md` § "The seed-ownership contract").
-Backfilled 2026-08-31 from the full credential audit.
+Backfilled 2026-08-31 from the full credential audit; `strive-realm` added 2026-09-12.
 The vault itself: `docs/runbooks/openbao-recovery.md`. The dev-worker consumption plane (which does
 NOT read these paths): `docs/runbooks/openbao-dev-workers.md`.
 
@@ -27,6 +27,14 @@ Deliberately **not** mirrored here:
   (ADR 0019; `openbao-recovery.md` path classes).
 - **The unseal key and the breakglass token** — they cannot live inside the vault they open.
 
+> **The one named exception (2026-09-12): `keycloak_admin_password`.** It *is* a Flux+SOPS
+> Secret — in the **platform** repo (`deploy/secrets/ailab/`), not this one — and it was
+> escrowed anyway, on an explicit operator decision: break-glass reach into the `strive` realm
+> without needing the platform repo's age key. It therefore has exactly the second home the first
+> bullet above exists to prevent, and the split-brain is real, not theoretical: seed-wins means
+> rotating it in the platform SOPS file alone is reverted by this Job within a day. Rotate both
+> or neither. Nothing else on this page is a Flux+SOPS mirror.
+
 ## Layout
 
 Mount `af` (KV v2), prefix `estate/`, one path per system:
@@ -42,6 +50,7 @@ Mount `af` (KV v2), prefix `estate/`, one path per system:
 | `af/estate/restic` | `nextcloud_password` | `~/work/keys/nextcloud-restic-password.txt` | that file only — it was in **no** SOPS file anywhere (ADR 0021 Step 0) |
 | `af/estate/platform` | `hatchet_encryption_master_keyset`, `hatchet_jwt_public_keyset`, `hatchet_jwt_private_keyset`, `hatchet_client_token`, `sendgrid_key` | `~/work/keys/platform.env` | that file only. **NOT** the OpenAI/Anthropic keys in the same file — see the rejected list below |
 | `af/estate/oauth` | `gcloud_client_id`, `gcloud_client_secret`, `github_client_id`, `github_client_secret` | `~/work/keys.txt` | that file only |
+| `af/estate/strive-realm` | `keycloak_admin_user`, `keycloak_admin_password`, `e2e_worker_usernames`, `e2e_worker_password`, `load_persona_username`, `load_persona_password` | live cluster Secrets in ns `strive-ailab`: `keycloak-secrets/admin-password`, `e2e-secrets/worker-password`, `load-secrets/persona-password` | **the two persona passwords: nowhere else at all** — `e2e-secrets` and `load-secrets` are hand-created (no Flux labels, no owner, in no git repo); **`keycloak_admin_password`: a SECOND home** — the platform repo's `deploy/secrets/ailab/keycloak-secrets.enc.yaml` (Flux SOPS → the live `keycloak-secrets`), so rotation must touch that file AND this seed in the same change |
 
 **Verified-and-REJECTED candidates (2026-09-10, ADR 0021).** Every `*.sops.yaml` in the repo (57
 files) was decrypted and value-hashed before anything was seeded. Three candidates that *looked*

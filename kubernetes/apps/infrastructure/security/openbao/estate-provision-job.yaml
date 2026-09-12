@@ -9,6 +9,17 @@
 # Secrets under kubernetes/apps/**) deliberately do NOT get mirrored here — Flux+SOPS is their
 # system of record and a second home would add rotation split-brains, not remove them.
 #
+# strive-realm is a deliberate, documented EXCEPTION to that last sentence, and only in part.
+# Its e2e/load persona passwords were hand-created Secrets in ns strive-ailab with no git home
+# at all (the platform repo's deploy/components/e2e/kustomization.yaml offers SOPS "or seed it
+# directly", and directly is what happened), so they are squarely in scope. Its
+# keycloak_admin_password is NOT: that one also lives in the platform repo's
+# deploy/secrets/ailab/keycloak-secrets.enc.yaml, and escrowing it was an explicit operator
+# decision (break-glass reach into the realm without the platform repo's age key) that buys a
+# SECOND home. Rotating it must touch the platform SOPS file AND this seed in the same change,
+# or seed-wins reverts it within a day. Recorded in the runbook's multi-home table so the cost
+# is visible at rotation time.
+#
 # ACCESS: nothing is granted read on af/estate/* — not the dev-worker AppRoles, not any ESO
 # SecretStore. The only readers are root-level tokens (breakglass) via the operator ceremonies in
 # the runbook. Widening access is a deliberate future decision, not a default.
@@ -76,7 +87,10 @@ data:
       platform:hatchet_encryption_master_keyset platform:hatchet_jwt_public_keyset \
       platform:hatchet_jwt_private_keyset platform:hatchet_client_token platform:sendgrid_key \
       oauth:gcloud_client_id oauth:gcloud_client_secret \
-      oauth:github_client_id oauth:github_client_secret"
+      oauth:github_client_id oauth:github_client_secret \
+      strive-realm:keycloak_admin_user strive-realm:keycloak_admin_password \
+      strive-realm:e2e_worker_usernames strive-realm:e2e_worker_password \
+      strive-realm:load_persona_username strive-realm:load_persona_password"
 
     # PASS 1 — the SEED must contain every matrix field, non-empty. This is NOT redundant with pass
     # 2: pass 2 probes LIVE KV after seeding, so a stale live value happily masks a seed that never
