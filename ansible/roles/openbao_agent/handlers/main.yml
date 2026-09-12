@@ -1,0 +1,11 @@
+---
+# Deliberately EMPTY. This role is imported by more than one consumer role, and dev-workers.yml
+# applies BOTH of them (pr_reviewer under `when: pr_reviewer_enabled`, false on every worker).
+# Handlers defined here would be registered once per import, name-collide, and the LAST copy —
+# the reviewer's, carrying that false `when` — would be the one a worker's notify resolves to, so
+# it would be skipped and the agent would restart onto nothing (the stale-process health check
+# then rolls the host back). So the tasks in this role notify TOPICS instead
+# (`openbao-agent: ca changed` / `unit changed` / `config changed`), and every consumer declares
+# its own uniquely named handlers that `listen` to them (dev_worker/handlers/main.yml,
+# pr_reviewer/handlers/main.yml). A consumer's handler set is unconditional at role level, so a
+# worker's copy is never shadowed by the reviewer's.

@@ -24,12 +24,16 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROLE="$HERE/.."
+# The host-agnostic half of the agent (unit, group/user, bao install) lives in the shared
+# openbao_agent role since 2026-09-12; the wiring checks below read both roles.
+AGENT_ROLE="$ROLE/../openbao_agent"
 CRED="$ROLE/files/cred"
 HCL="$ROLE/templates/openbao-agent.hcl.j2"
-UNIT="$ROLE/templates/openbao-agent.service.j2"
+UNIT="$AGENT_ROLE/templates/openbao-agent.service.j2"
 CTMPL="$ROLE/templates/git-credentials.ctmpl.j2"
 TASKS="$ROLE/tasks/openbao.yml"
-for f in "$CRED" "$HCL" "$UNIT" "$CTMPL" "$TASKS"; do
+AGENT_TASKS="$AGENT_ROLE/tasks/main.yml"
+for f in "$CRED" "$HCL" "$UNIT" "$CTMPL" "$TASKS" "$AGENT_TASKS"; do
   [ -r "$f" ] || { echo "FATAL: cannot read $f"; exit 2; }
 done
 
@@ -233,10 +237,16 @@ if [ -z "$unit_group" ]; then
 else
   # The group is the entire access mechanism, so the unit, the ansible group creation, the
   # membership loop and the helper's error message all have to name the same one.
-  if grep -q "name: $unit_group" "$TASKS" && grep -q "groups: $unit_group" "$TASKS"; then
-    ok "D3a: openbao.yml creates '$unit_group' and adds the dev-worker users to it"
+  if grep -q "name: $unit_group" "$AGENT_TASKS" && grep -q "groups: $unit_group" "$AGENT_TASKS"; then
+    ok "D3a: openbao_agent creates '$unit_group' and adds the sink readers to it"
   else
-    bad "D3a: openbao.yml does not both create '$unit_group' and add the users to it"
+    bad "D3a: openbao_agent does not both create '$unit_group' and add the sink readers to it"
+  fi
+  # ...and dev_worker actually hands its users over as those readers (an empty list = no cred).
+  if grep -q "openbao_agent_sink_readers:.*dev_worker_users" "$TASKS"; then
+    ok "D3c: openbao.yml passes the dev-worker users as the sink readers"
+  else
+    bad "D3c: openbao.yml does not pass dev_worker_users as openbao_agent_sink_readers"
   fi
   if grep -q "$unit_group group" "$CRED"; then
     ok "D3b: cred's permission error names the '$unit_group' group"
@@ -246,9 +256,9 @@ else
 fi
 
 unit_bin="$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$UNIT" | head -1)"
-task_bin_dir="$(grep -A6 'Install the bao CLI' "$TASKS" | sed -n 's/^[[:space:]]*dest:[[:space:]]*\(.*\)$/\1/p' | head -1)"
+task_bin_dir="$(grep -A6 'Install the bao CLI' "$AGENT_TASKS" | sed -n 's/^[[:space:]]*dest:[[:space:]]*\(.*\)$/\1/p' | head -1)"
 if [ -z "$task_bin_dir" ]; then
-  bad "D4: openbao.yml has no 'Install the bao CLI' task with a dest — the unit's binary is never installed"
+  bad "D4: openbao_agent has no 'Install the bao CLI' task with a dest — the unit's binary is never installed"
 else
   assert_eq "$(dirname "$unit_bin")" "$task_bin_dir" "D4: the unit runs the bao the role actually installs"
 fi

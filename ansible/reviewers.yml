@@ -1,8 +1,10 @@
 # Dedicated PR-reviewer VMs (reviewer-1 = claude persona, reviewer-2 = codex persona).
 # Deliberately minimal compared to dev-workers: no docker, no tmux dashboard, no toolchains -
-# just node (for the LLM CLIs), node_exporter, ufw, and the pr_reviewer role. LLM CLI auth
-# (~/.claude, ~/.codex) is seeded ONCE from the previous reviewer hosts (subscription OAuth;
-# see docs/runbooks/dev-workers.md § reviewers) and is NOT ansible-managed.
+# just node (for the LLM CLIs), node_exporter, ufw, and the pr_reviewer role. Claude auth
+# (~/.claude) is seeded ONCE from the previous reviewer hosts (subscription OAuth; see
+# docs/runbooks/dev-workers.md § reviewers) and is NOT ansible-managed. Codex auth is: the
+# pr_reviewer role's bao agent renders the isolated user's ~/.codex/auth.json from the estate's
+# one shared login (pr_reviewer_enable_openbao; docs/runbooks/openbao-dev-workers.md).
 #   ansible-playbook reviewers.yml           # provision/refresh both
 - name: Configure PR-reviewer VMs
   hosts: reviewers

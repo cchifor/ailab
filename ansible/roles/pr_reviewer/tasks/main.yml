@@ -13,6 +13,7 @@
   become: false
   run_once: true
   register: reviewbot_secrets_stat
+  tags: [openbao] # the tag-limited credential rollout (-t openbao) needs the AppRole pair from this file
 
 - name: Load reviewbot secrets (SOPS)
   community.sops.load_vars:
@@ -21,6 +22,7 @@
   become: false
   run_once: true
   when: reviewbot_secrets_stat.stat.exists
+  tags: [openbao]
 
 - name: Resolve this persona's secrets
   ansible.builtin.set_fact:
@@ -98,6 +100,18 @@
     mode: "0440"
     validate: visudo -cf %s
   when: pr_reviewer_llm_sudo_user | length > 0
+
+# The shared codex login, rendered by the bao agent (tasks/openbao.yml). Sits AFTER the isolated
+# user + its ~/.codex exist and BEFORE reviewbot starts, so the first review after a rollout runs
+# on the rendered token. import_tasks so the `when` here gates every task inside, tag `openbao` so
+# the credential plumbing can be rolled on its own (ansible-playbook reviewers.yml -t openbao).
+- name: OpenBao-rendered codex login (bao agent — ADR 0020)
+  ansible.builtin.import_tasks: openbao.yml
+  when:
+    - pr_reviewer_enable_openbao | bool
+    - pr_reviewer_llm_kind == "codex"
+    - pr_reviewer_llm_sudo_user | length > 0
+  tags: [openbao]
 
 - name: Install reviewbot.py
   ansible.builtin.copy:

@@ -1,0 +1,190 @@
+---
+# The host-agnostic install of the bao agent (ADR 0020): everything a host needs BEFORE it can say
+# what to render. Verbatim moves from dev_worker/tasks/openbao.yml (2026-09-12, when the reviewer
+# VMs started rendering the shared codex login and needed the same agent); the consumer-specific
+# parts — agent.hcl, the .ctmpl files, start, the health check + rollback — stayed with dev_worker
+# and were written fresh (smaller) for pr_reviewer. Handlers too: this role notifies topics and each
+# consumer listens with its own handlers (see handlers/main.yml here for why).
+
+# Fails the play rather than deploying an agent that cannot log in: an empty secret-id would leave
+# openbao-agent crash-looping and every rendered credential unwritten. no_log is deliberately NOT
+# set — assert reports the expressions, never the values.
+- name: Assert this host has AppRole credentials and a pinned bao checksum
+  ansible.builtin.assert:
+    that:
+      - openbao_agent_role_id | length > 0
+      - openbao_agent_secret_id | length > 0
+      - openbao_agent_sha256 | length == 64
+    fail_msg: >-
+      openbao_agent_role_id + openbao_agent_secret_id must be non-empty for {{ inventory_hostname }}
+      (mint them: docs/runbooks/openbao-dev-workers.md (e)) and openbao_agent_sha256 must be the
+      64-hex-char sha256 of the pinned bao release.
+
+# The estate's private CA (CN=ailab-root-ca) signs openbao-tls. Installed into the system store so
+# `bao`, curl and anything else on the box trust the LAN endpoint; the agent also pins this exact
+# file (agent.hcl ca_cert).
+- name: Install the ailab root CA
+  ansible.builtin.copy:
+    src: ailab-root-ca.crt
+    dest: /usr/local/share/ca-certificates/ailab-root-ca.crt
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - "openbao-agent: ca changed"
+    - "openbao-agent: config changed"
+
+# openbao.lan.chifor.me is a cluster-internal name with no public DNS record, and the hosts resolve
+# through the LAN resolver cloud-init gave them, so it is pinned host-side. All three control-plane
+# node IPs: the Go dialer walks the resolved addresses in turn, so a node that is down or drained
+# costs a connect retry instead of the credential path.
+#
+# Pinned in TWO files. The Proxmox cloud-init user-data carries `manage_etc_hosts: true`, so cloud-init
+# REWRITES /etc/hosts from /etc/cloud/templates/hosts.debian.tmpl on EVERY boot (cc_update_etc_hosts is a
+# per-boot module) and a block written only to /etc/hosts vanishes at the next reboot — which is exactly
+# how all six workers lost OpenBao on 2026-09-11 (agent: `lookup openbao.lan.chifor.me: no such host`,
+# `cred` dead, credential templates unrenderable). User-data outranks cloud.cfg.d, so the setting can't
+# be turned off from the host; the template is the one place cloud-init itself reads, so the block in it
+# survives reboots, and the /etc/hosts block makes the pin live NOW without waiting for one.
+- name: Pin the openbao-lan NodePort name in /etc/hosts (live now)
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED - openbao-lan"
+    block: |
+      {% for row in openbao_agent_hosts_entries %}
+      {{ row }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Pin the openbao-lan NodePort name in the cloud-init hosts template (survives reboots)
+  ansible.builtin.blockinfile:
+    path: /etc/cloud/templates/hosts.debian.tmpl
+    marker: "# {mark} ANSIBLE MANAGED - openbao-lan"
+    block: |
+      {% for row in openbao_agent_hosts_entries %}
+      {{ row }}
+      {% endfor %}
+    create: false # the Ubuntu cloud image ships it; a host without cloud-init is not one of ours
+    owner: root
+    group: root
+    mode: "0644"
+
+# Tarball, not the .deb: the release's openbao_*.deb is the SERVER package (its own openbao user,
+# config dir and unit), and a host needs only the CLI/agent binary. Same shape as helm/k9s in
+# dev_worker's k8s_tools.yml, with the checksum verification those two lack — the download is kept
+# under /usr/local/src so get_url re-verifies the local file instead of re-fetching ~70 MB every run.
+- name: Fetch the pinned bao release tarball
+  ansible.builtin.get_url:
+    url: "https://github.com/openbao/openbao/releases/download/v{{ openbao_agent_version }}/bao_{{ openbao_agent_version }}_Linux_x86_64.tar.gz"
+    dest: "/usr/local/src/bao_{{ openbao_agent_version }}_Linux_x86_64.tar.gz"
+    checksum: "sha256:{{ openbao_agent_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+# extra_opts selects the one member worth installing — the tarball also carries CHANGELOG.md,
+# LICENSE and README.md, which do not belong in /usr/local/bin.
+- name: Install the bao CLI to /usr/local/bin
+  ansible.builtin.unarchive:
+    src: "/usr/local/src/bao_{{ openbao_agent_version }}_Linux_x86_64.tar.gz"
+    dest: /usr/local/bin
+    remote_src: true
+    extra_opts: [bao]
+    owner: root
+    group: root
+    mode: "0755"
+    creates: "/usr/local/bin/.bao-{{ openbao_agent_version }}"
+  notify: "openbao-agent: config changed"
+
+- name: Mark the installed bao version
+  ansible.builtin.copy:
+    content: "{{ openbao_agent_version }}\n"
+    dest: "/usr/local/bin/.bao-{{ openbao_agent_version }}"
+    mode: "0644"
+    force: false
+
+# The group is the access boundary for the sink token: the agent runs with it as its egid
+# (openbao-agent.service Group=), and the cred helper needs a reader on the other side.
+- name: Create the openbao-agent group
+  ansible.builtin.group:
+    name: openbao-agent
+    system: true
+
+- name: Create the openbao-agent system user
+  ansible.builtin.user:
+    name: openbao-agent
+    group: openbao-agent
+    system: true
+    home: /etc/openbao-agent
+    create_home: false
+    shell: /usr/sbin/nologin
+
+# A process inherits its group set at login, so a shell (or tmux session) that was already open when
+# this ran still cannot read the sink — the cred helper's error says so, and a re-login fixes it.
+- name: Add the sink readers to the openbao-agent group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: openbao-agent
+    append: true
+  loop: "{{ openbao_agent_sink_readers }}"
+
+# 0750 root:openbao-agent — the agent (root) writes it, nothing else needs to look inside. The sink
+# directory /run/openbao-agent is NOT created here: systemd owns it via RuntimeDirectory= (tmpfs,
+# recreated on every start), which is also what gives it the right group.
+- name: Ensure /etc/openbao-agent exists
+  ansible.builtin.file:
+    path: /etc/openbao-agent
+    state: directory
+    owner: root
+    group: openbao-agent
+    mode: "0750"
+
+# The role-id is an identifier, not a credential (a login needs the secret-id too), so it may be
+# group-readable; the secret-id is root-only. Both are durable per-VM files: the agent has to be
+# able to log in again after a reboot with nothing re-delivering them (ADR 0020).
+- name: Install the AppRole role-id
+  ansible.builtin.copy:
+    content: "{{ openbao_agent_role_id }}\n"
+    dest: /etc/openbao-agent/role-id
+    owner: root
+    group: openbao-agent
+    mode: "0640"
+  no_log: true
+  notify: "openbao-agent: config changed"
+
+- name: Install the AppRole secret-id
+  ansible.builtin.copy:
+    content: "{{ openbao_agent_secret_id }}\n"
+    dest: /etc/openbao-agent/secret-id
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: "openbao-agent: config changed"
+
+- name: Install the openbao-agent systemd unit
+  ansible.builtin.template:
+    src: openbao-agent.service.j2
+    dest: /etc/systemd/system/openbao-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - "openbao-agent: unit changed"
+    - "openbao-agent: config changed"
+
+# ONE codex login for the estate (2026-09-12): every consumer renders ~/.codex/auth.json for its
+# users from af/dev-workers/codex-auth — the refresh-token-free projection the af-codex-refresh
+# CronJob publishes after each rotation — so a host can use the token but never rotate it; the
+# CronJob is the only refresher and hosts cannot even read the oauth document. Host-agnostic, so it
+# lives here; the consumer's agent.hcl says which users get a render.
+- name: Lay down the codex auth render template
+  ansible.builtin.copy:
+    src: codex-auth.ctmpl
+    dest: /etc/openbao-agent/codex-auth.ctmpl
+    owner: root
+    group: openbao-agent
+    mode: "0640"
+  notify: "openbao-agent: config changed"

@@ -14,7 +14,16 @@ creation_rules:
   # Reviewbot secrets (PR review bots — ansible/roles/pr_reviewer). Same reason as dev-worker
   # above — MUST precede the generic ansible/secrets rule.
   - path_regex: ansible[/\\]secrets[/\\]reviewbot\.sops\.ya?ml$
-    encrypted_regex: ^(reviewbot_[a-z0-9]+_pat|reviewbot_[a-z0-9]+_webhook_secret)$
+    # reviewbot_openbao_credentials (+ its role_id/secret_id leaves, belt-and-braces exactly as the
+    # dev-worker rule above explains): the reviewer VMs' AppRole pairs for the bao agent that renders
+    # the shared codex login (roles/pr_reviewer/tasks/openbao.yml). Added 2026-09-12 BEFORE the key
+    # exists, so no checkout can ever encrypt that file with a rule that leaves the pair plaintext.
+    # NB: an EXISTING encrypted file carries its own `sops.encrypted_regex` in its metadata and
+    # `sops edit` keeps THAT, not this rule — so adding the key to the already-encrypted
+    # reviewbot.sops.yaml must go through a decrypt + fresh `sops -e` WITH `--filename-override`
+    # naming this path (rules match the input file's path; a temp file matches none) — recipe in
+    # docs/runbooks/openbao-dev-workers.md (e) — and `git diff` must show only ENC[...] leaves.
+    encrypted_regex: ^(reviewbot_[a-z0-9]+_pat|reviewbot_[a-z0-9]+_webhook_secret|reviewbot_openbao_credentials|role_id|secret_id)$
     age: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
   # Registry secrets. Same reason as dev-worker above — MUST precede the generic ansible/secrets rule
   # (which would otherwise encrypt only github_app_private_key and leave these two keys plaintext).

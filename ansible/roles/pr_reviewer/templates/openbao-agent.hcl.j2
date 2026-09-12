@@ -1,0 +1,42 @@
+// Managed by ansible (role: pr_reviewer). bao agent: AppRole auto-auth -> PERIODIC token (no
+// max-TTL cliff — see dev_worker's agent.hcl for the 2026-08-25 lesson), a sink for the agent's
+// own renewal, and ONE template: the shared codex login for the isolated LLM user.
+vault {
+  address = "{{ openbao_agent_addr }}"
+  ca_cert = "/usr/local/share/ca-certificates/ailab-root-ca.crt"
+}
+
+auto_auth {
+  method "approle" {
+    config = {
+      role_id_file_path   = "/etc/openbao-agent/role-id"
+      secret_id_file_path = "/etc/openbao-agent/secret-id"
+      // The secret-id has to survive reboots — nothing re-delivers it (ADR 0020).
+      remove_secret_id_file_after_reading = false
+    }
+  }
+  // Nobody reads this sink on a reviewer (no `cred` here); the agent needs a sink to run at all.
+  sink "file" {
+    config = {
+      path = "/run/openbao-agent/token"
+      mode = 0640
+    }
+  }
+}
+
+template_config {
+  // An unreachable or sealed vault makes the agent EXIT rather than leave a half-rendered or stale
+  // credential file in place; systemd (Restart=always) then retries until the vault answers.
+  exit_on_retry_failure = true
+}
+
+// The shared codex login — ACCESS-TOKEN-ONLY (codex-auth.ctmpl reads the refresh-token-free
+// projection, so this host can never rotate the estate's one login). Rendered by root, handed to
+// the LLM user.
+template {
+  source      = "/etc/openbao-agent/codex-auth.ctmpl"
+  destination = "/home/{{ pr_reviewer_llm_sudo_user }}/.codex/auth.json"
+  perms       = "0600"
+  command     = "chown {{ pr_reviewer_llm_sudo_user }}:{{ pr_reviewer_llm_sudo_user }} /home/{{ pr_reviewer_llm_sudo_user }}/.codex/auth.json"
+  error_on_missing_key = true
+}

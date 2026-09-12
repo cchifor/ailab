@@ -135,3 +135,11 @@ pr_reviewer_assert_hook_config: true
 # Falls back to '' (not the reviewer PAT) so a missing credential fails the readable-check
 # loudly instead of silently 403ing under a token that was never going to work.
 pr_reviewer_hook_check_token: "{{ lookup('vars', 'reviewbot_hookcheck_pat', default='') }}"
+
+# ---- OpenBao-rendered codex login (ADR 0020; opt-in until the reviewer AppRole exists) ----
+# When true on the codex persona, the bao agent renders /home/<llm_sudo_user>/.codex/auth.json
+# from the af/dev-workers/codex-auth projection in OpenBao (refresh_token stripped server-side —
+# see roles/openbao_agent/files/codex-auth.ctmpl) instead of the file being seeded by hand. Needs the
+# reviewer-N AppRole (devworker-provision-job.yaml) and its minted secret-id in reviewbot.sops.yaml
+# under reviewbot_openbao_credentials.<inventory_hostname>.{role_id,secret_id}.
+pr_reviewer_enable_openbao: false
