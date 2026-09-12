@@ -63,7 +63,7 @@ data:
 
     # ONE codex login for the whole estate (2026-09-12). The Codex Pro OAuth document the broker uses
     # (af/operator/broker/openai/codex-pro/oauth) is rotated by the af-codex-refresh CronJob, and that
-    # CronJob also PUBLISHES a host projection of it — af/dev-workers/codex-auth: access + id token +
+    # CronJob also PUBLISHES a host projection of it — af/dev-workers/codex-auth (field auth_json): access + id token +
     # account_id, refresh_token replaced by "" — which is what every dev worker and reviewer VM
     # renders its ~/.codex/auth.json from. Hosts get `read` on the PROJECTION and nothing on the oauth
     # document: OpenAI refresh tokens are single-use, so a host that could fetch the refresh_token

@@ -14,8 +14,8 @@
 #      reads METADATA only; it treats record.credential_version != current KV version as
 #      UNKNOWN/PENDING, so the stamp always names the exact version it describes.
 #   6. PUBLISH the host projection: a second k8s-auth login (same SA, role codex-hosts-publisher —
-#      devworker-provision-job.yaml) writes af/dev-workers/codex-auth = the current auth.json with
-#      the refresh_token replaced by "" (access + id token + account_id only). That document, and
+#      devworker-provision-job.yaml) writes af/dev-workers/codex-auth (field auth_json) = the current
+#      auth.json with the refresh_token replaced by "" (access + id token + account_id only). That document, and
 #      NOT the oauth one, is what every dev worker and reviewer VM's bao agent renders ~/.codex/
 #      auth.json from — so no host token can ever fetch the refresh_token and rotate the family
 #      behind this CronJob's back. Written on both arms (rotated AND fresh), skipped when identical,
@@ -66,6 +66,11 @@ data:
     # narrow policies rather than one wide one.
     HOSTS_ROLE = "codex-hosts-publisher"
     HOSTS_KEY = "dev-workers/codex-auth"
+    # The projection's field is `auth_json`, NOT the oauth document's `auth.json`: a consul-template
+    # can only reach a dotted key through `index`, and `index` renders "<no value>" for a missing key
+    # instead of honouring error_on_missing_key — a dot-free name lets the hosts' template use plain
+    # `.Data.data.auth_json`, which fails closed (verified against bao 2.5.5, 2026-09-12).
+    HOSTS_FIELD = "auth_json"
     KV_MOUNT = "af"
     KV_KEY = "operator/broker/openai/codex-pro/oauth"
     # NB: the KV field is `auth.json` — it MUST match the broker-openai-codex-oauth ExternalSecret's
@@ -189,7 +194,7 @@ data:
         token = login["auth"]["client_token"]
         projection = _host_projection(json.loads(auth_text))
         try:
-            stored = _api("GET", f"{KV_MOUNT}/data/{HOSTS_KEY}", token=token)["data"]["data"].get(FIELD)
+            stored = _api("GET", f"{KV_MOUNT}/data/{HOSTS_KEY}", token=token)["data"]["data"].get(HOSTS_FIELD)
         except urllib.error.HTTPError as exc:
             if exc.code != 404:
                 raise
@@ -197,7 +202,7 @@ data:
         if stored == projection:
             print("host projection unchanged; not rewritten")
             return
-        _api("POST", f"{KV_MOUNT}/data/{HOSTS_KEY}", token=token, body={"data": {FIELD: projection}})
+        _api("POST", f"{KV_MOUNT}/data/{HOSTS_KEY}", token=token, body={"data": {HOSTS_FIELD: projection}})
         print(f"host projection published to {KV_MOUNT}/{HOSTS_KEY}")
 
 
