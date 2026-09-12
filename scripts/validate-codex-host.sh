@@ -23,11 +23,14 @@ if [ ! -s "$f" ]; then echo "$h FAIL user=$u no $f"; exit 1; fi
 
 auth=$(python3 - "$f" <<'PY'
 import base64, json, sys, time
-d = json.load(open(sys.argv[1])); t = d["tokens"]
+d = json.load(open(sys.argv[1])); t = d.get("tokens") or {}
+if not t.get("access_token"):
+    # `codex login --with-api-key` shape: no ChatGPT tokens at all, just OPENAI_API_KEY.
+    print("API-KEY(not the shared login)" if d.get("OPENAI_API_KEY") else "UNKNOWN-SHAPE"); sys.exit(0)
 p = t["access_token"].split(".")[1]; p += "=" * (-len(p) % 4)
 left = (json.loads(base64.urlsafe_b64decode(p))["exp"] - time.time()) / 86400
 kind = "projection(no-refresh-token)" if t.get("refresh_token", "") == "" else "HAS-REFRESH-TOKEN(hand-copied)"
-print(f"{kind} access_token_left={left:.1f}d")
+print(f"{kind} access_token_left={left:.1f}d last_refresh={str(d.get('last_refresh',''))[:10]}")
 PY
 ) || { echo "$h FAIL user=$u unreadable $f"; exit 1; }
 
