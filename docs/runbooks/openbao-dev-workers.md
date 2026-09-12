@@ -495,14 +495,17 @@ A host holding only the access token cannot cause that.
 **Re-seeding after a revocation** (the only time a browser is involved — once, on any box):
 
 ```bash
-# 1. a THROWAWAY codex home, so the real ~/.codex never holds a refresh token
-CODEX_HOME=$(mktemp -d) codex login --device-auth      # prints a URL + one-time code; finish in a browser
+# 1. a THROWAWAY codex home, so the real ~/.codex never holds a refresh token. The temp dir lives in
+#    its OWN variable: `CODEX_HOME=... cmd` scopes the assignment to that one command, so reusing
+#    $CODEX_HOME below would read (and `rm -rf`!) whatever the shell already had — possibly ~/.codex.
+SEED=$(mktemp -d)
+CODEX_HOME="$SEED" codex login --device-auth      # prints a URL + one-time code; finish in a browser
 # 2. CAS-write it as the af-codex-refresher role (k8s-auth; that role can write exactly this path)
 JWT=$(kubectl --context admin@ai -n agentforge-broker create token af-codex-refresher --duration=10m)
 T=$(bao write -field=token auth/kubernetes/login role=af-codex-refresher jwt="$JWT")
 VER=$(BAO_TOKEN="$T" bao kv metadata get -format=json af/operator/broker/openai/codex-pro/oauth | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["current_version"])')
-BAO_TOKEN="$T" bao kv put -cas="$VER" af/operator/broker/openai/codex-pro/oauth auth.json=@"$CODEX_HOME/auth.json"
-rm -rf "$CODEX_HOME"
+BAO_TOKEN="$T" bao kv put -cas="$VER" af/operator/broker/openai/codex-pro/oauth auth.json=@"$SEED/auth.json"
+rm -rf "$SEED"
 # 3. ESO re-syncs broker-openai-codex-oauth and the broker reloads (~1 min). Kick the CronJob once: it
 #    proves the new family self-refreshes AND publishes the host projection (af/dev-workers/codex-auth),
 #    which is what the hosts re-render from (~5 min) — they do NOT see step 2's write directly:
