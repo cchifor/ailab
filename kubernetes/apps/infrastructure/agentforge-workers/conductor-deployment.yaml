@@ -129,6 +129,29 @@ spec:
             # case, so a differently-capitalised spelling is refused too.
             - name: AF_CONDUCT_FILING_REPOS
               value: "cchifor/ailab"
+            # Which of the filing repos an ESTATE finding is routed to. A separate knob from the
+            # filing SET because which tracker an estate fault belongs in is an operator's decision,
+            # not a consequence of list order — and startup checks it is a MEMBER of the set above,
+            # in that set's spelling, because the write door compares repo names by equality.
+            - name: AF_CONDUCT_ESTATE_REPO
+              value: "cchifor/ailab"
+            # The metrics store the estate lane reads. Every Prometheus-sourced row reads through
+            # this and nothing else, so unset is not a conductor with one sensor missing — it is one
+            # whose entire estate lane answers UNKNOWN for ever, which reads exactly like a healthy
+            # conductor watching a quiet estate. Startup refuses it unset, and refuses a value with
+            # no host (an empty Helm render leaves `http://:9090`, which builds a client that
+            # answers `transport` on every read). The CNP's egress already admits this service.
+            - name: AF_CONDUCT_PROMETHEUS_URL
+              value: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+            # The two repositories the estate lane's GitOps paths resolve against. The PATHS are
+            # enumerated in `conductor/estate_lane.AUTHORIZED_BLOBS` and nowhere else — these name
+            # only which repository those repo-relative paths sit in, which is a deployment fact the
+            # engine must not assume. Both are grammar-checked as owner/repo at startup and threaded
+            # on in their canonical spelling.
+            - name: AF_CONDUCT_AILAB_REPO
+              value: "cchifor/ailab"
+            - name: AF_CONDUCT_TENANTS_REPO
+              value: "cchifor/agentforge-tenants"
             # The probe port. Distinct from AF_METRICS_PORT — see the header.
             - name: AF_CONDUCT_PORT
               value: "8720"
