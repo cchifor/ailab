@@ -2,10 +2,10 @@
 # The shared codex login on a reviewer VM (2026-09-12). The isolated LLM user's ~/.codex/auth.json
 # used to be seeded by hand from another host's copy of the same ChatGPT login — and OpenAI refresh
 # tokens are single-use, so the moment two copies both refreshed, the family was revoked estate-wide
-# (2026-09-03). Now the bao agent renders that file from the broker's OAuth document in OpenBao
-# with the refresh_token stripped: this host can use the token but never rotate it, and picks up the
-# af-codex-refresh CronJob's nightly rotation within the agent's poll interval. No `codex login`
-# here, ever again.
+# (2026-09-03). Now the bao agent renders that file from af/dev-workers/codex-auth — the
+# refresh-token-free projection the af-codex-refresh CronJob publishes after each rotation: this
+# host can use the token but never rotate it (it cannot even read the oauth document), and picks up
+# each rotation within the agent's poll interval. No `codex login` here, ever again.
 #
 # Deliberately smaller than dev_worker's plumbing: no `cred` (nothing else to read — the reviewer
 # AppRole policy is this one document and nothing more), no sink readers, one template. Opt-in via

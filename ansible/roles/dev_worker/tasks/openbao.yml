@@ -170,8 +170,9 @@
   notify: Restart openbao-agent
 
 # ONE codex login for the estate (2026-09-12): every user's ~/.codex/auth.json is rendered from the
-# broker's OAuth document through the shared role's codex-auth.ctmpl (refresh_token stripped, so
-# this host can never rotate the family — the af-codex-refresh CronJob is the only refresher).
+# af/dev-workers/codex-auth projection through the shared role's codex-auth.ctmpl (refresh_token
+# already stripped server-side; this host cannot read the oauth document at all, so it can never
+# rotate the family — the af-codex-refresh CronJob is the only refresher).
 # `codex login` on a worker is therefore never needed again, and would only be overwritten by the
 # next render.
 # The agent creates a missing destination directory itself — as root — and codex needs to write

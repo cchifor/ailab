@@ -53,14 +53,15 @@ Secret.
 
 **KV layout** (mount `af`, KV v2 — the same mount ADR 0019 uses):
 
-- `af/operator/broker/openai/codex-pro/oauth` — **not under `dev-workers/`, and read-only from every
-  worker AND both reviewer VMs** (field `auth.json`, the broker's Codex Pro OAuth document). Since
-  2026-09-12 this is the estate's ONE codex login: the `af-codex-refresh` CronJob rotates it nightly
-  (`kubernetes/apps/infrastructure/agentforge-codex-refresh/`) and every host's bao agent renders
-  `~/.codex/auth.json` from it through `roles/openbao_agent/files/codex-auth.ctmpl`, which
-  **strips the `refresh_token`** — a host can use the token but never rotate it. See
-  § "The shared codex login" below. The grant is `read` on the DATA path only (no metadata, no
-  list): a host cannot see the rotation history or race the CronJob's CAS write.
+- `af/dev-workers/codex-auth` — **read-only from every worker AND both reviewer VMs** (field
+  `auth.json`). The HOST PROJECTION of the estate's ONE codex login: the `af-codex-refresh` CronJob
+  (`kubernetes/apps/infrastructure/agentforge-codex-refresh/`) rotates the real OAuth document
+  (`af/operator/broker/openai/codex-pro/oauth` — hosts have **no** grant on it) and, right after,
+  publishes this projection of it under its `codex-hosts-publisher` k8s-auth role: access + id token
+  + `account_id`, **`refresh_token` replaced by `""`**. Every host's bao agent renders
+  `~/.codex/auth.json` from it verbatim (`roles/openbao_agent/files/codex-auth.ctmpl`) — a host can
+  use the token but can never rotate it, and cannot even fetch the refresh token to try. See
+  § "The shared codex login" below. The grant is `read` on the DATA path only (no metadata, no list).
 
 - `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `proxmox_ssh_key`.
 
@@ -478,9 +479,10 @@ nobody runs `codex login` on a host — ever. How it hangs together:
 
 | Piece | Where | What it does |
 |---|---|---|
-| The login | `af/operator/broker/openai/codex-pro/oauth` (KV v2, field `auth.json`) | The full OAuth document (access + id + **refresh** token). The broker mounts it via ESO; hosts read it. |
-| The ONLY refresher | `af-codex-refresh` CronJob, ns `agentforge-broker`, 03:00 UTC | `--skew-seconds 691200`: the ~10-day access token is rotated every night, CAS-written back, C2 status stamped as custom metadata. |
-| The host render | `roles/openbao_agent/files/codex-auth.ctmpl` → `~/.codex/auth.json` (0600, user-owned) | Access-token-only: `refresh_token` is written as `""`. codex 0.153 runs on the stored token and never tries to refresh with an empty refresh token (verified, even with a 23-day-old `last_refresh`). The agent re-polls KV every few minutes, so a host follows the nightly rotation within ~5 min. |
+| The login | `af/operator/broker/openai/codex-pro/oauth` (KV v2, field `auth.json`) | The full OAuth document (access + id + **refresh** token). The broker mounts it via ESO. **No host can read it.** |
+| The ONLY refresher | `af-codex-refresh` CronJob, ns `agentforge-broker`, 03:00 UTC | `--skew-seconds 691200`: the ~10-day access token is rotated every second night (refresh when ≤8 days left), CAS-written back, C2 status stamped as custom metadata. |
+| The host projection | `af/dev-workers/codex-auth` (field `auth.json`), written by the same CronJob under the `codex-hosts-publisher` role right after each run | Access + id token + `account_id`, `refresh_token` = `""`. Rebuilt field-by-field, written only when changed. This is the ONLY codex document a host policy can read. |
+| The host render | `roles/openbao_agent/files/codex-auth.ctmpl` → `~/.codex/auth.json` (0600, user-owned) | The projection, verbatim. codex 0.153 runs on the stored token and never tries to refresh with an empty refresh token (verified, even with a 23-day-old `last_refresh`). The agent re-polls KV every few minutes, so a host follows each rotation within ~5 min and always has ~8–10 days left. |
 | Who renders it | dev_worker: every `dev_worker_users` entry. pr_reviewer: `pr_reviewer_llm_sudo_user` (`codexrun`) when `pr_reviewer_enable_openbao` and the persona is codex. | The play's health check asserts the file is user-owned 0600 JSON, has >24h left on the access token, and has **no** refresh token. |
 
 **Why the refresh token must never reach a host.** OpenAI refresh tokens are single-use and rotate
@@ -501,8 +503,9 @@ T=$(bao write -field=token auth/kubernetes/login role=af-codex-refresher jwt="$J
 VER=$(BAO_TOKEN="$T" bao kv metadata get -format=json af/operator/broker/openai/codex-pro/oauth | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["current_version"])')
 BAO_TOKEN="$T" bao kv put -cas="$VER" af/operator/broker/openai/codex-pro/oauth auth.json=@"$CODEX_HOME/auth.json"
 rm -rf "$CODEX_HOME"
-# 3. ESO re-syncs broker-openai-codex-oauth, the broker reloads (~1 min), every host re-renders (~5 min);
-#    kick the CronJob once to prove the new family self-refreshes:
+# 3. ESO re-syncs broker-openai-codex-oauth and the broker reloads (~1 min). Kick the CronJob once: it
+#    proves the new family self-refreshes AND publishes the host projection (af/dev-workers/codex-auth),
+#    which is what the hosts re-render from (~5 min) — they do NOT see step 2's write directly:
 kubectl --context admin@ai -n agentforge-broker create job --from=cronjob/af-codex-refresh af-codex-refresh-manual-$(date +%s)
 ```
 
@@ -561,7 +564,7 @@ restart `openbao-agent` on the workers to force a fresh login that picks it up.
 | Agent logs TLS/x509 errors | The server has not restarted since the SAN was added, or `ailab-root-ca.crt` is missing on the host. | Re-run activation (b); check `/usr/local/share/ca-certificates/ailab-root-ca.crt` + `update-ca-certificates`. |
 | Connection refused / timeout to `openbao.lan.chifor.me:30820` | `/etc/hosts` block missing, or all three nodes down, or the Service was removed. | `getent hosts openbao.lan.chifor.me`; `kubectl --context admin@ai -n openbao get svc openbao-lan`. |
 | `openbao-lan` has **no endpoints** | The vault is **sealed** — the `openbao-active` label is absent, by design (a sealed vault is unreachable rather than answering 503s). | Unseal: check the unsealer Deployment (`docs/runbooks/openbao-recovery.md`). |
-| Agent dies and stays dead | `exit_on_retry_failure = true` on template rendering — a missing KV path is fatal by design. | `journalctl -u openbao-agent`; usually `af/dev-workers/common` is missing its field → check the provision Job ran. Since 2026-09-12 also: `permission denied` on `af/data/operator/broker/openai/codex-pro/oauth` → the host's policy predates the codex grant (the daily provision Job rewrites it; kick it). |
+| Agent dies and stays dead | `exit_on_retry_failure = true` on template rendering — a missing KV path is fatal by design. | `journalctl -u openbao-agent`; usually `af/dev-workers/common` is missing its field → check the provision Job ran. Since 2026-09-12 also: `permission denied` / 404 on `af/data/dev-workers/codex-auth` → the host's policy predates the codex grant, or the projection was never published (the daily provision Job rewrites policies; a CronJob run publishes the projection — kick either). |
 | codex on a host says `401` / `token expired`, but nobody ran `codex login` | The shared login stopped rotating: `af-codex-refresh` has been failing (its `401` = OpenAI revoked the family; anything else = OpenBao/CAS). Hosts hold an access token that lasts ~10 days past the last good rotation. | `kubectl -n agentforge-broker get jobs`; logs of the last `af-codex-refresh-*`. On `401` re-seed per § "The shared codex login". Never `codex login` on a host — the agent overwrites it within minutes anyway. |
 | Token silently expires | Should be impossible: the role issues **periodic** tokens, whose TTL resets on renewal (ADR 0020 — the antidote to the 2026-08-25 768h lockout). If it happens anyway, the role lost `token_period`. | `bao read auth/approle/role/<host>` and compare with the provision script. |
 | Provision Job red, `CreateContainerConfigError` | `openbao-breakglass-token` missing, or its data key is not `root_token`. | `kubectl --context admin@ai -n openbao get secret openbao-breakglass-token -o jsonpath='{.data}'` piped through a key-name print — **never** `-o yaml`. |

@@ -53,8 +53,9 @@ template {
   error_on_missing_key = true
 }
 
-// The shared codex login — ACCESS-TOKEN-ONLY (see codex-auth.ctmpl: the refresh_token is
-// stripped so this host can never rotate the estate's one login). Same root-render + chown dance.
+// The shared codex login — ACCESS-TOKEN-ONLY (see codex-auth.ctmpl: the projection this host may
+// read carries no refresh_token, so it can never rotate the estate's one login). Same root-render +
+// chown dance.
 template {
   source      = "/etc/openbao-agent/codex-auth.ctmpl"
   destination = "{{ user.home }}/.codex/auth.json"

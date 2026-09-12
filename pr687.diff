@@ -1,0 +1,55 @@
+diff --git a/ansible/roles/dev_worker/tasks/openbao.yml b/ansible/roles/dev_worker/tasks/openbao.yml
+index ccd71620..6c32a776 100644
+--- a/ansible/roles/dev_worker/tasks/openbao.yml
++++ b/ansible/roles/dev_worker/tasks/openbao.yml
+@@ -70,7 +70,15 @@
+ # through the LAN resolver cloud-init gave them, so it is pinned host-side. All three control-plane
+ # node IPs: the Go dialer walks the resolved addresses in turn, so a node that is down or drained
+ # costs a connect retry instead of the credential path.
+-- name: Pin the openbao-lan NodePort name in /etc/hosts
++#
++# Pinned in TWO files. The Proxmox cloud-init user-data carries `manage_etc_hosts: true`, so cloud-init
++# REWRITES /etc/hosts from /etc/cloud/templates/hosts.debian.tmpl on EVERY boot (cc_update_etc_hosts is a
++# per-boot module) and a block written only to /etc/hosts vanishes at the next reboot — which is exactly
++# how all six workers lost OpenBao on 2026-09-11 (agent: `lookup openbao.lan.chifor.me: no such host`,
++# `cred` dead, credential templates unrenderable). User-data outranks cloud.cfg.d, so the setting can't
++# be turned off from the host; the template is the one place cloud-init itself reads, so the block in it
++# survives reboots, and the /etc/hosts block makes the pin live NOW without waiting for one.
++- name: Pin the openbao-lan NodePort name in /etc/hosts (live now)
+   ansible.builtin.blockinfile:
+     path: /etc/hosts
+     marker: "# {mark} ANSIBLE MANAGED - openbao-lan"
+@@ -82,6 +90,19 @@
+     group: root
+     mode: "0644"
+ 
++- name: Pin the openbao-lan NodePort name in the cloud-init hosts template (survives reboots)
++  ansible.builtin.blockinfile:
++    path: /etc/cloud/templates/hosts.debian.tmpl
++    marker: "# {mark} ANSIBLE MANAGED - openbao-lan"
++    block: |
++      {% for row in dev_worker_openbao_hosts_entries %}
++      {{ row }}
++      {% endfor %}
++    create: false # the Ubuntu cloud image ships it; a host without cloud-init is not a dev worker
++    owner: root
++    group: root
++    mode: "0644"
++
+ # Tarball, not the .deb: the release's openbao_*.deb is the SERVER package (its own openbao user,
+ # config dir and unit), and a worker needs only the CLI/agent binary. Same shape as helm/k9s in
+ # k8s_tools.yml, with the checksum verification those two lack — the download is kept under
+diff --git a/docs/runbooks/openbao-dev-workers.md b/docs/runbooks/openbao-dev-workers.md
+index 0eb7969f..352b0f4e 100644
+--- a/docs/runbooks/openbao-dev-workers.md
++++ b/docs/runbooks/openbao-dev-workers.md
+@@ -507,7 +507,8 @@ restart `openbao-agent` on the workers to force a fresh login that picks it up.
+ | `cred: /run/openbao-agent/token not readable` | The user is not in the `openbao-agent` group, or the agent is not running. | `id <user>`; log out/in after the first playbook run (group membership is per-session). Else `systemctl status openbao-agent`. |
+ | Agent logs `invalid role or secret ID` (400) | The secret-id was destroyed/rotated, or the vault was wiped (all secret-ids die with it), or `/etc/openbao-agent/secret-id` never got the real value. | Re-mint (e) for that host and re-run the playbook. Check the role still exists: `bao read auth/approle/role/dev-worker-N`. |
+ | Agent logs TLS/x509 errors | The server has not restarted since the SAN was added, or `ailab-root-ca.crt` is missing on the host. | Re-run activation (b); check `/usr/local/share/ca-certificates/ailab-root-ca.crt` + `update-ca-certificates`. |
+-| Connection refused / timeout to `openbao.lan.chifor.me:30820` | `/etc/hosts` block missing, or all three nodes down, or the Service was removed. | `getent hosts openbao.lan.chifor.me`; `kubectl --context admin@ai -n openbao get svc openbao-lan`. |
++| Agent logs `lookup openbao.lan.chifor.me ... no such host` (every ~4 min, sink token never written, `cred` dead) | The worker **rebooted**: the Proxmox cloud-init user-data has `manage_etc_hosts: true`, so cloud-init rewrites `/etc/hosts` from `/etc/cloud/templates/hosts.debian.tmpl` on every boot and drops the pinned block (2026-09-11: all six workers at once). | Re-run the playbook (`just dev-workers`) — since 2026-09-12 it pins the block in the template too, so it survives reboots. Hand fix on one box: append the three `192.168.0.4{1,2,3} openbao.lan.chifor.me` lines to BOTH files, `systemctl restart openbao-agent`, `cred list`. |
++| Connection refused / timeout to `openbao.lan.chifor.me:30820` | `/etc/hosts` block missing (see the row above), or all three nodes down, or the Service was removed. | `getent hosts openbao.lan.chifor.me`; `kubectl --context admin@ai -n openbao get svc openbao-lan`. |
+ | `openbao-lan` has **no endpoints** | The vault is **sealed** — the `openbao-active` label is absent, by design (a sealed vault is unreachable rather than answering 503s). | Unseal: check the unsealer Deployment (`docs/runbooks/openbao-recovery.md`). |
+ | Agent dies and stays dead | `exit_on_retry_failure = true` on template rendering — a missing KV path is fatal by design. | `journalctl -u openbao-agent`; usually `af/dev-workers/common` is missing its field → check the provision Job ran. |
+ | Token silently expires | Should be impossible: the role issues **periodic** tokens, whose TTL resets on renewal (ADR 0020 — the antidote to the 2026-08-25 768h lockout). If it happens anyway, the role lost `token_period`. | `bao read auth/approle/role/<host>` and compare with the provision script. |

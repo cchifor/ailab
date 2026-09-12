@@ -1,0 +1,9 @@
+You are cross-reviewing three related pull requests to an infra repo (ailab). Read the diffs in the files named below (they are in this directory) and the surrounding repo (you are in a checkout of the ansible branch, PR 690; PR 687/688 diffs touch files you can also read here at their pre-PR state).
+
+Context: OpenAI refresh tokens are single-use/rotated. The estate hand-copied one codex auth.json to many hosts plus a nightly refresher CronJob in-cluster; two refreshers revoked the family. The fix: OpenBao holds the single login, only the CronJob refreshes it, every host's bao agent renders ~/.codex/auth.json from it with refresh_token stripped ("" — verified codex 0.153 works on an access-token-only file and never tries to refresh).
+
+- pr687.diff: pin openbao.lan.chifor.me also in /etc/cloud/templates/hosts.debian.tmpl (cloud-init manage_etc_hosts rewrites /etc/hosts every boot).
+- pr688.diff: OpenBao provision job grants dev-worker policies read on af/data/operator/broker/openai/codex-pro/oauth and adds reviewer-1/2 AppRoles; CronJob skew 2d -> 8d.
+- pr690.diff: new shared ansible role openbao_agent (extracted from roles/dev_worker/tasks/openbao.yml), dev_worker imports it and renders/verifies the codex file per user; pr_reviewer gets an opt-in openbao.yml; consul-template codex-auth.ctmpl; .sops.yaml rule; runbooks.
+
+Review for: correctness bugs, ansible semantics (import_role vars/handlers/tags/when inheritance, check mode, block/rescue), consul-template/bao-agent behaviour, OpenBao policy/HCL correctness, security regressions (credential exposure, plaintext SOPS), rollout-order hazards, and anything that would break the existing dev-worker plumbing (git-credentials, kubeconfig cutover, cred helper). Be concrete: file:line, what breaks, how. Do NOT modify files. Output a numbered list of findings ordered by severity, each with a one-line fix; end with a verdict line APPROVE / REQUEST CHANGES.

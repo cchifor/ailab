@@ -30,8 +30,9 @@ template_config {
   exit_on_retry_failure = true
 }
 
-// The shared codex login — ACCESS-TOKEN-ONLY (codex-auth.ctmpl strips the refresh_token so this
-// host can never rotate the estate's one login). Rendered by root, handed to the LLM user.
+// The shared codex login — ACCESS-TOKEN-ONLY (codex-auth.ctmpl reads the refresh-token-free
+// projection, so this host can never rotate the estate's one login). Rendered by root, handed to
+// the LLM user.
 template {
   source      = "/etc/openbao-agent/codex-auth.ctmpl"
   destination = "/home/{{ pr_reviewer_llm_sudo_user }}/.codex/auth.json"

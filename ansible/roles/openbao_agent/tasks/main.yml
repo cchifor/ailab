@@ -175,9 +175,10 @@
     - Restart openbao-agent
 
 # ONE codex login for the estate (2026-09-12): every consumer renders ~/.codex/auth.json for its
-# users from the broker's OAuth document through this template, which STRIPS the refresh_token so a
-# host can use the token but never rotate it — the af-codex-refresh CronJob is the only refresher.
-# Host-agnostic, so it lives here; the consumer's agent.hcl says which users get a render.
+# users from af/dev-workers/codex-auth — the refresh-token-free projection the af-codex-refresh
+# CronJob publishes after each rotation — so a host can use the token but never rotate it; the
+# CronJob is the only refresher and hosts cannot even read the oauth document. Host-agnostic, so it
+# lives here; the consumer's agent.hcl says which users get a render.
 - name: Lay down the codex auth render template
   ansible.builtin.copy:
     src: codex-auth.ctmpl
