@@ -9,8 +9,10 @@ resources:
   - install-job.yaml   # one-shot: npm-installs dsh into the app PVC (see the file for why not an image)
   - deployment.yaml
   - searxng.yaml      # self-hosted metasearch: dsh's ONLY route to web content
+  - oauth2-proxy-searxng-secret.sops.yaml # SOPS: oauth2-proxy client + cookie secrets
+  - searxng-auth.yaml # Authelia SSO gate publishing the SearXNG web UI at search.chifor.me
   - service.yaml
-  - networkpolicy.yaml # default-deny both ways; only cloudflared in, only DNS + LiteLLM out
+  - networkpolicy.yaml # default-deny both ways; only cloudflared in; DNS + LiteLLM + SearXNG + 443 out
 
 configMapGenerator:
   # Generated so the name carries a content hash: editing relay.js rolls the pod automatically

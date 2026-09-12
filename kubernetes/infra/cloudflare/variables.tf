@@ -15,9 +15,9 @@ variable "tunnel_id" {
 }
 
 variable "tunnel_hostnames" {
-  description = "Subdomains under chifor.me published by the tunnel; each gets a proxied CNAME -> <tunnel>.cfargotunnel.com. Existing records are adopted via imports.tf; NEW ones (status, dw1-dw6, agentforge, openbao) are created. The dw* hosts are the dev-worker ttyd terminals (2 per node) and are gated by access.tf. agentforge is Access-FREE (own Authelia OIDC, ADR 0019). openbao is the secret-store UI and IS Access-gated (access.tf `openbao`) despite having its own token login — see that resource for why. dsh is the DeepSeek Harness agent UI and IS Access-gated (access.tf `dsh`): it executes model-generated tool calls, and its own session cookie carries no SSO identity, so Access is the only per-person gate."
+  description = "Subdomains under chifor.me published by the tunnel; each gets a proxied CNAME -> <tunnel>.cfargotunnel.com. Existing records are adopted via imports.tf; NEW ones (status, dw1-dw6, agentforge, openbao, search) are created. The dw* hosts are the dev-worker ttyd terminals (2 per node) and are gated by access.tf. agentforge is Access-FREE (own Authelia OIDC, ADR 0019). openbao is the secret-store UI and IS Access-gated (access.tf `openbao`) despite having its own token login — see that resource for why. dsh is the DeepSeek Harness agent UI and IS Access-gated (access.tf `dsh`): it executes model-generated tool calls, and its own session cookie carries no SSO identity, so Access is the only per-person gate. search is the SearXNG web UI and is Access-FREE, gated instead by its own oauth2-proxy -> Authelia (kubernetes/apps/apps/dsh/searxng-auth.yaml), the same shape as home.chifor.me."
   type        = list(string)
-  default     = ["home", "sso", "status", "chat", "grafana", "api", "dw1", "dw2", "dw3", "dw4", "dw5", "dw6", "k8s", "hubble", "proxmox", "qnap", "prometheus", "alertmanager", "ntfy", "git", "vault", "agentforge", "openbao", "dsh"]
+  default     = ["home", "sso", "status", "chat", "grafana", "api", "dw1", "dw2", "dw3", "dw4", "dw5", "dw6", "k8s", "hubble", "proxmox", "qnap", "prometheus", "alertmanager", "ntfy", "git", "vault", "agentforge", "openbao", "dsh", "search"]
 }
 
 variable "registry_ip" {

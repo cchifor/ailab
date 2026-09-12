@@ -1,5 +1,7 @@
-# SearXNG — a self-hosted metasearch engine, deployed for ONE reason: to give dsh web access
-# WITHOUT giving the pod that runs model-authored code a route to the internet.
+# SearXNG — a self-hosted metasearch engine, deployed to give dsh web access WITHOUT giving the pod
+# that runs model-authored code a route to the internet. Since 2026-09-12 its web UI is ALSO published
+# at search.chifor.me behind its own SSO gate (searxng-auth.yaml) — a second consumer of the same
+# instance, not a second instance, and one that changes nothing about the containment below.
 #
 # THE PROBLEM. dsh's web_search/web_fetch need outbound HTTP. The dsh pod executes code the model
 # writes, with a `danger-full-access` permission preset available in the UI, so general egress from
@@ -11,8 +13,10 @@
 #     dsh (no internet) ──▶ searxng.dsh.svc:8080 ──▶ search engines
 #
 # The dsh policy gains exactly one destination, and the component that does reach the internet runs
-# no model-authored code. The dsh-searxng-web plugin backs BOTH web_search and web_fetch through
-# this instance, so neither tool needs a direct route out.
+# no model-authored code. searxng-search.mjs backs web_search through this instance. It does NOT back
+# web_fetch, and cannot: SearXNG exposes no page-fetch endpoint (see that file's "SEARCH ONLY"
+# note), so web_fetch stays on dsh's own `http` provider over the namespace's own egress — which is
+# why networkpolicy.yaml allows dsh outbound 443 directly as of 2026-09-09.
 #
 # Chosen over the alternatives on that basis. The shipped deepseek-official provider needs a
 # DEEPSEEK_API_KEY this estate does not hold (checked OpenBao: cloudflare, gitea, github, litellm,
@@ -57,8 +61,12 @@ data:
       # on the branch where it copies its template, which it skips when settings.yml already
       # exists, so seeding a file means taking responsibility for the key.
       secret_key: "__SECRET_KEY__"
-      # No bot-limiting: the only client is dsh, on the pod network, behind a NetworkPolicy. Leaving
-      # it on logs a missing limiter.toml and adds nothing here.
+      # No bot-limiting, still. Both clients are authenticated before they arrive: dsh reaches the
+      # ClusterIP under a NetworkPolicy that admits nothing else, and every browser request has
+      # already cleared Authelia at oauth2-proxy-searxng. There is no anonymous caller for a limiter
+      # to rate-limit, and switching it on logs a missing limiter.toml and wants a Valkey/Redis for
+      # its counters — a dependency bought for nothing. This is also why public_instance stays
+      # false: that flag turns on the bot-detection suite this instance has no untrusted traffic for.
       limiter: false
       public_instance: false
       image_proxy: false
@@ -158,7 +166,7 @@ spec:
         # else. Generating it here rather than storing a Secret keeps key material out of git and
         # out of the API server for a value nothing else needs to know.
         - name: seed-settings
-          image: docker.io/searxng/searxng@sha256:e084201aa606fafce2151c8dc2844c9c3309025e90fbe7163b4f5e5183e474f0
+          image: docker.io/searxng/searxng@sha256:6c9da4d4d236672a1b722f597d643de2202410a2281b7aa4d98fccca3a8f3732
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -183,9 +191,22 @@ spec:
             limits:   { cpu: 200m, memory: 128Mi }
       containers:
         - name: searxng
-          image: docker.io/searxng/searxng@sha256:e084201aa606fafce2151c8dc2844c9c3309025e90fbe7163b4f5e5183e474f0
+          image: docker.io/searxng/searxng@sha256:6c9da4d4d236672a1b722f597d643de2202410a2281b7aa4d98fccca3a8f3732
           env:
-            - { name: SEARXNG_BASE_URL, value: "http://searxng.dsh.svc.cluster.local:8080/" }
+            # The PUBLIC origin. MEASURED against the running instance rather than assumed, because
+            # the list of what this value actually reaches is shorter than it looks. SearXNG stamps
+            # base_url into exactly three places: /opensearch.xml (both the descriptor's own URL and
+            # the search template), the /preferences form action, and the RSS
+            # <link rel="alternate"> on a results page. The index page, pagination and static asset
+            # links are all RELATIVE and do not carry it at all. So the breakage from leaving the
+            # ClusterIP name here is narrow but real — "add this search engine" in a browser, and
+            # saving preferences, would both resolve to a name that exists only inside the cluster.
+            #
+            # dsh is unaffected either way. VERIFIED in a throwaway pod carrying this exact value:
+            # GET /search?format=json with Host: searxng.dsh.svc.cluster.local:8080 answered 200
+            # with 32 parsed results and no redirect. base_url is not enforced against the request
+            # Host, so the in-cluster JSON path is indifferent to what this says.
+            - { name: SEARXNG_BASE_URL, value: "https://search.chifor.me/" }
             # One client, so the upstream worker count (which scales with host CPUs) would
             # over-allocate on a 32-thread node for no benefit.
             - { name: SEARXNG_UWSGI_WORKERS, value: "2" }
@@ -228,8 +249,14 @@ spec:
   ports: [{ name: http, port: 8080, targetPort: http, protocol: TCP }]
 ---
 # SearXNG is the one component here that MAY reach the internet, so it carries its own policy
-# rather than inheriting dsh's. Ingress is restricted to the dsh pod: nothing else in the cluster
-# has reason to query it, and it is deliberately NOT exposed through cloudflared.
+# rather than inheriting dsh's. Ingress is restricted to the two clients that have reason to query
+# it: the dsh pod, and the oauth2-proxy that fronts search.chifor.me.
+#
+# It became reachable FROM the internet through cloudflared on 2026-09-12, reversing the
+# "deliberately NOT exposed" posture this comment used to state. What made that safe is that the tunnel does NOT
+# terminate here — it terminates on oauth2-proxy-searxng (searxng-auth.yaml), which completes an
+# Authelia OIDC flow before proxying a single byte. The policy below still admits NO traffic from
+# cloudflared itself, so the gate cannot be walked around from inside the cluster either.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -241,7 +268,12 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
+        # dsh, for /search?format=json. Unauthenticated and in-cluster — it holds no SSO identity and
+        # could not complete the browser flow the other client goes through.
         - podSelector: { matchLabels: { app: dsh } }
+        # The SSO gate in front of the web UI. A separate `from` item, i.e. OR'ed with dsh above,
+        # which is what is wanted here: two independent clients, not a conjunction.
+        - podSelector: { matchLabels: { app: oauth2-proxy-searxng } }
       ports: [{ port: 8080, protocol: TCP }]
   egress:
     - to:
