@@ -310,6 +310,7 @@ spec:
         # policies do not already give those pods. SearXNG has no page-fetch surface (image_proxy
         # off), so a caller cannot make it GET an arbitrary URL; the egress rules below are
         # unchanged, and dsh-allow is untouched (strive-ailab still cannot reach dsh itself).
+        # Shape pinned by scripts/tests/test_searxng_netpol.py; a diff that loosens it fails there.
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: strive-ailab } }
           podSelector:
             matchExpressions:

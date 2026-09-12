@@ -30,8 +30,11 @@ Verified live before this was written (2026-09-12, `kubectl` against the ailab c
   policy at all — it already has unrestricted egress, the internet included.
 - `strive.io/service` is stamped on every chart-managed service pod by the platform chart
   (`deploy/helm/templates/_helpers.tpl`: `strive.io/service: {{ .Chart.Name }}`) and on the raw
-  worker manifests (`deploy/components/workers/workflow-worker.yaml`). Nothing else in the
-  namespace carries it: hatchet, valkey, the seed/init Jobs and the perf pod are labelled otherwise.
+  worker manifests (`deploy/components/workers/workflow-worker.yaml`). Only the three pods
+  `workflow-worker`, `workflow` and `integration` carry one of the three admitted values; every
+  other `strive.io/service` value in the namespace (`postgres` on the CNPG pods, `ci-objectstore*`,
+  `airlock` on the reaper CronJob pods, the other hatchet workers `digest-worker` /
+  `integration-worker` / `mcp-worker`, and the rest of the chart services) is excluded by `In`.
 - The platform's sandboxes run in `strive-sandboxes-ailab`, a different namespace. The only
   RoleBinding in `strive-ailab` is CNPG's `strive-pg`; no tenant-facing identity can create pods
   there.
@@ -118,4 +121,6 @@ Three shapes were on the table:
   `kubectl -n strive-ailab exec deploy/workflow-worker -- python -c "import urllib.request;print(urllib.request.urlopen('http://searxng.dsh.svc.cluster.local:8080/healthz',timeout=5).status)"`
   answers `200` (it timed out before this element), and `/search?q=test&format=json` returns JSON.
   The platform's own gate for the round trip is a Topic News run whose `news_item` rows carry a
-  `source` and a `published_at` — the fake provider produces neither.
+  `source` and a `published_at` — the fake provider produces neither. The manifest's shape (one
+  rule, two peers, the AND'ed strive element, port 8080, egress unchanged) is pinned by
+  `scripts/tests/test_searxng_netpol.py` (`python3 -m unittest discover -s scripts/tests -p "test_*.py"`).
