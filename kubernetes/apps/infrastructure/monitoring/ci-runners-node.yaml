@@ -40,8 +40,11 @@ subsets:
       - { ip: 192.168.0.19 } # ci-runner-6 (ai-node3, vmid 4106)
       - { ip: 192.168.0.23 } # ci-runner-10 (ai-node2, vmid 4110)
       - { ip: 192.168.0.29 } # ci-runner-7 (ai-node3, vmid 4107) -- was wrongly .20 = cloud1
-      - { ip: 192.168.0.30 } # ci-runner-8 (ai-node1, vmid 4108) -- was wrongly .21 = cloud2
-      - { ip: 192.168.0.31 } # ci-runner-9 (ai-node2, vmid 4109) -- was wrongly .22 = cloud3
+      # .30 / ci-runner-8 (ai-node1, vmid 4108) RETIRED 2026-09-12 to return ~10 GiB to ai-node1 for
+      # the qwen3.8-27b-ailab instance. Dropped from this list in the SAME change that destroys the
+      # VM: a target left here would scrape a dead address and fire NodeExporterDown forever, which
+      # is the failure this list already carries a long comment about in the other direction.
+      - { ip: 192.168.0.31 } # ci-runner-9 (ai-node1, vmid 4109) -- was wrongly .22 = cloud3; moved node2 -> node1 2026-09-07
     ports:
       - { name: metrics, port: 9100, protocol: TCP }
 ---
