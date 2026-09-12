@@ -99,7 +99,7 @@ spec:
           # Keeping this digest CURRENT is therefore the right posture rather than a risk: PR-7b
           # should inherit a ref that works, not one it has to repair. Do not reintroduce a
           # placeholder here — put the guard in the listing, where it holds.
-          image: registry.chifor.me/agentforge/p1-worker@sha256:fb779c7df1f1c4d1505233e86ec1c91f0c56602eb6479341df4952e42ac93aca
+          image: registry.chifor.me/agentforge/p1-worker@sha256:d774e04a0781099421ac924d81906271c9c6bd922d20090b28e6cea330990b8a
           # The image ENTRYPOINT is ["tini","--"] and `agentforge` is a console script, so argv must be
           # the full two-element form — a bare subcommand crash-loops.
           args: ["agentforge", "conduct"]
