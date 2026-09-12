@@ -42,7 +42,7 @@
     mode: "0640"
     backup: true # the rollback target if the post-restart health check fails
   register: pr_reviewer_agent_hcl
-  notify: Restart openbao-agent
+  notify: Restart openbao-agent (reviewer)
 
 # The hand-seeded login this render replaces is the reviewer's ONLY working codex auth until the
 # first render is proven; a render that succeeds but fails the health check (an expired projection,

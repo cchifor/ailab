@@ -13,6 +13,7 @@
   become: false
   run_once: true
   register: reviewbot_secrets_stat
+  tags: [openbao] # the tag-limited credential rollout (-t openbao) needs the AppRole pair from this file
 
 - name: Load reviewbot secrets (SOPS)
   community.sops.load_vars:
@@ -21,6 +22,7 @@
   become: false
   run_once: true
   when: reviewbot_secrets_stat.stat.exists
+  tags: [openbao]
 
 - name: Resolve this persona's secrets
   ansible.builtin.set_fact:

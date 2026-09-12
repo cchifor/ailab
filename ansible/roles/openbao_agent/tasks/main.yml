@@ -3,7 +3,8 @@
 # what to render. Verbatim moves from dev_worker/tasks/openbao.yml (2026-09-12, when the reviewer
 # VMs started rendering the shared codex login and needed the same agent); the consumer-specific
 # parts — agent.hcl, the .ctmpl files, start, the health check + rollback — stayed with dev_worker
-# and were written fresh (smaller) for pr_reviewer.
+# and were written fresh (smaller) for pr_reviewer. Handlers too: this role notifies topics and each
+# consumer listens with its own handlers (see handlers/main.yml here for why).
 
 # Fails the play rather than deploying an agent that cannot log in: an empty secret-id would leave
 # openbao-agent crash-looping and every rendered credential unwritten. no_log is deliberately NOT
@@ -30,8 +31,8 @@
     group: root
     mode: "0644"
   notify:
-    - Update CA trust
-    - Restart openbao-agent
+    - "openbao-agent: ca changed"
+    - "openbao-agent: config changed"
 
 # openbao.lan.chifor.me is a cluster-internal name with no public DNS record, and the hosts resolve
 # through the LAN resolver cloud-init gave them, so it is pinned host-side. All three control-plane
@@ -95,7 +96,7 @@
     group: root
     mode: "0755"
     creates: "/usr/local/bin/.bao-{{ openbao_agent_version }}"
-  notify: Restart openbao-agent
+  notify: "openbao-agent: config changed"
 
 - name: Mark the installed bao version
   ansible.builtin.copy:
@@ -151,7 +152,7 @@
     group: openbao-agent
     mode: "0640"
   no_log: true
-  notify: Restart openbao-agent
+  notify: "openbao-agent: config changed"
 
 - name: Install the AppRole secret-id
   ansible.builtin.copy:
@@ -161,7 +162,7 @@
     group: root
     mode: "0600"
   no_log: true
-  notify: Restart openbao-agent
+  notify: "openbao-agent: config changed"
 
 - name: Install the openbao-agent systemd unit
   ansible.builtin.template:
@@ -171,8 +172,8 @@
     group: root
     mode: "0644"
   notify:
-    - Reload systemd for openbao-agent
-    - Restart openbao-agent
+    - "openbao-agent: unit changed"
+    - "openbao-agent: config changed"
 
 # ONE codex login for the estate (2026-09-12): every consumer renders ~/.codex/auth.json for its
 # users from af/dev-workers/codex-auth — the refresh-token-free projection the af-codex-refresh
@@ -186,4 +187,4 @@
     owner: root
     group: openbao-agent
     mode: "0640"
-  notify: Restart openbao-agent
+  notify: "openbao-agent: config changed"

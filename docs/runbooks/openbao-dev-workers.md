@@ -301,9 +301,23 @@ BAO_TOKEN="$(kubectl --context admin@ai -n openbao get secret openbao-breakglass
 
 Mint role-id + secret-id for all six, straight into 0600 files (for the two **reviewer** VMs the
 loop is `for h in reviewer-1 reviewer-2` and the pair lands in `ansible/secrets/reviewbot.sops.yaml`
-under `reviewbot_openbao_credentials.<hostname>.{role_id,secret_id}` — the `.sops.yaml` reviewbot
-rule encrypts that key; then set `pr_reviewer_enable_openbao: true` in the codex persona's
-host_vars):
+under `reviewbot_openbao_credentials.<hostname>.{role_id,secret_id}`; then set
+`pr_reviewer_enable_openbao: true` in the codex persona's host_vars).
+
+> **Reviewer file — re-encrypt, do not `sops edit`.** `reviewbot.sops.yaml` already exists, and an
+> encrypted file carries its own `sops.encrypted_regex` in its metadata (PATs + webhook secrets
+> only); `sops edit` keeps THAT regex, so a key added that way lands in **plaintext** even though
+> `.sops.yaml` now lists `reviewbot_openbao_credentials`. Decrypt, append, and encrypt afresh so the
+> creation rule is consulted:
+>
+> ```bash
+> sops -d ansible/secrets/reviewbot.sops.yaml > "$MINT/reviewbot.plain.yaml"      # 0600 via umask
+> # append the reviewbot_openbao_credentials block (same python shape as below, paths reviewer-1/2)
+> sops -e --config .sops.yaml "$MINT/reviewbot.plain.yaml" > ansible/secrets/reviewbot.sops.yaml
+> rm -f "$MINT/reviewbot.plain.yaml"
+> sops -d ansible/secrets/reviewbot.sops.yaml | python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin)["reviewbot_openbao_credentials"]; print(sorted(c), sorted(next(iter(c.values()))))'
+> git diff -- ansible/secrets/reviewbot.sops.yaml     # ONLY ENC[...] lines may appear
+> ```
 
 ```bash
 for n in 1 2 3 4 5 6; do

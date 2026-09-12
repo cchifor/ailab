@@ -25,11 +25,14 @@ on:
       - "ansible/roles/dev_worker/tests/**"
       - "ansible/roles/dev_worker/templates/**"
       - "ansible/roles/dev_worker/tasks/**"
+      # the cred-helper test reads the shared agent role's unit + tasks too
+      - "ansible/roles/openbao_agent/**"
       - ".gitea/workflows/dev-worker-scripts.yaml"
   push:
     branches: [main]
     paths:
       - "ansible/roles/dev_worker/**"
+      - "ansible/roles/openbao_agent/**"
 
 jobs:
   dev-worker-scripts:

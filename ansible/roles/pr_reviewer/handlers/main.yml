@@ -4,3 +4,24 @@
     state: restarted
     daemon_reload: true
   when: not ansible_check_mode
+
+# ---- openbao-agent (the shared codex login, tasks/openbao.yml) -------------------------------------
+# Uniquely NAMED (dev-workers.yml applies this role next to dev_worker, and a shared name would
+# shadow the worker's handler with this role's conditional copy — openbao_agent/handlers/main.yml),
+# listening to the topics the shared role notifies. tasks/openbao.yml notifies the reviewer name.
+- name: Update CA trust (reviewer openbao-agent)
+  ansible.builtin.command: update-ca-certificates
+  changed_when: true
+  listen: "openbao-agent: ca changed"
+
+- name: Reload systemd (reviewer openbao-agent)
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: "openbao-agent: unit changed"
+
+- name: Restart openbao-agent (reviewer)
+  ansible.builtin.systemd:
+    name: openbao-agent.service
+    state: restarted
+  when: not ansible_check_mode
+  listen: "openbao-agent: config changed"

@@ -37,10 +37,11 @@
     dev_worker_openbao_renders_kubeconfigs: "{{ dev_worker_kubeconfig_marker.stat.exists }}"
 
 # The host-agnostic install — CA, openbao-lan pin, `bao` binary, group/user, AppRole identity files,
-# unit — is the shared openbao_agent role (also what the reviewer VMs run). import_role, not
-# include_role: static import is what makes its handlers ("Restart openbao-agent", "Update CA
-# trust") notifiable by name from the tasks below. Everything dev-worker-specific — which users get
-# `cred`, agent.hcl, the .ctmpl files, the kubeconfig cutover, start + verify + rollback — stays here.
+# unit — is the shared openbao_agent role (also what the reviewer VMs run). Its tasks notify topics
+# that this role's own handlers listen to (handlers/main.yml — a shared handler NAME would be
+# shadowed by pr_reviewer's copy on dev-workers.yml, which applies both roles). Everything
+# dev-worker-specific — which users get `cred`, agent.hcl, the .ctmpl files, the kubeconfig cutover,
+# start + verify + rollback — stays here.
 - name: Install the bao agent (shared openbao_agent role)
   ansible.builtin.import_role:
     name: openbao_agent

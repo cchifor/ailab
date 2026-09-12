@@ -1,20 +1,11 @@
 ---
-# Dropping a certificate into /usr/local/share/ca-certificates does nothing until the bundle is
-# rebuilt; there is no module for it.
-- name: Update CA trust
-  ansible.builtin.command: update-ca-certificates
-  changed_when: true
-
-# Own daemon-reload rather than a consumer's "Reload systemd": this role is imported by more than
-# one play and must not depend on a handler name another role happens to define.
-- name: Reload systemd for openbao-agent
-  ansible.builtin.systemd:
-    daemon_reload: true
-
-# Check-mode guard: a first-run --check preview never really writes the unit file, and the systemd
-# module fails on a unit it cannot find. Consumers notify this by name after importing the role.
-- name: Restart openbao-agent
-  ansible.builtin.systemd:
-    name: openbao-agent.service
-    state: restarted
-  when: not ansible_check_mode
+# Deliberately EMPTY. This role is imported by more than one consumer role, and dev-workers.yml
+# applies BOTH of them (pr_reviewer under `when: pr_reviewer_enabled`, false on every worker).
+# Handlers defined here would be registered once per import, name-collide, and the LAST copy —
+# the reviewer's, carrying that false `when` — would be the one a worker's notify resolves to, so
+# it would be skipped and the agent would restart onto nothing (the stale-process health check
+# then rolls the host back). So the tasks in this role notify TOPICS instead
+# (`openbao-agent: ca changed` / `unit changed` / `config changed`), and every consumer declares
+# its own uniquely named handlers that `listen` to them (dev_worker/handlers/main.yml,
+# pr_reviewer/handlers/main.yml). A consumer's handler set is unconditional at role level, so a
+# worker's copy is never shadowed by the reviewer's.

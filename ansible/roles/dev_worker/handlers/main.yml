@@ -110,3 +110,32 @@
 - name: Apply sysctl
   ansible.builtin.command: sysctl --system
   changed_when: false
+
+# ---- openbao-agent (ADR 0020) ---------------------------------------------------------------------
+# The shared openbao_agent role notifies TOPICS ("openbao-agent: ... changed") rather than handler
+# names, because dev-workers.yml applies both this role and pr_reviewer and a shared handler name
+# would be shadowed by the reviewer role's (conditional) copy — see openbao_agent/handlers/main.yml.
+# These are this role's own listeners; tasks/openbao.yml also notifies "Restart openbao-agent" by
+# name.
+# Dropping a certificate into /usr/local/share/ca-certificates does nothing until the bundle is
+# rebuilt; there is no module for it.
+- name: Update CA trust
+  ansible.builtin.command: update-ca-certificates
+  changed_when: true
+  listen: "openbao-agent: ca changed"
+
+- name: Reload systemd for openbao-agent
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: "openbao-agent: unit changed"
+
+# The check-mode guard is the same concern the agentforge/herdr handlers above solve implicitly (the
+# command module is skipped in check mode): a first-run --check preview never really writes the unit
+# file, and the systemd module fails on a unit it cannot find. Spelled out here because this handler
+# uses the module.
+- name: Restart openbao-agent
+  ansible.builtin.systemd:
+    name: openbao-agent.service
+    state: restarted
+  when: not ansible_check_mode
+  listen: "openbao-agent: config changed"

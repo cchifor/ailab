@@ -7,6 +7,8 @@ refresher revokes the family — how every host and the broker lost codex on 202
 runs on the stored access_token and never attempts a refresh with an empty refresh_token (verified
 2026-09-12, even with a 23-day-old last_refresh). The CronJob rotates every second night and the
 agent re-renders within its poll interval, so the token here always has ~8-10 days left. The value
-is emitted verbatim (it is already the exact file content); error_on_missing_key in agent.hcl fails
-the render closed if the field is absent. */ -}}
-{{ with secret "af/data/dev-workers/codex-auth" }}{{ index .Data.data "auth.json" }}{{ end }}
+is emitted verbatim (it is already the exact file content). Plain field access on purpose: with
+error_on_missing_key it fails the render CLOSED when the field is absent, whereas `index` would
+silently render "<no value>" into every host's auth.json (both verified against bao 2.5.5) — which
+is also why the projection's field is the dot-free `auth_json`. */ -}}
+{{ with secret "af/data/dev-workers/codex-auth" }}{{ .Data.data.auth_json }}{{ end }}
