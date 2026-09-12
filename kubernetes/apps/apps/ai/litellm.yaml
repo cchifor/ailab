@@ -585,9 +585,83 @@ data:
       # shows up in Open WebUI under External, because connection "1" discovers /v1/models and this
       # key is not something LiteLLM knows. See the generator's docstring; it costs money, which is
       # why the exemption is per-entry rather than a loosened rule.
+      #
+      # ---- WHY `responses/` IS IN THE MODEL STRING (2026-09-12, the day after the route shipped)
+      # The route above went in as plain `openai/gpt-6-astra` and the FIRST real Conductor turn 400'd:
+      #   litellm.BadRequestError: OpenAIException - Function tools with reasoning_effort are not
+      #   supported for gpt-6-astra in /v1/chat/completions. To use function tools, use /v1/responses
+      #   or set reasoning_effort to 'none'.   ("param":"reasoning_effort","code":"400")
+      # A conductor delegates, so EVERY conductor turn carries tools; the route was unusable for the
+      # one team it was added for, while a plain chat call kept returning 200 and hid it.
+      #
+      # THE ERROR MESSAGE'S OWN ADVICE IS A DEAD END, and that is the whole reason this is a transport
+      # change and not a one-parameter one. Measured against api.openai.com directly from the litellm
+      # pod, POST /v1/chat/completions with one function tool attached:
+      #   tools, NO reasoning_effort sent  -> 400 "Function tools with reasoning_effort are not
+      #                                       supported ... use /v1/responses or set ... to 'none'"
+      #   tools + reasoning_effort=none    -> 400 "Unsupported value: 'reasoning_effort' does not
+      #                                       support 'none' with this model. Supported values are:
+      #                                       'low', 'medium', 'high', and 'xhigh'."
+      #   tools + reasoning_effort=medium  -> 400 (the tools+reasoning block again)
+      #   no tools + reasoning_effort=med  -> 200
+      # Two things follow. First, the remedy the 400 names is REFUSED BY THE SAME MODEL'S parameter
+      # validation -- there is no value of reasoning_effort that makes function tools work here, so
+      # `additional_drop_params` / a forced `reasoning_effort: none` cannot fix it and would only
+      # trade this 400 for the other one. Second, reasoning on this model is ON BY DEFAULT server-side:
+      # the first probe sends no reasoning_effort at all and is still refused for having it "with"
+      # reasoning. So the param named in `"param":"reasoning_effort"` is frequently one the caller
+      # never sent -- do not go looking for it in the client. dsh in particular does NOT send it here:
+      # pi-ai only emits reasoning_effort when the model row declares `reasoning`, which a hand-entered
+      # row does not (openai-completions.js, the `model.reasoning &&` arms).
+      #
+      # WHAT `responses/` DOES. LiteLLM 1.100.1 (the installed version) reads a `responses/` segment in
+      # the model string as "serve this Chat-Completions request over the provider's Responses API":
+      # main.py's responses_api_bridge_check strips the prefix, sets mode=responses, and hands off to
+      # completion_extras.responses_api_bridge, which transforms the request out and the reply back. So
+      # the WIRE PROTOCOL TOWARD OPENAI CHANGES AND NOTHING ELSE DOES -- this proxy still speaks plain
+      # Chat Completions to its clients, dsh's provider stays `api: openai-completions` (it speaks
+      # exactly one protocol and cannot call /v1/responses itself), and the id dsh selects is still
+      # `gpt-6-astra`, because the generator derives consumer rows from `model_name`, not from this.
+      #
+      # LiteLLM HAS an automatic version of this bridge and it does NOT fire for this model: the gate
+      # is `OpenAIGPT5Config.is_model_gpt_5_model(model)`, which is a NAME test -- measured in the pod,
+      # is_model_gpt_5_model("gpt-5.4")=True, ("gpt-6-astra")=False. Upstream added it for exactly this
+      # constraint on gpt-5.4+ and the gpt-6 names outran the predicate. Hence the explicit prefix. If
+      # a later LiteLLM teaches that predicate about gpt-6, this stays correct and merely redundant.
+      #
+      # VERIFIED THROUGH A REAL PROXY, not just the SDK: a throwaway `litellm --config ... --port 4999`
+      # inside the running pod, same drop_params/request_timeout settings as here, two routes differing
+      # only in this one string. Over HTTP POST /v1/chat/completions:
+      #   plain `openai/gpt-6-astra`      + tools                   -> 400 (the failure above)
+      #   plain `openai/gpt-6-astra`      + tools + reasoning_effort -> 400
+      #   `openai/responses/gpt-6-astra`  + tools                   -> 200 finish_reason=tool_calls
+      #   `openai/responses/gpt-6-astra`  + tools + reasoning_effort -> 200 finish_reason=tool_calls
+      #   `openai/responses/gpt-6-astra`  plain chat                -> 200
+      #   `openai/responses/gpt-6-astra`  reasoning prompt          -> 200, reasoning_tokens=32
+      #   `openai/responses/gpt-6-astra`  image_url part            -> 200, described the image
+      #   `openai/responses/gpt-6-astra`  image_url part + tools    -> 200
+      #   `openai/responses/gpt-6-astra`  stream=true + tools       -> 200, tool name over SSE deltas
+      #   `openai/responses/gpt-6-astra`  stream=true, text         -> 200, 15 deltas
+      # TOOLS AND REASONING ARE BOTH KEPT -- that is the point of choosing this over dropping a param,
+      # and it is measured (nonzero reasoning_tokens on the same transport that returns tool_calls).
+      # Streaming is listed because a coding agent is useless without it, and vision because this entry
+      # declares supports_vision and the generator turns that into dsh's `input: [text, image]` row;
+      # neither survives by assumption just because the text path works.
+      #
+      # IT ALSO CLOSES A SECOND, LATENT 400. This model rejects `max_tokens` outright
+      # ("Unsupported parameter: 'max_tokens' is not supported with this model. Use
+      # 'max_completion_tokens' instead"), and LiteLLM's catalog for the id lists max_tokens as
+      # supported, so `drop_params: true` does NOT strip it -- measured: plain route + max_tokens=16
+      # -> 400. On the Responses transport the bridge TRANSLATES it instead: max_tokens=16 -> 200 with
+      # finish_reason=length, and so does max_completion_tokens=16. The cap is HONOURED, not discarded,
+      # which matters on a metered model with a 128k output ceiling -- discarding it would swap a
+      # recoverable 400 for unbounded spend. dsh is not the caller that would have tripped it (pi-ai
+      # detects maxTokensField=max_completion_tokens for this baseURL -- `useMaxTokens` is a
+      # provider-host allowlist and a .svc.cluster.local gateway is not on it), but any other consumer
+      # of this route now sends either spelling safely.
       - model_name: gpt-6-astra
         litellm_params:
-          model: openai/gpt-6-astra
+          model: openai/responses/gpt-6-astra
           api_key: os.environ/OPENAI_API_KEY
         model_info: { supports_vision: true, dsh_only: true }
       # ------------------------------------------------- the ON-PREM Qwen3.8-27B (ailab, always on)
@@ -821,7 +895,7 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "d0fb1cce71c7"
+        checksum/config: "04d4c9f91b6f"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
