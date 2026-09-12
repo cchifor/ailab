@@ -1,7 +1,13 @@
 # oauth2-proxy — the SSO gate in front of SearXNG's web UI at search.chifor.me. SearXNG has NO
-# authentication of its own, so this is the only thing between the internet and the one pod in this
-# namespace that holds a route out. It is an OIDC client of Authelia (sso.chifor.me); unauthenticated
-# requests are redirected to the Authelia login, then proxied to the searxng Service.
+# authentication of its own, so this is the only thing standing between the public internet and a
+# service that will fetch third-party URLs on behalf of whoever asks it to. It is an OIDC client of
+# Authelia (sso.chifor.me); unauthenticated requests are redirected to the Authelia login, then
+# proxied to the searxng Service.
+#
+# NOT "the only pod here with a route out" — an earlier draft of this comment said that and it is
+# wrong: dsh gained direct 443 egress on 2026-09-09 (networkpolicy.yaml documents why). What is
+# singular about searxng is not that it can reach the internet, it is that it reaches the internet
+# ON BEHALF OF ITS CALLER — which is precisely the capability that must not be offered anonymously.
 #
 # THIS DOES NOT SIT IN dsh's PATH, which is the whole reason it is a separate Deployment with its own
 # Service rather than a gate bolted onto `searxng`:
@@ -15,9 +21,10 @@
 #
 # WHY NOT REUSE THE homepage PROXY (apps/homepage/oauth2-proxy.yaml, same image and flags). Its cookie
 # and redirect_uri are scoped to home.chifor.me, so a second hostname would have to arrive either on a
-# shared parent-domain cookie or as a path-mounted upstream under home.chifor.me/search/ — and SearXNG
-# builds absolute URLs from ONE base_url that dsh's in-cluster client shares. A separate proxy keeps
-# the two surfaces, and their two cookies, independent.
+# shared parent-domain cookie or as a path-mounted upstream under home.chifor.me/search/ — which would
+# also drag base_url to https://home.chifor.me/search/ for the three surfaces derived from it (see
+# searxng.yaml). A separate proxy costs one 64Mi pod and keeps the two surfaces, their two cookies and
+# their two failure modes independent: Homepage does not go down with search, or the reverse.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
