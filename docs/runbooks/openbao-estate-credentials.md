@@ -35,7 +35,8 @@ Deliberately **not** mirrored here:
 >
 > **The failure mode is a stale escrow, not a reverted credential** — the obvious guess is the
 > wrong one. Nothing reads `af/estate/*` back into Keycloak or into the platform Secret (see
-> **Access** below: no policy grants it, no ESO SecretStore consumes it), so the provision Job
+> **Access** below: nothing grants `estate/strive-realm` specifically — the single estate
+> grant that does exist is on `estate/litellm`), so the provision Job
 > only ever writes the VAULT copy. Rotate the admin password in the platform SOPS file alone
 > and Keycloak is correct, the live `keycloak-secrets` is correct, and this Job quietly keeps
 > restoring the OLD password into `af/estate/strive-realm` every day. The break-glass copy is
@@ -76,10 +77,28 @@ split-brain this page exists to prevent:
 > **decrypts nothing**, so it is not a DR artifact and must not be treated as one. Before deleting
 > it, establish whether any *retained* snapshot predates a key change and was encrypted to it.
 
-**Access:** no policy grants `estate/*` to anything — not the dev-worker AppRoles, not ESO. The
-dev-worker `cred` helper gets a permission error here by design. Readers are root-level tokens only
-(the ceremony below). Widening access (e.g. a scoped operator token, an ESO consumer) is a
-deliberate follow-up decision, not a default.
+**Access:** **one** policy grants anything under `estate/*`, and it is deliberately narrow —
+`af-app-dsh` has `read` on `af/data/estate/litellm` (+ its metadata) and nothing else
+(`dsh-provision-job.yaml`, where that grant is pinned into the BASELINE/DESIRED strings so a
+policy rewrite cannot silently drop it). Everything else here is root-tokens-only: no dev-worker
+AppRole and no ESO SecretStore has a grant, and the `cred` helper is denied by design. Widening
+further is a deliberate decision, not a default.
+
+> *Corrected 2026-09-12 — this paragraph previously read "no policy grants `estate/*` to
+> anything", which had been false since before `dsh-provision-job.yaml` landed. It was quoted
+> back at me by an agent reasoning about its own 403, so the stale absolute was actively
+> misleading someone.*
+
+> **Before widening `estate/*` for a workload, project instead.** Two reasons. First, a KV grant
+> is **per path, not per field**: `read` on `af/estate/strive-realm` hands over all six fields,
+> including the master-realm admin password, when the caller wanted one persona password.
+> `estate/litellm` was a clean single-path grant only because it has a single field. Second,
+> there is already a sanctioned mechanism: seed the value the consumer actually needs into
+> `af/dev-workers/common` or `af/dev-workers/<host>`, which every worker policy already covers,
+> so no policy changes at all. `af/dev-workers/codex-auth` is the precedent — a host PROJECTION
+> of an estate-class credential — and `af/dev-workers/dev-worker-3.strive_test_{user,password}`
+> (the e2e persona, added 2026-09-12) is the second. Projection also keeps the blast radius of a
+> compromised worker to the projected field rather than the whole estate path.
 
 > **The vault policy is not the whole boundary, and the difference matters (ADR 0021).** Flux
 > decrypts `estate-seeds.sops.yaml` into a **live `openbao-estate-seeds` Secret in ns `openbao`**, so
@@ -87,8 +106,8 @@ deliberate follow-up decision, not a default.
 > every value on this page regardless of what the vault policy says. The real boundary is the
 > **union** of (a) the vault policy, (b) Secret-read RBAC in `openbao`, and (c) the root-capable
 > vault logins: the never-expiring breakglass token, and the undocumented `auth/userpass` `root`
-> user this page already flags below. Treat "no policy grants `estate/*`" as one of three locks, not
-> as the lock.
+> user this page already flags below. Treat the vault policy — even stated correctly, as it now is above — as one of
+> three locks, not as the lock.
 >
 > **Testing the denial correctly.** `cred get estate/platform openai_api_key` proves nothing: `cred`
 > prefixes every lookup with `dev-workers/`, so that probes `af/dev-workers/estate/platform` and

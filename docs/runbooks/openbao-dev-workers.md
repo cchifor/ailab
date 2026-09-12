@@ -53,6 +53,17 @@ Secret.
 
 **KV layout** (mount `af`, KV v2 — the same mount ADR 0019 uses):
 
+- `af/dev-workers/dev-worker-3` — fields `strive_test_user` / `strive_test_password` (added
+  2026-09-12). A HOST PROJECTION of the `strive` realm's seeded **e2e persona** login
+  (`e2e-w0@localhost`), the credential the platform repo's live suites take as
+  `STRIVE_TEST_USER` / `STRIVE_TEST_PASSWORD` — see `live-ailab-e2e.yml`, whose precheck names
+  `e2e-secrets/worker-password` as the value. Reach it with
+  `cred exec dev-worker-3 strive_test_password STRIVE_TEST_PASSWORD -- <cmd>`.
+  **This is deliberately NOT the Keycloak admin login.** That one is master-realm admin (all of
+  `master`/`app`/`strive`), and it is unusable from a worker anyway: the edge 404s
+  `/realms/master/*` and `/admin/*`, so it cannot even authenticate from here. A request for
+  "the strive realm admin login" is nearly always this persona instead.
+  The escrow copy stays root-only at `af/estate/strive-realm`.
 - `af/dev-workers/codex-auth` — **read-only from every worker AND both reviewer VMs** (field
   `auth_json` — dot-free on purpose, so the host template can use plain field access that fails
   closed; `index` on a dotted key would render `<no value>`). The HOST PROJECTION of the estate's ONE codex login: the `af-codex-refresh` CronJob
