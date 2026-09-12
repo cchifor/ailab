@@ -5,7 +5,8 @@
 # Flow:
 #   1. k8s-auth login (POST v1/auth/kubernetes/login) with the pod's projected af-codex-refresher SA JWT;
 #   2. read the CURRENT auth.json field + its KV-v2 version (GET v1/af/data/...), for the check-and-set;
-#   3. agentforge-codex-refresh --skew-seconds 172800 (refresh only if <2d to access_token expiry);
+#   3. agentforge-codex-refresh --skew-seconds 691200 (refresh if <8d to access_token expiry — i.e.
+#      every night for a ~10-day token; see the skew note at the call site);
 #   4. if a NEW auth.json was emitted, CAS-write it back (POST with options.cas=<ver>);
 #   5. stamp the C2 STATUS RECORD as KV custom metadata on the same path:
 #      {credential_version, expires_at, last_refresh, outcome, last_checked} — sanitized (a version
@@ -13,7 +14,11 @@
 #      reads METADATA only; it treats record.credential_version != current KV version as
 #      UNKNOWN/PENDING, so the stamp always names the exact version it describes.
 # refresh_tokens are SINGLE-USE/rotated, so reading the FRESHEST value and CAS-writing (concurrencyPolicy
-# Forbid + cas=<ver>) is what prevents a stale overwrite / a lost rotation.
+# Forbid + cas=<ver>) is what prevents a stale overwrite / a lost rotation. That single-use property is
+# also why this CronJob is the ONLY thing in the estate that ever refreshes this login: every dev worker
+# and reviewer VM renders its ~/.codex/auth.json from this same KV document with the refresh_token
+# STRIPPED (dev_worker/pr_reviewer ansible roles), so a host can use the token but never rotate it. Two
+# refreshing copies of one login = OpenAI revokes the whole family (2026-09-03, every host + broker).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -156,8 +161,14 @@ data:
         with open("/work/in.json", "w", encoding="utf-8") as fh:
             fh.write(current)
 
-        # (3) Refresh (file-in/file-out, atomic). --skew-seconds 172800 => refresh iff <2 days to expiry;
-        #     the CLI writes /work/out.json ONLY when it actually rotated, so a still-fresh token is a
+        # (3) Refresh (file-in/file-out, atomic). --skew-seconds 691200 => refresh iff <8 days to expiry.
+        #     The ChatGPT access_token lives ~10 days, so this is effectively EVERY night, on purpose:
+        #     the hosts that render this token (refresh_token stripped, so they cannot refresh it
+        #     themselves) then always hold >= 8 days of validity, and a broken CronJob has a week of
+        #     nightly retries before anything 401s — at the old 2-day skew a failed rotation was two
+        #     nights from a fleet-wide outage. A larger skew never forces a refresh of a token that
+        #     already has more than 8 days left, so a longer-lived upstream token is not churned.
+        #     The CLI writes /work/out.json ONLY when it actually rotated, so a still-fresh token is a
         #     clean no-op. Clear any stale out.json first so step (4)'s existence check is meaningful.
         try:
             os.remove("/work/out.json")
@@ -168,7 +179,7 @@ data:
                 "agentforge-codex-refresh",
                 "--in", "/work/in.json",
                 "--out", "/work/out.json",
-                "--skew-seconds", "172800",
+                "--skew-seconds", "691200",
             ],
             check=True,
         )
