@@ -193,12 +193,19 @@ spec:
         - name: searxng
           image: docker.io/searxng/searxng@sha256:e084201aa606fafce2151c8dc2844c9c3309025e90fbe7163b4f5e5183e474f0
           env:
-            # The PUBLIC origin, because this is the value SearXNG stamps into every absolute URL it
-            # generates — /preferences form actions, the opensearch descriptor, pagination, static
-            # asset links. Left as the ClusterIP name, a browser arriving via search.chifor.me would
-            # be handed links to a hostname that resolves nowhere outside the cluster. dsh is
-            # unaffected: its client builds its own request URL and reads only the JSON body, so the
-            # in-cluster path stays searxng.dsh.svc:8080 regardless of what this says.
+            # The PUBLIC origin. MEASURED against the running instance rather than assumed, because
+            # the list of what this value actually reaches is shorter than it looks. SearXNG stamps
+            # base_url into exactly three places: /opensearch.xml (both the descriptor's own URL and
+            # the search template), the /preferences form action, and the RSS
+            # <link rel="alternate"> on a results page. The index page, pagination and static asset
+            # links are all RELATIVE and do not carry it at all. So the breakage from leaving the
+            # ClusterIP name here is narrow but real — "add this search engine" in a browser, and
+            # saving preferences, would both resolve to a name that exists only inside the cluster.
+            #
+            # dsh is unaffected either way. VERIFIED in a throwaway pod carrying this exact value:
+            # GET /search?format=json with Host: searxng.dsh.svc.cluster.local:8080 answered 200
+            # with 32 parsed results and no redirect. base_url is not enforced against the request
+            # Host, so the in-cluster JSON path is indifferent to what this says.
             - { name: SEARXNG_BASE_URL, value: "https://search.chifor.me/" }
             # One client, so the upstream worker count (which scales with host CPUs) would
             # over-allocate on a 32-thread node for no benefit.
