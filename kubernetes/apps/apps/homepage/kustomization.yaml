@@ -1,7 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# Homepage — the lab app dashboard at home.chifor.me (behind Cloudflare Access). Plain manifests
-# (matches the ai/edge apps; no HelmRelease pattern here). Config-as-code via the homepage-config CM.
+# Homepage — the lab app dashboard at home.chifor.me, behind the oauth2-proxy -> Authelia gate in this
+# directory. There is NO Cloudflare Access app for `home` (checked infra/cloudflare/access.tf: dw1-6,
+# k8s, hubble, dsh, proxmox, qnap, prometheus, alertmanager, vault/admin, openbao, api — no home), so
+# that proxy is the only gate. Plain manifests (matches the ai/edge apps; no HelmRelease pattern
+# here). Config-as-code via the homepage-config CM.
 resources:
   - namespace.yaml
   - limitrange.yaml

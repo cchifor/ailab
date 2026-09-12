@@ -15,9 +15,10 @@
 #
 # WHY NOT REUSE THE homepage PROXY (apps/homepage/oauth2-proxy.yaml, same image and flags). Its cookie
 # and redirect_uri are scoped to home.chifor.me, so a second hostname would have to arrive either on a
-# shared parent-domain cookie or as a path-mounted upstream under home.chifor.me/search/ — and SearXNG
-# builds absolute URLs from ONE base_url that dsh's in-cluster client shares. A separate proxy keeps
-# the two surfaces, and their two cookies, independent.
+# shared parent-domain cookie or as a path-mounted upstream under home.chifor.me/search/ — which would
+# also drag base_url to https://home.chifor.me/search/ for the three surfaces derived from it (see
+# searxng.yaml). A separate proxy costs one 64Mi pod and keeps the two surfaces, their two cookies and
+# their two failure modes independent: Homepage does not go down with search, or the reverse.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
