@@ -1,7 +1,13 @@
 # oauth2-proxy — the SSO gate in front of SearXNG's web UI at search.chifor.me. SearXNG has NO
-# authentication of its own, so this is the only thing between the internet and the one pod in this
-# namespace that holds a route out. It is an OIDC client of Authelia (sso.chifor.me); unauthenticated
-# requests are redirected to the Authelia login, then proxied to the searxng Service.
+# authentication of its own, so this is the only thing standing between the public internet and a
+# service that will fetch third-party URLs on behalf of whoever asks it to. It is an OIDC client of
+# Authelia (sso.chifor.me); unauthenticated requests are redirected to the Authelia login, then
+# proxied to the searxng Service.
+#
+# NOT "the only pod here with a route out" — an earlier draft of this comment said that and it is
+# wrong: dsh gained direct 443 egress on 2026-09-09 (networkpolicy.yaml documents why). What is
+# singular about searxng is not that it can reach the internet, it is that it reaches the internet
+# ON BEHALF OF ITS CALLER — which is precisely the capability that must not be offered anonymously.
 #
 # THIS DOES NOT SIT IN dsh's PATH, which is the whole reason it is a separate Deployment with its own
 # Service rather than a gate bolted onto `searxng`:
