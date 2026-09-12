@@ -54,7 +54,8 @@ Secret.
 **KV layout** (mount `af`, KV v2 — the same mount ADR 0019 uses):
 
 - `af/dev-workers/codex-auth` — **read-only from every worker AND both reviewer VMs** (field
-  `auth.json`). The HOST PROJECTION of the estate's ONE codex login: the `af-codex-refresh` CronJob
+  `auth_json` — dot-free on purpose, so the host template can use plain field access that fails
+  closed; `index` on a dotted key would render `<no value>`). The HOST PROJECTION of the estate's ONE codex login: the `af-codex-refresh` CronJob
   (`kubernetes/apps/infrastructure/agentforge-codex-refresh/`) rotates the real OAuth document
   (`af/operator/broker/openai/codex-pro/oauth` — hosts have **no** grant on it) and, right after,
   publishes this projection of it under its `codex-hosts-publisher` k8s-auth role: access + id token
@@ -313,9 +314,14 @@ under `reviewbot_openbao_credentials.<hostname>.{role_id,secret_id}`; then set
 > ```bash
 > sops -d ansible/secrets/reviewbot.sops.yaml > "$MINT/reviewbot.plain.yaml"      # 0600 via umask
 > # append the reviewbot_openbao_credentials block (same python shape as below, paths reviewer-1/2)
-> sops -e --config .sops.yaml "$MINT/reviewbot.plain.yaml" > ansible/secrets/reviewbot.sops.yaml
+> # --filename-override: creation rules match the file's PATH, and the temp file's path matches no
+> # rule; the override makes sops pick the reviewbot rule. Encrypt into a temp file and swap it in
+> # only after it verifies — `sops -e ... > <the real file>` would truncate the original first.
+> sops --filename-override ansible/secrets/reviewbot.sops.yaml -e "$MINT/reviewbot.plain.yaml" > "$MINT/reviewbot.enc.yaml"
+> sops -d "$MINT/reviewbot.enc.yaml" | python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin)["reviewbot_openbao_credentials"]; print(sorted(c), sorted(next(iter(c.values()))))'
+> grep -c 'role_id: ENC\[' "$MINT/reviewbot.enc.yaml"      # 2 — the leaves are ciphertext
+> mv "$MINT/reviewbot.enc.yaml" ansible/secrets/reviewbot.sops.yaml
 > rm -f "$MINT/reviewbot.plain.yaml"
-> sops -d ansible/secrets/reviewbot.sops.yaml | python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin)["reviewbot_openbao_credentials"]; print(sorted(c), sorted(next(iter(c.values()))))'
 > git diff -- ansible/secrets/reviewbot.sops.yaml     # ONLY ENC[...] lines may appear
 > ```
 
@@ -495,7 +501,7 @@ nobody runs `codex login` on a host — ever. How it hangs together:
 |---|---|---|
 | The login | `af/operator/broker/openai/codex-pro/oauth` (KV v2, field `auth.json`) | The full OAuth document (access + id + **refresh** token). The broker mounts it via ESO. **No host can read it.** |
 | The ONLY refresher | `af-codex-refresh` CronJob, ns `agentforge-broker`, 03:00 UTC | `--skew-seconds 691200`: the ~10-day access token is rotated every second night (refresh when ≤8 days left), CAS-written back, C2 status stamped as custom metadata. |
-| The host projection | `af/dev-workers/codex-auth` (field `auth.json`), written by the same CronJob under the `codex-hosts-publisher` role right after each run | Access + id token + `account_id`, `refresh_token` = `""`. Rebuilt field-by-field, written only when changed. This is the ONLY codex document a host policy can read. |
+| The host projection | `af/dev-workers/codex-auth` (field `auth_json`), written by the same CronJob under the `codex-hosts-publisher` role right after each run | Access + id token + `account_id`, `refresh_token` = `""`. Rebuilt field-by-field, written only when changed. This is the ONLY codex document a host policy can read. |
 | The host render | `roles/openbao_agent/files/codex-auth.ctmpl` → `~/.codex/auth.json` (0600, user-owned) | The projection, verbatim. codex 0.153 runs on the stored token and never tries to refresh with an empty refresh token (verified, even with a 23-day-old `last_refresh`). The agent re-polls KV every few minutes, so a host follows each rotation within ~5 min and always has ~8–10 days left. |
 | Who renders it | dev_worker: every `dev_worker_users` entry. pr_reviewer: `pr_reviewer_llm_sudo_user` (`codexrun`) when `pr_reviewer_enable_openbao` and the persona is codex. | The play's health check asserts the file is user-owned 0600 JSON, has >24h left on the access token, and has **no** refresh token. |
 

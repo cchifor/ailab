@@ -125,34 +125,34 @@
         state: absent
 
   rescue:
-    # Two cases. A previous agent.hcl exists (a re-run on an already-converted host): put it back and
-    # restart, exactly like dev_worker. No previous config (the FIRST rollout on this host): there is
-    # nothing to restart onto, so stop + disable the agent rather than leave a failing unit enabled
-    # and restart-looping — and restore the pre-agent login it may have overwritten, so reviews keep
-    # running on what worked before. The backup is consumed (moved back), so a later successful run
-    # takes a fresh one.
-    - name: Restore the previous agent config, or stop the agent if there was none
+    # Order matters: STOP the agent first, THEN put the pre-agent login back — a running agent (old
+    # config or new, it renders the same codex template from the same KV) would re-render the same
+    # rejected projection over the restored file within its poll interval. The agent stays stopped +
+    # disabled until an operator has fixed the render source and re-runs the play; reviews keep
+    # running on the restored login meanwhile (on an already-converted host that is the previously
+    # rendered projection, still good for ~8 days). A previous agent.hcl, if any, is put back so the
+    # next run diffs and backs up against the last-known-good config rather than the rejected one.
+    # The login backup is consumed (moved back), so a later successful run takes a fresh one.
+    - name: Stop the agent, restore the pre-agent login and the previous agent config
       ansible.builtin.shell: |
         set -eu
-        BAK="{{ pr_reviewer_agent_hcl.backup_file | default('') }}"
-        if [ -n "$BAK" ] && [ -f "$BAK" ]; then
-          cp "$BAK" /etc/openbao-agent/agent.hcl
-          systemctl restart openbao-agent
-        else
-          systemctl disable --now openbao-agent || true
-        fi
+        systemctl disable --now openbao-agent || true
         PRE=/etc/openbao-agent/codex-auth.json.pre-agent
         USR="{{ pr_reviewer_llm_sudo_user }}"
         if [ -f "$PRE" ]; then
           install -o "$USR" -g "$USR" -m 0600 "$PRE" "/home/$USR/.codex/auth.json"
           rm -f "$PRE"
         fi
+        BAK="{{ pr_reviewer_agent_hcl.backup_file | default('') }}"
+        if [ -n "$BAK" ] && [ -f "$BAK" ]; then
+          cp "$BAK" /etc/openbao-agent/agent.hcl
+        fi
       changed_when: true
 
     - name: Fail loudly after rolling back
       ansible.builtin.fail:
         msg: >-
-          openbao-agent did not come up healthy on {{ inventory_hostname }}. The previous agent.hcl
-          was restored (or, on a first rollout, the agent was stopped + disabled) and the codex login
-          from before this run was put back, so reviews keep running on it — fix the agent before
-          re-running (docs/runbooks/openbao-dev-workers.md, "Failure modes").
+          openbao-agent did not come up healthy on {{ inventory_hostname }}: it was stopped + disabled,
+          the codex login from before this run was put back (reviews keep running on it), and the
+          previous agent.hcl, if any, was restored. It stays stopped until the render source is fixed
+          and this play is re-run (docs/runbooks/openbao-dev-workers.md, "Failure modes").

@@ -20,8 +20,9 @@ creation_rules:
     # exists, so no checkout can ever encrypt that file with a rule that leaves the pair plaintext.
     # NB: an EXISTING encrypted file carries its own `sops.encrypted_regex` in its metadata and
     # `sops edit` keeps THAT, not this rule — so adding the key to the already-encrypted
-    # reviewbot.sops.yaml must go through a decrypt + fresh `sops -e` (recipe in
-    # docs/runbooks/openbao-dev-workers.md (e)), and `git diff` must show only ENC[...] leaves.
+    # reviewbot.sops.yaml must go through a decrypt + fresh `sops -e` WITH `--filename-override`
+    # naming this path (rules match the input file's path; a temp file matches none) — recipe in
+    # docs/runbooks/openbao-dev-workers.md (e) — and `git diff` must show only ENC[...] leaves.
     encrypted_regex: ^(reviewbot_[a-z0-9]+_pat|reviewbot_[a-z0-9]+_webhook_secret|reviewbot_openbao_credentials|role_id|secret_id)$
     age: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
   # Registry secrets. Same reason as dev-worker above — MUST precede the generic ansible/secrets rule
