@@ -1,7 +1,9 @@
 # Dev-worker AppRole provisioning (ADR 0020) — the declarative half of giving each dev-worker VM its
 # own OpenBao identity. Enables the `approle` auth mount, writes one read-only policy + one AppRole
 # role per worker (PERIODIC tokens, so a renewing agent never hits the max-TTL cliff that locked the
-# estate out on 2026-08-25), and seed-patches the af/dev-workers/* KV paths from the
+# estate out on 2026-08-25) — and, since 2026-09-12, the same shape for the two reviewer VMs, whose
+# only grant is the shared codex projection read (below), plus the k8s-auth role the codex CronJob
+# publishes that projection under — and seed-patches the af/dev-workers/* KV paths from the
 # openbao-devworker-seeds Secret (SEED-WINS contract — a key present in the seed overwrites live KV
 # on every daily run). NB: that is the contract of THIS Job and of estate-provision-job.yaml, and it
 # is NOT the AgentForge operator seed's — provision-job.yaml's `_apply_operator_seeds` is
@@ -59,6 +61,18 @@ data:
       bao auth enable approle
     fi
 
+    # ONE codex login for the whole estate (2026-09-12). The Codex Pro OAuth document the broker uses
+    # (af/operator/broker/openai/codex-pro/oauth) is rotated by the af-codex-refresh CronJob, and that
+    # CronJob also PUBLISHES a host projection of it — af/dev-workers/codex-auth (field auth_json): access + id token +
+    # account_id, refresh_token replaced by "" — which is what every dev worker and reviewer VM
+    # renders its ~/.codex/auth.json from. Hosts get `read` on the PROJECTION and nothing on the oauth
+    # document: OpenAI refresh tokens are single-use, so a host that could fetch the refresh_token
+    # (any process holding the worker's OpenBao token, e.g. an agent session via the cred sink) could
+    # refresh behind the CronJob's back and revoke the entire family — which is how every host + the
+    # broker lost codex on 2026-09-03. With only the projection readable, a host can use the token but
+    # can never rotate it. `read` on the DATA path only — no metadata, no list, no write.
+    CODEX_AUTH_GRANT='path "af/data/dev-workers/codex-auth" { capabilities = ["read"] }'
+
     # The six dev workers (inventory/hosts.yml, group dev_workers). Role and policy are both named
     # after the ansible inventory_hostname, so an audit entry names the machine. Adding a worker is
     # one word here plus the mint ceremony in docs/runbooks/openbao-dev-workers.md.
@@ -67,6 +81,7 @@ data:
       # grants are what make `cred list` work; nothing here can create, update or delete, so a
       # compromised worker cannot rewrite another worker's credentials.
       bao policy write "$host" - <<EOF
+    ${CODEX_AUTH_GRANT}
     path "af/data/dev-workers/common"        { capabilities = ["read"] }
     path "af/data/dev-workers/common/*"      { capabilities = ["read"] }
     path "af/data/dev-workers/${host}"       { capabilities = ["read"] }
@@ -91,6 +106,38 @@ data:
         secret_id_ttl=0 \
         secret_id_num_uses=0
     done
+
+    # The two reviewer VMs (inventory/hosts.yml, group reviewers; ansible/reviewers.yml). Same
+    # AppRole shape as a dev worker, but the policy is the codex projection read and NOTHING else: a
+    # reviewer has no `cred`, no per-host subtree, and must not see the rest of the dev-workers KV
+    # (gitea PAT, hypervisor key). The mint ceremony is the same one — docs/runbooks/openbao-dev-workers.md (e).
+    for host in reviewer-1 reviewer-2; do
+      bao policy write "$host" - <<EOF
+    ${CODEX_AUTH_GRANT}
+    EOF
+      bao write "auth/approle/role/${host}" \
+        token_policies="${host}" \
+        token_period=72h \
+        secret_id_ttl=0 \
+        secret_id_num_uses=0
+    done
+
+    # codex-hosts-publisher — the WRITE side of af/dev-workers/codex-auth (the host projection above).
+    # Bound to the af-codex-refresh CronJob's own ServiceAccount (ns agentforge-broker): that CronJob
+    # is the one process that ever holds a freshly rotated auth.json, so it publishes the projection
+    # right after each rotation. A SEPARATE k8s-auth role rather than a wider af-codex-refresher
+    # policy: that policy is owned/reconciled by the agentforge provisioner and scoped to the oauth
+    # document; this one is owned here, next to the readers, and scoped to the projection only —
+    # `read` for the write-if-changed compare, no delete, nothing else under dev-workers/.
+    bao policy write codex-hosts-publisher - <<'EOF'
+    path "af/data/dev-workers/codex-auth" { capabilities = ["read", "create", "update"] }
+    EOF
+    bao write auth/kubernetes/role/codex-hosts-publisher \
+      bound_service_account_names=af-codex-refresher \
+      bound_service_account_namespaces=agentforge-broker \
+      token_policies=codex-hosts-publisher \
+      token_ttl=15m \
+      token_max_ttl=30m
 
     # openbao-k8stoken-sync (ADR 0021) — the in-cluster job that mints per-worker kubeconfigs and
     # writes them to af/dev-workers/<host>.{tep,helmtest}_kubeconfig. It authenticates with the

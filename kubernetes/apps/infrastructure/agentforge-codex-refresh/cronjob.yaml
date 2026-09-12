@@ -5,15 +5,28 @@
 # Flow:
 #   1. k8s-auth login (POST v1/auth/kubernetes/login) with the pod's projected af-codex-refresher SA JWT;
 #   2. read the CURRENT auth.json field + its KV-v2 version (GET v1/af/data/...), for the check-and-set;
-#   3. agentforge-codex-refresh --skew-seconds 172800 (refresh only if <2d to access_token expiry);
+#   3. agentforge-codex-refresh --skew-seconds 691200 (refresh if <=8d to access_token expiry — every
+#      second night for a ~10-day token; see the skew note at the call site);
 #   4. if a NEW auth.json was emitted, CAS-write it back (POST with options.cas=<ver>);
 #   5. stamp the C2 STATUS RECORD as KV custom metadata on the same path:
 #      {credential_version, expires_at, last_refresh, outcome, last_checked} — sanitized (a version
 #      number + timestamps derived from the JWT exp, NEVER token material). The CP status surface
 #      reads METADATA only; it treats record.credential_version != current KV version as
 #      UNKNOWN/PENDING, so the stamp always names the exact version it describes.
+#   6. PUBLISH the host projection: a second k8s-auth login (same SA, role codex-hosts-publisher —
+#      devworker-provision-job.yaml) writes af/dev-workers/codex-auth (field auth_json) = the current
+#      auth.json with the refresh_token replaced by "" (access + id token + account_id only). That document, and
+#      NOT the oauth one, is what every dev worker and reviewer VM's bao agent renders ~/.codex/
+#      auth.json from — so no host token can ever fetch the refresh_token and rotate the family
+#      behind this CronJob's back. Written on both arms (rotated AND fresh), skipped when identical,
+#      so a wiped or missing projection self-heals on the next run.
 # refresh_tokens are SINGLE-USE/rotated, so reading the FRESHEST value and CAS-writing (concurrencyPolicy
-# Forbid + cas=<ver>) is what prevents a stale overwrite / a lost rotation.
+# Forbid + cas=<ver>) is what prevents a stale overwrite / a lost rotation. That single-use property is
+# also why this CronJob is the ONLY thing in the estate that ever refreshes this login: every dev worker
+# and reviewer VM renders its ~/.codex/auth.json from the host projection in step 6 (refresh_token
+# already stripped server-side; dev_worker/pr_reviewer ansible roles), so a host can use the token but
+# never rotate it. Two refreshing copies of one login = OpenAI revokes the whole family (2026-09-03,
+# every host + broker).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -48,6 +61,16 @@ data:
     BAO_ADDR = os.environ.get("BAO_ADDR", "https://openbao.openbao.svc:8200")
     CA_CERT = os.environ.get("BAO_CACERT", "/tls/ca.crt")
     ROLE = "af-codex-refresher"
+    # The host projection (step 6): its own k8s-auth role on the SAME SA, scoped to exactly this one
+    # KV document (read/create/update) — nothing on the oauth path — so the two writes stay under two
+    # narrow policies rather than one wide one.
+    HOSTS_ROLE = "codex-hosts-publisher"
+    HOSTS_KEY = "dev-workers/codex-auth"
+    # The projection's field is `auth_json`, NOT the oauth document's `auth.json`: a consul-template
+    # can only reach a dotted key through `index`, and `index` renders "<no value>" for a missing key
+    # instead of honouring error_on_missing_key — a dot-free name lets the hosts' template use plain
+    # `.Data.data.auth_json`, which fails closed (verified against bao 2.5.5, 2026-09-12).
+    HOSTS_FIELD = "auth_json"
     KV_MOUNT = "af"
     KV_KEY = "operator/broker/openai/codex-pro/oauth"
     # NB: the KV field is `auth.json` — it MUST match the broker-openai-codex-oauth ExternalSecret's
@@ -142,6 +165,47 @@ data:
         )
 
 
+    def _host_projection(auth_doc):
+        """The consumer-safe view of auth.json: everything a codex CLI needs to CALL the API, nothing
+        it could use to ROTATE. Rebuilt field-by-field (never a copy-minus-one-key) so a new field
+        upstream can never leak through, and refresh_token is the literal "" — codex 0.153 runs on
+        that and never attempts a refresh with an empty refresh_token (verified 2026-09-12)."""
+        t = auth_doc["tokens"]
+        return json.dumps({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "id_token": t["id_token"],
+                "access_token": t["access_token"],
+                "refresh_token": "",
+                "account_id": t["account_id"],
+            },
+            "last_refresh": auth_doc.get("last_refresh", ""),
+        }, separators=(",", ":"))
+
+
+    def _publish_hosts(jwt, auth_text):
+        """(6) Write the host projection to af/dev-workers/codex-auth under the codex-hosts-publisher
+        role. Skips the write when the stored projection is already identical (no version churn on
+        the fresh arm). Runs AFTER the rotation is persisted + stamped, so a failure here can never
+        lose a rotation — it just fails the run and the hosts keep rendering the previous (still
+        valid, >= ~8 days) projection until the next nightly run."""
+        login = _api("POST", "auth/kubernetes/login", body={"role": HOSTS_ROLE, "jwt": jwt})
+        token = login["auth"]["client_token"]
+        projection = _host_projection(json.loads(auth_text))
+        try:
+            stored = _api("GET", f"{KV_MOUNT}/data/{HOSTS_KEY}", token=token)["data"]["data"].get(HOSTS_FIELD)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+            stored = None
+        if stored == projection:
+            print("host projection unchanged; not rewritten")
+            return
+        _api("POST", f"{KV_MOUNT}/data/{HOSTS_KEY}", token=token, body={"data": {HOSTS_FIELD: projection}})
+        print(f"host projection published to {KV_MOUNT}/{HOSTS_KEY}")
+
+
     def main():
         # (1) Authenticate as the projected af-codex-refresher SA token under the af-codex-refresher role.
         with open(SA_TOKEN_PATH, encoding="utf-8") as fh:
@@ -156,8 +220,16 @@ data:
         with open("/work/in.json", "w", encoding="utf-8") as fh:
             fh.write(current)
 
-        # (3) Refresh (file-in/file-out, atomic). --skew-seconds 172800 => refresh iff <2 days to expiry;
-        #     the CLI writes /work/out.json ONLY when it actually rotated, so a still-fresh token is a
+        # (3) Refresh (file-in/file-out, atomic). --skew-seconds 691200 => refresh iff <= 8 days to
+        #     expiry. The ChatGPT access_token lives ~10 days, so with a nightly check it is rotated
+        #     every SECOND night (10d -> 9d left: no; 8d left: refresh), on purpose: the hosts that
+        #     render this token (refresh_token never reaches them, so they cannot refresh it
+        #     themselves) then hold between ~8 and 10 days of validity at every nightly check, and a
+        #     broken CronJob has about a week of nightly retries before anything 401s — at the old
+        #     2-day skew a failed rotation was two nights from a fleet-wide outage. The skew never
+        #     forces a refresh of a token with more than 8 days left, so a longer-lived upstream
+        #     token is not churned.
+        #     The CLI writes /work/out.json ONLY when it actually rotated, so a still-fresh token is a
         #     clean no-op. Clear any stale out.json first so step (4)'s existence check is meaningful.
         try:
             os.remove("/work/out.json")
@@ -168,7 +240,7 @@ data:
                 "agentforge-codex-refresh",
                 "--in", "/work/in.json",
                 "--out", "/work/out.json",
-                "--skew-seconds", "172800",
+                "--skew-seconds", "691200",
             ],
             check=True,
         )
@@ -208,9 +280,11 @@ data:
                 )
                 sys.exit(1)
             _stamp_status(token, record)
+            _publish_hosts(jwt, rotated)
         else:
             print(f"codex {FIELD} still fresh (> skew); no refresh performed")
             _stamp_status(token, _status_record(json.loads(current), version, "fresh"))
+            _publish_hosts(jwt, current)
 
 
     if __name__ == "__main__":
