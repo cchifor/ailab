@@ -243,6 +243,127 @@ class SelectionRule(unittest.TestCase):
         self.assertFalse(by_name["epsilon-local"].vision)  # supports_vision: false
 
 
+class DshOptIn(unittest.TestCase):
+    """`model_info.dsh_only` — the one documented exemption from the private-api_base rule.
+
+    It exists so ONE paid route can reach dsh's picker without loosening the rule for gpt-5.4,
+    claude-sonnet-5 and the embedding model along with it, and it must never widen Open WebUI's
+    Local group, which is what the private-api_base rule protects.
+    """
+
+    def _entry(self, api_base=None, **model_info):
+        entry = {"model_name": "x", "litellm_params": {"model": "openai/x", "api_key": "k"}}
+        if api_base is not None:
+            entry["litellm_params"]["api_base"] = api_base
+        if model_info:
+            entry["model_info"] = model_info
+        return entry
+
+    def test_paid_route_reaches_dsh_and_not_the_local_group(self):
+        entry = self._entry(dsh_only=True)  # no api_base at all — the shape of every paid route
+        self.assertTrue(glc.dsh_visible(entry))
+        self.assertFalse(glc.consumer_visible(entry))
+
+    def test_the_same_route_without_the_key_reaches_neither(self):
+        entry = self._entry()
+        self.assertFalse(glc.dsh_visible(entry))
+        self.assertFalse(glc.consumer_visible(entry))
+
+    def test_self_hosted_route_can_be_held_back_from_the_local_group(self):
+        entry = self._entry("http://10.0.0.5:8080/v1", dsh_only=True)
+        self.assertTrue(glc.dsh_visible(entry))
+        self.assertFalse(glc.consumer_visible(entry))
+
+    def test_boolean_false_is_not_an_opt_in(self):
+        self.assertFalse(glc.dsh_visible(self._entry(dsh_only=False)))
+        # ...and it does not withdraw a route that qualifies on its own.
+        entry = self._entry("http://10.0.0.5:8080/v1", dsh_only=False)
+        self.assertTrue(glc.dsh_visible(entry))
+        self.assertTrue(glc.consumer_visible(entry))
+
+    def test_mode_still_applies_through_the_opt_in(self):
+        # A PAID embedding route must not reach a chat picker by opting in.
+        self.assertFalse(glc.dsh_visible(self._entry(dsh_only=True, mode="embedding")))
+
+    def test_non_boolean_is_an_error_naming_the_entry_and_the_key(self):
+        for bad in ("true", "false", "yes", 1, 0, None, [True]):
+            with self.subTest(dsh_only=bad):
+                with self.assertRaises(glc.SourceError) as cm:
+                    glc.dsh_visible(self._entry(dsh_only=bad))
+                self.assertIn("'x'", str(cm.exception))
+                self.assertIn("model_info.dsh_only", str(cm.exception))
+
+    def test_non_boolean_is_checked_before_any_filter_could_exclude_the_entry(self):
+        # Same discipline as `hidden`: an entry with no api_base is excluded anyway, but a typo in
+        # the opt-in must still be a FAILURE rather than a silent "well, it was excluded regardless".
+        for probe in (glc.dsh_visible, glc.consumer_visible):
+            with self.subTest(probe=probe.__name__):
+                with self.assertRaises(glc.SourceError):
+                    probe(self._entry(dsh_only="true"))
+
+    def test_hidden_and_dsh_only_together_are_a_contradiction(self):
+        for probe in (glc.dsh_visible, glc.consumer_visible):
+            with self.subTest(probe=probe.__name__):
+                with self.assertRaises(glc.SourceError) as cm:
+                    probe(self._entry("http://10.0.0.5:8080/v1", hidden=True, dsh_only=True))
+                self.assertIn("'x'", str(cm.exception))
+                self.assertIn("contradictory", str(cm.exception))
+
+    @staticmethod
+    def _opt_in_paid_route(sb):
+        """Give the fixture's paid gpt-4.1 entry the opt-in key."""
+        text = sb.read(LITELLM_REL)
+        old = "          model: openai/gpt-4.1\n          api_key: os.environ/OPENAI_API_KEY\n"
+        assert old in text, "fixture shape changed"
+        sb.write(LITELLM_REL, text.replace(old, old + "        model_info: { dsh_only: true }\n", 1))
+
+    def test_cli_write_adds_it_to_dsh_and_leaves_open_webui_untouched(self):
+        with Sandbox() as sb:
+            self._opt_in_paid_route(sb)
+            proc = sb.run("--write")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            # The fixture's Local group is deliberately stale, so --write DOES rewrite this line;
+            # what matters is that it normalises to the self-hosted routes and no more. Asserting
+            # the exact expected line (not "unchanged") is what catches a paid route leaking in.
+            self.assertIn(EXPECTED_WEBUI_LINE, sb.read(OPEN_WEBUI_REL))
+            self.assertNotIn("gpt-4.1", sb.read(OPEN_WEBUI_REL),
+                             "a paid route must never widen Open WebUI's Local group")
+            providers = yaml.safe_load(sb.read(SEED_REL))["llm-pi-ai"]["providers"]
+            self.assertEqual([r["id"] for r in providers["litellm"]["models"]],
+                             ["alpha-cloud", "gpt-4.1", "delta-172", "epsilon-local"],
+                             "model_list order, with the opted-in route in its own position")
+            self.assertEqual([r["id"] for r in providers["other-provider"]["models"]],
+                             ["untouched-model"], "a sibling provider's rows are not the owned span")
+            self.assertEqual(sb.run("--check").returncode, 0, "the written state must be clean")
+
+    def test_cli_check_reports_the_drift_before_it_is_written(self):
+        with Sandbox() as sb:
+            self._opt_in_paid_route(sb)
+            proc = sb.run("--check")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("gpt-4.1", proc.stdout)
+            self.assertIn(SEED_REL, proc.stdout)
+
+    def test_an_all_dsh_only_config_is_refused_rather_than_emptying_the_local_group(self):
+        for mode in ("--check", "--write"):
+            with self.subTest(mode=mode), Sandbox() as sb:
+                text = sb.read(LITELLM_REL)
+                text = text.replace("{ supports_vision: true, max_input_tokens: 81920 }",
+                                    "{ supports_vision: true, max_input_tokens: 81920, dsh_only: true }")
+                text = text.replace("{ max_input_tokens: 81920 }", "{ max_input_tokens: 81920, dsh_only: true }")
+                text = text.replace("{ supports_vision: false, max_input_tokens: 114688 }",
+                                    "{ supports_vision: false, max_input_tokens: 114688, dsh_only: true }")
+                self.assertEqual(text.count("dsh_only: true"), 3, "every selectable fixture route is now dsh_only")
+                sb.write(LITELLM_REL, text)
+                before = {rel: sb.read(rel) for rel in ALL_REL}
+                proc = sb.run(mode)
+                self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertIn("refusing to render an empty Open WebUI Local group", proc.stdout)
+                self.assertNotIn("Traceback", proc.stderr)
+                for rel in ALL_REL:
+                    self.assertEqual(sb.read(rel), before[rel], f"{rel} must not be touched")
+
+
 class ModelNames(unittest.TestCase):
     """A model_name is written verbatim into a dsh `- id: <name>` row and into the JSON inside Open
     WebUI's single-quoted YAML scalar, so it must survive both: yaml.safe_load(name) must be the
@@ -475,6 +596,11 @@ class SeedRewrite(unittest.TestCase):
                 "ui:\n"
                 "  theme: light\n",
                 encoding="utf-8",
+                # newline="": without it write_text translates every \n to \r\n on Windows, and
+                # reconcile-provider.js walks this file line by line -- it then matches nothing,
+                # warns "settings.yaml has no llm-pi-ai" on STDERR and leaves the file untouched,
+                # which read as an empty-stdout failure here. The pod's real settings.yaml is LF.
+                newline="",
             )
             env = dict(os.environ, DSH_SETTINGS=str(live), DSH_SEED=str(sb.root / SEED_REL))
             proc = subprocess.run(["node", str(_RECONCILE_JS)], env=env, capture_output=True, text=True)

@@ -541,6 +541,55 @@ data:
         litellm_params:
           model: openai/gpt-5-mini
           api_key: os.environ/OPENAI_API_KEY
+      # ------------------------------------------------------------------ the Codex route for dsh
+      # Added 2026-09-12 so dsh's `Conductor` team can actually be what its name says. That team's
+      # own header states the constraint: a preset composes plugins, it does NOT pin a model route,
+      # so the conductor runs on whatever the session selects. With no Codex route in the picker the
+      # only thing selectable was qwen3.8, i.e. qwen conducting qwen -- and when the cloudlab hosts
+      # are powered off (they are, nightly) that selection fell down LiteLLM's fallback chain and
+      # 500'd instead. Delegated WORKERS still point at qwen3.8-27b-vllm-cloud, by explicit
+      # agentOptions in the team's `tool-subagent` row, so they fail while cloudlab is off. That is
+      # intended: the conductor answers, delegation does not.
+      #
+      # WHY gpt-6-astra AND NOT A `-codex` ID. Measured against the live key on 2026-09-12:
+      #   gpt-6-astra    POST /v1/chat/completions -> 200
+      #   gpt-5.3-codex  POST /v1/chat/completions -> 404 "This model is not supported in the
+      #                  v1/chat/completions endpoint. Use the v1/responses endpoint instead."
+      # (the whole gpt-5*-codex family answers the same way). dsh reaches this proxy through a
+      # provider declared `api: openai-completions`, and a dsh provider speaks EXACTLY ONE protocol,
+      # so a Responses-only id is not reachable from here at all. gpt-6-astra is also the estate's
+      # standing codex model everywhere else, so this agrees with the dev-worker profiles rather
+      # than introducing a second answer.
+      #
+      # THIS IS WHAT REPLACES THE `codex` PROVIDER, and that is the point. dsh/settings.seed.yaml
+      # and dsh/deployment.yaml carry the long version: a `codex` provider seeded with
+      # `api: openai-codex-responses` is not a schema value, and because validation covers the WHOLE
+      # providers dict it failed litellm along with itself -- every model gone, dead composer. The
+      # init container still actively unwrites that block on every boot. Serving the Codex model as
+      # an ORDINARY LiteLLM route needs no dsh provider, no af/estate/codex path in OpenBao (absent;
+      # its ExternalSecret wedged the apps layer for a day and was removed on 2026-09-11) and no
+      # CODEX_API_KEY (codex 0.153.4 ignores it anyway). It reuses the key that already serves
+      # gpt-5.4 above.
+      #
+      # NO max_input_tokens OVERRIDE, deliberately: LiteLLM's own catalog already knows this id
+      # (max_input_tokens 922000, max_output_tokens 128000, supports_vision true -- read from
+      # litellm.get_model_info in the running pod), so a hand-copied number here could only drift
+      # from it. supports_vision IS declared, because that key is what gen-litellm-consumers.py
+      # reads to emit dsh's `input: [text, image]` row -- and it is measured, not copied: an
+      # image_url part over /v1/chat/completions was accepted and answered on 2026-09-12.
+      #
+      # NO FALLBACKS, in either direction. Nothing falls back TO this route -- a chain that lands on
+      # a paid endpoint turns a local outage into silent spend -- and it needs none of its own.
+      #
+      # dsh_only: it reaches dsh's picker and is kept OUT of Open WebUI's Local group. It still
+      # shows up in Open WebUI under External, because connection "1" discovers /v1/models and this
+      # key is not something LiteLLM knows. See the generator's docstring; it costs money, which is
+      # why the exemption is per-entry rather than a loosened rule.
+      - model_name: gpt-6-astra
+        litellm_params:
+          model: openai/gpt-6-astra
+          api_key: os.environ/OPENAI_API_KEY
+        model_info: { supports_vision: true, dsh_only: true }
       # --------------------------------------------------------------- always-on fallback route
       # Added 2026-09-09. Both cloud routes above live on cloudlab hosts that POWER OFF NIGHTLY, so
       # neither can back the other after hours -- .26 shares .28's outage window by design. node2 is
@@ -735,7 +784,7 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "a838466a2829"
+        checksum/config: "2b4c2719ab38"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
