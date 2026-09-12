@@ -34,8 +34,10 @@
 # app, and any search step bound to that connection) query /search?format=json here instead of a
 # paid vendor. Nothing about the containment above changes for that. The admitted callers are the
 # platform's own service pods -- workflow-worker, workflow and integration, picked out by the
-# chart's strive.io/service label. They hold platform service identities; toward SearXNG, which
-# has no auth of its own, they are admitted by pod label under searxng-allow exactly as dsh is.
+# platform's strive.io/service label (stamped by the chart on workflow/integration and by the raw
+# worker manifest on workflow-worker). They hold platform service identities; toward SearXNG,
+# which has no auth of its own, they are admitted by pod label under searxng-allow exactly as dsh
+# is.
 # The Service stays ClusterIP-only (no Ingress, no cloudflared). And SearXNG
 # has no page-fetch surface: a caller hands it a query string, never a URL to GET (image_proxy is
 # off), so it cannot be turned into a fetcher for arbitrary pages and the egress policy at the
@@ -295,11 +297,13 @@ spec:
         # health probe, which is passive today and so does not dial yet.
         #
         # The two selectors sit in ONE `from` element on purpose: that is an AND -- a pod that
-        # carries the chart's strive.io/service label AND lives in strive-ailab. As two list items
-        # they would be OR'ed, and a bare namespaceSelector would admit every pod in that
-        # namespace (the same trap dsh-allow documents for `edge`). kubernetes.io/metadata.name is
-        # stamped by the API server and cannot be relabelled, so the namespace half cannot be
-        # spoofed; the platform's sandboxes run in strive-sandboxes-ailab and are not admitted.
+        # carries the platform's strive.io/service label (stamped by the chart on
+        # workflow/integration and by the raw worker manifest on workflow-worker) AND lives in
+        # strive-ailab. As two list items they would be OR'ed, and a bare namespaceSelector would
+        # admit every pod in that namespace (the same trap dsh-allow documents for `edge`).
+        # kubernetes.io/metadata.name is stamped by the API server and cannot be relabelled, so
+        # the namespace half cannot be spoofed; the platform's sandboxes run in
+        # strive-sandboxes-ailab and are not admitted.
         #
         # What this grants is search queries against public engines through this pod -- exactly
         # what dsh already has -- and nothing toward the internet that the platform's own

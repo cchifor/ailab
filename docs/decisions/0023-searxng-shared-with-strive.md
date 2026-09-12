@@ -98,11 +98,13 @@ Three shapes were on the table:
   the point at which option 1 becomes the right answer.
 - **Shared engine budgets.** A CAPTCHA from an engine suspends it for both consumers
   (`suspended_times.SearxEngineCaptcha: 300`). The platform's default cadence — one Topic News run a
-  day per app, at most eight queries a run against this instance, plus dry-run validations — is a
-  handful of queries a day; a runaway platform loop would show up as dsh searches degrading, and
-  `/stats/errors` (metrics stay on) is where to look. The uwsgi ceiling (`SEARXNG_UWSGI_WORKERS=2` ×
-  `SEARXNG_UWSGI_THREADS=2`, four concurrent requests) is shared too; queued requests wait rather
-  than fail.
+  day per app, at most eight queries a run against this instance (one per topic), plus dry-run
+  validations — is a handful of queries a day. The cadence is an enum of four presets, not a free
+  cron, so the maximum is bounded too: the hourly preset is 24 runs × 8 topics = up to 192 queries
+  a day per app, and that ceiling grows only with the number of apps. A runaway platform loop would
+  show up as dsh searches degrading, and `/stats/errors` (metrics stay on) is where to look. The
+  uwsgi ceiling (`SEARXNG_UWSGI_WORKERS=2` × `SEARXNG_UWSGI_THREADS=2`, four concurrent requests)
+  is shared too; queued requests wait rather than fail.
 - **The platform's own SSRF guard would refuse this address** (an RFC1918 ClusterIP), which is why
   its SearXNG provider talks to `PLATFORM_SEARCH_URL` with a plain client rather than through that
   guard: an operator-configured cluster address, not user input. That is the platform's call,
