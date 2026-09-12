@@ -70,7 +70,15 @@
 # through the LAN resolver cloud-init gave them, so it is pinned host-side. All three control-plane
 # node IPs: the Go dialer walks the resolved addresses in turn, so a node that is down or drained
 # costs a connect retry instead of the credential path.
-- name: Pin the openbao-lan NodePort name in /etc/hosts
+#
+# Pinned in TWO files. The Proxmox cloud-init user-data carries `manage_etc_hosts: true`, so cloud-init
+# REWRITES /etc/hosts from /etc/cloud/templates/hosts.debian.tmpl on EVERY boot (cc_update_etc_hosts is a
+# per-boot module) and a block written only to /etc/hosts vanishes at the next reboot — which is exactly
+# how all six workers lost OpenBao on 2026-09-11 (agent: `lookup openbao.lan.chifor.me: no such host`,
+# `cred` dead, credential templates unrenderable). User-data outranks cloud.cfg.d, so the setting can't
+# be turned off from the host; the template is the one place cloud-init itself reads, so the block in it
+# survives reboots, and the /etc/hosts block makes the pin live NOW without waiting for one.
+- name: Pin the openbao-lan NodePort name in /etc/hosts (live now)
   ansible.builtin.blockinfile:
     path: /etc/hosts
     marker: "# {mark} ANSIBLE MANAGED - openbao-lan"
@@ -78,6 +86,19 @@
       {% for row in dev_worker_openbao_hosts_entries %}
       {{ row }}
       {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Pin the openbao-lan NodePort name in the cloud-init hosts template (survives reboots)
+  ansible.builtin.blockinfile:
+    path: /etc/cloud/templates/hosts.debian.tmpl
+    marker: "# {mark} ANSIBLE MANAGED - openbao-lan"
+    block: |
+      {% for row in dev_worker_openbao_hosts_entries %}
+      {{ row }}
+      {% endfor %}
+    create: false # the Ubuntu cloud image ships it; a host without cloud-init is not a dev worker
     owner: root
     group: root
     mode: "0644"
