@@ -37,7 +37,9 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.24 / .25` | Reviewer VMs `reviewer-1/2` | 4501–4502 | ⚠️ unmanaged — see note below |
 | `.26` | 🔒 **cloudlab** LXC `cloud-llm-3` | 5101 | `../cloudlab/README.md` |
 | `.27 / .28` | 🔒 **cloudlab** LXCs `cloud-exec-1/2` | 5102–5103 | `../cloudlab/kubernetes/infra/executor-lxc/variables.tf` |
-| `.29 / .30 / .31` | CI runner VMs `ci-runner-7/8/9` (moved off `.20`–`.22` on 2026-09-03; `ci-runner-9` moved ai-node2→ai-node1 on 2026-09-07) | 4107–4109 | `kubernetes/infra/runners/variables.tf` |
+| `.29` | CI runner VM `ci-runner-7` (moved off `.20` on 2026-09-03) | 4107 | `kubernetes/infra/runners/variables.tf` |
+| `.30` | **free (static)** — was `ci-runner-8`, retired 2026-09-12 | — | — |
+| `.31` | CI runner VM `ci-runner-9` (moved off `.22` on 2026-09-03; moved ai-node2→ai-node1 on 2026-09-07) | 4109 | `kubernetes/infra/runners/variables.tf` |
 | `.32`–`.35` | **free (static)** | — | — |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
 | `.37` | Talos env-node `talos-env-node-1` (k8s member) | 4401 | ⚠️ unmanaged — see note below |
@@ -49,7 +51,8 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | **free (static)** | — | — |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.5`–`.7`, `.32`–`.35`, `.38`, `.39`, `.50`** (10 addresses). Nothing else in
+**Free static space: `.5`–`.7`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`** (11 addresses; `.30` freed
+2026-09-12 by retiring `ci-runner-8`). Nothing else in
 `.2`–`.50` is available.
 
 > **Keep all lab static IPs inside `.2`–`.50`.** The DHCP pool starts at `.51`, so anything `.51`+

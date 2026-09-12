@@ -228,7 +228,20 @@ variable "runner_nodes" {
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
     "ci-runner-7" = { node_name = "ai-node3", vm_id = 4107, ip = "192.168.0.29", hostname = "ci-runner-7" }
-    "ci-runner-8" = { node_name = "ai-node1", vm_id = 4108, ip = "192.168.0.30", hostname = "ci-runner-8" }
+    # ci-runner-8 (vm_id 4108, .30, ai-node1) RETIRED 2026-09-12 — removed from this map so the next
+    # apply destroys it. It is the straight REVERT of the trade commit 1acd59cc made: that commit
+    # retired node1's qwen3.8-27b instance and spent the freed memory on two new runners, in its own
+    # words "turns a reservation that can never be met into two CI runners at the 10 GiB balloon
+    # floor". The reservation is being met again — see kubernetes/infra/ai-lxc/models.yaml — so the
+    # trade is being unwound, and this is the runner it created on node1.
+    #
+    # WHY THIS ONE AND NOT ci-runner-9, which is also on node1: ci-runner-9 is here by a LATER and
+    # UNRELATED decision. It was migrated ai-node2 -> ai-node1 on 2026-09-07 specifically to pull
+    # ~10 GiB off node2, which was floor-pinning its dev-workers and whose MemAvailable still bottoms
+    # out at 2.43 GiB over 13 days (measured). Removing ci-runner-9 from node1 would push it back and
+    # re-create the crisis that move solved. ci-runner-8 carries no such history.
+    #
+    # .30 returns to the free pool; docs/network-plan.md is the IPAM registry and records it.
     # ci-runner-9 MOVED ai-node2 -> ai-node1 on 2026-09-07 (offline qm migrate) to pull ~10 GiB off
     # ai-node2, which was floor-pinning its dev-workers. Placement here reflects the live estate.
     "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9" }
