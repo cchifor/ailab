@@ -1,4 +1,4 @@
-# Managed by ansible (role: dev_worker, ADR 0020). Keeps this worker's OpenBao periodic token alive
+# Managed by ansible (role: openbao_agent, ADR 0020). Keeps this host's OpenBao periodic token alive
 # and renders the file-shaped credentials described in agent.hcl.
 #
 # Runs as root (it writes into user homes and reads the root-only secret-id) but with
@@ -7,7 +7,7 @@
 # root:openbao-agent 0640 and a member of that group can read it through the cred helper. That is the
 # whole reason the group exists — no ExecStartPost chgrp is needed.
 [Unit]
-Description=OpenBao agent (dev-worker credential plumbing)
+Description={{ openbao_agent_unit_description }}
 After=network-online.target
 Wants=network-online.target
 

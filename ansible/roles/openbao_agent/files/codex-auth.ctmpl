@@ -1,0 +1,10 @@
+{{/* Managed by ansible (role: openbao_agent). consul-template markup for the bao agent: renders an
+ACCESS-TOKEN-ONLY ~/.codex/auth.json from the broker's Codex Pro OAuth document — the one codex
+login the whole estate shares. The refresh_token is deliberately replaced by "" so this host can
+never rotate it (OpenAI refresh tokens are single-use; a second refresher revokes the family — how
+every host and the broker lost codex on 2026-09-03). codex 0.153 runs on the stored access_token and
+never attempts a refresh with an empty refresh_token (verified 2026-09-12, even with a 23-day-old
+last_refresh). The af-codex-refresh CronJob rotates the document nightly and the agent re-renders
+within its poll interval, so the token here is always < 10 days old. Output is a single JSON line:
+id_token/access_token are JWTs and account_id is a UUID, so nothing needs JSON escaping. */ -}}
+{{ with secret "af/data/operator/broker/openai/codex-pro/oauth" }}{{ $a := index .Data.data "auth.json" | parseJSON }}{{ $t := index $a "tokens" }}{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"{{ index $t "id_token" }}","access_token":"{{ index $t "access_token" }}","refresh_token":"","account_id":"{{ index $t "account_id" }}"},"last_refresh":"{{ index $a "last_refresh" }}"}{{ end }}

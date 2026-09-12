@@ -52,6 +52,16 @@ template {
   // systemd's restart loop makes the failure visible in journalctl.
   error_on_missing_key = true
 }
+
+// The shared codex login — ACCESS-TOKEN-ONLY (see codex-auth.ctmpl: the refresh_token is
+// stripped so this host can never rotate the estate's one login). Same root-render + chown dance.
+template {
+  source      = "/etc/openbao-agent/codex-auth.ctmpl"
+  destination = "{{ user.home }}/.codex/auth.json"
+  perms       = "0600"
+  command     = "chown {{ user.name }}:{{ user.name }} {{ user.home }}/.codex/auth.json"
+  error_on_missing_key = true
+}
 {% endfor %}
 {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
 

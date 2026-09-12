@@ -204,8 +204,10 @@ reviewer-1 (.24, claude persona) and reviewer-2 (.25, codex persona) — **vmid 
 ai-node3, 2 vCPU / 4 GiB FIXED, tofu module kubernetes/infra/reviewers, guest config
 ansible/reviewers.yml (deliberately minimal: node + LLM CLIs, node_exporter, ufw, pr_reviewer
 role — no docker/tmux/toolchains). Migrated off dev-worker-2/-3 2026-09-02 so reviews never
-contend with feature work. LLM auth (~/.claude, ~/.codex) was seeded once from the old hosts
-and is NOT ansible-managed — a subscription re-login is manual. Org webhooks 38/39 point at
+contend with feature work. Claude auth (~/.claude) was seeded once from the old hosts and is
+NOT ansible-managed — a subscription re-login is manual. Codex auth on reviewer-2 is, since
+2026-09-12, rendered by the bao agent from the estate's ONE shared login (`pr_reviewer_enable_openbao`;
+docs/runbooks/openbao-dev-workers.md § "The shared codex login") — never `codex login` there. Org webhooks 38/39 point at
 .24/.25:8477; scrape via monitoring/reviewers-node.yaml (job=reviewer-node); the AI Lab Fleet
 dashboard "PR Reviewers" row reads the reviewbot_* textfile metrics. Tofu state: applied from
 the session scratchpad clone — hand the tfstate to the main checkout and verify a no-op plan

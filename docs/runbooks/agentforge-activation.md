@@ -151,8 +151,14 @@ Flux roll); **ailab** = this repo (manifests); **agentforge-config** = the live-
    failing (see the open step below). Fix: reload a fresh codex OAuth token into OpenBao — **the current open
    step**.
 
-## Current open step — reload the codex OAuth token (STOPGAP) + create the refresher role (durable)
-Blocker #7 above is the sole remaining item; everything upstream/downstream is proven. The fresh token is
+## Reloading the codex OAuth token (historical — see openbao-dev-workers.md for the current recipe)
+> **2026-09-12:** the `af-codex-refresher` role exists and the CronJob self-rotates nightly; the
+> failure mode that remains is a REVOKED family (OpenAI 401 on refresh — caused by a second copy of
+> the login refreshing, which the host-side render now makes impossible). The re-seed recipe lives in
+> `docs/runbooks/openbao-dev-workers.md` § "The shared codex login" (device-code login into a
+> throwaway CODEX_HOME, CAS-write as the refresher role). What follows is the original stopgap note.
+
+Blocker #7 above was the sole remaining item; everything upstream/downstream is proven. The fresh token is
 ~10-day, so there is no urgency, but the broker upstream stays `401` until it is reloaded.
 
 **Refresh** a fresh auth.json from this box's live codex creds (codex auto-refreshes `~/.codex/auth.json`

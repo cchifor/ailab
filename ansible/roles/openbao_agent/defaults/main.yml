@@ -1,0 +1,33 @@
+---
+# openbao_agent — the host-agnostic half of the OpenBao credential plumbing (ADR 0020): the estate
+# root CA, the openbao-lan name pin, the pinned `bao` binary, the openbao-agent group/user, the
+# AppRole identity files and the systemd unit. It deliberately does NOT write agent.hcl, start the
+# service or verify it: what a host renders (and how it proves the render) is the consumer's
+# business — dev_worker (tasks/openbao.yml) and pr_reviewer (tasks/openbao.yml) each lay down their
+# own agent.hcl + .ctmpl files after importing this role, then start + verify on their own terms.
+#
+# Consumers pass the per-host AppRole pair from their SOPS file (never defaults — the assert below
+# fails the play on an empty value, so an agent that cannot log in is never deployed).
+openbao_agent_role_id: ""
+openbao_agent_secret_id: ""
+
+openbao_agent_addr: "https://openbao.lan.chifor.me:30820" # openbao-lan NodePort (SAN on openbao-tls)
+# /etc/hosts rows for the LAN name — the workers resolve via the LAN resolver cloud-init gave them
+# and the name has no public record, so it is pinned host-side. All three node IPs: the Go dialer
+# walks the resolved addresses in turn, so a drained node is a retry, not an outage.
+openbao_agent_hosts_entries:
+  - "192.168.0.41 openbao.lan.chifor.me"
+  - "192.168.0.42 openbao.lan.chifor.me"
+  - "192.168.0.43 openbao.lan.chifor.me"
+
+# Pinned like herdr, but upstream DOES publish per-release checksums: this is the sha256 of
+# bao_<version>_Linux_x86_64.tar.gz from the release's checksums-linux.txt. Re-read it on a bump.
+openbao_agent_version: "2.5.5"
+openbao_agent_sha256: "2c5577707e97fc95c2086950f39880ead5e45b356c94388e5cb606f5a5c2b697"
+
+# Local users that may read the sink token (/run/openbao-agent/token, root:openbao-agent 0640) —
+# i.e. who gets `cred`. Empty on a host whose agent only renders files (the reviewers).
+openbao_agent_sink_readers: []
+
+# Shown in `systemctl status`; consumers name their host class.
+openbao_agent_unit_description: "OpenBao agent (credential plumbing)"
