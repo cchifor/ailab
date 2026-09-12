@@ -505,6 +505,19 @@ nobody runs `codex login` on a host — ever. How it hangs together:
 | The host render | `roles/openbao_agent/files/codex-auth.ctmpl` → `~/.codex/auth.json` (0600, user-owned) | The projection, verbatim. codex 0.153 runs on the stored token and never tries to refresh with an empty refresh token (verified, even with a 23-day-old `last_refresh`). The agent re-polls KV every few minutes, so a host follows each rotation within ~5 min and always has ~8–10 days left. |
 | Who renders it | dev_worker: every `dev_worker_users` entry. pr_reviewer: `pr_reviewer_llm_sudo_user` (`codexrun`) when `pr_reviewer_enable_openbao` and the persona is codex. | The play's health check asserts the file is user-owned 0600 JSON, has >24h left on the access token, and has **no** refresh token. |
 
+**Prove it works, fleet-wide, in one command** (from the control node, after a rollout or whenever
+someone says "codex is broken on X"):
+
+```bash
+scripts/validate-codex-fleet.sh                 # all six workers + reviewer-2; exit 1 on any FAIL
+scripts/validate-codex-fleet.sh dev-worker-3    # any inventory pattern
+#   dev-worker-1 OK   user=c4 projection(no-refresh-token) access_token_left=8.9d codex=0.153.4
+```
+
+Per host it runs a real `codex exec` round-trip as the codex user and reports which login the CLI
+used: `projection(no-refresh-token)` is the target state; `HAS-REFRESH-TOKEN(hand-copied)` means the
+ansible rollout has not replaced that host's file yet (and that host can still revoke the family).
+
 **Why the refresh token must never reach a host.** OpenAI refresh tokens are single-use and rotate
 on every refresh. Two copies of one login that both refresh revoke the entire family: that is
 exactly what happened on 2026-09-03 — the hand-copied `auth.json` on the hosts and the CronJob
