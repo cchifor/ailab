@@ -66,6 +66,27 @@ data:
           algorithm: 'argon2'
     access_control:
       default_policy: 'one_factor'
+      rules:
+        # DO NOT DELETE — this rule is load-bearing for passkey ENROLLMENT, not for authorization.
+        #
+        # Authelia hides the entire credential-management UI (Settings → Two-Factor Authentication)
+        # unless at least ONE policy requires `two_factor`. With only the `one_factor` default above
+        # it renders "There are no protected applications that require a second factor method" and
+        # there is no path to register anything — including the passkey that `enable_passkey_login`
+        # above is meant to consume. That gate is upstream authelia/authelia#9664, still OPEN as of
+        # 4.39.26, and there is no config knob for it, so a rule is the only lever.
+        #
+        # The domain is SYNTHETIC: it resolves nowhere and nothing proxies it, so this rule never
+        # authorizes a real request. Raising a REAL host to `two_factor` would flip the same gate,
+        # but a passkey counts as ONE factor (see `enable_passkey_login`), so that host would then
+        # demand passkey AND password — the opposite of the point.
+        #
+        # 2026-09-13: this gate is why `webauthn_credentials` was empty and Windows Hello never
+        # appeared in the passkey picker (only phone + security key). Deleting the rule does not
+        # revoke existing credentials, but makes enrolling the NEXT device impossible, with only
+        # that frontend message to explain it. See docs/runbooks/passkeys.md.
+        - domain: '2fa-unlock.chifor.me'
+          policy: 'two_factor'
     session:
       # Shared session store (ADR 0016): both authelia replicas see the same sessions. Password via
       # AUTHELIA_SESSION_REDIS_PASSWORD_FILE env. auth-valkey is accepted-ephemeral — a bounce means
