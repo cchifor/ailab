@@ -78,6 +78,8 @@ variable "data_gb" {
   type = number
   # 256 -> 384 for the 2026-09-13 registry-full incident (platform build 32171).
   # Grow mp0 online with the documented pct resize path; preserve all retained images.
+  # Once actual size and effective data_gb agree, the later plan should not resize it.
+  # Stop on a shrink plan and inspect existing state and variable overrides.
   default = 384
 }
 
