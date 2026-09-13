@@ -9,8 +9,10 @@
 # and its PAT, the collaborator grants, and the SOPS operator-seeds fragment that puts the PAT at
 # `operator/conductor/forge`. ALL OF THEM WERE COMPLETED 2026-09-13 and verified against the live
 # forge and the running vault; conductor-externalsecret.yaml's header is the record of what exists,
-# including one grant (`cchifor/agentforge-config`, the config source) the program plan's
-# prerequisite list omitted. What remains before arming is code, not credentials: PR-7b itself.
+# including one grant (`cchifor/agentforge-config`, the config source) omitted by the prerequisite
+# list in the program plan — which lives in cchifor/agentforge as
+# plans/2026-09-06-conductor-program-plan.md, NOT in this repo, so it cannot be checked from this
+# checkout. What remains before arming is code, not credentials: PR-7b itself.
 #
 # ⚠ UNLISTED ALSO MEANS UNVALIDATED. scripts/manifest-lint.sh runs `kustomize build` + kubeconform over
 # the paths Flux declares, and `kustomize build` renders only what a kustomization LISTS — so CI never
