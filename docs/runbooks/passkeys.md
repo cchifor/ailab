@@ -1,9 +1,10 @@
 # Runbook: passkeys (Windows Hello) for estate SSO
 
 How to log into the `*.chifor.me` apps with a **face/PIN scan instead of a password**, and the one-time
-ceremony that registers the credential. Config: `kubernetes/apps/apps/auth/authelia-config.yaml`
-(`webauthn:` + `identity_validation.elevated_session`). Design: **ADR 0012**. The Cloudflare-gated
-hosts: `docs/runbooks/cloudflare-access-apps.md`.
+ceremony that registers the credential. Config: `kubernetes/apps/apps/auth/configuration.yml`
+(`webauthn:` + `access_control` + `identity_validation.elevated_session`), generated into a ConfigMap
+by `kustomization.yaml`. Design: **ADR 0012**. The Cloudflare-gated hosts:
+`docs/runbooks/cloudflare-access-apps.md`.
 
 **Context for every command below:** `kubectl --context admin@ai` (the default context flip-flops —
 always pass it explicitly), namespace `auth`.
@@ -39,7 +40,9 @@ One-Time Code sent through the `notifier`. There is no SMTP relay in this estate
 `filesystem` and the code must be read out of the pod by hand. That is the whole awkward part.
 
 1. Log into <https://sso.chifor.me> with your **password** as usual.
-2. Go to <https://sso.chifor.me/settings/security> → add a **passkey / WebAuthn credential**.
+2. Open <https://sso.chifor.me/settings> → **☰ → Two-Factor Authentication** → **WebAuthn
+   Credentials** → **Add**. It is NOT under *Security* — that panel is passwords only, and both of
+   its actions are disabled here (see Troubleshooting).
 3. Authelia says it sent a code. Read it — **check both replicas**, the code lands on whichever one
    served the request:
 
@@ -68,7 +71,8 @@ password form is still there as a fallback and nothing about it changed.
 
 ## Revoking a lost device
 
-Delete the credential in <https://sso.chifor.me/settings/security>. If you cannot log in to get there,
+Delete the credential in <https://sso.chifor.me/settings> → **☰ → Two-Factor Authentication**. If you
+cannot log in to get there,
 delete it in the database (this is the break-glass path):
 
 ```bash
@@ -90,7 +94,7 @@ a device is actually lost.
 
 ## Session lifetimes
 
-`session.cookies[0]` in `authelia-config.yaml`:
+`session.cookies[0]` in `configuration.yml`:
 
 | Setting | Value | Meaning |
 |---|---|---|
@@ -110,7 +114,11 @@ and the cost — one login a day — is a Hello face scan rather than a typed pa
 
 | Symptom | Cause / fix |
 |---|---|
-| No "passkey" option on the login page | Config not reconciled. `kubectl --context admin@ai -n auth get cm authelia-config -o yaml \| grep enable_passkey_login`, then `rollout restart deploy/authelia`. |
+| No "passkey" option on the login page | Config not reconciled. The ConfigMap is generated, so its name carries a content hash — select it by prefix: `kubectl --context admin@ai -n auth get cm -o name \| grep authelia-config`, then `-o yaml \| grep enable_passkey_login`. Do **not** fix this with `rollout restart`: that stamps a `restartedAt` annotation Flux strips on its next reconcile. A content change rolls the pods on its own via the name hash. |
+| **Settings → Two-Factor Authentication says "There are no protected applications that require a second factor method"** | Authelia hides the whole credential-management UI unless some `access_control` policy requires `two_factor`, so **no passkey can be enrolled at all**. A synthetic `two_factor` rule in `configuration.yml` exists only to flip that gate — if it was deleted, restore it. Upstream [authelia#9664](https://github.com/authelia/authelia/issues/9664), open as of 4.39.26; there is no config knob. |
+| **Windows "Choose a passkey" offers only phone + security key, no Windows Hello** | Almost always means **nothing is registered for `sso.chifor.me` on that machine** — not a broken camera. Passkey login sends a discoverable-credential assertion with no `allowCredentials`, and Windows lists the platform authenticator only when a matching local credential exists; with none it falls back to the transports that can import one from elsewhere. Confirm with the `webauthn_credentials` query below, then enrol. Hello being healthy is separately checkable: `Get-PnpDevice -Class Biometric` and `EnrolledFactors` under `HKLM:\…\WinBio\AccountInfo\<SID>` (`2` = face). |
+| Credential enrolled but still not offered at login | Check `discoverable` in `webauthn_credentials`. A non-discoverable credential cannot satisfy the usernameless passkey flow. Hello mints discoverable ones; `discoverability` is left at `preferred` so roaming keys that cannot are still accepted for 2FA. |
+| "Change Password" fails, or there is no "Reset password?" link | Both flows are **disabled on purpose** (`password_change.disable` / `password_reset.disable`). The users database is a Secret mounted `readOnly: true`, so the `file` backend can never write it — `open /secrets/users_database.yml: read-only file system`. Rotate passwords in the SOPS users database secret and reconcile. |
 | `notification.txt` missing or stale | You read the wrong replica — loop over both (above). The file is a per-pod `emptyDir` and is lost on restart. |
 | "elevation has expired" | More than 10 minutes passed since the code. Start over at step 2. |
 | Hello prompt never appears | The browser must reach `sso.chifor.me` over **HTTPS** with the real hostname — WebAuthn is origin-bound and will not fire on an IP or a port-forward. |

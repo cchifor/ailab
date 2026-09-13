@@ -6,6 +6,26 @@ resources:
   - namespace.yaml
   - limitrange.yaml
   - authelia-secret.sops.yaml
-  - authelia-config.yaml
   - authelia.yaml
   - valkey.yaml # auth-valkey: shared (ephemeral) session store enabling authelia x2 (ADR 0016)
+
+# authelia-config is GENERATED rather than committed as a static ConfigMap, and the name suffix
+# hash is the entire point: Authelia reads its configuration ONCE at startup and never reloads it,
+# and a plain ConfigMap edit changes no field of the pod template, so the Deployment does not roll
+# and the running pods keep serving the OLD config indefinitely. The generator makes every content
+# change produce a new name (authelia-config-<hash>), which rewrites the volume reference in
+# authelia.yaml, which changes the pod template, which rolls the pods. Flux prunes the superseded
+# ConfigMap.
+#
+# The manual alternative — `kubectl rollout restart deploy/authelia` — does NOT hold: it works by
+# stamping a kubectl.kubernetes.io/restartedAt annotation onto the pod template, which is drift
+# that Flux strips on its next reconcile (observed 2026-09-13). Do not rely on it.
+#
+# Consequence for operators: the ConfigMap is no longer named `authelia-config`. Select it by
+# label or prefix, e.g.
+#   kubectl --context admin@ai -n auth get cm -o name | grep authelia-config
+configMapGenerator:
+  - name: authelia-config
+    namespace: auth
+    files:
+      - configuration.yml
