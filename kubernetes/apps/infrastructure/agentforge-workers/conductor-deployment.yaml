@@ -3,9 +3,16 @@
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # DELIBERATELY UNLISTED. This file is NOT in kustomization.yaml's `resources:`, mirroring the
 # dispatcher/reaper precedent in this same tree. Nothing here deploys until the arming rung (PR-7b)
-# adds the line, and that rung is gated on human acts the engine cannot do: the Gitea `conductor-bot`
-# principal and its PAT, the collaborator grants, and the SOPS operator-seeds fragment that puts the
-# PAT at `operator/conductor/forge`.
+# adds the line.
+#
+# That rung USED to be gated on human acts the engine cannot do — the Gitea `conductor-bot` principal
+# and its PAT, the collaborator grants, and the SOPS operator-seeds fragment that puts the PAT at
+# `operator/conductor/forge`. ALL OF THEM WERE COMPLETED 2026-09-13 and verified against the live
+# forge and the running vault; conductor-externalsecret.yaml's header is the record of what exists,
+# including one grant (`cchifor/agentforge-config`, the config source) omitted by the prerequisite
+# list in the program plan — which lives in cchifor/agentforge as
+# plans/2026-09-06-conductor-program-plan.md, NOT in this repo, so it cannot be checked from this
+# checkout. What remains before arming is code, not credentials: PR-7b itself.
 #
 # ⚠ UNLISTED ALSO MEANS UNVALIDATED. scripts/manifest-lint.sh runs `kustomize build` + kubeconform over
 # the paths Flux declares, and `kustomize build` renders only what a kustomization LISTS — so CI never

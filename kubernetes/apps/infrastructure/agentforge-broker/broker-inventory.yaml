@@ -107,8 +107,8 @@ seats:
 # REVOKED dispatcher PAT against paths read from the corrected live Secret. Same-file sourcing
 # makes that divergence unrepresentable, so the recipe above is the only supported one.
 seedCoverage:
-  recordedAt: "2026-09-07"
-  seedsDocumentSha256: "3accf08b9608431886b4ecd81e0b3aebbe575908166605a8eec65e2803136819"
+  recordedAt: "2026-09-13"
+  seedsDocumentSha256: "6165e20eea90278bb4a27aa66a4bb2968a535448e731b3e0b80de488cd712790"
   seedsDocument: kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml
   recordedForAuds:
     - "anthropic/claude-max-1"
@@ -124,6 +124,7 @@ seedCoverage:
     - "operator/broker/openai/codex-pro/ledger"
     - "operator/ci/runner-registration"
     - "operator/ci/scaler-token"
+    - "operator/conductor/forge"
     - "operator/dispatcher/forge"
     - "operator/reaper/ledger"
     - "tenants/tenant-zero/platform-dev/orchestrator"

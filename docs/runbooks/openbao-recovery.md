@@ -95,8 +95,8 @@ seed the answer is always "the live value wins over the seed".
 
 | Class | Paths | Post-wipe action |
 |---|---|---|
-| **SEED** — self-heals from `seeds.json` | `operator/dispatcher/forge` (`AF_BOT_TOKEN_PLANNER`), `operator/reaper/ledger` (`AF_REAPER_LEDGER_DSN`), `operator/broker/{anthropic/claude-max-1,anthropic/claude-max-2,openai/codex-pro}/ledger` (all three `AF_BROKER_LEDGER_DSN`, one shared `agentforge_broker` DB on infra-pg), `operator/ci/runner-registration` (`token`), `operator/ci/scaler-token` (`token`) | **Nothing** — re-provision restores them. (The 5 broker-ledger + ci paths were added to `seeds.json` on 2026-07-26; before that they were RESCUE.) |
-| **RESCUE** — from the Retain'd Secret | `operator/broker/{anthropic/claude-max-1,anthropic/claude-max-2,openai/codex-pro}/oauth` | Re-seed from the Retain'd k8s Secret via the recipe in step 5. **Cannot be seeded** (`cas_required=true`) unless `bootstrap.py` is changed to CAS-write. Codex (`codex-pro/oauth`) **also rotates nightly** (single-use refresh token) so it stays a rescue regardless. |
+| **SEED** — self-heals from `seeds.json` | `operator/dispatcher/forge` (`AF_BOT_TOKENS`), `operator/conductor/forge` (`AF_BOT_TOKENS`), `operator/reaper/ledger` (`AF_REAPER_LEDGER_DSN`), `operator/broker/{anthropic/claude-max-1,anthropic/claude-max-2,anthropic/claude-max-3,anthropic/claude-max-4,openai/codex-pro}/ledger` (all five `AF_BROKER_LEDGER_DSN`, one shared `agentforge_broker` DB on infra-pg), `operator/ci/runner-registration` (`token`), `operator/ci/scaler-token` (`token`) | **Nothing for the KV** — re-provision restores them. (The broker-ledger + CI paths were added on 2026-07-26 and were RESCUE before that. The ledger set has GROWN since: three broker ledgers existed at that commit — `claude-max-{1,2}` plus `codex-pro` — `claude-max-3` landed later the same day and `claude-max-4` on 2026-09-05. Count the broker manifests, never this sentence.) **But a seeded forge PAT is only as fresh as its last commit:** both `*/forge` paths carry a Gitea PAT, which a wipe does not revoke, so what comes back is whatever `operator-seeds.sops.yaml` last recorded. If a PAT was rotated without re-committing the seed, re-provision restores a **revoked** credential and the consumer 401s — re-mint and re-seed rather than debugging the consumer. |
+| **RESCUE** — from the Retain'd Secret | `operator/broker/{anthropic/claude-max-1,anthropic/claude-max-2,anthropic/claude-max-3,anthropic/claude-max-4,openai/codex-pro}/oauth` — **all FIVE**, confirmed against the live vault 2026-09-13 | Re-seed from the Retain'd k8s Secret via the recipe in step 5. **Cannot be seeded** (`cas_required=true`) unless `bootstrap.py` is changed to CAS-write. Codex (`codex-pro/oauth`) **also rotates nightly** (single-use refresh token) so it stays a rescue regardless. **This row said THREE until 2026-09-13**, having been written when three brokers existed; a recovery that followed it would have left `claude-max-3` and `claude-max-4` with no OAuth credential while every step reported success. Derive the list from the broker manifests (or `bao kv list af/operator/broker/...`), never from this cell. |
 | **RE-PROVISION** — by owner, never seeded | `operator/broker/*/kids` (registry.json — public key registry) | Rebuilt by the broker **keypair lifecycle**. It is not in `seeds.json` and must not be added (see the hard constraint above). |
 | **SEED-FLOOR + OWNER** — seeded, but the seed can never overwrite a live value | `tenants/<org>/<ws>/orchestrator` (bot PATs / `AF_BOT_TOKENS`, `AF_CONTROL_PLANE_TOKEN`, `AF_CAPABILITY_SIGNING_KEY`+`AF_CAPABILITY_KID`) | **Partly automatic, and the split matters.** `_apply_operator_seeds` restores the seeded fragment — the `AF_BOT_TOKENS` map + the CP bearer **as of the last `operator-seeds.sops.yaml` refresh**, so REVOKED if a rotation was never committed with it; re-mint through the **control plane** in that case. The capability keypair is **not** seeded and does not come back with it: `AF_CAPABILITY_SIGNING_KEY`/`AF_CAPABILITY_KID` are restored only by the **keypair lifecycle** (owner action). Expect a short worker-401 window. This row is the reconciliation of the old "`tenants/*` — restore via the control plane, **not** by re-seeding" rule: the path *is* seeded, and the rule survives as **"the seed cannot override a live value"** — enforced now by create-if-absent rather than by everyone remembering. |
 | **SEED (dev-worker subtree)** — a SECOND, independent seed path | `dev-workers/common`, `dev-workers/<hostname>` (ADR 0020) | **Nothing for the KV** — the daily `openbao-devworker-provision` Job re-creates the `approle` mount, the six `dev-worker-*` policies/roles, and seed-patches these paths from `devworker-seeds.sops.yaml`. **But every AppRole secret-id is invalidated by the wipe** → re-run the mint ceremony for all six workers (`docs/runbooks/openbao-dev-workers.md` §Activation (e)) or the workers' `bao agent`s log `invalid role or secret ID` forever. |
@@ -143,8 +143,10 @@ more privileged consumers do **not** ride that image:
    Jobs recreate on the pinned image: `openbao-init` (fresh init = NEW unseal key + cluster_id,
    writes `openbao-keys`) then `openbao-provision` (mount, k8s-auth, ALL policies/roles, seeds,
    `cas_required` stamps, tokens). Wait both `succeeded=1` (provision may retry 1-2×).
-5. **Re-seed the RESCUE-class paths** — all three broker `oauth` (the SEED-class ledger/ci/dispatcher/
-   reaper paths self-heal from `seeds.json` and need nothing; `kids` is owner-restored; the SEED-FLOOR +
+5. **Re-seed the RESCUE-class paths** — all FIVE broker `oauth` (every SEED-class path self-heals from
+   `seeds.json` and needs nothing — read the SEED row above for the list rather than trusting a second
+   copy of it here, which is how `operator/conductor/forge` was missed once already; `kids` is
+   owner-restored; the SEED-FLOOR +
    OWNER row — `tenants/*` — comes back from the seed but still needs its keypair-lifecycle half, and a
    control-plane re-mint if the seeded PATs were stale). For each `oauth`: read its Retain'd k8s Secret,
    stage the value + the new provisioner token
@@ -153,9 +155,10 @@ more privileged consumers do **not** ride that image:
    `openbao-operator-provisioner-token`; the pod listens HTTPS so use `BAO_ADDR=https://127.0.0.1:8200
    BAO_SKIP_VERIFY=true` — MSYS `curl` is Schannel and `--cacert` fails exit 60):
    `bao kv put -cas=<current_version|0> -mount=af operator/broker/<broker>/oauth <field>=@/tmp/f`.
-   **The field name is provider-specific** — `CLAUDE_CODE_OAUTH_TOKEN` for the two anthropic
-   `claude-max-{1,2}` brokers, `auth.json` for `openai/codex-pro` (the ESO extract copies the whole doc, so
-   the wrong key would sync a wrong-shaped Secret). Then re-stamp `bao kv metadata put -cas-required=true
+   **The field name is provider-specific** — `CLAUDE_CODE_OAUTH_TOKEN` for **all four** anthropic
+   `claude-max-{1,2,3,4}` brokers, `auth.json` for `openai/codex-pro` (the ESO extract copies the whole doc, so
+   the wrong key would sync a wrong-shaped Secret). Field names read back from the live vault 2026-09-13;
+   this said "the two anthropic `claude-max-{1,2}`" while four existed. Then re-stamp `bao kv metadata put -cas-required=true
    ...`. Verify the read-back sha equals the
    broker's `/readyz` `credential_generation` (:8700), force-annotate the matching `broker-*-oauth`
    ExternalSecret (`force-sync="$(date +%s)"`), confirm `SecretSynced=True`, and delete `/tmp/f`.
@@ -187,11 +190,28 @@ Never hand-edit ciphertext:
 
 1. `export SOPS_AGE_KEY_FILE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out/age.agekey"`
    — the key lives in the **main** checkout (`_out/` is gitignored, so it is absent from a worktree).
-2. `sops -d operator-seeds.sops.yaml` → parse `stringData.seeds.json` → add the entries (preserve the
-   existing ones) → re-serialize **compact** (`json.dumps(obj, separators=(',',':'))`, no trailing newline).
-3. Overwrite the file with the plaintext `kind: Secret` manifest and re-encrypt **in place**:
-   `sops -e -i operator-seeds.sops.yaml` (the generic `.*\.sops\.ya?ml$` rule applies
-   `^(data|stringData)$` + the age recipient).
+2. Parse `stringData.seeds.json` → add the entries (preserve the existing ones) → re-serialize.
+   **Two levels, two different serializations, and they are easy to swap:** the seeds BLOB is
+   `json.dumps(obj, indent=2)` inside a `|` literal block scalar indented by 8; an individual VALUE
+   that is itself JSON — `AF_BOT_TOKENS`, say — is a compact `json.dumps(v, separators=(',',':'))`
+   **string** inside it. Getting this backwards reformats the whole document, which buries the one
+   line that actually changed. **The `|` costs you a trailing newline**: a YAML parser hands back the
+   scalar *with* one and `json.dumps` never emits one, so compare against
+   `json.dumps(obj, indent=2) + "\n"` if you parsed with YAML, or against `json.dumps(obj, indent=2)`
+   if you de-indented the block's lines yourself and dropped the trailing blank. Prove it instead of
+   trusting this paragraph: re-serialize the blob *before* editing it and assert the result is
+   byte-identical to what you parsed; only then add the key. An assertion that fails here is telling
+   you your newline convention is wrong, not that the document is.
+3. Re-encrypt. Prefer `sops edit` driven by a **programmatic `EDITOR`** — sops shlex-splits `$EDITOR`
+   and appends the decrypted tmpfile as the **LAST** argument, after every argument you configured
+   (use forward slashes; shlex eats Windows backslashes). With `EDITOR="python shim.py"` that lands
+   at the shim's `sys.argv[1]`, but only because the shim took no arguments of its own — read it as
+   `sys.argv[-1]` if yours does. A shim can then fetch the value from its live source itself, so the
+   plaintext never
+   reaches a shell argv, a terminal, or any file sops does not already manage and delete. The older
+   route — write the plaintext manifest out, then `sops -e -i operator-seeds.sops.yaml` — works and
+   applies the same rules (generic `.*\.sops\.ya?ml$` → `^(data|stringData)$` + the age recipient),
+   but it puts the whole decrypted blob on disk to do it.
 4. **Pre-push verification (SOPS shape trap — caused a real 2026-07-24 leak):** the creation rules encrypt
    ONLY Secret-shaped keys, so a flat YAML would pass through **PLAINTEXT** while sops still adds
    metadata+mac (a naive `grep -c 'ENC\['` and a decrypt round-trip both still look "fine"). Assert
