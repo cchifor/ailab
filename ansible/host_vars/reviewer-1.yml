@@ -14,9 +14,15 @@ pr_reviewer_llm_cmd:
 # can actually talk to Anthropic.
 #
 #   which account?   `ssh c4@192.168.0.24 /usr/bin/claude auth status` (prints email + plan).
-#                    Deliberately NOT recorded here: this repo mirrors to a PUBLIC GitHub repo,
-#                    which is also Flux's source, so an account address committed here is
-#                    published. Ask the host, not the file.
+#                    The ADDRESS is deliberately not recorded here, and the distinction is worth
+#                    stating because this line commits a host and a username to the same place:
+#                    this repo mirrors to a PUBLIC GitHub repo (also Flux's source), and the
+#                    RFC1918 address plus the `c4` login are already published throughout it —
+#                    `inventory/hosts.yml`, `docs/network-plan.md` (the IPAM registry), CLAUDE.md,
+#                    `kubernetes/infra/reviewers/variables.tf` — and neither is a credential; the
+#                    LAN is not reachable from the mirror. A personal account address is different
+#                    in kind: it is an identity that appears nowhere else in the tree, and writing
+#                    it here would be the act that publishes it. Ask the host, not the file.
 #   re-login         `claude auth login --claudeai` ON THIS HOST. It prompts for a pasted code, so
 #                    stdin must stay open — `mkfifo`, hold the write end from a detached process,
 #                    run the login reading from the fifo, then write the code into it. Redirecting
