@@ -143,8 +143,10 @@ more privileged consumers do **not** ride that image:
    Jobs recreate on the pinned image: `openbao-init` (fresh init = NEW unseal key + cluster_id,
    writes `openbao-keys`) then `openbao-provision` (mount, k8s-auth, ALL policies/roles, seeds,
    `cas_required` stamps, tokens). Wait both `succeeded=1` (provision may retry 1-2×).
-5. **Re-seed the RESCUE-class paths** — all FIVE broker `oauth` (the SEED-class ledger/ci/dispatcher/
-   reaper paths self-heal from `seeds.json` and need nothing; `kids` is owner-restored; the SEED-FLOOR +
+5. **Re-seed the RESCUE-class paths** — all FIVE broker `oauth` (every SEED-class path self-heals from
+   `seeds.json` and needs nothing — read the SEED row above for the list rather than trusting a second
+   copy of it here, which is how `operator/conductor/forge` was missed once already; `kids` is
+   owner-restored; the SEED-FLOOR +
    OWNER row — `tenants/*` — comes back from the seed but still needs its keypair-lifecycle half, and a
    control-plane re-mint if the seeded PATs were stale). For each `oauth`: read its Retain'd k8s Secret,
    stage the value + the new provisioner token
