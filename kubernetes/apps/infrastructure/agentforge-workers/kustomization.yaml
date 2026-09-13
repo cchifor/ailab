@@ -27,9 +27,12 @@ resources:
   - cilium-egress.yaml             # worker egress: Gitea + kube-apiserver:6443 + DNS ONLY (deny world/metadata/IPv6)
   - worker-podmonitor.yaml         # kube-prometheus scrape of the worker's forge_* registry (R8; no Service → PodMonitor).
   # -- af-conductor (fleet-wide observer) — ARMED 2026-09-13 (PR-7b), tier=observe -----------------
-  # Listed together, in dependency order, once the three arming prerequisites were met: the
-  # conductor-bot forge principal is a collaborator on the filing repo; its PAT is seeded at
-  # af/data/operator/conductor/forge (#705) and read by the ExternalSecret below; and the
+  # Listed in logical dependency order FOR THE READER — kustomize list order does not sequence
+  # applies (Flux and kubectl sort by kind first), so never rely on reordering this list. Listed
+  # once the three arming prerequisites were met: the
+  # conductor-bot forge principal is a collaborator on the filing repo; its PAT is seeded at the
+  # KV path operator/conductor/forge (#705; `af/data/` is the mount prefix, which is how the vault
+  # spells the same path) and read by the ExternalSecret below; and the
   # Deployment's env carries every knob main::_require_conduct_wiring refuses (#695). The PodMonitor
   # is listed WITH the workload rather than with the rules, for the reason the unlisted-era comment
   # gave: a monitor pointed at a pod it cannot reach is a permanently-down target, which this repo
@@ -37,8 +40,11 @@ resources:
   #
   # T0 is WRITE-FREE by construction: AF_CONDUCT_TIER=observe makes the write door refuse every
   # proposal on tier before any forge call, and monitoring/agentforge-conductor-rules.yaml carries
-  # ForgeConductUnexpectedWrites for the day that stops being true. The exit criteria for leaving T0
-  # are in plans/2026-09-06-conductor-program-plan.md (agentforge repo), "Rollout tiers".
+  # ForgeConductUnexpectedWrites for the day that stops being true. The window between "armed" and
+  # "running" — an ExternalSecret stuck NotReady leaves the pod at ContainerCreating, which no
+  # pod-or-pass rule can see — is watched by ForgeConductSecretNotReady in the same rules file.
+  # The exit criteria for leaving T0 are in plans/2026-09-06-conductor-program-plan.md (agentforge
+  # repo), "Rollout tiers".
   #
   # Before this listing the five files were UNVALIDATED (kustomize build renders only what this list
   # names). They were rendered through a scratch kustomization and pass kubeconform -strict

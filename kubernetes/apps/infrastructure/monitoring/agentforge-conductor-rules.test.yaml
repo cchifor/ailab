@@ -223,3 +223,67 @@ tests:
       - eval_time: 90m
         alertname: ForgeConductSensorUnrecognised
         exp_alerts: []
+
+  # ── ForgeConductSecretNotReady ────────────────────────────────────────────────────────────────
+  # Both series are present in every case, because that is what ESO exports: a condition is a PAIR of
+  # 1/0 series (status="True" and status="False"), never one series that appears and disappears. A
+  # fixture that supplied only the False series would prove the rule fires on an input the exporter
+  # never produces, and say nothing about whether it stays quiet on the one it does.
+  - interval: 1m
+    name: a secret that stays NotReady past one refresh interval fires
+    input_series:
+      - series: externalsecret_status_condition{exported_namespace="agentforge", name="agentforge-conductor-forge", condition="Ready", status="False"}
+        values: 1+0x30
+      - series: externalsecret_status_condition{exported_namespace="agentforge", name="agentforge-conductor-forge", condition="Ready", status="True"}
+        values: 0+0x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ForgeConductSecretNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              exported_namespace: agentforge
+              name: agentforge-conductor-forge
+              condition: Ready
+              status: "False"
+            exp_annotations:
+              summary: "AgentForge conductor's forge secret is NotReady — the pod cannot start"
+              description: >-
+                ExternalSecret agentforge-conductor-forge has reported Ready=False for 15m. The conductor
+                Deployment requires this secret, so its pod sits at ContainerCreating — a state no other
+                conductor rule can see, because the container never becomes Ready and no pass ever
+                runs. Check `kubectl -n agentforge describe externalsecret agentforge-conductor-forge`:
+                the usual causes are the af/data/operator/conductor/forge path not yet written by the
+                openbao-provision Job (the seed is create-if-absent; the Job runs daily), or the
+                SecretStore's AppRole role not yet minted.
+  - interval: 1m
+    name: a Ready secret is quiet — the False series exists and is zero
+    input_series:
+      - series: externalsecret_status_condition{exported_namespace="agentforge", name="agentforge-conductor-forge", condition="Ready", status="False"}
+        values: 0+0x30
+      - series: externalsecret_status_condition{exported_namespace="agentforge", name="agentforge-conductor-forge", condition="Ready", status="True"}
+        values: 1+0x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ForgeConductSecretNotReady
+        exp_alerts: []
+  - interval: 1m
+    name: a NotReady that clears within the refresh window does not fire
+    input_series:
+      - series: externalsecret_status_condition{exported_namespace="agentforge", name="agentforge-conductor-forge", condition="Ready", status="False"}
+        values: 1+0x8 0+0x22
+      - series: externalsecret_status_condition{exported_namespace="agentforge", name="agentforge-conductor-forge", condition="Ready", status="True"}
+        values: 0+0x8 1+0x22
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ForgeConductSecretNotReady
+        exp_alerts: []
+  - interval: 1m
+    name: another component's NotReady secret is not this alert
+    input_series:
+      - series: externalsecret_status_condition{exported_namespace="agentforge", name="agentforge-dispatcher-forge", condition="Ready", status="False"}
+        values: 1+0x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ForgeConductSecretNotReady
+        exp_alerts: []

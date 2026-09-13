@@ -182,3 +182,39 @@ spec:
               AST pin should have caught this before it shipped, so also check why it did not: it
               reads sensor keys written as string literals in conduct_pass and cannot see one that
               is computed.
+        # THE GAP BETWEEN "ARMED" AND "RUNNING", watched permanently rather than once. The conductor's
+        # forge PAT reaches its pod through an ExternalSecret (agentforge-conductor-forge, reading
+        # operator/conductor/forge from the af KV mount), and that secret is REQUIRED — the pod does not
+        # start without it. An ES stuck NotReady therefore leaves the pod at ContainerCreating, which
+        # neither rule above can see: the container never becomes Ready, so ForgeConductDown's anti-join
+        # has an empty left side, and no pass runs, so ForgeConductBlind's `passes_total > 0` guard is
+        # false. From the estate that state is indistinguishable from a rung nobody merged — and the
+        # arming PR (#710) documented that window and then covered it with a single manual kubectl
+        # check, which reviewer-claude correctly called out as a gap watched once, not watched.
+        #
+        # Shape, verified against the live store rather than written from memory: ESO exports BOTH
+        # status="True" and status="False" series for every condition, as 1/0 — so NotReady is
+        # `condition="Ready", status="False"` EQUAL TO 1, not the absence of the True series. And the
+        # ES's own namespace lives in `exported_namespace` (plain `namespace` is ESO's), which is the
+        # kind of label mistake that yields an empty vector that never fires.
+        #
+        # `for: 15m` is one ES refreshInterval plus slack: the SecretStore's role can take a provision
+        # tick to exist, and a NotReady that clears on the next refresh is not an operator's problem.
+        - alert: ForgeConductSecretNotReady
+          expr: |-
+            externalsecret_status_condition{
+              exported_namespace="agentforge", name="agentforge-conductor-forge",
+              condition="Ready", status="False"
+            } == 1
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor's forge secret is NotReady — the pod cannot start"
+            description: >-
+              ExternalSecret agentforge-conductor-forge has reported Ready=False for 15m. The conductor
+              Deployment requires this secret, so its pod sits at ContainerCreating — a state no other
+              conductor rule can see, because the container never becomes Ready and no pass ever
+              runs. Check `kubectl -n agentforge describe externalsecret agentforge-conductor-forge`:
+              the usual causes are the af/data/operator/conductor/forge path not yet written by the
+              openbao-provision Job (the seed is create-if-absent; the Job runs daily), or the
+              SecretStore's AppRole role not yet minted.
