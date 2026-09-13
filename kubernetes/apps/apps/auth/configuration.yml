@@ -39,8 +39,9 @@ webauthn:
   selection_criteria:
     user_verification: 'required'
 identity_validation:
-  reset_password:
-    jwt_lifespan: '5 minutes'
+  # `reset_password` is intentionally absent: that flow is disabled in
+  # `authentication_backend.password_reset` below, so its JWT lifespan would be inert config. The
+  # upstream default is 5 minutes if it is ever re-enabled.
   elevated_session:
     # Registering a credential needs an elevated session, and the One-Time Code is delivered via
     # the `notifier` — which is `filesystem` here (no SMTP relay in the estate), so the code must
@@ -62,8 +63,19 @@ authentication_backend:
   # "configuration key not expected", and neither of these does).
   #
   # Reset is doubly dead: its notification would go to the `filesystem` notifier below, which no
-  # human reads. Passwords are SOPS-managed IaC: rotate the argon2 hash in the users database inside
-  # `authelia-secret.sops.yaml` and let Flux reconcile. 2026-09-13.
+  # human reads. Passwords are SOPS-managed IaC: rotate the argon2 hash in the users database
+  # inside `authelia-secret.sops.yaml`.
+  #
+  # Rotation is NOT finished when Flux reconciles that Secret, and the gap is silent. `watch` is
+  # false below, so Authelia loads the users database once at startup and never re-reads it; and
+  # the ConfigMap name hash that rolls these pods covers `configuration.yml` ONLY, so a
+  # Secret-only change alters no pod-template field and rolls nothing. Until the pods restart the
+  # OLD password still authenticates. Force it:
+  #   kubectl --context admin@ai -n auth rollout restart deploy/authelia
+  # That annotation is drift Flux later strips, which simply rolls the pods once more — harmless
+  # here, because the reload happens on the first roll. (Setting `watch: true` would make Authelia
+  # reload on its own, but whether fsnotify catches Kubernetes' atomic symlink swap on a Secret
+  # mount is UNVERIFIED in this estate — do not flip it without testing.) 2026-09-13.
   password_reset:
     disable: true
   password_change:
@@ -143,8 +155,10 @@ storage:
     username: 'authelia'
     timeout: '5s'
 notifier:
-  # Per-pod emptyDir now (no SMTP relay in the estate): a password-reset notification lands on
-  # whichever replica served the request — `kubectl exec` into BOTH pods to find it.
+  # Per-pod emptyDir now (no SMTP relay in the estate): a notification lands on whichever replica
+  # served the request — `kubectl exec` into BOTH pods to find it. In practice the one you are
+  # after is the elevated-session One-Time Code from registering a credential; password-reset
+  # notifications no longer occur, that flow being disabled above.
   filesystem:
     filename: '/data/notification.txt'
 identity_providers:

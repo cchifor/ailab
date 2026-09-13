@@ -21,9 +21,16 @@ resources:
 # stamping a kubectl.kubernetes.io/restartedAt annotation onto the pod template, which is drift
 # that Flux strips on its next reconcile (observed 2026-09-13). Do not rely on it.
 #
-# Consequence for operators: the ConfigMap is no longer named `authelia-config`. Select it by
-# label or prefix, e.g.
-#   kubectl --context admin@ai -n auth get cm -o name | grep authelia-config
+# Two consequences for operators:
+#
+#   1. The ConfigMap is no longer named `authelia-config`. Select it by prefix, e.g.
+#        kubectl --context admin@ai -n auth get cm -o name | grep authelia-config
+#
+#   2. `kubectl rollout undo deploy/authelia` is NOT a usable rollback any more. The previous pod
+#      template references the previous authelia-config-<hash>, and Flux prunes a superseded
+#      generated ConfigMap — so the rolled-back pods would fail to mount a ConfigMap that no longer
+#      exists. Roll back in git and let Flux reconcile, which restores config and pod template
+#      together.
 configMapGenerator:
   - name: authelia-config
     namespace: auth
