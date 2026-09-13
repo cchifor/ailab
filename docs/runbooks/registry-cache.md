@@ -118,8 +118,10 @@ pct resize 5004 mp0 384G
 pct exec 5004 -- df -h /var/lib/registry
 ```
 
-Do not resize a different mount or shrink a volume that already exceeds the target. The module
-default matches the requested target, so a subsequent OpenTofu refresh/apply preserves it.
+Do not resize a different mount or shrink a volume that already exceeds the target. Before a
+subsequent OpenTofu apply, use the existing local state, verify the effective `data_gb` is 384
+(or larger if already grown), and review the plan. A variable override can supersede the module
+default; refreshing state alone does not correct an overridden desired size.
 Verify a complete platform image build and its pin manifest before resuming a deployment.
 
 ```bash
