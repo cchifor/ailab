@@ -38,7 +38,8 @@
 # worker manifest on workflow-worker). They hold platform service identities; toward SearXNG,
 # which has no auth of its own, they are admitted by pod label under searxng-allow exactly as dsh
 # is.
-# The Service stays ClusterIP-only (no Ingress, no cloudflared). And SearXNG
+# The Service stays ClusterIP; the only route in from outside is the Authelia-gated
+# oauth2-proxy at search.chifor.me (searxng-auth.yaml), which the platform pods do not use. And SearXNG
 # has no page-fetch surface: a caller hands it a query string, never a URL to GET (image_proxy is
 # off), so it cannot be turned into a fetcher for arbitrary pages and the egress policy at the
 # bottom of this file is untouched. The admission is the one extra `from` element on searxng-allow.

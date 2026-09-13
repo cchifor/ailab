@@ -77,7 +77,9 @@ Three shapes were on the table:
   `In` rather than `Exists` on `strive.io/service`, because `Exists` would admit every platform
   service (airlock, web, tms, …) that has no business here.
 - **Port 8080 only; egress untouched.** SearXNG still reaches DNS and 443 on public addresses with
-  the private ranges excluded. The Service stays ClusterIP; no Ingress, no cloudflared route.
+  the private ranges excluded. The Service stays ClusterIP; the only external route is the
+  Authelia-gated oauth2-proxy at search.chifor.me (`searxng-auth.yaml`, admitted as its own `from`
+  peer), which this decision neither uses nor changes.
 - **Where it lives:** this repo, through Flux's `apps` Kustomization, like every other object in
   `dsh` (ADR 0019). The platform side — `PLATFORM_SEARCH_URL` set to
   `http://searxng.dsh.svc.cluster.local:8080` on the workflow API and worker, plus the chart's
@@ -122,5 +124,6 @@ Three shapes were on the table:
   answers `200` (it timed out before this element), and `/search?q=test&format=json` returns JSON.
   The platform's own gate for the round trip is a Topic News run whose `news_item` rows carry a
   `source` and a `published_at` — the fake provider produces neither. The manifest's shape (one
-  rule, two peers, the AND'ed strive element, port 8080, egress unchanged) is pinned by
+  rule, the dsh and oauth2-proxy peers, the AND'ed strive element last, port 8080, egress
+  unchanged) is pinned by
   `scripts/tests/test_searxng_netpol.py` (`python3 -m unittest discover -s scripts/tests -p "test_*.py"`).

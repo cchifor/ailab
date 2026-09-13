@@ -33,6 +33,7 @@ POLICY_NAME = "searxng-allow"
 
 # The dsh pod: the consumer SearXNG was deployed for (the header of searxng.yaml).
 DSH_PEER = {"podSelector": {"matchLabels": {"app": "dsh"}}}
+OAUTH2_PROXY_PEER = {"podSelector": {"matchLabels": {"app": "oauth2-proxy-searxng"}}}
 
 # ADR 0023: the platform's search services, BOTH selectors in ONE element (AND).
 STRIVE_NAMESPACE = "strive-ailab"
@@ -123,14 +124,27 @@ class SearxngAllowShape(unittest.TestCase):
     def _peers(self):
         peers = self.spec["ingress"][0].get("from")
         self.assertIsInstance(peers, list, "a rule without `from` admits every source")
-        self.assertEqual(len(peers), 2, f"exactly two peers, dsh and strive-ailab; got {peers!r}")
+        self.assertEqual(
+            len(peers), 3, f"exactly three peers: dsh, oauth2-proxy-searxng, strive-ailab; got {peers!r}"
+        )
         return peers
+
+    def _strive_peer(self):
+        peers = self._peers()
+        # The strive element is the LAST peer and the only one carrying a namespaceSelector.
+        with_ns = [p for p in peers if "namespaceSelector" in p]
+        self.assertEqual(len(with_ns), 1, f"exactly one cross-namespace peer; got {peers!r}")
+        self.assertIs(with_ns[0], peers[-1], "the strive-ailab peer must stay last (after dsh and oauth2-proxy)")
+        return with_ns[0]
 
     def test_first_peer_is_the_dsh_pod_by_label(self):
         self.assertEqual(self._peers()[0], DSH_PEER)
 
-    def test_second_peer_ands_the_strive_namespace_with_the_service_label(self):
-        peer = self._peers()[1]
+    def test_oauth2_proxy_peer_is_the_sso_gate_by_label(self):
+        self.assertEqual(self._peers()[1], OAUTH2_PROXY_PEER)
+
+    def test_strive_peer_ands_the_namespace_with_the_service_label(self):
+        peer = self._strive_peer()
         # Both keys in ONE element is the whole point of ADR 0023: as two items they would be
         # OR'ed, and a bare namespaceSelector alone admits every pod in strive-ailab.
         self.assertEqual(
