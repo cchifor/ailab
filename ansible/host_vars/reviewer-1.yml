@@ -6,6 +6,31 @@ pr_reviewer_llm_cmd:
   - "/usr/bin/claude"
 # Fable primary (verified on this VM), latest-opus fallback on primary errors (operator-
 # directed 2026-09-02) — makes claude reviews model-pinned like the codex persona.
+#
+# THE SUBSCRIPTION BEHIND THESE PINS IS NOT IN GIT, AND CANNOT BE. The claude CLI authenticates
+# from `~/.claude/.credentials.json`, written by an interactive browser OAuth flow that no Ansible
+# task can perform. Ansible therefore configures WHICH models to ask for and never WHICH ACCOUNT
+# is asking — so a green `ansible-playbook reviewers.yml` proves nothing about whether this host
+# can actually talk to Anthropic.
+#
+#   which account?   `ssh c4@192.168.0.24 /usr/bin/claude auth status` (prints email + plan).
+#                    Deliberately NOT recorded here: this repo mirrors to a PUBLIC GitHub repo,
+#                    which is also Flux's source, so an account address committed here is
+#                    published. Ask the host, not the file.
+#   re-login         `claude auth login --claudeai` ON THIS HOST. It prompts for a pasted code, so
+#                    stdin must stay open — `mkfifo`, hold the write end from a detached process,
+#                    run the login reading from the fifo, then write the code into it. Redirecting
+#                    from /dev/null EOFs the prompt instantly and the login fails.
+#   NEVER            copy `.credentials.json` from another host. Copies share one refresh-token
+#                    family and OAuth rotation invalidates every copy except whichever host
+#                    refreshed last — that is the 2026-09-10 outage that took BOTH personas down,
+#                    and it does not self-heal or surface until the access token expires days later.
+#
+# After any account change, probe THESE TWO PINS explicitly — `claude --model claude-fable-5 -p ...`
+# and `--model opus` — never a bare `claude -p`. Per-account model availability is not uniform: on
+# 2026-09-12 a bare probe answered fine while the pinned Fable-5 had no credits on that account, and
+# every review silently burned a doomed primary call before the fallback rescued it (308 of 308).
+# Account swapped 2026-09-13 for exactly that reason; both pins verified answering afterwards.
 pr_reviewer_llm_model: claude-fable-5
 pr_reviewer_llm_fallback_model: opus
 # Ship journald to Loki (roles/journal_ship) — the reviewer failure REASON was
