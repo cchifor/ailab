@@ -54,7 +54,7 @@ spec:
             - { name: data, mountPath: /data }
       containers:
         - name: vaultwarden
-          image: vaultwarden/server:1.37.2-alpine
+          image: vaultwarden/server:1.37.3-alpine
           ports:
             - { name: http, containerPort: 8080 }
           env:
