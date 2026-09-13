@@ -67,7 +67,7 @@ path. Zot `gc` (every `gcInterval`, now 1h) reclaims the orphaned blobs.
 
 ## Disk / retention
 
-The store lives on the mp0 data disk (now **192 GiB**, `kubernetes/infra/registry-lxc` `data_gb`). A
+The store lives on the mp0 data disk (target **384 GiB**, `kubernetes/infra/registry-lxc` `data_gb`). A
 `storage.retention` policy (config.json.j2) bounds growth with policies evaluated **in order**,
 each more specific one listed before the catch-all it would otherwise fall through to:
 
@@ -99,6 +99,28 @@ tag" above for the delete pattern) — `ansible-playbook ansible/registry.yml` t
 new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs within ~3h.
 
 ## Verify it's working
+
+### Capacity recovery, 2026-09-13
+
+Platform main build 32171 repeatedly failed image uploads with `blob upload unknown to registry`.
+Read-only checks found registry LXC 5004's 256 GiB mp0 filesystem at 100%, with less than 1 GiB
+available. Node1's local-lvm pool had approximately 771 GiB free (56.07% data use; 2.29% metadata
+use). The capacity target is 384 GiB. This preserves retained image tags and their rollback
+history; no retention change or image deletion is part of this recovery.
+
+After reviewing the capacity change, check the current size and pool availability again, then
+use the existing grow-only recovery path on node1:
+
+```sh
+pvesm status
+pct config 5004
+pct resize 5004 mp0 384G
+pct exec 5004 -- df -h /var/lib/registry
+```
+
+Do not resize a different mount or shrink a volume that already exceeds the target. The module
+default matches the requested target, so a subsequent OpenTofu refresh/apply preserves it.
+Verify a complete platform image build and its pin manifest before resuming a deployment.
 
 ```bash
 # Catalog should list cached upstreams after CI has pulled through it:
