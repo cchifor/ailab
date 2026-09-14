@@ -74,23 +74,28 @@ spec:
         # that actually read the estate (`listings_complete and not any(incomplete.values())`), so a
         # stale stamp on a scraped conductor means nothing since has read it — every pass coming back
         # short (a forge outage, a spent budget, an auth failure), or no pass returning at all while
-        # the process stays up. The expression does not tell those apart; the pass counter does.
+        # the process stays up. The expression does not tell those apart; the pass counter does, and
+        # the description points the operator at it.
         #
-        # `> 0` ON THE GAUGE IS THE PRECONDITION, not a tidy-up (the header's epoch note). A conductor
-        # that has never stamped is ForgeConductNeverObserved's case, below; this rule speaks only for
-        # one whose stamp is real, which is what makes `$value` an age the engine actually produced
-        # rather than the epoch's. The two rules read the same pair of series and partition them on
-        # the gauge — `== 0` there, `> 0` here — so at most one of them can be the answer for any one
-        # process, and the pass-count term is the half both branches share. On this branch it never
-        # decides anything on its own (a stamped gauge is by construction a counted complete pass); it
-        # is written so the partition can be read off the two expressions side by side.
+        # `> 0` ON THE GAUGE IS THE PRECONDITION, not a tidy-up (the header's epoch note), written
+        # inline the way the estate's other stamp rules write it (ForgeReconcileStalled,
+        # ForgeDispatchStalled, ReviewbotReconcileStale): the filter passes the gauge through when it
+        # holds a stamp and yields an empty vector when it holds the construction-time 0, and
+        # `time() -` an empty vector is empty — so a conductor that has never stamped is invisible to
+        # this rule rather than a 56-year outage to it. That conductor is ForgeConductNeverObserved's
+        # case, below. The two rules partition the gauge — `== 0` there, `> 0` here — so at most one
+        # of them can be the answer for any one process, and `$value` here is an age the engine
+        # actually produced. The alert wears the gauge's own scrape labels.
         #
-        # JOINED PER POD, on the labels the PodMonitor stamps on every series. The gauge and the
-        # counter come from one process and must be read as one process's: a rollout replaces the
-        # pod, the outgoing pod's last samples stay queryable until Prometheus marks them stale, and a
-        # join that summed the counter across pods would let the old pod's history answer for the
-        # new one. `on (namespace, pod)` rather than a bare `and` because the gauge carries instance
-        # and job as well, which the summed side does not.
+        # THE PASS COUNTER IS NOT A TERM, on purpose. `record_pass` writes the stamp and counts the
+        # complete pass in one call, so on a healthy process `passes_total > 0` follows from
+        # `gauge > 0` and decides nothing. On the one process where it does not follow, it decides
+        # the wrong thing: the engine keeps stamping when the counter's write fails, by design
+        # (test_a_wedged_counter_does_not_stop_the_liveness_stamp, agentforge
+        # tests/unit/test_conduct_metrics.py — an instrument fault must never cost the liveness
+        # series), and a `passes_total > 0` conjunct here would silence this rule on that process
+        # while its stamped gauge silences NeverObserved, leaving a conductor that stopped observing
+        # with no rule at all. The fixture's wedged-counter case holds that open.
         #
         # 1800s = six pass intervals: at 300s a conductor has passed on six consecutive chances to
         # re-stamp before the expression is true, and the 10m hold adds two more before it fires —
@@ -98,9 +103,7 @@ spec:
         # the time a human would want to know.
         - alert: ForgeConductBlind
           expr: |-
-            (time() - forge_conduct_last_pass_timestamp) > 1800
-              and (forge_conduct_last_pass_timestamp > 0)
-              and on (namespace, pod) (sum by (namespace, pod) (forge_conduct_passes_total) > 0)
+            (time() - (forge_conduct_last_pass_timestamp > 0)) > 1800
           for: 10m
           labels: { severity: warning }
           annotations:
@@ -124,9 +127,12 @@ spec:
         # zero and gets six passes of its own — and the RAW sum, joined per pod, is what makes that
         # true. increase() would carry a pre-restart count across the reset, and a sum across pods
         # would let the outgoing pod's count answer for the incoming pod's zero gauge for as long as
-        # its samples stay queryable. `>= 6` is Blind's six-pass-interval yardstick counted in the
-        # unit that exists on this side of the partition; at the 300s cadence the sixth pass returns
-        # about 25 minutes after boot, and at the backed-off cadence of a raising pass about 90.
+        # its samples stay queryable. The join is `on (namespace, pod)` — the labels the PodMonitor
+        # stamps on every series — rather than a bare `and`, because the gauge carries instance and
+        # job as well, which the summed side does not, and a bare `and` would match nothing. `>= 6`
+        # is Blind's six-pass-interval yardstick counted in the unit that exists on this side of the
+        # partition; at the 300s cadence the sixth pass returns about 25 minutes after boot, and at
+        # the backed-off cadence of a raising pass about 90.
         #
         # No `for`. The condition cannot flap: the count only grows until the gauge is stamped or the
         # process changes, and either is the alert clearing for the right reason (the first stamp
