@@ -657,9 +657,9 @@ tests:
               severity: warning
               detector: CP-DB-NO-BACKUP
             exp_annotations:
-              summary: "AgentForge conductor row CP-DB-NO-BACKUP has answered Unknown 8 times in the last hour"
+              summary: "AgentForge conductor row CP-DB-NO-BACKUP answered Unknown on 8 passes in the last hour"
               description: >-
-                The detector row CP-DB-NO-BACKUP could not read what it needed on most passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="CP-DB-NO-BACKUP"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
+                The detector row CP-DB-NO-BACKUP could not read what it needed, for one and the same reason, on at least six passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="CP-DB-NO-BACKUP"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
       # 75m: the whole window is one step per pass — twelve, the value a blind row reads all day.
       - eval_time: 75m
         alertname: ForgeConductDetectorBlind
@@ -668,9 +668,9 @@ tests:
               severity: warning
               detector: CP-DB-NO-BACKUP
             exp_annotations:
-              summary: "AgentForge conductor row CP-DB-NO-BACKUP has answered Unknown 12 times in the last hour"
+              summary: "AgentForge conductor row CP-DB-NO-BACKUP answered Unknown on 12 passes in the last hour"
               description: >-
-                The detector row CP-DB-NO-BACKUP could not read what it needed on most passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="CP-DB-NO-BACKUP"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
+                The detector row CP-DB-NO-BACKUP could not read what it needed, for one and the same reason, on at least six passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="CP-DB-NO-BACKUP"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
 
   - interval: 1m
     name: the two designed pairs never fire, and the same reason on another row does
@@ -693,9 +693,37 @@ tests:
               severity: warning
               detector: SEAT-CAPACITY-IDLE
             exp_annotations:
-              summary: "AgentForge conductor row SEAT-CAPACITY-IDLE has answered Unknown 12 times in the last hour"
+              summary: "AgentForge conductor row SEAT-CAPACITY-IDLE answered Unknown on 12 passes in the last hour"
               description: >-
-                The detector row SEAT-CAPACITY-IDLE could not read what it needed on most passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="SEAT-CAPACITY-IDLE"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
+                The detector row SEAT-CAPACITY-IDLE could not read what it needed, for one and the same reason, on at least six passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="SEAT-CAPACITY-IDLE"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
+
+  - interval: 1m
+    name: a wide row that could not read on ONE pass is a transient, not blindness
+    input_series:
+      # LABEL-VOCAB-DRIFT over six bound repos: one pass at 10m where the gauge query failed for
+      # all six — six answers, one pass. A count of answers would read six and fire for the rest
+      # of the hour; a count of passes reads one. The row then reads every pass.
+      - series: 'forge_conduct_detector_unknown_total{detector="LABEL-VOCAB-DRIFT", reason="no_label_gauge_for_repo"}'
+        values: "0+0x9 6+0x70"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ForgeConductDetectorBlind
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: ForgeConductDetectorBlind
+        exp_alerts: []
+
+  - interval: 1m
+    name: a container restart is not a pass on which the row answered Unknown
+    input_series:
+      # Five Unknown passes, a restart at 30m (the counter re-exports at 0), then reading again:
+      # changes() sees the drop as a sixth move, resets() takes it back — quiet at the floor.
+      - series: 'forge_conduct_detector_unknown_total{detector="CP-DB-NO-BACKUP", reason="cluster_unparsed"}'
+        values: "1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x4 0+0x40"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ForgeConductDetectorBlind
+        exp_alerts: []
 
   - interval: 1m
     name: a row that was blind and reads again clears within the window
@@ -713,9 +741,9 @@ tests:
               severity: warning
               detector: SCALE-ORACLE-DEAD
             exp_annotations:
-              summary: "AgentForge conductor row SCALE-ORACLE-DEAD has answered Unknown 9 times in the last hour"
+              summary: "AgentForge conductor row SCALE-ORACLE-DEAD answered Unknown on 9 passes in the last hour"
               description: >-
-                The detector row SCALE-ORACLE-DEAD could not read what it needed on most passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="SCALE-ORACLE-DEAD"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
+                The detector row SCALE-ORACLE-DEAD could not read what it needed, for one and the same reason, on at least six passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="SCALE-ORACLE-DEAD"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
       - eval_time: 125m
         alertname: ForgeConductDetectorBlind
         exp_alerts: []
