@@ -14,6 +14,13 @@
 # so any `increase(...) == 0` over a short window is a false positive by construction. The scrape is
 # 30s (conductor-podmonitor.yaml) purely so a per-pass counter is never read as flat.
 #
+# AN UNLABELLED GAUGE IS 0 FROM CONSTRUCTION, AND 0 IS NOT A TIMESTAMP. prometheus_client exports
+# `forge_conduct_last_pass_timestamp` at 0.0 the instant the registry is built, and it stays there
+# until the first pass that observes the estate. Read as a stamp, that 0 is the Unix epoch: `time() - 0`
+# is ~1.77e9 seconds, which satisfies any age threshold from the first scrape of a freshly booted
+# conductor and renders as a 56-year outage. Every rule here that subtracts the gauge from `time()`
+# carries `> 0` on the gauge as its precondition, and the never-stamped state has a rule of its own.
+#
 # `release: kube-prometheus-stack` so the operator's ruleSelector picks it up. Without it this file
 # applies cleanly and is never loaded — no rule, no error, no event.
 apiVersion: monitoring.coreos.com/v1
@@ -63,57 +70,134 @@ spec:
               the PodMonitor binds the container port NAMED metrics (9464, the conductor's own
               registry) and not probe (8720, which serves /healthz and /readyz only), and that the
               CiliumNetworkPolicy admits the monitoring namespace to 9464.
-        # A conductor that is scraped, running, and not observing anything. The stamp is set ONLY on a
-        # pass that actually read the estate (`listings_complete and not any(incomplete.values())`), so
-        # this fires on a conductor whose passes are all coming back short — a forge outage, a spent
-        # budget, an auth failure — while its process stays perfectly healthy.
+        # A conductor that HAS observed the estate and has stopped. The stamp is set ONLY on a pass
+        # that actually read the estate (`listings_complete and not any(incomplete.values())`), so a
+        # stale stamp on a scraped conductor means nothing since has read it — every pass coming back
+        # short (a forge outage, a spent budget, an auth failure), or no pass returning at all while
+        # the process stays up. The expression does not tell those apart; the pass counter does, and
+        # the description points the operator at it.
         #
-        # 1800s = six pass intervals. At 300s a conductor misses five consecutive passes before this
-        # fires, which is past any single transient and well inside the time a human would want to know.
+        # `> 0` ON THE GAUGE IS THE PRECONDITION, not a tidy-up (the header's epoch note), written
+        # inline the way the estate's other stamp rules write it (ForgeReconcileStalled,
+        # ForgeDispatchStalled, ReviewbotReconcileStale): the filter passes the gauge through when it
+        # holds a stamp and yields an empty vector when it holds the construction-time 0, and
+        # `time() -` an empty vector is empty — so a conductor that has never stamped is invisible to
+        # this rule rather than a 56-year outage to it. That conductor is ForgeConductNeverObserved's
+        # case, below. The two rules partition the gauge — `== 0` there, `> 0` here — so at most one
+        # of them can be the answer for any one process, and `$value` here is an age the engine
+        # actually produced. The alert wears the gauge's own scrape labels.
+        #
+        # THE PASS COUNTER IS NOT A TERM, on purpose. `record_pass` writes the stamp and counts the
+        # complete pass in one call, so on a healthy process `passes_total > 0` follows from
+        # `gauge > 0` and decides nothing. On the one process where it does not follow, it decides
+        # the wrong thing: the engine keeps stamping when the counter's write fails, by design
+        # (test_a_wedged_counter_does_not_stop_the_liveness_stamp, agentforge
+        # tests/unit/test_conduct_metrics.py — an instrument fault must never cost the liveness
+        # series), and a `passes_total > 0` conjunct here would silence this rule on that process
+        # while its stamped gauge silences NeverObserved, leaving a conductor that stopped observing
+        # with no rule at all. The fixture's wedged-counter case holds that open.
+        #
+        # 1800s = six pass intervals: at 300s a conductor has passed on six consecutive chances to
+        # re-stamp before the expression is true, and the 10m hold adds two more before it fires —
+        # about forty minutes after the last observation, past any single transient and well inside
+        # the time a human would want to know.
         - alert: ForgeConductBlind
           expr: |-
-            (time() - forge_conduct_last_pass_timestamp) > 1800
-              and on() (sum(forge_conduct_passes_total) > 0)
+            (time() - (forge_conduct_last_pass_timestamp > 0)) > 1800
           for: 10m
           labels: { severity: warning }
           annotations:
             summary: "AgentForge conductor has not completed a pass in {{ $value | printf \"%.0f\" }}s"
             description: >-
-              The conductor is up and its passes are returning, but none has observed the estate
-              completely in over six pass intervals. The per-sensor counter
-              forge_conduct_sensor_incomplete_total says which read is coming back short.
+              The conductor has observed the estate before — the stamp is live — and has not done so
+              in over six pass intervals. Either every pass since is coming back short, or no pass is
+              returning at all while the process is still scraped: forge_conduct_passes_total says
+              which, and the per-sensor counter forge_conduct_sensor_incomplete_total says which read
+              is short. A conductor that has never stamped at all is ForgeConductNeverObserved's case,
+              not this one.
+        # THE OTHER HALF OF THE PARTITION: a conductor that has never stamped. Thirty minutes into
+        # the pod's life and no stamp means every pass that ended came back short or raised, or no
+        # pass has ended at all: a lane reading a path that is not there, a permission the bot lacks,
+        # a sensor that fails on every pass, a first pass that hung. A fault the process cannot see,
+        # and Blind, above, cannot speak for.
+        #
+        # THE POD'S AGE IS THE CLOCK, NOT THE PASS COUNT. `time()` has nothing on the engine's side
+        # to measure against here (the gauge is 0), and a count of passes only ticks for passes that
+        # END — a conductor whose second pass hangs for ever sits at one pass, scraped and Ready,
+        # and a rule waiting for a sixth would wait with it (reviewer-codex on #719). The pod's
+        # start time is what kube-state-metrics already joins the Down rule against, it is a clock
+        # that runs whether or not passes end, and 1800s is Blind's own six-interval yardstick on
+        # this side of the partition: a healthy conductor stamps within its first interval, so a pod
+        # half an hour old with no stamp has passed on six chances. The join is `on (namespace, pod)`
+        # — the labels the PodMonitor stamps on every series and the two that name a pod — so a
+        # rollout's new pod starts its own clock, and the pod-scoped max strips kube-state-metrics'
+        # other labels (uid, service, ...) so the alert wears only the join's.
+        #
+        # `for: 10m` FOR THE IN-PLACE RESTART. A container that restarts inside a pod that is
+        # already older than the clock re-exports the gauge at 0 while the pod's start time stays
+        # where it was, so the expression is true from the new container's first scrape and stays
+        # true until its first complete pass — one interval on a healthy conductor. The hold is two
+        # intervals, so a restart that observes the estate as it should never fires, and one that
+        # cannot fires ten minutes later than a fresh pod would. The count is still the first thing
+        # to read: forge_conduct_passes_total says whether passes are ending short, raising, or not
+        # ending at all, and the description says so.
+        - alert: ForgeConductNeverObserved
+          expr: |-
+            max by (namespace, pod) (
+              time() - kube_pod_start_time{namespace="agentforge", pod=~"agentforge-conductor-.*"}
+            ) > 1800
+              and on (namespace, pod) (forge_conduct_last_pass_timestamp == 0)
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor pod has been up for {{ $value | printf \"%.0f\" }}s and no pass has observed the estate"
+            description: >-
+              forge_conduct_last_pass_timestamp is still the 0 it is exported at before the first
+              complete pass, half an hour or more after the pod started — so no pass has read the
+              estate, which is a fault the process itself cannot see: a lane reading a path that is
+              not there, a permission its bot lacks, a sensor that fails on every pass, or a pass
+              that never ends. Read forge_conduct_passes_total first: a rising incomplete count is
+              passes coming back short (forge_conduct_sensor_incomplete_total says which read), a
+              rising failed count is passes raising (the log has the traceback), and a count that
+              is not moving at all is a pass that hung. A rollout's new pod starts its own clock;
+              the first complete pass hands the watch over to ForgeConductBlind.
         # Passes that RAISED, as opposed to passes that came back incomplete. The loop catches every
         # exception and backs off, so a raising pass is invisible in the process's health — it looks
-        # like a conductor that is simply quiet.
+        # like a conductor that is simply quiet. `_conduct_loop` (agentforge main.py) counts every
+        # pass on this counter, on the return arm and on the except arm.
         #
-        # [2h], NOT the six-pass-interval [30m] this shipped with. Both reviewers of PR #674 caught
-        # that window, and they were right for a reason the rule's OWN ANNOTATION states: a sustained
-        # failure run backs the loop off to a quarter rate. `backoff_seconds` (conductor/loop.py) is
-        # `interval * 2 ** min(consecutive_failures, 2)`, so at the 300s default the failures land at
-        # t=0, +600s, then +1200s forever. A 30-minute window can hold at most TWO of them — 1800/1200
-        # = 1.5 — so `> 2` was not merely hard to reach in the backed-off regime, it was UNREACHABLE
-        # in it, and the rule was structurally silent in exactly the condition it exists to catch.
-        # That is the same defect class as the delta() form recorded in agentforge-rules.yaml's header:
-        # not mis-tuned, mis-shaped. [2h] holds ~6 failures at the backed-off cadence while still
-        # needing three of them, so one transient (or two) stays quiet. The fixture now asserts both
-        # ends rather than only the quiet one.
+        # [2h] BECAUSE OF THAT BACKOFF, which the rule's own annotation states. `backoff_seconds`
+        # (conductor/loop.py) is `interval * 2 ** min(consecutive_failures, 2)`, so at the 300s
+        # default a sustained failure run lands its failures at t=0, +600s, then +1200s apart for
+        # ever. A window sized off the pass cadence — six intervals, [30m] — holds at most two of
+        # those (1800/1200 = 1.5) and can never need three of anything; [2h] holds ~6 at the
+        # backed-off cadence while still needing three, so one transient (or two) stays quiet.
         #
-        # ⚠️ DEPENDS ON AN ENGINE FIX THAT IS NOT YET IN A RELEASED IMAGE. `forge_conduct_passes_total`
-        # was never incremented by anything: `ConductMetrics.record_pass` and `record_pass_failure`
-        # each documented the conduct loop as their caller and neither had a production call site, so
-        # the endpoint served construction-time zeros. `main::_conduct_loop` now records on both arms
-        # (agentforge, "fix(conduct): the loop publishes the passes it survives"). Until that image is
-        # the one the conductor runs, this rule and ForgeConductBlind are inert — which is harmless
-        # while the workload stays unlisted, and is a BLOCKER for PR-7b (arming). Check before arming:
-        # `forge_conduct_passes_total` must be non-zero on a conductor that has run a pass.
+        # COUNTED, NOT increase()'d. increase() scales the raw step count to the window's edges by a
+        # factor set by where the samples sit against them, and a COUNT threshold on it is a coin
+        # toss at the margin: at a full scrape two failures read 2.01-2.07 (by window and scrape
+        # interval) once the counter was non-zero when the window opened — over a `> 2` — and with
+        # scrapes missing they read past three (samples at 60m, 70m and 90m read at 100m put two
+        # steps at 3.17), while the factor is never under 1, so a `>= 3` is safe only from below.
+        # changes() counts the value changes among the samples the window holds — an integer, no
+        # extrapolation — and resets() subtracts the one change that is not a failure, a restart's
+        # drop to 0. That is exact on this counter because record_pass_failure moves it by one and
+        # the backoff puts at least 600s between two moves of one process, so a 30s scrape never
+        # sees two as one. Where it is not exact it is quiet: a scrape gap wide enough to merge two
+        # failures under-counts, and a failure that lands before the first scrape after a restart
+        # is hidden unless the counter stood at 0 before it (n to 1 is one change less one reset;
+        # 1 to 1 is no change at all).
         #
-        # sum() is not decoration: an un-aggregated increase() carries the series' own labels onto the
-        # alert, so the day passes_total gains a dimension this becomes one alert per value of it. The
-        # fixture caught that — the first version produced an alert labelled outcome="failed", which is
-        # redundant with the alert's own name and would not have stayed redundant.
+        # sum() is not decoration: an un-aggregated result carries the series' own labels onto the
+        # alert — outcome="failed", redundant with the alert's name, and one alert per value of any
+        # dimension the counter gains later. It sums ONE series per pod, because the conductor has
+        # one PodMonitor; a second scrape of the same pod would count every failure twice.
         - alert: ForgeConductPassesFailing
           expr: |-
-            sum(increase(forge_conduct_passes_total{outcome="failed"}[2h])) > 2
+            sum(
+              changes(forge_conduct_passes_total{outcome="failed"}[2h])
+                - resets(forge_conduct_passes_total{outcome="failed"}[2h])
+            ) >= 3
           for: 5m
           labels: { severity: warning }
           annotations:
@@ -122,8 +206,51 @@ spec:
               Passes are raising rather than returning incomplete, which the loop absorbs into its
               backoff. Check the conductor's logs for the traceback. The window is 2h BECAUSE of that
               backoff: a sustained run settles at one failed pass per four intervals (1200s at the
-              300s default), so three failures take roughly 50 minutes to accrue and a shorter window
-              could not hold enough of them to fire at all.
+              300s default), so three failures span thirty to forty minutes of backoff plus the
+              passes' own run time, and a window sized off the pass cadence holds at most two of them.
+        # A CONFIG GENERATION THE LOOP REFUSED (agentforge #379). The refresh after every pass re-checks
+        # the startup gate's isolation invariants against the tenant config's newest generation — the
+        # repo-name grammar, a non-empty bound read set, filing repos disjoint from every repo the
+        # config binds, act repos inside the bound set — and a generation that breaks one is not
+        # adopted: the conductor keeps running on the last generation that satisfied them, and this
+        # counter is the only outward sign. From the estate that is indistinguishable from a config
+        # that never changed — passes complete, the stamp advances, every rule above stays quiet — while
+        # whoever edited the config is reading an estate observed under the config they replaced.
+        #
+        # `> 0`, NOT A COUNT, over [30m]. One refusal is already the fact: someone pushed a generation
+        # the gate rejects, and a restart on it would refuse to boot. The counter moves once per
+        # REFRESH — once per pass interval while the source keeps serving the bad generation, and once
+        # per 1200s in the backed-off regime, because the refresh runs after the sleep and backs off
+        # with the pass. A threshold of one needs only a window longer than the slowest interval, and
+        # 1800 > 1200 (a window of exactly the interval holds no step for one eval per cycle, which
+        # is enough to drop the alert). Not `> 1` either: increase() extrapolates to the window's
+        # edges, so one refusal reads as exactly 1 or as 1-and-a-bit depending on where its samples
+        # sit against the window, and a threshold of one turns a single refusal into a coin toss on
+        # scrape timing. The window is also the clear: refusals stop when a good generation lands,
+        # and the alert resolves itself once the last one ages out — within 30m of it.
+        #
+        # sum() for ForgeConductPassesFailing's reason: the counter is unlabelled, so an un-aggregated
+        # increase() would put the scrape's own labels on the alert. No `for`: a refusal is a discrete
+        # event the counter records once and the window holds for just under 30m (until the sample
+        # before the step leaves it), nothing about that can flap, and a hold would only delay the
+        # page.
+        - alert: ForgeConductConfigRejected
+          expr: |-
+            sum(increase(forge_conduct_config_rejected_total[30m])) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor refused a config generation and is running on the last one it accepted"
+            description: >-
+              forge_conduct_config_rejected_total advanced: the refresh after a pass re-checked the
+              startup gate's isolation invariants against a new generation of the tenant config and
+              refused it — the repo-name grammar, a non-empty bound read set, filing repos disjoint
+              from every repo the config binds, act repos inside the bound set. The conductor keeps
+              running on the last generation that satisfied them, so the estate it reports on is not
+              the one the refused generation describes — and for as long as that generation is the
+              one the source serves, a restart would refuse to boot on it with the same messages.
+              The conductor's log carries them (`conduct: refusing config generation`); fix the
+              generation at its Gitea source and the alert clears once the last refused refresh
+              ages out of its 30m window.
         # T0's standing invariant, and the one rule here that is a POSTURE check rather than a health
         # check. At AF_CONDUCT_TIER=observe the write door refuses before its first forge call, so any
         # movement on this counter means the tier is no longer observe — an arming that was not meant
@@ -186,11 +313,11 @@ spec:
         # forge PAT reaches its pod through an ExternalSecret (agentforge-conductor-forge, reading
         # operator/conductor/forge from the af KV mount), and that secret is REQUIRED — the pod does not
         # start without it. An ES stuck NotReady therefore leaves the pod at ContainerCreating, which
-        # neither rule above can see: the container never becomes Ready, so ForgeConductDown's anti-join
-        # has an empty left side, and no pass runs, so ForgeConductBlind's `passes_total > 0` guard is
-        # false. From the estate that state is indistinguishable from a rung nobody merged — and the
-        # arming PR (#710) documented that window and then covered it with a single manual kubectl
-        # check, which reviewer-claude correctly called out as a gap watched once, not watched.
+        # none of the liveness rules above can see: the container never becomes Ready, so
+        # ForgeConductDown's anti-join has an empty left side, and no registry is ever served, so
+        # ForgeConductNeverObserved has no gauge to join the pod's age against and ForgeConductBlind's
+        # stamp precondition never holds. From the estate that state is indistinguishable from a rung
+        # nobody merged, and a kubectl check after arming is that gap watched once, not watched.
         #
         # Shape, verified against the live store rather than written from memory: ESO exports BOTH
         # status="True" and status="False" series for every condition, as 1/0 — so NotReady is
