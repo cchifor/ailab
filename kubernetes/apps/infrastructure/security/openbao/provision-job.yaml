@@ -55,7 +55,7 @@ spec:
           # Digest pinned by scripts/pin-image-digests.py (the bot's pin PRs, or a manual pin). Resolve the
           # build from the registry tag / git, never from prose here — a commit named beside a bot-managed
           # digest goes stale within hours.
-          image: registry.chifor.me/agentforge/orchestrator@sha256:de0a18f8b029f71b475ed1bcc048150e5664504dce435f364dff6628d9eb4fde
+          image: registry.chifor.me/agentforge/orchestrator@sha256:7dec54e2159ff3b011fef2a98ac715727dda3644b1069d7960755694e5c09522
           args: ["agentforge", "openbao-provision"]
           env:
             - { name: AF_OB_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
