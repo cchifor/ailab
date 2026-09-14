@@ -309,6 +309,74 @@ spec:
               AST pin should have caught this before it shipped, so also check why it did not: it
               reads sensor keys written as string literals in conduct_pass and cannot see one that
               is computed.
+        # A DETECTOR ROW THAT CANNOT SEE, made visible (agentforge #393). A row that answers Unknown
+        # files nothing and lets the filer resolve nothing, and from the estate that is the same
+        # picture as a row watching a quiet estate: three rows sat Unknown on every one of the
+        # conductor's first fifty-four passes (a two-document manifest, a second trigger type, a
+        # rules file of another shape — agentforge #388) and nothing said so, because nothing
+        # exported WHY a row did not answer. `forge_conduct_detector_unknown_total{detector, reason}`
+        # counts every Unknown answer per pass; this reads it.
+        #
+        # PASSES, NOT ANSWERS. The counter advances once per Unknown ANSWER, and a row has one
+        # answer per scope: a pass on which a row with six scopes could not read adds six, the same
+        # six that a row with one scope adds over six passes — so a count of answers cannot tell a
+        # one-pass blip on a wide row from an hour of blindness on a narrow one (reviewer-codex on
+        # #723). changes() counts the SAMPLES at which a series moved, and a pass writes all of its
+        # answers in one record_pass call, inside one 30s scrape, so a series moves once per pass
+        # whatever the row's width; resets() takes back the one move that is a container restart.
+        # That is the number of passes in the hour on which the row answered Unknown with that
+        # reason. max by (detector) over its reasons: a row blind for one reason all hour is what a
+        # row that cannot see looks like (every one of #388's three was), and one alert per row is
+        # the unit an operator acts on. Two reasons taking turns on one row each read half and
+        # stay under — the quiet direction, and the description points at the per-reason series.
+        #
+        # `>= 6` OVER [1h]: twelve passes an hour at the 300s cadence, so six is a row blind on
+        # half of them; a one- or two-pass transient reads one or two. Far from both, and changes()
+        # is an integer, so nothing here rides on a window edge (the coin toss
+        # ForgeConductPassesFailing's `> 2` was, above).
+        #
+        # THE TWO PAIRS SUBTRACTED ARE DESIGNED, NOT TOLERATED, and each is subtracted as a
+        # (detector, reason) PAIR rather than by reason alone, so the same word on another row is
+        # still an alert. Both are what the first complete pass answered (2026-09-14 17:19Z) and
+        # both are Unknown by the estate's construction, not the conductor's:
+        #   WEBHOOK-WIRING-UNRENDERED / webhook_env_from_unresolved — the live CP-rendered pool wires
+        #     its env through envFrom (a ConfigMap with no AF_WEBHOOK_* and an ESO-materialised Secret
+        #     no repository read can see), so the Deployment alone cannot answer; the plan's
+        #     RAISED-NOT-TAKEN paragraph records why no path grant changes that.
+        #   BROKER-SEAT-UNAVAILABLE / no_snapshot_for_aud — the anthropic brokers export no usage
+        #     snapshot series for their aud, so the row has nothing to read for those seats.
+        # Adding a pair here is a claim that the row CANNOT answer by design, and it needs the
+        # paragraph that says why; a row that merely does not answer today is this alert's business.
+        # The pairs are spelled as a vector of label_replace()d constants, the one PromQL way to name
+        # a (detector, reason) pair without a series to match against; `unless on (detector, reason)`
+        # removes exactly those and nothing else.
+        - alert: ForgeConductDetectorBlind
+          expr: |-
+            max by (detector) (
+              (
+                changes(forge_conduct_detector_unknown_total[1h])
+                  - resets(forge_conduct_detector_unknown_total[1h])
+              )
+                unless on (detector, reason) (
+                  label_replace(label_replace(vector(1), "detector", "WEBHOOK-WIRING-UNRENDERED", "", ""), "reason", "webhook_env_from_unresolved", "", "")
+                  or label_replace(label_replace(vector(1), "detector", "BROKER-SEAT-UNAVAILABLE", "", ""), "reason", "no_snapshot_for_aud", "", "")
+                )
+            ) >= 6
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor row {{ $labels.detector }} answered Unknown on {{ $value | printf \"%.0f\" }} passes in the last hour"
+            description: >-
+              The detector row {{ $labels.detector }} could not read what it needed, for one and the
+              same reason, on at least six passes of the last hour, so it filed nothing and resolved
+              nothing for that scope — and from the estate that looks exactly like a row watching a
+              quiet estate. forge_conduct_detector_unknown_total{detector="{{ $labels.detector }}"}
+              carries the reason per series (a manifest of another shape, a path that is not there,
+              a query the store refused, a budget ceiling); the conductor's own pass line in its log
+              names the same reasons beside what it did find. Two (detector, reason) pairs are
+              subtracted from this rule because they are Unknown by the estate's design; they are
+              listed in the rule's comment with why, and a row that joins them needs the same
+              paragraph.
         # THE GAP BETWEEN "ARMED" AND "RUNNING", watched permanently rather than once. The conductor's
         # forge PAT reaches its pod through an ExternalSecret (agentforge-conductor-forge, reading
         # operator/conductor/forge from the af KV mount), and that secret is REQUIRED — the pod does not
