@@ -99,7 +99,13 @@ tests:
         values: "1+0x4 2+0x4 3+0x9 4+0x4 5+0x4 6+0x4 7+0x4 8+0x4 9+0x4 10+0x4 11+0x4"
       - series: 'forge_conduct_passes_total{outcome="failed", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "0+0x59"
-      # Pod def: boots at 60m with the gauge at its construction-time 0 and a count of its own.
+      # kube-state-metrics' side of the join: abc started at the epoch and def at 60m. Its extra
+      # labels (uid, service) are what the pod-scoped max in the rule strips.
+      - series: 'kube_pod_start_time{namespace="agentforge", pod="agentforge-conductor-abc", uid="aaaa", job="kube-state-metrics"}'
+        values: "0+0x59"
+      - series: 'kube_pod_start_time{namespace="agentforge", pod="agentforge-conductor-def", uid="dddd", job="kube-state-metrics"}'
+        values: "_x60 3600+0x19"
+      # Pod def: boots at 60m with the gauge at its construction-time 0 and a clock of its own.
       - series: 'forge_conduct_last_pass_timestamp{namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
         values: "_x60 0+0x19"
       - series: 'forge_conduct_passes_total{outcome="complete", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
@@ -142,8 +148,8 @@ tests:
         exp_alerts: []
       # 62m: the rollout window. abc's last samples (59m) are still inside the lookback and def is
       # one pass in with a zero gauge. Blind stays up for abc — that pod DID go blind, and the alert
-      # leaves with its samples — and NeverObserved must not borrow abc's twelve passes for def's
-      # zero gauge: the join is per pod, and a global sum here would fire it at once.
+      # leaves with its samples — and NeverObserved must not borrow abc's hour of age for def's
+      # zero gauge: the join is per pod, and a clock not scoped to the pod would fire it at once.
       - eval_time: 62m
         alertname: ForgeConductBlind
         exp_alerts:
@@ -159,7 +165,7 @@ tests:
       - eval_time: 62m
         alertname: ForgeConductNeverObserved
         exp_alerts: []
-      # 68m: abc is out of the lookback and def is two passes into the six it gets.
+      # 68m: abc is out of the lookback and def is eight minutes into the half hour it gets.
       - eval_time: 68m
         alertname: ForgeConductBlind
         exp_alerts: []
@@ -172,7 +178,9 @@ tests:
     input_series:
       # The gauge as prometheus_client exports it before the first complete pass: 0, and staying 0
       # because every pass comes back short. One pass per 300s from boot, none complete, none raised;
-      # the container restarts in place at 45m (same pod, same series) and the count starts over.
+      # the container restarts in place at 45m (same pod, same start time) and the count starts over.
+      - series: 'kube_pod_start_time{namespace="agentforge", pod="agentforge-conductor-abc", uid="aaaa", job="kube-state-metrics"}'
+        values: "0+0x64"
       - series: 'forge_conduct_last_pass_timestamp{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "0+0x64"
       - series: 'forge_conduct_passes_total{outcome="complete", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
@@ -191,13 +199,18 @@ tests:
       - eval_time: 14m
         alertname: ForgeConductBlind
         exp_alerts: []
-      # 24m: five passes. There is no hold on this rule, so quiet here is the floor itself.
-      - eval_time: 24m
+      # 30m: the pod is exactly 1800s old and the strict `>` is false; 40m: the expression has been
+      # true for nine minutes and the hold is ten. Quiet at both is the floor, on the 1m grid.
+      - eval_time: 30m
         alertname: ForgeConductNeverObserved
         exp_alerts: []
-      # 25m: the sixth pass has returned and none has stamped. This is the alert for that state, and
-      # it carries only the join labels — the count is summed per pod, not per outcome.
-      - eval_time: 25m
+      - eval_time: 40m
+        alertname: ForgeConductNeverObserved
+        exp_alerts: []
+      # 41m: 2460s since the pod started and no stamp, hold up. This is the alert for that state; it
+      # carries only the join labels, and the summary carries the pod's age — a number the estate
+      # produced, not the epoch's.
+      - eval_time: 41m
         alertname: ForgeConductNeverObserved
         exp_alerts:
           - exp_labels:
@@ -205,18 +218,19 @@ tests:
               namespace: agentforge
               pod: agentforge-conductor-abc
             exp_annotations:
-              summary: "AgentForge conductor has run 6 passes since it started and none has observed the estate"
-              description: "forge_conduct_last_pass_timestamp is still the 0 it is exported at before the first complete pass, and six or more passes have ended since this process started — so none of them read the estate, which is a fault the process itself cannot see: a lane reading a path that is not there, a permission its bot lacks, a sensor that fails on every pass. The per-sensor counter forge_conduct_sensor_incomplete_total says which read is short, and forge_conduct_passes_total{outcome=failed} whether the passes raised rather than returned. Both the stamp and the count belong to the process, so a restart or a rollout starts the count over and the new process gets six passes of its own; the first complete pass hands the watch over to ForgeConductBlind."
-      - eval_time: 25m
-        alertname: ForgeConductBlind
-        exp_alerts: []
+              summary: "AgentForge conductor pod has been up for 2460s and no pass has observed the estate"
+              description: "forge_conduct_last_pass_timestamp is still the 0 it is exported at before the first complete pass, half an hour or more after the pod started — so no pass has read the estate, which is a fault the process itself cannot see: a lane reading a path that is not there, a permission its bot lacks, a sensor that fails on every pass, or a pass that never ends. Read forge_conduct_passes_total first: a rising incomplete count is passes coming back short (forge_conduct_sensor_incomplete_total says which read), a rising failed count is passes raising (the log has the traceback), and a count that is not moving at all is a pass that hung. A rollout's new pod starts its own clock; the first complete pass hands the watch over to ForgeConductBlind."
       # 44m: `time() - 0` is 2640 here and has been over 1800 since 31m — the input on which a rule
       # reading the zero as a stamp fires with the epoch's age as its value. Blind is asserted QUIET
-      # on it; NeverObserved is still up, counting, until the process changes.
+      # on it; NeverObserved is up.
       - eval_time: 44m
         alertname: ForgeConductBlind
         exp_alerts: []
-      - eval_time: 44m
+      # 50m: the in-place restart at 45m reset the count with the process and the gauge is still 0.
+      # The pod is the clock, and the pod is fifty minutes old with no stamp from either container:
+      # the alert STAYS up, which is right — a restart that observes as it should stamps within an
+      # interval, and this one did not.
+      - eval_time: 50m
         alertname: ForgeConductNeverObserved
         exp_alerts:
           - exp_labels:
@@ -224,21 +238,17 @@ tests:
               namespace: agentforge
               pod: agentforge-conductor-abc
             exp_annotations:
-              summary: "AgentForge conductor has run 9 passes since it started and none has observed the estate"
-              description: "forge_conduct_last_pass_timestamp is still the 0 it is exported at before the first complete pass, and six or more passes have ended since this process started — so none of them read the estate, which is a fault the process itself cannot see: a lane reading a path that is not there, a permission its bot lacks, a sensor that fails on every pass. The per-sensor counter forge_conduct_sensor_incomplete_total says which read is short, and forge_conduct_passes_total{outcome=failed} whether the passes raised rather than returned. Both the stamp and the count belong to the process, so a restart or a rollout starts the count over and the new process gets six passes of its own; the first complete pass hands the watch over to ForgeConductBlind."
-      # 50m: the in-place restart at 45m reset the count with the process. The alert clears and the
-      # new process gets its own six passes — the raw sum, not an increase() that would carry the
-      # pre-restart count across the reset.
-      - eval_time: 50m
-        alertname: ForgeConductNeverObserved
-        exp_alerts: []
+              summary: "AgentForge conductor pod has been up for 3000s and no pass has observed the estate"
+              description: "forge_conduct_last_pass_timestamp is still the 0 it is exported at before the first complete pass, half an hour or more after the pod started — so no pass has read the estate, which is a fault the process itself cannot see: a lane reading a path that is not there, a permission its bot lacks, a sensor that fails on every pass, or a pass that never ends. Read forge_conduct_passes_total first: a rising incomplete count is passes coming back short (forge_conduct_sensor_incomplete_total says which read), a rising failed count is passes raising (the log has the traceback), and a count that is not moving at all is a pass that hung. A rollout's new pod starts its own clock; the first complete pass hands the watch over to ForgeConductBlind."
 
   - interval: 1m
-    name: six passes that raised and never stamped are never-observed too
+    name: passes that raise and never stamp are never-observed too
     input_series:
       # Every pass raises, so the loop backs off (`backoff_seconds` = 300 * 2 ** min(failures, 2)):
-      # failures at 0, 10m, then every 20m. The sixth lands at 90m. A count over incomplete passes
-      # only would wait for ever here — the passes exist, they just never returned.
+      # failures at 0, 10m, then every 20m. Nothing here counts passes — the clock is the pod's —
+      # so the backed-off cadence changes nothing about when this fires.
+      - series: 'kube_pod_start_time{namespace="agentforge", pod="agentforge-conductor-abc", uid="aaaa", job="kube-state-metrics"}'
+        values: "0+0x99"
       - series: 'forge_conduct_last_pass_timestamp{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "0+0x99"
       - series: 'forge_conduct_passes_total{outcome="complete", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
@@ -248,10 +258,10 @@ tests:
       - series: 'forge_conduct_passes_total{outcome="failed", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "1+0x9 2+0x19 3+0x19 4+0x19 5+0x19 6+0x9"
     alert_rule_test:
-      - eval_time: 89m
+      - eval_time: 40m
         alertname: ForgeConductNeverObserved
         exp_alerts: []
-      - eval_time: 90m
+      - eval_time: 41m
         alertname: ForgeConductNeverObserved
         exp_alerts:
           - exp_labels:
@@ -259,9 +269,84 @@ tests:
               namespace: agentforge
               pod: agentforge-conductor-abc
             exp_annotations:
-              summary: "AgentForge conductor has run 6 passes since it started and none has observed the estate"
-              description: "forge_conduct_last_pass_timestamp is still the 0 it is exported at before the first complete pass, and six or more passes have ended since this process started — so none of them read the estate, which is a fault the process itself cannot see: a lane reading a path that is not there, a permission its bot lacks, a sensor that fails on every pass. The per-sensor counter forge_conduct_sensor_incomplete_total says which read is short, and forge_conduct_passes_total{outcome=failed} whether the passes raised rather than returned. Both the stamp and the count belong to the process, so a restart or a rollout starts the count over and the new process gets six passes of its own; the first complete pass hands the watch over to ForgeConductBlind."
+              summary: "AgentForge conductor pod has been up for 2460s and no pass has observed the estate"
+              description: "forge_conduct_last_pass_timestamp is still the 0 it is exported at before the first complete pass, half an hour or more after the pod started — so no pass has read the estate, which is a fault the process itself cannot see: a lane reading a path that is not there, a permission its bot lacks, a sensor that fails on every pass, or a pass that never ends. Read forge_conduct_passes_total first: a rising incomplete count is passes coming back short (forge_conduct_sensor_incomplete_total says which read), a rising failed count is passes raising (the log has the traceback), and a count that is not moving at all is a pass that hung. A rollout's new pod starts its own clock; the first complete pass hands the watch over to ForgeConductBlind."
       - eval_time: 90m
+        alertname: ForgeConductBlind
+        exp_alerts: []
+
+  - interval: 1m
+    name: a conductor that returned one pass and then hung is never-observed, not unreported
+    input_series:
+      # One incomplete pass at boot, then the second pass never ends: the count sits at one, the
+      # gauge at 0, the container Ready and scraped. Nothing reading the count could see this —
+      # a floor of six passes waits for ever, and Down is satisfied by the scrape. The pod's age
+      # is the clock that runs anyway. (A first pass that hangs is the same case with the count
+      # at 0.)
+      - series: 'kube_pod_start_time{namespace="agentforge", pod="agentforge-conductor-abc", uid="aaaa", job="kube-state-metrics"}'
+        values: "0+0x59"
+      - series: 'forge_conduct_last_pass_timestamp{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x59"
+      - series: 'forge_conduct_passes_total{outcome="complete", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x59"
+      - series: 'forge_conduct_passes_total{outcome="incomplete", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "1+0x59"
+      - series: 'forge_conduct_passes_total{outcome="failed", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x59"
+      - series: 'kube_pod_container_status_ready{namespace="agentforge", pod="agentforge-conductor-abc", container="conductor"}'
+        values: "1+0x59"
+      - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x59"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ForgeConductNeverObserved
+        exp_alerts: []
+      - eval_time: 41m
+        alertname: ForgeConductNeverObserved
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: agentforge
+              pod: agentforge-conductor-abc
+            exp_annotations:
+              summary: "AgentForge conductor pod has been up for 2460s and no pass has observed the estate"
+              description: "forge_conduct_last_pass_timestamp is still the 0 it is exported at before the first complete pass, half an hour or more after the pod started — so no pass has read the estate, which is a fault the process itself cannot see: a lane reading a path that is not there, a permission its bot lacks, a sensor that fails on every pass, or a pass that never ends. Read forge_conduct_passes_total first: a rising incomplete count is passes coming back short (forge_conduct_sensor_incomplete_total says which read), a rising failed count is passes raising (the log has the traceback), and a count that is not moving at all is a pass that hung. A rollout's new pod starts its own clock; the first complete pass hands the watch over to ForgeConductBlind."
+      # Neither neighbour speaks for it: the gauge is 0, so Blind is empty; it is scraped, so Down is.
+      - eval_time: 41m
+        alertname: ForgeConductBlind
+        exp_alerts: []
+      - eval_time: 41m
+        alertname: ForgeConductDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: a container restart in a pod that had observed does not fire never-observed
+    input_series:
+      # Stamped every interval from 5m; the container restarts in place at 60m (the pod is an hour
+      # old, the gauge re-exports at 0) and stamps again at 65m. The expression is true for those
+      # five minutes and the hold is ten: quiet throughout. A hold under five minutes would page on
+      # every healthy restart of a pod older than the clock.
+      - series: 'kube_pod_start_time{namespace="agentforge", pod="agentforge-conductor-abc", uid="aaaa", job="kube-state-metrics"}'
+        values: "0+0x79"
+      - series: 'forge_conduct_last_pass_timestamp{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x4 300+0x4 600+0x4 900+0x4 1200+0x4 1500+0x4 1800+0x4 2100+0x4 2400+0x4 2700+0x4 3000+0x4 3300+0x4 0+0x4 3900+0x4 4200+0x4 4500+0x4"
+      - series: 'forge_conduct_passes_total{outcome="complete", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x4 1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x4 7+0x4 8+0x4 9+0x4 10+0x4 11+0x4 0+0x4 1+0x4 2+0x4 3+0x4"
+      - series: 'forge_conduct_passes_total{outcome="incomplete", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x79"
+      - series: 'forge_conduct_passes_total{outcome="failed", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x79"
+    alert_rule_test:
+      - eval_time: 64m
+        alertname: ForgeConductNeverObserved
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: ForgeConductNeverObserved
+        exp_alerts: []
+      - eval_time: 79m
+        alertname: ForgeConductNeverObserved
+        exp_alerts: []
+      - eval_time: 79m
         alertname: ForgeConductBlind
         exp_alerts: []
 
