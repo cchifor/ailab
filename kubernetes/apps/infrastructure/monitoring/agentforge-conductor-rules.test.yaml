@@ -10,13 +10,11 @@
 #
 # The second reason: every window in that file is sized off the 300s pass cadence — and the failure mode
 # runs in BOTH directions. Too tight and the rule fires on a healthy conductor; too short and it cannot
-# fire on a sick one. This file shipped with the second kind and said the opposite: its
-# ForgeConductPassesFailing case drove one failure every 5 minutes and called that "the real shape of a
-# conductor whose pass keeps raising", when `backoff_seconds` makes two failures 5 minutes apart
-# impossible — the loop waits 600s after the first and 1200s after every one thereafter. The case has
-# been replaced by one at the cadence the loop actually produces, and the window it exercises is now
-# [2h] rather than [30m], which is what makes the rule reachable at all. A fixture whose input the
-# production code cannot generate proves nothing, however green it is.
+# hold what it is meant to count. So the ForgeConductPassesFailing cases drive the cadence the loop's
+# `backoff_seconds` actually produces — the next pass 600s after a failure and 1200s after every one
+# thereafter — and never one failure every five minutes, which the backoff makes impossible and which
+# would make a window sized off the pass cadence look adequate. A fixture whose input the production
+# code cannot generate proves nothing, however green it is.
 #
 # The third reason is the CLOCK. promtool's evaluation clock starts at Unix time 0, so a gauge fed as
 # 0 reads here as "stamped at the start of the test" and `time() - 0` at 45m as a plausible 2700s —
@@ -269,20 +267,23 @@ tests:
 
   # ── ForgeConductPassesFailing ─────────────────────────────────────────────────────────────────
   #
-  # THREE CASES, because the first version of this fixture had only the quiet one and that is how a
-  # rule that could never fire passed review. Both reviewers of PR #674 named it: the loop's own
-  # backoff (`backoff_seconds` = interval * 2 ** min(failures, 2)) settles a sustained failure run at
-  # ONE failed pass per 1200s, so the [30m] window this shipped with could hold at most 1.5 of them
-  # and `> 2` was unreachable in precisely the regime the alert exists for. A fixture that only
-  # asserts silence cannot tell "correctly quiet" from "structurally mute".
+  # SIX CASES, every one at the cadence the loop produces. `backoff_seconds` (conductor/loop.py,
+  # interval * 2 ** min(failures, 2)) puts the next pass 600s after a failure and 1200s after every
+  # failure thereafter, so a sustained run lands its failures at 0, 10m, 30m, 50m, 70m, ... (plus
+  # each pass's own run time) and one failure every five minutes is a shape the loop cannot write.
+  # The rule COUNTS the steps the window holds (changes() less resets()), so the quiet cases are the
+  # ones that carry it: two failures are two whether the counter opened the window at 0 or at 1,
+  # whether the samples are dense or sparse, and whether a restart sits between them — three inputs
+  # an increase() reads differently (2.01 to 2.07, 3.17, and a reset it re-adds), each asserted
+  # quiet here.
   - interval: 1m
     name: a healthy conductor at the 300s cadence does not trip the failure rule
     input_series:
-      # six passes in 30m, every one of them fine — the shape of a perfectly healthy conductor
+      # A pass every 300s from boot, every one of them fine.
       - series: 'forge_conduct_passes_total{outcome="complete"}'
-        values: "0+1x40"
+        values: "1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x4 7+0x4 8+0x4 9+0x4"
       - series: 'forge_conduct_passes_total{outcome="failed"}'
-        values: "0+0x40"
+        values: "0+0x44"
     alert_rule_test:
       - eval_time: 35m
         alertname: ForgeConductPassesFailing
@@ -291,10 +292,9 @@ tests:
   - interval: 1m
     name: a sustained failure run AT THE BACKED-OFF CADENCE fires
     input_series:
-      # The cadence the loop actually produces once it is failing: `backoff_seconds(300, n)` is
-      # 300*2**min(n,2), so the failures land at t=0, +600s, then +1200s apart forever — 0, 10m, 30m,
-      # 50m, 70m, 90m, 110m. This is the series a real outage writes, not one failure every 5 minutes
-      # (which the backoff makes impossible).
+      # Raising from boot: failures at 0, 10m, 30m, 50m, 70m, 90m, 110m, 130m — the series a real
+      # outage writes. The failure at boot sits on the fixture's first sample, so the first step a
+      # window can hold is 10m's.
       - series: 'forge_conduct_passes_total{outcome="failed"}'
         values: "1+0x9 2+0x19 3+0x19 4+0x19 5+0x19 6+0x19 7+0x19 8+0x19"
       # nothing completes during the run — the reason ForgeConductBlind is the neighbouring rule
@@ -303,29 +303,97 @@ tests:
     alert_rule_test:
       - eval_time: 15m
         alertname: ForgeConductPassesFailing
-        exp_alerts: [] # two failures in: still one transient away from meaning anything
+        exp_alerts: [] # one step in: still two transients away from meaning anything
+      # 45m: two steps (10m, 30m); the third lands at 50m. Quiet here is the threshold's floor.
+      - eval_time: 45m
+        alertname: ForgeConductPassesFailing
+        exp_alerts: []
+      # 55m: three steps since 50m, held five minutes.
+      - eval_time: 55m
+        alertname: ForgeConductPassesFailing
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor: 3 passes raised in the last 2h"
+              description: "Passes are raising rather than returning incomplete, which the loop absorbs into its backoff. Check the conductor's logs for the traceback. The window is 2h BECAUSE of that backoff: a sustained run settles at one failed pass per four intervals (1200s at the 300s default), so three failures span thirty to forty minutes of backoff plus the passes' own run time, and a window sized off the pass cadence holds at most two of them."
       - eval_time: 75m
         alertname: ForgeConductPassesFailing
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "AgentForge conductor: 4 passes raised in the last 2h"
-              description: "Passes are raising rather than returning incomplete, which the loop absorbs into its backoff. Check the conductor's logs for the traceback. The window is 2h BECAUSE of that backoff: a sustained run settles at one failed pass per four intervals (1200s at the 300s default), so three failures take roughly 50 minutes to accrue and a shorter window could not hold enough of them to fire at all."
+              description: "Passes are raising rather than returning incomplete, which the loop absorbs into its backoff. Check the conductor's logs for the traceback. The window is 2h BECAUSE of that backoff: a sustained run settles at one failed pass per four intervals (1200s at the 300s default), so three failures span thirty to forty minutes of backoff plus the passes' own run time, and a window sized off the pass cadence holds at most two of them."
 
   - interval: 1m
-    name: two isolated failures two hours apart stay quiet
+    name: a conductor that booted clean and then started raising
     input_series:
-      # The loop recovers between them (consecutive_failures resets on success), so this is the shape
-      # of ordinary transient forge flakiness rather than an outage. `> 2` is what separates them.
+      # Two complete passes, then every pass raises: failures at 10m, 20m (600s on), then 1200s
+      # apart. The third step lands at 40m, so 44m is the eval that holds the five-minute hold.
       - series: 'forge_conduct_passes_total{outcome="failed"}'
-        values: "1+0x59 2+0x90"
+        values: "0+0x9 1+0x9 2+0x19 3+0x19 4+0x19 5+0x19"
       - series: 'forge_conduct_passes_total{outcome="complete"}'
-        values: "1+1x149"
+        values: "1+0x4 2+0x94"
     alert_rule_test:
-      - eval_time: 75m
+      - eval_time: 44m
+        alertname: ForgeConductPassesFailing
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: ForgeConductPassesFailing
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor: 3 passes raised in the last 2h"
+              description: "Passes are raising rather than returning incomplete, which the loop absorbs into its backoff. Check the conductor's logs for the traceback. The window is 2h BECAUSE of that backoff: a sustained run settles at one failed pass per four intervals (1200s at the 300s default), so three failures span thirty to forty minutes of backoff plus the passes' own run time, and a window sized off the pass cadence holds at most two of them."
+
+  - interval: 1m
+    name: two isolated failures inside one window stay quiet
+    input_series:
+      # The fixture opens on a conductor with one failure already on its counter, then two more an
+      # hour apart (30m and 90m) with the loop recovering between them — one 600s sleep after each
+      # and the 300s cadence resumes. Ordinary transient forge flakiness, not an outage. From 90m
+      # the window holds both steps over a counter that was non-zero when it opened: the input an
+      # increase() lifts to 2.01-2.02, and two steps to this rule.
+      - series: 'forge_conduct_passes_total{outcome="failed"}'
+        values: "1+0x29 2+0x59 3+0x60"
+      - series: 'forge_conduct_passes_total{outcome="complete"}'
+        values: "1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x14 7+0x4 8+0x4 9+0x4 10+0x4 11+0x4 12+0x4 13+0x4 14+0x4 15+0x4 16+0x14 17+0x4 18+0x4 19+0x4 20+0x4 21+0x4 22+0x4 23+0x4 24+0x4 25+0x4 26+0x4 27"
+    alert_rule_test:
+      # 100m: the series began inside the window. 145m: the window is fully sampled. Both hold the
+      # two steps and nothing else.
+      - eval_time: 100m
         alertname: ForgeConductPassesFailing
         exp_alerts: []
       - eval_time: 145m
+        alertname: ForgeConductPassesFailing
+        exp_alerts: []
+
+  - interval: 1m
+    name: a restart between two failures is not a third
+    input_series:
+      # One failure at 10m, a container restart at 40m that resets both counters in place, one
+      # failure at 50m. The drop to 0 is a change in the series and not a failure: changes() reads
+      # three, resets() one, and the rule two.
+      - series: 'forge_conduct_passes_total{outcome="failed"}'
+        values: "0+0x9 1+0x29 0+0x9 1+0x29"
+      - series: 'forge_conduct_passes_total{outcome="complete"}'
+        values: "1+0x4 2+0x14 3+0x4 4+0x4 5+0x4 6+0x4 1+0x4 2+0x14 3+0x4 4+0x4 5+0x4 6+0x4"
+    alert_rule_test:
+      # 60m: ten minutes past the second failure, past any hold.
+      - eval_time: 60m
+        alertname: ForgeConductPassesFailing
+        exp_alerts: []
+
+  - interval: 1m
+    name: two failures under a sparse scrape are still two
+    input_series:
+      # Scrapes missing for minutes at a time — a fault on the scrape path, not the loop's — leave
+      # samples at 60m, 70m and 90m only: failures at ~70m and ~90m (1200s apart, the backed-off
+      # spacing) over a counter that opened at 1. Three samples that far apart are the input an
+      # increase() extrapolates to 3.17 at 100m and 3.5 at 105m; two steps are two.
+      - series: 'forge_conduct_passes_total{outcome="failed"}'
+        values: "_x60 1 _x9 2 _x19 3 _x24"
+    alert_rule_test:
+      - eval_time: 105m
         alertname: ForgeConductPassesFailing
         exp_alerts: []
 
