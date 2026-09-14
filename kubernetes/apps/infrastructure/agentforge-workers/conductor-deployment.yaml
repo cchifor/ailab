@@ -159,6 +159,13 @@ spec:
               value: "cchifor/ailab"
             - name: AF_CONDUCT_TENANTS_REPO
               value: "cchifor/agentforge-tenants"
+            # The one repo whose CI gate script CI-RUNS-TRUNCATED reads (agentforge#384). Only the
+            # control-plane repo carries scripts/require_ci_success.py, so this is a single repo
+            # and not a list — declaring ailab too would make that row permanently UNKNOWN, and
+            # because completeness is keyed by detector that would kill it for this repo as well.
+            # Startup refuses it unset: a conductor that watches no deploy repo must say so.
+            - name: AF_CONDUCT_PLATFORM_REPO
+              value: "cchifor/agentforge-platform"
             # The probe port. Distinct from AF_METRICS_PORT — see the header.
             - name: AF_CONDUCT_PORT
               value: "8720"

@@ -26,16 +26,35 @@ resources:
   - scaledobject.yaml              # KEDA scale-to-zero (prometheus backlog + cron warm-floor) over the worker
   - cilium-egress.yaml             # worker egress: Gitea + kube-apiserver:6443 + DNS ONLY (deny world/metadata/IPv6)
   - worker-podmonitor.yaml         # kube-prometheus scrape of the worker's forge_* registry (R8; no Service → PodMonitor).
-  # -- af-conductor (fleet-wide observer) — DELIBERATELY UNLISTED until PR-7b -----------------------
-  # conductor-{serviceaccount,externalsecret,netpol,deployment,podmonitor}.yaml are present and
-  # absent from this list on purpose, mirroring the gating above. The PodMonitor is unlisted WITH
-  # the workload rather than with the rules: a monitor whose pods do not exist selects nothing and
-  # is harmless, but one pointed at a pod it cannot reach is a permanently-down target, which this
-  # repo has twice written up as worse than a known absence. Its rules file IS listed
-  # (monitoring/agentforge-conductor-rules.yaml) because rules over absent series are inert.
+  # -- af-conductor (fleet-wide observer) — ARMED 2026-09-13 (PR-7b), tier=observe -----------------
+  # Listed in logical dependency order FOR THE READER — kustomize list order does not sequence
+  # applies (Flux and kubectl sort by kind first), so never rely on reordering this list. Listed
+  # once the three arming prerequisites were met: the
+  # conductor-bot forge principal is a collaborator on the filing repo; its PAT is seeded at the
+  # KV path operator/conductor/forge (#705; `af/data/` is the mount prefix, which is how the vault
+  # spells the same path) and read by the ExternalSecret below; and the
+  # Deployment's env carries every knob main::_require_conduct_wiring refuses (#695). The PodMonitor
+  # is listed WITH the workload rather than with the rules, for the reason the unlisted-era comment
+  # gave: a monitor pointed at a pod it cannot reach is a permanently-down target, which this repo
+  # has twice written up as worse than a known absence.
   #
-  # ⚠ Unlisted means UNVALIDATED: `kustomize build` renders only what this list names, so CI never
-  # parses those five files. Validate by hand through a scratch kustomization that does list them.
+  # T0 is WRITE-FREE by construction: AF_CONDUCT_TIER=observe makes the write door refuse every
+  # proposal on tier before any forge call, and monitoring/agentforge-conductor-rules.yaml carries
+  # ForgeConductUnexpectedWrites for the day that stops being true. The window between "armed" and
+  # "running" — an ExternalSecret stuck NotReady leaves the pod at ContainerCreating, which no
+  # pod-or-pass rule can see — is watched by ForgeConductSecretNotReady in the same rules file.
+  # The exit criteria for leaving T0 are in plans/2026-09-06-conductor-program-plan.md (agentforge
+  # repo), "Rollout tiers".
+  #
+  # Before this listing the five files were UNVALIDATED (kustomize build renders only what this list
+  # names). They were rendered through a scratch kustomization and pass kubeconform -strict
+  # (7 resources, 0 invalid) — recorded in the PR that armed them, so the first CI parse is not the
+  # first parse.
+  - conductor-serviceaccount.yaml  # the eso SA the SecretStore authenticates as (no automount for the pod)
+  - conductor-externalsecret.yaml  # SecretStore + ES: operator/conductor/forge -> AF_BOT_TOKENS (REQUIRED by the pod)
+  - conductor-netpol.yaml          # egress: DNS, gitea:3000, prometheus:9090, CP:8080; ingress: monitoring -> :9464
+  - conductor-deployment.yaml      # replicas 1, Recreate, observe tier; refuses to start on a missing knob
+  - conductor-podmonitor.yaml      # kube-prometheus scrape of forge_conduct_* on :9464 (its OWN registry)
                                    # OPERATOR-managed pods ONLY — CP-rendered tenant pools stay unscraped until the CP
                                    # renderer emits a 9464 port + a monitoring ingress rule (see the file's COVERAGE BOUNDARY).
   # BOTH Deployments ARE listed and live (the gating described below was lifted when their
