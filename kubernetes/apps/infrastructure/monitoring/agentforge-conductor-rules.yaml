@@ -115,46 +115,52 @@ spec:
               which, and the per-sensor counter forge_conduct_sensor_incomplete_total says which read
               is short. A conductor that has never stamped at all is ForgeConductNeverObserved's case,
               not this one.
-        # THE OTHER HALF OF THE PARTITION: a conductor that has never stamped. Six passes in and no
-        # stamp means six passes have ended — returned short, or raised — and none observed the
-        # estate: a lane reading a path that is not there, a permission the bot lacks, a sensor that
-        # fails on every pass. A fault the process cannot see, and Blind, above, cannot speak for.
+        # THE OTHER HALF OF THE PARTITION: a conductor that has never stamped. Thirty minutes into
+        # the pod's life and no stamp means every pass that ended came back short or raised, or no
+        # pass has ended at all: a lane reading a path that is not there, a permission the bot lacks,
+        # a sensor that fails on every pass, a first pass that hung. A fault the process cannot see,
+        # and Blind, above, cannot speak for.
         #
-        # THE PASS COUNT IS THE CLOCK, on purpose. `time()` has nothing to measure against on this side
-        # (the gauge is 0), and the counter is the engine's own record of how many passes this
-        # process has run. Both belong to the process: a container restart resets them in place and
-        # a rollout replaces them with a new pod's, so either way the new process starts its count at
-        # zero and gets six passes of its own — and the RAW sum, joined per pod, is what makes that
-        # true. increase() would carry a pre-restart count across the reset, and a sum across pods
-        # would let the outgoing pod's count answer for the incoming pod's zero gauge for as long as
-        # its samples stay queryable. The join is `on (namespace, pod)` — the labels the PodMonitor
-        # stamps on every series — rather than a bare `and`, because the gauge carries instance and
-        # job as well, which the summed side does not, and a bare `and` would match nothing. `>= 6`
-        # is Blind's six-pass-interval yardstick counted in the unit that exists on this side of the
-        # partition; at the 300s cadence the sixth pass returns about 25 minutes after boot, and at
-        # the backed-off cadence of a raising pass about 90.
+        # THE POD'S AGE IS THE CLOCK, NOT THE PASS COUNT. `time()` has nothing on the engine's side
+        # to measure against here (the gauge is 0), and a count of passes only ticks for passes that
+        # END — a conductor whose second pass hangs for ever sits at one pass, scraped and Ready,
+        # and a rule waiting for a sixth would wait with it (reviewer-codex on #719). The pod's
+        # start time is what kube-state-metrics already joins the Down rule against, it is a clock
+        # that runs whether or not passes end, and 1800s is Blind's own six-interval yardstick on
+        # this side of the partition: a healthy conductor stamps within its first interval, so a pod
+        # half an hour old with no stamp has passed on six chances. The join is `on (namespace, pod)`
+        # — the labels the PodMonitor stamps on every series and the two that name a pod — so a
+        # rollout's new pod starts its own clock, and the pod-scoped max strips kube-state-metrics'
+        # other labels (uid, service, ...) so the alert wears only the join's.
         #
-        # No `for`. The condition cannot flap: the count only grows until the gauge is stamped or the
-        # process changes, and either is the alert clearing for the right reason (the first stamp
-        # hands the watch to Blind). A hold would only delay the answer — a second clock on top of
-        # the one the count already is.
+        # `for: 10m` FOR THE IN-PLACE RESTART. A container that restarts inside a pod that is
+        # already older than the clock re-exports the gauge at 0 while the pod's start time stays
+        # where it was, so the expression is true from the new container's first scrape and stays
+        # true until its first complete pass — one interval on a healthy conductor. The hold is two
+        # intervals, so a restart that observes the estate as it should never fires, and one that
+        # cannot fires ten minutes later than a fresh pod would. The count is still the first thing
+        # to read: forge_conduct_passes_total says whether passes are ending short, raising, or not
+        # ending at all, and the description says so.
         - alert: ForgeConductNeverObserved
           expr: |-
-            sum by (namespace, pod) (forge_conduct_passes_total) >= 6
+            max by (namespace, pod) (
+              time() - kube_pod_start_time{namespace="agentforge", pod=~"agentforge-conductor-.*"}
+            ) > 1800
               and on (namespace, pod) (forge_conduct_last_pass_timestamp == 0)
+          for: 10m
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge conductor has run {{ $value | printf \"%.0f\" }} passes since it started and none has observed the estate"
+            summary: "AgentForge conductor pod has been up for {{ $value | printf \"%.0f\" }}s and no pass has observed the estate"
             description: >-
               forge_conduct_last_pass_timestamp is still the 0 it is exported at before the first
-              complete pass, and six or more passes have ended since this process started — so
-              none of them read the estate, which is a fault the process itself cannot see: a lane
-              reading a path that is not there, a permission its bot lacks, a sensor that fails on
-              every pass. The per-sensor counter forge_conduct_sensor_incomplete_total says which read
-              is short, and forge_conduct_passes_total{outcome=failed} whether the passes raised
-              rather than returned. Both the stamp and the count belong to the process, so a restart
-              or a rollout starts the count over and the new process gets six passes of its own; the
-              first complete pass hands the watch over to ForgeConductBlind.
+              complete pass, half an hour or more after the pod started — so no pass has read the
+              estate, which is a fault the process itself cannot see: a lane reading a path that is
+              not there, a permission its bot lacks, a sensor that fails on every pass, or a pass
+              that never ends. Read forge_conduct_passes_total first: a rising incomplete count is
+              passes coming back short (forge_conduct_sensor_incomplete_total says which read), a
+              rising failed count is passes raising (the log has the traceback), and a count that
+              is not moving at all is a pass that hung. A rollout's new pod starts its own clock;
+              the first complete pass hands the watch over to ForgeConductBlind.
         # Passes that RAISED, as opposed to passes that came back incomplete. The loop catches every
         # exception and backs off, so a raising pass is invisible in the process's health — it looks
         # like a conductor that is simply quiet. `_conduct_loop` (agentforge main.py) counts every
@@ -308,10 +314,10 @@ spec:
         # operator/conductor/forge from the af KV mount), and that secret is REQUIRED — the pod does not
         # start without it. An ES stuck NotReady therefore leaves the pod at ContainerCreating, which
         # none of the liveness rules above can see: the container never becomes Ready, so
-        # ForgeConductDown's anti-join has an empty left side, and no pass runs, so
-        # ForgeConductNeverObserved's six-pass floor is never reached and ForgeConductBlind's stamp
-        # precondition never holds. From the estate that state is indistinguishable from a rung nobody
-        # merged, and a kubectl check after arming is that gap watched once, not watched.
+        # ForgeConductDown's anti-join has an empty left side, and no registry is ever served, so
+        # ForgeConductNeverObserved has no gauge to join the pod's age against and ForgeConductBlind's
+        # stamp precondition never holds. From the estate that state is indistinguishable from a rung
+        # nobody merged, and a kubectl check after arming is that gap watched once, not watched.
         #
         # Shape, verified against the live store rather than written from memory: ESO exports BOTH
         # status="True" and status="False" series for every condition, as 1/0 — so NotReady is
