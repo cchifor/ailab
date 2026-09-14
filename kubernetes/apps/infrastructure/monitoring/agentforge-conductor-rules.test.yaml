@@ -628,6 +628,98 @@ tests:
         alertname: ForgeConductUnexpectedWrites
         exp_alerts: []
 
+  # ── ForgeConductDetectorBlind ──────────────────────────────────────────────────────────────────
+  #
+  # The counter is labelled and NOT pre-touched (the reason vocabulary is the detectors' own), so a
+  # series appears at its first Unknown answer; increase() sees only the change after that, which is
+  # why every case here starts its series a few samples before the first step it counts. One step per
+  # pass at the 300s cadence: the series step every five samples.
+  - interval: 1m
+    name: a row Unknown on every pass of the hour fires, and a transient does not
+    input_series:
+      # CP-DB-NO-BACKUP Unknown on every pass from 5m: one step per 300s, twelve an hour.
+      - series: 'forge_conduct_detector_unknown_total{detector="CP-DB-NO-BACKUP", reason="cluster_unparsed"}'
+        values: "1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x4 7+0x4 8+0x4 9+0x4 10+0x4 11+0x4 12+0x4 13+0x4 14+0x4 15+0x4 16+0x4"
+      # AUTH-LATCHED Unknown on two passes (a forge blip at 10m and 15m), then reading again.
+      - series: 'forge_conduct_detector_unknown_total{detector="AUTH-LATCHED", reason="http_503"}'
+        values: "0+0x9 1+0x4 2+0x65"
+    alert_rule_test:
+      # 30m: the sixth step lands at 30m and the hold is five minutes — quiet at the floor.
+      - eval_time: 30m
+        alertname: ForgeConductDetectorBlind
+        exp_alerts: []
+      # 40m: eight steps in the window (5m … 40m), held five minutes. The transient row is two
+      # and stays out.
+      - eval_time: 40m
+        alertname: ForgeConductDetectorBlind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              detector: CP-DB-NO-BACKUP
+            exp_annotations:
+              summary: "AgentForge conductor row CP-DB-NO-BACKUP has answered Unknown 8 times in the last hour"
+              description: >-
+                The detector row CP-DB-NO-BACKUP could not read what it needed on most passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="CP-DB-NO-BACKUP"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
+      # 75m: the whole window is one step per pass — twelve, the value a blind row reads all day.
+      - eval_time: 75m
+        alertname: ForgeConductDetectorBlind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              detector: CP-DB-NO-BACKUP
+            exp_annotations:
+              summary: "AgentForge conductor row CP-DB-NO-BACKUP has answered Unknown 12 times in the last hour"
+              description: >-
+                The detector row CP-DB-NO-BACKUP could not read what it needed on most passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="CP-DB-NO-BACKUP"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
+
+  - interval: 1m
+    name: the two designed pairs never fire, and the same reason on another row does
+    input_series:
+      # Exactly what the first complete live pass answered, on every pass: the live pool's envFrom
+      # and the anthropic seats' missing snapshot, two scopes for the latter.
+      - series: 'forge_conduct_detector_unknown_total{detector="WEBHOOK-WIRING-UNRENDERED", reason="webhook_env_from_unresolved"}'
+        values: "1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x4 7+0x4 8+0x4 9+0x4 10+0x4 11+0x4 12+0x4 13+0x4 14+0x4 15+0x4 16+0x4"
+      - series: 'forge_conduct_detector_unknown_total{detector="BROKER-SEAT-UNAVAILABLE", reason="no_snapshot_for_aud"}'
+        values: "2+0x4 4+0x4 6+0x4 8+0x4 10+0x4 12+0x4 14+0x4 16+0x4 18+0x4 20+0x4 22+0x4 24+0x4 26+0x4 28+0x4 30+0x4 32+0x4"
+      # The subtraction is by PAIR: a designed reason turning up on a row it was not designed for
+      # is that row going blind, and it fires.
+      - series: 'forge_conduct_detector_unknown_total{detector="SEAT-CAPACITY-IDLE", reason="no_snapshot_for_aud"}'
+        values: "1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x4 7+0x4 8+0x4 9+0x4 10+0x4 11+0x4 12+0x4 13+0x4 14+0x4 15+0x4 16+0x4"
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: ForgeConductDetectorBlind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              detector: SEAT-CAPACITY-IDLE
+            exp_annotations:
+              summary: "AgentForge conductor row SEAT-CAPACITY-IDLE has answered Unknown 12 times in the last hour"
+              description: >-
+                The detector row SEAT-CAPACITY-IDLE could not read what it needed on most passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="SEAT-CAPACITY-IDLE"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
+
+  - interval: 1m
+    name: a row that was blind and reads again clears within the window
+    input_series:
+      # Blind from 0 to 60m (twelve steps, the last at 55m), then every pass answers: the increase
+      # decays as the steps age out of the window — nine of them still inside it at 70m — and the
+      # alert is gone by 125m.
+      - series: 'forge_conduct_detector_unknown_total{detector="SCALE-ORACLE-DEAD", reason="rules_unparsed"}'
+        values: "1+0x4 2+0x4 3+0x4 4+0x4 5+0x4 6+0x4 7+0x4 8+0x4 9+0x4 10+0x4 11+0x4 12+0x4 12+0x70"
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: ForgeConductDetectorBlind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              detector: SCALE-ORACLE-DEAD
+            exp_annotations:
+              summary: "AgentForge conductor row SCALE-ORACLE-DEAD has answered Unknown 9 times in the last hour"
+              description: >-
+                The detector row SCALE-ORACLE-DEAD could not read what it needed on most passes of the last hour, so it filed nothing and resolved nothing for that scope — and from the estate that looks exactly like a row watching a quiet estate. forge_conduct_detector_unknown_total{detector="SCALE-ORACLE-DEAD"} carries the reason per series (a manifest of another shape, a path that is not there, a query the store refused, a budget ceiling); the conductor's own pass line in its log names the same reasons beside what it did find. Two (detector, reason) pairs are subtracted from this rule because they are Unknown by the estate's design; they are listed in the rule's comment with why, and a row that joins them needs the same paragraph.
+      - eval_time: 125m
+        alertname: ForgeConductDetectorBlind
+        exp_alerts: []
+
   # ── ForgeConductSensorUnrecognised ────────────────────────────────────────────────────────────
   #
   # The reserved bucket only means something if a rule reads it, and the rule only means something if
