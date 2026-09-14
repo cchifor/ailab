@@ -265,6 +265,44 @@ tests:
         alertname: ForgeConductBlind
         exp_alerts: []
 
+  - interval: 1m
+    name: a conductor whose pass counter is wedged still goes blind
+    input_series:
+      # The stamp at 15m with every pass counter still at its construction-time 0: the engine keeps
+      # stamping when the counter's write fails (test_a_wedged_counter_does_not_stop_the_liveness_stamp,
+      # agentforge tests/unit/test_conduct_metrics.py), so that an instrument fault never costs the
+      # liveness series. A `passes_total > 0` term on Blind would leave this process with no rule at
+      # all — NeverObserved's `== 0` is false on a stamped gauge — and this case is what refuses it.
+      - series: 'forge_conduct_last_pass_timestamp{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x14 900+0x59"
+      - series: 'forge_conduct_passes_total{outcome="complete", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x74"
+      - series: 'forge_conduct_passes_total{outcome="incomplete", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x74"
+      - series: 'forge_conduct_passes_total{outcome="failed", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x74"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ForgeConductBlind
+        exp_alerts: []
+      - eval_time: 56m
+        alertname: ForgeConductBlind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: agentforge
+              pod: agentforge-conductor-abc
+              instance: "10.42.0.7:9464"
+              job: monitoring/agentforge-conductor
+            exp_annotations:
+              summary: "AgentForge conductor has not completed a pass in 2460s"
+              description: "The conductor has observed the estate before — the stamp is live — and has not done so in over six pass intervals. Either every pass since is coming back short, or no pass is returning at all while the process is still scraped: forge_conduct_passes_total says which, and the per-sensor counter forge_conduct_sensor_incomplete_total says which read is short. A conductor that has never stamped at all is ForgeConductNeverObserved's case, not this one."
+      # Quiet by its count (0 is not six) before its gauge term is consulted; the partition on the
+      # gauge is the rolled case's assertion. Held here so the pair is read against one input.
+      - eval_time: 56m
+        alertname: ForgeConductNeverObserved
+        exp_alerts: []
+
   # ── ForgeConductPassesFailing ─────────────────────────────────────────────────────────────────
   #
   # SIX CASES, every one at the cadence the loop produces. `backoff_seconds` (conductor/loop.py,
