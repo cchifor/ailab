@@ -75,10 +75,12 @@ variable "data_datastore" {
   default = "local-lvm"
 }
 variable "data_gb" {
-  type    = number
-  # 192 -> 256 during the 2026-09-02 registry-full incident (platform#1037): grown LIVE via
-  # pct resize (the grow-only path this module documents), so the next apply is a no-op.
-  default = 256
+  type = number
+  # 256 -> 384 for the 2026-09-13 registry-full incident (platform build 32171).
+  # Grow mp0 online with the documented pct resize path; preserve all retained images.
+  # Once actual size and effective data_gb agree, the later plan should not resize it.
+  # Stop on a shrink plan and inspect existing state and variable overrides.
+  default = 384
 }
 
 # ---- Debian 13 LXC template (matches ai-lxc). Distinct file_name so a destroy here never deletes
