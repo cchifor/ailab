@@ -397,7 +397,7 @@ data:
           top_p: 0.95
           extra_body:
             top_k: 20
-        model_info: { max_input_tokens: 229376 }
+        model_info: { supports_vision: true, max_input_tokens: 229376 }
       # qwen3.8-27b — the quality tier, ON-DEMAND on node1 (.44) :8082 via its own llama-swap
       # instance, in the slot gemma-4 used to hold. 27B DENSE (not MoE), so every token reads all 27B
       # params: a MEASURED 9.3 tok/s vs qwen3.6's ~50. That is inherent to a dense model on a
@@ -861,7 +861,7 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "3341819c9a02"
+        checksum/config: "6c502d78dbea"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

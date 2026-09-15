@@ -54,6 +54,7 @@ llm-pi-ai:
         - id: qwen3.8-27b-fp8-unc-cloud
         - id: qwen3-coder-30b-a3b-cloud
         - id: qwen3.8-flash-next-cloud
+          input: [text, image]
         - id: gpt-6-astra
           input: [text, image]
         - id: qwen3.8-27b-ailab
