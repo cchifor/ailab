@@ -814,7 +814,14 @@ def run_llm(title, desc, diff_text, rubric=""):
     started = time.monotonic()
     try:
         return _run_llm(title, desc, diff_text, rubric, started)
-    except (subprocess.TimeoutExpired, ExpensiveFailure):
+    # RateLimited passes through UNRECLASSIFIED. It is not a cost class at all - it says the
+    # account is shut, and next_failure_state() answers it by charging no attempt. Let the
+    # clause below rewrap it and both halves are lost: an ExpensiveFailure is not a
+    # RateLimited, so the worker takes the ordinary path, the persona never parks, and the
+    # job is billed to the DEADLINE cap - quarantine after 2, against a wall it will keep
+    # hitting. The window can close mid-stream (codex streams for minutes before it is cut
+    # off), so a refusal past a third of the budget is a normal event, not a corner.
+    except (subprocess.TimeoutExpired, ExpensiveFailure, RateLimited):
         raise
     except Exception as e:
         spent = time.monotonic() - started
@@ -943,7 +950,43 @@ def _run_llm(title, desc, diff_text, rubric, started):
             elif os.path.exists(out_file):
                 text = io.open(out_file, encoding="utf-8").read()
             if not text.strip():
-                raise RuntimeError(f"codex produced no output (exit {r.returncode}): {r.stderr[-300:]}")
+                detail = f"codex produced no output (exit {r.returncode}): {r.stderr[-300:]}"
+                # THE SAME PARK THE CLAUDE BRANCH GETS BELOW, and for the same reason. An
+                # exhausted subscription is an ACCOUNT condition: the PR did nothing wrong,
+                # so it must not spend an attempt on it. Without this, 2026-09-14 21:47
+                # played out on codex exactly as 2026-09-06 played out on claude - every
+                # queued job walked its 5 attempts into the same wall and quarantined (11
+                # jobs, 10 PRs stuck on `codex=no review` for ~9 h behind an empty queue),
+                # and since quarantine is sticky by design each one then needed --requeue by
+                # hand, against a window that had reopened on its own hours earlier.
+                #
+                # The predicate is the claude branch's, verbatim, because the distinction is
+                # the same one: a MODEL-scoped limit means another model still serves, and
+                # parking on it would be the expensive mistake. The codex wording carries
+                # `purchase more credits` but not the CLI's `/usage-credits` remedy, so
+                # MODEL_LIMIT_RE correctly declines it - and there is nowhere to fall back to
+                # anyway: codex has no fallback branch, and this account is refused outright
+                # for any non-Codex model.
+                #
+                # The refusal names a WEEKLY reset that RESET_RE does not parse, which is
+                # deliberate: what actually reopens is the rolling window, hours out, not the
+                # date in the message. parse_reset returning None puts us on DEFAULT_PARK_S -
+                # a 15-minute re-probe - and a refused call costs no tokens, so probing is
+                # the cheap side of the trade.
+                # DECIDED ON THE WHOLE STDERR, reported on the tail (reviewer-claude, round 1
+                # of ailab#729). `detail` keeps the last 300 chars so the journal line stays
+                # readable, but that truncation must not reach the predicate: codex streams
+                # for minutes and anything it prints after the refusal would push the limit
+                # line out of the window, the match would miss, and the job would fall
+                # through to the ordinary raise - the quarantine storm this exists to stop,
+                # reintroduced by a display detail. Unlike the claude branch, scanning wide
+                # here is also safe: codex stderr carries CLI diagnostics, while the model's
+                # own prose goes to --output-last-message, so there is no model-authored text
+                # in scope to spoof either pattern.
+                err = r.stderr or ""
+                if not MODEL_LIMIT_RE.search(err) and RATE_LIMIT_RE.search(err):
+                    raise RateLimited(detail, parse_reset(err))
+                raise RuntimeError(detail)
             # The sandbox permits reads of the isolated user's own HOME, auth.json
             # included (round-3 finding): scan the (public-once-posted) output for that
             # credential material and quarantine instead of posting. Mistake prevention,
