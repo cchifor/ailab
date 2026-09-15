@@ -822,10 +822,11 @@ REAL_LIMIT_TEXT = ("llm exit 1: subtype=success result=You've hit your session l
                    "resets 4:20pm (UTC) [stderr: empty]")
 
 
-# The three limit messages this estate has actually produced, verbatim from the journal, with
-# the action each one REQUIRES. They are not interchangeable: two are account-scoped and must
-# park, one is model-scoped and must fall back. Table-driven precisely because the previous
-# code had a single regex and therefore a single answer for all three.
+# Every limit message this estate has actually produced, verbatim from the journal, with the
+# action each one REQUIRES. They are not interchangeable: the account-scoped ones must park,
+# the model-scoped ones must fall back. Table-driven precisely because the previous code had a
+# single regex and therefore a single answer for all of them. Both CLIs are in here: the
+# predicate is shared, so a wording either persona can produce belongs in the same table.
 LIMIT_MESSAGES = [
     # (label, error text, expect_park)
     ("weekly/account",
@@ -843,6 +844,15 @@ LIMIT_MESSAGES = [
     ("Fable 5/model (2026-09-10 wording)",
      "llm exit 1: subtype=success result=You're out of usage credits. Run /usage-credits "
      "to keep using Fable 5 or /model to switch models. [stderr: empty]", False),
+    # The codex persona's wording (2026-09-15). ACCOUNT-scoped: the login is out of window,
+    # and there is no other model to move to - `gpt-6` is rejected outright for a ChatGPT
+    # account, so a fallback here would only be a second refusal. Note it carries the word
+    # `credits` WITHOUT the CLI's `/usage-credits` remedy, which is exactly the near-miss
+    # MODEL_LIMIT_RE's two-token anchor was written to survive.
+    ("codex usage window/account",
+     "codex produced no output (exit 1): ERROR: You've hit your usage limit. Visit "
+     "https://chatgpt.com/codex/settings/usage to purchase more credits or try again at "
+     "Sep 21st, 2026 9:38 AM.", True),
 ]
 
 
@@ -963,6 +973,117 @@ class LimitScopeTest(unittest.TestCase):
         e = self.m.RateLimited(text, self.m.parse_reset(text))
         state, attempts, timeouts, note = self.m.next_failure_state(e, 4, 1)
         self.assertEqual(("retry", 4, 1), (state, attempts, timeouts))
+
+
+# Verbatim stderr from reviewer-2, on every attempt of every job between 2026-09-14 21:47 and
+# 2026-09-15 06:33. codex writes its refusal to STDERR and exits 1 having written no output
+# file, so it arrives at the "codex produced no output" raise rather than through any envelope
+# the claude branch knows how to read.
+CODEX_LIMIT_STDERR = ("ERROR: You've hit your usage limit. Visit "
+                      "https://chatgpt.com/codex/settings/usage to purchase more credits or "
+                      "try again at Sep 21st, 2026 9:38 AM.\n")
+
+
+class CodexLimitParkTest(unittest.TestCase):
+    """The park is the CLAUDE branch's, and the codex branch never had it (2026-09-15).
+
+    THE INCIDENT: reviewer-2's codex login ran out of usage window at 2026-09-14 21:47. The
+    claude branch would have parked the persona and left every job's attempt budget alone; the
+    codex branch raised a plain RuntimeError, so each job spent all 5 attempts against the same
+    wall and quarantined. 11 jobs quarantined, 10 PRs sat blocked on `codex=no review` for ~9 h,
+    and because quarantine is deliberately sticky the reconciler never retried them - they
+    needed `--requeue` by hand, against a window that had in fact reopened by 06:33.
+
+    That is the SAME failure the claude branch was fixed for on 2026-09-06 (8 PRs, empty queue,
+    the reviewer looking idle and healthy throughout). One persona having the fix is the whole
+    bug: the automerge lane needs EVERY persona clean, so a codex quarantine storm stops the
+    lane just as dead as a claude one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # llm_fallback_model is deliberately empty: _run_llm's fallback branch is claude-only,
+        # so for codex the park is the ONLY thing between a spent window and a quarantine.
+        # Matches host_vars/reviewer-2.yml, which sets no fallback.
+        self.m = load(self.tmp.name, llm_kind="codex", llm_model="gpt-6-astra",
+                      llm_fallback_model="", llm_timeout_s=600, llm_sudo_user="")
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+
+    def _fake_run(self, stderr, elapsed=0.0):
+        """codex exits 1 and writes no --output-last-message file, which is what makes the
+        output empty. Nothing about that path is stubbed: the test drives the real one."""
+        def run(args, **kw):
+            if elapsed:
+                type(self.clock).now += elapsed
+            return self.m.subprocess.CompletedProcess(args, 1, "", stderr)
+        return run
+
+    def _freeze_clock(self):
+        class Clock:
+            now = 1000.0
+
+            def monotonic(self):
+                return Clock.now
+
+            def time(self):
+                return real_time.time()
+
+            def sleep(self, _n):
+                pass
+
+            def strftime(self, *a):
+                return real_time.strftime(*a)
+
+        self.clock = Clock()
+        self.m.time = self.clock
+
+    def test_a_spent_codex_window_parks_instead_of_failing_the_job(self):
+        self.m.subprocess.run = self._fake_run(CODEX_LIMIT_STDERR)
+        with self.assertRaises(self.m.RateLimited):
+            self.m.run_llm("t", "d", "diff")
+
+    def test_the_park_leaves_the_attempt_budget_untouched(self):
+        """The property that decides quarantine-or-not, asserted through the real policy
+        function rather than by re-reading the raise site."""
+        self.m.subprocess.run = self._fake_run(CODEX_LIMIT_STDERR)
+        state = attempts = timeouts = None
+        try:
+            self.m.run_llm("t", "d", "diff")
+        except self.m.RateLimited as e:
+            state, attempts, timeouts, _note = self.m.next_failure_state(e, 4, 1)
+        self.assertEqual(("retry", 4, 1), (state, attempts, timeouts),
+                         "attempt 5 against a spent window is what quarantined 11 jobs")
+
+    def test_an_ordinary_empty_output_is_still_an_ordinary_failure(self):
+        """The park must stay narrow. An empty output with no limit in it is a real failure and
+        MUST keep burning attempts - otherwise a broken CLI parks the persona forever."""
+        self.m.subprocess.run = self._fake_run("ERROR: stream disconnected before completion")
+        with self.assertRaises(RuntimeError) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertNotIsInstance(cm.exception, self.m.RateLimited)
+        state, attempts, _t, _n = self.m.next_failure_state(cm.exception, 4, 0)
+        self.assertEqual(("quarantined", 5), (state, attempts))
+
+    def test_a_slow_refusal_is_a_park_and_not_a_deadline_failure(self):
+        """run_llm re-bills any failure past a third of the budget as an ExpensiveFailure, which
+        the worker charges to the DEADLINE cap (2, not 5) - and an ExpensiveFailure is not a
+        RateLimited, so the park would be silently dropped for exactly the slow refusals. codex
+        can stream for minutes before the window cuts it off, so this is not hypothetical."""
+        self._freeze_clock()
+        self.m.subprocess.run = self._fake_run(CODEX_LIMIT_STDERR, elapsed=400.0)
+        with self.assertRaises(self.m.RateLimited):
+            self.m.run_llm("t", "d", "diff")
+
+    def test_the_weekly_date_in_the_message_is_deliberately_not_parsed(self):
+        """codex names a WEEKLY reset ("try again at Sep 21st, 2026 9:38 AM") while the thing
+        that actually reopens is the rolling window - on 2026-09-15 the very PRs that failed all
+        morning reviewed clean at 06:33, six days before the date in the message. RESET_RE does
+        not read that format, so the park falls to DEFAULT_PARK_S and re-probes every 15
+        minutes, which is the behaviour we want. Pinned so that "improving" parse_reset to read
+        it would have to argue with this test first."""
+        self.assertIsNone(self.m.parse_reset(CODEX_LIMIT_STDERR))
+        at = self.m.park(self.m.parse_reset(CODEX_LIMIT_STDERR))
+        self.assertLessEqual(at - real_time.time(), self.m.DEFAULT_PARK_S + 1)
 
 
 class RateLimitTest(unittest.TestCase):
