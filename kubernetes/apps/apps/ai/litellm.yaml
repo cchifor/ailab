@@ -385,9 +385,19 @@ data:
       # 'qwen4exp'". That is a serving-side detail — see cloudlab host/llama-swap.yaml — but it
       # is why this model appeared later than the other three on the same endpoint.
       #
-      # host -c 262144 --parallel 1, so the whole 256K window serves ONE request; minus 32768
-      # output headroom = 229376. The window is large because it is nearly free on this
-      # architecture: 4x the context cost 11.6 GiB and no measurable speed change.
+      # host -c 524288 --parallel 2 since cloudlab PR #13 (2026-09-14). In llama.cpp `-c` is the
+      # TOTAL KV shared across slots, so each of the 2 slots still gets 524288/2 = 262144: the
+      # per-request window is UNCHANGED from the -c 262144 --parallel 1 it replaced, and so is
+      # max_input_tokens below (262144 - 32768 output headroom = 229376).
+      #
+      # The second slot exists for the no-cancel constraint documented above: on --parallel 1 an
+      # abandoned request wedges the ONLY slot, measured at 7+ minutes. Both flash-next entries
+      # were still on --parallel 1 after the 122B was moved off it; this one was fixed and the
+      # q6 entry was removed. Measured after the change: 79.8 GiB of 96 resident, 61.1 tok/s
+      # generation vs 59.8 before -- no regression.
+      #
+      # The window is large because context is nearly free on this architecture: 4x the context
+      # cost 11.6 GiB and no measurable speed change.
       - model_name: qwen3.8-flash-next-cloud
         litellm_params:
           model: openai/qwen3.8-flash-next
@@ -861,7 +871,7 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "6c502d78dbea"
+        checksum/config: "10beb07c6607"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
