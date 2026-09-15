@@ -1074,6 +1074,20 @@ class CodexLimitParkTest(unittest.TestCase):
         with self.assertRaises(self.m.RateLimited):
             self.m.run_llm("t", "d", "diff")
 
+    def test_trailing_stderr_cannot_push_the_refusal_out_of_the_park_decision(self):
+        """reviewer-claude, round 1 of ailab#729. The journal line keeps only the last 300
+        chars of stderr, and for one commit that truncated string was what the park was
+        decided on - so a refusal followed by any trailing output would have missed the
+        match and quarantined, which is the exact storm this class exists to prevent. The
+        decision reads the whole stream; only the message is trimmed."""
+        noise = "\n".join("codex: reconnecting to stream (attempt %d)" % i for i in range(1, 12))
+        self.assertGreater(len(noise), 300, "the trailing noise must overflow the window")
+        self.m.subprocess.run = self._fake_run(CODEX_LIMIT_STDERR + noise)
+        with self.assertRaises(self.m.RateLimited) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertNotIn("usage limit", str(cm.exception),
+                         "the reported message is still the (truncated) tail")
+
     def test_the_weekly_date_in_the_message_is_deliberately_not_parsed(self):
         """codex names a WEEKLY reset ("try again at Sep 21st, 2026 9:38 AM") while the thing
         that actually reopens is the rolling window - on 2026-09-15 the very PRs that failed all

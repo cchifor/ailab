@@ -973,8 +973,19 @@ def _run_llm(title, desc, diff_text, rubric, started):
                 # date in the message. parse_reset returning None puts us on DEFAULT_PARK_S -
                 # a 15-minute re-probe - and a refused call costs no tokens, so probing is
                 # the cheap side of the trade.
-                if not MODEL_LIMIT_RE.search(detail) and RATE_LIMIT_RE.search(detail):
-                    raise RateLimited(detail, parse_reset(detail))
+                # DECIDED ON THE WHOLE STDERR, reported on the tail (reviewer-claude, round 1
+                # of ailab#729). `detail` keeps the last 300 chars so the journal line stays
+                # readable, but that truncation must not reach the predicate: codex streams
+                # for minutes and anything it prints after the refusal would push the limit
+                # line out of the window, the match would miss, and the job would fall
+                # through to the ordinary raise - the quarantine storm this exists to stop,
+                # reintroduced by a display detail. Unlike the claude branch, scanning wide
+                # here is also safe: codex stderr carries CLI diagnostics, while the model's
+                # own prose goes to --output-last-message, so there is no model-authored text
+                # in scope to spoof either pattern.
+                err = r.stderr or ""
+                if not MODEL_LIMIT_RE.search(err) and RATE_LIMIT_RE.search(err):
+                    raise RateLimited(detail, parse_reset(err))
                 raise RuntimeError(detail)
             # The sandbox permits reads of the isolated user's own HOME, auth.json
             # included (round-3 finding): scan the (public-once-posted) output for that
