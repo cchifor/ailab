@@ -48,8 +48,23 @@ pr_reviewer_llm_cmd:
 #     claude-fable-5  →  "You've reached your Fable 5 limit"   (refused)
 #     opus            →  OK
 #     sonnet          →  OK
-# Primary and fallback must stay DIFFERENT models: a fallback equal to the primary turns the
-# rescue path into a second doomed call on the same quota.
+#
+# WHAT THE FALLBACK IS AND IS NOT (reviewer-claude, round 1 of ailab#728). It is NOT quota
+# insurance. opus and sonnet both draw on the Max plan's shared usage windows, so an
+# account-scoped limit takes the two of them together — and _run_llm() would not reach the
+# fallback in that case anyway: RATE_LIMIT_RE parks the whole persona before it, deliberately
+# (see the MODEL_LIMIT_RE comment in reviewbot.py). What the fallback covers is the
+# MODEL-scoped class, which is the one that just cost 353 doomed calls: a pin whose own credit
+# pool is spent, like Fable, or a model this account cannot serve at all. That class is real
+# and recurring here, so the two pins must stay DIFFERENT models — a fallback equal to the
+# primary makes the rescue path a second identical refusal.
+#
+# Both are the FLOATING aliases on purpose, not version IDs (reviewer-claude, same round): this
+# host wants always-latest, the previous configuration made the same choice for its `opus`
+# fallback, and an alias cannot go stale the way a version ID left in a file for months does.
+# "Model-pinned" at the top of this comment means the request NAMES a model instead of taking
+# the account default — it does not claim a frozen version, and the effective model behind
+# each alias may move without a change here.
 pr_reviewer_llm_model: opus
 pr_reviewer_llm_fallback_model: sonnet
 # Ship journald to Loki (roles/journal_ship) — the reviewer failure REASON was
