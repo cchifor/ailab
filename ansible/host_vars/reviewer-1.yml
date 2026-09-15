@@ -4,8 +4,9 @@ pr_reviewer_enabled: true
 pr_reviewer_persona: claude
 pr_reviewer_llm_cmd:
   - "/usr/bin/claude"
-# Fable primary (verified on this VM), latest-opus fallback on primary errors (operator-
-# directed 2026-09-02) — makes claude reviews model-pinned like the codex persona.
+# Opus primary, sonnet fallback on primary errors — makes claude reviews model-pinned like
+# the codex persona (operator-directed 2026-09-02). Both pins are MEASURED, not chosen: see
+# the probe paragraph at the bottom of this comment.
 #
 # THE SUBSCRIPTION BEHIND THESE PINS IS NOT IN GIT, AND CANNOT BE. The claude CLI authenticates
 # from `~/.claude/.credentials.json`, written by an interactive browser OAuth flow that no Ansible
@@ -32,13 +33,25 @@ pr_reviewer_llm_cmd:
 #                    refreshed last — that is the 2026-09-10 outage that took BOTH personas down,
 #                    and it does not self-heal or surface until the access token expires days later.
 #
-# After any account change, probe THESE TWO PINS explicitly — `claude --model claude-fable-5 -p ...`
-# and `--model opus` — never a bare `claude -p`. Per-account model availability is not uniform: on
-# 2026-09-12 a bare probe answered fine while the pinned Fable-5 had no credits on that account, and
-# every review silently burned a doomed primary call before the fallback rescued it (308 of 308).
-# Account swapped 2026-09-13 for exactly that reason; both pins verified answering afterwards.
-pr_reviewer_llm_model: claude-fable-5
-pr_reviewer_llm_fallback_model: opus
+# After any account change, probe THE TWO PINS BELOW explicitly — `claude --model <primary> -p ...`
+# and `--model <fallback>` — never a bare `claude -p`. Per-account model availability is not
+# uniform: on 2026-09-12 a bare probe answered fine while the pinned Fable-5 had no credits on that
+# account, and every review silently burned a doomed primary call before the fallback rescued it
+# (308 of 308). The account was swapped 2026-09-13 for exactly that reason, and its Fable-5 quota
+# went the same way on 2026-09-14 20:49 — 353 of 353 reviews ran on the fallback, with
+# ReviewbotPrimaryModelDown firing throughout. Fable's limit is its own credit pool, separate from
+# the Max plan's usage windows, and on the evidence here it does not come back on its own: two
+# different accounts have now exhausted it (the second within ~36 h of the swap) and neither
+# recovered. Treat a Fable primary as a doomed call per review until someone buys credits and
+# re-probes, not as a transient to wait out. Repointed 2026-09-15 to the two
+# models measured answering on this host that morning (`-p 'reply with exactly: OK'`):
+#     claude-fable-5  →  "You've reached your Fable 5 limit"   (refused)
+#     opus            →  OK
+#     sonnet          →  OK
+# Primary and fallback must stay DIFFERENT models: a fallback equal to the primary turns the
+# rescue path into a second doomed call on the same quota.
+pr_reviewer_llm_model: opus
+pr_reviewer_llm_fallback_model: sonnet
 # Ship journald to Loki (roles/journal_ship) — the reviewer failure REASON was
 # previously visible only by SSHing to this host.
 journal_ship_enabled: true
