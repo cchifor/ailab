@@ -1,0 +1,55 @@
+name: litellm-route-contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - kubernetes/apps/apps/ai/litellm.yaml
+      - scripts/tests/integration/test_litellm_platform_route_contract.py
+      - .gitea/workflows/litellm-route-contract.yaml
+  pull_request:
+    paths:
+      - kubernetes/apps/apps/ai/litellm.yaml
+      - scripts/tests/integration/test_litellm_platform_route_contract.py
+      - .gitea/workflows/litellm-route-contract.yaml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: litellm-route-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: offline document-model contract
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify the configured route in its deployed gateway image
+        shell: bash
+        run: |
+          set -euo pipefail
+          litellm_image=$(python3 - <<'PY'
+          import pathlib
+          import re
+          import yaml
+
+          path = pathlib.Path("kubernetes/apps/apps/ai/litellm.yaml")
+          deployment = next(doc for doc in yaml.safe_load_all(path.read_text())
+                            if isinstance(doc, dict) and doc.get("kind") == "Deployment"
+                            and doc["metadata"]["name"] == "litellm")
+          container = next(item for item in deployment["spec"]["template"]["spec"]["containers"]
+                           if item["name"] == "litellm")
+          image = container["image"]
+          assert re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image), "Gateway image must be digest-pinned"
+          print(image)
+          PY
+          )
+          # Real Router/OpenAI transport code, synthetic HTTP replies, no keys
+          # or provider access. Test the same image that Flux will deploy.
+          docker run --rm --network none --entrypoint python \
+            -e LITELLM_LOCAL_MODEL_COST_MAP=True -e DO_NOT_TRACK=1 \
+            -v "$PWD:/work:ro" -w /work "$litellm_image" \
+            scripts/tests/integration/test_litellm_platform_route_contract.py

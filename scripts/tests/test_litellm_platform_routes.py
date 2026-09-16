@@ -18,7 +18,8 @@ class PlatformModelRoutes(unittest.TestCase):
     def test_document_table_model_routes_to_the_same_openai_model(self):
         path = ROOT / "kubernetes/apps/apps/ai/litellm.yaml"
         documents = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
-        config_map = next(doc for doc in documents if doc.get("kind") == "ConfigMap"
+        config_map = next(doc for doc in documents if isinstance(doc, dict)
+                          and doc.get("kind") == "ConfigMap"
                           and doc["metadata"]["name"] == "litellm-config")
         config = yaml.safe_load(config_map["data"]["config.yaml"])
         routes = [entry for entry in config["model_list"]
@@ -27,11 +28,18 @@ class PlatformModelRoutes(unittest.TestCase):
         params = routes[0]["litellm_params"]
         self.assertEqual(params["model"], "openai/gpt-5.6-sol")
         self.assertEqual(params["api_key"], "os.environ/OPENAI_API_KEY")
-        self.assertEqual(set(params), {"model", "api_key"},
+        self.assertEqual(params.get("num_retries"), 0,
+                         "An admitted document-table request must not be replayed by the gateway")
+        self.assertEqual(set(params), {"model", "api_key", "num_retries"},
                          "Preserve the caller's evaluated protocol and generation parameters")
-        fallbacks = config.get("router_settings", {}).get("fallbacks", [])
-        self.assertFalse(any("gpt-5.6-sol" in rule for rule in fallbacks),
-                         "Document-table extraction must not silently switch models")
+        router = config.get("router_settings", {})
+        self.assertFalse(router.get("default_fallbacks"),
+                         "Document-table extraction must not inherit a model fallback")
+        for key in ("fallbacks", "context_window_fallbacks", "content_policy_fallbacks"):
+            for rule in router.get(key, []):
+                self.assertIsInstance(rule, dict)
+                self.assertFalse({"gpt-5.6-sol", "*"}.intersection(rule),
+                                 f"Document-table extraction must not use {key}")
 
 
 if __name__ == "__main__":
