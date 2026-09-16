@@ -755,20 +755,24 @@ tests:
                 The pinned primary model on 192.168.0.24:9100 has failed often enough in 6h that the fallback is carrying the service. Reviews still land, which is exactly why this needs an alert: nothing else changes. `llm_failures_total` counts whole reviews and a rescued review is not a failed one, so reviewer-1 served 463 reviews on its fallback over 4 days (`claude-fable-5` quota, from 2026-09-06 19:17) with no signal but a per-run journal line. Check `journalctl -u reviewbot | grep 'primary model failed'`; if the quota is gone for good, repoint `pr_reviewer_llm_model` rather than leaving every review to pay a doomed first attempt.
 
   # ------------------------------------------------------- subscription rate limit
-  # `interval: 5m` so a 900s park lands on a sample boundary: the real series steps by 1 every
-  # ~913s, and the point of these two fixtures is the RATE, not the step shape.
-  - interval: 5m
-    name: a sustained rate-limit park pages, a single park does not
+  # `interval: 15m` is THE POINT of this fixture, not a detail: it is the real park cadence
+  # (DEFAULT_PARK_S = 900s), so the sustained series produces ~4 parks/hour — just above the
+  # >=3 threshold, which is the case that actually has to work. An earlier cut used
+  # `interval: 5m`, which made the same `0+1x60` step 12/hour and quietly tested a
+  # threshold-crossing four times easier than the incident it claims to reproduce
+  # (reviewer-codex, round 1 of ailab#742).
+  - interval: 15m
+    name: a sustained rate-limit park pages at its real cadence, a single park does not
     input_series:
-      # The 2026-09-15 codex shape: one park per 15m, sustained. 46 of these ran back to back
-      # over 11h36m while 7 PRs waited and the estate's automerge lane stalled.
+      # The 2026-09-15 codex shape at ITS OWN RATE: one park per 900s. 46 ran back to back over
+      # 11h36m while 7 PRs waited and the estate's automerge lane stalled.
       - series: 'reviewbot_llm_rate_limited_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex"}'
         values: "0+1x60"
       # ONE park, then nothing — a transient refusal that self-cleared on the next probe. This
       # is the healthy shape the >=3/h threshold exists to stay silent on; a rule keyed on
       # "is parked at all" would page on it.
       - series: 'reviewbot_llm_rate_limited_total{job="reviewer-node",instance="192.168.0.24:9100",persona="claude"}'
-        values: "0x10 1x51"
+        values: "0x4 1x56"
     alert_rule_test:
       - eval_time: 200m
         alertname: ReviewbotRateLimited
@@ -781,7 +785,7 @@ tests:
             exp_annotations:
               summary: "reviewbot (codex) is parked on a subscription rate limit"
               description: >-
-                The LLM subscription behind 192.168.0.25:9100 refused 12 times in an hour and the worker is parking (900s a cycle) instead of reviewing. This self-heals: no attempt is consumed, the queue is left intact, and the 2026-09-15 codex episode drained 7 jobs in ~60s once the window reopened. But the persona posts no verdicts meanwhile and automerge needs EVERY persona clean at the head, so the merge lane stalls estate-wide for the duration — 12.3h of merge_blocked on the OTHER, healthy reviewer that day. Read the upstream refusal with `journalctl -u reviewbot | grep rate-limited` (the note carries it). If this recurs on a roughly daily cadence the answer is quota, not code — the account is too small for the review volume, and no fallback model can help because an account-scoped limit takes the fallback with it.
+                The LLM subscription behind 192.168.0.25:9100 refused 4 times in an hour and the worker is parking (900s a cycle) instead of reviewing. This self-heals: no attempt is consumed, the queue is left intact, and the 2026-09-15 codex episode drained 7 jobs in ~60s once the window reopened. But the persona posts no verdicts meanwhile and automerge needs EVERY persona clean at the head, so the merge lane stalls estate-wide for the duration — 12.3h of merge_blocked on the OTHER, healthy reviewer that day. Read the upstream refusal with `journalctl -u reviewbot | grep rate-limited` (the note carries it). If this recurs on a roughly daily cadence the answer is quota, not code — the account is too small for the review volume, and no fallback model can help because an account-scoped limit takes the fallback with it.
       # The hold is load-bearing: at 10m the sustained series has already crossed >=3/h but
       # has not held it for 10m, so the alert is PENDING and must not have fired yet.
       - eval_time: 10m
