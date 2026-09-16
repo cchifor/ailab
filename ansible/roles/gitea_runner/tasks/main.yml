@@ -18,6 +18,20 @@
       See docs/runbooks/ci-runners.md.
   no_log: true
 
+- name: Assert the shutdown drain budget is a positive whole number of minutes
+  ansible.builtin.assert:
+    that:
+      - gitea_runner_shutdown_timeout_min is defined
+      - gitea_runner_shutdown_timeout_min | int == gitea_runner_shutdown_timeout_min
+      - gitea_runner_shutdown_timeout_min | int > 0
+    fail_msg: >-
+      gitea_runner_shutdown_timeout_min must be a positive INTEGER number of minutes (got
+      {{ gitea_runner_shutdown_timeout_min | default('undefined') }}). It is not a duration string:
+      both config.yaml's `shutdown_timeout: <n>m` and the unit's `TimeoutStopSec=<n+1>min` are
+      rendered from it, so a value like "10m" would emit `10mm` / `10mmin` — act_runner would fall
+      back to cancelling in-flight jobs and systemd would reject the unit's timeout, which is the
+      zero-log-line CI failure this whole setting exists to prevent.
+
 - name: Assert the base host toolchain (Docker) is present
   ansible.builtin.command: docker --version
   register: _gitea_runner_docker
