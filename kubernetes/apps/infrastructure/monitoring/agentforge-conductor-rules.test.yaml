@@ -49,7 +49,7 @@ tests:
     alert_rule_test:
       - eval_time: 25m
         alertname: ForgeConductDown
-        exp_alerts:
+        exp_alerts: &conduct_down
           - exp_labels:
               severity: warning
               namespace: agentforge
@@ -603,30 +603,174 @@ tests:
         alertname: ForgeConductConfigRejected
         exp_alerts: []
 
-  # ── ForgeConductUnexpectedWrites ──────────────────────────────────────────────────────────────
+  # ── ForgeConductUnexpectedWrites / ForgeConductTierUnknown ────────────────────────────────
+  #
+  # THE TIER GAUGE IS FED AS THE ENGINE EXPORTS IT: all five children of forge_conduct_tier_info on
+  # every pod, the deployed tier at 1 and the other four at 0 — never the one child alone. A fixture
+  # that supplied only the observe child would prove the rule fires on an input the exporter never
+  # produces, and could not tell `max(...{tier="observe"}) == 1` from a rule that fires on the child's
+  # mere presence. Every series carries the scrape labels, because the write-to-tier join is
+  # `on (namespace, pod)` and a fixture without them cannot tell that from a bare `and`.
   - interval: 1m
-    name: a write at T0 means the tier is no longer observe
+    name: a write from a pod deployed at observe is the posture breach
     input_series:
-      - series: 'forge_conduct_writes_total'
+      - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "0+0x20 1+0x20"
+      - series: 'forge_conduct_tier_info{tier="observe", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "1+0x40"
+      - series: 'forge_conduct_tier_info{tier="advise", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="act-safe", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="act-approved", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="escalate", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
     alert_rule_test:
       - eval_time: 35m
         alertname: ForgeConductUnexpectedWrites
         exp_alerts:
-          - exp_labels: { severity: warning }
+          - exp_labels:
+              severity: warning
+              namespace: agentforge
+              pod: agentforge-conductor-abc
             exp_annotations:
-              summary: "AgentForge conductor wrote to the forge while T0 expects none"
-              description: "forge_conduct_writes_total advanced. At AF_CONDUCT_TIER=observe the write door refuses before reaching the forge, so this means the deployed tier is no longer observe. Confirm the Deployment's AF_CONDUCT_TIER and whether an arming rung landed."
+              summary: "AgentForge conductor agentforge/agentforge-conductor-abc wrote to the forge while deployed at tier=observe"
+              description: "forge_conduct_writes_total advanced on a pod whose forge_conduct_tier_info reads tier=observe. At observe the write door refuses before reaching the forge, so a write from that pod means the door let one through under a tier that forbids it — the posture the T0 invariant pins. Confirm the Deployment's AF_CONDUCT_TIER and the image the pod runs. A pod at advise or above writing is the T1 program working and is not this alert; a pod that publishes no tier at all is ForgeConductTierUnknown's."
+      # the tier is published, so the sibling has nothing to say on the same input
+      - eval_time: 35m
+        alertname: ForgeConductTierUnknown
+        exp_alerts: []
 
   - interval: 1m
-    name: a conductor that never writes does not trip the posture rule
+    name: a write from a pod deployed at advise is the T1 program working, not this alert
     input_series:
-      - series: 'forge_conduct_writes_total'
+      # The same write, the same pod, the advise child at 1 and the observe child at 0 — the input
+      # the pre-tier form of this rule fired on for ever.
+      - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x20 1+0x20"
+      - series: 'forge_conduct_tier_info{tier="observe", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="advise", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "1+0x40"
+      - series: 'forge_conduct_tier_info{tier="act-safe", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="act-approved", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="escalate", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "0+0x40"
     alert_rule_test:
       - eval_time: 35m
         alertname: ForgeConductUnexpectedWrites
         exp_alerts: []
+
+  - interval: 1m
+    name: a conductor at observe that never writes does not trip the posture rule
+    input_series:
+      - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="observe", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "1+0x40"
+      - series: 'forge_conduct_tier_info{tier="advise", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="act-safe", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="act-approved", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      - series: 'forge_conduct_tier_info{tier="escalate", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ForgeConductUnexpectedWrites
+        exp_alerts: []
+
+  - interval: 1m
+    name: a de-arming rollout does not read the old pod's writes at the new pod's tier
+    input_series:
+      # Pod abc at advise writes at 20m and is replaced at 30m (Recreate: its series simply end);
+      # pod def at observe comes up at 31m and writes nothing. abc's write sits inside [30m] until
+      # 50m while def's observe child reads 1 from 31m — the input a fleet-wide
+      # `and on() (max(...) == 1)` fires on for twenty minutes. Joined per pod it is quiet.
+      - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x19 1+0x10"
+      - series: 'forge_conduct_tier_info{tier="observe", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x29"
+      - series: 'forge_conduct_tier_info{tier="advise", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "1+0x29"
+      - series: 'forge_conduct_tier_info{tier="act-safe", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x29"
+      - series: 'forge_conduct_tier_info{tier="act-approved", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x29"
+      - series: 'forge_conduct_tier_info{tier="escalate", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x29"
+      - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x31 0+0x29"
+      - series: 'forge_conduct_tier_info{tier="observe", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x31 1+0x29"
+      - series: 'forge_conduct_tier_info{tier="advise", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x31 0+0x29"
+      - series: 'forge_conduct_tier_info{tier="act-safe", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x31 0+0x29"
+      - series: 'forge_conduct_tier_info{tier="act-approved", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x31 0+0x29"
+      - series: 'forge_conduct_tier_info{tier="escalate", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x31 0+0x29"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ForgeConductUnexpectedWrites
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: ForgeConductUnexpectedWrites
+        exp_alerts: []
+      - eval_time: 49m
+        alertname: ForgeConductUnexpectedWrites
+        exp_alerts: []
+
+  # The partition with ForgeConductDown is asserted against ONE input per state: a pod publishing
+  # everything but the tier is TierUnknown's and not Down's; a pod publishing nothing is Down's and
+  # not TierUnknown's. A fixture that fed each rule its own convenient series could not tell a
+  # partition from two rules that both fire on an unscraped conductor.
+  - interval: 1m
+    name: a Ready, scraped conductor publishing no tier is tier-unknown, and not Down
+    input_series:
+      - series: 'kube_pod_container_status_ready{namespace="agentforge", pod="agentforge-conductor-abc", container="conductor"}'
+        values: "1+0x40"
+      # scraped: the unlabelled marker is there from the first scrape, as it is on any conductor
+      - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+      # no forge_conduct_tier_info at all — an image from before the gauge
+    alert_rule_test:
+      # 9m: true since the first scrape, hold not up
+      - eval_time: 9m
+        alertname: ForgeConductTierUnknown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ForgeConductTierUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: agentforge
+              pod: agentforge-conductor-abc
+            exp_annotations:
+              summary: "AgentForge conductor agentforge/agentforge-conductor-abc publishes no forge_conduct_tier_info — its tier is unknown"
+              description: "The conductor is Ready and scraped (forge_conduct_writes_total is present) but publishes no forge_conduct_tier_info, so nothing here can say which tier it runs at, and ForgeConductUnexpectedWrites — which reads the tier before it will fire — is silent for this pod whatever it writes. The usual cause is an image from before the gauge (the agentforge conduct-tier-info change); check the pinned conductor digest, and until the pod publishes its tier, read the Deployment's AF_CONDUCT_TIER by hand."
+      - eval_time: 25m
+        alertname: ForgeConductDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: an unscraped conductor is Down's, not tier-unknown
+    input_series:
+      - series: 'kube_pod_container_status_ready{namespace="agentforge", pod="agentforge-conductor-abc", container="conductor"}'
+        values: "1+0x40"
+      # nothing from the conductor's registry at all
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ForgeConductTierUnknown
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ForgeConductDown
+        exp_alerts: *conduct_down
 
   # ── ForgeConductDetectorBlind ──────────────────────────────────────────────────────────────────
   #

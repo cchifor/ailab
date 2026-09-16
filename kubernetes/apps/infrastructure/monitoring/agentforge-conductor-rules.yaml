@@ -253,23 +253,93 @@ spec:
               ages out of its 30m window.
         # T0's standing invariant, and the one rule here that is a POSTURE check rather than a health
         # check. At AF_CONDUCT_TIER=observe the write door refuses before its first forge call, so any
-        # movement on this counter means the tier is no longer observe — an arming that was not meant
-        # to happen, or a knob edited in place.
+        # movement on this counter under that tier means the door let a write through under a tier
+        # that forbids it — the arming that was not meant to happen.
         #
         # This is deliberately NOT the proof that T0 is write-free: the engine pins that with an AST
         # writer pin, because `writes == 0` at observe is a tautology rather than a measurement. This
         # rule catches the CONFIGURATION changing, not the code.
+        #
+        # THE RULE READS THE TIER, since the arming rungs. A conductor deployed at AF_CONDUCT_TIER=advise
+        # writes by design — one lifecycle comment per park, the T1 program — and the earlier form of
+        # this rule, which took every write for a breach, would have fired for as long as the tier
+        # stayed armed, which is for ever, and muted ntfy under it (program-plan invariant 9).
+        # `forge_conduct_tier_info{tier}` is the deployed tier as the engine read it at construction:
+        # one child per tier of Settings' closed set (observe, advise, act-safe, act-approved,
+        # escalate), the deployed one at 1 and the other four at 0, so the series is TOTAL and its
+        # absence means the gauge was not scraped — never "some other tier".
+        #
+        # A WRITE MEETS ITS OWN POD'S TIER: `on (namespace, pod)`, the two labels the PodMonitor stamps
+        # on both series, rather than a fleet-wide `max()`. The Deployment is Recreate, so two pods
+        # never overlap — but the WINDOW does. A de-arming rollout (advise back to observe) leaves the
+        # old pod's writes inside [30m] for half an hour after the new pod's observe child reads 1,
+        # and a fleet-wide join would read that as a write at observe and page the operator who just
+        # de-armed. Joined per pod, the old pod's writes meet the old pod's advise (0, then stale)
+        # and nothing fires. `max by (namespace, pod)` strips the tier and scrape labels so the join
+        # is on exactly those two; `sum by (namespace, pod)` on the left for
+        # ForgeConductPassesFailing's reason — it sums the one series per pod.
+        #
+        # THE GAUGE'S ABSENCE IS THIS RULE'S QUIET DIRECTION, and ForgeConductTierUnknown (next) is
+        # what makes that safe: a conductor that publishes no tier — an image from before the gauge —
+        # cannot satisfy the conjunct, so this rule cannot fire on it, and a posture rule that cannot
+        # fire is a posture nobody is checking.
         - alert: ForgeConductUnexpectedWrites
           expr: |-
-            sum(increase(forge_conduct_writes_total[30m])) > 0
+            sum by (namespace, pod) (increase(forge_conduct_writes_total[30m])) > 0
+              and on (namespace, pod) (
+                max by (namespace, pod) (forge_conduct_tier_info{tier="observe"}) == 1
+              )
           for: 5m
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge conductor wrote to the forge while T0 expects none"
+            summary: "AgentForge conductor {{ $labels.namespace }}/{{ $labels.pod }} wrote to the forge while deployed at tier=observe"
             description: >-
-              forge_conduct_writes_total advanced. At AF_CONDUCT_TIER=observe the write door refuses
-              before reaching the forge, so this means the deployed tier is no longer observe. Confirm
-              the Deployment's AF_CONDUCT_TIER and whether an arming rung landed.
+              forge_conduct_writes_total advanced on a pod whose forge_conduct_tier_info reads
+              tier=observe. At observe the write door refuses before reaching the forge, so a write
+              from that pod means the door let one through under a tier that forbids it — the
+              posture the T0 invariant pins. Confirm the Deployment's AF_CONDUCT_TIER and the image
+              the pod runs. A pod at advise or above writing is the T1 program working and is not
+              this alert; a pod that publishes no tier at all is ForgeConductTierUnknown's.
+        # THE TIER NOBODY IS SCRAPING READS AS "NOT OBSERVE". ForgeConductUnexpectedWrites is a
+        # conjunction, and a conjunct over a series that is not there is an empty vector: a conductor
+        # that publishes no forge_conduct_tier_info — an image from before the gauge, or a gauge
+        # dropped from the registry — silences the posture rule without a word. That is the header's
+        # instrument that reads healthy because nothing watches it, one rule over, and this is the
+        # rule that says so.
+        #
+        # THE ANTI-JOIN, NOT `absent()`, for ForgeConductDown's reason: absent() cannot tell a pod
+        # that is gone from a pod that is up and publishing no tier, and this estate has measured that
+        # form as wrong. The left side is Down's — the Ready conductor container, pod-scoped — and so
+        # is the marker: forge_conduct_writes_total is unlabelled, present from the first scrape of
+        # any conductor, so `and on (namespace, pod)` on it is "this pod IS scraped", and `unless on
+        # (namespace, pod) forge_conduct_tier_info` is "and publishes no tier". The two rules partition
+        # the missing-series states: a pod publishing nothing is Down's, a pod publishing everything
+        # but the tier is this one's, a pod publishing the tier is neither's — and a pod that never
+        # became Ready is ForgeConductSecretNotReady's, which is why the left side is the Ready
+        # container and not the pod's start time (a pod stuck at ContainerCreating has one).
+        #
+        # `for: 10m`: the writes counter and the tier gauge are constructed together, so on a healthy
+        # conductor they arrive in the same scrape and the expression is never true; the hold covers
+        # a scrape that lands while a pod is still coming up, and Prometheus' 5m staleness on the
+        # series of a pod that has just left.
+        - alert: ForgeConductTierUnknown
+          expr: |-
+            max by (namespace, pod) (
+              kube_pod_container_status_ready{namespace="agentforge", container="conductor"} == 1
+            )
+              and on (namespace, pod) forge_conduct_writes_total
+              unless on (namespace, pod) forge_conduct_tier_info
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor {{ $labels.namespace }}/{{ $labels.pod }} publishes no forge_conduct_tier_info — its tier is unknown"
+            description: >-
+              The conductor is Ready and scraped (forge_conduct_writes_total is present) but publishes
+              no forge_conduct_tier_info, so nothing here can say which tier it runs at, and
+              ForgeConductUnexpectedWrites — which reads the tier before it will fire — is silent for
+              this pod whatever it writes. The usual cause is an image from before the gauge (the
+              agentforge conduct-tier-info change); check the pinned conductor digest, and until the
+              pod publishes its tier, read the Deployment's AF_CONDUCT_TIER by hand.
         # THE OTHER HALF OF A FIX THAT WOULD OTHERWISE BE HALF-DONE (agentforge #365). The engine
         # counts per-sensor incompleteness under a CLOSED label vocabulary — an undeclared child
         # appears mid-flight and is invisible to the pre-touch, which is how a closed vocabulary
