@@ -1,7 +1,21 @@
-# ADR 0024 — reviewer-2 gets its own Codex seat; review volume is not cut to fit one
+# ADR 0024 — reviewer-2 gets more Codex capacity; review volume is not cut to fit one seat
 
-**Status:** ACCEPTED (2026-09-16). **PARTIALLY IMPLEMENTED — the seat itself is NOT provisioned
-yet.** What ships in the PR carrying this ADR is only the observability half: the
+> **AMENDED 2026-09-16, same day, before any seat was bought.** This ADR originally decided on a
+> *dedicated* seat, reasoning that the reviewer was starved by sharing one with the AgentForge
+> dev agents. **That premise was wrong and the measurement is below.** The dev agents make 41
+> `codex exec` calls a week against the reviewer's ~980 — the reviewer is ~96% of its own
+> problem, and a dedicated seat recovers ~4%. The reviewer exhausts a seat on its own, so
+> un-sharing changes almost nothing.
+>
+> The decision is therefore now: **three licences, all pooled for the reviewer, with reviewbot
+> rotating across them** — because a second or third seat is worth nothing unless the bot can
+> route around a spent one. Design in
+> `plans/2026-09-16-codex-seat-rotation-plan.md`. Everything below stands except where it argues
+> for dedication-as-capacity; it is kept rather than rewritten because the measurement that
+> overturned it is the useful part of the record.
+
+**Status:** ACCEPTED (2026-09-16), AMENDED the same day (see above). **NOT IMPLEMENTED — no seat
+is provisioned yet.** What ships in the PR carrying this ADR is only the observability half: the
 `ReviewbotRateLimited` alert, the upstream refusal text in the park note, and the model-scoped
 primary/fallback counters. Buying the second Codex subscription, logging it in, and repointing
 `codexrun` at it are MANUAL steps that have not been performed — see "What is still outstanding".
@@ -50,6 +64,31 @@ date is not mistaken for a capacity fact.
 (101, 93) had no block. The load is broad rather than pathological — over 7 days `cchifor/platform`
 alone accounts for 510 of 845 jobs across **217 distinct PRs at 2.4 review rounds each**, with no
 single hotspot PR (the busiest is 8 jobs).
+
+**THE SHARE IS THE REVIEWER'S, NOT THE DEV AGENTS' (measured 2026-09-16 — this is what amended
+the decision).** Over the same 7 days the six dev-workers made **41** `codex exec` calls between
+them, against the reviewer's ~980: the reviewer is **~96%** of the shared seat's consumption.
+They are genuinely the same account — `tokens.account_id` reads
+`cfdea639-03a7-4690-9a8b-eaa4566d5063` on both reviewer-2's `codexrun` and dev-worker-1's `c4` —
+so the sharing is real, it is simply not the constraint. Un-sharing buys ~4%.
+
+That also brackets the wall empirically: 09-10 ran 167 calls without a refusal, 09-14 ran 198 and
+09-15 ran 210 and both exhausted, so **one seat is worth roughly 170–200 calls/day** against
+present demand of 210.
+
+**Two different questions, which an earlier draft ran together** (reviewer-codex, round 2):
+
+* *Does swapping the shared seat for a dedicated one fix it?* **No.** Without rotation the persona
+  uses one credential at a time, so a dedicated seat is still 170–200/day against demand of 210 —
+  at best parity, and it was this scenario the "parity, not headroom" line was about. Stated
+  without that qualifier it read as a claim about two seats, which it is not.
+* *What do two POOLED seats give?* 340–400/day against 210 — **roughly 60–90% headroom**, which is
+  real. Three give 510–600, ~2.5–3×.
+
+So the case for the third seat is not present demand, which two would already cover. It is growth:
+86 → 210 calls/day inside one week, which on the arithmetic in the plan consumes even the
+three-seat ceiling in 1–3 weeks. Buying the third now is buying re-provisioning time, and it is
+worth saying plainly that it is a hedge rather than a fix.
 
 ## Decision
 
