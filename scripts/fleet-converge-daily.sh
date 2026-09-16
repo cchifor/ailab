@@ -16,8 +16,19 @@ BASE="$HOME/.ailab-converge"
 REPO="$BASE/repo"
 LOG="$BASE/converge.log"
 
-exec 9>"$BASE/.lock"
-flock -n 9 || { echo "another converge is running; skipping" >>"$LOG"; exit 0; }
+# The bootstrap (scripts/fleet-converge-bootstrap.sh) must fetch and reset the clone BEFORE it
+# execs this script, and that mutation has to be inside the same lock as the run that consumes
+# the checkout — otherwise a second invocation can rewrite playbooks and roles underneath an
+# active ansible run, which no lock taken later can undo (reviewer-codex, round 2 of ailab#744).
+# So when it has already taken the lock it says so, and passes fd 9 down through `exec`, which
+# preserves open file descriptors: the lock is held continuously from before the fetch to the end
+# of this script. Re-locking here would deadlock against our own parent — flock is per open file
+# description, so opening "$BASE/.lock" again would be a DIFFERENT description and `flock -n`
+# would simply fail. Invoked directly, without the bootstrap, this locks itself exactly as before.
+if [ "${CONVERGE_LOCK_HELD:-0}" != "1" ]; then
+  exec 9>"$BASE/.lock"
+  flock -n 9 || { echo "another converge is running; skipping" >>"$LOG"; exit 0; }
+fi
 
 {
   echo "=== converge $(date -Is)"

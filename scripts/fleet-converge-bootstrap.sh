@@ -12,6 +12,15 @@
 # current converge script OUT to a stable path, and exec that copy. Git never touches the file
 # bash is reading.
 #
+# INSTALL ORDERING MATTERS — install this only AFTER its sibling change is on main. This script
+# takes the converge lock and hands it down via CONVERGE_LOCK_HELD; a fleet-converge-daily.sh that
+# predates that handshake will try to lock again, fail, and log "another converge is running;
+# skipping" — a converge that silently does nothing, which is the failure class this whole file
+# exists to end. Both changes ship together, so: merge first, then
+#   install -m 0755 ~/.ailab-converge/repo/scripts/fleet-converge-bootstrap.sh \
+#                   ~/.ailab-converge/fleet-converge-daily.sh
+# The drift warning below tells you when the installed copy has fallen behind main.
+#
 # WHAT THIS FIXES (2026-09-16). From 2026-09-03 to 2026-09-16 the scheduled path held a FROZEN
 # COPY of the converge script rather than a bootstrap. It predated the reviewers step added on
 # 09-06, so `ansible-playbook reviewers.yml` never ran: the reviewer VMs converged NOWHERE for
@@ -40,6 +49,22 @@ SRC="$REPO/scripts/fleet-converge-daily.sh"
 # FAIL CLOSED, like every other gate in this repo: a missing clone or a missing script must be a
 # non-zero exit that Task Scheduler shows, never a silent skip that looks like a clean converge.
 [ -d "$REPO/.git" ] || { echo "bootstrap: $REPO is not a git clone" >&2; exit 1; }
+
+# TAKE THE CONVERGE LOCK BEFORE TOUCHING THE CHECKOUT, and hold it through the run.
+# `git reset --hard` rewrites playbooks, roles and inventory. If another converge is mid-run and
+# consuming them, doing that outside its lock corrupts the run in progress, and the lock it takes
+# afterwards cannot undo a mutation that already happened (reviewer-codex, round 2 of ailab#744 —
+# the original script took this lock BEFORE its own fetch, and moving the fetch out here silently
+# dropped that ordering).
+#
+# fd 9 survives the `exec` below, so the lock spans fetch -> install -> the entire converge.
+# CONVERGE_LOCK_HELD tells the converge script not to re-lock: flock is per open file description,
+# so a second open of the same path is a different description and `flock -n` would fail against
+# our own lock. Same skip-and-exit-0 contract as the script's own path, so nothing changes for a
+# concurrent invocation.
+exec 9>"$BASE/.lock"
+flock -n 9 || { echo "another converge is running; skipping" >> "$BASE/converge.log"; exit 0; }
+export CONVERGE_LOCK_HELD=1
 
 git -C "$REPO" fetch --quiet origin main
 git -C "$REPO" reset --hard --quiet origin/main
