@@ -1,73 +1,18 @@
-apiVersion: v1
-kind: Service
-metadata:
-  name: llm
-  namespace: ai
-  labels: { app.kubernetes.io/name: llm, app.kubernetes.io/component: llama-server }
-spec:
-  type: ClusterIP
-  ports:
-    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
----
-apiVersion: v1
-kind: Endpoints
-metadata:
-  name: llm
-  namespace: ai
-  labels: { app.kubernetes.io/name: llm }
-subsets:
-  # qwen3.6-35b-a3b now runs on node2 (.45) ONLY -- node1's copy was disabled 2026-08-15 and its
-  # llama-server unit no longer exists. (This comment previously said "pinned on BOTH node1 and
-  # node2", which stopped being true three weeks before the address was removed below.) `llm` stays
-  # for metrics scraping + the compat /v1/models DNS; LiteLLM does not route chat here.
-  # .44 REMOVED 2026-09-07. ai-llm-1 has no llama-server.service at all -- only
-  # llama-swap-qwen38 on :8082 -- so .44:8080 has been a dead scrape target since node1's
-  # qwen3.6 deployment was disabled (2026-08-15), producing a permanent TargetDown{job="llm"}.
-  # This Service is scrape-only (nothing routes chat through it), so removing the address costs
-  # no capacity. node1 is NOT unmonitored as a result: it is still covered as an LXC host.
-  - addresses:
-      - { ip: 192.168.0.45, hostname: ai-llm-2 }
-    ports: [{ name: http, port: 8080, protocol: TCP }]
----
-# Per-node Service for the surviving qwen3.6 route. This was originally a PAIR (llm-node1 +
-# llm-node2) load-balancing qwen3.6 across node1 and node2. llm-node1 was RETIRED 2026-09-07:
-# ai-llm-1 (.44) has no llama-server.service at all, so that Service pointed at a closed port and
-# LiteLLM was round-robining roughly half of the agentforge workers' qwen3.6 requests into it.
+# `llm` and `llm-node2` Services + Endpoints REMOVED 2026-09-16, with qwen3.6-35b-a3b.
+# Both pointed at .45:8080, which was qwen3.6's direct llama-server.service on ai-llm-2. That model
+# was retired so node2 could host a qwen3.8-27b instance -- node2 cannot hold both (22.38 + 22.45 =
+# 44.83 GiB). See kubernetes/infra/ai-lxc/models.yaml.
 #
-# The Service+Endpoints pair was deliberately kept for one reconcile after its consumer
-# (litellm-local.yaml) dropped the node1 deployment, because LiteLLM reads its config only at
-# startup -- deleting it in the same reconcile would have pulled it out from under a still-running
-# old pod. All three gate conditions were then verified on the live cluster before this removal:
-#   1. `kubectl -n ai rollout status deploy/litellm-local` -> successfully rolled out, and the sole
-#      remaining pod carries checksum/config 64ae47a82bad (the 23-day-old pod is gone);
-#   2. the running proxy's loaded config has ZERO `api_base` entries pointing at llm-node1 -- only
-#      llm-node2 and llm-qwen35 remain (llm-qwen35 has since been removed too, 2026-09-08 -- the
-#      122b moved to cloudlab; only llm-node2 remains);
-#   3. an authenticated chat/completions call for qwen3.6-35b-a3b through litellm-local returned
-#      HTTP 200, finish_reason=stop.
+# ORDER MATTERS AND IT IS THE OPPOSITE OF THE ROUTING CASE. `llm` carried
+# app.kubernetes.io/component: llama-server, so the `ai-llm-llamacpp` ServiceMonitor scraped it
+# directly. A scraped Service whose backend has stopped fires TargetDown FOREVER -- this file already
+# carries that scar from .44. So the Service is removed BEFORE the backend stops, whereas a ROUTING
+# Service is only repointed AFTER its new backend is up.
 #
-# Deliberately NOT labelled app.kubernetes.io/component=llama-server: the `llm` Service above
-# already scrapes .45, so labelling this too would double-scrape it.
-apiVersion: v1
-kind: Service
-metadata:
-  name: llm-node2
-  namespace: ai
-  labels: { app.kubernetes.io/name: llm-node2 }
-spec:
-  type: ClusterIP
-  ports:
-    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
----
-apiVersion: v1
-kind: Endpoints
-metadata:
-  name: llm-node2
-  namespace: ai
-  labels: { app.kubernetes.io/name: llm-node2 }
-subsets:
-  - addresses: [{ ip: 192.168.0.45, hostname: ai-llm-2 }]
-    ports: [{ name: http, port: 8080, protocol: TCP }]
+# The `ai-llm-llamacpp` ServiceMonitor is deliberately KEPT even though it now matches zero Services.
+# It is not a TargetDown risk (no targets = no scrape), and keeping it means a future direct-mode
+# llama-server model is scraped automatically rather than silently unmonitored. The qwen3.8 engines
+# do NOT match it on purpose: they are lazy, and their metrics travel the node_exporter textfile path.
 ---
 # llm-qwen35 (node3 .46 :8080) REMOVED 2026-09-08. qwen3.5-122b moved to the cloudlab estate and is
 # served by cloud3's llama-swap (192.168.0.26:8080), where 72 GiB of Q4_K_M weights sit entirely in
@@ -150,5 +95,46 @@ metadata:
   namespace: ai
   labels: { app.kubernetes.io/name: llm-qwen38 }
 subsets:
-  - addresses: [{ ip: 192.168.0.44, hostname: ai-llm-1 }]
+  # MOVED .44 (ai-llm-1/node1) -> .45 (ai-llm-2/node2) on 2026-09-16. node1's instance was
+  # retired: a LAZY load arrives all at once and node1's 7-day-minimum MemAvailable is 4.73 GiB
+  # against this model's measured 22.45. node2 pays for it by retiring qwen3.6 (22.38 GiB).
+  - addresses: [{ ip: 192.168.0.45, hostname: ai-llm-2 }]
+    ports: [{ name: http, port: 8082, protocol: TCP }]
+---
+# llm-qwen38-node3 (node3 .46 :8082) ADDED 2026-09-16 -- the SECOND deployment of the same LiteLLM
+# model_name (qwen3.8-27b-ailab). Paid for by retiring ci-runner-7, which freed a measured 10.40 GiB
+# and took ai-node3's 7-day-minimum MemAvailable from 18.15 to ~28.6 GiB, clearing this model's
+# 22.45 GiB with +6.1 GiB margin. Before that, NO node in the estate could absorb the load at its
+# weekly floor.
+#
+# A SEPARATE Service, deliberately NOT a second address on llm-qwen38's Endpoints. LiteLLM must see
+# two distinct api_base values to treat them as two deployments it can route between; folding .46
+# into the existing Endpoints would hide the second engine behind kube-proxy and give the router one
+# backend it cannot reason about (no per-deployment cooldown, no failover, no least-busy).
+#
+# component: llama-swap, NOT llama-server -- and that is load-bearing, not cosmetic. The
+# `ai-llm-llamacpp` ServiceMonitor selects component=llama-server and scrapes /metrics directly.
+# These engines are LAZY, so a direct scrape of an unloaded :8082 would fire TargetDown forever.
+# Their metrics travel the node_exporter textfile path instead (llamacpp-metrics.timer, written by
+# provision.sh), collected on :9100 from the node_exporter endpoints in monitoring.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-qwen38-node3
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-qwen38-node3, app.kubernetes.io/component: llama-swap }
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - { name: http, port: 8082, targetPort: 8082, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llm-qwen38-node3
+  namespace: ai
+  labels: { app.kubernetes.io/name: llm-qwen38-node3 }
+subsets:
+  - addresses: [{ ip: 192.168.0.46, hostname: ai-llm-3 }]
     ports: [{ name: http, port: 8082, protocol: TCP }]

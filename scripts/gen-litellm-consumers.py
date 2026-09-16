@@ -310,17 +310,34 @@ def models_from_config(config_text: str) -> list[Model]:
             continue
         name = entry["model_name"]
         check_model_name(name)
+        info = entry.get("model_info") or {}
+        vision = isinstance(info, dict) and info.get("supports_vision") is True
+        dsh_only = not consumer_visible(entry)
         if name in seen:
+            # A model_name may legitimately appear more than once: that is how LiteLLM expresses
+            # several DEPLOYMENTS of one model for the router to balance across (qwen3.8-27b-ailab
+            # runs on node2 and node3). Consumers must still see exactly ONE row, so later entries
+            # are folded into the first.
+            #
+            # But folding SILENTLY is a trap. The consumer-visible capability comes from whichever
+            # entry happens to be first in the list, so two deployments that disagree would make
+            # dsh's `input: [text, image]` row depend on ORDERING -- edit the first entry to drop
+            # supports_vision and dsh loses image input on that route with nothing failing and no
+            # diff in either consumer file. Deployments of one model_name are the same model on
+            # different hosts; if they disagree about what the model can do, one of them is wrong.
+            prev = next(m for m in out if m.name == name)
+            if prev.vision != vision or prev.dsh_only != dsh_only:
+                raise SourceError(
+                    f"{LITELLM_REL}: model_list[{i}] '{name}' is a second deployment of the same "
+                    f"model_name but its model_info disagrees with the first "
+                    f"(supports_vision {prev.vision} vs {vision}, "
+                    f"dsh_only {prev.dsh_only} vs {dsh_only}). Deployments of one model_name must "
+                    f"declare IDENTICAL capabilities -- consumers render one row and would silently "
+                    f"take whichever entry comes first."
+                )
             continue
         seen.add(name)
-        info = entry.get("model_info") or {}
-        out.append(
-            Model(
-                name=name,
-                vision=isinstance(info, dict) and info.get("supports_vision") is True,
-                dsh_only=not consumer_visible(entry),
-            )
-        )
+        out.append(Model(name=name, vision=vision, dsh_only=dsh_only))
     if not out:
         raise SourceError(
             f"{LITELLM_REL}: no consumer-visible route in model_list; refusing to render empty consumer lists"

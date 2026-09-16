@@ -39,23 +39,45 @@ data:
       # so roughly half of every agentforge qwen3.6 request was being routed into a closed port.
       # This is the same defect litellm.yaml fixed for the MAIN proxy on 2026-08-15 ("Connection
       # error on roughly half of all qwen3.6 requests"); litellm-local never got that fix.
-      # node2 below is the surviving route and is deliberately kept -- the model is still served
-      # here for the agentforge workers even though litellm.yaml retired it for interactive use.
-      - model_name: qwen3.6-35b-a3b
+      # REPOINTED 2026-09-16, qwen3.6-35b-a3b -> qwen3.8-27b-ailab.
+      #
+      # qwen3.6 was this gateway's ONLY model, so its removal would have left an EMPTY model_list and
+      # broken every agentforge worker that routes through here. The backend it pointed at
+      # (llm-node2 -> .45:8080) is gone: node2 now serves qwen3.8-27b on :8082 instead, because it
+      # cannot hold both (22.38 + 22.45 = 44.83 GiB). See kubernetes/infra/ai-lxc/models.yaml.
+      #
+      # TWO DEPLOYMENTS, mirroring the main proxy: node2 (.45) and node3 (.46). This gateway has its
+      # own router, so it needs both entries to fail over between them -- naming the main proxy's
+      # model_name would not help, fallbacks resolve against THIS proxy's model_list.
+      #
+      # supports_vision is now TRUE, and unlike the old entry that is not a copied claim: both
+      # instances pass --mmproj (models.yaml `mmproj:`), which is precisely what node2's old
+      # llama-server did NOT do and why the previous entry correctly declared false.
+      #
+      # max_input_tokens 49152, not 114688. The old value was a 14x over-declaration -- the live
+      # qwen3.6 process served `-c 32768 --parallel 4` = 8192 per slot. qwen3.8-27b runs
+      # `-c 131072 --parallel 2`, so per-slot is 65536 and 49152 leaves the same 16K output headroom
+      # the main proxy uses. Keep in sync with models.yaml `ctx`/`parallel`.
+      - model_name: qwen3.8-27b-ailab
         litellm_params:
-          model: openai/qwen3.6-35b-a3b
-          api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
+          model: openai/qwen3.8-27b-ailab
+          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1   # ai-llm-2 / node2 / .45
           api_key: "sk-noauth"
           input_cost_per_token: 0.000001
           output_cost_per_token: 0.000001
         model_info:
-          # PRE-EXISTING and wrong, corrected 2026-09-09 while verifying the same backend for the
-          # main proxy's fallback chain. node2's llama-server does not pass --mmproj, so the live
-          # endpoint answers an image_url part with 500 "image input is not supported". The
-          # mmproj-F16.gguf file is on disk; it is simply never loaded. Advertising vision here made
-          # the gateway route image requests to a backend that cannot serve them.
-          supports_vision: false
-          max_input_tokens: 114688
+          supports_vision: true
+          max_input_tokens: 49152
+      - model_name: qwen3.8-27b-ailab
+        litellm_params:
+          model: openai/qwen3.8-27b-ailab
+          api_base: http://llm-qwen38-node3.ai.svc.cluster.local:8082/v1   # ai-llm-3 / node3 / .46
+          api_key: "sk-noauth"
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000001
+        model_info:
+          supports_vision: true
+          max_input_tokens: 49152
       # qwen3.5-122b REMOVED 2026-09-08. It moved to the cloudlab estate (cloud3, llama-swap on
       # 192.168.0.26) where 72 GiB of Q4_K_M weights fit entirely in 96 GiB of VRAM -- MEASURED
       # 60.6-66.2 tok/s fully resident, against 16.6 tok/s here where it spilled MoE experts to
@@ -101,7 +123,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "821ec1e003f5"
+        checksum/config: "6f757e292565"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux
