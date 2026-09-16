@@ -2855,6 +2855,56 @@ class SeatRotationTest(unittest.TestCase):
         self.assertTrue(self.m.fail_note(e).startswith(
             "subscription rate-limited, waiting until "))
 
+    def _meta(self, key):
+        c = self.m.db()
+        row = c.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+        c.close()
+        return float(row[0]) if row else 0.0
+
+    def test_the_seat_that_produced_the_review_is_the_one_credited(self):
+        """Counting successes per seat is the ONLY way to tell a seat that is merely busy from
+        one that can never serve. Sticky selection reaches a seat only when the stickier ones
+        are spent, so an unusable seat emits nothing at all until the estate needs it."""
+        self.m.subprocess.run = self._runner({"runa"})      # a refuses, b serves
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual(0.0, self._meta("seat_reviews_total.a"),
+                         "a refused; it must not be credited with a review")
+        self.assertEqual(1.0, self._meta("seat_reviews_total.b"))
+        self.assertEqual(1.0, self._meta("seat_parks_total.a"))
+        self.assertEqual(0.0, self._meta("seat_parks_total.b"))
+
+    def test_a_seat_that_only_ever_parks_is_credited_with_nothing(self):
+        """The shape of an account with no Codex entitlement: tried, parked, served nothing."""
+        self.m.subprocess.run = self._runner({"runa", "runb", "runc"})
+        with self.assertRaises(self.m.RateLimited):
+            self.m.run_llm("t", "d", "diff")
+        for name in ("a", "b", "c"):
+            self.assertEqual(1.0, self._meta(f"seat_parks_total.{name}"))
+            self.assertEqual(0.0, self._meta(f"seat_reviews_total.{name}"))
+
+    def test_a_busy_seat_accrues_BOTH_counters(self):
+        """The discriminating case. A busy estate parks seats constantly, so parking alone
+        cannot be the alert signal - the healthy seat must show successes too."""
+        self.m.subprocess.run = self._runner({"runa"})
+        for _ in range(3):
+            self.m.run_llm("t", "d", "diff")
+        self.assertEqual(1.0, self._meta("seat_parks_total.a"), "a parked once, then rotation left it")
+        self.assertEqual(3.0, self._meta("seat_reviews_total.b"), "b did the work")
+
+    def test_both_per_seat_counters_reach_the_textfile_including_zeros(self):
+        """Zero is the signal for the never-serves rule, so an omitted series would make the
+        expression unable to match rather than merely quiet."""
+        self.m.subprocess.run = self._runner({"runa"})
+        self.m.run_llm("t", "d", "diff")
+        self.m.write_metrics()
+        got = dict(line.split(" ", 1) for line in
+                   pathlib.Path(self.m.CFG["textfile"]).read_text(encoding="utf-8").splitlines())
+        self.assertEqual(0.0, float(got['reviewbot_llm_seat_reviews_total{persona="test",seat="a"}']))
+        self.assertEqual(1.0, float(got['reviewbot_llm_seat_reviews_total{persona="test",seat="b"}']))
+        self.assertEqual(0.0, float(got['reviewbot_llm_seat_reviews_total{persona="test",seat="c"}']),
+                         "an untried seat must still export a zero")
+        self.assertEqual(1.0, float(got['reviewbot_llm_seat_parks_total{persona="test",seat="a"}']))
+
     def test_the_seat_series_reach_the_textfile(self):
         self.m.park(real_time.time() + 300, seat="b")
         m = self.m
