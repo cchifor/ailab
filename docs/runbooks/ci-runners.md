@@ -185,6 +185,21 @@ pool is HAND-installed over SSH, mirroring the role):**
   gitea-act-runner.service); pgrep -P $mp` must be empty (0 children = no job). NB: a persistent
   `buildx_buildkit_builder` container is NOT a job — it blocks a strict `docker ps` gate but not the
   children check.
+  > **This idle-only rule relaxes on hosts carrying the DRAIN change (ailab#745), and not before.**
+  > Check the host first — `grep -E '^KillMode' /etc/systemd/system/gitea-act-runner.service`:
+  > * `KillMode=control-group` (or no `shutdown_timeout` in `config.yaml`) → **unchanged, stay idle-only.**
+  >   A stop SIGTERMs every process in the cgroup at once, so the in-flight job dies and Gitea reds the
+  >   check with ZERO log lines after ZOMBIE_TASK_TIMEOUT (10m), needing a manual rerun.
+  > * `KillMode=mixed` → a stop **drains**: systemd signals only the daemon, act_runner finishes the
+  >   in-flight job within `runner.shutdown_timeout` (default 10m), and systemd SIGKILLs anything left at
+  >   `TimeoutStopSec` (drain + 1min). `systemctl stop` therefore BLOCKS for up to that long — budget for
+  >   it in a maintenance window and do not assume a stop is instant.
+  >
+  > Draining is still not free: the job occupies a capacity slot for the whole drain, so to take a runner
+  > out of the pool PROMPTLY, disable it in Gitea first (`PATCH /api/v1/admin/actions/runners/<id>`
+  > `{"disabled": true}`) so it accepts no new work, then wait for the current job before stopping.
+  > Gitea's `busy` flag is NOT a reliable drain signal — it was observed flapping to `false` while a job
+  > was still executing (2026-09-16); the authoritative check is the `pgrep -P $mp` children test above.
 - **Commission a new runner / re-provision** without `just`: fresh org token via
   `POST /api/v1/orgs/cchifor/actions/runners/registration-token` (the SOPS `gitea-runner.sops.yaml` token
   may be an empty placeholder) → download `act_runner` → write `config.yaml` (copy an existing runner's) →
