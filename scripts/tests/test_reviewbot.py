@@ -2653,6 +2653,39 @@ class ModelPinStampTest(unittest.TestCase):
         text = pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8")
         self.assertIn('model="(account default)"', text)
 
+    def test_a_seeded_stamp_reports_its_counters_as_UNattributable(self):
+        """THE reviewer-1 case (reviewer-claude, round 1 of ailab#742): 363/363 accumulated
+        under a pin that has ALREADY been repointed away from. Seeding without resetting is
+        correct — they are not the new pin's failures and must not be deleted on a guess — but
+        naming the current pin beside them would assert opus produced failures it never did."""
+        self.m.bump_meta("llm_primary_failed_total", 363)
+        self.m.bump_meta("llm_fallback_used_total", 363)
+        got = self._emit()
+        self.assertEqual(0.0, float(got['reviewbot_llm_counters_pin_scoped{persona="test"}']),
+                         "seeded stamp must not claim the counters belong to the current pin")
+        self.assertEqual(363.0, float(got['reviewbot_llm_primary_failed_total{persona="test"}']),
+                         "and must not delete them either")
+
+    def test_an_observed_repoint_makes_the_counters_attributable(self):
+        self.m.bump_meta("llm_primary_failed_total", 363)
+        self._emit()                               # seeds at old-pin
+        self.m.CFG["llm_model"] = "new-pin"
+        got = self._emit()                         # observes the change
+        self.assertEqual(1.0, float(got['reviewbot_llm_counters_pin_scoped{persona="test"}']))
+        self.assertEqual(0.0, float(got['reviewbot_llm_primary_failed_total{persona="test"}']),
+                         "counters reset, so they now genuinely describe the named pin")
+
+    def test_attributability_survives_restarts_once_observed(self):
+        """The flag is durable in `meta`, not in-process: a restart must not silently downgrade
+        an attributable counter back to 'may predate the pin'."""
+        self._emit()
+        self.m.CFG["llm_model"] = "new-pin"
+        self._emit()
+        fresh = load(self.tmp.name, llm_model="new-pin")   # same DB, new module object
+        fresh.write_metrics()
+        text = pathlib.Path(fresh.CFG["textfile"]).read_text(encoding="utf-8")
+        self.assertIn('reviewbot_llm_counters_pin_scoped{persona="test"} 1', text)
+
     def test_a_pin_carrying_a_quote_cannot_break_the_whole_textfile(self):
         """node_exporter rejects the ENTIRE file on one malformed line, so an unescaped label
         value would delete every reviewbot metric on the host — the trap the repo label below
