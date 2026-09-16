@@ -826,6 +826,14 @@ for _s in SEATS:
     _unique.append(_s)
 SEATS = _unique or [{"name": "default", "sudo_user": CFG.get("llm_sudo_user") or ""}]
 SEAT_BY_NAME = {s["name"]: s for s in SEATS}
+# CAPTURED BEFORE ANY FILTERING, and never recomputed. reviewbot_llm_seats_total is read
+# against reviewbot_llm_seats_distinct to show that usable capacity is LESS than what was
+# configured; deriving both from the post-resolution list makes them identical by
+# construction and the comparison can never be true - a metric that parses and cannot
+# fire, which is the defect this estate keeps writing headers about (reviewer-codex and
+# reviewer-claude, round 1 of ailab#749). Counted from CFG rather than from SEATS so a
+# duplicate NAME shows as degradation too, not just a collapsed account.
+SEATS_CONFIGURED = len(CFG.get("llm_seats") or []) or 1
 # Pre-seeded so the dict is FIXED-SIZE for the life of the process. The metrics thread iterates
 # a snapshot of it while the worker thread writes; a dict that grew would risk "changed size
 # during iteration" inside write_metrics, whose blanket `except Exception` would swallow it and
@@ -942,7 +950,18 @@ def resolve_seats():
         if acct:
             seen[acct] = name
         keep.append(s)
-    _apply_seats(keep or SEATS[:1])
+    if not keep:
+        # EVERY seat failed its probe. Do NOT reinstate one of them: sticky selection would
+        # hand it work forever, and a broken seat fails as an ordinary error rather than a
+        # RateLimited, so it never parks - attempts climb and the PR quarantines, which is
+        # precisely what this guard exists to prevent (reviewer-codex, round 1 of #749).
+        # Keep the configured list untouched instead and say so: a probe that rejects
+        # EVERYTHING is far more likely to be broken than a fleet that is entirely broken,
+        # and leaving the list alone keeps this guard incapable of making things worse.
+        log("seat guard: no seat passed its probe - leaving the configured list unchanged. "
+            "Either sudo is broken estate-wide or the probe is; check the drop reasons above.")
+        return
+    _apply_seats(keep)
 
 
 def _apply_seats(keep):
@@ -1825,8 +1844,11 @@ def write_metrics():
                          f'{1 if _until > now else 0}')
             lines.append(f'reviewbot_llm_seat_parked_seconds_remaining'
                          f'{{persona="{_persona}",seat="{_sn}"}} {max(0.0, _until - now):.0f}')
-        lines.append(f'reviewbot_llm_seats_total{{persona="{_persona}"}} {len(SEATS)}')
-        lines.append(f'reviewbot_llm_seats_distinct{{persona="{_persona}"}} {len(SEAT_BY_NAME)}')
+        # CONFIGURED vs USABLE. These must come from different places or the difference is
+        # unrepresentable: len(SEATS) is the post-resolution list and len(SEAT_BY_NAME) is
+        # built from that same list, so the pair was always equal before this was fixed.
+        lines.append(f'reviewbot_llm_seats_total{{persona="{_persona}"}} {SEATS_CONFIGURED}')
+        lines.append(f'reviewbot_llm_seats_distinct{{persona="{_persona}"}} {len(SEATS)}')
         lines.append(f'reviewbot_llm_seats_available{{persona="{_persona}"}} '
                      f'{sum(1 for _s in SEATS if _parked.get(_s["name"], 0.0) <= now)}')
         # UNCONDITIONAL, falling back to CURRENT_SEAT, so the info series never gaps while every

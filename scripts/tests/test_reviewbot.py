@@ -2714,6 +2714,40 @@ class SeatRotationTest(unittest.TestCase):
         self.assertEqual(["a"], [s["name"] for s in m.SEATS],
                          "a duplicate series makes node_exporter reject the WHOLE textfile")
 
+    def test_degraded_capacity_is_REPRESENTABLE_not_just_exported(self):
+        """seats_total vs seats_distinct is the whole degradation signal, and it was dead:
+        both were derived from the post-resolution list, so they were equal by construction and
+        Phase 3's ReviewbotSeatsDegraded could never have fired. This fails on the old code."""
+        m = load(tempfile.mkdtemp(), llm_kind="codex",
+                 llm_seats=[{"name": "a", "sudo_user": "runa"},
+                            {"name": "a", "sudo_user": "runb"},      # dropped: duplicate name
+                            {"name": "c", "sudo_user": "runc"}])
+        m.write_metrics()
+        got = dict(line.split(" ", 1) for line in
+                   pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8").splitlines())
+        total = float(got['reviewbot_llm_seats_total{persona="test"}'])
+        distinct = float(got['reviewbot_llm_seats_distinct{persona="test"}'])
+        self.assertEqual(3.0, total, "total must be what was CONFIGURED")
+        self.assertEqual(2.0, distinct, "distinct must be what is USABLE")
+        self.assertLess(distinct, total, "the degradation signal must be able to be true")
+
+    def test_a_seat_that_failed_its_probe_is_never_reinstated(self):
+        """`keep or SEATS[:1]` put back a seat that had just been declared unreachable. Sticky
+        selection would then hand it every job, and a broken seat raises an ordinary error
+        rather than RateLimited - so it never parks, attempts climb, and the PR quarantines:
+        the exact outcome the guard exists to prevent."""
+        m = load(tempfile.mkdtemp(), llm_kind="codex", llm_seats=SEATS_3)
+        calls = []
+
+        def run(args, **kw):
+            calls.append(list(args))
+            return m.subprocess.CompletedProcess(args, 1, "", "sudo: unknown user")
+        m.subprocess.run = run
+        m.resolve_seats()
+        self.assertEqual(["a", "b", "c"], [s["name"] for s in m.SEATS],
+                         "with nothing provable, leave the configured list alone")
+        self.assertTrue(calls, "the probe must actually have run")
+
     def test_the_seat_series_reach_the_textfile(self):
         self.m.park(real_time.time() + 300, seat="b")
         m = self.m
