@@ -136,8 +136,28 @@ models:
     # ROLLED BACK from b10573 on 2026-09-16, and this COSTS THE WebP DECODE PATH -- read on before
     # bumping it again. b10573 is the build that gained WebP (PR #27520, merged 2026-08-21) via an
     # ffmpeg subprocess; b10456 has none, VERIFIED on the boxes (libmtmd.so in b9672/b10430/b10456
-    # contains ZERO "webp" strings, b10573's contains two). So on THIS route an agent that renders an
-    # image and reads it back as WebP still gets `Failed to load image or audio file`. The
+    # contains ZERO "webp" strings, b10573's contains two).
+    #
+    # AND IT FAILS SILENTLY, WHICH IS WORSE THAN THE ERROR IT REPLACES. An earlier revision of this
+    # comment said a WebP image "still gets `Failed to load image or audio file`". That is WRONG and
+    # was never measured on b10456 -- that error belongs to the b10573-WITHOUT-ffmpeg case. MEASURED
+    # 2026-09-16 against the live route, PNG and WebP renderings of the SAME picture:
+    #
+    #   text-only control   prompt_tokens  65
+    #   PNG                 prompt_tokens 117  (+52 image tokens)  -> correct description
+    #   WebP                prompt_tokens  67  (+2, i.e. NO image) -> "I can't see the image"
+    #
+    # HTTP 200, finish_reason=stop, no error anywhere. The image is DROPPED and the model then
+    # confabulates a perfectly reasonable-sounding refusal. Proven to be llama.cpp and not the
+    # gateway by replaying the same payload straight at :8082, bypassing LiteLLM: same result, and
+    # the returned reasoning_content shows what the server actually received --
+    # "Describe this image in one short sentence.Video:" -- the image slot collapsed to a bare
+    # "Video:" marker carrying no pixels. So an agent gets a confident "there is no image" instead
+    # of a failure it could retry or report. Treat any "I can't see the image" from this route as
+    # SUSPECTED WebP until proven otherwise, and re-encode to PNG before sending.
+    #
+    # PNG and JPEG are FINE -- vision genuinely works here (see the +52 image tokens and the correct
+    # description above), which is why model_info.supports_vision stays true in litellm.yaml. The
     # qwen3.8-flash-next-cloud route is UNAFFECTED: cloud3 runs its own newer build and got ffmpeg
     # installed the same day. ensure_ffmpeg in provision.sh is deliberately KEPT -- it is correct, it
     # is idempotent, and it means a future re-bump needs a one-line change here and nothing else.
