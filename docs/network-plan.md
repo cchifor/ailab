@@ -37,7 +37,7 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.24 / .25` | Reviewer VMs `reviewer-1/2` | 4501–4502 | ⚠️ unmanaged — see note below |
 | `.26` | 🔒 **cloudlab** LXC `cloud-llm-3` | 5101 | `../cloudlab/README.md` |
 | `.27 / .28` | 🔒 **cloudlab** LXCs `cloud-exec-1/2` | 5102–5103 | `../cloudlab/kubernetes/infra/executor-lxc/variables.tf` |
-| `.29` | CI runner VM `ci-runner-7` (moved off `.20` on 2026-09-03) | 4107 | `kubernetes/infra/runners/variables.tf` |
+| `.29` | **free (static)** — was `ci-runner-7`, retired 2026-09-16 | — | — |
 | `.30` | **free (static)** — was `ci-runner-8`, retired 2026-09-12 | — | — |
 | `.31` | CI runner VM `ci-runner-9` (moved off `.22` on 2026-09-03; moved ai-node2→ai-node1 on 2026-09-07) | 4109 | `kubernetes/infra/runners/variables.tf` |
 | `.32`–`.35` | **free (static)** | — | — |
@@ -51,9 +51,9 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | **free (static)** | — | — |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.5`–`.7`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`** (11 addresses; `.30` freed
-2026-09-12 by retiring `ci-runner-8`). Nothing else in
-`.2`–`.50` is available.
+**Free static space: `.5`–`.7`, `.29`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`** (12 addresses; `.30`
+freed 2026-09-12 by retiring `ci-runner-8`, `.29` freed 2026-09-16 by retiring `ci-runner-7`).
+Nothing else in `.2`–`.50` is available.
 
 > **Keep all lab static IPs inside `.2`–`.50`.** The DHCP pool starts at `.51`, so anything `.51`+
 > can be leased to a random client — exactly the collision that pushed the AI LXCs off `.51`–`.53`
@@ -61,10 +61,15 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 
 #### ⚠️ VMs not managed by OpenTofu
 
-`ci-runner-6..10` (4106–4110), `reviewer-1/2` (4501–4502) and `talos-env-node-1` (4401) are **running
-but tracked in no tofu state**. They were created out-of-band, so `tofu plan` cannot see their
-addresses and will not warn when a managed module is given one of them. Until they are imported,
-this table is their only record — treat it as load-bearing.
+`reviewer-1/2` (4501–4502) and `talos-env-node-1` (4401) are **running but tracked in no tofu
+state**. They were created out-of-band, so `tofu plan` cannot see their addresses and will not warn
+when a managed module is given one of them. Until they are imported, this table is their only
+record — treat it as load-bearing.
+
+> **CORRECTED 2026-09-16:** `ci-runner-6..10` were listed here as unmanaged. They were IMPORTED on
+> 2026-09-07 and are in `terraform.tfstate` (serial 43), so that claim had been wrong for nine days.
+> Every remaining CI runner is under `kubernetes/infra/runners` management; retire one by removing
+> its map entry and applying, never with `qm destroy`, which would drift state.
 
 #### ⚠️ `ipconfig0` drift is invisible to `tofu plan`
 

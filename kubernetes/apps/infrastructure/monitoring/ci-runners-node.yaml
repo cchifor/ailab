@@ -39,7 +39,10 @@ subsets:
       # as a CI-runner problem. Verified by node_exporter nodename on each address.
       - { ip: 192.168.0.19 } # ci-runner-6 (ai-node3, vmid 4106)
       - { ip: 192.168.0.23 } # ci-runner-10 (ai-node2, vmid 4110)
-      - { ip: 192.168.0.29 } # ci-runner-7 (ai-node3, vmid 4107) -- was wrongly .20 = cloud1
+      # .29 / ci-runner-7 (ai-node3, vmid 4107) RETIRED 2026-09-16 to free ~10.4 GiB on ai-node3
+      # for a qwen3.8-27b-ailab instance. Dropped from this list in the SAME change that removes
+      # it from tofu: a target left here scrapes a dead address and fires NodeExporterDown
+      # forever -- the failure this list already carries a long comment about.
       # .30 / ci-runner-8 (ai-node1, vmid 4108) RETIRED 2026-09-12 to return ~10 GiB to ai-node1 for
       # the qwen3.8-27b-ailab instance. Dropped from this list in the SAME change that destroys the
       # VM: a target left here would scrape a dead address and fire NodeExporterDown forever, which
