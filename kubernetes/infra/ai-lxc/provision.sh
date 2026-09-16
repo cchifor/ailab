@@ -13,7 +13,7 @@
 #                 b9631 predated gemma4 vision. Re-provisioning a node's DEFAULT instance
 #                 re-downloads this build and restarts every instance on that node.)
 #   MODEL        GGUF path inside the CT                   (default daily driver)
-#   MODEL_ALIAS  name reported by /v1/models               (default qwen3.6-35b-a3b)
+#   MODEL_ALIAS  name reported by /v1/models               (default qwen3.8-27b-ailab)
 #   CTX          total KV context (shared across slots)    (default 32768)
 #   PARALLEL     concurrent server slots                   (default 4)
 #   EXTRA_ARGS   extra llama-server flags (e.g. --no-mmap) (default empty)
@@ -28,12 +28,13 @@
 set -euo pipefail
 
 LLAMA_BUILD="${LLAMA_BUILD:-b9672}"
-# Daily driver = Qwen3.6-35B-A3B (replaced qwen3-30b-a3b, retired 2026-07-01). node1's full
-# steady-state launch (CTX=262144 PARALLEL=1 CACHE_TYPE_K/V=q8_0 + MMPROJ) is passed explicitly —
-# see docs/runbooks/ai-host-setup.md. CTX/PARALLEL/MMPROJ/CACHE_TYPE defaults stay generic so they
-# don't leak into node2/3 heavyweight re-provisions (which override MODEL/CTX/PARALLEL but not these).
-MODEL="${MODEL:-/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf}"
-MODEL_ALIAS="${MODEL_ALIAS:-qwen3.6-35b-a3b}"
+# Defaults retargeted 2026-09-16: qwen3.6-35b-a3b was REMOVED, so defaulting to it would have left a
+# bare run trying to serve a model this estate no longer carries. Every real invocation passes MODEL,
+# MODEL_ALIAS, CTX, PARALLEL and MMPROJ explicitly (see models.yaml + docs/runbooks/ai-model-swap.md);
+# these defaults exist so a bare run is coherent, not so anyone relies on them. CTX/PARALLEL stay
+# generic on purpose so they do not leak into a heavyweight re-provision that overrides only MODEL.
+MODEL="${MODEL:-/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf}"
+MODEL_ALIAS="${MODEL_ALIAS:-qwen3.8-27b-ailab}"
 CTX="${CTX:-32768}"
 PARALLEL="${PARALLEL:-4}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
@@ -82,7 +83,8 @@ UNIT="llama-server.service"
 [ "$INSTANCE" != "default" ] && UNIT="llama-server-${INSTANCE}.service"
 # llama-swap owns PORT; the model is a child it spawns/kills. Unit AND config dir are per-instance so a
 # node can run a swap instance on one port while another instance (direct or swap) serves a different
-# port — node1 pins qwen3.6 on :8080 and swaps qwen3.8-27b on :8082 in the SAME container.
+# port. (Historical example: node1 pinned qwen3.6 on :8080 and swapped qwen3.8-27b on :8082 in the
+# SAME container. Both are gone from node1 since 2026-09-16; qwen3.8-27b now runs on node2 + node3.)
 SWAP_CONF_DIR="/etc/llama-swap"
 if [ -n "$SWAP" ]; then
   UNIT="llama-swap.service"
@@ -98,11 +100,13 @@ export DEBIAN_FRONTEND=noninteractive
 # $BIN is already per-build ("$INSTALL_DIR/llama-$LLAMA_BUILD"), so builds coexist on disk —
 # /opt/llama.cpp has carried llama-b9631 + llama-b9672 side by side since 2026-06. That lets a
 # SECOND instance pin a NEWER LLAMA_BUILD (a model whose arch the running build predates) without
-# touching the build the default instance is serving: node1 runs qwen3.6 on b9672 :8080 while
-# qwen3.8-27b needs b10430 on :8082. Idempotency keys off $BIN itself — the old single
+# touching the build the default instance is serving. qwen3.8-27b pins b10573 (it needs the WebP
+# decode path) independently of whatever the default instance runs. Idempotency keys off $BIN itself — the old single
 # "$INSTALL_DIR/.build" marker could not express more than one installed build, and gating on it
 # would re-extract build A every time build B was provisioned. The marker is still written (it
 # records the most recently installed build) but is no longer a freshness test.
+# This is what makes the b10573 WebP bump safe to roll back: the older build stays on disk, so
+# reverting is a one-line `build:` change in models.yaml plus a re-provision, not a re-download.
 ensure_llama_build() {
   echo "== llama.cpp Vulkan prebuilt ${LLAMA_BUILD} =="
   mkdir -p "$INSTALL_DIR"
@@ -140,6 +144,34 @@ ensure_llama_swap() {
   test -x "$SWAP_BIN" || { echo "FATAL: llama-swap missing after extract — check LLAMA_SWAP_VERSION / asset name" >&2; exit 1; }
 }
 
+# ffmpeg/ffprobe — REQUIRED for WebP image input, and deliberately NOT inside the
+# `INSTANCE = default` apt block below.
+#
+# llama.cpp decodes images with stb_image, which has no WebP codec and never will (upstream stb
+# declined; the vendored-decoder PR #24217 was closed). Since build b10573 (PR #27520, merged
+# 2026-08-21) it instead shells out to ffmpeg for WebP, resolving both binaries from PATH. Without
+# them the server logs `failed to launch ffprobe` and then `failed to decode webp buffer`, and the
+# caller gets `Failed to load image or audio file` — which looks like a model problem, not a missing
+# package. That is a live failure mode: dsh's agent renders an SVG preview and reads it back, and
+# dsh's attachment store re-encodes any 16-bit or metadata-bearing image to WebP.
+#
+# WHY ITS OWN FUNCTION: the apt block below runs ONLY when INSTANCE = default. Every qwen3.8-27b
+# instance is a NON-default instance ("qwen38"), so putting ffmpeg in that list would install it on
+# exactly the instances that do not need it and skip the ones that do — silently, with the provision
+# reporting success. Called from BOTH branches instead.
+# Written as an `if`, not `&& `: under `set -e` a trailing false test aborts the whole script.
+ensure_ffmpeg() {
+  if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+    echo "   ffmpeg/ffprobe already present ($(ffmpeg -hide_banner -version 2>/dev/null | head -1))"
+  else
+    echo "   installing ffmpeg (WebP decode path for llama.cpp >= b10573)"
+    apt-get update -qq
+    apt-get install -y --no-install-recommends ffmpeg
+    command -v ffprobe >/dev/null 2>&1 || {
+      echo "FATAL: ffprobe still missing after installing ffmpeg — WebP input will fail" >&2; exit 1; }
+  fi
+}
+
 if [ "$INSTANCE" = "default" ]; then
   echo "== [1/7] apt: RADV Vulkan userspace + tooling + node_exporter (NO amdvlk) =="
   apt-get update -qq
@@ -147,6 +179,7 @@ if [ "$INSTANCE" = "default" ]; then
     libvulkan1 mesa-vulkan-drivers vulkan-tools \
     libgomp1 libcurl4 ca-certificates curl tar jq rsync \
     prometheus-node-exporter
+  ensure_ffmpeg
 
   echo "== [2/7] non-root service user 'llama' in render(${RENDER_GID})+video(${VIDEO_GID}) =="
   getent group "$RENDER_GID" >/dev/null || groupadd -g "$RENDER_GID" hostrender
@@ -177,9 +210,14 @@ else
   echo "== additional instance '${INSTANCE}' (port ${PORT}) — base setup skipped =="
   # The base setup (apt, service user, helper scripts) is the default instance's job and is skipped
   # here, but the BUILD is not: this instance may pin a different LLAMA_BUILD than the default one.
+  # ffmpeg is NOT the base setup's job either, despite living in that apt block historically: a
+  # non-default instance is exactly the case the block above skips, and qwen3.8-27b needs ffmpeg
+  # for WebP. See ensure_ffmpeg.
+  ensure_ffmpeg
   ensure_llama_build
   # Likewise the llama-swap binary: a non-default instance can be swap-managed even when the default
-  # instance is direct-mode (node1: qwen3.6 pinned on :8080, qwen3.8-27b on-demand on :8082).
+  # instance is direct-mode. (Historical example: node1 pinned qwen3.6 on :8080 and swapped
+  # qwen3.8-27b on :8082; both are gone from node1 since 2026-09-16.)
   # NOTE: an `if`, not `[ -n "$SWAP" ] && ...` — under `set -e` a trailing false test would make the
   # whole branch exit non-zero and abort the script for every direct-mode extra instance.
   if [ -n "$SWAP" ]; then
