@@ -500,6 +500,15 @@ data:
         litellm_params:
           model: openai/gpt-5.4-nano
           api_key: os.environ/OPENAI_API_KEY
+      # 2026-09-16: Strive's contextual document-table workflow requests this
+      # evaluated model. Its first live draft was rejected here with HTTP 400
+      # because the route was absent. Preserve Chat Completions, the caller's
+      # structured output/reasoning parameters, and the existing cloud key.
+      # https://developers.openai.com/api/docs/models/gpt-5.6-sol
+      - model_name: gpt-5.6-sol
+        litellm_params:
+          model: openai/gpt-5.6-sol
+          api_key: os.environ/OPENAI_API_KEY
       - model_name: gpt-5
         litellm_params:
           model: openai/gpt-5
@@ -884,7 +893,7 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "4f447bf85eca"
+        checksum/config: "493d967fa0c4"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
