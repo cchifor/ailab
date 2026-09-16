@@ -252,6 +252,56 @@ the session scratchpad clone — hand the tfstate to the main checkout and verif
 > `ssh c4@192.168.0.24 md5sum /usr/local/lib/reviewbot/reviewbot.py` against
 > `md5sum ansible/roles/pr_reviewer/files/reviewbot.py` on main.
 
+### Seats: the codex persona holds several subscriptions
+
+reviewer-2 runs `pr_reviewer_llm_seats` — a list of `{name, sudo_user, home?}`, one ChatGPT
+subscription each, one OS user each. Live since 2026-09-16:
+
+| seat | user | account |
+|---|---|---|
+| `a` | `codexrun` | `cfdea639…` (shared with the AgentForge dev agents) |
+| `b` | `codexrun2` | `9c8a8cfb…` |
+
+**One user per seat is not tidiness.** `_run_llm` binds the isolated 0700 tmpdir, the answer
+read-back, the credential scan and the cleanup to a single sudo user for a whole invocation, so a
+shared home would put every credential within reach of one prompt-injected diff.
+
+**Selection is STICKY**: seat `a` carries everything until it refuses, then `b`, and it stays on
+`b` — it does not drift back when `a`'s park lapses. Round-robin would drive both accounts to
+their walls simultaneously and turn two staggered recoveries into one synchronised outage.
+
+`pr_reviewer_llm_seats: []` (reviewer-1, and any host that has not been migrated) is not a
+special case: reviewbot synthesises one seat named `default` from `pr_reviewer_llm_sudo_user` and
+runs the identical code path.
+
+**Adding a seat.** Provisioning is automatic once the seat is in host_vars — the role creates the
+user, its `~/.codex` (0700), the model pin, and one `/etc/sudoers.d/reviewbot-llm` line listing
+every seat user. What is NOT automatic, and cannot be, is the credential:
+
+1. `ssh c4@192.168.0.25` then, in a scratch HOME so no working credential is at risk:
+   `setsid env HOME=/home/c4/.seatN nohup /usr/bin/codex login --device-auth &`
+   — `--device-auth` is the headless flow. It is **absent from `codex login --help`** at 0.153.4;
+   the CLI only mentions it after a browser login fails. Read the code and URL out of the log.
+2. Authenticate in a browser against the NEW licence.
+3. `sudo install -o codexrunN -g codexrunN -m 0600 <scratch>/.codex/auth.json \
+      /home/codexrunN/.codex/auth.json`
+4. **Delete the scratch copy.** `install` copies; leaving both is the 2026-09-10 outage — OpenAI
+   refresh tokens are single-use, so two copies of one family revoke each other on first refresh.
+5. Add the seat to `ansible/host_vars/reviewer-2.yml`, converge, restart.
+
+**Never add a seat whose account already appears.** `resolve_seats()` reads `tokens.account_id`
+from each seat at startup and COLLAPSES duplicates, because rotating inside one account is the
+doomed-retry loop the park exists to prevent — it cost 463 refused calls over four days in
+September. A collapse is not silent: `reviewbot_llm_seats_distinct` drops below
+`reviewbot_llm_seats_total` and **ReviewbotSeatsDegraded** fires. A seat that cannot be `sudo`'d
+to is dropped the same way; if NO seat passes its probe, all of them are parked rather than one
+being handed work it cannot do.
+
+> **Only two of the three intended licences exist.** Verified across every host on 2026-09-16 by
+> `tokens.account_id`: `cfdea639…` and `9c8a8cfb…`, and nothing else anywhere. The third is one
+> `--device-auth` run away, then a one-line host_vars change. Until it lands, capacity is
+> ~340–400 codex calls/day against a demand of ~210 that grew from 86 in a week.
+
 ### When a persona is parked on a subscription rate limit
 
 **Do nothing. It self-heals, and the two obvious interventions both make it worse.** This is the
@@ -266,7 +316,10 @@ job 1526 cchifor/ailab#737 deferred: subscription rate-limited, waiting until ~1
   (no attempt consumed) [upstream: ...]
 ```
 
-* `ReviewbotRateLimited` fires at ≥3 parks in an hour — it is the rule that NAMES this. Expect
+* **ReviewbotAllSeatsExhausted** is the outage: no seat left to run on. **ReviewbotSeatExhausted**
+  is one seat spent while others still serve — capacity, not an outage, and it arrives first.
+  `ReviewbotRateLimited` remains the backstop; its counter still means "a job no seat could
+  serve", because a refusal run_llm routes around never reaches the worker. Expect
   `ReviewbotQueueBacklog` and `ReviewbotStalled` alongside it; those detect the stall, this one
   attributes it.
 * `reviewbot_rate_limited_seconds_remaining` counts down 900 → 0 per cycle. It is a **sawtooth**,

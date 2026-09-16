@@ -348,6 +348,80 @@ spec:
         # parked since 2026-09-13, and reviewer-2 sat at zero through the 12h08m BETWEEN its
         # two episodes. >=3/h clears a blip and sits well under the sustained rate, and mirrors
         # the two counter rules above rather than inventing a new shape for this one.
+        # ── seat rotation (Phase 3 of plans/2026-09-16-codex-seat-rotation-plan.md) ──
+        # THESE ARE STATE PREDICATES, NOT RATES, and that is the point of the re-scoping. The
+        # plan said the >=3/h threshold on ReviewbotRateLimited had to be "re-measured against
+        # real series once seats exist" — but once rotation exists the question stops being "how
+        # often did it refuse" and becomes "is there a seat to run on", which is a boolean. The
+        # holds below are the only tunable left, and each is derived from DEFAULT_PARK_S (900s,
+        # reviewbot.py) rather than chosen: nothing here is waiting on production data.
+        #
+        # A NOTE ON WHY ReviewbotRateLimited SURVIVES BELOW. Its counter still means what it
+        # meant when its threshold was measured: worker_once only ever sees a RateLimited that
+        # run_llm could not route around, so llm_rate_limited_total counts JOB DEFERRALS — "no
+        # seat could serve this" — not refusals. Rotation made it rarer, never looser, so the
+        # threshold stayed honest without being touched. The rules here are faster and name the
+        # cause; that one remains the backstop.
+        - alert: ReviewbotAllSeatsExhausted
+          expr: reviewbot_llm_seats_available == 0
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) has no usable seat left"
+            description: >-
+              Every configured seat on {{ $labels.instance }} is parked, so the persona is
+              producing no verdicts and the two-persona merge gate is stalled estate-wide — the
+              2026-09-15 shape, which cost 11h36m and 12.3h of merge_blocked on the OTHER,
+              healthy reviewer. This is the real outage condition and it is what ReviewbotRateLimited
+              used to approximate. 10m is deliberately UNDER one park cycle (900s): a rotation
+              momentarily leaves every seat parked between the last refusal and the next probe,
+              and this must ride that out while still firing inside the first cycle of a genuine
+              exhaustion. It self-heals — check `reviewbot_llm_seat_parked_seconds_remaining` for
+              when the earliest seat reopens, and do NOT --requeue: nothing is quarantined.
+        - alert: ReviewbotSeatExhausted
+          expr: reviewbot_llm_seat_parked == 1
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) seat {{ $labels.seat }} has been parked >30m"
+            description: >-
+              Seat {{ $labels.seat }} on {{ $labels.instance }} is spent while others still serve,
+              so reviews continue and nothing is blocked — this is a CAPACITY signal, not an
+              outage, and it is the one that arrives before ReviewbotAllSeatsExhausted does.
+              30m is two full park cycles (2 x 900s), so a single park cannot page; a seat still
+              parked after two is a spent window rather than a blip. Sticky selection means the
+              rotation stays where it moved to, so a parked seat is not itself a problem. If one
+              seat is persistently the parked one, its subscription is the smallest and the
+              capacity plan (ADR 0024) is what needs revisiting, not this alert.
+        - alert: ReviewbotSeatsDegraded
+          expr: reviewbot_llm_seats_distinct < reviewbot_llm_seats_total
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) is running on fewer seats than configured"
+            description: >-
+              {{ $labels.instance }} configured more seats than it can use: resolve_seats() dropped
+              one that could not be sudo'd to, or COLLAPSED two that share a ChatGPT account_id.
+              The collapse case is the dangerous one to leave alone — rotating inside a single
+              account is the doomed-retry loop the park exists to prevent, and it cost 463 refused
+              calls over four days in September. Capacity is NOT what the seat count implies. The
+              reason is in the journal at startup: `journalctl -u reviewbot | grep "seat "`. 15m is
+              startup grace; this is a provisioning fault, so it will not clear on its own.
+        - alert: ReviewbotCredentialScanSkipped
+          expr: increase(reviewbot_llm_credscan_skipped_total[1h]) > 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) posted a review without the credential scan"
+            description: >-
+              The pre-post scan reads the active seat's auth.json and refuses output containing it.
+              On {{ $labels.instance }} that file could not be read, so review output went out
+              UNSCANNED. Before seats existed this failed silently — an unreadable file made the
+              scan a no-op indistinguishable from one that ran and found nothing — which is why it
+              is counted now. Almost always a seat whose `home` is wrong or whose ~/.codex is not
+              readable by its own user. Fix the seat's home/permissions; the scan is
+              mistake-prevention rather than a security boundary, so this is not an emergency, but
+              it must not be left standing.
         - alert: ReviewbotRateLimited
           expr: increase(reviewbot_llm_rate_limited_total[1h]) >= 3
           for: 10m

@@ -52,13 +52,20 @@
     group: "{{ pr_reviewer_user }}"
     mode: "0775"
 
-- name: Create the isolated LLM run user
+# ONE LOOP PER CONCERN, over pr_reviewer_seats_effective, so a single-seat host and a three-seat
+# one run the same tasks. With pr_reviewer_llm_seats empty that list holds exactly the legacy seat
+# and every task below renders what it always did.
+- name: Create the isolated LLM run user for each seat
   ansible.builtin.user:
-    name: "{{ pr_reviewer_llm_sudo_user }}"
+    name: "{{ item.sudo_user }}"
     system: true
     shell: /usr/sbin/nologin
     create_home: true
-  when: pr_reviewer_llm_sudo_user | length > 0
+    home: "{{ item.home | default('/home/' + item.sudo_user) }}"
+  loop: "{{ pr_reviewer_seats_effective }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.sudo_user }})"
+  when: item.sudo_user | length > 0
 
 # LLM auth for the isolated user (e.g. /home/codexrun/.codex/auth.json) is seeded
 # MANUALLY, like the agent user's — see the runbook. The MODEL pin in that user's
@@ -67,45 +74,60 @@
 # tables codex appends and any `[profiles.*]` are never touched) so no host carries
 # a stale pin; reviewbot still passes `-m` explicitly on every exec, so this is
 # consistency, not the authority.
-- name: Ensure the isolated codex user's ~/.codex exists
+- name: Ensure each seat's ~/.codex exists
   ansible.builtin.file:
-    path: "/home/{{ pr_reviewer_llm_sudo_user }}/.codex"
+    path: "{{ item.home | default('/home/' + item.sudo_user) }}/.codex"
     state: directory
-    owner: "{{ pr_reviewer_llm_sudo_user }}"
-    group: "{{ pr_reviewer_llm_sudo_user }}"
+    owner: "{{ item.sudo_user }}"
+    group: "{{ item.sudo_user }}"
     mode: "0700" # holds the seeded auth.json — non-traversable, like the dev_worker one
+  loop: "{{ pr_reviewer_seats_effective }}"
+  loop_control:
+    label: "{{ item.name }}"
   when:
     - pr_reviewer_llm_kind == "codex"
-    - pr_reviewer_llm_sudo_user | length > 0
+    - item.sudo_user | length > 0
 
-- name: Pin the codex model in the isolated user's config (top-level key, table-aware)
+- name: Pin the codex model in each seat's config (top-level key, table-aware)
   community.general.ini_file:
-    path: "/home/{{ pr_reviewer_llm_sudo_user }}/.codex/config.toml"
+    path: "{{ item.home | default('/home/' + item.sudo_user) }}/.codex/config.toml"
     option: model
     value: '"{{ pr_reviewer_llm_model }}"'
     no_extra_spaces: false
     create: true
-    owner: "{{ pr_reviewer_llm_sudo_user }}"
-    group: "{{ pr_reviewer_llm_sudo_user }}"
+    owner: "{{ item.sudo_user }}"
+    group: "{{ item.sudo_user }}"
     mode: "0600"
+  loop: "{{ pr_reviewer_seats_effective }}"
+  loop_control:
+    label: "{{ item.name }}"
   when:
     - pr_reviewer_llm_kind == "codex"
-    - pr_reviewer_llm_sudo_user | length > 0
+    - item.sudo_user | length > 0
     - pr_reviewer_llm_model | length > 0
 
-- name: Allow the service user to run the LLM as the isolated user
+# ONE file with a runas LIST rather than one file per seat: sudoers accepts `(a,b,c)` directly,
+# and a single validated file cannot half-apply the way a set of files can. Seat order is
+# preserved so the rendered line is stable and a re-converge stays idempotent.
+- name: Allow the service user to run the LLM as any seat's user
   ansible.builtin.copy:
-    content: "{{ pr_reviewer_user }} ALL=({{ pr_reviewer_llm_sudo_user }}) NOPASSWD: ALL\n"
+    content: "{{ pr_reviewer_user }} ALL=({{ pr_reviewer_seats_effective | map(attribute='sudo_user') | select('string') | select() | join(',') }}) NOPASSWD: ALL\n"
     dest: /etc/sudoers.d/reviewbot-llm
     mode: "0440"
     validate: visudo -cf %s
-  when: pr_reviewer_llm_sudo_user | length > 0
+  when: pr_reviewer_seats_effective | map(attribute='sudo_user') | select() | list | length > 0
 
 # The shared codex login, rendered by the bao agent (tasks/openbao.yml). Sits AFTER the isolated
 # user + its ~/.codex exist and BEFORE reviewbot starts, so the first review after a rollout runs
 # on the rendered token. import_tasks so the `when` here gates every task inside, tag `openbao` so
 # the credential plumbing can be rolled on its own (ansible-playbook reviewers.yml -t openbao).
-- name: OpenBao-rendered codex login (bao agent — ADR 0020)
+# STILL SINGLE-SEAT, deliberately. pr_reviewer_enable_openbao is false on every host and the bao
+# agent is NOT running on reviewer-2 (verified 2026-09-16 — the runbook's claim that this renders
+# the codex login is wrong today), so there is nothing live to generalise against and no way to
+# test per-seat rendering. Seat credentials are hand-seeded exactly as the single one is. Per-seat
+# projection needs a reviewer-N-seat AppRole and a secret-id per seat in reviewbot.sops.yaml; that
+# is real work and it is NOT pretended to here.
+- name: OpenBao-rendered codex login (bao agent — ADR 0020; single-seat only)
   ansible.builtin.import_tasks: openbao.yml
   when:
     - pr_reviewer_enable_openbao | bool
