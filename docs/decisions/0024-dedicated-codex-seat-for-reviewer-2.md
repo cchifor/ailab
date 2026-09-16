@@ -18,12 +18,23 @@
 phases of `plans/2026-09-16-codex-seat-rotation-plan.md` are merged and live on reviewer-2:
 rotation (Phase 1), two provisioned seats (Phase 2), and the four seat alerts (Phase 3).
 
-**With one gap that is not code:** only TWO of the three intended licences exist. Verified
-2026-09-16 across every host by `tokens.account_id` — `cfdea639…` (shared with the dev agents)
-and `9c8a8cfb…`, and no third anywhere. So the deployed capacity is ~340–400 codex calls/day,
-not the ~510–600 this ADR sized for. The third licence needs one `codex login --device-auth`
-run and a one-line host_vars change; the runbook has the procedure. Until then the estate is
-at roughly 1.6–1.9× present demand rather than 2.5–3×, against a rate that grew 2.4× in a week. What ships in the PR carrying this ADR is only the observability half: the
+**All three licences now exist** (2026-09-16): `cfdea639…` seat a (shared with the dev agents),
+`9c8a8cfb…` seat b, `11c52fea…` seat c — three distinct `tokens.account_id` values, which is the
+property `resolve_seats()` enforces rather than assumes.
+
+**But the third is not yet capacity.** Probed immediately after provisioning, seat c's account
+answers `You've hit your usage limit … try again at Sep 19th, 2026 8:10 AM`. It authenticates and
+its credential is valid; it has no usable quota today. Two readings that cannot be told apart from
+the host: a rolling window that is currently spent, or an account with no Codex entitlement at all
+(the message says "purchase more credits"). Note the date in that message is not reliable — the
+2026-09-14 episode named `Sep 21st` and in fact reopened daily.
+
+Activating it anyway is safe and deliberate: an exhausted seat raises `RateLimited`, parks
+losslessly, consumes no attempt, and begins contributing the moment its window reopens with no
+further action. The honest number for TODAY is therefore still ~340–400 calls/day, roughly
+1.6–1.9× present demand — not the ~510–600 three seats imply. One caveat worth knowing:
+`resolve_seats()` verifies a credential is READABLE, not that it has quota, so
+`reviewbot_llm_seats_available` reads 3 until seat c is first tried and refuses. What ships in the PR carrying this ADR is only the observability half: the
 `ReviewbotRateLimited` alert, the upstream refusal text in the park note, and the model-scoped
 primary/fallback counters. Buying the second Codex subscription, logging it in, and repointing
 `codexrun` at it are MANUAL steps that have not been performed — see "What is still outstanding".
