@@ -2731,22 +2731,42 @@ class SeatRotationTest(unittest.TestCase):
         self.assertEqual(2.0, distinct, "distinct must be what is USABLE")
         self.assertLess(distinct, total, "the degradation signal must be able to be true")
 
-    def test_a_seat_that_failed_its_probe_is_never_reinstated(self):
-        """`keep or SEATS[:1]` put back a seat that had just been declared unreachable. Sticky
-        selection would then hand it every job, and a broken seat raises an ordinary error
-        rather than RateLimited - so it never parks, attempts climb, and the PR quarantines:
-        the exact outcome the guard exists to prevent."""
+    def _all_probes_fail(self):
         m = load(tempfile.mkdtemp(), llm_kind="codex", llm_seats=SEATS_3)
-        calls = []
+        self.calls = []
 
         def run(args, **kw):
-            calls.append(list(args))
+            self.calls.append(list(args))
             return m.subprocess.CompletedProcess(args, 1, "", "sudo: unknown user")
         m.subprocess.run = run
         m.resolve_seats()
-        self.assertEqual(["a", "b", "c"], [s["name"] for s in m.SEATS],
-                         "with nothing provable, leave the configured list alone")
-        self.assertTrue(calls, "the probe must actually have run")
+        return m
+
+    def test_when_no_seat_passes_its_probe_none_is_handed_work(self):
+        """Two wrong answers here, and the first fix shipped the second of them. Dropping every
+        seat idles the reviewer silently forever; keeping them unchanged leaves them selectable,
+        so the worker immediately picks one already known unreachable - and a broken seat raises
+        an ordinary error, never RateLimited, so it never parks and the PR quarantines."""
+        m = self._all_probes_fail()
+        self.assertTrue(self.calls, "the probe must actually have run")
+        self.assertEqual(0, m.seats_available(), "no seat may be selectable")
+        self.assertIsNone(m.active_seat(), "the selector must not offer a known-bad seat")
+
+    def test_that_parking_is_lossless_rather_than_a_quarantine(self):
+        """Parking is chosen precisely because it is the path that consumes no attempt."""
+        m = self._all_probes_fail()
+        e = m.RateLimited("x", None)
+        self.assertEqual(("retry", 4, 1), m.next_failure_state(e, 4, 1)[:3])
+        self.assertGreater(m.RATE_LIMITED_UNTIL, real_time.time(),
+                           "the worker's own gate must hold it off")
+
+    def test_the_seats_are_kept_so_the_park_can_lapse_and_re_probe(self):
+        """Dropped seats could never recover; parked ones come back on their own."""
+        m = self._all_probes_fail()
+        self.assertEqual(["a", "b", "c"], [s["name"] for s in m.SEATS])
+        for name in ("a", "b", "c"):
+            m.SEAT_PARKED_UNTIL[name] = 0.0
+        self.assertEqual(3, m.seats_available(), "recovery needs no restart")
 
     def test_the_seat_series_reach_the_textfile(self):
         self.m.park(real_time.time() + 300, seat="b")

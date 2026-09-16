@@ -951,15 +951,27 @@ def resolve_seats():
             seen[acct] = name
         keep.append(s)
     if not keep:
-        # EVERY seat failed its probe. Do NOT reinstate one of them: sticky selection would
-        # hand it work forever, and a broken seat fails as an ordinary error rather than a
-        # RateLimited, so it never parks - attempts climb and the PR quarantines, which is
-        # precisely what this guard exists to prevent (reviewer-codex, round 1 of #749).
-        # Keep the configured list untouched instead and say so: a probe that rejects
-        # EVERYTHING is far more likely to be broken than a fleet that is entirely broken,
-        # and leaving the list alone keeps this guard incapable of making things worse.
-        log("seat guard: no seat passed its probe - leaving the configured list unchanged. "
-            "Either sudo is broken estate-wide or the probe is; check the drop reasons above.")
+        # EVERY seat failed its probe, and BOTH obvious responses are wrong. Dropping them all
+        # leaves no seat and idles the reviewer silently forever. Keeping them all unchanged -
+        # the first cut of this fix - leaves every seat unparked and selectable, so the worker
+        # immediately hands work to one already established as unreachable; a broken seat raises
+        # an ordinary error rather than RateLimited, so it never parks, attempts climb and the PR
+        # quarantines (reviewer-codex, rounds 1 and 2 of ailab#749).
+        #
+        # So use the mechanism that already exists for "cannot work right now": PARK them. That
+        # is the lossless path - no attempt consumed, queue intact, nothing quarantined - and it
+        # self-heals, because the park lapses and the next refusal re-probes for real.
+        #
+        # HONEST ABOUT WHAT THIS DOES NOT DO: it does not make a broken fleet work. If the
+        # breakage is real and persists, jobs still fail once per park window and a PR still
+        # reaches quarantine eventually - which is correct, because a permanently broken reviewer
+        # should surface rather than idle. What it buys is minutes instead of seconds, every seat
+        # visibly parked in the metrics, and an immediate recovery once sudo is fixed.
+        log(f"seat guard: no seat passed its probe - parking all {len(SEATS)} rather than "
+            f"handing work to one known to be unreachable. Either sudo is broken estate-wide or "
+            f"the probe is; check the drop reasons above. Nothing is quarantined by this.")
+        for s in SEATS:
+            park(None, seat=s["name"])
         return
     _apply_seats(keep)
 
