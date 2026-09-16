@@ -10,6 +10,10 @@ runner:
   # memory footprint under this daemon's systemd MemoryMax (see the unit file).
   capacity: {{ gitea_runner_capacity }}
   timeout: {{ gitea_runner_job_timeout }}
+  # Wait for an in-flight job on shutdown instead of cancelling it. UNSET means 0s in act_runner
+  # 0.6.1, i.e. cancel immediately — see the defaults for why that reds a check with zero log lines.
+  # Keep BELOW the unit's TimeoutStopSec.
+  shutdown_timeout: {{ gitea_runner_shutdown_timeout }}
   # Poll the Gitea instance for jobs. insecure=false: git.chifor.me presents a valid (Cloudflare) cert.
   insecure: false
   fetch_timeout: 5s

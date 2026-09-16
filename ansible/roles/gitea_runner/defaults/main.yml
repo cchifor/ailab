@@ -50,6 +50,19 @@ gitea_runner_capacity: 1 # one heavy job at a time (a platform e2e run is ~32 co
 #   without headroom — host-mode job children live under this daemon's cgroup (MemoryMax below).
 gitea_runner_job_timeout: 3h
 gitea_runner_fetch_interval: 2s
+# How long act_runner waits for an IN-FLIGHT job to finish when it is asked to stop.
+# act_runner 0.6.1 has NO compiled default for this — `generate-config` emits `shutdown_timeout: 0s`,
+# and 0 means the context is already expired when `poller.Shutdown(ctx)` is called, so the running job
+# is CANCELLED IMMEDIATELY. Combined with the unit's KillMode=control-group that kills the whole job
+# process tree. Gitea then marks the task failed (ZOMBIE_TASK_TIMEOUT, 10m default) and the check goes
+# red with ZERO log lines, which reads as a code failure rather than an infrastructure one, and needs a
+# manual rerun — Gitea 1.26 does not reassign or re-queue an abandoned task.
+# Consequence before this key existed: EVERY `systemctl stop`, VM reboot, node maintenance or
+# `just gitea-runners` run silently killed whatever job was in flight.
+# 10m is chosen against measured job duration on this fleet (median 14s, p90 31s, max 127s), so it
+# covers the whole observed distribution with ~5x margin on the worst case while still bounding a
+# shutdown. It must stay BELOW the unit's TimeoutStopSec or systemd SIGKILLs the drain half-done.
+gitea_runner_shutdown_timeout: 10m
 
 # ---- built-in Actions cache server (actions/cache + setup-* caches) ----
 # In HOST mode the job runs on the same host as the daemon, so the cache server on localhost is

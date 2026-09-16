@@ -30,7 +30,11 @@ RestartSec=10
 TimeoutStartSec=10min
 KillMode=control-group
 KillSignal=SIGTERM
-TimeoutStopSec=5min
+# MUST exceed runner.shutdown_timeout in config.yaml ({{ gitea_runner_shutdown_timeout }}), or systemd
+# SIGKILLs the process group while act_runner is still draining its in-flight job — which reintroduces
+# exactly the zero-log-line failure shutdown_timeout exists to prevent. KillMode=control-group above
+# means that SIGKILL takes the job's whole process tree with it.
+TimeoutStopSec=11min
 
 # Resource caps bound the daemon AND its host-mode job children (they run in this unit's cgroup).
 # During co-location the GitHub runner is capped at 10G; keep the SUM under the VM's 24 GiB. See the
