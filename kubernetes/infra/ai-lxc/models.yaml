@@ -6,39 +6,40 @@
 # in docs/runbooks/ai-model-swap.md. Keep the max_input_tokens in kubernetes/apps/apps/ai/litellm.yaml in
 # sync with `ctx`.
 #
-# Topology (2026-08-14):
-#   node2 ONLY    : qwen3.6-35b-a3b, and MANAGED (llama-swap, ttl 1800) since 2026-09-07 -- see below.
-#                   The old "PINNED on BOTH node1+node2 -> LiteLLM load-balances .44+.45" topology is
-#                   GONE twice over: node1's copy was disabled 2026-08-15 (its llama-server.service no
-#                   longer exists at all), and .44 was removed from the `llm` Endpoints on 2026-09-07.
-#   node1 :8082   : qwen3.8-27b ON-DEMAND via its own llama-swap instance (the dense quality tier),
-#                   in the slot gemma-4 used to hold. Runs its own llama.cpp build (b10430) alongside
-#                   the daily driver's b9672 in the same CT. NOT pinned — it costs 31.4 GiB of host
-#                   RAM once loaded (post carve->GTT), which node1 cannot hold permanently. See the
-#                   per-instance build + memory notes on that entry.
-#   node3         : no managed model in this file. llama-swap served ONLY qwen3.5-122b on demand
-#                   until 2026-09-08, when it moved to the cloudlab estate (cloud3) where it is
-#                   fully VRAM-resident; gpt-oss-120b had been RETIRED on 2026-07-08.
-#                   NOTHING ROUTES here any more: the four gates in llm-service.yaml passed on
-#                   2026-09-08 and the retained llm-qwen35 Service was deleted. Removing this entry
-#                   does NOT by itself stop the running unit — it is intent, read only when
-#                   provision.sh is deliberately re-run — so node3's llama-swap is still serving
-#                   .46:8080 as of this commit and is stopped as a manual step alongside the merge.
-#                   Reclaim status of /models-local (the copies of record stay on the QNAP at
-#                   /models/, so both are re-stageable):
-#                     * gpt-oss-120b, 60 GiB  — DELETED 2026-09-08, after verifying all three
-#                       shards byte-for-byte against NFS. Took the volume from 88% to 49% full.
-#                     * qwen3.5-122b, 72 GiB  — STILL STAGED. Goes with the manual unit stop.
-# This replaced the earlier "gpt-oss pinned on node2" layout, which over-subscribed node2 (59 GiB model
-# + 2 runners + 2 dev-workers -> OOM). qwen3.6 (~24 GiB) frees ~35 GiB on node2 for its runners/workers.
+# Topology (2026-09-16):
+#   node1         : NO managed model. It held qwen3.8-27b on :8082 until 2026-09-16; the instance was
+#                   retired because node1 is the thinnest node in the estate (7-day-minimum
+#                   MemAvailable 4.73 GiB) and also carries a Talos control plane, three CI runners
+#                   and two dev-workers. A LAZY load arrives all at once, so the weekly floor is the
+#                   number that matters, not the current value.
+#   node2 :8082   : qwen3.8-27b MANAGED (llama-swap, ttl 1800), ctid 5002 / .45. Replaced
+#                   qwen3.6-35b-a3b, which was removed the same day -- node2 cannot hold both
+#                   (22.38 + 22.45 = 44.83 GiB). Net memory change ~-0.07 GiB.
+#   node3 :8082   : qwen3.8-27b MANAGED (llama-swap, ttl 1800), ctid 5003 / .46. Paid for by retiring
+#                   ci-runner-7 (10.40 GiB measured), which took node3's weekly floor 18.15 -> ~28.6.
+#                   Before that, NO node in the estate could absorb a 22.45 GiB lazy load at its floor.
+#
+# The two instances share ONE LiteLLM model_name (qwen3.8-27b-ailab) as two deployments, routed by
+# least-busy. Note least-busy ties break FIRST-IN-DICT, so under purely SEQUENTIAL traffic the second
+# deployment is rarely selected: treat it as HA + concurrency headroom, not load-spreading.
+#
+# node3 previously served ONLY qwen3.5-122b on demand, until 2026-09-08 when it moved to the cloudlab
+# estate (cloud3) where it is fully VRAM-resident. Reclaim status of node3's /models-local (the copies
+# of record stay on the QNAP at /models/, so both are re-stageable):
+#   * gpt-oss-120b, 60 GiB  — DELETED 2026-09-08, after verifying all three shards byte-for-byte
+#     against NFS. Took the volume from 88% to 49% full.
+#   * qwen3.5-122b, 72 GiB  — STILL STAGED.
+# Removing an entry here does NOT by itself stop a running unit — this file is intent, read only when
+# provision.sh is deliberately re-run — so a retirement is always paired with a manual unit stop.
 #
 # Why node3 is SINGLE-MODEL (2026-07-08): qwen3.5-122b (~71 GiB) and gpt-oss-120b (~59 GiB) cannot
 # co-reside in node3's 96 GiB iGPU LXC, so llama-swap could hold only one at a time. With interactive
 # traffic hitting qwen3.5-122b and the deepagent platform hitting gpt-oss, the two demand streams
 # interleaved and forced a full evict+cold-reload on nearly every crossover (measured ~55-82s PER
-# request, 4/4). Serving a single heavyweight ends the thrash. gpt-oss's LiteLLM model_name is shimmed
-# to the pinned qwen3.6 (kubernetes/apps/apps/ai/litellm.yaml) so callers still work. To bring gpt-oss
-# back you must give up qwen3.5-122b (they cannot share node3) — do NOT re-add it here as a 2nd model.
+# request, 4/4). Serving a single heavyweight ends the thrash. gpt-oss's LiteLLM model_name was shimmed
+# to qwen3.6, which was REMOVED 2026-09-16 -- check kubernetes/apps/apps/ai/litellm.yaml for where that
+# alias points now before assuming a gpt-oss caller still works. node3 now serves qwen3.8-27b, so the
+# single-model constraint binds again: bringing gpt-oss back means giving that up.
 #
 # ttl semantics (llama-swap): 0 = pinned (load once, never idle-unload); >0 = idle seconds before unload
 # (returning GTT to the host). swap:false => direct llama-server.service (no llama-swap). Managed models
@@ -46,48 +47,19 @@
 # (~30-60s) vs ~300 MB/s over NFS; `gguf` = local copy, `stage_from` = NFS source (provision.sh rsyncs it).
 
 models:
-  # ---- Daily driver: PINNED on node1 AND node2 (coding + image/video vision; the always-warm chat path) ----
-  qwen3.6-35b-a3b:
-    nodes: [ai-node2]             # ctid 5002/.45 (local NVMe). node1/ctid 5001 dropped 2026-08-15.
-    alias: qwen3.6-35b-a3b
-    gguf: /models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf         # node1 serves from NFS
-    gguf_node2: /models-local/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf  # node2 serves from local NVMe
-    stage_from: /models/qwen3.6-35b-a3b   # node2 stages the GGUF + mmproj to /models-local once
-    mmproj: /models/qwen3.6-35b-a3b/mmproj-F16.gguf   # node1 (NFS); node2 uses /models-local/.../mmproj-F16.gguf
-    ctx: 262144
-    parallel: 2               # 2 concurrent slots/node (per-slot n_ctx = ctx/parallel = 131072) for interactive
-                              # concurrency; keep litellm max_input_tokens (114688 = 131072 - 16K headroom) in sync
-    cache_type: q8_0          # K + V
-    swap: true                # MANAGED via llama-swap since 2026-09-07 (was: pinned llama-server)
-    ttl: 1800                 # idle-unload after 30 min, matching node1's qwen3.8 and node3's 122b
-    # WHY THIS STOPPED BEING PINNED (2026-09-07). Measured GTT per node while dev-workers were thrashing:
-    #     ai-node1  17 MiB     (llama-swap, idle-unloaded)
-    #     ai-node2  24766 MiB  (this model, pinned, always resident)
-    #     ai-node3  17 MiB     (llama-swap, idle-unloaded)
-    # node2 was the ONLY node holding a model resident and the ONLY node whose dev-workers were
-    # floor-pinned: 118/124 GiB used, above PVE's 80% auto-balloon threshold, so dw2 and dw5 could
-    # never inflate. dw5 had swapped 140 GB with 39.6M major faults. The 24.2 GiB held here was the
-    # difference. Meanwhile the model was IDLE -- its only remaining consumer is litellm-local (the
-    # agentforge workers; the main proxy retired qwen3.6 in #524/#525) and llama-server logged
-    # "all slots are idle" with ~no requests in 24h. Pinning 24 GiB for an idle model is what the
-    # runbook's own time-share rule forbids: a node serves EITHER its heavyweight OR its two workers.
-    # Cost accepted: the first request after an idle period pays a cold load from local NVMe
-    # (~30-60s; that is why this model is staged to /models-local rather than served over NFS).
-    # KEEP parallel: 2 -- litellm max_input_tokens 114688 is derived from ctx/parallel, so changing
-    # one without the other silently breaks context limits.
-    # Sampling + reasoning flags are provision.sh DEFAULTS (not per-model here), applied to both nodes on
-    # re-provision (2026-07-10 web research): Qwen3.6-35B-A3B "general thinking" profile — temp 1.0, top-p
-    # 0.95, top-k 20, min-p 0, presence-penalty 1.5, repeat-penalty 1.0 (llama.cpp generic defaults temp
-    # 0.8/top-k 40/min-p 0.05 hurt Qwen3 quality; top-k/min-p/repeat can't be forwarded by OWUI/LiteLLM so
-    # they MUST be server-side). Plus --reasoning-format deepseek (split <think> -> reasoning_content for
-    # OWUI's Thinking panel) and --flash-attn on (pinned; q8_0 KV needs it). For a coding/precise instance
-    # pass TEMP=0.6 PRESENCE_PENALTY=0.0. Both nodes provisioned with REASONING_BUDGET=3000 — a GENEROUS
-    # runaway-thinking backstop (forces answer after 3000 reasoning tokens). NOTE: the sampling fix above is
-    # what actually TAMED the over-reasoning (a trivial prompt that pre-fix wrote ~6000 think-tokens/110s now
-    # writes ~250; even a 5-part hard prompt stays ~1930, well under 3000) — the budget rarely triggers and
-    # exists only to bound a future pathological loop. Raise/clear REASONING_BUDGET if a hard task gets clipped.
-
-  # ---- Quality tier: ON-DEMAND (llama-swap) as a SECOND instance on node1 :8082 (ctid 5001 / .44) ----
+  # ---- On-prem quality tier: qwen3.8-27b, MANAGED on node2 + node3 (dense, vision-capable) ----
+  # qwen3.6-35b-a3b REMOVED 2026-09-16. It served node2 (.45:8080) and was the estate's only
+  # always-on terminal fallback, holding a measured 22.38 GiB of iGPU GTT. Retired for three
+  # reasons: (1) node2 is the only node that could host a qwen3.8-27b instance, and it cannot
+  # hold both (22.38 + 22.45 = 44.83 GiB); (2) its LiteLLM route declared max_input_tokens
+  # 114688 while the live process served `-c 32768 --parallel 4` = 8192 per slot -- a 14x
+  # over-declaration on the route every overnight failover landed on; (3) it ran a DIRECT
+  # llama-server.service with provision.sh's bare defaults, no --mmproj and no KV quant, so
+  # this file's `swap: true / ttl 1800 / ctx 262144 / parallel 2 / mmproj` entry was false on
+  # every axis. Consumers move to qwen3.8-27b-ailab; see kubernetes/apps/apps/ai/litellm.yaml
+  # and litellm-local.yaml.
+  #
+  # ---- the entry below is qwen3.8-27b, unrelated to the tombstone above ----
   # UN-RETIRED 2026-09-12, at a FULL WINDOW, and renamed `qwen3.8-27b-ailab`.
   #
   # IT WAS NEVER ACTUALLY GONE. The 2026-08-25 retirement (commit 1acd59cc) removed the k8s/LiteLLM
@@ -109,9 +81,13 @@ models:
   #   fixed  = weights 16.69 + mmproj 0.86 + compute ~0.65      = 18.20 GiB
   #   ctx 131072 KV                                              =  4.25 GiB
   #                                                        total = 22.45 GiB
-  # ai-node1 measured 34 GiB available right after ci-runner-8 was destroyed (was 24.99), so this
-  # fits with ~11 GiB of headroom instead of the -1.67 GiB it would have had before. That runner's
-  # retirement is what pays for this; see kubernetes/infra/runners/variables.tf.
+  # SUPERSEDED 2026-09-16 on placement, not on arithmetic. The 22.45 GiB total above is CORRECT --
+  # independently confirmed by measuring a real load/unload on node1 (MemAvailable 24.99 -> 4.73 on
+  # load, rebounding to 47.45 on unload; unload delta 22.46 GiB, agreeing to within 10 MiB).
+  # What was wrong was the node1 headroom claim: the "34 GiB available" was a TRANSIENT measured
+  # seconds after ci-runner-8 was destroyed. node1's quiet-day floor is 22.7-23.8 GiB and its
+  # 7-day minimum is 4.73, so the load did NOT fit with ~11 GiB spare -- it fit only at the instant
+  # it was measured. This is why the instance moved to node2 + node3; see the header topology.
   #
   # parallel: 2, NOT 1, and the reason is routing rather than throughput. `ctx` is TOTAL KV shared
   # across slots, so per-slot n_ctx = 131072/2 = 65536 and litellm max_input_tokens = 65536 - 16K
@@ -130,19 +106,72 @@ models:
   # through here via EXTRA_ARGS because provision.sh has no SPEC_* knob. UNMEASURED on this estate:
   # the 11.49 tok/s figure in the runbook predates these flags and describes a different config.
   # Benchmark it before quoting a number.
+  # TWO INSTANCES since 2026-09-16, on node2 and node3. node1 LOSES its instance.
+  #
+  # WHY NOT node1. A lazy load arrives ALL AT ONCE, so the test is each node's WORST case, not its
+  # current value. Measured 7-day-minimum MemAvailable: node1 4.73, node2 11.70, node3 18.15 GiB
+  # against this model's 22.45. node1 is the thinnest node in the estate and also carries a Talos
+  # control plane; a lazy load there at a bad moment lands in a 4.73 GiB hole. The "34 GiB available"
+  # figure the previous revision relied on was a TRANSIENT measured seconds after ci-runner-8 was
+  # destroyed -- node1's quiet-day floor is 22.7-23.8 GiB and its weekly floor is 4.73.
+  #
+  # WHAT PAID FOR EACH HOME:
+  #   node2 -- retiring qwen3.6-35b-a3b, which held a measured 22.38 GiB of iGPU GTT (Strix Halo
+  #            carves GTT from system RAM). Net swap: 22.38 out, 22.45 in, -0.07 GiB. node2 keeps the
+  #            resource profile it had, with a newer model and an honest context declaration.
+  #   node3 -- retiring ci-runner-7 (measured 10.40 GiB RSS), taking node3's weekly floor from
+  #            18.15 to ~28.6 GiB: a 22.45 GiB load clears with +6.1 GiB margin. See
+  #            kubernetes/infra/runners/variables.tf.
+  #
+  # BOTH STAY LAZY (ttl 1800). Pinning either (ttl 0) costs 22.45 GiB permanently and NO node in the
+  # estate can hold that at its weekly floor without displacing something. llama-swap keeps :8082
+  # listening either way, so the ENDPOINT is always-on and a failover always lands somewhere; the
+  # only cost is a cold load, bounded by healthCheckTimeout 900 and litellm request_timeout 900.
   qwen3.8-27b:
-    nodes: [ai-node1]             # ctid 5001 / .44, second instance on :8082
+    nodes: [ai-node2, ai-node3]   # ctid 5002 / .45 and ctid 5003 / .46, both on :8082
     instance: qwen38              # INSTANCE=qwen38 -> its own unit + /etc/llama-swap-qwen38/
-    port: 8082                    # the daily driver's :8080 is untouched (it does not exist on node1)
+    port: 8082                    # node2's daily driver :8080 is retired with qwen3.6; node3 has none
     alias: qwen3.8-27b-ailab      # -ailab distinguishes this on-prem route from the -cloud ones
-    build: b10456                 # per-instance build, installed alongside; supports --spec-type
+    build: b10456                 # per-instance build, installed alongside; supports --spec-type.
+    # ROLLED BACK from b10573 on 2026-09-16, and this COSTS THE WebP DECODE PATH -- read on before
+    # bumping it again. b10573 is the build that gained WebP (PR #27520, merged 2026-08-21) via an
+    # ffmpeg subprocess; b10456 has none, VERIFIED on the boxes (libmtmd.so in b9672/b10430/b10456
+    # contains ZERO "webp" strings, b10573's contains two). So on THIS route an agent that renders an
+    # image and reads it back as WebP still gets `Failed to load image or audio file`. The
+    # qwen3.8-flash-next-cloud route is UNAFFECTED: cloud3 runs its own newer build and got ffmpeg
+    # installed the same day. ensure_ffmpeg in provision.sh is deliberately KEPT -- it is correct, it
+    # is idempotent, and it means a future re-bump needs a one-line change here and nothing else.
+    #
+    # WHY THE ROLLBACK. A b10573 load on node3 WEDGED THE iGPU. The estate's UMA carve is 512 MiB of
+    # VRAM on all three nodes (measured: mem_info_vram_total 536870912 on node1, node2 and node3
+    # alike) and that budget holds the page tables for the GTT mapping, not the weights. The stuck
+    # process sat at 487 MiB of VRAM having mapped only 20.63 GiB of GTT, then blocked forever in
+    # drm_suballoc_new -- waiting on a fence that could never arrive, because every ring was already
+    # drained (signaled == emitted on all of them, sdma0 included). amdgpu later confirmed it:
+    # "device wedged, but recovered through reset".
+    #
+    # THE CONTROL. node1 served the SAME model on b10456 through the live route during the incident:
+    # full load in 31 s, correct answer with reasoning_content intact, peaking at 392 MiB of VRAM for
+    # a COMPLETE 23.58 GiB GTT mapping. More model, less VRAM. That is the whole case for this pin.
+    #
+    # WHAT IS AND IS NOT PROVEN. PROVEN: b10456 fits, with ~120 MiB of headroom under the 512 MiB
+    # ceiling. NOT PROVEN: that b10573 is inherently heavier. Its 487 MiB was read mid-wedge, after
+    # earlier failed attempts on that node, so fragmentation is not excluded. Do not write "b10573
+    # uses more VRAM" into a runbook on this evidence -- the honest statement is that b10456 is
+    # measured-good and b10573 is unproven and coincided with the failure. A clean A/B is cheap once
+    # node3 is rebooted: provision each build in turn and read mem_info_vram_used at full load.
+    #
+    # THE REAL CEILING IS THE BIOS. 120 MiB of headroom on a 512 MiB carve is thin for any build.
+    # Raising the UMA frame-buffer size in BIOS is the durable fix and would make the WebP bump safe
+    # again; it needs physical/IPMI access and a reboot per node, so it is a maintenance-window
+    # decision, not something to attempt from here.
     gguf: /models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf   # NFS; NOT Q6_K -- see the runbook
-    mmproj: /models/qwen3.8-27b/mmproj-F16.gguf             # vision; node1 DOES pass it, unlike node2
+    mmproj: /models/qwen3.8-27b/mmproj-F16.gguf             # vision; BOTH instances pass it
     ctx: 131072               # TOTAL KV across slots; per-slot = ctx/parallel = 65536
     parallel: 2               # keep litellm max_input_tokens (49152 = 65536 - 16K) in sync
     cache_type: q8_0          # K + V
     swap: true                # llama-swap, so it idle-unloads rather than holding 22.45 GiB
-    ttl: 1800                 # idle-unload after 30 min -- REQUIRED, this node cannot hold it pinned
+    ttl: 1800                 # idle-unload after 30 min -- LAZY BY DESIGN, see the block above
     # PRESENCE_PENALTY=0.0 is REQUIRED (provision.sh defaults to 1.5, Qwen3.8's INSTRUCT profile;
     # this runs in thinking mode, whose card specifies 0.0). REASONING_BUDGET=16384 matches the live
     # unit, not the runbook's stale 3000.

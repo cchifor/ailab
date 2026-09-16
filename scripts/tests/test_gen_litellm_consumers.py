@@ -939,5 +939,75 @@ class LineEndings(unittest.TestCase):
         self.assertIn(SEED_REL, drift[0])
 
 
+class DuplicateModelNameTests(unittest.TestCase):
+    """Several DEPLOYMENTS of one model_name -> exactly ONE consumer row, and a LOUD failure if the
+    deployments disagree about capability.
+
+    This is how LiteLLM expresses a router-balanced pool (qwen3.8-27b-ailab runs on ai-node2 and
+    ai-node3). Before these tests the generator folded duplicates FIRST-WINS and silently: the
+    consumer-visible vision flag came from whichever entry happened to be first, so dropping
+    supports_vision from the first of two identical deployments removed dsh's image-input row with
+    nothing failing and no diff in either consumer file.
+    """
+
+    DUP = '      - model_name: {name}\n        litellm_params:\n          model: openai/{name}\n          api_base: {api_base}\n        model_info: {{ supports_vision: {vision} }}\n'
+
+    def _dup_block(self, name, api_base, vision):
+        return self.DUP.format(name=name, api_base=api_base, vision=str(vision).lower())
+
+    def _with_dup(self, sb, name, vision):
+        text = sb.read(LITELLM_REL)
+        anchor = "    litellm_settings:"
+        self.assertIn(anchor, text, "fixture layout changed")
+        block = self._dup_block(name, "http://10.0.0.99:8080/v1", vision)
+        return text.replace(anchor, block + anchor, 1)
+
+    def test_matching_duplicate_emits_one_row_not_two(self):
+        with Sandbox() as sb:
+            sb.write(LITELLM_REL, self._with_dup(sb, "alpha-cloud", True))
+            proc = sb.run("--write")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            seed, webui = sb.read(SEED_REL), sb.read(OPEN_WEBUI_REL)
+        self.assertEqual(seed.count("- id: alpha-cloud"), 1, "duplicate deployment emitted twice")
+        self.assertEqual(webui.count('"alpha-cloud"'), 1)
+        self.assertIn("          input: [text, image]", seed)
+
+    def test_matching_duplicate_leaves_consumers_byte_identical(self):
+        # Adding a second deployment is a ROUTING change, not a capability change: the consumers
+        # must not move at all, or every such change would churn two generated files.
+        with Sandbox() as sb:
+            sb.run("--write")
+            before_seed, before_webui = sb.read(SEED_REL), sb.read(OPEN_WEBUI_REL)
+            sb.write(LITELLM_REL, self._with_dup(sb, "alpha-cloud", True))
+            proc = sb.run("--write")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(sb.read(SEED_REL), before_seed)
+            self.assertEqual(sb.read(OPEN_WEBUI_REL), before_webui)
+
+    def test_mismatched_vision_across_deployments_is_a_loud_error(self):
+        # alpha-cloud is vision:true in the fixture; a second deployment saying false must NOT be
+        # silently dropped in favour of the first.
+        with Sandbox() as sb:
+            sb.write(LITELLM_REL, self._with_dup(sb, "alpha-cloud", False))
+            proc = sb.run("--check")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("alpha-cloud", proc.stdout)
+        self.assertIn("supports_vision", proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_mismatch_is_caught_regardless_of_which_entry_is_first(self):
+        # The error must not depend on ordering -- that would reintroduce the first-wins bug in the
+        # validation itself.
+        with Sandbox() as sb:
+            text = sb.read(LITELLM_REL)
+            head = "      - model_name: alpha-cloud"
+            self.assertIn(head, text, "fixture layout changed")
+            dup = self._dup_block("alpha-cloud", "http://10.0.0.99:8080/v1", False)
+            sb.write(LITELLM_REL, text.replace(head, dup + head, 1))
+            proc = sb.run("--check")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("alpha-cloud", proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
+
 if __name__ == "__main__":
     unittest.main()

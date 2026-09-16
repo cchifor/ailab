@@ -46,7 +46,8 @@ data:
       # Open WebUI's TASK_MODEL_EXTERNAL pointed here and was repointed in the same change --
       # see open-webui.yaml. Leaving it would have made every task-model call 404.
       # gpt-oss-120b DELETED 2026-09-07. It had been retired as a local model on 2026-07-08 and kept
-      # as a NAME SHIMMED to qwen3.6-35b-a3b so old callers would not break. That shim is worse than a
+      # as a NAME SHIMMED to qwen3.6-35b-a3b so old callers would not break (qwen3.6 itself was removed
+      # 2026-09-16; check where that alias points now). That shim is worse than a
       # 404: a caller asking for gpt-oss-120b silently received a different model, with nothing in the
       # response saying so. The retirement note already offered "delete this entry to hard-retire the
       # name" as the alternative; this takes it. Callers now get an explicit model-not-found instead of
@@ -636,7 +637,7 @@ data:
       # were down at the time of writing. So the estate had no Qwen3.8 route at all roughly two-thirds
       # of the time. This is the on-prem one, on ai-node1's iGPU, which is always up.
       #
-      # `-ailab` rather than `-local`: `-local` is already taken by qwen3.6-35b-a3b-local below and
+      # `-ailab` rather than `-local`: `-local` was taken by qwen3.6-35b-a3b-local (removed 2026-09-16) and
       # means "the always-on terminal fallback". This is a different thing -- a quality tier on a
       # different node, different engine build and different checkpoint -- so it gets the estate name.
       # The suffix is carried end to end: llama-server is launched with `-a qwen3.8-27b-ailab`
@@ -653,7 +654,7 @@ data:
       # max_input_tokens 49152 = per-slot n_ctx 65536 (ctx 131072 / parallel 2) less 16K output and
       # reasoning headroom. `ctx` is TOTAL KV shared across slots in llama.cpp, so changing either
       # `ctx` or `parallel` in kubernetes/infra/ai-lxc/models.yaml without changing this number
-      # silently breaks the context limit -- that is exactly how qwen3.6-35b-a3b-local below ended up
+      # silently breaks the context limit -- that is exactly how qwen3.6-35b-a3b-local (removed 2026-09-16) ended up
       # advertising 114688 against a host serving 8192.
       #
       # supports_vision: the unit DOES pass --mmproj (unlike node2's, which is why that route declares
@@ -662,40 +663,49 @@ data:
       - model_name: qwen3.8-27b-ailab
         litellm_params:
           model: openai/qwen3.8-27b-ailab
-          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1
+          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1   # ai-llm-2 / node2 / .45
+          api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+        model_info: { supports_vision: true, max_input_tokens: 49152 }
+      # SECOND DEPLOYMENT of the SAME model_name, added 2026-09-16 -> the router load-balances the
+      # two with routing_strategy least-busy, retries the other on a failed call, and parks a bad one
+      # for cooldown_time after allowed_fails. Paid for by retiring ci-runner-7 from ai-node3.
+      #
+      # model_info MUST stay BYTE-IDENTICAL to the entry above. scripts/gen-litellm-consumers.py
+      # de-duplicates on model_name FIRST-WINS, so the FIRST entry's model_info alone decides what the
+      # consumers see. If these two disagreed on supports_vision, dsh would SILENTLY lose
+      # `input: [text, image]` on this route with nothing failing. There is a regression test for this
+      # in scripts/tests/test_gen_litellm_consumers.py -- do not "tidy" one of these and not the other.
+      #
+      # least-busy breaks TIES first-in-dict, so under purely SEQUENTIAL traffic (a dsh agent turn, a
+      # single OWUI chat) the second deployment is rarely selected. Treat it as HA + concurrency
+      # headroom, not as load-spreading: its value is that one node going down or going slow no longer
+      # takes the on-prem qwen3.8 route with it.
+      - model_name: qwen3.8-27b-ailab
+        litellm_params:
+          model: openai/qwen3.8-27b-ailab
+          api_base: http://llm-qwen38-node3.ai.svc.cluster.local:8082/v1   # ai-llm-3 / node3 / .46
           api_key: "sk-noauth"
           temperature: 1.0
           top_p: 0.95
         model_info: { supports_vision: true, max_input_tokens: 49152 }
       # --------------------------------------------------------------- always-on fallback route
-      # Added 2026-09-09. Both cloud routes above live on cloudlab hosts that POWER OFF NIGHTLY, so
-      # neither can back the other after hours -- .26 shares .28's outage window by design. node2 is
-      # an on-prem LXC that is always up, so it is the only honest terminal fallback in the estate.
+      # qwen3.6-35b-a3b-local REMOVED 2026-09-16. Its role -- the estate's only always-on on-prem
+      # terminal fallback -- is now served by qwen3.8-27b-ailab above, which since this change runs as
+      # TWO deployments (node2 + node3) instead of one.
       #
-      # Registered here (it already exists in litellm-local for the agentforge workers) because
-      # fallbacks resolve against THIS proxy's model_list -- a name this router cannot see is not a
-      # fallback. Same family, different engine: llama.cpp, not vLLM, so it deliberately carries NONE
-      # of :18020's vLLM-only sampling (chat_template_kwargs / enable_thinking would 400 here).
+      # It had to go: it held a measured 22.38 GiB of iGPU GTT on node2, and node2 is the only node
+      # that could host a qwen3.8-27b instance (22.38 + 22.45 = 44.83 GiB will not fit). It was also
+      # lying about its capacity -- it declared max_input_tokens 114688 while the live process served
+      # `-c 32768 --parallel 4`, i.e. 8192 tokens per slot. A 14x over-declaration, on the one route
+      # every overnight failover landed on.
       #
-      # It is smaller and, with node2's ttl idle-unload, a first request may pay a cold model load.
-      # That is the correct trade against the alternative, which on 2026-09-08 was a 500 in the
-      # user's chat window with no second route to try.
-      - model_name: qwen3.6-35b-a3b-local
-        litellm_params:
-          model: openai/qwen3.6-35b-a3b
-          api_base: http://llm-node2.ai.svc.cluster.local:8080/v1
-          api_key: "sk-noauth"
-        # supports_vision is FALSE, measured against the live endpoint rather than copied:
-        #   POST /v1/chat/completions with an image_url part ->
-        #     500 "image input is not supported - hint: ... you may need to provide the mmproj"
-        # mmproj-F16.gguf IS present in /models/qwen3.6-35b-a3b/, but node2's llama-server ExecStart
-        # does not pass --mmproj, so the projector is never loaded and the model is text-only at
-        # runtime. Advertising vision here would send any image request that fails over from the
-        # vision-capable cloud route straight into a 500 -- i.e. the fallback would silently not
-        # cover multimodal traffic, which is the exact class of outage this chain exists to close.
-        # (reviewer-claude on #606.)
-        # hidden: the always-on fallback route is reachable by name and as a fallback target, but excluded from dsh and from Open WebUI's Local group (Open WebUI's second connection still lists it under External).
-        model_info: { supports_vision: false, max_input_tokens: 114688, hidden: true }
+      # NOTE that over-declaration was never ENFORCED: enable_pre_call_checks is not set in
+      # router_settings and defaults to False, so LiteLLM does not filter deployments on context
+      # length at all in this estate. An over-length failover simply reached llama.cpp and failed
+      # there. The comment near the top of this file claiming a "clean ContextWindowExceededError"
+      # describes a configuration we do not run.
     litellm_settings:
       drop_params: true
       # 900s to cover a llama-swap COLD START: the first request to an idle-unloaded heavyweight
@@ -779,9 +789,22 @@ data:
       # Keep the chain -- it is correct for what it covers, and it is still the only thing standing
       # between a user and a 500 when the unit is actually down. Just do not mistake it for health
       # monitoring of the model's OUTPUT.
+      # REWIRED 2026-09-16 with the qwen3.6 removal.
+      #
+      # qwen3.8-27b-vllm-cloud keeps a terminal on-prem hop, now qwen3.8-27b-ailab. Both cloud routes
+      # live on cloudlab hosts that POWER OFF NIGHTLY (measured `up` over 7d: 0.34-0.38), so without an
+      # on-prem terminal this route has no backstop for roughly two-thirds of the day.
+      #
+      # qwen3.8-27b-vllm-fast-cloud deliberately gets NO fallbacks entry at all. It is Open WebUI's
+      # TASK_MODEL_EXTERNAL (chat titles, tags), and its `max_tokens: 512` / `enable_thinking: false`
+      # are DEPLOYMENT-scoped -- they are NOT carried across a fallback hop. Pointing it at the local
+      # engine would turn every chat-title call into an uncapped THINKING request on a 2-slot
+      # 9.3 tok/s box, while the real chat route is failing over to that same box. That is a self-DoS,
+      # not a fallback. An absent entry is also strictly more honest than a dangling one: LiteLLM does
+      # not validate that fallback targets exist, and run_async_fallback re-raises the LAST error, so a
+      # dangling name would MASK the true upstream failure with "no healthy deployment".
       fallbacks:
-        - qwen3.8-27b-vllm-cloud: ["qwen3.5-122b-cloud", "qwen3.6-35b-a3b-local"]
-        - qwen3.8-27b-vllm-fast-cloud: ["qwen3.6-35b-a3b-local"]
+        - qwen3.8-27b-vllm-cloud: ["qwen3.5-122b-cloud", "qwen3.8-27b-ailab"]
       num_retries: 2
       allowed_fails: 2
       cooldown_time: 30
@@ -861,7 +884,7 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "6c502d78dbea"
+        checksum/config: "4f447bf85eca"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

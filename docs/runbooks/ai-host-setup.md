@@ -1,8 +1,17 @@
 # Runbook — AI LLM appliance (Strix Halo iGPU, llama.cpp Vulkan)
 
-How the per-node **`ai-llm`** LXCs are built and operated. They serve an OpenAI-compatible API on
-`:8080` from `llama.cpp` (Vulkan/RADV) on each Bosgame M5's Radeon 8060S iGPU (gfx1151), models from
-the shared QNAP NFS store. Surfaced in Kubernetes as `llm.ai.svc.cluster.local:8080`.
+How the per-node **`ai-llm`** LXCs are built and operated. They serve an OpenAI-compatible API from
+`llama.cpp` (Vulkan/RADV) on each Bosgame M5's Radeon 8060S iGPU (gfx1151), models from the shared
+QNAP NFS store.
+
+> **Ports and Services changed 2026-09-16 — `llm.ai.svc.cluster.local:8080` NO LONGER EXISTS.** The
+> `llm` and `llm-node2` Services were removed with `qwen3.6-35b-a3b`, the last direct-mode model. The
+> live surface is now **`:8082` via llama-swap** on node2 (`llm-qwen38` → .45) and node3
+> (`llm-qwen38-node3` → .46), both carrying the single LiteLLM route `qwen3.8-27b-ailab`. Two
+> consequences when following this runbook: every `:8080` URL below is historical unless you have
+> deliberately provisioned a direct-mode instance, and those endpoints are **lazy** — llama-swap holds
+> the port open and loads on first request, so a slow first call is normal and is not a fault.
+> `kubernetes/infra/ai-lxc/models.yaml` is the current topology; this runbook is the procedure.
 
 - **IaC:** OpenTofu module `kubernetes/infra/ai-lxc/` (3 privileged LXCs, vmid 5001–5003, IP **.44–.46**),
   provisioning scripts in the same dir, k8s wiring in `kubernetes/apps/apps/ai/`.
@@ -358,12 +367,20 @@ daily driver is untouched throughout.
 
 ## Verify
 ```bash
-curl http://192.168.0.44:8080/health                      # {"status":"ok"}  (node1 LXC; .45=node2, .46=node3)
-curl http://192.168.0.44:8080/v1/models                   # lists the served model
+# Live surface since 2026-09-16 (llama-swap, :8082, LAZY — see the note at the top of this file).
+curl http://192.168.0.45:8082/v1/models                   # node2; .46 = node3. Answers WITHOUT loading:
+                                                          # status.value is "unloaded" until first use.
+curl http://192.168.0.44:8080/health                      # only if a DIRECT-mode instance is provisioned
 # decode rate: POST /v1/chat/completions, read .timings.predicted_per_second
+# First call to a :8082 endpoint LOADS the model (~31 s measured, node1/b10456) — budget for it.
 kubectl --kubeconfig kubernetes/infra/_out/kubeconfig -n ai get svc,endpoints,servicemonitor
-# in-cluster: wget -qO- http://llm.ai.svc.cluster.local:8080/v1/models
+# in-cluster: wget -qO- http://llm-qwen38.ai.svc.cluster.local:8082/v1/models
+#             wget -qO- http://llm-qwen38-node3.ai.svc.cluster.local:8082/v1/models
 ```
+> **Do NOT add these :8082 Services to a ServiceMonitor.** They are labelled
+> `app.kubernetes.io/component: llama-swap` on purpose: the engines are lazy, so a direct `/metrics`
+> scrape of an unloaded port fires `TargetDown` forever. Their metrics reach Prometheus through the
+> node_exporter textfile path (`llamacpp-metrics.timer`), collected on `:9100`.
 Grafana/Prometheus: `llamacpp:*` (throughput, KV, queue depth) + `amdgpu_*` (busy %, VRAM/GTT used,
 temp, power, sclk) per node.
 

@@ -40,16 +40,28 @@ metadata:
   namespace: ai
 data:
   # Declarative per-org virtual-key spec. models MUST be a subset of litellm-local's local-only model_list
-  # (qwen3.6-35b-a3b) — NEVER a cloud model. qwen3.5-122b was dropped 2026-09-08 when it moved to
+  # (qwen3.8-27b-ailab) — NEVER a cloud model. qwen3.5-122b was dropped 2026-09-08 when it moved to
   # the cloudlab estate, which powers off nightly; see litellm-local.yaml for why it was not repointed.
   # max_budget is in synthetic credit units (1 ~= 1M tokens; see litellm-local.yaml). key_env names
   # the VKEY_ var in the litellm-vkeys Secret.
+  #
+  # RETARGETED 2026-09-16, with qwen3.6-35b-a3b's removal. That was litellm-local's ONLY model, so this
+  # whitelist named a route that no longer resolves. NOTHING WAS LIVE-BROKEN: this file is deliberately
+  # absent from kustomization.yaml (operator-run, not Flux-applied), the seeding Job has never run, the
+  # `litellm-vkeys` Secret does not exist in the cluster, and `example` is a template whose key value is
+  # the 40-zero PLACEHOLDER that seed.py skips by design. The fix matters anyway: this ConfigMap is the
+  # declarative source of truth a real tenant gets copied from, and a whitelist naming a dead model would
+  # have produced a key that authenticates fine and then fails every request.
+  #
+  # The whitelist entry is a LiteLLM model_name, not a backend: qwen3.8-27b-ailab is ONE name carrying TWO
+  # deployments (node2 .45 + node3 .46), so a tenant key whitelisting it reaches both and inherits the
+  # router's failover. Whitelisting a backend Service would be wrong here and is not possible anyway.
   orgs.json: |
     [
       {
         "org": "example",
         "key_env": "VKEY_EXAMPLE",
-        "models": ["qwen3.6-35b-a3b"],
+        "models": ["qwen3.8-27b-ailab"],
         "max_budget": 20,
         "budget_duration": "30d",
         "rpm_limit": 60,
