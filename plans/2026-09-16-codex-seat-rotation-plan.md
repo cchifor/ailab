@@ -30,9 +30,26 @@ Therefore a second seat is only worth buying if reviewbot can *use* it when the 
 Rotation is not an optimisation on top of the extra licences — it is the thing that makes them
 do anything at all.
 
-Capacity with three seats: **~510–600 calls/day**, ~2.5–3× present demand. At the observed
-growth that is 5–8 weeks of headroom, not a permanent answer. The durable lever remains review
-volume — most cheaply the 2.4 review rounds per PR, not the repo allowlist.
+Capacity with three seats: **~510–600 calls/day**, ~2.5–3× present demand.
+
+**How long that lasts — corrected.** An earlier draft said 5–8 weeks; that does not follow from
+the growth rate this document itself cites, and both reviewers caught it (round 1 of ailab#742's
+successor, #743). Working it properly from 210/day against a 510–600/day ceiling:
+
+* **Linear** (+124 calls/day per week, the observed 86 → 210 step): reaches 510 in ~2.4 weeks,
+  600 in ~3.1 weeks.
+* **Exponential** (×2.44 per week, the same two points read as a ratio): reaches 510 in ~1.0
+  weeks, 600 in ~1.2 weeks.
+
+So the honest figure is **1–3 weeks**, not 5–8. Worth stating plainly because it changes what
+this project is: three seats buy time to fix review volume, they are not themselves the fix.
+
+And a caveat on all of the above — this is **two data points a week apart**. Sep 9–15 also
+contains 167, 101, 93 and 125, which is not a smooth curve, so neither model is well supported.
+Treat 1–3 weeks as an order of magnitude and re-measure rather than trusting the extrapolation.
+
+The durable lever remains review volume — most cheaply the 2.4 review rounds per PR, not the
+repo allowlist.
 
 ## Decisions
 
@@ -63,6 +80,13 @@ pr_reviewer_llm_seats:
   - { name: b, sudo_user: codexrun2 }
   - { name: c, sudo_user: codexrun3 }
 ```
+
+**On the two spellings** (reviewer-claude, round 1): `pr_reviewer_llm_seats` is the Ansible
+variable; `llm_seats` is the key it renders into `/etc/reviewbot/config.json`, which is what
+reviewbot.py reads. That is the existing convention for every option here —
+`pr_reviewer_llm_model` → `llm_model`, `pr_reviewer_llm_timeout_s` → `llm_timeout_s` — not an
+inconsistency. Prose and tests below use the config.json spelling because that is the name in
+the code.
 
 `llm_seats: []` falls back to the current `llm_sudo_user`, so the claude persona and any
 single-seat host are untouched by this change and Phase 1 deploys as a no-op.
@@ -167,6 +191,17 @@ invalidates every copy but the last to refresh — that is the 2026-09-10 outage
   below pin. Deploy and confirm a no-op.
 * **Phase 2 — seats b and c.** Provision the two licences, create `codexrun2`/`codexrun3`,
   `codex login` each, project into OpenBao, add to `reviewer-2` host_vars, restart.
+
+  **One seat is already provisioned (2026-09-16).** Use `codex login --device-auth` — the headless
+  flow, which the CLI mentions only when a browser login fails and which `codex login --help` does
+  not list at 0.153.4. It prints a URL and a one-time code, then polls. The resulting credential is
+  parked at `/home/c4/.codex-seat3/.codex/auth.json` on reviewer-2 (0700/0600), deliberately NOT in
+  `codexrun`'s HOME so the credential currently serving reviews was never touched; it moves to its
+  own seat user as part of this phase. Verified live: `account_id`
+  `9c8a8cfb-1147-4e67-8131-4f91174e5ee7`, **distinct** from the in-use
+  `cfdea639-03a7-4690-9a8b-eaa4566d5063` — which is the precondition the uniqueness guard above
+  exists to enforce — `auth_mode=chatgpt`, and a `codex exec -m gpt-6-astra` probe returned `OK`
+  for 3,045 tokens.
 * **Phase 3 — alerts.** Re-measure and land the three rules above against real per-seat series.
 * **Rollback at any point:** empty `pr_reviewer_llm_seats` and restart. Single-seat behaviour is
   the same code path, not a separate one.
@@ -183,18 +218,30 @@ already pins the single-seat contract:
 5. A refusal with less than `llm_seat_switch_min_s` remaining defers instead of rotating.
 6. Sticky: with all seats healthy, consecutive jobs stay on the same seat (no round-robin).
 7. `llm_seats: []` reproduces today's single-seat behaviour exactly, including the park path.
-8. Seat state survives a restart the way `RATE_LIMITED_UNTIL` does not — in-memory is acceptable
-   here (a restart re-probes one seat and re-parks it, costing one refused call), but the test
-   records that choice so it is deliberate rather than accidental.
+8. **Seat park state does NOT survive a restart, deliberately.** It stays in memory, exactly as
+   `RATE_LIMITED_UNTIL` does today: a restart forgets which seats were spent, re-probes the first
+   one and re-parks it, costing one refused call per spent seat. That is cheap and self-correcting,
+   and persisting it would add a durability problem for no gain. The test asserts the forgetting so
+   the choice is recorded rather than accidental. (An earlier draft of this line said the opposite
+   in its first clause — reviewer-claude, round 1.)
 
 ## Risks
 
-* **Provider terms.** Three licensed seats serving one estate is ordinary; rotating specifically
-  to exceed a per-account quota is a question for the provider's terms and the operator's to
-  confirm. Flagged, not resolved here.
+* **Provider terms — RAISED, AND ACCEPTED BY THE OPERATOR.** This is not left open, so it should
+  not be re-raised on every review of this file. OpenAI's Terms of Use prohibit "circumventing any
+  rate limits or restrictions", and the Business terms prohibit "violate or circumvent Usage
+  Limits **or otherwise configure the Services to avoid Usage Limits**". Owning three licences is
+  not what that clause is about; the exposure is narrower and specific to this design — rotation
+  *triggers on a usage-limit refusal and retries the same work on another account*, which is close
+  to a literal description of the prohibited behaviour. That was put to the operator on 2026-09-16
+  with the clause quoted, alongside the alternatives (no rotation; manual seat switch only), and
+  the direction was to build it as planned. Recorded here as an accepted, operator-acknowledged
+  risk rather than an unexamined one.
 * **The invariant.** The refactor touches the one path that makes an exhaustion recoverable.
   Tests 1, 2 and 7 are the gate; a regression here converts a self-healing outage back into a
   quarantine storm.
 * **Sticky concentrates load on seat A**, which will be the seat that exhausts. That is intended
   (it preserves stagger), but per-seat metrics are needed to tell it apart from a broken seat.
-* **Headroom is weeks, not permanent.** 2.5–3× at a growth rate that did 2.4× in a week.
+* **Headroom is 1–3 weeks, not permanent** — see the corrected arithmetic in "What changed": 2.5–3×
+  capacity against a rate that did 2.4× in a single week buys very little time, and the two-point
+  extrapolation it rests on is itself weak. Re-measure rather than trust it.
