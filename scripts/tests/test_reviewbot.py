@@ -2517,5 +2517,186 @@ class MergeBlockedVisibilityTest(unittest.TestCase):
         self.assertEqual(2.0, exported['reviewbot_llm_fallback_used_total{persona="test"}'])
 
 
+class RateLimitNoteDetailTest(unittest.TestCase):
+    """The park note must carry the UPSTREAM refusal, not just our own wait.
+
+    2026-09-15: the codex persona parked 46 times over 11h36m holding 7 PRs, and the only
+    record of why was the fixed string `waiting until ~15m` — `journalctl -u reviewbot |
+    grep -E 'usage limit|credits|weekly'` over the whole episode returns nothing. A
+    15-minute blip and a spent weekly window render identically, so telling them apart
+    needed a live probe against the CLI. The PREVIOUS episode's text survived only because
+    the pre-park code billed it as an ordinary failure and stored it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_the_upstream_text_reaches_the_note(self):
+        note = self.m.fail_note(self.m.RateLimited(REAL_LIMIT_TEXT, None))
+        self.assertIn("upstream:", note)
+        self.assertIn("session limit", note)
+
+    def test_the_prefix_is_unchanged_so_the_note_prefix_queries_still_match(self):
+        """enqueue(), worker() and retire_closed_quarantines() match jobs.note by PREFIX
+        (`NOT LIKE 'ambiguous POST%'`) and --requeue uses .startswith, so the leading text is
+        load-bearing: prepending the upstream detail would reclassify the row."""
+        note = self.m.fail_note(self.m.RateLimited(REAL_LIMIT_TEXT, None))
+        self.assertTrue(note.startswith("subscription rate-limited, waiting until "))
+        self.assertFalse(note.startswith("ambiguous POST"))
+
+    def test_the_park_duration_wording_is_preserved(self):
+        """`~15m` is DEFAULT_PARK_S, NOT a parsed reset — it is what says the window is
+        UNKNOWN rather than known and close."""
+        note = self.m.fail_note(self.m.RateLimited(REAL_LIMIT_TEXT, None))
+        self.assertIn(f"~{self.m.DEFAULT_PARK_S // 60}m", note)
+        self.assertIn("no attempt consumed", note)
+
+    def test_a_parsed_reset_still_renders_its_wall_clock_time(self):
+        at = real_time.time() + 3600
+        note = self.m.fail_note(self.m.RateLimited(REAL_LIMIT_TEXT, at))
+        self.assertIn(real_time.strftime("%H:%M UTC", real_time.gmtime(at)), note)
+
+    def test_the_detail_is_bounded_and_single_line(self):
+        """It goes to the journal AND to jobs.note. Unbounded multi-line stderr is how the
+        journal filled with argv dumps before fail_note existed."""
+        note = self.m.fail_note(self.m.RateLimited("x\ny\n" + "z" * 5000, None))
+        self.assertNotIn("\n", note)
+        self.assertLess(len(note), 320)
+
+    def test_it_still_consumes_no_attempt(self):
+        """The note is telemetry; it must not disturb the policy it describes."""
+        e = self.m.RateLimited(REAL_LIMIT_TEXT, None)
+        self.assertEqual(("retry", 4, 1), self.m.next_failure_state(e, 4, 1)[:3])
+
+
+class ModelPinStampTest(unittest.TestCase):
+    """llm_primary_failed_total / llm_fallback_used_total describe exactly ONE pin.
+
+    2026-09-16: reviewer-1's textfile still read 363 == 363 — the signature of a primary
+    failing every single call — 23 h and 103 clean reviews after the repoint that retired the
+    exhausted `claude-fable-5` pin which actually produced them. ReviewbotPrimaryModelDown
+    reads increase()[6h] and was never fooled; the human reading the raw textfile was, and
+    that is what gets read first."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, llm_model="old-pin")
+
+    def _emit(self):
+        self.m.write_metrics()
+        return dict(line.split(" ", 1) for line in
+                    pathlib.Path(self.m.CFG["textfile"])
+                    .read_text(encoding="utf-8").splitlines())
+
+    def _meta(self):
+        c = self.m.db()
+        rows = dict(c.execute("SELECT k,v FROM meta WHERE k LIKE 'llm_%'"))
+        c.close()
+        return rows
+
+    def test_a_first_sight_stamp_does_not_discard_history(self):
+        """On a host that predates the stamp we cannot know which pin the totals belong to,
+        and the counter is the only record there is — so seed, do not delete."""
+        self.m.bump_meta("llm_primary_failed_total", 363)
+        self.m.bump_meta("llm_fallback_used_total", 363)
+        self._emit()
+        meta = self._meta()
+        self.assertEqual(363.0, float(meta["llm_primary_failed_total"]))
+        self.assertEqual(363.0, float(meta["llm_fallback_used_total"]))
+        self.assertEqual("old-pin", meta["llm_model_stamp"])
+
+    def test_an_unchanged_pin_leaves_the_counters_alone(self):
+        self.m.bump_meta("llm_primary_failed_total", 5)
+        self._emit()
+        self._emit()
+        self.assertEqual(5.0, float(self._meta()["llm_primary_failed_total"]))
+
+    def test_a_changed_pin_resets_both_counters(self):
+        self.m.bump_meta("llm_primary_failed_total", 363)
+        self.m.bump_meta("llm_fallback_used_total", 363)
+        self._emit()                               # seeds the stamp at old-pin
+        self.m.CFG["llm_model"] = "new-pin"
+        self._emit()                               # observes the change
+        meta = self._meta()
+        self.assertEqual(0.0, float(meta["llm_primary_failed_total"]))
+        self.assertEqual(0.0, float(meta["llm_fallback_used_total"]))
+        self.assertEqual("new-pin", meta["llm_model_stamp"])
+
+    def test_unrelated_counters_survive_a_pin_change(self):
+        """Only the two MODEL-scoped counters reset. llm_failures_total counts whole reviews
+        and says nothing about which model was asked."""
+        self.m.bump_meta("llm_failures_total", 9)
+        self.m.bump_meta("llm_timeouts_total", 4)
+        self._emit()
+        self.m.CFG["llm_model"] = "new-pin"
+        self._emit()
+        meta = self._meta()
+        self.assertEqual(9.0, float(meta["llm_failures_total"]))
+        self.assertEqual(4.0, float(meta["llm_timeouts_total"]))
+
+    def test_the_pin_is_named_in_the_textfile(self):
+        got = self._emit()
+        keys = [k for k in got if k.startswith("reviewbot_llm_primary_model_info")]
+        self.assertEqual(1, len(keys))
+        self.assertIn('model="old-pin"', keys[0])
+        self.assertEqual(1.0, float(got[keys[0]]))
+
+    def test_an_unset_pin_is_named_explicitly_rather_than_blank(self):
+        """An empty llm_model means the ACCOUNT DEFAULT, a distinct state from any named
+        model; a blank label value would read as a missing one."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        m = load(tmp.name, llm_model="")
+        m.write_metrics()
+        text = pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8")
+        self.assertIn('model="(account default)"', text)
+
+    def test_a_seeded_stamp_reports_its_counters_as_UNattributable(self):
+        """THE reviewer-1 case (reviewer-claude, round 1 of ailab#742): 363/363 accumulated
+        under a pin that has ALREADY been repointed away from. Seeding without resetting is
+        correct — they are not the new pin's failures and must not be deleted on a guess — but
+        naming the current pin beside them would assert opus produced failures it never did."""
+        self.m.bump_meta("llm_primary_failed_total", 363)
+        self.m.bump_meta("llm_fallback_used_total", 363)
+        got = self._emit()
+        self.assertEqual(0.0, float(got['reviewbot_llm_counters_pin_scoped{persona="test"}']),
+                         "seeded stamp must not claim the counters belong to the current pin")
+        self.assertEqual(363.0, float(got['reviewbot_llm_primary_failed_total{persona="test"}']),
+                         "and must not delete them either")
+
+    def test_an_observed_repoint_makes_the_counters_attributable(self):
+        self.m.bump_meta("llm_primary_failed_total", 363)
+        self._emit()                               # seeds at old-pin
+        self.m.CFG["llm_model"] = "new-pin"
+        got = self._emit()                         # observes the change
+        self.assertEqual(1.0, float(got['reviewbot_llm_counters_pin_scoped{persona="test"}']))
+        self.assertEqual(0.0, float(got['reviewbot_llm_primary_failed_total{persona="test"}']),
+                         "counters reset, so they now genuinely describe the named pin")
+
+    def test_attributability_survives_restarts_once_observed(self):
+        """The flag is durable in `meta`, not in-process: a restart must not silently downgrade
+        an attributable counter back to 'may predate the pin'."""
+        self._emit()
+        self.m.CFG["llm_model"] = "new-pin"
+        self._emit()
+        fresh = load(self.tmp.name, llm_model="new-pin")   # same DB, new module object
+        fresh.write_metrics()
+        text = pathlib.Path(fresh.CFG["textfile"]).read_text(encoding="utf-8")
+        self.assertIn('reviewbot_llm_counters_pin_scoped{persona="test"} 1', text)
+
+    def test_a_pin_carrying_a_quote_cannot_break_the_whole_textfile(self):
+        """node_exporter rejects the ENTIRE file on one malformed line, so an unescaped label
+        value would delete every reviewbot metric on the host — the trap the repo label below
+        it was escaped for."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        m = load(tmp.name, llm_model='ev"il')
+        m.write_metrics()
+        text = pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8")
+        self.assertIn(r'model="ev\"il"', text)
+
+
 if __name__ == "__main__":
     unittest.main()
