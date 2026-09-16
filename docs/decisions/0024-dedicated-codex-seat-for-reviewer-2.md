@@ -74,7 +74,21 @@ so the sharing is real, it is simply not the constraint. Un-sharing buys ~4%.
 
 That also brackets the wall empirically: 09-10 ran 167 calls without a refusal, 09-14 ran 198 and
 09-15 ran 210 and both exhausted, so **one seat is worth roughly 170–200 calls/day** against
-present demand of 210. One extra seat is not headroom, it is parity; hence three, pooled.
+present demand of 210.
+
+**Two different questions, which an earlier draft ran together** (reviewer-codex, round 2):
+
+* *Does swapping the shared seat for a dedicated one fix it?* **No.** Without rotation the persona
+  uses one credential at a time, so a dedicated seat is still 170–200/day against demand of 210 —
+  at best parity, and it was this scenario the "parity, not headroom" line was about. Stated
+  without that qualifier it read as a claim about two seats, which it is not.
+* *What do two POOLED seats give?* 340–400/day against 210 — **roughly 60–90% headroom**, which is
+  real. Three give 510–600, ~2.5–3×.
+
+So the case for the third seat is not present demand, which two would already cover. It is growth:
+86 → 210 calls/day inside one week, which on the arithmetic in the plan consumes even the
+three-seat ceiling in 1–3 weeks. Buying the third now is buying re-provisioning time, and it is
+worth saying plainly that it is a hedge rather than a fix.
 
 ## Decision
 
