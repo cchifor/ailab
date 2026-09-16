@@ -1484,6 +1484,47 @@ def write_metrics():
             # ticker is alive - a permanently wedged worker would otherwise look healthy.
             run_since = c.execute("SELECT MIN(updated) FROM jobs WHERE state IN "
                                   "('running','posting')").fetchone()[0]
+            # THE PRIMARY/FALLBACK COUNTERS ARE MODEL-SCOPED; RESET THEM WHEN THE PIN MOVES.
+            # bump_meta() keeps all-time totals, so they carry the PREVIOUS pin's history across
+            # a repoint and keep describing a model that is no longer being asked for. Measured
+            # 2026-09-16 on reviewer-1: the textfile still exported
+            # llm_primary_failed_total 363 == llm_fallback_used_total 363 - the signature of a
+            # primary failing every single call - 23 h and 103 clean reviews AFTER the 09-15
+            # opus/sonnet repoint retired the exhausted claude-fable-5 pin that produced them.
+            # The alert was never fooled (ReviewbotPrimaryModelDown reads increase()[6h] and had
+            # long since resolved); a human reading the raw textfile was, and that is the first
+            # thing anyone reads.
+            #
+            # HERE, and not in bump_meta(), for two reasons. db_lock is a plain Lock, not
+            # reentrant, and bump_meta's own contract says callers must not hold it - it runs
+            # from the worker's exception handler and from a `finally`, where a raise would
+            # escape and kill the only worker thread. write_metrics() runs on the metrics
+            # ticker, its own thread, and is already inside the lock.
+            #
+            # increase() treats the drop as a counter reset rather than negative rate, so
+            # ReviewbotPrimaryModelDown stays correct across one.
+            #
+            # RESET ONLY ON AN OBSERVED CHANGE. A missing stamp row seeds the stamp and touches
+            # nothing else: on first deploy we cannot know which pin the existing totals belong
+            # to, and discarding a counter on a guess is worse than carrying it - the counter is
+            # the only record there is. So this clears the residue from the NEXT repoint onward,
+            # and the already-accumulated totals on a host that predates the stamp stay put
+            # until then. reviewbot_llm_primary_model_info below is what makes those readable in
+            # the meantime by naming the pin in the textfile; clearing an old host's residue by
+            # hand is a one-line UPDATE on the meta table and an operator decision, not this
+            # function's call to make.
+            stamp = c.execute("SELECT v FROM meta WHERE k='llm_model_stamp'").fetchone()
+            pin = str(CFG.get("llm_model") or "")
+            if stamp is None:
+                c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("llm_model_stamp", pin))
+                c.commit()
+            elif stamp[0] != pin:
+                for k in ("llm_primary_failed_total", "llm_fallback_used_total"):
+                    c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (k, "0"))
+                c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("llm_model_stamp", pin))
+                c.commit()
+                log(f"llm_model pin {stamp[0]!r} -> {pin!r}: "
+                    f"reset primary/fallback counters (they described the old pin)")
             gauges = {r[0]: r[1] for r in c.execute(
                 "SELECT k,v FROM meta WHERE k IN ('llm_timeouts_total','llm_failures_total',"
                 "'llm_seconds','llm_seconds_max','llm_output_tokens','llm_output_tokens_max',"
@@ -1547,6 +1588,14 @@ def write_metrics():
             lines.append(f'reviewbot_last_success_timestamp_seconds{{persona="{_persona}"}} {float(last_ok[0]):.0f}')
         if last_rec:
             lines.append(f'reviewbot_last_reconcile_timestamp_seconds{{persona="{_persona}"}} {float(last_rec[0]):.0f}')
+        # Names the pin the counters above are scoped to, so "363 primary failures" can be read
+        # against the model that produced them instead of the one configured today. An info
+        # series (constant 1, meaning in the labels) - `llm_model` is optional and unset means
+        # the account default, which is a distinct state from any named model. ESCAPED: like the
+        # repo label below, this value is free-form config, and one malformed line makes
+        # node_exporter reject the WHOLE textfile.
+        lines.append(f'reviewbot_llm_primary_model_info{{persona="{_persona}",'
+                     f'model="{_label(CFG.get("llm_model") or "(account default)")}"}} 1')
         # Iterate the CONFIGURED repos, not the stored keys: a repo removed from the allowlist must
         # stop being exported rather than freeze at its last value. A configured repo with no row
         # yet (fresh database, first sweep still running) is omitted rather than reported clean -
@@ -1580,7 +1629,28 @@ def fail_note(e):
     if isinstance(e, RateLimited):
         when = (time.strftime("%H:%M UTC", time.gmtime(e.reset_at)) if e.reset_at
                 else f"~{DEFAULT_PARK_S // 60}m")
-        return f"subscription rate-limited, waiting until {when} (no attempt consumed)"
+        # CARRY THE UPSTREAM REFUSAL. `when` says how long WE will wait; only the refusal text
+        # says what we are waiting FOR, and the difference between a 15-minute blip and a spent
+        # weekly window is the whole operational question. This path used to drop it, and the
+        # cost is measured: the 2026-09-15 codex episode (46 parks, 11h36m, 7 PRs held) left no
+        # record anywhere of what upstream said - `journalctl | grep -E 'usage limit|credits'`
+        # over the entire window returns nothing - while the 2026-09-14 episode's text survives
+        # only because the pre-park code billed it as an ordinary failure and stored it:
+        # "You've hit your usage limit. Visit .../codex/settings/usage to purchase more credits
+        # or try again at Sep 21st, 2026 9:38 AM". Diagnosing the second one needed a live probe.
+        #
+        # APPENDED, never prepended. This string is written to jobs.note, and three queries match
+        # that column by PREFIX (`COALESCE(note,'') NOT LIKE 'ambiguous POST%'` in enqueue(),
+        # worker() and retire_closed_quarantines(); `.startswith` in the --requeue guard), so the
+        # leading text is load-bearing and must stay exactly as it was.
+        #
+        # Bounded at 200 and newline-flattened: `detail` reaches here from llm_error_text(),
+        # already capped at 300, but on the codex branch it is built from STDERR - CLI
+        # diagnostics rather than model prose (see the _run_llm comment at the codex raise
+        # site), which is what makes it safe to log at all. Do not widen it.
+        upstream = " ".join(str(e).split())[:200]
+        return (f"subscription rate-limited, waiting until {when} (no attempt consumed)"
+                + (f" [upstream: {upstream}]" if upstream else ""))
     return str(e)[:200]
 
 

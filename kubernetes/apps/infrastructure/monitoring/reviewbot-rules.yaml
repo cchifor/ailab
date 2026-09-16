@@ -309,6 +309,54 @@ spec:
         # per 6h over 7d, typical 44 — so a dead primary yields roughly one fallback per review,
         # ~44 per 6h (reviewer-1's real rate was 463 over 4 days = ~29 per 6h). 10 is far above
         # any plausible blip and far below either figure.
+        # THE FAILURE MODE NO OTHER RULE IN THIS GROUP CAN NAME. An account-scoped subscription
+        # limit parks the worker (RATE_LIMIT_RE -> RateLimited -> park()), and that path
+        # deliberately consumes no attempt — which is what stops one exhausted window
+        # quarantining every queued PR, and is equally why llm_failures_total AND
+        # llm_timeouts_total both stay FLAT throughout. ReviewbotReviewFailures and
+        # ReviewbotReviewTimeouts are therefore structurally blind to it, by construction.
+        #
+        # SCOPE IS ATTRIBUTION, NOT DETECTION — and the severity is set to match. The
+        # 2026-09-15 codex episode (11h36m, 46 parks, 7 PRs held, estate-wide automerge
+        # stalled) DID page: ReviewbotQueueBacklog and ReviewbotStalled both fired and both
+        # delivered. What nothing said was WHY, so the operator saw "queue backlog" and had to
+        # SSH to the host and read the journal to find a spent ChatGPT quota. That is the gap
+        # this closes. It is not a second outage detector and must not be read as one.
+        #
+        # THE COUNTER, NOT THE GAUGE. `reviewbot_rate_limited_seconds_remaining > 0` is the
+        # obvious expression and it does NOT work. The gauge is max(0, RATE_LIMITED_UNTIL - now)
+        # rewritten every 15s, and worker() sleeps min(wait, 30) before re-probing, so every
+        # 900s park lapses 13-18s before the next one begins — measured cadence on 2026-09-15:
+        # 913 / 912 / 915 / 918s. The gauge reads 0 across that seam. At a 30s scrape, one
+        # sample landing in any of the ~2 seams per half hour resets a `for:` clause, so the
+        # gauge form would miss most real episodes while looking perfectly correct in review.
+        # This is the same class of defect as the two in this file's header: it parses, it
+        # just cannot fire.
+        #
+        # THRESHOLD IS MEASURED. One park is 900s, so a persona inside a sustained window
+        # produces ~4/h — the 2026-09-15 episode ran 46 across 11h36m. A one-off transient is
+        # ONE park. The healthy baseline is a flat zero on both personas: reviewer-1 has not
+        # parked since 2026-09-13, and reviewer-2 sat at zero through the 12h08m BETWEEN its
+        # two episodes. >=3/h clears a blip and sits well under the sustained rate, and mirrors
+        # the two counter rules above rather than inventing a new shape for this one.
+        - alert: ReviewbotRateLimited
+          expr: increase(reviewbot_llm_rate_limited_total[1h]) >= 3
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) is parked on a subscription rate limit"
+            description: >-
+              The LLM subscription behind {{ $labels.instance }} refused
+              {{ $value | printf "%.0f" }} times in an hour and the worker is parking (900s a
+              cycle) instead of reviewing. This self-heals: no attempt is consumed, the queue
+              is left intact, and the 2026-09-15 codex episode drained 7 jobs in ~60s once the
+              window reopened. But the persona posts no verdicts meanwhile and automerge needs
+              EVERY persona clean at the head, so the merge lane stalls estate-wide for the
+              duration — 12.3h of merge_blocked on the OTHER, healthy reviewer that day. Read
+              the upstream refusal with `journalctl -u reviewbot | grep rate-limited` (the note
+              carries it). If this recurs on a roughly daily cadence the answer is quota, not
+              code — the account is too small for the review volume, and no fallback model can
+              help because an account-scoped limit takes the fallback with it.
         - alert: ReviewbotPrimaryModelDown
           expr: increase(reviewbot_llm_fallback_used_total[6h]) >= 10
           for: 30m
