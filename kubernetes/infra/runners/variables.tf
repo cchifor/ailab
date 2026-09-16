@@ -183,15 +183,18 @@ variable "runner_ssh_public_key" {
 #   node2: floors 68.0 + qwen3.6-35b 24 =  92 -> 28 GiB spare
 #   node3: floors 82.0 + qwen3.5-122b 71 = 153 -> OVERSUBSCRIBED
 #
-# !! DO NOT UNCOMMENT THE MAP ENTRIES BELOW WITHOUT IMPORTING FIRST !!
+# HISTORICAL — reason 1 below is NO LONGER TRUE, kept because reason 2 still is.
 #
-# Two independent reasons, both verified 2026-09-07:
+# RESOLVED 2026-09-07: ci-runner-6..10 WERE imported and are now fully under management.
+# terraform.tfstate (serial 43) holds proxmox_virtual_environment_vm.runner for every live runner,
+# so `tofu plan` sees them and an apply no longer tries to create existing vmids. The entries below
+# are UNCOMMENTED and reconciled. Leaving the old "NOT IN STATE / DO NOT UNCOMMENT" banner in place
+# was actively misleading: it told a reader the opposite of the state on disk, which is how a
+# well-intentioned `qm destroy` would have silently drifted state out from under this module.
 #
-#   1. NOT IN STATE. terraform.tfstate tracks ci-runner-1..5 ONLY. All five of 4106-4110 exist on
-#      Proxmox but this module cannot see them, so `tofu plan` reads them as five VMs to CREATE.
-#      An apply would try to create vmids that already exist.
+# Reason 2 stands and is why the IP column is still load-bearing:
 #
-#   2. THREE OF THE IPs WERE WRONG AND POINTED AT ANOTHER CLUSTER. The entries as written declared
+#   THREE OF THE IPs WERE WRONG AND POINTED AT ANOTHER CLUSTER. The entries as written declared
 #      ci-runner-7/8/9 at .20/.21/.22. Those addresses belong to the cloudlab GPU hosts cloud1/2/3
 #      (bare metal, separate Proxmox cluster, separate repo) -- they are NOT ailab addresses. The
 #      runners were moved off them on 2026-09-03. Live mapping, verified by node_exporter nodename:
@@ -227,7 +230,21 @@ variable "runner_nodes" {
     "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4" }
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
-    "ci-runner-7" = { node_name = "ai-node3", vm_id = 4107, ip = "192.168.0.29", hostname = "ci-runner-7" }
+    # ci-runner-7 (vm_id 4107, .29, ai-node3) RETIRED 2026-09-16 — removed from this map so the next
+    # apply destroys it. Retired to free ai-node3 for a qwen3.8-27b-ailab instance: the VM held a
+    # MEASURED 10.40 GiB RSS, which takes node3's 7-day-minimum MemAvailable from 18.15 GiB to ~28.6
+    # and makes a 22.46 GiB lazy model load safe there (+6.1 GiB margin). Before this, NO node in the
+    # estate could absorb that load at its weekly floor — node1 sits at 4.73 GiB and node3 at 18.15,
+    # and a lazy load arrives all at once. The Gitea registration (runner id 14) was drained via the
+    # API's `disabled` flag, then deleted; the stale ci-runner-8 registration (id 18, offline since
+    # its 2026-09-12 retirement) was deleted in the same pass, because check-ci-runners.py:181-182
+    # fails CLOSED on ANY duplicate runner name and orphans were accumulating.
+    # NO RENUMBERING: ci-runner-9/-10 keep their names. A runner's Gitea name is fixed at
+    # registration (EditActionRunnerOption carries only `disabled`; the daemon's Declare RPC
+    # re-declares labels and version, never the name), so "renaming" means delete .runner and
+    # re-register, which mints a NEW runner id and orphans the old row. It would also break the
+    # `vmid == 4100+N` invariant that still holds across every remaining runner, and the map key here
+    # IS the for_each key — changing it is a destroy+create of a 200 GB VM, not a rename.
     # ci-runner-8 (vm_id 4108, .30, ai-node1) RETIRED 2026-09-12 — removed from this map so the next
     # apply destroys it. It is the straight REVERT of the trade commit 1acd59cc made: that commit
     # retired node1's qwen3.8-27b instance and spent the freed memory on two new runners, in its own
