@@ -50,6 +50,38 @@ gitea_runner_capacity: 1 # one heavy job at a time (a platform e2e run is ~32 co
 #   without headroom — host-mode job children live under this daemon's cgroup (MemoryMax below).
 gitea_runner_job_timeout: 3h
 gitea_runner_fetch_interval: 2s
+# Drain budget, in WHOLE MINUTES, for an IN-FLIGHT job when the runner is asked to stop. This single
+# integer drives BOTH halves of the drain, because draining needs two independent things to be true
+# and fixing only one of them achieves nothing:
+#
+#   1. config.yaml  `shutdown_timeout: {{ n }}m`   — act_runner waits for its in-flight job.
+#      act_runner 0.6.1 has NO compiled default: `generate-config` emits `shutdown_timeout: 0s`, and 0
+#      means the context is ALREADY EXPIRED when `poller.Shutdown(ctx)` is called, so the job is
+#      CANCELLED IMMEDIATELY.
+#   2. the unit's `KillMode=mixed`                 — systemd SIGTERMs only act_runner, not the job.
+#      This is the half the first revision of this change MISSED (caught in review on ailab#745). The
+#      unit shipped `KillMode=control-group`, which SIGTERMs EVERY process in the cgroup — act_runner
+#      AND the host-mode job's whole process tree — the instant the stop begins. Under that mode a
+#      generous shutdown_timeout buys nothing: act_runner dutifully waits out a drain window for a job
+#      whose processes systemd already killed. See the unit template for the SIGKILL backstop.
+#
+# Without BOTH, Gitea marks the task failed (ZOMBIE_TASK_TIMEOUT, 10m default) and the check goes red
+# with ZERO log lines, which reads as a code failure rather than an infrastructure one and needs a
+# manual rerun — Gitea 1.26 does not reassign or re-queue an abandoned task. Before this key existed,
+# EVERY `systemctl stop`, VM reboot, node maintenance or `just gitea-runners` run silently killed
+# whatever job was in flight.
+#
+# 10 is chosen against measured job duration on this fleet (median 14s, p90 31s, max 127s): it covers
+# the whole observed distribution with ~5x margin on the worst case while still bounding a shutdown.
+#
+# WHY AN INTEGER AND NOT A DURATION STRING ("10m"): the unit's TimeoutStopSec MUST exceed this, or
+# systemd SIGKILLs the process group mid-drain and reintroduces the exact zero-log-line failure this
+# key exists to prevent. That invariant used to be prose next to a hardcoded `TimeoutStopSec=11min`,
+# so raising this value alone silently broke it (also caught in review on ailab#745). Both templates
+# now derive from this one number — TimeoutStopSec renders as (n + 1)min — so the invariant holds by
+# construction and cannot be overridden apart. tasks/main.yml asserts the type, because a stray "10m"
+# here would render `shutdown_timeout: 10mm` and `TimeoutStopSec=10mmin`.
+gitea_runner_shutdown_timeout_min: 10
 
 # ---- built-in Actions cache server (actions/cache + setup-* caches) ----
 # In HOST mode the job runs on the same host as the daemon, so the cache server on localhost is

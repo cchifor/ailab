@@ -28,9 +28,24 @@ RestartSec=10
 # single-pass now (see gitea-runner-reclaim.sh); this headroom keeps a slow disk or a big post-incident
 # chown-heal from ever wedging the daemon the same way again.
 TimeoutStartSec=10min
-KillMode=control-group
+# KillMode=mixed, NOT control-group — this is what makes runner.shutdown_timeout mean anything.
+# In HOST mode a job's processes are children of this daemon and live in THIS unit's cgroup. Under
+# control-group (systemd's default, and what this unit shipped until ailab#745 review) the stop
+# sequence SIGTERMs EVERY process in the cgroup at once — act_runner AND the running job's whole
+# process tree — so act_runner would sit out its entire drain window waiting for a job systemd had
+# already killed. `mixed` sends the stop signal to the MAIN process only, leaving the job's children
+# untouched so they can actually finish.
+KillMode=mixed
 KillSignal=SIGTERM
-TimeoutStopSec=5min
+# The SIGKILL backstop is unaffected by the above: at TimeoutStopSec systemd still sends
+# FinalKillSignal to EVERY remaining process in the cgroup, so a wedged job cannot outlive the stop.
+# TimeoutStopSec MUST exceed runner.shutdown_timeout in config.yaml, or that SIGKILL lands while
+# act_runner is still draining and reintroduces exactly the zero-log-line failure shutdown_timeout
+# exists to prevent. It is DERIVED rather than written literally: both values come from
+# gitea_runner_shutdown_timeout_min ({{ gitea_runner_shutdown_timeout_min }}), so the +1min buffer
+# holds for any override. A hardcoded literal here silently broke that invariant the moment anyone
+# raised the drain budget (ailab#745 review).
+TimeoutStopSec={{ gitea_runner_shutdown_timeout_min + 1 }}min
 
 # Resource caps bound the daemon AND its host-mode job children (they run in this unit's cgroup).
 # During co-location the GitHub runner is capped at 10G; keep the SUM under the VM's 24 GiB. See the
