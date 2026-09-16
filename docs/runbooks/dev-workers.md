@@ -207,7 +207,11 @@ role — no docker/tmux/toolchains). Migrated off dev-worker-2/-3 2026-09-02 so 
 contend with feature work. Claude auth (~/.claude) was seeded once from the old hosts and is
 NOT ansible-managed — a subscription re-login is manual. Codex auth on reviewer-2 is, since
 2026-09-12, rendered by the bao agent from the estate's ONE shared login (`pr_reviewer_enable_openbao`;
-docs/runbooks/openbao-dev-workers.md § "The shared codex login") — never `codex login` there. Org webhooks 38/39 point at
+docs/runbooks/openbao-dev-workers.md § "The shared codex login") — never `codex login` there.
+**Still true as of 2026-09-16, and it is what exhausts:** sharing one seat with the dev agents is
+why the codex persona was quota-blocked 20h21m of one 32h span. ADR 0024 decides to give the
+reviewer its own seat — that seat is NOT provisioned yet, so this paragraph describes the live
+state, not a superseded one. Org webhooks 38/39 point at
 .24/.25:8477; scrape via monitoring/reviewers-node.yaml (job=reviewer-node); the AI Lab Fleet
 dashboard "PR Reviewers" row reads the reviewbot_* textfile metrics. Tofu state: applied from
 the session scratchpad clone — hand the tfstate to the main checkout and verify a no-op plan
@@ -223,6 +227,57 @@ the session scratchpad clone — hand the tfstate to the main checkout and verif
 > hours undeployed while platform#1074 failed 66 times on both personas. If you suspect drift:
 > `ssh c4@192.168.0.24 md5sum /usr/local/lib/reviewbot/reviewbot.py` against
 > `md5sum ansible/roles/pr_reviewer/files/reviewbot.py` on main.
+
+### When a persona is parked on a subscription rate limit
+
+**Do nothing. It self-heals, and the two obvious interventions both make it worse.** This is the
+one failure mode here that is not a fault: the account's quota is spent, reviewbot has noticed, and
+it is waiting with the queue intact.
+
+What it looks like:
+
+```
+subscription rate-limited; parking the worker for 900s (queue left intact)
+job 1526 cchifor/ailab#737 deferred: subscription rate-limited, waiting until ~15m
+  (no attempt consumed) [upstream: ...]
+```
+
+* `ReviewbotRateLimited` fires at ≥3 parks in an hour — it is the rule that NAMES this. Expect
+  `ReviewbotQueueBacklog` and `ReviewbotStalled` alongside it; those detect the stall, this one
+  attributes it.
+* `reviewbot_rate_limited_seconds_remaining` counts down 900 → 0 per cycle. It is a **sawtooth**,
+  briefly 0 between parks, so do not read a single 0 as recovery — `reviewbot_llm_rate_limited_total`
+  is the honest signal.
+* `waiting until ~15m` is `DEFAULT_PARK_S`, **not** a parsed reset: it means upstream named no
+  reset we could read, so we re-probe every 15 minutes. `waiting until HH:MM UTC` means we did
+  parse one. The `[upstream: ...]` tail is the CLI's own refusal — that is the text that tells you
+  whether this is a blip or a spent weekly window.
+
+Why not to intervene:
+
+* **Do NOT `--requeue`.** Nothing is quarantined: the park charges no attempt precisely so a
+  rate-limit window cannot exhaust a PR's retry budget. Requeue is a no-op at best.
+* **Do NOT restart the service to "clear" it.** `RATE_LIMITED_UNTIL` is an in-memory global, so a
+  restart does drop the park — and the worker then walks straight back into the same wall, one
+  refused call later. (This is how reviewer-1 came back 4h35m early on 2026-09-13: the 06:35 daily
+  converge restarted it, not the park lapsing.)
+
+Measured behaviour, so you know what normal looks like: the 2026-09-15 codex episode ran
+**46 parks over 11h36m**, held 7 PRs, consumed zero attempts, quarantined nothing, and on recovery
+drained the whole queue in **~60 seconds**, auto-merging 4 PRs.
+
+What DOES need a human is the recurrence. The limit is account-scoped, so no fallback model can
+rescue it (a fallback on the same seat shares the spent budget — `reviewbot.py` L697-698, and the
+codex branch has no fallback path at all). If parks recur on a roughly daily cadence, the answer is
+quota, not code: see **ADR 0024**, which records the decision to give reviewer-2 its own Codex seat
+rather than cut review coverage. Note the refusal text's `try again at <date>` is misleading — what
+actually reopens is a rolling window hours out, measured recovering at ~06:17–06:20 UTC on two
+consecutive days against a message naming Sep 21.
+
+While a persona is parked, **automerge stops estate-wide** — merging needs every persona in
+`merge_personas` clean at the current head, so the healthy reviewer logs `codex=no review` holds
+(313 of them during that episode) and `reviewbot_merge_blocked_seconds` climbs. Merging past the
+gate by hand is the intended escape hatch; it is silent by design.
 
 ### When a review never lands (deadlines, quarantine, requeue)
 
