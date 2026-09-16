@@ -221,27 +221,34 @@ the session scratchpad clone — hand the tfstate to the main checkout and verif
 > 4301/4302 is what destroyed the agent nodes and cost ~6h of agentforge downtime. Verify with
 > `python scripts/node-ssh.py 192.168.0.4 "qm list"` before any destructive tofu run.
 
-> **THE REVIEWERS DO NOT CONVERGE AUTOMATICALLY — deploy reviewbot changes by hand.** This block
-> used to claim they converged daily via `scripts/fleet-converge-daily.sh`. That is false, and was
-> false the whole time: the repo's copy of the script does run `reviewers.yml` (added 2026-09-06),
-> but **Task Scheduler does not run the repo's copy**. The `ailab-fleet-converge` task executes
-> `wsl.exe -e bash -lc "~/.ailab-converge/fleet-converge-daily.sh"` — a STANDALONE copy frozen at
-> 2026-09-03 13:26 that predates the reviewers step, does not self-update, and is not the
-> `~/.ailab-converge/repo/scripts/` copy that does. Verified 2026-09-16: the converge log
-> (`~/.ailab-converge/converge.log`) contains **zero** occurrences of `reviewer-1`/`reviewer-2`
-> across every run it retains, and reviewbot.py on both hosts is stamped 2026-09-15 07:05:45 UTC —
-> a hand-run, not the 03:35 UTC converge (the script's "06:35" is WSL-local, UTC+3).
+> **The reviewers converge daily — since 2026-09-16, and not before.** From 2026-09-03 to
+> 2026-09-16 they converged NOWHERE, while both this runbook and the repo said otherwise. The
+> repo's `scripts/fleet-converge-daily.sh` did run `reviewers.yml` (added 09-06), but Task
+> Scheduler was not running the repo's copy: `ailab-fleet-converge` executes
+> `wsl.exe -e bash -lc "~/.ailab-converge/fleet-converge-daily.sh"`, and that path held a
+> STANDALONE copy frozen at 2026-09-03 13:26 which predated the reviewers step and never
+> self-updated. Proof at the time: zero occurrences of `reviewer-1`/`reviewer-2` anywhere in
+> `~/.ailab-converge/converge.log`, against two dev-worker PLAY RECAPs per run, and reviewbot.py
+> on both hosts stamped from a hand-run rather than the 03:35 UTC converge (the "06:35" in the
+> script is WSL-local, UTC+3).
 >
-> Two further consequences of that frozen copy, both silent: it has no `set -o pipefail`, so a
-> failed `ansible-playbook | tail` reports success, and no `exit "$rc"`, so **Task Scheduler shows
-> LastTaskResult 0 forever** regardless of what happened. `git log` on the repo copy therefore says
-> these were fixed; the running system never picked any of it up.
+> It stayed invisible because the same frozen copy predated two guards added in the same commit:
+> no `set -o pipefail`, so a failed `ansible-playbook | tail` reported the status of `tail`; and
+> no `exit "$rc"`, so Task Scheduler's LastTaskResult was 0 whatever happened. Three fixes were in
+> main for ten days and none of them ever ran.
 >
-> Until the scheduled task is repointed, after merging a reviewbot change run it yourself:
-> `wsl.exe -e bash -lc 'cd ~/.ailab-converge/repo && git fetch -q origin main && git reset --hard -q origin/main && cd ansible && ANSIBLE_CONFIG=$PWD/ansible.cfg PATH=$HOME/.local/bin:$PATH ansible-playbook reviewers.yml'`
-> then confirm with the md5 check below. The tolerant-diff-decode fix went 22 hours undeployed
-> while platform#1074 failed 66 times on both personas — that is the cost of assuming this is
-> automatic. If you suspect drift:
+> **The scheduled path is now a bootstrap** (`scripts/fleet-converge-bootstrap.sh`): it updates the
+> clone, copies the current converge script out to `~/.ailab-converge/.run-converge.sh`, and execs
+> it — so the logic is always current main, and git never rewrites the file bash is mid-way through
+> reading (which is why the converge script cannot simply be scheduled directly). The bootstrap has
+> no logic of its own, so it cannot drift the way its predecessor did. Verified on install: the
+> first run put `reviewer-1 : ok=40 changed=4` / `reviewer-2 : ok=42 changed=4` in the log for the
+> first time, and surfaced a real `rc=4` that the old copy would have reported as success.
+>
+> To deploy a reviewbot change without waiting for 03:35 UTC, run the same entry point the
+> scheduler does: `wsl.exe -e bash -lc "~/.ailab-converge/fleet-converge-daily.sh"`. The
+> tolerant-diff-decode fix once went 22 hours undeployed while platform#1074 failed 66 times on
+> both personas — that is the cost of assuming deployment happened. If you suspect drift:
 > `ssh c4@192.168.0.24 md5sum /usr/local/lib/reviewbot/reviewbot.py` against
 > `md5sum ansible/roles/pr_reviewer/files/reviewbot.py` on main.
 
