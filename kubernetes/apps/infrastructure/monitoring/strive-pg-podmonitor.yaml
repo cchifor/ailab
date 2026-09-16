@@ -1,0 +1,46 @@
+# Scrape the strive-pg CloudNativePG cluster, so cnpg-replication-rules.yaml has series to fire on.
+#
+# WHY THIS IS NEEDED AT ALL. strive-pg already asks to be scraped — its Cluster spec sets
+# `monitoring.enablePodMonitor: true`, and CNPG duly creates a PodMonitor named `strive-pg` in
+# strive-ailab. But CNPG labels that object {cnpg.io/cluster, strive.io/service}, while this estate's
+# kube-prometheus-stack Prometheus selects PodMonitors with `release: kube-prometheus-stack`
+# (podMonitorSelector; podMonitorNamespaceSelector is {} so the NAMESPACE was never the problem).
+# The label does not match, so the PodMonitor has been ignored for 90 days and strive-pg has had
+# ZERO metrics in Prometheus the whole time.
+#
+# That is how strive-pg came to sit with BOTH replicas' slots invalidated and zero streaming
+# replicas for ~27 days without anything noticing: there was no series to alert on. Found
+# 2026-09-16 while draining talos-cp3; see cnpg-replication-rules.yaml for the full incident.
+#
+# WHY A SECOND PodMonitor RATHER THAN RELABELLING CNPG'S. Two reasons, and both matter:
+#   1. OWNERSHIP. strive-pg's Cluster CR is reconciled by the `platform-cnpg` Flux Kustomization out
+#      of the EXTERNAL cchifor/platform repo — ailab manages nothing else in strive-ailab. A label
+#      patched onto CNPG's managed object from here would be reverted by whichever controller wins,
+#      silently and on an unpredictable schedule.
+#   2. CNPG DELETES PodMonitors NAMED AFTER THE CLUSTER. apps/databases/infra-pg.yaml records this
+#      the hard way: the operator treats a PodMonitor carrying the cluster's own name as its managed
+#      object and removes it every reconcile (observed live — Flux applied it, the operator deleted
+#      it, and the Kustomization health check hung on the missing object). Hence `strive-pg-metrics`,
+#      not `strive-pg`. This is the same shape as the working `infra-pg-metrics`.
+#
+# The two PodMonitors coexist without double-scraping: CNPG's `strive-pg` is still ignored by
+# Prometheus for want of the release label, so only this one produces targets.
+#
+# NOTE this object lives in strive-ailab, a namespace ailab does not otherwise own. It is additive
+# and self-contained (a PodMonitor creates nothing and mutates nothing), which is what makes it a
+# safe exception rather than a precedent for managing that namespace from here. The durable fix is
+# for the platform repo to add the release label to its Cluster's monitoring stanza; when it does,
+# delete this file.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: strive-pg-metrics
+  namespace: strive-ailab
+  labels:
+    release: kube-prometheus-stack # kps Prometheus podMonitorSelector — without this it is ignored
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: strive-pg
+  podMetricsEndpoints:
+    - port: metrics # CNPG instance-pod exporter :9187 (cnpg_* series)
