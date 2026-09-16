@@ -483,3 +483,291 @@ spec:
               the usual causes are the af/data/operator/conductor/forge path not yet written by the
               openbao-provision Job (the seed is create-if-absent; the Job runs daily), or the
               SecretStore's AppRole role not yet minted.
+        # ── T1: THE PARK LANE'S RULES ─────────────────────────────────────────────────────────────
+        # From here the conductor WRITES. At AF_CONDUCT_TIER=advise the park lane posts one diagnosis
+        # comment per park and the filer opens findings, and the T1 series read what the door let
+        # through, what it refused and what the lanes withheld. The header's rules still hold — every
+        # counter keeps `_total`, every window is sized off the pass cadence, every threshold is on
+        # an increase() or a changes() over a window and never on a raw counter — with two things
+        # new. Several of these counters are NOT PRE-TOUCHED (forge_conduct_diagnoses_total by
+        # (detector, op), forge_conduct_refusals_total by reason): a child has no series until its
+        # first event, and increase() reads a series from its first sample, so a child's first event
+        # is below any increase()'s notice until the counter moves again. Each rule below says what
+        # that costs it, or what it does about it. And forge_conduct_parks is a GAUGE, rebuilt in
+        # place every pass, whole over the bound repos, and EMPTY when a pass could not report its
+        # parks — absence on it is "not known", never 0.
+        #
+        # A WAKE WITH NO DIAGNOSIS BEHIND IT (program row 6c's prerequisite). A lifecycle comment on a
+        # bound repo wakes that repo's pool, and the door counts it under
+        # forge_conduct_wake_writes_total{repo} on the ATTEMPT — before the POST, so that a request
+        # that left and timed out is still a wake the pool may have taken.
+        # forge_conduct_diagnoses_total{detector, op} is the other end of the same write: a comment
+        # the lane saw APPLIED, by row and op. On a healthy conductor the two move together, in one
+        # record_pass call; a wake with no diagnosis behind it is a comment the door sent that never
+        # came back applied — the forge failing after the request left, a pool woken for a comment
+        # nobody can read.
+        #
+        # THE HONEST COMPARISON IS FLEET-WIDE, and the reason is the labels: the wakes carry `repo`,
+        # the diagnoses carry `detector, op`, a row is not a repo, and no series carries both — so
+        # "wakes on repo R against diagnoses on repo R" is a join PromQL cannot write. Summed over
+        # everything, the two are the same writes read at the two ends of the door, and the
+        # difference is what fell between. The alert therefore names no repo and no lane; the pass
+        # line in the conductor's log carries each lane's `failed=` count (`comments=` for the park
+        # lane, `chains=` for the chain lane), and the description says so.
+        #
+        # COUNTED EXACTLY, because the diagnoses counter is not pre-touched. A (detector, op) pair
+        # has no series until its first comment and increase() reads a series from its first sample,
+        # so a pair's first comment inside the window is a wake the window sees and a diagnosis it
+        # does not — and after an arming rollout, when every row diagnoses for the first time, that
+        # is most of them: the plain difference of two increase()s reads the first two hours of T1
+        # as the forge dropping comments. The second term on each side puts the first sample back.
+        # `min_over_time(x[2h]) unless x offset 2h` is, for every series that did NOT exist at the
+        # window's start, its lowest value inside the window — on a counter minted inside it, its
+        # first sample (or, if the pod also restarted inside the window, the lower of that and the
+        # re-mint, which reads the pair short by at most an allowance less one, under the bar) — and
+        # nothing for every series that did exist, which increase() reads whole, a mid-window restart
+        # included, by its reset arithmetic. Both sides carry the term, because the wakes counter is
+        # pre-touched per PASS over the bound repos, in the same record_pass call as its increment: a
+        # first pass that attempts a wake mints the series at its count, not at 0. `or vector(0)` on
+        # each of the four, because an aggregation over nothing is EMPTY, not 0, and an empty operand
+        # empties the subtraction and the alert with it — on a conductor that has never applied a
+        # comment, which is the estate this rule is for.
+        #
+        # `>= 3` OVER [2h]. The two sides extrapolate separately (ForgeConductPassesFailing's note),
+        # so equal counts read a few hundredths apart and `> 0` would take that for a lost comment;
+        # and one lost comment is a timeout — the pool woken once for a comment it may not be able to
+        # read, which the next pass's fold settles either way (the comment is on the issue, or it is
+        # proposed again). Three is one pass's whole allowance (LIFECYCLE_WRITES_PER_PASS) lost, or
+        # one comment lost on each of three passes: a forge dropping the conductor's comments, not a
+        # single timeout. [2h] is twenty-four passes at the 300s cadence and six at the backed-off
+        # 1200s, so a run at either lands three inside it. The one input the arithmetic misreads —
+        # an in-place restart whose first pass mints a pair at a count no lower than that pair had
+        # before it, which increase() cannot see as a reset — is bounded by that first pass's
+        # allowance and reaches three only on the coincidence of exactly three before and exactly
+        # three after, on one pair. `for: 5m` for a pass that lands on a window edge.
+        - alert: ForgeConductWakesUnanswered
+          expr: |-
+            (
+              (sum(increase(forge_conduct_wake_writes_total[2h])) or vector(0))
+                + (
+                  sum(
+                    min_over_time(forge_conduct_wake_writes_total[2h])
+                      unless forge_conduct_wake_writes_total offset 2h
+                  ) or vector(0)
+                )
+            ) - (
+              (sum(increase(forge_conduct_diagnoses_total[2h])) or vector(0))
+                + (
+                  sum(
+                    min_over_time(forge_conduct_diagnoses_total[2h])
+                      unless forge_conduct_diagnoses_total offset 2h
+                  ) or vector(0)
+                )
+            ) >= 3
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor woke bound pools with {{ $value | printf \"%.0f\" }} lifecycle comments in 2h that never came back applied"
+            description: >-
+              forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted
+              before the POST) advanced in the last 2h by at least three more than
+              forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments
+              that never came back as applied, so a bound pool may have been woken by a comment
+              nobody can read. The two series share no label — wakes carry repo, diagnoses carry
+              detector and op — so this is the fleet-wide difference and names no repo; the
+              conductor's pass line carries each lane's failed= count beside its comments= and
+              chains=. Check the forge's health from the conductor's side (timeouts and 5xx on
+              POST) before anything else.
+        # AN ISSUE NO OWN COMMENT CAN EVER SETTLE (conductor/filing.py, plan item 15). The filer's
+        # lifetime ceiling is three own comments per issue — the finding, at most one observation,
+        # and the resolution — and a fingerprint that RECURS after its resolution, with no room left
+        # for a recurrence finding and the resolution after it, posts nothing and files no successor
+        # while the issue is open; so does a resolution the ceiling itself left no room for. The
+        # filer counts it under forge_conduct_park_quiet_total{reason="exhausted"} on EVERY pass the
+        # state holds and names the fingerprint on its pass line, and nothing but the operator
+        # closing the issue ends it: only then, with no open issue for the fingerprint, does the next
+        # recurrence file anew. This is the T1 comments-per-issue criterion's second reason, made
+        # visible from the estate.
+        #
+        # `> 0` OVER [24h], info, no hold. The counter is pre-touched at 0 for every declared reason,
+        # so the first exhausted pass is visible to increase(). The state is a standing to-do for a
+        # human rather than an incident, so the window is a day: it keeps the alert up across an
+        # afternoon of passes coming back short (the counter only moves on passes that return)
+        # instead of clearing mid-state and re-raising after, and it clears itself a day after the
+        # operator's close. sum() for ForgeConductConfigRejected's reason.
+        - alert: ForgeConductIssueExhausted
+          expr: |-
+            sum(increase(forge_conduct_park_quiet_total{reason="exhausted"}[24h])) > 0
+          labels: { severity: info }
+          annotations:
+            summary: "AgentForge conductor has a filed issue it can never settle — close it by hand"
+            description: >-
+              forge_conduct_park_quiet_total{reason="exhausted"} advanced in the last 24h: a filed
+              issue's fingerprint recurred after its resolution with no room under the lifetime
+              ceiling (three own comments) for a recurrence finding and a resolution after it — or
+              a resolution itself had no room — so the filer posts nothing on it and files no
+              successor while it stays open. The conductor's pass line names the fingerprint
+              (`exhausted=`). Close the issue: the next pass on which the finding recurs files a
+              fresh one, and this clears a day after the last exhausted pass.
+        # THE LIFETIME CEILING, HOLDING. Three own comments on an issue is all the conductor may ever
+        # post on it — the park lane's ceiling (diagnose.decide, LIFECYCLE_COMMENTS) and the filer's
+        # (max_comments_per_issue) alike — and a park whose issue already wears three is one the
+        # conductor has said everything it can about: the lane folds it every pass, answers
+        # `ceiling` and proposes nothing; the filer skips the observation it would have posted and
+        # retains the entry. Counted under forge_conduct_park_quiet_total{reason="ceiling"} on every
+        # pass it holds. From the estate that park looks like one the conductor is watching; it is
+        # one the conductor has finished with, and a human's to act on.
+        #
+        # The same [24h] `> 0` as ForgeConductIssueExhausted, for the same reasons: a standing state,
+        # counted per pass on a pre-touched counter, a human's to end, info. The two are not one rule
+        # because they ask for different things — an exhausted issue must be CLOSED for the filer to
+        # work again; a ceiling'd park needs a human to act on the park itself.
+        - alert: ForgeConductCeilingHolding
+          expr: |-
+            sum(increase(forge_conduct_park_quiet_total{reason="ceiling"}[24h])) > 0
+          labels: { severity: info }
+          annotations:
+            summary: "AgentForge conductor has said all it may on at least one issue (lifetime ceiling) — it is a human's from here"
+            description: >-
+              forge_conduct_park_quiet_total{reason="ceiling"} advanced in the last 24h: on at least
+              one issue the conductor's own comments have reached the lifetime ceiling (three), so
+              the park lane proposes nothing more on that park and the filer skips the observation
+              it would have posted. The conductor is finished with that issue — it will not be
+              diagnosed again — and closing or moving it is a human's call. The conductor's pass
+              line names what each lane withheld and why; the issue is the one wearing three
+              conductor comments.
+        # THE RESERVED QUIET REASON, read for ForgeConductSensorUnrecognised's reason. The lanes and
+        # the filer withhold comments under a closed vocabulary (CONDUCT_QUIET_REASONS: ceiling,
+        # unchanged, interval, held, classless, exhausted), pinned in the engine against every
+        # Quiet(...) and quiet[...] the conductor spells; a reason outside it is counted under
+        # `unrecognised` rather than dropped, and a bucket nothing alerts on is the same hole one
+        # layer down. The counter is pre-touched at 0 for every declared reason and the reserved one,
+        # so the first occurrence is visible to increase(). Same window, threshold and hold as the
+        # sensor rule, for its reasons.
+        - alert: ForgeConductQuietReasonUnrecognised
+          expr: |-
+            sum(increase(forge_conduct_park_quiet_total{reason="unrecognised"}[30m])) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor withheld a comment for a reason it cannot name"
+            description: >-
+              forge_conduct_park_quiet_total advanced on the reserved `unrecognised` label: a lane
+              or the filer withheld a lifecycle comment for a reason outside CONDUCT_QUIET_REASONS
+              (agentforge infra/conduct_metrics.py). The count is real and the attribution is
+              missing, so the T1 comments-per-issue criterion — which reads reason=ceiling and
+              reason=exhausted — cannot be trusted while this fires. Fix in the ENGINE: add the
+              reason to the vocabulary, and a rule here if it needs one, in the same change; then
+              check why the engine's own pin over every Quiet(...) the conductor spells did not
+              catch it first.
+        # THE RESERVED REFUSAL REASON. A refusal's reason is the door's own word for it, held to
+        # CONDUCT_REASON_SHAPE at the publisher: one that is not a word (whitespace, a slash, a quote,
+        # free text) is counted under `unrecognised` rather than minted as a series. Every refusal
+        # reason is a literal in conductor.mutate and word-shaped by construction, so reaching this
+        # rule means a refusal was built from something read off the estate — the exact leak the
+        # shape exists to stop.
+        #
+        # NOT PRE-TOUCHED, and what that costs: a refusal reason has no series until its first
+        # refusal, so the reserved child's first refusal mints the series and is below increase()'s
+        # notice — this fires on the SECOND. A refusal the door decides recurs on every pass the
+        # proposal does, so a real one is seen on the next pass; one that happened once, ever, is
+        # the series itself to show (a forge_conduct_refusals_total{reason="unrecognised"} that
+        # exists at all is the fact). Otherwise the sensor rule's shape.
+        - alert: ForgeConductRefusalUnrecognised
+          expr: |-
+            sum(increase(forge_conduct_refusals_total{reason="unrecognised"}[30m])) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor's write door refused for a reason it cannot name"
+            description: >-
+              forge_conduct_refusals_total advanced on the reserved `unrecognised` label: the door
+              refused a write for a reason outside the word shape CONDUCT_REASON_SHAPE (agentforge
+              infra/conduct_metrics.py). Every refusal reason is a literal in conductor.mutate, so
+              one that is not a word was built from something read off the estate. The count is
+              real and the reason is missing from the series; the conductor's pass line carries the
+              refusals by reason as the door spelled them. Fix in the ENGINE.
+        # THE SWEEP, STARVED. The door budgets every pass — max_writes_per_pass mutations and
+        # max_new_issues_per_pass filings (conductor.mutate) — and a proposal past either is refused
+        # under reason=budget, counted, and carried to the next pass by the lane or the filer that
+        # made it. One such pass is a burst: more to say than a pass may, the rest said next pass.
+        # Pass after pass it is starvation — the proposals never drain, the newest finding waits
+        # behind the oldest — and nothing else in the estate distinguishes that from a quiet sweep:
+        # findings still get filed, the stamp still advances.
+        #
+        # PASSES, NOT REFUSALS (ForgeConductDetectorBlind's arithmetic). A starved pass refuses every
+        # proposal past the budget, so a count of refusals cannot tell one wide pass from three
+        # narrow ones, and it is the run of passes that means starvation. The door's delta reaches
+        # the counter in one record_pass call, so a series moves at most once per pass, and
+        # changes() less resets() over [1h] is the number of passes in the hour on which the door
+        # refused on budget — an integer, no window-edge coin toss. `>= 3` is three of the hour's
+        # twelve. sum() because the counter has one series per pod.
+        #
+        # NOT PRE-TOUCHED, and what that costs: the child is minted by the first budget refusal in
+        # the pod's life, and that sample is no change, so on a fresh series the bar is met on the
+        # fourth starved pass of the hour and on the third ever after — the quiet direction, by one
+        # pass, once per pod.
+        - alert: ForgeConductFilingOverBudget
+          expr: |-
+            sum(
+              changes(forge_conduct_refusals_total{reason="budget"}[1h])
+                - resets(forge_conduct_refusals_total{reason="budget"}[1h])
+            ) >= 3
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor's write door refused on budget on {{ $value | printf \"%.0f\" }} passes in the last hour — the sweep is starved"
+            description: >-
+              forge_conduct_refusals_total{reason="budget"} moved on at least three passes of the
+              last hour: pass after pass the lanes and the filer propose more than the door's
+              per-pass budget (max_writes_per_pass mutations, max_new_issues_per_pass filings)
+              admits, so the rest is carried to the next pass and never drains. Read the
+              conductor's pass line for what is being proposed — a storm of findings on one
+              detector, or a backlog of parks to diagnose — before raising the budget; a budget
+              raised for a storm is the storm let through.
+        # THE RETIREMENT INSTRUMENT (plan item 26). Every park cites an escalation, and its origin
+        # is one of two: `engine`, the af:esc record the current engine writes, or `legacy`, the
+        # pre-marker template a legacy reader (conductor/recovery.py, LEGACY_ORIGIN) still knows how
+        # to read — kept so the estate's old parks are classified, and to be REMOVED once no park
+        # needs it. There are two legacy arms and they retire together, the reader's docstring says
+        # so: the conductor's pre-marker reader and the engine's back-compat in
+        # markers.carries_escalation, whose backstop would otherwise synthesize a record above every
+        # legacy park. forge_conduct_parks{repo, prognosis, origin} is the last returned pass's
+        # classification, rebuilt in place every pass with EVERY cell over the bound repos present
+        # (a cell reads 0, never absent, when a pass reported) and EMPTY when a pass could not report
+        # its parks — so `sum(...{origin="legacy"}) == 0` is a pass that classified the estate and
+        # found no legacy park, and an empty sum is a pass that does not know.
+        #
+        # A WEEK OF ZERO, WHILE PARKS EXIST. The second conjunct: on an estate with no parks at all,
+        # zero legacy parks says nothing about the reader. The week is `for: 7d` — a hold, not a
+        # window — because what retirement needs is that the instrument read 0 CONTINUOUSLY, and a
+        # hold is exactly that: one eval where the sum is not 0, or is not there, starts the week
+        # over. That is right for a legacy park appearing (the week restarts from its last reading)
+        # and wrong for a gap in the reading: a Recreate rollout leaves the gauge empty for the
+        # minutes between the old pod's last scrape and the new pod's first pass, a pass that cannot
+        # report its parks empties it for a cadence, and a conductor rolled weekly would never get
+        # its week. So both conjuncts read the gauge through `last_over_time(...[30m])` — each cell's
+        # last sample within half an hour, which carries a reading across a rollout or a short
+        # unreadable stretch (the old pod's cells hold their last value beside the new pod's until
+        # they age out; 0 + 0 is 0, and a park is a park) and stops carrying it after thirty minutes,
+        # since six cadences of not knowing is not knowing, and the week starts over.
+        #
+        # `info`, because firing is the good news: the week is up and the retirement change can be
+        # opened. It stays up until that lands, which is the point of an instrument.
+        - alert: ForgeConductParksLegacyRetired
+          expr: |-
+            sum(last_over_time(forge_conduct_parks{origin="legacy"}[30m])) == 0
+              and on() (sum(last_over_time(forge_conduct_parks[30m])) > 0)
+          for: 7d
+          labels: { severity: info }
+          annotations:
+            summary: "AgentForge conductor has classified no legacy-origin park for 7 days — remove both legacy arms"
+            description: >-
+              forge_conduct_parks{origin="legacy"} has summed to 0 over every bound repo and
+              prognosis for seven days while parks were being classified (sum(forge_conduct_parks)
+              > 0), so the legacy reader has had nothing to read for a week. Plan item 26's
+              retirement instrument: open the change that removes both legacy arms — the
+              conductor's pre-marker reader (recovery.LEGACY_ORIGIN and the arm that assigns it)
+              and the engine's back-compat in markers.carries_escalation, which retire together —
+              and with them the origin=legacy cell of this gauge, this rule and its fixtures. A
+              legacy park appearing before that lands clears this and starts the week over.

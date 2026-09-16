@@ -1015,3 +1015,420 @@ tests:
       - eval_time: 20m
         alertname: ForgeConductSecretNotReady
         exp_alerts: []
+
+  # ── ForgeConductWakesUnanswered ───────────────────────────────────────────────────────────────
+  #
+  # THE WAKES ARE PRE-TOUCHED PER PASS, THE DIAGNOSES ARE NOT, and the cases below drive both the
+  # way the engine writes them: a wakes series appears at 0 on a first pass that attempts none and at
+  # its count on one that does; a (detector, op) series appears at its first comment's count, never
+  # at 0. The rule's second term exists for the second shape, and the healthy case mints a pair
+  # mid-window to hold it — on the plain difference of two increase()s that input reads 4 and fires.
+  # Every wake in these cases is a comment the door counted before the POST; every diagnosis is one
+  # the lane saw applied; the two step in the same sample because record_pass writes both.
+  - interval: 1m
+    name: comments the forge drops after the request leaves fire on the third
+    input_series:
+      # Two passes (10m, 15m) attempting the pass's whole allowance of three, every POST raising
+      # after it left: six wakes, and no diagnoses series at all — the conductor has never seen a
+      # comment applied, which is the `or vector(0)` arm.
+      - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x9 3+0x4 6+0x60"
+    alert_rule_test:
+      # 14m: three lost since 10m, hold not up
+      - eval_time: 14m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor woke bound pools with 6 lifecycle comments in 2h that never came back applied"
+              description: "forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted before the POST) advanced in the last 2h by at least three more than forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments that never came back as applied, so a bound pool may have been woken by a comment nobody can read. The two series share no label — wakes carry repo, diagnoses carry detector and op — so this is the fleet-wide difference and names no repo; the conductor's pass line carries each lane's failed= count beside its comments= and chains=. Check the forge's health from the conductor's side (timeouts and 5xx on POST) before anything else."
+
+  - interval: 1m
+    name: a healthy lane whose pairs mint mid-window is exact, and quiet
+    input_series:
+      # Boot with no wake (the series at 0), then: 5m attempts 2 and applies 2 on a NEW pair; 10m
+      # attempts 1, applies 1 on the same pair; 15m attempts 3, applies 1 on that pair and 2 on a
+      # SECOND new pair. Six wakes, six diagnoses, three of them the first sample of their series.
+      - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x4 2+0x4 3+0x4 6+0x100"
+      - series: 'forge_conduct_diagnoses_total{detector="PARK-AUTH", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x5 2+0x4 3+0x4 4+0x100"
+      - series: 'forge_conduct_diagnoses_total{detector="PARK-BUDGET-EXHAUSTED", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x15 2+0x100"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+
+  - interval: 1m
+    name: one lost comment is a timeout, two are two, the third in the window fires
+    input_series:
+      # A comment lost at 10m, another at 70m, a third at 100m; nothing applied in between.
+      - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x9 1+0x59 2+0x29 3+0x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+      - eval_time: 110m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
+              description: "forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted before the POST) advanced in the last 2h by at least three more than forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments that never came back as applied, so a bound pool may have been woken by a comment nobody can read. The two series share no label — wakes carry repo, diagnoses carry detector and op — so this is the fleet-wide difference and names no repo; the conductor's pass line carries each lane's failed= count beside its comments= and chains=. Check the forge's health from the conductor's side (timeouts and 5xx on POST) before anything else."
+
+  - interval: 1m
+    name: a rollout mid-window is two pods, one old and one new, and exact
+    input_series:
+      # Pod abc existed before the window opened (forty of each, a step to forty-one at 150m) and
+      # is gone at 160m; pod def mints at 165m on a first pass that attempts three and applies three
+      # — both of its series appear at 3, never at 0 — and steps to five at 170m. increase() reads
+      # abc whole; the second term reads def's first samples, on both sides.
+      - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "40+0x149 41+0x9 _x100"
+      - series: 'forge_conduct_diagnoses_total{detector="PARK-AUTH", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "40+0x149 41+0x9 _x100"
+      - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x165 3+0x4 5+0x90"
+      - series: 'forge_conduct_diagnoses_total{detector="PARK-AUTH", op="finding", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x165 3+0x4 5+0x90"
+    alert_rule_test:
+      - eval_time: 200m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+
+  - interval: 1m
+    name: an in-place restart inside the window is read by the reset arithmetic, and is quiet
+    input_series:
+      # Both series existed at the window's start. Three at 120m; the container restarts at 130m
+      # — the wakes re-export at 0 on a first pass that attempts none, the pair is gone until its
+      # next comment — and three more at 135m. Six of each: increase() adds the pre-reset value
+      # back on the drop it sees (6 to 0, and 6 to 3), and the second term has nothing to add.
+      - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x9 3+0x109 6+0x9 0+0x4 3+0x70"
+      - series: 'forge_conduct_diagnoses_total{detector="PARK-AUTH", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x9 3+0x109 6+0x9 _x5 3+0x70"
+    alert_rule_test:
+      - eval_time: 200m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+
+  # ── ForgeConductIssueExhausted / ForgeConductCeilingHolding ──────────────────────────────────
+  #
+  # One input, both rules, each reason driven while the other holds still: the two read the same
+  # counter by reason and a fixture feeding each its own series could not tell `reason="exhausted"`
+  # from a rule over the whole family. The counter is pre-touched at 0 for every reason, so every
+  # series is present from boot; a state that holds is counted on EVERY pass, one step per 300s.
+  - interval: 1m
+    name: an exhausted issue fires from its first pass and clears a day after its last
+    input_series:
+      # Exhausted from 10m to 25m (four passes), then the operator closes the issue.
+      - series: 'forge_conduct_park_quiet_total{reason="exhausted", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x9 1+0x4 2+0x4 3+0x4 4+0x1500"
+      - series: 'forge_conduct_park_quiet_total{reason="ceiling", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x1520"
+      - series: 'forge_conduct_park_quiet_total{reason="unchanged", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x9 5+0x4 10+0x4 15+0x4 20+0x4 25+0x4 30+0x4 35+0x4 40+0x1480"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ForgeConductIssueExhausted
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ForgeConductIssueExhausted
+        exp_alerts: &issue_exhausted
+          - exp_labels: { severity: info }
+            exp_annotations:
+              summary: "AgentForge conductor has a filed issue it can never settle — close it by hand"
+              description: >-
+                forge_conduct_park_quiet_total{reason="exhausted"} advanced in the last 24h: a filed issue's fingerprint recurred after its resolution with no room under the lifetime ceiling (three own comments) for a recurrence finding and a resolution after it — or a resolution itself had no room — so the filer posts nothing on it and files no successor while it stays open. The conductor's pass line names the fingerprint (`exhausted=`). Close the issue: the next pass on which the finding recurs files a fresh one, and this clears a day after the last exhausted pass.
+      # 20h in: the issue was closed long ago and the last exhausted pass is still inside the day
+      - eval_time: 1200m
+        alertname: ForgeConductIssueExhausted
+        exp_alerts: *issue_exhausted
+      # a day and a bit after the last exhausted pass: gone
+      - eval_time: 1470m
+        alertname: ForgeConductIssueExhausted
+        exp_alerts: []
+      # the ceiling counter never moved, whatever the other reasons did
+      - eval_time: 12m
+        alertname: ForgeConductCeilingHolding
+        exp_alerts: []
+      - eval_time: 1200m
+        alertname: ForgeConductCeilingHolding
+        exp_alerts: []
+
+  - interval: 1m
+    name: a park at the lifetime ceiling fires the ceiling rule and not the exhausted one
+    input_series:
+      - series: 'forge_conduct_park_quiet_total{reason="ceiling", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x9 1+0x4 2+0x4 3+0x4 4+0x1500"
+      - series: 'forge_conduct_park_quiet_total{reason="exhausted", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x1520"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ForgeConductCeilingHolding
+        exp_alerts:
+          - exp_labels: { severity: info }
+            exp_annotations:
+              summary: "AgentForge conductor has said all it may on at least one issue (lifetime ceiling) — it is a human's from here"
+              description: >-
+                forge_conduct_park_quiet_total{reason="ceiling"} advanced in the last 24h: on at least one issue the conductor's own comments have reached the lifetime ceiling (three), so the park lane proposes nothing more on that park and the filer skips the observation it would have posted. The conductor is finished with that issue — it will not be diagnosed again — and closing or moving it is a human's call. The conductor's pass line names what each lane withheld and why; the issue is the one wearing three conductor comments.
+      - eval_time: 1470m
+        alertname: ForgeConductCeilingHolding
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ForgeConductIssueExhausted
+        exp_alerts: []
+
+  # ── ForgeConductQuietReasonUnrecognised ──────────────────────────────────────────────────────
+  # The sensor rule's three cases, on the quiet counter: pre-touched, so the first occurrence is
+  # the alert; a declared reason is not; one historical occurrence ages out of the window.
+  - interval: 1m
+    name: a comment withheld for a reason outside the vocabulary fires
+    input_series:
+      - series: 'forge_conduct_park_quiet_total{reason="unrecognised", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x9 1+0x4 2+0x40"
+      - series: 'forge_conduct_park_quiet_total{reason="interval", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x54"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ForgeConductQuietReasonUnrecognised
+        exp_alerts: &quiet_unrecognised
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor withheld a comment for a reason it cannot name"
+              description: "forge_conduct_park_quiet_total advanced on the reserved `unrecognised` label: a lane or the filer withheld a lifecycle comment for a reason outside CONDUCT_QUIET_REASONS (agentforge infra/conduct_metrics.py). The count is real and the attribution is missing, so the T1 comments-per-issue criterion — which reads reason=ceiling and reason=exhausted — cannot be trusted while this fires. Fix in the ENGINE: add the reason to the vocabulary, and a rule here if it needs one, in the same change; then check why the engine's own pin over every Quiet(...) the conductor spells did not catch it first."
+  - interval: 1m
+    name: a declared quiet reason advancing is not this alert
+    input_series:
+      - series: 'forge_conduct_park_quiet_total{reason="held", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+2x40"
+      - series: 'forge_conduct_park_quiet_total{reason="unrecognised", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ForgeConductQuietReasonUnrecognised
+        exp_alerts: []
+  - interval: 1m
+    name: a single historical unrecognised quiet reason does not latch the alert forever
+    input_series:
+      - series: 'forge_conduct_park_quiet_total{reason="unrecognised", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x5 3+0x90"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ForgeConductQuietReasonUnrecognised
+        exp_alerts: *quiet_unrecognised
+      - eval_time: 90m
+        alertname: ForgeConductQuietReasonUnrecognised
+        exp_alerts: []
+
+  # ── ForgeConductRefusalUnrecognised ───────────────────────────────────────────────────────────
+  # NOT pre-touched: the reserved child is minted by its first refusal, at 1, and the first case
+  # holds what the rule's comment says that costs — quiet on the mint, up on the second refusal.
+  - interval: 1m
+    name: a refusal for a reason that is not a word fires on its second occurrence
+    input_series:
+      # minted at 10m by the first refusal; the proposal recurs and is refused again at 15m
+      - series: 'forge_conduct_refusals_total{reason="unrecognised", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x10 1+0x4 2+0x40"
+    alert_rule_test:
+      # 14m: the mint is a first sample, not a change
+      - eval_time: 14m
+        alertname: ForgeConductRefusalUnrecognised
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ForgeConductRefusalUnrecognised
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor's write door refused for a reason it cannot name"
+              description: "forge_conduct_refusals_total advanced on the reserved `unrecognised` label: the door refused a write for a reason outside the word shape CONDUCT_REASON_SHAPE (agentforge infra/conduct_metrics.py). Every refusal reason is a literal in conductor.mutate, so one that is not a word was built from something read off the estate. The count is real and the reason is missing from the series; the conductor's pass line carries the refusals by reason as the door spelled them. Fix in the ENGINE."
+      # 50m: the last step at 15m has aged out of [30m]
+      - eval_time: 50m
+        alertname: ForgeConductRefusalUnrecognised
+        exp_alerts: []
+  - interval: 1m
+    name: a refusal the door can name, and one unrecognised refusal ever, are not this alert
+    input_series:
+      - series: 'forge_conduct_refusals_total{reason="tier", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+3x40"
+      # minted once and never moved again: the stated residue, and the series itself is the fact
+      - series: 'forge_conduct_refusals_total{reason="unrecognised", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x10 1+0x30"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ForgeConductRefusalUnrecognised
+        exp_alerts: []
+
+  # ── ForgeConductFilingOverBudget ──────────────────────────────────────────────────────────────
+  # PASSES, not refusals: the cases hold one wide pass quiet and three narrow ones loud, and a
+  # restart's drop is taken back. The child is minted by the first budget refusal in the pod's life
+  # (never 0), so the first starved pass is a first sample and no change.
+  - interval: 1m
+    name: a door refusing on budget pass after pass fires on the third pass it can count
+    input_series:
+      # Starved from 10m: four refused at 10m (the mint), three more on each of the next three
+      # passes, a breather, and a fourth starved pass at 40m.
+      - series: 'forge_conduct_refusals_total{reason="budget", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x10 4+0x4 7+0x4 10+0x4 13+0x14 16+0x40"
+    alert_rule_test:
+      # 24m: two changes (15m, 20m) — the mint at 10m is not one
+      - eval_time: 24m
+        alertname: ForgeConductFilingOverBudget
+        exp_alerts: []
+      # 29m: three changes since 25m, hold not up; 30m: up
+      - eval_time: 29m
+        alertname: ForgeConductFilingOverBudget
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: ForgeConductFilingOverBudget
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor's write door refused on budget on 3 passes in the last hour — the sweep is starved"
+              description: >-
+                forge_conduct_refusals_total{reason="budget"} moved on at least three passes of the last hour: pass after pass the lanes and the filer propose more than the door's per-pass budget (max_writes_per_pass mutations, max_new_issues_per_pass filings) admits, so the rest is carried to the next pass and never drains. Read the conductor's pass line for what is being proposed — a storm of findings on one detector, or a backlog of parks to diagnose — before raising the budget; a budget raised for a storm is the storm let through.
+      - eval_time: 45m
+        alertname: ForgeConductFilingOverBudget
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor's write door refused on budget on 4 passes in the last hour — the sweep is starved"
+              description: >-
+                forge_conduct_refusals_total{reason="budget"} moved on at least three passes of the last hour: pass after pass the lanes and the filer propose more than the door's per-pass budget (max_writes_per_pass mutations, max_new_issues_per_pass filings) admits, so the rest is carried to the next pass and never drains. Read the conductor's pass line for what is being proposed — a storm of findings on one detector, or a backlog of parks to diagnose — before raising the budget; a budget raised for a storm is the storm let through.
+  - interval: 1m
+    name: one wide pass over budget is a burst, not starvation
+    input_series:
+      # a series that existed (one old refusal), then a single pass refusing eight
+      - series: 'forge_conduct_refusals_total{reason="budget", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "1+0x9 9+0x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ForgeConductFilingOverBudget
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: ForgeConductFilingOverBudget
+        exp_alerts: []
+  - interval: 1m
+    name: a restart between two starved passes is not a third
+    input_series:
+      # minted at 10m, a second starved pass at 15m, a container restart at 20m (the child is gone
+      # until its next refusal), re-minted at 25m: changes() reads the drop as a third and resets()
+      # takes it back.
+      - series: 'forge_conduct_refusals_total{reason="budget", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x10 4+0x4 7+0x4 _x5 3+0x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ForgeConductFilingOverBudget
+        exp_alerts: []
+
+  # ── ForgeConductParksLegacyRetired ────────────────────────────────────────────────────────────
+  #
+  # THE GAUGE IS FED AS THE ENGINE REBUILDS IT: every cell over a bound repo present, the legacy
+  # cell at 0 and never absent while a pass reports, and ALL cells gone when a pass cannot report or
+  # a pod is gone. The scrape interval here is 5m so a week is two thousand samples rather than ten;
+  # the rule's `last_over_time(...[30m])` sees every one of them. The four cases hold the four
+  # things the week turns on: a rollout gap shorter than the bridge is carried; a legacy park seen
+  # restarts the week from its last reading; a gap longer than the bridge restarts it; and an estate
+  # with no parks at all never starts it.
+  - interval: 5m
+    name: a week of zero legacy parks, carried across a rollout, is the retirement
+    input_series:
+      # Pod abc reports for three days (its last sample at 4320m) and is gone; pod def's first
+      # pass reports at 4335m — a fifteen-minute gap the bridge carries.
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="legacy", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x864 _x1300"
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="engine", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "2+0x864 _x1300"
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-UNKNOWN", origin="none", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "1+0x864 _x1300"
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="legacy", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x867 0+0x1300"
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="engine", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x867 2+0x1300"
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-UNKNOWN", origin="none", namespace="agentforge", pod="agentforge-conductor-def", instance="10.42.0.9:9464", job="monitoring/agentforge-conductor"}'
+        values: "_x867 1+0x1300"
+    alert_rule_test:
+      # inside the gap: the bridge is holding, nothing fires yet either way
+      - eval_time: 4330m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: []
+      # five minutes short of the week
+      - eval_time: 10075m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: []
+      - eval_time: 10085m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: &legacy_retired
+          - exp_labels: { severity: info }
+            exp_annotations:
+              summary: "AgentForge conductor has classified no legacy-origin park for 7 days — remove both legacy arms"
+              description: >-
+                forge_conduct_parks{origin="legacy"} has summed to 0 over every bound repo and prognosis for seven days while parks were being classified (sum(forge_conduct_parks) > 0), so the legacy reader has had nothing to read for a week. Plan item 26's retirement instrument: open the change that removes both legacy arms — the conductor's pre-marker reader (recovery.LEGACY_ORIGIN and the arm that assigns it) and the engine's back-compat in markers.carries_escalation, which retire together — and with them the origin=legacy cell of this gauge, this rule and its fixtures. A legacy park appearing before that lands clears this and starts the week over.
+      # and it stays up
+      - eval_time: 10800m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: *legacy_retired
+  - interval: 5m
+    name: a legacy park seen on day two restarts the week from its last reading
+    input_series:
+      # One legacy park classified from day 1 to day 1.5 (1440m to 2160m), then gone: the week
+      # runs from 2165m, the first reading of 0 after it, and is up at 12245m.
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="legacy", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x287 1+0x144 0+0x2100"
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="engine", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "2+0x2532"
+    alert_rule_test:
+      - eval_time: 10085m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: []
+      - eval_time: 12235m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: []
+      - eval_time: 12250m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: *legacy_retired
+  - interval: 5m
+    name: a gap longer than the bridge is not knowing, and restarts the week
+    input_series:
+      # The gauge is empty from 1445m to 1480m — eight passes that could not report their parks,
+      # or a rollout that took forty minutes — which is past the thirty-minute bridge. The week
+      # restarts at 1485m and is not up until 11565m.
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="legacy", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x288 _x8 0+0x2100"
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="engine", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "2+0x288 _x8 2+0x2100"
+    alert_rule_test:
+      - eval_time: 10085m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: []
+      - eval_time: 11555m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: []
+      - eval_time: 11570m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: *legacy_retired
+  - interval: 5m
+    name: an estate with no parks at all says nothing about the legacy reader
+    input_series:
+      # every cell present and zero for well over a week: the second conjunct is false throughout
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="legacy", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x2120"
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-DIAGNOSED", origin="engine", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x2120"
+      - series: 'forge_conduct_parks{repo="cchifor/platform", prognosis="PARK-UNKNOWN", origin="none", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "0+0x2120"
+    alert_rule_test:
+      - eval_time: 10500m
+        alertname: ForgeConductParksLegacyRetired
+        exp_alerts: []
