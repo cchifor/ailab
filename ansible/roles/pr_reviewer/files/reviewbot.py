@@ -1015,6 +1015,12 @@ def park(reset_at, seat=None):
     until = max(time.time() + 60, min(until, time.time() + MAX_PARK_S))
     # The max stays HERE, per seat, where it was always right: one seat's wall only moves later.
     SEAT_PARKED_UNTIL[seat] = max(SEAT_PARKED_UNTIL.get(seat, 0.0), until)
+    # A COUNTER BESIDE THE GAUGE, because the gauge cannot answer "is this seat spent?".
+    # A park lapses after DEFAULT_PARK_S and sticky selection has already moved on, so nothing
+    # re-probes that seat: reviewbot_llm_seat_parked drops back to 0 without the subscription
+    # having recovered, and any `== 1 for: >15m` rule over it is unsatisfiable (reviewer-codex,
+    # round 1 of ailab#754). Repeated parks ARE observable, and monotonic.
+    bump_meta(f"seat_parks_total.{seat}")
     RATE_LIMITED_UNTIL = all_parked_until()
     # Leading text is verbatim on purpose: docs/runbooks/dev-workers.md and the runbook line in
     # reviewbot-rules.yaml both tell an operator to grep for it. The seat is appended only when
@@ -1850,6 +1856,10 @@ def write_metrics():
             # torn (commit_sweep writes both in one transaction).
             repo_failed = {r[0][len(REPO_FAILED_PREFIX):]: r[1] for r in c.execute(
                 "SELECT k,v FROM meta WHERE k LIKE ?", (REPO_FAILED_PREFIX + "%",))}
+            # Per-seat park counters. Prefix scan for the same reason the repo results above are
+            # one: the key carries a seat name, which is config, so it cannot be a fixed list.
+            _parks = {r[0]: r[1] for r in c.execute(
+                "SELECT k,v FROM meta WHERE k LIKE 'seat_parks_total.%'")}
             c.close()
         now = time.time()
         # Escape ONCE for every emission. persona is operator-set config like repo,
@@ -1884,6 +1894,14 @@ def write_metrics():
                          f'{1 if _until > now else 0}')
             lines.append(f'reviewbot_llm_seat_parked_seconds_remaining'
                          f'{{persona="{_persona}",seat="{_sn}"}} {max(0.0, _until - now):.0f}')
+            # The alertable one. Read from meta directly rather than via the `gauges` whitelist,
+            # because the key is per-seat and that dict is a fixed key list by design.
+            try:
+                lines.append(f'reviewbot_llm_seat_parks_total'
+                             f'{{persona="{_persona}",seat="{_sn}"}} '
+                             f'{float(_parks.get("seat_parks_total." + _s["name"], 0) or 0):.0f}')
+            except (TypeError, ValueError):
+                pass
         # CONFIGURED vs USABLE. These must come from different places or the difference is
         # unrepresentable: len(SEATS) is the post-resolution list and len(SEAT_BY_NAME) is
         # built from that same list, so the pair was always equal before this was fixed.

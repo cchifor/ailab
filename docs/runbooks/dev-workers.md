@@ -274,20 +274,41 @@ their walls simultaneously and turn two staggered recoveries into one synchronis
 special case: reviewbot synthesises one seat named `default` from `pr_reviewer_llm_sudo_user` and
 runs the identical code path.
 
-**Adding a seat.** Provisioning is automatic once the seat is in host_vars — the role creates the
-user, its `~/.codex` (0700), the model pin, and one `/etc/sudoers.d/reviewbot-llm` line listing
-every seat user. What is NOT automatic, and cannot be, is the credential:
+**Adding a seat. THE ORDER IS THE PROCEDURE** — get it wrong and reviewbot runs with a seat that
+has no credential, which fails as an ORDINARY error rather than a `RateLimited`, so it never parks
+and burns the PR's attempts toward quarantine. The `seats` tag exists to make the staging possible:
+it provisions the user WITHOUT touching reviewbot.py or restarting the service (none of those four
+tasks notify the restart handler).
 
-1. `ssh c4@192.168.0.25` then, in a scratch HOME so no working credential is at risk:
-   `setsid env HOME=/home/c4/.seatN nohup /usr/bin/codex login --device-auth &`
-   — `--device-auth` is the headless flow. It is **absent from `codex login --help`** at 0.153.4;
-   the CLI only mentions it after a browser login fails. Read the code and URL out of the log.
-2. Authenticate in a browser against the NEW licence.
-3. `sudo install -o codexrunN -g codexrunN -m 0600 <scratch>/.codex/auth.json \
-      /home/codexrunN/.codex/auth.json`
-4. **Delete the scratch copy.** `install` copies; leaving both is the 2026-09-10 outage — OpenAI
-   refresh tokens are single-use, so two copies of one family revoke each other on first refresh.
-5. Add the seat to `ansible/host_vars/reviewer-2.yml`, converge, restart.
+1. **Get the credential first**, into a scratch HOME so nothing in use is at risk:
+   ```
+   ssh c4@192.168.0.25
+   rm -rf ~/.seatN && mkdir -p ~/.seatN
+   setsid env HOME=/home/c4/.seatN nohup /usr/bin/codex login --device-auth \
+       > ~/.seatN/login.log 2>&1 < /dev/null &
+   sleep 10 && cat ~/.seatN/login.log      # prints the URL and a one-time code, then polls
+   ```
+   `--device-auth` is the headless flow and is **absent from `codex login --help`** at 0.153.4 —
+   the CLI only names it after a browser login fails. Authenticate against the NEW licence.
+2. **Add the seat to `ansible/host_vars/reviewer-2.yml`** (`{name, sudo_user, home?}`).
+3. **Provision the user only** — no restart, so the not-yet-credentialled seat is never live:
+   ```
+   ansible-playbook reviewers.yml -l reviewer-2 -t seats
+   ```
+   This creates the user, its `0700 ~/.codex`, the model pin, and rewrites
+   `/etc/sudoers.d/reviewbot-llm` with every seat user in one validated file.
+4. **Install the credential, then DELETE the scratch copy:**
+   ```
+   sudo install -o codexrunN -g codexrunN -m 0600 \
+       /home/c4/.seatN/.codex/auth.json /home/codexrunN/.codex/auth.json
+   rm -rf /home/c4/.seatN
+   ```
+   Deleting it is not tidiness. OpenAI refresh tokens are single-use, so two copies of one family
+   revoke each other on first refresh — that is the 2026-09-10 outage, which took BOTH personas
+   down and did not surface until the access token expired days later.
+5. **Activate**: a full converge (or `-t reviewbot`) re-renders the config and restarts the service.
+   Confirm with `journalctl -u reviewbot | grep "^.*seats:"` and the textfile's
+   `reviewbot_llm_seats_total` / `_distinct` / `_available`.
 
 **Never add a seat whose account already appears.** `resolve_seats()` reads `tokens.account_id`
 from each seat at startup and COLLAPSES duplicates, because rotating inside one account is the

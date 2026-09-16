@@ -61,7 +61,7 @@
     system: true
     shell: /usr/sbin/nologin
     create_home: true
-    home: "{{ item.home | default('/home/' + item.sudo_user) }}"
+    home: "{{ item.home | default('/home/' + item.sudo_user, true) }}"
   loop: "{{ pr_reviewer_seats_effective }}"
   loop_control:
     label: "{{ item.name }} ({{ item.sudo_user }})"
@@ -74,9 +74,11 @@
 # tables codex appends and any `[profiles.*]` are never touched) so no host carries
 # a stale pin; reviewbot still passes `-m` explicitly on every exec, so this is
 # consistency, not the authority.
+  tags: [seats]
+
 - name: Ensure each seat's ~/.codex exists
   ansible.builtin.file:
-    path: "{{ item.home | default('/home/' + item.sudo_user) }}/.codex"
+    path: "{{ item.home | default('/home/' + item.sudo_user, true) }}/.codex"
     state: directory
     owner: "{{ item.sudo_user }}"
     group: "{{ item.sudo_user }}"
@@ -87,10 +89,11 @@
   when:
     - pr_reviewer_llm_kind == "codex"
     - item.sudo_user | length > 0
+  tags: [seats]
 
 - name: Pin the codex model in each seat's config (top-level key, table-aware)
   community.general.ini_file:
-    path: "{{ item.home | default('/home/' + item.sudo_user) }}/.codex/config.toml"
+    path: "{{ item.home | default('/home/' + item.sudo_user, true) }}/.codex/config.toml"
     option: model
     value: '"{{ pr_reviewer_llm_model }}"'
     no_extra_spaces: false
@@ -109,6 +112,8 @@
 # ONE file with a runas LIST rather than one file per seat: sudoers accepts `(a,b,c)` directly,
 # and a single validated file cannot half-apply the way a set of files can. Seat order is
 # preserved so the rendered line is stable and a re-converge stays idempotent.
+  tags: [seats]
+
 - name: Allow the service user to run the LLM as any seat's user
   ansible.builtin.copy:
     content: "{{ pr_reviewer_user }} ALL=({{ pr_reviewer_seats_effective | map(attribute='sudo_user') | select('string') | select() | join(',') }}) NOPASSWD: ALL\n"
@@ -127,6 +132,8 @@
 # test per-seat rendering. Seat credentials are hand-seeded exactly as the single one is. Per-seat
 # projection needs a reviewer-N-seat AppRole and a secret-id per seat in reviewbot.sops.yaml; that
 # is real work and it is NOT pretended to here.
+  tags: [seats]
+
 - name: OpenBao-rendered codex login (bao agent — ADR 0020; single-seat only)
   ansible.builtin.import_tasks: openbao.yml
   when:
