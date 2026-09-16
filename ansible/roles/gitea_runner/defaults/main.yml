@@ -73,6 +73,16 @@ gitea_runner_fetch_interval: 2s
 #
 # 10 is chosen against measured job duration on this fleet (median 14s, p90 31s, max 127s): it covers
 # the whole observed distribution with ~5x margin on the worst case while still bounding a shutdown.
+# REVISIT IT when that stops being true — if p90 job duration ever approaches ~half this budget, raise
+# this number rather than discovering the ceiling during an incident. Nothing alerts on that today;
+# the measurement is `journalctl -u gitea-act-runner | grep 'task .* repo'` timings on a runner.
+#
+# WHY +1min IS ENOUGH BUFFER, since it looks thin next to a 10-minute drain: the job's log/artifact
+# upload back to Gitea happens INSIDE this budget, not after it — act_runner reports task state as
+# part of running the job, and the whole thing is bounded by the one `poller.Shutdown(ctx)` deadline.
+# So if a job plus its upload cannot finish within n minutes, act_runner cancels it at n (that is what
+# this setting IS), and systemd's SIGKILL at n+1 only has to cover act_runner's own exit after its
+# deadline expires — which is fast. The buffer is not sized for the upload; the drain budget is.
 #
 # WHY AN INTEGER AND NOT A DURATION STRING ("10m"): the unit's TimeoutStopSec MUST exceed this, or
 # systemd SIGKILLs the process group mid-drain and reintroduces the exact zero-log-line failure this
