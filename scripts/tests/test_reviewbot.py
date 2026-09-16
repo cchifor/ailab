@@ -930,7 +930,8 @@ class LimitScopeTest(unittest.TestCase):
                                   "one token alone is not the CLI's remedy")
 
     def test_ordinary_review_prose_does_not_park_the_persona(self):
-        """A park is GLOBAL to the persona - it stops every repo, not one PR - so a false
+        """A park stops the SEAT, and with one seat that is the whole persona - every repo, not
+        one PR - so a false
         positive is expensive. These are the near-misses the word boundaries exist for."""
         for text in ("This PR adds a rate limiter; the daily limitation is documented.",
                      "raise the concurrency limits for the weekly digest job",
@@ -2515,6 +2516,370 @@ class MergeBlockedVisibilityTest(unittest.TestCase):
         self.assertIn('reviewbot_merge_blocked_seconds{persona="test"}', exported)
         self.assertEqual(3.0, exported['reviewbot_llm_primary_failed_total{persona="test"}'])
         self.assertEqual(2.0, exported['reviewbot_llm_fallback_used_total{persona="test"}'])
+
+
+SEATS_3 = [{"name": "a", "sudo_user": "runa"},
+           {"name": "b", "sudo_user": "runb"},
+           {"name": "c", "sudo_user": "runc"}]
+
+
+class SeatRotationTest(unittest.TestCase):
+    """Rotating across several subscriptions instead of parking the whole worker.
+
+    THE INVARIANT UNDER TEST is the one the 2026-09-15 episode proved and the 09-14 episode
+    before it lacked: an exhausted account consumes NO attempt, leaves the queue intact and
+    quarantines nothing. Rotation adds routing ABOVE that; every test here exists to show it
+    did not erode it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, llm_kind="codex", llm_model="gpt-6-astra",
+                      llm_fallback_model="", llm_timeout_s=600, llm_sudo_user="",
+                      llm_seats=SEATS_3)
+        self.calls = []
+
+    def _runner(self, refusing_users, elapsed=0.0):
+        """codex refuses for the named users and answers for the rest. Dispatch is on the sudo
+        USER at argv[3], which is the only thing that differs between seats."""
+        answer = json.dumps({"summary": "s", "findings": []})
+
+        def run(args, **kw):
+            CP = self.m.subprocess.CompletedProcess
+            if args[0] != "sudo":
+                return CP(args, 0, "", "")
+            user, verb = args[3], args[4]
+            if verb == "mktemp":
+                return CP(args, 0, f"/tmp/reviewbot-llm-{user}\n", "")
+            if verb.startswith("HOME="):
+                self.calls.append(user)
+                if elapsed:
+                    type(self.clock).now += elapsed
+                if user in refusing_users:
+                    return CP(args, 1, "", CODEX_LIMIT_STDERR)
+                return CP(args, 0, "", "")
+            if verb == "cat":
+                if args[5].endswith("auth.json"):
+                    return CP(args, 0, "{}", "")
+                return CP(args, 0, "" if user in refusing_users else answer, "")
+            return CP(args, 0, "", "")
+        return run
+
+    def _freeze(self):
+        class Clock:
+            now = 1000.0
+            def monotonic(self): return Clock.now
+            def time(self): return real_time.time()
+            def sleep(self, _n): pass
+            def strftime(self, *a): return real_time.strftime(*a)
+            # gmtime is NOT optional: fail_note() calls time.gmtime(e.reset_at) for any parsable
+            # reset, and parse_reset() calls it too. Without it a rotation test that freezes the
+            # clock dies on AttributeError, which reads like a production bug in fail_note.
+            def gmtime(self, *a): return real_time.gmtime(*a)
+        self.clock = Clock()
+        self.m.time = self.clock
+
+    # 1 ---------------------------------------------------------------------------------
+    def test_a_refusal_rotates_to_the_next_seat_and_consumes_no_attempt(self):
+        self.m.subprocess.run = self._runner({"runa"})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual(["runa", "runb"], self.calls, "should have moved a -> b")
+        self.assertTrue(self.m.seat_parked("a"))
+        self.assertFalse(self.m.seat_parked("b"))
+        self.assertEqual("b", self.m.CURRENT_SEAT)
+
+    def test_rotation_does_not_touch_the_attempt_budget(self):
+        e = self.m.RateLimited(CODEX_LIMIT_STDERR, None)
+        self.assertEqual(("retry", 4, 1), self.m.next_failure_state(e, 4, 1)[:3])
+
+    # 2 ---------------------------------------------------------------------------------
+    def test_every_seat_refusing_parks_the_worker_and_keeps_the_queue(self):
+        self.m.subprocess.run = self._runner({"runa", "runb", "runc"})
+        head = "a" * 40
+        self.m.enqueue("o/r", 1, head, "webhook")
+        self.m.review_job = lambda *a: self.m.run_llm("t", "d", "diff")
+        self.m.worker_once()
+        c = self.m.db()
+        state, attempts = c.execute("SELECT state, attempts FROM jobs WHERE head_sha=?",
+                                    (head,)).fetchone()
+        c.close()
+        self.assertEqual("retry", state, "must never quarantine on an account condition")
+        self.assertEqual(0, attempts, "the PR must not pay for the subscription")
+        self.assertEqual(0, self.m.seats_available())
+        self.assertGreater(self.m.RATE_LIMITED_UNTIL, real_time.time())
+
+    def test_one_refusal_per_seat_when_all_are_spent(self):
+        self.m.subprocess.run = self._runner({"runa", "runb", "runc"})
+        with self.assertRaises(self.m.RateLimited):
+            self.m.run_llm("t", "d", "diff")
+        self.assertEqual(["runa", "runb", "runc"], self.calls,
+                         "each seat tried exactly once - `exclude=tried` bounds the loop")
+
+    # 3 ---------------------------------------------------------------------------------
+    def test_seat_deadlines_are_independent(self):
+        self.m.park(real_time.time() + 5000, seat="a")
+        self.assertTrue(self.m.seat_parked("a"))
+        self.assertFalse(self.m.seat_parked("b"))
+        self.assertEqual(2, self.m.seats_available())
+        self.assertEqual(0.0, self.m.all_parked_until(), "a free seat means the worker runs")
+        self.assertEqual(0.0, self.m.RATE_LIMITED_UNTIL)
+
+    def test_the_global_takes_the_EARLIEST_reopening_not_the_latest(self):
+        """A latched global would wedge the worker for MAX_PARK_S after the short seat came
+        back - which is why park() assigns instead of max()ing at the global level."""
+        now = real_time.time()
+        self.m.park(now + 6 * 3600, seat="a")
+        self.m.park(now + 6 * 3600, seat="b")
+        self.m.park(now + 900, seat="c")
+        self.assertAlmostEqual(self.m.SEAT_PARKED_UNTIL["c"], self.m.RATE_LIMITED_UNTIL, delta=2)
+        self.assertLess(self.m.RATE_LIMITED_UNTIL - now, 1000)
+
+    # 5 ---------------------------------------------------------------------------------
+    def test_a_refusal_with_no_budget_left_defers_instead_of_rotating(self):
+        self._freeze()
+        self.m.subprocess.run = self._runner({"runa"}, elapsed=580)  # 600s budget
+        with self.assertRaises(self.m.RateLimited) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertEqual(["runa"], self.calls, "must not start seat b on 20s of budget")
+        self.assertTrue(getattr(cm.exception, "deferred_for_budget", False))
+        self.assertTrue(self.m.seat_parked("a"), "the refusing seat is still parked")
+        self.assertFalse(self.m.seat_parked("b"), "and the untried seat is NOT")
+
+    def test_the_budget_defer_is_still_free(self):
+        """It raises RateLimited, so next_failure_state charges nothing. A sibling exception
+        class here would land in worker_once's generic handler, be promoted to
+        ExpensiveFailure, and quarantine on the second occurrence."""
+        self._freeze()
+        self.m.subprocess.run = self._runner({"runa"}, elapsed=580)
+        try:
+            self.m.run_llm("t", "d", "diff")
+        except self.m.RateLimited as e:
+            self.assertEqual(("retry", 3, 0), self.m.next_failure_state(e, 3, 0)[:3])
+            self.assertFalse(self.m.is_budget_failure(e))
+        else:
+            self.fail("expected RateLimited")
+
+    # 6 ---------------------------------------------------------------------------------
+    def test_selection_is_sticky_not_round_robin(self):
+        self.m.subprocess.run = self._runner(set())
+        for _ in range(4):
+            self.m.run_llm("t", "d", "diff")
+        self.assertEqual(["runa"] * 4, self.calls, "healthy seat must be reused, not rotated")
+
+    def test_a_reopened_seat_does_not_pull_the_rotation_back(self):
+        """Sticky means it STAYS moved. Drifting back to seat A each time its 900s park lapsed
+        would re-walk it into the same wall every 15 minutes - round-robin by another route."""
+        self.m.subprocess.run = self._runner({"runa"})
+        self.m.run_llm("t", "d", "diff")            # a refuses -> now on b
+        self.m.SEAT_PARKED_UNTIL["a"] = 0.0         # a's window reopens
+        self.calls.clear()
+        self.m.subprocess.run = self._runner(set())
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual(["runb"], self.calls)
+
+    # 7 ---------------------------------------------------------------------------------
+    def test_an_empty_seat_list_is_the_single_seat_path(self):
+        m = load(tempfile.mkdtemp(), llm_kind="codex", llm_model="gpt-6-astra",
+                 llm_fallback_model="", llm_sudo_user="")
+        self.assertEqual(["default"], [s["name"] for s in m.SEATS])
+        self.assertEqual("default", m.CURRENT_SEAT)
+        self.assertEqual(0.0, m.all_parked_until())
+        until = m.park(None)
+        self.assertGreater(until, real_time.time())
+        self.assertAlmostEqual(until, m.RATE_LIMITED_UNTIL, delta=1,
+                               msg="one seat: the global IS that seat's deadline, as before")
+
+    def test_the_synthetic_seat_carries_the_configured_sudo_user(self):
+        m = load(tempfile.mkdtemp(), llm_kind="codex", llm_sudo_user="codexrun")
+        self.assertEqual("codexrun", m.SEAT_BY_NAME["default"]["sudo_user"])
+
+    # 8 ---------------------------------------------------------------------------------
+    def test_park_state_is_deliberately_forgotten_on_restart(self):
+        """In-memory ON PURPOSE. A restart re-probes one seat and re-parks it, costing a single
+        refused call per spent seat, and main()'s startup recovery clears the deferred timers
+        (`UPDATE jobs SET next_at=0 WHERE state='retry'`) so the queue is claimable at once.
+        Persisting it would buy nothing and add a durability problem."""
+        self.m.park(real_time.time() + 5000, seat="a")
+        self.assertTrue(self.m.seat_parked("a"))
+        fresh = load(self.tmp.name, llm_kind="codex", llm_seats=SEATS_3)
+        self.assertFalse(fresh.seat_parked("a"), "a restart forgets the park")
+        self.assertEqual(0.0, fresh.RATE_LIMITED_UNTIL)
+
+    # 4 (name guard; the account_id guard needs sudo and is covered in SeatGuardTest) --
+    def test_duplicate_seat_names_are_dropped_before_they_can_be_exported(self):
+        m = load(tempfile.mkdtemp(), llm_kind="codex",
+                 llm_seats=[{"name": "a", "sudo_user": "runa"},
+                            {"name": "a", "sudo_user": "runb"},
+                            {"name": "", "sudo_user": "runc"}])
+        self.assertEqual(["a"], [s["name"] for s in m.SEATS],
+                         "a duplicate series makes node_exporter reject the WHOLE textfile")
+
+    def test_degraded_capacity_is_REPRESENTABLE_not_just_exported(self):
+        """seats_total vs seats_distinct is the whole degradation signal, and it was dead:
+        both were derived from the post-resolution list, so they were equal by construction and
+        Phase 3's ReviewbotSeatsDegraded could never have fired. This fails on the old code."""
+        m = load(tempfile.mkdtemp(), llm_kind="codex",
+                 llm_seats=[{"name": "a", "sudo_user": "runa"},
+                            {"name": "a", "sudo_user": "runb"},      # dropped: duplicate name
+                            {"name": "c", "sudo_user": "runc"}])
+        m.write_metrics()
+        got = dict(line.split(" ", 1) for line in
+                   pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8").splitlines())
+        total = float(got['reviewbot_llm_seats_total{persona="test"}'])
+        distinct = float(got['reviewbot_llm_seats_distinct{persona="test"}'])
+        self.assertEqual(3.0, total, "total must be what was CONFIGURED")
+        self.assertEqual(2.0, distinct, "distinct must be what is USABLE")
+        self.assertLess(distinct, total, "the degradation signal must be able to be true")
+
+    def _all_probes_fail(self):
+        m = load(tempfile.mkdtemp(), llm_kind="codex", llm_seats=SEATS_3)
+        self.calls = []
+
+        def run(args, **kw):
+            self.calls.append(list(args))
+            return m.subprocess.CompletedProcess(args, 1, "", "sudo: unknown user")
+        m.subprocess.run = run
+        m.resolve_seats()
+        return m
+
+    def test_when_no_seat_passes_its_probe_none_is_handed_work(self):
+        """Two wrong answers here, and the first fix shipped the second of them. Dropping every
+        seat idles the reviewer silently forever; keeping them unchanged leaves them selectable,
+        so the worker immediately picks one already known unreachable - and a broken seat raises
+        an ordinary error, never RateLimited, so it never parks and the PR quarantines."""
+        m = self._all_probes_fail()
+        self.assertTrue(self.calls, "the probe must actually have run")
+        self.assertEqual(0, m.seats_available(), "no seat may be selectable")
+        self.assertIsNone(m.active_seat(), "the selector must not offer a known-bad seat")
+
+    def test_that_parking_is_lossless_rather_than_a_quarantine(self):
+        """Parking is chosen precisely because it is the path that consumes no attempt."""
+        m = self._all_probes_fail()
+        e = m.RateLimited("x", None)
+        self.assertEqual(("retry", 4, 1), m.next_failure_state(e, 4, 1)[:3])
+        self.assertGreater(m.RATE_LIMITED_UNTIL, real_time.time(),
+                           "the worker's own gate must hold it off")
+
+    def test_the_seats_are_kept_so_the_park_can_lapse_and_re_probe(self):
+        """Dropped seats could never recover; parked ones come back on their own."""
+        m = self._all_probes_fail()
+        self.assertEqual(["a", "b", "c"], [s["name"] for s in m.SEATS])
+        for name in ("a", "b", "c"):
+            m.SEAT_PARKED_UNTIL[name] = 0.0
+        self.assertEqual(3, m.seats_available(), "recovery needs no restart")
+
+    def test_the_seat_series_reach_the_textfile(self):
+        self.m.park(real_time.time() + 300, seat="b")
+        m = self.m
+        m.write_metrics()
+        got = dict(line.split(" ", 1) for line in
+                   pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8").splitlines())
+        self.assertEqual(3.0, float(got['reviewbot_llm_seats_total{persona="test"}']))
+        self.assertEqual(3.0, float(got['reviewbot_llm_seats_distinct{persona="test"}']))
+        self.assertEqual(2.0, float(got['reviewbot_llm_seats_available{persona="test"}']))
+        self.assertEqual(1.0, float(got['reviewbot_llm_seat_parked{persona="test",seat="b"}']))
+        # 0, not absent: Phase 3's `seat_parked == 1 for: 30m` needs zeros to RESOLVE.
+        self.assertEqual(0.0, float(got['reviewbot_llm_seat_parked{persona="test",seat="a"}']))
+        self.assertIn('reviewbot_llm_active_seat_info{persona="test",seat="a"}', got)
+        self.assertIn('reviewbot_llm_seat_switches_total{persona="test"}', got)
+
+
+class IsolatedSeatUserTest(unittest.TestCase):
+    """CHARACTERISATION of the llm_sudo_user path, which had NO coverage at all.
+
+    `llm_sudo_user` is "" in BASE_CFG and in CodexLimitParkTest, so until this class existed
+    nothing exercised wrap_sudo, the isolated mktemp, the `cat` of the model's answer, the
+    credential scan, or the `rm -rf` cleanup — the five places that bind a review to ONE OS
+    user, and therefore the five that a multi-seat refactor can silently break. These tests
+    assert the CURRENT behaviour so that a change to it has to be deliberate.
+
+    The fake dispatches on argv POSITION, not on path strings: out_file is built with
+    os.path.join, which is backslash-joined when the suite runs on Windows, so matching on a
+    literal "/tmp/..." substring would silently classify every call as the same branch."""
+
+    ANSWER = json.dumps({"summary": "s", "findings": []})
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, llm_kind="codex", llm_model="gpt-6-astra",
+                      llm_fallback_model="", llm_sudo_user="codexrun")
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+        self.calls = []
+
+    def _fake_run(self, auth_json='{"tokens":{"account_id":"acct-A"}}'):
+        def run(args, **kw):
+            self.calls.append(list(args))
+            CP = self.m.subprocess.CompletedProcess
+            if args[0] != "sudo":
+                return CP(args, 0, "", "")
+            verb = args[4]
+            if verb == "mktemp":
+                return CP(args, 0, "/tmp/reviewbot-llm-AAAAAA\n", "")
+            if verb.startswith("HOME="):
+                return CP(args, 0, "", "")          # the model run itself
+            if verb == "cat":
+                if args[5].endswith("auth.json"):
+                    return CP(args, 0, auth_json, "")
+                return CP(args, 0, self.ANSWER, "")  # the answer file
+            if verb == "rm":
+                return CP(args, 0, "", "")
+            return CP(args, 0, "", "")
+        return run
+
+    def _sudo_calls(self, verb_pred):
+        return [c for c in self.calls if c[0] == "sudo" and verb_pred(c[4])]
+
+    def test_the_model_runs_as_the_isolated_user_with_its_own_HOME(self):
+        self.m.subprocess.run = self._fake_run()
+        self.m.run_llm("t", "d", "diff")
+        model = self._sudo_calls(lambda v: v.startswith("HOME="))
+        self.assertEqual(1, len(model))
+        self.assertEqual(["sudo", "-n", "-u", "codexrun", "HOME=/home/codexrun"], model[0][:5])
+
+    def test_the_answer_is_read_from_the_isolated_tmpdir_not_the_workdir(self):
+        """The out dir is 0700 and owned by the isolated user; c4 never opens it directly."""
+        self.m.subprocess.run = self._fake_run()
+        self.m.run_llm("t", "d", "diff")
+        answer = self._sudo_calls(lambda v: v == "cat")
+        answer = [c for c in answer if not c[5].endswith("auth.json")]
+        self.assertEqual(1, len(answer))
+        self.assertIn("reviewbot-llm-AAAAAA", answer[0][5],
+                      "the answer must come from the mktemp'd dir, not the service workdir")
+
+    def test_the_credential_scan_reads_the_SAME_user_that_produced_the_output(self):
+        """THE one that matters for rotation. Asserted on the argv, not the return value: a
+        scan of the WRONG seat's auth.json still exits 0 and still finds nothing, so a
+        return-value assertion passes while the protection is gone."""
+        self.m.subprocess.run = self._fake_run()
+        self.m.run_llm("t", "d", "diff")
+        model = self._sudo_calls(lambda v: v.startswith("HOME="))[0]
+        scan = [c for c in self._sudo_calls(lambda v: v == "cat") if c[5].endswith("auth.json")]
+        self.assertEqual(1, len(scan))
+        self.assertEqual(model[3], scan[0][3], "scan ran as a different user than the model")
+        self.assertEqual("/home/codexrun/.codex/auth.json", scan[0][5])
+
+    def test_credential_material_in_the_output_is_refused(self):
+        """The scan is the reason the isolated user exists: model output is about to be
+        posted publicly, so a token appearing in it must fail the review, not publish."""
+        token = "x" * 40
+        answer = json.dumps({"summary": "leak " + token, "findings": []})
+        self.__class__.ANSWER = answer
+        self.addCleanup(setattr, self.__class__, "ANSWER",
+                        json.dumps({"summary": "s", "findings": []}))
+        self.m.subprocess.run = self._fake_run(
+            auth_json=json.dumps({"tokens": {"access_token": token}}))
+        with self.assertRaises(RuntimeError) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertIn("credential material", str(cm.exception))
+
+    def test_the_tmpdir_is_cleaned_up_as_the_isolated_user(self):
+        self.m.subprocess.run = self._fake_run()
+        self.m.run_llm("t", "d", "diff")
+        rm = self._sudo_calls(lambda v: v == "rm")
+        self.assertEqual(1, len(rm))
+        self.assertEqual("codexrun", rm[0][3])
+        self.assertIn("reviewbot-llm-AAAAAA", rm[0][6])
 
 
 class RateLimitNoteDetailTest(unittest.TestCase):

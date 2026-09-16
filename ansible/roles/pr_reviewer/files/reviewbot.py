@@ -742,8 +742,17 @@ RESET_RE = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?\s*\(?\s*UTC\
 # Never park longer than this, whatever the text says: a misparse must not wedge the worker.
 MAX_PARK_S = 6 * 3600
 DEFAULT_PARK_S = 900
-# When the whole persona is waiting on its subscription. Module-level because the worker is
-# single-threaded by design - one account, one wall, one timer.
+# When EVERY seat is waiting on its subscription: the earliest reopening, or 0.0 while any seat
+# is still usable. DERIVED - park() assigns it from the per-seat table below, and the three
+# readers (write_metrics, worker_once's claim gate, worker's sleep) are unchanged from when this
+# was the one and only wall, because "the earliest reopening, else 0.0" is already exactly the
+# all-parked predicate they were written against. It self-heals with no event: the value falls
+# into the past precisely when the earliest seat reopens.
+#
+# NOTE IT IS ASSIGNED, NOT LATCHED. The per-seat deadline below keeps the `max()` this line used
+# to have - a seat's own wall only ever moves later. Latching the GLOBAL would be the bug: a seat
+# parked 6h (MAX_PARK_S) alongside one parked 15m would wedge the whole worker for six hours
+# after the second reopened.
 RATE_LIMITED_UNTIL = 0.0
 
 
@@ -783,15 +792,224 @@ def parse_reset(text):
     return today
 
 
-def park(reset_at):
-    """Stop taking work until the subscription resets. Returns the deadline actually used."""
+# ── seats ────────────────────────────────────────────────────────────────────────────
+# A "seat" is one LLM subscription plus the OS user whose HOME holds its credential. One seat
+# per user is not incidental: _run_llm binds the isolated tmpdir, the answer read, the
+# credential scan and the cleanup to a single sudo user for a whole invocation, so a shared HOME
+# would put every credential within reach of one prompt-injected diff.
+#
+# EMPTY llm_seats IS NOT A SPECIAL CASE. One seat named "default" is synthesised from
+# llm_sudo_user, so the single-seat host runs the same statements as a three-seat one and the
+# no-op claim is structural rather than a promise. Synthesised UNCONDITIONALLY, including when
+# llm_sudo_user is "" (the claude persona, and every test): "" already means "run as the service
+# user" to wrap_sudo, whereas zero seats would mean a permanently parked worker.
+#
+# The name is the literal "default" and not `llm_sudo_user or "default"`: a seat name is a
+# permanent Prometheus series identity, and deriving it from the user would rename
+# reviewbot_llm_seat_parked{seat=...} the moment Phase 2 lands - at exactly the point the new
+# alerts are being measured against it.
+SEATS = [dict(s) for s in (CFG.get("llm_seats") or [])] or \
+        [{"name": "default", "sudo_user": CFG.get("llm_sudo_user") or ""}]
+# Duplicate or empty NAMES are deduped here, before anything can emit them. Two seats sharing a
+# name produce two reviewbot_llm_seat_parked{seat="a"} lines with different values, and
+# node_exporter rejects a textfile with a duplicate series WHOLESALE - taking every reviewbot
+# metric on the host with it. _label() escaping does not help; only uniqueness does.
+_seen_names, _unique = set(), []
+for _s in SEATS:
+    _n = (_s.get("name") or "").strip()
+    if not _n or _n in _seen_names:
+        log(f"seat with a missing or duplicate name {_s.get('name')!r} ignored "
+            f"(names are Prometheus series identities and must be unique)")
+        continue
+    _seen_names.add(_n)
+    _s["name"] = _n
+    _unique.append(_s)
+SEATS = _unique or [{"name": "default", "sudo_user": CFG.get("llm_sudo_user") or ""}]
+SEAT_BY_NAME = {s["name"]: s for s in SEATS}
+# CAPTURED BEFORE ANY FILTERING, and never recomputed. reviewbot_llm_seats_total is read
+# against reviewbot_llm_seats_distinct to show that usable capacity is LESS than what was
+# configured; deriving both from the post-resolution list makes them identical by
+# construction and the comparison can never be true - a metric that parses and cannot
+# fire, which is the defect this estate keeps writing headers about (reviewer-codex and
+# reviewer-claude, round 1 of ailab#749). Counted from CFG rather than from SEATS so a
+# duplicate NAME shows as degradation too, not just a collapsed account.
+SEATS_CONFIGURED = len(CFG.get("llm_seats") or []) or 1
+# Pre-seeded so the dict is FIXED-SIZE for the life of the process. The metrics thread iterates
+# a snapshot of it while the worker thread writes; a dict that grew would risk "changed size
+# during iteration" inside write_metrics, whose blanket `except Exception` would swallow it and
+# skip the os.replace - freezing the entire textfile, heartbeat included.
+SEAT_PARKED_UNTIL = {s["name"]: 0.0 for s in SEATS}
+# STICKY selection needs somewhere to remember the choice, and this is it. Without an explicit
+# "current", a selector that just takes the first unparked seat in order drifts back to seat A
+# the moment A's 900s DEFAULT_PARK_S lapses, walks it into the same wall and re-parks it every
+# 15 minutes - round-robin's synchronised-exhaustion failure reached by another route.
+CURRENT_SEAT = SEATS[0]["name"]
+
+
+def use_seat(name):
+    """The only writer of CURRENT_SEAT."""
+    global CURRENT_SEAT
+    CURRENT_SEAT = name
+
+
+def seat_parked(name, now=None):
+    return SEAT_PARKED_UNTIL.get(name, 0.0) > (now if now is not None else time.time())
+
+
+def active_seat(now=None, exclude=()):
+    """The seat to use, sticky: keep the current one until it refuses.
+
+    Iterates SEATS (a list fixed at import), never SEAT_PARKED_UNTIL, so a concurrent read from
+    the metrics thread cannot see a mutating sequence."""
+    now = time.time() if now is None else now
+    if CURRENT_SEAT not in exclude and not seat_parked(CURRENT_SEAT, now):
+        return CURRENT_SEAT
+    for s in SEATS:
+        if s["name"] not in exclude and not seat_parked(s["name"], now):
+            return s["name"]
+    return None
+
+
+def seats_available(now=None):
+    now = time.time() if now is None else now
+    return sum(1 for s in SEATS if not seat_parked(s["name"], now))
+
+
+def all_parked_until(now=None):
+    """0.0 while any seat is usable, else the EARLIEST reopening.
+
+    0.0 is load-bearing, not a sentinel for "unknown": worker_once feeds this to
+    `next_at = limited_until or (backoff)`, so a free seat falls through to the ordinary
+    backoff - now+60 with attempts unchanged - instead of deferring the job to the deadline of
+    a seat it is no longer going to use."""
+    now = time.time() if now is None else now
+    if seats_available(now):
+        return 0.0
+    return min(SEAT_PARKED_UNTIL.get(s["name"], 0.0) for s in SEATS)
+
+
+_SEATS_RESOLVED = False
+
+
+def resolve_seats():
+    """Drop seats that cannot be used, and collapse seats that are the SAME ACCOUNT.
+
+    Rotating within one account is not rotation at all - it is the doomed-retry loop the park
+    exists to prevent, which cost 463 refused calls over four days in September. A
+    mis-provisioned seat therefore has to surface as visible capacity loss
+    (seats_distinct < seats_total) and never as a wall we keep walking into.
+
+    NEVER FATAL. reviewbot.service sets Restart=always/RestartSec=10, so a SystemExit on a
+    host_vars typo is a permanent ten-second crash loop - strictly worse than running at
+    reduced capacity, which is the posture the plan records.
+
+    Lazy and called from main(), never at import: no subprocess on the single-seat path, none
+    in --requeue (the recovery tool you reach for when credentials are broken), and none in the
+    tests - which is what keeps SharedBudgetTest's positional call-log assertions meaningful as
+    the canary for "Phase 1 added no subprocess"."""
+    global _SEATS_RESOLVED
+    if _SEATS_RESOLVED:
+        return
+    _SEATS_RESOLVED = True
+    # Nothing to deduplicate with one seat, and the scan is codex-only.
+    if len(SEATS) < 2 or CFG.get("llm_kind") != "codex":
+        return
+    seen, keep = {}, []
+    for s in SEATS:
+        name, user = s["name"], s.get("sudo_user") or ""
+        # TWO probes, because one return value cannot express both rules. Unreachable (the OS
+        # user is missing, or absent from sudoers) means DROP - sticky selection would otherwise
+        # keep handing work to a seat that fails as an ordinary error, burning attempts toward
+        # quarantine, because a broken seat never raises RateLimited and so never parks.
+        try:
+            r = subprocess.run(["sudo", "-n", "-u", user, "true"],
+                               capture_output=True, timeout=30)
+            if r.returncode != 0:
+                log(f"seat '{name}': cannot sudo to '{user}' - dropped from rotation "
+                    f"(capacity reduced; fix the user or sudoers)")
+                continue
+        except Exception as e:
+            log(f"seat '{name}': sudo probe failed ({e}) - dropped from rotation")
+            continue
+        # A readable seat whose JSON carries no account_id is USABLE with an unknown account.
+        # It is kept, and None is never used as a dedupe key - two unknowns are not "the same".
+        acct = None
+        try:
+            r = subprocess.run(["sudo", "-n", "-u", user, "cat",
+                                f"/home/{user}/.codex/auth.json"],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                acct = (json.loads(r.stdout).get("tokens") or {}).get("account_id") or None
+        except Exception as e:
+            log(f"seat '{name}': could not read account_id ({e}); keeping it, account unknown")
+        if acct and acct in seen:
+            log(f"seat '{name}' shares an account with seat '{seen[acct]}' - collapsed. "
+                f"Rotating inside one account is the doomed-retry loop the park prevents; "
+                f"capacity is NOT what the seat count implies.")
+            continue
+        if acct:
+            seen[acct] = name
+        keep.append(s)
+    if not keep:
+        # EVERY seat failed its probe, and BOTH obvious responses are wrong. Dropping them all
+        # leaves no seat and idles the reviewer silently forever. Keeping them all unchanged -
+        # the first cut of this fix - leaves every seat unparked and selectable, so the worker
+        # immediately hands work to one already established as unreachable; a broken seat raises
+        # an ordinary error rather than RateLimited, so it never parks, attempts climb and the PR
+        # quarantines (reviewer-codex, rounds 1 and 2 of ailab#749).
+        #
+        # So use the mechanism that already exists for "cannot work right now": PARK them. That
+        # is the lossless path - no attempt consumed, queue intact, nothing quarantined - and it
+        # self-heals, because the park lapses and the next refusal re-probes for real.
+        #
+        # HONEST ABOUT WHAT THIS DOES NOT DO: it does not make a broken fleet work. If the
+        # breakage is real and persists, jobs still fail once per park window and a PR still
+        # reaches quarantine eventually - which is correct, because a permanently broken reviewer
+        # should surface rather than idle. What it buys is minutes instead of seconds, every seat
+        # visibly parked in the metrics, and an immediate recovery once sudo is fixed.
+        log(f"seat guard: no seat passed its probe - parking all {len(SEATS)} rather than "
+            f"handing work to one known to be unreachable. Either sudo is broken estate-wide or "
+            f"the probe is; check the drop reasons above. Nothing is quarantined by this.")
+        for s in SEATS:
+            park(None, seat=s["name"])
+        return
+    _apply_seats(keep)
+
+
+def _apply_seats(keep):
+    """Rebind the seat tables in place, before any thread exists."""
+    global SEATS, CURRENT_SEAT
+    SEATS = keep
+    SEAT_BY_NAME.clear()
+    SEAT_BY_NAME.update({s["name"]: s for s in SEATS})
+    for name in list(SEAT_PARKED_UNTIL):
+        if name not in SEAT_BY_NAME:
+            del SEAT_PARKED_UNTIL[name]
+    for s in SEATS:
+        SEAT_PARKED_UNTIL.setdefault(s["name"], 0.0)
+    if CURRENT_SEAT not in SEAT_BY_NAME:
+        CURRENT_SEAT = SEATS[0]["name"]
+
+
+def park(reset_at, seat=None):
+    """Stop taking work ON ONE SEAT until its subscription resets.
+
+    Returns that seat's deadline - not the global - so the callers that assert the clamps still
+    see the value they clamp."""
     global RATE_LIMITED_UNTIL
+    seat = seat or CURRENT_SEAT
     until = reset_at or (time.time() + DEFAULT_PARK_S)
     until = max(time.time() + 60, min(until, time.time() + MAX_PARK_S))
-    RATE_LIMITED_UNTIL = max(RATE_LIMITED_UNTIL, until)
+    # The max stays HERE, per seat, where it was always right: one seat's wall only moves later.
+    SEAT_PARKED_UNTIL[seat] = max(SEAT_PARKED_UNTIL.get(seat, 0.0), until)
+    RATE_LIMITED_UNTIL = all_parked_until()
+    # Leading text is verbatim on purpose: docs/runbooks/dev-workers.md and the runbook line in
+    # reviewbot-rules.yaml both tell an operator to grep for it. The seat is appended only when
+    # there is more than one, so a single-seat journal is byte-identical to before.
+    where = f" [seat: {seat}]" if len(SEATS) > 1 else ""
     log(f"subscription rate-limited; parking the worker for "
-        f"{RATE_LIMITED_UNTIL - time.time():.0f}s (queue left intact)")
-    return RATE_LIMITED_UNTIL
+        f"{SEAT_PARKED_UNTIL[seat] - time.time():.0f}s (queue left intact){where}")
+    return SEAT_PARKED_UNTIL[seat]
 
 
 class ExpensiveFailure(RuntimeError):
@@ -813,7 +1031,48 @@ def run_llm(title, desc, diff_text, rubric=""):
     otherwise be billed as a cheap error worth five more full-length retries."""
     started = time.monotonic()
     try:
-        return _run_llm(title, desc, diff_text, rubric, started)
+        # ROTATION LIVES HERE, not inside _run_llm. `started` is passed down, so every seat's
+        # attempt shares ONE deadline and rotation cannot raise the per-attempt wall clock -
+        # which is why the cost classifier below stays correct while being seat-blind.
+        # NOTE run_llm now has a side effect on module state: it parks the refusing seat.
+        tried = set()
+        while True:
+            seat = active_seat() or CURRENT_SEAT
+            if seat != CURRENT_SEAT:
+                use_seat(seat)
+            tried.add(seat)
+            try:
+                return _run_llm(title, desc, diff_text, rubric, started, seat)
+            except RateLimited as e:
+                # ORDER IS LOAD-BEARING.
+                # 1. Park first, on every exit path, so worker_once always observes the
+                #    refusing seat as parked and never parks a second one on its behalf.
+                e.seat = seat
+                park(e.reset_at, seat=seat)
+                # 2. Nowhere to move -> re-raise the ORIGINAL exception. A sibling class here
+                #    would be a quarantine storm: it would miss the pass-through tuple below,
+                #    be promoted to ExpensiveFailure (a refusal past a third of the budget is
+                #    the NORMAL case), and bill to max_timeout_attempts=2 instead of being free.
+                nxt = active_seat(exclude=tried)
+                if nxt is None:
+                    raise
+                # 3. Budget floor, mirroring llm_fallback_min_s. Computed inline and NOT via
+                #    remaining(), which RAISES TimeoutExpired at zero - that would be re-raised
+                #    verbatim below, accepted by is_budget_failure, and turn a lossless defer
+                #    into a quarantine on its second occurrence.
+                left = max(0.0, started + CFG["llm_timeout_s"] - time.monotonic())
+                if left < CFG.get("llm_seat_switch_min_s", 60):
+                    e.deferred_for_budget = True
+                    log(f"seat '{seat}' rate-limited; {left:.0f}s of budget left - deferring "
+                        f"rather than starting seat '{nxt}' (no attempt consumed)")
+                    raise
+                # 4. Rotate. Bounded twice over: `exclude=tried` caps this at len(SEATS), and
+                #    each pass needs llm_seat_switch_min_s of a finite shared budget.
+                use_seat(nxt)
+                bump_meta("llm_seat_switches_total")
+                log(f"seat '{seat}' rate-limited; switching to seat '{nxt}' "
+                    f"with {left:.0f}s of the shared budget left")
+                continue
     # RateLimited passes through UNRECLASSIFIED. It is not a cost class at all - it says the
     # account is shut, and next_failure_state() answers it by charging no attempt. Let the
     # clause below rewrap it and both halves are lost: an ExpensiveFailure is not a
@@ -847,7 +1106,7 @@ def aux_run(args, remaining, **kw):
         raise RuntimeError(f"auxiliary command timed out: {' '.join(map(str, args[:4]))}") from e
 
 
-def _run_llm(title, desc, diff_text, rubric, started):
+def _run_llm(title, desc, diff_text, rubric, started, seat):
     # Clock started in run_llm, before any setup: the budget is for the whole operation, and
     # the isolated-user mktemp below is a subprocess that can itself hang.
     deadline = started + CFG["llm_timeout_s"]
@@ -862,7 +1121,13 @@ def _run_llm(title, desc, diff_text, rubric, started):
     workdir = tempfile.mkdtemp(prefix="reviewbot-")
     env = {k: v for k, v in os.environ.items() if k not in ("GITEA_TOKEN",)}
     kind = CFG.get("llm_kind", "claude")
-    sudo_user = CFG.get("llm_sudo_user") or ""
+    # ONE seat for this whole invocation, which is what keeps the four bindings below
+    # consistent: the isolated tmpdir is created as this user, the answer is read back as
+    # this user, the credential scan reads THIS user's auth.json, and the cleanup runs as
+    # this user. Rotation happens one level up, in run_llm, precisely so none of that has
+    # to become seat-aware - a mid-invocation switch would strand a 0700 tmpdir and scan
+    # the wrong credential against output the other seat produced.
+    sudo_user = SEAT_BY_NAME[seat]["sudo_user"]
     out_file = os.path.join(workdir, "last-message.md")
 
     def wrap_sudo(a):
@@ -1548,7 +1813,8 @@ def write_metrics():
                 "'llm_seconds','llm_seconds_max','llm_output_tokens','llm_output_tokens_max',"
                 "'reviews_full_total','reviews_partial_total','reviews_skipped_total',"
                 "'findings_dropped_total','llm_rate_limited_total','merge_blocked_prs',"
-                "'merge_blocked_seconds','llm_primary_failed_total','llm_fallback_used_total')")}
+                "'merge_blocked_seconds','llm_primary_failed_total','llm_fallback_used_total',"
+                "'llm_seat_switches_total')")}
             # SEPARATE read, deliberately: the dict above is an explicit key whitelist, so a new
             # metric added only to the (key, metric) render list below would export 0 forever.
             # The per-repo results are keyed by repo name, which is config - hence a prefix scan.
@@ -1575,6 +1841,32 @@ def write_metrics():
         ]
         lines.append(f'reviewbot_rate_limited_seconds_remaining{{persona="{_persona}"}} '
                      f'{max(0.0, RATE_LIMITED_UNTIL - now):.0f}')
+        # PER-SEAT. Snapshot first: this runs on the metrics ticker while the worker thread
+        # parks seats, and write_metrics' blanket `except Exception` would swallow a
+        # "changed size during iteration" and skip the os.replace, freezing the WHOLE textfile
+        # including the heartbeat. Names are escaped like the repo label below - free-form
+        # config, and one malformed line makes node_exporter reject every metric on the host.
+        _parked = dict(SEAT_PARKED_UNTIL)
+        for _s in SEATS:
+            _sn = _label(_s["name"])
+            _until = _parked.get(_s["name"], 0.0)
+            # 0 for an unparked seat rather than omitting the line: Phase 3's
+            # `seat_parked == 1 for: 30m` needs the zero samples in order to RESOLVE.
+            lines.append(f'reviewbot_llm_seat_parked{{persona="{_persona}",seat="{_sn}"}} '
+                         f'{1 if _until > now else 0}')
+            lines.append(f'reviewbot_llm_seat_parked_seconds_remaining'
+                         f'{{persona="{_persona}",seat="{_sn}"}} {max(0.0, _until - now):.0f}')
+        # CONFIGURED vs USABLE. These must come from different places or the difference is
+        # unrepresentable: len(SEATS) is the post-resolution list and len(SEAT_BY_NAME) is
+        # built from that same list, so the pair was always equal before this was fixed.
+        lines.append(f'reviewbot_llm_seats_total{{persona="{_persona}"}} {SEATS_CONFIGURED}')
+        lines.append(f'reviewbot_llm_seats_distinct{{persona="{_persona}"}} {len(SEATS)}')
+        lines.append(f'reviewbot_llm_seats_available{{persona="{_persona}"}} '
+                     f'{sum(1 for _s in SEATS if _parked.get(_s["name"], 0.0) <= now)}')
+        # UNCONDITIONAL, falling back to CURRENT_SEAT, so the info series never gaps while every
+        # seat is parked - a gap would read as "the exporter died", which is a different incident.
+        lines.append(f'reviewbot_llm_active_seat_info{{persona="{_persona}",'
+                     f'seat="{_label(active_seat(now) or CURRENT_SEAT)}"}} 1')
         for key, metric in (("llm_rate_limited_total", "reviewbot_llm_rate_limited_total"),
                             ("reviews_full_total", "reviewbot_reviews_full_total"),
                             ("reviews_partial_total", "reviewbot_reviews_partial_total"),
@@ -1596,7 +1888,8 @@ def write_metrics():
                             # means the primary is gone. Counted apart from llm_failures_total,
                             # which by design does not see a review the fallback rescued.
                             ("llm_primary_failed_total", "reviewbot_llm_primary_failed_total"),
-                            ("llm_fallback_used_total", "reviewbot_llm_fallback_used_total")):
+                            ("llm_fallback_used_total", "reviewbot_llm_fallback_used_total"),
+                            ("llm_seat_switches_total", "reviewbot_llm_seat_switches_total")):
             try:
                 lines.append(f'{metric}{{persona="{_persona}"}} '
                              f'{float(gauges.get(key, 0)):.0f}')
@@ -1749,8 +2042,17 @@ def worker_once():
     try:
         state, rid, note = review_job(jid, repo, pr, head_sha)
     except RateLimited as e:
+        # ONE increment per JOB DEFERRAL, deliberately - not per refusal. The >=3/h threshold on
+        # ReviewbotRateLimited was measured against this meaning on the 2026-09-15 series, so
+        # per-refusal counting would silently re-scale a live alert. Rotation counts itself in
+        # llm_seat_switches_total instead.
         bump_meta("llm_rate_limited_total")
-        limited_until = park(e.reset_at)
+        # run_llm parks the seat that refused and stamps it on the exception. A RateLimited with
+        # no seat never reached run_llm at all (review_job raising directly, as the tests do), so
+        # it still parks the current seat here - which is what it has always done.
+        if not getattr(e, "seat", None):
+            park(e.reset_at)
+        limited_until = all_parked_until()
         state, attempts, timeouts, note = next_failure_state(e, attempts, timeouts)
         rid = None
         log(f"job {jid} {repo}#{pr} deferred: {fail_note(e)}")
@@ -1791,8 +2093,10 @@ def worker():
         if inhibited() or posting_disabled():
             time.sleep(15)
             continue
-        # One account, one wall: while the subscription is exhausted every job would fail
-        # identically, so take no work at all rather than walking the queue into it.
+        # While EVERY seat is exhausted, any job would fail identically on all of them, so take
+        # no work rather than walking the queue into the wall. RATE_LIMITED_UNTIL is 0.0 the
+        # moment one seat is usable, so this is unchanged for a single-seat host and is already
+        # the all-parked predicate for a rotating one.
         wait = RATE_LIMITED_UNTIL - time.time()
         if wait > 0:
             time.sleep(min(wait, 30))
@@ -2039,6 +2343,10 @@ def main():
     c.close()
     if n:
         log(f"startup: re-queued {n} orphaned job(s)")
+    # Before any thread exists, so the rebind cannot race the worker or the ticker.
+    resolve_seats()
+    if len(SEATS) > 1:
+        log(f"seats: {[s['name'] for s in SEATS]} (sticky rotation)")
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=reconciler, daemon=True).start()
     # Metrics get their own thread so they keep flowing THROUGH a long LLM run; the worker no
