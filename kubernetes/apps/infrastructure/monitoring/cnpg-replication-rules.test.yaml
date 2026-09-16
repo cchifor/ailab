@@ -144,3 +144,63 @@ tests:
       - eval_time: 45m
         alertname: CNPGReplicaNotStreaming
         exp_alerts: []
+
+  # --- guard 3: CNPG SYNCS SLOTS TO REPLICAS, and those are inactive by design -----------------
+  # This fixture is the LIVE strive-pg state on 2026-09-16, minutes after the rule first shipped, and
+  # it is the shape the original fixtures missed: they modelled slots as living only on the primary,
+  # so the suite passed while the rule paged for two healthy replicas. Exactly ONE of these three
+  # inactive slots is real.
+  - interval: 1m
+    name: only the PRIMARY's inactive slot pages; synced slots on replicas stay silent
+    input_series:
+      # strive-pg-9 = PRIMARY. Holds a live slot for strive-pg-8 and a dead one for strive-pg-1.
+      - series: 'cnpg_pg_replication_in_recovery{namespace="strive-ailab", pod="strive-pg-9"}'
+        values: "0+0x60"
+      - series: 'cnpg_pg_replication_slots_active{namespace="strive-ailab", pod="strive-pg-9", slot_name="_cnpg_strive_pg_8", slot_type="physical"}'
+        values: "1+0x60"
+      - series: 'cnpg_pg_replication_slots_active{namespace="strive-ailab", pod="strive-pg-9", slot_name="_cnpg_strive_pg_1", slot_type="physical"}'
+        values: "0+0x60"
+      # strive-pg-8 = healthy REPLICA carrying a SYNCED slot for its peer. Inactive BY DESIGN.
+      - series: 'cnpg_pg_replication_in_recovery{namespace="strive-ailab", pod="strive-pg-8"}'
+        values: "1+0x60"
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="strive-ailab", pod="strive-pg-8"}'
+        values: "1+0x60"
+      - series: 'cnpg_pg_replication_slots_active{namespace="strive-ailab", pod="strive-pg-8", slot_name="_cnpg_strive_pg_1", slot_type="physical"}'
+        values: "0+0x60"
+      # strive-pg-1 = REPLICA that diverged at the switchover: synced slot (noise) AND a dead
+      # walreceiver (the real fault, which CNPGReplicaNotStreaming must still catch).
+      - series: 'cnpg_pg_replication_in_recovery{namespace="strive-ailab", pod="strive-pg-1"}'
+        values: "1+0x60"
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="strive-ailab", pod="strive-pg-1"}'
+        values: "0+0x60"
+      - series: 'cnpg_pg_replication_slots_active{namespace="strive-ailab", pod="strive-pg-1", slot_name="_cnpg_strive_pg_8", slot_type="physical"}'
+        values: "0+0x60"
+    alert_rule_test:
+      # EXACTLY ONE slot alert: the primary's. Two synced replica slots must not appear.
+      - eval_time: 31m
+        alertname: CNPGReplicationSlotInactive
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: strive-ailab
+              pod: strive-pg-9
+              slot_name: _cnpg_strive_pg_1
+              slot_type: physical
+            exp_annotations:
+              summary: "CNPG slot _cnpg_strive_pg_1 inactive >30m (strive-ailab)"
+              description: "Replication slot _cnpg_strive_pg_1 on strive-ailab/strive-pg-9 has been inactive for over 30 minutes. If max_slot_wal_keep_size invalidated it (wal_status=lost) this is PERMANENT and the replica can never catch up by streaming — neither cluster has a WAL archive to fall back on. Confirm with psql on the primary: select slot_name, active, wal_status from pg_replication_slots. Recovery is a re-bootstrap of the affected replica — delete its PVC(s) AND its pod, and CNPG re-clones it from the primary via pg_basebackup."
+      # The diverged replica is still caught by the walreceiver rule — the guard must not mute that.
+      - eval_time: 31m
+        alertname: CNPGReplicaNotStreaming
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: strive-ailab
+              pod: strive-pg-1
+            exp_annotations:
+              summary: "CNPG replica strive-pg-1 has no WAL receiver (strive-ailab)"
+              description: "strive-ailab/strive-pg-1 is in recovery but its walreceiver has been down for over 30 minutes, so it is NOT replicating. It will still pass its readiness probe and still be counted in readyInstances — this alert exists precisely because that green light is not a replication signal. Check the pod log for \"requested WAL segment ... has already been removed\", which means the slot was invalidated and a re-bootstrap is required."
+      # The cluster still HAS a streaming replica, so the impact rule must stay quiet.
+      - eval_time: 31m
+        alertname: CNPGClusterHasNoStreamingReplica
+        exp_alerts: []

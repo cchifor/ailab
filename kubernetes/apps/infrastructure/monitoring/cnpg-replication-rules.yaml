@@ -54,8 +54,19 @@ spec:
         # deliberately longer than any rolling restart, image pull or node reboot this estate
         # performs (a CNPG switchover is seconds; the node-maintenance drain is minutes), so a firing
         # alert means "not coming back on its own".
+        # GUARDED ON in_recovery == 0, i.e. evaluated ONLY on the primary. CNPG SYNCHRONISES slots to
+        # every instance for failover readiness, so each REPLICA also carries a slot named after its
+        # peers — and those are `active=false` BY DESIGN, permanently, on a perfectly healthy cluster.
+        # Without this join the rule pages for every replica in every multi-instance cluster forever.
+        # Caught live on 2026-09-16, the day the rule shipped: of three firing series exactly one was
+        # real (`strive-pg-9` the primary, holding an inactive slot for a genuinely disconnected
+        # `strive-pg-1`); the other two were synced slots sitting on replicas `strive-pg-1` and
+        # `strive-pg-8`. The promtool fixtures did not catch it because they were written from the
+        # mental model "slots live on the primary" rather than from the live series.
         - alert: CNPGReplicationSlotInactive
-          expr: cnpg_pg_replication_slots_active == 0
+          expr: |
+            cnpg_pg_replication_slots_active == 0
+            and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
           for: 30m
           labels:
             severity: critical
