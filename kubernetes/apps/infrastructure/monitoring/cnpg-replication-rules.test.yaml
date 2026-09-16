@@ -1,0 +1,146 @@
+# `promtool test rules` fixtures for cnpg-replication-rules.yaml. Run by scripts/rules-lint.sh on
+# every PR, after `promtool check rules`.
+#
+# WHY THIS FILE EXISTS. The two things that can go wrong with these rules are invisible to
+# `check rules`, because both are about what the expression SELECTS, not whether it parses:
+#
+#   1. A rule that fires on a primary. cnpg_pg_replication_is_wal_receiver_up is 0 on every primary
+#      forever (a primary has no walreceiver), so the unguarded form of CNPGReplicaNotStreaming
+#      would page for every healthy cluster, permanently. The in_recovery join is load-bearing.
+#   2. A rule that fires on a deliberately single-instance cluster. A 1-instance CNPG cluster has no
+#      replicas BY DESIGN and reports streaming_replicas=0 forever. The count(...)>1 guard on
+#      CNPGClusterHasNoStreamingReplica is what keeps that from being a permanent page.
+#
+# Both guards are cheap to write and easy to drop in a later edit, so each has a test that FAILS if
+# the guard is removed. The third test is the positive case — the real 2026-09-16 shape — so the
+# guards cannot be "fixed" by simply making the rules never fire.
+#
+# `rule_files` is the extracted spec name, because rules-lint.sh hands promtool the `spec:` body of
+# each PrometheusRule (the CRD wrapper is not a promtool rules file) under the manifest's basename.
+rule_files:
+  - cnpg-replication-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------- the real 2026-09-16 failure shape
+  - interval: 1m
+    name: a lost slot on a 2-instance cluster pages on all three rules after 30m
+    input_series:
+      # Primary: not in recovery, and its streaming peer count has dropped to zero.
+      - series: 'cnpg_pg_replication_in_recovery{namespace="databases", pod="infra-pg-4"}'
+        values: "0+0x60"
+      - series: 'cnpg_pg_replication_streaming_replicas{namespace="databases", pod="infra-pg-4"}'
+        values: "0+0x60"
+      # The invalidated slot, as seen on the primary.
+      - series: 'cnpg_pg_replication_slots_active{namespace="databases", pod="infra-pg-4", slot_name="_cnpg_infra_pg_3", slot_type="physical"}'
+        values: "0+0x60"
+      # Replica: in recovery, walreceiver down — it passes readiness but is not replicating.
+      - series: 'cnpg_pg_replication_in_recovery{namespace="databases", pod="infra-pg-3"}'
+        values: "1+0x60"
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="databases", pod="infra-pg-3"}'
+        values: "0+0x60"
+    alert_rule_test:
+      # Nothing at 29m — the `for: 30m` is what separates a restart from a dead replica.
+      - eval_time: 29m
+        alertname: CNPGReplicationSlotInactive
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: CNPGReplicationSlotInactive
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: databases
+              pod: infra-pg-4
+              slot_name: _cnpg_infra_pg_3
+              slot_type: physical
+            exp_annotations:
+              summary: "CNPG slot _cnpg_infra_pg_3 inactive >30m (databases)"
+              description: "Replication slot _cnpg_infra_pg_3 on databases/infra-pg-4 has been inactive for over 30 minutes. If max_slot_wal_keep_size invalidated it (wal_status=lost) this is PERMANENT and the replica can never catch up by streaming — neither cluster has a WAL archive to fall back on. Confirm with psql on the primary: select slot_name, active, wal_status from pg_replication_slots. Recovery is a re-bootstrap of the affected replica — delete its PVC(s) AND its pod, and CNPG re-clones it from the primary via pg_basebackup."
+      - eval_time: 31m
+        alertname: CNPGReplicaNotStreaming
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: databases
+              pod: infra-pg-3
+            exp_annotations:
+              summary: "CNPG replica infra-pg-3 has no WAL receiver (databases)"
+              description: "databases/infra-pg-3 is in recovery but its walreceiver has been down for over 30 minutes, so it is NOT replicating. It will still pass its readiness probe and still be counted in readyInstances — this alert exists precisely because that green light is not a replication signal. Check the pod log for \"requested WAL segment ... has already been removed\", which means the slot was invalidated and a re-bootstrap is required."
+      - eval_time: 31m
+        alertname: CNPGClusterHasNoStreamingReplica
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: databases
+              pod: infra-pg-4
+            exp_annotations:
+              summary: "CNPG databases primary has ZERO streaming replicas"
+              description: "The primary databases/infra-pg-4 has had no streaming replica for over 30 minutes, in a cluster declared with more than one instance. That cluster has no HA: losing this pod means promoting a stale replica or taking an outage. This is the cluster-level twin of CNPGReplicationSlotInactive — if both fire, treat this one as the impact statement and that one as the cause."
+
+  # ------------------------------------------------- guard 1: a healthy primary must stay silent
+  - interval: 1m
+    name: a healthy 2-instance cluster pages on nothing, despite the primary reporting no walreceiver
+    input_series:
+      # is_wal_receiver_up is 0 on the PRIMARY forever. Without the in_recovery join,
+      # CNPGReplicaNotStreaming would fire here permanently, for every healthy cluster in the estate.
+      - series: 'cnpg_pg_replication_in_recovery{namespace="databases", pod="infra-pg-4"}'
+        values: "0+0x60"
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="databases", pod="infra-pg-4"}'
+        values: "0+0x60"
+      - series: 'cnpg_pg_replication_streaming_replicas{namespace="databases", pod="infra-pg-4"}'
+        values: "1+0x60"
+      - series: 'cnpg_pg_replication_slots_active{namespace="databases", pod="infra-pg-4", slot_name="_cnpg_infra_pg_2", slot_type="physical"}'
+        values: "1+0x60"
+      # A healthy replica: in recovery WITH its walreceiver up.
+      - series: 'cnpg_pg_replication_in_recovery{namespace="databases", pod="infra-pg-2"}'
+        values: "1+0x60"
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="databases", pod="infra-pg-2"}'
+        values: "1+0x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CNPGReplicaNotStreaming
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CNPGReplicationSlotInactive
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CNPGClusterHasNoStreamingReplica
+        exp_alerts: []
+
+  # ------------------- guard 2: a deliberately single-instance cluster must never be a permanent page
+  - interval: 1m
+    name: a 1-instance cluster with zero streaming replicas is not an alert
+    input_series:
+      # One instance, not in recovery, no replicas — correct and permanent for a single-instance
+      # cluster. Only the count(...)>1 guard keeps CNPGClusterHasNoStreamingReplica quiet here.
+      - series: 'cnpg_pg_replication_in_recovery{namespace="solo", pod="solo-pg-1"}'
+        values: "0+0x60"
+      - series: 'cnpg_pg_replication_streaming_replicas{namespace="solo", pod="solo-pg-1"}'
+        values: "0+0x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CNPGClusterHasNoStreamingReplica
+        exp_alerts: []
+
+  # --------------------------------- a transient restart must not page (this is what `for:` buys)
+  - interval: 1m
+    name: a replica that reconnects within 30m does not page
+    input_series:
+      # Slot goes inactive for 20 minutes (a rolling restart / node reboot) then comes back.
+      - series: 'cnpg_pg_replication_slots_active{namespace="databases", pod="infra-pg-4", slot_name="_cnpg_infra_pg_2", slot_type="physical"}'
+        values: "0+0x20 1+0x40"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="databases", pod="infra-pg-2"}'
+        values: "1+0x60"
+      - series: 'cnpg_pg_replication_is_wal_receiver_up{namespace="databases", pod="infra-pg-2"}'
+        values: "0+0x20 1+0x40"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CNPGReplicationSlotInactive
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CNPGReplicationSlotInactive
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CNPGReplicaNotStreaming
+        exp_alerts: []

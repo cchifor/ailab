@@ -1,0 +1,111 @@
+# Alerts over CloudNativePG REPLICATION health. Written after finding, on 2026-09-16, that BOTH
+# CNPG clusters in the estate had dead replicas and nothing anywhere said so:
+#
+#   * infra-pg (backs GITEA, litellm, grafana, authelia, open-webui) — infra-pg-3's slot was
+#     wal_status=lost, its walreceiver had been retrying and failing every 5s for FOURTEEN DAYS with
+#     "requested WAL segment 0000000400000133000000A4 has already been removed", and its replay LSN
+#     was 14d04h behind. The Cluster reported Ready=True, readyInstances=2, phase "Cluster in
+#     healthy state".
+#   * strive-pg — BOTH replicas' slots lost, ZERO streaming replicas, strive-pg-5 reporting
+#     READY=true to Kubernetes while sitting 26d22h behind the primary.
+#
+# THE CAUSE IS A DELIBERATE TRADE-OFF WHOSE DOWNSIDE WAS NEVER INSTRUMENTED. Both clusters set
+# max_slot_wal_keep_size (1GB infra-pg, 2GB strive-pg) after the strive-pg 2026-07-21 near-crash
+# where an unlimited slot pinned WAL until the volume nearly filled. apps/databases/infra-pg.yaml
+# states the cost in as many words: "Cost of hitting the cap: the lagging replica's slot is
+# invalidated." That is correct and was the right call — a full volume takes the PRIMARY down, an
+# invalidated slot only costs a replica. What was missing is that hitting it is SILENT and
+# PERMANENT: with no WAL archive configured (spec.backup is empty on both clusters) an invalidated
+# slot can never be recovered by streaming, so the replica is dead until someone re-bootstraps it by
+# hand, and CNPG goes on reporting the cluster healthy the whole time.
+#
+# WHY CNPG'S OWN READY CONDITION CANNOT BE USED. readyInstances counts pods passing their readiness
+# probe. A replica stuck in recovery with no walreceiver passes that probe — it IS a running,
+# reachable Postgres, it is simply not replicating. Same shape as the count(pods) > count(scraped)
+# silent all-clear that bit AgentForge observability: the top-level green light is not a statement
+# about the thing you actually care about.
+#
+# Every rule below is anchored on a REPLICATION fact (slot active, walreceiver up, streaming peer
+# count), never on pod health, for that reason.
+#
+# COVERAGE CAVEAT, and it is why this file ships alongside strive-pg-podmonitor.yaml: these rules can
+# only fire for clusters Prometheus actually scrapes. As of 2026-09-16 that was infra-pg ONLY.
+# strive-pg sets enablePodMonitor: true, so CNPG creates a PodMonitor named `strive-pg`, but it
+# carries labels {cnpg.io/cluster, strive.io/service} while the kps Prometheus podMonitorSelector
+# matches `release: kube-prometheus-stack` — so it was silently ignored for 90 days. A rule with no
+# series is not a safety net.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up (same convention as
+# backup-rules.yaml / reviewbot-rules.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cnpg-replication
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cnpg-replication
+      rules:
+        # THE rule that would have caught both incidents. A physical slot reads active=0 both while
+        # its replica is briefly away AND forever once max_slot_wal_keep_size invalidates it — the
+        # metric cannot distinguish them, which is exactly why the `for:` carries the meaning. 30m is
+        # deliberately longer than any rolling restart, image pull or node reboot this estate
+        # performs (a CNPG switchover is seconds; the node-maintenance drain is minutes), so a firing
+        # alert means "not coming back on its own".
+        - alert: CNPGReplicationSlotInactive
+          expr: cnpg_pg_replication_slots_active == 0
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CNPG slot {{ $labels.slot_name }} inactive >30m ({{ $labels.namespace }})"
+            description: >-
+              Replication slot {{ $labels.slot_name }} on {{ $labels.namespace }}/{{ $labels.pod }}
+              has been inactive for over 30 minutes. If max_slot_wal_keep_size invalidated it
+              (wal_status=lost) this is PERMANENT and the replica can never catch up by streaming —
+              neither cluster has a WAL archive to fall back on. Confirm with psql on the primary:
+              select slot_name, active, wal_status from pg_replication_slots. Recovery is a
+              re-bootstrap of the affected replica — delete its PVC(s) AND its pod, and CNPG
+              re-clones it from the primary via pg_basebackup.
+        # The same failure from the replica's side, which also covers a replica whose walreceiver
+        # died for an unrelated reason. Guarded on in_recovery so it can never fire against a primary
+        # (a primary legitimately has no walreceiver and reports is_wal_receiver_up=0 forever).
+        - alert: CNPGReplicaNotStreaming
+          expr: |
+            cnpg_pg_replication_is_wal_receiver_up == 0
+            and on (namespace, pod) cnpg_pg_replication_in_recovery == 1
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CNPG replica {{ $labels.pod }} has no WAL receiver ({{ $labels.namespace }})"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.pod }} is in recovery but its walreceiver has been
+              down for over 30 minutes, so it is NOT replicating. It will still pass its readiness
+              probe and still be counted in readyInstances — this alert exists precisely because
+              that green light is not a replication signal. Check the pod log for
+              "requested WAL segment ... has already been removed", which means the slot was
+              invalidated and a re-bootstrap is required.
+        # Whole-cluster impact view: the primary has no streaming peer at all. Guarded TWICE — on
+        # in_recovery==0 so it evaluates only on the primary, and on the cluster actually having more
+        # than one instance, so a deliberately single-instance cluster never trips it.
+        - alert: CNPGClusterHasNoStreamingReplica
+          expr: |
+            (
+              cnpg_pg_replication_streaming_replicas == 0
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            )
+            and on (namespace) (count by (namespace) (cnpg_pg_replication_in_recovery) > 1)
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CNPG {{ $labels.namespace }} primary has ZERO streaming replicas"
+            description: >-
+              The primary {{ $labels.namespace }}/{{ $labels.pod }} has had no streaming replica for
+              over 30 minutes, in a cluster declared with more than one instance. That cluster has no
+              HA: losing this pod means promoting a stale replica or taking an outage. This is the
+              cluster-level twin of CNPGReplicationSlotInactive — if both fire, treat this one as the
+              impact statement and that one as the cause.
