@@ -150,21 +150,42 @@ models:
     # drained (signaled == emitted on all of them, sdma0 included). amdgpu later confirmed it:
     # "device wedged, but recovered through reset".
     #
-    # THE CONTROL. node1 served the SAME model on b10456 through the live route during the incident:
-    # full load in 31 s, correct answer with reasoning_content intact, peaking at 392 MiB of VRAM for
-    # a COMPLETE 23.58 GiB GTT mapping. More model, less VRAM. That is the whole case for this pin.
+    # THE BUILD HYPOTHESIS IS WRONG -- CORRECTED 2026-09-16 with all three nodes measured. An earlier
+    # revision of this comment argued b10573 was the likely culprit because node1 peaked at 392 MiB on
+    # b10456 while node3 sat at 487 MiB on b10573. Measuring every node on the SAME build killed that:
     #
-    # WHAT IS AND IS NOT PROVEN. PROVEN: b10456 fits, with ~120 MiB of headroom under the 512 MiB
-    # ceiling. NOT PROVEN: that b10573 is inherently heavier. Its 487 MiB was read mid-wedge, after
-    # earlier failed attempts on that node, so fragmentation is not excluded. Do not write "b10573
-    # uses more VRAM" into a runbook on this evidence -- the honest statement is that b10456 is
-    # measured-good and b10573 is unproven and coincided with the failure. A clean A/B is cheap once
-    # node3 is rebooted: provision each build in turn and read mem_info_vram_used at full load.
+    #   node   build    peak VRAM / 512 MiB   peak GTT     cold load   outcome
+    #   node1  b10456   392 MiB   (77%)       24141 MiB    31 s        OK
+    #   node3  b10456   481 MiB   (94%)       24006 MiB    72 s        OK
+    #   node2  b10456   503 MiB   (98%)       24007 MiB    28 s        OK
+    #   node3  b10573   487 MiB  (95%)        20630 MiB    --          WEDGED (incomplete map)
     #
-    # THE REAL CEILING IS THE BIOS. 120 MiB of headroom on a 512 MiB carve is thin for any build.
-    # Raising the UMA frame-buffer size in BIOS is the durable fix and would make the WebP bump safe
-    # again; it needs physical/IPMI access and a reboot per node, so it is a maintenance-window
-    # decision, not something to attempt from here.
+    # Same build, same model, same flags, and the peak swings 392 -> 503 MiB BY NODE. So the variable
+    # is the node, not the build, and the wedge threshold sits somewhere around 500-510 MiB: node3 on
+    # b10573 died at 487 MiB having mapped only 20.6 GiB, while node2 on b10456 survives at 503 MiB
+    # with the full 23.4 GiB mapped. b10573 is NOT exonerated -- it failed at a LOWER VRAM figure for
+    # LESS mapped memory, which is still the worst data point here -- but it is not the cause either.
+    # The cause is that a ~23.5 GiB GTT mapping needs most of a 512 MiB page-table budget on this
+    # silicon, and how much "most" is varies per host.
+    #
+    # WHY THE PER-NODE SPREAD IS NOT EXPLAINED. Not investigated: all three carve an identical
+    # 512 MiB (mem_info_vram_total 536870912 on every node) and ran identical flags. Plausible causes
+    # are GTT fragmentation from prior allocations and differing uptime/allocation history -- node3's
+    # 481 MiB was measured minutes after a fresh boot, which if anything should have been the CLEANEST
+    # case and still came in 89 MiB above node1. Do not guess in a runbook; measure.
+    #
+    # OPERATIONAL CONSEQUENCE -- node2 has 9 MiB of headroom. It works, it is verified end to end, and
+    # it is one bad allocation from the same wedge that took node3 out for an afternoon. Treat a
+    # repeat of `amdgpu_gem_va_ioctl ... (-12)` or a task stuck in drm_suballoc_new as THIS, and note
+    # that a GPU reset does NOT clear it: on node3 two successive resets reported
+    # "device wedged, but recovered through reset" while the task stayed in uninterruptible D with
+    # SIGKILL pending. Only a HOST REBOOT frees it, which is why this is worth avoiding rather than
+    # recovering from.
+    #
+    # THE REAL FIX IS THE BIOS. Raising the UMA frame-buffer size is the durable answer -- it would
+    # restore real headroom on all three nodes AND make the b10573 WebP bump safe again. It needs
+    # physical/IPMI access and a reboot per node, so it is a maintenance-window decision, not
+    # something to attempt from here. Until then: b10456, and do not raise ctx above 131072.
     gguf: /models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf   # NFS; NOT Q6_K -- see the runbook
     mmproj: /models/qwen3.8-27b/mmproj-F16.gguf             # vision; BOTH instances pass it
     ctx: 131072               # TOTAL KV across slots; per-slot = ctx/parallel = 65536
@@ -182,8 +203,13 @@ models:
   # measured 16.6 tok/s; on cloud3 the 72 GiB of Q4_K_M weights fit entirely in 96 GiB of VRAM
   # across four RTX 3090s and it measures 60.6-66.2 tok/s. ~4x, from residency alone.
   #
-  # ai-node3 therefore has NO managed model. The LXC (ai-llm-3, vmid 5003, .46) is kept, empty.
-  # The "node3 is SINGLE-MODEL" constraint in the header above no longer binds anything: it existed
-  # because qwen3.5-122b (~71 GiB) and gpt-oss-120b (~59 GiB) could not co-reside. That slot is now
-  # free, so gpt-oss-120b COULD return here — a capacity decision, not a correctness one, and
-  # deliberately not taken in this change.
+  # SUPERSEDED 2026-09-16 — this paragraph described the gap between qwen3.5-122b leaving on 09-08 and
+  # node3 being refilled, and it contradicted the header for the few hours in between. ai-node3 is NOT
+  # empty: it serves qwen3.8-27b on :8082 (see the entry above, and the header topology).
+  #
+  # The "node3 is SINGLE-MODEL" constraint therefore BINDS AGAIN, and now for a second, harder reason.
+  # It originally existed because qwen3.5-122b (~71 GiB) and gpt-oss-120b (~59 GiB) could not co-reside
+  # in 96 GiB. The new reason is the 512 MiB VRAM carve: one 23.5 GiB GTT mapping already consumes
+  # 94-98% of the page-table budget on node2/node3, so a SECOND resident model on either box is not a
+  # capacity trade any more -- it is the wedge, reproducibly. Bringing gpt-oss-120b back here means
+  # giving up qwen3.8-27b on that node, not sharing with it.
