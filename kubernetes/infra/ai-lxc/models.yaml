@@ -132,12 +132,39 @@ models:
     instance: qwen38              # INSTANCE=qwen38 -> its own unit + /etc/llama-swap-qwen38/
     port: 8082                    # node2's daily driver :8080 is retired with qwen3.6; node3 has none
     alias: qwen3.8-27b-ailab      # -ailab distinguishes this on-prem route from the -cloud ones
-    build: b10573                 # per-instance build, installed alongside; supports --spec-type.
-    #   BUMPED from b10456 for WebP: llama.cpp gained WebP decode in b10573 (PR #27520, merged
-    #   2026-08-21) via an ffmpeg subprocess. VERIFIED on the boxes: libmtmd.so in b9672/b10430/b10456
-    #   contains ZERO "webp" strings, b10573's contains two. ffmpeg/ffprobe must ALSO be present --
-    #   see the ensure_ffmpeg change in provision.sh. Without both, an agent that renders an image and
-    #   reads it back gets `Failed to load image or audio file` and the turn dies.
+    build: b10456                 # per-instance build, installed alongside; supports --spec-type.
+    # ROLLED BACK from b10573 on 2026-09-16, and this COSTS THE WebP DECODE PATH -- read on before
+    # bumping it again. b10573 is the build that gained WebP (PR #27520, merged 2026-08-21) via an
+    # ffmpeg subprocess; b10456 has none, VERIFIED on the boxes (libmtmd.so in b9672/b10430/b10456
+    # contains ZERO "webp" strings, b10573's contains two). So on THIS route an agent that renders an
+    # image and reads it back as WebP still gets `Failed to load image or audio file`. The
+    # qwen3.8-flash-next-cloud route is UNAFFECTED: cloud3 runs its own newer build and got ffmpeg
+    # installed the same day. ensure_ffmpeg in provision.sh is deliberately KEPT -- it is correct, it
+    # is idempotent, and it means a future re-bump needs a one-line change here and nothing else.
+    #
+    # WHY THE ROLLBACK. A b10573 load on node3 WEDGED THE iGPU. The estate's UMA carve is 512 MiB of
+    # VRAM on all three nodes (measured: mem_info_vram_total 536870912 on node1, node2 and node3
+    # alike) and that budget holds the page tables for the GTT mapping, not the weights. The stuck
+    # process sat at 487 MiB of VRAM having mapped only 20.63 GiB of GTT, then blocked forever in
+    # drm_suballoc_new -- waiting on a fence that could never arrive, because every ring was already
+    # drained (signaled == emitted on all of them, sdma0 included). amdgpu later confirmed it:
+    # "device wedged, but recovered through reset".
+    #
+    # THE CONTROL. node1 served the SAME model on b10456 through the live route during the incident:
+    # full load in 31 s, correct answer with reasoning_content intact, peaking at 392 MiB of VRAM for
+    # a COMPLETE 23.58 GiB GTT mapping. More model, less VRAM. That is the whole case for this pin.
+    #
+    # WHAT IS AND IS NOT PROVEN. PROVEN: b10456 fits, with ~120 MiB of headroom under the 512 MiB
+    # ceiling. NOT PROVEN: that b10573 is inherently heavier. Its 487 MiB was read mid-wedge, after
+    # earlier failed attempts on that node, so fragmentation is not excluded. Do not write "b10573
+    # uses more VRAM" into a runbook on this evidence -- the honest statement is that b10456 is
+    # measured-good and b10573 is unproven and coincided with the failure. A clean A/B is cheap once
+    # node3 is rebooted: provision each build in turn and read mem_info_vram_used at full load.
+    #
+    # THE REAL CEILING IS THE BIOS. 120 MiB of headroom on a 512 MiB carve is thin for any build.
+    # Raising the UMA frame-buffer size in BIOS is the durable fix and would make the WebP bump safe
+    # again; it needs physical/IPMI access and a reboot per node, so it is a maintenance-window
+    # decision, not something to attempt from here.
     gguf: /models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf   # NFS; NOT Q6_K -- see the runbook
     mmproj: /models/qwen3.8-27b/mmproj-F16.gguf             # vision; BOTH instances pass it
     ctx: 131072               # TOTAL KV across slots; per-slot = ctx/parallel = 65536

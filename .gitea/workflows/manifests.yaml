@@ -74,3 +74,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/gen-litellm-consumers.py --check
+
+      # The FOURTH cross-reference out of litellm's model lists, and the only one the generator above
+      # cannot see: per-tenant virtual keys whitelist model_names from litellm-LOCAL, which that
+      # generator never reads (it derives its three spans from the MAIN proxy). litellm-vkeys.yaml is
+      # also deliberately not Flux-applied, so no reconcile revisits it after a model is renamed, and a
+      # dangling entry does not fail at seed time -- the key is created fine and then fails every
+      # request. Removing qwen3.6-35b-a3b on 2026-09-16 left exactly that dangling entry and nothing
+      # here noticed. Same fail-closed shape as the two steps above.
+      - name: LiteLLM tenant vkey whitelists resolve against litellm-local's model_list
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-vkey-models.py
