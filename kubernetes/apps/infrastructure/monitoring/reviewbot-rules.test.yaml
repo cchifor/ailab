@@ -810,10 +810,16 @@ tests:
       # carries the zero across them.
       - series: 'reviewbot_llm_seats_available{job="reviewer-node",instance="192.168.0.25:9100",persona="codex"}'
         values: "0x14 1 0x14 1 0x10"
-      # A HEALTHY ROTATION never reaches zero: one seat parks while another still serves. This is
-      # the case that must stay silent, and it is why the rule can be this sensitive.
+      # A HEALTHY ROTATION never reaches zero: one seat parks while another still serves.
       - series: 'reviewbot_llm_seats_available{job="reviewer-node",instance="192.168.0.24:9100",persona="claude"}'
         values: "2x10 1x20 2x11"
+      # THE OVER-CORRECTION CASE (reviewer-codex, round 2). Availability touches zero for a single
+      # sample - both seats momentarily parked - then recovers and stays positive. An expression
+      # that latches on one zero (min_over_time over a LONG window with a short hold) pages here,
+      # minutes after reviews resumed. A short window with a long hold does not: that one sample
+      # keeps the inner predicate true for exactly 5 minutes, well short of the 15m hold.
+      - series: 'reviewbot_llm_seats_available{job="reviewer-node",instance="192.168.0.23:9100",persona="codex"}'
+        values: "2x25 0 2x14"
     alert_rule_test:
       - eval_time: 35m
         alertname: ReviewbotAllSeatsExhausted
@@ -827,7 +833,7 @@ tests:
               summary: >-
                 reviewbot (codex) has no usable seat left
               description: >-
-                Every configured seat on 192.168.0.25:9100 was spent at once within the last 20 minutes, so the persona is producing no verdicts and the two-persona merge gate is stalled estate-wide - the 2026-09-15 shape, which cost 11h36m and 12.3h of merge_blocked on the OTHER, healthy reviewer. Nothing is quarantined and nothing needs --requeue: the queue is intact and the parks lapse on their own. Check reviewbot_llm_seat_parked_seconds_remaining for the earliest reopening, and reviewbot_llm_seat_parks_total to see which seats are carrying the exhaustion. If this recurs daily the answer is quota, not code (ADR 0024).
+                Every configured seat on 192.168.0.25:9100 has been spent, continuously, for at least 15 minutes, so the persona is producing no verdicts and the two-persona merge gate is stalled estate-wide - the 2026-09-15 shape, which cost 11h36m and 12.3h of merge_blocked on the OTHER, healthy reviewer. Nothing is quarantined and nothing needs --requeue: the queue is intact and the parks lapse on their own. Check reviewbot_llm_seat_parked_seconds_remaining for the earliest reopening, and reviewbot_llm_seat_parks_total to see which seats are carrying the exhaustion. If this recurs daily the answer is quota, not code (ADR 0024).
 
   - interval: 1m
     name: a seat that keeps running out pages, one ordinary park does not

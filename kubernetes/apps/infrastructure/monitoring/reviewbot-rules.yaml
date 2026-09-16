@@ -362,25 +362,30 @@ spec:
         # seat could serve this" — not refusals. Rotation made it rarer, never looser, so the
         # threshold stayed honest without being touched. The rules here are faster and name the
         # cause; that one remains the backstop.
-        # NOT `reviewbot_llm_seats_available == 0` on its own. During a real exhaustion the
-        # earliest park lapses, that seat becomes available for the seconds it takes the worker
-        # to claim a job and be refused again, and the raw gauge briefly reads 1 - which resets
-        # any `for:` clause over it. That is the SAME seam that ruled out
-        # reviewbot_rate_limited_seconds_remaining when ReviewbotRateLimited was written, and it
-        # applies here for the same reason. min_over_time carries the zero across the re-probe:
-        # "at some point in the last 20 minutes every seat was spent at once", which is the
-        # condition, and which no single lapse can clear.
-        # Rotation does NOT trip it: a successful rotation parks one seat while another still
-        # serves, so the gauge never reaches 0 at all.
+        # THIS EXPRESSION HAS BEEN WRONG TWICE, in opposite directions, and the shape of the
+        # series is why. Recording both so the next edit does not pick one of them again:
+        #   * `seats_available == 0` with a long `for:` CANNOT FIRE. During a real exhaustion the
+        #     earliest park lapses, the seat is available for the seconds it takes the worker to
+        #     claim a job and be refused again, and that blip resets the hold - the same seam that
+        #     ruled out rate_limited_seconds_remaining when ReviewbotRateLimited was written.
+        #   * `min_over_time(...[20m]) == 0` with a short `for:` FIRES SPURIOUSLY: one zero sample
+        #     keeps it true for the whole 20m window, so a momentary simultaneous park pages
+        #     minutes after reviews have resumed (reviewer-codex, round 2 of ailab#754).
+        # A SHORT window with a LONG hold has neither failure. min_over_time over 5m tolerates the
+        # re-probe gap - a 45s lapse never fills a 5m window - while `for: 15m` demands that EVERY
+        # window across a quarter of an hour contained a zero, which a single blip cannot do: one
+        # zero sample makes the inner expression true for exactly 5 minutes, then it clears.
+        # No magic constant, and it scales to a 1-seat or 3-seat host unchanged.
+        # A successful rotation never reaches zero at all: one seat parks while another serves.
         - alert: ReviewbotAllSeatsExhausted
-          expr: min_over_time(reviewbot_llm_seats_available[20m]) == 0
-          for: 5m
+          expr: min_over_time(reviewbot_llm_seats_available[5m]) == 0
+          for: 15m
           labels: { severity: warning }
           annotations:
             summary: "reviewbot ({{ $labels.persona }}) has no usable seat left"
             description: >-
-              Every configured seat on {{ $labels.instance }} was spent at once within the last
-              20 minutes, so the persona is producing no verdicts and the two-persona merge gate
+              Every configured seat on {{ $labels.instance }} has been spent, continuously, for
+              at least 15 minutes, so the persona is producing no verdicts and the two-persona merge gate
               is stalled estate-wide - the 2026-09-15 shape, which cost 11h36m and 12.3h of
               merge_blocked on the OTHER, healthy reviewer. Nothing is quarantined and nothing
               needs --requeue: the queue is intact and the parks lapse on their own. Check
