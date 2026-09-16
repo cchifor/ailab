@@ -16,9 +16,14 @@ ExecStart=/usr/bin/python3 /usr/local/lib/reviewbot/reviewbot.py /etc/reviewbot/
 Restart=always
 RestartSec=10
 MemoryMax=2G
-{% if not pr_reviewer_llm_sudo_user %}
+{% if not pr_reviewer_llm_sudo_user and not pr_reviewer_llm_seats %}
 # NoNewPrivileges is incompatible with the sudo-based LLM isolation (it blocked every
 # codex run on reviewer-2, caught live 2026-09-02); it stays on where sudo is unused.
+# pr_reviewer_llm_seats is in the condition for the same reason: a seat list is ALSO a
+# sudo user, and once Phase 2 moves the users there and clears pr_reviewer_llm_sudo_user,
+# a sudo_user-only test would render NoNewPrivileges=true and break every seat at once -
+# the isolated mktemp fails first, so every job dies burning attempts. Renders identically
+# while the list is empty.
 NoNewPrivileges=true
 {% endif %}
 

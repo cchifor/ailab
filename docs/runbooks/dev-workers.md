@@ -281,9 +281,10 @@ Why not to intervene:
 
 * **Do NOT `--requeue`.** Nothing is quarantined: the park charges no attempt precisely so a
   rate-limit window cannot exhaust a PR's retry budget. Requeue is a no-op at best.
-* **Do NOT restart the service to "clear" it.** `RATE_LIMITED_UNTIL` is an in-memory global, so a
+* **Do NOT restart the service to "clear" it.** The seat park table is in memory, so a
   restart does drop the park — and the worker then walks straight back into the same wall, one
-  refused call later. (This is how reviewer-1 came back 4h35m early on 2026-09-13: a service
+  refused call later — once per SPENT SEAT, since a restart forgets every seat's deadline and
+  re-probes them in order. (This is how reviewer-1 came back 4h35m early on 2026-09-13: a service
   restart at 06:38:27 UTC dropped the park, rather than the park lapsing at 11:13. It was NOT the
   daily converge — that runs 03:35 UTC and, per the box above, has never run `reviewers.yml` at
   all; on the evidence it was a hand-run of the playbook. Whoever restarts it gets this for free,

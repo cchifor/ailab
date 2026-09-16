@@ -57,6 +57,14 @@ pr_reviewer_llm_fallback_model: ""
 # credentials to read. Required for codex (no tool-denial flags); claude gets the same
 # effect from --disallowedTools.
 pr_reviewer_llm_sudo_user: ""
+# Multi-seat rotation (ADR 0024 / plans/2026-09-16-codex-seat-rotation-plan.md). Each entry is
+# {name, sudo_user}; the credential lives in that user's HOME, one per user, so a
+# prompt-injected diff still reaches at most one seat. EMPTY IS THE SINGLE-SEAT PATH and is not
+# a special case in the code: reviewbot synthesises one seat named "default" from
+# pr_reviewer_llm_sudo_user above, which is the same statement sequence this has always run.
+# Rotation is STICKY - one seat until it refuses - never round-robin, which would drive every
+# seat to its wall at once and turn staggered recoveries into one synchronised outage.
+pr_reviewer_llm_seats: []
 # WALL-CLOCK BUDGET FOR ONE ATTEMPT — primary AND fallback share it (they used to get one
 # each, so the real worst case was 2x this). 300 was too small and is what broke the claude
 # persona: measured 2026-09-04, a 341,672-byte diff needs 515 s (40,948 output tokens — run
@@ -68,6 +76,10 @@ pr_reviewer_llm_timeout_s: 900
 # Skip the fallback model when less than this is left of the attempt's budget: a 30-second
 # fallback run only produces a second failure, and the retry is the better use of the time.
 pr_reviewer_llm_fallback_min_s: 60
+# The same floor, for a SEAT switch rather than a model fallback: do not start a retry on the
+# next seat with less than this left of the shared attempt budget. A few seconds on a fresh
+# seat only buys a second failure, and the job re-runs with a whole budget shortly anyway.
+pr_reviewer_llm_seat_switch_min_s: 60
 # The LLM-input cap. Whole files are excluded by class BEFORE this is measured (generated,
 # vendored, binary, non-UTF-8), and prose is shed largest-first if the remainder still does not
 # fit — so this now bounds what the model READS rather than deciding whether it reads anything.
