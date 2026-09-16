@@ -1061,7 +1061,17 @@ def run_llm(title, desc, diff_text, rubric=""):
                 use_seat(seat)
             tried.add(seat)
             try:
-                return _run_llm(title, desc, diff_text, rubric, started, seat)
+                out = _run_llm(title, desc, diff_text, rubric, started, seat)
+                # THE COUNTERPART TO seat_parks_total, and the only way to tell a seat that is
+                # merely busy from one that can never serve. A seat is tried only when the
+                # stickier ones are spent, so an unusable seat produces NO signal at all until
+                # the estate actually needs it - at which point it fails. Counting successes per
+                # seat makes "parked repeatedly and served nothing" expressible, which is the
+                # shape of an account with no Codex entitlement (or one whose window is far
+                # longer than this estate assumes). Bumped HERE, on the return path, so it means
+                # "this seat produced a usable review", not "this seat was selected".
+                bump_meta(f"seat_reviews_total.{seat}")
+                return out
             except RateLimited as e:
                 # ORDER IS LOAD-BEARING.
                 # 1. Park first, on every exit path, so worker_once always observes the
@@ -1860,6 +1870,8 @@ def write_metrics():
             # one: the key carries a seat name, which is config, so it cannot be a fixed list.
             _parks = {r[0]: r[1] for r in c.execute(
                 "SELECT k,v FROM meta WHERE k LIKE 'seat_parks_total.%'")}
+            _serves = {r[0]: r[1] for r in c.execute(
+                "SELECT k,v FROM meta WHERE k LIKE 'seat_reviews_total.%'")}
             c.close()
         now = time.time()
         # Escape ONCE for every emission. persona is operator-set config like repo,
@@ -1900,6 +1912,12 @@ def write_metrics():
                 lines.append(f'reviewbot_llm_seat_parks_total'
                              f'{{persona="{_persona}",seat="{_sn}"}} '
                              f'{float(_parks.get("seat_parks_total." + _s["name"], 0) or 0):.0f}')
+                # Emitted for EVERY seat including zero, not only for seats that have served:
+                # the alert reads "parked and served nothing", so the zero is the signal and an
+                # absent series would make the expression unable to match.
+                lines.append(f'reviewbot_llm_seat_reviews_total'
+                             f'{{persona="{_persona}",seat="{_sn}"}} '
+                             f'{float(_serves.get("seat_reviews_total." + _s["name"], 0) or 0):.0f}')
             except (TypeError, ValueError):
                 pass
         # CONFIGURED vs USABLE. These must come from different places or the difference is

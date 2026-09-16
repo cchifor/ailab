@@ -417,6 +417,46 @@ spec:
               parks once is normal; a seat that keeps parking has the smallest remaining window
               and is what the capacity plan (ADR 0024) should be sized against. Do not silence
               this per seat - which seat is failing is the whole signal.
+        # THE GAP THE OTHER SEAT RULES CANNOT SEE. ReviewbotSeatExhausted says a seat keeps
+        # running out; ReviewbotSeatsDegraded says one was dropped or collapsed at startup.
+        # Neither can say "this seat is tried and never works" — which is what an account with no
+        # Codex entitlement looks like, and what a licence you are paying for and not receiving
+        # looks like. It is invisible by construction: sticky selection only reaches a seat when
+        # the stickier ones are spent, so an unusable seat emits NOTHING until the estate
+        # actually needs it, and then fails.
+        #
+        # PARKED BUT SERVED NOTHING is the discriminator. On a busy estate every seat parks AND
+        # serves, so the second clause is false and this stays silent no matter how heavy the
+        # load. A seat that parks while its success counter does not move in a whole day is
+        # either entitled to nothing, or has a window so much longer than this estate assumes
+        # that it is not capacity — and both want a human.
+        #
+        # WINDOWED, not absolute: `seat_reviews_total == 0` would only ever catch a seat that has
+        # NEVER worked, and would go permanently silent the moment it served once. increase()
+        # over 24h also catches a seat that used to work and has stopped, which is the same
+        # problem arriving later.
+        # A newly added seat cannot trip it: with no parks yet the first clause is false.
+        # 30m hold because both counters are cumulative and move slowly; this is a standing
+        # condition, not a spike, and it does not clear on its own.
+        - alert: ReviewbotSeatNeverServes
+          expr: >-
+            (increase(reviewbot_llm_seat_parks_total[24h]) > 0)
+            and on (job, instance, persona, seat)
+            (increase(reviewbot_llm_seat_reviews_total[24h]) == 0)
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) seat {{ $labels.seat }} is parked but never serves"
+            description: >-
+              Seat {{ $labels.seat }} on {{ $labels.instance }} was parked at least once in the
+              last 24h and produced NO review in that time, so it is not capacity - it is a seat
+              the rotation walks into and falls through. Two causes, both needing a human and
+              indistinguishable from the host: the account has no Codex entitlement at all (check
+              chatgpt.com/codex/settings/usage for it - the refusal says "purchase more credits"),
+              or its quota window is far longer than the 900s re-probe assumes. Nothing is broken
+              and nothing is quarantined: the park path is lossless and the other seats carry the
+              work. What is wrong is the CAPACITY PLAN - seats_available counts this seat, ADR
+              0024 sized the estate on it, and neither is true while this fires.
         - alert: ReviewbotSeatsDegraded
           expr: reviewbot_llm_seats_distinct < reviewbot_llm_seats_total
           for: 15m

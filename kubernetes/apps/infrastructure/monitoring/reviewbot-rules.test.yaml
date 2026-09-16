@@ -866,6 +866,44 @@ tests:
                 Seat b on 192.168.0.25:9100 has been parked repeatedly within an hour. Reviews continue on the other seats, so this is a CAPACITY signal rather than an outage, and it is the one that arrives before ReviewbotAllSeatsExhausted does. Sticky selection means the rotation stays where it moved to, so a seat that parks once is normal; a seat that keeps parking has the smallest remaining window and is what the capacity plan (ADR 0024) should be sized against. Do not silence this per seat - which seat is failing is the whole signal.
 
   - interval: 1m
+    name: a seat that is parked but never serves pages, a busy seat does not
+    input_series:
+      # SEAT C: the estate walks into it and falls through. Parks climb, successes never move -
+      # an account with no Codex entitlement, or a window far longer than the 900s re-probe.
+      - series: 'reviewbot_llm_seat_parks_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex",seat="c"}'
+        values: "0x5 1x10 2x10 3x35"
+      - series: 'reviewbot_llm_seat_reviews_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex",seat="c"}'
+        values: "0x60"
+      # SEAT A: THE DISCRIMINATING CASE. A busy estate parks seats constantly - if parking alone
+      # were the signal this would page on healthy heavy load. It serves as well as parking, so
+      # the second clause is false and it stays silent.
+      - series: 'reviewbot_llm_seat_parks_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex",seat="a"}'
+        values: "0x5 1x10 2x10 3x35"
+      - series: 'reviewbot_llm_seat_reviews_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex",seat="a"}'
+        values: "0x5 4x10 9x10 14x35"
+      # SEAT B: newly added, never yet tried. No parks, so the first clause is false and a fresh
+      # seat cannot trip this before it has had a chance.
+      - series: 'reviewbot_llm_seat_parks_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex",seat="b"}'
+        values: "0x60"
+      - series: 'reviewbot_llm_seat_reviews_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex",seat="b"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ReviewbotSeatNeverServes
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.25:9100
+              persona: codex
+              seat: c
+            exp_annotations:
+              summary: >-
+                reviewbot (codex) seat c is parked but never serves
+              description: >-
+                Seat c on 192.168.0.25:9100 was parked at least once in the last 24h and produced NO review in that time, so it is not capacity - it is a seat the rotation walks into and falls through. Two causes, both needing a human and indistinguishable from the host: the account has no Codex entitlement at all (check chatgpt.com/codex/settings/usage for it - the refusal says "purchase more credits"), or its quota window is far longer than the 900s re-probe assumes. Nothing is broken and nothing is quarantined: the park path is lossless and the other seats carry the work. What is wrong is the CAPACITY PLAN - seats_available counts this seat, ADR 0024 sized the estate on it, and neither is true while this fires.
+
+  - interval: 1m
     name: fewer usable seats than configured pages, a healthy full set does not
     input_series:
       # Three configured, two usable: a collapsed duplicate account or an unreachable user.
