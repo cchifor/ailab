@@ -2768,6 +2768,93 @@ class SeatRotationTest(unittest.TestCase):
             m.SEAT_PARKED_UNTIL[name] = 0.0
         self.assertEqual(3, m.seats_available(), "recovery needs no restart")
 
+    def test_seat_home_defaults_to_the_users_home_but_can_be_overridden(self):
+        """A seat provisioned by hand does not necessarily live at /home/<user> — the third
+        licence sat at /home/c4/.codex-seat3 before it had a user. With the path hard-coded
+        such a seat is not merely awkward, it is UNEXPRESSIBLE, and the credential scan then
+        fails at a path that does not exist, which fails open."""
+        m = load(tempfile.mkdtemp(), llm_kind="codex",
+                 llm_seats=[{"name": "a", "sudo_user": "runa"},
+                            {"name": "b", "sudo_user": "runb", "home": "/home/c4/.codex-seat3"}])
+        self.assertEqual("/home/runa", m.seat_home("a"))
+        self.assertEqual("/home/c4/.codex-seat3", m.seat_home("b"))
+
+    def test_the_credential_scan_uses_the_seats_home(self):
+        m = load(tempfile.mkdtemp(), llm_kind="codex", llm_model="gpt-6-astra",
+                 llm_fallback_model="",
+                 llm_seats=[{"name": "a", "sudo_user": "runa", "home": "/srv/seat-a"}])
+        seen = []
+        answer = json.dumps({"summary": "s", "findings": []})
+
+        def run(args, **kw):
+            CP = m.subprocess.CompletedProcess
+            if args[0] != "sudo":
+                return CP(args, 0, "", "")
+            seen.append(list(args))
+            verb = args[4]
+            if verb == "mktemp":
+                return CP(args, 0, "/tmp/reviewbot-llm-a\n", "")
+            if verb.startswith("HOME="):
+                return CP(args, 0, "", "")
+            if verb == "cat":
+                return CP(args, 0, "{}" if args[5].endswith("auth.json") else answer, "")
+            return CP(args, 0, "", "")
+        m.subprocess.run = run
+        m.run_llm("t", "d", "diff")
+        scan = [c for c in seen if c[4] == "cat" and c[5].endswith("auth.json")]
+        self.assertEqual(["/srv/seat-a/.codex/auth.json"], [c[5] for c in scan])
+        home = [c for c in seen if c[4].startswith("HOME=")]
+        self.assertEqual("HOME=/srv/seat-a", home[0][4], "the model run must get the same HOME")
+
+    def test_an_unreadable_credential_file_is_COUNTED_not_silently_skipped(self):
+        """The scan had no else-branch: an unreadable auth.json made it a no-op that looked
+        exactly like a scan which ran and found nothing, while the output went out anyway."""
+        m = load(tempfile.mkdtemp(), llm_kind="codex", llm_model="gpt-6-astra",
+                 llm_fallback_model="", llm_seats=[{"name": "a", "sudo_user": "runa"}])
+        answer = json.dumps({"summary": "s", "findings": []})
+
+        def run(args, **kw):
+            CP = m.subprocess.CompletedProcess
+            if args[0] != "sudo":
+                return CP(args, 0, "", "")
+            verb = args[4]
+            if verb == "mktemp":
+                return CP(args, 0, "/tmp/reviewbot-llm-a\n", "")
+            if verb.startswith("HOME="):
+                return CP(args, 0, "", "")
+            if verb == "cat":
+                if args[5].endswith("auth.json"):
+                    return CP(args, 1, "", "cat: No such file")   # unreadable
+                return CP(args, 0, answer, "")
+            return CP(args, 0, "", "")
+        m.subprocess.run = run
+        m.run_llm("t", "d", "diff")                      # must still succeed
+        c = m.db()
+        val = c.execute("SELECT v FROM meta WHERE k='llm_credscan_skipped_total'").fetchone()
+        c.close()
+        self.assertIsNotNone(val, "a skipped scan must leave a trace")
+        self.assertEqual(1.0, float(val[0]))
+
+    def test_the_budget_defer_note_does_not_claim_a_long_wait(self):
+        """`waiting until <reset>` describes the REFUSING seat. Printing it when another seat is
+        free sends an operator hunting a multi-hour window for a 60-second backoff."""
+        e = self.m.RateLimited("upstream text", real_time.time() + 5000)
+        e.seat = "a"
+        e.deferred_for_budget = True
+        note = self.m.fail_note(e)
+        self.assertIn("retrying shortly", note)
+        self.assertIn("[seat: a]", note)
+        self.assertNotIn("waiting until", note)
+        self.assertIn("no attempt consumed", note)
+        self.assertIn("rate-limited", note, "the runbook greps for this")
+        self.assertFalse(note.startswith("ambiguous POST"))
+        self.assertLess(len(note), 320)
+
+    def test_the_ordinary_park_note_is_unchanged(self):
+        e = self.m.RateLimited("upstream text", None)
+        self.assertTrue(self.m.fail_note(e).startswith(
+            "subscription rate-limited, waiting until "))
+
     def test_the_seat_series_reach_the_textfile(self):
         self.m.park(real_time.time() + 300, seat="b")
         m = self.m

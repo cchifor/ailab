@@ -791,3 +791,127 @@ tests:
       - eval_time: 10m
         alertname: ReviewbotRateLimited
         exp_alerts: []
+
+  # ------------------------------------------------------- seat rotation (Phase 3)
+  # Annotations here are GENERATED from the rule bodies rather than transcribed, so a fixture
+  # cannot drift into agreeing with a typo in the rule it is meant to check.
+  #
+  # The two series shapes below are the point of this section. A seat park EXPIRES after
+  # DEFAULT_PARK_S and sticky selection never re-probes it, so any fixture that feeds a constant
+  # (the first cut of these used `1x60`) tests a shape production never produces - it passes while
+  # the rule it covers is unsatisfiable. Both fixtures now model the expiry.
+
+  - interval: 1m
+    name: all seats spent pages ACROSS the re-probe seam, a healthy rotation does not
+    input_series:
+      # THE SEAM. During a real exhaustion the earliest park lapses every ~15m, the worker claims
+      # a job, is refused, and re-parks - so the raw gauge blips to 1 for the seconds in between.
+      # A bare `== 0 for: 10m` resets on each of those blips and would never fire; min_over_time
+      # carries the zero across them.
+      - series: 'reviewbot_llm_seats_available{job="reviewer-node",instance="192.168.0.25:9100",persona="codex"}'
+        values: "0x14 1 0x14 1 0x10"
+      # A HEALTHY ROTATION never reaches zero: one seat parks while another still serves.
+      - series: 'reviewbot_llm_seats_available{job="reviewer-node",instance="192.168.0.24:9100",persona="claude"}'
+        values: "2x10 1x20 2x11"
+      # THE OVER-CORRECTION CASE (reviewer-codex, round 2). Availability touches zero for a single
+      # sample - both seats momentarily parked - then recovers and stays positive. An expression
+      # that latches on one zero (min_over_time over a LONG window with a short hold) pages here,
+      # minutes after reviews resumed. A short window with a long hold does not: that one sample
+      # keeps the inner predicate true for exactly 5 minutes, well short of the 15m hold.
+      - series: 'reviewbot_llm_seats_available{job="reviewer-node",instance="192.168.0.23:9100",persona="codex"}'
+        values: "2x25 0 2x14"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ReviewbotAllSeatsExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.25:9100
+              persona: codex
+            exp_annotations:
+              summary: >-
+                reviewbot (codex) has no usable seat left
+              description: >-
+                Every configured seat on 192.168.0.25:9100 has been spent, continuously, for at least 15 minutes, so the persona is producing no verdicts and the two-persona merge gate is stalled estate-wide - the 2026-09-15 shape, which cost 11h36m and 12.3h of merge_blocked on the OTHER, healthy reviewer. Nothing is quarantined and nothing needs --requeue: the queue is intact and the parks lapse on their own. Check reviewbot_llm_seat_parked_seconds_remaining for the earliest reopening, and reviewbot_llm_seat_parks_total to see which seats are carrying the exhaustion. If this recurs daily the answer is quota, not code (ADR 0024).
+
+  - interval: 1m
+    name: a seat that keeps running out pages, one ordinary park does not
+    input_series:
+      # THE CASE THE GAUGE CANNOT SEE. seat b is parked, the park EXPIRES after 15m, and sticky
+      # selection has moved on so nothing re-probes it - the gauge reads 0 from minute 15 while
+      # the subscription is still spent. The counter keeps counting, which is the whole reason
+      # it was added.
+      - series: 'reviewbot_llm_seat_parked{job="reviewer-node",instance="192.168.0.25:9100",persona="codex",seat="b"}'
+        values: "1x15 0x45"
+      - series: 'reviewbot_llm_seat_parks_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex",seat="b"}'
+        values: "0x5 1x10 2x10 3x10 4x25"
+      # One park, then nothing: an ordinary rotation. Must not page.
+      - series: 'reviewbot_llm_seat_parks_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex",seat="a"}'
+        values: "0x5 1x55"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: ReviewbotSeatExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.25:9100
+              persona: codex
+              seat: b
+            exp_annotations:
+              summary: >-
+                reviewbot (codex) seat b keeps running out
+              description: >-
+                Seat b on 192.168.0.25:9100 has been parked repeatedly within an hour. Reviews continue on the other seats, so this is a CAPACITY signal rather than an outage, and it is the one that arrives before ReviewbotAllSeatsExhausted does. Sticky selection means the rotation stays where it moved to, so a seat that parks once is normal; a seat that keeps parking has the smallest remaining window and is what the capacity plan (ADR 0024) should be sized against. Do not silence this per seat - which seat is failing is the whole signal.
+
+  - interval: 1m
+    name: fewer usable seats than configured pages, a healthy full set does not
+    input_series:
+      # Three configured, two usable: a collapsed duplicate account or an unreachable user.
+      # Config-derived and stable, so this one has no seam to work around.
+      - series: 'reviewbot_llm_seats_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex"}'
+        values: "3x40"
+      - series: 'reviewbot_llm_seats_distinct{job="reviewer-node",instance="192.168.0.25:9100",persona="codex"}'
+        values: "2x40"
+      - series: 'reviewbot_llm_seats_total{job="reviewer-node",instance="192.168.0.24:9100",persona="claude"}'
+        values: "1x40"
+      - series: 'reviewbot_llm_seats_distinct{job="reviewer-node",instance="192.168.0.24:9100",persona="claude"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ReviewbotSeatsDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.25:9100
+              persona: codex
+            exp_annotations:
+              summary: >-
+                reviewbot (codex) is running on fewer seats than configured
+              description: >-
+                192.168.0.25:9100 configured more seats than it can use: resolve_seats() dropped one that could not be sudo'd to, or COLLAPSED two that share a ChatGPT account_id. The collapse case is the dangerous one to leave alone — rotating inside a single account is the doomed-retry loop the park exists to prevent, and it cost 463 refused calls over four days in September. Capacity is NOT what the seat count implies. The reason is in the journal at startup: `journalctl -u reviewbot | grep "seat "`. 15m is startup grace; this is a provisioning fault, so it will not clear on its own.
+
+  - interval: 1m
+    name: an unscanned review pages, a clean hour does not
+    input_series:
+      - series: 'reviewbot_llm_credscan_skipped_total{job="reviewer-node",instance="192.168.0.25:9100",persona="codex"}'
+        values: "0x5 1x55"
+      # The healthy baseline is a flat zero, which is why `> 0` is the threshold.
+      - series: 'reviewbot_llm_credscan_skipped_total{job="reviewer-node",instance="192.168.0.24:9100",persona="claude"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ReviewbotCredentialScanSkipped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.25:9100
+              persona: codex
+            exp_annotations:
+              summary: >-
+                reviewbot (codex) posted a review without the credential scan
+              description: >-
+                The pre-post scan reads the active seat's auth.json and refuses output containing it. On 192.168.0.25:9100 that file could not be read, so review output went out UNSCANNED. Before seats existed this failed silently — an unreadable file made the scan a no-op indistinguishable from one that ran and found nothing — which is why it is counted now. Almost always a seat whose `home` is wrong or whose ~/.codex is not readable by its own user. Fix the seat's home/permissions; the scan is mistake-prevention rather than a security boundary, so this is not an emergency, but it must not be left standing.

@@ -11,3 +11,20 @@ pr_reviewer_llm_sudo_user: codexrun
 # Ship journald to Loki (roles/journal_ship) — the reviewer failure REASON was
 # previously visible only by SSHing to this host.
 journal_ship_enabled: true
+# ---- seat rotation (ADR 0024, plans/2026-09-16-codex-seat-rotation-plan.md) ----
+# TWO seats, not three: exactly two distinct ChatGPT accounts exist in this estate, verified by
+# tokens.account_id across every host on 2026-09-16 — cfdea639… (shared with the dev agents, all
+# six of them) and 9c8a8cfb… (provisioned 2026-09-16 by `codex login --device-auth`). A third
+# licence needs one more device-auth run; adding it here is then a one-line change, because
+# resolve_seats() refuses to rotate inside one account and would collapse a duplicate rather
+# than pretend the capacity exists.
+#
+# Sticky, in this order: seat `a` carries the load until it refuses, then `b`. That is deliberate
+# and not round-robin — spreading evenly drives both accounts to their walls at the same time and
+# turns two staggered recoveries into one synchronised outage.
+#
+# pr_reviewer_llm_sudo_user stays set below: it is what the dormant OpenBao import still gates on,
+# and the systemd NoNewPrivileges condition covers both variables.
+pr_reviewer_llm_seats:
+  - { name: a, sudo_user: codexrun }
+  - { name: b, sudo_user: codexrun2 }

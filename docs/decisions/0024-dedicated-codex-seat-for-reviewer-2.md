@@ -14,8 +14,16 @@
 > for dedication-as-capacity; it is kept rather than rewritten because the measurement that
 > overturned it is the useful part of the record.
 
-**Status:** ACCEPTED (2026-09-16), AMENDED the same day (see above). **NOT IMPLEMENTED — no seat
-is provisioned yet.** What ships in the PR carrying this ADR is only the observability half: the
+**Status:** ACCEPTED (2026-09-16), AMENDED the same day (see above). **IMPLEMENTED** — all three
+phases of `plans/2026-09-16-codex-seat-rotation-plan.md` are merged and live on reviewer-2:
+rotation (Phase 1), two provisioned seats (Phase 2), and the four seat alerts (Phase 3).
+
+**With one gap that is not code:** only TWO of the three intended licences exist. Verified
+2026-09-16 across every host by `tokens.account_id` — `cfdea639…` (shared with the dev agents)
+and `9c8a8cfb…`, and no third anywhere. So the deployed capacity is ~340–400 codex calls/day,
+not the ~510–600 this ADR sized for. The third licence needs one `codex login --device-auth`
+run and a one-line host_vars change; the runbook has the procedure. Until then the estate is
+at roughly 1.6–1.9× present demand rather than 2.5–3×, against a rate that grew 2.4× in a week. What ships in the PR carrying this ADR is only the observability half: the
 `ReviewbotRateLimited` alert, the upstream refusal text in the park note, and the model-scoped
 primary/fallback counters. Buying the second Codex subscription, logging it in, and repointing
 `codexrun` at it are MANUAL steps that have not been performed — see "What is still outstanding".

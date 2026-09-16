@@ -846,6 +846,19 @@ SEAT_PARKED_UNTIL = {s["name"]: 0.0 for s in SEATS}
 CURRENT_SEAT = SEATS[0]["name"]
 
 
+def seat_home(seat):
+    """Where this seat's credential lives.
+
+    Not always /home/<user>: a seat provisioned by hand can sit anywhere, and the plan's own
+    Phase-2 credential was parked at /home/c4/.codex-seat3 before it had a user of its own. The
+    optional `home` key exists so such a seat is EXPRESSIBLE - with the path hard-coded, a seat
+    whose credential is elsewhere silently fails the scan below rather than being rejected."""
+    s = SEAT_BY_NAME.get(seat) if isinstance(seat, str) else seat
+    if not s:
+        return ""
+    return s.get("home") or (f"/home/{s['sudo_user']}" if s.get("sudo_user") else "")
+
+
 def use_seat(name):
     """The only writer of CURRENT_SEAT."""
     global CURRENT_SEAT
@@ -936,7 +949,7 @@ def resolve_seats():
         acct = None
         try:
             r = subprocess.run(["sudo", "-n", "-u", user, "cat",
-                                f"/home/{user}/.codex/auth.json"],
+                                f"{seat_home(s)}/.codex/auth.json"],
                                capture_output=True, text=True, timeout=30)
             if r.returncode == 0:
                 acct = (json.loads(r.stdout).get("tokens") or {}).get("account_id") or None
@@ -1002,6 +1015,12 @@ def park(reset_at, seat=None):
     until = max(time.time() + 60, min(until, time.time() + MAX_PARK_S))
     # The max stays HERE, per seat, where it was always right: one seat's wall only moves later.
     SEAT_PARKED_UNTIL[seat] = max(SEAT_PARKED_UNTIL.get(seat, 0.0), until)
+    # A COUNTER BESIDE THE GAUGE, because the gauge cannot answer "is this seat spent?".
+    # A park lapses after DEFAULT_PARK_S and sticky selection has already moved on, so nothing
+    # re-probes that seat: reviewbot_llm_seat_parked drops back to 0 without the subscription
+    # having recovered, and any `== 1 for: >15m` rule over it is unsatisfiable (reviewer-codex,
+    # round 1 of ailab#754). Repeated parks ARE observable, and monotonic.
+    bump_meta(f"seat_parks_total.{seat}")
     RATE_LIMITED_UNTIL = all_parked_until()
     # Leading text is verbatim on purpose: docs/runbooks/dev-workers.md and the runbook line in
     # reviewbot-rules.yaml both tell an operator to grep for it. The seat is appended only when
@@ -1137,7 +1156,7 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
         0700-workdir failure."""
         if not sudo_user:
             return a
-        return ["sudo", "-n", "-u", sudo_user, f"HOME=/home/{sudo_user}"] + a
+        return ["sudo", "-n", "-u", sudo_user, f"HOME={seat_home(seat)}"] + a
 
     def claude_args(model):
         # Tool-less for real: Read/Grep/Glob/LS are denied too - the diff arrives inline,
@@ -1256,8 +1275,11 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
             # included (round-3 finding): scan the (public-once-posted) output for that
             # credential material and quarantine instead of posting. Mistake prevention,
             # not tamper-proof - an encoding model defeats a substring scan.
+            # PATH FROM THE SEAT, not from the username: the two were the same thing until
+            # seats existed, and a seat whose credential lives elsewhere would otherwise be
+            # scanned at a path that does not exist - which fails OPEN (see below).
             ar = aux_run(["sudo", "-n", "-u", sudo_user, "cat",
-                          f"/home/{sudo_user}/.codex/auth.json"], remaining,
+                          f"{seat_home(seat)}/.codex/auth.json"], remaining,
                          capture_output=True, text=True)
             if ar.returncode == 0:
                 try:
@@ -1267,6 +1289,18 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
                                 raise RuntimeError("credential material detected in llm output")
                 except json.JSONDecodeError:
                     pass
+            else:
+                # THIS BRANCH USED NOT TO EXIST, and its absence was the whole problem: an
+                # unreadable auth.json made the scan a silent no-op, indistinguishable from a
+                # scan that ran and found nothing. The output is about to be posted publicly,
+                # so "I could not check" must be visible. Counted rather than raised: failing
+                # the review would let a permissions mistake block every PR, which is a worse
+                # outcome than a logged gap on a scan that is mistake-prevention rather than
+                # a security boundary (an encoding model defeats a substring match anyway).
+                bump_meta("llm_credscan_skipped_total")
+                log(f"credential scan SKIPPED for seat '{seat}': could not read "
+                    f"{seat_home(seat)}/.codex/auth.json (rc={ar.returncode}). Output is being "
+                    f"posted UNSCANNED - check the seat's home and permissions.")
         else:
             fb = CFG.get("llm_fallback_model") or ""
             if r.returncode != 0:
@@ -1814,7 +1848,7 @@ def write_metrics():
                 "'reviews_full_total','reviews_partial_total','reviews_skipped_total',"
                 "'findings_dropped_total','llm_rate_limited_total','merge_blocked_prs',"
                 "'merge_blocked_seconds','llm_primary_failed_total','llm_fallback_used_total',"
-                "'llm_seat_switches_total')")}
+                "'llm_seat_switches_total','llm_credscan_skipped_total')")}
             # SEPARATE read, deliberately: the dict above is an explicit key whitelist, so a new
             # metric added only to the (key, metric) render list below would export 0 forever.
             # The per-repo results are keyed by repo name, which is config - hence a prefix scan.
@@ -1822,6 +1856,10 @@ def write_metrics():
             # torn (commit_sweep writes both in one transaction).
             repo_failed = {r[0][len(REPO_FAILED_PREFIX):]: r[1] for r in c.execute(
                 "SELECT k,v FROM meta WHERE k LIKE ?", (REPO_FAILED_PREFIX + "%",))}
+            # Per-seat park counters. Prefix scan for the same reason the repo results above are
+            # one: the key carries a seat name, which is config, so it cannot be a fixed list.
+            _parks = {r[0]: r[1] for r in c.execute(
+                "SELECT k,v FROM meta WHERE k LIKE 'seat_parks_total.%'")}
             c.close()
         now = time.time()
         # Escape ONCE for every emission. persona is operator-set config like repo,
@@ -1856,6 +1894,14 @@ def write_metrics():
                          f'{1 if _until > now else 0}')
             lines.append(f'reviewbot_llm_seat_parked_seconds_remaining'
                          f'{{persona="{_persona}",seat="{_sn}"}} {max(0.0, _until - now):.0f}')
+            # The alertable one. Read from meta directly rather than via the `gauges` whitelist,
+            # because the key is per-seat and that dict is a fixed key list by design.
+            try:
+                lines.append(f'reviewbot_llm_seat_parks_total'
+                             f'{{persona="{_persona}",seat="{_sn}"}} '
+                             f'{float(_parks.get("seat_parks_total." + _s["name"], 0) or 0):.0f}')
+            except (TypeError, ValueError):
+                pass
         # CONFIGURED vs USABLE. These must come from different places or the difference is
         # unrepresentable: len(SEATS) is the post-resolution list and len(SEAT_BY_NAME) is
         # built from that same list, so the pair was always equal before this was fixed.
@@ -1889,7 +1935,8 @@ def write_metrics():
                             # which by design does not see a review the fallback rescued.
                             ("llm_primary_failed_total", "reviewbot_llm_primary_failed_total"),
                             ("llm_fallback_used_total", "reviewbot_llm_fallback_used_total"),
-                            ("llm_seat_switches_total", "reviewbot_llm_seat_switches_total")):
+                            ("llm_seat_switches_total", "reviewbot_llm_seat_switches_total"),
+                            ("llm_credscan_skipped_total", "reviewbot_llm_credscan_skipped_total")):
             try:
                 lines.append(f'{metric}{{persona="{_persona}"}} '
                              f'{float(gauges.get(key, 0)):.0f}')
@@ -1967,6 +2014,15 @@ def fail_note(e):
         # diagnostics rather than model prose (see the _run_llm comment at the codex raise
         # site), which is what makes it safe to log at all. Do not widen it.
         upstream = " ".join(str(e).split())[:200]
+        # `when` describes the REFUSING SEAT's reset, which is the wrong thing to print when
+        # another seat is free and the job is only waiting on its 60s backoff - the note would
+        # send an operator looking for a multi-hour window during an outage that is 60 seconds
+        # long. Say which of the two this is; with one seat the extra clause never renders.
+        if getattr(e, "deferred_for_budget", False):
+            where = f" [seat: {e.seat}]" if getattr(e, "seat", None) else ""
+            return (f"seat rate-limited with too little budget left to try another"
+                    f"{where}; retrying shortly (no attempt consumed)"
+                    + (f" [upstream: {upstream}]" if upstream else ""))
         return (f"subscription rate-limited, waiting until {when} (no attempt consumed)"
                 + (f" [upstream: {upstream}]" if upstream else ""))
     return str(e)[:200]

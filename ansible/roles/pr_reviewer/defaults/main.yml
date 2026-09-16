@@ -65,6 +65,18 @@ pr_reviewer_llm_sudo_user: ""
 # Rotation is STICKY - one seat until it refuses - never round-robin, which would drive every
 # seat to its wall at once and turn staggered recoveries into one synchronised outage.
 pr_reviewer_llm_seats: []
+# The list the PROVISIONING tasks iterate. Derived so the seat tasks have exactly ONE shape to
+# handle: an explicit list when there is one, otherwise the legacy single seat synthesised from
+# pr_reviewer_llm_sudo_user, otherwise nothing (the claude persona runs as the service user and
+# needs no isolated user at all). This mirrors what reviewbot.py derives as SEATS, deliberately:
+# two places deriving the same thing by different rules is how a seat ends up with a user but no
+# ~/.codex, or a sudoers entry and no user.
+# Entry shape: {name, sudo_user, home?}. `home` defaults to /home/<sudo_user> and exists because
+# a hand-provisioned seat need not live there.
+pr_reviewer_seats_effective: >-
+  {{ pr_reviewer_llm_seats if (pr_reviewer_llm_seats | length > 0)
+     else ([{'name': 'default', 'sudo_user': pr_reviewer_llm_sudo_user}]
+           if (pr_reviewer_llm_sudo_user | length > 0) else []) }}
 # WALL-CLOCK BUDGET FOR ONE ATTEMPT — primary AND fallback share it (they used to get one
 # each, so the real worst case was 2x this). 300 was too small and is what broke the claude
 # persona: measured 2026-09-04, a 341,672-byte diff needs 515 s (40,948 output tokens — run
