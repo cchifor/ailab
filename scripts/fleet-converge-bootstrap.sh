@@ -69,7 +69,10 @@ RUN="$BASE/.run-converge.$$.sh"
 
 # Sweep copies left behind by earlier runs — `exec` below means this process cannot clean up
 # after itself. A day's grace so a long-running converge's copy is never pulled out from under it.
-find "$BASE" -maxdepth 1 -name '.run-converge.*.sh' -mmin +1440 -delete 2>/dev/null || true
+# The glob is `.run-converge*.sh`, not `.run-converge.*.sh`, so it also reaps the single shared
+# `.run-converge.sh` that the first cut of this script created — which the narrower pattern would
+# have orphaned forever on every host that had already run it.
+find "$BASE" -maxdepth 1 -name '.run-converge*.sh' -mmin +1440 -delete 2>/dev/null || true
 
 install -m 0755 "$SRC" "$RUN"
 
