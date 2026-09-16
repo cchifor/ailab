@@ -16,18 +16,25 @@
 
 **Status:** ACCEPTED (2026-09-16), AMENDED the same day (see above). **IMPLEMENTED** — all three
 phases of `plans/2026-09-16-codex-seat-rotation-plan.md` are merged and live on reviewer-2:
-rotation (Phase 1), two provisioned seats (Phase 2), and the four seat alerts (Phase 3).
+rotation (Phase 1), three provisioned seats (Phase 2), and the four seat alerts (Phase 3).
 
-**With one gap that is not code:** only TWO of the three intended licences exist. Verified
-2026-09-16 across every host by `tokens.account_id` — `cfdea639…` (shared with the dev agents)
-and `9c8a8cfb…`, and no third anywhere. So the deployed capacity is ~340–400 codex calls/day,
-not the ~510–600 this ADR sized for. The third licence needs one `codex login --device-auth`
-run and a one-line host_vars change; the runbook has the procedure. Until then the estate is
-at roughly 1.6–1.9× present demand rather than 2.5–3×, against a rate that grew 2.4× in a week. What ships in the PR carrying this ADR is only the observability half: the
-`ReviewbotRateLimited` alert, the upstream refusal text in the park note, and the model-scoped
-primary/fallback counters. Buying the second Codex subscription, logging it in, and repointing
-`codexrun` at it are MANUAL steps that have not been performed — see "What is still outstanding".
-Until they are, reviewer-2 remains on the shared seat and the outage described below WILL recur.
+**All three licences now exist** (2026-09-16): `cfdea639…` seat a (shared with the dev agents),
+`9c8a8cfb…` seat b, `11c52fea…` seat c — three distinct `tokens.account_id` values, which is the
+property `resolve_seats()` enforces rather than assumes.
+
+**But the third is not yet capacity.** Probed immediately after provisioning, seat c's account
+answers `You've hit your usage limit … try again at Sep 19th, 2026 8:10 AM`. It authenticates and
+its credential is valid; it has no usable quota today. Two readings that cannot be told apart from
+the host: a rolling window that is currently spent, or an account with no Codex entitlement at all
+(the message says "purchase more credits"). Note the date in that message is not reliable — the
+2026-09-14 episode named `Sep 21st` and in fact reopened daily.
+
+Activating it anyway is safe and deliberate: an exhausted seat raises `RateLimited`, parks
+losslessly, consumes no attempt, and begins contributing the moment its window reopens with no
+further action. The honest number for TODAY is therefore still ~340–400 calls/day, roughly
+1.6–1.9× present demand — not the ~510–600 three seats imply. One caveat worth knowing:
+`resolve_seats()` verifies a credential is READABLE, not that it has quota, so
+`reviewbot_llm_seats_available` reads 3 until seat c is first tried and refuses.
 
 **Relates to:** ADR 0020 (dev-worker OpenBao credentials — the shared codex login this moves away
 from for the reviewer), ADR 0018 (the autonomous dev agents that share that login), the reviewers
@@ -100,6 +107,13 @@ worth saying plainly that it is a hedge rather than a fix.
 
 ## Decision
 
+> **SUPERSEDED — read the amendment at the top of this file.** The paragraph below is the ORIGINAL
+> decision, kept verbatim because the measurement that overturned it is the useful part of the
+> record. What was actually built is THREE seats pooled with sticky rotation, not one dedicated
+> seat: the reviewer turned out to be ~96% of its own load, so un-sharing recovers ~4% and a second
+> subscription is worth nothing unless the bot can route around a spent one. Do not read the next
+> paragraph as current intent.
+
 **Provision a second, dedicated Codex subscription for the reviewer identity, and do not reduce
 review coverage to fit the existing one.**
 
@@ -109,29 +123,38 @@ dev agents (ADR 0020) and gets a seat whose budget is consumed only by PR review
 
 ## Consequences
 
-- Recurring subscription cost for a second seat.
+- Recurring subscription cost for TWO further seats (b and c), not one.
 - `codexrun`'s credential stops coming from the shared `af/dev-workers/codex-auth` projection and
   needs a reviewer-scoped sibling plus its own role_id/secret_id in
   `ansible/secrets/reviewbot.sops.yaml`. The dev agents keep the existing shared login unchanged.
-- **A second seat raises the ceiling; it does not remove it.** The trend is 86 → 210 calls/day in a
-  week. If it keeps climbing this recurs on the new seat, and the next lever would have to be
-  volume or a per-repo split. `ReviewbotRateLimited` is what makes the next occurrence legible
+- **More seats raise the ceiling; they do not remove it.** The trend is 86 → 210 calls/day in a
+  week, which consumes even a three-seat ceiling in 1–3 weeks. The next lever has to be volume or
+  a per-repo split, not a fourth licence. `ReviewbotRateLimited` is what makes the next occurrence legible
   within the hour instead of after an SSH.
 - Reviews continue to be produced by both personas on every allowlisted repo. No repo loses
   coverage, no author class is skipped, and `pr_reviewer_llm_effort` stays at `medium` —
   all three were considered and rejected below.
 
-## What is still outstanding (manual, not shipped by this PR)
+## What is still outstanding
 
-1. Purchase the second Codex/ChatGPT subscription.
-2. `codex login` ON reviewer-2 as `codexrun` against the new account — interactive, browser OAuth;
-   no Ansible task can perform it. Never copy an `auth.json` between hosts (the 2026-09-10 claude
-   outage was exactly that: copies share one refresh-token family and rotation invalidates all but
-   whichever host refreshed last).
-3. Project the new credential into OpenBao and point `pr_reviewer_enable_openbao` at it, so the
-   login is managed rather than hand-seeded.
-4. Confirm the fix: a full day above 200 `codex exec` calls with zero park cycles
-   (`journalctl -u reviewbot | grep -c "parking the worker"`).
+The seats themselves are done — three provisioned, three distinct accounts, activated. What is
+not:
+
+1. **Seat c has no usable quota yet** (see the status note above). Whether that is a spent rolling
+   window or an account with no Codex entitlement is unresolved; `chatgpt.com/codex/settings/usage`
+   for that account answers it, and the two need different responses. Until it serves, the
+   deployed capacity is two seats' worth.
+2. **Confirm the fix once it does**: a full day above 200 `codex exec` calls with no job deferred
+   for want of a seat (`journalctl -u reviewbot | grep -c "parking the worker"` counts per-seat
+   parks, which are expected and harmless; `reviewbot_llm_rate_limited_total` counts the deferrals
+   that actually matter).
+3. **Credentials are hand-seeded, not projected.** `pr_reviewer_enable_openbao` is false and the
+   bao agent is not running on reviewer-2, so all three `auth.json` files were installed by hand.
+   Per-seat OpenBao projection needs a reviewer-N-seat AppRole and a secret-id per seat in
+   `reviewbot.sops.yaml`; it is not done, and the runbook says so rather than implying otherwise.
+4. **Capacity is weeks, not a fix.** Demand grew 86 → 210 calls/day in one week; three working
+   seats buy 1–3 weeks on that trend. The durable lever is review volume — most cheaply the 2.4
+   review rounds per PR, not the repo allowlist.
 
 ## Alternatives rejected
 

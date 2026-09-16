@@ -12,12 +12,15 @@ pr_reviewer_llm_sudo_user: codexrun
 # previously visible only by SSHing to this host.
 journal_ship_enabled: true
 # ---- seat rotation (ADR 0024, plans/2026-09-16-codex-seat-rotation-plan.md) ----
-# TWO seats, not three: exactly two distinct ChatGPT accounts exist in this estate, verified by
-# tokens.account_id across every host on 2026-09-16 — cfdea639… (shared with the dev agents, all
-# six of them) and 9c8a8cfb… (provisioned 2026-09-16 by `codex login --device-auth`). A third
-# licence needs one more device-auth run; adding it here is then a one-line change, because
-# resolve_seats() refuses to rotate inside one account and would collapse a duplicate rather
-# than pretend the capacity exists.
+# THREE seats, one per distinct ChatGPT account, each verified by tokens.account_id at the time
+# it was added — cfdea639… (seat a, shared with the six dev agents), 9c8a8cfb… (seat b) and
+# 11c52fea… (seat c). All three were provisioned with `codex login --device-auth`, which is the
+# headless flow and is absent from `codex login --help` at 0.153.4.
+# Distinctness is not a convention here, it is enforced: resolve_seats() reads each seat's
+# account_id at startup and COLLAPSES duplicates, because rotating inside one account is the
+# doomed-retry loop the park exists to prevent. A fourth seat sharing an existing account would
+# reduce reviewbot_llm_seats_distinct and fire ReviewbotSeatsDegraded rather than pretend the
+# capacity exists.
 #
 # Sticky, in this order: seat `a` carries the load until it refuses, then `b`. That is deliberate
 # and not round-robin — spreading evenly drives both accounts to their walls at the same time and
@@ -28,3 +31,4 @@ journal_ship_enabled: true
 pr_reviewer_llm_seats:
   - { name: a, sudo_user: codexrun }
   - { name: b, sudo_user: codexrun2 }
+  - { name: c, sudo_user: codexrun3 }
