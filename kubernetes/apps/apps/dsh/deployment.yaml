@@ -19,7 +19,8 @@ spec:
       labels: { app: dsh }
     spec:
       terminationGracePeriodSeconds: 30   # SIGTERM starts root disposal on a 5s budget; give it room
-      automountServiceAccountToken: false # it executes model-generated code; do not hand it the API
+      serviceAccountName: dsh-k8s-admin
+      automountServiceAccountToken: true # required for the operator's namespace-scoped kubectl access
       # runAsNonRoot is deliberately ABSENT here and set per-container instead. The
       # fix-ownership initContainer below must run as root, and a pod-level runAsNonRoot: true
       # would forbid that. fsGroup stays, but note it does NOT solve the ownership problem it
