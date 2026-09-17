@@ -1,0 +1,41 @@
+# Namespace-scoped Kubernetes API identity for the dsh runtime.  This is intentionally
+# a Role, not a ClusterRoleBinding: the agent can operate acceptance resources in dsh,
+# but cannot read Secrets or touch another namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dsh-k8s-admin
+  namespace: dsh
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dsh-k8s-admin
+  namespace: dsh
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: [""]
+    resources: [configmaps, persistentvolumeclaims, pods, events]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, get, list, watch, patch, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dsh-k8s-admin
+  namespace: dsh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dsh-k8s-admin
+subjects:
+  - kind: ServiceAccount
+    name: dsh-k8s-admin
+    namespace: dsh

@@ -38,6 +38,13 @@ spec:
     # a status dot trades the property for a cosmetic. The homepage tile still links to dsh; it just
     # does not probe it.
   egress:
+    # Kubernetes API for the namespace-scoped dsh-k8s-admin identity.
+    - to:
+        - ipBlock: { cidr: 192.168.0.41/32 }
+        - ipBlock: { cidr: 192.168.0.42/32 }
+        - ipBlock: { cidr: 192.168.0.43/32 }
+      ports:
+        - { protocol: TCP, port: 6443 }
     # CoreDNS specifically, not every pod in kube-system. A namespace-wide rule lets this pod
     # open :53 to anything scheduled there, a wider hole than name resolution needs. Verified
     # the two coredns pods carry k8s-app=kube-dns before narrowing to it.

@@ -5,6 +5,7 @@ namespace: dsh
 resources:
   - namespace.yaml
   - openbao-eso.yaml   # SA + CA + SecretStore + ExternalSecret: the LiteLLM key from OpenBao
+  - k8s-admin.yaml     # namespace-scoped API access for acceptance/diagnostics
   - pvc.yaml
   - install-job.yaml   # one-shot: npm-installs dsh into the app PVC (see the file for why not an image)
   - deployment.yaml
