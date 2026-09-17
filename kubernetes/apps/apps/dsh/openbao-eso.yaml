@@ -174,6 +174,10 @@ spec:
 #   DSH_OPERATOR_SSH_KEY, DSH_OPERATOR_SSH_USER, DSH_OPERATOR_SSH_KNOWN_HOSTS
 #                             dedicated operator SSH identity; read from the mounted files.
 #                             Host authorization and sudo scope: docs/runbooks/dsh.md.
+#   DSH_CODEX_ACCESS_TOKEN    native openai-codex provider; access-only projection of reviewer-2
+#                             seat B. The reviewer owns refresh; its publisher patches this field.
+#   DSH_CODEX_ACCOUNT_EMAIL, DSH_CODEX_EXPIRES_AT
+#                             projection identity and expiry metadata, never refresh credentials.
 # Whatever else lands here is readable by the agent, which is why the document must hold only
 # credentials dsh is meant to have (see the volume comment in deployment.yaml).
 apiVersion: external-secrets.io/v1

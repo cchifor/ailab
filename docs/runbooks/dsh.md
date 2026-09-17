@@ -235,6 +235,56 @@ with git itself, isolated from the host's configuration.
 
 ---
 
+## Codex subscription: realjaysage reviewer seat
+
+DSH's **OpenAI Codex (realjaysage)** provider serves `gpt-6-astra` using the
+`realjaysage@gmail.com` ChatGPT login from reviewer-2 seat B (`codexrun2`). This replaces the
+DSH model picker's legacy LiteLLM/API-key GPT-6 route. Local Qwen routes keep using LiteLLM.
+The provider key is `openai-codex`, with `apiKeyEnv: DSH_CODEX_ACCESS_TOKEN` and no explicit
+`api`: the installed catalog selects the Codex subscription protocol. Provider reconciliation
+in `seed-settings` preserves this configuration across pod replacements.
+The two existing sessions selecting `litellm/gpt-6-astra` were migrated through DSH's
+`session/selectModel` API; their histories and the user's Qwen default were preserved.
+
+The token lives in **`af/dsh/credentials.DSH_CODEX_ACCESS_TOKEN`**; account and expiry metadata
+are `DSH_CODEX_ACCOUNT_EMAIL` and `DSH_CODEX_EXPIRES_AT`. ESO projects these fields into
+`/dsh-credentials`, and the credentials provider rereads the access token per request.
+Do not put a ChatGPT OAuth token in LiteLLM's `OPENAI_API_KEY` or send it to `api.openai.com`.
+
+**Refresh has one owner:** the Codex CLI running as `codexrun2` on reviewer-2. Its
+`/home/codexrun2/.codex/auth.json` retains the refresh token. `dsh-codex-publisher.timer` runs
+every minute on that host and publishes only the current access token, email and expiry.
+It never refreshes OAuth or copies the refresh/id tokens. It rejects the wrong email or a token
+with five minutes or less remaining. If that seat needs a fresh login, fix it there; DSH follows
+the next publication and ESO refresh. It does not switch to another account automatically.
+
+Publisher implementation and units: `ansible/roles/dsh_codex_publisher/`; enabled only on
+reviewer-2 by its host vars. A CAS **PATCH** preserves all unrelated DSH fields. Unchanged
+source credentials and unchanged vault versions produce no write. Its OpenBao AppRole is
+`dsh-codex-publisher`, using the matching `files/policy.hcl`: **patch** on this single data path,
+**read** on its metadata, no credential-value reads and no whole-document put/delete. ACLs are
+per document, so patch permission covers all fields in this one document; the script's allowlist
+restricts its normal writes to the three Codex fields.
+
+Bootstrap/recovery is an operator ceremony: install that policy, create the same-named AppRole
+with `token_policies=dsh-codex-publisher`, `token_ttl=60s`, `token_max_ttl=120s`,
+`token_no_default_policy=true`, `bind_secret_id=true`, `secret_id_ttl=0`, and
+`secret_id_num_uses=0`. Mint a role-id/secret-id pair and transfer it without terminal output into
+`/etc/dsh-codex-publisher/approle.json` on reviewer-2, shaped as
+`{"role_id":"...","secret_id":"..."}`, root-owned mode 0600. Run the `dsh-codex` tag of
+`ansible/reviewers.yml` to install the publisher, CA, LAN hosts entries and timer. The AppRole
+credential is independently revocable and is never projected into DSH.
+
+Check without showing tokens:
+
+```bash
+ssh c4@192.168.0.25 'sudo systemctl status dsh-codex-publisher.timer --no-pager'
+ssh c4@192.168.0.25 'sudo journalctl -u dsh-codex-publisher.service -n 10 --no-pager'
+kubectl --context admin@ai -n dsh get externalsecret dsh-credentials
+```
+
+---
+
 ## Dedicated operator SSH
 
 Provisioned on 2026-09-17 in the existing **`af/dsh/credentials`** KV-v2 document:
