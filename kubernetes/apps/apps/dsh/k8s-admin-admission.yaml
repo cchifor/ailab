@@ -32,6 +32,8 @@ spec:
          (!has(object.spec.template.spec.volumes) || object.spec.template.spec.volumes.all(v,
            !has(v.secret) && !has(v.hostPath) && (!has(v.projected) || v.projected.sources.all(s, !has(s.secret))))) &&
          object.spec.template.spec.containers.all(c,
+           (!has(c.securityContext) || ((!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+             (!has(c.securityContext.allowPrivilegeEscalation) || c.securityContext.allowPrivilegeEscalation == false))) &&
            (!has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef))) &&
            (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) ||
              ((e.valueFrom.secretKeyRef.name == 'dsh-litellm' && e.valueFrom.secretKeyRef.key == 'api_key') ||
