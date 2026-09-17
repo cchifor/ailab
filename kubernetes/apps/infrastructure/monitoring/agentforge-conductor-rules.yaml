@@ -253,23 +253,107 @@ spec:
               ages out of its 30m window.
         # T0's standing invariant, and the one rule here that is a POSTURE check rather than a health
         # check. At AF_CONDUCT_TIER=observe the write door refuses before its first forge call, so any
-        # movement on this counter means the tier is no longer observe — an arming that was not meant
-        # to happen, or a knob edited in place.
+        # movement on this counter under that tier means the door let a write through under a tier
+        # that forbids it — the arming that was not meant to happen.
         #
         # This is deliberately NOT the proof that T0 is write-free: the engine pins that with an AST
         # writer pin, because `writes == 0` at observe is a tautology rather than a measurement. This
         # rule catches the CONFIGURATION changing, not the code.
+        #
+        # THE RULE READS THE TIER, since the arming rungs. A conductor deployed at AF_CONDUCT_TIER=advise
+        # writes by design — one lifecycle comment per park, the T1 program — and the earlier form of
+        # this rule, which took every write for a breach, would have fired for as long as the tier
+        # stayed armed, which is for ever, and muted ntfy under it (program-plan invariant 9).
+        # `forge_conduct_tier_info{tier}` is the deployed tier as the engine read it at construction:
+        # one child per tier of Settings' closed set (observe, advise, act-safe, act-approved,
+        # escalate), the deployed one at 1 and the other four at 0, so the series is TOTAL and its
+        # absence means the gauge was not scraped — never "some other tier".
+        #
+        # A WRITE MEETS ITS OWN POD'S TIER: `on (namespace, pod)`, the two labels the PodMonitor stamps
+        # on both series, rather than a fleet-wide `max()`. The Deployment is Recreate, so two pods
+        # never overlap — but the WINDOW does. A de-arming rollout (advise back to observe) leaves the
+        # old pod's writes inside [30m] for half an hour after the new pod's observe child reads 1,
+        # and a fleet-wide join would read that as a write at observe and page the operator who just
+        # de-armed. Joined per pod, the old pod's writes meet the old pod's advise (0, then stale)
+        # and nothing fires. `max by (namespace, pod)` strips the tier and scrape labels so the join
+        # is on exactly those two; `sum by (namespace, pod)` on the left for
+        # ForgeConductPassesFailing's reason — it sums the one series per pod.
+        #
+        # THE GAUGE'S ABSENCE IS THIS RULE'S QUIET DIRECTION, and ForgeConductTierUnknown (next) is
+        # what makes that safe: a conductor that publishes no tier — an image from before the gauge —
+        # cannot satisfy the conjunct, so this rule cannot fire on it, and a posture rule that cannot
+        # fire is a posture nobody is checking.
         - alert: ForgeConductUnexpectedWrites
           expr: |-
-            sum(increase(forge_conduct_writes_total[30m])) > 0
+            sum by (namespace, pod) (increase(forge_conduct_writes_total[30m])) > 0
+              and on (namespace, pod) (
+                max by (namespace, pod) (forge_conduct_tier_info{tier="observe"}) == 1
+              )
           for: 5m
           labels: { severity: warning }
           annotations:
-            summary: "AgentForge conductor wrote to the forge while T0 expects none"
+            summary: "AgentForge conductor {{ $labels.namespace }}/{{ $labels.pod }} wrote to the forge while deployed at tier=observe"
             description: >-
-              forge_conduct_writes_total advanced. At AF_CONDUCT_TIER=observe the write door refuses
-              before reaching the forge, so this means the deployed tier is no longer observe. Confirm
-              the Deployment's AF_CONDUCT_TIER and whether an arming rung landed.
+              forge_conduct_writes_total advanced on a pod whose forge_conduct_tier_info reads
+              tier=observe. At observe the write door refuses before reaching the forge, so a write
+              from that pod means the door let one through under a tier that forbids it — the
+              posture the T0 invariant pins. Confirm the Deployment's AF_CONDUCT_TIER and the image
+              the pod runs. A pod at advise or above writing is the T1 program working and is not
+              this alert; a pod that publishes no tier at all is ForgeConductTierUnknown's.
+        # THE TIER NOBODY IS SCRAPING READS AS "NOT OBSERVE". ForgeConductUnexpectedWrites is a
+        # conjunction, and a conjunct over a series that is not there is an empty vector: a conductor
+        # that publishes no forge_conduct_tier_info — an image from before the gauge, or a gauge
+        # dropped from the registry — silences the posture rule without a word. That is the header's
+        # instrument that reads healthy because nothing watches it, one rule over, and this is the
+        # rule that says so.
+        #
+        # THE ANTI-JOIN, NOT `absent()`, for ForgeConductDown's reason: absent() cannot tell a pod
+        # that is gone from a pod that is up and publishing no tier, and this estate has measured that
+        # form as wrong. The left side is Down's — the Ready conductor container, pod-scoped — and so
+        # is the marker: forge_conduct_writes_total is unlabelled, present from the first scrape of
+        # any conductor, so `and on (namespace, pod)` on it is "this pod IS scraped", and `unless on
+        # (namespace, pod) forge_conduct_tier_info` is "and publishes no tier". The two rules partition
+        # the missing-series states: a pod publishing nothing is Down's, a pod publishing everything
+        # but the tier is this one's, a pod publishing the tier is neither's — and a pod that never
+        # became Ready is ForgeConductSecretNotReady's, which is why the left side is the Ready
+        # container and not the pod's start time (a pod stuck at ContainerCreating has one).
+        #
+        # `for: 10m`: the writes counter and the tier gauge are constructed together, so on a healthy
+        # conductor they arrive in the same scrape and the expression is never true; the hold covers
+        # a scrape that lands while a pod is still coming up, and Prometheus' 5m staleness on the
+        # series of a pod that has just left.
+        #
+        # MERGE ORDER, because the rule is right and its timing can still be wrong. The conductor
+        # image this estate runs (conductor-deployment.yaml's digest: agentforge build 455c12b, the
+        # #402 merge) publishes no forge_conduct_tier_info — the gauge is agentforge's
+        # conduct-tier-info change, stacked on its T1 instruments, and agentforge main (9255b43 as
+        # this is written) carries neither. Landed against that image, this rule fires on the live
+        # pod ten minutes in and stays up — a phone push every four hours, at warning — until the
+        # engine merges the gauge AND the ailab pin moves to a build that has it, a window nothing
+        # here bounds (program-plan invariant 9). So this file lands AFTER the agentforge tier-info
+        # and T1-instrument merges and the repin that carries them, and the PR that carries it is
+        # held until that pin is live. The T1 rules below cost nothing in the meantime — each is an
+        # empty vector on an image that exports none of their series — this is the one rule that
+        # would not be. If it must land first, replace this paragraph with the date the pin is due
+        # and the window accepted, in days.
+        - alert: ForgeConductTierUnknown
+          expr: |-
+            max by (namespace, pod) (
+              kube_pod_container_status_ready{namespace="agentforge", container="conductor"} == 1
+            )
+              and on (namespace, pod) forge_conduct_writes_total
+              unless on (namespace, pod) forge_conduct_tier_info
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor {{ $labels.namespace }}/{{ $labels.pod }} publishes no forge_conduct_tier_info — its tier is unknown"
+            description: >-
+              The conductor is Ready and scraped (forge_conduct_writes_total is present) but publishes
+              no forge_conduct_tier_info, so nothing here can say which tier it runs at, and
+              ForgeConductUnexpectedWrites — which reads the tier before it will fire — is silent for
+              this pod whatever it writes. The usual cause is an image from before the gauge (the
+              agentforge conduct-tier-info change); check the pinned conductor digest, and until the
+              pod publishes its tier, read the Deployment's AF_CONDUCT_TIER by hand.
         # THE OTHER HALF OF A FIX THAT WOULD OTHERWISE BE HALF-DONE (agentforge #365). The engine
         # counts per-sensor incompleteness under a CLOSED label vocabulary — an undeclared child
         # appears mid-flight and is invisible to the pre-touch, which is how a closed vocabulary
@@ -413,3 +497,403 @@ spec:
               the usual causes are the af/data/operator/conductor/forge path not yet written by the
               openbao-provision Job (the seed is create-if-absent; the Job runs daily), or the
               SecretStore's AppRole role not yet minted.
+        # ── T1: THE PARK LANE'S RULES ─────────────────────────────────────────────────────────────
+        # From here the conductor WRITES. At AF_CONDUCT_TIER=advise the park lane posts one diagnosis
+        # comment per park and the filer opens findings, and the T1 series read what the door let
+        # through, what it refused and what the lanes withheld. The header's rules still hold — every
+        # counter keeps `_total`, every window is sized off the pass cadence, every threshold is on
+        # an increase() or a changes() over a window and never on a raw counter — with two things
+        # new. Several of these counters are NOT PRE-TOUCHED (forge_conduct_diagnoses_total by
+        # (detector, op), forge_conduct_refusals_total by reason): a child has no series until its
+        # first event, and increase() reads a series from its first sample, so a child's first event
+        # is below any increase()'s notice until the counter moves again. Each rule below says what
+        # that costs it, or what it does about it. And forge_conduct_parks is a GAUGE, rebuilt in
+        # place every pass, whole over the bound repos, and EMPTY when a pass could not report its
+        # parks — absence on it is "not known", never 0. Every series below is exported by
+        # agentforge's T1 instruments, unmerged as this is written and absent from the live pin
+        # (ForgeConductTierUnknown's MERGE ORDER note): until the repin every rule here is an empty
+        # vector, quiet and inert, and the section is read against that ordering.
+        #
+        # AND THE ROUTING FACT THAT SHAPES THE STANDING-STATE RULES: Alertmanager here routes EVERY
+        # alert to ntfy — no severity route, only Watchdog dropped, repeat_interval 4h
+        # (kube-prometheus-stack.yaml) — so `severity: info` de-pages nothing, and a rule that is up
+        # for as long as a state holds is a phone push every four hours until the topic is muted,
+        # which loses every ailab alert (agentforge-rules.yaml measured this on ForgeNeedsHuman and
+        # rejected that shape; program-plan invariant 9). Two of the states below are a human's to
+        # end and hold for weeks on this estate; they are announced for a day and then left on the
+        # issue. The retirement instrument, which is true until a change lands, is a record and not
+        # an alert at all. The Alertmanager route that would make a standing info alert safe is a
+        # piece of work of its own and is deliberately not smuggled into a rule-file PR.
+        #
+        # A WAKE WITH NO DIAGNOSIS BEHIND IT (program row 6c's prerequisite). A lifecycle comment on a
+        # bound repo wakes that repo's pool, and the door counts it under
+        # forge_conduct_wake_writes_total{repo} on the ATTEMPT — before the POST, so that a request
+        # that left and timed out is still a wake the pool may have taken.
+        # forge_conduct_diagnoses_total{detector, op} is the other end of the same write: a comment
+        # the lane saw APPLIED, by row and op. On a healthy conductor the two move together, in one
+        # record_pass call; a wake with no diagnosis behind it is a comment the door sent that never
+        # came back applied — the forge failing after the request left, a pool woken for a comment
+        # nobody can read.
+        #
+        # THE HONEST COMPARISON IS FLEET-WIDE, and the reason is the labels: the wakes carry `repo`,
+        # the diagnoses carry `detector, op`, a row is not a repo, and no series carries both — so
+        # "wakes on repo R against diagnoses on repo R" is a join PromQL cannot write. Summed over
+        # everything, the two are the same writes read at the two ends of the door, and the
+        # difference is what fell between. The alert therefore names no repo and no lane; the pass
+        # line in the conductor's log carries each lane's `failed=` count (`comments=` for the park
+        # lane, `chains=` for the chain lane), and the description says so.
+        #
+        # COUNTED EXACTLY, because the diagnoses counter is not pre-touched. A (detector, op) pair
+        # has no series until its first comment and increase() reads a series from its first sample,
+        # so a pair's first comment inside the window is a wake the window sees and a diagnosis it
+        # does not — and after an arming rollout, when every row diagnoses for the first time, that
+        # is most of them: the plain difference of two increase()s reads the first two hours of T1
+        # as the forge dropping comments. The second term on each side puts the first sample back:
+        # `min_over_time(x[2h])` for every series MINTED inside the window — its first sample on a
+        # counter minted at its count (or, if the pod also restarted inside the window, the lower of
+        # that and the re-mint, which reads the pair short by at most an allowance less one, under
+        # the bar) — and nothing for a series that existed before it, which increase() reads whole,
+        # a mid-window restart included, by its reset arithmetic. Both sides carry the term, because
+        # the wakes counter is pre-touched per PASS over the bound repos, in the same record_pass
+        # call as its increment: a first pass that attempts a wake mints the series at its count,
+        # not at 0. `or vector(0)` on each of the four, because an aggregation over nothing is EMPTY,
+        # not 0, and an empty operand empties the subtraction and the alert with it — on a conductor
+        # that has never applied a comment, which is the estate this rule is for.
+        #
+        # "MINTED INSIDE THE WINDOW" IS THREE CLAUSES, NOT ONE, because "no sample at the window's
+        # edge" (`unless x offset 2h`) is also what a SCRAPE GAP looks like. A Prometheus restart,
+        # upgrade or node drain longer than the 5m lookback leaves every series without a sample at
+        # the gap, and two hours later the gap is this window's edge: the one-clause test then reads
+        # every live old series as minted and adds its LIFETIME count on each side, so the pod's
+        # lifetime W-D — three lifecycle comments ever lost to forge timeouts over weeks, the one
+        # thing that moves W without D, since the COMMENT arm after the wake count in
+        # conductor/mutate.py returns no Refusal — is re-read as lost now, for (gap - 5m) minutes,
+        # long after ForgeConductDown explained the gap. Measured on the one-clause form: a 15m gap
+        # fired this alert for ten minutes two hours later on a conductor that lost nothing in the
+        # window. So a series absent at the edge is minted UNLESS it existed in the two hours before
+        # the window (`last_over_time(x[2h] offset 2h)`) AND its pod was not scraped at the edge
+        # (`unless on (namespace, pod) forge_conduct_writes_total offset 2h` — the unlabelled marker
+        # every scraped conductor exports): existed-before-and-pod-unscraped is a gap, and increase()
+        # reads the series as the continuation it is. The pod clause is not decoration. "Existed
+        # before the window" alone would also cover a pair RE-MINTED after an in-place restart when
+        # the restart sits before the edge and the re-mint after it — the pair's old samples in the
+        # two hours before the window, its new ones inside it, and increase() reading the re-mint
+        # from its first sample, short by the whole of it; measured: a pair at 5, a restart, the pair
+        # re-minted at 3, read as three lost for the twenty minutes the restart and the re-mint
+        # straddled the edge. With the pod's own marker in the clause that pod WAS scraped at the
+        # edge, the pair is minted, and its 3 is put back. A pair minted for the first time inside
+        # the window is minted under every clause, gap or no gap: it has no samples before it.
+        #
+        # THE GATE, LAST: `unless on () absent_over_time(forge_conduct_writes_total[2h] offset 2h)`.
+        # When the store holds no conductor sample at all from the two hours before the window — a
+        # Prometheus that began scraping the conductor under two hours ago, a PodMonitor freshly
+        # adopted, an outage longer than the window — every series is minted by any test the samples
+        # can express, and the lifetime counts come back on both sides for those two hours; measured:
+        # an old conductor at W=10, D=7 scraped from empty history fired this alert for its first two
+        # hours. So the rule reads nothing until the store has two hours behind the window: the quiet
+        # direction, for the first two hours of a Prometheus' conductor history, while every other
+        # rule here is finding its feet too. The honest fix for all of this is in the ENGINE: a
+        # diagnoses counter pre-touched over CONDUCT_DETECTORS x CONDUCT_OPS (as park_quiet_total is)
+        # makes both sides a plain increase() and retires the second term, its three clauses and the
+        # asymmetry they paper over; until then this is the rule-side reading.
+        #
+        # `>= 3` OVER [2h]. The two sides extrapolate separately (ForgeConductPassesFailing's note),
+        # so equal counts read a few hundredths apart and `> 0` would take that for a lost comment;
+        # and one lost comment is a timeout — the pool woken once for a comment it may not be able to
+        # read, which the next pass's fold settles either way (the comment is on the issue, or it is
+        # proposed again). Three is one pass's whole allowance (LIFECYCLE_WRITES_PER_PASS) lost, or
+        # one comment lost on each of three passes: a forge dropping the conductor's comments, not a
+        # single timeout. [2h] is twenty-four passes at the 300s cadence and six at the backed-off
+        # 1200s, so a run at either lands three inside it. The one input the arithmetic misreads is
+        # an in-place restart inside the window after which a pair is re-minted at a count no lower
+        # than it had before, which increase() cannot see as a reset: that pair is read short by its
+        # OLD count, while W reads whole — its re-mint is the first pass's own wake count, below the
+        # pod's old count on any pod more than a few passes old, a drop increase() does take for a
+        # reset. So the bar is met once the pairs re-minted that way inside the window, in the first
+        # pass or a later one, carry old counts summing to three: one pair at 3 re-minted at 3,
+        # three at 1 re-minted at 1, or 2 and 1 (verified: W 9 then 3, one pair 3 then 3, fires at
+        # 145m) — each a pair the restart caught at exactly the count its next comments would
+        # bring it back to. `for: 5m` for a pass that lands on a window edge.
+        - alert: ForgeConductWakesUnanswered
+          expr: |-
+            (
+              (
+                (sum(increase(forge_conduct_wake_writes_total[2h])) or vector(0))
+                  + (
+                    sum(
+                      min_over_time(forge_conduct_wake_writes_total[2h])
+                        unless forge_conduct_wake_writes_total offset 2h
+                        unless (
+                          last_over_time(forge_conduct_wake_writes_total[2h] offset 2h)
+                            unless on (namespace, pod) forge_conduct_writes_total offset 2h
+                        )
+                    ) or vector(0)
+                  )
+              ) - (
+                (sum(increase(forge_conduct_diagnoses_total[2h])) or vector(0))
+                  + (
+                    sum(
+                      min_over_time(forge_conduct_diagnoses_total[2h])
+                        unless forge_conduct_diagnoses_total offset 2h
+                        unless (
+                          last_over_time(forge_conduct_diagnoses_total[2h] offset 2h)
+                            unless on (namespace, pod) forge_conduct_writes_total offset 2h
+                        )
+                    ) or vector(0)
+                  )
+              ) >= 3
+            )
+              unless on () absent_over_time(forge_conduct_writes_total[2h] offset 2h)
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor woke bound pools with {{ $value | printf \"%.0f\" }} lifecycle comments in 2h that never came back applied"
+            description: >-
+              forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted
+              before the POST) advanced in the last 2h by at least three more than
+              forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments
+              that never came back as applied, so a bound pool may have been woken by a comment
+              nobody can read. The two series share no label — wakes carry repo, diagnoses carry
+              detector and op — so this is the fleet-wide difference and names no repo; the
+              conductor's pass line carries each lane's failed= count beside its comments= and
+              chains=. Check the forge's health from the conductor's side (timeouts and 5xx on
+              POST) before anything else.
+        # AN ISSUE NO OWN COMMENT CAN EVER SETTLE (conductor/filing.py, plan item 15). The filer's
+        # lifetime ceiling is three own comments per issue — the finding, at most one observation,
+        # and the resolution — and a fingerprint that RECURS after its resolution, with no room left
+        # for a recurrence finding and the resolution after it, posts nothing and files no successor
+        # while the issue is open; so does a resolution the ceiling itself left no room for. The
+        # filer counts it under forge_conduct_park_quiet_total{reason="exhausted"} on EVERY pass the
+        # state holds and names the fingerprint on its pass line, and nothing but the operator
+        # closing the issue ends it: only then, with no open issue for the fingerprint, does the next
+        # recurrence file anew. This is the T1 comments-per-issue criterion's second reason, made
+        # visible from the estate.
+        #
+        # THE STATE'S FIRST DAY, NOT THE STATE. The counter is pre-touched at 0 for every declared
+        # reason, so the first exhausted pass is visible to increase(), and `> 0` over [24h] is up
+        # from that pass. But the counter moves on EVERY pass the state holds and the state holds
+        # until a human closes the issue, so `> 0` alone would be up for the state's whole life plus
+        # a day — on this estate's routing (the section header) a phone push every four hours until
+        # the topic is muted, and `severity: info` de-pages none of it; measured: a state held for
+        # ten days kept the one-clause form up for all ten. The second clause is the estate's form
+        # (b), the NEW state rather than its persistence: `unless` the counter also moved in the day
+        # BEFORE the window. The alert is then up for the state's first day — a window long enough
+        # to survive an afternoon of passes coming back short (the counter only moves on passes
+        # that return) without clearing and re-raising mid-state — and clears on its own whether or
+        # not the state has ended; the standing to-do lives on the issue and the pass line, which
+        # the description points at. sum() on both clauses for ForgeConductConfigRejected's reason,
+        # and fleet-wide on purpose: a rollout mid-state hands the old pod's day to the new pod's,
+        # so a standing state is announced once, not once per pod. The quiet direction: a state that
+        # ends and recurs within a day of its last pass is folded into the first announcement (the
+        # day before the window still moved); one that recurs later is announced afresh. No hold: a
+        # pre-touched counter's step is a discrete event, and the clear is the window's.
+        - alert: ForgeConductIssueExhausted
+          expr: |-
+            sum(increase(forge_conduct_park_quiet_total{reason="exhausted"}[24h])) > 0
+              unless sum(increase(forge_conduct_park_quiet_total{reason="exhausted"}[24h] offset 24h)) > 0
+          labels: { severity: info }
+          annotations:
+            summary: "AgentForge conductor has a filed issue it can never settle — close it by hand"
+            description: >-
+              forge_conduct_park_quiet_total{reason="exhausted"} advanced in the last 24h and not in
+              the day before: a filed issue's fingerprint recurred after its resolution with no room
+              under the lifetime ceiling (three own comments) for a recurrence finding and a
+              resolution after it — or a resolution itself had no room — so the filer posts nothing
+              on it and files no successor while it stays open. The conductor's pass line names the
+              fingerprint (`exhausted=`). Close the issue: the next pass on which the finding recurs
+              files a fresh one. This is the state's first day only — it clears a day after the
+              state began whether or not the issue is closed, and the pass line carries the to-do
+              until it is.
+        # THE LIFETIME CEILING, HOLDING. Three own comments on an issue is all the conductor may ever
+        # post on it — the park lane's ceiling (diagnose.decide, LIFECYCLE_COMMENTS) and the filer's
+        # (max_comments_per_issue) alike — and a park whose issue already wears three is one the
+        # conductor has said everything it can about: the lane folds it every pass, answers
+        # `ceiling` and proposes nothing; the filer skips the observation it would have posted and
+        # retains the entry. Counted under forge_conduct_park_quiet_total{reason="ceiling"} on every
+        # pass it holds. From the estate that park looks like one the conductor is watching; it is
+        # one the conductor has finished with, and a human's to act on.
+        #
+        # The same shape as ForgeConductIssueExhausted, for the same reasons: a standing state,
+        # counted per pass on a pre-touched counter, a human's to end — announced for its first day
+        # and then left on the issue, because on this estate's routing a standing alert is the muted
+        # topic. Here that is not a corner: the playground's parked backlog is permanent
+        # (agentforge-rules.yaml, backlog 9 and never drained) and a park that stands for weeks
+        # reaches three conductor comments, so at T1 steady state a rule up for as long as the
+        # ceiling holds would simply be up. The two are not one rule because they ask for different
+        # things — an exhausted issue must be CLOSED for the filer to work again; a ceiling'd park
+        # needs a human to act on the park itself.
+        - alert: ForgeConductCeilingHolding
+          expr: |-
+            sum(increase(forge_conduct_park_quiet_total{reason="ceiling"}[24h])) > 0
+              unless sum(increase(forge_conduct_park_quiet_total{reason="ceiling"}[24h] offset 24h)) > 0
+          labels: { severity: info }
+          annotations:
+            summary: "AgentForge conductor has said all it may on at least one issue (lifetime ceiling) — it is a human's from here"
+            description: >-
+              forge_conduct_park_quiet_total{reason="ceiling"} advanced in the last 24h and not in
+              the day before: on at least one issue the conductor's own comments have reached the
+              lifetime ceiling (three), so the park lane proposes nothing more on that park and the
+              filer skips the observation it would have posted. The conductor is finished with that
+              issue — it will not be diagnosed again — and closing or moving it is a human's call.
+              The conductor's pass line names what each lane withheld and why; the issue is the one
+              wearing three conductor comments. This is the state's first day only — it clears a
+              day after the ceiling was first counted, and the pass line carries the state until a
+              human acts.
+        # THE RESERVED QUIET REASON, read for ForgeConductSensorUnrecognised's reason. The lanes and
+        # the filer withhold comments under a closed vocabulary (CONDUCT_QUIET_REASONS: ceiling,
+        # unchanged, interval, held, classless, exhausted), pinned in the engine against every
+        # Quiet(...) and quiet[...] the conductor spells; a reason outside it is counted under
+        # `unrecognised` rather than dropped, and a bucket nothing alerts on is the same hole one
+        # layer down. The counter is pre-touched at 0 for every declared reason and the reserved one,
+        # so the first occurrence is visible to increase(). Same window, threshold and hold as the
+        # sensor rule, for its reasons.
+        - alert: ForgeConductQuietReasonUnrecognised
+          expr: |-
+            sum(increase(forge_conduct_park_quiet_total{reason="unrecognised"}[30m])) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor withheld a comment for a reason it cannot name"
+            description: >-
+              forge_conduct_park_quiet_total advanced on the reserved `unrecognised` label: a lane
+              or the filer withheld a lifecycle comment for a reason outside CONDUCT_QUIET_REASONS
+              (agentforge infra/conduct_metrics.py). The count is real and the attribution is
+              missing, so the T1 comments-per-issue criterion — which reads reason=ceiling and
+              reason=exhausted — cannot be trusted while this fires. Fix in the ENGINE: add the
+              reason to the vocabulary, and a rule here if it needs one, in the same change; then
+              check why the engine's own pin over every Quiet(...) the conductor spells did not
+              catch it first.
+        # THE RESERVED REFUSAL REASON. A refusal's reason is the door's own word for it, held to
+        # CONDUCT_REASON_SHAPE at the publisher: one that is not a word (whitespace, a slash, a quote,
+        # free text) is counted under `unrecognised` rather than minted as a series. Every refusal
+        # reason is a literal in conductor.mutate and word-shaped by construction, so reaching this
+        # rule means a refusal was built from something read off the estate — the exact leak the
+        # shape exists to stop.
+        #
+        # NOT PRE-TOUCHED, and what that costs: a refusal reason has no series until its first
+        # refusal, so the reserved child's first refusal mints the series and is below increase()'s
+        # notice — this fires on the SECOND. A refusal the door decides recurs on every pass the
+        # proposal does, so a real one is seen on the next pass; one that happened once, ever, is
+        # the series itself to show (a forge_conduct_refusals_total{reason="unrecognised"} that
+        # exists at all is the fact). Otherwise the sensor rule's shape.
+        - alert: ForgeConductRefusalUnrecognised
+          expr: |-
+            sum(increase(forge_conduct_refusals_total{reason="unrecognised"}[30m])) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor's write door refused for a reason it cannot name"
+            description: >-
+              forge_conduct_refusals_total advanced on the reserved `unrecognised` label: the door
+              refused a write for a reason outside the word shape CONDUCT_REASON_SHAPE (agentforge
+              infra/conduct_metrics.py). Every refusal reason is a literal in conductor.mutate, so
+              one that is not a word was built from something read off the estate. The count is
+              real and the reason is missing from the series; the conductor's pass line carries the
+              refusals by reason as the door spelled them. Fix in the ENGINE.
+        # THE SWEEP, STARVED. The door budgets every pass — max_writes_per_pass mutations and
+        # max_new_issues_per_pass filings (conductor.mutate) — and a proposal past either is refused
+        # under reason=budget, counted, and carried to the next pass by the lane or the filer that
+        # made it. One such pass is a burst: more to say than a pass may, the rest said next pass.
+        # Pass after pass it is starvation — the proposals never drain, the newest finding waits
+        # behind the oldest — and nothing else in the estate distinguishes that from a quiet sweep:
+        # findings still get filed, the stamp still advances.
+        #
+        # PASSES, NOT REFUSALS (ForgeConductDetectorBlind's arithmetic). A starved pass refuses every
+        # proposal past the budget, so a count of refusals cannot tell one wide pass from three
+        # narrow ones, and it is the run of passes that means starvation. The door's delta reaches
+        # the counter in one record_pass call, so a series moves at most once per pass, and
+        # changes() less resets() over [1h] is the number of passes in the hour on which the door
+        # refused on budget — an integer, no window-edge coin toss. `>= 3` is three of the hour's
+        # twelve. sum() because the counter has one series per pod.
+        #
+        # NOT PRE-TOUCHED, and what that costs: the child is minted by the first budget refusal in
+        # the container's life, and that sample is no change, so on a fresh series the bar is met on
+        # the fourth starved pass of the hour and on the third ever after — the quiet direction, by
+        # one pass, once per CONTAINER life rather than per pod. An in-place restart re-mints the
+        # child at its first starved pass's count: below the old value that is one change less one
+        # reset, uncounted again (the restart fixture); at or above it the change stands and the
+        # pass is counted (verified: 4, 7, a restart, 9 reads two passes at 35m).
+        - alert: ForgeConductFilingOverBudget
+          expr: |-
+            sum(
+              changes(forge_conduct_refusals_total{reason="budget"}[1h])
+                - resets(forge_conduct_refusals_total{reason="budget"}[1h])
+            ) >= 3
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge conductor's write door refused on budget on {{ $value | printf \"%.0f\" }} passes in the last hour — the sweep is starved"
+            description: >-
+              forge_conduct_refusals_total{reason="budget"} moved on at least three passes of the
+              last hour: pass after pass the lanes and the filer propose more than the door's
+              per-pass budget (max_writes_per_pass mutations, max_new_issues_per_pass filings)
+              admits, so the rest is carried to the next pass and never drains. Read the
+              conductor's pass line for what is being proposed — a storm of findings on one
+              detector, or a backlog of parks to diagnose — before raising the budget; a budget
+              raised for a storm is the storm let through.
+        # THE RETIREMENT INSTRUMENT (plan item 26) — A RECORDED WEEK, NOT AN ALERT. Every park cites
+        # an escalation, and its origin is one of two: `engine`, the af:esc record the current engine
+        # writes, or `legacy`, the pre-marker template a legacy reader (conductor/recovery.py,
+        # LEGACY_ORIGIN) still knows how to read — kept so the estate's old parks are classified, and
+        # to be REMOVED once no park needs it. There are two legacy arms and they retire together, the
+        # reader's docstring says so: the conductor's pre-marker reader and the engine's back-compat
+        # in markers.carries_escalation, whose backstop would otherwise synthesize a record above
+        # every legacy park. forge_conduct_parks{repo, prognosis, origin} is the last returned pass's
+        # classification, rebuilt in place every pass with EVERY cell over the bound repos present (a
+        # cell reads 0, never absent, when a pass reported) and EMPTY when a pass could not report its
+        # parks — so a legacy sum of 0 is a pass that classified the estate and found no legacy park,
+        # and an empty sum is a pass that does not know.
+        #
+        # NOT AN ALERT, on the routing fact in the section header. The retirement reading is "zero
+        # for a week, and then zero until the retirement change lands" — a permanently-firing rule
+        # by construction, which on this estate is a phone push every four hours until the topic is
+        # muted; `severity: info` would not de-page it, and the route that would is not this file's
+        # to smuggle in. The plan asks only that retirement be OBSERVABLE through the gauge's origin
+        # label (park-lane-advise plan, item 26), and a recorded series is observable: a Grafana stat,
+        # or the one-line query below at the moment of opening the change.
+        #
+        # THREE RECORDS. The two sums are the gauge, bridged: `last_over_time(...[30m])` is each cell's
+        # last sample within half an hour, which carries a reading across a Recreate rollout (the
+        # minutes between the old pod's last scrape and the new pod's first pass), a pass that could
+        # not report its parks (one cadence) and a short unreadable stretch, and stops carrying it
+        # after thirty minutes, since six cadences of not knowing is not knowing. `max by (repo,
+        # prognosis, origin)` before the sum, not a bare sum across pods: the bridge holds the old
+        # pod's cells beside the new pod's for up to half an hour after a rollout, and a bare sum
+        # would read the estate's parks twice for that half hour. The old pod's stale cell wins only
+        # upward — a legacy=1 it last saw keeps the count at 1 until it ages out — which is the
+        # conservative direction for a retirement reading. The third record is THE WEEK: the time at
+        # which the current run of readings that were KNOWN (both sums present), had PARKS (an estate
+        # with none says nothing about the reader) and found NO LEGACY park began. It carries its
+        # previous value while the run holds and resets to now the moment it does not — a legacy park
+        # read, a gauge unknown for longer than the bridge (the sum is absent, so the conjunct fails),
+        # an estate with no parks — so `time() - it` is the run's length, and a run is exactly what
+        # "zero, continuously" means. A rule reading its own series reads the previous evaluation's
+        # sample, which is what a running start needs; `last_over_time(self[30m])` on the carry so a
+        # Prometheus outage shorter than the bridge does not restart the week (the `for: 7d` alert
+        # this replaced would have restarted it, silently, on any Prometheus outage over
+        # --rules.alert.for-outage-tolerance's 1h). The value is a Unix timestamp, so on the fixture's
+        # clock it reads as minutes from 0, and one evaluation interval late: the run starts at the
+        # eval after the last reading that broke it.
+        #
+        # THE RETIREMENT READING:
+        #   time() - agentforge:conduct_parks_legacy_zero_since:timestamp_seconds >= 7 * 24 * 3600
+        # is the week of zero, up (`/ 86400` for the days so far, on a stat panel). Open the change
+        # that removes both legacy arms — the conductor's pre-marker reader (recovery.LEGACY_ORIGIN
+        # and the arm that assigns it) and the engine's back-compat in markers.carries_escalation,
+        # which retire together — and with them the origin=legacy cell of the gauge, these three
+        # records and their fixtures. A legacy park read before that lands resets the week from its
+        # last reading; which repo and prognosis carried it is on the raw gauge.
+        - record: agentforge:conduct_parks_legacy:sum
+          expr: |-
+            sum(max by (repo, prognosis, origin) (last_over_time(forge_conduct_parks{origin="legacy"}[30m])))
+        - record: agentforge:conduct_parks:sum
+          expr: |-
+            sum(max by (repo, prognosis, origin) (last_over_time(forge_conduct_parks[30m])))
+        - record: agentforge:conduct_parks_legacy_zero_since:timestamp_seconds
+          expr: |-
+            (
+              last_over_time(agentforge:conduct_parks_legacy_zero_since:timestamp_seconds[30m])
+                and (agentforge:conduct_parks_legacy:sum == 0)
+                and (agentforge:conduct_parks:sum > 0)
+            )
+              or vector(time())
