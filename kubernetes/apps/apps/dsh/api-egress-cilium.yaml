@@ -1,0 +1,18 @@
+# The Kubernetes Service is translated by Cilium before the ordinary
+# NetworkPolicy CIDR rule is evaluated. Name the API entity directly so the
+# projected dsh-k8s-admin token can reach kubernetes.default.svc:443.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: dsh-api-egress
+  namespace: dsh
+spec:
+  endpointSelector:
+    matchLabels:
+      app: dsh
+  egress:
+    - toEntities: [kube-apiserver]
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }
+            - { port: "6443", protocol: TCP }

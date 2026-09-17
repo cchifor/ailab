@@ -15,6 +15,7 @@ resources:
   - searxng-auth.yaml # Authelia SSO gate publishing the SearXNG web UI at search.chifor.me
   - service.yaml
   - networkpolicy.yaml # default-deny both ways; only cloudflared in; DNS + LiteLLM + SearXNG + 443 out
+  - api-egress-cilium.yaml # Cilium service translation for kubernetes.default.svc:443
   - operator-ssh-networkpolicy.yaml # dedicated SSH account on explicitly approved hosts
 
 configMapGenerator:
