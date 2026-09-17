@@ -38,6 +38,13 @@ spec:
     # a status dot trades the property for a cosmetic. The homepage tile still links to dsh; it just
     # does not probe it.
   egress:
+    # The in-cluster kubernetes Service is 10.96.0.1:443. kube-proxy/Cilium
+    # translates it to the control-plane endpoints below; both paths need an
+    # explicit allowance for kubectl in the pod to reach the API.
+    - to:
+        - ipBlock: { cidr: 10.96.0.1/32 }
+      ports:
+        - { protocol: TCP, port: 443 }
     # Kubernetes API for the namespace-scoped dsh-k8s-admin identity.
     - to:
         - ipBlock: { cidr: 192.168.0.41/32 }
