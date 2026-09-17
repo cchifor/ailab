@@ -14,6 +14,14 @@ resources:
   - llm-service.yaml
   - monitoring.yaml
   - litellm.yaml
+  - text-embeddings.yaml
   - litellm-local.yaml # local-models-only LiteLLM + litellm-lan NodePort :30400 (agentforge, ADR 0018)
   - owui-valkey.yaml # dedicated valkey for the OWUI Socket.IO backplane (multi-replica)
   - open-webui.yaml
+configMapGenerator:
+  - name: embedding-bootstrap
+    namespace: ai
+    files:
+      - prepare-embedding-model.sh
+      - embedding-assets.sha256
+      - embedding-input-limit.json
