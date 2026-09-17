@@ -1,0 +1,73 @@
+# RBAC cannot restrict create by name.  This ValidatingAdmissionPolicy makes the
+# acceptance operator's broad-looking namespace verbs useful only for disposable
+# dsh-* -acceptance-* objects and the fixed model-secret references.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: dsh-acceptance-operator-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [jobs]
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [configmaps, persistentvolumeclaims]
+      - apiGroups: [networking.k8s.io]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [networkpolicies]
+  validations:
+    - expression: >-
+        request.userInfo.username != 'system:serviceaccount:dsh:dsh-acceptance-operator' ||
+        object.metadata.name.matches('^dsh-[a-z0-9-]+-acceptance-[a-z0-9]+$')
+      message: acceptance operator may manage only dsh-*-acceptance-* resources
+    - expression: >-
+        request.userInfo.username != 'system:serviceaccount:dsh:dsh-acceptance-operator' ||
+        object.kind != 'Job' ||
+        (has(object.spec.template.spec.serviceAccountName) &&
+         object.spec.template.spec.serviceAccountName == 'dsh-acceptance-operator' &&
+         object.spec.template.spec.restartPolicy == 'Never' &&
+         !has(object.spec.template.spec.hostNetwork) &&
+         !has(object.spec.template.spec.hostPID) &&
+         !has(object.spec.template.spec.hostIPC) &&
+         !has(object.spec.template.spec.ephemeralContainers) &&
+         (!has(object.spec.template.spec.initContainers) || size(object.spec.template.spec.initContainers) == 0) &&
+         (!has(object.spec.template.spec.volumes) || object.spec.template.spec.volumes.all(v, !has(v.secret) && !has(v.hostPath) && !has(v.persistentVolumeClaim))) &&
+         object.spec.template.spec.containers.all(c,
+           (!has(c.securityContext) || (!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+            (!has(c.securityContext.allowPrivilegeEscalation) || c.securityContext.allowPrivilegeEscalation == false)) &&
+           (!has(c.env) || c.env.all(e,
+             !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) ||
+             ((e.valueFrom.secretKeyRef.name == 'dsh-litellm' && e.valueFrom.secretKeyRef.key == 'api_key') ||
+              (e.valueFrom.secretKeyRef.name == 'dsh-credentials' && e.valueFrom.secretKeyRef.key == 'DSH_CODEX_ACCESS_TOKEN'))))))
+      message: acceptance Job pod shape or credential reference is not permitted
+    - expression: >-
+        request.userInfo.username != 'system:serviceaccount:dsh:dsh-acceptance-operator' ||
+        object.kind != 'PersistentVolumeClaim' ||
+        (object.metadata.name == 'dsh-acceptance-workspace' &&
+         object.spec.accessModes.size() == 1 && object.spec.accessModes[0] == 'ReadWriteOnce')
+      message: only the dedicated dsh-acceptance-workspace PVC may be changed
+    - expression: >-
+        request.userInfo.username != 'system:serviceaccount:dsh:dsh-acceptance-operator' ||
+        object.kind != 'NetworkPolicy' ||
+        (object.metadata.name.matches('^dsh-[a-z0-9-]+-acceptance-[a-z0-9]+$') &&
+         has(object.spec.podSelector.matchLabels) &&
+         object.spec.podSelector.matchLabels['dsh.chifor.me/acceptance'] == 'true')
+      message: acceptance NetworkPolicies must select only acceptance pods
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: dsh-acceptance-operator-guard
+spec:
+  policyName: dsh-acceptance-operator-guard
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: dsh

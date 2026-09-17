@@ -5,6 +5,10 @@ namespace: dsh
 resources:
   - namespace.yaml
   - openbao-eso.yaml   # SA + CA + SecretStore + ExternalSecret: the LiteLLM key from OpenBao
+  - acceptance-rbac.yaml       # namespace-scoped identity for disposable acceptance runtimes
+  - acceptance-admission.yaml  # fail-closed name, pod, and fixed-credential fence
+  - acceptance-pvc.yaml        # dedicated acceptance workspace only
+  - acceptance-networkpolicy.yaml # API egress for labelled acceptance pods
   - pvc.yaml
   - install-job.yaml   # one-shot: npm-installs dsh into the app PVC (see the file for why not an image)
   - deployment.yaml

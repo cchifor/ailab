@@ -1,0 +1,51 @@
+# Identity used only by the disposable native acceptance runtime.  It is deliberately
+# separate from dsh (which has no Kubernetes API token) and has no Secret permissions.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dsh-acceptance-operator
+  namespace: dsh
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dsh-acceptance-operator
+  namespace: dsh
+rules:
+  # create cannot be constrained by resourceNames; acceptance-admission.yaml is the
+  # fail-closed name and pod-shape fence for these verbs.
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dsh-acceptance-operator
+  namespace: dsh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dsh-acceptance-operator
+subjects:
+  - kind: ServiceAccount
+    name: dsh-acceptance-operator
+    namespace: dsh
