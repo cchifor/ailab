@@ -243,19 +243,48 @@ Provisioned on 2026-09-17 in the existing **`af/dsh/credentials`** KV-v2 documen
 |---|---|
 | `DSH_OPERATOR_SSH_KEY` | Dedicated Ed25519 private key, including its original line breaks |
 | `DSH_OPERATOR_SSH_USER` | `dsh-operator` |
-| `DSH_OPERATOR_SSH_KNOWN_HOSTS` | Host keys obtained over SSH connections verified against the operator workstation's existing known-host entries |
+| `DSH_OPERATOR_SSH_KNOWN_HOSTS` | Verified host keys; trust provenance below |
 
 The public-key fingerprint is `SHA256:JXbAxiKLrZeKEbqHOHFTNV1cAIsdJLPcrt5WVZNPHSs`.
-The public key is authorized on **reviewer-1 (`192.168.0.24`)** and
-**reviewer-2 (`192.168.0.25`)**. These are also the only destinations allowed by
-`operator-ssh-networkpolicy.yaml`. No runner host has been selected yet.
+The public key is authorized on **reviewer-1 (`192.168.0.24`)**, **reviewer-2
+(`192.168.0.25`)**, and all eight active runner hosts, explicitly selected by the operator:
 
-The dedicated account has **no sudo permissions and no supplementary groups**. Its home and
+| Runner | Address |
+|---|---|
+| ci-runner-1 | `192.168.0.14` |
+| ci-runner-2 | `192.168.0.15` |
+| ci-runner-3 | `192.168.0.16` |
+| ci-runner-4 | `192.168.0.17` |
+| ci-runner-5 | `192.168.0.18` |
+| ci-runner-6 | `192.168.0.19` |
+| ci-runner-9 | `192.168.0.31` |
+| ci-runner-10 | `192.168.0.23` |
+
+These ten addresses are the only destinations allowed by `operator-ssh-networkpolicy.yaml`,
+on TCP 22 only. Retired runners and hypervisor hosts are not included.
+
+Host keys were obtained over SSH connections verified against the workstation's existing
+known-host entries, except ci-runner-3: its saved entries were stale. Its current Ed25519 key
+was independently verified through a trusted SSH connection to ai-node2, ai-node3's host key
+from Proxmox cluster metadata, and the QEMU guest agent for VM 4103 on ai-node3. No unverified
+key scan or disabled host-key checking was used. The workstation's global trust file was left
+unchanged.
+
+The operator explicitly authorized **passwordless sudo on all ten hosts** on 2026-09-17.
+`/etc/sudoers.d/dsh-operator` is root-owned, mode 0440, and validated with `visudo`:
+
+```sudoers
+dsh-operator ALL=(ALL:ALL) NOPASSWD: ALL
+```
+
+This grants full administrative command access, including reviewer configuration and service
+installation. The dedicated account has no supplementary groups. Its home and
 `.ssh/authorized_keys` are root-owned; `/home/dsh-operator/work` is its writable working directory.
-The authorized key uses OpenSSH's `restrict` option, disabling forwarding, PTYs and user rc files.
-It cannot update the protected reviewer configuration or install system services. Those operations
-need an explicit operator decision about the allowed commands and, for an additional runner, its
-host and repository. Do not reuse `c4`, `ubuntu`, a hypervisor key, or a vault token as this identity.
+The authorized key uses OpenSSH's `restrict` option, disabling forwarding, PTYs and user rc files
+for the normal SSH session; this is not a privilege boundary once sudo is granted. Use `sudo -n`
+for noninteractive commands. SSH/sudo access alone does not install or register an additional
+runner; its repository still needs to be specified for that separate operation. Do not reuse
+`c4`, `ubuntu`, a hypervisor key, or a vault token as this identity.
 
 ESO discovers these fields automatically. Patch the document with a version check (`bao kv patch
 -cas=<current-version> -mount=af dsh/credentials ...`) and preserve every existing field. Neither
@@ -286,9 +315,11 @@ variables, so shell commands must read the mounted files. For example, inside DS
 )
 ```
 
-To revoke access, remove the dedicated public key on each authorized host and terminate any
-existing sessions for this account. Removing a field from OpenBao alone does not revoke a key
-that has already been read. For rotation, authorize the new public key first, patch OpenBao,
+To revoke access, remove the dedicated public key and `/etc/sudoers.d/dsh-operator` on each
+authorized host and terminate any existing sessions for this account, including privileged
+processes it started. Because the account can become root, investigate any additional access
+it created when revoking after a compromise. Removing a field from OpenBao alone does not revoke
+a key that has already been read. For rotation, authorize the new public key first, patch OpenBao,
 verify that the mounted credential authenticates, and then remove the previous public key.
 
 ---
