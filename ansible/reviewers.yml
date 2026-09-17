@@ -120,3 +120,6 @@
       tags: [logs]
     - role: pr_reviewer
       tags: [reviewbot]
+    - role: dsh_codex_publisher
+      when: dsh_codex_publisher is defined
+      tags: [dsh-codex]

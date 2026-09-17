@@ -139,6 +139,7 @@ spec:
                 # re-added in its correct form (see settings.seed.yaml), and in that case it must
                 # be replaced by a reconcile of the new provider name, not simply deleted.
                 DSH_PROVIDER=codex DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
+                DSH_PROVIDER=openai-codex node /seed/reconcile-provider.js
               else
                 echo "seeding settings.yaml with the LiteLLM provider"
                 # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp

@@ -1,0 +1,10 @@
+[Unit]
+Description=Follow reviewer Codex token rotation for DSH
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=dsh-codex-publisher.service
+
+[Install]
+WantedBy=timers.target

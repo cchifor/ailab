@@ -1,0 +1,73 @@
+---
+- name: Resolve the TLS-verified OpenBao LAN endpoint
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} DSH CODEX OPENBAO"
+    block: |
+      192.168.0.41 openbao.lan.chifor.me
+      192.168.0.42 openbao.lan.chifor.me
+      192.168.0.43 openbao.lan.chifor.me
+
+- name: Create publisher directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /usr/local/lib/dsh-codex-publisher, mode: "0755" }
+    - { path: /etc/dsh-codex-publisher, mode: "0700" }
+
+- name: Install the access-only publisher
+  ansible.builtin.copy:
+    src: publish.py
+    dest: /usr/local/lib/dsh-codex-publisher/publish.py
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install OpenBao's trusted CA
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../openbao_agent/files/ailab-root-ca.crt"
+    dest: /etc/dsh-codex-publisher/ca.crt
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Pin the reviewer account and source
+  ansible.builtin.copy:
+    content: "{{ dsh_codex_publisher | to_nice_json }}\n"
+    dest: /etc/dsh-codex-publisher/config.json
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Check the operator-provisioned AppRole credential exists
+  ansible.builtin.stat:
+    path: /etc/dsh-codex-publisher/approle.json
+  register: dsh_codex_publisher_approle
+
+- name: Require the AppRole bootstrap ceremony
+  ansible.builtin.assert:
+    that:
+      - dsh_codex_publisher_approle.stat.exists
+      - dsh_codex_publisher_approle.stat.pw_name | default('') == 'root'
+      - dsh_codex_publisher_approle.stat.mode | default('') == '0600'
+    fail_msg: Bootstrap dsh-codex-publisher AppRole per docs/runbooks/dsh.md before enabling publication.
+
+- name: Install publisher service and timer
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [dsh-codex-publisher.service, dsh-codex-publisher.timer]
+
+- name: Enable token projection
+  ansible.builtin.systemd_service:
+    name: dsh-codex-publisher.timer
+    enabled: true
+    state: started
+    daemon_reload: true
