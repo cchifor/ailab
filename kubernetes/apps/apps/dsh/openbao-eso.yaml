@@ -171,6 +171,9 @@ spec:
 #   GITEA_USER, GITEA_PAT       read by git-credential-openbao.sh (the agent's git identity for
 #                               git.chifor.me), NOT through openbao-credentials.mjs: the shell
 #                               that runs git never sees dsh's credentials service.
+#   DSH_OPERATOR_SSH_KEY, DSH_OPERATOR_SSH_USER, DSH_OPERATOR_SSH_KNOWN_HOSTS
+#                             dedicated operator SSH identity; read from the mounted files.
+#                             Host authorization and sudo scope: docs/runbooks/dsh.md.
 # Whatever else lands here is readable by the agent, which is why the document must hold only
 # credentials dsh is meant to have (see the volume comment in deployment.yaml).
 apiVersion: external-secrets.io/v1

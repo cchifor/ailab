@@ -25,15 +25,15 @@ browser ──▶ Cloudflare Access ──▶ cloudflared ──▶ dsh Service 
                                                  the internet
 ```
 
-`dsh` itself has **no route to the internet**. Its NetworkPolicy allows exactly three destinations:
-CoreDNS, LiteLLM, and the SearXNG Service. SearXNG does any reaching-out, and runs no
-model-authored code.
+`dsh` can reach CoreDNS, LiteLLM, SearXNG, and public IPv4 HTTP(S) destinations. Private ranges
+remain excluded from web egress. A separate `dsh-operator-ssh` NetworkPolicy allows TCP 22 to
+the explicitly approved operator hosts listed below.
 
 | Component | What it is |
 |---|---|
 | `dsh` Deployment | 2 containers: `dsh` (the app) and `relay` (a raw TCP proxy) |
 | `relay` | `dsh web` binds loopback only and rejects `--host 0.0.0.0`; the relay is what makes it reachable from the pod network at all |
-| `searxng` Deployment | self-hosted metasearch; the only component with egress |
+| `searxng` Deployment | self-hosted metasearch with its own restricted egress |
 | `dsh-app` PVC | RWX nfs-csi — the npm-installed dsh tree |
 | `dsh-home` PVC | RWO local-path — config, credentials, sessions |
 | `dsh-workspace` PVC | RWO local-path — the agent's working directory |
@@ -232,6 +232,64 @@ That line alone says only that git obtained no username. What accompanies it dec
 `scripts/tests/test_dsh_git_credential_helper.py` runs the real helper against a kubelet-shaped
 fixture (including a `..data` symlink swap for rotation) and fills through the seeded gitconfig
 with git itself, isolated from the host's configuration.
+
+---
+
+## Dedicated operator SSH
+
+Provisioned on 2026-09-17 in the existing **`af/dsh/credentials`** KV-v2 document:
+
+| Field | Purpose |
+|---|---|
+| `DSH_OPERATOR_SSH_KEY` | Dedicated Ed25519 private key, including its original line breaks |
+| `DSH_OPERATOR_SSH_USER` | `dsh-operator` |
+| `DSH_OPERATOR_SSH_KNOWN_HOSTS` | Host keys obtained over SSH connections verified against the operator workstation's existing known-host entries |
+
+The public-key fingerprint is `SHA256:JXbAxiKLrZeKEbqHOHFTNV1cAIsdJLPcrt5WVZNPHSs`.
+The public key is authorized on **reviewer-1 (`192.168.0.24`)** and
+**reviewer-2 (`192.168.0.25`)**. These are also the only destinations allowed by
+`operator-ssh-networkpolicy.yaml`. No runner host has been selected yet.
+
+The dedicated account has **no sudo permissions and no supplementary groups**. Its home and
+`.ssh/authorized_keys` are root-owned; `/home/dsh-operator/work` is its writable working directory.
+The authorized key uses OpenSSH's `restrict` option, disabling forwarding, PTYs and user rc files.
+It cannot update the protected reviewer configuration or install system services. Those operations
+need an explicit operator decision about the allowed commands and, for an additional runner, its
+host and repository. Do not reuse `c4`, `ubuntu`, a hypervisor key, or a vault token as this identity.
+
+ESO discovers these fields automatically. Patch the document with a version check (`bao kv patch
+-cas=<current-version> -mount=af dsh/credentials ...`) and preserve every existing field. Neither
+the OpenBao policy nor the Deployment needs a change. Force a refresh when needed:
+
+```bash
+kubectl --context admin@ai -n dsh annotate externalsecret dsh-credentials \
+  force-sync="$(date +%s)" --overwrite
+kubectl --context admin@ai -n dsh get externalsecret dsh-credentials
+kubectl --context admin@ai -n dsh describe externalsecret dsh-credentials
+```
+
+Check `Ready=True`, a refresh after the write, and eventual file projection under
+`/dsh-credentials`. No pod restart is needed. DSH's subprocess environment strips `DSH_*`
+variables, so shell commands must read the mounted files. For example, inside DSH:
+
+```bash
+(
+  set -eu
+  umask 077
+  sshdir=$(mktemp -d)
+  trap 'rm -f "$sshdir/key" "$sshdir/known_hosts"; rmdir "$sshdir"' EXIT
+  cp /dsh-credentials/DSH_OPERATOR_SSH_KEY "$sshdir/key"
+  cp /dsh-credentials/DSH_OPERATOR_SSH_KNOWN_HOSTS "$sshdir/known_hosts"
+  ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile="$sshdir/known_hosts" -i "$sshdir/key" \
+    "$(cat /dsh-credentials/DSH_OPERATOR_SSH_USER)@192.168.0.24" id
+)
+```
+
+To revoke access, remove the dedicated public key on each authorized host and terminate any
+existing sessions for this account. Removing a field from OpenBao alone does not revoke a key
+that has already been read. For rotation, authorize the new public key first, patch OpenBao,
+verify that the mounted credential authenticates, and then remove the previous public key.
 
 ---
 
