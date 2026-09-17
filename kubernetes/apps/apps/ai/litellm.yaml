@@ -474,6 +474,18 @@ data:
         litellm_params:
           model: openai/text-embedding-3-small
           api_key: os.environ/OPENAI_API_KEY
+      # An independent, pinned encoder for local and cloud generation models.
+      # Never fall back between embedding spaces: stored and query vectors must
+      # use the same profile. Existing OpenAI indexes keep their original route.
+      - model_name: bge-m3-local-v1
+        litellm_params:
+          model: openai/bge-m3-local-v1
+          api_base: http://text-embeddings.ai.svc.cluster.local:8080/v1
+          api_key: sk-noauth
+          num_retries: 0
+        model_info:
+          mode: embedding
+          max_input_tokens: 1024
       - model_name: claude-sonnet-4-6
         litellm_params:
           model: anthropic/claude-sonnet-4-6
@@ -783,7 +795,7 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "9ed81178ecb3"
+        checksum/config: "3837cf82beda"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
