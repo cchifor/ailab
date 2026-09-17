@@ -384,6 +384,24 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
+        # Keep kubectl out of the application image. The pinned utility image copies
+        # only the client into an emptyDir; the dsh container uses the already-projected
+        # service-account token and namespace Role above.
+        - name: install-kubectl
+          image: mirror.gcr.io/bitnami/kubectl:1.31.1
+          command: ["/bin/sh", "-c"]
+          args: ["set -eu; cp /opt/bitnami/kubectl/bin/kubectl /kube-tools/kubectl; chmod 0555 /kube-tools/kubectl"]
+          volumeMounts:
+            - { name: kube-tools, mountPath: /kube-tools }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
       containers:
         - name: dsh
           image: mirror.gcr.io/library/node:24
@@ -462,7 +480,7 @@ spec:
             - { name: npm_config_prefix, value: /dsh-home/.npm-global }
             # PATH is spelled out in full because a container env var cannot reference the
             # image's own PATH. The tail is node:22's default, verified live -- do not trim it.
-            - { name: PATH, value: "/dsh-home/.local/bin:/dsh-home/.npm-global/bin:/app/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
+            - { name: PATH, value: "/kube-tools:/dsh-home/.local/bin:/dsh-home/.npm-global/bin:/app/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
           volumeMounts:
             - { name: app,  mountPath: /app, readOnly: true }
             - { name: home, mountPath: /dsh-home }
@@ -488,6 +506,7 @@ spec:
             # and it is why the OpenBao document behind it must hold ONLY credentials dsh is meant
             # to have. Containment here is the OpenBao ACL, not the filesystem.
             - { name: credentials, mountPath: /dsh-credentials, readOnly: true }
+            - { name: kube-tools, mountPath: /kube-tools, readOnly: true }
           # Probes are exec, not httpGet: unauthenticated / returns 401 once routes mount, which a
           # standard HTTP probe reads as failure, and the listener is on loopback where a Pod-IP
           # probe cannot reach it at all. A TCP connect to 127.0.0.1 proves the listener is up
@@ -550,6 +569,7 @@ spec:
         # content-hashed dsh-relay ConfigMap on every boot, so it holds nothing durable and a
         # team deleted from git cannot survive as a stale, still-selectable directory.
         - { name: teams, emptyDir: { sizeLimit: 16Mi } }
+        - { name: kube-tools, emptyDir: { sizeLimit: 16Mi } }
         # optional: true is REQUIRED, not defensive. The OpenBao path and policy behind
         # dsh-credentials are operator writes that do not exist yet (see openbao-eso.yaml), so this
         # Secret is absent today. Without `optional` the kubelet would refuse to start the pod --
