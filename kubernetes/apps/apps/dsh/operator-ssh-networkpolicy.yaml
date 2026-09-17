@@ -1,0 +1,19 @@
+# Dedicated operator access. Each destination must also accept the public key belonging to
+# af/dsh/credentials.DSH_OPERATOR_SSH_KEY as dsh-operator. See docs/runbooks/dsh.md.
+# Runner access is added only after the operator selects the host and privileged operations.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dsh-operator-ssh
+  namespace: dsh
+spec:
+  podSelector:
+    matchLabels:
+      app: dsh
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock: { cidr: 192.168.0.24/32 } # reviewer-1
+        - ipBlock: { cidr: 192.168.0.25/32 } # reviewer-2
+      ports:
+        - { port: 22, protocol: TCP }
