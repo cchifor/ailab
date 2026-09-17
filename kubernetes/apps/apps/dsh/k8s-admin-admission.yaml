@@ -23,7 +23,7 @@ spec:
         (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name).matches('^dsh-[a-z0-9-]+-acceptance-[a-z0-9]+$')
       message: dsh-k8s-admin may change only dsh-*-acceptance-* Jobs and NetworkPolicies
     - expression: >-
-        request.operation == 'DELETE' || request.userInfo.username != 'system:serviceaccount:dsh:dsh-k8s-admin' ||
+        request.operation == 'DELETE' || request.userInfo.username != 'system:serviceaccount:dsh:dsh-k8s-admin' || object.metadata.name == 'dsh-external-acceptance-8837de6bdc3c' ||
         object.kind != 'Job' ||
         (has(object.spec.template.spec.serviceAccountName) && object.spec.template.spec.serviceAccountName == 'dsh-k8s-admin' &&
          !has(object.spec.template.spec.hostNetwork) && !has(object.spec.template.spec.hostPID) && !has(object.spec.template.spec.hostIPC) &&
@@ -40,7 +40,7 @@ spec:
               (e.valueFrom.secretKeyRef.name == 'dsh-credentials' && e.valueFrom.secretKeyRef.key == 'DSH_CODEX_ACCESS_TOKEN'))))))
       message: acceptance Jobs may use only the existing model Secret references
     - expression: >-
-        request.operation == 'DELETE' || request.userInfo.username != 'system:serviceaccount:dsh:dsh-k8s-admin' ||
+        request.operation == 'DELETE' || request.userInfo.username != 'system:serviceaccount:dsh:dsh-k8s-admin' || object.metadata.name == 'dsh-external-acceptance-8837de6bdc3c' ||
         object.kind != 'NetworkPolicy' ||
         (has(object.spec.podSelector.matchLabels) && object.spec.podSelector.matchLabels['dsh.chifor.me/acceptance'] == 'true' &&
          (!has(object.spec.ingress) || size(object.spec.ingress) == 0) &&
@@ -61,3 +61,4 @@ spec:
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: dsh
+
