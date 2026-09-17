@@ -569,7 +569,7 @@ spec:
         # content-hashed dsh-relay ConfigMap on every boot, so it holds nothing durable and a
         # team deleted from git cannot survive as a stale, still-selectable directory.
         - { name: teams, emptyDir: { sizeLimit: 16Mi } }
-        - { name: kube-tools, emptyDir: { sizeLimit: 16Mi } }
+        - { name: kube-tools, emptyDir: { sizeLimit: 128Mi } }
         # optional: true is REQUIRED, not defensive. The OpenBao path and policy behind
         # dsh-credentials are operator writes that do not exist yet (see openbao-eso.yaml), so this
         # Secret is absent today. Without `optional` the kubelet would refuse to start the pod --
