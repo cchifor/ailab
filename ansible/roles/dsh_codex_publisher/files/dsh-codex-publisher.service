@@ -1,0 +1,18 @@
+[Unit]
+Description=Publish reviewer Codex access token to OpenBao for DSH
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/dsh-codex-publisher/publish.py
+User=root
+UMask=0077
+StateDirectory=dsh-codex-publisher
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6
+TimeoutStartSec=90

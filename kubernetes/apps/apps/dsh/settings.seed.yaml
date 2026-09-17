@@ -55,43 +55,15 @@ llm-pi-ai:
         - id: qwen3-coder-30b-a3b-cloud
         - id: qwen3.8-flash-next-cloud
           input: [text, image]
-        - id: gpt-6-astra
-          input: [text, image]
         - id: qwen3.8-27b-ailab
           input: [text, image]
-    # THE CODEX MODEL ARRIVES THROUGH THE `litellm` PROVIDER ABOVE, as `gpt-6-astra` (2026-09-12).
-    # That row is not decoration: it is what makes the `Conductor` team routable. The team pins no
-    # model of its own -- a preset composes plugins -- so its conductor runs on whatever the session
-    # selects, and until that row existed the only selectable routes were qwen, i.e. qwen conducting
-    # qwen. Select `gpt-6-astra` for a Conductor session; workers stay on qwen3.8 by the explicit
-    # agentOptions in the team's own `tool-subagent` row.
-    #
-    # It is served as an ORDINARY LiteLLM route on the key that already serves gpt-5.4, so it needs
-    # none of the machinery the rest of this comment describes: no dsh provider, no OpenBao path, no
-    # CODEX_API_KEY. `-codex` ids could not have been used here in any case -- they are Responses-API
-    # only (404 on /v1/chat/completions, measured), and this provider speaks openai-completions.
-    # Full rationale lives on the entry in kubernetes/apps/apps/ai/litellm.yaml.
-    #
-    # A SEPARATE `codex` PROVIDER IS STILL NOT CONFIGURED HERE, and the reason is a live
-    # outage rather than a decision deferred. It remains the only way to reach the Responses-shaped
-    # Codex API, so this stays recorded rather than deleted:
-    #
-    # A `codex` provider was seeded with `api: openai-codex-responses`. That is NOT an accepted
-    # value: the profile schema takes only
-    #     openai-completions | openai-responses | anthropic-messages
-    # and `openai-codex-responses` is an internal wire-protocol key that appears in the adapter's
-    # COMPAT_GATES table, not something a profile may name. It was mistaken for one.
-    #
-    # THE FAILURE MODE IS WHY THIS COMMENT IS LONG. Schema validation runs over the WHOLE
-    # `providers` dict, so one bad value did not merely disable its own route -- it failed the
-    # entire section, litellm included. Every model vanished and the composer went dead with a
-    # not-allowed cursor. Nothing in `dsh --dump-config` or the boot shows it, because the
-    # provider section is resolved lazily when models are asked for; both were clean throughout.
-    #
-    # THE CORRECT CONSTRUCTION, verified against the schema, for whenever the credential exists:
-    #   openai-codex:                  # the provider KEY must match pi-ai's catalog provider
-    #     apiKeyEnv: CODEX_API_KEY     # dsh's routeAuth adds an api-key method beside the
-    #     models:                      # catalog's own when the profile names a credential
-    #       - id: gpt-6-astra
-    # with NO `api:` -- the catalog provider supplies the protocol. An explicit
-    # `api: openai-responses` plus a baseURL also validates, if a gateway fronts it.
+    # Subscription credential projected from reviewer-2 seat B through OpenBao/ESO.
+    # Omit api: the catalog supplies openai-codex-responses; that internal protocol
+    # name is not an accepted explicit profile api value.
+    openai-codex:
+      displayName: OpenAI Codex (realjaysage)
+      apiKeyEnv: DSH_CODEX_ACCESS_TOKEN
+      transport: sse
+      models:
+        - id: gpt-6-astra
+          input: [text, image]

@@ -32,3 +32,9 @@ pr_reviewer_llm_seats:
   - { name: a, sudo_user: codexrun }
   - { name: b, sudo_user: codexrun2 }
   - { name: c, sudo_user: codexrun3 }
+
+# The reviewer remains the sole OAuth refresher; DSH receives access tokens only.
+dsh_codex_publisher:
+  address: https://openbao.lan.chifor.me:30820
+  auth_path: /home/codexrun2/.codex/auth.json
+  email: realjaysage@gmail.com
