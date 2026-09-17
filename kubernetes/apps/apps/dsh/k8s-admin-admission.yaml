@@ -43,7 +43,8 @@ spec:
         (has(object.spec.podSelector.matchLabels) && object.spec.podSelector.matchLabels['dsh.chifor.me/acceptance'] == 'true' &&
          (!has(object.spec.ingress) || size(object.spec.ingress) == 0) &&
          has(object.spec.egress) && size(object.spec.egress) > 0 &&
-         object.spec.egress.all(e, e.to.all(t, has(t.ipBlock) && t.ipBlock.cidr in ['192.168.0.41/32','192.168.0.42/32','192.168.0.43/32']) &&
+         object.spec.egress.all(e, size(e.to) > 0 && size(e.ports) > 0 &&
+           e.to.all(t, has(t.ipBlock) && t.ipBlock.cidr in ['192.168.0.41/32','192.168.0.42/32','192.168.0.43/32']) &&
            e.ports.all(p, p.protocol == 'TCP' && p.port == 6443)))
       message: acceptance NetworkPolicies may only allow Kubernetes API egress
 ---
