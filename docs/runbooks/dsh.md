@@ -97,6 +97,15 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 
 ## Git access to the forge
 
+> **`dsh-team-conductor` lives at `cchifor/dsh-team-conductor` since 2026-09-18** (transferred by the
+> operator from the restricted `dsh` user, which could not initiate a transfer itself: a restricted
+> account cannot see the org). `dsh` keeps **admin** on it as a collaborator; `reviewer-claude` and
+> `reviewer-codex` have write. It is on the reviewers' allowlist and `dsh` is a merge author, so a
+> PR authored by the agent merges when both personas are clean and its own CI (`test.yml`, on the
+> repo-scoped runner `dsh-conductor-ci-runner-1`, which survived the move) is green. Gitea answers
+> the old path with a 301, git and API alike, so existing clones keep working — but point the
+> agent's remote at the new path rather than living on the redirect.
+
 The agent's shell can clone, fetch and push `https://git.chifor.me/...` repositories **without
 being handed a token**, once the operator has provisioned one in OpenBao. Everything on the forge
 is private (`REQUIRE_SIGNIN_VIEW` is on: even the API answers 403 anonymously), so without this an

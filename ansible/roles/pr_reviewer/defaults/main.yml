@@ -30,6 +30,13 @@ pr_reviewer_repos:
   - cchifor/agentforge
   - cchifor/platform
   - cchifor/agentforge-platform
+  # dsh-team-conductor joined 2026-09-18 (operator-directed): the DSH agent team's own repo,
+  # transferred from the restricted `dsh` user into this org so the org webhooks, the hook
+  # assertion and the org runners cover it like every other entry. `dsh` keeps admin on it as a
+  # collaborator; both reviewer identities have write. Its PRs are authored by `dsh`, which is in
+  # pr_reviewer_merge_authors below - so a clean pair of verdicts plus its own CI (test.yml on
+  # the repo-scoped runner) merges model-authored code with no human in the loop, by decision.
+  - cchifor/dsh-team-conductor
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
 # The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
 # its PRs get the pin rubric below and automerge when digest-only + clean + CI green.
@@ -152,7 +159,9 @@ pr_reviewer_merge_personas: [claude, codex]
 # tags and major versions, which that rubric does not describe. It reviews under the
 # general rubric instead. `no-automerge` remains the per-PR brake for a bump that wants a
 # human — a major runtime bump touching something load-bearing, say.
-pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot, renovate-bot]
+# dsh added 2026-09-18 (operator-directed, with cchifor/dsh-team-conductor above): the DSH agent
+# team's PRs automerge on the same gate as everyone else's.
+pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot, renovate-bot, dsh]
 pr_reviewer_allow_cidr: "{{ lan_cidr | default('192.168.0.0/24') }}"
 
 # Fail the play when the Gitea org-webhook configuration cannot be READ or is wrong.
