@@ -41,6 +41,10 @@
     - { path: /etc/reviewbot, owner: "{{ pr_reviewer_user }}", mode: "0750" }
     - { path: /usr/local/lib/reviewbot, owner: root, mode: "0755" }
     - { path: /var/lib/reviewbot, owner: "{{ pr_reviewer_user }}", mode: "0750" }
+  # `seats` too: the seat helpers below are installed under that tag, and on a fresh or rebuilt
+  # host a `-t seats` staging run would otherwise copy into a directory nothing had created
+  # (codex review of PR 1). Directories are inert, so the tag costs the staging run nothing.
+  tags: [seats]
 
 # The packaged node-exporter textfile dir is root-owned; the service (runs as the agent
 # user) writes its heartbeat metrics there atomically. Group-writable via the agent group.
@@ -88,6 +92,24 @@
     label: "{{ item.name }}"
   when:
     - pr_reviewer_llm_kind == "codex"
+    - item.sudo_user | length > 0
+  tags: [seats]
+
+# The claude twin (plans/2026-09-18-claude-seat-rotation-plan.md). Holds the hand-seeded
+# oauth-token AND the CLI's own sessions/projects writes, so it is the seat user's and 0700.
+# The token itself is seeded by hand from OpenBao (runbook § Seats on reviewer-1), never here.
+- name: Ensure each seat's ~/.claude exists
+  ansible.builtin.file:
+    path: "{{ item.home | default('/home/' + item.sudo_user, true) }}/.claude"
+    state: directory
+    owner: "{{ item.sudo_user }}"
+    group: "{{ item.sudo_user }}"
+    mode: "0700"
+  loop: "{{ pr_reviewer_seats_effective }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - pr_reviewer_llm_kind == "claude"
     - item.sudo_user | length > 0
   tags: [seats]
 
@@ -150,6 +172,23 @@
     group: root
     mode: "0755"
   notify: Restart reviewbot
+
+# The claude seat helpers: the entry point that lifts a seat's token into the CLI's
+# environment, and the identity/usage probe reviewbot runs AS each seat. Tagged `seats` as
+# well as the role's `reviewbot` so a `-t seats` staging run leaves them in place BEFORE the
+# restart that first uses them - the same ordering the seat users and sudoers need. No restart
+# notify: reviewbot spawns both per invocation, so a new copy is live on the next job.
+# Installed on every host: harmless where llm_kind is codex, and one fewer conditional to
+# get wrong.
+- name: Install the claude seat helpers
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/lib/reviewbot/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [claude-seat.sh, claude-usage.py]
+  tags: [seats]
 
 - name: Render reviewbot config
   ansible.builtin.template:

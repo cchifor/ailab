@@ -859,6 +859,48 @@ def seat_home(seat):
     return s.get("home") or (f"/home/{s['sudo_user']}" if s.get("sudo_user") else "")
 
 
+# The claude seat probe (files/claude-usage.py). Run AS the seat user: it reads that HOME's
+# credential and answers with the account identity and the usage windows, so the service user
+# never holds a seat's token to learn who the seat is - the same isolation _run_llm keeps.
+USAGE_PROBE = "/usr/local/lib/reviewbot/claude-usage.py"
+
+
+def probe_usage(seat, timeout=30):
+    """One seat's identity/usage document, never an exception: {"ok", "error", "account",
+    "limits"}. A seat with no sudo user is the service user's own login, probed in-process."""
+    s = SEAT_BY_NAME.get(seat) if isinstance(seat, str) else seat
+    user = (s or {}).get("sudo_user") or ""
+    if user:
+        args = ["sudo", "-n", "-u", user, f"HOME={seat_home(s)}", USAGE_PROBE]
+    else:
+        args = [sys.executable, USAGE_PROBE]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            return {"ok": False, "error": f"probe exit {r.returncode}: {r.stderr[-200:]}",
+                    "account": {}, "limits": []}
+        doc = json.loads(r.stdout)
+        if not isinstance(doc, dict):
+            raise ValueError("probe printed no object")
+        return doc
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
+
+
+def seat_identity(s):
+    """The ACCOUNT behind a seat, for the duplicate collapse in resolve_seats(); None when it
+    cannot be learned. codex: tokens.account_id in the seat's auth.json. claude: the profile's
+    account uuid, via the probe run as the seat - there is no local file that names it."""
+    user = s.get("sudo_user") or ""
+    if CFG.get("llm_kind") == "codex":
+        r = subprocess.run(["sudo", "-n", "-u", user, "cat", f"{seat_home(s)}/.codex/auth.json"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return None
+        return (json.loads(r.stdout).get("tokens") or {}).get("account_id") or None
+    return (probe_usage(s).get("account") or {}).get("uuid") or None
+
+
 def use_seat(name):
     """The only writer of CURRENT_SEAT."""
     global CURRENT_SEAT
@@ -924,8 +966,9 @@ def resolve_seats():
     if _SEATS_RESOLVED:
         return
     _SEATS_RESOLVED = True
-    # Nothing to deduplicate with one seat, and the scan is codex-only.
-    if len(SEATS) < 2 or CFG.get("llm_kind") != "codex":
+    # Nothing to deduplicate with one seat. (This used to return for every kind but codex; the
+    # claude persona has rotated since plans/2026-09-18-claude-seat-rotation-plan.md.)
+    if len(SEATS) < 2:
         return
     seen, keep = {}, []
     for s in SEATS:
@@ -944,17 +987,14 @@ def resolve_seats():
         except Exception as e:
             log(f"seat '{name}': sudo probe failed ({e}) - dropped from rotation")
             continue
-        # A readable seat whose JSON carries no account_id is USABLE with an unknown account.
+        # A reachable seat whose identity cannot be learned is USABLE with an unknown account.
         # It is kept, and None is never used as a dedupe key - two unknowns are not "the same".
         acct = None
         try:
-            r = subprocess.run(["sudo", "-n", "-u", user, "cat",
-                                f"{seat_home(s)}/.codex/auth.json"],
-                               capture_output=True, text=True, timeout=30)
-            if r.returncode == 0:
-                acct = (json.loads(r.stdout).get("tokens") or {}).get("account_id") or None
+            acct = seat_identity(s)
         except Exception as e:
-            log(f"seat '{name}': could not read account_id ({e}); keeping it, account unknown")
+            log(f"seat '{name}': could not read its account identity ({e}); keeping it, "
+                f"account unknown")
         if acct and acct in seen:
             log(f"seat '{name}' shares an account with seat '{seen[acct]}' - collapsed. "
                 f"Rotating inside one account is the doomed-retry loop the park prevents; "
@@ -1135,6 +1175,70 @@ def aux_run(args, remaining, **kw):
         raise RuntimeError(f"auxiliary command timed out: {' '.join(map(str, args[:4]))}") from e
 
 
+def seat_secrets(seat, remaining):
+    """(secrets, readable): the strings that must never appear in posted output, read AS the
+    seat. `readable` is False when NO credential file could be read at all, which the caller
+    counts (llm_credscan_skipped_total) rather than hides. codex keeps every string value of
+    auth.json; claude keeps the token file, else both tokens of a browser login's
+    .credentials.json. A readable file that is not JSON is scanned as nothing, as before."""
+    s = SEAT_BY_NAME[seat]
+    user, home = s.get("sudo_user") or "", seat_home(seat)
+    if CFG.get("llm_kind") == "codex":
+        paths = [f"{home}/.codex/auth.json"]
+    else:
+        paths = [f"{home}/.claude/oauth-token", f"{home}/.claude/.credentials.json"]
+    for path in paths:
+        r = aux_run(["sudo", "-n", "-u", user, "cat", path], remaining,
+                    capture_output=True, text=True)
+        if r.returncode != 0:
+            continue
+        if path.endswith("oauth-token"):
+            # A readable but empty/short token file is NOT a credential: fall through to the
+            # browser login beside it, exactly as claude-usage.py's read_credential() does.
+            # Returning ([], True) here ended the scan with nothing to look for and nothing
+            # counted (codex review of PR 1).
+            tok = r.stdout.strip()
+            if len(tok) >= 20:
+                return [tok], True
+            continue
+        try:
+            data = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return [], True
+        found = []
+
+        def walk(v):
+            if isinstance(v, dict):
+                for x in v.values():
+                    walk(x)
+            elif isinstance(v, str) and len(v) >= 20:
+                found.append(v)
+        walk(data)
+        return found, True
+    return [], False
+
+
+def scan_output(seat, text, remaining, pre=None):
+    """Refuse output carrying the seat's credential; count a scan that could not run.
+
+    Mistake prevention, not tamper-proof - an encoding model defeats a substring scan. Counted
+    rather than raised when unreadable: failing the review would let a permissions mistake
+    block every PR, which is a worse outcome than a logged gap (and 'I could not check' has to
+    be VISIBLE, which is the whole reason the skip counter exists). `pre` is the (secrets,
+    readable) pair _run_llm read before the model ran; None reads now (the codex path with no
+    isolated user, unchanged)."""
+    secrets, readable = pre if pre is not None else seat_secrets(seat, remaining)
+    if not readable:
+        bump_meta("llm_credscan_skipped_total")
+        log(f"credential scan SKIPPED for seat '{seat}': no credential file readable under "
+            f"{seat_home(seat)}. Output is being posted UNSCANNED - check the seat's home and "
+            f"permissions.")
+        return
+    for sec in secrets:
+        if sec in text:
+            raise RuntimeError("credential material detected in llm output")
+
+
 def _run_llm(title, desc, diff_text, rubric, started, seat):
     # Clock started in run_llm, before any setup: the budget is for the whole operation, and
     # the isolated-user mktemp below is a subprocess that can itself hang.
@@ -1167,6 +1271,42 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
         if not sudo_user:
             return a
         return ["sudo", "-n", "-u", sudo_user, f"HOME={seat_home(seat)}"] + a
+
+    # THE SEAT'S SECRETS ARE READ BEFORE THE MODEL RUNS, and once. A failing run's
+    # stdout/stderr goes through llm_error_text() into the journal (shipped to Loki) and the
+    # job note, and a CLI that echoes a malformed token in its error - Python's own header
+    # validation does exactly that - would put it there. The first cut read them lazily on the
+    # error path with whatever budget was left, and when that read failed it published the
+    # original text: it failed OPEN precisely when a near-deadline run had spent the budget
+    # (reviewer-codex on ailab#777). Now the read cannot compete with the run for budget, and a
+    # read that fails WITHHOLDS the diagnostic rather than publishing it unscrubbed. The same
+    # read serves the post-run scan, so an isolated seat is read exactly once per invocation.
+    # Only an isolated seat has a credential of its own; the service user's protection is
+    # the tool-denial list in claude_args, unchanged.
+    secrets, readable = [], True
+    if sudo_user:
+        try:
+            secrets, readable = seat_secrets(seat, remaining)
+        except Exception as e:
+            log(f"seat '{seat}': credential read failed before the run ({e}); any failure "
+                f"text from this run will be withheld rather than posted unscrubbed")
+            secrets, readable = [], False
+
+    def scrub(s):
+        """The text as it may be published. NEVER used for classification - RATE_LIMIT_RE,
+        MODEL_LIMIT_RE and parse_reset read the raw text, because withholding is a
+        publication decision and must not turn a park into an ordinary failure."""
+        if not sudo_user:
+            return s
+        if not readable:
+            return ("[llm error text withheld: the seat's credential could not be read, so "
+                    "the text could not be scrubbed - check the seat's home and permissions]")
+        for sec in secrets:
+            s = s.replace(sec, "<redacted>")
+        return s
+
+    def err(cp):
+        return scrub(llm_error_text(cp.returncode, cp.stdout, cp.stderr))
 
     def claude_args(model):
         # Tool-less for real: Read/Grep/Glob/LS are denied too - the diff arrives inline,
@@ -1283,44 +1423,22 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
                 raise RuntimeError(detail)
             # The sandbox permits reads of the isolated user's own HOME, auth.json
             # included (round-3 finding): scan the (public-once-posted) output for that
-            # credential material and quarantine instead of posting. Mistake prevention,
-            # not tamper-proof - an encoding model defeats a substring scan.
-            # PATH FROM THE SEAT, not from the username: the two were the same thing until
-            # seats existed, and a seat whose credential lives elsewhere would otherwise be
-            # scanned at a path that does not exist - which fails OPEN (see below).
-            ar = aux_run(["sudo", "-n", "-u", sudo_user, "cat",
-                          f"{seat_home(seat)}/.codex/auth.json"], remaining,
-                         capture_output=True, text=True)
-            if ar.returncode == 0:
-                try:
-                    for v in json.loads(ar.stdout).values():
-                        for tokv in (v.values() if isinstance(v, dict) else [v]):
-                            if isinstance(tokv, str) and len(tokv) >= 20 and tokv in text:
-                                raise RuntimeError("credential material detected in llm output")
-                except json.JSONDecodeError:
-                    pass
-            else:
-                # THIS BRANCH USED NOT TO EXIST, and its absence was the whole problem: an
-                # unreadable auth.json made the scan a silent no-op, indistinguishable from a
-                # scan that ran and found nothing. The output is about to be posted publicly,
-                # so "I could not check" must be visible. Counted rather than raised: failing
-                # the review would let a permissions mistake block every PR, which is a worse
-                # outcome than a logged gap on a scan that is mistake-prevention rather than
-                # a security boundary (an encoding model defeats a substring match anyway).
-                bump_meta("llm_credscan_skipped_total")
-                log(f"credential scan SKIPPED for seat '{seat}': could not read "
-                    f"{seat_home(seat)}/.codex/auth.json (rc={ar.returncode}). Output is being "
-                    f"posted UNSCANNED - check the seat's home and permissions.")
+            # credential material and quarantine instead of posting. PATH FROM THE SEAT, not
+            # from the username: a seat whose credential lives elsewhere would otherwise be
+            # scanned at a path that does not exist - which used to fail OPEN, silently; the
+            # skip counter inside scan_output is what made that visible.
+            scan_output(seat, text, remaining, pre=(secrets, readable) if sudo_user else None)
         else:
             fb = CFG.get("llm_fallback_model") or ""
             if r.returncode != 0:
-                detail = llm_error_text(r.returncode, r.stdout, r.stderr)
+                raw = llm_error_text(r.returncode, r.stdout, r.stderr)
                 # ORDER IS THE WHOLE POINT. A model-scoped limit falls through to the
                 # fallback below (a different model on the same account still serves); only
                 # an account-scoped one parks, because there the fallback shares the budget
                 # that is already gone and retrying it just burns more of it.
-                if not MODEL_LIMIT_RE.search(detail) and RATE_LIMIT_RE.search(detail):
-                    raise RateLimited(detail, parse_reset(detail))
+                # Classified on RAW text; raised with the publishable text (see scrub).
+                if not MODEL_LIMIT_RE.search(raw) and RATE_LIMIT_RE.search(raw):
+                    raise RateLimited(scrub(raw), parse_reset(raw))
             if r.returncode != 0:
                 # A primary failure that the fallback RESCUES is invisible today:
                 # llm_failures_total counts whole reviews, and a rescued review is not a
@@ -1333,10 +1451,10 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
                 if left < CFG.get("llm_fallback_min_s", 60):
                     # A few seconds of fallback only buys a second failure; the retry (with a
                     # whole fresh budget) is the better use of the time.
-                    log(f"primary model failed ({llm_error_text(r.returncode, r.stdout, r.stderr)}); "
+                    log(f"primary model failed ({err(r)}); "
                         f"{left:.0f}s of budget left - skipping the '{fb}' fallback")
                 else:
-                    log(f"primary model failed ({llm_error_text(r.returncode, r.stdout, r.stderr)}); "
+                    log(f"primary model failed ({err(r)}); "
                         f"retrying with fallback '{fb}' in the remaining {left:.0f}s")
                     bump_meta("llm_fallback_used_total")
                     r = subprocess.run(wrap_sudo(claude_args(fb)), input=prompt,
@@ -1345,7 +1463,7 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
             if r.returncode != 0:
                 # Cost classification happens ONCE, in run_llm's wrapper, so every raise site
                 # in here is covered by it - not just this one.
-                raise RuntimeError(llm_error_text(r.returncode, r.stdout, r.stderr))
+                raise RuntimeError(err(r))
             envelope = json.loads(r.stdout)
             text = envelope.get("result", "")
             # The data that decides whether llm_timeout_s is right. Output tokens because run
@@ -1357,6 +1475,13 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
                     record_gauge("llm_output_tokens", float(usage.get("output_tokens") or 0))
                 except (TypeError, ValueError):
                     pass
+            # The same pre-post scan the codex branch runs, for the same reason: the seat's
+            # token sits in a HOME the model runs from, and the output is about to be posted.
+            # Only an ISOLATED seat has a credential of its own to scan for; the single-seat
+            # host runs as the service user, whose protection is the tool-denial list in
+            # claude_args, unchanged.
+            if sudo_user:
+                scan_output(seat, text, remaining, pre=(secrets, readable))
     finally:
         # STRICTLY non-propagating. `except OSError` did not cover the TimeoutExpired the 60s
         # `rm -rf` can raise, and an exception escaping a `finally` REPLACES whatever the

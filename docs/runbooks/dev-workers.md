@@ -205,7 +205,9 @@ ai-node3, 2 vCPU / 4 GiB FIXED, tofu module kubernetes/infra/reviewers, guest co
 ansible/reviewers.yml (deliberately minimal: node + LLM CLIs, node_exporter, ufw, pr_reviewer
 role — no docker/tmux/toolchains). Migrated off dev-worker-2/-3 2026-09-02 so reviews never
 contend with feature work. Claude auth (~/.claude) was seeded once from the old hosts and is
-NOT ansible-managed — a subscription re-login is manual. Codex auth on reviewer-2 is, since
+NOT ansible-managed — a subscription re-login is manual; since 2026-09-18 the persona's reviews
+run on three seat tokens instead (§ "Seats on reviewer-1" below), and c4's own login stays for
+`claude auth status` only. Codex auth on reviewer-2 is, since
 2026-09-12, rendered by the bao agent from the estate's ONE shared login (`pr_reviewer_enable_openbao`;
 docs/runbooks/openbao-dev-workers.md § "The shared codex login") — never `codex login` there.
 **Still true as of 2026-09-16, and it is what exhausts:** sharing one seat with the dev agents is
@@ -322,6 +324,59 @@ being handed work it cannot do.
 > `tokens.account_id`: `cfdea639…` and `9c8a8cfb…`, and nothing else anywhere. The third is one
 > `--device-auth` run away, then a one-line host_vars change. Until it lands, capacity is
 > ~340–400 codex calls/day against a demand of ~210 that grew from 86 in a week.
+
+### Seats on reviewer-1: the claude persona holds three subscriptions
+
+Since 2026-09-18 (`plans/2026-09-18-claude-seat-rotation-plan.md`, ADR 0025) reviewer-1 runs the
+same `pr_reviewer_llm_seats` rotation as reviewer-2 — sticky selection, lossless park, duplicate
+collapse — after its single account spent a whole weekly window and the persona idled for 21 h
+with 9 jobs queued and 7 PRs merge-blocked on reviewer-2.
+
+| seat | user | account (OpenBao) |
+|---|---|---|
+| `a` | `clauderun` | `af/operator/broker/anthropic/claude-max-1/oauth` (shared with the AgentForge brokers) |
+| `b` | `clauderun2` | `…/claude-max-2/oauth` |
+| `c` | `clauderun3` | `…/claude-max-3/oauth` |
+
+Three things differ from the codex seats:
+
+1. **The credential is a long-lived token, hand-seeded once**, at
+   `/home/<user>/.claude/oauth-token` (0600). It is a `setup-token` credential — no refresh
+   token, no rotation — so one copy cannot revoke another, and the scratch-HOME ceremony codex
+   needs does not apply. Seed from the workstation straight into the seat:
+   ```
+   bao kv get -field=CLAUDE_CODE_OAUTH_TOKEN af/operator/broker/anthropic/claude-max-1/oauth \
+     | ssh c4@192.168.0.24 'sudo install -o clauderun -g clauderun -m 0600 /dev/stdin /home/clauderun/.claude/oauth-token'
+   ```
+   (repeat for `claude-max-2 → clauderun2`, `claude-max-3 → clauderun3`). The same tokens sit in
+   the cluster as `kubectl --context admin@ai -n agentforge-broker get secret
+   broker-anthropic-max1-oauth -o jsonpath='{.data.CLAUDE_CODE_OAUTH_TOKEN}' | base64 -d` —
+   the Secrets for 2 and 3 are `broker-anthropic-max2-oauth` and
+   `broker-anthropic-claude-max-3-oauth`.
+2. **The entry point is `/usr/local/lib/reviewbot/claude-seat.sh`**, not the CLI: it exports the
+   token from the seat's HOME into `CLAUDE_CODE_OAUTH_TOKEN` and execs `/usr/bin/claude`. sudo
+   resets the environment and shows argv to every process on the host, so the HOME is the only
+   place a token may come from.
+3. **Identity comes from the API, not a file.** `resolve_seats()` runs
+   `/usr/local/lib/reviewbot/claude-usage.py` as each seat (`GET /api/oauth/profile` and
+   `/usage` — the calls behind the CLI's `/usage`; they consume no quota) and collapses seats
+   that share an `account.uuid`. The same command is the operator's probe:
+   ```
+   ssh c4@192.168.0.24 'sudo -n -u clauderun HOME=/home/clauderun /usr/local/lib/reviewbot/claude-usage.py'
+   ```
+   prints the account's email and every usage window with its percent and reset time. (Do not
+   `claude auth status` as a seat: that reads a browser login, which a seat does not have.)
+
+**Adding or replacing a seat — the same order as codex, for the same reason** (a seat with no
+credential fails as an ordinary error, never parks, and burns the PR's attempts):
+edit `host_vars/reviewer-1.yml` → `ansible-playbook reviewers.yml -l reviewer-1 -t seats`
+(user, 0700 `~/.claude`, sudoers, the two helpers — NO restart) → seed the token as above →
+`-t reviewbot` (or the converge) to restart → `journalctl -u reviewbot | grep "seats:"` shows
+`['a', 'b', 'c']` and the textfile's `reviewbot_llm_seats_distinct{persona="claude"}` reads 3.
+
+`~/.claude/projects` under each seat grows by one directory per review — the CLI keys them by
+working directory and reviewbot hands it a fresh tmpdir every run; c4's held 1 926 on
+2026-09-18. Pre-existing behaviour, now per seat; harmless until the disk says otherwise.
 
 ### When a persona is parked on a subscription rate limit
 
