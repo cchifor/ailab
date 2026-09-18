@@ -912,9 +912,13 @@ def _models():
         if isinstance(m, str) and m.strip() and m.strip() not in out:
             out.append(m.strip())
     if not out:
-        for m in (CFG.get("llm_model"), CFG.get("llm_fallback_model")):
-            if isinstance(m, str) and m.strip() and m.strip() not in out:
-                out.append(m.strip())
+        # The legacy pair, INCLUDING a blank primary: `llm_model: ""` has always meant "the
+        # account default, no --model flag", tried first, with the fallback only after a
+        # failure. Dropping the blank made the fallback the only tier, so every review ran on
+        # it and was counted as primary service (reviewer-codex on ailab#780).
+        primary = (CFG.get("llm_model") or "").strip() if isinstance(CFG.get("llm_model"), str) else ""
+        fb = (CFG.get("llm_fallback_model") or "").strip() if isinstance(CFG.get("llm_fallback_model"), str) else ""
+        out = [primary] + ([fb] if fb and fb != primary else [])
     return out or [""]
 
 

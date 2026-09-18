@@ -3768,6 +3768,17 @@ class ModelLadderTest(unittest.TestCase):
         codex = load(self.tmp.name, llm_kind="codex", llm_model="gpt-6-astra",
                      llm_fallback_model="")
         self.assertEqual(["gpt-6-astra"], codex.MODELS)
+
+    def test_a_blank_primary_stays_the_account_default_tier_ahead_of_the_fallback(self):
+        """reviewer-codex on ailab#780: a host with `llm_model: ""` (the account default,
+        i.e. no --model flag) and a fallback used to run the default first and the fallback
+        only after a failure. Dropping the blank made the fallback the ONLY tier, so every
+        review ran on it and was counted as primary service. The blank is a tier."""
+        m = load(self.tmp.name, llm_model="", llm_fallback_model="fb")
+        self.assertEqual(["", "fb"], m.MODELS)
+        self.assertEqual("", m.CURRENT_MODEL)
+        both = load(self.tmp.name, llm_model="", llm_fallback_model="")
+        self.assertEqual([""], both.MODELS)
         self.assertEqual({(s["name"], mdl) for s in self.m.SEATS for mdl in LADDER},
                          set(self.m.MODEL_PARKED_UNTIL), "pre-seeded, fixed-size, per pair")
 
