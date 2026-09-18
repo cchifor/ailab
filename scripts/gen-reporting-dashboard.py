@@ -186,8 +186,11 @@ def _seat_pct(limit):
 
 
 def _seat_reset(limit):
-    # resets_at is 0 for a window with no open period -> no series -> a blank cell.
-    return (f'max by (seat) (reviewbot_llm_usage_resets_at_seconds{{persona="claude",limit="{limit}"}} > 0)'
+    # Only a reset still ahead is a countdown. resets_at is 0 for a window with no open period,
+    # and it is refreshed HOURLY, so once the reset moment passes the stale stamp sits in the
+    # past until the next probe - a `> 0` filter alone rendered that as "-42 min"
+    # (reviewer-claude on ailab#784). Either case -> no series -> a blank cell.
+    return (f'max by (seat) (reviewbot_llm_usage_resets_at_seconds{{persona="claude",limit="{limit}"}} > time())'
             ' - time()')
 
 
@@ -560,12 +563,15 @@ panels += [
                 {"color": "green", "value": 2}]),
     # Orange at 80, red at 100: 100 IS the parked state, and the API's percent is what the
     # persona is parked on, so anything below it is still capacity. A window with no open
-    # period reports resets_at = 0 (a seat with no session running); the `> 0` filter drops
-    # it so the cell is blank rather than the "0 seconds" a clamp produced.
+    # period reports resets_at = 0 (a seat with no session running) and one that just reset
+    # carries a stale past stamp; _seat_reset drops both so the cell is blank rather than the
+    # "0 seconds" a clamp produced. The email rides on its OWN target (H), not on the session
+    # series: a seat whose probe is failing, or a fresh seat with no usage yet, still gets its
+    # account named - the state that most needs it (reviewer-claude on ailab#784).
     table("Claude Seats — usage per account and window", 0, 163, 24, 7,
           targets=[
-              ("A", _seat_pct("session") + ' * on(seat) group_left(email) '
-                    'max by (seat, email) (reviewbot_llm_seat_info{persona="claude"})'),
+              ("H", 'max by (seat, email) (reviewbot_llm_seat_info{persona="claude"})'),
+              ("A", _seat_pct("session")),
               ("B", _seat_pct("weekly_all")),
               ("C", _seat_pct("weekly_fable")),
               ("D", _seat_reset("session")),
@@ -581,7 +587,7 @@ panels += [
                   "Value #A": "Session used", "Value #D": "Session resets in",
                   "Value #B": "Weekly used (all models)", "Value #E": "Weekly resets in",
                   "Value #C": "Weekly used (Fable)", "Value #F": "Fable resets in"},
-          exclude=["Time"] + [f"Time {i}" for i in range(1, 8)],
+          exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, 9)],
           overrides=[
               _ov("Seat", [{"id": "custom.width", "value": 70}]),
               _ov("State", [{"id": "custom.width", "value": 100},
