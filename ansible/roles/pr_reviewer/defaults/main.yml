@@ -32,20 +32,26 @@ pr_reviewer_repos:
   - cchifor/agentforge-platform
   # dsh-team-conductor joined 2026-09-18 (operator-directed): the DSH agent team's own repo,
   # transferred from the restricted `dsh` user into this org so the org webhooks, the hook
-  # assertion and the org runners cover it like every other entry. `dsh` has ADMIN on it as a
-  # collaborator - operator decision, 2026-09-18, after a write-only grant broke the agent's
-  # preflight (reading /branch_protections is admin-only in Gitea). ACCEPTED WITH IT: the
-  # reviewed party can edit the branch protection it is gated by; the protection's merge and
-  # approvals whitelists (chifor and the two reviewer identities) are what keep merging with the
-  # reviewers, and only as long as `dsh` leaves them alone. Both reviewer identities have write.
-  # Its PRs are authored by `dsh`, which
-  # is a merge author FOR THIS REPO ONLY (pr_reviewer_merge_authors_by_repo) and an unattended
-  # author (pr_reviewer_unattended_authors) - so a clean pair of verdicts plus its own CI
-  # (test.yml on the repo-scoped runner) merges model-authored code with no human in the loop,
-  # by decision. FOR AN UNATTENDED AUTHOR, CI GREEN IS ADVISORY: the workflow runs the PR's own
-  # tests and scripts, which the same author writes, so the TWO REVIEWS are the operative
-  # control. The guarded-path rule below only keeps the CI DEFINITION from changing without a
-  # human - it does not make the CI leg independent of the author.
+  # assertion and the org runners cover it like every other entry. Both reviewer identities have
+  # write. `dsh` has ADMIN on it as a collaborator - operator decision, 2026-09-18: a write-only
+  # grant broke the agent's preflight, which reads /branch_protections (admin-only in Gitea; the
+  # non-admin read of the same facts is GET /branches/main). The operator chose to restore admin
+  # rather than change the agent's check - a DSH-side change - so the agent was unblocked at
+  # once; switching that preflight to /branches/main and dropping admin again is the recorded
+  # follow-up. ACCEPTED WITH IT, AND WITHOUT MONITORING: the reviewed party can edit the branch
+  # protection it is gated by, and nothing here detects that. Merging stays with the reviewers
+  # only because that protection's merge and approvals whitelists name chifor and the two
+  # reviewer identities, and only as long as `dsh` leaves them alone. A converge-time drift
+  # assertion would need an admin-scoped credential (the hook-check token is read:organization
+  # only and cannot read protections; the reviewer PATs have write, not admin) - not done.
+  # Its PRs are authored by `dsh`, which is a merge author FOR THIS REPO ONLY
+  # (pr_reviewer_merge_authors_by_repo) and an unattended author (pr_reviewer_unattended_authors)
+  # - so a clean pair of verdicts plus its own CI (test.yml on the repo-scoped runner) merges
+  # model-authored code with no human in the loop, by decision. FOR AN UNATTENDED AUTHOR, CI
+  # GREEN IS ADVISORY: the workflow runs the PR's own tests and scripts, which the same author
+  # writes, so the TWO REVIEWS are the operative control. The guarded-path rule below only keeps
+  # the CI DEFINITION from changing without a human - it does not make the CI leg independent
+  # of the author.
   - cchifor/dsh-team-conductor
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
 # The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
