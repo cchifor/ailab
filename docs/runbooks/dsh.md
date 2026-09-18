@@ -104,9 +104,12 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 > 2 approvals, which the two reviewer bots supply); `reviewer-claude` and `reviewer-codex` have
 > write. It is on the reviewers' allowlist and `dsh` is a merge author **for this repo only**, so a
 > PR authored by the agent merges when both personas are clean and its own CI (`test.yml`, on the
-> repo-scoped runner `dsh-conductor-ci-runner-1`, which survived the move) is green - **except a
-> PR that edits `.gitea/workflows/**`**: the agent is an *unattended* author, and the reviewers
-> post such a change as a blocker finding, never an approval, so a human must merge it. Gitea answers
+> repo-scoped runner `dsh-conductor-ci-runner-1`, which survived the move) is green. Two things
+> to hold in mind about that gate: **CI green is advisory for this author** - the workflow runs
+> the tests and scripts the agent itself writes, so the two reviews are the operative control -
+> and **a PR that edits `.gitea/workflows/**` is never approved by the bots**: the agent is an
+> *unattended* author, the reviewers post such a change as a blocker finding, and a human must
+> merge it. That guard covers the CI definition only, not everything the definition runs. Gitea answers
 > the old path with a 301, git and API alike, so existing clones keep working — but point the
 > agent's remote at the new path rather than living on the redirect.
 

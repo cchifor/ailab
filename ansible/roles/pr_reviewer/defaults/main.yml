@@ -38,7 +38,10 @@ pr_reviewer_repos:
   # is a merge author FOR THIS REPO ONLY (pr_reviewer_merge_authors_by_repo) and an unattended
   # author (pr_reviewer_unattended_authors) - so a clean pair of verdicts plus its own CI
   # (test.yml on the repo-scoped runner) merges model-authored code with no human in the loop,
-  # by decision, EXCEPT when the PR touches the CI definition itself.
+  # by decision. FOR AN UNATTENDED AUTHOR, CI GREEN IS ADVISORY: the workflow runs the PR's own
+  # tests and scripts, which the same author writes, so the TWO REVIEWS are the operative
+  # control. The guarded-path rule below only keeps the CI DEFINITION from changing without a
+  # human - it does not make the CI leg independent of the author.
   - cchifor/dsh-team-conductor
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
 # The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
@@ -170,8 +173,11 @@ pr_reviewer_merge_authors_by_repo:
   cchifor/dsh-team-conductor: [dsh]
 # UNATTENDED authors: automation whose PRs merge with no human in the loop. When one of them
 # touches a guarded path, the review carries a BLOCKER finding and is never APPROVED, so branch
-# protection holds the merge for a human - the CI leg of the gate is self-attesting for a
-# workflow the PR itself edits (reviewer-claude on ailab#782). Prefix match on the diff paths.
+# protection holds the merge for a human - the workflow is the one file whose edit would let
+# the author change the gate itself (reviewer-claude on ailab#782). Prefix match on the diff
+# paths, taken from the diff HEADERS so a rename into the directory counts. WHAT THIS DOES NOT
+# DO: make CI independent of an unattended author - the workflow runs the PR's own tests and
+# scripts. For such authors CI green is advisory and the two reviews are the operative gate.
 pr_reviewer_unattended_authors: [dsh]
 pr_reviewer_guarded_paths:
   - .gitea/workflows/
