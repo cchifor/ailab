@@ -777,11 +777,12 @@ class RateLimited(RuntimeError):
     "model" (one tier on this seat - the (seat, model) pair parks and the same tier is tried
     on the next seat). `model` is the tier that was asked for."""
 
-    def __init__(self, message, reset_at=None, scope="account", model=None):
+    def __init__(self, message, reset_at=None, scope="account", model=None, unserveable=False):
         super().__init__(message)
         self.reset_at = reset_at
         self.scope = scope
         self.model = model
+        self.unserveable = unserveable
 
 
 class ModelError(RuntimeError):
@@ -927,6 +928,14 @@ MODELS = _models()
 # an ACCOUNT-scoped one parks the seat. Pre-seeded and fixed-size like SEAT_PARKED_UNTIL, for
 # the same metrics-thread reason.
 MODEL_PARKED_UNTIL = {(s["name"], m): 0.0 for s in SEATS for m in MODELS}
+# A model the CLI CANNOT SERVE (a floating alias that stopped resolving, a pin newer than the
+# installed CLI) is a different fact from a spent window, and it gets its own table: the usage
+# poll owns MODEL_PARKED_UNTIL and clears a pair whenever the API shows its window below 100%,
+# which says nothing about whether the alias resolves - clearing a 404 park that way re-armed
+# a broken alias every hour and cost len(SEATS) doomed calls per poll (reviewer-claude on
+# ailab#780). The poll never touches this one; it lapses on its own (MAX_PARK_S) and the next
+# refusal re-parks it.
+MODEL_UNSERVED_UNTIL = {(s["name"], m): 0.0 for s in SEATS for m in MODELS}
 CURRENT_MODEL = MODELS[0]
 # The usage poller's last snapshot per seat (None until the first poll). Replaced by
 # assignment, never mutated in place, so the metrics thread reads a consistent object.
@@ -946,8 +955,15 @@ def use_model(model):
     CURRENT_MODEL = model
 
 
+def model_parked_until(seat, model):
+    """When this pair can next be asked: the later of its spent-window park and its
+    unserveable-model park."""
+    return max(MODEL_PARKED_UNTIL.get((seat, model), 0.0),
+               MODEL_UNSERVED_UNTIL.get((seat, model), 0.0))
+
+
 def model_parked(seat, model, now=None):
-    return MODEL_PARKED_UNTIL.get((seat, model), 0.0) > (now if now is not None else time.time())
+    return model_parked_until(seat, model) > (now if now is not None else time.time())
 
 
 def seat_usable(seat, now=None):
@@ -959,7 +975,7 @@ def seat_usable(seat, now=None):
 def seat_reopens_at(seat, now=None):
     """When this seat can next serve SOMETHING: its account wall, or its earliest tier."""
     return max(SEAT_PARKED_UNTIL.get(seat, 0.0),
-               min(MODEL_PARKED_UNTIL.get((seat, m), 0.0) for m in MODELS))
+               min(model_parked_until(seat, m) for m in MODELS))
 
 
 def active_choice(now=None, exclude=()):
@@ -978,15 +994,17 @@ def active_choice(now=None, exclude=()):
     return None
 
 
-def park_model(seat, model, reset_at):
-    """Stop asking ONE tier on ONE seat until its scoped window resets. Same clamps as park(),
-    same lossless contract, its own counter."""
+def park_model(seat, model, reset_at, unserveable=False):
+    """Stop asking ONE tier on ONE seat until its scoped window resets - or, `unserveable`,
+    until the CLI might resolve the name again. Same clamps as park(), same lossless contract,
+    the same counter; a different table, because the usage poll clears only the first."""
     global RATE_LIMITED_UNTIL
     until = reset_at or (time.time() + DEFAULT_PARK_S)
     until = max(time.time() + 60, min(until, time.time() + MAX_PARK_S))
     key = (seat, model)
+    table = MODEL_UNSERVED_UNTIL if unserveable else MODEL_PARKED_UNTIL
     with park_lock:
-        MODEL_PARKED_UNTIL[key] = max(MODEL_PARKED_UNTIL.get(key, 0.0), until)
+        table[key] = max(table.get(key, 0.0), until)
         RATE_LIMITED_UNTIL = all_parked_until()
     bump_meta(f"model_parks_total.{seat}.{model}")
     log(f"model '{model}' limited on seat '{seat}'; parking that pair for "
@@ -1328,12 +1346,13 @@ def _apply_seats(keep):
             del SEAT_PARKED_UNTIL[name]
     for s in SEATS:
         SEAT_PARKED_UNTIL.setdefault(s["name"], 0.0)
-    for key in list(MODEL_PARKED_UNTIL):
-        if key[0] not in SEAT_BY_NAME:
-            del MODEL_PARKED_UNTIL[key]
-    for s in SEATS:
-        for m in MODELS:
-            MODEL_PARKED_UNTIL.setdefault((s["name"], m), 0.0)
+    for table in (MODEL_PARKED_UNTIL, MODEL_UNSERVED_UNTIL):
+        for key in list(table):
+            if key[0] not in SEAT_BY_NAME:
+                del table[key]
+        for s in SEATS:
+            for m in MODELS:
+                table.setdefault((s["name"], m), 0.0)
     for name in list(USAGE_SNAPSHOT):
         if name not in SEAT_BY_NAME:
             del USAGE_SNAPSHOT[name]
@@ -1425,7 +1444,8 @@ def run_llm(title, desc, diff_text, rubric=""):
                 if e.scope == "model":
                     if model == MODELS[0]:
                         bump_meta("llm_primary_failed_total")
-                    park_model(seat, model, e.reset_at)
+                    park_model(seat, model, e.reset_at,
+                               unserveable=getattr(e, "unserveable", False))
                 else:
                     park(e.reset_at, seat=seat)
                 # 2. Nowhere to move -> re-raise the ORIGINAL exception. A sibling class here
@@ -1778,7 +1798,7 @@ def _run_llm(title, desc, diff_text, rubric, started, seat, model):
                     raise RateLimited(scrub(raw), parse_reset(raw), scope="model", model=model)
                 if MODEL_404_RE.search(raw):
                     raise RateLimited(scrub(raw), time.time() + MAX_PARK_S, scope="model",
-                                      model=model)
+                                      model=model, unserveable=True)
                 if RATE_LIMIT_RE.search(raw):
                     raise RateLimited(scrub(raw), parse_reset(raw), scope="account", model=model)
                 raise ModelError(scrub(raw))
@@ -2378,11 +2398,11 @@ def write_metrics():
         lines.append(f'reviewbot_llm_active_seat_info{{persona="{_persona}",'
                      f'seat="{_label(active_seat(now) or CURRENT_SEAT)}"}} 1')
         # ── the ladder: one line per (seat, model) pair, zeros included, plus the active tier.
-        _mparked = dict(MODEL_PARKED_UNTIL)
+        _mparked, _munserved = dict(MODEL_PARKED_UNTIL), dict(MODEL_UNSERVED_UNTIL)
         for _s in SEATS:
             for _m in MODELS:
                 _sn, _mn = _label(_s["name"]), _label(_m or "(account default)")
-                _u = _mparked.get((_s["name"], _m), 0.0)
+                _u = max(_mparked.get((_s["name"], _m), 0.0), _munserved.get((_s["name"], _m), 0.0))
                 _pk = "model_parks_total." + _s["name"] + "." + _m
                 lines.append(f'reviewbot_llm_model_parked{{persona="{_persona}",seat="{_sn}",'
                              f'model="{_mn}"}} {1 if _u > now else 0}')
