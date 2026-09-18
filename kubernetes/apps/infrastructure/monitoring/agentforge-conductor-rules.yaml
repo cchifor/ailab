@@ -332,10 +332,14 @@ spec:
         # engine merges the gauge AND the ailab pin moves to a build that has it, a window nothing
         # here bounds (program-plan invariant 9). So this file lands AFTER the agentforge tier-info
         # and T1-instrument merges and the repin that carries them, and the PR that carries it is
-        # held until that pin is live. The T1 rules below cost nothing in the meantime — each is an
-        # empty vector on an image that exports none of their series — this is the one rule that
-        # would not be. If it must land first, replace this paragraph with the date the pin is due
-        # and the window accepted, in days.
+        # held until that pin is live — and the pin must carry 5d (feat/conduct-diagnoses-pretouch,
+        # the diagnoses AND wakes pre-touch) as well, because ForgeConductWakesUnanswered below is a
+        # page on every container restart on an image without it (its REQUIRES paragraph). The
+        # holding label is history: #748 merged with `no-automerge` still on (an operator merge), so
+        # the label condition is moot and the live dependency is simply 5d PINNED — until the pin
+        # carries it, every T1 rule below is an empty vector at no cost, and
+        # ForgeConductWakesUnanswered is the one rule that would not be. Record the date the pin is
+        # due beside this paragraph if the window is to be accepted rather than closed.
         - alert: ForgeConductTierUnknown
           expr: |-
             max by (namespace, pod) (
@@ -503,16 +507,25 @@ spec:
         # through, what it refused and what the lanes withheld. The header's rules still hold — every
         # counter keeps `_total`, every window is sized off the pass cadence, every threshold is on
         # an increase() or a changes() over a window and never on a raw counter — with two things
-        # new. Several of these counters are NOT PRE-TOUCHED (forge_conduct_diagnoses_total by
-        # (detector, op), forge_conduct_refusals_total by reason): a child has no series until its
-        # first event, and increase() reads a series from its first sample, so a child's first event
-        # is below any increase()'s notice until the counter moves again. Each rule below says what
-        # that costs it, or what it does about it. And forge_conduct_parks is a GAUGE, rebuilt in
-        # place every pass, whole over the bound repos, and EMPTY when a pass could not report its
-        # parks — absence on it is "not known", never 0. Every series below is exported by
-        # agentforge's T1 instruments, unmerged as this is written and absent from the live pin
-        # (ForgeConductTierUnknown's MERGE ORDER note): until the repin every rule here is an empty
-        # vector, quiet and inert, and the section is read against that ordering.
+        # new. One of these counters is NOT PRE-TOUCHED (forge_conduct_refusals_total by reason): a
+        # child has no series until its first event, and increase() reads a series from its first
+        # sample, so a child's first event is below any increase()'s notice until the counter moves
+        # again; the rule that reads it says what that costs. forge_conduct_diagnoses_total by
+        # (detector, op) was that shape too, until agentforge 5d (feat/conduct-diagnoses-pretouch)
+        # touched every pair over the commentable rows and the two ops at 0 from construction — the
+        # reserved pair excepted — because a pair with no series until its first comment made an
+        # in-place restart invisible to increase() and ForgeConductWakesUnanswered a page on every
+        # restart (#748); and forge_conduct_wake_writes_total by repo, pre-touched per PASS until
+        # then, is from 5d pre-touched at construction over the bound repos as well (per pass still,
+        # for a repo a config refresh binds later), so both sides of that rule's subtraction read a
+        # restart as a reset — provided a scrape read the 0 before the first pass returned, which
+        # nothing guarantees (the rule's REQUIRES paragraph has the residual and its measure); the
+        # rule REQUIRES the 5d image and says so. And forge_conduct_parks
+        # is a GAUGE, rebuilt in place every pass, whole over the bound repos, and EMPTY when a pass
+        # could not report its parks — absence on it is "not known", never 0. Every series below is
+        # exported by agentforge's T1 instruments, unmerged as this is written and absent from the
+        # live pin (ForgeConductTierUnknown's MERGE ORDER note): until the repin every rule here is
+        # an empty vector, quiet and inert, and the section is read against that ordering.
         #
         # AND THE ROUTING FACT THAT SHAPES THE STANDING-STATE RULES: Alertmanager here routes EVERY
         # alert to ntfy — no severity route, only Watchdog dropped, repeat_interval 4h
@@ -543,22 +556,68 @@ spec:
         # line in the conductor's log carries each lane's `failed=` count (`comments=` for the park
         # lane, `chains=` for the chain lane), and the description says so.
         #
-        # COUNTED EXACTLY, because the diagnoses counter is not pre-touched. A (detector, op) pair
-        # has no series until its first comment and increase() reads a series from its first sample,
-        # so a pair's first comment inside the window is a wake the window sees and a diagnosis it
-        # does not — and after an arming rollout, when every row diagnoses for the first time, that
-        # is most of them: the plain difference of two increase()s reads the first two hours of T1
-        # as the forge dropping comments. The second term on each side puts the first sample back:
-        # `min_over_time(x[2h])` for every series MINTED inside the window — its first sample on a
-        # counter minted at its count (or, if the pod also restarted inside the window, the lower of
-        # that and the re-mint, which reads the pair short by at most an allowance less one, under
-        # the bar) — and nothing for a series that existed before it, which increase() reads whole,
-        # a mid-window restart included, by its reset arithmetic. Both sides carry the term, because
-        # the wakes counter is pre-touched per PASS over the bound repos, in the same record_pass
-        # call as its increment: a first pass that attempts a wake mints the series at its count,
-        # not at 0. `or vector(0)` on each of the four, because an aggregation over nothing is EMPTY,
-        # not 0, and an empty operand empties the subtraction and the alert with it — on a conductor
-        # that has never applied a comment, which is the estate this rule is for.
+        # THIS RULE REQUIRES THE PRE-TOUCHED ENGINE — agentforge 5d,
+        # feat/conduct-diagnoses-pretouch. #748 merged with `no-automerge` still on (an operator
+        # merge), so the label condition this paragraph once carried is moot; the live dependency is
+        # 5d PINNED, not merely the T1 series scraped. 5d touches every (detector, op) pair over the
+        # rows a comment can name (the sixteen PARK-* rows and DAG-DEADLOCKED, crossed with finding
+        # and observation) at 0 at construction, so a pair is at 0 on the wire before the first pass
+        # moves it and an in-place restart reads 3, then 0, then 3 — a drop increase() takes for a
+        # reset and puts back; and it touches every bound repo's forge_conduct_wake_writes_total at
+        # 0 at construction too, so the wakes read the same restart as 9, then 0, then 3. PROVIDED A
+        # SCRAPE READ THE 0: the conductor runs its first pass at once after construction (the loop
+        # sleeps after a pass, never before the first) and this PodMonitor scrapes every 30s, so a
+        # first pass shorter than the interval leaves the construction-time 0 unread and the wire
+        # carries the pre-5d shape on the SAME pod — wakes 9, a gap, 3; a pair 3, a gap, 3 — with
+        # nothing for the second term to put back (the series existed before the window; this is a
+        # restart, not a rollout). That is the RESIDUAL, and it is a fixture below ("an in-place
+        # restart whose construction-time 0 no scrape read — the residual, fires": fires at 145m
+        # and 200m, quiet with the 0 scraped once). Measured on the estate: a pass takes ~5s, so
+        # the 0 is read about one restart in six, and an in-place restart of the conductor (a crash,
+        # a liveness kill — not a rollout) leaves the pre-5d arithmetic on both sides five times in
+        # six — the page when the first pass re-mints a pair at or above its old count while the
+        # wakes come back under theirs (the reviewers' input; a pair re-minted UNDER its old count
+        # drops, and the drop is the reset), the hidden loss in the mirror case — until the engine
+        # holds its first pass until the first scrape has been served; that is the loop's follow-up,
+        # recorded in agentforge's plans/conduct-diagnoses-pretouch-impl-review.md. On the
+        # engine before 5d a pair had no series until its first comment and was RE-MINTED after a
+        # restart at the first commenting pass's own count: 3, then nothing, then 3 — no drop, so no
+        # reset, the pair read as no change while the wakes beside it read whole (their re-mint
+        # under the old count, 9 then 3, a drop), and this rule paged on an ordinary restart with
+        # every comment applied (#748, both reviewers, high; this text recorded it as a residue and
+        # measured it: W 9 then 3, one pair 3 then 3, fires at 145m). Nothing on the rule's side can
+        # put back a sample that was never there; only the engine can make the sample exist. The
+        # fixture "the reviewers' restart under the pre-touched engine" is the 5d shape on both
+        # sides, quiet at every minute of the restart's passage through the window (swept 121m to
+        # 350m); the pre-5d shape of the same input — the pair absent for the five minutes between
+        # the restart and the first pass, then 3 — fires at 145m and 200m and is NOT a fixture as
+        # the pre-5d ENGINE's shape: a case asserting a false page green would document the defect
+        # as the contract. It IS a fixture as the 5d engine's unread-0 shape (the residual, above),
+        # because that is an input the 5d engine produces, and a fixture that goes red when the
+        # loop closes it is how the closing is seen. Enabled on an image without 5d, this rule is
+        # that page, every four hours, on every restart; on 5d, on the restarts whose 0 went unread
+        # and whose first pass re-minted a pair at or above its old count.
+        #
+        # THE SECOND TERM ON EACH SIDE puts back the first sample of a series MINTED inside the
+        # window — `min_over_time(x[2h])`, its first sample on a counter minted at its count — and
+        # nothing for a series that existed before the window, which increase() reads whole, a
+        # mid-window restart included, by its reset arithmetic. The term stays with 5d, and what
+        # reaches it is the same on both sides: any series whose FIRST SAMPLE a new pod exports
+        # after its first pass — a rollout whose pod is scraped only after the pass, so the 0 the
+        # pre-touch put on the wire was never read and the series is minted at its count, which
+        # increase(), reading a series from its first sample, sees none of (the two rollout
+        # fixtures, def's wakes and pair both at 3 from their first sample); on the WAKES side a
+        # repo a config refresh binds after construction, minted by its first pass; and on the
+        # DIAGNOSES side the reserved pair — (unrecognised, unrecognised), a comment whose row or op
+        # is outside the engine's vocabularies, which 5d does not pre-touch and the engine's mirror
+        # pins refuse first. The term is dead only for a series exported at 0 before its first event
+        # — a commentable pair, or a bound repo's wakes, on a pod scraped before its first pass:
+        # `min_over_time` of it is 0 and the term adds nothing. The fixtures whose pairs are absent
+        # until their first comment drive the pre-5d shape the term was written on; the two restart
+        # cases and three of the others were re-run on the 5d shape out of tree and read the same.
+        # `or vector(0)` on each of the four, because an aggregation over nothing is EMPTY, not 0,
+        # and an empty operand empties the subtraction and the alert with it — on a conductor that
+        # has never applied a comment, which is the estate this rule is for.
         #
         # "MINTED INSIDE THE WINDOW" IS THREE CLAUSES, NOT ONE, because "no sample at the window's
         # edge" (`unless x offset 2h`) is also what a SCRAPE GAP looks like. A Prometheus restart,
@@ -582,7 +641,11 @@ spec:
         # re-minted at 3, read as three lost for the twenty minutes the restart and the re-mint
         # straddled the edge. With the pod's own marker in the clause that pod WAS scraped at the
         # edge, the pair is minted, and its 3 is put back. A pair minted for the first time inside
-        # the window is minted under every clause, gap or no gap: it has no samples before it.
+        # the window is minted under every clause, gap or no gap: it has no samples before it. That
+        # re-mint is the pre-5d shape of a diagnoses pair, and of a bound repo's wakes: on 5d the
+        # same restart reads 5, then 0, then 3 on both, a reset either way, and the clause stays for
+        # what still mints inside the window (the SECOND TERM paragraph) — a pod scraped only after
+        # its first pass, a repo bound after construction, the reserved pair.
         #
         # THE GATE, LAST: `unless on () absent_over_time(forge_conduct_writes_total[2h] offset 2h)`.
         # When the store holds no conductor sample at all from the two hours before the window — a
@@ -592,10 +655,11 @@ spec:
         # an old conductor at W=10, D=7 scraped from empty history fired this alert for its first two
         # hours. So the rule reads nothing until the store has two hours behind the window: the quiet
         # direction, for the first two hours of a Prometheus' conductor history, while every other
-        # rule here is finding its feet too. The honest fix for all of this is in the ENGINE: a
-        # diagnoses counter pre-touched over CONDUCT_DETECTORS x CONDUCT_OPS (as park_quiet_total is)
-        # makes both sides a plain increase() and retires the second term, its three clauses and the
-        # asymmetry they paper over; until then this is the rule-side reading.
+        # rule here is finding its feet too. The gate is about the STORE, not the counters, and
+        # stays with 5d; so do the three clauses, for the shapes that still mint (above). What 5d
+        # retires is the restart's need for any of it on either side, and the false page the
+        # REQUIRES paragraph names — over the commentable rows, not all of CONDUCT_DETECTORS: an
+        # ESTATE or DEPLOY row is filed, never commented, and a pair for it would be 0 forever.
         #
         # `>= 3` OVER [2h]. The two sides extrapolate separately (ForgeConductPassesFailing's note),
         # so equal counts read a few hundredths apart and `> 0` would take that for a lost comment;
@@ -604,16 +668,24 @@ spec:
         # proposed again). Three is one pass's whole allowance (LIFECYCLE_WRITES_PER_PASS) lost, or
         # one comment lost on each of three passes: a forge dropping the conductor's comments, not a
         # single timeout. [2h] is twenty-four passes at the 300s cadence and six at the backed-off
-        # 1200s, so a run at either lands three inside it. The one input the arithmetic misreads is
-        # an in-place restart inside the window after which a pair is re-minted at a count no lower
-        # than it had before, which increase() cannot see as a reset: that pair is read short by its
-        # OLD count, while W reads whole — its re-mint is the first pass's own wake count, below the
-        # pod's old count on any pod more than a few passes old, a drop increase() does take for a
-        # reset. So the bar is met once the pairs re-minted that way inside the window, in the first
-        # pass or a later one, carry old counts summing to three: one pair at 3 re-minted at 3,
-        # three at 1 re-minted at 1, or 2 and 1 (verified: W 9 then 3, one pair 3 then 3, fires at
-        # 145m) — each a pair the restart caught at exactly the count its next comments would
-        # bring it back to. `for: 5m` for a pass that lands on a window edge.
+        # 1200s, so a run at either lands three inside it. The input the arithmetic misread — an
+        # in-place restart inside the window after which a pair was re-minted at a count no lower
+        # than it had before, the pair read short by its OLD count while W read whole, the bar met
+        # once such pairs' old counts summed to three — is retired on the DIAGNOSES side by 5d's
+        # pre-touch of every commentable pair. The WAKES side had the mirror image, in the quiet
+        # direction: pre-touched per pass only, a bound repo's series was absent from the restart
+        # until the first pass and re-minted at that pass's count, and a re-mint at or above W_old
+        # had no drop for the reset arithmetic, so W read short by at most W_old for the two hours
+        # the restart sat in the window — a lost comment hidden, never a page (measured: three lost
+        # on the first pass after a restart at W_old 2, W read 1, quiet at every minute from 121m to
+        # 350m) — until the wakes are pre-touched at construction over the bound repos, which 5d
+        # also does (the engine's ConductMetrics takes the bound set): the same input then reads 2,
+        # then 0, then 3, and fires, the fixture "three comments lost across a restart, the wakes
+        # pre-touched at construction, fire". 5d closes both sides for a restart whose 0 a scrape
+        # read before the first pass returned; for one whose 0 no scrape read, both inputs are back
+        # on the same pod — the diagnoses' false page and the wakes' hidden loss alike — the
+        # REQUIRES paragraph's residual, one restart in six read, five not, until the loop holds
+        # its first pass for the first scrape. `for: 5m` for a pass that lands on a window edge.
         - alert: ForgeConductWakesUnanswered
           expr: |-
             (
