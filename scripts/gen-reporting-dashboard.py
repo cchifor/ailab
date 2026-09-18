@@ -87,17 +87,51 @@ def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, color="va
     }
 
 
-def bargauge(title, x, y, w, h, expr, unit="percent", legend="{{id}}", maxv=100):
+def bargauge(title, x, y, w, h, expr, unit="percent", legend="{{id}}", maxv=100, steps=None):
     return {
         "id": _nid(), "type": "bargauge", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
         "fieldConfig": {"defaults": {"unit": unit, "min": 0, "max": maxv, "decimals": 1,
-            "thresholds": {"mode": "absolute", "steps": [
+            "thresholds": {"mode": "absolute", "steps": steps or [
                 {"color": "green", "value": None}, {"color": "yellow", "value": 75},
                 {"color": "red", "value": 90}]}}, "overrides": []},
         "options": {"displayMode": "gradient", "orientation": "horizontal", "showUnfilled": True,
                     "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}},
         "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "legendFormat": legend, "instant": True}],
+    }
+
+
+def stat_name(title, x, y, w, h, expr, legend):
+    """A stat that shows a LABEL rather than a number - for info metrics whose value is always
+    1 (reviewbot_llm_seat_info, reviewbot_llm_active_model_info). textMode "name" renders the
+    legendFormat, so the panel reads e.g. the account email or the model alias."""
+    return {
+        "id": _nid(), "type": "stat", "title": title, "datasource": _ds(),
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute",
+                                                    "steps": [{"color": "blue", "value": None}]}},
+                        "overrides": []},
+        "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+                    "colorMode": "none", "graphMode": "none", "textMode": "name", "justifyMode": "auto"},
+        "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "legendFormat": legend, "instant": True}],
+    }
+
+
+def state_timeline(title, x, y, w, h, expr, legend):
+    """A 0/1 series per row over time - parked (1) or free (0) per (seat, model) pair."""
+    return {
+        "id": _nid(), "type": "state-timeline", "title": title, "datasource": _ds(),
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "fieldConfig": {"defaults": {
+            "custom": {"lineWidth": 0, "fillOpacity": 70},
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": None},
+                                                         {"color": "red", "value": 1}]},
+            "mappings": [{"type": "value", "options": {
+                "0": {"text": "free", "color": "green", "index": 0},
+                "1": {"text": "parked", "color": "red", "index": 1}}}]}, "overrides": []},
+        "options": {"showValue": "never", "mergeValues": True, "rowHeight": 0.8,
+                    "legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+        "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "legendFormat": legend}],
     }
 
 
@@ -452,12 +486,54 @@ panels += [
     ts("Queue Depth / Oldest Age", 12, 152, 12, 7,
        ['reviewbot_queue_depth', 'reviewbot_oldest_job_age_seconds'],
        "short", legends=["{{persona}} depth", "{{persona}} oldest s"]),
+    # ── seats, ladder and usage (plans/2026-09-18-claude-seat-rotation-plan.md, PR 2) ──────
+    # Which account and model the claude persona is on RIGHT NOW, and every account's windows
+    # from the usage API (GET /api/oauth/usage, read hourly by reviewbot as each seat). The
+    # email lives on ONE info series, reviewbot_llm_seat_info, and is joined onto the active-seat
+    # and usage series here, so the numeric series never carry it. Percent panels are per
+    # account; Time to Reset counts down from the API's own resets_at; the timeline shows which
+    # (seat, model) pairs the rotation is currently parked on, which is the ladder's whole
+    # state in one picture.
+    stat_name("Active Claude Account", 0, 159, 6, 4,
+              'reviewbot_llm_active_seat_info{persona="claude"} * on(persona,seat) '
+              'group_left(email,plan) reviewbot_llm_seat_info{persona="claude"}',
+              "{{email}} · seat {{seat}}"),
+    stat_name("Active Claude Model", 6, 159, 4, 4,
+              'reviewbot_llm_active_model_info{persona="claude"}', "{{model}}"),
+    # 0 = a seat's probe failed on the last poll (ReviewbotUsageProbeFailing after 3h of it).
+    stat("Usage Probe", 10, 159, 3, 4,
+         'min(reviewbot_llm_usage_probe_ok{persona="claude"}) or vector(0)',
+         steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
+    # Seats that can serve SOMETHING: neither account-parked nor parked on every tier.
+    # Aggregated before `or vector(0)`: a labelled series OR'd with the label-less vector(0)
+    # keeps BOTH (the label sets differ), and the stat showed a phantom red zero beside the
+    # real value (codex review of PR 2). min() drops the labels, as the other stats do.
+    stat("Seats Usable", 13, 159, 3, 4,
+         'min(reviewbot_llm_seats_available{persona="claude"}) or vector(0)',
+         steps=[{"color": "red", "value": None}, {"color": "orange", "value": 1},
+                {"color": "green", "value": 2}]),
+    # Orange at 80, red at 100: 100 IS the parked state, and the API's percent is what the
+    # persona is parked on, so anything below it is still capacity.
+    bargauge("Claude Usage per Account", 16, 159, 8, 13,
+             'reviewbot_llm_usage_percent{persona="claude"} * on(persona,seat) '
+             'group_left(email) reviewbot_llm_seat_info{persona="claude"}',
+             legend="{{email}} · {{limit}}",
+             steps=[{"color": "green", "value": None}, {"color": "orange", "value": 80},
+                    {"color": "red", "value": 100}]),
+    qtable("Time to Reset per Account and Window", 0, 163, 16, 4,
+           'clamp_min(reviewbot_llm_usage_resets_at_seconds{persona="claude"} - time(), 0) '
+           '* on(persona,seat) group_left(email) reviewbot_llm_seat_info{persona="claude"}',
+           rename={"seat": "seat", "email": "account", "limit": "window", "Value": "resets in"},
+           exclude=["Time", "__name__", "persona", "job", "instance"],
+           overrides=[_ov("resets in", [{"id": "unit", "value": "dtdurations"}])]),
+    state_timeline("Tier Parked per Seat", 0, 167, 16, 5,
+                   'reviewbot_llm_model_parked{persona="claude"}', "{{seat}} / {{model}}"),
     # THE REASON, not just the rate. Everything above is numeric and can only say THAT a review
     # failed; this says which PR and why. Shipped by roles/journal_ship (Alloy -> loki-lan).
     # The filter is deliberately broad — `failed`, `error`, `skipped` — because the 2026-09-06
     # failure text ("'utf-8' codec can't decode byte 0xf6") matched no term anyone would have
     # thought to search for in advance.
-    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 159, 24, 9,
+    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 172, 24, 9,
          '{job="host-journal", unit="reviewbot.service"} '
          '|~ "(?i)(failed|error|quarantin|skipped|exhausted)"'),
 ]

@@ -1,8 +1,16 @@
 # ADR 0025 — reviewer-1 rotates across three Claude accounts and a model ladder
 
-**Status:** ACCEPTED (2026-09-18). Phase 1 (seats) implemented by
-`plans/2026-09-18-claude-seat-rotation-plan.md` PR 1; Phase 2 (ladder, watchdog, dashboard)
-is that plan's PR 2.
+**Status:** ACCEPTED (2026-09-18). **IMPLEMENTED** — Phase 1 (seats, ailab#777) and Phase 2
+(ladder, watchdog, dashboard) of `plans/2026-09-18-claude-seat-rotation-plan.md`.
+
+> **Credential change during Phase 1's rollout, same day.** Decision 2 below planned the seats
+> on the brokers' long-lived tokens. Those answer `/api/oauth/usage` and `/profile` with
+> `403 oauth_scope_insufficient` (they carry `user:inference` only), so the identity collapse
+> and the watchdog could not see them. Every seat was moved to a **browser login in its own
+> HOME** the same afternoon — one refresh-token family per seat, so the copy hazard that
+> motivated decision 2 still does not arise. Decision 2 stands only as the record of why the
+> token path exists in the wrapper. All four accounts on the estate were also at their weekly
+> wall that day; the persona resumed when seat `c` was moved to an account with headroom.
 
 ## Context
 
