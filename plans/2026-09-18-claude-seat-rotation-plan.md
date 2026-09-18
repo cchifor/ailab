@@ -70,11 +70,26 @@ Two things this settles that `host_vars/reviewer-1.yml` currently gets wrong:
   `Bearer` OAuth token with header `anthropic-beta: oauth-2025-04-20`. Profile carries
   `account.uuid`, `account.email`, `organization.rate_limit_tier` (`default_claude_max_20x`).
 * The CLI reads `CLAUDE_CODE_OAUTH_TOKEN` from the environment (the brokers run on it).
-* **UNVERIFIED — the broker tokens against the two endpoints.** The workstation policy refused to
-  read the cluster Secret. Expected to work (same OAuth family; reviewer-1's own token answered
-  both). If they do not: the poller reports `usage_probe_ok=0` for those seats, rotation runs on
-  refusal-text parks exactly as today, and Grafana's usage panels stay empty for them. Check
-  before PR 2 with the one-liner in "Rollout".
+* **RESOLVED 2026-09-18, against the design: the broker tokens do NOT answer the two endpoints.**
+  All three `claude-max-N` `setup-token` credentials get `403 oauth_scope_insufficient`
+  (`required_scopes: user:profile`) on `/usage` and `/profile`; their authorize URL requests
+  `scope=user:inference` only. Inference works with them (the CLI answered `429`, not `401`).
+  The rollout therefore re-credentialed every seat by **browser login** as its own OS user
+  (`claude auth login --claudeai`, one flow per seat, each its own refresh-token family; helper
+  `/home/c4/seat-login.sh`), retired the token files, and the probe now answers on all three
+  seats. `claude-seat.sh`'s fall-through path (no token file → `.credentials.json`) is the live
+  path. The identity collapse works as designed on these logins.
+* **Browser-login access tokens expire (~7 h `expiresAt`) and only the CLI refreshes them**, when it
+  runs as that seat. reviewbot re-probes a parked seat at most every `MAX_PARK_S`, which keeps
+  the credential fresh; the poller must NEVER refresh (two refreshers in one family is the
+  2026-09-10 outage) and treats a `401` as "stale token, keep the last-known windows".
+* **The CLI's weekly refusal carries a DATE** — `You've hit your weekly limit · resets Sep 20,
+  11pm (UTC)` — which `RESET_RE` does not parse, so every such park today is `DEFAULT_PARK_S`.
+  PR 2 teaches `parse_reset` that form (belt and braces beside the API).
+* All four accounts on the estate were at their weekly wall at once on 2026-09-18 (three
+  seats + the old c4 login); the persona resumed only when seat `c` was moved to an account with
+  headroom. Three windows are three of the size one reviewer proved it can empty in a week —
+  capacity is the standing risk, not code.
 * `resolve_seats()` returns early for anything but codex today; `_run_llm`'s credential scan is
   codex-only; the `~/.codex` and `config.toml` seat tasks are gated on `llm_kind == "codex"`; the
   sudoers task and the `NoNewPrivileges` gate are already generic.
@@ -371,27 +386,28 @@ unparked pairs; `seat_info` is omitted for a seat with no account.
 
 ### Docs (PR 2)
 
-Runbook: "how the ladder chooses", "what the watchdog does and does not do", the one-liner to
-verify a token, how to read the new panels. ADR 0025 gets its "IMPLEMENTED" line.
+Runbook: "how the ladder chooses", "what the watchdog does and does not do", how to read the new
+panels — and the **credential model as it actually is**: `host_vars/reviewer-1.yml`'s comment and
+the runbook § "Seats on reviewer-1" still describe OpenBao-seeded setup-tokens; both are rewritten
+for browser logins per seat, with `/home/c4/seat-login.sh` as the documented re-login procedure
+(start a detached flow, paste the code, verify with the probe) and the scope finding recorded.
+ADR 0025 gets its "IMPLEMENTED" line and a note on the credential change.
 
 ---
 
 ## Rollout of PR 2
 
-1. Verify the broker tokens against the endpoints once (any seat):
-   ```
-   ssh c4@192.168.0.24 'sudo -n -u clauderun HOME=/home/clauderun /usr/local/lib/reviewbot/claude-usage.py' | python -c 'import json,sys; d=json.load(sys.stdin); print(d["ok"], d.get("error"), [(l["kind"], l["model"], l["percent"]) for l in d["limits"]])'
-   ```
-   (`claude-usage.py` ships in PR 1, so this runs before PR 2 is written.)
-2. Normal lane: PR reviewed by both personas, automerged, converged.
-3. Verify: `journalctl -u reviewbot | grep -E "usage|climbing|tier"`, the six new panels
-   populated, `reviewbot_llm_usage_probe_ok{seat=~"a|b|c"} 1`.
+1. Normal lane: PR reviewed by both personas (reviewer-1 is reviewing again since 2026-09-18
+   10:53 UTC), automerged, converged.
+2. Verify: `journalctl -u reviewbot | grep -E "usage|climbing|tier"`, the six new panels
+   populated, `reviewbot_llm_usage_probe_ok{seat=~"a|b|c"} 1` (the probe was already verified
+   on every seat during PR 1's rollout).
 
 ## Risks
 
 | risk | handling |
 |---|---|
-| Broker tokens rejected by the usage/profile endpoints | Rotation still works on refusal text; probe alert fires; Grafana usage empty. Verified in PR 2 step 1 before writing the watchdog. |
+| ~~Broker tokens rejected by the usage/profile endpoints~~ | Happened (403, scope). Resolved on 2026-09-18 by moving every seat to a browser login; the setup-token path stays supported by the wrapper for a seat that needs it, without usage visibility. |
 | Sharing weekly windows with the dev agents | Sticky selection staggers exhaustion; `ReviewbotSeatExhausted` names the seat; three windows ≈ 3× the runway that just proved insufficient for one. Capacity, not code, if it recurs. |
 | `fable` alias stops resolving | 404-model park keeps the persona on `opus`; `ReviewbotPrimaryModelDown` says so. |
 | A poller bug parks everything | Parks are clamped to `MAX_PARK_S`; the worker gate self-heals; the poll is `try/except` per seat so one bad seat cannot skip the others. |
