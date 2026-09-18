@@ -4300,6 +4300,29 @@ class UnattendedCiGuardTest(unittest.TestCase):
         self._drive("cchifor", GUARDED_DIFF)
         self.assertEqual("APPROVED", self.posted[0]["event"])
 
+    def test_a_pure_rename_into_the_workflow_dir_is_guarded(self):
+        """reviewer-codex on ailab#782: a rename carries no hunks, so a guard fed from the
+        commentable positions never saw the destination. Paths come from the diff headers -
+        both rename endpoints - not from the hunks."""
+        rename = (b"diff --git a/ci/test.yml b/.gitea/workflows/test.yml\n"
+                  b"similarity index 100%\nrename from ci/test.yml\n"
+                  b"rename to .gitea/workflows/test.yml\n")
+        self._drive("dsh", rename)
+        self.assertEqual("COMMENT", self.posted[0]["event"])
+        self.assertIn(".gitea/workflows/test.yml", self.posted[0]["body"])
+
+    def test_the_guard_is_rendered_even_when_the_model_fills_the_comment_cap(self):
+        """The verdict reads every finding, but the review BODY is built from the first
+        max_comments only - a guard appended after a full set of model findings was blocking
+        invisibly. It goes first."""
+        cap = self.m.CFG["max_comments"]
+        self.m.run_llm = lambda *a, **k: {"summary": "s", "findings": [
+            {"path": "src/x.py", "side": "NEW", "line": 1, "severity": "nit",
+             "confidence": "low", "body": f"nit {i}"} for i in range(cap)]}
+        self._drive("dsh", GUARDED_DIFF)
+        self.assertEqual("COMMENT", self.posted[0]["event"])
+        self.assertIn("unattended", self.posted[0]["body"].lower())
+
     def test_an_unattended_author_outside_guarded_paths_is_approved(self):
         self._drive("dsh", PLAIN_DIFF)
         self.assertEqual("APPROVED", self.posted[0]["event"])
