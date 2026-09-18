@@ -3260,11 +3260,13 @@ class ClaudeSeatTest(unittest.TestCase):
         self.answer = _review_envelope()
 
     def _runner(self, refusing=(), fable_limited=(), tokens=None, creds=None, identities=None,
-                unreachable=(), probe_broken=(), broken=None):
+                unreachable=(), probe_broken=(), broken=None, cat_hangs=()):
         """`tokens` maps user -> the text of <home>/.claude/oauth-token; `creds` maps user ->
         the text of <home>/.claude/.credentials.json. A user in neither has NO readable
         credential. `identities` maps user -> account uuid the usage probe reports. `broken`
-        maps user -> the `result` text of a non-limit failure (exit 1 on every model)."""
+        maps user -> the `result` text of a non-limit failure (exit 1 on every model).
+        `cat_hangs`: users whose credential read times out (aux_run turns that into an
+        ordinary RuntimeError)."""
         tokens, creds = tokens or {}, creds or {}
         identities, broken = identities or {}, broken or {}
 
@@ -3300,6 +3302,8 @@ class ClaudeSeatTest(unittest.TestCase):
                 return CP(args, 0, self.answer, "")
             if verb == "cat":
                 path = args[5]
+                if user in cat_hangs:
+                    raise self.m.subprocess.TimeoutExpired(args, kw.get("timeout", 1))
                 if path.endswith("oauth-token") and user in tokens:
                     return CP(args, 0, tokens[user] + "\n", "")
                 if path.endswith(".credentials.json") and user in creds:
@@ -3454,6 +3458,36 @@ class ClaudeSeatTest(unittest.TestCase):
         self.assertIn("<redacted>", str(cm.exception))
         self.assertEqual([], [ln for ln in logged if token in ln],
                          "the seat token reached the journal")
+
+    def test_an_unreadable_credential_withholds_the_failure_text_instead_of_publishing_it(self):
+        """reviewer-codex on ailab#777: the first cut read the secrets lazily, on the error
+        path, with the budget that was left - and when that read failed it cached an empty
+        list and returned the ORIGINAL text, i.e. it failed open precisely when a near-deadline
+        run had spent the budget. The secrets are now read BEFORE the model runs, and a read
+        that fails withholds the diagnostic rather than publishing it unscrubbed."""
+        token = "T" * 40
+        logged = []
+        self.m.log = lambda *a: logged.append(" ".join(str(x) for x in a))
+        self.m.subprocess.run = self._runner(tokens={"runa": token}, cat_hangs={"runa"},
+                                             broken={"runa": "API Error: 401 bad token " + token})
+        with self.assertRaises(RuntimeError) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertNotIn(token, str(cm.exception))
+        self.assertIn("withheld", str(cm.exception))
+        self.assertEqual([], [ln for ln in logged if token in ln],
+                         "the seat token reached the journal")
+
+    def test_a_withheld_diagnostic_still_parks_on_a_rate_limit(self):
+        """Classification and the reset parse must read the RAW text: withholding it from the
+        exception is a publication decision, and must not turn a park into an ordinary
+        failure that bills the PR an attempt."""
+        self.m.subprocess.run = self._runner(refusing={"runa", "runb", "runc"},
+                                             cat_hangs={"runa", "runb", "runc"})
+        with self.assertRaises(self.m.RateLimited) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertTrue(self.m.seat_parked("a"))
+        self.assertIn("withheld", str(cm.exception))
+        self.assertNotIn("weekly limit", str(cm.exception))
 
 
 def _load_probe():

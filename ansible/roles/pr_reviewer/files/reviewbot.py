@@ -1218,14 +1218,16 @@ def seat_secrets(seat, remaining):
     return [], False
 
 
-def scan_output(seat, text, remaining):
+def scan_output(seat, text, remaining, pre=None):
     """Refuse output carrying the seat's credential; count a scan that could not run.
 
     Mistake prevention, not tamper-proof - an encoding model defeats a substring scan. Counted
     rather than raised when unreadable: failing the review would let a permissions mistake
     block every PR, which is a worse outcome than a logged gap (and 'I could not check' has to
-    be VISIBLE, which is the whole reason the skip counter exists)."""
-    secrets, readable = seat_secrets(seat, remaining)
+    be VISIBLE, which is the whole reason the skip counter exists). `pre` is the (secrets,
+    readable) pair _run_llm read before the model ran; None reads now (the codex path with no
+    isolated user, unchanged)."""
+    secrets, readable = pre if pre is not None else seat_secrets(seat, remaining)
     if not readable:
         bump_meta("llm_credscan_skipped_total")
         log(f"credential scan SKIPPED for seat '{seat}': no credential file readable under "
@@ -1270,26 +1272,36 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
             return a
         return ["sudo", "-n", "-u", sudo_user, f"HOME={seat_home(seat)}"] + a
 
-    _secrets = None
+    # THE SEAT'S SECRETS ARE READ BEFORE THE MODEL RUNS, and once. A failing run's
+    # stdout/stderr goes through llm_error_text() into the journal (shipped to Loki) and the
+    # job note, and a CLI that echoes a malformed token in its error - Python's own header
+    # validation does exactly that - would put it there. The first cut read them lazily on the
+    # error path with whatever budget was left, and when that read failed it published the
+    # original text: it failed OPEN precisely when a near-deadline run had spent the budget
+    # (reviewer-codex on ailab#777). Now the read cannot compete with the run for budget, and a
+    # read that fails WITHHOLDS the diagnostic rather than publishing it unscrubbed. The same
+    # read serves the post-run scan, so an isolated seat is read exactly once per invocation.
+    # Only an isolated seat has a credential of its own; the service user's protection is
+    # the tool-denial list in claude_args, unchanged.
+    secrets, readable = [], True
+    if sudo_user:
+        try:
+            secrets, readable = seat_secrets(seat, remaining)
+        except Exception as e:
+            log(f"seat '{seat}': credential read failed before the run ({e}); any failure "
+                f"text from this run will be withheld rather than posted unscrubbed")
+            secrets, readable = [], False
 
     def scrub(s):
-        """Redact the seat's credential from text bound for an exception or the journal.
-
-        A failing run's stdout/stderr goes through llm_error_text() into the journal (which
-        ships to Loki) and the job note BEFORE any scan, and a CLI that echoes a malformed
-        token in its error - Python's own header validation does exactly that - would put it
-        there (codex review of PR 1). Read once per invocation, and never allowed to change
-        the error class: a secrets read that itself fails (budget gone, sudo broken) leaves
-        the text as it was rather than replacing the real failure with its own."""
-        nonlocal _secrets
+        """The text as it may be published. NEVER used for classification - RATE_LIMIT_RE,
+        MODEL_LIMIT_RE and parse_reset read the raw text, because withholding is a
+        publication decision and must not turn a park into an ordinary failure."""
         if not sudo_user:
             return s
-        if _secrets is None:
-            try:
-                _secrets = seat_secrets(seat, remaining)[0]
-            except Exception:
-                _secrets = []
-        for sec in _secrets:
+        if not readable:
+            return ("[llm error text withheld: the seat's credential could not be read, so "
+                    "the text could not be scrubbed - check the seat's home and permissions]")
+        for sec in secrets:
             s = s.replace(sec, "<redacted>")
         return s
 
@@ -1415,17 +1427,18 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
             # from the username: a seat whose credential lives elsewhere would otherwise be
             # scanned at a path that does not exist - which used to fail OPEN, silently; the
             # skip counter inside scan_output is what made that visible.
-            scan_output(seat, text, remaining)
+            scan_output(seat, text, remaining, pre=(secrets, readable) if sudo_user else None)
         else:
             fb = CFG.get("llm_fallback_model") or ""
             if r.returncode != 0:
-                detail = err(r)
+                raw = llm_error_text(r.returncode, r.stdout, r.stderr)
                 # ORDER IS THE WHOLE POINT. A model-scoped limit falls through to the
                 # fallback below (a different model on the same account still serves); only
                 # an account-scoped one parks, because there the fallback shares the budget
                 # that is already gone and retrying it just burns more of it.
-                if not MODEL_LIMIT_RE.search(detail) and RATE_LIMIT_RE.search(detail):
-                    raise RateLimited(detail, parse_reset(detail))
+                # Classified on RAW text; raised with the publishable text (see scrub).
+                if not MODEL_LIMIT_RE.search(raw) and RATE_LIMIT_RE.search(raw):
+                    raise RateLimited(scrub(raw), parse_reset(raw))
             if r.returncode != 0:
                 # A primary failure that the fallback RESCUES is invisible today:
                 # llm_failures_total counts whole reviews, and a rescued review is not a
@@ -1465,9 +1478,10 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
             # The same pre-post scan the codex branch runs, for the same reason: the seat's
             # token sits in a HOME the model runs from, and the output is about to be posted.
             # Only an ISOLATED seat has a credential of its own to scan for; the single-seat
-            # host runs as the service user, whose protection is --disallowedTools, unchanged.
+            # host runs as the service user, whose protection is the tool-denial list in
+            # claude_args, unchanged.
             if sudo_user:
-                scan_output(seat, text, remaining)
+                scan_output(seat, text, remaining, pre=(secrets, readable))
     finally:
         # STRICTLY non-propagating. `except OSError` did not cover the TimeoutExpired the 60s
         # `rm -rf` can raise, and an exception escaping a `finally` REPLACES whatever the
