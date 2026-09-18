@@ -490,9 +490,13 @@ spec:
         # every seat's windows from the API each hour (plans/2026-09-18-claude-seat-rotation-plan.md);
         # when its probe fails, the parks fall back to refusal-text guesses and the usage panels
         # go stale, and nothing else notices - reviews keep landing until the window closes.
-        # 3h = three consecutive failed polls, so one transient 401 (an access token the CLI
-        # refreshes on its next run as that seat) never pages. The series exists only on hosts
-        # with the watchdog on, so the codex host cannot fire this.
+        # 3h = three consecutive failed polls, so one transient failure never pages. An EXPIRED
+        # browser login is not one of those any more: the poll renews it with one CLI run as
+        # the seat (the keepalive, pr_reviewer_usage_keepalive) and probes again in the same
+        # pass - seats a and b answered 401 for hours on 2026-09-18 because, parked and never
+        # chosen, nothing ran the CLI as them. So 3h of this is a credential the keepalive
+        # could not renew. The series exists only on hosts with the watchdog on, so the codex
+        # host cannot fire this.
         - alert: ReviewbotUsageProbeFailing
           expr: reviewbot_llm_usage_probe_ok == 0
           for: 3h
@@ -502,11 +506,14 @@ spec:
             description: >-
               The usage probe for seat {{ $labels.seat }} on {{ $labels.instance }} has failed for
               3h (three polls). Rotation still works on refusal text, but the parks are 15-minute
-              guesses again and the usage panels are stale for this seat. Almost always the seat's
-              credential: a revoked or expired browser login answers 401, a setup-token answers
-              403 (no user:profile scope). Read the error with `sudo -n -u <seat user>
-              HOME=/home/<seat user> /usr/local/lib/reviewbot/claude-usage.py` on the host, then
-              re-login the seat with /home/c4/seat-login.sh (runbook, Seats on reviewer-1).
+              guesses again and the usage panels are stale for this seat. Each poll already ran
+              the keepalive for an expired login (one CLI run as the seat, then a re-probe), so
+              this is a credential that run could not renew: a revoked browser login answers 401,
+              a setup-token answers 403 (no user:profile scope). Check
+              `journalctl -u reviewbot | grep keepalive` and
+              reviewbot_llm_seat_keepalive_failures_total, read the error with `sudo -n -u <seat
+              user> HOME=/home/<seat user> /usr/local/lib/reviewbot/claude-usage.py` on the host,
+              then re-login the seat with /home/c4/seat-login.sh (runbook, Seats on reviewer-1).
         - alert: ReviewbotRateLimited
           expr: increase(reviewbot_llm_rate_limited_total[1h]) >= 3
           for: 10m

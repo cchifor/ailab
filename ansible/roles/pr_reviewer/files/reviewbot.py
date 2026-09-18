@@ -882,6 +882,12 @@ for _s in SEATS:
     _unique.append(_s)
 SEATS = _unique or [{"name": "default", "sudo_user": CFG.get("llm_sudo_user") or ""}]
 SEAT_BY_NAME = {s["name"]: s for s in SEATS}
+# ONE CLI PER SEAT AT A TIME. run_llm holds a seat's lock for the whole model run and the usage
+# poll's keepalive holds it for its CLI run (non-blocking: a seat it cannot take is a seat whose
+# CLI is renewing its own token, so it is skipped). Two CLIs renewing one credential file at
+# once is the race this prevents; a flag read once before a 60s call was a TOCTOU (both
+# personas on ailab#786).
+SEAT_LOCKS = {s["name"]: threading.Lock() for s in SEATS}
 # CAPTURED BEFORE ANY FILTERING, and never recomputed. reviewbot_llm_seats_total is read
 # against reviewbot_llm_seats_distinct to show that usable capacity is LESS than what was
 # configured; deriving both from the post-resolution list makes them identical by
@@ -1047,6 +1053,13 @@ def seat_home(seat):
 # credential and answers with the account identity and the usage windows, so the service user
 # never holds a seat's token to learn who the seat is - the same isolation _run_llm keeps.
 USAGE_PROBE = "/usr/local/lib/reviewbot/claude-usage.py"
+KEEPALIVE_PROMPT = "ok"
+
+
+def seat_lock(name):
+    """The seat's CLI reservation (see SEAT_LOCKS). A seat resolve_seats() dropped, or a name
+    from a test, still gets one rather than a KeyError."""
+    return SEAT_LOCKS.setdefault(name, threading.Lock())
 
 
 def probe_usage(seat, timeout=30):
@@ -1076,6 +1089,74 @@ def usage_poller_enabled():
         return int(CFG.get("usage_poll_s") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def keepalive_enabled():
+    v = CFG.get("usage_keepalive", True)
+    if isinstance(v, str):
+        return v.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(v)
+
+
+def credential_expired(doc, now=None):
+    """The probe says this seat is a browser login whose ACCESS TOKEN is past its expiry. Only
+    that: a setup-token has no expiry and no refresh, and a 401 on a login that is still
+    within its expiry is a revocation - nothing a CLI run renews."""
+    now = time.time() if now is None else now
+    cred = doc.get("credential") if isinstance(doc, dict) else None
+    if not isinstance(cred, dict) or cred.get("source") != "login":
+        return False
+    exp = cred.get("expires_at")
+    return isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp <= now
+
+
+def keepalive(seat):
+    """One minimal CLI run AS the seat, so the CLI renews and persists the seat's token.
+
+    A browser login's access token lives ~7-8h and ONLY the CLI refreshes it, when it runs as
+    that seat. Seat choice is sticky, so a seat that is parked - or merely not chosen - is
+    never run, its token expires, and the probe answers 401 for as long as that lasts (seats
+    a and b, 2026-09-18: 401 from 19:10Z, nothing to renew them). The CLI refreshes BEFORE
+    its API call, so as a parked seat the call is refused (429) at zero cost and the token is
+    renewed all the same; an idle unparked seat spends one tiny turn per expiry. The same
+    isolated-user prefix and wrapper _run_llm uses; stdin is /dev/null so a CLI that grows an
+    interactive prompt reads EOF instead of hanging; output is discarded, never published.
+    Returns whether the CLI exited 0 - which is NOT whether the token was renewed: the caller
+    probes again and lets the probe decide - or None when the seat's lock is held, i.e. a
+    review's CLI is running as this seat right now and renews the token itself."""
+    s = SEAT_BY_NAME.get(seat) if isinstance(seat, str) else seat
+    name = s["name"]
+    lock = seat_lock(name)
+    if not lock.acquire(blocking=False):
+        log(f"usage: seat '{name}' login expired, but a review is running as it - left to that CLI")
+        return None
+    try:
+        model = str(CFG.get("usage_keepalive_model") or "haiku")
+        try:
+            timeout = float(CFG.get("usage_keepalive_timeout_s") or 60)
+        except (TypeError, ValueError):
+            timeout = 60.0
+        args = list(CFG["llm_cmd"]) + ["-p", KEEPALIVE_PROMPT, "--model", model, "--max-turns", "1",
+                                       "--output-format", "json"]
+        user = s.get("sudo_user") or ""
+        if user:
+            args = ["sudo", "-n", "-u", user, f"HOME={seat_home(s)}"] + args
+        env = {k: v for k, v in os.environ.items() if k not in ("GITEA_TOKEN",)}
+        bump_meta(f"seat_keepalives_total.{name}")
+        try:
+            r = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                               timeout=timeout, env=env)
+            ok, why = r.returncode == 0, f"exit {r.returncode}"
+        except subprocess.TimeoutExpired:
+            ok, why = False, f"timeout after {timeout:.0f}s"
+        except Exception as e:
+            ok, why = False, f"{type(e).__name__}: {e}"
+    finally:
+        lock.release()
+    if not ok:
+        bump_meta(f"seat_keepalive_failures_total.{name}")
+    log(f"usage: seat '{name}' login expired; keepalive run as the seat ({why})")
+    return ok
 
 
 def tiers_for(display):
@@ -1152,10 +1233,14 @@ def apply_usage(seat, doc, now=None):
             RATE_LIMITED_UNTIL = all_parked_until(now)
         for key in counters:
             bump_meta(key)
+    cred = doc.get("credential")
     USAGE_SNAPSHOT[seat] = {"ok": ok, "ts": now,
                    "account": (doc.get("account") if ok and doc.get("account")
                                else prev.get("account") or {}),
-                   "limits": limits if ok else (prev.get("limits") or {})}
+                   "limits": limits if ok else (prev.get("limits") or {}),
+                   # Read from the seat's files, so it is there on a 401 too - that is when
+                   # the keepalive needs it.
+                   "credential": cred if isinstance(cred, dict) else (prev.get("credential") or {})}
 
 
 def rebalance(now=None):
@@ -1187,6 +1272,23 @@ def poll_usage(now=None):
             doc = probe_usage(s)
         except Exception as e:
             doc = {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
+        # A FAILED probe on an expired login gets ONE keepalive and ONE more probe, per poll.
+        # The 401 is the trigger, not the clock alone: server-side leeway or clock skew can
+        # keep usage flowing on a token the file calls expired (reviewer-claude on ailab#786).
+        # Shielded like the probe and apply_usage around it, so one seat's sqlite hiccup does
+        # not skip the poll for the rest. keepalive() answers None when a review's CLI holds
+        # the seat; nothing to re-probe then.
+        if keepalive_enabled() and not doc.get("ok") and credential_expired(doc, now):
+            try:
+                ran = keepalive(s)
+            except Exception as e:
+                ran = None
+                log(f"usage: seat '{s['name']}' keepalive failed: {e}")
+            if ran is not None:
+                try:
+                    doc = probe_usage(s)
+                except Exception as e:
+                    doc = {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
         try:
             apply_usage(s["name"], doc, now)
         except Exception as e:
@@ -1442,7 +1544,10 @@ def run_llm(title, desc, diff_text, rubric=""):
                 use_model(model)
             tried.add((seat, model))
             try:
-                out = _run_llm(title, desc, diff_text, rubric, started, seat, model)
+                # The seat is reserved for the whole run (SEAT_LOCKS). A keepalive in flight
+                # holds it for at most its timeout; this waits it out rather than racing it.
+                with seat_lock(seat):
+                    out = _run_llm(title, desc, diff_text, rubric, started, seat, model)
                 # THE COUNTERPART TO seat_parks_total, and the only way to tell a seat that is
                 # merely busy from one that can never serve. Bumped on the return path, so it
                 # means "this seat produced a usable review", not "this seat was selected".
@@ -2412,6 +2517,8 @@ def write_metrics():
                 "SELECT k,v FROM meta WHERE k LIKE 'seat_reviews_total.%'")}
             _mparks = {r[0]: r[1] for r in c.execute(
                 "SELECT k,v FROM meta WHERE k LIKE 'model_parks_total.%'")}
+            _keeps = {r[0]: r[1] for r in c.execute(
+                "SELECT k,v FROM meta WHERE k LIKE 'seat_keepalive%'")}
             c.close()
         now = time.time()
         # Escape ONCE for every emission. persona is operator-set config like repo,
@@ -2458,6 +2565,14 @@ def write_metrics():
                 lines.append(f'reviewbot_llm_seat_reviews_total'
                              f'{{persona="{_persona}",seat="{_sn}"}} '
                              f'{float(_serves.get("seat_reviews_total." + _s["name"], 0) or 0):.0f}')
+                # The keepalive: how often an expired login was renewed by a CLI run, and how
+                # often that run itself failed. Zero for every seat, so a rate() has a base.
+                lines.append(f'reviewbot_llm_seat_keepalives_total'
+                             f'{{persona="{_persona}",seat="{_sn}"}} '
+                             f'{float(_keeps.get("seat_keepalives_total." + _s["name"], 0) or 0):.0f}')
+                lines.append(f'reviewbot_llm_seat_keepalive_failures_total'
+                             f'{{persona="{_persona}",seat="{_sn}"}} '
+                             f'{float(_keeps.get("seat_keepalive_failures_total." + _s["name"], 0) or 0):.0f}')
             except (TypeError, ValueError):
                 pass
         # CONFIGURED vs USABLE. These must come from different places or the difference is
@@ -2499,6 +2614,14 @@ def write_metrics():
             _sn = _label(_s["name"])
             lines.append(f'reviewbot_llm_usage_probe_ok{{persona="{_persona}",seat="{_sn}"}} '
                          f'{1 if _snap.get("ok") else 0}')
+            # When the login's access token expires (0: a setup-token, or unknown). Past this
+            # the seat's next poll renews it; a value that stays in the past is a login the
+            # keepalive could not renew.
+            _cred = _snap.get("credential") or {}
+            _exp = _cred.get("expires_at") if isinstance(_cred, dict) else None
+            _exp = float(_exp) if isinstance(_exp, (int, float)) and not isinstance(_exp, bool) else 0.0
+            lines.append(f'reviewbot_llm_seat_credential_expires_at_seconds'
+                         f'{{persona="{_persona}",seat="{_sn}"}} {_exp:.0f}')
             lines.append(f'reviewbot_llm_usage_probe_timestamp_seconds{{persona="{_persona}",'
                          f'seat="{_sn}"}} {float(_snap.get("ts") or 0):.0f}')
             _acct = _snap.get("account") or {}

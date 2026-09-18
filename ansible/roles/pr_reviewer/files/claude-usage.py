@@ -25,6 +25,14 @@ answered - each endpoint is guarded on its own, so a token with one scope but no
 still yields whatever it can. `resets_at` is an epoch or null. Unknown `kind`s pass through
 untouched - the caller decides.
 
+    "credential": {"source": "login" | "token" | "none", "expires_at": 1789000000 | null}
+
+names WHICH credential was used and, for a browser login, when its access token expires (the
+CLI stores `expiresAt` in epoch milliseconds; epoch seconds here). It is filled whatever the
+API answered: reviewbot's keepalive decides from it whether a 401 is an expired login - which
+one CLI run as the seat renews - or something a re-login must fix. A setup-token has no
+expiry and no refresh, so it is never "expired" here.
+
 THE DOCUMENT NEVER CARRIES THE CREDENTIAL. A token is validated before it is used (whitespace
 inside it would make http.client raise `ValueError: Invalid header value b'Bearer <token>'` -
 an exception whose text IS the secret), and exception text reaches the document only for the
@@ -64,6 +72,14 @@ def read_credential(home):
     CredentialError when one exists but is unusable - not UTF-8, not JSON, whitespace inside.
     An EMPTY token file falls through to the login beside it, the same rule reviewbot's
     seat_secrets() applies."""
+    return credential(home)[0]
+
+
+def credential(home):
+    """(token, source, expires_at): the token read_credential() returns, which file it came
+    from ("token" = oauth-token, "login" = .credentials.json, "none"), and the login's expiry
+    as epoch seconds (None for a token, or a login whose expiresAt is missing or unreadable).
+    """
     try:
         with open(os.path.join(home, ".claude", "oauth-token"), encoding="utf-8") as f:
             raw = f.read()
@@ -74,19 +90,31 @@ def read_credential(home):
     if raw is not None:
         tok = _clean(raw)
         if tok:
-            return tok
+            return tok, "token", None
     try:
         with open(os.path.join(home, ".claude", ".credentials.json"), encoding="utf-8") as f:
             d = json.load(f)
     except OSError:
-        return None
+        return None, "none", None
     except ValueError:
         raise CredentialError("credential malformed: .credentials.json is not UTF-8 JSON")
     if not isinstance(d, dict):
         raise CredentialError("credential malformed: .credentials.json is not an object")
-    tok = (d.get("claudeAiOauth") or {}).get("accessToken") if isinstance(
-        d.get("claudeAiOauth"), dict) else None
-    return _clean(tok) if isinstance(tok, str) else None
+    o = d.get("claudeAiOauth") if isinstance(d.get("claudeAiOauth"), dict) else {}
+    tok = o.get("accessToken")
+    tok = _clean(tok) if isinstance(tok, str) else None
+    if not tok:
+        return None, "none", None
+    return tok, "login", login_expiry(o.get("expiresAt"))
+
+
+def login_expiry(v):
+    """The CLI's expiresAt (epoch MILLISECONDS) as epoch seconds; seconds pass through; anything
+    that is not a positive number is None - the caller then treats the login as never expired,
+    which is the pre-keepalive behaviour."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+        return None
+    return int(v / 1000.0) if v > 1e11 else int(v)
 
 
 def iso_epoch(s):
@@ -127,15 +155,17 @@ def fetch(url, token):
 
 
 def probe(home, http=fetch):
-    doc = {"ok": False, "error": "", "account": {}, "limits": []}
+    doc = {"ok": False, "error": "", "account": {}, "limits": [],
+           "credential": {"source": "none", "expires_at": None}}
     try:
-        token = read_credential(home)
+        token, source, expires_at = credential(home)
     except CredentialError as e:
         doc["error"] = str(e)
         return doc
     except Exception as e:
         doc["error"] = "credential unreadable: " + _describe(e)
         return doc
+    doc["credential"] = {"source": source, "expires_at": expires_at}
     if not token:
         doc["error"] = f"no credential under {home}/.claude (oauth-token or .credentials.json)"
         return doc
@@ -185,7 +215,8 @@ def main():
     try:
         doc = probe(home)
     except Exception as e:  # the contract is one document and exit 0, whatever happened
-        doc = {"ok": False, "error": "probe crashed: " + _describe(e), "account": {}, "limits": []}
+        doc = {"ok": False, "error": "probe crashed: " + _describe(e), "account": {}, "limits": [],
+               "credential": {"source": "none", "expires_at": None}}
     print(json.dumps(doc))
     return 0
 

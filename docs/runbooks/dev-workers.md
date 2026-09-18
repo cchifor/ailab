@@ -393,11 +393,33 @@ unparks seats and tiers from the API's own `percent`/`resets_at` (a window at 10
 its reset, below 100 % clears the park whatever text-derived guess set it), then climbs to the
 best tier that is free anywhere. It never moves within a tier. A park that lapses on its own
 (or a transient non-limit failure, which parks nothing) lets the next review try the higher
-tier again by itself — a refused call costs nothing and is what keeps a parked seat's credential
-fresh. Parks stay clamped to 6 h and the next poll re-extends them, so a dead poller cannot
-leave a week-long park behind. Read it on the AI Lab
-Fleet dashboard: *Active Claude Account* (email), *Active Claude Model*, *Claude Usage per
-Account*, *Time to Reset*, *Tier Parked per Seat*; in the journal: `grep -E "usage|climbing|limited"`.
+tier again by itself — a refused call costs nothing. Parks stay clamped to 6 h and the next
+poll re-extends them, so a dead poller cannot leave a week-long park behind. Read it on the AI
+Lab Fleet dashboard: *Active Claude Account* (email), *Active Claude Model*, *Usage Probe*,
+*Claude Seats — usage per account and window* (one row per account, with *Login valid until*),
+*Parked per Seat — account and per tier*; in the journal: `grep -E "usage|climbing|limited"`.
+
+**The credential keepalive** (`pr_reviewer_usage_keepalive: true`, part of the poll). A browser
+login's access token lives ~7–8 h and ONLY the CLI renews it, when it runs as that seat. The
+2026-09-18 assumption that "a refused call keeps a parked seat's credential fresh" was wrong for
+a seat that is never chosen: selection is sticky, so seats a and b — parked on their weekly
+walls while c served — were never run, their tokens expired (18:30Z, 18:48Z) and their probes
+answered `profile: HTTP 401; usage: HTTP 401` from 19:10Z on, with nothing to renew them.
+`claude auth status` does not refresh. What does: any non-interactive CLI call — the CLI renews
+the token BEFORE its API request and persists it even when that request is then refused. So
+when the probe reports an expired login, the poll runs `claude-seat.sh -p ok --model haiku
+--max-turns 1 --output-format json` as that seat (stdin closed, output discarded, 60 s
+timeout), then probes again; measured on seat a: 2 s, refused with 429 at zero cost, token
+renewed. Never for a setup-token (no expiry, no refresh); only after the probe actually failed
+(a 401, not the clock alone); never while a review's CLI is running as that seat — both paths
+hold a per-seat lock (`SEAT_LOCKS`), so a review that rotates onto a seat mid-keepalive waits
+for it (≤ 60 s) instead of racing it on the credential file; once per poll. Journal:
+`grep keepalive`; metrics: `reviewbot_llm_seat_credential_expires_at_seconds`,
+`reviewbot_llm_seat_keepalives_total`, `reviewbot_llm_seat_keepalive_failures_total`.
+`ReviewbotUsageProbeFailing` (3 h) therefore now means a login the keepalive could NOT renew —
+revoked, or a CLI that changed its non-interactive behaviour — and the answer is a re-login.
+Manual equivalent: `sudo -n -u <seat user> env HOME=/home/<seat user> claude -p ok --model
+haiku --max-turns 1 --output-format json`.
 If `ReviewbotUsageProbeFailing` fires, the seat's login is what needs attention (401 = expired
 or revoked, 403 = a token file without `user:profile`) — re-login as above.
 
