@@ -4323,6 +4323,25 @@ class UnattendedCiGuardTest(unittest.TestCase):
         self.assertEqual("COMMENT", self.posted[0]["event"])
         self.assertIn("unattended", self.posted[0]["body"].lower())
 
+    def test_a_c_quoted_workflow_path_is_guarded(self):
+        """reviewer-codex on ailab#782, round 3: git C-quotes header paths that carry quotes,
+        tabs or non-ASCII (`diff --git "a/..." "b/..."`); a regex anchored on `a/` never saw
+        them, and an unattended author could add a workflow under such a name unguarded. The
+        headers are parsed by the same helper the coverage planner uses."""
+        quoted = (b'diff --git "a/.gitea/workflows/t\\303\\251st.yml" "b/.gitea/workflows/t\\303\\251st.yml"\n'
+                  b'--- "a/.gitea/workflows/t\\303\\251st.yml"\n+++ "b/.gitea/workflows/t\\303\\251st.yml"\n'
+                  b"@@ -1,1 +1,1 @@\n-run: pytest\n+run: true\n")
+        self._drive("dsh", quoted)
+        self.assertEqual("COMMENT", self.posted[0]["event"])
+        self.assertIn(".gitea/workflows/t", self.posted[0]["body"])
+
+    def test_a_c_quoted_rename_into_the_workflow_dir_is_guarded(self):
+        quoted = (b'diff --git "a/ci/t\\303\\251st.yml" "b/.gitea/workflows/t\\303\\251st.yml"\n'
+                  b'similarity index 100%\nrename from "ci/t\\303\\251st.yml"\n'
+                  b'rename to ".gitea/workflows/t\\303\\251st.yml"\n')
+        self._drive("dsh", quoted)
+        self.assertEqual("COMMENT", self.posted[0]["event"])
+
     def test_an_unattended_author_outside_guarded_paths_is_approved(self):
         self._drive("dsh", PLAIN_DIFF)
         self.assertEqual("APPROVED", self.posted[0]["event"])

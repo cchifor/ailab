@@ -1936,22 +1936,21 @@ def merge_author_ok(repo, author):
     return a in allowed
 
 
-DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$", re.M)
-RENAME_RE = re.compile(r"^rename (?:from|to) (.+)$", re.M)
-
-
-def diff_paths(text):
-    """Every path a unified diff touches, from the FILE HEADERS - both sides of every
-    `diff --git` line and both rename endpoints - never from the hunks: a pure rename carries
-    no hunk at all, so a guard fed from commentable positions never saw a workflow renamed
-    INTO place (reviewer-codex on ailab#782)."""
-    paths = set()
-    for m in DIFF_HEADER_RE.finditer(text or ""):
-        paths.add(m.group(1).strip())
-        paths.add(m.group(2).strip())
-    for m in RENAME_RE.finditer(text or ""):
-        paths.add(m.group(1).strip())
-    return {unquote_path(x) if x.startswith('"') else x for x in paths if x}
+def diff_paths(raw):
+    """Every path a unified diff touches, both sides of every per-file section, read by the
+    SAME parser the coverage planner uses (split_sections/section_paths): git C-quotes a
+    header path that carries a quote, a tab or non-ASCII (`diff --git "a/..." "b/..."`), and a
+    regex anchored on `a/` never saw those - an unattended author could have added a workflow
+    under such a name unguarded (reviewer-codex on ailab#782). Never from the hunks: a pure
+    rename carries no hunk at all. A diff the parser refuses yields no paths; review_job has
+    already posted a skip for that shape before the guard runs."""
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", "surrogateescape")
+    try:
+        sections = split_sections(raw)
+    except ValueError:
+        return set()
+    return {p for sec in sections for p in (sec.get("a"), sec.get("b")) if p}
 
 
 def guard_findings(author, paths):
@@ -2198,7 +2197,7 @@ def review_job(job_id, repo, pr, head_sha):
     # max_comments findings only, and a guard appended after a full set of model findings was
     # blocking the verdict invisibly (reviewer-codex on ailab#782).
     out["findings"] = guard_findings(
-        author, diff_paths(diff) | {p for p, _r, _n in dropped}) + list(out.get("findings") or [])
+        author, diff_paths(diff_bytes) | {p for p, _r, _n in dropped}) + list(out.get("findings") or [])
     comments, demoted, hallucinated = [], [], 0
     for f in out["findings"][:CFG["max_comments"]]:
         try:
