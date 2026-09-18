@@ -1005,15 +1005,21 @@ def park_model(seat, model, reset_at, unserveable=False):
     # fact about the INSTALLED CLI, shared by every seat - parking it per seat would pay one
     # doomed 404 per seat before the ladder descended, every time the parks lapsed
     # (reviewer-claude on ailab#781).
-    keys = [(s["name"], model) for s in SEATS] if unserveable else [(seat, model)]
+    keys = [(s["name"], model) for s in SEATS] if unserveable else []
+    if (seat, model) not in keys:
+        # ALWAYS the refusing pair too: a seat pruned by a reload between the refusal and this
+        # call is not in SEATS, and indexing it below would KeyError inside run_llm's handler
+        # instead of parking (reviewer-claude on ailab#781, round 2).
+        keys.append((seat, model))
     table = MODEL_UNSERVED_UNTIL if unserveable else MODEL_PARKED_UNTIL
     with park_lock:
         for key in keys:
             table[key] = max(table.get(key, 0.0), until)
+        deadline = table[(seat, model)]
         RATE_LIMITED_UNTIL = all_parked_until()
     for key in keys:
         bump_meta(f"model_parks_total.{key[0]}.{model}")
-    left = table[(seat, model)] - time.time()
+    left = deadline - time.time()
     if unserveable:
         log(f"model '{model or '(account default)'}' cannot be served by the installed CLI "
             f"(refused on seat '{seat}'); parking that model on every seat for {left:.0f}s "
@@ -1021,7 +1027,7 @@ def park_model(seat, model, reset_at, unserveable=False):
     else:
         log(f"model '{model or '(account default)'}' limited on seat '{seat}'; parking that "
             f"pair for {left:.0f}s (queue left intact)")
-    return table[(seat, model)]
+    return deadline
 
 
 def seat_home(seat):

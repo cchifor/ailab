@@ -3827,6 +3827,16 @@ class ModelLadderTest(unittest.TestCase):
             self.assertEqual(0.0, self.m.MODEL_PARKED_UNTIL[(seat, "fable")],
                              "an unserveable model is not a spent window: its own table")
 
+    def test_an_unserveable_park_for_a_seat_no_longer_configured_still_parks_and_returns(self):
+        """reviewer-claude on ailab#781, round 2: the CLI-wide key list came from SEATS and the
+        refusing seat was then indexed unconditionally - a seat pruned by a reload between the
+        refusal and the park would KeyError inside run_llm's handler instead of parking."""
+        now = real_time.time()
+        deadline = self.m.park_model("zed", "fable", now + self.m.MAX_PARK_S, unserveable=True)
+        self.assertGreaterEqual(deadline - now, self.m.MAX_PARK_S - 5)
+        for seat in "abc":
+            self.assertTrue(self.m.model_parked(seat, "fable"))
+
     def test_the_global_wall_sees_unserveable_parks(self):
         """all_parked_until() reads through seat_usable()/seat_reopens_at(), both of which
         read model_parked_until() - pinned, because an unserveable park that the wall could
