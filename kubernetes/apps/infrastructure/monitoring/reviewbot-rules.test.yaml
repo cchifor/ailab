@@ -752,7 +752,7 @@ tests:
             exp_annotations:
               summary: "reviewbot (claude) is running on its fallback model"
               description: >-
-                The pinned primary model on 192.168.0.24:9100 has failed often enough in 6h that the fallback is carrying the service. Reviews still land, which is exactly why this needs an alert: nothing else changes. `llm_failures_total` counts whole reviews and a rescued review is not a failed one, so reviewer-1 served 463 reviews on its fallback over 4 days (`claude-fable-5` quota, from 2026-09-06 19:17) with no signal but a per-run journal line. Check `journalctl -u reviewbot | grep 'primary model failed'`; if the quota is gone for good, repoint `pr_reviewer_llm_model` rather than leaving every review to pay a doomed first attempt.
+                Reviews on 192.168.0.24:9100 are being served below the top tier of the model ladder often enough in 6h that the fallback is carrying the service - a spent top-tier window on every seat, or a pin the accounts cannot serve. Reviews still land, which is exactly why this needs an alert: nothing else changes (reviewer-1 once served 463 reviews on its fallback over 4 days with no signal but a per-run journal line). Check `reviewbot_llm_model_parked` for the parked (seat, model) pairs and the per-account usage panels for when the top tier reopens; the hourly watchdog climbs back on its own once the API shows it available, so this resolves itself unless every seat is spent on that tier for good - then repoint `pr_reviewer_llm_models` rather than leaving every review to pay a doomed first call.
 
   # ------------------------------------------------------- subscription rate limit
   # `interval: 15m` is THE POINT of this fixture, not a detail: it is the real park cadence
@@ -953,3 +953,39 @@ tests:
                 reviewbot (codex) posted a review without the credential scan
               description: >-
                 The pre-post scan reads the active seat's auth.json and refuses output containing it. On 192.168.0.25:9100 that file could not be read, so review output went out UNSCANNED. Before seats existed this failed silently — an unreadable file made the scan a no-op indistinguishable from one that ran and found nothing — which is why it is counted now. Almost always a seat whose `home` is wrong or whose ~/.codex is not readable by its own user. Fix the seat's home/permissions; the scan is mistake-prevention rather than a security boundary, so this is not an emergency, but it must not be left standing.
+
+  # ---------------------------------------------------------------- usage probe
+  # Three consecutive failed hourly polls page; a healthy seat and a one-hour blip do not.
+  - interval: 1m
+    name: a seat whose usage probe keeps failing pages, a blip does not
+    input_series:
+      - series: 'reviewbot_llm_usage_probe_ok{job="reviewer-node",instance="192.168.0.24:9100",persona="claude",seat="a"}'
+        values: "0x200"
+      - series: 'reviewbot_llm_usage_probe_ok{job="reviewer-node",instance="192.168.0.24:9100",persona="claude",seat="b"}'
+        values: "1x200"
+      # One failed poll: an access token the CLI refreshed on its next run.
+      - series: 'reviewbot_llm_usage_probe_ok{job="reviewer-node",instance="192.168.0.24:9100",persona="claude",seat="c"}'
+        values: "1x50 0x60 1x90"
+    alert_rule_test:
+      - eval_time: 190m
+        alertname: ReviewbotUsageProbeFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+              persona: claude
+              seat: a
+            exp_annotations:
+              summary: "reviewbot (claude) cannot read seat a's usage"
+              description: >-
+                The usage probe for seat a on 192.168.0.24:9100 has failed for
+                3h (three polls). Rotation still works on refusal text, but the parks are 15-minute
+                guesses again and the usage panels are stale for this seat. Almost always the seat's
+                credential: a revoked or expired browser login answers 401, a setup-token answers
+                403 (no user:profile scope). Read the error with `sudo -n -u <seat user>
+                HOME=/home/<seat user> /usr/local/lib/reviewbot/claude-usage.py` on the host, then
+                re-login the seat with /home/c4/seat-login.sh (runbook, Seats on reviewer-1).
+      - eval_time: 100m
+        alertname: ReviewbotUsageProbeFailing
+        exp_alerts: []

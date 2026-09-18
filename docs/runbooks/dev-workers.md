@@ -332,47 +332,68 @@ same `pr_reviewer_llm_seats` rotation as reviewer-2 — sticky selection, lossle
 collapse — after its single account spent a whole weekly window and the persona idled for 21 h
 with 9 jobs queued and 7 PRs merge-blocked on reviewer-2.
 
-| seat | user | account (OpenBao) |
+| seat | user | account (`account.uuid` from the probe; browser login since 2026-09-18) |
 |---|---|---|
-| `a` | `clauderun` | `af/operator/broker/anthropic/claude-max-1/oauth` (shared with the AgentForge brokers) |
-| `b` | `clauderun2` | `…/claude-max-2/oauth` |
-| `c` | `clauderun3` | `…/claude-max-3/oauth` |
+| `a` | `clauderun` | `16976f97…` — the account behind the brokers' `claude-max-1` token |
+| `b` | `clauderun2` | `fe33cddd…` — behind `claude-max-2`; also dev-worker-1's interactive login |
+| `c` | `clauderun3` | `0ce2e93c…` — also dev-worker-4's interactive login; the seat that carried the persona out of the 2026-09-18 outage |
 
 Three things differ from the codex seats:
 
-1. **The credential is a long-lived token, hand-seeded once**, at
-   `/home/<user>/.claude/oauth-token` (0600). It is a `setup-token` credential — no refresh
-   token, no rotation — so one copy cannot revoke another, and the scratch-HOME ceremony codex
-   needs does not apply. Seed from the workstation straight into the seat:
+1. **Each seat is a browser login in its own HOME** (`/home/<user>/.claude/.credentials.json`),
+   made once *as that user*. One login per seat means one refresh-token family per seat, so
+   nothing can invalidate anything else — the hazard that makes codex seeding a ceremony is a
+   hazard of *copies*, and there are none. **Not the OpenBao setup-tokens** the agentforge
+   brokers use: those authenticate for inference but carry only `user:inference`, and
+   `/api/oauth/usage` and `/profile` answer `403 oauth_scope_insufficient` — measured on all
+   three on 2026-09-18, the day the seats went live on them and were moved off them the same
+   afternoon. A seat can still run on a token file (`~/.claude/oauth-token`, which the wrapper
+   prefers when present); such a seat is blind to usage and unknown to the identity collapse.
+
+   **Logging a seat in** — the CLI prompts for a pasted code on stdin, so the flow runs detached
+   with its stdin held open on a fifo (`/home/c4/seat-login.sh`, kept on the host):
    ```
-   bao kv get -field=CLAUDE_CODE_OAUTH_TOKEN af/operator/broker/anthropic/claude-max-1/oauth \
-     | ssh c4@192.168.0.24 'sudo install -o clauderun -g clauderun -m 0600 /dev/stdin /home/clauderun/.claude/oauth-token'
+   ssh c4@192.168.0.24 '/home/c4/seat-login.sh start clauderun2'      # prints the URL to open
+   # sign in as THE SEAT'S ACCOUNT in a private window (a warm browser session reuses the
+   # wrong account silently - it did, on the first attempt), then:
+   ssh c4@192.168.0.24 '/home/c4/seat-login.sh code clauderun2 <pasted code>'
+   ssh c4@192.168.0.24 'sudo -n -u clauderun2 HOME=/home/clauderun2 /usr/local/lib/reviewbot/claude-usage.py'
    ```
-   (repeat for `claude-max-2 → clauderun2`, `claude-max-3 → clauderun3`). The same tokens sit in
-   the cluster as `kubectl --context admin@ai -n agentforge-broker get secret
-   broker-anthropic-max1-oauth -o jsonpath='{.data.CLAUDE_CODE_OAUTH_TOKEN}' | base64 -d` —
-   the Secrets for 2 and 3 are `broker-anthropic-max2-oauth` and
-   `broker-anthropic-claude-max-3-oauth`.
-2. **The entry point is `/usr/local/lib/reviewbot/claude-seat.sh`**, not the CLI: it exports the
-   token from the seat's HOME into `CLAUDE_CODE_OAUTH_TOKEN` and execs `/usr/bin/claude`. sudo
-   resets the environment and shows argv to every process on the host, so the HOME is the only
-   place a token may come from.
+   The last line is the check that matters: `"ok": true` with the expected `email`. Then
+   remove any `oauth-token` left in that HOME so the login is the seat's one credential.
+2. **The entry point is `/usr/local/lib/reviewbot/claude-seat.sh`**, not the CLI: with a token
+   file it exports it into `CLAUDE_CODE_OAUTH_TOKEN` (sudo resets the environment and shows argv
+   to every process, so the HOME is the only place a token may come from); without one it
+   simply execs `/usr/bin/claude`, which uses the seat's login.
 3. **Identity comes from the API, not a file.** `resolve_seats()` runs
    `/usr/local/lib/reviewbot/claude-usage.py` as each seat (`GET /api/oauth/profile` and
    `/usage` — the calls behind the CLI's `/usage`; they consume no quota) and collapses seats
-   that share an `account.uuid`. The same command is the operator's probe:
-   ```
-   ssh c4@192.168.0.24 'sudo -n -u clauderun HOME=/home/clauderun /usr/local/lib/reviewbot/claude-usage.py'
-   ```
-   prints the account's email and every usage window with its percent and reset time. (Do not
-   `claude auth status` as a seat: that reads a browser login, which a seat does not have.)
+   that share an `account.uuid`. The same command is the operator's probe (above): it prints the
+   account's email and every usage window with its percent and reset time.
 
 **Adding or replacing a seat — the same order as codex, for the same reason** (a seat with no
 credential fails as an ordinary error, never parks, and burns the PR's attempts):
 edit `host_vars/reviewer-1.yml` → `ansible-playbook reviewers.yml -l reviewer-1 -t seats`
-(user, 0700 `~/.claude`, sudoers, the two helpers — NO restart) → seed the token as above →
+(user, 0700 `~/.claude`, sudoers, the two helpers — NO restart) → log the seat in as above →
 `-t reviewbot` (or the converge) to restart → `journalctl -u reviewbot | grep "seats:"` shows
 `['a', 'b', 'c']` and the textfile's `reviewbot_llm_seats_distinct{persona="claude"}` reads 3.
+
+**The ladder and the watchdog** (`pr_reviewer_llm_models: [fable, opus, sonnet]`,
+`pr_reviewer_usage_poll_s: 3600`). Selection is tier-major, then the sticky seat, then seat
+order: any seat that can serve `fable` beats the current seat on `opus`. A refusal moves the
+persona DOWN or ACROSS — a model-scoped one (`/usage-credits … switch models`, or a model the
+CLI cannot serve) parks that `(seat, model)` pair and the same tier is tried on the next seat;
+an account-scoped one (`weekly limit`, `session limit`) parks the whole seat; a tier is left only
+when every seat is parked for it, and the descent stays on the sticky seat. Only the hourly
+watchdog moves the persona UP: it runs the probe as every seat, parks and unparks seats and
+tiers from the API's own `percent`/`resets_at` (a window at 100 % parks until its reset, below
+100 % clears the park whatever text-derived guess set it), then climbs to the best tier that is
+free anywhere. It never moves within a tier. Parks stay clamped to 6 h and the next poll
+re-extends them, so a dead poller cannot leave a week-long park behind. Read it on the AI Lab
+Fleet dashboard: *Active Claude Account* (email), *Active Claude Model*, *Claude Usage per
+Account*, *Time to Reset*, *Tier Parked per Seat*; in the journal: `grep -E "usage|climbing|limited"`.
+If `ReviewbotUsageProbeFailing` fires, the seat's login is what needs attention (401 = expired
+or revoked, 403 = a token file without `user:profile`) — re-login as above.
 
 `~/.claude/projects` under each seat grows by one directory per review — the CLI keys them by
 working directory and reviewbot hands it a fresh tmpdir every run; c4's held 1 926 on

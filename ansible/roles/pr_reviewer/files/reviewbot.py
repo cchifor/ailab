@@ -739,6 +739,14 @@ MODEL_LIMIT_RE = re.compile(r"(?=.*\bswitch models?\b)(?=.*/usage-credits\b)", r
 # original pattern parsed nothing and the park fell back to DEFAULT_PARK_S - a 15-minute
 # retry loop against a limit 13 hours from resetting. parse_reset() defaults the group to 0.
 RESET_RE = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?\s*\(?\s*UTC\s*\)?", re.I)
+# The WEEKLY refusal names a date - `resets Sep 20, 11pm (UTC)` - which the time-only pattern
+# above never matched, so every weekly park was the 15-minute default with a doomed re-probe
+# each cycle (measured on all three claude seats, 2026-09-18). Month names as the CLI prints
+# them; an ordinal suffix and the comma are tolerated because codex's wording carries them.
+RESET_DATE_RE = re.compile(r"resets?\s+([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+"
+                           r"(\d{1,2})(?::(\d{2}))?\s*([ap]m)?\s*\(?\s*UTC\s*\)?", re.I)
+MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug",
+                                      "sep", "oct", "nov", "dec"), 1)}
 # Never park longer than this, whatever the text says: a misparse must not wedge the worker.
 MAX_PARK_S = 6 * 3600
 DEFAULT_PARK_S = 900
@@ -757,18 +765,55 @@ RATE_LIMITED_UNTIL = 0.0
 
 
 class RateLimited(RuntimeError):
-    """The subscription is exhausted until `reset_at`. Not the PR's fault."""
+    """A limit refused the run until `reset_at`. Not the PR's fault.
 
-    def __init__(self, message, reset_at=None):
+    `scope` says what is spent: "account" (session/weekly window - the whole seat parks) or
+    "model" (one tier on this seat - the (seat, model) pair parks and the same tier is tried
+    on the next seat). `model` is the tier that was asked for."""
+
+    def __init__(self, message, reset_at=None, scope="account", model=None):
         super().__init__(message)
         self.reset_at = reset_at
+        self.scope = scope
+        self.model = model
+
+
+class ModelError(RuntimeError):
+    """One tier failed for a reason that says nothing about the account (a 5xx, an empty
+    answer, a CLI crash). Nothing parks; run_llm descends a tier on the SAME seat if the budget
+    allows, else it becomes an ordinary failure that bills the attempt."""
+
+
+# A model name the CLI cannot serve at all - a floating alias that stopped resolving, or a
+# versioned pin on a CLI too old for it (`does not support this model; version X or newer is
+# required`). MODEL-scoped and parked for MAX_PARK_S: without this every PR would burn its
+# attempts against a name that never answers.
+MODEL_404_RE = re.compile(r"issue with the selected model|does not support this model", re.I)
 
 
 def parse_reset(text):
     """Epoch of the reset time named in the error, clamped to a sane window.
 
     The CLI gives a wall-clock UTC time with no date ("resets 4:20pm (UTC)"), so a time that
-    has already passed today means tomorrow."""
+    has already passed today means tomorrow. The dated weekly form ("resets Sep 20, 11pm
+    (UTC)") is taken as this year, or next year if that day is already more than a day gone."""
+    d = RESET_DATE_RE.search(text or "")
+    if d and d.group(1).lower() in MONTHS:
+        mon, day = MONTHS[d.group(1).lower()], int(d.group(2))
+        hour, minute, ampm = int(d.group(3)), int(d.group(4) or 0), (d.group(5) or "").lower()
+        if ampm == "pm" and hour != 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+        if 0 <= hour <= 23 and 0 <= minute <= 59 and 1 <= day <= 31:
+            year = time.gmtime().tm_year
+            try:
+                at = calendar.timegm((year, mon, day, hour, minute, 0, 0, 0, 0))
+                if at < time.time() - 86400:
+                    at = calendar.timegm((year + 1, mon, day, hour, minute, 0, 0, 0, 0))
+                return at
+            except (OverflowError, ValueError):
+                pass
     m = RESET_RE.search(text or "")
     if not m:
         return None
@@ -845,6 +890,91 @@ SEAT_PARKED_UNTIL = {s["name"]: 0.0 for s in SEATS}
 # 15 minutes - round-robin's synchronised-exhaustion failure reached by another route.
 CURRENT_SEAT = SEATS[0]["name"]
 
+# ── model ladder ─────────────────────────────────────────────────────────────────────────
+# Ordered tiers, tier-major: any seat that can serve MODELS[0] beats the current seat on
+# MODELS[1]. EMPTY llm_models IS THE LEGACY PIN PAIR - [llm_model, llm_fallback_model] minus
+# blanks - so the single-pin host and codex run the same statements as a three-tier one, and a
+# host with no pin at all gets one tier named "" (the account default), which claude_args
+# renders as no --model flag exactly as before.
+def _models():
+    out = []
+    for m in (CFG.get("llm_models") or []):
+        if isinstance(m, str) and m.strip() and m.strip() not in out:
+            out.append(m.strip())
+    if not out:
+        for m in (CFG.get("llm_model"), CFG.get("llm_fallback_model")):
+            if isinstance(m, str) and m.strip() and m.strip() not in out:
+                out.append(m.strip())
+    return out or [""]
+
+
+MODELS = _models()
+# Per (seat, model) park table beside the per-seat one: a MODEL-scoped refusal parks a pair,
+# an ACCOUNT-scoped one parks the seat. Pre-seeded and fixed-size like SEAT_PARKED_UNTIL, for
+# the same metrics-thread reason.
+MODEL_PARKED_UNTIL = {(s["name"], m): 0.0 for s in SEATS for m in MODELS}
+CURRENT_MODEL = MODELS[0]
+# The usage poller's last snapshot per seat (None until the first poll). Replaced by
+# assignment, never mutated in place, so the metrics thread reads a consistent object.
+USAGE_SNAPSHOT = {s["name"]: None for s in SEATS}
+
+
+def tier_index(model):
+    return MODELS.index(model) if model in MODELS else len(MODELS)
+
+
+def use_model(model):
+    """The only writer of CURRENT_MODEL."""
+    global CURRENT_MODEL
+    CURRENT_MODEL = model
+
+
+def model_parked(seat, model, now=None):
+    return MODEL_PARKED_UNTIL.get((seat, model), 0.0) > (now if now is not None else time.time())
+
+
+def seat_usable(seat, now=None):
+    """Not account-parked AND at least one tier not model-parked."""
+    now = time.time() if now is None else now
+    return not seat_parked(seat, now) and any(not model_parked(seat, m, now) for m in MODELS)
+
+
+def seat_reopens_at(seat, now=None):
+    """When this seat can next serve SOMETHING: its account wall, or its earliest tier."""
+    return max(SEAT_PARKED_UNTIL.get(seat, 0.0),
+               min(MODEL_PARKED_UNTIL.get((seat, m), 0.0) for m in MODELS))
+
+
+def active_choice(now=None, exclude=()):
+    """The (seat, model) to use: tier-major, then the sticky seat, then seat order.
+
+    Iterates SEATS and MODELS (lists fixed at import), never the park dicts, so a concurrent
+    read from the metrics thread cannot see a mutating sequence."""
+    now = time.time() if now is None else now
+    order = [CURRENT_SEAT] + [s["name"] for s in SEATS if s["name"] != CURRENT_SEAT]
+    for m in MODELS:
+        for seat in order:
+            if seat not in SEAT_BY_NAME or (seat, m) in exclude:
+                continue
+            if not seat_parked(seat, now) and not model_parked(seat, m, now):
+                return seat, m
+    return None
+
+
+def park_model(seat, model, reset_at):
+    """Stop asking ONE tier on ONE seat until its scoped window resets. Same clamps as park(),
+    same lossless contract, its own counter."""
+    global RATE_LIMITED_UNTIL
+    until = reset_at or (time.time() + DEFAULT_PARK_S)
+    until = max(time.time() + 60, min(until, time.time() + MAX_PARK_S))
+    key = (seat, model)
+    MODEL_PARKED_UNTIL[key] = max(MODEL_PARKED_UNTIL.get(key, 0.0), until)
+    bump_meta(f"model_parks_total.{seat}.{model}")
+    RATE_LIMITED_UNTIL = all_parked_until()
+    log(f"model '{model}' limited on seat '{seat}'; parking that pair for "
+        f"{MODEL_PARKED_UNTIL[key] - time.time():.0f}s (queue left intact)")
+    return MODEL_PARKED_UNTIL[key]
+
 
 def seat_home(seat):
     """Where this seat's credential lives.
@@ -887,6 +1017,130 @@ def probe_usage(seat, timeout=30):
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
 
 
+def usage_poller_enabled():
+    try:
+        return int(CFG.get("usage_poll_s") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def tier_for(display):
+    """The configured tier a scoped limit's model display name refers to ("Fable" -> "fable",
+    "Opus" -> "opus" or "claude-opus-5"), or None for a model this host does not run."""
+    d = (display or "").strip().lower()
+    if not d:
+        return None
+    for m in MODELS:
+        ml = m.lower()
+        if ml and (ml in d or d in ml):
+            return m
+    return None
+
+
+def _clamped(until, now):
+    return max(now + 60, min(until, now + MAX_PARK_S))
+
+
+def apply_usage(seat, doc, now=None):
+    """Turn one seat's probe document into parks, unparks and a metrics snapshot.
+
+    THE API'S WORD WINS IN BOTH DIRECTIONS: a window at 100% parks (seat for session/weekly_all,
+    the matching tier for a scoped window) until the reset the API names; a window below 100%
+    CLEARS that park, whatever text-derived guess set it. Verdicts are per SCOPE across all the
+    entries of a document, so a healthy session entry cannot clear a park a spent weekly entry
+    in the same document just set. Parks stay clamped to MAX_PARK_S and the next poll
+    re-extends them, so a dead poller can never leave a 7-day park behind. A failed probe
+    changes no park and keeps the last-known windows and identity (a 401 is a stale access
+    token, which the CLI refreshes the next time it runs as that seat)."""
+    now = time.time() if now is None else now
+    prev = USAGE_SNAPSHOT.get(seat) or {}
+    ok = bool(doc.get("ok"))
+    entries, limits = [], {}
+    if ok:
+        for lim in (doc.get("limits") or []):
+            if not isinstance(lim, dict):
+                continue
+            kind, model = str(lim.get("kind") or ""), str(lim.get("model") or "")
+            try:
+                pct = float(lim.get("percent") or 0)
+            except (TypeError, ValueError):
+                pct = 0.0
+            reset = lim.get("resets_at")
+            reset = float(reset) if isinstance(reset, (int, float)) and reset > 0 else None
+            label = f"weekly_{model.lower()}" if (kind == "weekly_scoped" and model) else kind
+            if not label:
+                continue
+            entries.append((kind, model, pct, reset))
+            limits[label] = (pct, reset)
+        account = [(pct, reset) for kind, _m, pct, reset in entries
+                   if kind in ("session", "weekly_all")]
+        if account:
+            spent = [reset or (now + DEFAULT_PARK_S) for pct, reset in account if pct >= 100.0]
+            SEAT_PARKED_UNTIL[seat] = _clamped(max(spent), now) if spent else 0.0
+        tiers = {}
+        for kind, model, pct, reset in entries:
+            if kind == "weekly_scoped":
+                t = tier_for(model)
+                if t is not None:
+                    tiers.setdefault(t, []).append((pct, reset))
+        for t, es in tiers.items():
+            spent = [reset or (now + DEFAULT_PARK_S) for pct, reset in es if pct >= 100.0]
+            MODEL_PARKED_UNTIL[(seat, t)] = _clamped(max(spent), now) if spent else 0.0
+    USAGE_SNAPSHOT[seat] = {"ok": ok, "ts": now,
+                   "account": (doc.get("account") if ok and doc.get("account")
+                               else prev.get("account") or {}),
+                   "limits": limits if ok else (prev.get("limits") or {})}
+
+
+def rebalance(now=None):
+    """Climb back UP the ladder when a better tier is available anywhere - the only place an
+    upward move happens, and it happens on the poll's cadence, never per review. Within a tier
+    the choice stays sticky; a downward move is the refusal path's business."""
+    now = time.time() if now is None else now
+    best = active_choice(now)
+    if best and tier_index(best[1]) < tier_index(CURRENT_MODEL):
+        old = (CURRENT_SEAT, CURRENT_MODEL)
+        use_seat(best[0])
+        use_model(best[1])
+        bump_meta("llm_model_switches_total")
+        log(f"usage: climbing from seat '{old[0]}' model '{old[1] or '(account default)'}' to "
+            f"seat '{best[0]}' model '{best[1] or '(account default)'}'")
+        return best
+    return None
+
+
+def poll_usage(now=None):
+    """One pass over every seat: probe, apply, rebalance, refresh the global wall."""
+    global RATE_LIMITED_UNTIL
+    now = time.time() if now is None else now
+    for s in SEATS:
+        try:
+            doc = probe_usage(s)
+        except Exception as e:
+            doc = {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
+        try:
+            apply_usage(s["name"], doc, now)
+        except Exception as e:
+            log(f"usage: applying seat '{s['name']}' failed: {e}")
+        if not doc.get("ok"):
+            log(f"usage: seat '{s['name']}' probe failed: {doc.get('error')}")
+    rebalance(now)
+    RATE_LIMITED_UNTIL = all_parked_until(now)
+
+
+def usage_ticker():
+    """The hourly poll. Returns at once when usage_poll_s is 0 (the codex host), so a disabled
+    watchdog starts no thread body and touches nothing."""
+    if not usage_poller_enabled():
+        return
+    while True:
+        time.sleep(int(CFG.get("usage_poll_s") or 0))
+        try:
+            poll_usage()
+        except Exception as e:
+            log(f"usage: poll failed: {e}")
+
+
 def seat_identity(s):
     """The ACCOUNT behind a seat, for the duplicate collapse in resolve_seats(); None when it
     cannot be learned. codex: tokens.account_id in the seat's auth.json. claude: the profile's
@@ -917,17 +1171,17 @@ def active_seat(now=None, exclude=()):
     Iterates SEATS (a list fixed at import), never SEAT_PARKED_UNTIL, so a concurrent read from
     the metrics thread cannot see a mutating sequence."""
     now = time.time() if now is None else now
-    if CURRENT_SEAT not in exclude and not seat_parked(CURRENT_SEAT, now):
+    if CURRENT_SEAT not in exclude and seat_usable(CURRENT_SEAT, now):
         return CURRENT_SEAT
     for s in SEATS:
-        if s["name"] not in exclude and not seat_parked(s["name"], now):
+        if s["name"] not in exclude and seat_usable(s["name"], now):
             return s["name"]
     return None
 
 
 def seats_available(now=None):
     now = time.time() if now is None else now
-    return sum(1 for s in SEATS if not seat_parked(s["name"], now))
+    return sum(1 for s in SEATS if seat_usable(s["name"], now))
 
 
 def all_parked_until(now=None):
@@ -940,7 +1194,7 @@ def all_parked_until(now=None):
     now = time.time() if now is None else now
     if seats_available(now):
         return 0.0
-    return min(SEAT_PARKED_UNTIL.get(s["name"], 0.0) for s in SEATS)
+    return min(seat_reopens_at(s["name"], now) for s in SEATS)
 
 
 _SEATS_RESOLVED = False
@@ -1040,6 +1294,17 @@ def _apply_seats(keep):
             del SEAT_PARKED_UNTIL[name]
     for s in SEATS:
         SEAT_PARKED_UNTIL.setdefault(s["name"], 0.0)
+    for key in list(MODEL_PARKED_UNTIL):
+        if key[0] not in SEAT_BY_NAME:
+            del MODEL_PARKED_UNTIL[key]
+    for s in SEATS:
+        for m in MODELS:
+            MODEL_PARKED_UNTIL.setdefault((s["name"], m), 0.0)
+    for name in list(USAGE_SNAPSHOT):
+        if name not in SEAT_BY_NAME:
+            del USAGE_SNAPSHOT[name]
+    for s in SEATS:
+        USAGE_SNAPSHOT.setdefault(s["name"], None)
     if CURRENT_SEAT not in SEAT_BY_NAME:
         CURRENT_SEAT = SEATS[0]["name"]
 
@@ -1095,34 +1360,38 @@ def run_llm(title, desc, diff_text, rubric=""):
         # which is why the cost classifier below stays correct while being seat-blind.
         # NOTE run_llm now has a side effect on module state: it parks the refusing seat.
         tried = set()
+        forced = None                     # the pair the previous failure dictated, if any
         while True:
-            seat = active_seat() or CURRENT_SEAT
+            seat, model = forced or active_choice(exclude=tried) or (CURRENT_SEAT, CURRENT_MODEL)
+            forced = None
             if seat != CURRENT_SEAT:
                 use_seat(seat)
-            tried.add(seat)
+            if model != CURRENT_MODEL:
+                use_model(model)
+            tried.add((seat, model))
             try:
-                out = _run_llm(title, desc, diff_text, rubric, started, seat)
+                out = _run_llm(title, desc, diff_text, rubric, started, seat, model)
                 # THE COUNTERPART TO seat_parks_total, and the only way to tell a seat that is
-                # merely busy from one that can never serve. A seat is tried only when the
-                # stickier ones are spent, so an unusable seat produces NO signal at all until
-                # the estate actually needs it - at which point it fails. Counting successes per
-                # seat makes "parked repeatedly and served nothing" expressible, which is the
-                # shape of an account with no Codex entitlement (or one whose window is far
-                # longer than this estate assumes). Bumped HERE, on the return path, so it means
-                # "this seat produced a usable review", not "this seat was selected".
+                # merely busy from one that can never serve. Bumped on the return path, so it
+                # means "this seat produced a usable review", not "this seat was selected".
                 bump_meta(f"seat_reviews_total.{seat}")
                 return out
             except RateLimited as e:
                 # ORDER IS LOAD-BEARING.
                 # 1. Park first, on every exit path, so worker_once always observes the
-                #    refusing seat as parked and never parks a second one on its behalf.
-                e.seat = seat
-                park(e.reset_at, seat=seat)
+                #    refusing seat (or pair) as parked and never parks a second one for it.
+                e.seat, e.model = seat, model
+                if e.scope == "model":
+                    if model == MODELS[0]:
+                        bump_meta("llm_primary_failed_total")
+                    park_model(seat, model, e.reset_at)
+                else:
+                    park(e.reset_at, seat=seat)
                 # 2. Nowhere to move -> re-raise the ORIGINAL exception. A sibling class here
                 #    would be a quarantine storm: it would miss the pass-through tuple below,
                 #    be promoted to ExpensiveFailure (a refusal past a third of the budget is
                 #    the NORMAL case), and bill to max_timeout_attempts=2 instead of being free.
-                nxt = active_seat(exclude=tried)
+                nxt = active_choice(exclude=tried)
                 if nxt is None:
                     raise
                 # 3. Budget floor, mirroring llm_fallback_min_s. Computed inline and NOT via
@@ -1133,14 +1402,47 @@ def run_llm(title, desc, diff_text, rubric=""):
                 if left < CFG.get("llm_seat_switch_min_s", 60):
                     e.deferred_for_budget = True
                     log(f"seat '{seat}' rate-limited; {left:.0f}s of budget left - deferring "
-                        f"rather than starting seat '{nxt}' (no attempt consumed)")
+                        f"rather than starting seat '{nxt[0]}' (no attempt consumed)")
                     raise
-                # 4. Rotate. Bounded twice over: `exclude=tried` caps this at len(SEATS), and
-                #    each pass needs llm_seat_switch_min_s of a finite shared budget.
-                use_seat(nxt)
-                bump_meta("llm_seat_switches_total")
-                log(f"seat '{seat}' rate-limited; switching to seat '{nxt}' "
-                    f"with {left:.0f}s of the shared budget left")
+                # 4. Move. Bounded twice over: `exclude=tried` caps this at
+                #    len(SEATS) * len(MODELS), and each pass needs llm_seat_switch_min_s of a
+                #    finite shared budget. A step DOWN the ladder is what the fallback counter
+                #    (and ReviewbotPrimaryModelDown) has always measured; a seat change is the
+                #    rotation's own counter.
+                if nxt[0] != seat:
+                    bump_meta("llm_seat_switches_total")
+                if nxt[1] != model:
+                    bump_meta("llm_model_switches_total")
+                    if tier_index(nxt[1]) > tier_index(model):
+                        bump_meta("llm_fallback_used_total")
+                what = "model-limited" if e.scope == "model" else "rate-limited"
+                log(f"seat '{seat}' {what} on '{model or '(account default)'}'; switching to "
+                    f"seat '{nxt[0]}' model '{nxt[1] or '(account default)'}' with {left:.0f}s "
+                    f"of the shared budget left")
+                continue
+            except ModelError as e:
+                # Not evidence about the account: nothing parks. Today's fallback, generalised
+                # down the ladder on the SAME seat - a transient 5xx on the top tier costs one
+                # attempt at most, never a quarantine storm, and a tier that is broken for good
+                # still surfaces through the attempt budget.
+                if model == MODELS[0]:
+                    bump_meta("llm_primary_failed_total")
+                lower = [m for m in MODELS[tier_index(model) + 1:]
+                         if (seat, m) not in tried and not model_parked(seat, m)]
+                left = max(0.0, started + CFG["llm_timeout_s"] - time.monotonic())
+                who = "primary model" if model == MODELS[0] else f"model '{model}'"
+                if not lower:
+                    raise RuntimeError(str(e)) from None
+                if left < CFG.get("llm_fallback_min_s", 60):
+                    # A few seconds of fallback only buys a second failure; the retry (with a
+                    # whole fresh budget) is the better use of the time.
+                    log(f"{who} failed ({e}); {left:.0f}s of budget left - skipping the "
+                        f"'{lower[0]}' fallback")
+                    raise RuntimeError(str(e)) from None
+                log(f"{who} failed ({e}); retrying with fallback '{lower[0]}' in the "
+                    f"remaining {left:.0f}s")
+                bump_meta("llm_fallback_used_total")
+                forced = (seat, lower[0])
                 continue
     # RateLimited passes through UNRECLASSIFIED. It is not a cost class at all - it says the
     # account is shut, and next_failure_state() answers it by charging no attempt. Let the
@@ -1239,7 +1541,7 @@ def scan_output(seat, text, remaining, pre=None):
             raise RuntimeError("credential material detected in llm output")
 
 
-def _run_llm(title, desc, diff_text, rubric, started, seat):
+def _run_llm(title, desc, diff_text, rubric, started, seat, model):
     # Clock started in run_llm, before any setup: the budget is for the whole operation, and
     # the isolated-user mktemp below is a subprocess that can itself hang.
     deadline = started + CFG["llm_timeout_s"]
@@ -1330,14 +1632,13 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
         # attacker-influenced diff in the prompt, the model could read credentials into
         # its (posted!) output. llm_sudo_user runs it as a dedicated OS user whose home
         # holds only that persona's LLM auth and can read nothing else of value.
-        args = CFG["llm_cmd"] + ["exec", "-m", CFG["llm_model"],
+        args = CFG["llm_cmd"] + ["exec", "-m", model or CFG["llm_model"],
                                  "-c", "model_reasoning_effort=" + CFG.get("llm_effort", "medium"),
                                  "--skip-git-repo-check",
                                  "-s", "read-only", "--output-last-message", out_file, "-"]
     else:
-        # Model: pinned primary (fable), one retry on the fallback (the `opus` alias =
-        # latest opus) when the primary errors, e.g. limits.
-        args = claude_args(CFG.get("llm_model") or "")
+        # ONE tier per invocation; run_llm walks the ladder (and the seats) between calls.
+        args = claude_args(model)
     if sudo_user:
         # The out dir belongs to the ISOLATED user (0700): with a world-writable dir any
         # local process could pre-create last-message.md and have forged JSON posted as
@@ -1429,41 +1730,23 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
             # skip counter inside scan_output is what made that visible.
             scan_output(seat, text, remaining, pre=(secrets, readable) if sudo_user else None)
         else:
-            fb = CFG.get("llm_fallback_model") or ""
             if r.returncode != 0:
                 raw = llm_error_text(r.returncode, r.stdout, r.stderr)
-                # ORDER IS THE WHOLE POINT. A model-scoped limit falls through to the
-                # fallback below (a different model on the same account still serves); only
-                # an account-scoped one parks, because there the fallback shares the budget
-                # that is already gone and retrying it just burns more of it.
+                # SCOPE DECIDES THE RESPONSE, and MODEL-scope is checked FIRST because the
+                # account-scoped pattern must never win on a message that is really about one
+                # model (see MODEL_LIMIT_RE). A model-scoped limit parks this (seat, model) pair
+                # and the same tier is tried on the next seat; an account-scoped one parks the
+                # seat; a name the CLI cannot serve parks the pair for MAX_PARK_S; anything
+                # else is a ModelError - no park, next tier on this seat if the budget allows.
                 # Classified on RAW text; raised with the publishable text (see scrub).
-                if not MODEL_LIMIT_RE.search(raw) and RATE_LIMIT_RE.search(raw):
-                    raise RateLimited(scrub(raw), parse_reset(raw))
-            if r.returncode != 0:
-                # A primary failure that the fallback RESCUES is invisible today:
-                # llm_failures_total counts whole reviews, and a rescued review is not a
-                # failed one. reviewer-1 ran 4 days and 463 reviews entirely on its fallback
-                # (the `claude-fable-5` quota went at 2026-09-06 19:17 and never came back)
-                # with no metric, no alert and nothing but a per-run journal line to say so.
-                bump_meta("llm_primary_failed_total")
-            if r.returncode != 0 and fb:
-                left = max(0.0, deadline - time.monotonic())
-                if left < CFG.get("llm_fallback_min_s", 60):
-                    # A few seconds of fallback only buys a second failure; the retry (with a
-                    # whole fresh budget) is the better use of the time.
-                    log(f"primary model failed ({err(r)}); "
-                        f"{left:.0f}s of budget left - skipping the '{fb}' fallback")
-                else:
-                    log(f"primary model failed ({err(r)}); "
-                        f"retrying with fallback '{fb}' in the remaining {left:.0f}s")
-                    bump_meta("llm_fallback_used_total")
-                    r = subprocess.run(wrap_sudo(claude_args(fb)), input=prompt,
-                                       capture_output=True, text=True,
-                                       timeout=left, cwd=workdir, env=env)
-            if r.returncode != 0:
-                # Cost classification happens ONCE, in run_llm's wrapper, so every raise site
-                # in here is covered by it - not just this one.
-                raise RuntimeError(err(r))
+                if MODEL_LIMIT_RE.search(raw):
+                    raise RateLimited(scrub(raw), parse_reset(raw), scope="model", model=model)
+                if MODEL_404_RE.search(raw):
+                    raise RateLimited(scrub(raw), time.time() + MAX_PARK_S, scope="model",
+                                      model=model)
+                if RATE_LIMIT_RE.search(raw):
+                    raise RateLimited(scrub(raw), parse_reset(raw), scope="account", model=model)
+                raise ModelError(scrub(raw))
             envelope = json.loads(r.stdout)
             text = envelope.get("result", "")
             # The data that decides whether llm_timeout_s is right. Output tokens because run
@@ -1983,7 +2266,8 @@ def write_metrics():
                 "'reviews_full_total','reviews_partial_total','reviews_skipped_total',"
                 "'findings_dropped_total','llm_rate_limited_total','merge_blocked_prs',"
                 "'merge_blocked_seconds','llm_primary_failed_total','llm_fallback_used_total',"
-                "'llm_seat_switches_total','llm_credscan_skipped_total')")}
+                "'llm_seat_switches_total','llm_credscan_skipped_total',"
+                "'llm_model_switches_total')")}
             # SEPARATE read, deliberately: the dict above is an explicit key whitelist, so a new
             # metric added only to the (key, metric) render list below would export 0 forever.
             # The per-repo results are keyed by repo name, which is config - hence a prefix scan.
@@ -1997,6 +2281,8 @@ def write_metrics():
                 "SELECT k,v FROM meta WHERE k LIKE 'seat_parks_total.%'")}
             _serves = {r[0]: r[1] for r in c.execute(
                 "SELECT k,v FROM meta WHERE k LIKE 'seat_reviews_total.%'")}
+            _mparks = {r[0]: r[1] for r in c.execute(
+                "SELECT k,v FROM meta WHERE k LIKE 'model_parks_total.%'")}
             c.close()
         now = time.time()
         # Escape ONCE for every emission. persona is operator-set config like repo,
@@ -2051,11 +2337,51 @@ def write_metrics():
         lines.append(f'reviewbot_llm_seats_total{{persona="{_persona}"}} {SEATS_CONFIGURED}')
         lines.append(f'reviewbot_llm_seats_distinct{{persona="{_persona}"}} {len(SEATS)}')
         lines.append(f'reviewbot_llm_seats_available{{persona="{_persona}"}} '
-                     f'{sum(1 for _s in SEATS if _parked.get(_s["name"], 0.0) <= now)}')
+                     f'{sum(1 for _s in SEATS if seat_usable(_s["name"], now))}')
         # UNCONDITIONAL, falling back to CURRENT_SEAT, so the info series never gaps while every
         # seat is parked - a gap would read as "the exporter died", which is a different incident.
         lines.append(f'reviewbot_llm_active_seat_info{{persona="{_persona}",'
                      f'seat="{_label(active_seat(now) or CURRENT_SEAT)}"}} 1')
+        # ── the ladder: one line per (seat, model) pair, zeros included, plus the active tier.
+        _mparked = dict(MODEL_PARKED_UNTIL)
+        for _s in SEATS:
+            for _m in MODELS:
+                _sn, _mn = _label(_s["name"]), _label(_m or "(account default)")
+                _u = _mparked.get((_s["name"], _m), 0.0)
+                _pk = "model_parks_total." + _s["name"] + "." + _m
+                lines.append(f'reviewbot_llm_model_parked{{persona="{_persona}",seat="{_sn}",'
+                             f'model="{_mn}"}} {1 if _u > now else 0}')
+                lines.append(f'reviewbot_llm_model_parked_seconds_remaining{{persona="{_persona}",'
+                             f'seat="{_sn}",model="{_mn}"}} {max(0.0, _u - now):.0f}')
+                try:
+                    lines.append(f'reviewbot_llm_model_parks_total{{persona="{_persona}",'
+                                 f'seat="{_sn}",model="{_mn}"}} '
+                                 f'{float(_mparks.get(_pk, 0) or 0):.0f}')
+                except (TypeError, ValueError):
+                    pass
+        lines.append(f'reviewbot_llm_active_model_info{{persona="{_persona}",'
+                     f'model="{_label(CURRENT_MODEL or "(account default)")}"}} 1')
+        # ── the watchdog: only for seats that have been probed, so a host with the poller off
+        # exports no probe series at all and ReviewbotUsageProbeFailing has nothing to match.
+        for _s in SEATS:
+            _snap = USAGE_SNAPSHOT.get(_s["name"])
+            if not _snap:
+                continue
+            _sn = _label(_s["name"])
+            lines.append(f'reviewbot_llm_usage_probe_ok{{persona="{_persona}",seat="{_sn}"}} '
+                         f'{1 if _snap.get("ok") else 0}')
+            lines.append(f'reviewbot_llm_usage_probe_timestamp_seconds{{persona="{_persona}",'
+                         f'seat="{_sn}"}} {float(_snap.get("ts") or 0):.0f}')
+            _acct = _snap.get("account") or {}
+            if _acct.get("uuid") or _acct.get("email"):
+                lines.append(f'reviewbot_llm_seat_info{{persona="{_persona}",seat="{_sn}",'
+                             f'email="{_label(_acct.get("email") or "")}",'
+                             f'plan="{_label(_acct.get("plan") or "")}"}} 1')
+            for _lab, (_pct, _reset) in sorted((_snap.get("limits") or {}).items()):
+                lines.append(f'reviewbot_llm_usage_percent{{persona="{_persona}",seat="{_sn}",'
+                             f'limit="{_label(_lab)}"}} {float(_pct):.0f}')
+                lines.append(f'reviewbot_llm_usage_resets_at_seconds{{persona="{_persona}",'
+                             f'seat="{_sn}",limit="{_label(_lab)}"}} {float(_reset or 0):.0f}')
         for key, metric in (("llm_rate_limited_total", "reviewbot_llm_rate_limited_total"),
                             ("reviews_full_total", "reviewbot_reviews_full_total"),
                             ("reviews_partial_total", "reviewbot_reviews_partial_total"),
@@ -2079,6 +2405,7 @@ def write_metrics():
                             ("llm_primary_failed_total", "reviewbot_llm_primary_failed_total"),
                             ("llm_fallback_used_total", "reviewbot_llm_fallback_used_total"),
                             ("llm_seat_switches_total", "reviewbot_llm_seat_switches_total"),
+                            ("llm_model_switches_total", "reviewbot_llm_model_switches_total"),
                             ("llm_credscan_skipped_total", "reviewbot_llm_credscan_skipped_total")):
             try:
                 lines.append(f'{metric}{{persona="{_persona}"}} '
@@ -2546,7 +2873,16 @@ def main():
     resolve_seats()
     if len(SEATS) > 1:
         log(f"seats: {[s['name'] for s in SEATS]} (sticky rotation)")
+    if len(MODELS) > 1:
+        log(f"models: {MODELS} (tier-major ladder)")
+    # BEFORE the worker exists: the first job must not walk into a seat the API already says
+    # is spent, and the poll writes the same tables the worker reads.
+    if usage_poller_enabled():
+        poll_usage()
+        log(f"usage: polled {len(SEATS)} seat(s); active seat '{CURRENT_SEAT}' model "
+            f"'{CURRENT_MODEL or '(account default)'}'; next poll in {CFG['usage_poll_s']}s")
     threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=usage_ticker, daemon=True).start()
     threading.Thread(target=reconciler, daemon=True).start()
     # Metrics get their own thread so they keep flowing THROUGH a long LLM run; the worker no
     # longer writes them (one writer only - see metrics_ticker).

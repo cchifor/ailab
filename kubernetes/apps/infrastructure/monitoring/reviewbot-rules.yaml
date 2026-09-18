@@ -486,6 +486,27 @@ spec:
               readable by its own user. Fix the seat's home/permissions; the scan is
               mistake-prevention rather than a security boundary, so this is not an emergency, but
               it must not be left standing.
+        # THE SILENT FAILURE A CREDENTIAL EXPIRY WOULD OTHERWISE BE. The usage watchdog reads
+        # every seat's windows from the API each hour (plans/2026-09-18-claude-seat-rotation-plan.md);
+        # when its probe fails, the parks fall back to refusal-text guesses and the usage panels
+        # go stale, and nothing else notices - reviews keep landing until the window closes.
+        # 3h = three consecutive failed polls, so one transient 401 (an access token the CLI
+        # refreshes on its next run as that seat) never pages. The series exists only on hosts
+        # with the watchdog on, so the codex host cannot fire this.
+        - alert: ReviewbotUsageProbeFailing
+          expr: reviewbot_llm_usage_probe_ok == 0
+          for: 3h
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) cannot read seat {{ $labels.seat }}'s usage"
+            description: >-
+              The usage probe for seat {{ $labels.seat }} on {{ $labels.instance }} has failed for
+              3h (three polls). Rotation still works on refusal text, but the parks are 15-minute
+              guesses again and the usage panels are stale for this seat. Almost always the seat's
+              credential: a revoked or expired browser login answers 401, a setup-token answers
+              403 (no user:profile scope). Read the error with `sudo -n -u <seat user>
+              HOME=/home/<seat user> /usr/local/lib/reviewbot/claude-usage.py` on the host, then
+              re-login the seat with /home/c4/seat-login.sh (runbook, Seats on reviewer-1).
         - alert: ReviewbotRateLimited
           expr: increase(reviewbot_llm_rate_limited_total[1h]) >= 3
           for: 10m
@@ -511,4 +532,4 @@ spec:
           annotations:
             summary: "reviewbot ({{ $labels.persona }}) is running on its fallback model"
             description: >-
-              The pinned primary model on {{ $labels.instance }} has failed often enough in 6h that the fallback is carrying the service. Reviews still land, which is exactly why this needs an alert: nothing else changes. `llm_failures_total` counts whole reviews and a rescued review is not a failed one, so reviewer-1 served 463 reviews on its fallback over 4 days (`claude-fable-5` quota, from 2026-09-06 19:17) with no signal but a per-run journal line. Check `journalctl -u reviewbot | grep 'primary model failed'`; if the quota is gone for good, repoint `pr_reviewer_llm_model` rather than leaving every review to pay a doomed first attempt.
+              Reviews on {{ $labels.instance }} are being served below the top tier of the model ladder often enough in 6h that the fallback is carrying the service - a spent top-tier window on every seat, or a pin the accounts cannot serve. Reviews still land, which is exactly why this needs an alert: nothing else changes (reviewer-1 once served 463 reviews on its fallback over 4 days with no signal but a per-run journal line). Check `reviewbot_llm_model_parked` for the parked (seat, model) pairs and the per-account usage panels for when the top tier reopens; the hourly watchdog climbs back on its own once the API shows it available, so this resolves itself unless every seat is spent on that tier for good - then repoint `pr_reviewer_llm_models` rather than leaving every review to pay a doomed first call.

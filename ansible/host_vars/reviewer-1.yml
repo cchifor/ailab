@@ -2,70 +2,72 @@
 # reviewer-1: the claude PR-review persona (moved off dev-worker-2 for isolation, 2026-09-02).
 pr_reviewer_enabled: true
 pr_reviewer_persona: claude
-# THE ENTRY POINT IS A WRAPPER, not the CLI. Each seat's long-lived OAuth token has to reach the
-# CLI through the environment - sudo resets it and shows argv to every process - so
-# claude-seat.sh exports $HOME/.claude/oauth-token and execs /usr/bin/claude. With no token file
-# it changes nothing, which is how the single-seat path stays the same statements.
+# THE ENTRY POINT IS A WRAPPER, not the CLI. claude-seat.sh exports $HOME/.claude/oauth-token
+# into the environment when a seat carries a long-lived token (sudo resets the environment and
+# shows argv to every process, so the seat's HOME is the only place a token may come from) and
+# execs /usr/bin/claude. With no token file it changes nothing and the CLI uses the seat's own
+# browser login - which is what every seat here runs on since 2026-09-18.
 pr_reviewer_llm_cmd:
   - "/usr/local/lib/reviewbot/claude-seat.sh"
 # ---- seats (plans/2026-09-18-claude-seat-rotation-plan.md, ADR 0025) ----
 # THREE seats, one Claude Max account each, one OS user each - the rotation reviewer-2 runs for
-# codex, unchanged. The accounts are the agentforge broker accounts whose long-lived tokens live
-# in OpenBao at af/operator/broker/anthropic/claude-max-N/oauth (field CLAUDE_CODE_OAUTH_TOKEN):
-# a -> claude-max-1, b -> claude-max-2, c -> claude-max-3. The reviewer therefore shares those
-# weekly windows with the AgentForge dev agents; the codex plan measured the reviewer at ~96% of
-# its own load and accepted the same sharing.
+# codex, unchanged. Sticky, in this order: seat `a` carries the load until it refuses, then `b`,
+# then `c` - never round-robin, which would drive every account to its wall at once.
 #
-# THE TOKENS ARE NOT IN GIT AND NOT ANSIBLE-MANAGED. Each is hand-seeded ONCE into
-# /home/<user>/.claude/oauth-token (0600) from OpenBao - runbook docs/runbooks/dev-workers.md
-# § "Seats on reviewer-1". They are `setup-token` credentials and do not rotate, which is why
-# hand-seeding is safe here and was not for codex (whose refresh tokens are single-use).
+# EACH SEAT IS A BROWSER LOGIN IN ITS OWN HOME (/home/<user>/.claude/.credentials.json), made
+# ONCE as that user with /home/c4/seat-login.sh (runbook § "Seats on reviewer-1"): one login per
+# seat means one refresh-token family per seat, so nothing can invalidate anything else. NOT the
+# OpenBao setup-tokens the agentforge brokers use: those authenticate for inference but carry
+# only `user:inference`, and /api/oauth/usage and /profile answer 403 `oauth_scope_insufficient`
+# (measured on all three, 2026-09-18) - so neither the usage watchdog below nor the identity
+# collapse in resolve_seats() can see them. The wrapper still honours a token file, for a seat
+# that has to run on one; such a seat is blind to usage.
 #   which account is a seat?   sudo -n -u clauderun HOME=/home/clauderun /usr/local/lib/reviewbot/claude-usage.py
 #                              (prints account.uuid/email and the usage windows; consumes no quota)
-#   NEVER                      copy a browser login's .credentials.json between hosts or seats:
-#                              copies share one refresh-token family and OAuth rotation
-#                              invalidates every copy but the last refresher - the 2026-09-10
-#                              outage that took BOTH personas down. Token files have no refresh
-#                              token and no such failure mode.
+#   NEVER                      copy a .credentials.json between hosts or seats: copies share one
+#                              refresh-token family and OAuth rotation invalidates every copy but
+#                              the last refresher - the 2026-09-10 outage that took BOTH personas
+#                              down. Re-login the seat instead.
 # resolve_seats() reads each seat's account uuid at startup and COLLAPSES duplicates, because
 # rotating inside one account is the doomed-retry loop the park exists to prevent; a collapse
 # shows as reviewbot_llm_seats_distinct < _total and ReviewbotSeatsDegraded.
 #
-# Sticky, in this order: seat `a` carries the load until it refuses, then `b`, then `c` - never
-# round-robin, which would drive every account to its wall at once.
-#
-# The service user's own login (c4's ~/.claude) is no longer in the rotation; it stays for
+# The service user's own login (c4's ~/.claude) is not in the rotation; it stays for
 # `claude auth status` by humans. The address behind it, and behind every seat, is deliberately
 # NOT recorded here: this repo mirrors to a PUBLIC GitHub repo, the LAN address and the `c4`
 # login are already published throughout the tree and are not credentials, but an account
-# address is an identity that appears nowhere else - ask the host, not the file.
+# address is an identity that appears nowhere else - ask the host (the probe above), not the file.
 pr_reviewer_llm_seats:
   - { name: a, sudo_user: clauderun }
   - { name: b, sudo_user: clauderun2 }
   - { name: c, sudo_user: clauderun3 }
-# ---- model pins ----
-# Fable primary, opus fallback on primary errors - Fable is the operator's default (2026-09-18).
-# Both are the FLOATING aliases on purpose: this host wants always-latest, and an alias cannot
-# go stale the way a version ID left in a file does. `claude-fable-5-1` would be the pinned
-# form and needs CLI >= 2.1.251 (2.1.197 answers `does not support this model`); `fable`
-# resolves on the installed CLI - measured 2026-09-18 with the same refusal `opus` gave.
+# ---- model ladder + usage watchdog (plan PR 2) ----
+# fable first on ANY seat, then opus, then sonnet - tier-major, sticky within a tier. A
+# MODEL-scoped refusal (Fable spent) parks that (seat, model) pair and the same tier is tried on
+# the next seat; a tier is left only when every seat is parked for it. Sonnet stays because the
+# usage API exposes an opus-scoped weekly cap: a seat can be out of opus while its account
+# window is fine. All FLOATING aliases on purpose: this host wants always-latest, and an alias
+# cannot go stale the way a version ID left in a file does (`claude-fable-5-1` would be the
+# pinned form and needs CLI >= 2.1.251; `fable` resolves on the installed 2.1.197).
 #
 # WHAT A FABLE LIMIT IS - corrected 2026-09-18. Earlier revisions of this file called it a dead
-# credit pool that "does not come back on its own". The usage API reviewbot now reads
+# credit pool that "does not come back on its own". The usage API reviewbot now reads hourly
 # (GET /api/oauth/usage, the call behind `/usage`) shows it as a WEEKLY SCOPED window with a
 # reset time, beside the account-wide weekly window:
 #     weekly_all    percent 100  resets 2026-09-19T19:59:59Z
 #     weekly_scoped percent 100  resets 2026-09-19T19:59:59Z  scope.model "Fable"
-# Two accounts "never recovering" was a 7-day window observed for less than 7 days. The
-# fallback exists for the MODEL-scoped class - Fable spent while opus still serves - and stays
-# a DIFFERENT model from the primary on purpose. An ACCOUNT-scoped limit (weekly_all) takes
-# both pins together and parks the seat; the rotation, not the fallback, is what answers that.
-# The model ladder and the hourly usage watchdog that climbs back to fable are PR 2 of the plan.
-#
-# After any account change, probe BOTH pins explicitly - `claude --model fable -p ...` and
-# `--model opus` - never a bare `claude -p`: per-account model availability is not uniform
-# (2026-09-12: a bare probe answered fine while the pinned model had no quota, and every review
-# paid a doomed primary call, 308 of 308, before the fallback rescued it).
+# Two accounts "never recovering" was a 7-day window observed for less than 7 days. An
+# ACCOUNT-scoped limit (weekly_all, session) parks the whole seat; only the rotation answers
+# that. The watchdog parks and unparks from these numbers and climbs back to fable when the API
+# shows it reopened - the only place an upward move happens, hourly, never per review.
+pr_reviewer_llm_models: [fable, opus, sonnet]
+pr_reviewer_usage_poll_s: 3600
+# The pin pair is what reviewbot_llm_primary_model_info reports and what a host without a
+# ladder would run; here the ladder above is authoritative and these are its first two rungs.
+# After any account change, probe EVERY rung explicitly - `claude --model fable -p ...` etc. -
+# never a bare `claude -p`: per-account model availability is not uniform (2026-09-12: a bare
+# probe answered fine while the pinned model had no quota, and every review paid a doomed
+# primary call, 308 of 308, before the fallback rescued it).
 pr_reviewer_llm_model: fable
 pr_reviewer_llm_fallback_model: opus
 # Ship journald to Loki (roles/journal_ship) — the reviewer failure REASON was

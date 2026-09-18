@@ -3327,14 +3327,18 @@ class ClaudeSeatTest(unittest.TestCase):
         self.assertFalse(self.m.seat_parked("b"))
         self.assertEqual("b", self.m.CURRENT_SEAT)
 
-    def test_a_fable_limit_takes_the_same_seat_fallback_and_parks_nothing(self):
-        """CHARACTERISATION, and the line PR 2 moves: a MODEL-scoped refusal is answered on
-        the SAME seat by the fallback pin today. The ladder will answer it on the next seat."""
-        self.m.subprocess.run = self._runner(fable_limited={"runa"}, tokens={"runa": "T" * 40})
+    def test_a_fable_limit_moves_to_the_next_seat_on_the_same_tier(self):
+        """PR 2 (the ladder): a MODEL-scoped refusal parks that SEAT+TIER pair and moves to the
+        next seat on the SAME tier - the account still serves fable elsewhere - instead of
+        dropping to the fallback pin on the exhausted seat as PR 1 characterised. The legacy
+        pin pair (llm_model + llm_fallback_model) is the ladder here: [fable, opus]."""
+        self.m.subprocess.run = self._runner(fable_limited={"runa"},
+                                             tokens={"runa": "T" * 40, "runb": "U" * 40})
         self.m.run_llm("t", "d", "diff")
-        self.assertEqual([("runa", "fable"), ("runa", "opus")], self.models_run)
-        self.assertFalse(self.m.seat_parked("a"))
-        self.assertEqual("a", self.m.CURRENT_SEAT)
+        self.assertEqual([("runa", "fable"), ("runb", "fable")], self.models_run)
+        self.assertTrue(self.m.model_parked("a", "fable"))
+        self.assertFalse(self.m.seat_parked("a"), "a model limit is not an account limit")
+        self.assertEqual(("b", "fable"), (self.m.CURRENT_SEAT, self.m.CURRENT_MODEL))
 
     def test_the_model_runs_through_the_wrapper_as_the_seat_user_with_its_HOME(self):
         """The token can only reach the CLI from inside the seat's HOME (sudo resets the
@@ -3685,6 +3689,357 @@ class ClaudeSeatWrapperTest(unittest.TestCase):
         """The single-seat host keeps its .credentials.json login; the wrapper must not
         invent an empty token that would shadow it."""
         self.assertEqual("unset|-p hi", self._run())
+
+
+# ── model ladder + usage watchdog (plan PR 2) ─────────────────────────────────────────────────
+CLAUDE_404_ENVELOPE = json.dumps({
+    "type": "result", "subtype": "success", "is_error": True, "api_error_status": 404,
+    "result": "There's an issue with the selected model (fable). It may not exist or you may "
+              "not have access to it. Run --model to pick a different model.",
+    "usage": {"output_tokens": 0}})
+LADDER = ["fable", "opus", "sonnet"]
+
+
+def _ladder_module(tmp, **overrides):
+    cfg = dict(llm_kind="claude", llm_model="fable", llm_fallback_model="opus",
+               llm_models=LADDER, llm_cmd=["/usr/local/lib/reviewbot/claude-seat.sh"],
+               llm_sudo_user="", llm_seats=CLAUDE_SEATS, usage_poll_s=0)
+    cfg.update(overrides)
+    return load(tmp, **cfg)
+
+
+class ModelLadderTest(unittest.TestCase):
+    """fable -> opus -> sonnet, tier-major, sticky within a tier.
+
+    Any seat that can serve fable beats the current seat on opus; a tier is left only when
+    every seat is parked for it; a park is per (seat, model) for a MODEL-scoped refusal and per
+    seat for an ACCOUNT-scoped one. THE INVARIANT IS STILL THE LOSSLESS PARK: no attempt
+    consumed, queue intact, nothing quarantined, whatever the scope."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = _ladder_module(self.tmp.name)
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+        self.models_run = []
+        self.answer = _review_envelope()
+
+    def _runner(self, model_limited=(), account_limited=(), notfound=(), broken=None):
+        """Keys are (sudo user, model). `broken` maps a pair to a non-limit failure text."""
+        broken = broken or {}
+
+        def run(args, **kw):
+            CP = self.m.subprocess.CompletedProcess
+            if args[0] != "sudo":
+                return CP(args, 0, "", "")
+            user, verb = args[3], args[4]
+            if verb == "mktemp":
+                return CP(args, 0, f"/tmp/reviewbot-llm-{user}\n", "")
+            if verb.startswith("HOME=") and args[5] != self.m.USAGE_PROBE:
+                model = args[args.index("--model") + 1] if "--model" in args else ""
+                self.models_run.append((user, model))
+                if user in account_limited:
+                    return CP(args, 1, CLAUDE_WEEKLY_ENVELOPE, "")
+                if (user, model) in model_limited:
+                    return CP(args, 1, CLAUDE_FABLE_ENVELOPE, "")
+                if (user, model) in notfound:
+                    return CP(args, 1, CLAUDE_404_ENVELOPE, "")
+                if (user, model) in broken:
+                    return CP(args, 1, json.dumps({"type": "result", "subtype": "success",
+                                                   "is_error": True,
+                                                   "result": broken[(user, model)]}), "")
+                return CP(args, 0, self.answer, "")
+            if verb == "cat":
+                return CP(args, 1, "", "no such file")
+            return CP(args, 0, "", "")
+        return run
+
+    def _meta(self, key):
+        c = self.m.db()
+        v = c.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+        c.close()
+        return float(v[0]) if v else 0.0
+
+    def test_tiers_come_from_llm_models_and_fall_back_to_the_pin_pair(self):
+        self.assertEqual(LADDER, self.m.MODELS)
+        self.assertEqual("fable", self.m.CURRENT_MODEL)
+        legacy = load(self.tmp.name)                     # BASE_CFG: llm_model m, fallback fb
+        self.assertEqual(["m", "fb"], legacy.MODELS, "empty llm_models is the pin pair")
+        codex = load(self.tmp.name, llm_kind="codex", llm_model="gpt-6-astra",
+                     llm_fallback_model="")
+        self.assertEqual(["gpt-6-astra"], codex.MODELS)
+        self.assertEqual({(s["name"], mdl) for s in self.m.SEATS for mdl in LADDER},
+                         set(self.m.MODEL_PARKED_UNTIL), "pre-seeded, fixed-size, per pair")
+
+    def test_a_model_limit_on_seat_a_moves_to_seat_b_on_the_same_tier(self):
+        self.m.subprocess.run = self._runner(model_limited={("runa", "fable")})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runa", "fable"), ("runb", "fable")], self.models_run)
+        self.assertTrue(self.m.model_parked("a", "fable"))
+        self.assertFalse(self.m.model_parked("a", "opus"))
+        self.assertFalse(self.m.seat_parked("a"))
+        self.assertEqual(("b", "fable"), (self.m.CURRENT_SEAT, self.m.CURRENT_MODEL))
+        self.assertEqual(1.0, self._meta("llm_seat_switches_total"))
+        self.assertEqual(0.0, self._meta("llm_model_switches_total"))
+
+    def test_an_account_limit_parks_the_seat_for_every_tier(self):
+        self.m.subprocess.run = self._runner(account_limited={"runa"})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runa", "fable"), ("runb", "fable")], self.models_run)
+        self.assertTrue(self.m.seat_parked("a"))
+        self.assertFalse(self.m.seat_usable("a"))
+        self.assertFalse(self.m.model_parked("a", "opus"), "the pair table is untouched")
+
+    def test_descends_a_tier_only_when_every_seat_is_parked_for_it_and_on_the_sticky_seat(self):
+        self.m.subprocess.run = self._runner(
+            model_limited={("runa", "fable"), ("runb", "fable"), ("runc", "fable")})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runa", "fable"), ("runb", "fable"), ("runc", "fable"),
+                          ("runc", "opus")], self.models_run)
+        self.assertEqual(("c", "opus"), (self.m.CURRENT_SEAT, self.m.CURRENT_MODEL))
+        self.assertEqual(1.0, self._meta("llm_model_switches_total"))
+        self.assertEqual(1.0, self._meta("llm_fallback_used_total"),
+                         "served below the top tier - the PrimaryModelDown signal")
+
+    def test_a_missing_model_parks_the_pair_for_MAX_PARK_S(self):
+        """A floating alias that stops resolving must not quarantine every PR: the 404 is
+        model-scoped, parked long, and the persona serves on from the next candidate."""
+        self.m.subprocess.run = self._runner(notfound={("runa", "fable")})
+        before = real_time.time()
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runa", "fable"), ("runb", "fable")], self.models_run)
+        self.assertGreaterEqual(self.m.MODEL_PARKED_UNTIL[("a", "fable")] - before,
+                                self.m.MAX_PARK_S - 5)
+
+    def test_an_ordinary_error_on_the_top_tier_descends_on_the_same_seat_without_parking(self):
+        """Today's fallback, generalised: a non-limit failure is not evidence about the account,
+        so nothing parks; the next tier on the SAME seat gets the rest of the budget."""
+        self.m.subprocess.run = self._runner(broken={("runa", "fable"): "API Error: 500"})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runa", "fable"), ("runa", "opus")], self.models_run)
+        self.assertFalse(self.m.model_parked("a", "fable"))
+        self.assertEqual(("a", "opus"), (self.m.CURRENT_SEAT, self.m.CURRENT_MODEL))
+        self.assertEqual(1.0, self._meta("llm_primary_failed_total"))
+        self.assertEqual(1.0, self._meta("llm_fallback_used_total"))
+
+    def test_every_tier_erroring_bills_exactly_one_attempt(self):
+        self.m.subprocess.run = self._runner(broken={("runa", m): "API Error: 500" for m in LADDER})
+        with self.assertRaises(RuntimeError) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertNotIsInstance(cm.exception, self.m.RateLimited)
+        self.assertEqual([("runa", "fable"), ("runa", "opus"), ("runa", "sonnet")],
+                         self.models_run)
+        self.assertEqual(("retry", 1, 0), self.m.next_failure_state(cm.exception, 0, 0)[:3])
+
+    def test_the_loop_is_bounded_by_seats_times_models_and_consumes_no_attempt(self):
+        self.m.subprocess.run = self._runner(
+            model_limited={(u, mdl) for u in ("runa", "runb", "runc") for mdl in LADDER})
+        with self.assertRaises(self.m.RateLimited) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertEqual(9, len(self.models_run))
+        self.assertEqual(0, self.m.seats_available())
+        self.assertEqual(("retry", 4, 1), self.m.next_failure_state(cm.exception, 4, 1)[:3])
+
+    def test_availability_and_reopening_understand_tiers(self):
+        now = real_time.time()
+        for i, mdl in enumerate(LADDER):
+            self.m.park_model("a", mdl, now + 100 * (i + 1))
+        self.m.park(now + 80, seat="b")               # above park()'s 60 s floor
+        self.assertFalse(self.m.seat_usable("a"), "every tier parked = seat unusable")
+        self.assertTrue(self.m.seat_usable("b") is False and self.m.seat_usable("c") is True)
+        self.assertEqual(1, self.m.seats_available())
+        self.assertEqual(0.0, self.m.all_parked_until(), "one usable seat = no global wall")
+        self.m.park(now + 400, seat="c")
+        self.assertAlmostEqual(now + 80, self.m.all_parked_until(), delta=2,
+                               msg="the EARLIEST reopening across seats, b's")
+        self.assertAlmostEqual(now + 100, self.m.seat_reopens_at("a"), delta=2,
+                               msg="a reopens when its earliest tier does")
+
+    def test_the_choice_is_tier_major_then_sticky_seat_then_seat_order(self):
+        now = real_time.time()
+        self.m.use_seat("c")
+        self.assertEqual(("c", "fable"), self.m.active_choice(now), "sticky seat first")
+        self.m.park_model("c", "fable", now + 900)
+        self.assertEqual(("a", "fable"), self.m.active_choice(now),
+                         "another seat on the top tier beats the sticky seat's next tier")
+        for s in ("a", "b"):
+            self.m.park_model(s, "fable", now + 900)
+        self.assertEqual(("c", "opus"), self.m.active_choice(now), "descent stays on the sticky seat")
+        self.assertIsNone(self.m.active_choice(now, exclude={(s, mdl) for s in "abc" for mdl in LADDER}))
+
+
+class UsageWatchdogTest(unittest.TestCase):
+    """poll_usage(): the API's numbers park and unpark seats and tiers, and climb back up the
+    ladder - hourly, never within a tier. No network: probe_usage is replaced per test."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = _ladder_module(self.tmp.name, usage_poll_s=3600)
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+        self.now = real_time.time()
+
+    def _doc(self, email="seat@example.test", uuid="acct-1", limits=(), ok=True):
+        return {"ok": ok, "error": "" if ok else "usage: HTTP 401",
+                "account": {"uuid": uuid, "email": email, "plan": "max"} if ok else {},
+                "limits": [{"kind": k, "model": mdl, "percent": float(p),
+                            "resets_at": (None if r is None else self.now + r), "active": p >= 100}
+                           for (k, mdl, p, r) in limits]}
+
+    def _probe(self, docs):
+        """docs: seat name -> document (missing seats get an ok=false document)."""
+        def probe(seat, timeout=30):
+            name = seat["name"] if isinstance(seat, dict) else seat
+            return docs.get(name, self._doc(ok=False))
+        self.m.probe_usage = probe
+
+    def test_a_spent_weekly_window_parks_the_seat_until_the_api_reset(self):
+        self.m.apply_usage("a", self._doc(limits=[("weekly_all", "", 100, 3000)]), self.now)
+        self.assertTrue(self.m.seat_parked("a"))
+        self.assertAlmostEqual(self.now + 3000, self.m.SEAT_PARKED_UNTIL["a"], delta=2)
+
+    def test_below_100_percent_clears_a_park_the_api_no_longer_supports(self):
+        self.m.park(self.now + 800, seat="a")
+        self.m.apply_usage("a", self._doc(limits=[("weekly_all", "", 40, 3000)]), self.now)
+        self.assertFalse(self.m.seat_parked("a"), "the API's word wins over a text-derived guess")
+
+    def test_a_fable_scoped_limit_parks_the_fable_tier_only(self):
+        self.m.apply_usage("a", self._doc(limits=[("weekly_all", "", 60, 3000),
+                                                  ("weekly_scoped", "Fable", 100, 3000)]), self.now)
+        self.assertTrue(self.m.model_parked("a", "fable"))
+        self.assertFalse(self.m.model_parked("a", "opus"))
+        self.assertTrue(self.m.seat_usable("a"))
+        self.m.apply_usage("a", self._doc(limits=[("weekly_scoped", "Fable", 20, 3000)]), self.now)
+        self.assertFalse(self.m.model_parked("a", "fable"), "and the API reopens it")
+
+    def test_an_unknown_scope_changes_no_park_but_reaches_the_snapshot(self):
+        self.m.apply_usage("a", self._doc(limits=[("weekly_scoped", "Haiku", 100, 3000),
+                                                  ("session", "", 5, None)]), self.now)
+        self.assertTrue(self.m.seat_usable("a"))
+        self.assertFalse(any(self.m.model_parked("a", mdl) for mdl in LADDER))
+        self.assertEqual({"weekly_haiku": (100.0, self.now + 3000), "session": (5.0, None)},
+                         self.m.USAGE_SNAPSHOT["a"]["limits"])
+
+    def test_parks_from_the_api_are_clamped_so_a_dead_poller_cannot_wedge_a_week(self):
+        self.m.apply_usage("a", self._doc(limits=[("weekly_all", "", 100, 7 * 86400)]), self.now)
+        self.assertLessEqual(self.m.SEAT_PARKED_UNTIL["a"] - self.now, self.m.MAX_PARK_S + 1)
+
+    def test_a_failed_probe_keeps_parks_and_the_last_known_windows(self):
+        self.m.apply_usage("a", self._doc(limits=[("weekly_all", "", 100, 3000)]), self.now)
+        self.m.apply_usage("a", self._doc(ok=False), self.now + 10)
+        self.assertTrue(self.m.seat_parked("a"))
+        snap = self.m.USAGE_SNAPSHOT["a"]
+        self.assertFalse(snap["ok"])
+        self.assertEqual({"weekly_all": (100.0, self.now + 3000)}, snap["limits"])
+        self.assertEqual("acct-1", snap["account"]["uuid"], "identity is not forgotten on a 401")
+
+    def test_the_poll_climbs_back_to_fable_on_a_better_seat_but_never_moves_within_a_tier(self):
+        self.m.use_seat("c"); self.m.use_model("opus")
+        self._probe({"a": self._doc(limits=[("weekly_all", "", 50, 3000)]),
+                     "b": self._doc(uuid="acct-2", limits=[("weekly_all", "", 50, 3000)]),
+                     "c": self._doc(uuid="acct-3", limits=[("weekly_scoped", "Fable", 100, 3000)])})
+        self.m.poll_usage(self.now)
+        self.assertEqual(("a", "fable"), (self.m.CURRENT_SEAT, self.m.CURRENT_MODEL))
+        c = self.m.db()
+        switches = c.execute("SELECT v FROM meta WHERE k='llm_model_switches_total'").fetchone()
+        c.close()
+        self.assertEqual(1.0, float(switches[0]))
+        self.m.use_seat("b")                                   # sticky within the tier:
+        self.m.poll_usage(self.now + 60)
+        self.assertEqual(("b", "fable"), (self.m.CURRENT_SEAT, self.m.CURRENT_MODEL),
+                         "seat a is free on fable too, but the poll never moves within a tier")
+
+    def test_the_poll_refreshes_the_global_wall(self):
+        self._probe({s: self._doc(uuid=f"acct-{s}", limits=[("weekly_all", "", 100, 3000)])
+                     for s in "abc"})
+        self.m.poll_usage(self.now)
+        self.assertEqual(0, self.m.seats_available())
+        self.assertGreater(self.m.RATE_LIMITED_UNTIL, self.now)
+
+    def test_a_zero_interval_starts_nothing(self):
+        off = _ladder_module(self.tmp.name, usage_poll_s=0)
+        off.time = type("T", (), {"sleep": staticmethod(lambda n: (_ for _ in ()).throw(
+            AssertionError("the ticker must not sleep when disabled"))),
+            "time": staticmethod(real_time.time), "monotonic": staticmethod(real_time.monotonic),
+            "gmtime": staticmethod(real_time.gmtime), "strftime": staticmethod(real_time.strftime)})()
+        off.usage_ticker()                                    # returns, no loop
+        self.assertFalse(off.usage_poller_enabled())
+        self.assertTrue(self.m.usage_poller_enabled())
+
+
+class ParseResetDateTest(unittest.TestCase):
+    """The weekly refusal names a DATE - `resets Sep 20, 11pm (UTC)` - which the time-only
+    pattern never matched, so every such park was the 15-minute default (measured on all three
+    seats, 2026-09-18)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_the_dated_form_is_parsed_to_the_named_day_and_hour(self):
+        for text, expect in (("You've hit your weekly limit · resets Sep 20, 11pm (UTC)", (9, 20, 23, 0)),
+                             ("resets Sep 19, 8pm (UTC)", (9, 19, 20, 0)),
+                             ("resets Sep 20, 5am (UTC)", (9, 20, 5, 0)),
+                             ("resets Oct 3, 12:30am (UTC)", (10, 3, 0, 30))):
+            with self.subTest(text=text):
+                at = self.m.parse_reset(text)
+                self.assertIsNotNone(at)
+                self.assertEqual(expect, real_time.gmtime(at)[1:5])
+
+    def test_a_dated_reset_already_past_rolls_to_next_year(self):
+        now = real_time.gmtime()
+        past_month = "Jan" if now.tm_mon > 1 else "Dec"
+        at = self.m.parse_reset(f"resets {past_month} 2, 3am (UTC)")
+        self.assertGreater(at, real_time.time())
+
+    def test_the_time_only_forms_still_parse(self):
+        self.assertEqual((16, 20), real_time.gmtime(self.m.parse_reset("resets 4:20pm (UTC)"))[3:5])
+        self.assertIsNone(self.m.parse_reset("resets never"))
+
+
+class LadderMetricsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = _ladder_module(self.tmp.name, usage_poll_s=3600)
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+
+    def _emit(self):
+        self.m.write_metrics()
+        lines = pathlib.Path(self.m.CFG["textfile"]).read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), len(set(l.split(" ")[0] for l in lines)),
+                         "a duplicate series makes node_exporter drop the WHOLE textfile")
+        return dict(l.split(" ", 1) for l in lines)
+
+    def test_the_ladder_series_exist_with_zeros_for_every_pair(self):
+        got = self._emit()
+        self.assertEqual("1", got['reviewbot_llm_active_model_info{persona="test",model="fable"}'])
+        for s in "abc":
+            for mdl in LADDER:
+                self.assertEqual("0", got[f'reviewbot_llm_model_parked{{persona="test",seat="{s}",model="{mdl}"}}'])
+                self.assertIn(f'reviewbot_llm_model_parks_total{{persona="test",seat="{s}",model="{mdl}"}}', got)
+        self.assertIn('reviewbot_llm_model_switches_total{persona="test"}', got)
+        self.assertNotIn('reviewbot_llm_usage_probe_ok{persona="test",seat="a"}', got,
+                         "no probe has run: no probe series, so the alert cannot fire on nothing")
+
+    def test_a_park_and_a_probe_show_up(self):
+        now = real_time.time()
+        self.m.park_model("b", "fable", now + 500)
+        self.m.apply_usage("a", {"ok": True, "error": "", "account": {"uuid": "u", "email": 'x"y@example.test', "plan": "max"},
+                                 "limits": [{"kind": "weekly_all", "model": "", "percent": 42.0, "resets_at": now + 100, "active": False},
+                                            {"kind": "weekly_scoped", "model": "Fable", "percent": 100.0, "resets_at": now + 100, "active": False},
+                                            {"kind": "session", "model": "", "percent": 3.0, "resets_at": None, "active": False}]}, now)
+        got = self._emit()
+        self.assertEqual("1", got['reviewbot_llm_model_parked{persona="test",seat="b",model="fable"}'])
+        self.assertEqual("1", got['reviewbot_llm_usage_probe_ok{persona="test",seat="a"}'])
+        self.assertEqual("1", got['reviewbot_llm_seat_info{persona="test",seat="a",email="x\\"y@example.test",plan="max"}'])
+        self.assertEqual("42", got['reviewbot_llm_usage_percent{persona="test",seat="a",limit="weekly_all"}'])
+        self.assertEqual("100", got['reviewbot_llm_usage_percent{persona="test",seat="a",limit="weekly_fable"}'])
+        self.assertEqual("0", got['reviewbot_llm_usage_resets_at_seconds{persona="test",seat="a",limit="session"}'])
+        self.assertEqual(f"{now + 100:.0f}", got['reviewbot_llm_usage_resets_at_seconds{persona="test",seat="a",limit="weekly_all"}'])
+        self.assertEqual("3", got['reviewbot_llm_seats_available{persona="test"}'],
+                         "a and b are parked on fable only - still usable on opus - and c is free")
 
 
 if __name__ == "__main__":
