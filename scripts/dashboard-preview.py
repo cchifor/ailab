@@ -13,8 +13,9 @@ without touching the cluster's Grafana or any credential. After an edit: re-run 
 then `sync` (copies the ConfigMap's JSON into the running instance; the provider re-reads it
 within 10s) and reload the page.
 
-`check` opens the dashboard (the local one, or --url https://... with --auth user:pass for HTTP
-basic auth), reads the row's panel inventory from the dashboard model, pages through the row so
+`check` opens the dashboard (the local one, or --url https://... with --auth user:pass, which logs
+in through POST /login - e.g. a `kubectl port-forward svc/kube-prometheus-stack-grafana 3300:80` and
+the break-glass admin), reads the row's panel inventory from the dashboard model, pages through the row so
 every lazy panel mounts, waits for the row to settle, and FAILS when a panel of the model never
 mounted or never showed content, or when in any panel: the title is ellipsised, a stat value
 wraps, a table scrolls sideways, the panel says "No data", or an --expect text is missing from
@@ -211,6 +212,13 @@ def check(a):
         ctx = browser.new_context(viewport={"width": a.width, "height": a.height}, http_credentials=creds,
                                   ignore_https_errors=a.insecure)
         page = ctx.new_page()
+        if creds:
+            # A session, not just basic auth: Grafana answers an unauthenticated PAGE load with a
+            # redirect to /login, never a 401 challenge, so http_credentials alone leaves the
+            # dashboard unreachable. page.request shares the context's cookie jar.
+            r = page.request.post(f"{base}/login", data={"user": creds["username"], "password": creds["password"]})
+            if not r.ok:
+                sys.exit(f"login as {creds['username']!r} failed: HTTP {r.status}")
         page.goto(url, wait_until="load", timeout=a.timeout * 1000)
         expected, collapsed = _row_inventory(page, base, a.uid, a.row)
         row = page.locator('[data-testid^="data-testid dashboard-row-title-"]', has_text=a.row).first
