@@ -1001,15 +1001,27 @@ def park_model(seat, model, reset_at, unserveable=False):
     global RATE_LIMITED_UNTIL
     until = reset_at or (time.time() + DEFAULT_PARK_S)
     until = max(time.time() + 60, min(until, time.time() + MAX_PARK_S))
-    key = (seat, model)
+    # A spent window is a fact about ONE seat's account; a name the CLI cannot serve is a
+    # fact about the INSTALLED CLI, shared by every seat - parking it per seat would pay one
+    # doomed 404 per seat before the ladder descended, every time the parks lapsed
+    # (reviewer-claude on ailab#781).
+    keys = [(s["name"], model) for s in SEATS] if unserveable else [(seat, model)]
     table = MODEL_UNSERVED_UNTIL if unserveable else MODEL_PARKED_UNTIL
     with park_lock:
-        table[key] = max(table.get(key, 0.0), until)
+        for key in keys:
+            table[key] = max(table.get(key, 0.0), until)
         RATE_LIMITED_UNTIL = all_parked_until()
-    bump_meta(f"model_parks_total.{seat}.{model}")
-    log(f"model '{model}' limited on seat '{seat}'; parking that pair for "
-        f"{MODEL_PARKED_UNTIL[key] - time.time():.0f}s (queue left intact)")
-    return MODEL_PARKED_UNTIL[key]
+    for key in keys:
+        bump_meta(f"model_parks_total.{key[0]}.{model}")
+    left = table[(seat, model)] - time.time()
+    if unserveable:
+        log(f"model '{model or '(account default)'}' cannot be served by the installed CLI "
+            f"(refused on seat '{seat}'); parking that model on every seat for {left:.0f}s "
+            f"(queue left intact)")
+    else:
+        log(f"model '{model or '(account default)'}' limited on seat '{seat}'; parking that "
+            f"pair for {left:.0f}s (queue left intact)")
+    return table[(seat, model)]
 
 
 def seat_home(seat):
