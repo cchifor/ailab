@@ -1018,20 +1018,24 @@ tests:
 
   # ── ForgeConductWakesUnanswered ───────────────────────────────────────────────────────────────
   #
-  # THE WAKES ARE PRE-TOUCHED PER PASS, THE DIAGNOSES AT CONSTRUCTION — from agentforge 5d
-  # (feat/conduct-diagnoses-pretouch), every (detector, op) pair over the commentable rows and the
-  # two ops at 0 from a container's first scrape, the reserved pair excepted — and the rule REQUIRES
-  # that image (its comment says why: a pair with no series until its first comment made an in-place
-  # restart invisible to increase(), and the rule a page on every restart, #748). The cases drive the
-  # wakes the way the engine writes them: a wakes series appears at 0 on a first pass that attempts
-  # none and at its count on one that does. The cases whose (detector, op) series are ABSENT until
-  # their first comment drive the pre-5d shape of the diagnoses, and are kept: the second term they
-  # hold is the wakes' too and the reserved pair's still, and the two restart cases and three of
-  # the others were re-run on the 5d shape out of tree and read the same. The last case is the 5d
-  # shape of the restart #748 was held on, and the one input whose pre-5d shape reads differently:
-  # it fires, which is the defect, and is not a case. Every wake in these cases is a comment the
-  # door counted before the POST; every diagnosis is one the lane saw applied; the two step in the
-  # same sample because record_pass writes both.
+  # BOTH COUNTERS ARE PRE-TOUCHED AT CONSTRUCTION from agentforge 5d (feat/conduct-diagnoses-
+  # pretouch): every (detector, op) pair over the commentable rows and the two ops at 0 from a
+  # container's first scrape, the reserved pair excepted, and every bound repo's wakes at 0 the same
+  # way (per pass as well, for a repo a config refresh binds later) — and the rule REQUIRES that
+  # image (its comment says why: a pair with no series until its first comment made an in-place
+  # restart invisible to increase(), and the rule a page on every restart, #748; the wakes had the
+  # mirror image in the quiet direction). Before 5d the wakes were pre-touched per pass only, and
+  # the cases drive that shape where it is still an input the engine produces: a wakes series that
+  # appears at 0 on a first pass that attempts none, or at its count on one that does, is a pod
+  # scraped only after its first pass (the rollout cases) or a repo bound after construction. The
+  # cases whose (detector, op) series are ABSENT until their first comment drive the pre-5d shape of
+  # the diagnoses, and are kept: the second term they hold is the reserved pair's still and the
+  # after-the-pass rollout's on both sides, and the two restart cases and three of the others were
+  # re-run on the 5d shape out of tree and read the same. The last two cases are the 5d shape of
+  # the restart #748 was held on, on both sides, and the inputs whose pre-5d shape reads
+  # differently — the diagnoses' fires, the wakes' hides a loss — neither of which is a case. Every
+  # wake in these cases is a comment the door counted before the POST; every diagnosis is one the
+  # lane saw applied; the two step in the same sample because record_pass writes both.
   #
   # EVERY CASE CARRIES THE POD'S forge_conduct_writes_total, and every pod has two hours of history
   # before anything it is asked about: the rule reads nothing until the store holds a conductor
@@ -1041,7 +1045,7 @@ tests:
   # pod. The three cases after the five originals are the ones the gate and the third clause were
   # measured on: a scrape gap two hours earlier, an old conductor scraped from empty history, and a
   # pair re-minted after a restart that straddles the window's edge — each fired the earlier form.
-  # The case after those is #748's.
+  # The case after those is #748's; the one after it is the wakes side of the same restart.
   - interval: 1m
     name: comments the forge drops after the request leaves fire on the third
     input_series:
@@ -1063,7 +1067,8 @@ tests:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "AgentForge conductor woke bound pools with 6 lifecycle comments in 2h that never came back applied"
-              description: "forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted before the POST) advanced in the last 2h by at least three more than forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments that never came back as applied, so a bound pool may have been woken by a comment nobody can read. The two series share no label — wakes carry repo, diagnoses carry detector and op — so this is the fleet-wide difference and names no repo; the conductor's pass line carries each lane's failed= count beside its comments= and chains=. Check the forge's health from the conductor's side (timeouts and 5xx on POST) before anything else."
+              description: &wakes_unanswered >-
+                forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted before the POST) advanced in the last 2h by at least three more than forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments that never came back as applied, so a bound pool may have been woken by a comment nobody can read. The two series share no label — wakes carry repo, diagnoses carry detector and op — so this is the fleet-wide difference and names no repo; the conductor's pass line carries each lane's failed= count beside its comments= and chains=. Check the forge's health from the conductor's side (timeouts and 5xx on POST) before anything else.
 
   - interval: 1m
     name: a healthy lane whose pairs mint mid-window is exact, and quiet
@@ -1108,16 +1113,18 @@ tests:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
-              description: "forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted before the POST) advanced in the last 2h by at least three more than forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments that never came back as applied, so a bound pool may have been woken by a comment nobody can read. The two series share no label — wakes carry repo, diagnoses carry detector and op — so this is the fleet-wide difference and names no repo; the conductor's pass line carries each lane's failed= count beside its comments= and chains=. Check the forge's health from the conductor's side (timeouts and 5xx on POST) before anything else."
+              description: *wakes_unanswered
 
   - interval: 1m
     name: a rollout mid-window is two pods, one old and one new, and exact
     input_series:
       # Pod abc existed before the window opened (forty of each, a step to forty-one at 150m) and
-      # is gone at 160m; pod def mints at 165m on a first pass that attempts three and applies three
-      # — both of its series appear at 3, never at 0 — and steps to five at 170m. increase() reads
-      # abc whole; the second term reads def's first samples, on both sides: def has no sample
-      # before the window, so it is minted under every clause.
+      # is gone at 160m; pod def is scraped only after its first pass, which attempts three and
+      # applies three, so both of its series appear at 3 from their first sample — the 0 the 5d
+      # pre-touch put on the wire at construction was never read — and step to five at 170m.
+      # increase() reads abc whole; the second term reads def's first samples, on both sides: def
+      # has no sample before the window, so it is minted under every clause. This is the shape
+      # that still reaches the term on 5d (the rule's SECOND TERM paragraph).
       - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "40+0x149 41+0x9 _x100"
       - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
@@ -1200,14 +1207,14 @@ tests:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
-              description: "forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted before the POST) advanced in the last 2h by at least three more than forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments that never came back as applied, so a bound pool may have been woken by a comment nobody can read. The two series share no label — wakes carry repo, diagnoses carry detector and op — so this is the fleet-wide difference and names no repo; the conductor's pass line carries each lane's failed= count beside its comments= and chains=. Check the forge's health from the conductor's side (timeouts and 5xx on POST) before anything else."
+              description: *wakes_unanswered
       - eval_time: 400m
         alertname: ForgeConductWakesUnanswered
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
-              description: "forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted before the POST) advanced in the last 2h by at least three more than forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments that never came back as applied, so a bound pool may have been woken by a comment nobody can read. The two series share no label — wakes carry repo, diagnoses carry detector and op — so this is the fleet-wide difference and names no repo; the conductor's pass line carries each lane's failed= count beside its comments= and chains=. Check the forge's health from the conductor's side (timeouts and 5xx on POST) before anything else."
+              description: *wakes_unanswered
 
   - interval: 1m
     name: a pair minted inside the window while the gap sits at the edge is still a mint
@@ -1312,14 +1319,14 @@ tests:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
-              description: "forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted before the POST) advanced in the last 2h by at least three more than forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments that never came back as applied, so a bound pool may have been woken by a comment nobody can read. The two series share no label — wakes carry repo, diagnoses carry detector and op — so this is the fleet-wide difference and names no repo; the conductor's pass line carries each lane's failed= count beside its comments= and chains=. Check the forge's health from the conductor's side (timeouts and 5xx on POST) before anything else."
+              description: *wakes_unanswered
       - eval_time: 178m
         alertname: ForgeConductWakesUnanswered
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
-              description: "forge_conduct_wake_writes_total (lifecycle comments ATTEMPTED on bound repos, counted before the POST) advanced in the last 2h by at least three more than forge_conduct_diagnoses_total (comments the lanes saw APPLIED): the door sent comments that never came back as applied, so a bound pool may have been woken by a comment nobody can read. The two series share no label — wakes carry repo, diagnoses carry detector and op — so this is the fleet-wide difference and names no repo; the conductor's pass line carries each lane's failed= count beside its comments= and chains=. Check the forge's health from the conductor's side (timeouts and 5xx on POST) before anything else."
+              description: *wakes_unanswered
       - eval_time: 180m
         alertname: ForgeConductWakesUnanswered
         exp_alerts: []
@@ -1363,21 +1370,22 @@ tests:
       # wakes and three diagnoses on one pair, a second pair at 0 as every commentable pair is from
       # construction. The container restarts at 130m: the marker re-exports at 0 at once, and so
       # does EVERY pair — the moving one drops 3 to 0, the still one reads 0 through both lives —
-      # while the wakes are absent until the first pass; the first pass at 135m attempts three and
-      # applies three on the pair: the wakes re-mint at 3, the pair steps 0 to 3. increase() reads
-      # a reset on BOTH sides — 9 then 3 on the wakes (the 9 put back, 3 read), 3 then 0 then 3 on
-      # the pair (the 3 put back, 3 read) — and the difference is 0 at every minute of the
-      # restart's passage through the window (swept 121m to 350m out of tree; the evals below are
-      # its edges: the minute the pre-5d shape fires from, the restart's last minute inside the
-      # window, and the one after). THE PRE-5D SHAPE OF THIS INPUT — the pair ABSENT from 130m to
-      # 134m and re-minted at 3 — has no drop for the reset arithmetic, reads the pair as no change
-      # against three wakes read whole, and fires at 145m and 200m. That is the false page 5d
-      # removes, and it is not a case here: a fixture asserting a wrong page green would document
-      # the defect as the contract (the rule's REQUIRES paragraph).
+      # and so do the wakes, pre-touched at construction over the bound repo; the first pass at
+      # 135m attempts three and applies three on the pair: the wakes step 0 to 3, the pair 0 to 3.
+      # increase() reads a reset on BOTH sides — 9 then 0 then 3 on the wakes (the 9 put back, 3
+      # read), 3 then 0 then 3 on the pair (the 3 put back, 3 read) — and the difference is 0 at
+      # every minute of the restart's passage through the window (swept 121m to 350m out of tree,
+      # on this shape and on the wakes' per-pass shape before it, 9 then absent then 3; the evals
+      # below are its edges: the minute the pre-5d shape fires from, the restart's last minute
+      # inside the window, and the one after). THE PRE-5D SHAPE OF THIS INPUT — the pair ABSENT
+      # from 130m to 134m and re-minted at 3 — has no drop for the reset arithmetic, reads the pair
+      # as no change against three wakes read whole, and fires at 145m and 200m. That is the false
+      # page 5d removes, and it is not a case here: a fixture asserting a wrong page green would
+      # document the defect as the contract (the rule's REQUIRES paragraph).
       - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "9+0x129 0+0x4 3+0x220"
       - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
-        values: "9+0x129 _x5 3+0x220"
+        values: "9+0x129 0+0x4 3+0x220"
       - series: 'forge_conduct_diagnoses_total{detector="PARK-AUTH", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "3+0x129 0+0x4 3+0x220"
       - series: 'forge_conduct_diagnoses_total{detector="PARK-BUDGET-EXHAUSTED", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
@@ -1399,6 +1407,53 @@ tests:
         alertname: ForgeConductWakesUnanswered
         exp_alerts: []
       - eval_time: 340m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+
+  - interval: 1m
+    name: three comments lost across a restart, the wakes pre-touched at construction, fire
+    input_series:
+      # The wakes side of 5d, measured. Two wakes and two diagnoses before the restart at 130m;
+      # the first pass at 135m attempts three and every POST is lost — the wakes step 0 to 3, the
+      # pair stays at 0. On 5d the wakes read 2, then 0, then 3: a reset, 3 read, against a pair
+      # read 0 — three lost, the page. Pre-touched per PASS only (the engine before 5d), the same
+      # input read 2, then absent, then 3 — a re-mint at or above W_old with no drop for the reset
+      # arithmetic, W read 1, and the rule QUIET at every minute from 121m to 350m (swept out of
+      # tree): the quiet direction, three comments lost and hidden behind the old count. That
+      # false negative is not a case, for the reason the pre-5d false page is not.
+      - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "2+0x129 0+0x4 3+0x220"
+      - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "2+0x129 0+0x4 3+0x220"
+      - series: 'forge_conduct_diagnoses_total{detector="PARK-AUTH", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "2+0x129 0+0x4 0+0x220"
+    alert_rule_test:
+      - eval_time: 134m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+      - eval_time: 140m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
+              description: *wakes_unanswered
+      - eval_time: 200m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
+              description: *wakes_unanswered
+      # the restart's drop to 0 at 134m is the last sample the reset arithmetic needs in the window
+      - eval_time: 253m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
+              description: *wakes_unanswered
+      - eval_time: 254m
         alertname: ForgeConductWakesUnanswered
         exp_alerts: []
 
