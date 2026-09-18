@@ -43,7 +43,7 @@ spec:
       containers:
         - name: provisioner
           # CHANGEME digest — pinned by `just pin-bootstrap` before merge (plan Stage 0; bootstrap-class).
-          image: registry.chifor.me/agentforge/orchestrator@sha256:a1cb642963434bd027c200cff3c2387d2187d39fe05a76f9089d9bac279a33a8
+          image: registry.chifor.me/agentforge/orchestrator@sha256:e7c0040a091cbe637ccbd6e66685306343328342b10933e097a92579e7e228ea
           args: ["agentforge", "provisioner"]
           # METRICS (ailab#293). The provisioner ALREADY exports af_provisioner_* — the composition
           # root `provisioner()` calls start_http_server(metrics_port, registry=metrics.registry)
@@ -163,7 +163,7 @@ spec:
             # merged broker manifests (all four agree; e.g. agentforge-broker/broker-anthropic-max1
             # .yaml), which the pin bot keeps in lockstep with this deployment's own image.
             - name: AF_PROVISIONER_SEAT_IMAGE
-              value: "registry.chifor.me/agentforge/orchestrator@sha256:a1cb642963434bd027c200cff3c2387d2187d39fe05a76f9089d9bac279a33a8"
+              value: "registry.chifor.me/agentforge/orchestrator@sha256:e7c0040a091cbe637ccbd6e66685306343328342b10933e097a92579e7e228ea"
             # provider -> the operator-reviewed seat each new seat is cloned FROM: its ledger DSN is
             # copied (D3 — unset means seeding refuses with LedgerSourceUnset) and its entitlements
             # are cloned onto seats the declaration does not name explicitly. These two are the
