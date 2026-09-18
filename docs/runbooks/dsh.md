@@ -99,10 +99,14 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 
 > **`dsh-team-conductor` lives at `cchifor/dsh-team-conductor` since 2026-09-18** (transferred by the
 > operator from the restricted `dsh` user, which could not initiate a transfer itself: a restricted
-> account cannot see the org). `dsh` has **write** on it as a collaborator - not admin, so it cannot
-> edit the branch protection it is gated by (`main`: status check `test / test (pull_request)` +
-> 2 approvals, which the two reviewer bots supply); `reviewer-claude` and `reviewer-codex` have
-> write. It is on the reviewers' allowlist and `dsh` is a merge author **for this repo only**, so a
+> account cannot see the org). `dsh` has **admin** on it as a collaborator (operator decision,
+> 2026-09-18: a write-only grant broke the agent's preflight, because `GET /branch_protections`
+> is admin-only in Gitea - the non-admin way to read the same facts is `GET /branches/main`).
+> Accepted with it: the agent *can* edit the protection it is gated by. What keeps merging with
+> the reviewers is that protection's own configuration - `main`: status check
+> `test / test (pull_request)`, 2 approvals, merge and approvals whitelists of `chifor`,
+> `reviewer-claude` and `reviewer-codex`, stale approvals dismissed - and that `dsh` leaves it
+> alone; `reviewer-claude` and `reviewer-codex` have write. It is on the reviewers' allowlist and `dsh` is a merge author **for this repo only**, so a
 > PR authored by the agent merges when both personas are clean and its own CI (`test.yml`, on the
 > repo-scoped runner `dsh-conductor-ci-runner-1`, which survived the move) is green. Two things
 > to hold in mind about that gate: **CI green is advisory for this author** - the workflow runs

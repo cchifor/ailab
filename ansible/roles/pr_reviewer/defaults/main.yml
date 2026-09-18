@@ -32,9 +32,13 @@ pr_reviewer_repos:
   - cchifor/agentforge-platform
   # dsh-team-conductor joined 2026-09-18 (operator-directed): the DSH agent team's own repo,
   # transferred from the restricted `dsh` user into this org so the org webhooks, the hook
-  # assertion and the org runners cover it like every other entry. `dsh` has WRITE on it as a
-  # collaborator (not admin: the reviewed party must not be able to edit the branch protection
-  # it is gated by); both reviewer identities have write. Its PRs are authored by `dsh`, which
+  # assertion and the org runners cover it like every other entry. `dsh` has ADMIN on it as a
+  # collaborator - operator decision, 2026-09-18, after a write-only grant broke the agent's
+  # preflight (reading /branch_protections is admin-only in Gitea). ACCEPTED WITH IT: the
+  # reviewed party can edit the branch protection it is gated by; the protection's merge and
+  # approvals whitelists (chifor and the two reviewer identities) are what keep merging with the
+  # reviewers, and only as long as `dsh` leaves them alone. Both reviewer identities have write.
+  # Its PRs are authored by `dsh`, which
   # is a merge author FOR THIS REPO ONLY (pr_reviewer_merge_authors_by_repo) and an unattended
   # author (pr_reviewer_unattended_authors) - so a clean pair of verdicts plus its own CI
   # (test.yml on the repo-scoped runner) merges model-authored code with no human in the loop,
