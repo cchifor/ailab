@@ -3855,6 +3855,29 @@ class ModelLadderTest(unittest.TestCase):
         self.assertAlmostEqual(now + 100, self.m.seat_reopens_at("a"), delta=2,
                                msg="a reopens when its earliest tier does")
 
+    # ---- codex review of PR 2 ---------------------------------------------------------------
+    def test_fallback_used_counts_reviews_SERVED_below_the_top_tier_not_transitions(self):
+        """The startup poll can park fable on every seat before any review runs; reviews then
+        start directly on opus with no transition to count, and ReviewbotPrimaryModelDown
+        (increase(fallback_used)[6h] >= 10) would stay silent through hours of fallback
+        service. Count what the alert is about: a review served below the top tier."""
+        now = real_time.time()
+        for s in "abc":
+            self.m.park_model(s, "fable", now + 3000)
+        self.m.subprocess.run = self._runner()
+        self.m.run_llm("t", "d", "diff")
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runa", "opus"), ("runa", "opus")], self.models_run)
+        self.assertEqual(2.0, self._meta("llm_fallback_used_total"))
+
+    def test_model_switches_count_every_committed_model_change(self):
+        """A ModelError descent changes the model just as a refusal does; the counter follows
+        the COMMITTED model, not the code path that changed it."""
+        self.m.subprocess.run = self._runner(broken={("runa", "fable"): "API Error: 500"})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual(("a", "opus"), (self.m.CURRENT_SEAT, self.m.CURRENT_MODEL))
+        self.assertEqual(1.0, self._meta("llm_model_switches_total"))
+
     def test_the_choice_is_tier_major_then_sticky_seat_then_seat_order(self):
         now = real_time.time()
         self.m.use_seat("c")
@@ -3934,7 +3957,8 @@ class UsageWatchdogTest(unittest.TestCase):
         self.assertEqual("acct-1", snap["account"]["uuid"], "identity is not forgotten on a 401")
 
     def test_the_poll_climbs_back_to_fable_on_a_better_seat_but_never_moves_within_a_tier(self):
-        self.m.use_seat("c"); self.m.use_model("opus")
+        self.m.use_seat("c")
+        self.m.CURRENT_MODEL = "opus"        # start there without counting it as a switch
         self._probe({"a": self._doc(limits=[("weekly_all", "", 50, 3000)]),
                      "b": self._doc(uuid="acct-2", limits=[("weekly_all", "", 50, 3000)]),
                      "c": self._doc(uuid="acct-3", limits=[("weekly_scoped", "Fable", 100, 3000)])})
@@ -3955,6 +3979,65 @@ class UsageWatchdogTest(unittest.TestCase):
         self.m.poll_usage(self.now)
         self.assertEqual(0, self.m.seats_available())
         self.assertGreater(self.m.RATE_LIMITED_UNTIL, self.now)
+
+    # ---- codex review of PR 2 ---------------------------------------------------------------
+    def test_a_deferral_wakes_within_the_default_park_even_when_the_wall_is_hours_away(self):
+        """A job deferred to a six-hour wall kept that next_at after the watchdog unparked the
+        seat an hour later. The worker gate (RATE_LIMITED_UNTIL) already holds work while every
+        seat is parked, so a deferral only needs to wake within DEFAULT_PARK_S and let the gate
+        decide - an unpark then takes effect within 15 minutes, not hours."""
+        head = "a" * 40
+        self.m.enqueue("o/r", 1, head, "webhook")
+        for s in "abc":
+            self.m.park(self.now + 6 * 3600, seat=s)
+
+        def refuse(*a):
+            raise self.m.RateLimited("You've hit your weekly limit", self.now + 6 * 3600)
+        self.m.review_job = refuse
+        self.m.RATE_LIMITED_UNTIL = 0.0                 # let worker_once claim the job
+        self.m.worker_once()
+        c = self.m.db()
+        state, next_at, attempts = c.execute(
+            "SELECT state,next_at,attempts FROM jobs WHERE head_sha=?", (head,)).fetchone()
+        c.close()
+        self.assertEqual(("retry", 0), (state, attempts))
+        self.assertLessEqual(next_at, self.now + self.m.DEFAULT_PARK_S + 5)
+
+    def test_apply_usage_refreshes_the_global_wall_under_the_park_lock(self):
+        """Unparking must publish a fresh wall itself, atomically with the table it changed:
+        a worker computing a stale wall from the old tables must not be able to re-publish
+        it over the unpark."""
+        self.assertTrue(hasattr(self.m.park_lock, "acquire"))
+        for s in "abc":
+            self.m.park(self.now + 6 * 3600, seat=s)
+        self.assertGreater(self.m.RATE_LIMITED_UNTIL, self.now)
+        self.m.apply_usage("b", self._doc(limits=[("weekly_all", "", 40, 3000)]), self.now)
+        self.assertEqual(0.0, self.m.RATE_LIMITED_UNTIL, "one usable seat = the wall is down")
+
+    def test_a_watchdog_park_counts_once_and_an_extension_does_not(self):
+        """ReviewbotSeatNeverServes needs increase(seat_parks_total) > 0: a seat the API keeps
+        parked must be countable as parked, but re-extending it hourly must not read as a
+        seat that 'keeps running out'."""
+        self.m.apply_usage("a", self._doc(limits=[("weekly_all", "", 100, 3000)]), self.now)
+        self.m.apply_usage("a", self._doc(limits=[("weekly_all", "", 100, 3500)]), self.now + 60)
+        self.m.apply_usage("a", self._doc(limits=[("weekly_scoped", "Fable", 100, 3000)]), self.now)
+        c = self.m.db()
+        rows = dict(c.execute("SELECT k,v FROM meta WHERE k LIKE '%parks_total%'"))
+        c.close()
+        self.assertEqual(1.0, float(rows.get("seat_parks_total.a") or 0), rows)
+        self.assertEqual(1.0, float(rows.get("model_parks_total.a.fable") or 0), rows)
+
+    def test_a_scope_that_matches_several_tiers_parks_all_of_them(self):
+        """Two configured names for one model share one window; parking only the first
+        substring match would leave the other eligible for the same refusal."""
+        m = _ladder_module(self.tmp.name, llm_models=["claude-opus-5", "opus", "sonnet"],
+                           usage_poll_s=3600)
+        m.apply_usage("a", {"ok": True, "error": "", "account": {"uuid": "u"},
+                            "limits": [{"kind": "weekly_scoped", "model": "Opus", "percent": 100.0,
+                                        "resets_at": self.now + 3000, "active": False}]}, self.now)
+        self.assertTrue(m.model_parked("a", "claude-opus-5"))
+        self.assertTrue(m.model_parked("a", "opus"))
+        self.assertFalse(m.model_parked("a", "sonnet"))
 
     def test_a_zero_interval_starts_nothing(self):
         off = _ladder_module(self.tmp.name, usage_poll_s=0)
@@ -3996,6 +4079,15 @@ class ParseResetDateTest(unittest.TestCase):
     def test_the_time_only_forms_still_parse(self):
         self.assertEqual((16, 20), real_time.gmtime(self.m.parse_reset("resets 4:20pm (UTC)"))[3:5])
         self.assertIsNone(self.m.parse_reset("resets never"))
+
+    def test_a_message_naming_both_forms_takes_the_earlier_reset(self):
+        """codex review of PR 2: a message that names a session reset (hours) and a weekly one
+        (days) must not park to the later one - a park that lapses re-probes for free, a park
+        that overshoots idles the persona."""
+        text = "session resets 11pm (UTC); weekly resets Jan 2, 12pm (UTC)"
+        at = self.m.parse_reset(text)
+        self.assertEqual(23, real_time.gmtime(at)[3])
+        self.assertLess(at, real_time.time() + 86400 + 60)
 
 
 class LadderMetricsTest(unittest.TestCase):

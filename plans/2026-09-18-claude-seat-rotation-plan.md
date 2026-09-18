@@ -48,9 +48,12 @@ Two things this settles that `host_vars/reviewer-1.yml` currently gets wrong:
    the current seat on `opus`. Descend only when every seat is parked for the current tier; stay
    on the sticky seat when descending. Sonnet stays because the API exposes an Opus-scoped weekly
    cap (`seven_day_opus`): a seat can be out of Opus while its account window is fine.
-4. **Upward moves happen only in the hourly watchdog; downward moves happen on refusal.**
-   A refusal at minute 1 must not idle the persona for 59 minutes, and a climb back to Fable
-   must not ping-pong on every review. Poll interval 3600 s, as specified.
+4. **The hourly watchdog is what moves the persona up before a park lapses; downward moves
+   happen on refusal.** A refusal at minute 1 must not idle the persona for 59 minutes, and a
+   climb back to Fable must not ping-pong on every review — the parks prevent that, not the
+   selector: a lapsed park (or a transient non-limit failure, which parks nothing) lets the next
+   review try the higher tier again on its own, which is the free re-probe that also keeps a
+   parked seat's credential fresh. Poll interval 3600 s, as specified.
 5. **The lossless-park property is still the invariant.** An exhausted account or tier consumes no
    attempt, leaves the queue intact and quarantines nothing. Every test below defends it.
 6. **The email goes into Prometheus, not git.** `reviewbot_llm_seat_info{email=…}` is read from

@@ -55,6 +55,12 @@ def _label(v):
     return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 db_lock = threading.Lock()
+# Park tables and RATE_LIMITED_UNTIL change together, from the worker thread (refusals) AND
+# the usage thread (the hourly poll). Without one lock a worker can compute a wall from the
+# old tables, the poll can clear them and publish 0.0, and the worker then publishes its
+# stale wall over the unpark (codex review of PR 2). Re-entrant: park_model() -> all_parked_until()
+# nests reads inside a write.
+park_lock = threading.RLock()
 
 
 def log(*a):
@@ -797,6 +803,7 @@ def parse_reset(text):
     The CLI gives a wall-clock UTC time with no date ("resets 4:20pm (UTC)"), so a time that
     has already passed today means tomorrow. The dated weekly form ("resets Sep 20, 11pm
     (UTC)") is taken as this year, or next year if that day is already more than a day gone."""
+    found = []
     d = RESET_DATE_RE.search(text or "")
     if d and d.group(1).lower() in MONTHS:
         mon, day = MONTHS[d.group(1).lower()], int(d.group(2))
@@ -811,12 +818,14 @@ def parse_reset(text):
                 at = calendar.timegm((year, mon, day, hour, minute, 0, 0, 0, 0))
                 if at < time.time() - 86400:
                     at = calendar.timegm((year + 1, mon, day, hour, minute, 0, 0, 0, 0))
-                return at
+                found.append(at)
             except (OverflowError, ValueError):
                 pass
     m = RESET_RE.search(text or "")
     if not m:
-        return None
+        # A message naming both forms parks to the EARLIER one: a park that lapses re-probes
+        # for free, a park that overshoots idles the persona (codex review of PR 2).
+        return min(found) if found else None
     # `or 0` is LOAD-BEARING since minutes became optional in RESET_RE: `int(None)` raises
     # TypeError, which run_llm's wrapper would re-raise as an ordinary failure - defeating
     # the very park this parses for, on exactly the messages it was widened to read.
@@ -834,7 +843,8 @@ def parse_reset(text):
     # No clamp here: this reports what the error SAID. Clamping at parse time silently
     # rewrote 4:20pm into "now + 6h", which is a different wall-clock time and made the
     # value wrong for logging and for the metric. park() is where the bound belongs.
-    return today
+    found.append(today)
+    return min(found)
 
 
 # ── seats ────────────────────────────────────────────────────────────────────────────
@@ -924,8 +934,11 @@ def tier_index(model):
 
 
 def use_model(model):
-    """The only writer of CURRENT_MODEL."""
+    """The only writer of CURRENT_MODEL - and therefore the only place a model change is
+    counted, whichever path committed it (a refusal, a non-limit descent, the poll's climb)."""
     global CURRENT_MODEL
+    if model != CURRENT_MODEL:
+        bump_meta("llm_model_switches_total")
     CURRENT_MODEL = model
 
 
@@ -968,9 +981,10 @@ def park_model(seat, model, reset_at):
     until = reset_at or (time.time() + DEFAULT_PARK_S)
     until = max(time.time() + 60, min(until, time.time() + MAX_PARK_S))
     key = (seat, model)
-    MODEL_PARKED_UNTIL[key] = max(MODEL_PARKED_UNTIL.get(key, 0.0), until)
+    with park_lock:
+        MODEL_PARKED_UNTIL[key] = max(MODEL_PARKED_UNTIL.get(key, 0.0), until)
+        RATE_LIMITED_UNTIL = all_parked_until()
     bump_meta(f"model_parks_total.{seat}.{model}")
-    RATE_LIMITED_UNTIL = all_parked_until()
     log(f"model '{model}' limited on seat '{seat}'; parking that pair for "
         f"{MODEL_PARKED_UNTIL[key] - time.time():.0f}s (queue left intact)")
     return MODEL_PARKED_UNTIL[key]
@@ -1024,17 +1038,15 @@ def usage_poller_enabled():
         return False
 
 
-def tier_for(display):
-    """The configured tier a scoped limit's model display name refers to ("Fable" -> "fable",
-    "Opus" -> "opus" or "claude-opus-5"), or None for a model this host does not run."""
+def tiers_for(display):
+    """EVERY configured tier a scoped limit's model display name refers to ("Fable" ->
+    ["fable"], "Opus" -> ["claude-opus-5", "opus"] when both are configured): two names for one
+    model share one window, and parking only the first match would leave the other eligible
+    for the same refusal (codex review of PR 2). Empty for a model this host does not run."""
     d = (display or "").strip().lower()
     if not d:
-        return None
-    for m in MODELS:
-        ml = m.lower()
-        if ml and (ml in d or d in ml):
-            return m
-    return None
+        return []
+    return [m for m in MODELS if m and (m.lower() in d or d in m.lower())]
 
 
 def _clamped(until, now):
@@ -1052,10 +1064,11 @@ def apply_usage(seat, doc, now=None):
     re-extends them, so a dead poller can never leave a 7-day park behind. A failed probe
     changes no park and keeps the last-known windows and identity (a 401 is a stale access
     token, which the CLI refreshes the next time it runs as that seat)."""
+    global RATE_LIMITED_UNTIL
     now = time.time() if now is None else now
     prev = USAGE_SNAPSHOT.get(seat) or {}
     ok = bool(doc.get("ok"))
-    entries, limits = [], {}
+    entries, limits, counters = [], {}, []
     if ok:
         for lim in (doc.get("limits") or []):
             if not isinstance(lim, dict):
@@ -1074,18 +1087,31 @@ def apply_usage(seat, doc, now=None):
             limits[label] = (pct, reset)
         account = [(pct, reset) for kind, _m, pct, reset in entries
                    if kind in ("session", "weekly_all")]
-        if account:
-            spent = [reset or (now + DEFAULT_PARK_S) for pct, reset in account if pct >= 100.0]
-            SEAT_PARKED_UNTIL[seat] = _clamped(max(spent), now) if spent else 0.0
         tiers = {}
         for kind, model, pct, reset in entries:
             if kind == "weekly_scoped":
-                t = tier_for(model)
-                if t is not None:
+                for t in tiers_for(model):
                     tiers.setdefault(t, []).append((pct, reset))
-        for t, es in tiers.items():
-            spent = [reset or (now + DEFAULT_PARK_S) for pct, reset in es if pct >= 100.0]
-            MODEL_PARKED_UNTIL[(seat, t)] = _clamped(max(spent), now) if spent else 0.0
+        with park_lock:
+            if account:
+                spent = [reset or (now + DEFAULT_PARK_S) for pct, reset in account if pct >= 100.0]
+                new = _clamped(max(spent), now) if spent else 0.0
+                # A park the API creates is a park: ReviewbotSeatNeverServes reads
+                # increase(seat_parks_total) as its first clause. Counted on the TRANSITION
+                # into parked, so the hourly re-extension of an already-parked seat is not a
+                # seat that "keeps running out" (codex review of PR 2).
+                if new > now and SEAT_PARKED_UNTIL.get(seat, 0.0) <= now:
+                    counters.append(f"seat_parks_total.{seat}")
+                SEAT_PARKED_UNTIL[seat] = new
+            for t, es in tiers.items():
+                spent = [reset or (now + DEFAULT_PARK_S) for pct, reset in es if pct >= 100.0]
+                new = _clamped(max(spent), now) if spent else 0.0
+                if new > now and MODEL_PARKED_UNTIL.get((seat, t), 0.0) <= now:
+                    counters.append(f"model_parks_total.{seat}.{t}")
+                MODEL_PARKED_UNTIL[(seat, t)] = new
+            RATE_LIMITED_UNTIL = all_parked_until(now)
+        for key in counters:
+            bump_meta(key)
     USAGE_SNAPSHOT[seat] = {"ok": ok, "ts": now,
                    "account": (doc.get("account") if ok and doc.get("account")
                                else prev.get("account") or {}),
@@ -1093,20 +1119,23 @@ def apply_usage(seat, doc, now=None):
 
 
 def rebalance(now=None):
-    """Climb back UP the ladder when a better tier is available anywhere - the only place an
-    upward move happens, and it happens on the poll's cadence, never per review. Within a tier
-    the choice stays sticky; a downward move is the refusal path's business."""
+    """Climb back UP the ladder when a better tier is available anywhere, on the poll's
+    cadence. This is what moves the persona up BEFORE a park lapses; a lapsed park (or a
+    transient non-limit failure, which parks nothing) lets the next review try the higher tier
+    again on its own - a refused call costs nothing and is what keeps a parked seat's
+    credential fresh. Within a tier the choice stays sticky; a downward move is the refusal
+    path's business."""
     now = time.time() if now is None else now
-    best = active_choice(now)
-    if best and tier_index(best[1]) < tier_index(CURRENT_MODEL):
+    with park_lock:
+        best = active_choice(now)
+        if not (best and tier_index(best[1]) < tier_index(CURRENT_MODEL)):
+            return None
         old = (CURRENT_SEAT, CURRENT_MODEL)
         use_seat(best[0])
         use_model(best[1])
-        bump_meta("llm_model_switches_total")
-        log(f"usage: climbing from seat '{old[0]}' model '{old[1] or '(account default)'}' to "
-            f"seat '{best[0]}' model '{best[1] or '(account default)'}'")
-        return best
-    return None
+    log(f"usage: climbing from seat '{old[0]}' model '{old[1] or '(account default)'}' to "
+        f"seat '{best[0]}' model '{best[1] or '(account default)'}'")
+    return best
 
 
 def poll_usage(now=None):
@@ -1125,7 +1154,8 @@ def poll_usage(now=None):
         if not doc.get("ok"):
             log(f"usage: seat '{s['name']}' probe failed: {doc.get('error')}")
     rebalance(now)
-    RATE_LIMITED_UNTIL = all_parked_until(now)
+    with park_lock:
+        RATE_LIMITED_UNTIL = all_parked_until(now)
 
 
 def usage_ticker():
@@ -1319,14 +1349,15 @@ def park(reset_at, seat=None):
     until = reset_at or (time.time() + DEFAULT_PARK_S)
     until = max(time.time() + 60, min(until, time.time() + MAX_PARK_S))
     # The max stays HERE, per seat, where it was always right: one seat's wall only moves later.
-    SEAT_PARKED_UNTIL[seat] = max(SEAT_PARKED_UNTIL.get(seat, 0.0), until)
+    with park_lock:
+        SEAT_PARKED_UNTIL[seat] = max(SEAT_PARKED_UNTIL.get(seat, 0.0), until)
+        RATE_LIMITED_UNTIL = all_parked_until()
     # A COUNTER BESIDE THE GAUGE, because the gauge cannot answer "is this seat spent?".
     # A park lapses after DEFAULT_PARK_S and sticky selection has already moved on, so nothing
     # re-probes that seat: reviewbot_llm_seat_parked drops back to 0 without the subscription
     # having recovered, and any `== 1 for: >15m` rule over it is unsatisfiable (reviewer-codex,
     # round 1 of ailab#754). Repeated parks ARE observable, and monotonic.
     bump_meta(f"seat_parks_total.{seat}")
-    RATE_LIMITED_UNTIL = all_parked_until()
     # Leading text is verbatim on purpose: docs/runbooks/dev-workers.md and the runbook line in
     # reviewbot-rules.yaml both tell an operator to grep for it. The seat is appended only when
     # there is more than one, so a single-seat journal is byte-identical to before.
@@ -1375,6 +1406,12 @@ def run_llm(title, desc, diff_text, rubric=""):
                 # merely busy from one that can never serve. Bumped on the return path, so it
                 # means "this seat produced a usable review", not "this seat was selected".
                 bump_meta(f"seat_reviews_total.{seat}")
+                # WHAT ReviewbotPrimaryModelDown MEASURES: a review SERVED below the top tier,
+                # whether the ladder descended on this call or the startup poll had already
+                # parked the top tier on every seat (codex review of PR 2 - counting the
+                # descent left steady-state fallback service invisible).
+                if model != MODELS[0]:
+                    bump_meta("llm_fallback_used_total")
                 return out
             except RateLimited as e:
                 # ORDER IS LOAD-BEARING.
@@ -1406,15 +1443,10 @@ def run_llm(title, desc, diff_text, rubric=""):
                     raise
                 # 4. Move. Bounded twice over: `exclude=tried` caps this at
                 #    len(SEATS) * len(MODELS), and each pass needs llm_seat_switch_min_s of a
-                #    finite shared budget. A step DOWN the ladder is what the fallback counter
-                #    (and ReviewbotPrimaryModelDown) has always measured; a seat change is the
-                #    rotation's own counter.
+                #    finite shared budget. A seat change is the rotation's own counter; a model
+                #    change is counted where it is committed (use_model).
                 if nxt[0] != seat:
                     bump_meta("llm_seat_switches_total")
-                if nxt[1] != model:
-                    bump_meta("llm_model_switches_total")
-                    if tier_index(nxt[1]) > tier_index(model):
-                        bump_meta("llm_fallback_used_total")
                 what = "model-limited" if e.scope == "model" else "rate-limited"
                 log(f"seat '{seat}' {what} on '{model or '(account default)'}'; switching to "
                     f"seat '{nxt[0]}' model '{nxt[1] or '(account default)'}' with {left:.0f}s "
@@ -1441,7 +1473,6 @@ def run_llm(title, desc, diff_text, rubric=""):
                     raise RuntimeError(str(e)) from None
                 log(f"{who} failed ({e}); retrying with fallback '{lower[0]}' in the "
                     f"remaining {left:.0f}s")
-                bump_meta("llm_fallback_used_total")
                 forced = (seat, lower[0])
                 continue
     # RateLimited passes through UNRECLASSIFIED. It is not a cost class at all - it says the
@@ -2591,7 +2622,15 @@ def worker_once():
         c = db()
         # A deferred job waits for the SUBSCRIPTION, not for an exponential backoff it did
         # nothing to earn.
-        next_at = limited_until or (time.time() + min(3600, 60 * 2 ** attempts))
+        # ...but, WITH THE WATCHDOG ON, never past DEFAULT_PARK_S: the worker gate
+        # (RATE_LIMITED_UNTIL) holds work while every seat is parked anyway, and an unpark by
+        # the poll then takes effect within minutes instead of at the wall the job was deferred
+        # to (codex review of PR 2). Without a poller nothing unparks before the wall, so the
+        # wall itself is the exact wake-up and the legacy deferral is unchanged.
+        if limited_until and usage_poller_enabled():
+            next_at = min(limited_until, time.time() + DEFAULT_PARK_S)
+        else:
+            next_at = limited_until or (time.time() + min(3600, 60 * 2 ** attempts))
         c.execute("UPDATE jobs SET state=?, attempts=?, timeout_attempts=?, next_at=?, "
                   "updated=?, review_id=?, note=? WHERE id=?",
                   (state, attempts, timeouts, next_at, time.time(), rid, note, jid))

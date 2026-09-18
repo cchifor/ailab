@@ -87,12 +87,12 @@ def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, color="va
     }
 
 
-def bargauge(title, x, y, w, h, expr, unit="percent", legend="{{id}}", maxv=100):
+def bargauge(title, x, y, w, h, expr, unit="percent", legend="{{id}}", maxv=100, steps=None):
     return {
         "id": _nid(), "type": "bargauge", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
         "fieldConfig": {"defaults": {"unit": unit, "min": 0, "max": maxv, "decimals": 1,
-            "thresholds": {"mode": "absolute", "steps": [
+            "thresholds": {"mode": "absolute", "steps": steps or [
                 {"color": "green", "value": None}, {"color": "yellow", "value": 75},
                 {"color": "red", "value": 90}]}}, "overrides": []},
         "options": {"displayMode": "gradient", "orientation": "horizontal", "showUnfilled": True,
@@ -505,14 +505,21 @@ panels += [
          'min(reviewbot_llm_usage_probe_ok{persona="claude"}) or vector(0)',
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
     # Seats that can serve SOMETHING: neither account-parked nor parked on every tier.
+    # Aggregated before `or vector(0)`: a labelled series OR'd with the label-less vector(0)
+    # keeps BOTH (the label sets differ), and the stat showed a phantom red zero beside the
+    # real value (codex review of PR 2). min() drops the labels, as the other stats do.
     stat("Seats Usable", 13, 159, 3, 4,
-         'reviewbot_llm_seats_available{persona="claude"} or vector(0)',
+         'min(reviewbot_llm_seats_available{persona="claude"}) or vector(0)',
          steps=[{"color": "red", "value": None}, {"color": "orange", "value": 1},
                 {"color": "green", "value": 2}]),
+    # Orange at 80, red at 100: 100 IS the parked state, and the API's percent is what the
+    # persona is parked on, so anything below it is still capacity.
     bargauge("Claude Usage per Account", 16, 159, 8, 13,
              'reviewbot_llm_usage_percent{persona="claude"} * on(persona,seat) '
              'group_left(email) reviewbot_llm_seat_info{persona="claude"}',
-             legend="{{email}} · {{limit}}"),
+             legend="{{email}} · {{limit}}",
+             steps=[{"color": "green", "value": None}, {"color": "orange", "value": 80},
+                    {"color": "red", "value": 100}]),
     qtable("Time to Reset per Account and Window", 0, 163, 16, 4,
            'clamp_min(reviewbot_llm_usage_resets_at_seconds{persona="claude"} - time(), 0) '
            '* on(persona,seat) group_left(email) reviewbot_llm_seat_info{persona="claude"}',

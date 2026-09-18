@@ -357,10 +357,13 @@ Three things differ from the codex seats:
    # sign in as THE SEAT'S ACCOUNT in a private window (a warm browser session reuses the
    # wrong account silently - it did, on the first attempt), then:
    ssh c4@192.168.0.24 '/home/c4/seat-login.sh code clauderun2 <pasted code>'
+   ssh c4@192.168.0.24 'sudo -n rm -f /home/clauderun2/.claude/oauth-token'     # BEFORE the check
    ssh c4@192.168.0.24 'sudo -n -u clauderun2 HOME=/home/clauderun2 /usr/local/lib/reviewbot/claude-usage.py'
    ```
-   The last line is the check that matters: `"ok": true` with the expected `email`. Then
-   remove any `oauth-token` left in that HOME so the login is the seat's one credential.
+   The last line is the check that matters: `"ok": true` with the expected `email`. The
+   token file is removed first because both the wrapper and the probe PREFER it when present —
+   a leftover setup-token keeps answering 403 and the check would be testing the wrong
+   credential.
 2. **The entry point is `/usr/local/lib/reviewbot/claude-seat.sh`**, not the CLI: with a token
    file it exports it into `CLAUDE_CODE_OAUTH_TOKEN` (sudo resets the environment and shows argv
    to every process, so the HOME is the only place a token may come from); without one it
@@ -384,12 +387,15 @@ order: any seat that can serve `fable` beats the current seat on `opus`. A refus
 persona DOWN or ACROSS — a model-scoped one (`/usage-credits … switch models`, or a model the
 CLI cannot serve) parks that `(seat, model)` pair and the same tier is tried on the next seat;
 an account-scoped one (`weekly limit`, `session limit`) parks the whole seat; a tier is left only
-when every seat is parked for it, and the descent stays on the sticky seat. Only the hourly
-watchdog moves the persona UP: it runs the probe as every seat, parks and unparks seats and
-tiers from the API's own `percent`/`resets_at` (a window at 100 % parks until its reset, below
-100 % clears the park whatever text-derived guess set it), then climbs to the best tier that is
-free anywhere. It never moves within a tier. Parks stay clamped to 6 h and the next poll
-re-extends them, so a dead poller cannot leave a week-long park behind. Read it on the AI Lab
+when every seat is parked for it, and the descent stays on the sticky seat. The hourly
+watchdog moves the persona UP before a park lapses: it runs the probe as every seat, parks and
+unparks seats and tiers from the API's own `percent`/`resets_at` (a window at 100 % parks until
+its reset, below 100 % clears the park whatever text-derived guess set it), then climbs to the
+best tier that is free anywhere. It never moves within a tier. A park that lapses on its own
+(or a transient non-limit failure, which parks nothing) lets the next review try the higher
+tier again by itself — a refused call costs nothing and is what keeps a parked seat's credential
+fresh. Parks stay clamped to 6 h and the next poll re-extends them, so a dead poller cannot
+leave a week-long park behind. Read it on the AI Lab
 Fleet dashboard: *Active Claude Account* (email), *Active Claude Model*, *Claude Usage per
 Account*, *Time to Reset*, *Tier Parked per Seat*; in the journal: `grep -E "usage|climbing|limited"`.
 If `ReviewbotUsageProbeFailing` fires, the seat's login is what needs attention (401 = expired
