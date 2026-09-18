@@ -518,7 +518,9 @@ spec:
         # restart (#748); and forge_conduct_wake_writes_total by repo, pre-touched per PASS until
         # then, is from 5d pre-touched at construction over the bound repos as well (per pass still,
         # for a repo a config refresh binds later), so both sides of that rule's subtraction read a
-        # restart as a reset; the rule REQUIRES the 5d image and says so. And forge_conduct_parks
+        # restart as a reset — provided a scrape read the 0 before the first pass returned, which
+        # nothing guarantees (the rule's REQUIRES paragraph has the residual and its measure); the
+        # rule REQUIRES the 5d image and says so. And forge_conduct_parks
         # is a GAUGE, rebuilt in place every pass, whole over the bound repos, and EMPTY when a pass
         # could not report its parks — absence on it is "not known", never 0. Every series below is
         # exported by agentforge's T1 instruments, unmerged as this is written and absent from the
@@ -559,10 +561,25 @@ spec:
         # merge), so the label condition this paragraph once carried is moot; the live dependency is
         # 5d PINNED, not merely the T1 series scraped. 5d touches every (detector, op) pair over the
         # rows a comment can name (the sixteen PARK-* rows and DAG-DEADLOCKED, crossed with finding
-        # and observation) at 0 at construction, so a pair is on the wire from a container's first
-        # scrape and an in-place restart reads 3, then 0, then 3 — a drop increase() takes for a
+        # and observation) at 0 at construction, so a pair is at 0 on the wire before the first pass
+        # moves it and an in-place restart reads 3, then 0, then 3 — a drop increase() takes for a
         # reset and puts back; and it touches every bound repo's forge_conduct_wake_writes_total at
-        # 0 at construction too, so the wakes read the same restart as 9, then 0, then 3. On the
+        # 0 at construction too, so the wakes read the same restart as 9, then 0, then 3. PROVIDED A
+        # SCRAPE READ THE 0: the conductor runs its first pass at once after construction (the loop
+        # sleeps after a pass, never before the first) and this PodMonitor scrapes every 30s, so a
+        # first pass shorter than the interval leaves the construction-time 0 unread and the wire
+        # carries the pre-5d shape on the SAME pod — wakes 9, a gap, 3; a pair 3, a gap, 3 — with
+        # nothing for the second term to put back (the series existed before the window; this is a
+        # restart, not a rollout). That is the RESIDUAL, and it is a fixture below ("an in-place
+        # restart whose construction-time 0 no scrape read — the residual, fires": fires at 145m
+        # and 200m, quiet with the 0 scraped once). Measured on the estate: a pass takes ~5s, so
+        # the 0 is read about one restart in six, and an in-place restart of the conductor (a crash,
+        # a liveness kill — not a rollout) leaves the pre-5d arithmetic on both sides five times in
+        # six — the page when the first pass re-mints a pair at or above its old count while the
+        # wakes come back under theirs (the reviewers' input; a pair re-minted UNDER its old count
+        # drops, and the drop is the reset), the hidden loss in the mirror case — until the engine
+        # holds its first pass until the first scrape has been served; that is the loop's follow-up,
+        # recorded in agentforge's plans/conduct-diagnoses-pretouch-impl-review.md. On the
         # engine before 5d a pair had no series until its first comment and was RE-MINTED after a
         # restart at the first commenting pass's own count: 3, then nothing, then 3 — no drop, so no
         # reset, the pair read as no change while the wakes beside it read whole (their re-mint
@@ -573,9 +590,13 @@ spec:
         # fixture "the reviewers' restart under the pre-touched engine" is the 5d shape on both
         # sides, quiet at every minute of the restart's passage through the window (swept 121m to
         # 350m); the pre-5d shape of the same input — the pair absent for the five minutes between
-        # the restart and the first pass, then 3 — fires at 145m and 200m and is NOT a fixture: a
-        # case asserting a false page green would document the defect as the contract. Enabled on an
-        # image without 5d, this rule is that page, every four hours, on every restart.
+        # the restart and the first pass, then 3 — fires at 145m and 200m and is NOT a fixture as
+        # the pre-5d ENGINE's shape: a case asserting a false page green would document the defect
+        # as the contract. It IS a fixture as the 5d engine's unread-0 shape (the residual, above),
+        # because that is an input the 5d engine produces, and a fixture that goes red when the
+        # loop closes it is how the closing is seen. Enabled on an image without 5d, this rule is
+        # that page, every four hours, on every restart; on 5d, on the restarts whose 0 went unread
+        # and whose first pass re-minted a pair at or above its old count.
         #
         # THE SECOND TERM ON EACH SIDE puts back the first sample of a series MINTED inside the
         # window — `min_over_time(x[2h])`, its first sample on a counter minted at its count — and
@@ -660,8 +681,11 @@ spec:
         # 350m) — until the wakes are pre-touched at construction over the bound repos, which 5d
         # also does (the engine's ConductMetrics takes the bound set): the same input then reads 2,
         # then 0, then 3, and fires, the fixture "three comments lost across a restart, the wakes
-        # pre-touched at construction, fire". 5d closes both sides; neither input exists on it (the
-        # REQUIRES paragraph). `for: 5m` for a pass that lands on a window edge.
+        # pre-touched at construction, fire". 5d closes both sides for a restart whose 0 a scrape
+        # read before the first pass returned; for one whose 0 no scrape read, both inputs are back
+        # on the same pod — the diagnoses' false page and the wakes' hidden loss alike — the
+        # REQUIRES paragraph's residual, one restart in six read, five not, until the loop holds
+        # its first pass for the first scrape. `for: 5m` for a pass that lands on a window edge.
         - alert: ForgeConductWakesUnanswered
           expr: |-
             (

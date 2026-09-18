@@ -1019,9 +1019,11 @@ tests:
   # ── ForgeConductWakesUnanswered ───────────────────────────────────────────────────────────────
   #
   # BOTH COUNTERS ARE PRE-TOUCHED AT CONSTRUCTION from agentforge 5d (feat/conduct-diagnoses-
-  # pretouch): every (detector, op) pair over the commentable rows and the two ops at 0 from a
-  # container's first scrape, the reserved pair excepted, and every bound repo's wakes at 0 the same
-  # way (per pass as well, for a repo a config refresh binds later) — and the rule REQUIRES that
+  # pretouch): every (detector, op) pair over the commentable rows and the two ops at 0 from
+  # construction, the reserved pair excepted, and every bound repo's wakes at 0 the same way (per
+  # pass as well, for a repo a config refresh binds later) — on the wire from the first scrape IF a
+  # scrape lands before the first pass returns, which the engine does not wait for (the rule's
+  # REQUIRES paragraph: the residual, and the fixture after the last two) — and the rule REQUIRES that
   # image (its comment says why: a pair with no series until its first comment made an in-place
   # restart invisible to increase(), and the rule a page on every restart, #748; the wakes had the
   # mirror image in the quiet direction). Before 5d the wakes were pre-touched per pass only, and
@@ -1031,9 +1033,12 @@ tests:
   # cases whose (detector, op) series are ABSENT until their first comment drive the pre-5d shape of
   # the diagnoses, and are kept: the second term they hold is the reserved pair's still and the
   # after-the-pass rollout's on both sides, and the two restart cases and three of the others were
-  # re-run on the 5d shape out of tree and read the same. The last two cases are the 5d shape of
-  # the restart #748 was held on, on both sides, and the inputs whose pre-5d shape reads
-  # differently — the diagnoses' fires, the wakes' hides a loss — neither of which is a case. Every
+  # re-run on the 5d shape out of tree and read the same. The two cases after them are the 5d shape
+  # of the restart #748 was held on, on both sides, and the inputs whose pre-5d shape reads
+  # differently — the diagnoses' fires, the wakes' hides a loss — neither of which is a case as the
+  # pre-5d engine's; the last case is the same restart on 5d with the construction-time 0 unread,
+  # which IS the 5d engine's input and fires: the residual, held as a fixture so that its closing
+  # in the loop is seen here as a red case. Every
   # wake in these cases is a comment the door counted before the POST; every diagnosis is one the
   # lane saw applied; the two step in the same sample because record_pass writes both.
   #
@@ -1149,13 +1154,15 @@ tests:
       # — the marker re-exports at 0 at once, the wakes re-export at 0 on a first pass that attempts
       # none, the pair is gone until its next comment — and three more at 135m. Six of each:
       # increase() adds the pre-reset value back on the drop it sees (6 to 0, and 6 to 3), and the
-      # second term has nothing to add.
+      # second term has nothing to add. The pair here is the PRE-5D shape (absent from the restart
+      # to its next comment, not 0), kept for the term; on 5d with the 0 scraped the pair reads 6,
+      # then 0, then 3 and the claim holds the same (re-run on that shape out of tree).
       - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "0+0x9 3+0x109 6+0x9 0+0x4 3+0x70"
       - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "0+0x9 3+0x109 6+0x9 0+0x4 3+0x70"
       - series: 'forge_conduct_diagnoses_total{detector="PARK-AUTH", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
-        values: "_x9 3+0x109 6+0x9 _x5 3+0x70"
+        values: "_x10 3+0x109 6+0x9 _x5 3+0x70"
     alert_rule_test:
       - eval_time: 200m
         alertname: ForgeConductWakesUnanswered
@@ -1340,6 +1347,10 @@ tests:
       # the re-mint after it: "existed in the two hours before the window" alone would read the
       # pair as a continuation and increase() would read its 3 from the re-mint's own sample as 0
       # — three lost. The pod WAS scraped at the edge, so the pair is minted and its 3 is put back.
+      # The pair and the wakes here are the PRE-5D shape (absent after the restart until their next
+      # sample, not 0), kept for the term; on 5d with the 0 scraped the pair reads 5, then 0, then 3
+      # and the wakes 9, then 0, then 3, and the claim holds the same (re-run on that shape out of
+      # tree).
       - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "9+0x99 0+0x29 3+0x200"
       - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
@@ -1380,8 +1391,11 @@ tests:
       # inside the window, and the one after). THE PRE-5D SHAPE OF THIS INPUT — the pair ABSENT
       # from 130m to 134m and re-minted at 3 — has no drop for the reset arithmetic, reads the pair
       # as no change against three wakes read whole, and fires at 145m and 200m. That is the false
-      # page 5d removes, and it is not a case here: a fixture asserting a wrong page green would
-      # document the defect as the contract (the rule's REQUIRES paragraph).
+      # page 5d removes for a restart whose 0 a scrape read, and as the pre-5d ENGINE's shape it is
+      # not a case here: a fixture asserting a wrong page green would document the defect as the
+      # contract. The same wire from a 5d engine whose construction-time 0 went UNREAD — the first
+      # pass returned before the first scrape — is an input 5d produces, and IS a case: the
+      # residual, two fixtures on (the rule's REQUIRES paragraph).
       - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "9+0x129 0+0x4 3+0x220"
       - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
@@ -1389,7 +1403,7 @@ tests:
       - series: 'forge_conduct_diagnoses_total{detector="PARK-AUTH", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
         values: "3+0x129 0+0x4 3+0x220"
       - series: 'forge_conduct_diagnoses_total{detector="PARK-BUDGET-EXHAUSTED", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
-        values: "0+0x354"
+        values: "0+0x355"
     alert_rule_test:
       - eval_time: 138m
         alertname: ForgeConductWakesUnanswered
@@ -1456,6 +1470,54 @@ tests:
       - eval_time: 254m
         alertname: ForgeConductWakesUnanswered
         exp_alerts: []
+
+  - interval: 1m
+    name: an in-place restart whose construction-time 0 no scrape read — the residual, fires
+    input_series:
+      # THE RESIDUAL, NOT THE CONTRACT. The reviewers' restart on 5d again — nine wakes and three
+      # pairs at 3 before it (W and D balanced at 9), the container restarting at 130m, the first
+      # pass applying three on PARK-AUTH — but the first pass returned BEFORE any scrape read the
+      # construction-time 0: the engine runs its first pass at once and this PodMonitor scrapes
+      # every 30s, so a ~5s pass (the estate's) leaves the 0 unread about five restarts in six. The
+      # wire is then the pre-5d shape on the SAME pod: the marker and the wakes 9, one minute unscraped,
+      # 3 — a drop, the 9 put back, 3 read; PARK-AUTH 3, a gap, 3 — NO drop, read as no change; the
+      # two other pairs 3, a gap, 0 — a drop, 0 read. W 3 against D 0, and the second term puts
+      # nothing back: every series existed before the window (a restart, not a rollout) and the pod
+      # was scraped at the edge. Fires at 145m and 200m, the page #748 was held on. The same input
+      # with the 0 scraped once — "9+0x129 0 3+0x220" on the wakes, "3+0x129 0 3+0x220" on the pair
+      # — is quiet at both (the reviewers' restart above is that shape at five minutes). This case
+      # is here BECAUSE it is an input the 5d engine produces: the day the loop holds its first pass
+      # until the first scrape has been served, this case goes red, and is rewritten to quiet with
+      # the rule's REQUIRES paragraph. Until then it is the rule's known false page, at its measured
+      # frequency, and not a fixture that says the page is right.
+      - series: 'forge_conduct_writes_total{namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "9+0x129 _x1 3+0x224"
+      - series: 'forge_conduct_wake_writes_total{repo="cchifor/platform", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "9+0x129 _x1 3+0x224"
+      - series: 'forge_conduct_diagnoses_total{detector="PARK-AUTH", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "3+0x129 _x1 3+0x224"
+      - series: 'forge_conduct_diagnoses_total{detector="PARK-BUDGET-EXHAUSTED", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "3+0x129 _x1 0+0x224"
+      - series: 'forge_conduct_diagnoses_total{detector="PARK-MERGE-FAILED", op="finding", namespace="agentforge", pod="agentforge-conductor-abc", instance="10.42.0.7:9464", job="monitoring/agentforge-conductor"}'
+        values: "3+0x129 _x1 0+0x224"
+    alert_rule_test:
+      - eval_time: 129m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts: []
+      - eval_time: 145m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
+              description: *wakes_unanswered
+      - eval_time: 200m
+        alertname: ForgeConductWakesUnanswered
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "AgentForge conductor woke bound pools with 3 lifecycle comments in 2h that never came back applied"
+              description: *wakes_unanswered
 
   # ── ForgeConductIssueExhausted / ForgeConductCeilingHolding ──────────────────────────────────
   #
