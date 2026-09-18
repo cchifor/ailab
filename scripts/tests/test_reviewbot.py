@@ -3812,15 +3812,40 @@ class ModelLadderTest(unittest.TestCase):
         self.assertEqual(1.0, self._meta("llm_fallback_used_total"),
                          "served below the top tier - the PrimaryModelDown signal")
 
-    def test_a_missing_model_parks_the_pair_for_MAX_PARK_S(self):
-        """A floating alias that stops resolving must not quarantine every PR: the 404 is
-        model-scoped, parked long, and the persona serves on from the next candidate."""
-        self.m.subprocess.run = self._runner(notfound={("runa", "fable")})
+    def test_a_missing_model_parks_that_model_on_EVERY_seat_for_MAX_PARK_S(self):
+        """A floating alias that stops resolving must not quarantine every PR: the 404 is a
+        fact about the INSTALLED CLI, shared by every seat (reviewer-claude on ailab#781), so
+        one refusal parks the model everywhere and the ladder descends on the same seat
+        instead of paying one doomed call per seat."""
+        self.m.subprocess.run = self._runner(notfound={(u, "fable") for u in ("runa", "runb", "runc")})
         before = real_time.time()
         self.m.run_llm("t", "d", "diff")
-        self.assertEqual([("runa", "fable"), ("runb", "fable")], self.models_run)
-        self.assertGreaterEqual(self.m.MODEL_PARKED_UNTIL[("a", "fable")] - before,
-                                self.m.MAX_PARK_S - 5)
+        self.assertEqual([("runa", "fable"), ("runa", "opus")], self.models_run)
+        for seat in "abc":
+            self.assertGreaterEqual(self.m.model_parked_until(seat, "fable") - before,
+                                    self.m.MAX_PARK_S - 5)
+            self.assertEqual(0.0, self.m.MODEL_PARKED_UNTIL[(seat, "fable")],
+                             "an unserveable model is not a spent window: its own table")
+
+    def test_an_unserveable_park_for_a_seat_no_longer_configured_still_parks_and_returns(self):
+        """reviewer-claude on ailab#781, round 2: the CLI-wide key list came from SEATS and the
+        refusing seat was then indexed unconditionally - a seat pruned by a reload between the
+        refusal and the park would KeyError inside run_llm's handler instead of parking."""
+        now = real_time.time()
+        deadline = self.m.park_model("zed", "fable", now + self.m.MAX_PARK_S, unserveable=True)
+        self.assertGreaterEqual(deadline - now, self.m.MAX_PARK_S - 5)
+        for seat in "abc":
+            self.assertTrue(self.m.model_parked(seat, "fable"))
+
+    def test_the_global_wall_sees_unserveable_parks(self):
+        """all_parked_until() reads through seat_usable()/seat_reopens_at(), both of which
+        read model_parked_until() - pinned, because an unserveable park that the wall could
+        not see would understate how long everything is parked."""
+        now = real_time.time()
+        for mdl in LADDER:
+            self.m.park_model("a", mdl, now + self.m.MAX_PARK_S, unserveable=True)
+        self.assertEqual(0, self.m.seats_available())
+        self.assertGreater(self.m.all_parked_until(), now + 60)
 
     def test_an_ordinary_error_on_the_top_tier_descends_on_the_same_seat_without_parking(self):
         """Today's fallback, generalised: a non-limit failure is not evidence about the account,
@@ -4049,6 +4074,25 @@ class UsageWatchdogTest(unittest.TestCase):
         self.assertTrue(m.model_parked("a", "claude-opus-5"))
         self.assertTrue(m.model_parked("a", "opus"))
         self.assertFalse(m.model_parked("a", "sonnet"))
+
+    def test_the_poll_does_not_clear_a_park_set_because_the_cli_cannot_serve_the_model(self):
+        """reviewer-claude on ailab#780: the API's scoped window says nothing about whether the
+        installed CLI resolves the alias. Clearing the pair on `Fable 20%` re-armed a broken
+        alias every hour, and each poll then cost up to len(SEATS) doomed 404 calls before the
+        ladder re-parked and descended. A limit park and an unserveable park are different
+        facts and live in different tables; the poll owns only the first."""
+        self.m.park_model("a", "fable", self.now + self.m.MAX_PARK_S, unserveable=True)
+        self.m.park_model("b", "opus", self.now + 900)
+        for s in "ab":
+            self.m.apply_usage(s, self._doc(uuid=f"acct-{s}",
+                                            limits=[("weekly_scoped", "Fable", 20, 3000),
+                                                    ("weekly_scoped", "Opus", 20, 3000)]), self.now)
+        for s in "abc":
+            self.assertTrue(self.m.model_parked(s, "fable"),
+                            "unserveable everywhere: the API cannot vouch for the alias")
+        self.assertFalse(self.m.model_parked("b", "opus"), "a limit park is the API's to clear")
+        self.assertEqual(("a", "opus"), self.m.active_choice(self.now),
+                         "the ladder descends on the sticky seat past the unserveable tier")
 
     def test_a_zero_interval_starts_nothing(self):
         off = _ladder_module(self.tmp.name, usage_poll_s=0)
