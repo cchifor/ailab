@@ -21,9 +21,15 @@ Neither call consumes quota. The document:
                 {"kind": "weekly_scoped", "model": "Fable", "percent": 100.0, "resets_at": 1789847999, "active": false}]}
 
 `ok` is "the usage call answered"; `account` is filled independently when the profile call
-answered, so a token with one scope but not the other still yields whatever it can.
-`resets_at` is an epoch or null. Unknown `kind`s pass through untouched - the caller decides.
-Stdlib only: the reviewer VMs carry no pip packages.
+answered - each endpoint is guarded on its own, so a token with one scope but not the other
+still yields whatever it can. `resets_at` is an epoch or null. Unknown `kind`s pass through
+untouched - the caller decides.
+
+THE DOCUMENT NEVER CARRIES THE CREDENTIAL. A token is validated before it is used (whitespace
+inside it would make http.client raise `ValueError: Invalid header value b'Bearer <token>'` -
+an exception whose text IS the secret), and exception text reaches the document only for the
+classes whose messages describe the network or the body, never a header. Stdlib only: the
+reviewer VMs carry no pip packages.
 """
 import datetime
 import json
@@ -38,23 +44,49 @@ HEADERS = {"anthropic-beta": "oauth-2025-04-20", "Accept": "application/json",
 TIMEOUT_S = 15
 
 
+class CredentialError(ValueError):
+    """A credential that exists but cannot be used. Its message never contains the value."""
+
+
+def _clean(tok):
+    tok = (tok or "").strip()
+    if not tok:
+        return None
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in tok):
+        raise CredentialError("credential malformed: whitespace or control characters inside "
+                              "the token")
+    return tok
+
+
 def read_credential(home):
     """The seat's token: the hand-seeded long-lived one first, else a browser login's access
-    token. None when neither is readable - a seat with no credential is a document, not a
-    crash."""
+    token. None when neither exists (a seat with no credential is a document, not a crash);
+    CredentialError when one exists but is unusable - not UTF-8, not JSON, whitespace inside.
+    An EMPTY token file falls through to the login beside it, the same rule reviewbot's
+    seat_secrets() applies."""
     try:
         with open(os.path.join(home, ".claude", "oauth-token"), encoding="utf-8") as f:
-            tok = f.read().strip()
+            raw = f.read()
+    except OSError:
+        raw = None
+    except ValueError:
+        raise CredentialError("credential malformed: oauth-token is not UTF-8")
+    if raw is not None:
+        tok = _clean(raw)
         if tok:
             return tok
-    except OSError:
-        pass
     try:
         with open(os.path.join(home, ".claude", ".credentials.json"), encoding="utf-8") as f:
             d = json.load(f)
-        return ((d.get("claudeAiOauth") or {}).get("accessToken") or "").strip() or None
-    except (OSError, ValueError, AttributeError):
+    except OSError:
         return None
+    except ValueError:
+        raise CredentialError("credential malformed: .credentials.json is not UTF-8 JSON")
+    if not isinstance(d, dict):
+        raise CredentialError("credential malformed: .credentials.json is not an object")
+    tok = (d.get("claudeAiOauth") or {}).get("accessToken") if isinstance(
+        d.get("claudeAiOauth"), dict) else None
+    return _clean(tok) if isinstance(tok, str) else None
 
 
 def iso_epoch(s):
@@ -74,6 +106,15 @@ def iso_epoch(s):
         return None
 
 
+def _describe(e):
+    """Exception text that can never carry the credential. Transport and decode errors
+    describe the network or the body and keep their message; anything else - http.client's
+    header validation above all - is reduced to its class name."""
+    if isinstance(e, (urllib.error.URLError, json.JSONDecodeError, TimeoutError, OSError)):
+        return f"{type(e).__name__}: {e}"[:200]
+    return type(e).__name__
+
+
 def fetch(url, token):
     """(status, body). An HTTP error is a status like any other; only transport failures raise,
     and probe() turns those into the document too."""
@@ -87,11 +128,20 @@ def fetch(url, token):
 
 def probe(home, http=fetch):
     doc = {"ok": False, "error": "", "account": {}, "limits": []}
-    token = read_credential(home)
+    try:
+        token = read_credential(home)
+    except CredentialError as e:
+        doc["error"] = str(e)
+        return doc
+    except Exception as e:
+        doc["error"] = "credential unreadable: " + _describe(e)
+        return doc
     if not token:
         doc["error"] = f"no credential under {home}/.claude (oauth-token or .credentials.json)"
         return doc
     errors = []
+    # Each endpoint guarded on its own, so a profile that fails - transport, an HTML body, a
+    # missing scope - can never skip the usage call the parks depend on.
     try:
         st, body = http(API + "/profile", token)
         if st == 200:
@@ -101,8 +151,13 @@ def probe(home, http=fetch):
                               "plan": str(o.get("rate_limit_tier") or "")}
         else:
             errors.append(f"profile: HTTP {st}")
+    except Exception as e:
+        errors.append("profile: " + _describe(e))
+        doc["account"] = {}
+    try:
         st, body = http(API + "/usage", token)
         if st == 200:
+            limits = []
             for lim in (json.loads(body).get("limits") or []):
                 if not isinstance(lim, dict):
                     continue
@@ -111,22 +166,27 @@ def probe(home, http=fetch):
                     pct = float(lim.get("percent") or 0)
                 except (TypeError, ValueError):
                     pct = 0.0
-                doc["limits"].append({"kind": str(lim.get("kind") or ""), "model": str(model),
-                                      "percent": pct, "resets_at": iso_epoch(lim.get("resets_at")),
-                                      "active": bool(lim.get("is_active"))})
+                limits.append({"kind": str(lim.get("kind") or ""), "model": str(model),
+                               "percent": pct, "resets_at": iso_epoch(lim.get("resets_at")),
+                               "active": bool(lim.get("is_active"))})
+            doc["limits"] = limits
             doc["ok"] = True
         else:
             errors.append(f"usage: HTTP {st}")
-    except Exception as e:  # transport, JSON, anything: the document says so, the exit code does not
-        errors.append(f"{type(e).__name__}: {e}"[:300])
-        doc["ok"] = False
+    except Exception as e:
+        errors.append("usage: " + _describe(e))
+        doc["ok"], doc["limits"] = False, []
     doc["error"] = "; ".join(errors)
     return doc
 
 
 def main():
     home = os.environ.get("HOME") or os.path.expanduser("~")
-    print(json.dumps(probe(home)))
+    try:
+        doc = probe(home)
+    except Exception as e:  # the contract is one document and exit 0, whatever happened
+        doc = {"ok": False, "error": "probe crashed: " + _describe(e), "account": {}, "limits": []}
+    print(json.dumps(doc))
     return 0
 
 

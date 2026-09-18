@@ -41,6 +41,10 @@
     - { path: /etc/reviewbot, owner: "{{ pr_reviewer_user }}", mode: "0750" }
     - { path: /usr/local/lib/reviewbot, owner: root, mode: "0755" }
     - { path: /var/lib/reviewbot, owner: "{{ pr_reviewer_user }}", mode: "0750" }
+  # `seats` too: the seat helpers below are installed under that tag, and on a fresh or rebuilt
+  # host a `-t seats` staging run would otherwise copy into a directory nothing had created
+  # (codex review of PR 1). Directories are inert, so the tag costs the staging run nothing.
+  tags: [seats]
 
 # The packaged node-exporter textfile dir is root-owned; the service (runs as the agent
 # user) writes its heartbeat metrics there atomically. Group-writable via the agent group.

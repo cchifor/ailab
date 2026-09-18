@@ -1193,8 +1193,14 @@ def seat_secrets(seat, remaining):
         if r.returncode != 0:
             continue
         if path.endswith("oauth-token"):
+            # A readable but empty/short token file is NOT a credential: fall through to the
+            # browser login beside it, exactly as claude-usage.py's read_credential() does.
+            # Returning ([], True) here ended the scan with nothing to look for and nothing
+            # counted (codex review of PR 1).
             tok = r.stdout.strip()
-            return ([tok] if len(tok) >= 20 else [], True)
+            if len(tok) >= 20:
+                return [tok], True
+            continue
         try:
             data = json.loads(r.stdout)
         except json.JSONDecodeError:
@@ -1263,6 +1269,32 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
         if not sudo_user:
             return a
         return ["sudo", "-n", "-u", sudo_user, f"HOME={seat_home(seat)}"] + a
+
+    _secrets = None
+
+    def scrub(s):
+        """Redact the seat's credential from text bound for an exception or the journal.
+
+        A failing run's stdout/stderr goes through llm_error_text() into the journal (which
+        ships to Loki) and the job note BEFORE any scan, and a CLI that echoes a malformed
+        token in its error - Python's own header validation does exactly that - would put it
+        there (codex review of PR 1). Read once per invocation, and never allowed to change
+        the error class: a secrets read that itself fails (budget gone, sudo broken) leaves
+        the text as it was rather than replacing the real failure with its own."""
+        nonlocal _secrets
+        if not sudo_user:
+            return s
+        if _secrets is None:
+            try:
+                _secrets = seat_secrets(seat, remaining)[0]
+            except Exception:
+                _secrets = []
+        for sec in _secrets:
+            s = s.replace(sec, "<redacted>")
+        return s
+
+    def err(cp):
+        return scrub(llm_error_text(cp.returncode, cp.stdout, cp.stderr))
 
     def claude_args(model):
         # Tool-less for real: Read/Grep/Glob/LS are denied too - the diff arrives inline,
@@ -1387,7 +1419,7 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
         else:
             fb = CFG.get("llm_fallback_model") or ""
             if r.returncode != 0:
-                detail = llm_error_text(r.returncode, r.stdout, r.stderr)
+                detail = err(r)
                 # ORDER IS THE WHOLE POINT. A model-scoped limit falls through to the
                 # fallback below (a different model on the same account still serves); only
                 # an account-scoped one parks, because there the fallback shares the budget
@@ -1406,10 +1438,10 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
                 if left < CFG.get("llm_fallback_min_s", 60):
                     # A few seconds of fallback only buys a second failure; the retry (with a
                     # whole fresh budget) is the better use of the time.
-                    log(f"primary model failed ({llm_error_text(r.returncode, r.stdout, r.stderr)}); "
+                    log(f"primary model failed ({err(r)}); "
                         f"{left:.0f}s of budget left - skipping the '{fb}' fallback")
                 else:
-                    log(f"primary model failed ({llm_error_text(r.returncode, r.stdout, r.stderr)}); "
+                    log(f"primary model failed ({err(r)}); "
                         f"retrying with fallback '{fb}' in the remaining {left:.0f}s")
                     bump_meta("llm_fallback_used_total")
                     r = subprocess.run(wrap_sudo(claude_args(fb)), input=prompt,
@@ -1418,7 +1450,7 @@ def _run_llm(title, desc, diff_text, rubric, started, seat):
             if r.returncode != 0:
                 # Cost classification happens ONCE, in run_llm's wrapper, so every raise site
                 # in here is covered by it - not just this one.
-                raise RuntimeError(llm_error_text(r.returncode, r.stdout, r.stderr))
+                raise RuntimeError(err(r))
             envelope = json.loads(r.stdout)
             text = envelope.get("result", "")
             # The data that decides whether llm_timeout_s is right. Output tokens because run

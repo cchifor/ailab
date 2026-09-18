@@ -3260,12 +3260,13 @@ class ClaudeSeatTest(unittest.TestCase):
         self.answer = _review_envelope()
 
     def _runner(self, refusing=(), fable_limited=(), tokens=None, creds=None, identities=None,
-                unreachable=(), probe_broken=()):
+                unreachable=(), probe_broken=(), broken=None):
         """`tokens` maps user -> the text of <home>/.claude/oauth-token; `creds` maps user ->
         the text of <home>/.claude/.credentials.json. A user in neither has NO readable
-        credential. `identities` maps user -> account uuid the usage probe reports."""
+        credential. `identities` maps user -> account uuid the usage probe reports. `broken`
+        maps user -> the `result` text of a non-limit failure (exit 1 on every model)."""
         tokens, creds = tokens or {}, creds or {}
-        identities = identities or {}
+        identities, broken = identities or {}, broken or {}
 
         def run(args, **kw):
             self.calls.append(list(args))
@@ -3293,6 +3294,9 @@ class ClaudeSeatTest(unittest.TestCase):
                     return CP(args, 1, CLAUDE_WEEKLY_ENVELOPE, "")
                 if user in fable_limited and model == "fable":
                     return CP(args, 1, CLAUDE_FABLE_ENVELOPE, "")
+                if user in broken:
+                    return CP(args, 1, json.dumps({"type": "result", "subtype": "success",
+                                                   "is_error": True, "result": broken[user]}), "")
                 return CP(args, 0, self.answer, "")
             if verb == "cat":
                 path = args[5]
@@ -3392,8 +3396,10 @@ class ClaudeSeatTest(unittest.TestCase):
         self.assertIn("credential material", str(cm.exception))
 
     def test_a_credentials_json_login_is_scanned_when_there_is_no_token_file(self):
-        """The single-seat path (c4's own login) keeps its credential in .credentials.json;
-        both of its secrets must be scanned for."""
+        """A seat provisioned by browser login instead of a token file keeps its credential in
+        .credentials.json; both of its tokens must be scanned for. (The single-seat service
+        user is NOT scanned - it has no isolated credential, and --disallowedTools is its
+        protection, unchanged.)"""
         refresh = "R" * 40
         self.answer = _review_envelope(summary="leak " + refresh)
         self.m.subprocess.run = self._runner(creds={"runa": json.dumps(
@@ -3402,15 +3408,52 @@ class ClaudeSeatTest(unittest.TestCase):
             self.m.run_llm("t", "d", "diff")
         self.assertIn("credential material", str(cm.exception))
 
+    def _skipped(self):
+        c = self.m.db()
+        v = c.execute("SELECT v FROM meta WHERE k='llm_credscan_skipped_total'").fetchone()
+        c.close()
+        return float(v[0]) if v else 0.0
+
     def test_no_readable_credential_counts_a_skipped_scan_and_still_posts(self):
         """The same visibility rule as codex: "I could not check" must be counted, never
         silent, and must not block the review (mistake prevention, not a boundary)."""
         self.m.subprocess.run = self._runner()
         self.m.run_llm("t", "d", "diff")
-        c = self.m.db()
-        v = c.execute("SELECT v FROM meta WHERE k='llm_credscan_skipped_total'").fetchone()
-        c.close()
-        self.assertEqual(1.0, float(v[0]) if v else 0.0)
+        self.assertEqual(1.0, self._skipped())
+
+    def test_an_empty_token_file_falls_through_to_the_browser_login_scan(self):
+        """codex review of PR 1: a readable-but-empty oauth-token used to end the scan with
+        nothing to look for and nothing counted - the browser login beside it went unscanned.
+        Same fall-through as claude-usage.py's read_credential()."""
+        refresh = "R" * 40
+        self.answer = _review_envelope(summary="leak " + refresh)
+        self.m.subprocess.run = self._runner(tokens={"runa": ""}, creds={"runa": json.dumps(
+            {"claudeAiOauth": {"accessToken": "A" * 40, "refreshToken": refresh}})})
+        with self.assertRaises(RuntimeError) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertIn("credential material", str(cm.exception))
+
+    def test_an_empty_token_file_and_no_login_is_a_counted_skip(self):
+        self.m.subprocess.run = self._runner(tokens={"runa": ""})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual(1.0, self._skipped())
+
+    def test_a_token_in_failure_text_is_redacted_from_the_error_and_the_journal(self):
+        """codex review of PR 1: the scan covered only SUCCESSFUL output. A failing run's
+        stdout/stderr goes through llm_error_text() into the exception and the journal (which
+        ships to Loki), and a CLI that echoes a malformed credential in its error - as Python's
+        own header validation does - would post it there. Every error path must be scrubbed."""
+        token = "T" * 40
+        logged = []
+        self.m.log = lambda *a: logged.append(" ".join(str(x) for x in a))
+        self.m.subprocess.run = self._runner(tokens={"runa": token},
+                                             broken={"runa": "API Error: 401 bad token " + token})
+        with self.assertRaises(RuntimeError) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertNotIn(token, str(cm.exception))
+        self.assertIn("<redacted>", str(cm.exception))
+        self.assertEqual([], [ln for ln in logged if token in ln],
+                         "the seat token reached the journal")
 
 
 def _load_probe():
@@ -3502,13 +3545,61 @@ class ClaudeUsageProbeTest(unittest.TestCase):
         self.assertIn("401", doc["error"])
         self.assertEqual([], doc["limits"])
 
-    def test_main_prints_one_json_document_and_exits_zero_without_a_credential(self):
+    def _main(self):
         r = _REAL_RUN([sys.executable, str(CLAUDE_USAGE_PY)], capture_output=True,
                       text=True, timeout=60, env={**os.environ, "HOME": str(self.home)})
         self.assertEqual(0, r.returncode, r.stderr)
         self.assertTrue(r.stdout.strip(), f"no document on stdout; stderr={r.stderr!r}")
-        doc = json.loads(r.stdout)
+        return json.loads(r.stdout)
+
+    def test_main_prints_one_json_document_and_exits_zero_without_a_credential(self):
+        self.assertFalse(self._main()["ok"])
+
+    # ---- codex review of PR 1: the "one document, exit 0" contract on every path --------------
+    def test_a_malformed_token_file_is_a_document_not_a_traceback(self):
+        """UnicodeDecodeError is a ValueError, which `except OSError` never caught."""
+        (self.home / ".claude" / "oauth-token").write_bytes(b"\xff\xfe\x00bad")
+        doc = self.p.probe(str(self.home), self._http())
         self.assertFalse(doc["ok"])
+        self.assertIn("credential", doc["error"])
+        self.assertEqual([], self.seen, "a malformed credential must never be sent")
+        self.assertFalse(self._main()["ok"])
+
+    def test_a_token_with_embedded_whitespace_is_refused_and_never_echoed(self):
+        """Python's header validation raises `ValueError: Invalid header value b'Bearer
+        <token>'` for such a token - the one exception whose text IS the credential."""
+        (self.home / ".claude" / "oauth-token").write_text("sk-secret-part\nsk-secret-tail\n",
+                                                          encoding="utf-8")
+        doc = self.p.probe(str(self.home), self._http())
+        self.assertFalse(doc["ok"])
+        self.assertNotIn("sk-secret", doc["error"])
+        self.assertEqual([], self.seen)
+
+    def test_exception_text_never_carries_the_token(self):
+        (self.home / ".claude" / "oauth-token").write_text("tok-secret-value-1234567890\n",
+                                                          encoding="utf-8")
+
+        def http(url, token):
+            raise ValueError(f"Invalid header value b'Bearer {token}'")
+        doc = self.p.probe(str(self.home), http)
+        self.assertFalse(doc["ok"])
+        self.assertNotIn("tok-secret", doc["error"])
+        self.assertIn("ValueError", doc["error"])
+
+    def test_a_profile_failure_does_not_skip_the_usage_call(self):
+        """The two results are documented as independent; one try block made them not."""
+        (self.home / ".claude" / "oauth-token").write_text("tok\n", encoding="utf-8")
+        good = self._http()
+
+        def http(url, token):
+            if url.endswith("/profile"):
+                raise RuntimeError("boom")
+            return good(url, token)
+        doc = self.p.probe(str(self.home), http)
+        self.assertTrue(doc["ok"])
+        self.assertEqual({}, doc["account"])
+        self.assertIn("profile", doc["error"])
+        self.assertEqual(3, len(doc["limits"]))
 
 
 def _bash():
