@@ -99,10 +99,14 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 
 > **`dsh-team-conductor` lives at `cchifor/dsh-team-conductor` since 2026-09-18** (transferred by the
 > operator from the restricted `dsh` user, which could not initiate a transfer itself: a restricted
-> account cannot see the org). `dsh` keeps **admin** on it as a collaborator; `reviewer-claude` and
-> `reviewer-codex` have write. It is on the reviewers' allowlist and `dsh` is a merge author, so a
+> account cannot see the org). `dsh` has **write** on it as a collaborator - not admin, so it cannot
+> edit the branch protection it is gated by (`main`: status check `test / test (pull_request)` +
+> 2 approvals, which the two reviewer bots supply); `reviewer-claude` and `reviewer-codex` have
+> write. It is on the reviewers' allowlist and `dsh` is a merge author **for this repo only**, so a
 > PR authored by the agent merges when both personas are clean and its own CI (`test.yml`, on the
-> repo-scoped runner `dsh-conductor-ci-runner-1`, which survived the move) is green. Gitea answers
+> repo-scoped runner `dsh-conductor-ci-runner-1`, which survived the move) is green - **except a
+> PR that edits `.gitea/workflows/**`**: the agent is an *unattended* author, and the reviewers
+> post such a change as a blocker finding, never an approval, so a human must merge it. Gitea answers
 > the old path with a 301, git and API alike, so existing clones keep working — but point the
 > agent's remote at the new path rather than living on the redirect.
 

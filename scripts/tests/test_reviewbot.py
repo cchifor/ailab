@@ -2249,7 +2249,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
     the role defaults would leave them green. This is the test that would actually go red."""
 
     EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
-                "cchifor/agentforge-platform"]
+                "cchifor/agentforge-platform", "cchifor/dsh-team-conductor"]
 
     @staticmethod
     def _parse_repos(text):
@@ -4188,6 +4188,121 @@ class LadderMetricsTest(unittest.TestCase):
         self.assertEqual("3", got['reviewbot_llm_seats_available{persona="test"}'],
                          "a and b are parked on fable only - still usable on opus - and c is free")
 
+
+
+# ── governance of unattended authors (reviewer-claude on ailab#782) ──────────────────────────
+GUARDED_DIFF = (
+    b"diff --git a/.gitea/workflows/test.yml b/.gitea/workflows/test.yml\n"
+    b"--- a/.gitea/workflows/test.yml\n+++ b/.gitea/workflows/test.yml\n"
+    b"@@ -1,2 +1,2 @@\n name: test\n-run: pytest\n+run: true\n")
+PLAIN_DIFF = (
+    b"diff --git a/src/x.py b/src/x.py\n--- a/src/x.py\n+++ b/src/x.py\n"
+    b"@@ -1,1 +1,1 @@\n-a = 1\n+a = 2\n")
+
+
+class MergeAuthorScopeTest(unittest.TestCase):
+    """pr_reviewer_merge_authors is one global list, so admitting the DSH agent there would
+    make any `dsh`-authored PR in EVERY allowlisted repo automerge-eligible (it has read on
+    two of them, and a fork-PR is one read away). merge_authors_by_repo scopes a grant to
+    the repo it was made for; the global list keeps its meaning."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, automerge=True, merge_personas=["test"],
+                      merge_authors=["cchifor"], merge_authors_by_repo={"o/r": ["dsh"]})
+        self.head = "f" * 40
+        self.merged = []
+
+    def _api(self, author):
+        mark = "ok\n\n<!-- review-bot:v1 persona=test head=%s verdict=clean -->" % self.head
+
+        def api(path, method="GET", body=None, raw=False):
+            if method == "POST" and path.endswith("/merge"):
+                self.merged.append(path)
+                return {}
+            if path.endswith("/status"):
+                return {"state": "success"}
+            if "/reviews" in path:
+                return [{"id": 1, "body": mark, "user": {"login": "reviewer-test"},
+                         "state": "APPROVED", "commit_id": self.head}]
+            if "/pulls/" in path:
+                return {"state": "open", "draft": False, "mergeable": True,
+                        "user": {"login": author}, "labels": [], "head": {"sha": self.head}}
+            self.fail("unexpected call: %s %s" % (method, path))
+        self.m.api = api
+
+    def test_a_repo_scoped_author_merges_in_its_repo(self):
+        self._api("dsh")
+        self.m.maybe_merge("o/r", 7)
+        self.assertEqual(["/repos/o/r/pulls/7/merge"], self.merged)
+
+    def test_a_repo_scoped_author_never_merges_elsewhere(self):
+        self._api("dsh")
+        self.assertIsNone(self.m.maybe_merge("o/other", 7))
+        self.assertEqual([], self.merged, "the grant is for o/r only")
+
+    def test_the_global_list_keeps_working_everywhere(self):
+        self._api("cchifor")
+        self.m.maybe_merge("o/other", 7)
+        self.assertEqual(["/repos/o/other/pulls/7/merge"], self.merged)
+
+
+class UnattendedCiGuardTest(unittest.TestCase):
+    """The CI leg of the merge gate is self-attesting for a repo whose workflow the PR under
+    review can edit: an unattended author can make its own CI green. When such an author
+    touches a guarded path, the review carries a BLOCKER finding and is never APPROVED, so
+    branch protection holds the merge for a human. Blocker, not important: the convergence
+    ladder relaxes `important` from round 3 and this must not lapse."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, unattended_authors=["dsh"],
+                      guarded_paths=[".gitea/workflows/"])
+        self.posted = []
+        m = self.m
+        m.existing_marker = lambda repo, pr, head: None
+        m.maybe_merge = lambda repo, pr: None
+        m.convergence_context = lambda *a, **k: ""
+        m.review_round = lambda repo, pr: 1
+        m.run_llm = lambda *a, **k: {"findings": [], "summary": "looks fine"}
+
+    def _drive(self, author, diff, rnd=1):
+        self.m.pr_ok = lambda repo, pr, head: {"head": {"sha": head}, "user": {"login": author},
+                                               "title": "t", "body": ""}
+        self.m.review_round = lambda repo, pr: rnd
+        posted = self.posted
+
+        def api(path, method="GET", body=None, raw=False):
+            if path.endswith(".diff"):
+                return diff
+            if method == "POST":
+                posted.append(body)
+                return {"id": 9}
+            return {}
+        self.m.api = api
+        return self.m.review_job(1, "o/r", 5, "a" * 40)
+
+    def test_an_unattended_author_touching_the_workflow_is_not_approved(self):
+        state, _rid, note = self._drive("dsh", GUARDED_DIFF)
+        self.assertEqual("done", state)
+        self.assertEqual("COMMENT", self.posted[0]["event"])
+        self.assertIn("verdict=findings", self.posted[0]["body"])
+        self.assertIn(".gitea/workflows/test.yml", self.posted[0]["body"])
+        self.assertIn("unattended", self.posted[0]["body"].lower())
+
+    def test_the_guard_holds_at_round_three(self):
+        self._drive("dsh", GUARDED_DIFF, rnd=3)
+        self.assertEqual("COMMENT", self.posted[0]["event"])
+
+    def test_the_same_change_by_an_attended_author_is_approved(self):
+        self._drive("cchifor", GUARDED_DIFF)
+        self.assertEqual("APPROVED", self.posted[0]["event"])
+
+    def test_an_unattended_author_outside_guarded_paths_is_approved(self):
+        self._drive("dsh", PLAIN_DIFF)
+        self.assertEqual("APPROVED", self.posted[0]["event"])
 
 if __name__ == "__main__":
     unittest.main()
