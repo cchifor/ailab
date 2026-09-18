@@ -101,6 +101,18 @@ pr_reviewer_llm_models: []
 # NEEDS A BROWSER-LOGIN CREDENTIAL PER SEAT (scope user:profile) - a setup-token cannot read
 # usage (403). 0 = off (the codex host; it has no such endpoint).
 pr_reviewer_usage_poll_s: 0
+# The credential keepalive, part of the poll above. A browser login's access token lives ~7-8h
+# and ONLY the CLI renews it, when it runs as that seat - and seat choice is sticky, so a seat
+# that is parked or simply not chosen is never run: its token expires and its probe answers 401
+# until something runs the CLI as it (seats a and b, 2026-09-18, from 19:10Z on). When the
+# probe reports an EXPIRED login, reviewbot runs the CLI once as that seat (`-p ok --model
+# <model> --max-turns 1`, stdin closed, output discarded) and probes again. The CLI renews the
+# token BEFORE its API call, so on a parked seat the call is refused at zero cost and the token
+# is renewed all the same; an idle unparked seat spends one tiny turn per expiry. Never for a
+# setup-token (no expiry, no refresh), never for the seat that is serving a review right now.
+pr_reviewer_usage_keepalive: true
+pr_reviewer_usage_keepalive_model: haiku
+pr_reviewer_usage_keepalive_timeout_s: 60
 # The list the PROVISIONING tasks iterate. Derived so the seat tasks have exactly ONE shape to
 # handle: an explicit list when there is one, otherwise the legacy single seat synthesised from
 # pr_reviewer_llm_sudo_user, otherwise nothing (the claude persona runs as the service user and

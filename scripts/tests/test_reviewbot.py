@@ -3639,6 +3639,44 @@ class ClaudeUsageProbeTest(unittest.TestCase):
         self.assertIn("profile", doc["error"])
         self.assertEqual(3, len(doc["limits"]))
 
+    # ── the credential itself, for the keepalive (ailab#786) ─────────────────────────────
+    def test_the_document_names_a_login_credential_and_its_expiry(self):
+        (self.home / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "tok-login", "refreshToken": "r", "expiresAt": 1789000000123}}), encoding="utf-8")
+        doc = self.p.probe(str(self.home), self._http())
+        self.assertEqual({"source": "login", "expires_at": 1789000000}, doc["credential"],
+                         "the CLI stores expiresAt in epoch MILLISECONDS")
+        self.assertTrue(doc["ok"])
+
+    def test_an_expired_login_still_names_itself_when_the_api_answers_401(self):
+        (self.home / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "tok-stale", "refreshToken": "r", "expiresAt": 1700000000000}}), encoding="utf-8")
+        doc = self.p.probe(str(self.home), self._http(profile=(401, "{}"), usage=(401, "{}")))
+        self.assertFalse(doc["ok"])
+        self.assertEqual({"source": "login", "expires_at": 1700000000}, doc["credential"],
+                         "the caller decides on a keepalive from this, so it must survive the 401")
+
+    def test_a_setup_token_has_no_expiry(self):
+        (self.home / ".claude" / "oauth-token").write_text("tok-file\n", encoding="utf-8")
+        doc = self.p.probe(str(self.home), self._http())
+        self.assertEqual({"source": "token", "expires_at": None}, doc["credential"])
+
+    def test_no_credential_is_source_none(self):
+        doc = self.p.probe(str(self.home), self._http())
+        self.assertEqual({"source": "none", "expires_at": None}, doc["credential"])
+
+    def test_a_login_without_a_readable_expiry_is_still_a_login(self):
+        (self.home / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "tok-login", "expiresAt": "soon"}}), encoding="utf-8")
+        doc = self.p.probe(str(self.home), self._http())
+        self.assertEqual({"source": "login", "expires_at": None}, doc["credential"])
+
+    def test_main_prints_the_credential_field_too(self):
+        r = _REAL_RUN([sys.executable, str(CLAUDE_USAGE_PY)], capture_output=True, text=True,
+                      env={**os.environ, "HOME": str(self.home)}, timeout=60)
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertEqual({"source": "none", "expires_at": None}, json.loads(r.stdout)["credential"])
+
 
 def _bash():
     """A bash that receives the environment we pass it. On Windows `shutil.which("bash")` finds
@@ -4345,6 +4383,176 @@ class UnattendedCiGuardTest(unittest.TestCase):
     def test_an_unattended_author_outside_guarded_paths_is_approved(self):
         self._drive("dsh", PLAIN_DIFF)
         self.assertEqual("APPROVED", self.posted[0]["event"])
+
+
+class CredentialKeepaliveTest(unittest.TestCase):
+    """poll_usage(): a browser-login seat whose access token has EXPIRED gets one minimal CLI
+    run as itself, then is probed again - the CLI refreshes and persists the token, the probe
+    then reads usage. Measured on reviewer-1, 2026-09-18: two seats parked on their weekly walls
+    sat idle for 7h, their tokens expired, and the probe answered 401 for hours because nothing
+    ever ran the CLI as them (seat choice is sticky, and nothing else touches an idle seat). The
+    call is `-p ok --model <cheap> --max-turns 1`; as a parked seat it is refused (429) at zero
+    cost and the token is refreshed all the same - that is the whole mechanism."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = _ladder_module(self.tmp.name, usage_poll_s=3600)
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+        self.now = real_time.time()
+        self.cli = []          # (args, kwargs) of every CLI run the keepalive made
+        self.probes = []       # seat names, in probe order
+
+    def _doc(self, ok=True, source="login", expires_at=None):
+        return {"ok": ok, "error": "" if ok else "profile: HTTP 401; usage: HTTP 401",
+                "account": {"uuid": "acct", "email": "seat@example.test", "plan": "max"} if ok else {},
+                "limits": [{"kind": "weekly_all", "model": "", "percent": 10.0,
+                            "resets_at": self.now + 3000, "active": False}] if ok else [],
+                "credential": {"source": source, "expires_at": expires_at}}
+
+    def _install(self, docs, cli_exit=0, cli_raises=None):
+        """docs: seat -> documents answered in order (the last one repeats). Seats not named
+        answer a credential-less failure. The CLI is faked at subprocess.run."""
+        served = {k: list(v) for k, v in docs.items()}
+
+        def probe(seat, timeout=30):
+            name = seat["name"] if isinstance(seat, dict) else seat
+            self.probes.append(name)
+            q = served.get(name) or [self._doc(ok=False, source="none")]
+            return q.pop(0) if len(q) > 1 else q[0]
+        self.m.probe_usage = probe
+
+        def run(args, **kw):
+            self.cli.append((args, kw))
+            if cli_raises:
+                raise cli_raises
+            return self.m.subprocess.CompletedProcess(args, cli_exit, "{}", "")
+        self.m.subprocess.run = run
+        self.addCleanup(setattr, self.m.subprocess, "run", _REAL_RUN)
+
+    def _meta(self, key):
+        c = self.m.db()
+        v = c.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+        c.close()
+        return float(v[0]) if v else 0.0
+
+    def test_an_expired_login_seat_is_kept_alive_and_probed_again(self):
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100),
+                             self._doc(expires_at=self.now + 7 * 3600)]})
+        self.m.poll_usage(self.now)
+        self.assertEqual(1, len(self.cli))
+        args, kw = self.cli[0]
+        self.assertEqual(["sudo", "-n", "-u", "runa", "HOME=/home/runa"] + self.m.CFG["llm_cmd"]
+                         + ["-p", "ok", "--model", "haiku", "--max-turns", "1", "--output-format", "json"],
+                         args, "the same isolated-user prefix _run_llm uses, the same wrapper")
+        self.assertIs(self.m.subprocess.DEVNULL, kw.get("stdin"),
+                      "a CLI that grows an interactive prompt must read EOF, not hang")
+        self.assertEqual(60, kw.get("timeout"))
+        self.assertNotIn("GITEA_TOKEN", kw.get("env") or {})
+        self.assertEqual(["a", "a", "b", "c"], self.probes, "probed again after the keepalive; the others once")
+        self.assertTrue(self.m.USAGE_SNAPSHOT["a"]["ok"])
+        self.assertEqual(1, self._meta("seat_keepalives_total.a"))
+        self.assertEqual(0, self._meta("seat_keepalive_failures_total.a"))
+
+    def test_a_login_that_is_still_valid_is_left_alone(self):
+        self._install({"a": [self._doc(expires_at=self.now + 3600)]})
+        self.m.poll_usage(self.now)
+        self.assertEqual([], self.cli)
+        self.assertEqual(["a", "b", "c"], self.probes)
+
+    def test_a_setup_token_seat_is_never_kept_alive(self):
+        """A setup-token is long-lived and has no refresh; a 403 from it is the missing
+        user:profile scope, not expiry, and no CLI run changes that."""
+        self._install({"a": [self._doc(ok=False, source="token")]})
+        self.m.poll_usage(self.now)
+        self.assertEqual([], self.cli)
+
+    def test_a_401_with_a_valid_expiry_is_a_revocation_not_expiry_and_gets_no_keepalive(self):
+        self._install({"a": [self._doc(ok=False, expires_at=self.now + 3600)]})
+        self.m.poll_usage(self.now)
+        self.assertEqual([], self.cli)
+
+    def test_a_seat_the_api_still_refuses_after_the_keepalive_stays_failed_once_per_poll(self):
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)]})
+        self.m.poll_usage(self.now)
+        self.assertEqual(1, len(self.cli), "one keepalive per poll, never a loop")
+        self.assertFalse(self.m.USAGE_SNAPSHOT["a"]["ok"])
+        self.assertEqual(["a", "a", "b", "c"], self.probes)
+
+    def test_the_seat_serving_a_review_keeps_its_own_token_fresh(self):
+        self.m.LLM_SERVING_SEAT = "a"
+        self.addCleanup(setattr, self.m, "LLM_SERVING_SEAT", None)
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)]})
+        self.m.poll_usage(self.now)
+        self.assertEqual([], self.cli, "two CLIs refreshing one seat at once is the CLI's race to lose")
+
+    def test_a_keepalive_that_fails_or_hangs_is_counted_and_the_poll_goes_on(self):
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)],
+                       "b": [self._doc(ok=False, expires_at=self.now - 100),
+                             self._doc(expires_at=self.now + 7 * 3600)]}, cli_exit=1)
+        self.m.poll_usage(self.now)
+        self.assertEqual(2, len(self.cli))
+        self.assertEqual(1, self._meta("seat_keepalive_failures_total.a"))
+        self.assertEqual(1, self._meta("seat_keepalive_failures_total.b"))
+        self.assertTrue(self.m.USAGE_SNAPSHOT["b"]["ok"],
+                        "a non-zero exit is not the last word: the CLI refreshes BEFORE the API "
+                        "refuses it, so the probe decides, not the exit code")
+        self.cli.clear()
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)]},
+                      cli_raises=self.m.subprocess.TimeoutExpired(cmd="claude", timeout=60))
+        self.m.poll_usage(self.now + 3600)          # must not raise
+        self.assertEqual(1, len(self.cli))
+        self.assertEqual(2, self._meta("seat_keepalive_failures_total.a"))
+        self.assertEqual(2, self._meta("seat_keepalives_total.a"))
+
+    def test_the_keepalive_can_be_switched_off_and_its_model_and_timeout_configured(self):
+        self.m = _ladder_module(self.tmp.name, usage_poll_s=3600, usage_keepalive=False)
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)]})
+        self.m.poll_usage(self.now)
+        self.assertEqual([], self.cli)
+        self.m = _ladder_module(self.tmp.name, usage_poll_s=3600, usage_keepalive_model="sonnet",
+                                usage_keepalive_timeout_s=20)
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)]})
+        self.m.poll_usage(self.now)
+        args, kw = self.cli[0]
+        self.assertEqual("sonnet", args[args.index("--model") + 1])
+        self.assertEqual(20, kw.get("timeout"))
+
+    def test_run_llm_marks_the_seat_it_is_serving_while_the_cli_runs(self):
+        seen = []
+
+        def run(args, **kw):
+            CP = self.m.subprocess.CompletedProcess
+            if args[0] == "sudo" and args[4] == "mktemp":
+                return CP(args, 0, "/tmp/reviewbot-llm-x\n", "")
+            if args[0] == "sudo" and args[4].startswith("HOME=") and args[5] != self.m.USAGE_PROBE:
+                seen.append(self.m.LLM_SERVING_SEAT)
+                return CP(args, 0, _review_envelope(), "")
+            return CP(args, 0, "", "")
+        self.m.subprocess.run = run
+        self.addCleanup(setattr, self.m.subprocess, "run", _REAL_RUN)
+        self.m.run_llm("t", "d", "diff --git a/x b/x\n", "")
+        self.assertEqual(["a"], seen)
+        self.assertIsNone(self.m.LLM_SERVING_SEAT, "cleared however the run ends")
+
+    def test_the_credential_and_keepalive_series_are_exported(self):
+        self.m.apply_usage("a", self._doc(expires_at=1789000000), self.now)
+        self.m.apply_usage("b", self._doc(ok=False, source="token"), self.now)
+        self.m.bump_meta("seat_keepalives_total.a")
+        self.m.bump_meta("seat_keepalive_failures_total.a")
+        self.m.write_metrics()
+        lines = pathlib.Path(self.m.CFG["textfile"]).read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), len(set(l.split(" ")[0] for l in lines)))
+        got = dict(l.split(" ", 1) for l in lines)
+        self.assertEqual("1789000000", got['reviewbot_llm_seat_credential_expires_at_seconds{persona="test",seat="a"}'])
+        self.assertEqual("0", got['reviewbot_llm_seat_credential_expires_at_seconds{persona="test",seat="b"}'],
+                         "a setup-token: no expiry, 0 - and the series exists once the seat was probed")
+        self.assertNotIn('reviewbot_llm_seat_credential_expires_at_seconds{persona="test",seat="c"}', got,
+                         "never probed: no series, like probe_ok")
+        self.assertEqual("1", got['reviewbot_llm_seat_keepalives_total{persona="test",seat="a"}'])
+        self.assertEqual("1", got['reviewbot_llm_seat_keepalive_failures_total{persona="test",seat="a"}'])
+        self.assertEqual("0", got['reviewbot_llm_seat_keepalives_total{persona="test",seat="c"}'],
+                         "zero for every seat, like seat_parks_total")
 
 if __name__ == "__main__":
     unittest.main()

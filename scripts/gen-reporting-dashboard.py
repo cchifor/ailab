@@ -579,15 +579,19 @@ panels += [
               ("F", _seat_reset("weekly_fable")),
               ("G", '(max by (seat) (reviewbot_llm_active_seat_info{persona="claude"}) * 2) '
                     'or max by (seat) (reviewbot_llm_seat_parked{persona="claude"})'),
+              # The login's access-token expiry, as a date: a stamp in the past that stays
+              # there is a login the keepalive could not renew (0 = setup-token, dropped).
+              ("I", 'max by (seat) (reviewbot_llm_seat_credential_expires_at_seconds{persona="claude"} > 0) * 1000'),
           ],
           by="seat",
           order=["seat", "email", "Value #G", "Value #A", "Value #D", "Value #B", "Value #E",
-                 "Value #C", "Value #F"],
+                 "Value #C", "Value #F", "Value #I"],
           rename={"seat": "Seat", "email": "Account", "Value #G": "State",
                   "Value #A": "Session used", "Value #D": "Session resets in",
                   "Value #B": "Weekly used (all models)", "Value #E": "Weekly resets in",
-                  "Value #C": "Weekly used (Fable)", "Value #F": "Fable resets in"},
-          exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, 9)],
+                  "Value #C": "Weekly used (Fable)", "Value #F": "Fable resets in",
+                  "Value #I": "Login valid until"},
+          exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, 10)],
           overrides=[
               _ov("Seat", [{"id": "custom.width", "value": 70}]),
               _ov("State", [{"id": "custom.width", "value": 100},
@@ -599,7 +603,8 @@ panels += [
           ] + [_gauge_col(c) for c in ("Session used", "Weekly used (all models)",
                                        "Weekly used (Fable)")]
             + [_reset_col(c) for c in ("Session resets in", "Weekly resets in",
-                                       "Fable resets in")],
+                                       "Fable resets in")]
+            + [_ov("Login valid until", [{"id": "unit", "value": "dateTimeAsLocalNoDateIfToday"}])],
           cell_height="md"),
     # Which seats and which (seat, model) pairs the rotation is parked on: the ladder's whole
     # state in one picture. The account row is the seat-level park (a weekly_all wall, or a

@@ -63,3 +63,13 @@ That machinery is kind-agnostic.
 * One assumption is verified only in Phase 2: that the broker tokens answer the usage and
   profile endpoints. If they do not, rotation still runs on refusal text and the watchdog
   reports `usage_probe_ok=0` — the plan records the fallback.
+* **Amendment, 2026-09-18 (credential keepalive).** With browser logins, a seat's access token
+  is renewed only by the CLI running as that seat — and sticky selection never runs a parked or
+  unchosen seat, so its token expires and the watchdog is blind to it (seats a and b, 401 from
+  19:10Z). The poll now renews an expired login itself with one minimal CLI call as the seat
+  (refused at zero cost when parked; the CLI renews before the request) and probes again.
+  Rejected: re-implementing the OAuth refresh in the probe (owns undocumented CLI internals:
+  token URL, client id, rotation, file format — drift logs a seat out) and muting the 401
+  (stale usage, blind watchdog). Cross-validated with codex: keepalive lives in reviewbot, not
+  the probe; the probe reports the credential's source and expiry; no ahead-of-expiry margin,
+  since decision and probe share one pass.
