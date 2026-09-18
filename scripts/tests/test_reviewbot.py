@@ -16,9 +16,12 @@ each test loads a fresh module object against a throwaway config + sqlite file.
 """
 import importlib.util
 import json
+import os
 import pathlib
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -3198,6 +3201,365 @@ class ModelPinStampTest(unittest.TestCase):
         m.write_metrics()
         text = pathlib.Path(m.CFG["textfile"]).read_text(encoding="utf-8")
         self.assertIn(r'model="ev\"il"', text)
+
+
+# ── claude seats (plans/2026-09-18-claude-seat-rotation-plan.md, PR 1) ────────────────────────
+# Captured at IMPORT, before any test runs: `self.m.subprocess` IS the stdlib module, so every
+# `self.m.subprocess.run = fake` above rebinds subprocess.run for the whole process and no test
+# restores it. The two tests below that spawn a real child must reach the real function.
+_REAL_RUN = subprocess.run
+CLAUDE_USAGE_PY = SRC.parent / "claude-usage.py"
+CLAUDE_SEAT_SH = SRC.parent / "claude-seat.sh"
+CLAUDE_SEATS = [{"name": "a", "sudo_user": "runa"},
+                {"name": "b", "sudo_user": "runb"},
+                {"name": "c", "sudo_user": "runc"}]
+# The envelope the claude CLI returned on reviewer-1 on 2026-09-18 (exit 1, api_error_status
+# 429) — ACCOUNT-scoped, so it must park the seat and move on.
+CLAUDE_WEEKLY_ENVELOPE = json.dumps({
+    "type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,
+    "result": "You've hit your weekly limit · resets Sep 19, 8pm (UTC)",
+    "usage": {"output_tokens": 0}})
+# The 2026-09-10 Fable wording — MODEL-scoped, so today's answer is the same-seat fallback.
+CLAUDE_FABLE_ENVELOPE = json.dumps({
+    "type": "result", "subtype": "success", "is_error": True,
+    "result": "You're out of usage credits. Run /usage-credits to keep using Fable 5 or "
+              "/model to switch models.",
+    "usage": {"output_tokens": 0}})
+
+
+def _review_envelope(summary="s"):
+    return json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                       "result": json.dumps({"summary": summary, "findings": []}),
+                       "usage": {"output_tokens": 7}})
+
+
+class ClaudeSeatTest(unittest.TestCase):
+    """The claude persona under the seat rotation reviewer-2 already runs.
+
+    2026-09-18: reviewer-1's ONE account hit its weekly limit and the persona idled for 21 h
+    with 9 jobs queued while reviewer-2 held 7 merge-blocked PRs waiting for the claude
+    verdict. The rotation, the lossless park and the sticky selection are kind-agnostic and
+    are CHARACTERISED here rather than re-tested; what is new for claude is (1) the seat's
+    credential reaching the CLI through a wrapper in the seat's own HOME, (2) resolve_seats()
+    learning claude identities from the usage probe, and (3) the pre-post credential scan
+    covering the claude token.
+
+    The fake dispatches on argv POSITION, like IsolatedSeatUserTest: the out paths are
+    os.path.join'd and backslashed when the suite runs on Windows."""
+
+    WRAPPER = "/usr/local/lib/reviewbot/claude-seat.sh"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, llm_kind="claude", llm_model="fable",
+                      llm_fallback_model="opus", llm_cmd=[self.WRAPPER], llm_sudo_user="",
+                      llm_seats=CLAUDE_SEATS)
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+        self.calls, self.models_run = [], []
+        self.answer = _review_envelope()
+
+    def _runner(self, refusing=(), fable_limited=(), tokens=None, creds=None, identities=None,
+                unreachable=(), probe_broken=()):
+        """`tokens` maps user -> the text of <home>/.claude/oauth-token; `creds` maps user ->
+        the text of <home>/.claude/.credentials.json. A user in neither has NO readable
+        credential. `identities` maps user -> account uuid the usage probe reports."""
+        tokens, creds = tokens or {}, creds or {}
+        identities = identities or {}
+
+        def run(args, **kw):
+            self.calls.append(list(args))
+            CP = self.m.subprocess.CompletedProcess
+            if args[0] != "sudo":
+                return CP(args, 0, "", "")
+            user, verb = args[3], args[4]
+            if verb == "true":
+                return CP(args, 1 if user in unreachable else 0, "", "")
+            if verb == "mktemp":
+                return CP(args, 0, f"/tmp/reviewbot-llm-{user}\n", "")
+            if verb.startswith("HOME="):
+                if args[5] == self.m.USAGE_PROBE:
+                    if user in probe_broken:
+                        return CP(args, 1, "", "boom")
+                    acct = identities.get(user)
+                    doc = {"ok": bool(acct), "error": "" if acct else "no credential",
+                           "account": ({"uuid": acct, "email": f"{user}@example.test",
+                                        "plan": "max"} if acct else {}),
+                           "limits": []}
+                    return CP(args, 0, json.dumps(doc), "")
+                model = args[args.index("--model") + 1] if "--model" in args else ""
+                self.models_run.append((user, model))
+                if user in refusing:
+                    return CP(args, 1, CLAUDE_WEEKLY_ENVELOPE, "")
+                if user in fable_limited and model == "fable":
+                    return CP(args, 1, CLAUDE_FABLE_ENVELOPE, "")
+                return CP(args, 0, self.answer, "")
+            if verb == "cat":
+                path = args[5]
+                if path.endswith("oauth-token") and user in tokens:
+                    return CP(args, 0, tokens[user] + "\n", "")
+                if path.endswith(".credentials.json") and user in creds:
+                    return CP(args, 0, creds[user], "")
+                return CP(args, 1, "", "cat: No such file or directory")
+            return CP(args, 0, "", "")
+        return run
+
+    def _sudo(self, pred):
+        return [c for c in self.calls if c[0] == "sudo" and pred(c)]
+
+    # ---- characterisation: the rotation is kind-agnostic ------------------------------------
+    def test_a_weekly_limit_on_seat_a_rotates_to_b_and_parks_a(self):
+        """CHARACTERISATION. The claude envelope carries the account-scoped text in `result`;
+        llm_error_text() surfaces it, RATE_LIMIT_RE parks the seat, run_llm moves on."""
+        self.m.subprocess.run = self._runner(refusing={"runa"},
+                                             tokens={"runa": "T" * 40, "runb": "U" * 40})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runa", "fable"), ("runb", "fable")], self.models_run)
+        self.assertTrue(self.m.seat_parked("a"))
+        self.assertFalse(self.m.seat_parked("b"))
+        self.assertEqual("b", self.m.CURRENT_SEAT)
+
+    def test_a_fable_limit_takes_the_same_seat_fallback_and_parks_nothing(self):
+        """CHARACTERISATION, and the line PR 2 moves: a MODEL-scoped refusal is answered on
+        the SAME seat by the fallback pin today. The ladder will answer it on the next seat."""
+        self.m.subprocess.run = self._runner(fable_limited={"runa"}, tokens={"runa": "T" * 40})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runa", "fable"), ("runa", "opus")], self.models_run)
+        self.assertFalse(self.m.seat_parked("a"))
+        self.assertEqual("a", self.m.CURRENT_SEAT)
+
+    def test_the_model_runs_through_the_wrapper_as_the_seat_user_with_its_HOME(self):
+        """The token can only reach the CLI from inside the seat's HOME (sudo resets the
+        environment), so the entry point must be the wrapper, run as that user, with HOME set."""
+        self.m.subprocess.run = self._runner(tokens={"runa": "T" * 40})
+        self.m.run_llm("t", "d", "diff")
+        model = self._sudo(lambda c: c[4].startswith("HOME=") and c[5] == self.WRAPPER)
+        self.assertEqual(1, len(model))
+        self.assertEqual(["sudo", "-n", "-u", "runa", "HOME=/home/runa", self.WRAPPER, "-p"],
+                         model[0][:7])
+        self.assertEqual("fable", model[0][model[0].index("--model") + 1])
+
+    # ---- resolve_seats(): claude identities come from the usage probe -------------------------
+    def test_two_seats_on_one_account_collapse_to_one(self):
+        """Rotating inside one account is the doomed-retry loop the park prevents. The codex
+        path reads tokens.account_id; the claude path has no such file, so identity is the
+        profile's account uuid, obtained the only way the service user may: by running the
+        probe AS the seat."""
+        self.m.subprocess.run = self._runner(identities={"runa": "acct-1", "runb": "acct-1",
+                                                         "runc": "acct-2"})
+        self.m.resolve_seats()
+        self.assertEqual(["a", "c"], [s["name"] for s in self.m.SEATS])
+        self.assertEqual(3, self.m.SEATS_CONFIGURED, "configured stays 3: that gap IS the alert")
+
+    def test_a_seat_that_cannot_be_sudoed_to_is_dropped(self):
+        self.m.subprocess.run = self._runner(identities={"runa": "acct-1", "runb": "acct-2",
+                                                         "runc": "acct-3"},
+                                             unreachable={"runb"})
+        self.m.resolve_seats()
+        self.assertEqual(["a", "c"], [s["name"] for s in self.m.SEATS])
+
+    def test_a_failed_probe_keeps_the_seat_with_an_unknown_identity(self):
+        """Unknown is not "the same as another unknown": b stays, while c (a real duplicate of
+        a) still collapses."""
+        self.m.subprocess.run = self._runner(identities={"runa": "acct-1", "runc": "acct-1"},
+                                             probe_broken={"runb"})
+        self.m.resolve_seats()
+        self.assertEqual(["a", "b"], [s["name"] for s in self.m.SEATS])
+
+    def test_the_identity_probe_runs_as_the_seat_with_its_HOME(self):
+        self.m.subprocess.run = self._runner(identities={"runa": "1", "runb": "2", "runc": "3"})
+        self.m.resolve_seats()
+        probes = self._sudo(lambda c: c[4].startswith("HOME=") and c[5] == self.m.USAGE_PROBE)
+        self.assertEqual([["sudo", "-n", "-u", u, f"HOME=/home/{u}", self.m.USAGE_PROBE]
+                          for u in ("runa", "runb", "runc")], probes)
+
+    # ---- the pre-post credential scan covers the claude token -------------------------------
+    def test_the_scan_reads_the_seat_token_as_the_SAME_user_that_ran_the_model(self):
+        self.m.subprocess.run = self._runner(tokens={"runa": "T" * 40})
+        self.m.run_llm("t", "d", "diff")
+        model = self._sudo(lambda c: c[4].startswith("HOME=") and c[5] == self.WRAPPER)[0]
+        scan = self._sudo(lambda c: c[4] == "cat" and c[5].endswith("oauth-token"))
+        self.assertEqual(1, len(scan))
+        self.assertEqual(model[3], scan[0][3], "scan ran as a different user than the model")
+        self.assertEqual("/home/runa/.claude/oauth-token", scan[0][5])
+
+    def test_the_seat_token_in_the_output_is_refused(self):
+        token = "T" * 40
+        self.answer = _review_envelope(summary="leak " + token)
+        self.m.subprocess.run = self._runner(tokens={"runa": token})
+        with self.assertRaises(RuntimeError) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertIn("credential material", str(cm.exception))
+
+    def test_a_credentials_json_login_is_scanned_when_there_is_no_token_file(self):
+        """The single-seat path (c4's own login) keeps its credential in .credentials.json;
+        both of its secrets must be scanned for."""
+        refresh = "R" * 40
+        self.answer = _review_envelope(summary="leak " + refresh)
+        self.m.subprocess.run = self._runner(creds={"runa": json.dumps(
+            {"claudeAiOauth": {"accessToken": "A" * 40, "refreshToken": refresh}})})
+        with self.assertRaises(RuntimeError) as cm:
+            self.m.run_llm("t", "d", "diff")
+        self.assertIn("credential material", str(cm.exception))
+
+    def test_no_readable_credential_counts_a_skipped_scan_and_still_posts(self):
+        """The same visibility rule as codex: "I could not check" must be counted, never
+        silent, and must not block the review (mistake prevention, not a boundary)."""
+        self.m.subprocess.run = self._runner()
+        self.m.run_llm("t", "d", "diff")
+        c = self.m.db()
+        v = c.execute("SELECT v FROM meta WHERE k='llm_credscan_skipped_total'").fetchone()
+        c.close()
+        self.assertEqual(1.0, float(v[0]) if v else 0.0)
+
+
+def _load_probe():
+    spec = importlib.util.spec_from_file_location("claude_usage_under_test", CLAUDE_USAGE_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class ClaudeUsageProbeTest(unittest.TestCase):
+    """files/claude-usage.py: runs AS a seat user, reads that HOME's credential, and turns
+    /api/oauth/profile + /api/oauth/usage into ONE small document reviewbot can consume.
+
+    Shape pinned against the payload measured on reviewer-1 on 2026-09-18. The `http` seam is
+    injected so no test opens a socket; main() is exercised once end to end with no credential
+    at all, which is the one path that needs no network."""
+
+    PROFILE = {"account": {"uuid": "acct-1", "email": "seat@example.test", "full_name": "x"},
+               "organization": {"rate_limit_tier": "default_claude_max_20x",
+                                "subscription_status": "active"}}
+    USAGE = {"limits": [
+        {"kind": "session", "group": "session", "percent": 0, "severity": "normal",
+         "resets_at": None, "scope": None, "is_active": False},
+        {"kind": "weekly_all", "group": "weekly", "percent": 100, "severity": "critical",
+         "resets_at": "2026-09-19T19:59:59.670651+00:00", "scope": None, "is_active": True},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 100, "severity": "critical",
+         "resets_at": "2026-09-19T19:59:59.670966+00:00",
+         "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
+         "is_active": False}]}
+
+    def setUp(self):
+        self.p = _load_probe()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = pathlib.Path(self.tmp.name)
+        (self.home / ".claude").mkdir()
+        self.seen = []
+
+    def _http(self, profile=(200, None), usage=(200, None)):
+        bodies = {"profile": (profile[0], json.dumps(self.PROFILE) if profile[1] is None else profile[1]),
+                  "usage": (usage[0], json.dumps(self.USAGE) if usage[1] is None else usage[1])}
+
+        def http(url, token):
+            self.seen.append((url.rsplit("/", 1)[-1], token))
+            return bodies[url.rsplit("/", 1)[-1]]
+        return http
+
+    def test_the_token_file_is_read_first(self):
+        (self.home / ".claude" / "oauth-token").write_text("tok-file\n", encoding="utf-8")
+        (self.home / ".claude" / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "tok-login"}}), encoding="utf-8")
+        self.assertEqual("tok-file", self.p.read_credential(str(self.home)))
+
+    def test_a_credentials_json_login_is_the_fallback(self):
+        (self.home / ".claude" / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "tok-login"}}), encoding="utf-8")
+        self.assertEqual("tok-login", self.p.read_credential(str(self.home)))
+
+    def test_no_credential_is_an_ok_false_document_not_an_exception(self):
+        doc = self.p.probe(str(self.home), self._http())
+        self.assertFalse(doc["ok"])
+        self.assertIn("credential", doc["error"])
+        self.assertEqual(({}, []), (doc["account"], doc["limits"]))
+        self.assertEqual([], self.seen, "no credential must mean no request")
+
+    def test_iso_timestamps_become_epochs_and_null_stays_null(self):
+        self.assertEqual(1789847999, self.p.iso_epoch("2026-09-19T19:59:59.670651+00:00"))
+        self.assertIsNone(self.p.iso_epoch(None))
+        self.assertIsNone(self.p.iso_epoch("not a date"))
+
+    def test_the_document_shape(self):
+        (self.home / ".claude" / "oauth-token").write_text("tok\n", encoding="utf-8")
+        doc = self.p.probe(str(self.home), self._http())
+        self.assertTrue(doc["ok"])
+        self.assertEqual("", doc["error"])
+        self.assertEqual({"uuid": "acct-1", "email": "seat@example.test",
+                          "plan": "default_claude_max_20x"}, doc["account"])
+        self.assertEqual({"kind": "weekly_all", "model": "", "percent": 100.0,
+                          "resets_at": 1789847999, "active": True}, doc["limits"][1])
+        self.assertEqual("Fable", doc["limits"][2]["model"])
+        self.assertEqual({"kind": "session", "model": "", "percent": 0.0,
+                          "resets_at": None, "active": False}, doc["limits"][0])
+        self.assertEqual([("profile", "tok"), ("usage", "tok")], self.seen)
+
+    def test_an_http_failure_is_ok_false_with_the_status_in_the_error(self):
+        (self.home / ".claude" / "oauth-token").write_text("tok\n", encoding="utf-8")
+        doc = self.p.probe(str(self.home), self._http(usage=(401, "unauthorized")))
+        self.assertFalse(doc["ok"])
+        self.assertIn("401", doc["error"])
+        self.assertEqual([], doc["limits"])
+
+    def test_main_prints_one_json_document_and_exits_zero_without_a_credential(self):
+        r = _REAL_RUN([sys.executable, str(CLAUDE_USAGE_PY)], capture_output=True,
+                      text=True, timeout=60, env={**os.environ, "HOME": str(self.home)})
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertTrue(r.stdout.strip(), f"no document on stdout; stderr={r.stderr!r}")
+        doc = json.loads(r.stdout)
+        self.assertFalse(doc["ok"])
+
+
+def _bash():
+    """A bash that receives the environment we pass it. On Windows `shutil.which("bash")` finds
+    System32\\bash.exe, which is WSL: it drops every Windows variable and has no /usr/bin/claude,
+    so the wrapper fails for reasons that have nothing to do with the wrapper. Prefer Git Bash
+    there; elsewhere (the Linux Gitea runners) plain bash is the real thing."""
+    if sys.platform == "win32":
+        for cand in (os.environ.get("CLAUDE_CODE_GIT_BASH_PATH"),
+                     r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"):
+            if cand and os.path.exists(cand):
+                return cand
+        return None
+    return shutil.which("bash")
+
+
+@unittest.skipUnless(_bash(), "needs a non-WSL bash (the Gitea runners are Linux)")
+class ClaudeSeatWrapperTest(unittest.TestCase):
+    """files/claude-seat.sh: the seat's long-lived token reaches the CLI through the
+    ENVIRONMENT, from inside the seat's own HOME — never on argv, which sudo would show to
+    every process on the host."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        home = pathlib.Path(self.tmp.name) / "home"
+        (home / ".claude").mkdir(parents=True)
+        self.home = home
+        stub = pathlib.Path(self.tmp.name) / "claude-stub.sh"
+        stub.write_text('#!/bin/sh\nprintf "%s|%s" "${CLAUDE_CODE_OAUTH_TOKEN-unset}" "$*"\n',
+                        encoding="utf-8")
+        stub.chmod(0o755)
+        self.stub = stub
+
+    def _run(self):
+        fwd = lambda p: str(p).replace("\\", "/")
+        env = {**os.environ, "HOME": fwd(self.home), "REVIEWBOT_CLAUDE_BIN": fwd(self.stub)}
+        env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        r = _REAL_RUN([_bash(), fwd(CLAUDE_SEAT_SH), "-p", "hi"], env=env,
+                      capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, r.returncode, r.stderr)
+        return r.stdout
+
+    def test_the_token_file_is_exported_and_the_cli_is_execd_with_the_arguments(self):
+        (self.home / ".claude" / "oauth-token").write_text("tok123\n", encoding="utf-8")
+        self.assertEqual("tok123|-p hi", self._run())
+
+    def test_without_a_token_file_the_environment_is_left_alone(self):
+        """The single-seat host keeps its .credentials.json login; the wrapper must not
+        invent an empty token that would shadow it."""
+        self.assertEqual("unset|-p hi", self._run())
 
 
 if __name__ == "__main__":
