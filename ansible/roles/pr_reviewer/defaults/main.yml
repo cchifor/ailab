@@ -30,6 +30,19 @@ pr_reviewer_repos:
   - cchifor/agentforge
   - cchifor/platform
   - cchifor/agentforge-platform
+  # dsh-team-conductor joined 2026-09-18 (operator-directed): the DSH agent team's own repo,
+  # transferred from the restricted `dsh` user into this org so the org webhooks, the hook
+  # assertion and the org runners cover it like every other entry. `dsh` has WRITE on it as a
+  # collaborator (not admin: the reviewed party must not be able to edit the branch protection
+  # it is gated by); both reviewer identities have write. Its PRs are authored by `dsh`, which
+  # is a merge author FOR THIS REPO ONLY (pr_reviewer_merge_authors_by_repo) and an unattended
+  # author (pr_reviewer_unattended_authors) - so a clean pair of verdicts plus its own CI
+  # (test.yml on the repo-scoped runner) merges model-authored code with no human in the loop,
+  # by decision. FOR AN UNATTENDED AUTHOR, CI GREEN IS ADVISORY: the workflow runs the PR's own
+  # tests and scripts, which the same author writes, so the TWO REVIEWS are the operative
+  # control. The guarded-path rule below only keeps the CI DEFINITION from changing without a
+  # human - it does not make the CI leg independent of the author.
+  - cchifor/dsh-team-conductor
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
 # The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
 # its PRs get the pin rubric below and automerge when digest-only + clean + CI green.
@@ -153,6 +166,22 @@ pr_reviewer_merge_personas: [claude, codex]
 # general rubric instead. `no-automerge` remains the per-PR brake for a bump that wants a
 # human — a major runtime bump touching something load-bearing, say.
 pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot, renovate-bot]
+# Repo-SCOPED merge authors, additive to the global list: {repo: [authors]}. A grant made for
+# ONE repo must not make that author's PRs automerge-eligible in every other allowlisted repo
+# (reviewer-claude on ailab#782: `dsh` has read on two of them, and a fork-PR is one read away).
+pr_reviewer_merge_authors_by_repo:
+  cchifor/dsh-team-conductor: [dsh]
+# UNATTENDED authors: automation whose PRs merge with no human in the loop. When one of them
+# touches a guarded path, the review carries a BLOCKER finding and is never APPROVED, so branch
+# protection holds the merge for a human - the workflow is the one file whose edit would let
+# the author change the gate itself (reviewer-claude on ailab#782). Prefix match on the diff
+# paths, taken from the diff HEADERS so a rename into the directory counts. WHAT THIS DOES NOT
+# DO: make CI independent of an unattended author - the workflow runs the PR's own tests and
+# scripts. For such authors CI green is advisory and the two reviews are the operative gate.
+pr_reviewer_unattended_authors: [dsh]
+pr_reviewer_guarded_paths:
+  - .gitea/workflows/
+  - .github/workflows/
 pr_reviewer_allow_cidr: "{{ lan_cidr | default('192.168.0.0/24') }}"
 
 # Fail the play when the Gitea org-webhook configuration cannot be READ or is wrong.
