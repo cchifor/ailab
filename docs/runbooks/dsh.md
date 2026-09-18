@@ -99,19 +99,30 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 
 > **`dsh-team-conductor` lives at `cchifor/dsh-team-conductor` since 2026-09-18** (transferred by the
 > operator from the restricted `dsh` user, which could not initiate a transfer itself: a restricted
-> account cannot see the org). `dsh` has **write** on it as a collaborator - not admin, so it cannot
-> edit the branch protection it is gated by (`main`: status check `test / test (pull_request)` +
-> 2 approvals, which the two reviewer bots supply); `reviewer-claude` and `reviewer-codex` have
-> write. It is on the reviewers' allowlist and `dsh` is a merge author **for this repo only**, so a
-> PR authored by the agent merges when both personas are clean and its own CI (`test.yml`, on the
-> repo-scoped runner `dsh-conductor-ci-runner-1`, which survived the move) is green. Two things
-> to hold in mind about that gate: **CI green is advisory for this author** - the workflow runs
-> the tests and scripts the agent itself writes, so the two reviews are the operative control -
-> and **a PR that edits `.gitea/workflows/**` is never approved by the bots**: the agent is an
+> account cannot see the org). `reviewer-claude` and `reviewer-codex` have write. `dsh` has **admin**
+> on it as a collaborator - operator decision, 2026-09-18: a write-only grant broke the agent's
+> preflight, which reads `GET /branch_protections` (admin-only in Gitea; the non-admin read of the
+> same facts is `GET /branches/main`, which the agent's token gets 200 on). The operator chose to
+> restore admin rather than change the agent's check - a DSH-side change - so the agent was
+> unblocked at once; switching that preflight to `/branches/main` and dropping admin again is the
+> recorded follow-up. **Accepted with it, and without monitoring:** the agent *can* edit the
+> protection it is gated by, and nothing detects that. What keeps merging with the reviewers is that
+> protection's own configuration - `main`: status check `test / test (pull_request)`, 2 approvals,
+> merge and approvals whitelists of `chifor`, `reviewer-claude` and `reviewer-codex`, stale approvals
+> dismissed - and that `dsh` leaves it alone. (A drift assertion at converge time would need an
+> admin-scoped credential: the hook-check token is `read:organization` only and cannot read
+> protections; the reviewer PATs have write, not admin.)
+>
+> It is on the reviewers' allowlist and `dsh` is a merge author **for this repo only**, so a PR
+> authored by the agent merges when both personas are clean and its own CI (`test.yml`, on the
+> repo-scoped runner `dsh-conductor-ci-runner-1`, which survived the move) is green. Two things to
+> hold in mind about that gate: **CI green is advisory for this author** - the workflow runs the
+> tests and scripts the agent itself writes, so the two reviews are the operative control - and
+> **a PR that edits `.gitea/workflows/**` is never approved by the bots**: the agent is an
 > *unattended* author, the reviewers post such a change as a blocker finding, and a human must
-> merge it. That guard covers the CI definition only, not everything the definition runs. Gitea answers
-> the old path with a 301, git and API alike, so existing clones keep working — but point the
-> agent's remote at the new path rather than living on the redirect.
+> merge it. That guard covers the CI definition only, not everything the definition runs. Gitea
+> answers the old path with a 301, git and API alike, so existing clones keep working - but point
+> the agent's remote at the new path rather than living on the redirect.
 
 The agent's shell can clone, fetch and push `https://git.chifor.me/...` repositories **without
 being handed a token**, once the operator has provisioned one in OpenBao. Everything on the forge
