@@ -963,7 +963,7 @@ tests:
         values: "0x200"
       - series: 'reviewbot_llm_usage_probe_ok{job="reviewer-node",instance="192.168.0.24:9100",persona="claude",seat="b"}'
         values: "1x200"
-      # One failed poll: an access token the CLI refreshed on its next run.
+      # One failed poll: an expired login the keepalive renewed on the next poll.
       - series: 'reviewbot_llm_usage_probe_ok{job="reviewer-node",instance="192.168.0.24:9100",persona="claude",seat="c"}'
         values: "1x50 0x60 1x90"
     alert_rule_test:
@@ -981,11 +981,14 @@ tests:
               description: >-
                 The usage probe for seat a on 192.168.0.24:9100 has failed for
                 3h (three polls). Rotation still works on refusal text, but the parks are 15-minute
-                guesses again and the usage panels are stale for this seat. Almost always the seat's
-                credential: a revoked or expired browser login answers 401, a setup-token answers
-                403 (no user:profile scope). Read the error with `sudo -n -u <seat user>
-                HOME=/home/<seat user> /usr/local/lib/reviewbot/claude-usage.py` on the host, then
-                re-login the seat with /home/c4/seat-login.sh (runbook, Seats on reviewer-1).
+                guesses again and the usage panels are stale for this seat. Each poll already ran
+                the keepalive for an expired login (one CLI run as the seat, then a re-probe), so
+                this is a credential that run could not renew: a revoked browser login answers 401,
+                a setup-token answers 403 (no user:profile scope). Check
+                `journalctl -u reviewbot | grep keepalive` and
+                reviewbot_llm_seat_keepalive_failures_total, read the error with `sudo -n -u <seat
+                user> HOME=/home/<seat user> /usr/local/lib/reviewbot/claude-usage.py` on the host,
+                then re-login the seat with /home/c4/seat-login.sh (runbook, Seats on reviewer-1).
       - eval_time: 100m
         alertname: ReviewbotUsageProbeFailing
         exp_alerts: []

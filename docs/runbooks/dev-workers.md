@@ -410,8 +410,10 @@ the token BEFORE its API request and persists it even when that request is then 
 when the probe reports an expired login, the poll runs `claude-seat.sh -p ok --model haiku
 --max-turns 1 --output-format json` as that seat (stdin closed, output discarded, 60 s
 timeout), then probes again; measured on seat a: 2 s, refused with 429 at zero cost, token
-renewed. Never for a setup-token (no expiry, no refresh), never for the seat whose CLI is
-serving a review at that moment (`LLM_SERVING_SEAT`), once per poll. Journal:
+renewed. Never for a setup-token (no expiry, no refresh); only after the probe actually failed
+(a 401, not the clock alone); never while a review's CLI is running as that seat — both paths
+hold a per-seat lock (`SEAT_LOCKS`), so a review that rotates onto a seat mid-keepalive waits
+for it (≤ 60 s) instead of racing it on the credential file; once per poll. Journal:
 `grep keepalive`; metrics: `reviewbot_llm_seat_credential_expires_at_seconds`,
 `reviewbot_llm_seat_keepalives_total`, `reviewbot_llm_seat_keepalive_failures_total`.
 `ReviewbotUsageProbeFailing` (3 h) therefore now means a login the keepalive could NOT renew —

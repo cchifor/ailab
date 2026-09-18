@@ -4479,12 +4479,40 @@ class CredentialKeepaliveTest(unittest.TestCase):
         self.assertFalse(self.m.USAGE_SNAPSHOT["a"]["ok"])
         self.assertEqual(["a", "a", "b", "c"], self.probes)
 
-    def test_the_seat_serving_a_review_keeps_its_own_token_fresh(self):
-        self.m.LLM_SERVING_SEAT = "a"
-        self.addCleanup(setattr, self.m, "LLM_SERVING_SEAT", None)
+    def test_a_seat_whose_cli_is_serving_a_review_is_left_to_it(self):
+        """The reservation is a per-seat LOCK both CLI paths hold, not a flag read once: a
+        flag was a TOCTOU - a review starting during the 60s keepalive still raced it on the
+        credential file (both personas on ailab#786)."""
+        lock = self.m.seat_lock("a")
+        self.assertTrue(lock.acquire(blocking=False))       # a review's CLI is running as a
+        self.addCleanup(lock.release)
         self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)]})
         self.m.poll_usage(self.now)
-        self.assertEqual([], self.cli, "two CLIs refreshing one seat at once is the CLI's race to lose")
+        self.assertEqual([], self.cli, "two CLIs renewing one seat at once is the race the lock exists for")
+        self.assertEqual(["a", "b", "c"], self.probes, "nothing to re-probe: no keepalive ran")
+        self.assertEqual(0, self._meta("seat_keepalives_total.a"), "a skipped keepalive is not an attempt")
+
+    def test_an_expired_login_the_api_still_accepts_is_not_kept_alive(self):
+        """reviewer-claude on ailab#786: the trigger is the 401, not the clock - server-side
+        leeway or clock skew can have usage flowing on a token the file calls expired."""
+        self._install({"a": [self._doc(ok=True, expires_at=self.now - 100)]})
+        self.m.poll_usage(self.now)
+        self.assertEqual([], self.cli)
+        self.assertTrue(self.m.USAGE_SNAPSHOT["a"]["ok"])
+
+    def test_a_keepalive_that_crashes_does_not_blind_the_other_seats(self):
+        """reviewer-claude on ailab#786: the probe and apply_usage around it are shielded;
+        the keepalive call must be too, or one seat's sqlite hiccup skips the poll for the
+        rest."""
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)],
+                       "b": [self._doc(expires_at=self.now + 3600)]})
+
+        def boom(seat):
+            raise RuntimeError("meta table locked")
+        self.m.keepalive = boom
+        self.m.poll_usage(self.now)                          # must not raise
+        self.assertEqual(["a", "b", "c"], self.probes)
+        self.assertTrue(self.m.USAGE_SNAPSHOT["b"]["ok"], "the seats after the crash were still polled")
 
     def test_a_keepalive_that_fails_or_hangs_is_counted_and_the_poll_goes_on(self):
         self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)],
@@ -4518,22 +4546,50 @@ class CredentialKeepaliveTest(unittest.TestCase):
         self.assertEqual("sonnet", args[args.index("--model") + 1])
         self.assertEqual(20, kw.get("timeout"))
 
-    def test_run_llm_marks_the_seat_it_is_serving_while_the_cli_runs(self):
-        seen = []
-
+    def _review_cli(self, seen):
+        """A fake CLI for run_llm that records whether seat a's lock was held while it ran."""
         def run(args, **kw):
             CP = self.m.subprocess.CompletedProcess
             if args[0] == "sudo" and args[4] == "mktemp":
                 return CP(args, 0, "/tmp/reviewbot-llm-x\n", "")
             if args[0] == "sudo" and args[4].startswith("HOME=") and args[5] != self.m.USAGE_PROBE:
-                seen.append(self.m.LLM_SERVING_SEAT)
+                lock = self.m.seat_lock("a")
+                held = not lock.acquire(blocking=False)
+                if not held:
+                    lock.release()
+                seen.append((args[3], held))
                 return CP(args, 0, _review_envelope(), "")
             return CP(args, 0, "", "")
-        self.m.subprocess.run = run
+        return run
+
+    def test_run_llm_holds_the_seat_lock_while_its_cli_runs(self):
+        seen = []
+        self.m.subprocess.run = self._review_cli(seen)
         self.addCleanup(setattr, self.m.subprocess, "run", _REAL_RUN)
         self.m.run_llm("t", "d", "diff --git a/x b/x\n", "")
-        self.assertEqual(["a"], seen)
-        self.assertIsNone(self.m.LLM_SERVING_SEAT, "cleared however the run ends")
+        self.assertEqual([("runa", True)], seen, "the CLI ran as seat a with a's lock held")
+        lock = self.m.seat_lock("a")
+        self.assertTrue(lock.acquire(blocking=False), "released however the run ends")
+        lock.release()
+
+    def test_a_review_that_starts_during_a_keepalive_waits_for_it(self):
+        """reviewer-codex on ailab#786: the reverse direction. A keepalive in flight holds the
+        seat; a review that rotates onto that seat waits (at most the keepalive timeout)
+        rather than starting a second CLI on the same credential file."""
+        import threading
+        seen = []
+        self.m.subprocess.run = self._review_cli(seen)
+        self.addCleanup(setattr, self.m.subprocess, "run", _REAL_RUN)
+        lock = self.m.seat_lock("a")
+        self.assertTrue(lock.acquire(blocking=False))       # the keepalive's CLI is running
+        worker = threading.Thread(target=self.m.run_llm, args=("t", "d", "diff --git a/x b/x\n", ""))
+        worker.start()
+        worker.join(0.5)
+        self.assertEqual([], seen, "the review must not run while the keepalive holds the seat")
+        lock.release()
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([("runa", True)], seen, "and runs as soon as the keepalive lets go")
 
     def test_the_credential_and_keepalive_series_are_exported(self):
         self.m.apply_usage("a", self._doc(expires_at=1789000000), self.now)
