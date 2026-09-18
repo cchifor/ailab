@@ -25,9 +25,21 @@ browser ──▶ Cloudflare Access ──▶ cloudflared ──▶ dsh Service 
                                                  the internet
 ```
 
-`dsh` can reach CoreDNS, LiteLLM, SearXNG, and public IPv4 HTTP(S) destinations. Private ranges
-remain excluded from web egress. A separate `dsh-operator-ssh` NetworkPolicy allows TCP 22 to
-the explicitly approved operator hosts listed below.
+`dsh` can reach CoreDNS, LiteLLM, SearXNG, the Kubernetes API, and public IPv4 HTTP(S)
+destinations. Private ranges remain excluded from *direct* web egress. A separate
+`dsh-operator-ssh` NetworkPolicy allows TCP 22 to the explicitly approved operator hosts listed
+below. Since 2026-09-18 those exclusions bound only the pod's direct connections, not what the
+agent can reach: see the next section.
+
+### Kubernetes access
+
+The pod's ServiceAccount `dsh-k8s-admin` is bound to the built-in **`cluster-admin`** ClusterRole
+(`k8s-admin.yaml`, ADR 0025), and `kubectl` v1.31.4 is on the agent's PATH, installed by the
+`install-kubectl` init container. Every namespace, every resource, every verb — through the API
+the agent can `exec` into any pod, `port-forward` to any Service, and read every Secret, which is
+why the network exclusions above are a convention rather than a boundary. Verification, the
+degraded-boot curl fallback, revocation and the history of the bounded design this replaced:
+[`docs/runbooks/dsh-k8s-admin.md`](dsh-k8s-admin.md).
 
 | Component | What it is |
 |---|---|
@@ -376,7 +388,8 @@ verify that the mounted credential authenticates, and then remove the previous p
 
 ## The image, and why it is what it is
 
-**`node:22` (Debian), not alpine and not slim.** Measured in-cluster:
+**`node:24` since 2026-09-11 (Debian, same toolchain); the comparison below was measured on
+`node:22` and is why it is Debian, not alpine and not slim.** Measured in-cluster:
 
 | | alpine | node:22-slim | **node:22** |
 |---|---|---|---|
@@ -475,7 +488,8 @@ resolving the patch against the running instance.
 
 ## Web search
 
-Live and working. `web_search` returns real results; **`web_fetch` is deliberately off**.
+Live and working. `web_search` returns real results through SearXNG; **`web_fetch` is on since
+2026-09-09** over the pod's own egress (private ranges excluded) — see below for why it was off.
 
 ```
 dsh ──▶ searxng.dsh.svc:8080 ──▶ search engines
@@ -502,12 +516,14 @@ A relative specifier resolves against that same directory, so a file works. It a
 supply-chain question entirely: no third-party code in the process that runs model-authored tool
 calls.
 
-### Why `web_fetch` is off
+### Why `web_fetch` was off (until 2026-09-09)
 
 SearXNG is a *metasearch* engine — it does not fetch arbitrary pages for a caller. dsh's built-in
-`http` fetch provider does, but it fetches **from the dsh pod**, which has no egress, so every call
-would fail. Advertising a tool that always fails wastes the model's turns discovering it doesn't
-work. `tool-web` is therefore configured `fetch: false`.
+`http` fetch provider does, but it fetches **from the dsh pod**, which at the time had no egress,
+so every call would have failed. Advertising a tool that always fails wastes the model's turns
+discovering it doesn't work, so `tool-web` shipped `fetch: false`. Since the 2026-09-09 egress
+change (`networkpolicy.yaml`, public IPv4 HTTP(S) with private ranges excluded) it is `fetch: true`
+(`cordis.patch.yml`); the paragraph below is kept for the reasoning.
 
 Adding real fetch needs its own component; see `docs/plans/` if one exists, or the discussion on the
 PR that introduced search.
@@ -540,8 +556,12 @@ So the ConfigMap is seeded into a writable emptyDir by an init container that al
 Check the binary exists before anything else — this accounted for every reported fault once:
 
 ```bash
-kubectl -n dsh exec deploy/dsh -c dsh -- sh -c 'for t in bash python3 git curl; do printf "%-8s %s\n" $t "$(command -v $t || echo MISSING)"; done'
+kubectl -n dsh exec deploy/dsh -c dsh -- sh -c 'for t in bash python3 git curl kubectl; do printf "%-8s %s\n" $t "$(command -v $t || echo MISSING)"; done'
 ```
+
+`kubectl` MISSING is the documented degraded boot (the download at pod start failed): read
+`kubectl --context admin@ai -n dsh logs deploy/dsh -c install-kubectl` and roll the pod. The other
+four missing means the wrong image.
 
 ### Models disappeared from the picker
 
@@ -595,9 +615,9 @@ kubectl -n dsh logs deploy/dsh -c dsh | grep -i 'patch:'
 Then open a NEW session in a private window: the coordinator only runs on a blank session, so that
 is the state in which the modal used to appear.
 
-### Pod stuck in `Init:0/3` with NO events
+### Pod stuck in `Init:0/4` with NO events
 
-**The cause that hid for days, and how to tell it apart.** A dsh pod that sits in `Init:0/3` with
+**The cause that hid for days, and how to tell it apart.** A dsh pod that sits in `Init:0/4` with
 `PodReadyToStartContainers=False` and no pod events, while other pods on the same node start
 normally, *may* be kubelet chowning the whole `/app` NFS volume. The `nfs.csi.k8s.io` CSIDriver is
 registered with `fsGroupPolicy: File`, so a pod that sets `fsGroup` gets a recursive ownership walk
@@ -624,7 +644,9 @@ kubectl -n dsh exec deploy/dsh -c dsh -- stat -c '%A %U:%G %n' /app    # expect 
 
 **Do not delete the pod while it walks** -- the replacement starts the walk from zero.
 
-**Otherwise it is usually not stuck.** The init sequence mounts NFS and runs three init containers; a
+**Otherwise it is usually not stuck.** The init sequence mounts NFS and runs four init containers
+(`fix-ownership`, `wait-for-install`, `seed-settings`, `install-kubectl` -- the last one is never
+fatal and finishes in under a second on a normal boot, see `dsh-k8s-admin.md`); a
 slow start looks identical to a stall in `kubectl get pods`. Read the pod *status* before acting -- a
 healthy pod was once deleted for no reason because the summary column lagged:
 

@@ -20,7 +20,9 @@ spec:
     spec:
       terminationGracePeriodSeconds: 30   # SIGTERM starts root disposal on a 5s budget; give it room
       serviceAccountName: dsh-k8s-admin
-      automountServiceAccountToken: true # required for the operator's namespace-scoped kubectl access
+      # The projected token is what kubectl (install-kubectl below) and the runbook's curl fallback
+      # authenticate with. The identity it carries is cluster-admin: k8s-admin.yaml, ADR 0025.
+      automountServiceAccountToken: true
       # runAsNonRoot is deliberately ABSENT here and set per-container instead. The
       # fix-ownership initContainer below must run as root, and a pod-level runAsNonRoot: true
       # would forbid that. fsGroup stays, but note it does NOT solve the ownership problem it
@@ -44,7 +46,7 @@ spec:
         # setgid bit and group rwx (pkg/volume/volume_linux.go, skipPermissionChange). A
         # previous apply leaves it that way; the NFS driver's mountPermissions chmod must not
         # strip setgid on remount -- verified on the live mount after this shipped (runbook,
-        # "Pod stuck in Init:0/3").
+        # "Pod stuck in Init:0/4").
         # fsGroup itself stays: it is what makes the 0440 dsh-credentials Secret volume readable
         # by uid 1000 (see the `credentials` volume below). The install Job carries the same
         # setting for the same volume.
@@ -384,6 +386,97 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
+        # kubectl for the agent, LAST in the init sequence: after fix-ownership (which chowns
+        # /dsh-home) and seed-settings (which creates /dsh-home/.local/bin -- though this script
+        # mkdir -p's it itself, so a fresh home volume works whatever the order). /dsh-home/.local/bin
+        # is the first PATH entry of the dsh container, so nothing else changes.
+        #
+        # WHY A DOWNLOAD AND NOT AN IMAGE COPY. The maintained kubectl images (registry.k8s.io/kubectl,
+        # rancher/kubectl) are distroless -- no shell, so nothing can `cp` out of them -- and the
+        # Bitnami tag an earlier attempt used (#773) no longer resolves on the mirror. dl.k8s.io is
+        # public 443, which dsh-allow already permits (verified from the live pod: 200, no redirect);
+        # the binary is checksum-pinned below and cached on the home volume, so a normal boot never
+        # touches the network: it hashes the cached file, re-asserts mode 0755, and exits.
+        #
+        # NEVER FATAL. `set -u` only, no `set -e`: every step is guarded and every failure ends in
+        # `degrade`, which prints a WARNING block and exits 0. A missing optional tool must not become
+        # a dead harness on a 1-replica Recreate Deployment (the same trade seed-settings makes for the
+        # plugin closure). Invariant after this container: /dsh-home/.local/bin/kubectl is either the
+        # pinned binary (mode 0755) or ABSENT -- a stale or unverified file is removed BEFORE the
+        # download is attempted and `degrade` removes it on every failure path, so nothing unverified
+        # is left on PATH behind an exit 0 (the one exception is a filesystem that refuses the rm,
+        # which the WARNING names). The cache check is keyed on the sha256 ALONE: a version-only edit
+        # is a no-op, which is why the cache-hit branch prints the real `version --client`. Worst case
+        # wall clock: a STALLED server costs 3 x 120 s (--max-time bounds the whole transfer, connect
+        # included) + 2 x 5 s = 370 s; an UNREACHABLE one fails each attempt at the 10 s connect
+        # timeout, ~40 s total. Publication is atomic: copied beside the destination, then renamed.
+        #
+        # This is verification at POD INITIALIZATION only. A container restart does not re-run init
+        # containers, and the agent (same uid 1000) can modify the file afterwards -- the same trade
+        # this file already documents for AGENTS.md and the git credential helper. To bump: edit BOTH
+        # pins (the sha256 is dl.k8s.io/release/<v>/bin/linux/amd64/kubectl.sha256); the template
+        # change rolls the pod and the mismatch branch re-downloads. Keep the client minor within one
+        # of the server's (v1.31 today). Tested case by case inside the live container on 2026-09-18:
+        # fresh install, cached hit without network, 0644 repaired to 0755, wrong pin leaves the
+        # destination absent with the WARNING, stale content replaced.
+        - name: install-kubectl
+          image: mirror.gcr.io/library/node:24
+          env:
+            - { name: KUBECTL_VERSION, value: "v1.31.4" }
+            - { name: KUBECTL_SHA256, value: "298e19e9c6c17199011404278f0ff8168a7eca4217edad9097af577023a5620f" }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              DEST=/dsh-home/.local/bin/kubectl
+              URL="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+              sum() { sha256sum "$1" 2>/dev/null | cut -c1-64; }
+              degrade() {
+                rm -f /tmp/kubectl "$DEST.new" "$DEST" 2>/dev/null
+                echo "WARNING: kubectl ${KUBECTL_VERSION} is NOT installed this roll: $1"
+                echo "WARNING: dsh boots without kubectl. The API is still reachable with curl and the projected"
+                echo "WARNING: token (docs/runbooks/dsh-k8s-admin.md). A completed init container is not re-run by a"
+                echo "WARNING: container restart; to retry: kubectl --context admin@ai -n dsh rollout restart deploy/dsh"
+                exit 0
+              }
+              [ "$(uname -m)" = "x86_64" ] || degrade "node architecture $(uname -m) is not x86_64 (only the amd64 checksum is pinned)"
+              if [ -f "$DEST" ] && [ "$(sum "$DEST")" = "$KUBECTL_SHA256" ]; then
+                chmod 0755 "$DEST" || degrade "could not chmod the cached binary"
+                echo "kubectl already present at $DEST: sha256 matches KUBECTL_SHA256 (pinned as ${KUBECTL_VERSION})"
+                "$DEST" version --client || echo "WARNING: the cached kubectl did not run; roll the pod to reinstall"
+                exit 0
+              fi
+              rm -f "$DEST" "$DEST.new" || degrade "could not remove the stale $DEST"
+              mkdir -p /dsh-home/.local/bin || degrade "could not create /dsh-home/.local/bin"
+              n=0
+              while [ "$n" -lt 3 ]; do
+                n=$((n + 1))
+                rm -f /tmp/kubectl
+                if curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 \
+                     -o /tmp/kubectl "$URL" && [ "$(sum /tmp/kubectl)" = "$KUBECTL_SHA256" ]; then
+                  if install -m 0755 /tmp/kubectl "$DEST.new" && mv -f "$DEST.new" "$DEST"; then
+                    rm -f /tmp/kubectl
+                    echo "kubectl ${KUBECTL_VERSION} installed to $DEST (sha256 $(sum "$DEST"))"
+                    exit 0
+                  fi
+                  degrade "verified download could not be published to $DEST"
+                fi
+                echo "kubectl download attempt ${n}/3 failed or did not match the pinned checksum"
+                [ "$n" -lt 3 ] && sleep 5
+              done
+              degrade "3 download attempts failed"
+          volumeMounts:
+            - { name: home, mountPath: /dsh-home }
+            - { name: tmp,  mountPath: /tmp }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 500m, memory: 128Mi }
       containers:
         - name: dsh
           image: mirror.gcr.io/library/node:24
@@ -461,7 +554,8 @@ spec:
             # `uv pip install cairosvg`, then cairosvg rendering the agent's own SVG to PNG.
             - { name: npm_config_prefix, value: /dsh-home/.npm-global }
             # PATH is spelled out in full because a container env var cannot reference the
-            # image's own PATH. The tail is node:22's default, verified live -- do not trim it.
+            # image's own PATH. The tail is the image's default (verified live on node:22; node:24
+            # since 2026-09-11 ships the same one) -- do not trim it.
             - { name: PATH, value: "/dsh-home/.local/bin:/dsh-home/.npm-global/bin:/app/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
           volumeMounts:
             - { name: app,  mountPath: /app, readOnly: true }

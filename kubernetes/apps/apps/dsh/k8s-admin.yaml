@@ -1,6 +1,14 @@
-# Namespace-scoped Kubernetes API identity for the dsh runtime.  This is intentionally
-# a Role, not a ClusterRoleBinding: the agent can operate acceptance resources in dsh,
-# but cannot read Secrets or touch another namespace.
+# The dsh runtime's Kubernetes identity: ONE ServiceAccount bound to the built-in `cluster-admin`
+# ClusterRole. Full access, by operator decision (2026-09-18, ADR 0025). The bounded design that
+# preceded it -- a namespace Role plus the dsh-k8s-admin-guard ValidatingAdmissionPolicy (#770-#774)
+# -- denied the agent's real acceptance workloads and could not even be read by the identity it
+# denied, so it was replaced rather than patched.
+#
+# What this means: every container of the dsh pod (the token is automounted) and any workload that
+# names this ServiceAccount can do anything the API allows, cluster-wide, including reading every
+# Secret. It is a deliberate exception to ADR 0021 Tier A. Revoke by deleting the ClusterRoleBinding
+# below from git; that stops FUTURE use only. Verification, the curl fallback and the history:
+# docs/runbooks/dsh-k8s-admin.md.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -8,36 +16,13 @@ metadata:
   namespace: dsh
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRoleBinding
 metadata:
   name: dsh-k8s-admin
-  namespace: dsh
-rules:
-  - apiGroups: [batch]
-    resources: [jobs]
-    verbs: [create, get, list, watch, patch, update, delete]
-  - apiGroups: [""]
-    resources: [configmaps, persistentvolumeclaims, events]
-    verbs: [create, get, list, watch, patch, update, delete]
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [get, list, watch]
-  - apiGroups: [""]
-    resources: [pods/log]
-    verbs: [get]
-  - apiGroups: [networking.k8s.io]
-    resources: [networkpolicies]
-    verbs: [create, get, list, watch, patch, update, delete]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: dsh-k8s-admin
-  namespace: dsh
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: dsh-k8s-admin
+  kind: ClusterRole
+  name: cluster-admin
 subjects:
   - kind: ServiceAccount
     name: dsh-k8s-admin

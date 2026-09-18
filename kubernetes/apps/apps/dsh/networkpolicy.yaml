@@ -45,7 +45,8 @@ spec:
         - ipBlock: { cidr: 10.96.0.1/32 }
       ports:
         - { protocol: TCP, port: 443 }
-    # Kubernetes API for the namespace-scoped dsh-k8s-admin identity.
+    # Kubernetes API for the dsh-k8s-admin identity, which is cluster-admin (k8s-admin.yaml,
+    # ADR 0025). These rules only make the API REACHABLE; what the identity may do there is RBAC.
     - to:
         - ipBlock: { cidr: 192.168.0.41/32 }
         - ipBlock: { cidr: 192.168.0.42/32 }
@@ -65,10 +66,9 @@ spec:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ai } }
           podSelector: { matchLabels: { app.kubernetes.io/name: litellm } }
       ports: [{ port: 4000, protocol: TCP }]
-    # SearXNG, in this namespace. This is the ONLY route dsh has to anything web-shaped, and it is
-    # a Service, not the internet: searxng fetches on its behalf. Adding this instead of general
-    # egress is the whole point — see searxng.yaml. The pod that runs model-authored code still
-    # cannot open a connection to an arbitrary host.
+    # SearXNG, in this namespace: dsh's web SEARCH provider (see searxng.yaml). It was dsh's ONLY
+    # web-shaped route until 2026-09-09; general HTTP(S) egress is granted by the rule below now,
+    # and SearXNG stays because search is a metasearch job, not a fetch job.
     - to:
         - podSelector: { matchLabels: { app: searxng } }
       ports: [{ port: 8080, protocol: TCP }]
@@ -78,15 +78,21 @@ spec:
     # This namespace previously allowed NO internet egress, on the grounds that this pod executes
     # model-authored code. That is the correct posture for a MULTI-TENANT sandbox running submitted
     # code. It is the wrong one here, and the inconsistency was ours: the dev-worker VMs beside this
-    # cluster run Claude Code and Codex with passwordless sudo and unrestricted internet, and this
-    # pod holds strictly less (a LiteLLM key and its own cookie secret, against a VM with sudo and
-    # SSH keys). Current guidance splits the two cases explicitly — allow-first/default-deny for
-    # regulated and multi-tenant, deny-first for INTERACTIVE DEVELOPER USE, which is what this is.
+    # cluster run Claude Code and Codex with passwordless sudo and unrestricted internet. (When this
+    # was written the pod held strictly less than a VM -- a LiteLLM key and its own cookie secret.
+    # Since 2026-09-18 it holds strictly MORE: its ServiceAccount is cluster-admin, k8s-admin.yaml /
+    # ADR 0025. The egress argument stands on its own; the comparison no longer does.) Current
+    # guidance splits the two cases explicitly — allow-first/default-deny for regulated and
+    # multi-tenant, deny-first for INTERACTIVE DEVELOPER USE, which is what this is.
     #
-    # What this does NOT give up: the private-range exclusions below. The agent still cannot reach
-    # the home LAN on 192.168.0.0/16, the Proxmox hosts, the cluster pod/service network, or
-    # link-local (169.254.0.0/16 covers cloud-metadata). Those protect against a mistake or a prompt
-    # injection pointing INWARD, which is the realistic failure here, and they cost nothing.
+    # What this does NOT give up: the private-range exclusions below. The agent still cannot open a
+    # DIRECT connection to the home LAN on 192.168.0.0/16, the Proxmox hosts, the cluster pod/service
+    # network, or link-local (169.254.0.0/16 covers cloud-metadata). Those catch a mistake or a
+    # prompt injection pointing INWARD over a raw socket, and they cost nothing. They are NOT a
+    # security boundary any more: with cluster-admin the Kubernetes API is the wider inward door
+    # (`kubectl exec`, `port-forward`, a hostNetwork pod), and the identity can rewrite this very
+    # policy. The boundary is the operator's decision to grant cluster-admin -- see
+    # docs/runbooks/dsh-k8s-admin.md.
     #
     # What it honestly does give up: outbound HTTP(S) is now a channel the agent controls. No
     # network rule can distinguish "fetch a docs page" from "POST the workspace somewhere", and the

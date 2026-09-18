@@ -49,3 +49,26 @@ what else it printed, because that line alone does not say why:
   print the contents of credential files.
 
 The Gitea **REST API** (`/api/v1/...`) is not covered by this: the helper answers git, not curl.
+
+## Kubernetes access is automatic and cluster-wide
+
+`kubectl` is on `PATH` (`/dsh-home/.local/bin/kubectl`, v1.31.4, installed by the pod's
+`install-kubectl` init container). It needs no kubeconfig and no context: it uses the in-cluster
+configuration — the `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT` variables, which survive
+the credential scrub, plus the projected token and CA under
+`/var/run/secrets/kubernetes.io/serviceaccount/`. The identity is
+`system:serviceaccount:dsh:dsh-k8s-admin`, bound to the `cluster-admin` ClusterRole: every
+namespace, every resource, every verb. `kubectl auth whoami` shows it.
+
+Do **not** create `~/.kube/config`: a kubeconfig in this persistent home would override the
+in-cluster configuration in every later session, and there is nothing it could add.
+
+Two limits that are not RBAC: the `dsh` namespace enforces the `baseline` Pod Security Standard,
+so a privileged or hostPath Pod in it is rejected at admission whatever the identity; and the
+network rules on this pod still block direct connections to private ranges — go through the API
+(`kubectl exec`, `kubectl port-forward`) rather than a raw socket.
+
+If `kubectl` is missing, that is the documented degraded boot: the download at pod start failed,
+the `install-kubectl` init container's log says why, and the fix is a pod roll by the operator.
+The API is still reachable with `curl --cacert` and the projected token. Report it; do not try
+to install kubectl yourself.

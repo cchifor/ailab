@@ -5,12 +5,11 @@ namespace: dsh
 resources:
   - namespace.yaml
   - openbao-eso.yaml   # SA + CA + SecretStore + ExternalSecret: the LiteLLM key from OpenBao
-  - k8s-admin.yaml     # namespace-scoped API access for acceptance/diagnostics
-  - k8s-admin-admission.yaml # blocks Secret injection and unsafe policy changes
+  - k8s-admin.yaml     # ServiceAccount + ClusterRoleBinding to cluster-admin (ADR 0025)
   - pvc.yaml
   - install-job.yaml   # one-shot: npm-installs dsh into the app PVC (see the file for why not an image)
   - deployment.yaml
-  - searxng.yaml      # self-hosted metasearch: dsh's ONLY route to web content
+  - searxng.yaml      # self-hosted metasearch: dsh's web SEARCH provider (direct HTTP(S) egress since 2026-09-09)
   - oauth2-proxy-searxng-secret.sops.yaml # SOPS: oauth2-proxy client + cookie secrets
   - searxng-auth.yaml # Authelia SSO gate publishing the SearXNG web UI at search.chifor.me
   - service.yaml

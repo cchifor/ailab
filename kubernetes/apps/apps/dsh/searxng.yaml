@@ -3,6 +3,11 @@
 # at search.chifor.me behind its own SSO gate (searxng-auth.yaml) — a second consumer of the same
 # instance, not a second instance, and one that changes nothing about the containment below.
 #
+# HISTORY NOTE (2026-09-18): the "no internet" premise below dates from the original deployment.
+# Since 2026-09-09 the dsh pod HAS public IPv4 HTTP(S) egress (networkpolicy.yaml, private ranges
+# excluded), and since 2026-09-18 its ServiceAccount is cluster-admin (k8s-admin.yaml, ADR 0025).
+# SearXNG remains the web SEARCH provider; it is no longer dsh's only route to the web.
+#
 # THE PROBLEM. dsh's web_search/web_fetch need outbound HTTP. The dsh pod executes code the model
 # writes, with a `danger-full-access` permission preset available in the UI, so general egress from
 # it is an exfiltration path no dsh-side setting can close. Its NetworkPolicy is deliberately DNS +
@@ -167,7 +172,8 @@ spec:
     metadata:
       labels: { app: searxng }
     spec:
-      # Talks to search engines and answers dsh; needs no API access. Same reasoning as dsh itself.
+      # Talks to search engines and answers dsh; needs no API access (unlike dsh, whose identity
+      # is cluster-admin since 2026-09-18 -- k8s-admin.yaml).
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true

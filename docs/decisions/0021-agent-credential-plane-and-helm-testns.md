@@ -134,6 +134,8 @@ the previous config, removes the marker so the SOPS writer resumes, and stops th
 - **Tier A — agent-readable** (`af/dev-workers/*`). Namespace-scoped k8s tokens, Gitea PATs. This
   tier *widens* here: a worker gains deploy authority it did not have. It does not gain reach into
   another worker's namespace, any estate credential, or anything cluster-scoped.
+  **One recorded exception (2026-09-18):** the dsh harness's ServiceAccount is `cluster-admin`,
+  by operator decision — ADR 0025. Nothing else in this tier is.
 - **Tier B — operator escrow only** (`af/estate/*`). The vault policy is not the whole boundary:
   Flux decrypts the seeds into a live Secret in ns `openbao`, so the real boundary is the union of
   the vault policy, Secret-read RBAC there, and the root-capable vault logins.

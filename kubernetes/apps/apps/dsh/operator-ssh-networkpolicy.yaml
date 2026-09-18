@@ -1,6 +1,11 @@
 # Dedicated operator access. Each destination must also accept the public key belonging to
 # af/dsh/credentials.DSH_OPERATOR_SSH_KEY as dsh-operator. See docs/runbooks/dsh.md.
 # Operator approved all eight active runner hosts and passwordless sudo on 2026-09-17.
+#
+# NOTE (2026-09-18): dsh's ServiceAccount is cluster-admin (k8s-admin.yaml, ADR 0025). This list
+# bounds the agent's DIRECT SSH path from the pod; the identity can rewrite this policy or reach
+# the same hosts through the API (exec, port-forward), so it is a convention, not a boundary.
+# See docs/runbooks/dsh-k8s-admin.md.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
