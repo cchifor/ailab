@@ -521,6 +521,89 @@ verify that the mounted credential authenticates, and then remove the previous p
 
 ---
 
+## The conductor validator image pin on ci-runner-1
+
+`ci-runner-1` (`192.168.0.14`) permanently runs one container that does nothing:
+**`dsh-conductor-image-pin`** — `/bin/sleep` as UID 65532, `--network=none`, read-only root, all
+capabilities dropped, 16 MiB memory (swap equal), 0.01 CPU, 4 PIDs, no mounts, no log driver. Its
+only purpose is to keep the conductor's validation image
+`sha256:318b8ae52ecf3656a602ba9edcc29d2130728a5f2ea9ac5ece2658df77fda39d` referenced, so neither
+runner cleanup on that host can prune it. IaC: `ansible/roles/dsh_validator_pin/` +
+`ansible/dsh-validator-pin.yml` + `ansible/host_vars/ci-runner-1.yml`; unit tests in
+`scripts/tests/test_dsh_validator_pin.py` (they run in the broker-inventory CI job).
+
+**Why a sleeping container.** The conductor (`cchifor/dsh-team-conductor`, `ops/validation/`) runs
+its test suite on this host through the operator SSH identity above: a root-owned helper
+(`/usr/local/sbin/dsh-validation-helper`) and policy (`/etc/dsh-validation/policy.json`) start a
+throwaway container from an image pinned by **local image ID**, which the policy refuses to
+substitute with a tag. That image is **untagged and idle between validations**, and two things on
+this shared host delete exactly that:
+
+- `gitea-runner-cleanup.sh` (§3) runs `docker image prune -af --filter until=<24h>` on every
+  sweep (timer, ~15 min) — an unused image older than a day is gone at the next tick. The
+  previous pinned image went missing that way (rebuilt and re-archived 2026-09-18; the ceremony
+  is `ops/validation/IMAGE-RECOVERY-EVIDENCE.md` in that repo).
+- the co-located **GitHub** agent's `runner-reclaim.sh` (`ExecStartPre` of
+  `actions.runner.cchifor-platform.service`, so every boot and every ephemeral cycle) does
+  `docker rm -f` on **every** container and then `docker image prune -f`.
+
+A running container makes the image "in use" for both prunes. The container itself is kept out of
+both removal paths by two host-only variables in `host_vars/ci-runner-1.yml`, which extend the
+fleet defaults with the exact space-prefixed name ` /dsh-conductor-image-pin$` (both scripts match
+`<image> <name>`, case-insensitively): `gitea_runner_cleanup_infra_exclude_re` for the Gitea reap
+and `github_runner_reclaim_keep_re` for the GitHub reclaim (empty fleet-wide, so the ephemeral
+contract is unchanged everywhere else). The Gitea value is a literal copy of the role default plus
+the pin — `test_dsh_validator_pin.py` fails CI if the default ever diverges from it.
+
+**Reconciliation is a timer, not just boot.** `dsh-conductor-image-pin.service` is a plain
+oneshot (no `RemainAfterExit`) run at boot and every 5 min by `dsh-conductor-image-pin.timer`: two
+inspects when the pin is healthy; `docker start` if it was stopped; a checksum-verified restore
+from the archive plus `docker run` if the image or the container is gone. Anything else on the
+reserved name — wrong image, any isolation field off — is refused and left untouched, with the
+failing field names in the journal. So `systemctl is-active` is NOT the health signal; the container
+is (below).
+
+**The helper, policy and image are NOT in ailab** — the agent installed them by hand under
+`dsh-operator` sudo, and the conductor repo's own `IAC-ADOPTION.md` lists a proper `dsh_validation`
+role as proposed work. This role codifies only the retention. Two consequences:
+
+- `image-pin.py` restores a missing image from `/var/lib/dsh-validation/images/<id>.tar`
+  (root-owned 0600, `docker save` output) only when the file's size and SHA-256 match the constants
+  in the script, and refuses otherwise. **A rebuilt VM has no archive**, so on such a host the unit
+  fails at every tick (`journalctl -u dsh-conductor-image-pin`: `Image retention refused: …`) until
+  the image is rebuilt and re-archived on the dsh side; that is fail-closed and expected, not a
+  bug in the role. Rebuilding the image changes its ID, and the archive with it: bump `IMAGE`,
+  `ARCHIVE_SHA` and `ARCHIVE_SIZE` in the script in the same change that rebinds the host policy.
+- The real fix is to push the image to `registry.chifor.me` and pin the host policy by registry
+  digest, which makes local pruning harmless and survives a rebuild; it needs the helper to pull by
+  digest, a dsh-side change. Until then this pin is the retention.
+
+**Apply / verify / rollback** (from WSL, `ansible/` dir, `ANSIBLE_CONFIG` explicit — see
+`ci-runners.md` § Troubleshooting for why):
+
+```bash
+ansible-playbook runners.yml -l ci-runner-1            # FIRST: renders runner-reclaim.sh with the keep-list
+ansible-playbook dsh-validator-pin.yml                 # refuses any other host, and refuses until the line above ran
+ssh ubuntu@192.168.0.14 'sudo docker ps --filter name=dsh-conductor-image-pin --format "{{.Names}} {{.Status}}";
+  systemctl list-timers dsh-conductor-image-pin.timer --no-pager | head -2;
+  sudo journalctl -u dsh-conductor-image-pin -n 1 --no-pager -o cat;
+  grep INFRA_EXCLUDE /etc/gitea-runner-cleanup.env; grep "^KEEP_RE" /usr/local/bin/runner-reclaim.sh'
+```
+
+The pin play asserts the host, refuses while `/usr/local/bin/runner-reclaim.sh` lacks the
+keep-list (the GitHub reclaim would otherwise undo it at its next cycle), installs the script and
+units, runs the unit (so a squatter on the reserved name fails the play BEFORE any exemption is
+written), then rewrites the one env line — refusing if the file holds anything but the fleet base
+or the composed value, or more than one assignment of the key in any shell spelling. A second run is a no-op for the container (`"created": false,
+"started": false` in the journal); the `restarted` task still reports changed because it is the
+"reconcile now". The normal `just gitea-runners` / `just runners` renders keep both exemptions
+through `host_vars/ci-runner-1.yml`. Rollback: `systemctl disable --now dsh-conductor-image-pin.timer
+dsh-conductor-image-pin.service`, `docker rm -f dsh-conductor-image-pin`, delete
+`host_vars/ci-runner-1.yml` and re-render both runner roles on the host; leave the archive and the
+image alone.
+
+---
+
 ## The image, and why it is what it is
 
 **`node:24` since 2026-09-11 (Debian, same toolchain); the comparison below was measured on

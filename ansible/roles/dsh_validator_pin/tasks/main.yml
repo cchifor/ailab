@@ -11,13 +11,38 @@
     src: /etc/gitea-runner-cleanup.env
   register: pin_cleanup_environment
 
+# Two checks, because the rewrite below replaces the LAST line matching the key while the value check
+# below sees only canonical double-quoted assignments: a second `export KEY=…` or single-quoted line
+# would be invisible to the value check and either dropped by the rewrite or left to override it when
+# the cleanup script sources the file. Exactly one assignment, in the canonical form, or refuse.
 - name: Refuse to overwrite an unknown operator cleanup exemption
   ansible.builtin.assert:
     that:
       - >-
         (pin_cleanup_environment.content | b64decode |
+        regex_findall('(?m)^[ \t]*(?:export[ \t]+)?GITEA_CLEANUP_INFRA_EXCLUDE_RE=.*$')) | length == 1
+      - >-
+        (pin_cleanup_environment.content | b64decode |
         regex_findall('(?m)^GITEA_CLEANUP_INFRA_EXCLUDE_RE="([^"]*)"$'))
         in [['buildkit|buildx'], [gitea_runner_cleanup_infra_exclude_re]]
+
+# The GitHub agent's between-jobs reclaim is rendered by the github_runner role, not by this play.
+# Without the keep-list on disk its next boot/ephemeral cycle removes the pin and the image with it,
+# so refuse to proceed until `ansible-playbook runners.yml -l ci-runner-1` has rendered it.
+- name: Inspect the co-located GitHub agent's reclaim script
+  ansible.builtin.slurp:
+    src: /usr/local/bin/runner-reclaim.sh
+  register: pin_github_reclaim
+
+- name: Refuse until the GitHub reclaim keeps the pin (run runners.yml -l ci-runner-1 first)
+  ansible.builtin.assert:
+    that:
+      - >-
+        ("KEEP_RE='" ~ github_runner_reclaim_keep_re ~ "'") in (pin_github_reclaim.content | b64decode)
+      - github_runner_reclaim_keep_re == ' /dsh-conductor-image-pin$'
+    fail_msg: >-
+      /usr/local/bin/runner-reclaim.sh on this host does not carry github_runner_reclaim_keep_re;
+      render it first with `ansible-playbook runners.yml -l ci-runner-1`.
 
 - name: Ensure the root-owned operator script directory exists
   ansible.builtin.file:
@@ -35,6 +60,34 @@
     group: root
     mode: '0644'
 
+- name: Install reconciliation unit and its timer
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - dsh-conductor-image-pin.service
+    - dsh-conductor-image-pin.timer
+
+# The unit validates (or creates) the container BEFORE the exemption below is written: a foreign
+# container squatting on the reserved name fails this task and never gains the cleanup exemption.
+# The freshly created container is safe in the gap — the stale-container reap only touches containers
+# older than GITEA_CLEANUP_REAP_AGE_SEC (4 h), and an image in use by a running container is not pruned.
+- name: Reconcile now and enable the image retention unit at boot
+  ansible.builtin.systemd_service:
+    name: dsh-conductor-image-pin.service
+    daemon_reload: true
+    enabled: true
+    state: restarted
+
+- name: Keep re-asserting the pin between boots
+  ansible.builtin.systemd_service:
+    name: dsh-conductor-image-pin.timer
+    enabled: true
+    state: started
+
 - name: Exempt only the named idle infrastructure container
   ansible.builtin.lineinfile:
     path: /etc/gitea-runner-cleanup.env
@@ -42,18 +95,3 @@
     line: 'GITEA_CLEANUP_INFRA_EXCLUDE_RE="{{ gitea_runner_cleanup_infra_exclude_re }}"'
     create: false
     backup: true
-
-- name: Install reboot reconciliation unit
-  ansible.builtin.copy:
-    src: dsh-conductor-image-pin.service
-    dest: /etc/systemd/system/dsh-conductor-image-pin.service
-    owner: root
-    group: root
-    mode: '0644'
-
-- name: Reconcile and enable only the image retention unit
-  ansible.builtin.systemd_service:
-    name: dsh-conductor-image-pin.service
-    daemon_reload: true
-    enabled: true
-    state: restarted

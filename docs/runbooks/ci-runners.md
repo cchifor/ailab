@@ -263,6 +263,11 @@ agent-nodes** (`kubernetes/infra/agent-nodes`, now live at .47/.48/.49). `infra/
 - **App key rotation:** generate a new key on the App, re-encrypt `github-runner.sops.yaml`, `just
   runners`. Revoke the old key.
 - **Rebuild a VM (DR):** `tofu apply` (recreates) → `just runners`. Stateless/ephemeral — no data loss.
+  **Except ci-runner-1:** it also carries the dsh conductor's validation image, its archive and the
+  `dsh-conductor-image-pin` container that keeps the image out of BOTH runners' image prunes
+  (`host_vars/ci-runner-1.yml` exempts it from the Gitea reap and from the GitHub agent's
+  `runner-reclaim.sh`; `ansible/dsh-validator-pin.yml` installs the pin). None of that survives a
+  rebuild and the archive is not IaC — see `dsh.md` § "The conductor validator image pin on ci-runner-1".
 - **Teardown:** `tofu -chdir=kubernetes/infra/runners destroy`, then remove the offline runners in the
   GitHub UI.
 

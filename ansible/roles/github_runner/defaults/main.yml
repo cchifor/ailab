@@ -27,6 +27,13 @@ github_runner_user: runner
 github_runner_group: runner
 github_runner_home: /home/runner
 github_runner_dir: /home/runner/actions-runner
+# Containers the between-jobs reclaim must NOT `docker rm -f`, as an extended regex matched
+# case-insensitively against `<image> <name>` (the same shape gitea_runner's INFRA_EXCLUDE_RE uses).
+# Empty = reclaim everything, the ephemeral contract. Set per host, never fleet-wide: ci-runner-1
+# keeps the dsh image-pin container (host_vars/ci-runner-1.yml), because the reclaim runs at every
+# boot and every ephemeral cycle of a co-located GitHub agent and would otherwise remove it and then
+# prune the untagged image it exists to retain (docs/runbooks/dsh.md).
+github_runner_reclaim_keep_re: ""
 github_runner_service: actions.runner.cchifor-platform.service
 
 # ---- guest swap (cchifor/platform#620: heavy e2e peaks spill to the VM's own disk, not OOM) ----

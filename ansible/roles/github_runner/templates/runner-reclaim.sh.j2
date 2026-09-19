@@ -7,8 +7,25 @@
 set -uo pipefail
 RUNNER_DIR="{{ github_runner_dir }}"
 DOCKER_CFG="{{ github_runner_home }}/.docker"
+# Containers to keep across the reclaim (github_runner_reclaim_keep_re; empty = keep nothing).
+KEEP_RE='{{ github_runner_reclaim_keep_re }}'
 if command -v docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1; then
   ids=$(docker ps -aq 2>/dev/null || true)
+  if [ -n "$KEEP_RE" ] && [ -n "$ids" ]; then
+    # Same match as gitea-runner-cleanup.sh's reap loop: `<image> <name>`, case-insensitive. A kept
+    # container also keeps its image out of the `image prune` calls below (it is in use).
+    kept=""
+    for cid in $ids; do
+      # An inspect that fails (transient daemon error, or the container is already gone) yields no
+      # metadata to match: KEEP it this cycle rather than let a blank line put the protected
+      # container into the rm -f list. Best-effort reclaim catches a real leftover next cycle.
+      meta="$(docker inspect -f '{% raw %}{{.Config.Image}} {{.Name}}{% endraw %}' "$cid" 2>/dev/null)" || continue
+      [ -n "$meta" ] || continue
+      printf '%s' "$meta" | grep -qiE "$KEEP_RE" && continue
+      kept="$kept $cid"
+    done
+    ids="${kept# }"
+  fi
   [ -n "$ids" ] && timeout 120 docker rm -f $ids >/dev/null 2>&1 || true
   # Remove per-job buildx builder instances — each docker-container builder leaves a *named*
   # buildx_buildkit_builder-<uuid>_state volume that `docker volume prune -f` (no -a) will NOT reap,

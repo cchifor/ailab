@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically re-assert the DSH validator image pin (self-heal after any container removal)
+
+[Timer]
+# The service is a plain oneshot (no RemainAfterExit), so each tick re-runs it: two inspects when
+# the pin is healthy, a start or a verified restore + create when it is not. OnUnitInactiveSec is
+# measured from the previous run's exit, so ticks never overlap a slow restore. 5 min bounds the
+# window in which an unreferenced image can meet the runner cleanup's `image prune -af` sweep.
+OnBootSec=2min
+OnUnitInactiveSec=5min
+AccuracySec=30s
+Unit=dsh-conductor-image-pin.service
+
+[Install]
+WantedBy=timers.target

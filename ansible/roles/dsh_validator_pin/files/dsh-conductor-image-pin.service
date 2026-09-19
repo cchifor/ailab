@@ -4,10 +4,11 @@ Requires=docker.service
 After=docker.service
 
 [Service]
+# A plain oneshot so the timer can re-run it; `systemctl is-active` is therefore NOT the health
+# signal - the container is (docs/runbooks/dsh.md).
 Type=oneshot
-RemainAfterExit=yes
 ExecStart=/usr/bin/python3 /usr/local/libexec/dsh-conductor-image-pin.py
-TimeoutStartSec=180
+TimeoutStartSec=600
 UMask=0077
 NoNewPrivileges=yes
 

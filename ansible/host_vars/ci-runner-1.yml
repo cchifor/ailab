@@ -1,4 +1,12 @@
 ---
-# Preserve only this approved idle infrastructure container from age-based reaping.
-# Ordinary dsh-validation-* containers and all existing cleanup rules remain unchanged.
+# Preserve only this approved idle infrastructure container from age-based reaping. Ordinary
+# dsh-validation-* containers and every other cleanup rule are unchanged. The prefix is a LITERAL copy
+# of the gitea_runner role default (`buildkit|buildx`): scripts/tests/test_dsh_validator_pin.py fails
+# CI if the two ever diverge, so a fleet-wide addition to the default cannot silently skip this host.
+# See docs/runbooks/dsh.md § "The conductor validator image pin on ci-runner-1".
 gitea_runner_cleanup_infra_exclude_re: 'buildkit|buildx| /dsh-conductor-image-pin$'
+# The co-located GitHub agent's between-jobs reclaim (`runner-reclaim.sh`, every boot and every
+# ephemeral cycle) `docker rm -f`s every container and then prunes dangling images: without this the
+# pin is removed and the untagged image with it. Only the pin is kept; the ephemeral contract for
+# job containers is unchanged. scripts/tests/test_dsh_validator_pin.py holds the two in step.
+github_runner_reclaim_keep_re: ' /dsh-conductor-image-pin$'
