@@ -186,53 +186,50 @@ def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None):
     }
 
 
-# The claude seat table: one instant series per seat per window, aggregated so the scrape
-# labels (endpoint/instance/job/namespace/service) never become columns.
-def _seat_pct(limit):
-    return f'max by (seat) (reviewbot_llm_usage_percent{{persona="claude",limit="{limit}"}})'
+# ── seat blocks, one per persona ──────────────────────────────────────────────────────────
+# The seat table: one instant series per seat per window, aggregated so the scrape labels
+# (endpoint/instance/job/namespace/service) never become columns.
+def _seat_pct(persona, limit):
+    return f'max by (seat) (reviewbot_llm_usage_percent{{persona="{persona}",limit="{limit}"}})'
 
 
-def _seat_reset(limit):
+def _seat_reset(persona, limit):
     # Only a reset still ahead is a countdown. resets_at is 0 for a window with no open period,
     # and it is refreshed HOURLY, so once the reset moment passes the stale stamp sits in the
     # past until the next probe - a `> 0` filter alone rendered that as "-42 min"
     # (reviewer-claude on ailab#784). Either case -> no series -> a blank cell.
-    return (f'max by (seat) (reviewbot_llm_usage_resets_at_seconds{{persona="claude",limit="{limit}"}} > time())'
-            ' - time()')
+    return (f'max by (seat) (reviewbot_llm_usage_resets_at_seconds{{persona="{persona}",limit="{limit}"}}'
+            ' > time()) - time()')
 
 
 USAGE_STEPS = [{"color": "green", "value": None}, {"color": "orange", "value": 80},
                {"color": "red", "value": 100}]
 
-# WHAT EACH ACCOUNT CAN SERVE. A tier is usable on a seat only when the seat is not parked as an
-# account (weekly_all/session wall) AND that tier is not parked on it; the first cut plotted
-# the per-model flags alone, so an account-parked seat showed opus and sonnet "free"
-# (screenshot review, 2026-09-19). The weights follow reviewer-1's ladder,
-# pr_reviewer_llm_models: [fable, opus, sonnet]; 0 = nothing, the seat is parked.
-CLAUDE_TIERS = (("fable", 3), ("opus", 2), ("sonnet", 1))
-TIER_MAP = [{"type": "value", "options": {
-    "3": {"text": "fable", "color": "green", "index": 0},
-    "2": {"text": "opus", "color": "yellow", "index": 1},
-    "1": {"text": "sonnet", "color": "orange", "index": 2},
-    "0": {"text": "parked", "color": "red", "index": 3}}}]
+
+def _usable(persona, model):
+    return (f'((1 - reviewbot_llm_model_parked{{persona="{persona}",model="{model}"}}) * on(seat) group_left() '
+            f'(1 - reviewbot_llm_seat_parked{{persona="{persona}"}}))')
 
 
-def _usable(model):
-    return (f'((1 - reviewbot_llm_model_parked{{persona="claude",model="{model}"}}) * on(seat) group_left() '
-            f'(1 - reviewbot_llm_seat_parked{{persona="claude"}}))')
+def best_tier(persona, tiers):
+    """WHAT EACH ACCOUNT CAN SERVE, as a weight. A tier is usable on a seat only when the seat is
+    not parked as an account (weekly_all/session wall) AND that tier is not parked on it; the
+    first cut plotted the per-model flags alone, so an account-parked seat showed opus and
+    sonnet "free" (screenshot review, 2026-09-19). Anchored on reviewbot_llm_seat_parked, which
+    write_metrics emits for EVERY seat, zero included: `(1 - x)` yields no series when x is
+    absent, so a seat with a missing flag series would silently rank one tier down, or vanish
+    (reviewer-claude on ailab#788) - with the anchor it reads `parked`, wrong on the safe side
+    and visible."""
+    return ("max by (seat) (" + " or ".join(f"({_usable(persona, m)} * {w})" for m, w in tiers)
+            + f' or (max by (seat) (reviewbot_llm_seat_parked{{persona="{persona}"}}) * 0))')
 
 
-# Anchored on reviewbot_llm_seat_parked, which write_metrics emits for EVERY seat, zero
-# included: `(1 - x)` yields no series when x is absent, so a seat with a missing flag series
-# would silently rank one tier down, or vanish (reviewer-claude on ailab#788). With the anchor
-# such a seat reads `parked` - wrong on the safe side, and visible.
-BEST_TIER = ("max by (seat) (" + " or ".join(f"({_usable(m)} * {w})" for m, w in CLAUDE_TIERS)
-             + ' or (max by (seat) (reviewbot_llm_seat_parked{persona="claude"}) * 0))')
-
-# The info series, ONE per seat: during an account swap the old and new seat_info can overlap a
-# scrape, and a many-to-one join on `seat` then errors ("multiple matches") and blanks the
-# panel at the very moment it should explain the swap (reviewer-claude on ailab#788).
-SEAT_EMAIL = 'topk by (seat) (1, max by (seat, email) (reviewbot_llm_seat_info{persona="claude"}))'
+def seat_email(persona):
+    """The info series, ONE per seat: during an account swap the old and new seat_info can
+    overlap a scrape, and a many-to-one join on `seat` then errors ("multiple matches") and
+    blanks the panel at the very moment it should explain the swap (reviewer-claude on
+    ailab#788)."""
+    return f'topk by (seat) (1, max by (seat, email) (reviewbot_llm_seat_info{{persona="{persona}"}}))'
 
 
 def _gauge_col(name, width=None):
@@ -247,6 +244,110 @@ def _gauge_col(name, width=None):
 def _reset_col(name, width=None):
     return _ov(name, ([{"id": "custom.width", "value": width}] if width else [])
                + [{"id": "unit", "value": "dtdurations"}, {"id": "decimals", "value": 0}])
+
+
+# The claude ladder on reviewer-1, pr_reviewer_llm_models: [fable, opus, sonnet]; 0 = parked.
+CLAUDE_TIERS = (("fable", 3), ("opus", 2), ("sonnet", 1))
+CLAUDE_TIER_MAP = [{"type": "value", "options": {
+    "3": {"text": "fable", "color": "green", "index": 0},
+    "2": {"text": "opus", "color": "yellow", "index": 1},
+    "1": {"text": "sonnet", "color": "orange", "index": 2},
+    "0": {"text": "parked", "color": "red", "index": 3}}}]
+# The windows the usage API reports, in table order: (limit label, column title).
+CLAUDE_WINDOWS = (("session", "Session"), ("weekly_all", "Weekly"), ("weekly_fable", "Fable"))
+# reviewer-2 runs ONE model (pr_reviewer_llm_model: gpt-6-astra), so capacity is serving or
+# parked, and the app server reports one weekly window on these plans (secondary: null,
+# 2026-09-19) - a Session column would be a blank one until a plan grows a 5h window.
+CODEX_TIERS = (("gpt-6-astra", 1),)
+CODEX_TIER_MAP = [{"type": "value", "options": {
+    "1": {"text": "serving", "color": "green", "index": 0},
+    "0": {"text": "parked", "color": "red", "index": 1}}}]
+CODEX_WINDOWS = (("weekly_all", "Weekly"),)
+
+
+def seat_block(persona, name, y, tiers, tier_map, windows, serves=True, capacity_title=None):
+    """One persona's seats: four stats (4 units), the seats table (6), the capacity timeline
+    (5) - 15 units from y. Which account and model the persona is on RIGHT NOW, every
+    account's windows from the usage API (read hourly by reviewbot as each seat), and what
+    each account can serve.
+
+    LAYOUT RULES, learned from screenshot reviews (2026-09-18/19): every stat >= 4 wide, the
+    account stat half the row with the font PINNED (auto-sizing wraps an email on a narrow
+    window); the table with short headers, no filter funnels, fixed widths so it fits a 1500px
+    window without a scrollbar, sm cells, 6 units; the timeline ONE row per account. The
+    email lives on ONE info series, reviewbot_llm_seat_info, joined here; the numeric series
+    are aggregated max by (seat) so scrape labels never reach the table. `serves` adds the
+    best-tier column, pointless for a single-model persona where State already says it."""
+    P = f'persona="{persona}"'
+    bt, se = best_tier(persona, tiers), seat_email(persona)
+    targets = [("H", se)]
+    order = ["seat", "email", "Value #G"] + (["Value #J"] if serves else [])
+    rename = {"seat": "Seat", "email": "Account", "Value #G": "State", "Value #J": "Serves",
+              "Value #I": "Login expires"}
+    gauges, resets = [], []
+    for i, (limit, label) in enumerate(windows):
+        pr, rr = f"P{i}", f"R{i}"
+        targets += [(pr, _seat_pct(persona, limit)), (rr, _seat_reset(persona, limit))]
+        order += [f"Value #{pr}", f"Value #{rr}"]
+        rename[f"Value #{pr}"], rename[f"Value #{rr}"] = label, f"{label} reset"
+        gauges.append(label)
+        resets.append(f"{label} reset")
+    # State: 2 = the active seat, 1 = account-parked, 0 = free; `or` fills the seats the
+    # active-seat series lacks. Login expires: the login's access-token expiry, relative
+    # ("in 5 hours"); a stamp that stays in the past is a login the keepalive could not
+    # renew (0 = setup-token, dropped).
+    targets += [("G", f'(max by (seat) (reviewbot_llm_active_seat_info{{{P}}}) * 2) '
+                      f'or max by (seat) (reviewbot_llm_seat_parked{{{P}}})'),
+                ("I", f'max by (seat) (reviewbot_llm_seat_credential_expires_at_seconds{{{P}}} > 0) * 1000')]
+    if serves:
+        targets.append(("J", bt))
+    order.append("Value #I")
+    overrides = [
+        _ov("Seat", [{"id": "custom.width", "value": 52}]),
+        _ov("Account", [{"id": "custom.minWidth", "value": 170}]),
+        _ov("State", [{"id": "custom.width", "value": 82},
+                      {"id": "custom.cellOptions", "value": {"type": "color-text"}},
+                      {"id": "mappings", "value": [{"type": "value", "options": {
+                          "2": {"text": "● active", "color": "green", "index": 0},
+                          "1": {"text": "parked", "color": "red", "index": 1},
+                          "0": {"text": "free", "color": "text", "index": 2}}}]}]),
+        _ov("Login expires", [{"id": "custom.width", "value": 130},
+                              {"id": "unit", "value": "dateTimeFromNow"}]),
+    ] + ([_ov("Serves", [{"id": "custom.width", "value": 72},
+                         {"id": "custom.cellOptions", "value": {"type": "color-text"}},
+                         {"id": "mappings", "value": tier_map}])] if serves else []) \
+      + [_gauge_col(c, 110) for c in gauges] + [_reset_col(c, 120) for c in resets]
+    return [
+        stat_name(f"{name} · Active Account", 0, y, 12, 4,
+                  f'reviewbot_llm_active_seat_info{{{P}}} * on(persona,seat) '
+                  f'group_left(email,plan) reviewbot_llm_seat_info{{{P}}}',
+                  "{{email}} · seat {{seat}}", value_size=26),
+        stat_name(f"{name} · Active Model", 12, y, 4, 4,
+                  f'reviewbot_llm_active_model_info{{{P}}}', "{{model}}", value_size=26),
+        # 0 = a seat's probe failed on the last poll (ReviewbotUsageProbeFailing after 3h).
+        stat(f"{name} · Usage Probe", 16, y, 4, 4,
+             f'min(reviewbot_llm_usage_probe_ok{{{P}}}) or vector(0)',
+             steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}],
+             mappings=[{"type": "value", "options": {"1": {"text": "OK", "index": 0},
+                                                     "0": {"text": "FAILING", "index": 1}}}],
+             value_size=26),
+        # Seats that can serve SOMETHING. Aggregated before `or vector(0)`: a labelled series
+        # OR'd with the label-less vector(0) keeps BOTH, and the stat showed a phantom red
+        # zero beside the real value (codex review of PR 2). min() drops the labels.
+        stat(f"{name} · Seats Usable", 20, y, 4, 4,
+             f'min(reviewbot_llm_seats_available{{{P}}}) or vector(0)',
+             steps=[{"color": "red", "value": None}, {"color": "orange", "value": 1},
+                    {"color": "green", "value": 2}], value_size=26),
+        # Orange at 80, red at 100: 100 IS the parked state. The email rides on its OWN
+        # target (H): a seat whose probe is failing still gets its account named.
+        table(f"{name} seats", 0, y + 4, 24, 6, targets=targets, by="seat", order=order, rename=rename,
+              exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, len(targets) + 1)],
+              overrides=overrides, cell_height="sm", filterable=False),
+        # ONE ROW PER ACCOUNT, over time: what it could serve, or parked.
+        state_timeline(capacity_title or f"{name} seat capacity — best tier each account can serve",
+                       0, y + 10, 24, 5, [bt + " * on(seat) group_left(email) " + se],
+                       ["{{seat}} · {{email}}"], tier_map),
+    ]
 
 
 # group_left(name) join so per-instance panels show the friendly guest name instead of qemu/4001
@@ -565,107 +666,18 @@ panels += [
     ts("Queue Depth / Oldest Age", 12, 152, 12, 7,
        ['reviewbot_queue_depth', 'reviewbot_oldest_job_age_seconds'],
        "short", legends=["{{persona}} depth", "{{persona}} oldest s"]),
-    # ── seats, ladder and usage (plans/2026-09-18-claude-seat-rotation-plan.md, PR 2) ──────
-    # Which account and model the claude persona is on RIGHT NOW, and every account's windows
-    # from the usage API (GET /api/oauth/usage, read hourly by reviewbot as each seat). The
-    # email lives on ONE info series, reviewbot_llm_seat_info, and is joined onto the active-seat
-    # series and the table here, so the numeric series never carry it.
-    #
-    # LAYOUT RULES, learned from the first cut (2026-09-18, screenshot review): a stat 3 columns
-    # wide truncates its own title ("Seats Usa..."), a 6-wide stat wraps an email, a bar gauge
-    # with nine bars labelled "<email> · <window>" cuts every label, and a table fed straight
-    # from the scrape leaks endpoint/instance/job/namespace/service as columns and scrolls
-    # sideways. So: every stat is >= 4 wide, the account stat takes half the row, the numeric
-    # series are aggregated (max by (seat)) so the scrape labels never reach the table, and the
-    # usage is ONE WIDE TABLE - one row per account, one column pair (used %, resets in) per
-    # window - with the percentages drawn as in-cell gauges. The windows are fixed by the API
-    # (session, weekly_all, weekly_fable), which is what makes the wide shape possible.
-    stat_name("Active Account", 0, 159, 12, 4,
-              'reviewbot_llm_active_seat_info{persona="claude"} * on(persona,seat) '
-              'group_left(email,plan) reviewbot_llm_seat_info{persona="claude"}',
-              "{{email}} · seat {{seat}}", value_size=26),
-    stat_name("Active Model", 12, 159, 4, 4,
-              'reviewbot_llm_active_model_info{persona="claude"}', "{{model}}", value_size=26),
-    # 0 = a seat's probe failed on the last poll (ReviewbotUsageProbeFailing after 3h of it).
-    stat("Usage Probe", 16, 159, 4, 4,
-         'min(reviewbot_llm_usage_probe_ok{persona="claude"}) or vector(0)',
-         steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}],
-         mappings=[{"type": "value", "options": {"1": {"text": "OK", "index": 0},
-                                                 "0": {"text": "FAILING", "index": 1}}}],
-         value_size=26),
-    # Seats that can serve SOMETHING: neither account-parked nor parked on every tier.
-    # Aggregated before `or vector(0)`: a labelled series OR'd with the label-less vector(0)
-    # keeps BOTH (the label sets differ), and the stat showed a phantom red zero beside the
-    # real value (codex review of PR 2). min() drops the labels, as the other stats do.
-    stat("Seats Usable", 20, 159, 4, 4,
-         'min(reviewbot_llm_seats_available{persona="claude"}) or vector(0)',
-         steps=[{"color": "red", "value": None}, {"color": "orange", "value": 1},
-                {"color": "green", "value": 2}], value_size=26),
-    # Orange at 80, red at 100: 100 IS the parked state, and the API's percent is what the
-    # persona is parked on, so anything below it is still capacity. A window with no open
-    # period reports resets_at = 0 (a seat with no session running) and one that just reset
-    # carries a stale past stamp; _seat_reset drops both so the cell is blank rather than the
-    # "0 seconds" a clamp produced. The email rides on its OWN target (H), not on the session
-    # series: a seat whose probe is failing, or a fresh seat with no usage yet, still gets its
-    # account named - the state that most needs it (reviewer-claude on ailab#784).
-    # COMPACT: short headers, no filter funnels (they cost ~20px per header and truncated
-    # "Session reset"), fixed widths (~1040px + the Account column) so eleven columns fit a
-    # 1500px window without a scrollbar, small cells, 6 units - three rows were floating in a
-    # 7-unit panel with md cells, and 5 units clipped the third (screenshot review, 2026-09-19).
-    table("Claude seats", 0, 163, 24, 6,
-          targets=[
-              ("H", SEAT_EMAIL),
-              ("A", _seat_pct("session")),
-              ("B", _seat_pct("weekly_all")),
-              ("C", _seat_pct("weekly_fable")),
-              ("D", _seat_reset("session")),
-              ("E", _seat_reset("weekly_all")),
-              ("F", _seat_reset("weekly_fable")),
-              ("G", '(max by (seat) (reviewbot_llm_active_seat_info{persona="claude"}) * 2) '
-                    'or max by (seat) (reviewbot_llm_seat_parked{persona="claude"})'),
-              # The best tier this account can serve right now (see BEST_TIER).
-              ("J", BEST_TIER),
-              # The login's access-token expiry, relative: "in 5 hours"; a stamp that stays in
-              # the past is a login the keepalive could not renew (0 = setup-token, dropped).
-              ("I", 'max by (seat) (reviewbot_llm_seat_credential_expires_at_seconds{persona="claude"} > 0) * 1000'),
-          ],
-          by="seat",
-          order=["seat", "email", "Value #G", "Value #J", "Value #A", "Value #D", "Value #B", "Value #E",
-                 "Value #C", "Value #F", "Value #I"],
-          rename={"seat": "Seat", "email": "Account", "Value #G": "State", "Value #J": "Serves",
-                  "Value #A": "Session", "Value #D": "Session reset",
-                  "Value #B": "Weekly", "Value #E": "Weekly reset",
-                  "Value #C": "Fable", "Value #F": "Fable reset",
-                  "Value #I": "Login expires"},
-          exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, 11)],
-          overrides=[
-              _ov("Seat", [{"id": "custom.width", "value": 52}]),
-              _ov("Account", [{"id": "custom.minWidth", "value": 170}]),
-              _ov("State", [{"id": "custom.width", "value": 82},
-                            {"id": "custom.cellOptions", "value": {"type": "color-text"}},
-                            {"id": "mappings", "value": [{"type": "value", "options": {
-                                "2": {"text": "● active", "color": "green", "index": 0},
-                                "1": {"text": "parked", "color": "red", "index": 1},
-                                "0": {"text": "free", "color": "text", "index": 2}}}]}]),
-              _ov("Serves", [{"id": "custom.width", "value": 72},
-                             {"id": "custom.cellOptions", "value": {"type": "color-text"}},
-                             {"id": "mappings", "value": TIER_MAP}]),
-              _ov("Login expires", [{"id": "custom.width", "value": 130},
-                                    {"id": "unit", "value": "dateTimeFromNow"}]),
-          ] + [_gauge_col(c, 110) for c in ("Session", "Weekly", "Fable")]
-            + [_reset_col(c, 120) for c in ("Session reset", "Weekly reset", "Fable reset")],
-          cell_height="sm", filterable=False),
-    # ONE ROW PER ACCOUNT, over time: the best tier it could serve, or parked. Replaces twelve
-    # red/green stripes per (seat, model) that read "opus free" on an account-parked seat.
-    state_timeline("Seat capacity — best tier each account can serve", 0, 169, 24, 5,
-                   [BEST_TIER + " * on(seat) group_left(email) " + SEAT_EMAIL],
-                   ["{{seat}} · {{email}}"], TIER_MAP),
+    # ── seats, ladder and usage, one block per persona (seat_block above) ─────────────────
+    *seat_block("claude", "Claude", 159, CLAUDE_TIERS, CLAUDE_TIER_MAP, CLAUDE_WINDOWS),
+    # The codex persona (reviewer-2): the same watchdog since ailab#789, through the CLI's
+    # app server; one model, one weekly window.
+    *seat_block("codex", "Codex", 174, CODEX_TIERS, CODEX_TIER_MAP, CODEX_WINDOWS, serves=False,
+                capacity_title="Codex seat capacity — serving or parked, per account"),
     # THE REASON, not just the rate. Everything above is numeric and can only say THAT a review
     # failed; this says which PR and why. Shipped by roles/journal_ship (Alloy -> loki-lan).
     # The filter is deliberately broad — `failed`, `error`, `skipped` — because the 2026-09-06
     # failure text ("'utf-8' codec can't decode byte 0xf6") matched no term anyone would have
     # thought to search for in advance.
-    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 174, 24, 9,
+    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 189, 24, 9,
          '{job="host-journal", unit="reviewbot.service"} '
          '|~ "(?i)(failed|error|quarantin|skipped|exhausted)"'),
 ]

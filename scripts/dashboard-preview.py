@@ -207,6 +207,8 @@ def check(a):
         u, _, pw = a.auth.partition(":")
         creds = {"username": u, "password": pw}
     failures, report = [], []
+    ignored = [re.compile(i) for i in a.ignore]
+    skip = lambda title: any(i.search(title) for i in ignored)
     with sync_playwright() as p:
         browser = p.chromium.launch()
         ctx = browser.new_context(viewport={"width": a.width, "height": a.height}, http_credentials=creds,
@@ -255,8 +257,12 @@ def check(a):
         while time.time() < deadline:
             st = page.evaluate(JS_ROW_PANELS, [a.row])
             byt = {x["title"]: x for x in st["panels"]}
+            # An --ignore'd panel must still MOUNT (it is in the model) but does not gate
+            # settling: a stat with no series renders nothing at all, and a panel skipped
+            # for lacking a datasource locally would otherwise hold the whole row hostage.
             ready = (all(t in byt for t in expected)
-                     and all((x["content"] or x["graphic"]) and not x["loading"] for x in byt.values()))
+                     and all((x["content"] or x["graphic"]) and not x["loading"]
+                             for t, x in byt.items() if not skip(t)))
             sig = tuple(sorted((t, x["content"]) for t, x in byt.items()))
             if ready and sig == prev:
                 settled = True
@@ -281,12 +287,12 @@ def check(a):
         if t not in titles:
             failures.append(f"panel in the model but not mounted: {t!r}")
     if not settled:
-        stuck = [x["title"] for x in panels if not (x["content"] or x["graphic"]) or x["loading"]]
+        stuck = [x["title"] for x in panels
+                 if not skip(x["title"]) and (not (x["content"] or x["graphic"]) or x["loading"])]
         failures.append(f"row did not settle within {a.timeout}s; unready: {stuck}")
-    ignored = [re.compile(i) for i in a.ignore]
     for x in panels:
         t = x["title"]
-        if any(i.search(t) for i in ignored):
+        if skip(t):
             report.append(f"  skip  {t}")
             continue
         probs = []
