@@ -1121,8 +1121,10 @@ def keepalive(seat):
     renewed all the same; an idle unparked seat spends one tiny turn per expiry. The same
     isolated-user prefix and wrapper _run_llm uses; stdin is /dev/null so a CLI that grows an
     interactive prompt reads EOF instead of hanging; output is discarded, never published.
-    Returns whether the CLI exited 0 - which is NOT whether the token was renewed: the caller
-    probes again and lets the probe decide - or None when the seat's lock is held, i.e. a
+    Returns whether the CLI exited 0 - which is NOT whether the token was renewed, in either
+    direction: the first poll after the rollout (2026-09-19 03:39Z) saw exit 1 on both parked
+    seats, the refused call, with both logins renewed. The caller probes again and lets that
+    decide, and counts the failure from it - or None when the seat's lock is held, i.e. a
     review's CLI is running as this seat right now and renews the token itself."""
     s = SEAT_BY_NAME.get(seat) if isinstance(seat, str) else seat
     name = s["name"]
@@ -1153,8 +1155,6 @@ def keepalive(seat):
             ok, why = False, f"{type(e).__name__}: {e}"
     finally:
         lock.release()
-    if not ok:
-        bump_meta(f"seat_keepalive_failures_total.{name}")
     log(f"usage: seat '{name}' login expired; keepalive run as the seat ({why})")
     return ok
 
@@ -1283,12 +1283,20 @@ def poll_usage(now=None):
                 ran = keepalive(s)
             except Exception as e:
                 ran = None
+                bump_meta(f"seat_keepalive_failures_total.{s['name']}")
                 log(f"usage: seat '{s['name']}' keepalive failed: {e}")
             if ran is not None:
                 try:
                     doc = probe_usage(s)
                 except Exception as e:
                     doc = {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
+                # THE VERDICT IS THE RE-PROBE. A failure is a login the run did not make usable
+                # - never the CLI's exit code, which is 1 on a parked seat's refused call.
+                if doc.get("ok"):
+                    log(f"usage: seat '{s['name']}' login renewed by the keepalive")
+                else:
+                    bump_meta(f"seat_keepalive_failures_total.{s['name']}")
+                    log(f"usage: seat '{s['name']}' still failing after the keepalive: {doc.get('error')}")
         try:
             apply_usage(s["name"], doc, now)
         except Exception as e:
@@ -2565,8 +2573,9 @@ def write_metrics():
                 lines.append(f'reviewbot_llm_seat_reviews_total'
                              f'{{persona="{_persona}",seat="{_sn}"}} '
                              f'{float(_serves.get("seat_reviews_total." + _s["name"], 0) or 0):.0f}')
-                # The keepalive: how often an expired login was renewed by a CLI run, and how
-                # often that run itself failed. Zero for every seat, so a rate() has a base.
+                # The keepalive: how often an expired login got a CLI run, and how often the
+                # login was still unusable afterwards (the re-probe's verdict, never the CLI's
+                # exit code). Zero for every seat, so a rate() has a base.
                 lines.append(f'reviewbot_llm_seat_keepalives_total'
                              f'{{persona="{_persona}",seat="{_sn}"}} '
                              f'{float(_keeps.get("seat_keepalives_total." + _s["name"], 0) or 0):.0f}')

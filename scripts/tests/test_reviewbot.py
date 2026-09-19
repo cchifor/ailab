@@ -4514,24 +4514,41 @@ class CredentialKeepaliveTest(unittest.TestCase):
         self.assertEqual(["a", "b", "c"], self.probes)
         self.assertTrue(self.m.USAGE_SNAPSHOT["b"]["ok"], "the seats after the crash were still polled")
 
-    def test_a_keepalive_that_fails_or_hangs_is_counted_and_the_poll_goes_on(self):
+    def test_a_failure_is_a_login_still_expired_after_the_keepalive_not_the_exit_code(self):
+        """First poll on reviewer-1 after the rollout (2026-09-19 03:39Z): the CLI exited 1 on
+        the two parked seats - the refused call - while both logins were renewed and both
+        probes then succeeded. A counter that calls that a failure is no signal; the failure
+        is the re-probe still finding the login expired."""
         self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)],
                        "b": [self._doc(ok=False, expires_at=self.now - 100),
                              self._doc(expires_at=self.now + 7 * 3600)]}, cli_exit=1)
         self.m.poll_usage(self.now)
         self.assertEqual(2, len(self.cli))
-        self.assertEqual(1, self._meta("seat_keepalive_failures_total.a"))
-        self.assertEqual(1, self._meta("seat_keepalive_failures_total.b"))
-        self.assertTrue(self.m.USAGE_SNAPSHOT["b"]["ok"],
-                        "a non-zero exit is not the last word: the CLI refreshes BEFORE the API "
-                        "refuses it, so the probe decides, not the exit code")
-        self.cli.clear()
-        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)]},
+        self.assertEqual(0, self._meta("seat_keepalive_failures_total.b"),
+                         "renewed - exit 1 was the API refusing the call AFTER the refresh")
+        self.assertEqual(1, self._meta("seat_keepalive_failures_total.a"),
+                         "still expired after the run - that is the failure")
+        self.assertTrue(self.m.USAGE_SNAPSHOT["b"]["ok"])
+        self.assertEqual(1, self._meta("seat_keepalives_total.a"))
+        self.assertEqual(1, self._meta("seat_keepalives_total.b"))
+
+    def test_a_keepalive_that_hangs_is_a_failure_and_the_poll_goes_on(self):
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100)],
+                       "b": [self._doc(expires_at=self.now + 3600)]},
                       cli_raises=self.m.subprocess.TimeoutExpired(cmd="claude", timeout=60))
-        self.m.poll_usage(self.now + 3600)          # must not raise
+        self.m.poll_usage(self.now)                 # must not raise
         self.assertEqual(1, len(self.cli))
-        self.assertEqual(2, self._meta("seat_keepalive_failures_total.a"))
-        self.assertEqual(2, self._meta("seat_keepalives_total.a"))
+        self.assertEqual(1, self._meta("seat_keepalive_failures_total.a"))
+        self.assertEqual(1, self._meta("seat_keepalives_total.a"))
+        self.assertEqual(["a", "a", "b", "c"], self.probes, "re-probed anyway; the others polled")
+
+    def test_a_401_that_survives_the_keepalive_on_a_renewed_stamp_is_still_a_failure(self):
+        """The file may show a fresh expiry while the API keeps refusing (a revoked login the
+        CLI could refresh but the API rejects): the probe still failed, so it counts."""
+        self._install({"a": [self._doc(ok=False, expires_at=self.now - 100),
+                             self._doc(ok=False, expires_at=self.now + 7 * 3600)]})
+        self.m.poll_usage(self.now)
+        self.assertEqual(1, self._meta("seat_keepalive_failures_total.a"))
 
     def test_the_keepalive_can_be_switched_off_and_its_model_and_timeout_configured(self):
         self.m = _ladder_module(self.tmp.name, usage_poll_s=3600, usage_keepalive=False)
