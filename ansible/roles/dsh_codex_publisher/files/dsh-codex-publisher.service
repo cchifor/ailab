@@ -12,7 +12,11 @@ StateDirectory=dsh-codex-publisher
 StateDirectoryMode=0700
 NoNewPrivileges=true
 ProtectSystem=strict
+# The freshness metrics land in node_exporter's textfile directory (ADR 0026); everything else stays
+# read-only.
+ReadWritePaths=/var/lib/prometheus/node-exporter
 ProtectHome=read-only
 PrivateTmp=true
 RestrictAddressFamilies=AF_INET AF_INET6
-TimeoutStartSec=90
+# Two projections x three 20 s HTTP operations (login, metadata, patch) = 120 s worst case.
+TimeoutStartSec=150

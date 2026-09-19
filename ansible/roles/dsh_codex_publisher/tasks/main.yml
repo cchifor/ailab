@@ -35,7 +35,12 @@
     group: root
     mode: "0644"
 
-- name: Pin the reviewer account and source
+# One entry per reviewer seat that feeds a consumer: {auth_path, email, kv_path, prefix, optional}.
+# The projection list, the vault address and the textfile path are the whole configuration; the
+# AppRole credential is the operator-provisioned file checked below. `optional: true` marks a
+# STAGED seat (provisioned, not logged in): its absent auth file is a logged skip, never a failure.
+# Flip it off when the seat is activated -- from then on absence is the failure it looks like.
+- name: Pin the reviewer accounts, their target documents and the metrics path
   ansible.builtin.copy:
     content: "{{ dsh_codex_publisher | to_nice_json }}\n"
     dest: /etc/dsh-codex-publisher/config.json

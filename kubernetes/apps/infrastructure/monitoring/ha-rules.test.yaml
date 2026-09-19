@@ -373,3 +373,49 @@ tests:
                 release label Prometheus selects on; a monitor whose labels stop matching
                 podMonitorSelector disappears silently, which is the live state of strive-pg
                 (ailab#594).
+
+  # ------------------------------------------ the chatgpt credential's ESO hop (ADR 0026)
+  - interval: 1m
+    name: a NotReady litellm-chatgpt-auth ExternalSecret pages after 15m, a Ready one does not
+    input_series:
+      # ESO exports both series as 1/0; NotReady is the False series equal to 1.
+      - series: 'externalsecret_status_condition{exported_namespace="ai",namespace="external-secrets",name="litellm-chatgpt-auth",condition="Ready",status="False"}'
+        values: "1x30"
+      - series: 'externalsecret_status_condition{exported_namespace="ai",namespace="external-secrets",name="litellm-chatgpt-auth",condition="Ready",status="True"}'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: LiteLLMChatGPTAuthNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              exported_namespace: ai
+              namespace: external-secrets
+              name: litellm-chatgpt-auth
+              condition: Ready
+              status: "False"
+            exp_annotations:
+              summary: "LiteLLM's ChatGPT-subscription auth Secret is NotReady (ai/litellm-chatgpt-auth)"
+              description: >-
+                ExternalSecret litellm-chatgpt-auth has reported Ready=False for 15m, so LiteLLM's
+                gpt-6-astra-realjaynesage route runs on the LAST rendered token and will start
+                answering 401 once that expires (the publisher on reviewer-2 cannot see this hop).
+                `kubectl -n ai describe externalsecret litellm-chatgpt-auth`: the usual causes are the
+                af-app-litellm k8s-auth role or policy missing (the openbao-chatgpt-provision Job owns
+                both), the af/litellm/chatgpt document deleted (the template errors on a missing key),
+                or the openbao-tls CA Secret in ns ai not yet issued.
+      # Inside the hold.
+      - eval_time: 10m
+        alertname: LiteLLMChatGPTAuthNotReady
+        exp_alerts: []
+  - interval: 1m
+    name: a Ready litellm-chatgpt-auth ExternalSecret stays silent
+    input_series:
+      - series: 'externalsecret_status_condition{exported_namespace="ai",namespace="external-secrets",name="litellm-chatgpt-auth",condition="Ready",status="False"}'
+        values: "0x30"
+      - series: 'externalsecret_status_condition{exported_namespace="ai",namespace="external-secrets",name="litellm-chatgpt-auth",condition="Ready",status="True"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: LiteLLMChatGPTAuthNotReady
+        exp_alerts: []

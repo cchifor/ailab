@@ -169,6 +169,37 @@ spec:
               it (talosctl's 5-min drain timeout, then a hard stop). Either the workload is degraded
               (heal it) or the PDB is mis-sized for its replica count — PDBs only belong on
               replicas>=2 workloads (ADR 0016). See docs/runbooks/node-maintenance.md.
+        # THE ESO HOP OF LITELLM'S CHATGPT-SUBSCRIPTION CREDENTIAL (ADR 0026). The reviewer host's
+        # publisher writes a fresh access token into af/litellm/chatgpt every few days; this
+        # ExternalSecret (ai/litellm-chatgpt-auth) renders it into the auth.json LiteLLM's chatgpt/
+        # provider reads. The publisher's own metrics (reviewbot-rules.yaml, CodexProjection*) describe
+        # the OpenBao copy only: a store whose k8s-auth role or CA broke keeps the pods on the LAST
+        # rendered token while both publisher rules read healthy. Same shape as
+        # ForgeConductSecretNotReady (agentforge-conductor-rules.yaml), verified against the live store:
+        # ESO exports BOTH status="True" and status="False" series as 1/0, so NotReady is the False
+        # series EQUAL TO 1, and the ES's own namespace lives in `exported_namespace` (plain
+        # `namespace` is ESO's). for: 15m = one refreshInterval (5m) plus slack; a NotReady that clears
+        # on the next refresh is not an operator's problem. What this cannot see -- kubelet's projection
+        # of the Secret into the volume -- is bounded by kubelet's sync period and recorded as the
+        # remaining blind spot in ADR 0026.
+        - alert: LiteLLMChatGPTAuthNotReady
+          expr: |-
+            externalsecret_status_condition{
+              exported_namespace="ai", name="litellm-chatgpt-auth",
+              condition="Ready", status="False"
+            } == 1
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "LiteLLM's ChatGPT-subscription auth Secret is NotReady (ai/litellm-chatgpt-auth)"
+            description: >-
+              ExternalSecret litellm-chatgpt-auth has reported Ready=False for 15m, so LiteLLM's
+              gpt-6-astra-realjaynesage route runs on the LAST rendered token and will start
+              answering 401 once that expires (the publisher on reviewer-2 cannot see this hop).
+              `kubectl -n ai describe externalsecret litellm-chatgpt-auth`: the usual causes are the
+              af-app-litellm k8s-auth role or policy missing (the openbao-chatgpt-provision Job owns
+              both), the af/litellm/chatgpt document deleted (the template errors on a missing key),
+              or the openbao-tls CA Secret in ns ai not yet issued.
     - name: application-ha-inventory
       rules:
         # Inventory of single-replica workloads NOT on the ADR 0016 Tier-B accepted list. The two

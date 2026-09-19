@@ -6,11 +6,18 @@ on:
     paths:
       - kubernetes/apps/apps/ai/litellm.yaml
       - scripts/tests/integration/test_litellm_platform_route_contract.py
+      # The chatgpt/ route (gpt-6-astra-realjaynesage, ADR 0026) and the ESO template
+      # that renders its auth.json: a template-only or test-only change must still
+      # run the device-flow regression (the test asserts the rendered file's shape).
+      - scripts/tests/integration/test_litellm_chatgpt_route_contract.py
+      - kubernetes/apps/apps/ai/litellm-chatgpt-eso.yaml
       - .gitea/workflows/litellm-route-contract.yaml
   pull_request:
     paths:
       - kubernetes/apps/apps/ai/litellm.yaml
       - scripts/tests/integration/test_litellm_platform_route_contract.py
+      - scripts/tests/integration/test_litellm_chatgpt_route_contract.py
+      - kubernetes/apps/apps/ai/litellm-chatgpt-eso.yaml
       - .gitea/workflows/litellm-route-contract.yaml
 
 permissions:
@@ -53,3 +60,12 @@ jobs:
             -e LITELLM_LOCAL_MODEL_COST_MAP=True -e DO_NOT_TRACK=1 \
             -v "$PWD:/work:ro" -w /work "$litellm_image" \
             scripts/tests/integration/test_litellm_platform_route_contract.py
+          # The chatgpt/ subscription route (ADR 0026): same image, same flags,
+          # sockets denied at the Python level. No -e CHATGPT_TOKEN_DIR here on
+          # purpose -- the test sets it to a fresh temp dir per case BEFORE
+          # importing litellm (the provider reads it when it builds its
+          # authenticator), and the workspace mount is read-only anyway.
+          docker run --rm --network none --entrypoint python \
+            -e LITELLM_LOCAL_MODEL_COST_MAP=True -e DO_NOT_TRACK=1 \
+            -v "$PWD:/work:ro" -w /work "$litellm_image" \
+            scripts/tests/integration/test_litellm_chatgpt_route_contract.py

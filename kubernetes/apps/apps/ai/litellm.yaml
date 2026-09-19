@@ -542,6 +542,44 @@ data:
           model: openai/responses/gpt-6-astra
           api_key: os.environ/OPENAI_API_KEY
         model_info: { supports_vision: true, dsh_only: false }
+      # ---- GPT-6 Astra from the realjaynesage ChatGPT SUBSCRIPTION, added 2026-09-19 (ADR 0026) ----
+      # Served through LiteLLM's OWN `chatgpt/` provider (litellm/llms/chatgpt, present in the pinned
+      # 1.101.0 image): Responses-native against chatgpt.com/backend-api/codex, auth read from
+      # /chatgpt-auth/auth.json -- the file litellm-chatgpt-eso.yaml renders from af/litellm/chatgpt,
+      # i.e. reviewer-2 seat d's ACCESS token as dsh-codex-publisher projects it (the refresh token
+      # never leaves the reviewer host). The provider re-reads that file on EVERY request, so a
+      # rotation needs no restart; the env and the Secret volume that wire it are on the Deployment
+      # below, and the env comment there says why CHATGPT_DEFAULT_INSTRUCTIONS is load-bearing.
+      #
+      # A NEW model_name, NOT a second deployment of `gpt-6-astra`: two deployments under one name
+      # would hand least-busy the choice between the paid API key and a subscription on every
+      # request, which is not a policy anyone chose. The DSH provider `openai-codex-realjaynesage`
+      # (dsh/settings.seed.yaml) needs a name that maps to the subscription ONLY, and this is that name.
+      #
+      # `mode: responses` is what keeps it OUT of the generated consumers: scripts/gen-litellm-consumers.py
+      # treats a non-chat mode as "not a picker entry" (its `_select`), so it is absent from Open
+      # WebUI's Local group and from the generated dsh-litellm models list -- dsh reaches it through
+      # its own named provider, not through that list. Like every other route on this proxy it STAYS
+      # discoverable through Open WebUI's master-key connection "1" under External (/v1/models
+      # advertises every name); that is the exposure class the `hidden` note at the top of this list
+      # already records as accepted, not a new one. Only the Responses API path has a consumer
+      # (dsh); chat-completions through this provider is UNVERIFIED for this model, and a user who
+      # picks it under External gets a working model or an honest 4xx (checked once after the seat
+      # logs in, plan § Verification).
+      #
+      # ACCEPTED PARAMETER LOSS, measured 2026-09-19 in the pinned image: the provider's Responses
+      # transform forwards only model, input, instructions, stream, store, include, tools,
+      # tool_choice, reasoning, previous_response_id and truncation. max_output_tokens,
+      # prompt_cache_key, text and parallel_tool_calls are DROPPED, silently. ADR 0026 records why
+      # none of those changes an answer's correctness for dsh.
+      # `chatgpt/gpt-6-astra` is ABSENT from LiteLLM's price map: cost logging WARNS on this route
+      # (no price to apply); routing is unaffected.
+      # ONE ACCOUNT PER PROCESS (upstream issue #23777): the provider holds a single process-global
+      # auth file, so a third subscription cannot be added to THIS proxy as another chatgpt/ route.
+      - model_name: gpt-6-astra-realjaynesage
+        litellm_params:
+          model: chatgpt/gpt-6-astra
+        model_info: { mode: responses, supports_vision: true }
       # ------------------------------------------------- the ON-PREM Qwen3.8-27B (ailab, always on)
       # Added 2026-09-12. Every other qwen3.8 route above lives on a cloudlab host (.26 / .28) and
       # those POWER OFF NIGHTLY: measured `avg_over_time(up[7d])` = 0.34-0.38 per host, and all three
@@ -795,7 +833,19 @@ spec:
         # Value is the documented yq recipe above applied to the current config.yaml, reproduced on
         # yq v4.44.5 (the recipe also reproduces the outgoing 369ac5bdabbc on that version, so this
         # is the same extraction as the previous value, not a new one).
-        checksum/config: "3837cf82beda"
+        #
+        # BUMPED 2026-09-19, 3837cf82beda -> d98f1b92fcb9, for the gpt-6-astra-realjaynesage route
+        # (ADR 0026): a NEW model_list entry, chatgpt/gpt-6-astra with mode: responses, served from
+        # the realjaynesage ChatGPT subscription through LiteLLM's own chatgpt/ provider. Unlike the
+        # 2026-09-11 bump this one changes what LiteLLM parses -- a route is added. The same change
+        # adds CHATGPT_TOKEN_DIR / CHATGPT_DEFAULT_INSTRUCTIONS to the container env and the
+        # chatgpt-auth Secret volume + mount, so the pod template moves for those on its own; the
+        # annotation still records the ConfigMap's change on its own terms, per the rule above.
+        # The cost is one rolling restart of the 2-replica maxUnavailable:0 Deployment (in-flight
+        # streams on the replaced replica are terminated). Value stamped by
+        # `scripts/gen-litellm-consumers.py --write` -- the documented recipe via check-inline-hashes,
+        # the same derivation as the 2026-09-11 value.
+        checksum/config: "d98f1b92fcb9"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
@@ -831,8 +881,27 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: { name: litellm-cloud-keys, key: ANTHROPIC_API_KEY }
+            # ---- the realjaynesage ChatGPT subscription route (gpt-6-astra-realjaynesage, ADR 0026) ----
+            # Where LiteLLM's chatgpt/ provider finds its auth file: it reads $CHATGPT_TOKEN_DIR/auth.json
+            # on EVERY request (measured 2026-09-19 in the pinned 1.101.0 image), so when the publisher
+            # rotates the token and ESO re-renders the Secret, the mounted file changes under the running
+            # process and the next request carries the new token -- no restart, no reload. ONE directory,
+            # ONE account per process (upstream issue #23777); the volume is `chatgpt-auth` below.
+            - { name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth }
+            # Replaces the Codex-CLI persona prompt the provider would otherwise PREPEND to every
+            # request's `instructions` (verified 2026-09-19: the override is sent verbatim). dsh's own
+            # system prompt arrives as a developer message and must not be preceded by that text.
+            # NON-EMPTY on purpose: an empty env var is read as unset and falls back to the persona
+            # prompt, so "" would silently re-enable exactly what this line removes.
+            - { name: CHATGPT_DEFAULT_INSTRUCTIONS, value: "You are a helpful assistant." }
           volumeMounts:
             - { name: config, mountPath: /etc/litellm, readOnly: true }
+            # The ChatGPT-subscription auth file for gpt-6-astra-realjaynesage (ADR 0026). The WHOLE
+            # Secret volume, NO subPath: kubelet does not propagate Secret updates into a subPath bind
+            # mount, so a rotated token would never arrive -- the same reason dsh's /dsh-credentials
+            # mount avoids it (dsh/deployment.yaml). Mounting the directory keeps kubelet's atomic
+            # symlink swap visible to the provider's per-request re-read.
+            - { name: chatgpt-auth, mountPath: /chatgpt-auth, readOnly: true }
           readinessProbe:
             httpGet: { path: /health/liveliness, port: http }
             initialDelaySeconds: 15
@@ -856,6 +925,24 @@ spec:
       volumes:
         - name: config
           configMap: { name: litellm-config }
+        # litellm-chatgpt-auth is rendered by the ExternalSecret in litellm-chatgpt-eso.yaml: ONE key,
+        # auth.json, always valid JSON with a NON-EMPTY token and a far-future expires_at (the header
+        # there explains why that exact shape is load-bearing).
+        # `optional: false` IS THE GUARD, not a default left alone. A pod WITHOUT this file is LiteLLM's
+        # device-flow path: Router construction calls the chatgpt/ authenticator, finds no token, and
+        # reaches for auth.openai.com in a synchronous poll of up to 15 minutes (measured 2026-09-19 in
+        # this image with sockets denied: a missing file made Router(...) attempt auth.openai.com
+        # immediately). With `optional: true` kubelet would start the container over an EMPTY
+        # directory and the process would hang in that flow behind a readiness probe that never
+        # passes; with `optional: false` the pod stays ContainerCreating on a visible MountVolume
+        # "secret not found" event and, under maxUnavailable: 0, the old replicas keep serving. A pod
+        # must not start without the file. The Secret exists BEFORE this Deployment change lands:
+        # the ESO chain (SA -> SecretStore -> ExternalSecret) is applied by hand from the branch and
+        # verified Ready first (plan § Verification), so the merge that rolls this Deployment finds
+        # it already present. Both replicas mount the same Secret, so a rotation reaches both within
+        # one kubelet sync.
+        - name: chatgpt-auth
+          secret: { secretName: litellm-chatgpt-auth, optional: false }
 ---
 apiVersion: v1
 kind: Service

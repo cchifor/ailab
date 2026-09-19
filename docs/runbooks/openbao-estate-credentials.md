@@ -82,7 +82,10 @@ split-brain this page exists to prevent:
 (`dsh-provision-job.yaml`, where that grant is pinned into the BASELINE/DESIRED strings so a
 policy rewrite cannot silently drop it). Everything else here is root-tokens-only: no dev-worker
 AppRole and no ESO SecretStore has a grant, and the `cred` helper is denied by design. Widening
-further is a deliberate decision, not a default.
+further is a deliberate decision, not a default. Since 2026-09-19 a second ESO SecretStore exists
+(`litellm-store` in ns `ai`, policy `af-app-litellm`, `chatgpt-provision-job.yaml`, ADR 0026), and
+it reads exactly one NON-estate path, `af/litellm/chatgpt` — `estate/*` itself still has the
+single reader this paragraph names.
 
 > *Corrected 2026-09-12 — this paragraph previously read "no policy grants `estate/*` to
 > anything", which had been false since before `dsh-provision-job.yaml` landed. It was quoted

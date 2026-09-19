@@ -994,3 +994,201 @@ tests:
       - eval_time: 100m
         alertname: ReviewbotUsageProbeFailing
         exp_alerts: []
+
+  # ------------------------------------------- Codex token projections (ADR 0026)
+  # Both projections live on ONE host (reviewer-2, .25) and are told apart by `document`, so
+  # every fixture carries both documents: a regression that fires or silences by instance alone
+  # cannot hide behind a single-series input. Series shapes follow publish.py's textfile: ok and
+  # optional are written for every projection on every run; expires_at only once a token has
+  # been published (a staged seat that never logged in has no expires_at series at all).
+  - interval: 1m
+    name: a required projection the publisher cannot publish pages, a staged one does not
+    input_series:
+      # seat b -> dsh/credentials, REQUIRED, failing every run: the login gone, the vault
+      # unreachable, or the secret-id revoked. dsh keeps serving on its last token meanwhile,
+      # which is exactly why nothing else can see this.
+      - series: 'dsh_codex_projection_ok{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials",email="realjaysage@gmail.com"}'
+        values: "0x60"
+      - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "0x60"
+      # seat d -> litellm/chatgpt, STAGED (optional): ok=0 is the designed pre-login state and
+      # must never page — the gate is what this pair of series proves.
+      - series: 'dsh_codex_projection_ok{job="reviewer-node",instance="192.168.0.25:9100",document="litellm/chatgpt",email="realjaynesage@gmail.com"}'
+        values: "0x60"
+      - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="litellm/chatgpt"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: CodexProjectionFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.25:9100
+              document: dsh/credentials
+              email: realjaysage@gmail.com
+            exp_annotations:
+              summary: "Codex token projection dsh/credentials on 192.168.0.25:9100 is failing"
+              description: >-
+                dsh-codex-publisher on 192.168.0.25:9100 (runs every minute;
+                ansible/roles/dsh_codex_publisher) has not published or confirmed the REQUIRED
+                projection af/dsh/credentials (realjaysage@gmail.com) for 30 minutes — the
+                seat's login may be gone, the vault unreachable, or the AppRole secret-id revoked.
+                The consumer keeps its LAST projected token and fails only when that token
+                expires, days later, so this fires while the fix is still cheap.
+                `journalctl -u dsh-codex-publisher.service` on 192.168.0.25 names the reason
+                without the secret. A projection marked optional (a staged seat awaiting its
+                login) never fires this.
+      # Inside the 30m hold: one vault timeout or a reboot must not page.
+      - eval_time: 20m
+        alertname: CodexProjectionFailing
+        exp_alerts: []
+
+  - interval: 1m
+    name: two healthy required projections do not page (the post-activation shape)
+    input_series:
+      # After PR 3 both projections are required and both publish or confirm every minute.
+      - series: 'dsh_codex_projection_ok{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials",email="realjaysage@gmail.com"}'
+        values: "1x60"
+      - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "0x60"
+      - series: 'dsh_codex_projection_ok{job="reviewer-node",instance="192.168.0.25:9100",document="litellm/chatgpt",email="realjaynesage@gmail.com"}'
+        values: "1x60"
+      - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="litellm/chatgpt"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CodexProjectionFailing
+        exp_alerts: []
+
+  - interval: 1m
+    name: a projected token inside its last day pages, a staged seat's does not
+    input_series:
+      # The JWT exp is a CONSTANT between publishes (it steps only when a newer token lands), so
+      # the fixture holds it flat and lets time() close the gap: 44400 is 12h past the 20m
+      # evaluation, and inside the 24h threshold from the very first sample, so the 15m hold is
+      # the only thing the 10m assertion exercises.
+      - series: 'dsh_codex_projection_token_expires_at_seconds{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "44400x60"
+      - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "0x60"
+      # seat d, logged in but still STAGED: the same 12h-left token, silent by the gate (the
+      # documented seam in the rule's comment).
+      - series: 'dsh_codex_projection_token_expires_at_seconds{job="reviewer-node",instance="192.168.0.25:9100",document="litellm/chatgpt"}'
+        values: "44400x60"
+      - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="litellm/chatgpt"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CodexProjectionStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.25:9100
+              document: dsh/credentials
+            exp_annotations:
+              summary: "Codex token projected for dsh/credentials expires in under 24h"
+              description: >-
+                The access token the publisher last projected into af/dsh/credentials has
+                under a day left and no newer one has been published. The reviewer's own login
+                renews a seat's token only when the CLI runs as that seat (a review, or the
+                hourly usage probe), so a seat that is never chosen and not in the hourly poll
+                ages out. The consumers (dsh's openai-codex provider, LiteLLM's chatgpt/ route)
+                fail fast upstream once it expires (401). Check the seat with codex-usage.py as
+                its user (`sudo -n -u <seat user> HOME=/home/<seat user>
+                /usr/local/lib/reviewbot/codex-usage.py` on 192.168.0.25) and the publisher
+                journal, `journalctl -u dsh-codex-publisher.service`.
+      # Inside the 15m hold.
+      - eval_time: 10m
+        alertname: CodexProjectionStale
+        exp_alerts: []
+
+  - interval: 1m
+    name: a freshly renewed token does not page
+    input_series:
+      # 604800 = the ~7-day life a Codex access token has at renewal (seat b read 163 h left on
+      # 2026-09-19); still more than six days ahead at the end of this hour. Required, so the
+      # gate is open and the threshold alone keeps this silent.
+      - series: 'dsh_codex_projection_token_expires_at_seconds{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "604800x60"
+      - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CodexProjectionStale
+        exp_alerts: []
+
+  # ------------------------------------------------- the publisher's own liveness
+  - interval: 1m
+    name: a frozen publisher heartbeat pages, a ticking one does not
+    input_series:
+      # Value tracks wall clock => time() - value stays ~0: the timer is firing every minute.
+      - series: 'dsh_codex_publisher_last_run_timestamp_seconds{job="reviewer-node",instance="192.168.0.25:9100"}'
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CodexPublisherDown
+        exp_alerts: []
+  - interval: 1m
+    name: a stopped publisher pages once its heartbeat is 15 minutes old
+    input_series:
+      # Frozen at 0 => staleness grows with time(): the timer stopped or the unit died before its write.
+      - series: 'dsh_codex_publisher_last_run_timestamp_seconds{job="reviewer-node",instance="192.168.0.25:9100"}'
+        values: "0+0x60"
+    alert_rule_test:
+      # >900 s from 15m, plus the 10m hold => fires from 25m.
+      - eval_time: 30m
+        alertname: CodexPublisherDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.25:9100
+            exp_annotations:
+              summary: "dsh-codex-publisher on 192.168.0.25:9100 has not run for 15 minutes"
+              description: >-
+                The publisher's textfile heartbeat on 192.168.0.25:9100 last moved over 15
+                minutes ago, so the projection metrics beside it are STALE, not current: ok=1 there
+                describes the last run that completed, not now. Every consumer keeps its last
+                projected token and fails only when it expires. `systemctl status
+                dsh-codex-publisher.timer` and `journalctl -u dsh-codex-publisher.service` on
+                192.168.0.25.
+      # Inside the hold.
+      - eval_time: 20m
+        alertname: CodexPublisherDown
+        exp_alerts: []
+  - interval: 1m
+    name: no publisher series at all pages after 30 minutes, a present one does not
+    input_series:
+      # The only series is a ticking heartbeat on ANOTHER instance shape is not this test: here the
+      # textfile has never been written, so the series does not exist at all.
+      - series: 'up{job="reviewer-node",instance="192.168.0.25:9100"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: CodexPublisherMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+            exp_annotations:
+              summary: "dsh-codex-publisher exports no metrics (its textfile is absent on reviewer-2)"
+              description: >-
+                No dsh_codex_publisher_last_run_timestamp_seconds series has reached Prometheus from
+                job=reviewer-node for 30 minutes: the publisher has never written its textfile, the
+                file was removed, or the unit cannot write /var/lib/prometheus/node-exporter. If
+                ReviewerNodeDown is firing too, that is the cause; otherwise on 192.168.0.25 check
+                `ls -l /var/lib/prometheus/node-exporter/dsh-codex-publisher.prom` and the journal.
+      - eval_time: 20m
+        alertname: CodexPublisherMetricsMissing
+        exp_alerts: []
+  - interval: 1m
+    name: a present publisher heartbeat keeps the absence alert silent
+    input_series:
+      - series: 'dsh_codex_publisher_last_run_timestamp_seconds{job="reviewer-node",instance="192.168.0.25:9100"}'
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CodexPublisherMetricsMissing
+        exp_alerts: []

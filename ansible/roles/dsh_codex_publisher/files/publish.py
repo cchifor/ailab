@@ -1,5 +1,30 @@
 #!/usr/bin/env python3
-"""Project one reviewer's access token into DSH's existing KV document. Never refresh OAuth."""
+"""Project reviewer Codex access tokens into their consumers' KV documents. Never refresh OAuth.
+
+One PROJECTION per reviewer seat: the seat's `~/.codex/auth.json` (the OAuth owner -- the Codex CLI
+running as that seat is the only thing that ever refreshes it) is read, its access token and the
+identity claims in that token are PATCHed into one KV-v2 document under a field prefix, and the
+refresh token, the id token and the auth document itself never leave the host. Two projections
+exist today (host_vars/reviewer-2.yml): seat b -> af/dsh/credentials as DSH_CODEX_*, read by dsh's
+native openai-codex provider; seat d -> af/litellm/chatgpt as CHATGPT_*, rendered by ESO into the
+auth file LiteLLM's `chatgpt/` provider reads (ADR 0026).
+
+Projections are independent, and each one logs in on its own: the AppRole token lives 60 s, so a
+token is never carried from one projection into the next. A seat whose auth file does not exist yet
+is a logged skip ONLY when the projection is `optional` (a staged seat, not logged in); for a required
+projection absence is a failure like any other, because "the service ran green while the token aged"
+is the silent failure this file exists to prevent. Any other failure -- unreadable or malformed file,
+wrong account, expiring token, vault error -- is logged without the secret, and the run exits 1 once
+every projection has had its turn.
+
+Per-projection freshness is exported through the node_exporter textfile collector (config `textfile`),
+beside reviewbot's own metrics, so a reviewer login that refreshes fine while the publisher, ESO or
+kubelet fails downstream is a distinct, alertable signal (CodexProjectionStale):
+    dsh_codex_projection_ok{document,email}                        1 published/unchanged, 0 otherwise
+    dsh_codex_projection_optional{document}                        1 when absence is tolerated
+    dsh_codex_projection_token_expires_at_seconds{document}        exp of the last token published
+    dsh_codex_projection_last_success_timestamp_seconds{document}  last run that published or confirmed
+"""
 import base64
 import hashlib
 import json
@@ -12,73 +37,189 @@ import urllib.request
 
 CONFIG_DIR = Path('/etc/dsh-codex-publisher')
 STATE = Path('/var/lib/dsh-codex-publisher/state.json')
+PROFILE_CLAIM = 'https://api.openai.com/profile'
+AUTH_CLAIM = 'https://api.openai.com/auth'
+HTTP_TIMEOUT_S = 20   # x3 operations x N projections must fit the unit's TimeoutStartSec
 
 
-def project(auth, email, now):
+class SeatAbsent(Exception):
+    """The seat's auth file is not there: provisioned but not logged in yet."""
+
+
+def project(auth, email, now, prefix='DSH_CODEX'):
+    """The four fields one projection publishes, or a ValueError naming why it must not."""
     token = auth['tokens']['access_token']
     claims = json.loads(base64.urlsafe_b64decode(token.split('.')[1] + '==='))
-    if claims.get('https://api.openai.com/profile', {}).get('email') != email:
+    if claims.get(PROFILE_CLAIM, {}).get('email') != email:
         raise ValueError('reviewer account does not match configured identity')
     expires = int(claims['exp'])
     if expires <= now + 300:
         raise ValueError('reviewer access token is expired or expires within five minutes')
-    # An explicit allowlist: neither refresh_token nor the auth.json document is published.
-    return {'DSH_CODEX_ACCESS_TOKEN': token, 'DSH_CODEX_ACCOUNT_EMAIL': email,
-            'DSH_CODEX_EXPIRES_AT': str(expires)}
+    # The ChatGPT account id is a JWT claim, not a secret: LiteLLM's auth file wants it beside the
+    # token (it derives it from the token otherwise, then tries to WRITE the file to cache it --
+    # which a read-only Secret mount refuses on every request).
+    account_id = claims.get(AUTH_CLAIM, {}).get('chatgpt_account_id') or auth['tokens'].get('account_id')
+    if not account_id:
+        raise ValueError('reviewer access token carries no ChatGPT account id')
+    # An explicit allowlist: neither refresh_token nor id_token nor the auth document is published.
+    return {prefix + '_ACCESS_TOKEN': token, prefix + '_ACCOUNT_ID': str(account_id),
+            prefix + '_ACCOUNT_EMAIL': email, prefix + '_EXPIRES_AT': str(expires)}
 
 
-def publish(config, approle, fields, state_path=STATE):
+def _request(config, tls, path, method='GET', data=None, token=None):
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['X-Vault-Token'] = token
+    if method == 'PATCH':
+        headers['Content-Type'] = 'application/merge-patch+json'
+    req = urllib.request.Request(config['address'] + '/v1/' + path,
+                                 data=None if data is None else json.dumps(data).encode(),
+                                 headers=headers, method=method)
+    with urllib.request.urlopen(req, context=tls, timeout=HTTP_TIMEOUT_S) as response:
+        return json.load(response)
+
+
+def login(config, approle):
+    """A short-lived AppRole token (ttl 60s); the persistent secret-id is root-readable only."""
     tls = ssl.create_default_context(cafile=str(CONFIG_DIR / 'ca.crt'))
+    return tls, _request(config, tls, 'auth/approle/login', 'POST', approle)['auth']['client_token']
 
-    def request(path, method='GET', data=None, token=None):
-        headers = {'Content-Type': 'application/json'}
-        if token:
-            headers['X-Vault-Token'] = token
-        if method == 'PATCH':
-            headers['Content-Type'] = 'application/merge-patch+json'
-        req = urllib.request.Request(config['address'] + '/v1/' + path,
-                                     data=None if data is None else json.dumps(data).encode(),
-                                     headers=headers, method=method)
-        with urllib.request.urlopen(req, context=tls, timeout=20) as response:
-            return json.load(response)
 
-    # Short-lived AppRole token; the persistent secret-id is root-readable only.
-    login = request('auth/approle/login', 'POST', approle)
-    token = login['auth']['client_token']
-    metadata = request('af/metadata/dsh/credentials', token=token)['data']
+def _read_state(state_path):
+    if not state_path.exists():
+        return {}
+    state = json.loads(state_path.read_text())
+    # The single-projection state was a bare {digest, version}; it belonged to af/dsh/credentials
+    # and costs at most one redundant PATCH to forget.
+    return state if all(isinstance(value, dict) for value in state.values()) else {}
+
+
+def _write_atomic(path, text, mode=0o600):
+    temp = path.with_suffix(path.suffix + '.tmp')
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, 'w') as file:
+        file.write(text)
+    # The unit runs with UMask=0077, which os.open applies to `mode`; the textfile must stay
+    # world-readable for node_exporter, so the mode is set explicitly (chmod ignores the umask).
+    os.chmod(temp, mode)
+    os.replace(temp, path)
+
+
+def publish(config, session, fields, kv_path='dsh/credentials', state_path=STATE):
+    """CAS-PATCH `fields` into af/<kv_path>; a no-op when neither the fields nor the version moved."""
+    tls, token = session
+    metadata = _request(config, tls, 'af/metadata/' + kv_path, token=token)['data']
     version = metadata['current_version']
     current = metadata['versions'][str(version)]
     if current['destroyed'] or current['deletion_time']:
-        raise ValueError('DSH credential document is deleted; operator recovery required')
+        raise ValueError('credential document af/' + kv_path + ' is deleted; operator recovery required')
     digest = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
-    state = json.loads(state_path.read_text()) if state_path.exists() else {}
-    if state == {'digest': digest, 'version': version}:
-        print('DSH Codex projection unchanged')
+    state = _read_state(state_path)
+    if state.get(kv_path) == {'digest': digest, 'version': version}:
+        print('projection af/' + kv_path + ' unchanged')
         return
-    result = request('af/data/dsh/credentials', 'PATCH',
-                     {'options': {'cas': version}, 'data': fields}, token)
-    state = {'digest': digest, 'version': result['data']['version']}
-    temp = state_path.with_suffix('.tmp')
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as file:
-        json.dump(state, file)
-    os.replace(temp, state_path)
-    print('DSH Codex projection updated; unrelated fields preserved')
+    result = _request(config, tls, 'af/data/' + kv_path, 'PATCH',
+                      {'options': {'cas': version}, 'data': fields}, token)
+    state[kv_path] = {'digest': digest, 'version': result['data']['version']}
+    _write_atomic(state_path, json.dumps(state))
+    print('projection af/' + kv_path + ' updated; unrelated fields preserved')
+
+
+def _label(text):
+    return str(text).replace('\\', '\\\\').replace('"', '\\"')
+
+
+def render_metrics(results, now):
+    """The textfile body for one run; `results` is a list of dicts from run()."""
+    lines = ['# HELP dsh_codex_projection_ok 1 when the projection was published or confirmed unchanged this run.',
+             '# TYPE dsh_codex_projection_ok gauge']
+    for r in results:
+        lines.append('dsh_codex_projection_ok{document="%s",email="%s"} %d'
+                     % (_label(r['document']), _label(r['email']), 1 if r['ok'] else 0))
+    lines += ['# HELP dsh_codex_projection_optional 1 when an absent auth file is tolerated (a staged seat).',
+              '# TYPE dsh_codex_projection_optional gauge']
+    for r in results:
+        lines.append('dsh_codex_projection_optional{document="%s"} %d' % (_label(r['document']), 1 if r['optional'] else 0))
+    lines += ['# HELP dsh_codex_projection_token_expires_at_seconds exp claim of the last token this projection published.',
+              '# TYPE dsh_codex_projection_token_expires_at_seconds gauge']
+    for r in results:
+        if r.get('expires_at') is not None:
+            lines.append('dsh_codex_projection_token_expires_at_seconds{document="%s"} %d' % (_label(r['document']), r['expires_at']))
+    lines += ['# HELP dsh_codex_projection_last_success_timestamp_seconds last run that published or confirmed this projection.',
+              '# TYPE dsh_codex_projection_last_success_timestamp_seconds gauge']
+    for r in results:
+        if r.get('last_success') is not None:
+            lines.append('dsh_codex_projection_last_success_timestamp_seconds{document="%s"} %d' % (_label(r['document']), r['last_success']))
+    lines.append('dsh_codex_publisher_last_run_timestamp_seconds %d' % now)
+    return '\n'.join(lines) + '\n'
+
+
+def run(config, approle, now, state_path=STATE, read_auth=None, textfile=None):
+    """Every projection in turn; 0 when all published or (optionally) skipped, 1 when any failed."""
+    read_auth = read_auth or (lambda path: json.loads(Path(path).read_text()))
+    failures = 0
+    results = []
+    for projection in config['projections']:
+        document, email = projection['kv_path'], projection['email']
+        optional = bool(projection.get('optional', False))
+        label = email + ' -> af/' + document
+        result = {'document': document, 'email': email, 'optional': optional, 'ok': False,
+                  'expires_at': None, 'last_success': None}
+        try:
+            try:
+                auth = read_auth(projection['auth_path'])
+            except FileNotFoundError:
+                raise SeatAbsent()
+            fields = project(auth, email, now, projection.get('prefix', 'DSH_CODEX'))
+            result['expires_at'] = int(fields[projection.get('prefix', 'DSH_CODEX') + '_EXPIRES_AT'])
+            publish(config, login(config, approle), fields, document, state_path)
+            result['ok'] = True
+            result['last_success'] = int(now)
+        except SeatAbsent:
+            if optional:
+                print('projection ' + label + ' skipped: auth file absent (seat not logged in yet)')
+            else:
+                print('projection ' + label + ' failed: auth file absent and the projection is required', flush=True)
+                failures += 1
+        except Exception as error:
+            # Never include HTTP response bodies, auth documents or credential-bearing locals.
+            detail = (' HTTP ' + str(error.code)) if isinstance(error, urllib.error.HTTPError) else ''
+            print('projection ' + label + ' failed: ' + type(error).__name__ + detail, flush=True)
+            failures += 1
+        results.append(result)
+    _carry_last_success(results, state_path)
+    if textfile:
+        _write_atomic(Path(textfile), render_metrics(results, now), 0o644)
+    return 1 if failures else 0
+
+
+def _carry_last_success(results, state_path):
+    """Remember the last success per document in the state file, so a failing run still reports
+    WHEN the document was last good rather than dropping the series."""
+    try:
+        state = _read_state(state_path)
+    except (OSError, ValueError):
+        state = {}
+    for r in results:
+        entry = state.setdefault(r['document'], {})
+        if r['ok']:
+            entry['last_success'] = r['last_success']
+            entry['expires_at'] = r['expires_at']
+        else:
+            r['last_success'] = entry.get('last_success')
+            if r['expires_at'] is None:
+                r['expires_at'] = entry.get('expires_at')
+    try:
+        _write_atomic(state_path, json.dumps(state))
+    except OSError:
+        pass
 
 
 def main():
     config = json.loads((CONFIG_DIR / 'config.json').read_text())
-    auth = json.loads(Path(config['auth_path']).read_text())
-    fields = project(auth, config['email'], time.time())
     approle = json.loads((CONFIG_DIR / 'approle.json').read_text())
-    publish(config, approle, fields)
+    raise SystemExit(run(config, approle, time.time(), textfile=config.get('textfile')))
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except Exception as error:
-        # Never include HTTP response bodies, auth documents or credential-bearing locals.
-        detail = (' HTTP ' + str(error.code)) if isinstance(error, urllib.error.HTTPError) else ''
-        print('DSH Codex projection failed: ' + type(error).__name__ + detail, flush=True)
-        raise SystemExit(1)
+    main()

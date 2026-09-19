@@ -257,12 +257,16 @@ the session scratchpad clone — hand the tfstate to the main checkout and verif
 ### Seats: the codex persona holds several subscriptions
 
 reviewer-2 runs `pr_reviewer_llm_seats` — a list of `{name, sudo_user, home?}`, one ChatGPT
-subscription each, one OS user each. Live since 2026-09-16:
+subscription each, one OS user each — plus `pr_reviewer_llm_seats_staged`, the same shape for a
+seat that is provisioned but not yet served. Live since 2026-09-16 (a, b, c) and 2026-09-19 (d,
+staged); emails from `reviewbot_llm_seat_info` on 2026-09-19:
 
-| seat | user | account |
-|---|---|---|
-| `a` | `codexrun` | `cfdea639…` (shared with the AgentForge dev agents) |
-| `b` | `codexrun2` | `9c8a8cfb…` |
+| seat | user | account | email | feeds |
+|---|---|---|---|---|
+| `a` | `codexrun` | `cfdea639…` (shared with the AgentForge dev agents) | `chifor@gmail.com` | reviews only |
+| `b` | `codexrun2` | `9c8a8cfb…` | `realjaysage@gmail.com` | reviews + dsh's native `openai-codex` provider (`af/dsh/credentials`, `docs/runbooks/dsh.md` § Codex subscriptions) |
+| `c` | `codexrun3` | `11c52fea…` | `constantin.chifor@strive.us` | reviews only |
+| `d` | `codexrun4` | — (no login yet) | `realjaynesage@gmail.com` | **STAGED until its login** (`pr_reviewer_llm_seats_staged`); LiteLLM's `chatgpt/` route (`af/litellm/chatgpt`, ADR 0026) |
 
 **One user per seat is not tidiness.** `_run_llm` binds the isolated 0700 tmpdir, the answer
 read-back, the credential scan and the cleanup to a single sudo user for a whole invocation, so a
@@ -278,39 +282,53 @@ runs the identical code path.
 
 **Adding a seat. THE ORDER IS THE PROCEDURE** — get it wrong and reviewbot runs with a seat that
 has no credential, which fails as an ORDINARY error rather than a `RateLimited`, so it never parks
-and burns the PR's attempts toward quarantine. The `seats` tag exists to make the staging possible:
-it provisions the user WITHOUT touching reviewbot.py or restarting the service (none of those four
-tasks notify the restart handler).
+and burns the PR's attempts toward quarantine. Since 2026-09-19 the order is expressed in
+configuration rather than in the operator's memory: `pr_reviewer_llm_seats_staged` (ADR 0026)
+provisions a seat exactly like a served one — user, `0700 ~/.codex`, model pin, sudoers — but does
+NOT render it into reviewbot's `config.json`, so reviewbot never learns of it until it is moved.
+`pr_reviewer_seats_effective` (the list the provisioning tasks iterate) is the active list plus the
+staged ones. The `seats` tag provisions WITHOUT touching reviewbot.py or restarting the service
+(none of those tasks notify the restart handler).
 
-1. **Get the credential first**, into a scratch HOME so nothing in use is at risk:
+1. **Stage it in `ansible/host_vars/reviewer-2.yml`**: add `{name, sudo_user, home?}` to
+   `pr_reviewer_llm_seats_staged`. If the seat feeds a consumer, add its projection to
+   `dsh_codex_publisher.projections` with `optional: true` (`docs/runbooks/dsh.md` § Codex
+   subscriptions).
+2. **Provision the user only** — no config change, no restart, so the not-yet-credentialled seat is
+   never live:
+   ```
+   ansible-playbook reviewers.yml -l reviewer-2 -t seats          # add ,dsh-codex if a projection was added
+   ```
+   This creates the user, its `0700 ~/.codex`, the model pin, and rewrites
+   `/etc/sudoers.d/reviewbot-llm` with every seat user (active and staged) in one validated file.
+3. **Log in DIRECTLY as the seat user** — no scratch HOME, no copy, nothing to delete:
    ```
    ssh c4@192.168.0.25
-   rm -rf ~/.seatN && mkdir -p ~/.seatN
-   setsid env HOME=/home/c4/.seatN nohup /usr/bin/codex login --device-auth \
-       > ~/.seatN/login.log 2>&1 < /dev/null &
-   sleep 10 && cat ~/.seatN/login.log      # prints the URL and a one-time code, then polls
+   sudo -n -u codexrunN HOME=/home/codexrunN setsid nohup /usr/bin/codex login --device-auth \
+       > /tmp/seat-N-login.log 2>&1 < /dev/null &
+   sleep 10 && cat /tmp/seat-N-login.log    # prints the URL and a one-time code, then polls
+   tail -f /tmp/seat-N-login.log            # WAIT for the CLI to report success before anything else
    ```
    `--device-auth` is the headless flow and is **absent from `codex login --help`** at 0.153.4 —
    the CLI only names it after a browser login fails. Authenticate against the NEW licence.
-2. **Add the seat to `ansible/host_vars/reviewer-2.yml`** (`{name, sudo_user, home?}`).
-3. **Provision the user only** — no restart, so the not-yet-credentialled seat is never live:
+4. **Verify the credential as the seat**, reading JSON only:
    ```
-   ansible-playbook reviewers.yml -l reviewer-2 -t seats
+   sudo -n -u codexrunN HOME=/home/codexrunN /usr/local/lib/reviewbot/codex-usage.py
    ```
-   This creates the user, its `0700 ~/.codex`, the model pin, and rewrites
-   `/etc/sudoers.d/reviewbot-llm` with every seat user in one validated file.
-4. **Install the credential, then DELETE the scratch copy:**
-   ```
-   sudo install -o codexrunN -g codexrunN -m 0600 \
-       /home/c4/.seatN/.codex/auth.json /home/codexrunN/.codex/auth.json
-   rm -rf /home/c4/.seatN
-   ```
-   Deleting it is not tidiness. OpenAI refresh tokens are single-use, so two copies of one family
-   revoke each other on first refresh — that is the 2026-09-10 outage, which took BOTH personas
-   down and did not surface until the access token expired days later.
-5. **Activate**: a full converge (or `-t reviewbot`) re-renders the config and restarts the service.
-   Confirm with `journalctl -u reviewbot | grep "^.*seats:"` and the textfile's
-   `reviewbot_llm_seats_total` / `_distinct` / `_available`.
+   It exits 0 either way; `"ok": true` and the expected `"email"` are the check. A projection with
+   `optional: true` publishes on the publisher's next minute from here.
+5. **Activate**: move the entry from `pr_reviewer_llm_seats_staged` to `pr_reviewer_llm_seats`
+   (and drop `optional` from its projection), then `-t reviewbot` (`-t reviewbot,dsh-codex` with a
+   projection) or a full converge re-renders the config and restarts the service. Confirm with
+   `journalctl -u reviewbot | grep "^.*seats:"` and the textfile's `reviewbot_llm_seats_total` /
+   `_distinct` / `_available`.
+
+**Why the login is direct and there is no copy step (changed 2026-09-19).** OpenAI refresh tokens
+are single-use, so two copies of one family revoke each other on first refresh — that is the
+2026-09-10 outage, which took BOTH personas down and did not surface until the access token
+expired days later. The earlier procedure logged in under a scratch HOME and `install`ed the
+`auth.json` into the seat, one forgotten `rm -rf` away from that outage; logging in as the seat
+user means the family has exactly one home from its first second.
 
 **Never add a seat whose account already appears.** `resolve_seats()` reads `tokens.account_id`
 from each seat at startup and COLLAPSES duplicates, because rotating inside one account is the
@@ -320,10 +338,16 @@ September. A collapse is not silent: `reviewbot_llm_seats_distinct` drops below
 to is dropped the same way; if NO seat passes its probe, all of them are parked rather than one
 being handed work it cannot do.
 
-> **Only two of the three intended licences exist.** Verified across every host on 2026-09-16 by
-> `tokens.account_id`: `cfdea639…` and `9c8a8cfb…`, and nothing else anywhere. The third is one
-> `--device-auth` run away, then a one-line host_vars change. Until it lands, capacity is
-> ~340–400 codex calls/day against a demand of ~210 that grew from 86 in a week.
+> **All three licences exist, and a fourth is staged (2026-09-19).** `reviewbot_llm_seat_info`
+> reports three distinct codex accounts on reviewer-2 — `chifor@gmail.com` (a),
+> `realjaysage@gmail.com` (b), `constantin.chifor@strive.us` (c) — and the same day seat b read
+> 100 % of its weekly window (`reviewbot_llm_usage_percent{persona="codex",seat="b"}`), which is
+> what dsh's Astra route was living on. Seat d (`codexrun4`, `realjaynesage@gmail.com`) is in
+> `pr_reviewer_llm_seats_staged`: its user exists, reviewbot does not serve on it, and its
+> publisher projection is `optional` until the login ceremony in `docs/runbooks/dsh.md` § Codex
+> subscriptions; then it moves into `pr_reviewer_llm_seats` (sticky order a→b→c→d) and
+> `reviewbot_llm_seats_distinct{persona="codex"}` reads 4. This note replaced a 2026-09-16 one
+> that said only two of three licences existed.
 
 **Usage watchdog for codex** (2026-09-19, `pr_reviewer_usage_poll_s: 3600` on reviewer-2). The
 same hourly poll as on reviewer-1, with `codex-usage.py` as the probe: run AS each seat, it asks

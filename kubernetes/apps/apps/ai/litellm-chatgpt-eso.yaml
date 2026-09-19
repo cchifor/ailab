@@ -1,0 +1,109 @@
+# LiteLLM's ChatGPT-subscription credential, from OpenBao through External Secrets (ADR 0026).
+#
+# WHAT THIS IS. LiteLLM's `chatgpt/` provider (litellm/llms/chatgpt, present in the pinned 1.101.0
+# image) serves ChatGPT-subscription models from ONE process-global auth file,
+# `$CHATGPT_TOKEN_DIR/auth.json`, which it re-reads on every request. The file rendered here carries
+# the access token of reviewer-2 seat d (realjaynesage), published access-only into
+# `af/litellm/chatgpt` by the reviewer host's dsh-codex-publisher -- the same shape dsh's own Codex
+# credential has (kubernetes/apps/apps/dsh/openbao-eso.yaml). The refresh token never leaves the
+# reviewer host; when the seat's CLI renews the token the publisher PATCHes the document within a
+# minute, this ExternalSecret follows within its refresh interval, kubelet swaps the mounted file, and
+# LiteLLM picks it up on the next request. Nothing restarts.
+#
+# THE OWNERSHIP CHAIN, so nothing here is hand-made:
+#   af/litellm/chatgpt          created ONCE by security/openbao/chatgpt-provision-job.yaml with all
+#                               four CHATGPT_* keys EMPTY plus a canary; the publisher owns the values.
+#   policy af-app-litellm       read on that one path -- written by the same Job.
+#   auth/kubernetes/role/af-app-litellm  bound to THIS ServiceAccount in THIS namespace -- same Job.
+#
+# THE GUARD THAT MAKES THE FILE SAFE TO SERVE BEFORE THE SEAT IS LOGGED IN, AND AFTER A TOKEN AGES.
+# Measured in the pinned image with sockets denied (2026-09-19): LiteLLM's authenticator treats a
+# MISSING file, an EMPTY access_token, an UNPARSEABLE file, or a token expired by the file's
+# `expires_at` (else the JWT exp) with no refresh_token as "log in now" and starts the OAuth DEVICE
+# FLOW -- a synchronous poll of auth.openai.com for up to 15 minutes -- and get_llm_provider() runs
+# that at Router construction, so it would freeze a request AND a pod start. Router(...) over a
+# missing file or a real past expiry reached for auth.openai.com immediately. The same file with a
+# NON-EMPTY placeholder token and a FAR-FUTURE `expires_at` built the Router in 0.07 s with no
+# network and sent the request upstream, where a bad token fails FAST (401). So:
+#   * `default "unconfigured"`: the token field is never empty. Before the login, and if the
+#     publisher ever stops, LiteLLM sends a placeholder and gets an honest upstream refusal.
+#   * `expires_at: 4102444800` (2100-01-01): LiteLLM never judges the token expired from this file.
+#     A genuinely expired JWT is refused UPSTREAM in seconds instead of parking the worker in a
+#     device flow. The REAL expiry is what the publisher exports
+#     (dsh_codex_projection_token_expires_at_seconds; CodexProjectionStale fires at <24 h left).
+#   * `toJson`: whatever the vault holds, the string fields are JSON-encoded, so the file LiteLLM
+#     parses is valid JSON by construction (an unparseable file is the device-flow path too).
+#   * `account_id` is published beside the token; without it LiteLLM derives it from the JWT and
+#     then tries to WRITE the file to cache it, which a read-only Secret mount refuses every request.
+# The ExternalSecret template errors on a key the document does not carry (ESO v2 engine), which is
+# why the provisioning Job seeds every key it references, empty, at creation.
+#
+# WHY NOT AN OPENBAO AGENT. Same answer as openbao-eso.yaml in dsh: ESO authenticates in its own
+# namespace, mints its own token and writes only the resolved value; the litellm pod gets no OpenBao
+# identity, no token and no egress exception.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litellm-eso
+  namespace: ai
+automountServiceAccountToken: false   # ESO mints its own token; nothing else may use this SA
+---
+# The CA that signed OpenBao's server cert, materialised locally so the SecretStore can verify TLS
+# -- the same throwaway-leaf trick every other namespace uses; only the chain is read.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-ca
+  namespace: ai
+spec:
+  secretName: openbao-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: openbao-ca-ref
+  dnsNames: ["openbao-ca-ref.ai.svc"]
+  privateKey: { algorithm: ECDSA, size: 256 }
+  issuerRef: { name: ailab-ca, kind: ClusterIssuer, group: cert-manager.io }
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: litellm-store
+  namespace: ai
+spec:
+  provider:
+    vault:
+      server: https://openbao.openbao.svc:8200
+      path: af
+      version: v2
+      auth:
+        kubernetes:
+          mountPath: kubernetes
+          role: af-app-litellm
+          serviceAccountRef: { name: litellm-eso }
+      caProvider: { type: Secret, name: openbao-tls, key: ca.crt }
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: litellm-chatgpt-auth
+  namespace: ai
+spec:
+  # The path a rotation travels: the reviewer's CLI renews a token, the publisher patches within a
+  # minute, this interval, then kubelet's own sync. Same value as dsh-credentials, for the same
+  # reason -- an hour here is a cache, not a credential store.
+  refreshInterval: 5m
+  secretStoreRef: { name: litellm-store, kind: SecretStore }
+  target:
+    name: litellm-chatgpt-auth
+    creationPolicy: Owner
+    # The default mergePolicy (Replace) means the Secret carries ONLY auth.json -- the raw
+    # CHATGPT_* fields are not projected beside it.
+    template:
+      engineVersion: v2
+      data:
+        # ONE line, valid JSON by construction (see the header). Keys are exactly what LiteLLM's
+        # Authenticator reads: access_token, account_id, expires_at. No refresh_token, ever.
+        auth.json: '{"access_token": {{ .CHATGPT_ACCESS_TOKEN | default "unconfigured" | toJson }}, "account_id": {{ .CHATGPT_ACCOUNT_ID | default "unconfigured" | toJson }}, "expires_at": 4102444800}'
+  dataFrom:
+    - extract:
+        key: litellm/chatgpt

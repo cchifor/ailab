@@ -143,6 +143,14 @@ spec:
                 # be replaced by a reconcile of the new provider name, not simply deleted.
                 DSH_PROVIDER=codex DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
                 DSH_PROVIDER=openai-codex node /seed/reconcile-provider.js
+                # openai-codex-realjaynesage: the SECOND Codex subscription (reviewer-2 seat d),
+                # served through LiteLLM -- the seed says why it is a Responses route and not a
+                # second native provider. Reconciled per boot like openai-codex, for the same
+                # reason: settings.yaml lives on the PVC, so a provider added to the seed never
+                # reaches it otherwise. Rollback = DSH_PROVIDER=openai-codex-realjaynesage
+                # DSH_PROVIDER_REMOVE=1 here for ONE boot (dropping the seed block alone leaves
+                # the PVC copy in place), then delete this line. ADR 0026.
+                DSH_PROVIDER=openai-codex-realjaynesage node /seed/reconcile-provider.js
               else
                 echo "seeding settings.yaml with the LiteLLM provider"
                 # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp
