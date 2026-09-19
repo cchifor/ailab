@@ -161,7 +161,8 @@ projections everywhere, exactly the shape seat b already has.** The refresh toke
   projection is `optional: true` while staged.
 - **Sequencing, and the human step in the middle.** PR 1 (the Job) is green before PR 2 lands;
   PR 2 ships the publisher, the staged seat, ESO, the LiteLLM route, the dsh provider, the alerts
-  and these docs, and is applied with `ansible-playbook reviewers.yml -l reviewer-2 -t seats,dsh-codex`.
+  and these docs (the dashboard's seat-d row is a separate PR: the generated ConfigMap's one-line
+  JSON put the combined diff past the reviewers' size cap), and is applied with `ansible-playbook reviewers.yml -l reviewer-2 -t seats,dsh-codex`.
   Then the operator logs in DIRECTLY as `codexrun4` (`sudo -n -u codexrun4 HOME=/home/codexrun4
   setsid nohup /usr/bin/codex login --device-auth ...`, sign in as `realjaynesage@gmail.com`,
   wait for the CLI to report success, verify with `codex-usage.py` JSON `"ok": true` and the

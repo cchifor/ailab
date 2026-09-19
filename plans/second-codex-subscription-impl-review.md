@@ -34,7 +34,7 @@
 | Staging logic | `pr_reviewer_llm_seats_effective` expressions provision seats a,b,c,d; active list remains a,b,c; seat d projection stays optional. |
 | Alert rules | Required/optional joins, thresholds (24h, 30m, 15m gates), heartbeat (15 min silent = down), ESO readiness expressions match plan. Fixtures cover positive/negative cases. |
 | Route contract | Placeholder, expired JWT under sentinel, missing/empty/malformed credentials, 401/429 responses, three credential swaps through one Router all exercised. Production template coupling missing. |
-| Dashboard and docs | Generated SEAT_NAMES entry verified; ADR 0026 covers device-flow hazard, single-process limit, parameter loss; recovery steps in openbao-recovery.md section PUBLISHER-OWNED; runbook procedures (operator ceremony, AppRole setup, login checks) documented. No unrelated scope expansion or dead code. |
+| Dashboard and docs | Generated SEAT_NAMES entry verified (moved to its own PR after both personas skipped #792 on the size cap: the generated ConfigMap's one-line JSON is a 336 KB hunk and Gitea 1.26's PR diff ignores a head-side `-diff` attribute); ADR 0026 covers device-flow hazard, single-process limit, parameter loss; recovery steps in openbao-recovery.md section PUBLISHER-OWNED; runbook procedures (operator ceremony, AppRole setup, login checks) documented. No unrelated scope expansion or dead code. |
 
 **Security observations:**
 
