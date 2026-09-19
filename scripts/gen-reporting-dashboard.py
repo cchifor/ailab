@@ -77,17 +77,20 @@ def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=N
 
 
 def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, color="value", graph="area",
-         mappings=None):
+         mappings=None, value_size=None):
     defaults = {"unit": unit, "decimals": decimals,
                 "thresholds": {"mode": "absolute", "steps": steps or [{"color": "blue", "value": None}]}}
     if mappings:
         defaults["mappings"] = mappings
+    options = {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+               "colorMode": color, "graphMode": graph, "textMode": "auto", "justifyMode": "auto"}
+    if value_size:
+        options["text"] = {"valueSize": value_size}
     return {
         "id": _nid(), "type": "stat", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
         "fieldConfig": {"defaults": defaults, "overrides": []},
-        "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
-                    "colorMode": color, "graphMode": graph, "textMode": "auto", "justifyMode": "auto"},
+        "options": options,
         "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "instant": True}],
     }
 
@@ -106,35 +109,37 @@ def bargauge(title, x, y, w, h, expr, unit="percent", legend="{{id}}", maxv=100,
     }
 
 
-def stat_name(title, x, y, w, h, expr, legend):
+def stat_name(title, x, y, w, h, expr, legend, value_size=None):
     """A stat that shows a LABEL rather than a number - for info metrics whose value is always
     1 (reviewbot_llm_seat_info, reviewbot_llm_active_model_info). textMode "name" renders the
-    legendFormat, so the panel reads e.g. the account email or the model alias."""
+    legendFormat, so the panel reads e.g. the account email or the model alias. value_size
+    pins the font: auto-sizing fills the panel and wraps a long email on a narrow window."""
+    options = {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+               "colorMode": "none", "graphMode": "none", "textMode": "name", "justifyMode": "auto"}
+    if value_size:
+        options["text"] = {"valueSize": value_size}
     return {
         "id": _nid(), "type": "stat", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
         "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute",
                                                     "steps": [{"color": "blue", "value": None}]}},
                         "overrides": []},
-        "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
-                    "colorMode": "none", "graphMode": "none", "textMode": "name", "justifyMode": "auto"},
+        "options": options,
         "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "legendFormat": legend, "instant": True}],
     }
 
 
-def state_timeline(title, x, y, w, h, exprs, legends):
-    """A 0/1 series per row over time - parked (1) or free (0) per (seat, model) pair."""
+def state_timeline(title, x, y, w, h, exprs, legends, mappings, show_value="auto"):
+    """One discrete-state series per row over time; `mappings` names and colours the states
+    (value mappings decide the colour, so the thresholds below never apply)."""
     return {
         "id": _nid(), "type": "state-timeline", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
         "fieldConfig": {"defaults": {
-            "custom": {"lineWidth": 0, "fillOpacity": 70},
-            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": None},
-                                                         {"color": "red", "value": 1}]},
-            "mappings": [{"type": "value", "options": {
-                "0": {"text": "free", "color": "green", "index": 0},
-                "1": {"text": "parked", "color": "red", "index": 1}}}]}, "overrides": []},
-        "options": {"showValue": "never", "mergeValues": True, "rowHeight": 0.8,
+            "custom": {"lineWidth": 0, "fillOpacity": 75},
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": None}]},
+            "mappings": mappings}, "overrides": []},
+        "options": {"showValue": show_value, "mergeValues": True, "rowHeight": 0.85,
                     "legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}},
         "targets": [{"refId": chr(65 + i), "datasource": _ds(), "expr": e, "legendFormat": legends[i]}
                     for i, e in enumerate(exprs)],
@@ -145,13 +150,15 @@ def _ov(name, props):
     return {"matcher": {"id": "byName", "options": name}, "properties": props}
 
 
-def table(title, x, y, w, h, targets, rename, exclude, overrides, by="id", order=None, cell_height="sm"):
+def table(title, x, y, w, h, targets, rename, exclude, overrides, by="id", order=None, cell_height="sm",
+          filterable=True):
     """Several instant queries outer-joined on the `by` label into one row per key. `order` lists
     the ORIGINAL column names (before rename) left to right; columns it omits keep their place."""
     return {
         "id": _nid(), "type": "table", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
-        "fieldConfig": {"defaults": {"custom": {"align": "auto", "filterable": True, "cellOptions": {"type": "auto"}}},
+        "fieldConfig": {"defaults": {"custom": {"align": "auto", "filterable": filterable,
+                                                "cellOptions": {"type": "auto"}}},
                         "overrides": overrides},
         "options": {"showHeader": True, "footer": {"show": False}, "cellHeight": cell_height},
         "transformations": [
@@ -197,17 +204,39 @@ def _seat_reset(limit):
 USAGE_STEPS = [{"color": "green", "value": None}, {"color": "orange", "value": 80},
                {"color": "red", "value": 100}]
 
+# WHAT EACH ACCOUNT CAN SERVE. A tier is usable on a seat only when the seat is not parked as an
+# account (weekly_all/session wall) AND that tier is not parked on it; the first cut plotted
+# the per-model flags alone, so an account-parked seat showed opus and sonnet "free"
+# (screenshot review, 2026-09-19). The weights follow reviewer-1's ladder,
+# pr_reviewer_llm_models: [fable, opus, sonnet]; 0 = nothing, the seat is parked.
+CLAUDE_TIERS = (("fable", 3), ("opus", 2), ("sonnet", 1))
+TIER_MAP = [{"type": "value", "options": {
+    "3": {"text": "fable", "color": "green", "index": 0},
+    "2": {"text": "opus", "color": "yellow", "index": 1},
+    "1": {"text": "sonnet", "color": "orange", "index": 2},
+    "0": {"text": "parked", "color": "red", "index": 3}}}]
 
-def _gauge_col(name):
-    return _ov(name, [{"id": "unit", "value": "percent"}, {"id": "min", "value": 0},
+
+def _usable(model):
+    return (f'((1 - reviewbot_llm_model_parked{{persona="claude",model="{model}"}}) * on(seat) group_left() '
+            f'(1 - reviewbot_llm_seat_parked{{persona="claude"}}))')
+
+
+BEST_TIER = "max by (seat) (" + " or ".join(f"({_usable(m)} * {w})" for m, w in CLAUDE_TIERS) + ")"
+
+
+def _gauge_col(name, width=None):
+    return _ov(name, ([{"id": "custom.width", "value": width}] if width else [])
+               + [{"id": "unit", "value": "percent"}, {"id": "min", "value": 0},
                       {"id": "max", "value": 100}, {"id": "decimals", "value": 0},
                       {"id": "thresholds", "value": {"mode": "absolute", "steps": USAGE_STEPS}},
                       {"id": "custom.cellOptions",
                        "value": {"type": "gauge", "mode": "gradient", "valueDisplayMode": "color"}}])
 
 
-def _reset_col(name):
-    return _ov(name, [{"id": "unit", "value": "dtdurations"}, {"id": "decimals", "value": 0}])
+def _reset_col(name, width=None):
+    return _ov(name, ([{"id": "custom.width", "value": width}] if width else [])
+               + [{"id": "unit", "value": "dtdurations"}, {"id": "decimals", "value": 0}])
 
 
 # group_left(name) join so per-instance panels show the friendly guest name instead of qemu/4001
@@ -541,18 +570,19 @@ panels += [
     # usage is ONE WIDE TABLE - one row per account, one column pair (used %, resets in) per
     # window - with the percentages drawn as in-cell gauges. The windows are fixed by the API
     # (session, weekly_all, weekly_fable), which is what makes the wide shape possible.
-    stat_name("Active Claude Account", 0, 159, 12, 4,
+    stat_name("Active Account", 0, 159, 12, 4,
               'reviewbot_llm_active_seat_info{persona="claude"} * on(persona,seat) '
               'group_left(email,plan) reviewbot_llm_seat_info{persona="claude"}',
-              "{{email}} · seat {{seat}}"),
-    stat_name("Active Claude Model", 12, 159, 4, 4,
-              'reviewbot_llm_active_model_info{persona="claude"}', "{{model}}"),
+              "{{email}} · seat {{seat}}", value_size=26),
+    stat_name("Active Model", 12, 159, 4, 4,
+              'reviewbot_llm_active_model_info{persona="claude"}', "{{model}}", value_size=26),
     # 0 = a seat's probe failed on the last poll (ReviewbotUsageProbeFailing after 3h of it).
     stat("Usage Probe", 16, 159, 4, 4,
          'min(reviewbot_llm_usage_probe_ok{persona="claude"}) or vector(0)',
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}],
          mappings=[{"type": "value", "options": {"1": {"text": "OK", "index": 0},
-                                                 "0": {"text": "FAILING", "index": 1}}}]),
+                                                 "0": {"text": "FAILING", "index": 1}}}],
+         value_size=26),
     # Seats that can serve SOMETHING: neither account-parked nor parked on every tier.
     # Aggregated before `or vector(0)`: a labelled series OR'd with the label-less vector(0)
     # keeps BOTH (the label sets differ), and the stat showed a phantom red zero beside the
@@ -560,7 +590,7 @@ panels += [
     stat("Seats Usable", 20, 159, 4, 4,
          'min(reviewbot_llm_seats_available{persona="claude"}) or vector(0)',
          steps=[{"color": "red", "value": None}, {"color": "orange", "value": 1},
-                {"color": "green", "value": 2}]),
+                {"color": "green", "value": 2}], value_size=26),
     # Orange at 80, red at 100: 100 IS the parked state, and the API's percent is what the
     # persona is parked on, so anything below it is still capacity. A window with no open
     # period reports resets_at = 0 (a seat with no session running) and one that just reset
@@ -568,7 +598,11 @@ panels += [
     # "0 seconds" a clamp produced. The email rides on its OWN target (H), not on the session
     # series: a seat whose probe is failing, or a fresh seat with no usage yet, still gets its
     # account named - the state that most needs it (reviewer-claude on ailab#784).
-    table("Claude Seats — usage per account and window", 0, 163, 24, 7,
+    # COMPACT: short headers, no filter funnels (they cost ~20px per header and truncated
+    # "Session reset"), fixed widths (~1040px + the Account column) so eleven columns fit a
+    # 1500px window without a scrollbar, small cells, 6 units - three rows were floating in a
+    # 7-unit panel with md cells, and 5 units clipped the third (screenshot review, 2026-09-19).
+    table("Claude seats", 0, 163, 24, 6,
           targets=[
               ("H", 'max by (seat, email) (reviewbot_llm_seat_info{persona="claude"})'),
               ("A", _seat_pct("session")),
@@ -579,47 +613,50 @@ panels += [
               ("F", _seat_reset("weekly_fable")),
               ("G", '(max by (seat) (reviewbot_llm_active_seat_info{persona="claude"}) * 2) '
                     'or max by (seat) (reviewbot_llm_seat_parked{persona="claude"})'),
-              # The login's access-token expiry, as a date: a stamp in the past that stays
-              # there is a login the keepalive could not renew (0 = setup-token, dropped).
+              # The best tier this account can serve right now (see BEST_TIER).
+              ("J", BEST_TIER),
+              # The login's access-token expiry, relative: "in 5 hours"; a stamp that stays in
+              # the past is a login the keepalive could not renew (0 = setup-token, dropped).
               ("I", 'max by (seat) (reviewbot_llm_seat_credential_expires_at_seconds{persona="claude"} > 0) * 1000'),
           ],
           by="seat",
-          order=["seat", "email", "Value #G", "Value #A", "Value #D", "Value #B", "Value #E",
+          order=["seat", "email", "Value #G", "Value #J", "Value #A", "Value #D", "Value #B", "Value #E",
                  "Value #C", "Value #F", "Value #I"],
-          rename={"seat": "Seat", "email": "Account", "Value #G": "State",
-                  "Value #A": "Session used", "Value #D": "Session resets in",
-                  "Value #B": "Weekly used (all models)", "Value #E": "Weekly resets in",
-                  "Value #C": "Weekly used (Fable)", "Value #F": "Fable resets in",
-                  "Value #I": "Login valid until"},
-          exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, 10)],
+          rename={"seat": "Seat", "email": "Account", "Value #G": "State", "Value #J": "Serves",
+                  "Value #A": "Session", "Value #D": "Session reset",
+                  "Value #B": "Weekly", "Value #E": "Weekly reset",
+                  "Value #C": "Fable", "Value #F": "Fable reset",
+                  "Value #I": "Login expires"},
+          exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, 11)],
           overrides=[
-              _ov("Seat", [{"id": "custom.width", "value": 70}]),
-              _ov("State", [{"id": "custom.width", "value": 100},
+              _ov("Seat", [{"id": "custom.width", "value": 52}]),
+              _ov("Account", [{"id": "custom.minWidth", "value": 170}]),
+              _ov("State", [{"id": "custom.width", "value": 82},
                             {"id": "custom.cellOptions", "value": {"type": "color-text"}},
                             {"id": "mappings", "value": [{"type": "value", "options": {
                                 "2": {"text": "● active", "color": "green", "index": 0},
                                 "1": {"text": "parked", "color": "red", "index": 1},
                                 "0": {"text": "free", "color": "text", "index": 2}}}]}]),
-          ] + [_gauge_col(c) for c in ("Session used", "Weekly used (all models)",
-                                       "Weekly used (Fable)")]
-            + [_reset_col(c) for c in ("Session resets in", "Weekly resets in",
-                                       "Fable resets in")]
-            + [_ov("Login valid until", [{"id": "unit", "value": "dateTimeAsLocalNoDateIfToday"}])],
-          cell_height="md"),
-    # Which seats and which (seat, model) pairs the rotation is parked on: the ladder's whole
-    # state in one picture. The account row is the seat-level park (a weekly_all wall, or a
-    # rate limit the API did not attribute to a model); without it a seat parked that way
-    # shows every tier green. Twelve rows: 9 units tall, or a row is 11px and unreadable.
-    state_timeline("Parked per Seat — account and per tier", 0, 170, 24, 9,
-                   ['reviewbot_llm_seat_parked{persona="claude"}',
-                    'reviewbot_llm_model_parked{persona="claude"}'],
-                   ["{{seat}} / account", "{{seat}} / {{model}}"]),
+              _ov("Serves", [{"id": "custom.width", "value": 72},
+                             {"id": "custom.cellOptions", "value": {"type": "color-text"}},
+                             {"id": "mappings", "value": TIER_MAP}]),
+              _ov("Login expires", [{"id": "custom.width", "value": 130},
+                                    {"id": "unit", "value": "dateTimeFromNow"}]),
+          ] + [_gauge_col(c, 110) for c in ("Session", "Weekly", "Fable")]
+            + [_reset_col(c, 120) for c in ("Session reset", "Weekly reset", "Fable reset")],
+          cell_height="sm", filterable=False),
+    # ONE ROW PER ACCOUNT, over time: the best tier it could serve, or parked. Replaces twelve
+    # red/green stripes per (seat, model) that read "opus free" on an account-parked seat.
+    state_timeline("Seat capacity — best tier each account can serve", 0, 169, 24, 5,
+                   [BEST_TIER + ' * on(seat) group_left(email) max by (seat, email) '
+                    '(reviewbot_llm_seat_info{persona="claude"})'],
+                   ["{{seat}} · {{email}}"], TIER_MAP),
     # THE REASON, not just the rate. Everything above is numeric and can only say THAT a review
     # failed; this says which PR and why. Shipped by roles/journal_ship (Alloy -> loki-lan).
     # The filter is deliberately broad — `failed`, `error`, `skipped` — because the 2026-09-06
     # failure text ("'utf-8' codec can't decode byte 0xf6") matched no term anyone would have
     # thought to search for in advance.
-    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 179, 24, 9,
+    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 174, 24, 9,
          '{job="host-journal", unit="reviewbot.service"} '
          '|~ "(?i)(failed|error|quarantin|skipped|exhausted)"'),
 ]
