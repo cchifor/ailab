@@ -18,5 +18,7 @@ ReadWritePaths=/var/lib/prometheus/node-exporter
 ProtectHome=read-only
 PrivateTmp=true
 RestrictAddressFamilies=AF_INET AF_INET6
-# Two projections x three 20 s HTTP operations (login, metadata, patch) = 120 s worst case.
-TimeoutStartSec=150
+# Sized from the projection list: each projection is three 20 s HTTP operations (login,
+# metadata, patch), so 60 s x N + 30 s of slack; a third projection cannot be SIGKILLed mid-run
+# by a budget written for two (#792 review). Rendered by the role from dsh_codex_publisher.
+TimeoutStartSec={{ 60 * (dsh_codex_publisher.projections | length) + 30 }}

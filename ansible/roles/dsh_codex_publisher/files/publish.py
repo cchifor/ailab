@@ -105,7 +105,13 @@ def _write_atomic(path, text, mode=0o600):
     a fresh, unpredictable name (mkstemp: O_CREAT|O_EXCL|O_NOFOLLOW, 0600), the mode set on the
     DESCRIPTOR (fchmod -- explicit because the unit's UMask=0077 would otherwise leave a 0600 file
     node_exporter cannot read), then rename, which is atomic for readers. A leftover temp from a
-    crash is unlinked on the next run's error path, never truncated in place."""
+    crash would never be touched again (mkstemp names are fresh every run), so earlier orphans of
+    THIS target are swept before writing (#792 review)."""
+    for orphan in path.parent.glob(path.name + '.*.tmp'):
+        try:
+            orphan.unlink()
+        except OSError:
+            pass
     fd, temp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
     try:
         with os.fdopen(fd, 'w') as file:
@@ -148,7 +154,10 @@ def publish(config, session, fields, kv_path='dsh/credentials', state_path=STATE
 
 
 def _label(text):
-    return str(text).replace('\\', '\\\\').replace('"', '\\"')
+    # The exposition format escapes backslash, double quote AND newline in label values; an
+    # unescaped newline (a folded-scalar typo in host_vars) would make node_exporter reject the
+    # WHOLE textfile, surfacing only as CodexPublisherMetricsMissing 30 min later (#792 review).
+    return str(text).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
 
 
 def render_metrics(results, now):

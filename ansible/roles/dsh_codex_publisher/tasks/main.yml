@@ -61,14 +61,23 @@
       - dsh_codex_publisher_approle.stat.mode | default('') == '0600'
     fail_msg: Bootstrap dsh-codex-publisher AppRole per docs/runbooks/dsh.md before enabling publication.
 
-- name: Install publisher service and timer
-  ansible.builtin.copy:
-    src: "{{ item }}"
-    dest: "/etc/systemd/system/{{ item }}"
+# The service is a TEMPLATE: its start budget is derived from the projection count, so adding
+# a projection in host_vars re-sizes it on the same converge. The timer is static.
+- name: Install publisher service (start budget sized from the projection count)
+  ansible.builtin.template:
+    src: dsh-codex-publisher.service.j2
+    dest: /etc/systemd/system/dsh-codex-publisher.service
     owner: root
     group: root
     mode: "0644"
-  loop: [dsh-codex-publisher.service, dsh-codex-publisher.timer]
+
+- name: Install publisher timer
+  ansible.builtin.copy:
+    src: dsh-codex-publisher.timer
+    dest: /etc/systemd/system/dsh-codex-publisher.timer
+    owner: root
+    group: root
+    mode: "0644"
 
 - name: Enable token projection
   ansible.builtin.systemd_service:

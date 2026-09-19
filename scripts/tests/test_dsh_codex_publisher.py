@@ -273,6 +273,20 @@ class Publishing(unittest.TestCase):
         self.assertEqual(decoy.read_text(), 'decoy')
         self.assertEqual(target.read_text(), 'y\n')
 
+    def test_atomic_write_sweeps_earlier_orphans_of_the_same_target(self):
+        target = Path(self.tmp.name) / 'out.prom'
+        orphan = Path(self.tmp.name) / 'out.prom.deadbeef.tmp'
+        orphan.write_text('orphan')
+        other = Path(self.tmp.name) / 'other.prom.deadbeef.tmp'
+        other.write_text('someone else')
+        publisher._write_atomic(target, 'x\n', 0o644)
+        self.assertFalse(orphan.exists())
+        self.assertTrue(other.exists())
+
+    def test_label_values_escape_newlines(self):
+        self.assertEqual(publisher._label('a\nb'), 'a\\nb')
+        self.assertEqual(publisher._label('q"\\'), 'q\\"\\\\')
+
     def test_textfile_expiry_is_the_published_tokens_not_the_locally_renewed_one(self):
         # Run 1 publishes a token expiring at 1000. Run 2 reads a RENEWED token (2000) but the
         # vault refuses the PATCH: the consumers still hold the 1000 token, and the metric must
