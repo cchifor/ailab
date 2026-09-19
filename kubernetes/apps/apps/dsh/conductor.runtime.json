@@ -1,0 +1,44 @@
+{
+  "enabled": true,
+  "database": "/dsh-home/team-conductor/state.sqlite",
+  "workspaceRoot": "/workspace/conductor-checkouts",
+  "agentPreset": "standard",
+  "pollIntervalMs": 30000,
+  "reviewOverdueMs": 86400000,
+  "externalReviewReminders": false,
+  "forge": {
+    "baseURL": "https://git.chifor.me",
+    "owner": "cchifor",
+    "repo": "dsh-team-conductor",
+    "tokenRef": "GITEA_PAT",
+    "reviewers": ["reviewer-claude", "reviewer-codex"],
+    "teamIdentities": ["dsh"],
+    "requiredContexts": ["test / test (pull_request)"]
+  },
+  "models": {
+    "conductor": {"provider":"openai-codex","model":"gpt-6-astra"},
+    "worker": {"provider":"litellm","model":"qwen3.8-27b-vllm-cloud"},
+    "reviewer": {"provider":"litellm","model":"qwen3.8-flash-next-cloud"}
+  },
+  "author": {"name":"DSH Conductor","email":"dsh-team@users.noreply.git.chifor.me"},
+  "validationCommands": [{"executable":"npm","args":["test"]}],
+  "validation": {
+    "runtime":"ssh-docker",
+    "host":"192.168.0.14",
+    "policySha256":"3e9fd01d77bf149b95a93d9713f766ffe153e573143d995bfe54698ddc30896d",
+    "maxTimeoutMs":300000,
+    "keyPath":"/dsh-credentials/DSH_OPERATOR_SSH_KEY",
+    "knownHostsPath":"/dsh-credentials/DSH_OPERATOR_SSH_KNOWN_HOSTS",
+    "commands":[{"id":"canary","executable":"canary","args":[]},{"id":"test","executable":"npm","args":["test"]}]
+  },
+  "limits":{"maxStageAttempts":3,"maxTotalAttempts":12,"stageTimeoutMs":2700000},
+  "admission": {
+    "maxCalls":40,
+    "maxReservedTokens":40000000,
+    "routes": {
+      "openai-codex/gpt-6-astra":{"maxTokensPerCall":1000000},
+      "litellm/qwen3.8-27b-vllm-cloud":{"maxTokensPerCall":1000000},
+      "litellm/qwen3.8-flash-next-cloud":{"maxTokensPerCall":1000000}
+    }
+  }
+}

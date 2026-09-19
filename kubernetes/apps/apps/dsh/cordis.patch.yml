@@ -413,3 +413,17 @@
 - id: ui-settings-models
   name: '@deepseek-ai/dsh-client-ui-settings-models'
   disabled: true
+
+# Host-only initialized-service observer. No model calls, coordinator or appExit.
+# Missing conductor remains a pending injection, not a missing top-level import.
+- insert:
+    - id: conductor-release-readiness
+      name: ./conductor-readiness.mjs
+      disabled: !!js '!process.env.DSH_TEAM_CONDUCTOR_CONFIG'
+      config:
+        configPath: !!js process.env.DSH_TEAM_CONDUCTOR_CONFIG
+        markerPath: /dsh-home/team-conductor/readiness.json
+        podUid: !!js process.env.DSH_POD_UID
+    - id: conductor-command
+      name: ./conductor-command.mjs
+      disabled: !!js '!process.env.DSH_TEAM_CONDUCTOR_CONFIG'

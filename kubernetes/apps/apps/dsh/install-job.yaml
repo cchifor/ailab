@@ -11,12 +11,12 @@
 # carries app=dsh-install, which the deny policy's podSelector (app=dsh) does not match, so the npm
 # reach exists ONLY here and only while installing.
 #
-# TO UPGRADE: bump DSH_VERSION and the Job name together (a Job's pod template is immutable), then
-# delete the marker file or the PVC so this re-runs.
+# TO UPGRADE: bump the version/plugin-set identity and Job name together.
+# Preserve prior directories and PVCs for rollback; never delete state to force an upgrade.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dsh-install-0-1-5-alpha-2-glibc-ps1
+  name: dsh-install-0-1-5-alpha-2-glibc-ps2
   annotations:
     # A Job's spec.template is IMMUTABLE, so any edit Flux applies to this object under the SAME
     # name is rejected with "field is immutable" — which fails the whole dsh Kustomization, not
@@ -76,12 +76,14 @@ spec:
             # silently overwrites the same directory and a rollback has nowhere to roll back to:
             # the closure this revision names and the closure on disk would be the same path with
             # different contents. Bump whenever DSH_PLUGINS below changes.
-            - { name: DSH_PLUGINSET, value: "ps1" }
+            - { name: DSH_PLUGINSET, value: "ps2" }
             # The Profile Bundles installed into the web profile. Each registers a DORMANT
             # provider on the host plane; a preset is what grants any agent the matching tool
             # (see agent-teams/). Space-separated, version-pinned to DSH_VERSION deliberately --
             # these ship against one harness release and the peer set is not independent.
-            - { name: DSH_PLUGINS, value: "@deepseek-ai/dsh-subagent-codex@0.1.5-alpha.2" }
+            # Private release bytes are pinned and locally staged; never resolve conductor from a registry.
+            - { name: CONDUCTOR_ARTIFACT_SHA256, value: "7a97432202131d79f11bb578708f2a3df32cde65700a28c778ca958ad4bdcb28" }
+            - { name: DSH_PLUGINS, value: "@deepseek-ai/dsh-subagent-codex@0.1.5-alpha.2 dsh-team-conductor@file:/app/conductor-artifacts/7a97432202131d79f11bb578708f2a3df32cde65700a28c778ca958ad4bdcb28/dsh-team-conductor-0.1.0.tgz" }
             - { name: npm_config_cache, value: /app/.npm }   # shared across versions; harmless
           command: ["/bin/sh", "-c"]
           args:
@@ -206,7 +208,13 @@ spec:
               #   none   -- this revision declares no plugins; retire and degrade
               SIGNAL="/app/profiles/${DSH_VERSION}-${DSH_BUILD}-${DSH_PLUGINSET}/.staging-state"
               mkdir -p "$(dirname "$SIGNAL")" || true
-              if [ -z "${DSH_PLUGINS:-}" ]; then
+              # Verify before checking old markers or modifying the new slot. ps1 remains untouched.
+              if ! node /conductor-release/stage-private-conductor.mjs \
+                /conductor-release/dsh-team-conductor-0.1.0.tgz \
+                "$CONDUCTOR_ARTIFACT_SHA256" /app/conductor-artifacts; then
+                printf 'failed' > "$SIGNAL" || true
+                echo 'WARNING: private conductor artifact verification failed; no closure changed'
+              elif [ -z "${DSH_PLUGINS:-}" ]; then
                 # RETIRE, do not just skip. An empty plugin list means "no deployment bundles",
                 # and leaving a previously marked closure in place would let the Deployment go on
                 # projecting it -- the pod would run providers this revision does not name.
@@ -330,6 +338,7 @@ spec:
               fi
           volumeMounts:
             - { name: app, mountPath: /app }
+            - { name: conductor-release, mountPath: /conductor-release, readOnly: true }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
@@ -339,3 +348,4 @@ spec:
             limits:   { cpu: "2",  memory: 2Gi }
       volumes:
         - { name: app, persistentVolumeClaim: { claimName: dsh-app } }
+        - { name: conductor-release, configMap: { name: dsh-conductor-release, defaultMode: 0444 } }
