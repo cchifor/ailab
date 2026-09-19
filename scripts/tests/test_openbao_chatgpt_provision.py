@@ -150,11 +150,17 @@ class ProvisionScript(unittest.TestCase):
         self.assertIn("sed -e 's/^[[:space:]]*#.*$//'", self.script)
         self.assertNotIn("grep -oE 'path", self.script)
 
+    def test_maintenance_rule_is_stated_beside_the_constants(self):
+        # No test can enforce "move the outgoing DESIRED into BASELINE" across revisions; the
+        # file must at least SAY it where the editor will look.
+        self.assertIn("MAINTENANCE RULE", self.script)
+        self.assertIn("OUTGOING", self.script)
+
     def test_kv_seeds_every_template_key_and_nothing_else_later(self):
         code = _code(self.script)
         self.assertNotIn("kv patch", code)
         self.assertIn("-cas=0", code)
-        put = code.split("kv put", 1)[1].split(">/dev/null", 1)[0]
+        put = code.split("kv put", 1)[1].split("2>&1", 1)[0]
         for key in TEMPLATE_KEYS:
             self.assertIn(f"{key}=", put)
 
@@ -323,8 +329,16 @@ class GuardBehaviour(unittest.TestCase):
         proc, log = self._run(FAKE_KV_DELETED=1)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn("operator action needed", proc.stderr)
+        # The CLI's own message rides along, so a permission error or a sealed vault is not
+        # misreported as a soft-delete (reviewer-claude, #791).
+        self.assertIn("check-and-set parameter did not match", proc.stderr)
         self.assertIn("kv put", log)
         self.assertNotIn("created", proc.stdout)
+
+    def test_kv_put_failure_message_reaches_the_operator(self):
+        proc, log = self._run(FAKE_KV_PUT_FAIL=1)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("permission denied", proc.stderr)
 
 
 if __name__ == "__main__":

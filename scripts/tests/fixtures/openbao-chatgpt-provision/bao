@@ -72,8 +72,8 @@ case "$1 ${2:-}" in
   "kv put")
     # -cas=0 fails once version history exists -- measured exit 2 against the live vault. A
     # soft-deleted path HAS history, so it must fail here too.
-    [ "${FAKE_KV_DELETED:-0}" = 1 ] && exit 2
-    [ "${FAKE_KV_PUT_FAIL:-0}" = 1 ] && exit 1
+    [ "${FAKE_KV_DELETED:-0}" = 1 ] && { echo "Error writing data to af/data/litellm/chatgpt: check-and-set parameter did not match the current version" >&2; exit 2; }
+    [ "${FAKE_KV_PUT_FAIL:-0}" = 1 ] && { echo "Error writing data: permission denied" >&2; exit 1; }
     printf '1' > "$FAKE_STATE/kv-created"
     exit 0
     ;;

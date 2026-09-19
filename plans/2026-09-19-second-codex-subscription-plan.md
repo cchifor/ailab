@@ -124,10 +124,11 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   reviewer-2 (the `pr_reviewer_textfile` directory the reviewbot metrics already use) with, per
   projection, `dsh_codex_projection_ok{document,email}` (1/0), `dsh_codex_projection_token_expires_at_seconds{document}`
   (the JWT expiry it last published) and `dsh_codex_projection_last_success_timestamp_seconds{document}`.
-  One rule in `kubernetes/apps/infrastructure/monitoring/reviewbot-rules.yaml`, `CodexProjectionStale`:
-  a required projection with `ok == 0` for 30 m, or a published token with less than 24 h left — the
-  reviewer's own login can be healthy while the publisher, ESO or kubelet fails, and this is the
-  signal that tells those apart. The textfile is written atomically (temp + rename) like reviewbot's;
+  Two rules in `kubernetes/apps/infrastructure/monitoring/reviewbot-rules.yaml`:
+  `CodexProjectionFailing` — a required projection with `ok == 0` for 30 m — and `CodexProjectionStale`
+  — a published token with less than 24 h left (`for: 15m`) — both `and on (instance, document)
+  dsh_codex_projection_optional == 0`, so a staged seat never pages. The reviewer's own login can be
+  healthy while the publisher, ESO or kubelet fails, and these are the signals that tell those apart. The textfile is written atomically (temp + rename) like reviewbot's;
   the unit gains `ReadWritePaths=/var/lib/prometheus/node-exporter` under its `ProtectSystem=strict`,
   and the writer chmods the file 0644 explicitly because the unit's `UMask=0077` masks the mode
   `os.open` is given (a 0600 file is invisible to node_exporter). Live check after the apply:

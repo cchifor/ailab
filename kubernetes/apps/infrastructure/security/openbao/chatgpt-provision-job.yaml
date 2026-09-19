@@ -90,10 +90,22 @@ data:
 
     # Whole-document equality has neither of the holes a path-name check has: a capability ADDED
     # to an already-allowed path, or a path written with tabs, are both differences here.
+    #
+    # THE MAINTENANCE RULE, which no test can enforce because it spans git revisions: when a
+    # heredoc below changes, the live vault holds the OUTGOING desired form, so a Job that only
+    # updated DESIRED refuses every run from then on (the daily TTL-reap re-applies it red and the
+    # `openbao` Kustomization goes False with it). On ANY policy change here, do all three:
+    #   1. edit the heredoc;
+    #   2. set *_DESIRED to the new normalised form (the unit test pins this pair);
+    #   3. set *_BASELINE to the OUTGOING *_DESIRED -- the form the vault holds right now -- and
+    #      drop the older form it replaced. BASELINE is "the last reviewed form still live", not
+    #      "the original hand-installed form forever".
+    # Skipping (3) is a guaranteed self-wedge on the first routine edit (reviewer-claude, #791).
     PUBLISHER_BASELINE='path"af/data/dsh/credentials"{capabilities=["patch"]}path"af/metadata/dsh/credentials"{capabilities=["read"]}'
     PUBLISHER_DESIRED='path"af/data/dsh/credentials"{capabilities=["patch"]}path"af/metadata/dsh/credentials"{capabilities=["read"]}path"af/data/litellm/chatgpt"{capabilities=["patch"]}path"af/metadata/litellm/chatgpt"{capabilities=["read"]}'
     # af-app-litellm has no pre-ownership form: nothing created it before this Job, so the only
-    # document it may find is its own previous output.
+    # document it may find is its own previous output. The same maintenance rule applies: the
+    # first edit to its heredoc must move today's DESIRED into APP_BASELINE.
     APP_BASELINE='path"af/data/litellm/chatgpt"{capabilities=["read"]}'
     APP_DESIRED='path"af/data/litellm/chatgpt"{capabilities=["read"]}'
 
@@ -214,17 +226,21 @@ data:
       return 0
     }
 
+    # The put's output is CAPTURED, not discarded: the final branch below is reached on a
+    # soft-deleted path, but also on a permission error, a network failure or a vault sealed
+    # mid-run, and only the CLI's own message tells those apart. The command line seeds empty
+    # strings and a non-secret canary, so nothing it can print is credential material.
     if kv_current_readable "$KV_PATH"; then
       echo "af/$KV_PATH already exists; contents are publisher-owned and left untouched"
-    elif bao kv put -cas=0 -mount=af "$KV_PATH" \
+    elif put_out="$(bao kv put -cas=0 -mount=af "$KV_PATH" \
         "${CANARY_NAME}=${CANARY_VALUE}" \
-        CHATGPT_ACCESS_TOKEN= CHATGPT_ACCOUNT_ID= CHATGPT_ACCOUNT_EMAIL= CHATGPT_EXPIRES_AT= \
-        >/dev/null 2>&1; then
+        CHATGPT_ACCESS_TOKEN= CHATGPT_ACCOUNT_ID= CHATGPT_ACCOUNT_EMAIL= CHATGPT_EXPIRES_AT= 2>&1)"; then
       echo "af/$KV_PATH created with the $CANARY_NAME marker and empty CHATGPT_* fields"
     elif kv_current_readable "$KV_PATH"; then
       echo "af/$KV_PATH created concurrently; leaving it alone"
     else
       echo "af/$KV_PATH is neither readable nor creatable (soft-deleted or destroyed?); operator action needed" >&2
+      echo "bao kv put said: $put_out" >&2
       exit 1
     fi
 ---
