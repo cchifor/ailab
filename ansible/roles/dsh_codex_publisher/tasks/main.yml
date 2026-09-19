@@ -61,18 +61,41 @@
       - dsh_codex_publisher_approle.stat.mode | default('') == '0600'
     fail_msg: Bootstrap dsh-codex-publisher AppRole per docs/runbooks/dsh.md before enabling publication.
 
-- name: Install publisher service and timer
-  ansible.builtin.copy:
-    src: "{{ item }}"
-    dest: "/etc/systemd/system/{{ item }}"
+# The service is a TEMPLATE: its start budget is derived from the projection count, so adding
+# a projection in host_vars re-sizes it on the same converge. The timer is static.
+- name: Install publisher service (start budget sized from the projection count)
+  ansible.builtin.template:
+    src: dsh-codex-publisher.service.j2
+    dest: /etc/systemd/system/dsh-codex-publisher.service
     owner: root
     group: root
     mode: "0644"
-  loop: [dsh-codex-publisher.service, dsh-codex-publisher.timer]
+  register: dsh_codex_publisher_service_unit
+
+- name: Install publisher timer
+  ansible.builtin.copy:
+    src: dsh-codex-publisher.timer
+    dest: /etc/systemd/system/dsh-codex-publisher.timer
+    owner: root
+    group: root
+    mode: "0644"
+  register: dsh_codex_publisher_timer_unit
+
+# A CHANGED UNIT FILE IS NOT A CHANGED UNIT until systemd re-reads it. `daemon_reload: true` on
+# the enable task below only runs when THAT task changes something, and the timer has been
+# enabled+started since 2026-09-17 -- so a re-rendered TimeoutStartSec (or any unit edit) would
+# sit on disk while systemd enforced the old one, which is exactly the SIGKILL-at-150s the
+# template exists to prevent (reviewer-claude, #793). Measured the same day: the first run of
+# the new publish.py under the OLD unit (no ReadWritePaths yet) failed on a read-only collector
+# dir until a hand daemon-reload. Reload unconditionally whenever either unit file changed; the
+# next timer tick starts the service under the new definition, so nothing else needs restarting.
+- name: Reload systemd when a publisher unit changed
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: dsh_codex_publisher_service_unit.changed or dsh_codex_publisher_timer_unit.changed
 
 - name: Enable token projection
   ansible.builtin.systemd_service:
     name: dsh-codex-publisher.timer
     enabled: true
     state: started
-    daemon_reload: true

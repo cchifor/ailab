@@ -267,9 +267,15 @@ CODEX_TIER_MAP = [{"type": "value", "options": {
 CODEX_WINDOWS = (("weekly_all", "Weekly"),)
 
 
-# The seats, in row order. Config on both hosts (pr_reviewer_llm_seats: a, b, c), like the tier
-# names above; a fourth seat is a one-line change here.
-SEAT_NAMES = ("a", "b", "c")
+# The seats, in row order, like the tier names above. reviewer-1 runs a, b, c
+# (pr_reviewer_llm_seats); reviewer-2 runs a, b, c and, since ADR 0026 (2026-09-19), provisions
+# seat d (codexrun4, realjaynesage — the second ChatGPT subscription LiteLLM serves) STAGED:
+# not in reviewbot's config until its login lands, so it exports no reviewbot_* series and its
+# timeline row is ABSENT — not `parked`, absent — until the plan's PR 3 activates it. A seat
+# only one persona has costs the other nothing: every per-seat target is anchored on
+# reviewbot_llm_seat_parked{seat=...}, and a target with no series draws no row. A fifth seat
+# is a one-line change here.
+SEAT_NAMES = ("a", "b", "c", "d")
 
 
 def seat_block(persona, name, y, tiers, tier_map, windows, serves=True, capacity_title=None):
