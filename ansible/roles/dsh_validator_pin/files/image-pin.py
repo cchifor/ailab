@@ -50,7 +50,7 @@ def validate_container(value):
               (host.get('RestartPolicy') or {}).get('Name')=='unless-stopped',
               not value.get('Mounts'),not host.get('Binds'),not host.get('PortBindings'),
               not host.get('CapAdd'),not host.get('Devices'),not host.get('DeviceRequests'),not host.get('DeviceCgroupRules'),
-              not host.get('PidMode'),not host.get('UTSMode'),host.get('IpcMode') in ('private',''),
+              not host.get('PidMode'),not host.get('UTSMode'),host.get('IpcMode')=='private',
               set((value.get('NetworkSettings') or {}).get('Networks',{}))=={'none'},
               (host.get('LogConfig') or {}).get('Type')=='none']
     if not all(required):
@@ -81,7 +81,7 @@ def ensure():
     if image is None or image.get('Id')!=IMAGE or image.get('Config',{}).get('Volumes'):
         raise RuntimeError('Pinned image identity or volume declaration mismatch')
     result=docker('run','--detach','--name',NAME,'--label',LABEL+'=0.1.0','--restart=unless-stopped',
-                  '--pull=never','--network=none','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
+                  '--pull=never','--network=none','--ipc=private','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
                   '--pids-limit=4','--memory=16m','--memory-swap=16m','--cpus=0.01','--user=65532:65532',
                   '--log-driver=none','--entrypoint=/bin/sleep',IMAGE,'2147483647')
     if result.returncode:

@@ -46,7 +46,7 @@ def make_valid_container(running=True):
             'PidMode': '',
             'IpcMode': 'private',
             'LogConfig': {'Type': 'none'},
-            'UtsMode': '',
+            'UTSMode': '',
             'DeviceRequests': [],
             'Devices': [],
         },
@@ -256,6 +256,14 @@ class TestValidateContainerFunction(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             image_pin.validate_container(c)
 
+    def test_rejects_nonprivate_ipc(self):
+        for mode in ['', 'shareable', 'host']:
+            with self.subTest(mode=mode):
+                c = make_valid_container()
+                c['HostConfig']['IpcMode'] = mode
+                with self.assertRaises(RuntimeError):
+                    image_pin.validate_container(c)
+
     def test_rejects_host_uts_namespace(self):
         c = make_valid_container()
         c['HostConfig']['UTSMode'] = 'host'
@@ -393,6 +401,8 @@ class TestEnsureFunction(unittest.TestCase):
                         self.assertIsNotNone(run_args)
                         # Check key isolation flags
                         self.assertIn('--network=none', run_args)
+                        self.assertIn('--ipc=private', run_args)
+                        self.assertIn('--memory-swap=16m', run_args)
                         self.assertIn('--read-only', run_args)
                         self.assertIn('--cap-drop=ALL', run_args)
                         self.assertIn('--security-opt=no-new-privileges', run_args)
