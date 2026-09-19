@@ -1,47 +1,24 @@
 # Implementation review — second-codex-subscription — round 1
 
-<!-- codex-impl-review-status: pending -->
-
-## Summary
-
-- **Two P2 defects in the publisher's state machine:** unchanged credentials generate unnecessary KV versions every run, and failed rotations misrepresent the expiry timestamp to monitoring. Both are reproduced with in-memory storage and break the stated no-op behavior.
-- **Device-flow regression test does not validate the production ESO template rendering:** fixture values are hard-coded rather than derived from the actual manifest, leaving the critical guard (sentinel expires_at, placeholder tokens, toJson escaping) untested against production inputs.
-- **Atomic write implementation is not safe against TOCTOU in a group-writable directory:** predictable temp pathname with truncate-then-chmod allows symlink attacks where the publisher runs as root.
-- **ADR claim contradicts implementation:** the ADR states that CodexProjectionStale fires before activation, but the rule explicitly gates on optional==0, correctly implementing the staged-seat design.
-- Remaining coverage includes CAS conflicts, external version changes, destroyed documents, first-projection vault failures, and parameter-loss request paths.
+<!-- codex-impl-review-status: complete -->
 
 ## Findings
 
 ### Freshness fields defeat the unchanged-state comparison
 **Location:** `ansible/roles/dsh_codex_publisher/files/publish.py:118`
 **Severity:** important
-
-<!-- codex: The state comparison includes `last_success` and `expires_at` fields that are updated by `_carry_last_success()` on every run, even when credentials and vault version are unchanged. This causes identical credentials to generate new KV versions every minute, consuming retained history. The no-op test misses this because it calls `publish()` directly rather than through the full `run()` cycle. Fix: compare only digest/version for the unchanged decision, keep freshness metadata separate. -->
-
 ### Failed rotations advertise the unpublished token's expiry
 **Location:** `ansible/roles/dsh_codex_publisher/files/publish.py:174`
 **Severity:** important
-
-<!-- codex: `result['expires_at']` is assigned before publication succeeds. On HTTP error, `_carry_last_success()` restores persisted expiry only when result is None, so it retains the candidate token's expiry instead. A failed rotation to token with expiry 2000 will emit that expiry to metrics even though 1000 remains published. This suppresses CodexProjectionStale until the real token actually expires, while CodexProjectionFailing correctly fires. The existing failure test uses identical tokens across runs, hiding the defect. Fix: assign candidate expiry after successful publication, or always restore persisted expiry on failure. -->
-
 ### Device-flow regression test never reads production ESO template
 **Location:** `scripts/tests/integration/test_litellm_chatgpt_route_contract.py:110`
 **Severity:** important
-
-<!-- codex: The test's SENTINEL_EXPIRES_AT and PLACEHOLDER_AUTH are hard-coded rather than derived from litellm-chatgpt-eso.yaml. Removing `default`, `toJson`, or the sentinel from the template would leave the test passing with the old fixture. This contradicts the workflow's stated purpose of asserting the rendered file's shape. Workflow filters already include the ESO manifest, so a template-only change runs the test with stale fixtures. Fix: derive the fixture from a checked production-template rendering via sprig evaluation, and assert the mount options (optional: false, readOnly, no subPath). -->
-
 ### Root metrics writer follows a predictable temporary pathname
 **Location:** `ansible/roles/dsh_codex_publisher/files/publish.py:97`
 **Severity:** important
-
-<!-- codex: `_write_atomic()` opens `<path>.tmp` with O_CREAT | O_TRUNC, follows symlinks, and calls pathname-based chmod(). The publisher runs as root; the collector directory (pr_reviewer/tasks/main.yml:51) is mode 0775 (group-writable). An attacker in that group can pre-position a symlink at the temp path, redirecting root's truncation or chmod to an arbitrary target. ProtectSystem=strict limits destinations but the publisher's state directory is writable. Fix: use exclusive temp-file creation (O_EXCL, mkstemp-style) and descriptor-based fchmod(), not pathname-based. The final rename remains atomic for readers; temporary creation must be safe. -->
-
 ### ADR incorrectly promises expiry alerts before activation
 **Location:** `docs/decisions/0026-second-chatgpt-subscription-through-litellm.md:198`
 **Severity:** nit
-
-<!-- codex: The ADR risks section states "CodexProjectionStale fires at 24 h left" before PR 3. The rule explicitly requires `and on (persona, instance) dsh_codex_projection_optional == 0`, and its fixture verifies optional seats remain silent. The implementation correctly implements the optional-seat gate. The contradictory claim was copied from the plan's risks section. Fix: correct the ADR text to clarify that stale-projection alerts only fire for active (non-optional) seats. -->
-
 ### Remaining verification gaps
 
 **Coverage not exercised:** CAS version conflicts, external vault version changes with unchanged credentials, soft-deleted/destroyed documents, state-file I/O failures, vault HTTP error on first projection followed by successful second, request parameters `prompt_cache_key` and `parallel_tool_calls` (documented loss, not exercised in tests).
