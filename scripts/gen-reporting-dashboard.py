@@ -151,9 +151,11 @@ def _ov(name, props):
 
 
 def table(title, x, y, w, h, targets, rename, exclude, overrides, by="id", order=None, cell_height="sm",
-          filterable=True):
+          filterable=True, sort=None):
     """Several instant queries outer-joined on the `by` label into one row per key. `order` lists
-    the ORIGINAL column names (before rename) left to right; columns it omits keep their place."""
+    the ORIGINAL column names (before rename) left to right; columns it omits keep their place.
+    `sort` names the (renamed) column the rows are sorted by: the join keeps Prometheus's series
+    order, which is not sorted - the codex seats came out a, c, b (screenshot, 2026-09-19)."""
     return {
         "id": _nid(), "type": "table", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
@@ -166,7 +168,7 @@ def table(title, x, y, w, h, targets, rename, exclude, overrides, by="id", order
             {"id": "organize", "options": {"excludeByName": {k: True for k in exclude},
                                            "renameByName": rename,
                                            "indexByName": {n: i for i, n in enumerate(order or [])}}},
-        ],
+        ] + ([{"id": "sortBy", "options": {"sort": [{"field": sort, "desc": False}]}}] if sort else []),
         "targets": [{"refId": t[0], "datasource": _ds(), "expr": t[1], "format": "table", "instant": True}
                     for t in targets],
     }
@@ -342,7 +344,7 @@ def seat_block(persona, name, y, tiers, tier_map, windows, serves=True, capacity
         # target (H): a seat whose probe is failing still gets its account named.
         table(f"{name} seats", 0, y + 4, 24, 6, targets=targets, by="seat", order=order, rename=rename,
               exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, len(targets) + 1)],
-              overrides=overrides, cell_height="sm", filterable=False),
+              overrides=overrides, cell_height="sm", filterable=False, sort="Seat"),
         # ONE ROW PER ACCOUNT, over time: what it could serve, or parked.
         state_timeline(capacity_title or f"{name} seat capacity — best tier each account can serve",
                        0, y + 10, 24, 5, [bt + " * on(seat) group_left(email) " + se],
