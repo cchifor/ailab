@@ -243,6 +243,19 @@ class Publishing(unittest.TestCase):
         self.assertIn('dsh_codex_projection_token_expires_at_seconds{document="dsh/credentials"} 1000', text)
         self.assertIn('dsh_codex_projection_last_success_timestamp_seconds{document="litellm/chatgpt"} 200', text)
 
+    def test_textfile_expiry_is_the_published_tokens_not_the_locally_renewed_one(self):
+        # Run 1 publishes a token expiring at 1000. Run 2 reads a RENEWED token (2000) but the
+        # vault refuses the PATCH: the consumers still hold the 1000 token, and the metric must
+        # say so -- reporting 2000 would silence CodexProjectionStale on a projection that never
+        # reached anyone (workflow verify, PR 2).
+        self._run(config(), both_seats, now=100)
+        self.vault = FakeVault(self, fail_path='dsh/credentials', fail_status=500)
+        rc, _ = self._run(config(), lambda p: auth(expires=2000) if 'codexrun2' in p else auth('realjaynesage@gmail.com'), now=200)
+        self.assertEqual(rc, 1)
+        text = self.textfile.read_text()
+        self.assertIn('dsh_codex_projection_token_expires_at_seconds{document="dsh/credentials"} 1000', text)
+        self.assertNotIn('dsh_codex_projection_token_expires_at_seconds{document="dsh/credentials"} 2000', text)
+
     def test_textfile_for_a_skipped_optional_seat_reads_not_ok_but_optional(self):
         def read_auth(path):
             if 'codexrun4' in path:

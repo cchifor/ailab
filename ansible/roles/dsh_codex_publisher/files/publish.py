@@ -171,8 +171,11 @@ def run(config, approle, now, state_path=STATE, read_auth=None, textfile=None):
             except FileNotFoundError:
                 raise SeatAbsent()
             fields = project(auth, email, now, projection.get('prefix', 'DSH_CODEX'))
-            result['expires_at'] = int(fields[projection.get('prefix', 'DSH_CODEX') + '_EXPIRES_AT'])
             publish(config, login(config, approle), fields, document, state_path)
+            # Recorded only AFTER the vault accepted it (or confirmed it unchanged): the metric is
+            # the exp of the token the CONSUMERS have, so a run that read a freshly renewed token
+            # and then failed to publish it must keep reporting the previous, still-served expiry.
+            result['expires_at'] = int(fields[projection.get('prefix', 'DSH_CODEX') + '_EXPIRES_AT'])
             result['ok'] = True
             result['last_success'] = int(now)
         except SeatAbsent:

@@ -176,8 +176,10 @@ spec:
 #                             Host authorization and sudo scope: docs/runbooks/dsh.md.
 #   DSH_CODEX_ACCESS_TOKEN    native openai-codex provider; access-only projection of reviewer-2
 #                             seat B. The reviewer owns refresh; its publisher patches this field.
-#   DSH_CODEX_ACCOUNT_EMAIL, DSH_CODEX_EXPIRES_AT
-#                             projection identity and expiry metadata, never refresh credentials.
+#   DSH_CODEX_ACCOUNT_ID, DSH_CODEX_ACCOUNT_EMAIL, DSH_CODEX_EXPIRES_AT
+#                             projection identity (the ChatGPT account id, a JWT claim -- added
+#                             2026-09-19 so every projection carries one field set, ADR 0026) and
+#                             expiry metadata, never refresh credentials. Nothing in dsh reads the id.
 # Whatever else lands here is readable by the agent, which is why the document must hold only
 # credentials dsh is meant to have (see the volume comment in deployment.yaml).
 apiVersion: external-secrets.io/v1
