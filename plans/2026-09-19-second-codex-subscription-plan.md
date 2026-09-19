@@ -1,5 +1,12 @@
 # A second ChatGPT subscription (realjaynesage) for GPT-6 Astra: LiteLLM `chatgpt/` route, a named DSH provider, reviewer-2 seat d
 
+## Codex Review
+
+- Both Round 1 pushbacks are accepted: a uniform projection field set is reasonable, and the documented proxy discovery behavior does not require a new caller-isolation project. Both marker pairs are removed.
+- Publisher metrics need systemd write access, exporter-readable permissions, and detection of a stopped publisher; publisher success alone cannot establish downstream credential freshness.
+- The recovery sequence must restore the existing DSH Kubernetes auth role before the unchanged DSH provision Job can succeed.
+- Extend CI path coverage and test credential replacement through an already-running Router, so the device-flow guard and token reload behavior remain protected.
+
 ## Context
 
 DSH's GPT-6 Astra route is the native `openai-codex` provider (`kubernetes/apps/apps/dsh/settings.seed.yaml`),
@@ -106,8 +113,6 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   `<prefix>_ACCESS_TOKEN`, `<prefix>_ACCOUNT_ID`, `<prefix>_ACCOUNT_EMAIL`, `<prefix>_EXPIRES_AT` by CAS
   PATCH into its own document with its own state digest (the account id, a UUID JWT claim, is what
   LiteLLM's auth file wants beside the token; it is added to the DSH document too, for symmetry).
-  <!-- codex: Adding account_id to seat b solely for symmetry is unnecessary and increases scope. -->
-  <!-- opus-pushback: One field set for every projection is the smaller change: project() has one code path and one test contract instead of a per-prefix field switch, and the value is a non-secret JWT claim that the reviewer dashboard already exports (`account.uuid`); the cost is one CAS PATCH adding one file under /dsh-credentials that nothing reads. -->
   Failure semantics per projection, each isolated from the others: wrong email, ≤5 min left, or a
   missing account id → refused (as today); an ABSENT auth file is a logged skip ONLY when the projection
   is `optional: true` (seat d until PR 3 activates it) and a failure otherwise; an unreadable or
@@ -126,10 +131,13 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   reviewer-2 (the `pr_reviewer_textfile` directory the reviewbot metrics already use) with, per
   projection, `dsh_codex_projection_ok{document,email}` (1/0), `dsh_codex_projection_token_expires_at_seconds{document}`
   (the JWT expiry it last published) and `dsh_codex_projection_last_success_timestamp_seconds{document}`.
+  <!-- codex: round-2: The existing publisher unit has ProtectSystem=strict without a writable collector path and UMask=0077, so the new textfile cannot be written and a normal file creation would leave it unreadable by node_exporter. Add a narrow ReadWritePaths exception and explicit readable mode for a separate .prom file beside pr_reviewer_textfile, then verify an actual exporter scrape under the installed unit. -->
   One rule in `kubernetes/apps/infrastructure/monitoring/reviewbot-rules.yaml`, `CodexProjectionStale`:
   a required projection with `ok == 0` for 30 m, or a published token with less than 24 h left — the
   reviewer's own login can be healthy while the publisher, ESO or kubelet fails, and this is the
   signal that tells those apart. The textfile is written atomically (temp + rename) like reviewbot's.
+  <!-- codex: round-2: A stopped timer or a process killed before writing metrics leaves the previous textfile scrapeable with ok=1, so this rule misses publisher failure until the token approaches expiry. Alert on stale or absent heartbeat/success timestamps, advance success on verified unchanged runs, and add promtool cases for stopped publication and a missing textfile. -->
+  <!-- codex: round-2: Publisher success and expiry describe the OpenBao copy; ESO or kubelet can retain an old token while both publisher metrics stay healthy. Monitor ESO status/freshness separately and either observe consumer token expiry or explicitly document the remaining mounted-token blind spot instead of claiming this rule detects it. -->
 - **reviewer-2 seat d, staged**: new role var `pr_reviewer_llm_seats_staged` (default `[]`) —
   provisioned like a seat (user, 0700 `~/.codex`, model pin, sudoers) but NOT rendered into
   `config.json`, so reviewbot never sees it. `pr_reviewer_seats_effective` = active list (or the legacy
@@ -156,8 +164,7 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   subscription only. `mode: responses` keeps it out of the generated Open WebUI Local group and the
   dsh-litellm list; like every other route on this proxy it stays discoverable through Open WebUI's
   master-key connection under External (chat-completions through this provider is unverified for this
-  model). <!-- codex: Open WebUI lacks model allowlists and uses the LiteLLM master key. Excluding the model from generated lists does not exclude it from /v1/models or prevent calls. This contradicts the stated non-goal and exposes the unverified chat-completions path. Define intended callers and enforce that boundary. Verify discovery and access using each consumer's credentials. -->
-  <!-- opus-pushback: That exposure class already exists for every route on this proxy — the paid gpt-6-astra, the gpt-5.x tier, the Anthropic routes are all discoverable in Open WebUI's External connection under the one master key (the `hidden` comment in litellm.yaml records this as accepted), and the estate has no per-caller model allowlist to enforce; inventing one (virtual keys per consumer) is a separate project. What this plan does instead: the non-goal is reworded to say what is true (discoverable, unverified), and the chat-completions path is exercised once after the login so that a user who picks it in Open WebUI either gets a working model or an honest 4xx — recorded either way. -->
+  model).
   Regenerate `checksum/config` with `scripts/gen-litellm-consumers.py --write`.
 - **Offline route contract for the new route**, in CI (`scripts/tests/integration/test_litellm_chatgpt_route_contract.py`,
   added to `litellm-route-contract.yaml`'s docker step — the pinned image, network disabled, sockets
@@ -170,6 +177,8 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   malformed file each make LiteLLM attempt `auth.openai.com` — asserted as the denied attempt — which
   documents in an executable form why the template must always render (a); (d) upstream 401 and 429
   map to `AuthenticationError` / `RateLimitError` in seconds.
+  <!-- codex: round-2: Updating only the docker step leaves the workflow's current push and pull_request path filters blind to changes confined to litellm-chatgpt-eso.yaml or the new contract test. Add both paths so subsequent template or test changes actually run the device-flow regression checks. -->
+  <!-- codex: round-2: These startup/error cases do not prove that an already-constructed Router switches credentials after an atomic auth.json replacement. Add placeholder-to-token-A-to-token-B calls through the same Router and assert the updated outbound bearer/account headers with no OAuth or restart; checking mounted files alone cannot detect a cached credential. -->
 - **DSH** (`settings.seed.yaml`, `deployment.yaml`): provider `openai-codex-realjaynesage`, displayName
   `OpenAI Codex (realjaynesage)`, `api: openai-responses`, `baseURL: http://litellm.ai.svc.cluster.local:4000/v1`,
   `apiKeyEnv: LITELLM_API_KEY`, `transport: sse`, one model `gpt-6-astra-realjaynesage` (name
@@ -201,6 +210,7 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   secret-id into `/etc/dsh-codex-publisher/approle.json`; (3) the publisher's next minute fills both
   documents — it can only PATCH, so (1) must precede it, and a soft-deleted document is refused until
   an operator `kv undelete`s or the Job's loud-failure branch is resolved;
+  <!-- codex: round-2: The unchanged openbao-dsh-provision Job aborts if auth/kubernetes/role/af-app-dsh is absent and seeds only DSH_OPENBAO_CANARY, so these Jobs alone cannot perform the stated post-wipe reconstruction. Restore that DSH auth role before running its Job and test recovery with both application roles initially absent, letting the publisher add the DSH_CODEX fields afterward. -->
   `docs/runbooks/openbao-estate-credentials.md` access paragraph (a second ESO store, `af-app-litellm`,
   reads one non-estate path).
 - **Apply after merge** (WSL, `ANSIBLE_CONFIG`): `ansible-playbook reviewers.yml -l reviewer-2 -t seats,dsh-codex`
