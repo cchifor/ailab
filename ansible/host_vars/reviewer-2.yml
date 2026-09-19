@@ -12,10 +12,11 @@ pr_reviewer_llm_sudo_user: codexrun
 # previously visible only by SSHing to this host.
 journal_ship_enabled: true
 # ---- seat rotation (ADR 0024, plans/2026-09-16-codex-seat-rotation-plan.md) ----
-# THREE seats, one per distinct ChatGPT account, each verified by tokens.account_id at the time
-# it was added — cfdea639… (seat a, shared with the six dev agents), 9c8a8cfb… (seat b) and
-# 11c52fea… (seat c). All three were provisioned with `codex login --device-auth`, which is the
-# headless flow and is absent from `codex login --help` at 0.153.4.
+# FOUR seats, one per distinct ChatGPT account, each verified by tokens.account_id at the time
+# it was added — cfdea639… (seat a, shared with the six dev agents), 9c8a8cfb… (seat b),
+# 11c52fea… (seat c) and 841dae14… (seat d, 2026-09-19). All four were provisioned with
+# `codex login --device-auth`, which is the headless flow and is absent from `codex login --help`
+# at 0.153.4.
 # Distinctness is not a convention here, it is enforced: resolve_seats() reads each seat's
 # account_id at startup and COLLAPSES duplicates, because rotating inside one account is the
 # doomed-retry loop the park exists to prevent. A fourth seat sharing an existing account would
@@ -32,12 +33,12 @@ pr_reviewer_llm_seats:
   - { name: a, sudo_user: codexrun }
   - { name: b, sudo_user: codexrun2 }
   - { name: c, sudo_user: codexrun3 }
-# Seat d (realjaynesage@gmail.com, ADR 0026) is STAGED: its user exists and its projection below is
-# configured, but reviewbot does not serve on it until its login is installed -- then it moves up
-# into the list above and its projection loses `optional`. Provisioned by `-t seats`; the login is
-# the operator ceremony in docs/runbooks/dsh.md § Codex subscriptions.
-pr_reviewer_llm_seats_staged:
+  # Seat d (realjaynesage@gmail.com, ADR 0026): staged on 2026-09-19, activated once its device-auth
+  # login was installed as codexrun4 -- the hourly usage probe now renews its token, which is what
+  # keeps the LiteLLM chatgpt/ projection fresh. Last in the sticky order, so reviews reach it only
+  # when a, b and c are all spent.
   - { name: d, sudo_user: codexrun4 }
+pr_reviewer_llm_seats_staged: []
 # The usage watchdog, hourly, as on reviewer-1: reviewbot runs codex-usage.py AS each seat, which
 # asks the CLI's own app server (`codex app-server`, account/rateLimits/read - no model call, no
 # quota) for the account's windows, parks and unparks seats from the API's percent/resets_at,
@@ -50,7 +51,7 @@ pr_reviewer_usage_poll_s: 3600
 # projection per seat that feeds something (ansible/roles/dsh_codex_publisher/files/publish.py):
 #   seat b -> af/dsh/credentials DSH_CODEX_*   dsh's native openai-codex provider
 #   seat d -> af/litellm/chatgpt CHATGPT_*     LiteLLM's chatgpt/ provider, via ESO (ADR 0026)
-# `optional: true` on seat d until it is activated (see pr_reviewer_llm_seats_staged above).
+# Both projections are REQUIRED: an absent auth file on either is a failure the alerts see.
 dsh_codex_publisher:
   address: https://openbao.lan.chifor.me:30820
   textfile: /var/lib/prometheus/node-exporter/dsh-codex-publisher.prom
@@ -63,4 +64,3 @@ dsh_codex_publisher:
       email: realjaynesage@gmail.com
       kv_path: litellm/chatgpt
       prefix: CHATGPT
-      optional: true

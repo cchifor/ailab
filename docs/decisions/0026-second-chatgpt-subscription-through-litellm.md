@@ -12,6 +12,11 @@ signals); then the activation change after the operator's login.
 **Relates to:** ADR 0024 (the reviewer-2 Codex seats — this adds seat d), ADR 0020 (access-only
 projections — the shape every credential here takes), ADR 0021 (credential tiering — the litellm
 pod gets a rendered file, never a vault identity).
+**Activated 2026-09-19 (PR 3):** after the operator's device-auth login as `codexrun4` (account
+`841dae14…`, plan `prolite`, 0 % of its weekly window), the publisher's first projection landed in
+`af/litellm/chatgpt` and the route served a 200; seat d moved into `pr_reviewer_llm_seats`, its
+projection is required, all four seats are served, and the staged-seat window described below is
+closed.
 
 ## Context
 
@@ -206,10 +211,25 @@ projections everywhere, exactly the shape seat b already has.** The refresh toke
   dsh's Astra route, the same arrangement seat b has.
 - **Discoverability is the proxy's, unchanged.** `mode: responses` keeps the route out of the
   generated Open WebUI Local group and the dsh-litellm list, but like every other route on this
-  proxy it is discoverable through Open WebUI's master-key connection under External; the
-  chat-completions path for `chatgpt/gpt-6-astra` is unverified (only the Responses path has a
-  consumer, dsh) and the post-login check records what a user gets there. There is no per-caller
-  model allowlist on the proxy; adding one is a separate project.
+  proxy it is discoverable through Open WebUI's master-key connection under External. The
+  chat-completions path for `chatgpt/gpt-6-astra` was measured after the login (2026-09-19):
+  `stream: true` works (200, model id echoed, 2.8 s); `stream: false` is a 500 after the router's
+  retries, because the provider forces streaming upstream and chatgpt.com's `response.completed`
+  carries an empty `output`, which LiteLLM's chat-to-Responses bridge rejects ("Unknown items in
+  responses API response: []"). Open WebUI's chat turn streams, so a user under External gets an
+  answer; its non-streaming task-model calls must never be pointed at this route. Recorded on the
+  route in `litellm.yaml`. There is no per-caller model allowlist on the proxy; adding one is a
+  separate project.
+- **Two dsh-side defects surfaced on the first in-app turns and are fixed by PR 3** (measured in
+  a live session, each fix proven before it was codified). A declared `"off": null` effort left
+  the adapter's level map entry undefined, so a fresh session sent `reasoning.effort: "none"`,
+  which the backend refuses for this model — every turn 400'd until the user picked an effort;
+  the row is gone and `reasoning: medium` is the route default. And the generic Responses adapter
+  omits `strict` on function tools, so the backend defaulted to strict and constrained decoding
+  filled every optional property — each bash call carried `sandbox_permissions: "workspace-write"`
+  and dsh refused it as a non-widening escalation, so no tool ever ran; `compat.supportsStrictMode:
+  true` now, as the native codex adapter already defaults. Neither is visible on the native
+  `openai-codex` provider, whose catalog entry carries both behaviours built in.
 - `chatgpt/gpt-6-astra` is absent from LiteLLM's price map — cost logging warns, routing is
   unaffected.
 - **Two documents, two prefixes, one publisher, one policy.** `af/dsh/credentials.DSH_CODEX_*`
