@@ -1,0 +1,73 @@
+#!/bin/sh
+# A fake `bao` for exercising chatgpt-provision-job.yaml's provision.sh end to end.
+#
+# Behaviour is driven entirely by FAKE_* environment variables so a test can put the vault into a
+# specific state. Every invocation is appended to $FAKE_LOG, which is what lets a test assert the
+# thing that matters most: that a guard failure never reaches `bao policy write`.
+#
+# Unlike the dsh shim this one keeps state PER POLICY NAME, because the Job owns two policies:
+#   $FAKE_STATE/policy-<name>          the pre-existing live document (a test writes it)
+#   $FAKE_STATE/written-policy-<name>  what the script wrote during the run; `policy read` prefers
+#                                      it so the script's read-back sees its own output
+set -u
+printf '%s\n' "$*" >> "$FAKE_LOG"
+
+case "$1 ${2:-}" in
+  "token lookup")
+    [ "${FAKE_TOKEN_FAIL:-0}" = 1 ] && exit 1
+    exit 0
+    ;;
+  "policy list")
+    [ "${FAKE_LIST_FAIL:-0}" = 1 ] && exit 1
+    printf '%s\n' "${FAKE_POLICY_LIST:-[\"af-app-litellm\",\"default\",\"dsh-codex-publisher\"]}"
+    exit 0
+    ;;
+  "policy read")
+    name=$3
+    if [ -f "$FAKE_STATE/written-policy-$name" ]; then
+      cat "$FAKE_STATE/written-policy-$name"; exit 0
+    fi
+    [ "${FAKE_READ_FAIL:-0}" = 1 ] && exit 1
+    [ -f "$FAKE_STATE/policy-$name" ] || exit 1
+    cat "$FAKE_STATE/policy-$name"
+    exit 0
+    ;;
+  "policy write")
+    name=$3
+    cat > "$FAKE_STATE/written-policy-$name"
+    exit 0
+    ;;
+  "write auth/kubernetes/role/af-app-litellm")
+    [ "${FAKE_ROLE_WRITE_FAIL:-0}" = 1 ] && exit 1
+    printf '1' > "$FAKE_STATE/role-written"
+    exit 0
+    ;;
+  "read -field=token_policies")
+    # The real CLI prints a bracketed, space-separated list on one line with NO trailing newline.
+    [ -f "$FAKE_STATE/role-written" ] && [ -z "${FAKE_ROLE_POLICIES:-}" ] && { printf '[af-app-litellm]'; exit 0; }
+    [ "${FAKE_ROLE_MISSING:-0}" = 1 ] && exit 1
+    printf '[%s]' "${FAKE_ROLE_POLICIES:-af-app-litellm}"
+    exit 0
+    ;;
+  "kv get")
+    # A SOFT-DELETED current version returns exit 0 with "data": null -- the real CLI's behaviour,
+    # verified against the live vault. The script must not read that as healthy.
+    [ "${FAKE_KV_DELETED:-0}" = 1 ] && {
+      printf '{\n  "data": {\n    "data": null,\n    "metadata": {\n      "deletion_time": "2026-01-01T00:00:00Z"\n    }\n  }\n}\n'
+      exit 0
+    }
+    [ -f "$FAKE_STATE/kv-created" ] && { printf '{\n  "data": {\n    "data": {}\n  }\n}\n'; exit 0; }
+    [ "${FAKE_KV_EXISTS:-0}" = 1 ] && { printf '{\n  "data": {\n    "data": {}\n  }\n}\n'; exit 0; }
+    exit 1
+    ;;
+  "kv put")
+    # -cas=0 fails once version history exists -- measured exit 2 against the live vault. A
+    # soft-deleted path HAS history, so it must fail here too.
+    [ "${FAKE_KV_DELETED:-0}" = 1 ] && exit 2
+    [ "${FAKE_KV_PUT_FAIL:-0}" = 1 ] && exit 1
+    printf '1' > "$FAKE_STATE/kv-created"
+    exit 0
+    ;;
+esac
+echo "fake bao: unhandled invocation: $*" >&2
+exit 99

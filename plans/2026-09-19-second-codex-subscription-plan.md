@@ -1,5 +1,13 @@
 # A second ChatGPT subscription (realjaynesage) for GPT-6 Astra: LiteLLM `chatgpt/` route, a named DSH provider, reviewer-2 seat d
 
+## Codex Review
+
+- **Route isolation and access control gaps**: Open WebUI lacks model allowlists and will discover the unverified chat-completions path; exclusion from generators is not access control. Enforce model boundaries per caller identity.
+- **Auth file robustness**: Device-flow guard assumes valid JSON with nonempty string token and numeric expiry; LiteLLM treats read/parse failures as absent credentials and enters device flow even on read-only mounts. Serialize safely and test malformed/unreadable/missing-key/placeholder/expired cases.
+- **ESO and bootstrap schema**: Template validation probe exercises only the populated canary path, not missing keys or absent values. Test complete production template with incomplete fields and verify `ai` SA/role/CA chain. Existing-document recovery is not tested.
+- **Credential publication visibility and recovery**: Absence skip applies to all projections; a deleted credential would leave the service successful while tokens age. Recovery incompletely specified—publisher lacks write permission on deleted docs. Clarify ownership and test ordered reconstruction.
+- **Timeout and failure mode gaps**: Multi-projection execution with 90-second `TimeoutStartSec` and three-per-projection HTTP operations risks exceeding budget. Parameter loss in Responses transform is unrecorded. Recovery and rollback paths are incomplete.
+
 ## Context
 
 DSH's GPT-6 Astra route is the native `openai-codex` provider (`kubernetes/apps/apps/dsh/settings.seed.yaml`),
@@ -66,7 +74,7 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   today), DESIRED = the heredoc. Any other document refuses before `policy write`.
 - **Writes k8s auth role `af-app-litellm`** (`bound_service_account_names=litellm-eso`,
   `bound_service_account_namespaces=ai`, `token_policies=af-app-litellm`, `token_ttl=1h`,
-  `alias_name_source=serviceaccount_uid` — the shape `af-app-dsh` has live). Written, not merely
+  `alias_name_source=serviceaccount_uid` — the shape `af-app-dsh` has live). <!-- codex: Idempotent role rewrite does not protect against drift on ServiceAccount bindings; recurring Job can overwrite emergency restrictions. Define ownership and test downstream authentication for litellm-eso plus rejection of other identities. --> Written, not merely
   asserted as the dsh Job does, because no ceremony ever created this one; an identical rewrite is
   idempotent and the values are all in this file.
 - **Creates `af/litellm/chatgpt` ONCE** (`-cas=0`) carrying EVERY key the ESO template will reference,
@@ -77,7 +85,7 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   no write on drift/unreadable/list-failure, role written with the policy, KV created once, soft-delete
   loud). `test_openbao_dsh_provision.py` keeps passing (that Job is untouched).
 - Verify live: Job `Succeeded`; `bao policy read af-app-litellm` / `dsh-codex-publisher` match;
-  `bao kv get -mount=af litellm/chatgpt` lists the keys (values never printed); `dsh-codex-publisher`
+  `bao kv list -mount=af litellm/chatgpt` lists the keys (values never printed); <!-- codex: Plain `bao kv get` displays values; use `list` or boolean validation whose output cannot contain tokens. --> `dsh-codex-publisher`
   keeps publishing ("unchanged" in its journal) — the existing projection is unaffected.
 
 ### PR 2 — publisher, reviewer staging, LiteLLM, DSH, monitoring, docs (after PR 1's Job is green)
@@ -87,9 +95,10 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   `{address, projections: [{auth_path, email, kv_path, prefix}]}`. Each projection publishes
   `<prefix>_ACCESS_TOKEN`, `<prefix>_ACCOUNT_ID`, `<prefix>_ACCOUNT_EMAIL`, `<prefix>_EXPIRES_AT` by CAS
   PATCH into its own document with its own state digest (the account id, a UUID JWT claim, is what
-  LiteLLM's auth file wants beside the token; it is added to the DSH document too, for symmetry).
+  LiteLLM's auth file wants beside the token; it is added to the DSH document too, for symmetry). 
+  <!-- codex: Adding account_id to seat b solely for symmetry is unnecessary and increases scope. -->
   Rules per projection: wrong email / ≤5 min left → refused as today; an ABSENT auth file is a logged
-  skip ("seat not logged in yet") so seat b keeps publishing while seat d waits; any other failure is
+  skip ("seat not logged in yet") so seat b keeps publishing while seat d waits; <!-- codex: Absence skip applies to both active and staged projections. A deleted credential leaves the service successful while tokens age. Make absence acceptable only for explicitly staged projections; required projections must fail while allowing others to continue. Test missing, malformed, wrong-account, and permission-denied sources independently. --> any other failure is
   logged and the run exits 1 after every projection ran. host_vars `reviewer-2.yml`: seat b →
   `dsh/credentials` prefix `DSH_CODEX`; seat d (`/home/codexrun4/.codex/auth.json`,
   `realjaynesage@gmail.com`) → `litellm/chatgpt` prefix `CHATGPT`.
@@ -102,10 +111,11 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   `ailab-ca`), SecretStore `litellm-store` (k8s auth role `af-app-litellm`), ExternalSecret
   `litellm-chatgpt-auth` (refresh 5m, `dataFrom.extract` `litellm/chatgpt`, template v2 rendering ONE
   key `auth.json` =
-  `{"access_token": "<CHATGPT_ACCESS_TOKEN | default "unconfigured">", "account_id": "<CHATGPT_ACCOUNT_ID | default "unconfigured">", "expires_at": 4102444800}`).
+  `{"access_token": "<CHATGPT_ACCESS_TOKEN | default "unconfigured">", "account_id": "<CHATGPT_ACCOUNT_ID | default "unconfigured">", "expires_at": 4102444800}`). 
+  <!-- codex: Template probe exercises only populated canary, not missing keys or absent values. Test complete production template with empty and missing fields. Verify the actual ai ServiceAccount/role/CA chain. The dsh-store probe cannot validate new auth paths. -->
   The far-future `expires_at` and the non-empty placeholder are the guard against finding 2: LiteLLM
   never enters the device flow — a stale or not-yet-published token fails FAST upstream (401) instead of
-  freezing a worker or a rollout. The real expiry stays visible as `CHATGPT_EXPIRES_AT` in OpenBao and
+  freezing a worker or a rollout. <!-- codex: Guard assumes valid JSON with nonempty string token and numeric expiry; LiteLLM treats read/parse failures as absent credentials and enters device flow even on read-only mounts, affecting every model in the shared process. Serialize JSON safely and test malformed, unreadable, missing-key, placeholder, and expired-token cases against the pinned image before deploying. A startup validator alone does not protect later file reads. --> The real expiry stays visible as `CHATGPT_EXPIRES_AT` in OpenBao and
   as the seat's login on the reviewer dashboard once activated.
 - **LiteLLM** (`kubernetes/apps/apps/ai/litellm.yaml`): env `CHATGPT_TOKEN_DIR=/chatgpt-auth`,
   `CHATGPT_DEFAULT_INSTRUCTIONS="You are a helpful assistant."` (DSH's own system prompt arrives as a
@@ -116,7 +126,7 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   A NEW model_name, not a second deployment of `gpt-6-astra`: least-busy across the paid API key and a
   subscription is not a policy anyone chose, and the DSH provider needs a name that maps to the
   subscription only. `mode: responses` also keeps it out of the generated Open WebUI / dsh-litellm lists
-  (chat-completions through this provider is unverified for this model). Regenerate `checksum/config`
+  (chat-completions through this provider is unverified for this model). <!-- codex: Open WebUI lacks model allowlists and uses the LiteLLM master key. Excluding the model from generated lists does not exclude it from /v1/models or prevent calls. This contradicts the stated non-goal and exposes the unverified chat-completions path. Define intended callers and enforce that boundary. Verify discovery and access using each consumer's credentials. --> Regenerate `checksum/config`
   with `scripts/gen-litellm-consumers.py --write`.
 - **DSH** (`settings.seed.yaml`, `deployment.yaml`): provider `openai-codex-realjaynesage`, displayName
   `OpenAI Codex (realjaynesage)`, `api: openai-responses`, `baseURL: http://litellm.ai.svc.cluster.local:4000/v1`,
@@ -125,18 +135,18 @@ A breakglass Job `openbao-chatgpt-provision`, same shape and guards as `dsh-prov
   `reasoningEfforts` mirroring the catalog's gpt-6-astra map, `"off"` quoted — YAML 1.1 reads a bare
   `off` as false). seed-settings gains `DSH_PROVIDER=openai-codex-realjaynesage node /seed/reconcile-provider.js`.
 - **Monitoring**: `scripts/gen-reporting-dashboard.py` `SEAT_NAMES` += `d`; regenerate
-  `reporting-dashboard.yaml`. Alert rules are seat-count agnostic (checked).
+  `reporting-dashboard.yaml`. <!-- codex: Reviewer expiry metrics cannot detect broken downstream publication. The reviewer can refresh successfully while publisher auth, ESO sync, or kubelet projection fails. The dashboard then shows healthy login while LiteLLM uses an expired token. Add per-projection failure/freshness signals and verify actual mounted JWT expiry on both replicas. Exercise rotation without pod restarts and downstream sync failure. --> Alert rules are seat-count agnostic (checked).
 - **Docs**: ADR 0026 (why LiteLLM's provider and not a second native DSH route; the device-flow guard;
   the single-account limit; the subscription-use risk already accepted in the 2026-09-16 plan);
   `docs/runbooks/dsh.md` § Codex subscription rewritten for two seats / two documents;
   `docs/runbooks/dev-workers.md` seats table (c exists; d staged) and the staged-seat procedure;
   `docs/runbooks/openbao-recovery.md` path classes gain **PUBLISHER-OWNED** (`dsh/credentials.DSH_CODEX_*`,
   `litellm/chatgpt.*`: not seeded, restored by the publisher's next minute once its AppRole secret-id
-  is re-minted); `docs/runbooks/openbao-estate-credentials.md` access paragraph (a second ESO store,
+  is re-minted); <!-- codex: Recovery and rollback are incomplete. Re-minting a secret-id alone cannot restore a wiped AppRole, policy, or missing KV document; the publisher has PATCH-only permission and refuses deleted documents. Document ordered reconstruction and test it. Specify rollback: removing the DSH provider from Git does not remove its persisted PVC block, and reverting the Job does not undo its OpenBao writes. Existing DSH_PROVIDER_REMOVE=1 support provides the removal mechanism. --> `docs/runbooks/openbao-estate-credentials.md` access paragraph (a second ESO store,
   `af-app-litellm`, reads one non-estate path).
 - **Apply after merge** (WSL, `ANSIBLE_CONFIG`): `ansible-playbook reviewers.yml -l reviewer-2 -t seats,dsh-codex`
   → `codexrun4` exists, the publisher config carries both projections (seat d logged as skipped until
-  the login). Flux rolls litellm (2 replicas, maxUnavailable 0) and dsh.
+  the login). <!-- codex: Multi-projection execution with 90-second TimeoutStartSec and three HTTP operations per projection can exceed the timeout budget before all projections finish. Sharing one login also needs AppRole token TTL (60-second documented) consideration. Specify bounded per-projection execution, authentication lifetime, and service timeout together; test slow operations and immediate exceptions. --> Flux rolls litellm (2 replicas, maxUnavailable 0) and dsh.
 
 ### Operator ceremony (human, after PR 2)
 
@@ -149,6 +159,8 @@ sudo install -o codexrun4 -g codexrun4 -m 0600 /home/c4/.seat4/.codex/auth.json 
 rm -rf /home/c4/.seat4                         # copies of one refresh-token family revoke each other
 sudo -n -u codexrun4 HOME=/home/codexrun4 /usr/local/lib/reviewbot/codex-usage.py   # ok:true, email realjaynesage
 ```
+
+<!-- codex: The ceremony can delete the only successful login after a failed copy. Sleeping ten seconds does not establish login completion, and unconditional cleanup follows install without checking success. The usage helper also exits zero on failure; its JSON must be inspected. Prefer logging in directly as the already-staged codexrun4 user. Otherwise pin CODEX_HOME and file credential storage, protect the scratch directory, wait for successful completion, and verify destination identity before deletion. Include the account's device-login prerequisite. -->
 
 The publisher's next minute publishes to `af/litellm/chatgpt`; ESO follows within 5 min; LiteLLM reads
 the file per request — nothing restarts.
@@ -206,5 +218,6 @@ and `reviewbot_llm_seat_info{seat="d",email="realjaynesage@gmail.com"}`.
 - If seat d is never activated (PR 3) its token is not renewed, the publisher stops updating after ~7
   days, and LiteLLM fails fast with 401 — visible, not silent, and self-healing on activation.
 - Not in scope: a second LiteLLM account (impossible in one process), DSH version bumps, moving seat b.
+- **Known Responses parameter loss is recorded without acceptance decision.** Advertising `maxTokens` does not make an outgoing `max_output_tokens` effective through the Responses transform. Likewise, `text` formatting constraints and `prompt_cache_key` disappear. <!-- codex: Define which limitations are acceptable and how unsupported requests are surfaced. Extend verification to a complete tool-result round trip, subsequent conversation turns, reasoning settings, cancellation, and upstream 401/429/stream failures—not just catalog presence and one successful turn. -->
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
