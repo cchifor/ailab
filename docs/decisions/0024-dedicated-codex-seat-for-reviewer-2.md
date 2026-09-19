@@ -171,3 +171,9 @@ not:
   paragraph above.
 - **Wait it out.** This is what the park already does, and it is correct behaviour; it is not a fix.
   At the current cadence it costs roughly half of every wall-clock day of automerge.
+
+**Amendment, 2026-09-19 (usage watchdog).** The codex seats' windows are read hourly through
+the CLI's own app server (`codex app-server`, `account/rateLimits/read`) by `codex-usage.py`,
+the twin of the claude probe: same document, same parks, same panels under `persona="codex"`.
+Until then the three subscriptions' state was invisible - on the day this landed they read
+97 %, 72 % and 100 % (rate_limit_reached) of their weekly windows.

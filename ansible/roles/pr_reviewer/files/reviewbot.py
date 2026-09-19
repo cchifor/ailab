@@ -1053,7 +1053,15 @@ def seat_home(seat):
 # credential and answers with the account identity and the usage windows, so the service user
 # never holds a seat's token to learn who the seat is - the same isolation _run_llm keeps.
 USAGE_PROBE = "/usr/local/lib/reviewbot/claude-usage.py"
+# The codex persona's twin (files/codex-usage.py): the CLI's own app server answers
+# account/rateLimits/read, no model call. Same document shape, so everything below is
+# persona-blind.
+CODEX_USAGE_PROBE = "/usr/local/lib/reviewbot/codex-usage.py"
 KEEPALIVE_PROMPT = "ok"
+
+
+def usage_probe_path():
+    return CODEX_USAGE_PROBE if CFG.get("llm_kind", "claude") == "codex" else USAGE_PROBE
 
 
 def seat_lock(name):
@@ -1068,9 +1076,9 @@ def probe_usage(seat, timeout=30):
     s = SEAT_BY_NAME.get(seat) if isinstance(seat, str) else seat
     user = (s or {}).get("sudo_user") or ""
     if user:
-        args = ["sudo", "-n", "-u", user, f"HOME={seat_home(s)}", USAGE_PROBE]
+        args = ["sudo", "-n", "-u", user, f"HOME={seat_home(s)}", usage_probe_path()]
     else:
-        args = [sys.executable, USAGE_PROBE]
+        args = [sys.executable, usage_probe_path()]
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:

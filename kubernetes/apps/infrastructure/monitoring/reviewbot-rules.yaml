@@ -512,8 +512,10 @@ spec:
               a setup-token answers 403 (no user:profile scope). Check
               `journalctl -u reviewbot | grep keepalive` and
               reviewbot_llm_seat_keepalive_failures_total, read the error with `sudo -n -u <seat
-              user> HOME=/home/<seat user> /usr/local/lib/reviewbot/claude-usage.py` on the host,
-              then re-login the seat with /home/c4/seat-login.sh (runbook, Seats on reviewer-1).
+              user> HOME=/home/<seat user> /usr/local/lib/reviewbot/<persona>-usage.py` on the
+              host, then re-login the seat: claude with /home/c4/seat-login.sh (runbook, Seats on
+              reviewer-1), codex with `codex login` as the seat user (runbook, Seats: the codex
+              persona).
         - alert: ReviewbotRateLimited
           expr: increase(reviewbot_llm_rate_limited_total[1h]) >= 3
           for: 10m

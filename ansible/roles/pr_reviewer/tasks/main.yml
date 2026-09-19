@@ -178,16 +178,16 @@
 # well as the role's `reviewbot` so a `-t seats` staging run leaves them in place BEFORE the
 # restart that first uses them - the same ordering the seat users and sudoers need. No restart
 # notify: reviewbot spawns both per invocation, so a new copy is live on the next job.
-# Installed on every host: harmless where llm_kind is codex, and one fewer conditional to
-# get wrong.
-- name: Install the claude seat helpers
+# Installed on every host, both personas' files: harmless where the other persona runs, and
+# one fewer conditional to get wrong. reviewbot picks the probe by llm_kind.
+- name: Install the seat helpers
   ansible.builtin.copy:
     src: "{{ item }}"
     dest: "/usr/local/lib/reviewbot/{{ item }}"
     owner: root
     group: root
     mode: "0755"
-  loop: [claude-seat.sh, claude-usage.py]
+  loop: [claude-seat.sh, claude-usage.py, codex-usage.py]
   tags: [seats]
 
 - name: Render reviewbot config
