@@ -222,7 +222,17 @@ def _usable(model):
             f'(1 - reviewbot_llm_seat_parked{{persona="claude"}}))')
 
 
-BEST_TIER = "max by (seat) (" + " or ".join(f"({_usable(m)} * {w})" for m, w in CLAUDE_TIERS) + ")"
+# Anchored on reviewbot_llm_seat_parked, which write_metrics emits for EVERY seat, zero
+# included: `(1 - x)` yields no series when x is absent, so a seat with a missing flag series
+# would silently rank one tier down, or vanish (reviewer-claude on ailab#788). With the anchor
+# such a seat reads `parked` - wrong on the safe side, and visible.
+BEST_TIER = ("max by (seat) (" + " or ".join(f"({_usable(m)} * {w})" for m, w in CLAUDE_TIERS)
+             + ' or (max by (seat) (reviewbot_llm_seat_parked{persona="claude"}) * 0))')
+
+# The info series, ONE per seat: during an account swap the old and new seat_info can overlap a
+# scrape, and a many-to-one join on `seat` then errors ("multiple matches") and blanks the
+# panel at the very moment it should explain the swap (reviewer-claude on ailab#788).
+SEAT_EMAIL = 'topk by (seat) (1, max by (seat, email) (reviewbot_llm_seat_info{persona="claude"}))'
 
 
 def _gauge_col(name, width=None):
@@ -604,7 +614,7 @@ panels += [
     # 7-unit panel with md cells, and 5 units clipped the third (screenshot review, 2026-09-19).
     table("Claude seats", 0, 163, 24, 6,
           targets=[
-              ("H", 'max by (seat, email) (reviewbot_llm_seat_info{persona="claude"})'),
+              ("H", SEAT_EMAIL),
               ("A", _seat_pct("session")),
               ("B", _seat_pct("weekly_all")),
               ("C", _seat_pct("weekly_fable")),
@@ -648,8 +658,7 @@ panels += [
     # ONE ROW PER ACCOUNT, over time: the best tier it could serve, or parked. Replaces twelve
     # red/green stripes per (seat, model) that read "opus free" on an account-parked seat.
     state_timeline("Seat capacity — best tier each account can serve", 0, 169, 24, 5,
-                   [BEST_TIER + ' * on(seat) group_left(email) max by (seat, email) '
-                    '(reviewbot_llm_seat_info{persona="claude"})'],
+                   [BEST_TIER + " * on(seat) group_left(email) " + SEAT_EMAIL],
                    ["{{seat}} · {{email}}"], TIER_MAP),
     # THE REASON, not just the rate. Everything above is numeric and can only say THAT a review
     # failed; this says which PR and why. Shipped by roles/journal_ship (Alloy -> loki-lan).
