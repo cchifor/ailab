@@ -12,6 +12,11 @@ signals); then the activation change after the operator's login.
 **Relates to:** ADR 0024 (the reviewer-2 Codex seats — this adds seat d), ADR 0020 (access-only
 projections — the shape every credential here takes), ADR 0021 (credential tiering — the litellm
 pod gets a rendered file, never a vault identity).
+**Activated 2026-09-19 (PR 3):** after the operator's device-auth login as `codexrun4` (account
+`841dae14…`, plan `prolite`, 0 % of its weekly window), the publisher's first projection landed in
+`af/litellm/chatgpt` and the route served a 200; seat d moved into `pr_reviewer_llm_seats`, its
+projection is required, all four seats are served, and the staged-seat window described below is
+closed.
 
 ## Context
 

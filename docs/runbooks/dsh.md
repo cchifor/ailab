@@ -283,7 +283,7 @@ Qwen routes keep using LiteLLM's ordinary routes and are not part of this.
 | seat | user / account | document (fields) | consumer |
 |---|---|---|---|
 | `b` | `codexrun2` / `realjaysage@gmail.com` | `af/dsh/credentials` (`DSH_CODEX_*`) | dsh's native `openai-codex` provider, **OpenAI Codex (realjaysage)** — unchanged since 2026-09-17 |
-| `d` | `codexrun4` / `realjaynesage@gmail.com` | `af/litellm/chatgpt` (`CHATGPT_*`) | LiteLLM's `chatgpt/` provider, route `gpt-6-astra-realjaynesage` → dsh's `openai-codex-realjaynesage` provider, **OpenAI Codex (realjaynesage)** (2026-09-19) |
+| `d` | `codexrun4` / `realjaynesage@gmail.com` | `af/litellm/chatgpt` (`CHATGPT_*`) | LiteLLM's `chatgpt/` provider, route `gpt-6-astra-realjaynesage` → dsh's `openai-codex-realjaynesage` provider, **OpenAI Codex (realjaynesage)** — logged in and activated 2026-09-19 |
 
 **Seat b → dsh, natively.** The provider key is `openai-codex`, with
 `apiKeyEnv: DSH_CODEX_ACCESS_TOKEN` and no explicit `api`: the installed catalog selects the Codex
@@ -392,7 +392,7 @@ the PUBLISHER-OWNED row of `docs/runbooks/openbao-recovery.md`.
 **Adding a seat that feeds a consumer** is the staged procedure in `docs/runbooks/dev-workers.md`
 § "Seats: the codex persona holds several subscriptions" — stage it, `-t seats,dsh-codex` with
 its projection `optional: true`, log in directly as its user, verify, then activate. Seat d's
-login is that ceremony:
+login was that ceremony (done 2026-09-19; kept here as the worked example):
 
 **Operator ceremony (seat d login).** Prerequisite: `realjaynesage@gmail.com` is a ChatGPT account
 with Codex access (device login is what the CLI offers a headless host). The login happens
@@ -412,8 +412,10 @@ sudo -n -u codexrun4 HOME=/home/codexrun4 /usr/local/lib/reviewbot/codex-usage.p
 The last command exits 0 either way; read its JSON: `"ok": true` and
 `"email": "realjaynesage@gmail.com"` are the check. The publisher's next minute publishes to
 `af/litellm/chatgpt`; ESO follows within 5 min; LiteLLM reads the file per request — nothing
-restarts. Activation (moving seat d into `pr_reviewer_llm_seats`, `optional: false` on its
-projection, `-t reviewbot,dsh-codex`) is a separate change after this ceremony.
+restarts. Activation (moving seat d into `pr_reviewer_llm_seats`, dropping `optional` from its
+projection, `-t reviewbot,dsh-codex`) followed the same day (ADR 0026, PR 3): both projections
+are now required, and seat d sits under the hourly probe and the `CodexProjection*` rules like
+seat b. No seat is staged any more; `pr_reviewer_llm_seats_staged` is `[]`.
 
 Check without showing tokens:
 
