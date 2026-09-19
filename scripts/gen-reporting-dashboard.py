@@ -302,12 +302,15 @@ def seat_block(persona, name, y, tiers, tier_map, windows, serves=True, capacity
     # State: 2 = the active seat, 1 = parked, 0 = free. "Parked" is NOTHING USABLE - the
     # account wall OR every tier parked - the same verdict the capacity timeline draws, so a
     # seat whose only model is parked can never read `free` here while the timeline says
-    # parked (reviewer-codex on ailab#790). best_tier is anchored per seat, so `or` fills
-    # the seats the active-seat series lacks. Login expires: the login's access-token expiry,
-    # relative ("in 5 hours"); a stamp that stays in the past is a login the keepalive could
-    # not renew (0 = setup-token, dropped).
-    targets += [("G", f'(max by (seat) (reviewbot_llm_active_seat_info{{{P}}}) * 2) '
-                      f'or ({bt} == bool 0)'),
+    # parked (reviewer-codex on ailab#790). And "active" needs something usable: reviewbot's
+    # active-seat marker falls back to the current seat when EVERY seat is parked, and `or`
+    # keeps its left side, so a parked seat read `● active` (codex cross-review of #790) - the
+    # `and` drops the marker for a seat with nothing usable. best_tier is anchored per seat,
+    # so the last term fills every seat the first lacks. Login expires: the login's
+    # access-token expiry, relative ("in 5 hours"); a stamp that stays in the past is a login
+    # the keepalive could not renew (0 = setup-token, dropped).
+    targets += [("G", f'((max by (seat) (reviewbot_llm_active_seat_info{{{P}}}) * 2) '
+                      f'and on(seat) ({bt} > 0)) or ({bt} == bool 0)'),
                 ("I", f'max by (seat) (reviewbot_llm_seat_credential_expires_at_seconds{{{P}}} > 0) * 1000')]
     if serves:
         targets.append(("J", bt))

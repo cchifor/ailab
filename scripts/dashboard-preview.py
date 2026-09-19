@@ -263,7 +263,9 @@ def check(a):
             ready = (all(t in byt for t in expected)
                      and all((x["content"] or x["graphic"]) and not x["loading"]
                              for t, x in byt.items() if not skip(t)))
-            sig = tuple(sorted((t, x["content"]) for t, x in byt.items()))
+            # The signature excludes --ignore'd panels too: a live logs panel changes its text
+            # every poll and would keep the row from ever settling (codex cross-review of #790).
+            sig = tuple(sorted((t, x["content"]) for t, x in byt.items() if not skip(t)))
             if ready and sig == prev:
                 settled = True
                 break
