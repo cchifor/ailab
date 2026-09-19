@@ -336,4 +336,4 @@ Verify `reviewbot_llm_seats_distinct{persona="codex"} == 4` and
 - Not in scope: a second LiteLLM account (impossible in one process), DSH version bumps, moving seat b,
   a per-caller model allowlist on the proxy.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
