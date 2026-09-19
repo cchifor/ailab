@@ -41,6 +41,7 @@ STATE = Path('/var/lib/dsh-codex-publisher/state.json')
 PROFILE_CLAIM = 'https://api.openai.com/profile'
 AUTH_CLAIM = 'https://api.openai.com/auth'
 HTTP_TIMEOUT_S = 20   # x3 operations x N projections must fit the unit's TimeoutStartSec
+ORPHAN_AGE_S = 300    # a temp file younger than this may belong to a concurrent writer; leave it
 
 
 class SeatAbsent(Exception):
@@ -106,9 +107,15 @@ def _write_atomic(path, text, mode=0o600):
     DESCRIPTOR (fchmod -- explicit because the unit's UMask=0077 would otherwise leave a 0600 file
     node_exporter cannot read), then rename, which is atomic for readers. A leftover temp from a
     crash would never be touched again (mkstemp names are fresh every run), so earlier orphans of
-    THIS target are swept before writing (#792 review)."""
+    THIS target are swept before writing (#792 review). The sweep assumes one writer at a time:
+    systemd serialises starts of the unit, so the only way to race it is a manual `publish.py`
+    beside a live timer tick, and a second writer's live temp would be a FileNotFoundError on
+    its rename. Temps younger than ORPHAN_AGE_S are therefore left alone (#793 review) -- a real
+    orphan is minutes old by the time the next tick sees it; a live one is seconds old."""
     for orphan in path.parent.glob(path.name + '.*.tmp'):
         try:
+            if time.time() - orphan.stat().st_mtime < ORPHAN_AGE_S:
+                continue
             orphan.unlink()
         except OSError:
             pass

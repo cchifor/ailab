@@ -279,8 +279,13 @@ class Publishing(unittest.TestCase):
         orphan.write_text('orphan')
         other = Path(self.tmp.name) / 'other.prom.deadbeef.tmp'
         other.write_text('someone else')
+        import os as _os, time as _time
+        _os.utime(orphan, (_time.time() - 3600, _time.time() - 3600))   # an hour old: a real orphan
+        fresh = Path(self.tmp.name) / 'out.prom.cafef00d.tmp'
+        fresh.write_text('a concurrent writer, seconds old')
         publisher._write_atomic(target, 'x\n', 0o644)
         self.assertFalse(orphan.exists())
+        self.assertTrue(fresh.exists(), 'a young temp may belong to a live writer and must survive')
         self.assertTrue(other.exists())
 
     def test_label_values_escape_newlines(self):

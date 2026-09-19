@@ -70,6 +70,7 @@
     owner: root
     group: root
     mode: "0644"
+  register: dsh_codex_publisher_service_unit
 
 - name: Install publisher timer
   ansible.builtin.copy:
@@ -78,10 +79,23 @@
     owner: root
     group: root
     mode: "0644"
+  register: dsh_codex_publisher_timer_unit
+
+# A CHANGED UNIT FILE IS NOT A CHANGED UNIT until systemd re-reads it. `daemon_reload: true` on
+# the enable task below only runs when THAT task changes something, and the timer has been
+# enabled+started since 2026-09-17 -- so a re-rendered TimeoutStartSec (or any unit edit) would
+# sit on disk while systemd enforced the old one, which is exactly the SIGKILL-at-150s the
+# template exists to prevent (reviewer-claude, #793). Measured the same day: the first run of
+# the new publish.py under the OLD unit (no ReadWritePaths yet) failed on a read-only collector
+# dir until a hand daemon-reload. Reload unconditionally whenever either unit file changed; the
+# next timer tick starts the service under the new definition, so nothing else needs restarting.
+- name: Reload systemd when a publisher unit changed
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: dsh_codex_publisher_service_unit.changed or dsh_codex_publisher_timer_unit.changed
 
 - name: Enable token projection
   ansible.builtin.systemd_service:
     name: dsh-codex-publisher.timer
     enabled: true
     state: started
-    daemon_reload: true
