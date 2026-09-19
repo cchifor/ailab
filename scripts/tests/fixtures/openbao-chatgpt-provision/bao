@@ -44,9 +44,18 @@ case "$1 ${2:-}" in
     ;;
   "read -field=token_policies")
     # The real CLI prints a bracketed, space-separated list on one line with NO trailing newline.
-    [ -f "$FAKE_STATE/role-written" ] && [ -z "${FAKE_ROLE_POLICIES:-}" ] && { printf '[af-app-litellm]'; exit 0; }
     [ "${FAKE_ROLE_MISSING:-0}" = 1 ] && exit 1
     printf '[%s]' "${FAKE_ROLE_POLICIES:-af-app-litellm}"
+    exit 0
+    ;;
+  "read -field=bound_service_account_names")
+    [ "${FAKE_ROLE_MISSING:-0}" = 1 ] && exit 1
+    printf '[%s]' "${FAKE_ROLE_SA:-litellm-eso}"
+    exit 0
+    ;;
+  "read -field=bound_service_account_namespaces")
+    [ "${FAKE_ROLE_MISSING:-0}" = 1 ] && exit 1
+    printf '[%s]' "${FAKE_ROLE_NS:-ai}"
     exit 0
     ;;
   "kv get")
