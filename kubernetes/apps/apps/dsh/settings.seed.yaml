@@ -67,3 +67,52 @@ llm-pi-ai:
       models:
         - id: gpt-6-astra
           input: [text, image]
+    # A SECOND Codex subscription -- reviewer-2 seat d (codexrun4, realjaynesage@gmail.com) -- served
+    # THROUGH LiteLLM's chatgpt/ provider as the route gpt-6-astra-realjaynesage (ADR 0026). Added
+    # 2026-09-19, when seat b's weekly window read 100 % (reviewbot_llm_usage_percent{persona="codex",
+    # seat="b"}) and dsh had no usable Astra route.
+    #
+    # NOT a second native openai-codex provider, because the installed adapter cannot host one: in
+    # @deepseek-ai/dsh-llm-pi-ai 0.1.5-alpha.2 the Codex subscription protocol (openai-codex-responses)
+    # is reachable only by reusing the CATALOG route id `openai-codex`, and a hand-declared route must
+    # name `api` in openai-completions | openai-responses | anthropic-messages -- any other value fails
+    # the adapter's Config schema for the WHOLE providers dict (that is what took every provider down
+    # once; see the DSH_PROVIDER_REMOVE line in deployment.yaml). This exact block passes that schema,
+    # verified in the pod 2026-09-19.
+    #
+    # api: openai-responses -- LiteLLM's chatgpt/ provider is Responses-native (it talks to
+    # chatgpt.com/backend-api/codex/responses), and this model's reasoning + function tools need the
+    # Responses protocol, as the paid gpt-6-astra route in litellm.yaml (openai/responses/...) already
+    # established. Not openai-completions: chat-completions through this provider is unverified.
+    #
+    # apiKeyEnv: LITELLM_API_KEY -- the same env the litellm provider above reads (the ESO-synced
+    # `dsh-litellm` Secret). The subscription token itself lives in the ai namespace (Secret
+    # litellm-chatgpt-auth, mounted in the litellm pod at /chatgpt-auth) and NEVER in this pod: dsh
+    # authenticates to the gateway, the gateway authenticates to OpenAI.
+    #
+    # A NON-CATALOG route inherits nothing, so every model field is spelled out. 272000 / 128000 are
+    # the catalog's own gpt-6-astra values; input: [text, image] is what makes attachments work at all
+    # (a hand-entered model is text-only until it says otherwise -- see the litellm block above).
+    # reasoningEfforts mirrors the catalog's thinkingLevelMap for gpt-6-astra. "off" is QUOTED on
+    # purpose: YAML 1.1 reads a bare `off` as the boolean false, and the key would then be false, not
+    # the string "off" the adapter looks up.
+    #
+    # ACCEPTED PARAMETER LOSS on this path (recorded in ADR 0026; measured in the pinned LiteLLM
+    # 1.101.0 image 2026-09-19): max_output_tokens is never sent -- maxTokens here sizes the model
+    # and is not a per-request cap, so the model's own 128k ceiling applies; text.verbosity,
+    # prompt_cache_key and parallel_tool_calls are dropped by LiteLLM's chatgpt Responses transform
+    # (default verbosity; backend default for parallel tool calls; prefix caching rides on the
+    # session_id header LiteLLM sets per call). None of these changes an answer's correctness.
+    openai-codex-realjaynesage:
+      displayName: OpenAI Codex (realjaynesage)
+      apiKeyEnv: LITELLM_API_KEY
+      api: openai-responses
+      baseURL: http://litellm.ai.svc.cluster.local:4000/v1
+      transport: sse
+      models:
+        - id: gpt-6-astra-realjaynesage
+          name: GPT-6 Astra
+          contextWindow: 272000
+          maxTokens: 128000
+          input: [text, image]
+          reasoningEfforts: { "off": null, minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }

@@ -121,7 +121,7 @@ Run `just` with no args to list all tasks — the K8s-era recipes live there too
 |---|---|
 | Full design / architecture | [`docs/architecture.md`](docs/architecture.md), [`docs/k8s-architecture.md`](docs/k8s-architecture.md) |
 | Authoritative IP plan | [`docs/network-plan.md`](docs/network-plan.md) |
-| **Decisions (source of truth)** | [`docs/decisions/`](docs/decisions/) — ADRs 0001–0025, living documents; the newest, [0025](docs/decisions/0025-dsh-cluster-admin.md), binds the dsh harness ServiceAccount to `cluster-admin` — a recorded exception to ADR 0021 Tier A |
+| **Decisions (source of truth)** | [`docs/decisions/`](docs/decisions/) — ADRs 0001–0026, living documents; the newest, [0026](docs/decisions/0026-second-chatgpt-subscription-through-litellm.md), serves GPT-6 Astra from a second ChatGPT subscription through LiteLLM's `chatgpt/` provider (a second native dsh Codex route is impossible on the installed adapter) |
 | Operations | [`docs/runbooks/`](docs/runbooks/) — node maintenance & node loss, AI host setup, [model registration](docs/runbooks/model-registration.md) (LiteLLM → dsh, Open WebUI), [dsh agent UI](docs/runbooks/dsh.md), [dsh Kubernetes access](docs/runbooks/dsh-k8s-admin.md), internet exposure, CI runners, dev workers, QNAP storage, registry cache |
 | Operator cheat-sheet (paths, contexts, gotchas) | [`CLAUDE.md`](CLAUDE.md) |
 | K8s follow-ups / backlog | [`docs/k8s-followups.md`](docs/k8s-followups.md) |

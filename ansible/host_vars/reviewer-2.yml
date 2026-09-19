@@ -32,6 +32,12 @@ pr_reviewer_llm_seats:
   - { name: a, sudo_user: codexrun }
   - { name: b, sudo_user: codexrun2 }
   - { name: c, sudo_user: codexrun3 }
+# Seat d (realjaynesage@gmail.com, ADR 0026) is STAGED: its user exists and its projection below is
+# configured, but reviewbot does not serve on it until its login is installed -- then it moves up
+# into the list above and its projection loses `optional`. Provisioned by `-t seats`; the login is
+# the operator ceremony in docs/runbooks/dsh.md § Codex subscriptions.
+pr_reviewer_llm_seats_staged:
+  - { name: d, sudo_user: codexrun4 }
 # The usage watchdog, hourly, as on reviewer-1: reviewbot runs codex-usage.py AS each seat, which
 # asks the CLI's own app server (`codex app-server`, account/rateLimits/read - no model call, no
 # quota) for the account's windows, parks and unparks seats from the API's percent/resets_at,
@@ -40,8 +46,21 @@ pr_reviewer_llm_seats:
 # until now.
 pr_reviewer_usage_poll_s: 3600
 
-# The reviewer remains the sole OAuth refresher; DSH receives access tokens only.
+# The reviewer remains the sole OAuth refresher; its consumers receive access tokens only. One
+# projection per seat that feeds something (ansible/roles/dsh_codex_publisher/files/publish.py):
+#   seat b -> af/dsh/credentials DSH_CODEX_*   dsh's native openai-codex provider
+#   seat d -> af/litellm/chatgpt CHATGPT_*     LiteLLM's chatgpt/ provider, via ESO (ADR 0026)
+# `optional: true` on seat d until it is activated (see pr_reviewer_llm_seats_staged above).
 dsh_codex_publisher:
   address: https://openbao.lan.chifor.me:30820
-  auth_path: /home/codexrun2/.codex/auth.json
-  email: realjaysage@gmail.com
+  textfile: /var/lib/prometheus/node-exporter/dsh-codex-publisher.prom
+  projections:
+    - auth_path: /home/codexrun2/.codex/auth.json
+      email: realjaysage@gmail.com
+      kv_path: dsh/credentials
+      prefix: DSH_CODEX
+    - auth_path: /home/codexrun4/.codex/auth.json
+      email: realjaynesage@gmail.com
+      kv_path: litellm/chatgpt
+      prefix: CHATGPT
+      optional: true

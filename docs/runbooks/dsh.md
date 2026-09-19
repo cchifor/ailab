@@ -274,45 +274,146 @@ with git itself, isolated from the host's configuration.
 
 ---
 
-## Codex subscription: realjaysage reviewer seat
+## Codex subscriptions: the reviewer seats behind dsh and LiteLLM
 
-DSH's **OpenAI Codex (realjaysage)** provider serves `gpt-6-astra` using the
-`realjaysage@gmail.com` ChatGPT login from reviewer-2 seat B (`codexrun2`). This replaces the
-DSH model picker's legacy LiteLLM/API-key GPT-6 route. Local Qwen routes keep using LiteLLM.
-The provider key is `openai-codex`, with `apiKeyEnv: DSH_CODEX_ACCESS_TOKEN` and no explicit
-`api`: the installed catalog selects the Codex subscription protocol. Provider reconciliation
-in `seed-settings` preserves this configuration across pod replacements.
-The two existing sessions selecting `litellm/gpt-6-astra` were migrated through DSH's
-`session/selectModel` API; their histories and the user's Qwen default were preserved.
+Two ChatGPT subscriptions serve `gpt-6-astra` to dsh, and both are reviewer-2 seats whose OAuth
+refresh happens ONLY on that host (ADR 0024 for the seats, ADR 0026 for the second route). Local
+Qwen routes keep using LiteLLM's ordinary routes and are not part of this.
 
-The token lives in **`af/dsh/credentials.DSH_CODEX_ACCESS_TOKEN`**; account and expiry metadata
-are `DSH_CODEX_ACCOUNT_EMAIL` and `DSH_CODEX_EXPIRES_AT`. ESO projects these fields into
-`/dsh-credentials`, and the credentials provider rereads the access token per request.
-Do not put a ChatGPT OAuth token in LiteLLM's `OPENAI_API_KEY` or send it to `api.openai.com`.
+| seat | user / account | document (fields) | consumer |
+|---|---|---|---|
+| `b` | `codexrun2` / `realjaysage@gmail.com` | `af/dsh/credentials` (`DSH_CODEX_*`) | dsh's native `openai-codex` provider, **OpenAI Codex (realjaysage)** — unchanged since 2026-09-17 |
+| `d` | `codexrun4` / `realjaynesage@gmail.com` | `af/litellm/chatgpt` (`CHATGPT_*`) | LiteLLM's `chatgpt/` provider, route `gpt-6-astra-realjaynesage` → dsh's `openai-codex-realjaynesage` provider, **OpenAI Codex (realjaynesage)** (2026-09-19) |
 
-**Refresh has one owner:** the Codex CLI running as `codexrun2` on reviewer-2. Its
-`/home/codexrun2/.codex/auth.json` retains the refresh token. `dsh-codex-publisher.timer` runs
-every minute on that host and publishes only the current access token, email and expiry.
-It never refreshes OAuth or copies the refresh/id tokens. It rejects the wrong email or a token
-with five minutes or less remaining. If that seat needs a fresh login, fix it there; DSH follows
-the next publication and ESO refresh. It does not switch to another account automatically.
+**Seat b → dsh, natively.** The provider key is `openai-codex`, with
+`apiKeyEnv: DSH_CODEX_ACCESS_TOKEN` and no explicit `api`: the installed catalog selects the Codex
+subscription protocol. This replaced the model picker's legacy LiteLLM/API-key GPT-6 route; the two
+sessions that had selected `litellm/gpt-6-astra` were migrated through dsh's `session/selectModel`
+API with their histories and the user's Qwen default preserved. ESO (`openbao-eso.yaml`,
+ExternalSecret `dsh-credentials`, refresh 5m) projects the document's fields into
+`/dsh-credentials`, and the credentials provider rereads the access token per request. Provider
+reconciliation in `seed-settings` preserves the block across pod replacements.
 
-Publisher implementation and units: `ansible/roles/dsh_codex_publisher/`; enabled only on
-reviewer-2 by its host vars. A CAS **PATCH** preserves all unrelated DSH fields. Unchanged
-source credentials and unchanged vault versions produce no write. Its OpenBao AppRole is
-`dsh-codex-publisher`, using the matching `files/policy.hcl`: **patch** on this single data path,
-**read** on its metadata, no credential-value reads and no whole-document put/delete. ACLs are
-per document, so patch permission covers all fields in this one document; the script's allowlist
-restricts its normal writes to the three Codex fields.
+**Seat d → LiteLLM → dsh.** It goes through LiteLLM because the installed dsh adapter cannot host a
+second native Codex route: the subscription protocol is bound to the catalog id `openai-codex`, and
+any other hand-declared `api` value fails the `Config` schema for EVERY provider (checked on
+0.1.5-alpha.2, 0.1.5-rc.2, 0.1.6-alpha.2; ADR 0026). So LiteLLM's `chatgpt/` provider holds the
+subscription — route `gpt-6-astra-realjaynesage` → `chatgpt/gpt-6-astra`, `mode: responses` in
+`kubernetes/apps/apps/ai/litellm.yaml`, auth from `/chatgpt-auth/auth.json`
+(`CHATGPT_TOKEN_DIR`), `CHATGPT_DEFAULT_INSTRUCTIONS` set so the Codex-CLI persona prompt is not
+prepended to dsh's own system prompt — and dsh's provider `openai-codex-realjaynesage` is an
+`api: openai-responses` route to `http://litellm.ai.svc.cluster.local:4000/v1` with
+`apiKeyEnv: LITELLM_API_KEY` and the one model `gpt-6-astra-realjaynesage`, reconciled per boot by
+`DSH_PROVIDER=openai-codex-realjaynesage node /seed/reconcile-provider.js` in `deployment.yaml`.
+The file LiteLLM reads is rendered by ESO in ns `ai` (`kubernetes/apps/apps/ai/litellm-chatgpt-eso.yaml`:
+ServiceAccount `litellm-eso`, SecretStore `litellm-store` on k8s-auth role `af-app-litellm`,
+ExternalSecret `litellm-chatgpt-auth`, refresh 5m) into Secret `litellm-chatgpt-auth`, mounted
+read-only with `optional: false` — a litellm pod without the file must not start. The template
+renders ONE key, `auth.json`, with `default "unconfigured"` on the token and account id, `toJson`,
+and `expires_at: 4102444800`: measured in the pinned image (2026-09-19), a missing, empty,
+unparseable or file-expired token sends LiteLLM into the OAuth device flow (a synchronous poll of
+`auth.openai.com` for up to 15 min, at Router construction), while the placeholder and the
+far-future sentinel built the Router in 0.07 s with no network and failed FAST upstream. Never
+remove any of the three from that template. The real expiry is `CHATGPT_EXPIRES_AT` in the vault
+and `dsh_codex_projection_token_expires_at_seconds` on the textfile below.
 
-Bootstrap/recovery is an operator ceremony: install that policy, create the same-named AppRole
-with `token_policies=dsh-codex-publisher`, `token_ttl=60s`, `token_max_ttl=120s`,
+> **Do not put a ChatGPT OAuth token in LiteLLM's `OPENAI_API_KEY` or send it to `api.openai.com`.**
+> The `chatgpt/` provider — that mounted `auth.json` — is the ONLY LiteLLM home for a subscription
+> token: it speaks to `chatgpt.com/backend-api/codex`, where the token is valid. An `openai/` route
+> would present it to the paid API, where it is not.
+
+**Refresh has one owner per seat:** the Codex CLI running as that seat's user on reviewer-2. Its
+`/home/codexrunN/.codex/auth.json` retains the refresh token; nothing copies it. The CLI renews
+the access token when the seat is run — reviews, or the hourly `codex app-server` usage probe,
+which iterates only the seats in `pr_reviewer_llm_seats` (so a staged seat's token ages until it
+is activated). If a seat needs a fresh login, fix it there; dsh and LiteLLM follow the next
+publication and ESO refresh. Nothing switches to another account automatically.
+
+**The publisher** (`ansible/roles/dsh_codex_publisher/`, enabled only on reviewer-2 by its host
+vars; `dsh-codex-publisher.timer` every minute) publishes access-only projections. Its config,
+`/etc/dsh-codex-publisher/config.json`, is `dsh_codex_publisher` from
+`ansible/host_vars/reviewer-2.yml`, shaped
+`{address, textfile, projections: [{auth_path, email, kv_path, prefix, optional}]}`. Each
+projection reads its seat's `auth.json` and CAS-**PATCH**es four fields into its own document:
+`<prefix>_ACCESS_TOKEN`, `<prefix>_ACCOUNT_ID` (added 2026-09-19 — the ChatGPT account id, a JWT
+claim and not a secret, which LiteLLM's auth file wants beside the token; without it LiteLLM
+derives it and then tries to WRITE the file to cache it, which the read-only mount refuses),
+`<prefix>_ACCOUNT_EMAIL`, `<prefix>_EXPIRES_AT`. The PATCH preserves every unrelated field;
+unchanged source credentials and an unchanged vault version produce no write. It never refreshes
+OAuth and never publishes the refresh or id token. It refuses the wrong email, a token with five
+minutes or less remaining, and a token without an account id.
+
+**Optional vs required, and the exit-1 rule.** `optional: true` marks a STAGED seat (provisioned,
+not logged in): an ABSENT auth file is a logged skip and nothing else. For a required projection
+absence is a failure — "the service ran green while the token aged" is the silent failure the
+publisher exists to prevent. An unreadable or unparseable file, a wrong account, an expiring
+token and a vault error (HTTP code logged, never the body) are failures whether or not the
+projection is optional. Every projection runs, each logs in on its own (the AppRole token lives
+60 s and is never carried across projections; every HTTP operation has a 20 s timeout;
+`TimeoutStartSec=150`), and the service exits 1 if ANY failed — visible in the journal shipped to
+Loki and on the textfile.
+
+**Metrics and alerts.** The publisher writes
+`/var/lib/prometheus/node-exporter/dsh-codex-publisher.prom` atomically (temp + rename, beside
+reviewbot's own textfile): `dsh_codex_projection_ok{document,email}` (1 published or confirmed
+unchanged, 0 otherwise), `dsh_codex_projection_optional{document}`,
+`dsh_codex_projection_token_expires_at_seconds{document}` (the `exp` of the last token it
+published), `dsh_codex_projection_last_success_timestamp_seconds{document}` (carried across
+failing runs from its state file) and `dsh_codex_publisher_last_run_timestamp_seconds`.
+Five rules watch the chain. In `kubernetes/apps/infrastructure/monitoring/reviewbot-rules.yaml`:
+`CodexProjectionFailing` (a required projection with `ok == 0` for 30 m), `CodexProjectionStale`
+(a published token with under 24 h left), `CodexPublisherDown` (the heartbeat
+`dsh_codex_publisher_last_run_timestamp_seconds` 15 min old — a stopped timer leaves the previous
+textfile scrapeable with `ok == 1`) and `CodexPublisherMetricsMissing` (no heartbeat series at
+all). In `ha-rules.yaml`: `LiteLLMChatGPTAuthNotReady`, on ESO's own status of
+`ai/litellm-chatgpt-auth`, because the publisher's metrics describe the OpenBao copy only.
+Kubelet's projection into the mounted volume is the remaining blind spot (ADR 0026). A staged
+seat (`optional: true`) never pages the first two.
+
+**Policy and AppRole.** Since 2026-09-19 the policy `dsh-codex-publisher` is OWNED by
+`kubernetes/apps/infrastructure/security/openbao/chatgpt-provision-job.yaml` — the role's
+`files/policy.hcl` is gone: **patch** on `af/data/dsh/credentials` and `af/data/litellm/chatgpt`,
+**read** on both metadata paths, no credential-value reads and no whole-document put/delete. ACLs
+are per document, so patch permission covers every field in those two documents; the script's
+allowlist restricts its writes to the four fields per prefix. Git owns the policy whole (`bao
+policy write` replaces): a hand edit is reverted on the Job's next run, and the Job refuses to
+run at all if the live document matches neither its reviewed baseline nor its desired form. The
+AppRole itself stays an operator ceremony: create the same-named AppRole with
+`token_policies=dsh-codex-publisher`, `token_ttl=60s`, `token_max_ttl=120s`,
 `token_no_default_policy=true`, `bind_secret_id=true`, `secret_id_ttl=0`, and
 `secret_id_num_uses=0`. Mint a role-id/secret-id pair and transfer it without terminal output into
 `/etc/dsh-codex-publisher/approle.json` on reviewer-2, shaped as
 `{"role_id":"...","secret_id":"..."}`, root-owned mode 0600. Run the `dsh-codex` tag of
-`ansible/reviewers.yml` to install the publisher, CA, LAN hosts entries and timer. The AppRole
-credential is independently revocable and is never projected into DSH.
+`ansible/reviewers.yml` to install the publisher, CA, LAN hosts entries, config and timer. The
+AppRole credential is independently revocable and is never projected into dsh or LiteLLM. After
+a vault wipe the secret-id is dead and the documents are empty; the order that rebuilds them is
+the PUBLISHER-OWNED row of `docs/runbooks/openbao-recovery.md`.
+
+**Adding a seat that feeds a consumer** is the staged procedure in `docs/runbooks/dev-workers.md`
+§ "Seats: the codex persona holds several subscriptions" — stage it, `-t seats,dsh-codex` with
+its projection `optional: true`, log in directly as its user, verify, then activate. Seat d's
+login is that ceremony:
+
+**Operator ceremony (seat d login).** Prerequisite: `realjaynesage@gmail.com` is a ChatGPT account
+with Codex access (device login is what the CLI offers a headless host). The login happens
+**directly as the staged seat user** — no scratch HOME, no copy, nothing to delete, so no second
+refresh-token family can ever exist:
+
+```
+ssh c4@192.168.0.25
+sudo -n -u codexrun4 HOME=/home/codexrun4 setsid nohup /usr/bin/codex login --device-auth \
+    > /tmp/seat-d-login.log 2>&1 < /dev/null &
+sleep 10 && cat /tmp/seat-d-login.log          # URL + one-time code; sign in as realjaynesage@gmail.com
+# then WAIT for the CLI to report success in that log before anything else:
+tail -f /tmp/seat-d-login.log                  # "Successfully logged in" (or the CLI's equivalent)
+sudo -n -u codexrun4 HOME=/home/codexrun4 /usr/local/lib/reviewbot/codex-usage.py
+```
+
+The last command exits 0 either way; read its JSON: `"ok": true` and
+`"email": "realjaynesage@gmail.com"` are the check. The publisher's next minute publishes to
+`af/litellm/chatgpt`; ESO follows within 5 min; LiteLLM reads the file per request — nothing
+restarts. Activation (moving seat d into `pr_reviewer_llm_seats`, `optional: false` on its
+projection, `-t reviewbot,dsh-codex`) is a separate change after this ceremony.
 
 Check without showing tokens:
 
@@ -320,6 +421,11 @@ Check without showing tokens:
 ssh c4@192.168.0.25 'sudo systemctl status dsh-codex-publisher.timer --no-pager'
 ssh c4@192.168.0.25 'sudo journalctl -u dsh-codex-publisher.service -n 10 --no-pager'
 kubectl --context admin@ai -n dsh get externalsecret dsh-credentials
+kubectl --context admin@ai -n ai get externalsecret litellm-chatgpt-auth
+# the textfile, through Prometheus (labels and numbers only, never a value):
+kubectl --context admin@ai -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+curl -s 'http://127.0.0.1:9090/api/v1/query?query=dsh_codex_projection_ok'
+curl -s 'http://127.0.0.1:9090/api/v1/query?query=dsh_codex_projection_token_expires_at_seconds'
 ```
 
 ---

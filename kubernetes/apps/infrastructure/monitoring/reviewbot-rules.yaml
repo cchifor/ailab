@@ -542,3 +542,129 @@ spec:
             summary: "reviewbot ({{ $labels.persona }}) is running on its fallback model"
             description: >-
               Reviews on {{ $labels.instance }} are being served below the top tier of the model ladder often enough in 6h that the fallback is carrying the service - a spent top-tier window on every seat, or a pin the accounts cannot serve. Reviews still land, which is exactly why this needs an alert: nothing else changes (reviewer-1 once served 463 reviews on its fallback over 4 days with no signal but a per-run journal line). Check `reviewbot_llm_model_parked` for the parked (seat, model) pairs and the per-account usage panels for when the top tier reopens; the hourly watchdog climbs back on its own once the API shows it available, so this resolves itself unless every seat is spent on that tier for good - then repoint `pr_reviewer_llm_models` rather than leaving every review to pay a doomed first call.
+        # ── Codex token projections (ADR 0026; ansible/roles/dsh_codex_publisher) ─────────────
+        # A REVIEWER LOGIN CAN BE HEALTHY WHILE EVERYTHING DOWNSTREAM OF IT IS NOT, and until
+        # 2026-09-19 nothing could tell the two apart. Each reviewer-2 seat's Codex CLI owns its
+        # OAuth refresh; dsh-codex-publisher (a systemd timer, OnUnitActiveSec=60s) reads the
+        # seat's auth.json and CAS-PATCHes the ACCESS token alone into that seat's consumer
+        # document — seat b -> af/dsh/credentials for dsh's native openai-codex provider, seat d
+        # -> af/litellm/chatgpt for LiteLLM's chatgpt/ route — and ESO renders the document into
+        # a mounted Secret. The publisher, the vault, ESO or the kubelet can each fail with the
+        # login still fine, and the consumer cannot see it: it keeps the LAST projected token
+        # and only fails when that one expires — Codex access tokens live ~7 days (seat b read
+        # 163 h left on 2026-09-19) — as a 401 days after the fault, naming no link in the
+        # chain. publish.py therefore writes a node_exporter textfile per run (its docstring is
+        # the metric contract: dsh_codex_projection_ok{document,email}, _optional{document},
+        # _token_expires_at_seconds{document}, _last_success_timestamp_seconds{document}, and
+        # dsh_codex_publisher_last_run_timestamp_seconds), so the two shapes below are alertable
+        # on their own. Scraped through job=reviewer-node, and — like every textfile series in
+        # this group — these VANISH with the VM rather than going stale; ReviewerNodeDown owns
+        # that case.
+        #
+        # THE PUBLISHER IS FAILING. ok reads 0 when a run could not publish or confirm a
+        # projection: the auth file unreadable or malformed, the wrong account in it, a token
+        # with <=5 min left, a vault error (the HTTP code is in the journal, never the body).
+        # for: 30m = thirty consecutive failed runs of a once-a-minute service, so one vault
+        # timeout (20 s per HTTP operation, three per projection) or a reboot never pages, while
+        # a standing fault is named inside the hour — early, against a token with days of life
+        # left. GATED on optional == 0: a staged seat (provisioned, not logged in — seat d until
+        # PR 3 of plans/2026-09-19-second-codex-subscription-plan.md) reports ok=0 by design
+        # and must not page. `and on (instance, document)` keeps the LEFT side's labels, which
+        # is how `email` reaches the alert without the gate series having to carry it.
+        - alert: CodexProjectionFailing
+          expr: >-
+            dsh_codex_projection_ok == 0
+            and on (instance, document)
+            dsh_codex_projection_optional == 0
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "Codex token projection {{ $labels.document }} on {{ $labels.instance }} is failing"
+            description: >-
+              dsh-codex-publisher on {{ $labels.instance }} (runs every minute;
+              ansible/roles/dsh_codex_publisher) has not published or confirmed the REQUIRED
+              projection af/{{ $labels.document }} ({{ $labels.email }}) for 30 minutes — the
+              seat's login may be gone, the vault unreachable, or the AppRole secret-id revoked.
+              The consumer keeps its LAST projected token and fails only when that token
+              expires, days later, so this fires while the fix is still cheap.
+              `journalctl -u dsh-codex-publisher.service` on 192.168.0.25 names the reason
+              without the secret. A projection marked optional (a staged seat awaiting its
+              login) never fires this.
+        # THE TOKEN IS AGEING OUT, and ok cannot see it. expires_at is the JWT exp of the last
+        # token the publisher PUBLISHED; it only moves when the seat's own CLI refreshes the
+        # login — a review run as that seat, or the hourly usage probe, which walks
+        # pr_reviewer_llm_seats only. A seat the sticky rotation never reaches and the poll does
+        # not cover keeps one token until it expires, ~7 days after the login, and the publisher
+        # correctly has nothing newer to publish: ok stays 1 all the way down, which is why the
+        # rule above is blind to this shape. 86400 = one day of a ~7-day token: the publisher
+        # refuses a token with <=5 min left and the consumers fail fast once it expires (dsh's
+        # provider and LiteLLM's chatgpt/ route both answer 401 — the far-future sentinel in
+        # LiteLLM's rendered auth.json keeps it out of the OAuth device flow, so stale is a
+        # 401, never a hang), so a day is the window in which running the CLI as the seat still
+        # AVERTS an outage rather than ending one. for: 15m — the value only ever steps when a
+        # newer token lands, so the hold rides out a scrape gap and costs nothing against a day
+        # of slack. Same optional gate as above. DOCUMENTED SEAM: a staged seat that has never
+        # published has no expires_at series at all (publish.py omits the line), so the gate is
+        # moot there — but seat d between its login ceremony and PR 3 (logged in, projecting,
+        # still optional) ages out WITHOUT a page; only PR 3 flipping the projection to required
+        # brings it under this rule. Dropping the gate is the one-line change if that window
+        # must page; the fixture pins the current choice either way.
+        - alert: CodexProjectionStale
+          expr: >-
+            (dsh_codex_projection_token_expires_at_seconds - time() < 86400)
+            and on (instance, document)
+            dsh_codex_projection_optional == 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Codex token projected for {{ $labels.document }} expires in under 24h"
+            description: >-
+              The access token the publisher last projected into af/{{ $labels.document }} has
+              under a day left and no newer one has been published. The reviewer's own login
+              renews a seat's token only when the CLI runs as that seat (a review, or the
+              hourly usage probe), so a seat that is never chosen and not in the hourly poll
+              ages out. The consumers (dsh's openai-codex provider, LiteLLM's chatgpt/ route)
+              fail fast upstream once it expires (401). Check the seat with codex-usage.py as
+              its user (`sudo -n -u <seat user> HOME=/home/<seat user>
+              /usr/local/lib/reviewbot/codex-usage.py` on 192.168.0.25) and the publisher
+              journal, `journalctl -u dsh-codex-publisher.service`.
+        # THE PUBLISHER HAS STOPPED, and neither rule above can see it (codex, plan round 2): a
+        # stopped timer, a unit that no longer starts, or a process killed before it writes leaves
+        # the PREVIOUS textfile on disk, scrapeable, with ok=1 and a token expiry days out. Every
+        # run stamps dsh_codex_publisher_last_run_timestamp_seconds as its LAST line, so that stamp
+        # is the heartbeat of the whole file. The timer fires every minute (OnUnitActiveSec=60s) and
+        # a run is bounded by TimeoutStartSec=150s, so 900 s of silence is fifteen missed runs -- a
+        # stopped unit, not a slow one; for: 10m rides out a scrape gap. Same shape as
+        # ReviewbotHeartbeatStale above, for the same reason.
+        - alert: CodexPublisherDown
+          expr: time() - dsh_codex_publisher_last_run_timestamp_seconds > 900
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "dsh-codex-publisher on {{ $labels.instance }} has not run for 15 minutes"
+            description: >-
+              The publisher's textfile heartbeat on {{ $labels.instance }} last moved over 15
+              minutes ago, so the projection metrics beside it are STALE, not current: ok=1 there
+              describes the last run that completed, not now. Every consumer keeps its last
+              projected token and fails only when it expires. `systemctl status
+              dsh-codex-publisher.timer` and `journalctl -u dsh-codex-publisher.service` on
+              192.168.0.25.
+        # THE TEXTFILE IS GONE -- never written, or removed -- which is not "healthy": an expression
+        # over an absent series never fires (the trap this group's header names). absent() is the one
+        # correct tool here because the heartbeat series carries no varying label, so the unlabelled
+        # result IS the whole answer (the selector's equality matcher becomes its label). A dead VM
+        # takes every reviewer-node series with it and is ReviewerNodeDown's, at critical; this is for
+        # a live host whose publisher never wrote, whose file was deleted, or whose unit lost its
+        # ReadWritePaths to the collector directory. for: 30m gives a rebuilt host time to converge.
+        - alert: CodexPublisherMetricsMissing
+          expr: absent(dsh_codex_publisher_last_run_timestamp_seconds{job="reviewer-node"})
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "dsh-codex-publisher exports no metrics (its textfile is absent on reviewer-2)"
+            description: >-
+              No dsh_codex_publisher_last_run_timestamp_seconds series has reached Prometheus from
+              job=reviewer-node for 30 minutes: the publisher has never written its textfile, the
+              file was removed, or the unit cannot write /var/lib/prometheus/node-exporter. If
+              ReviewerNodeDown is firing too, that is the cause; otherwise on 192.168.0.25 check
+              `ls -l /var/lib/prometheus/node-exporter/dsh-codex-publisher.prom` and the journal.

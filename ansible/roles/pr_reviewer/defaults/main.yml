@@ -116,15 +116,25 @@ pr_reviewer_usage_keepalive_timeout_s: 60
 # The list the PROVISIONING tasks iterate. Derived so the seat tasks have exactly ONE shape to
 # handle: an explicit list when there is one, otherwise the legacy single seat synthesised from
 # pr_reviewer_llm_sudo_user, otherwise nothing (the claude persona runs as the service user and
-# needs no isolated user at all). This mirrors what reviewbot.py derives as SEATS, deliberately:
+# needs no isolated user at all) -- PLUS the staged seats below, which are provisioned but not
+# served. This mirrors what reviewbot.py derives as SEATS, deliberately:
 # two places deriving the same thing by different rules is how a seat ends up with a user but no
 # ~/.codex, or a sudoers entry and no user.
 # Entry shape: {name, sudo_user, home?}. `home` defaults to /home/<sudo_user> and exists because
 # a hand-provisioned seat need not live there.
+# STAGED seats: provisioned exactly like a seat (user, 0700 ~/.codex, model pin, sudoers) but NOT
+# rendered into config.json, so reviewbot never learns of them. This is the runbook's ORDER IS THE
+# PROCEDURE expressed in configuration rather than in the operator's memory: a seat in
+# pr_reviewer_llm_seats with no credential is handed work by sticky selection and fails as an
+# ORDINARY error (burning attempts), while its user cannot be created before it is in host_vars.
+# So a new seat lands here first, the login happens as its user, and only then does it move to
+# pr_reviewer_llm_seats (a one-line change + `-t reviewbot`). Same {name, sudo_user, home?} shape.
+pr_reviewer_llm_seats_staged: []
 pr_reviewer_seats_effective: >-
-  {{ pr_reviewer_llm_seats if (pr_reviewer_llm_seats | length > 0)
-     else ([{'name': 'default', 'sudo_user': pr_reviewer_llm_sudo_user}]
-           if (pr_reviewer_llm_sudo_user | length > 0) else []) }}
+  {{ (pr_reviewer_llm_seats if (pr_reviewer_llm_seats | length > 0)
+      else ([{'name': 'default', 'sudo_user': pr_reviewer_llm_sudo_user}]
+            if (pr_reviewer_llm_sudo_user | length > 0) else []))
+     + pr_reviewer_llm_seats_staged }}
 # WALL-CLOCK BUDGET FOR ONE ATTEMPT — primary AND fallback share it (they used to get one
 # each, so the real worst case was 2x this). 300 was too small and is what broke the claude
 # persona: measured 2026-09-04, a 341,672-byte diff needs 515 s (40,948 output tokens — run
