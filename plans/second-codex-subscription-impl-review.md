@@ -1,6 +1,6 @@
 # Implementation review — second-codex-subscription — round 1
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
