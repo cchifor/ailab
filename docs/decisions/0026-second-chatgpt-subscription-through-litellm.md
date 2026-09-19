@@ -195,8 +195,12 @@ projections everywhere, exactly the shape seat b already has.** The refresh toke
   Ready before the litellm rollout — which is why the Job seeds every key empty (finding 5) and
   why PR 1 precedes PR 2. The `apps` layer is `wait: true`; a never-Ready ExternalSecret would
   wedge it.
-- **Until PR 3, seat d's token is not renewed.** The publisher stops updating after ~7 days,
-  `CodexProjectionStale` fires at 24 h left, and LiteLLM fails fast with 401 — visible, not
+- **Until PR 3, seat d's token is not renewed, and nothing pages for it.** The publisher stops
+  updating after ~7 days and LiteLLM fails fast with 401 — `CodexProjectionStale` and
+  `CodexProjectionFailing` are gated on `optional == 0`, so a staged seat ages out WITHOUT an alert
+  (the rule's own comment records this seam); PR 3 flipping the projection to required is what brings
+  it under them. Between the login ceremony and PR 3 the publisher journal and the textfile are the
+  only signals. LiteLLM's failure is — visible, not
   silent, and self-healing on activation. Once activated, seat d is both reviewer capacity and
   dsh's Astra route, the same arrangement seat b has.
 - **Discoverability is the proxy's, unchanged.** `mode: responses` keeps the route out of the

@@ -31,6 +31,7 @@ import json
 import os
 from pathlib import Path
 import ssl
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -95,14 +96,28 @@ def _read_state(state_path):
 
 
 def _write_atomic(path, text, mode=0o600):
-    temp = path.with_suffix(path.suffix + '.tmp')
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, 'w') as file:
-        file.write(text)
-    # The unit runs with UMask=0077, which os.open applies to `mode`; the textfile must stay
-    # world-readable for node_exporter, so the mode is set explicitly (chmod ignores the umask).
-    os.chmod(temp, mode)
-    os.replace(temp, path)
+    """Write `text` to `path` through a private temp file and one rename.
+
+    This runs as root, and the textfile's directory is the node_exporter collector dir, which is
+    GROUP-writable (0775, group = the reviewbot user) so reviewbot can write its own metrics
+    there. A predictable temp name opened with O_CREAT|O_TRUNC follows a symlink somebody in that
+    group pre-positioned, and a pathname chmod follows it again (codex impl-review round 1). So:
+    a fresh, unpredictable name (mkstemp: O_CREAT|O_EXCL|O_NOFOLLOW, 0600), the mode set on the
+    DESCRIPTOR (fchmod -- explicit because the unit's UMask=0077 would otherwise leave a 0600 file
+    node_exporter cannot read), then rename, which is atomic for readers. A leftover temp from a
+    crash is unlinked on the next run's error path, never truncated in place."""
+    fd, temp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w') as file:
+            os.fchmod(fd, mode)
+            file.write(text)
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
 
 
 def publish(config, session, fields, kv_path='dsh/credentials', state_path=STATE):
@@ -115,12 +130,19 @@ def publish(config, session, fields, kv_path='dsh/credentials', state_path=STATE
         raise ValueError('credential document af/' + kv_path + ' is deleted; operator recovery required')
     digest = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
     state = _read_state(state_path)
-    if state.get(kv_path) == {'digest': digest, 'version': version}:
+    entry = state.get(kv_path) or {}
+    # ONLY the digest and the version decide "unchanged". The same entry also carries the
+    # freshness fields _carry_last_success stamps every run (last_success, expires_at); comparing
+    # the whole entry made every run a mismatch and wrote a new KV version per minute (codex
+    # impl-review round 1) -- 1,440 versions a day of an identical token, eating the retained
+    # history the metadata read depends on.
+    if entry.get('digest') == digest and entry.get('version') == version:
         print('projection af/' + kv_path + ' unchanged')
         return
     result = _request(config, tls, 'af/data/' + kv_path, 'PATCH',
                       {'options': {'cas': version}, 'data': fields}, token)
-    state[kv_path] = {'digest': digest, 'version': result['data']['version']}
+    entry.update({'digest': digest, 'version': result['data']['version']})
+    state[kv_path] = entry
     _write_atomic(state_path, json.dumps(state))
     print('projection af/' + kv_path + ' updated; unrelated fields preserved')
 

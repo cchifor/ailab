@@ -243,6 +243,36 @@ class Publishing(unittest.TestCase):
         self.assertIn('dsh_codex_projection_token_expires_at_seconds{document="dsh/credentials"} 1000', text)
         self.assertIn('dsh_codex_projection_last_success_timestamp_seconds{document="litellm/chatgpt"} 200', text)
 
+    def test_three_identical_runs_patch_each_document_once(self):
+        # THE full run() cycle, not publish() alone: the freshness fields _carry_last_success
+        # stamps on the state entry must not turn every minute into a new KV version (codex
+        # impl-review round 1 found six PATCHes where two were due).
+        for now in (100, 160, 220):
+            rc, _ = self._run(config(), both_seats, now=now)
+            self.assertEqual(rc, 0)
+        self.assertEqual(len(self.vault.patches('dsh/credentials')), 1)
+        self.assertEqual(len(self.vault.patches('litellm/chatgpt')), 1)
+        # ...and a genuinely rotated token still publishes.
+        rc, _ = self._run(config(), lambda p: auth(expires=5000) if 'codexrun2' in p else auth('realjaynesage@gmail.com'), now=280)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.vault.patches('dsh/credentials')), 2)
+        self.assertEqual(len(self.vault.patches('litellm/chatgpt')), 1)
+
+    def test_atomic_write_uses_a_private_temp_and_leaves_nothing_behind(self):
+        target = Path(self.tmp.name) / 'out.prom'
+        publisher._write_atomic(target, 'x\n', 0o644)
+        self.assertEqual(target.read_text(), 'x\n')
+        leftovers = [p.name for p in Path(self.tmp.name).iterdir() if p.name.endswith('.tmp')]
+        self.assertEqual(leftovers, [])
+        if hasattr(publisher.os, 'fchmod') and publisher.os.name == 'posix':
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        # A pre-positioned file at the OLD predictable temp name is never opened, truncated or chmodded.
+        decoy = Path(self.tmp.name) / 'out.prom.tmp'
+        decoy.write_text('decoy')
+        publisher._write_atomic(target, 'y\n', 0o644)
+        self.assertEqual(decoy.read_text(), 'decoy')
+        self.assertEqual(target.read_text(), 'y\n')
+
     def test_textfile_expiry_is_the_published_tokens_not_the_locally_renewed_one(self):
         # Run 1 publishes a token expiring at 1000. Run 2 reads a RENEWED token (2000) but the
         # vault refuses the PATCH: the consumers still hold the 1000 token, and the metric must

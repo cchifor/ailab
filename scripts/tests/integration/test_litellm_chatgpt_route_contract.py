@@ -70,6 +70,7 @@ import hashlib
 import importlib.metadata
 import json
 import pathlib
+import re
 import sys
 import time
 import unittest
@@ -107,9 +108,59 @@ DEVICE_FLOW_HOST = "auth.openai.com"
 # The sentinel litellm-chatgpt-eso.yaml renders (2100-01-01T00:00:00Z). The provider
 # trusts a numeric expires_at over the token's own exp claim, so this is what keeps
 # a stale or placeholder token on the fail-fast (401 upstream) path (plan finding 2).
-SENTINEL_EXPIRES_AT = 4102444800
-PLACEHOLDER_AUTH = {"access_token": "unconfigured", "account_id": "unconfigured",
-                    "expires_at": SENTINEL_EXPIRES_AT}
+ESO_MANIFEST = ROOT / "kubernetes/apps/apps/ai/litellm-chatgpt-eso.yaml"
+ESO_DOCS = list(yaml.safe_load_all(ESO_MANIFEST.read_bytes()))
+EXTERNAL_SECRET = next(d for d in ESO_DOCS if isinstance(d, dict) and d.get("kind") == "ExternalSecret"
+                       and d["metadata"]["name"] == "litellm-chatgpt-auth")
+AUTH_TEMPLATE = EXTERNAL_SECRET["spec"]["target"]["template"]["data"]["auth.json"]
+
+
+def render_auth_template(fields):
+    """Render the production template the way ESO's v2 engine (sprig) does for the three
+    constructs it uses -- `.KEY`, `| default "x"`, `| toJson` -- over the document's fields.
+
+    A tiny evaluator on purpose: it accepts exactly the pipeline shapes the template is allowed to
+    carry, so a template edit that drops `default` or `toJson`, or changes the sentinel, changes
+    the fixture this test runs LiteLLM against instead of leaving a stale hard-coded one passing
+    (codex impl-review round 1). Anything it cannot evaluate is a test failure, not a guess.
+    """
+    def evaluate(expr):
+        stages = [s.strip() for s in expr.split("|")]
+        head = stages[0]
+        if not head.startswith("."):
+            raise AssertionError(f"unsupported template head {head!r}")
+        value = fields.get(head[1:])
+        if value is None:
+            raise AssertionError(f"template references {head}, which the document does not carry")
+        for stage in stages[1:]:
+            if stage.startswith("default "):
+                fallback = json.loads(stage[len("default "):])
+                value = value if value != "" else fallback
+            elif stage == "toJson":
+                value = json.dumps(value)
+            else:
+                raise AssertionError(f"unsupported template stage {stage!r}")
+        return value
+    rendered = re.sub(r"\{\{(.*?)\}\}", lambda m: evaluate(m.group(1)), AUTH_TEMPLATE)
+    return json.loads(rendered)
+
+
+# The fixture IS the production rendering over the document exactly as the provisioning Job
+# seeds it: every CHATGPT_* key present and EMPTY. What LiteLLM is then handed is what the litellm
+# pods hold before the seat logs in -- and the assertions below on its shape are what keep the
+# template's three guards (placeholder, sentinel, JSON-safety) from silently disappearing.
+SEEDED_EMPTY_DOCUMENT = {"CHATGPT_ACCESS_TOKEN": "", "CHATGPT_ACCOUNT_ID": "",
+                         "CHATGPT_ACCOUNT_EMAIL": "", "CHATGPT_EXPIRES_AT": "",
+                         "CHATGPT_OPENBAO_CANARY": "provisioned"}
+PLACEHOLDER_AUTH = render_auth_template(SEEDED_EMPTY_DOCUMENT)
+assert set(PLACEHOLDER_AUTH) == {"access_token", "account_id", "expires_at"}, PLACEHOLDER_AUTH
+assert isinstance(PLACEHOLDER_AUTH["access_token"], str) and PLACEHOLDER_AUTH["access_token"] != "", \
+    "the template must render a NON-EMPTY placeholder token (device-flow guard)"
+assert isinstance(PLACEHOLDER_AUTH["expires_at"], int) and PLACEHOLDER_AUTH["expires_at"] > 4_000_000_000, \
+    "the template must carry a far-future numeric expires_at (device-flow guard)"
+SENTINEL_EXPIRES_AT = PLACEHOLDER_AUTH["expires_at"]
+# JSON-safety: a token carrying a quote must still render valid JSON (that is what `toJson` buys).
+assert render_auth_template({**SEEDED_EMPTY_DOCUMENT, "CHATGPT_ACCESS_TOKEN": 'a"b\\c'})["access_token"] == 'a"b\\c'
 INPUT = [
     {"role": "developer", "content": "You are dsh's offline fixture. Answer with OK."},
     {"role": "user", "content": "Offline adapter fixture."},
