@@ -1,0 +1,59 @@
+---
+- name: Refuse application outside the explicitly approved validator host
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'ci-runner-1'
+      - ansible_host == '192.168.0.14'
+      - gitea_runner_cleanup_infra_exclude_re == 'buildkit|buildx| /dsh-conductor-image-pin$'
+
+- name: Inspect existing non-secret runner cleanup configuration
+  ansible.builtin.slurp:
+    src: /etc/gitea-runner-cleanup.env
+  register: pin_cleanup_environment
+
+- name: Refuse to overwrite an unknown operator cleanup exemption
+  ansible.builtin.assert:
+    that:
+      - >-
+        (pin_cleanup_environment.content | b64decode |
+        regex_findall('(?m)^GITEA_CLEANUP_INFRA_EXCLUDE_RE="([^"]*)"$'))
+        in [['buildkit|buildx'], [gitea_runner_cleanup_infra_exclude_re]]
+
+- name: Ensure the root-owned operator script directory exists
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install bounded image retention operator
+  ansible.builtin.copy:
+    src: image-pin.py
+    dest: /usr/local/libexec/dsh-conductor-image-pin.py
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Exempt only the named idle infrastructure container
+  ansible.builtin.lineinfile:
+    path: /etc/gitea-runner-cleanup.env
+    regexp: '^GITEA_CLEANUP_INFRA_EXCLUDE_RE='
+    line: 'GITEA_CLEANUP_INFRA_EXCLUDE_RE="{{ gitea_runner_cleanup_infra_exclude_re }}"'
+    create: false
+    backup: true
+
+- name: Install reboot reconciliation unit
+  ansible.builtin.copy:
+    src: dsh-conductor-image-pin.service
+    dest: /etc/systemd/system/dsh-conductor-image-pin.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Reconcile and enable only the image retention unit
+  ansible.builtin.systemd_service:
+    name: dsh-conductor-image-pin.service
+    daemon_reload: true
+    enabled: true
+    state: restarted
