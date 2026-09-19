@@ -267,6 +267,11 @@ CODEX_TIER_MAP = [{"type": "value", "options": {
 CODEX_WINDOWS = (("weekly_all", "Weekly"),)
 
 
+# The seats, in row order. Config on both hosts (pr_reviewer_llm_seats: a, b, c), like the tier
+# names above; a fourth seat is a one-line change here.
+SEAT_NAMES = ("a", "b", "c")
+
+
 def seat_block(persona, name, y, tiers, tier_map, windows, serves=True, capacity_title=None):
     """One persona's seats: four stats (4 units), the seats table (6), the capacity timeline
     (5) - 15 units from y. Which account and model the persona is on RIGHT NOW, every
@@ -345,10 +350,16 @@ def seat_block(persona, name, y, tiers, tier_map, windows, serves=True, capacity
         table(f"{name} seats", 0, y + 4, 24, 6, targets=targets, by="seat", order=order, rename=rename,
               exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, len(targets) + 1)],
               overrides=overrides, cell_height="sm", filterable=False, sort="Seat"),
-        # ONE ROW PER ACCOUNT, over time: what it could serve, or parked.
+        # ONE ROW PER ACCOUNT, over time: what it could serve, or parked. ONE TARGET PER SEAT:
+        # a state timeline draws frames in query-result order, and a range query's series come
+        # back in hash order (the codex rows read a, c, b - screenshot, 2026-09-19); Prometheus's
+        # sort_by_label sits behind an experimental-functions flag this cluster does not carry,
+        # so the order is fixed by targets instead.
         state_timeline(capacity_title or f"{name} seat capacity — best tier each account can serve",
-                       0, y + 10, 24, 5, [bt + " * on(seat) group_left(email) " + se],
-                       ["{{seat}} · {{email}}"], tier_map),
+                       0, y + 10, 24, 5,
+                       [f'({bt} * on(seat) group_left(email) {se}) and on(seat) '
+                        f'reviewbot_llm_seat_parked{{{P},seat="{sn}"}}' for sn in SEAT_NAMES],
+                       ["{{seat}} · {{email}}"] * len(SEAT_NAMES), tier_map),
     ]
 
 
