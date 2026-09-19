@@ -32,6 +32,13 @@ pr_reviewer_llm_seats:
   - { name: a, sudo_user: codexrun }
   - { name: b, sudo_user: codexrun2 }
   - { name: c, sudo_user: codexrun3 }
+# The usage watchdog, hourly, as on reviewer-1: reviewbot runs codex-usage.py AS each seat, which
+# asks the CLI's own app server (`codex app-server`, account/rateLimits/read - no model call, no
+# quota) for the account's windows, parks and unparks seats from the API's percent/resets_at,
+# and exports per-account usage with the email from the seat's token claims. 2026-09-19: the
+# three seats read 97 %, 72 % and 100 % (rate_limit_reached) of their weekly windows, invisible
+# until now.
+pr_reviewer_usage_poll_s: 3600
 
 # The reviewer remains the sole OAuth refresher; DSH receives access tokens only.
 dsh_codex_publisher:

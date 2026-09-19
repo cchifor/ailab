@@ -325,6 +325,20 @@ being handed work it cannot do.
 > `--device-auth` run away, then a one-line host_vars change. Until it lands, capacity is
 > ~340–400 codex calls/day against a demand of ~210 that grew from 86 in a week.
 
+**Usage watchdog for codex** (2026-09-19, `pr_reviewer_usage_poll_s: 3600` on reviewer-2). The
+same hourly poll as on reviewer-1, with `codex-usage.py` as the probe: run AS each seat, it asks
+the CLI's own app server — `codex app-server`, JSON-RPC over stdio, `initialize` →
+`account/rateLimits/read` — for the account's windows; no model call, no quota, and the app
+server refreshes the ChatGPT token itself, so the claude keepalive has nothing to do here (a
+`chatgpt` credential never triggers it). The backend URL behind it answers a script with a 403
+challenge page; the CLI is the only door. A window shorter than a day is `session`, the 10080
+minute one is `weekly_all`, so the same parks apply: a spent weekly window parks the seat until
+the API's own reset. Identity (email, plan, account id) is read from the seat's access-token JWT
+claims in `~/.codex/auth.json` — never verified, never printed. Same metrics and panels as the
+claude persona under `persona="codex"`; `ReviewbotUsageProbeFailing` fires after 3 h of failed
+probes, and the manual check is `sudo -n -u <seat user> HOME=/home/<seat user>
+/usr/local/lib/reviewbot/codex-usage.py`. Re-login a seat with `codex login` as its user.
+
 ### Seats on reviewer-1: the claude persona holds three subscriptions
 
 Since 2026-09-18 (`plans/2026-09-18-claude-seat-rotation-plan.md`, ADR 0025) reviewer-1 runs the

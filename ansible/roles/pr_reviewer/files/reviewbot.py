@@ -1053,7 +1053,15 @@ def seat_home(seat):
 # credential and answers with the account identity and the usage windows, so the service user
 # never holds a seat's token to learn who the seat is - the same isolation _run_llm keeps.
 USAGE_PROBE = "/usr/local/lib/reviewbot/claude-usage.py"
+# The codex persona's twin (files/codex-usage.py): the CLI's own app server answers
+# account/rateLimits/read, no model call. Same document shape, so everything below is
+# persona-blind.
+CODEX_USAGE_PROBE = "/usr/local/lib/reviewbot/codex-usage.py"
 KEEPALIVE_PROMPT = "ok"
+
+
+def usage_probe_path():
+    return CODEX_USAGE_PROBE if CFG.get("llm_kind", "claude") == "codex" else USAGE_PROBE
 
 
 def seat_lock(name):
@@ -1062,15 +1070,21 @@ def seat_lock(name):
     return SEAT_LOCKS.setdefault(name, threading.Lock())
 
 
-def probe_usage(seat, timeout=30):
+def probe_usage(seat, timeout=45):
     """One seat's identity/usage document, never an exception: {"ok", "error", "account",
-    "limits"}. A seat with no sudo user is the service user's own login, probed in-process."""
+    "limits"}. A seat with no sudo user is the service user's own login, probed in-process.
+
+    45 s sits ABOVE both probes' own budgets (claude-usage.py: two 15 s HTTP calls;
+    codex-usage.py: a 20 s app-server deadline) plus interpreter start, so what comes back is
+    the probe's document - identity included - and never a killed child (both personas on
+    ailab#789). A probe killed here anyway leaves nothing behind: the codex app server exits
+    the instant its stdin closes."""
     s = SEAT_BY_NAME.get(seat) if isinstance(seat, str) else seat
     user = (s or {}).get("sudo_user") or ""
     if user:
-        args = ["sudo", "-n", "-u", user, f"HOME={seat_home(s)}", USAGE_PROBE]
+        args = ["sudo", "-n", "-u", user, f"HOME={seat_home(s)}", usage_probe_path()]
     else:
-        args = [sys.executable, USAGE_PROBE]
+        args = [sys.executable, usage_probe_path()]
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:
@@ -1263,49 +1277,72 @@ def rebalance(now=None):
     return best
 
 
+def probe_needs_seat_lock():
+    """The codex probe spawns the CLI's app server AS the seat, which shares the seat's auth.json
+    with a review's `codex exec` and may refresh the token - one CLI per seat at a time, as for
+    the keepalive (codex cross-review of ailab#789). The claude probe is two HTTP calls and
+    spawns nothing; taking the lock there would only leave the serving seat's usage stale."""
+    return CFG.get("llm_kind", "claude") == "codex"
+
+
 def poll_usage(now=None):
-    """One pass over every seat: probe, apply, rebalance, refresh the global wall."""
+    """One pass over every seat: probe, apply, rebalance, refresh the global wall. A seat whose
+    lock a review holds is skipped this pass when the probe needs the lock - snapshot untouched,
+    nothing counted."""
     global RATE_LIMITED_UNTIL
     now = time.time() if now is None else now
     for s in SEATS:
+        guard = seat_lock(s["name"]) if probe_needs_seat_lock() else None
+        if guard is not None and not guard.acquire(blocking=False):
+            log(f"usage: seat '{s['name']}' is serving a review; its probe waits for the next poll")
+            continue
         try:
-            doc = probe_usage(s)
-        except Exception as e:
-            doc = {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
-        # A FAILED probe on an expired login gets ONE keepalive and ONE more probe, per poll.
-        # The 401 is the trigger, not the clock alone: server-side leeway or clock skew can
-        # keep usage flowing on a token the file calls expired (reviewer-claude on ailab#786).
-        # Shielded like the probe and apply_usage around it, so one seat's sqlite hiccup does
-        # not skip the poll for the rest. keepalive() answers None when a review's CLI holds
-        # the seat; nothing to re-probe then.
-        if keepalive_enabled() and not doc.get("ok") and credential_expired(doc, now):
-            try:
-                ran = keepalive(s)
-            except Exception as e:
-                ran = None
-                bump_meta(f"seat_keepalive_failures_total.{s['name']}")
-                log(f"usage: seat '{s['name']}' keepalive failed: {e}")
-            if ran is not None:
-                try:
-                    doc = probe_usage(s)
-                except Exception as e:
-                    doc = {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
-                # THE VERDICT IS THE RE-PROBE. A failure is a login the run did not make usable
-                # - never the CLI's exit code, which is 1 on a parked seat's refused call.
-                if doc.get("ok"):
-                    log(f"usage: seat '{s['name']}' login renewed by the keepalive")
-                else:
-                    bump_meta(f"seat_keepalive_failures_total.{s['name']}")
-                    log(f"usage: seat '{s['name']}' still failing after the keepalive: {doc.get('error')}")
-        try:
-            apply_usage(s["name"], doc, now)
-        except Exception as e:
-            log(f"usage: applying seat '{s['name']}' failed: {e}")
-        if not doc.get("ok"):
-            log(f"usage: seat '{s['name']}' probe failed: {doc.get('error')}")
+            _poll_seat(s, now)
+        finally:
+            if guard is not None:
+                guard.release()
     rebalance(now)
     with park_lock:
         RATE_LIMITED_UNTIL = all_parked_until(now)
+
+
+def _poll_seat(s, now):
+    """Probe one seat, keep an expired login alive, apply the document."""
+    try:
+        doc = probe_usage(s)
+    except Exception as e:
+        doc = {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
+    # A FAILED probe on an expired login gets ONE keepalive and ONE more probe, per poll.
+    # The 401 is the trigger, not the clock alone: server-side leeway or clock skew can
+    # keep usage flowing on a token the file calls expired (reviewer-claude on ailab#786).
+    # Shielded like the probe and apply_usage around it, so one seat's sqlite hiccup does
+    # not skip the poll for the rest. keepalive() answers None when a review's CLI holds
+    # the seat; nothing to re-probe then.
+    if keepalive_enabled() and not doc.get("ok") and credential_expired(doc, now):
+        try:
+            ran = keepalive(s)
+        except Exception as e:
+            ran = None
+            bump_meta(f"seat_keepalive_failures_total.{s['name']}")
+            log(f"usage: seat '{s['name']}' keepalive failed: {e}")
+        if ran is not None:
+            try:
+                doc = probe_usage(s)
+            except Exception as e:
+                doc = {"ok": False, "error": f"{type(e).__name__}: {e}", "account": {}, "limits": []}
+            # THE VERDICT IS THE RE-PROBE. A failure is a login the run did not make usable
+            # - never the CLI's exit code, which is 1 on a parked seat's refused call.
+            if doc.get("ok"):
+                log(f"usage: seat '{s['name']}' login renewed by the keepalive")
+            else:
+                bump_meta(f"seat_keepalive_failures_total.{s['name']}")
+                log(f"usage: seat '{s['name']}' still failing after the keepalive: {doc.get('error')}")
+    try:
+        apply_usage(s["name"], doc, now)
+    except Exception as e:
+        log(f"usage: applying seat '{s['name']}' failed: {e}")
+    if not doc.get("ok"):
+        log(f"usage: seat '{s['name']}' probe failed: {doc.get('error')}")
 
 
 def usage_ticker():
