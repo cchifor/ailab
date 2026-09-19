@@ -299,12 +299,15 @@ def seat_block(persona, name, y, tiers, tier_map, windows, serves=True, capacity
         rename[f"Value #{pr}"], rename[f"Value #{rr}"] = label, f"{label} reset"
         gauges.append(label)
         resets.append(f"{label} reset")
-    # State: 2 = the active seat, 1 = account-parked, 0 = free; `or` fills the seats the
-    # active-seat series lacks. Login expires: the login's access-token expiry, relative
-    # ("in 5 hours"); a stamp that stays in the past is a login the keepalive could not
-    # renew (0 = setup-token, dropped).
+    # State: 2 = the active seat, 1 = parked, 0 = free. "Parked" is NOTHING USABLE - the
+    # account wall OR every tier parked - the same verdict the capacity timeline draws, so a
+    # seat whose only model is parked can never read `free` here while the timeline says
+    # parked (reviewer-codex on ailab#790). best_tier is anchored per seat, so `or` fills
+    # the seats the active-seat series lacks. Login expires: the login's access-token expiry,
+    # relative ("in 5 hours"); a stamp that stays in the past is a login the keepalive could
+    # not renew (0 = setup-token, dropped).
     targets += [("G", f'(max by (seat) (reviewbot_llm_active_seat_info{{{P}}}) * 2) '
-                      f'or max by (seat) (reviewbot_llm_seat_parked{{{P}}})'),
+                      f'or ({bt} == bool 0)'),
                 ("I", f'max by (seat) (reviewbot_llm_seat_credential_expires_at_seconds{{{P}}} > 0) * 1000')]
     if serves:
         targets.append(("J", bt))
