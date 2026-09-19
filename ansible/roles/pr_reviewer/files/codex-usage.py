@@ -34,7 +34,13 @@ messages describe the process or the body (RpcError, transport errors), never a 
 Stdlib only: the reviewer VMs carry no pip packages.
 
     REVIEWBOT_CODEX_BIN            the CLI (default "codex"); a JSON list for a command with args
-    REVIEWBOT_CODEX_RPC_TIMEOUT_S  seconds to wait for the app server's answers (default 30)
+    REVIEWBOT_CODEX_RPC_TIMEOUT_S  seconds to wait for the app server's answers (default 20)
+
+DEADLINES. reviewbot runs this under its own subprocess timeout (probe_usage, 45 s); the RPC
+deadline here is 20 s so that on a hung app server THIS process answers with the timeout
+document - identity included - before the caller could ever kill it (both personas on
+ailab#789). Should the caller kill it anyway, nothing is left behind: the app server exits
+the instant its stdin closes (measured on reviewer-2: rc=0, 0.0 s after EOF).
 """
 import base64
 import json
@@ -46,6 +52,7 @@ import threading
 import time
 
 WEEKLY_MIN_MINUTES = 1440          # a window this long or longer is the weekly one
+RPC_TIMEOUT_S = 20.0               # well under reviewbot's 45 s probe timeout - see DEADLINES
 
 
 class CredentialError(ValueError):
@@ -71,9 +78,9 @@ def _bin():
 
 def _timeout():
     try:
-        return max(1.0, float(os.environ.get("REVIEWBOT_CODEX_RPC_TIMEOUT_S") or 30))
+        return max(1.0, float(os.environ.get("REVIEWBOT_CODEX_RPC_TIMEOUT_S") or RPC_TIMEOUT_S))
     except (TypeError, ValueError):
-        return 30.0
+        return RPC_TIMEOUT_S
 
 
 def _describe(e):
@@ -98,14 +105,16 @@ def jwt_claims(tok):
 
 
 def credential(home):
-    """(token, source, expires_at, claims). source: "chatgpt" (a ChatGPT login: tokens with an
-    access token), "apikey" (OPENAI_API_KEY only - no ChatGPT account, no windows), "none".
-    expires_at is the access token's `exp` claim, or None."""
+    """(source, expires_at, claims) - NEVER the token: the app server reads the credential
+    itself, so this process has no use for it in hand, and not returning it makes "never
+    printed" structural (reviewer-claude on ailab#789). source: "chatgpt" (a ChatGPT login:
+    tokens with an access token), "apikey" (OPENAI_API_KEY only - no ChatGPT account, no
+    windows), "none". expires_at is the access token's `exp` claim, or None."""
     try:
         with open(os.path.join(home, ".codex", "auth.json"), encoding="utf-8") as f:
             d = json.load(f)
     except OSError:
-        return None, "none", None, {}
+        return "none", None, {}
     except ValueError:
         raise CredentialError("credential malformed: auth.json is not UTF-8 JSON")
     if not isinstance(d, dict):
@@ -116,10 +125,10 @@ def credential(home):
         claims = jwt_claims(access.strip())
         exp = claims.get("exp")
         exp = int(exp) if isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp > 0 else None
-        return access.strip(), "chatgpt", exp, claims
+        return "chatgpt", exp, claims
     if d.get("OPENAI_API_KEY"):
-        return None, "apikey", None, {}
-    return None, "none", None, {}
+        return "apikey", None, {}
+    return "none", None, {}
 
 
 def identity(claims):
@@ -134,6 +143,16 @@ def identity(claims):
     return out if (out["uuid"] or out["email"]) else {}
 
 
+def epoch_seconds(v):
+    """An epoch stamp as seconds; milliseconds (> 1e11, the same rule as the claude probe's login
+    expiry) are converted, anything else that is not a positive number is None. A millisecond
+    stamp taken as seconds would read as a reset in the year 58000 (codex cross-review of
+    ailab#789)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+        return None
+    return int(v / 1000.0) if v > 1e11 else int(v)
+
+
 def window_kind(minutes):
     try:
         return "session" if float(minutes) < WEEKLY_MIN_MINUTES else "weekly_all"
@@ -142,7 +161,12 @@ def window_kind(minutes):
 
 
 def windows(result):
-    """(limits, plan, account id) from an account/rateLimits/read result."""
+    """(limits, plan, account id) from an account/rateLimits/read result.
+
+    THE SERVER'S VERDICT BEATS ITS ROUNDED PERCENT: usedPercent is an integer, and a seat the
+    API has limited can read 99 after rounding, while rateLimitReachedType says so in words.
+    reviewbot parks on percent, so when the answer says reached, the fullest window is
+    reported at 100 and active (reviewer-claude on ailab#789)."""
     rl = result.get("rateLimits") if isinstance(result, dict) else None
     rl = rl if isinstance(rl, dict) else {}
     limits = []
@@ -154,10 +178,13 @@ def windows(result):
             pct = float(w.get("usedPercent") or 0)
         except (TypeError, ValueError):
             pct = 0.0
-        reset = w.get("resetsAt")
-        reset = int(reset) if isinstance(reset, (int, float)) and not isinstance(reset, bool) and reset > 0 else None
+        reset = epoch_seconds(w.get("resetsAt"))
         limits.append({"kind": window_kind(w.get("windowDurationMins")), "model": "", "percent": pct,
                        "resets_at": reset, "active": pct >= 100.0})
+    if rl.get("rateLimitReachedType") and limits:
+        fullest = max(limits, key=lambda l: l["percent"])
+        fullest["percent"] = max(fullest["percent"], 100.0)
+        fullest["active"] = True
     plan = rl.get("planType")
     acct = result.get("accountId") if isinstance(result, dict) else None
     return limits, (str(plan) if plan else ""), (str(acct) if acct else "")
@@ -200,8 +227,13 @@ def app_server_rate_limits(home):
                 m = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(m, dict) or m.get("id") != rid:
-                continue                      # a notification, or someone else's answer
+            # Only a RESPONSE to our id: the app server also sends REQUESTS to its client, which
+            # carry a `method` and an id from its own counter that can collide with ours
+            # (reviewer-claude on ailab#789); notifications carry no id at all.
+            if not isinstance(m, dict) or m.get("id") != rid or "method" in m:
+                continue
+            if "result" not in m and "error" not in m:
+                continue
             if "error" in m:
                 err = m["error"]
                 msg = err.get("message") if isinstance(err, dict) else err
@@ -230,7 +262,7 @@ def probe(home, rpc=app_server_rate_limits):
     doc = {"ok": False, "error": "", "account": {}, "limits": [],
            "credential": {"source": "none", "expires_at": None}}
     try:
-        token, source, expires_at, claims = credential(home)
+        source, expires_at, claims = credential(home)
     except CredentialError as e:
         doc["error"] = str(e)
         return doc

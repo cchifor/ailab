@@ -1012,6 +1012,10 @@ class CodexLimitParkTest(unittest.TestCase):
         self.m = load(self.tmp.name, llm_kind="codex", llm_model="gpt-6-astra",
                       llm_fallback_model="", llm_timeout_s=600, llm_sudo_user="")
         self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+        # The fakes below rebind the STDLIB's subprocess.run (the module under test imports the
+        # real module), so every later test that spawns a real child got this class's codex
+        # stderr back until this restore existed (found by the codex probe's end-to-end test).
+        self.addCleanup(setattr, self.m.subprocess, "run", _REAL_RUN)
 
     def _fake_run(self, stderr, elapsed=0.0):
         """codex exits 1 and writes no --output-last-message file, which is what makes the
@@ -3540,6 +3544,9 @@ for line in sys.stdin:
         if mode == "silent":
             continue
         out({"method": "remoteControl/status/changed", "params": {"status": "disabled"}})
+        if mode == "request":
+            # a server->client REQUEST: has an id (its own counter, colliding with ours) and a method
+            out({"id": m["id"], "method": "item/commandExecution/requestApproval", "params": {"x": 1}})
         if mode == "error":
             out({"id": m["id"], "error": {"code": -32000, "message": "not logged in"}})
         else:
@@ -3589,6 +3596,83 @@ class CodexUsageProbeTest(unittest.TestCase):
                            "active": False}], doc["limits"], "a 10080-minute window is the weekly one")
         self.assertEqual({"source": "chatgpt", "expires_at": 1789900000}, doc["credential"])
         self.assertEqual([str(self.home)], self.calls)
+
+    def test_the_servers_reached_verdict_beats_its_rounded_percent(self):
+        """reviewer-claude on ailab#789: usedPercent is an integer (97, not 97.3) and the answer
+        carries rateLimitReachedType; a limited seat rounded to 99 must still park, and
+        apply_usage parks on percent, so the limited window reads 100."""
+        self._login()
+        r = json.loads(json.dumps(CODEX_RATE_LIMITS))
+        r["rateLimits"]["primary"] = {"usedPercent": 99, "windowDurationMins": 10080, "resetsAt": 1790143563}
+        r["rateLimits"]["secondary"] = {"usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1789810000}
+        r["rateLimits"]["rateLimitReachedType"] = "rate_limit_reached"
+        doc = self.p.probe(str(self.home), self._rpc(r))
+        self.assertEqual([("weekly_all", 100.0, True), ("session", 12.0, False)],
+                         [(l["kind"], l["percent"], l["active"]) for l in doc["limits"]],
+                         "the fullest window is the limited one; the other keeps its number")
+
+    def test_a_millisecond_reset_stamp_is_normalised_and_nonsense_dropped(self):
+        """codex cross-review of ailab#789: a resetsAt in milliseconds would read as a reset
+        in the year 58000 and park the seat "until then" (clamped to 6h per poll, but shown
+        as such). Same rule as the claude probe's login expiry: > 1e11 is milliseconds."""
+        self._login()
+        r = json.loads(json.dumps(CODEX_RATE_LIMITS))
+        r["rateLimits"]["primary"]["resetsAt"] = 1790143563000
+        r["rateLimits"]["secondary"] = {"usedPercent": 1, "windowDurationMins": 300, "resetsAt": -5}
+        doc = self.p.probe(str(self.home), self._rpc(r))
+        self.assertEqual([1790143563, None], [l["resets_at"] for l in doc["limits"]])
+
+    def test_credential_returns_no_token(self):
+        """reviewer-claude on ailab#789: the app server reads the credential itself, so the
+        probe never needs the token in hand - structurally, not by inspection."""
+        self._login()
+        got = self.p.credential(str(self.home))
+        self.assertEqual(3, len(got))
+        self.assertEqual(("chatgpt", 1789900000), got[:2])
+        self.assertNotIn("eyJ", json.dumps(got))
+
+    def test_a_server_request_with_a_colliding_id_is_not_the_answer(self):
+        """reviewer-claude on ailab#789: the app server can send REQUESTS to its client, with an
+        id from its own counter; one that collides with ours must be skipped, not taken as an
+        empty answer that reads "no windows"."""
+        self._login()
+        r = _REAL_RUN([sys.executable, str(CODEX_USAGE_PY)], capture_output=True, text=True,
+                      env=self._stub_env("request"), timeout=60)
+        doc = json.loads(r.stdout)
+        self.assertTrue(doc["ok"], doc["error"])
+        self.assertEqual(97.0, doc["limits"][0]["percent"])
+
+    def test_a_silent_server_becomes_a_document_through_probe_usage_too(self):
+        """reviewer-codex on ailab#789: the probe's own deadline must win against reviewbot's
+        outer subprocess timeout, or a hung app server yields a killed child - identity lost,
+        the app server possibly orphaned - instead of the document. Driven through
+        probe_usage() with ITS default timeout and the probe's default inner deadline."""
+        self._login()
+        stub = self.home / "codex-stub.py"
+        stub.write_text(CODEX_STUB, encoding="utf-8")
+        saved = {k: os.environ.get(k) for k in ("HOME", "STUB_MODE", "STUB_RESULT", "REVIEWBOT_CODEX_BIN",
+                                                "REVIEWBOT_CODEX_RPC_TIMEOUT_S")}
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.addCleanup(restore)
+        os.environ.update({"HOME": str(self.home), "STUB_MODE": "silent", "STUB_RESULT": "{}",
+                           "REVIEWBOT_CODEX_BIN": json.dumps([sys.executable, str(stub)])})
+        os.environ.pop("REVIEWBOT_CODEX_RPC_TIMEOUT_S", None)
+        m = load(self.tmp.name, llm_kind="codex", llm_model="gpt-6-astra", llm_fallback_model="",
+                 llm_cmd=["codex"], llm_sudo_user="", llm_seats=[{"name": "a"}], usage_poll_s=3600)
+        m.CODEX_USAGE_PROBE = str(CODEX_USAGE_PY)
+        m.subprocess.run = _REAL_RUN        # a real child process, whatever an earlier test left faked
+        started = real_time.time()
+        doc = m.probe_usage("a")
+        self.assertFalse(doc["ok"])
+        self.assertIn("timeout", doc["error"], doc)
+        self.assertEqual("seat@example.test", doc["account"]["email"], "the document, not a killed child")
+        self.assertLess(real_time.time() - started, 40, "the inner deadline, not the outer 45s")
 
     def test_a_five_hour_window_is_the_session_kind_and_100_percent_is_active(self):
         self._login()
@@ -4755,6 +4839,48 @@ class CredentialKeepaliveTest(unittest.TestCase):
         self.assertEqual(["sudo", "-n", "-u", "runa", "HOME=/home/runa", codex.CODEX_USAGE_PROBE], seen[0])
         self.assertTrue(codex.CODEX_USAGE_PROBE.endswith("codex-usage.py"))
         self.assertTrue(self.m.USAGE_PROBE.endswith("claude-usage.py"), "and claude keeps its own")
+
+    def test_the_codex_probe_runs_under_the_seat_lock_and_yields_to_a_review(self):
+        """codex cross-review of ailab#789: the codex probe spawns `codex app-server` as the
+        seat, and a review's `codex exec` as the same seat shares its auth.json (the app
+        server may refresh the token). One CLI per seat at a time, as for the keepalive: the
+        probe takes the seat's lock non-blocking and, while a review holds it, the seat is
+        skipped for this poll - snapshot untouched, no failure counted."""
+        codex = load(self.tmp.name, llm_kind="codex", llm_model="gpt-6-astra", llm_fallback_model="",
+                     llm_cmd=["codex"], llm_sudo_user="", llm_seats=CLAUDE_SEATS, usage_poll_s=3600)
+        probed, held = [], []
+
+        def probe(seat, timeout=30):
+            name = seat["name"] if isinstance(seat, dict) else seat
+            probed.append(name)
+            lock = codex.seat_lock(name)
+            held.append(not lock.acquire(blocking=False))
+            if not held[-1]:
+                lock.release()
+            return {"ok": True, "error": "", "account": {"uuid": "u", "email": "e", "plan": "p"},
+                    "limits": [], "credential": {"source": "chatgpt", "expires_at": 1}}
+        codex.probe_usage = probe
+        lock_b = codex.seat_lock("b")
+        self.assertTrue(lock_b.acquire(blocking=False))          # a review is running as b
+        self.addCleanup(lock_b.release)
+        codex.poll_usage(self.now)
+        self.assertEqual(["a", "c"], probed, "b was left to its review")
+        self.assertEqual([True, True], held, "the probe ran with the seat's lock held")
+        self.assertIsNone(codex.USAGE_SNAPSHOT.get("b"), "nothing was written for the skipped seat")
+        lock_b.release()
+        codex.poll_usage(self.now + 3600)
+        self.assertEqual(["a", "c", "a", "b", "c"], probed, "next poll, b is probed again")
+        lock_b.acquire()                                          # so the cleanup's release balances
+
+    def test_the_claude_probe_is_http_only_and_keeps_probing_the_serving_seat(self):
+        """The claude probe never spawns the CLI; skipping the serving seat would only make
+        its usage stale for an hour."""
+        lock_a = self.m.seat_lock("a")
+        self.assertTrue(lock_a.acquire(blocking=False))
+        self.addCleanup(lock_a.release)
+        self._install({"a": [self._doc(expires_at=self.now + 3600)]})
+        self.m.poll_usage(self.now)
+        self.assertEqual(["a", "b", "c"], self.probes)
 
     def test_a_chatgpt_credential_never_gets_a_keepalive(self):
         """The codex app-server refreshes its own token when asked; there is nothing for a
