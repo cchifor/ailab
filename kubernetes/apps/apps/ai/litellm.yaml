@@ -851,7 +851,7 @@ spec:
         # streams on the replaced replica are terminated). Value stamped by
         # `scripts/gen-litellm-consumers.py --write` -- the documented recipe via check-inline-hashes,
         # the same derivation as the 2026-09-11 value.
-        # BUMPED 2026-09-19 (second time that day), d98f1b92fcb9 -> cacf2566, for the measured
+        # BUMPED 2026-09-19 (second time that day), d98f1b92fcb9 -> cacf2566b094, for the measured
         # chat-completions record on the gpt-6-astra-realjaynesage route (streaming works,
         # non-streaming 500s -- never TASK_MODEL_EXTERNAL). Comments only: the config LiteLLM
         # parses is byte-identical in effect, no routing change; the cost is one rolling restart
