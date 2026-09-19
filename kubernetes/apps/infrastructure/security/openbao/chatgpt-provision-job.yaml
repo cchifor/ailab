@@ -1,0 +1,321 @@
+# Provisions the OpenBao side of the ChatGPT-subscription projection that LiteLLM reads (ADR 0026).
+#
+# WHAT IT OWNS, AND WHY IT EXISTS. A second Codex subscription (reviewer-2 seat d, realjaynesage)
+# feeds LiteLLM's `chatgpt/` provider through an access-only projection: the reviewer host's
+# dsh-codex-publisher PATCHes the seat's access token into `af/litellm/chatgpt`, and an ESO
+# SecretStore in ns `ai` reads that ONE document into the litellm pods. Three vault objects make
+# that path exist, and this Job owns them declaratively, the way dsh-provision-job.yaml owns
+# `af-app-dsh` -- nothing here is a hand ceremony that a wipe forgets:
+#   * policy `af-app-litellm`      read on af/data/litellm/chatgpt, nothing else.
+#   * policy `dsh-codex-publisher` the publisher's AppRole policy. It was installed BY HAND on
+#                                  2026-09-17 from ansible/roles/dsh_codex_publisher/files/policy.hcl
+#                                  (patch + metadata read on af/dsh/credentials). This Job takes it
+#                                  over -- git owns it from here; that role file is retired by ADR
+#                                  0026 -- and widens it to the litellm document. The AppRole itself
+#                                  (role-id/secret-id, token_ttl 60s) stays the operator ceremony in
+#                                  docs/runbooks/dsh.md.
+#   * k8s auth role `af-app-litellm` bound to ServiceAccount litellm-eso in ns ai. WRITTEN, not
+#                                  asserted as the dsh Job does with its role: no ceremony ever
+#                                  created this one, every setting it needs is in this file, and
+#                                  rewriting the same values is idempotent.
+#   * KV `af/litellm/chatgpt`      created ONCE with every key the ESO template references, EMPTY,
+#                                  plus a non-secret canary. ESO's v2 template errors on a key that
+#                                  is absent (measured on this cluster, 2026-09-19), so the keys must
+#                                  exist before the publisher's first write or the ExternalSecret
+#                                  never syncs and the `apps` layer (wait: true) wedges on it.
+#
+# AUTH: the openbao-breakglass-token Secret, for the same reason devworker-provision-job.yaml needs
+# it -- the scoped provisioner token cannot write policies or auth roles. `optional: false` so an
+# absent Secret turns this Job red rather than skipping silently.
+#
+# THE OWNERSHIP CONTRACT, stated because it cuts both ways:
+#   * GIT OWNS BOTH POLICIES WHOLE. `bao policy write` REPLACES the document; it does not merge. A
+#     grant added by hand is reverted on the next run -- and so is a grant REVOKED by hand during an
+#     incident. An emergency policy change must therefore suspend this Job (or its Flux
+#     Kustomization) AND land in git before reconciliation resumes.
+#   * THE JOB DOES NOT OWN THE KV CONTENTS. It CREATES af/litellm/chatgpt if absent and never
+#     touches it again. Every field after that is the publisher's (docs/runbooks/dsh.md, "Codex
+#     subscriptions"). A git seed here would put a credential that rotates every few days back to
+#     an empty (or stale) value daily.
+#   * REMOVING THIS FILE FROM GIT DOES NOT UNDO ITS WRITES. Rollback has to address the OpenBao
+#     objects explicitly.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-chatgpt-provision-script
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-chatgpt-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+data:
+  provision.sh: |
+    #!/bin/sh
+    # Idempotent and fail-closed: `set -eu`, no blanket `|| true`. NEVER echo credential material.
+    # A POLICY is not a credential, so the previous policies ARE printed before they are replaced --
+    # those log lines are the audit trail and the recovery source if this Job ever writes the wrong
+    # thing.
+    set -eu
+
+    APP_POLICY=af-app-litellm
+    PUBLISHER_POLICY=dsh-codex-publisher
+    ROLE=auth/kubernetes/role/af-app-litellm
+    KV_PATH=litellm/chatgpt
+    # A non-secret marker whose only job is to make the path exist and to prove the pipeline
+    # end-to-end; the four CHATGPT_* keys are the ones the ExternalSecret template references
+    # (kubernetes/apps/apps/ai/litellm-chatgpt-eso.yaml) and the publisher writes. Seeded EMPTY.
+    CANARY_NAME=CHATGPT_OPENBAO_CANARY
+    CANARY_VALUE=provisioned
+
+    bao token lookup >/dev/null || {
+      echo "openbao unreachable/sealed or the breakglass token was rejected; aborting" >&2
+      exit 1
+    }
+
+    # ---- 1. Drift guards, BEFORE replacing anything -----------------------------------------
+    # `bao policy write` replaces the document, so the failure mode that matters is silently
+    # DROPPING a permission somebody added since this file was reviewed. The guard compares the
+    # WHOLE DOCUMENT, normalised, against the two forms it is allowed to find: the reviewed
+    # BASELINE (what the vault holds before this Job first runs) and DESIRED (what section 2
+    # writes). Anything else is drift this file has not reviewed, and the Job stops before writing.
+    #
+    # NORMALISATION strips full-line comments FIRST, then every whitespace character. The dsh Job
+    # strips whitespace only; that is not enough here, because the live dsh-codex-publisher policy
+    # was installed from a file that carries two `#` comment lines, and a comment is not a grant --
+    # a guard that refused on a reworded comment would be refusing on nothing. A `#` inside a path
+    # string would be a grant, but no path in this estate contains one.
+    normalise() {
+      sed -e 's/^[[:space:]]*#.*$//' | tr -d '[:space:]'
+    }
+
+    # Whole-document equality has neither of the holes a path-name check has: a capability ADDED
+    # to an already-allowed path, or a path written with tabs, are both differences here.
+    #
+    # THE MAINTENANCE RULE, which no test can enforce because it spans git revisions: when a
+    # heredoc below changes, the live vault holds the OUTGOING desired form, so a Job that only
+    # updated DESIRED refuses every run from then on (the daily TTL-reap re-applies it red and the
+    # `openbao` Kustomization goes False with it). On ANY policy change here, do all three:
+    #   1. edit the heredoc;
+    #   2. set *_DESIRED to the new normalised form (the unit test pins this pair);
+    #   3. set *_BASELINE to the OUTGOING *_DESIRED -- the form the vault holds right now -- and
+    #      drop the older form it replaced. BASELINE is "the last reviewed form still live", not
+    #      "the original hand-installed form forever".
+    # Skipping (3) is a guaranteed self-wedge on the first routine edit (reviewer-claude, #791).
+    PUBLISHER_BASELINE='path"af/data/dsh/credentials"{capabilities=["patch"]}path"af/metadata/dsh/credentials"{capabilities=["read"]}'
+    PUBLISHER_DESIRED='path"af/data/dsh/credentials"{capabilities=["patch"]}path"af/metadata/dsh/credentials"{capabilities=["read"]}path"af/data/litellm/chatgpt"{capabilities=["patch"]}path"af/metadata/litellm/chatgpt"{capabilities=["read"]}'
+    # af-app-litellm has no pre-ownership form: nothing created it before this Job, so the only
+    # document it may find is its own previous output. The same maintenance rule applies: the
+    # first edit to its heredoc must move today's DESIRED into APP_BASELINE.
+    APP_BASELINE='path"af/data/litellm/chatgpt"{capabilities=["read"]}'
+    APP_DESIRED='path"af/data/litellm/chatgpt"{capabilities=["read"]}'
+
+    # An unreadable policy must NOT look like an absent one: absence is established from the
+    # policy LIST, and once a policy is known to exist the read must succeed or the Job stops.
+    POLICY_LIST="$(bao policy list -format=json)" || {
+      echo "cannot list policies; aborting rather than writing blind" >&2
+      exit 1
+    }
+
+    # guard_policy <name> <baseline> <desired>: refuse (exit 1) unless the live document is absent
+    # or matches one of the two reviewed forms. Runs for BOTH policies before EITHER is written, so
+    # a refusal on the second never leaves the first half-applied.
+    guard_policy() {
+      policy=$1; baseline=$2; desired=$3
+      if echo "$POLICY_LIST" | grep -q "\"${policy}\""; then
+        prev="$(bao policy read "$policy")" || {
+          echo "policy $policy exists but could not be read; aborting rather than writing blind" >&2
+          exit 1
+        }
+        echo "--- existing policy $policy (replaced below; kept here as the audit trail) ---"
+        echo "$prev"
+        echo "--- end existing policy ---"
+        prev_norm="$(printf '%s\n' "$prev" | normalise)"
+        if [ "$prev_norm" != "$baseline" ] && [ "$prev_norm" != "$desired" ]; then
+          echo "REFUSING: policy $policy does not match the reviewed baseline or the desired" >&2
+          echo "document. Something changed it outside git. Reconcile chatgpt-provision-job.yaml" >&2
+          echo "with the policy printed above before letting this Job run again." >&2
+          exit 1
+        fi
+        echo "policy $policy matches a reviewed form; safe to replace"
+      else
+        echo "policy $policy absent (fresh vault, or first run); creating it"
+      fi
+    }
+    guard_policy "$PUBLISHER_POLICY" "$PUBLISHER_BASELINE" "$PUBLISHER_DESIRED"
+    guard_policy "$APP_POLICY" "$APP_BASELINE" "$APP_DESIRED"
+
+    # ---- 2. The policies ----------------------------------------------------------------------
+    # The publisher: `patch` on the two documents it projects into, `read` on their metadata (the
+    # CAS version it patches against). No `read` on data -- it never learns another field's value
+    # -- and no put/delete, so it cannot replace or remove a document. OpenBao ACLs apply per
+    # document, which is why patch on af/dsh/credentials already covered every field there; the
+    # litellm document holds nothing but what this publisher writes plus the canary.
+    bao policy write "$PUBLISHER_POLICY" - <<'EOF'
+    path "af/data/dsh/credentials"     { capabilities = ["patch"] }
+    path "af/metadata/dsh/credentials" { capabilities = ["read"] }
+    path "af/data/litellm/chatgpt"     { capabilities = ["patch"] }
+    path "af/metadata/litellm/chatgpt" { capabilities = ["read"] }
+    EOF
+    # Read back. A write that silently did nothing is indistinguishable from success otherwise.
+    for grant in af/data/dsh/credentials af/metadata/dsh/credentials af/data/litellm/chatgpt af/metadata/litellm/chatgpt; do
+      bao policy read "$PUBLISHER_POLICY" | grep -q "$grant" || {
+        echo "policy $PUBLISHER_POLICY does not carry $grant after writing; aborting" >&2
+        exit 1
+      }
+    done
+    echo "policy $PUBLISHER_POLICY written and verified"
+
+    # The reader: `read` on the DATA endpoint only. ESO's `dataFrom.extract` reads KV-v2 data and
+    # never enumerates or fetches metadata.
+    bao policy write "$APP_POLICY" - <<'EOF'
+    path "af/data/litellm/chatgpt" { capabilities = ["read"] }
+    EOF
+    bao policy read "$APP_POLICY" | grep -q 'af/data/litellm/chatgpt' || {
+      echo "policy $APP_POLICY did not contain its grant after writing; aborting" >&2
+      exit 1
+    }
+    echo "policy $APP_POLICY written and verified"
+
+    # ---- 3. The auth role, WRITTEN and OWNED WHOLE --------------------------------------------
+    # The same shape af-app-dsh has live (read back 2026-09-19): the ServiceAccount's uid as the
+    # entity alias, a 1h token, the policy attached through token_policies -- a role's NAME does not
+    # attach the same-named policy. `bao write` REPLACES the role, so every setting is spelled out,
+    # and the ownership contract is the policies' one: a binding narrowed by hand during an incident
+    # is restored by the next run. An emergency change to this role must suspend the Job and land
+    # here. There is no drift guard on the role (unlike the policies) because nothing outside git
+    # ever owned it -- it did not exist before this file.
+    bao write "$ROLE" \
+      bound_service_account_names=litellm-eso \
+      bound_service_account_namespaces=ai \
+      token_policies="$APP_POLICY" \
+      token_ttl=1h \
+      alias_name_source=serviceaccount_uid
+    # Read back the three settings that decide WHO logs in and WHAT they may read -- each an EXACT
+    # LIST-ELEMENT MATCH, not a substring (`grep -w` is no better: `-` is not a word constituent).
+    # Each field prints a bracketed, space-separated list on ONE line with no trailing newline, so
+    # it is unwrapped into lines before an anchored match.
+    role_field_has() {
+      bao read -field="$1" "$ROLE" | tr -d '[]' | tr ' ' '\n' | grep -qx "$2"
+    }
+    role_field_has token_policies "$APP_POLICY" || {
+      echo "$ROLE does not carry policy $APP_POLICY after writing; aborting" >&2
+      exit 1
+    }
+    role_field_has bound_service_account_names litellm-eso || {
+      echo "$ROLE is not bound to ServiceAccount litellm-eso after writing; aborting" >&2
+      exit 1
+    }
+    role_field_has bound_service_account_namespaces ai || {
+      echo "$ROLE is not bound to namespace ai after writing; aborting" >&2
+      exit 1
+    }
+    echo "$ROLE written: litellm-eso@ai carries $APP_POLICY"
+
+    # ---- 4. Create the KV path, ONCE ----------------------------------------------------------
+    # -cas=0 writes only when no version history exists. Once the path exists every later run
+    # conflicts, which is the desired outcome: the publisher owns the contents from then on. The
+    # conflict is a SKIP, not a failure. Deliberately NO `kv patch` fallback and no blanket `|| true`.
+    # A SOFT-DELETED current version is not an absent one, and `bao kv get` does not distinguish
+    # them by exit code (a `kv delete`d path returns exit 0 with "data": null), so readability is
+    # decided on the DATA, not the exit code.
+    kv_current_readable() {
+      out="$(bao kv get -mount=af -format=json "$1" 2>/dev/null)" || return 1
+      case "$out" in
+        *'"data": null'*) return 1 ;;
+      esac
+      return 0
+    }
+
+    # The put's output is CAPTURED, not discarded: the final branch below is reached on a
+    # soft-deleted path, but also on a permission error, a network failure or a vault sealed
+    # mid-run, and only the CLI's own message tells those apart. The command line seeds empty
+    # strings and a non-secret canary, so nothing it can print is credential material.
+    if kv_current_readable "$KV_PATH"; then
+      echo "af/$KV_PATH already exists; contents are publisher-owned and left untouched"
+    elif put_out="$(bao kv put -cas=0 -mount=af "$KV_PATH" \
+        "${CANARY_NAME}=${CANARY_VALUE}" \
+        CHATGPT_ACCESS_TOKEN= CHATGPT_ACCOUNT_ID= CHATGPT_ACCOUNT_EMAIL= CHATGPT_EXPIRES_AT= 2>&1)"; then
+      echo "af/$KV_PATH created with the $CANARY_NAME marker and empty CHATGPT_* fields"
+    elif kv_current_readable "$KV_PATH"; then
+      echo "af/$KV_PATH created concurrently; leaving it alone"
+    else
+      echo "af/$KV_PATH is neither readable nor creatable (soft-deleted or destroyed?); operator action needed" >&2
+      echo "bao kv put said: $put_out" >&2
+      exit 1
+    fi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-chatgpt-provision
+  namespace: openbao
+  annotations:
+    # WEDGE GUARD -- same rationale as the other provision Jobs (2026-07-28 immutable-Job outage): a
+    # Job's spec.template is immutable, so editing the script ConfigMap name, the image or the
+    # security context would otherwise fail "field is immutable" and take the whole `openbao`
+    # Kustomization False. Scoped to THIS Job rather than Kustomization-wide `spec.force`.
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: openbao-chatgpt-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 6
+  # Reaped after a day, which is also how this re-runs: Flux re-applies the reaped Job, so a policy
+  # change in git converges within a day without anyone running `bao` by hand.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-chatgpt-provision
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      automountServiceAccountToken: false # talks only to the OpenBao API, never to kube-apiserver
+      securityContext:
+        # uid 100 / gid 1000 is the `openbao` user baked into the image, NUMERIC for the same reason
+        # the other provision Jobs spell it out: a NAMED image user cannot satisfy runAsNonRoot.
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provision
+          # Pinned to the SERVER's image so the CLI and the API cannot drift.
+          image: quay.io/openbao/openbao:2.6.2
+          command: ["/bin/sh", "/scripts/provision.sh"]
+          env:
+            # The headless per-pod name, not the `openbao` Service: it publishes not-ready addresses,
+            # so this Job reaches a pod that is up but sealed and fails with a real error rather than
+            # a DNS miss.
+            - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: BAO_CACERT, value: "/tls/ca.crt" }
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openbao-breakglass-token
+                  key: root_token # the live Secret carries no `token` key
+                  optional: false
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+        - name: script
+          configMap:
+            name: openbao-chatgpt-provision-script
+            defaultMode: 0555
