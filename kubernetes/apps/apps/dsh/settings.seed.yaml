@@ -93,9 +93,26 @@ llm-pi-ai:
     # A NON-CATALOG route inherits nothing, so every model field is spelled out. 272000 / 128000 are
     # the catalog's own gpt-6-astra values; input: [text, image] is what makes attachments work at all
     # (a hand-entered model is text-only until it says otherwise -- see the litellm block above).
-    # reasoningEfforts mirrors the catalog's thinkingLevelMap for gpt-6-astra. "off" is QUOTED on
-    # purpose: YAML 1.1 reads a bare `off` as the boolean false, and the key would then be false, not
-    # the string "off" the adapter looks up.
+    # reasoningEfforts mirrors the catalog's thinkingLevelMap for gpt-6-astra MINUS its "off" row,
+    # and `reasoning: medium` is the route default. Both are load-bearing, measured 2026-09-19 in a
+    # live session on this provider: a declared `"off": null` leaves the adapter's thinkingLevelMap
+    # entry UNDEFINED (dsh-llm-pi-ai resolveModelReasoning keeps only non-null wire values), and with
+    # no effort selected pi-ai's openai-responses then sends `reasoning.effort: "none"`, which the
+    # ChatGPT backend refuses for this model -- every turn 400'd ("Unsupported value: 'none' ...
+    # Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'") until the user picked an
+    # effort. With the row absent the map's `off` is an explicit null and pi-ai omits `reasoning`;
+    # the route default makes a fresh session usable at once. The native openai-codex provider above
+    # never had this problem because its catalog entry carries the same map with the wire semantics
+    # built in.
+    #
+    # compat.supportsStrictMode: true is the OTHER measured defect. The generic openai-responses
+    # adapter defaults it to false and OMITS `strict` on function tools; the Responses backend then
+    # defaults strict to true and constrained decoding fills EVERY optional property on every call --
+    # 12 of 12 bash calls in the probe carried `sandbox_permissions: "workspace-write"`, which dsh
+    # refuses as a non-widening escalation ("not strictly wider than this call's current mode"), so
+    # no tool call ever ran. The native codex adapter defaults the switch to true; proven live by a
+    # 40 s settings/update patch (reverted) after which the very next call emitted only
+    # {command, description} and succeeded. Offered on this protocol by RESPONSES_COMPAT_GATE.
     #
     # ACCEPTED PARAMETER LOSS on this path (recorded in ADR 0026; measured in the pinned LiteLLM
     # 1.101.0 image 2026-09-19): max_output_tokens is never sent -- maxTokens here sizes the model
@@ -109,10 +126,12 @@ llm-pi-ai:
       api: openai-responses
       baseURL: http://litellm.ai.svc.cluster.local:4000/v1
       transport: sse
+      reasoning: medium
+      compat: { supportsStrictMode: true }
       models:
         - id: gpt-6-astra-realjaynesage
           name: GPT-6 Astra
           contextWindow: 272000
           maxTokens: 128000
           input: [text, image]
-          reasoningEfforts: { "off": null, minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }
+          reasoningEfforts: { minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }

@@ -563,9 +563,15 @@ data:
       # discoverable through Open WebUI's master-key connection "1" under External (/v1/models
       # advertises every name); that is the exposure class the `hidden` note at the top of this list
       # already records as accepted, not a new one. Only the Responses API path has a consumer
-      # (dsh); chat-completions through this provider is UNVERIFIED for this model, and a user who
-      # picks it under External gets a working model or an honest 4xx (checked once after the seat
-      # logs in, plan § Verification).
+      # (dsh). Chat-completions through this provider, MEASURED 2026-09-19 after the seat logged in:
+      # `stream: true` works (200, "OK" in 2.8 s, model id echoed); `stream: false` is a 500 after
+      # the router's two retries (~12 s) -- the provider forces streaming upstream, chatgpt.com's
+      # `response.completed` carries `output: []` (the message arrives only in output_item.done),
+      # and LiteLLM's chat->Responses bridge raises "Unknown items in responses API response: []"
+      # on the empty output. Open WebUI's chat turn streams, so a user under External gets an
+      # answer; its NON-streaming task-model calls (titles, tags) would 500 if pointed here -- do
+      # not make this route TASK_MODEL_EXTERNAL. Direct non-streaming /v1/responses returns the raw
+      # upstream SSE with a 200, not a JSON object; dsh streams and is unaffected.
       #
       # ACCEPTED PARAMETER LOSS, measured 2026-09-19 in the pinned image: the provider's Responses
       # transform forwards only model, input, instructions, stream, store, include, tools,
@@ -845,7 +851,13 @@ spec:
         # streams on the replaced replica are terminated). Value stamped by
         # `scripts/gen-litellm-consumers.py --write` -- the documented recipe via check-inline-hashes,
         # the same derivation as the 2026-09-11 value.
-        checksum/config: "d98f1b92fcb9"
+        # BUMPED 2026-09-19 (second time that day), d98f1b92fcb9 -> cacf2566, for the measured
+        # chat-completions record on the gpt-6-astra-realjaynesage route (streaming works,
+        # non-streaming 500s -- never TASK_MODEL_EXTERNAL). Comments only: the config LiteLLM
+        # parses is byte-identical in effect, no routing change; the cost is one rolling restart
+        # of the 2-replica maxUnavailable:0 Deployment, taken because the annotation tracks the
+        # ConfigMap, per the rule above.
+        checksum/config: "cacf2566b094"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
