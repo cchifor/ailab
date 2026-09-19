@@ -1,0 +1,8 @@
+---
+# Narrow operator application; does not reconfigure runners, credentials or validation policy.
+- name: Retain the approved conductor validator image on its existing host
+  hosts: ci-runner-1
+  become: true
+  gather_facts: false
+  roles:
+    - dsh_validator_pin

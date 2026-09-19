@@ -1,0 +1,15 @@
+[Unit]
+Description=Retain the checksum-pinned DSH validator image without running validation
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /usr/local/libexec/dsh-conductor-image-pin.py
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

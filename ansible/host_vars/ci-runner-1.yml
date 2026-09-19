@@ -1,0 +1,4 @@
+---
+# Preserve only this approved idle infrastructure container from age-based reaping.
+# Ordinary dsh-validation-* containers and all existing cleanup rules remain unchanged.
+gitea_runner_cleanup_infra_exclude_re: 'buildkit|buildx| /dsh-conductor-image-pin$'
