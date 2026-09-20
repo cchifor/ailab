@@ -52,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import inspect
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -71,8 +72,13 @@ PROVIDER = "chatgpt-chat"
 # responses under the bundled map; the same call without the prefix -> {}).
 INNER_PROVIDER = "chatgpt"
 INNER_MODEL_PREFIX = f"{INNER_PROVIDER}/responses/"
-# The most content a non-streaming caller can receive: the platform adapter's own MAX_RESPONSE_BYTES.
+# Bounds on what a non-streaming call may retain before it is rebuilt: the platform adapter's own
+# MAX_RESPONSE_BYTES over EVERY delta payload (text, refusal, reasoning, tool-call JSON), and a chunk
+# count, because chatgpt.com streams a few characters per event and a stream of empty events would
+# otherwise escape the byte count. 32 K output tokens arrive in ~45 K events measured; 262 144 is
+# ~6x that and still a few hundred MB of retained chunks at most on the shared 6 GiB proxy.
 MAX_CONTENT_BYTES = 4 * 1024**2
+MAX_CHUNKS = 262_144
 # Set only for the duration of THIS provider's inner call; read by the transform wrapper below.
 _PASS_TEXT: contextvars.ContextVar[bool] = contextvars.ContextVar("chatgpt_chat_pass_text", default=False)
 # Chat-completion kwargs the handler owns (or the Router injects) and must not forward into the inner call.
@@ -130,35 +136,36 @@ def _deadline_seconds(timeout: Any) -> float | None:
 
 
 _REGISTERED: set[str] = set()
+# What the inner id's model info MUST say for the transport to be right, whatever the map says:
+# the chat->Responses bridge (mode) and native streaming (should_fake_stream reads
+# supports_native_streaming; False or absent -> a plain non-streaming POST the Codex backend does
+# not serve). Pinned over any existing entry, not only added when one is missing.
+_INNER_PINS = {"litellm_provider": "chatgpt", "mode": "responses", "supports_native_streaming": True}
 
 
 def _ensure_model_info(model: str) -> None:
     """Pin the inner id's model info so the transport does not depend on which cost map the pod
-    loaded. OpenAIResponsesAPIConfig.should_fake_stream() turns a streaming Responses call into a
-    plain (non-streaming) POST whenever supports_native_streaming(model) is False -- which is what
-    an id ABSENT from the map reports. The remote map the pod fetches at start lists
-    chatgpt/gpt-5.6-sol (mode responses); the bundled fallback map does not, so without this a pod
-    that started without the remote map would send the upstream a request the Codex backend does
-    not serve. The Router does the same registration for a deployment's own model_info (that is
-    why gpt-6-astra-realjaynesage streams natively); this handler's deployment is the OUTER id, so
-    the inner id must be registered here. Zero cost on both ids: the subscription has no per-token
-    price, and it keeps cost logging from warning on every request."""
+    loaded. The remote map the pod fetches at start lists chatgpt/gpt-5.6-sol (mode responses);
+    the bundled fallback map does not, and an entry could also arrive with
+    supports_native_streaming false. The Router does a similar registration for a deployment's own
+    model_info (that is why gpt-6-astra-realjaynesage streams natively); this handler's deployment
+    is the OUTER id, so the inner id is pinned here, merged over whatever entry exists. Zero cost on
+    both ids where no price is known: the subscription has no per-token price, and it keeps cost
+    logging from warning on every request."""
     if model in _REGISTERED:
         return
-    entries = {}
     inner = f"{INNER_PROVIDER}/{model}"
     try:
-        litellm.get_model_info(inner)
-    except Exception:  # noqa: BLE001 - "no entry" is the case we are here for
-        entries[inner] = {"litellm_provider": INNER_PROVIDER, "mode": "responses", "supports_native_streaming": True,
-                          "input_cost_per_token": 0.0, "output_cost_per_token": 0.0}
+        existing = dict(litellm.get_model_info(inner))
+    except Exception:  # noqa: BLE001 - no entry
+        existing = {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0}
+    entries = {inner: {**existing, **_INNER_PINS}}
     outer = f"{PROVIDER}/{model}"
     try:
         litellm.get_model_info(outer)
     except Exception:  # noqa: BLE001
         entries[outer] = {"litellm_provider": PROVIDER, "mode": "chat", "input_cost_per_token": 0.0, "output_cost_per_token": 0.0}
-    if entries:
-        litellm.register_model(entries)
+    litellm.register_model(entries)
     _REGISTERED.add(model)
 
 
@@ -171,13 +178,37 @@ async def _open_inner_stream(model: str, messages: list, optional_params: dict |
         _PASS_TEXT.reset(token)
 
 
+def _delta_bytes(chunk: Any) -> int:
+    """Bytes a chunk would retain: every delta payload, not only text."""
+    if not chunk.choices:
+        return 0
+    delta = chunk.choices[0].delta
+    if delta is None:
+        return 0
+    total = 0
+    for attr in ("content", "refusal", "reasoning_content"):
+        value = getattr(delta, attr, None)
+        if isinstance(value, str):
+            total += len(value.encode("utf-8"))
+    tool_calls = getattr(delta, "tool_calls", None)
+    if tool_calls:
+        total += len(json.dumps([tc.model_dump() if hasattr(tc, "model_dump") else tc for tc in tool_calls], default=str))
+    return total
+
+
 async def _close(stream: Any) -> None:
-    aclose = getattr(stream, "aclose", None)
-    if aclose is not None:
-        try:
-            await aclose()
-        except Exception:  # noqa: BLE001 - closing is best-effort; the caller's outcome is already decided
-            pass
+    """Close the inner wrapper AND the httpx response under it. The wrapper's aclose() reaches the
+    bridge iterator, whose aclose() only closes an `http_response` the bridge never attaches, so an
+    abandoned stream (deadline, client disconnect) would otherwise keep its upstream connection open
+    until garbage collection (measured with a stalling transport)."""
+    response = getattr(getattr(getattr(stream, "completion_stream", None), "streaming_response", None), "response", None)
+    for target in (stream, response):
+        aclose = getattr(target, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:  # noqa: BLE001 - closing is best-effort; the caller's outcome is already decided
+                pass
 
 
 class ChatGPTChat(CustomLLM):
@@ -223,10 +254,11 @@ class ChatGPTChat(CustomLLM):
                     raise CustomLLMError(status_code=502, message=f"{PROVIDER}: unexpected inner stream shape {type(stream).__name__}")
                 async for chunk in raw:
                     chunks.append(chunk)
-                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                        content_bytes += len(chunk.choices[0].delta.content.encode("utf-8"))
-                        if content_bytes > MAX_CONTENT_BYTES:
-                            raise CustomLLMError(status_code=502, message=f"{PROVIDER}: upstream content exceeded {MAX_CONTENT_BYTES} bytes")
+                    if len(chunks) > MAX_CHUNKS:
+                        raise CustomLLMError(status_code=502, message=f"{PROVIDER}: upstream stream exceeded {MAX_CHUNKS} chunks")
+                    content_bytes += _delta_bytes(chunk)
+                    if content_bytes > MAX_CONTENT_BYTES:
+                        raise CustomLLMError(status_code=502, message=f"{PROVIDER}: upstream content exceeded {MAX_CONTENT_BYTES} bytes")
         except TimeoutError as exc:
             raise litellm.Timeout(message=f"{PROVIDER}: deadline reached before the upstream stream completed",
                                   model=model, llm_provider=PROVIDER) from exc
@@ -235,6 +267,10 @@ class ChatGPTChat(CustomLLM):
                 await _close(stream)
         # The consumer records usage as billed truth and fails closed on a missing block, so an
         # estimate must never pass as one: no upstream usage -> an error, not a completion.
+        # KNOWN LOSS (measured 2026-09-20): the bridge in 1.101.0 carries no refusal text on its
+        # chunks, so a refusal item comes back as an EMPTY content with refusal None; the consumer
+        # still fails closed on it (empty content is not its JSON), just not through its refusal
+        # guard. ADR 0027.
         usage = next((chunk.usage for chunk in reversed(chunks) if getattr(chunk, "usage", None)), None)
         if usage is None:
             raise CustomLLMError(status_code=502, message=f"{PROVIDER}: the upstream stream reported no usage")

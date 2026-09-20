@@ -931,7 +931,7 @@ spec:
         #   sha256sum kubernetes/apps/apps/ai/chatgpt_chat.py | cut -c1-12
         # Gated by scripts/check-inline-hashes.py (check_litellm_chatgpt_chat_checksum) in the
         # manifests workflow, the same way checksum/config is. ADR 0027.
-        checksum/chatgpt-chat: "f6e6a67dff53"
+        checksum/chatgpt-chat: "cafa47289ae1"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
