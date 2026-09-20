@@ -11,6 +11,13 @@ on:
       # run the device-flow regression (the test asserts the rendered file's shape).
       - scripts/tests/integration/test_litellm_chatgpt_route_contract.py
       - kubernetes/apps/apps/ai/litellm-chatgpt-eso.yaml
+      # The chatgpt-chat custom provider that serves gpt-5.6-sol from the subscription (ADR 0027):
+      # the handler module, the kustomization that merges it into litellm-config, the hash gate
+      # that rolls it, and its image-level contract test.
+      - kubernetes/apps/apps/ai/chatgpt_chat.py
+      - kubernetes/apps/apps/ai/kustomization.yaml
+      - scripts/check-inline-hashes.py
+      - scripts/tests/integration/test_litellm_chatgpt_chat_handler_contract.py
       - .gitea/workflows/litellm-route-contract.yaml
   pull_request:
     paths:
@@ -18,6 +25,10 @@ on:
       - scripts/tests/integration/test_litellm_platform_route_contract.py
       - scripts/tests/integration/test_litellm_chatgpt_route_contract.py
       - kubernetes/apps/apps/ai/litellm-chatgpt-eso.yaml
+      - kubernetes/apps/apps/ai/chatgpt_chat.py
+      - kubernetes/apps/apps/ai/kustomization.yaml
+      - scripts/check-inline-hashes.py
+      - scripts/tests/integration/test_litellm_chatgpt_chat_handler_contract.py
       - .gitea/workflows/litellm-route-contract.yaml
 
 permissions:
@@ -69,3 +80,82 @@ jobs:
             -e LITELLM_LOCAL_MODEL_COST_MAP=True -e DO_NOT_TRACK=1 \
             -v "$PWD:/work:ro" -w /work "$litellm_image" \
             scripts/tests/integration/test_litellm_chatgpt_route_contract.py
+          # The chatgpt-chat custom provider (ADR 0027): the handler module loaded from the
+          # manifest path the way the proxy loads it, the platform's exact non-streaming body,
+          # the dsh route's unchanged wire body, streaming, one-attempt errors, the negative SSE
+          # shapes and the device-flow guard -- same image, same flags, sockets denied.
+          docker run --rm --network none --entrypoint python \
+            -e LITELLM_LOCAL_MODEL_COST_MAP=True -e DO_NOT_TRACK=1 \
+            -v "$PWD:/work:ro" -w /work "$litellm_image" \
+            scripts/tests/integration/test_litellm_chatgpt_chat_handler_contract.py
+
+      - name: Proxy startup smoke with the rendered ConfigMap (custom_provider_map loads)
+        shell: bash
+        # The in-process test above imports the handler itself. This starts the REAL proxy from
+        # the ConfigMap kustomize renders (config.yaml + chatgpt_chat.py side by side, the
+        # deployed loader path: get_instance_fn finds <config dir>/chatgpt_chat.py) with
+        # placeholder credentials and no network, and proves it comes up and advertises both
+        # gpt-5.6-sol aliases. A handler that fails to import fails the pod start; here it fails
+        # this step. No upstream request is made (it would need the network).
+        run: |
+          set -euo pipefail
+          litellm_image=$(python3 - <<'PY'
+          import pathlib, re, yaml
+          path = pathlib.Path("kubernetes/apps/apps/ai/litellm.yaml")
+          deployment = next(doc for doc in yaml.safe_load_all(path.read_text())
+                            if isinstance(doc, dict) and doc.get("kind") == "Deployment"
+                            and doc["metadata"]["name"] == "litellm")
+          container = next(item for item in deployment["spec"]["template"]["spec"]["containers"]
+                           if item["name"] == "litellm")
+          print(container["image"])
+          PY
+          )
+          kustomize_image="registry.k8s.io/kustomize/kustomize:v5.4.3@sha256:6dd0a67e2a8634a5d1aabd9c5e888ff220663e979b55bc17fe4b3a845718bb10"
+          work=$(mktemp -d)
+          docker run --rm -v "$PWD:/work:ro" -w /work "$kustomize_image" build kubernetes/apps/apps/ai > "$work/build.yaml"
+          python3 - "$work" <<'PY'
+          import json, pathlib, sys, yaml
+          work = pathlib.Path(sys.argv[1])
+          docs = [d for d in yaml.safe_load_all((work / "build.yaml").read_text()) if d]
+          cm = next(d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "litellm-config")
+          assert cm["metadata"]["namespace"] == "ai" and set(cm["data"]) == {"config.yaml", "chatgpt_chat.py"}, sorted(cm["data"])
+          (work / "etc").mkdir()
+          for key, value in cm["data"].items():
+              (work / "etc" / key).write_text(value)
+          (work / "auth").mkdir()
+          (work / "auth" / "auth.json").write_text(json.dumps(
+              {"access_token": "unconfigured", "account_id": "unconfigured", "expires_at": 4102444800}))
+          print("rendered litellm-config: config.yaml + chatgpt_chat.py")
+          PY
+          chmod -R a+rX "$work"
+          ctr=$(docker run -d --network none \
+            -e LITELLM_LOCAL_MODEL_COST_MAP=True -e DO_NOT_TRACK=1 -e LITELLM_LOG=INFO \
+            -e STORE_MODEL_IN_DB=False -e LITELLM_MASTER_KEY=sk-smoke -e OPENAI_API_KEY=sk-placeholder \
+            -e ANTHROPIC_API_KEY=sk-placeholder -e CHATGPT_TOKEN_DIR=/chatgpt-auth \
+            -e CHATGPT_DEFAULT_INSTRUCTIONS="You are a helpful assistant." \
+            -v "$work/etc:/etc/litellm:ro" -v "$work/auth:/chatgpt-auth:ro" \
+            "$litellm_image" --config /etc/litellm/config.yaml --port 4000 --num_workers 1)
+          trap 'docker logs "$ctr" 2>&1 | tail -40; docker rm -f "$ctr" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+          ready=0
+          for i in $(seq 1 60); do
+            if docker exec "$ctr" python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:4000/health/liveliness", timeout=2).read()' 2>/dev/null; then
+              ready=1; break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$ctr")" != "true" ]; then
+              echo "::error::the proxy exited during startup (a handler import failure looks like this)"; exit 1
+            fi
+            sleep 2
+          done
+          if [ "$ready" != 1 ]; then
+            echo "::error::the proxy never answered /health/liveliness within 120 s"; exit 1
+          fi
+          # -i: forward the heredoc to python. Without it docker exec hands python an EOF and the
+          # assertions below never run (reviewer-codex on #799).
+          docker exec -i "$ctr" python - <<'PY'
+          import json, urllib.request
+          req = urllib.request.Request("http://127.0.0.1:4000/v1/models", headers={"Authorization": "Bearer sk-smoke"})
+          ids = {m["id"] for m in json.load(urllib.request.urlopen(req, timeout=10))["data"]}
+          missing = {"gpt-5.6-sol", "gpt-5.6-sol-api", "gpt-6-astra-realjaynesage"} - ids
+          assert not missing, f"missing from /v1/models: {missing}"
+          print("proxy up; /v1/models advertises", len(ids), "names incl. both gpt-5.6-sol aliases")
+          PY

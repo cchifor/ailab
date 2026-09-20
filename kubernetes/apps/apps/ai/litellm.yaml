@@ -519,7 +519,67 @@ data:
       # Each draft admits one attempt; override the gateway's global retry
       # policy so transient/unknown outcomes cannot repeat paid generation.
       # https://developers.openai.com/api/docs/models/gpt-5.6-sol
+      #
+      # 2026-09-20 (ADR 0027): SERVED FROM THE realjaynesage ChatGPT SUBSCRIPTION FOR NOW, not the
+      # API key. The key in litellm-cloud-keys is rejected by api.openai.com ("Incorrect API key",
+      # measured 2026-09-20 by the platform's failing Workflow runs) and no replacement was supplied;
+      # the operator directed that the subscription serve this name meanwhile and that the API-key
+      # path stay wired -- that is `gpt-5.6-sol-api` below. Switching back is NOT a rename: when a
+      # replacement key lands, prove `gpt-5.6-sol-api` answers 200 upstream, then point THIS entry
+      # back at `openai/gpt-5.6-sol` + `os.environ/OPENAI_API_KEY` + `num_retries: 0` (the shape the
+      # contract test still admits), and once nothing uses `chatgpt-chat/` remove the handler, the
+      # generator entry and custom_provider_map.
+      #
+      # `chatgpt-chat/` is the estate's own custom provider (chatgpt_chat.py, merged into this
+      # ConfigMap): one inner `chatgpt/responses/gpt-5.6-sol` call, always streamed, rebuilt for the
+      # NON-streaming caller. It exists because, measured 2026-09-20 in the pinned image: (1)
+      # non-streaming chat-completions straight through `chatgpt/` 500 ("Unknown items in responses
+      # API response: []" -- chatgpt.com's response.completed carries output: [] and the bridge's
+      # recovery misses this shape) while streaming works; (2) the provider drops `text`, so the
+      # caller's strict json_schema never reached the backend and answers came back as free text
+      # (`answer='OK', n=7`), whereas the backend accepts and ENFORCES text.format; (3) the backend
+      # REJECTS max_output_tokens (400 "Unsupported parameter"), so the caller's
+      # max_completion_tokens: 32000 is dropped -- the backend's own output ceiling is the only
+      # generation bound, the handler's 4 MiB content cap the only memory bound, and the platform's
+      # post-hoc `usage.completion_tokens <= 32000` check bounds what it ACCEPTS, not what is
+      # generated. ACCEPTED LOSS, recorded in ADR 0027.
+      #
+      # allowed_openai_params: a custom provider's params are mapped through OpenAILikeChatConfig,
+      # whose list has no reasoning_effort, so `drop_params: true` silently dropped the caller's
+      # `reasoning_effort: medium` before the handler ran (measured); this carries it through, and
+      # the wire body then has `reasoning: {effort: medium}` beside `text`.
+      #
+      # QUOTA, not dollars: this spends reviewer-2 seat d's weekly window, shared with dsh's
+      # openai-codex-realjaynesage. Document-table drafts are large (the platform allows up to 512 K
+      # input and 32 K output per attempt). No gateway-side concurrency cap: the backend rate-limits,
+      # and exhaustion surfaces as upstream 429 -> RateLimitError -> 429 to the caller, which the
+      # adapter maps to model_unavailable (one attempt, no retry). Watch it on the hourly usage probe
+      # (reviewbot_llm_usage_percent{persona="codex",seat="d",limit="weekly_all"}) and the seat alerts
+      # (ReviewbotSeatExhausted / ReviewbotAllSeatsExhausted). max_input_tokens below records the
+      # input confirmed live on 2026-09-20 -- 116,520 prompt tokens answered in 3.7 s with the strict
+      # schema honoured -- rounded to the next power of two (enable_pre_call_checks is off in this
+      # estate, so it is a record, not a gate; the platform's input_token_cap is the pre-generation
+      # gate, and an oversized request fails upstream with a 400 the adapter maps to
+      # model_unavailable). Cost logging WARNS
+      # (no price for chatgpt-chat/...); usage is populated and the response is unaffected. The name
+      # is reachable by any master-key / virtual-key holder under Open WebUI's External connection,
+      # the same class as gpt-6-astra-realjaynesage (accepted, ADR 0026). Seen the same day: the
+      # chatgpt.com edge answers LiteLLM's client with a Cloudflare JS challenge (403) for
+      # gpt-6-astra while passing gpt-5.6-sol; that rule can change without notice.
+      #
+      # NO fallbacks between the two entries, deliberately: falling back to the paid key would be a
+      # silent paid replay of a draft the policy above says gets one attempt, and the key is dead.
       - model_name: gpt-5.6-sol
+        litellm_params:
+          model: chatgpt-chat/gpt-5.6-sol
+          num_retries: 0
+          allowed_openai_params: [reasoning_effort]
+        model_info: { max_input_tokens: 131072 }
+      # The retained paid path (ADR 0027): the original route under a new name, unchanged in every
+      # parameter, so a replacement key can be proven here before gpt-5.6-sol is pointed back at it.
+      # Its key is CONFIGURED and REJECTED upstream today, so a call answers 401 with OpenAI's own
+      # "Incorrect API key" AuthenticationError -- distinguishable from a proxy-side 401 by the body.
+      - model_name: gpt-5.6-sol-api
         litellm_params:
           model: openai/gpt-5.6-sol
           api_key: os.environ/OPENAI_API_KEY
@@ -663,6 +723,12 @@ data:
       # describes a configuration we do not run.
     litellm_settings:
       drop_params: true
+      # chatgpt-chat: the estate's custom provider (chatgpt_chat.py, merged into this ConfigMap by
+      # kustomization.yaml) that serves gpt-5.6-sol from the ChatGPT subscription for a non-streaming,
+      # json_schema caller -- see that route's comment and ADR 0027. The proxy loads the module from
+      # the config directory (/etc/litellm/chatgpt_chat.py) at start; a bad module fails the start.
+      custom_provider_map:
+        - { provider: chatgpt-chat, custom_handler: chatgpt_chat.handler }
       # 900s to cover a llama-swap COLD START: the first request to an idle-unloaded heavyweight
       # (gpt-oss ~1.5-4 min, qwen3.5-122b ~4-5 min over NFS) must not time out before the model loads.
       # Matches llama-swap's healthCheckTimeout (kubernetes/infra/ai-lxc/provision.sh SWAP mode).
@@ -857,7 +923,15 @@ spec:
         # parses is byte-identical in effect, no routing change; the cost is one rolling restart
         # of the 2-replica maxUnavailable:0 Deployment, taken because the annotation tracks the
         # ConfigMap, per the rule above.
-        checksum/config: "cacf2566b094"
+        checksum/config: "10295f7e398e"
+        # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
+        # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
+        # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
+        # edit. Value = sha256 of the file's bytes, first 12 hex:
+        #   sha256sum kubernetes/apps/apps/ai/chatgpt_chat.py | cut -c1-12
+        # Gated by scripts/check-inline-hashes.py (check_litellm_chatgpt_chat_checksum) in the
+        # manifests workflow, the same way checksum/config is. ADR 0027.
+        checksum/chatgpt-chat: "f6e6a67dff53"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.

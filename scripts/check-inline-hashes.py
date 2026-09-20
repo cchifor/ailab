@@ -21,6 +21,11 @@ no reloader/controller to keep them honest:
      `spec.template` is immutable, so the suffix changes whenever the
      container image/args script changes, letting Flux prune+recreate the Job
      instead of failing an in-place patch.
+  5. The `checksum/chatgpt-chat` pod-template annotation in litellm.yaml —
+     must equal sha256(bytes of kubernetes/apps/apps/ai/chatgpt_chat.py)[:12].
+     That file is merged into the litellm-config ConfigMap in place (no name
+     hash) and the proxy imports it only at startup, so this annotation is the
+     only thing that rolls the gateway on a handler edit (ADR 0027).
 
 Run: `python scripts/check-inline-hashes.py` (wired as `just af-verify-hashes`).
 Prints `OK <path>` per verified site, `DRIFT <path> expected=<8> actual=<8>`
@@ -243,6 +248,28 @@ def check_litellm_config_checksum() -> Site:
     return Site(path, expected, actual)
 
 
+def check_litellm_chatgpt_chat_checksum() -> Site:
+    """checksum/chatgpt-chat (litellm.yaml, the MAIN proxy) vs a fresh sha256 of
+    kubernetes/apps/apps/ai/chatgpt_chat.py, the custom-provider module that
+    kustomization.yaml merges into the litellm-config ConfigMap (ADR 0027).
+
+    Same failure mode as checksum/config: the ConfigMap updates in place, the
+    proxy imports the module only at startup, no Reloader is installed, so a
+    stale value leaves both replicas serving the previous handler. Recipe: the
+    file's raw bytes (what kustomize embeds), sha256, truncated to 12 hex:
+        sha256sum kubernetes/apps/apps/ai/chatgpt_chat.py | cut -c1-12
+    """
+    path = REPO / "kubernetes/apps/apps/ai/litellm.yaml"
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r'checksum/chatgpt-chat:\s*"([0-9a-f]{12})"', text)
+    if not m:
+        raise ValueError(f"checksum/chatgpt-chat annotation not found in {path}")
+    expected = m.group(1)
+    handler = REPO / "kubernetes/apps/apps/ai/chatgpt_chat.py"
+    actual = hashlib.sha256(handler.read_bytes()).hexdigest()[:12]
+    return Site(path, expected, actual)
+
+
 # Table of hash sites to verify. Add a `check_...() -> Site` function above
 # and append it here to cover a new site.
 SITES = [
@@ -250,6 +277,7 @@ SITES = [
     check_platform_dev_job_suffix,
     check_litellm_local_config_checksum,
     check_litellm_config_checksum,
+    check_litellm_chatgpt_chat_checksum,
 ]
 
 
