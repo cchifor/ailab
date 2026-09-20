@@ -44,4 +44,17 @@ The helper bounds descriptor reads, rejects symlinks/nonregular files, checks th
 - Clear only the readiness marker on both initial boot and main-container restart. Independent verification must bind it to Pod UID and require its timestamp to be no older than the current container's startedAt.
 - Obtain external review/CI/merge via the approved private fork, with restart-surviving observation and rollback handling armed first. No self-merge or protection change.
 
+## Deployment compatibility evidence
+
+- `!!js` is DSH's existing entry-list dialect, not a new generic YAML requirement. The installed `@deepseek-ai/dsh-app-boot` defines `tag:yaml.org,2002:js`, extends `yaml.JSON_SCHEMA`, and exports `loadOverlayPatches`, the actual boot-patch reader. The pre-existing `connection.config.trustedHosts` already uses this tag. Parse the **entire authoritative patch**, including the new negated gates, without booting plugins:
+
+  ```sh
+  node scripts/verify-dsh-conductor-patch.mjs /app/0.1.5-alpha.2-glibc/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js
+  ```
+
+  This passed against the installed0.1.5-alpha.2 runtime, verifying actual expression nodes and the credential-provider row, with no model calls.
+- `GITEA_PAT` is intentionally a **credential-service reference**, not a Deployment environment variable. The reviewed release's `plugin.ts:50–55` resolves `config.forge.tokenRef` through `ctx.get('credentials').resolve(...)` and passes a callback to GiteaClient. The existing `openbao-credentials.mjs` provider reads named references from `/dsh-credentials`; `openbao-eso.yaml` extracts the operator-provisioned credential document into Secret `dsh-credentials`, and the existing Deployment projects it read-only. No new env wiring or credential values belong in this PR. Metadata-only live checks confirmed the three configured references readable; actual installed-service forge/SSH preflight passed using that provider.
+- A separate disposable **real SDK** fault fixture made the marker destination a directory, observed the actual temporary publication attempt with a filesystem watcher, and verified containment: no marker, no leftover temporary file, active installed conductor, real human `/conductor status` still working, and zero inference. This is stronger than the mocked publication-failure unit test; it did not mutate the live profile.
+- The deadline-then-late-preflight-rejection test invokes the actual observer under `--unhandled-rejections=strict`: no process crash or marker. `Promise.race` retains rejection handlers on every participant after the winner settles; it does not leave the losing promise unobserved.
+
 Status: implementation/validation in progress. The existing GUI has not yet been rolled or activated.
