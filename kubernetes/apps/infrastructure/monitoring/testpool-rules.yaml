@@ -2,7 +2,10 @@
 # agent-sandbox operator). Deliberately SMALL — alertmanager has no severity routing, every rule
 # pages ntfy — and deliberately kube-state-metrics-only, so the rules cannot go blind if the
 # operator's own /metrics scrape (agent-sandbox/servicemonitor.yaml) breaks. Live-validated
-# expressions (each returned sane values against prometheus-lan on 2026-09-01).
+# expressions (each returned sane values against prometheus-lan on 2026-09-01; the teardown rules
+# against the 2026-09-20 incident data). The env NODE's kubelet-sourced precursors live in the
+# sibling env-node-rules.yaml (different scrape, different failure domain). Fixtures:
+# testpool-rules.test.yaml. Runbook: docs/runbooks/env-pool.md.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -42,8 +45,43 @@ spec:
             summary: "testpool has had no Ready environment for 30m"
             description: >-
               Warm pool drained and not refilling (golden snapshot missing? fill failing under the
-              readiness grace? node down?). tep leases are queueing. Check:
-              kubectl -n testpool get sandboxwarmpools,sandboxes,pvc and the env node.
+              readiness grace? env node NotReady — the 2026-09-20 shape?). tep leases are queueing.
+              Check: kubectl -n testpool get sandboxwarmpools,sandboxes,pvc and the env node.
+              Runbook: docs/runbooks/env-pool.md.
+
+        - alert: TestpoolEnvTeardownStuck
+          # 2026-09-20: a Kata env whose guest froze could not be killed through the kata-agent,
+          # kubelet retried StopPodSandbox every ~4.5m for THREE DAYS, and nothing said so. The
+          # env-reaper (testpool/env-reaper.yaml) SIGKILLs the VMM ~150s after the delete request
+          # and the shim ~120s later, so a pod still Terminating 5m past its deletionTimestamp
+          # (= delete request + 30s grace) means the reaper has not worked yet. kube-state-metrics
+          # only exports kube_pod_deletion_timestamp while the pod object exists, so this resolves
+          # by itself when the teardown finally completes.
+          expr: (time() - kube_pod_deletion_timestamp{namespace="testpool"}) > 300
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "testpool pod {{ $labels.pod }} has been Terminating for >5m"
+            description: >-
+              A Kata env teardown is hung — the frozen-guest failure of 2026-09-20. The env-reaper
+              on the env node should have killed the VMM by now: kubectl -n kube-system logs
+              ds/env-reaper. Runbook: docs/runbooks/env-pool.md.
+
+        - alert: TestpoolEnvTeardownStuckCritical
+          # The reaper's OUTCOME alert: 20m past deletion the reaper is dead, wedged, or its kills
+          # did not unstick the shim. Two hung teardowns plus one sandbox create is exactly what
+          # wedged the kubelet on 2026-09-20 — from here the node is one rotation from NotReady.
+          expr: (time() - kube_pod_deletion_timestamp{namespace="testpool"}) > 1200
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "testpool pod {{ $labels.pod }} Terminating >20m — env-reaper did not unstick it"
+            description: >-
+              The bounded-teardown guarantee failed; the env node is one more hung teardown away from
+              a wedged kubelet. Reset the env node before it accumulates a second one:
+              docs/runbooks/env-pool.md (qm reset 4401 from ai-node2, then force-delete the orphans).
 
         - alert: TestpoolPVCStuckPending
           expr: kube_persistentvolumeclaim_status_phase{namespace="testpool",phase="Pending"} == 1

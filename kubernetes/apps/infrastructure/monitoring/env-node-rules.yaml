@@ -1,0 +1,57 @@
+# Precursor alerts for the test-env-pool NODE(S) (talos-env-node-*, kubernetes/infra/env-pool),
+# sourced from the kubelet scrape — kept out of testpool-rules.yaml, which is deliberately
+# kube-state-metrics-only. Both signals below were visible for hours-to-days before the
+# 2026-09-20 outage and nothing named them (plans/2026-09-20-env-pool-frozen-guest-outage-plan.md):
+#   - kubelet_runtime_operations_errors_total{operation_type="stop_podsandbox"} climbed ~26 / 2h
+#     for THREE DAYS while a frozen Kata guest refused to die;
+#   - the kubelet's /metrics scrape target was down from ~02:56 (its handler blocks behind the
+#     hung CRI stats calls) — the kubelet wedged at 09:29. The chart's KubeletInstanceUnreachable
+#     fires on the same series after 15m with generic text; on THIS node the meaning is specific
+#     and the response is a hard reset, hence a rule of its own with the runbook and critical.
+# Label set verified against the live series on 2026-09-20 (node=, operation_type=, metrics_path=).
+# Fixtures: env-node-rules.test.yaml. Runbook: docs/runbooks/env-pool.md.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: env-node
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: env-node
+      rules:
+        - alert: EnvNodeRuntimeStopErrors
+          # A working teardown produces zero stop_* errors; any sustained non-zero rate is a Kata
+          # sandbox the kubelet cannot stop. The env-reaper should turn this into a blip; 30m of it
+          # means a hang the reaper is not clearing.
+          expr: >-
+            sum by (node) (
+              increase(kubelet_runtime_operations_errors_total{
+                node=~"talos-env-node-.*", operation_type=~"stop_container|stop_podsandbox"}[15m])
+            ) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.node }}: kubelet cannot stop a container/sandbox (30m of stop_* errors)"
+            description: >-
+              A Kata env teardown on {{ $labels.node }} keeps failing — the frozen-guest failure of
+              2026-09-20. Check kubectl -n testpool get pods (Terminating?), the env-reaper log
+              (kubectl -n kube-system logs ds/env-reaper) and talosctl logs cri. Runbook:
+              docs/runbooks/env-pool.md.
+
+        - alert: EnvNodeKubeletMetricsBlocked
+          # The kubelet's /metrics handler blocks when CRI stats calls hang; the scrape target going
+          # down is the earliest host-side sign that containerd is stuck on a sandbox. On
+          # 2026-09-20 this preceded the wedge by six hours.
+          expr: up{job="kubelet", metrics_path="/metrics", node=~"talos-env-node-.*"} == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.node }}: kubelet /metrics unreachable for 10m — CRI is hanging"
+            description: >-
+              On the env node this is the precursor of a wedged kubelet (2026-09-20: 6h lead). If the
+              node is still Ready, find and unstick the hung sandbox now; if it goes NotReady, the
+              only recovery is a hard reset from Proxmox. Runbook: docs/runbooks/env-pool.md.

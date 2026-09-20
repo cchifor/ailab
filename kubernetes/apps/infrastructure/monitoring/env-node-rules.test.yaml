@@ -1,0 +1,94 @@
+# `promtool test rules` fixtures for env-node-rules.yaml. Run by scripts/rules-lint.sh on every PR,
+# after `promtool check rules`.
+#
+# Both rules replay the 2026-09-20 precursors: a stop_* error counter that climbs for hours (the
+# kubelet retrying a Kata sandbox it cannot stop) and the kubelet's /metrics target going down
+# while the other kubelet targets stay up. Each has a firing case, a recovery case, and a negative.
+#
+# `rule_files` is the extracted spec name, because rules-lint.sh hands promtool the `spec:` body of
+# each PrometheusRule (the CRD wrapper is not a promtool rules file) under the manifest's basename.
+rule_files:
+  - env-node-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # --------------------------------------------- stop_* errors climbing for 30m, then flat
+  - interval: 1m
+    name: sustained stop_podsandbox errors on the env node page after 30m and resolve once the counter goes flat
+    input_series:
+      # +1 error per minute for 40m (the incident's ~26 / 2h shape, compressed), then flat.
+      - series: 'kubelet_runtime_operations_errors_total{node="talos-env-node-1", operation_type="stop_podsandbox"}'
+        values: "0+1x40 40+0x60"
+      # Other operation types erroring must not count.
+      - series: 'kubelet_runtime_operations_errors_total{node="talos-env-node-1", operation_type="list_container_stats"}'
+        values: "0+5x100"
+      # An agent node with the same errors must not match the env-node selector.
+      - series: 'kubelet_runtime_operations_errors_total{node="talos-agent-node-1", operation_type="stop_podsandbox"}'
+        values: "0+1x100"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: EnvNodeRuntimeStopErrors
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: EnvNodeRuntimeStopErrors
+        exp_alerts:
+          - exp_labels: { severity: warning, node: talos-env-node-1 }
+            exp_annotations:
+              summary: "talos-env-node-1: kubelet cannot stop a container/sandbox (30m of stop_* errors)"
+              description: >-
+                A Kata env teardown on talos-env-node-1 keeps failing — the frozen-guest failure of
+                2026-09-20. Check kubectl -n testpool get pods (Terminating?), the env-reaper log
+                (kubectl -n kube-system logs ds/env-reaper) and talosctl logs cri. Runbook:
+                docs/runbooks/env-pool.md.
+      # Counter flat since 40m: increase over [15m] is 0 from 55m on.
+      - eval_time: 60m
+        alertname: EnvNodeRuntimeStopErrors
+        exp_alerts: []
+
+  # ------------------------------------------ the negative: list_container_stats alone is not it
+  - interval: 1m
+    name: non-stop runtime errors alone never page
+    input_series:
+      - series: 'kubelet_runtime_operations_errors_total{node="talos-env-node-1", operation_type="list_container_stats"}'
+        values: "0+5x100"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: EnvNodeRuntimeStopErrors
+        exp_alerts: []
+
+  # ------------------------------------------------- kubelet /metrics target down for 10m
+  - interval: 1m
+    name: the env node's kubelet /metrics target down 10m pages critical, other paths and nodes do not
+    input_series:
+      - series: 'up{job="kubelet", metrics_path="/metrics", node="talos-env-node-1", instance="192.168.0.37:10250"}'
+        values: "1+0x5 0+0x15 1+0x20"
+      # cadvisor still answering on the same node (it did on 2026-09-20) must not mask or fire.
+      - series: 'up{job="kubelet", metrics_path="/metrics/cadvisor", node="talos-env-node-1", instance="192.168.0.37:10250"}'
+        values: "1+0x40"
+      # An agent node's /metrics going down is the chart's business, not this rule's.
+      - series: 'up{job="kubelet", metrics_path="/metrics", node="talos-agent-node-1", instance="192.168.0.47:10250"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: EnvNodeKubeletMetricsBlocked
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: EnvNodeKubeletMetricsBlocked
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: kubelet
+              metrics_path: /metrics
+              node: talos-env-node-1
+              instance: 192.168.0.37:10250
+            exp_annotations:
+              summary: "talos-env-node-1: kubelet /metrics unreachable for 10m — CRI is hanging"
+              description: >-
+                On the env node this is the precursor of a wedged kubelet (2026-09-20: 6h lead). If the
+                node is still Ready, find and unstick the hung sandbox now; if it goes NotReady, the
+                only recovery is a hard reset from Proxmox. Runbook: docs/runbooks/env-pool.md.
+      # Target back up at 21m: resolved.
+      - eval_time: 25m
+        alertname: EnvNodeKubeletMetricsBlocked
+        exp_alerts: []
