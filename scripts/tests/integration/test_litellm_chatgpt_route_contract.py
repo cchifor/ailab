@@ -11,7 +11,10 @@ What this proves, in the order the cases run:
       expires_at, exactly what litellm-chatgpt-eso.yaml renders) builds the Router
       and sends a Responses call to chatgpt.com/backend-api/codex with NO socket
       attempt, the override instructions, store=false and the encrypted-reasoning
-      include -- and the transform drops max_output_tokens/text (accepted loss);
+      include -- and the transform drops max_output_tokens (accepted loss) while the
+      caller's `text` IS forwarded: the proxy loads chatgpt_chat.py through
+      custom_provider_map before it builds its Router, and that module re-adds
+      `text` on every chatgpt/ call (ADR 0027, 2026-09-20), so this test loads it too;
   (b) a JWT whose exp is in the PAST behaves identically under the sentinel: the
       file's expires_at is what keeps LiteLLM out of the device flow;
   (c) a MISSING file, an EMPTY token and a MALFORMED file each send LiteLLM into
@@ -68,6 +71,7 @@ import base64
 import copy
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import pathlib
 import re
@@ -85,6 +89,14 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+# The deployed proxy imports the custom-provider module (litellm_settings.custom_provider_map) at
+# startup; its `text` pass-through is part of what this route's transform does in production.
+_HANDLER = ROOT / "kubernetes/apps/apps/ai/chatgpt_chat.py"
+if _HANDLER.exists():
+    _spec = importlib.util.spec_from_file_location("chatgpt_chat", _HANDLER)
+    _module = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_module)
+    sys.modules["chatgpt_chat"] = _module
 MANIFEST = ROOT / "kubernetes/apps/apps/ai/litellm.yaml"
 MANIFEST_BYTES = MANIFEST.read_bytes()
 DOCUMENTS = list(yaml.safe_load_all(MANIFEST_BYTES))
@@ -179,7 +191,7 @@ REQUEST = {
 }
 # Measured 2026-09-19 in the pinned image: the provider's allowlist after the
 # transform, with every optional key this request actually carries.
-EXPECTED_BODY_KEYS = {"include", "input", "instructions", "model", "reasoning", "store", "stream"}
+EXPECTED_BODY_KEYS = {"include", "input", "instructions", "model", "reasoning", "store", "stream", "text"}
 COMPLETED = {
     "type": "response.completed",
     "response": {
@@ -322,7 +334,7 @@ class ChatGPTRouteContract(unittest.TestCase):
         self.assertEqual(body["reasoning"], REQUEST["reasoning"], label)
         self.assertEqual(body["input"], INPUT, f"{label}: developer + user input forwarded as sent")
         self.assertNotIn("max_output_tokens", body, f"{label}: accepted loss, ADR 0026")
-        self.assertNotIn("text", body, f"{label}: accepted loss, ADR 0026")
+        self.assertEqual(body.get("text"), REQUEST["text"], f"{label}: text is forwarded (chatgpt_chat.py, ADR 0027)")
 
     async def _case_a_placeholder_file(self):
         directory = _use_token_dir("a-placeholder")

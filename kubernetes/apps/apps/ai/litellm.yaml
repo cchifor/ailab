@@ -639,8 +639,12 @@ data:
       # ACCEPTED PARAMETER LOSS, measured 2026-09-19 in the pinned image: the provider's Responses
       # transform forwards only model, input, instructions, stream, store, include, tools,
       # tool_choice, reasoning, previous_response_id and truncation. max_output_tokens,
-      # prompt_cache_key, text and parallel_tool_calls are DROPPED, silently. ADR 0026 records why
-      # none of those changes an answer's correctness for dsh.
+      # prompt_cache_key and parallel_tool_calls are DROPPED, silently. ADR 0026 records why
+      # none of those changes an answer's correctness for dsh. `text` WAS on that list until
+      # 2026-09-20: chatgpt_chat.py (loaded through custom_provider_map) now re-adds the caller's
+      # `text` on every chatgpt/ call, so dsh's `text.verbosity` reaches the backend and the Codex
+      # CLI's `--output-schema` (`text.format`) works on this route (measured: verbosity, format
+      # and both -> 200, format enforced). ADR 0027.
       # `chatgpt/gpt-6-astra` is ABSENT from LiteLLM's price map: cost logging WARNS on this route
       # (no price to apply); routing is unaffected.
       # ONE ACCOUNT PER PROCESS (upstream issue #23777): the provider holds a single process-global
@@ -926,7 +930,7 @@ spec:
         # parses is byte-identical in effect, no routing change; the cost is one rolling restart
         # of the 2-replica maxUnavailable:0 Deployment, taken because the annotation tracks the
         # ConfigMap, per the rule above.
-        checksum/config: "df4caa4b62f8"
+        checksum/config: "9e68009da031"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
@@ -934,7 +938,7 @@ spec:
         #   sha256sum kubernetes/apps/apps/ai/chatgpt_chat.py | cut -c1-12
         # Gated by scripts/check-inline-hashes.py (check_litellm_chatgpt_chat_checksum) in the
         # manifests workflow, the same way checksum/config is. ADR 0027.
-        checksum/chatgpt-chat: "aefce54b1cc2"
+        checksum/chatgpt-chat: "dfd6112a7bfc"
     spec:
       # Spread the two replicas across nodes so one node going down (or an OOM storm on it) can't take
       # both gateway pods at once. Preferred (not required) — the 3-node cluster must still schedule both.
