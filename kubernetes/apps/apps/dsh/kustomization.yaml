@@ -82,6 +82,9 @@ configMapGenerator:
       - agent-teams/team-solo.agent.cordis.yml
       - agent-teams/team-conductor.preset.yml
       - agent-teams/team-conductor.agent.cordis.yml
+      # Human control front door for the released singleton; not the legacy team above.
+      - agent-teams/team-dsh-conductor.preset.yml
+      - agent-teams/team-dsh-conductor.agent.cordis.yml
       - agent-teams/team-review.preset.yml
       - agent-teams/team-review.agent.cordis.yml
 
