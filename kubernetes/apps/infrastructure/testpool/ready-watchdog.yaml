@@ -39,6 +39,7 @@ data:
     #!/usr/bin/env python3
     """Hold tcp :9099 open only while virtio-fs and dockerd answer; reopen on recovery.
     See ready-watchdog.yaml. Tested by scripts/tests/test_ready_watchdog.py."""
+    import errno
     import os
     import socket
     import threading
@@ -66,13 +67,26 @@ data:
             os.fsync(f.fileno())
 
 
+    def read_status_line(sock, cap=64):
+        """The first line of an HTTP response, read in as many recv()s as it takes (a short read
+        is legal on a stream socket); stops at the newline, the cap, or EOF."""
+        buf = b""
+        while len(buf) < cap and b"\n" not in buf:
+            chunk = sock.recv(cap - len(buf))
+            if not chunk:
+                break
+            buf += chunk
+        nl = buf.find(b"\n")
+        return buf if nl < 0 else buf[:nl + 1]
+
+
     def check_dockerd():
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(TIMEOUT)
         try:
             s.connect(SOCK)
             s.sendall(b"GET /_ping HTTP/1.0\r\nHost: docker\r\n\r\n")
-            head = s.recv(64)
+            head = read_status_line(s)
         finally:
             s.close()
         if not head.startswith(b"HTTP/1.") or b" 200 " not in head[:20]:
@@ -109,11 +123,23 @@ data:
             return err
 
 
+    # accept(2) errors that do not mean the listener is broken: Linux surfaces ECONNABORTED for a
+    # connection the peer dropped mid-handshake, EMFILE/ENFILE/ENOBUFS/ENOMEM under resource
+    # pressure, EINTR/EAGAIN spuriously — the man page says treat them like EAGAIN and retry.
+    ACCEPT_TRANSIENT = frozenset(getattr(errno, n) for n in (
+        "ECONNABORTED", "EAGAIN", "EWOULDBLOCK", "EINTR", "EMFILE", "ENFILE", "ENOBUFS", "ENOMEM",
+        "EPROTO", "ENETDOWN", "ENOPROTOOPT", "EHOSTDOWN", "ENONET", "EHOSTUNREACH", "EOPNOTSUPP",
+        "ENETUNREACH") if hasattr(errno, n))
+
+
     class Port:
         """The ready-port. open() binds and starts a serve thread that accepts+closes probe
         connections; close() hands the socket back to that thread, which exits on its next
         accept timeout and closes it — deterministic on every platform (closing a listening
-        socket under a blocked accept() is not)."""
+        socket under a blocked accept() is not). A listener that dies for any OTHER reason
+        marks itself closed and says so, so the next tick reopens it — it must never be
+        "open" in the watchdog's eyes while nothing is accepting (a silent permanent
+        NotReady is the class of failure this whole file exists to prevent)."""
 
         def __init__(self, port):
             self.port, self.ls, self.thread = port, None, None
@@ -137,18 +163,29 @@ data:
                 self.thread.join(2)
 
         def _serve(self, ls):
+            died = None
             while self.ls is ls:
                 try:
                     c, _ = ls.accept()
                 except socket.timeout:
                     continue
-                except OSError:
+                except OSError as e:
+                    if e.errno in ACCEPT_TRANSIENT:
+                        time.sleep(0.1)
+                        continue
+                    died = e
                     break
                 try:
                     c.close()
                 except OSError:
                     pass
-            ls.close()
+            try:
+                ls.close()
+            except OSError:
+                pass
+            if died is not None and self.ls is ls:
+                self.ls = None
+                log("ready-port listener died (%s); reopening on the next passing tick" % died)
 
 
     class Watchdog:
@@ -172,7 +209,9 @@ data:
                 if self.fails:
                     log("checks recovered (after %d failure(s))" % self.fails)
                 self.fails = 0
-                # first open needs one pass (startup); a reopen needs SUCCESSES_TO_REOPEN in a row.
+                # first open needs one pass (startup); a reopen after a health closure needs
+                # SUCCESSES_TO_REOPEN in a row (oks was zeroed by the failure); a listener that died
+                # on its own while checks kept passing has oks already past that and reopens at once.
                 if not self.port.is_open() and (not self.opened_once or self.oks >= SUCCESSES_TO_REOPEN):
                     self.port.open()
                     log("ready-port %s :%d (checks every %.0fs, timeout %.0fs, close after %d failures, reopen after %d passes)"

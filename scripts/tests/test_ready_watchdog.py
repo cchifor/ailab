@@ -52,6 +52,11 @@ def _load(port):
     return mod
 
 
+class _DummyConn:
+    def close(self):
+        pass
+
+
 class ScriptedCheck:
     """A check whose outcome per call is scripted: "ok", "fail" (raises) or "hang" (blocks until
     released — the D-state shape)."""
@@ -132,6 +137,77 @@ class ReadyWatchdog(unittest.TestCase):
         self.assertTrue(any("reopened on" in m for m in self.log))
         self.assertTrue(any("checks recovered" in m for m in self.log))
 
+    # ------------------------------------------------ the listener itself (reviewer-claude, #800)
+    class _FakeListener:
+        """accept() plays a script: an exception instance is raised, "conn" yields a dummy
+        connection, "timeout" raises socket.timeout; an exhausted script keeps timing out."""
+
+        def __init__(self, script):
+            self.script, self.calls, self.closed = list(script), 0, False
+
+        def accept(self):
+            self.calls += 1
+            item = self.script.pop(0) if self.script else "timeout"
+            if item == "timeout":
+                raise socket.timeout()
+            if isinstance(item, BaseException):
+                raise item
+            return _DummyConn(), ("127.0.0.1", 0)
+
+        def close(self):
+            self.closed = True
+
+    def _serve_with(self, script, wait=0.4):
+        ls = self._FakeListener(script)
+        self.p.ls = ls
+        t = threading.Thread(target=self.p._serve, args=(ls,), daemon=True)
+        self.p.thread = t
+        t.start()
+        time.sleep(wait)
+        return ls, t
+
+    def test_transient_accept_errors_keep_the_listener_alive(self):
+        import errno
+        ls, t = self._serve_with([OSError(errno.ECONNABORTED, "aborted"), "conn",
+                                  OSError(errno.EMFILE, "too many files"), "conn"])
+        self.assertTrue(t.is_alive(), "ECONNABORTED/EMFILE are retried, the serve loop survives")
+        self.assertTrue(self.p.is_open())
+        self.assertGreaterEqual(ls.calls, 5)
+        self.assertFalse(any("listener died" in m for m in self.log))
+        self.p.close()
+
+    def test_dead_listener_marks_itself_closed_and_the_next_tick_reopens(self):
+        # THE FINDING: a non-transient accept() error used to kill the serve thread and close the
+        # socket while is_open() stayed True — a silent, permanent NotReady.
+        import errno
+        self.step(3)  # healthy, port open, oks=3
+        real = self.p.ls
+        ls, t = self._serve_with([OSError(errno.EBADF, "bad fd")])
+        real.close()
+        t.join(1)
+        self.assertFalse(t.is_alive())
+        self.assertTrue(ls.closed)
+        self.assertFalse(self.p.is_open(), "a dead listener must not be reported open")
+        self.assertTrue(any("listener died" in m for m in self.log))
+        self.step()  # checks pass, oks already >= 3: reopens at once
+        self.assertTrue(self.p.is_open())
+        self.assertTrue(_connect(self.port), "the port is really accepting again")
+        self.assertTrue(any("reopened on" in m for m in self.log))
+
+    def test_status_line_is_read_across_short_reads(self):
+        class Sock:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def recv(self, n):
+                return self.chunks.pop(0)[:n] if self.chunks else b""
+
+        self.assertEqual(b"HTTP/1.0 200 OK\r\n",
+                         self.rw.read_status_line(Sock([b"HTTP/1.", b"0 200 O", b"K\r\n", b"Content"])))
+        self.assertEqual(b"HTTP/1.0 200 OK\r\n", self.rw.read_status_line(Sock([b"HTTP/1.0 200 OK\r\nX: y\r\n"])))
+        self.assertEqual(b"", self.rw.read_status_line(Sock([])), "EOF before any byte is an empty line")
+        self.assertEqual(64, len(self.rw.read_status_line(Sock([b"x" * 200]))), "capped without a newline")
+
     def test_failure_during_recovery_resets_the_count(self):
         self.step()
         self.dk.script = ["fail", "fail"]
@@ -142,6 +218,32 @@ class ReadyWatchdog(unittest.TestCase):
         self.assertFalse(_connect(self.port), "2 passes, a failure, 2 passes: still not 3 in a row")
         self.step()
         self.assertTrue(_connect(self.port))
+
+
+class EnvReaperPlacement(unittest.TestCase):
+    """env-reaper.yaml is built through the testpool kustomization but MUST land in kube-system
+    (its header says why: testpool's NetworkPolicy blocks the API path and tep-worker's pods/exec
+    would make a hostPID pod a root shell). A `namespace:` transformer on the testpool
+    kustomization, or a targetNamespace on its Flux Kustomization, would silently move it —
+    reviewer-claude on ailab#800."""
+
+    TESTPOOL = ROOT / "kubernetes/apps/infrastructure/testpool"
+    FLUX_KS = ROOT / "kubernetes/apps/clusters/ai/testpool.yaml"
+
+    def test_reaper_workload_declares_kube_system_and_rbac_declares_testpool(self):
+        docs = [d for d in yaml.safe_load_all((self.TESTPOOL / "env-reaper.yaml").read_text(encoding="utf-8")) if d]
+        by_kind = {d["kind"]: d["metadata"]["namespace"] for d in docs}
+        self.assertEqual({"ServiceAccount": "kube-system", "ConfigMap": "kube-system", "DaemonSet": "kube-system",
+                          "Role": "testpool", "RoleBinding": "testpool"}, by_kind)
+        rb = next(d for d in docs if d["kind"] == "RoleBinding")
+        self.assertEqual([{"kind": "ServiceAccount", "name": "env-reaper", "namespace": "kube-system"}], rb["subjects"])
+
+    def test_nothing_in_the_build_chain_rewrites_namespaces(self):
+        kust = yaml.safe_load((self.TESTPOOL / "kustomization.yaml").read_text(encoding="utf-8"))
+        self.assertNotIn("namespace", kust, "a kustomize namespace transformer would move the reaper into testpool")
+        self.assertIn("env-reaper.yaml", kust["resources"])
+        flux = yaml.safe_load(self.FLUX_KS.read_text(encoding="utf-8"))
+        self.assertNotIn("targetNamespace", flux["spec"], "a Flux targetNamespace would move the reaper into testpool")
 
 
 if __name__ == "__main__":
