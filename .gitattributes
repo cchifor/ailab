@@ -19,9 +19,3 @@ justfile    text eol=lf
 *.png  binary
 *.jpg  binary
 *.gz   binary
-
-# Generator OUTPUT, not source: scripts/gen-reporting-dashboard.py emits this ConfigMap as one
-# ~350 KB JSON line, so any change diffs as the whole file and pushes a PR over the reviewbot's
-# 400 KB cap (ailab#800). `-diff` makes git (and the reviewer, which honours git's binary marker)
-# skip it; review the generator. `git diff --text` still shows it when you need to.
-kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml -diff
