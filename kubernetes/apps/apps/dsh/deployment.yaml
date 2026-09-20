@@ -663,7 +663,16 @@ spec:
         - { name: workspace, persistentVolumeClaim: { claimName: dsh-workspace } }
         - { name: tmp,  emptyDir: { sizeLimit: 1Gi } }
         - { name: relay, configMap: { name: dsh-relay, defaultMode: 0444 } }
-        - { name: conductor-release, configMap: { name: dsh-conductor-release, defaultMode: 0444 } }
+        - name: conductor-release
+          projected:
+            defaultMode: 0444
+            sources:
+              - configMap:
+                  name: dsh-conductor-release
+              - configMap:
+                  name: dsh-conductor-artifact-7a97432202131d79
+                  items:
+                    - { key: dsh-team-conductor-0.1.0.tgz, path: dsh-team-conductor-0.1.0.tgz }
         # Agent-team preset root. emptyDir, not a PVC: seed-settings rebuilds it from the
         # content-hashed dsh-relay ConfigMap on every boot, so it holds nothing durable and a
         # team deleted from git cannot survive as a stale, still-selectable directory.

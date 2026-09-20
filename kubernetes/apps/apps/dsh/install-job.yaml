@@ -348,4 +348,13 @@ spec:
             limits:   { cpu: "2",  memory: 2Gi }
       volumes:
         - { name: app, persistentVolumeClaim: { claimName: dsh-app } }
-        - { name: conductor-release, configMap: { name: dsh-conductor-release, defaultMode: 0444 } }
+        - name: conductor-release
+          projected:
+            defaultMode: 0444
+            sources:
+              - configMap:
+                  name: dsh-conductor-release
+              - configMap:
+                  name: dsh-conductor-artifact-7a97432202131d79
+                  items:
+                    - { key: dsh-team-conductor-0.1.0.tgz, path: dsh-team-conductor-0.1.0.tgz }

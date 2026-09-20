@@ -1,6 +1,6 @@
 # Private conductor 0.1.0 deployment plan
 
-**Activation update:** the user has since approved enabled production with a separate 40-call / 40M-token allowance. [CONDUCTOR-ACTIVATION.md](CONDUCTOR-ACTIVATION.md) supersedes disabled-only assumptions below; retain this original plan as preparation history. No task is authorized merely by activation.
+**Activation update:** the user has since approved enabled production with a separate 40-call / 40M-token allowance. [CONDUCTOR-ACTIVATION.md](CONDUCTOR-ACTIVATION.md) supersedes disabled-only assumptions and binary-in-GitOps ownership below (the user approved a separately provisioned immutable artifact ConfigMap); retain this original plan as preparation history. No task is authorized merely by activation.
 
 Status: release published; deployment changes prepared but not applied. Clean native acceptance passed (26/28 calls, PR #7 externally merged as `cd1fbc192309df160076fe9af070286618b40cac` after two exact-head approvals and CI). Private Gitea v0.1.0 is published with SHA256 `7a97432202131d79f11bb578708f2a3df32cde65700a28c778ca958ad4bdcb28`. Downloaded assets passed real DSH install/disable/removal checks and the named-file alias was verified with pnpm 12.4.1. No deployment PR, staged-slot mutation or live-profile change yet.
 

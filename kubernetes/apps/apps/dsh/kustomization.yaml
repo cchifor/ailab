@@ -18,12 +18,12 @@ resources:
   - operator-ssh-networkpolicy.yaml # dedicated SSH account on explicitly approved hosts
 
 configMapGenerator:
-  # Verified private release bytes and bounded operator configuration; no credentials.
+  # Reviewable release metadata/configuration; binary bytes live in the separately
+  # provisioned immutable artifact ConfigMap, verified against the published hash.
   - name: dsh-conductor-release
     options:
       immutable: true
     files:
-      - conductor-release/dsh-team-conductor-0.1.0.tgz
       - conductor-release/dsh-team-conductor-0.1.0.tgz.sha256
       - conductor-release/PROVENANCE.json
       - stage-private-conductor.mjs

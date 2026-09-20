@@ -20,6 +20,21 @@ The published package's admission limit is per run. The deployment therefore adm
 
 The configuration pins 40 calls, 40M tokens and 1M conservative tokens per call on each existing route. The previous 118 native acceptance calls remain in their separate preserved histories; none belong to this new production allowance.
 
+## Explicit artifact ownership decision
+
+The user approved storing the independently reviewed private release bytes in an **operator-provisioned immutable ConfigMap**, rather than embedding an opaque binary in this configuration PR. GitOps retains the checksum, provenance, installer and read-only projected references; automated reviewers are not asked to approve unseen binary contents. The package remains `private:true`, and the installer gets no forge credential.
+
+Before external activation merge, an operator downloads the existing private v0.1.0 release through the approved credential helper and verifies its published SHA256, then runs:
+
+```sh
+python3 scripts/provision-dsh-conductor-artifact.py /path/to/dsh-team-conductor-0.1.0.tgz --dry-run
+python3 scripts/provision-dsh-conductor-artifact.py /path/to/dsh-team-conductor-0.1.0.tgz
+```
+
+The helper bounds descriptor reads, rejects symlinks/nonregular files, checks the exact 54,302 bytes and published hash, and publishes that same verified buffer. It refuses mismatching existing objects; it never patches/replaces one. Repeat invocation verifies without mutation. Only the artifact key is projected into `/conductor-release`; the existing staging helper independently verifies it again before modifying ps2. ConfigMap name: `dsh-conductor-artifact-7a97432202131d79`, namespace `dsh`.
+
+**Recovery tradeoff:** this persistent artifact object is not recreated by Flux. If deleted or lost with the cluster, an operator must restore it from the private release with the same helper before rollout. Keep it and ps1 across rollback. Do not attach it to an ephemeral Job or delete it to recover a model budget.
+
 ## Activation gates
 
 - Verify the production database is absent or empty before enabling automatic polling. Initial inspection found both `/dsh-home/team-conductor/state.sqlite` and its parent absent.

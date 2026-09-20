@@ -6,7 +6,11 @@ export const name='conductor-release-readiness';
 // A required dependency on the profile entry itself makes optional-addon absence
 // fatal in DSH's assertEntriesActivated. Keep only a nested observer pending.
 export function apply(ctx,options={}){
- ctx.inject(['teamConductor','conductorControlsReady'],child=>observe(child,options));
+ ctx.inject(['teamConductor','conductorControlsReady'],child=>observe(child,options).catch(()=>{
+  // Readiness is evidence, not a reason to crash the existing GUI. Fail closed
+  // by withholding the marker; never leak credential-bearing exception details.
+  child.logger.warn('Conductor readiness unavailable; activation is not certified. Inspect operator preflight.');
+ }));
 }
 async function observe(ctx,options={}){
  const {default:Runtime}=await import('dsh-team-conductor');

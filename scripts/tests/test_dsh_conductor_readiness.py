@@ -42,8 +42,17 @@ class ConductorDeploymentTests(unittest.TestCase):
         env={x['name']:x.get('value') for x in job['spec']['template']['spec']['containers'][0]['env']}
         self.assertEqual(env['DSH_PLUGINSET'],'ps2')
         sha=env['CONDUCTOR_ARTIFACT_SHA256']
-        import hashlib
-        self.assertEqual(hashlib.sha256((APP/'conductor-release/dsh-team-conductor-0.1.0.tgz').read_bytes()).hexdigest(),sha)
+        self.assertEqual((APP/'conductor-release/dsh-team-conductor-0.1.0.tgz.sha256').read_text().split()[0],sha)
+        self.assertFalse((APP/'conductor-release/dsh-team-conductor-0.1.0.tgz').exists())
+        generated=yaml.safe_load((APP/'kustomization.yaml').read_text())['configMapGenerator']
+        release=next(x for x in generated if x['name']=='dsh-conductor-release')
+        self.assertNotIn('conductor-release/dsh-team-conductor-0.1.0.tgz',release['files'])
+        for file in ['install-job.yaml','deployment.yaml']:
+            spec=yaml.safe_load((APP/file).read_text())['spec']['template']['spec']
+            volume=next(v for v in spec['volumes'] if v['name']=='conductor-release')
+            artifact=volume['projected']['sources'][1]['configMap']
+            self.assertEqual(artifact['name'],'dsh-conductor-artifact-'+sha[:16])
+            self.assertEqual(artifact['items'],[{'key':'dsh-team-conductor-0.1.0.tgz','path':'dsh-team-conductor-0.1.0.tgz'}])
         self.assertIn('dsh-team-conductor@file:/app/conductor-artifacts/'+sha+'/dsh-team-conductor-0.1.0.tgz',env['DSH_PLUGINS'])
 
 if __name__=='__main__':
