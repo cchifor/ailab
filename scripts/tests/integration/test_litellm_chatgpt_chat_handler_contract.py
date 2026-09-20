@@ -18,6 +18,8 @@ What this proves, in the order the cases run:
       when a wrapped and an unwrapped call run concurrently;
   (c) streaming through the route yields the role-only first chunk, the text
       deltas, a terminal finish_reason stop and (with include_usage) a usage chunk;
+      a consumer that abandons the stream, and an upstream that stalls between
+      chunks, both end with the upstream transport closed (the stall at the deadline);
   (d) upstream 401 / 429 / 503 map to AuthenticationError / RateLimitError /
       ServiceUnavailableError from ONE POST each (no inner retry), and a stalled
       upstream hits the handler's deadline from ONE POST with the stream closed;
@@ -518,6 +520,47 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
         self.assertEqual(closed, ["transport"], "c: the upstream transport is closed after the last chunk")
         print(json.dumps({"case": "c", "chunks": len(chunks), "finish": finishes}))
 
+    async def _case_c_streaming_cancellation(self, kind):
+        """Streaming, abandoned: (abandon) the consumer stops after two chunks and closes the outer
+        stream -- the proxy's path on a client disconnect -- and the upstream transport must be closed
+        promptly; (stall-mid) the upstream hangs between two chunks and the consumer's next read must
+        hit the handler's deadline, with the transport closed, not hang or cancel elsewhere."""
+        _use_token_dir(f"c-{kind}")
+        sent, closed = [], []
+        outcome = "stall-mid" if kind == "stall-mid" else "success"
+        started = time.monotonic()
+        with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, outcome, closed)):
+            router = self._router()
+            litellm.callbacks = [self.logger]
+            try:
+                stream = await asyncio.wait_for(
+                    router.acompletion(**copy.deepcopy(PLATFORM_REQUEST), stream=True, timeout=2), timeout=25)
+                got, error = [], None
+                try:
+                    async for chunk in stream:
+                        got.append(chunk)
+                        if kind == "abandon" and len(got) == 2:
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    error = exc
+                await stream.aclose()
+                await asyncio.sleep(0.05)
+            finally:
+                await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+                router.reset()
+        elapsed = time.monotonic() - started
+        self.assertEqual(NETWORK_ATTEMPTS, [])
+        self.assertEqual(len(sent), 1, f"c-{kind}: one upstream request")
+        if kind == "abandon":
+            self.assertIsNone(error)
+            self.assertEqual(len(got), 2)
+        else:
+            self.assertEqual(type(error).__name__, "Timeout", f"c-stall-mid: {error!r}")
+            self.assertLess(elapsed, 15, "c-stall-mid: the handler's deadline, delivered to the consumer's read")
+        self.assertEqual(closed, ["transport"], f"c-{kind}: the upstream transport is closed on abandonment")
+        print(json.dumps({"case": f"c-{kind}", "chunks": len(got), "error": type(error).__name__ if error else None,
+                          "closed": closed, "elapsed_s": round(elapsed, 2)}))
+
     # (d) -------------------------------------------------------------------------------------
     async def _case_d_upstream_rejection(self, status, error_name):
         sent, closed, response, error = await self._exercise(f"d-{status}", status, PLATFORM_REQUEST)
@@ -558,7 +601,13 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
                                      "input_cost_per_token": 0.0, "output_cost_per_token": 0.0}
         self.module._REGISTERED.discard(INNER_MODEL)
         try:
+            before = litellm.get_model_info(inner)
+            self.assertEqual((before.get("mode"), before.get("supports_native_streaming")), ("chat", False),
+                             "h: the incompatible entry is in place before the call")
             sent, closed, response, error = await self._exercise("h-map", "success", PLATFORM_REQUEST)
+            after = litellm.get_model_info(inner)  # BEFORE restoration: what the handler merged in
+            self.assertEqual((after.get("mode"), after.get("supports_native_streaming")), ("responses", True),
+                             "h: the pins are merged over the existing entry")
         finally:
             if saved is None:
                 litellm.model_cost.pop(inner, None)
@@ -569,9 +618,6 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self._assert_wrapped_wire("h", sent[0])  # includes the native-streaming assertion
         self.assertEqual(response.choices[0].message.content, ANSWER)
-        info = litellm.get_model_info(inner)
-        self.assertEqual((info.get("mode"), info.get("supports_native_streaming")), ("responses", True),
-                         "h: the pins are merged over the existing entry")
 
     # (e) -------------------------------------------------------------------------------------
     async def _case_e_negative(self, kind):
@@ -640,6 +686,9 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
                     await self._case_b_dsh_route_unchanged_and_concurrent()
                 with self.subTest(case="c"):
                     await self._case_c_streaming()
+                for kind in ("abandon", "stall-mid"):
+                    with self.subTest(case=f"c-{kind}"):
+                        await self._case_c_streaming_cancellation(kind)
                 for status, error_name in (("401", "AuthenticationError"), ("429", "RateLimitError"),
                                            ("503", "ServiceUnavailableError")):
                     with self.subTest(case=f"d-{status}"):

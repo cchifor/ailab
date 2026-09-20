@@ -303,22 +303,40 @@ class ChatGPTChat(CustomLLM):
         # The proxy's CustomStreamWrapper accepts ModelResponseStream chunks from a custom provider
         # as-is (streaming_handler: the `_custom_providers` branch), so every delta the chatgpt/
         # route emits -- role-only, usage-only, tool-call, refusal -- passes through unchanged.
+        #
+        # The deadline is ABSOLUTE and scoped to the upstream awaits only: an asyncio.timeout held
+        # open across `yield` would cancel the CONSUMER's task while this generator sits suspended
+        # (e.g. in a slow downstream send) instead of this read. Each upstream read gets the time
+        # left; a consumer that stops iterating (client disconnect -> the outer wrapper's aclose)
+        # closes this generator, and the finally closes the upstream. (codex impl-review round 2)
         stream = None
+        loop = asyncio.get_running_loop()
+        budget = _deadline_seconds(timeout)
+        expires = None if budget is None else loop.time() + budget
         try:
-            async with asyncio.timeout(_deadline_seconds(timeout)):
+            async with asyncio.timeout(budget):
                 stream = await _open_inner_stream(model, messages, optional_params, timeout)
-                raw = getattr(stream, "completion_stream", None)
-                if raw is None or not hasattr(raw, "__aiter__"):
-                    raise CustomLLMError(status_code=502, message=f"{PROVIDER}: unexpected inner stream shape {type(stream).__name__}")
-                first = True
-                async for chunk in raw:  # the bridge's chunks: the terminal one carries the upstream usage
-                    chunk.model = model
-                    if first and chunk.choices and chunk.choices[0].delta is not None:
-                        # The wrapper this bypasses is what stamps `role` on the first chunk; keep
-                        # the OpenAI shape streaming clients expect.
-                        chunk.choices[0].delta.role = "assistant"
-                        first = False
-                    yield chunk
+            raw = getattr(stream, "completion_stream", None)
+            if raw is None or not hasattr(raw, "__aiter__"):
+                raise CustomLLMError(status_code=502, message=f"{PROVIDER}: unexpected inner stream shape {type(stream).__name__}")
+            iterator = raw.__aiter__()  # the bridge iterator initialises itself here, not in __anext__
+            first = True
+            while True:
+                remaining = None if expires is None else expires - loop.time()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError
+                try:
+                    async with asyncio.timeout(remaining):
+                        chunk = await iterator.__anext__()  # the bridge's chunks: the terminal one carries the upstream usage
+                except StopAsyncIteration:
+                    break
+                chunk.model = model
+                if first and chunk.choices and chunk.choices[0].delta is not None:
+                    # The wrapper this bypasses is what stamps `role` on the first chunk; keep
+                    # the OpenAI shape streaming clients expect.
+                    chunk.choices[0].delta.role = "assistant"
+                    first = False
+                yield chunk  # outside every timeout context
         except TimeoutError as exc:
             raise litellm.Timeout(message=f"{PROVIDER}: deadline reached before the upstream stream completed",
                                   model=model, llm_provider=PROVIDER) from exc
