@@ -45,12 +45,15 @@ staleness alert is a monitoring follow-up.
 Runbook: `docs/runbooks/env-pool.md`. Plan with the evidence chain:
 `plans/2026-09-20-env-pool-frozen-guest-outage-plan.md`.
 
-- **Readiness = "a lease can run docker here."** `control`'s readiness probe is an exec of
-  `docker version` through the kata-agent (10 s period, 6 failures ≈ 60 s); the tcp ready-port
-  9099 is only the startup gate. This matters because the warm-pool GC deletes any member older
-  than the 15 m grace the moment it is observed NotReady — a 6 s blip on a healthy 66 h-old env
-  is what started the outage. Known gap: the kubelet prober discards non-timeout CRI transport
-  errors without counting them; the two stalls that matter surface as timeouts.
+- **Readiness = "a lease can run docker here", decided in the guest.** `ready-watchdog.yaml`
+  (a stdlib-Python process in `control`) holds the ready-port 9099 open only while a virtio-fs
+  write+fsync on `/work` and a dockerd `/_ping` each answer within 5 s; both probes are TCP
+  against it (startup 1 s × 600, readiness 5 s × 6 ≈ 30 s). A TCP probe is answered by the
+  kubelet itself — an exec probe was tried first and stayed `Ready=True` through a 7-minute
+  virtio-fs freeze, because the kubelet discards non-timeout CRI exec errors. This matters
+  because the warm-pool GC deletes any member older than the 15 m grace the moment it is observed
+  NotReady — a 6 s blip on a healthy 66 h-old env is what started the outage; the old
+  fork-per-connection `nc -l` loop produced exactly such blips.
 - **Teardown is bounded.** `env-reaper.yaml` (DaemonSet in `kube-system`, Role here) SIGKILLs the
   Cloud Hypervisor VM of a pod `Terminating` > ~2 min, and its shim 2 min later. A frozen guest
   cannot be killed through the agent, and it was the *accumulation* of such hangs (two, plus a

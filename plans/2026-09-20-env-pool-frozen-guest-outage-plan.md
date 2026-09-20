@@ -305,4 +305,45 @@ cannot.
 
 
 
+## Implementation notes (deviations from the finalized plan, with the evidence that forced them)
+
+- **T1's exec readiness probe was REJECTED by V1's injected stall and replaced.** With the member's
+  virtiofsd frozen (`kill -STOP` from the reaper pod — the faithful injection, see below) the pod
+  stayed `Ready=True` for 7+ minutes: the first probe exec hung, every later one failed fast with
+  `cannot enter container` (a non-timeout CRI error the kubelet 1.31 prober discards), and the only
+  event was "Readiness probe **errored**". Codex's round-1 concern was right and the plan's "both
+  stalls surface as timeouts" claim was wrong. Shipped instead: `ready-watchdog.yaml`, a stdlib
+  Python process in `control` that holds :9099 open only while a virtio-fs write+fsync on `/work`
+  and a dockerd `/_ping` each answer within 5 s (a hung check closes the port at once), with BOTH
+  probes back on TCP — answered by the kubelet itself, no CRI path to discard. Verified: the hang
+  path in isolation (port open → hung check → port closed, exit 1) and, live, a member built from
+  the new template becoming Ready via the watchdog (startup 112 s) and going NotReady 43 s after a
+  virtiofsd freeze.
+- **SIGSTOP on cloud-hypervisor is NOT the incident's hang** (Codex asked). Kata's monitor pings
+  the VMM API (10 s) and the agent; an unresponsive VMM is declared dead in ~13 s, the shim aborts
+  every pending wait (`ttrpc: closed`) and containerd completes the stop — the pod was gone in
+  <30 s. That IS the mechanism stage 1 relies on, demonstrated. The faithful injection is
+  `kill -STOP` on the sandbox's **virtiofsd** processes: guest processes block in D-state on the
+  rootfs while the agent keeps answering — the incident's signature (`kubectl exec` hangs outright).
+- **V3 against the faithful hang passed twice**: a virtiofsd-frozen member deleted → `Terminating`
+  8.5 min with `stop_*` errors climbing and `EnvNodeRuntimeStopErrors` pending → three
+  `reap stage=1` lines (clh + both virtiofsd) → pod gone within 30 s, zero residual processes,
+  `/run/vc/sbs/<id>` and the shared dir gone, PV reclaimed, replacement Ready. Repeated at the
+  production setting (120 s): reaped at ~+180 s. Stage 2 was never needed and is untested.
+- In one virtiofsd-freeze run Kata's agent health check itself timed out after 34 s, the shim
+  marked both containers exited (255) and the kubelet restarted them in a fresh sandbox — a
+  self-heal path that exists for SOME stall shapes; the incident's did not take it. Recorded for
+  the root-cause follow-up.
+- **`kubectl --request-timeout` disables in-cluster config** (the reaper dialled localhost:8080
+  on every iteration until the flag was dropped). The outer `timeout` is the bound.
+- Kata process placement differs from the plan's assumption: only cloud-hypervisor is in the pod
+  cgroup; virtiofsd and the shim live in `/kata_overhead/<sandbox-id>`. The reaper derives the
+  sandbox id from the VMM's cgroup (or `persist.json` once the VMM is dead) and matches the others
+  by that id.
+- `TestpoolEnvTeardownStuck` could not be observed firing pre-merge: Flux's drift correction
+  reverted the hand-applied `prometheusrules/testpool` within its 10 m interval. The expression
+  evaluated live returned the stuck pod (`357 > 300`), and the promtool fixtures cover firing,
+  recovery and the negative case; the first real firing will be post-merge.
+- V6 (7-day soak) is deliberately still open at merge time.
+
 <!-- codex-review-status: finalized -->

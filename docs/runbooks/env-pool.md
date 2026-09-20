@@ -79,9 +79,11 @@ guarantee that hung teardowns never accumulate: a `testpool` pod `Terminating` l
 past its `deletionTimestamp` gets its Cloud Hypervisor VM and virtiofsd SIGKILLed from the host
 (stage 1), and the kata shim 120 s later if the teardown still has not completed (stage 2). A
 process is signalled only when its cgroup, executable and cmdline all tie it to the deleted pod's
-sandbox. The readiness contract in `sandboxtemplate-std.yaml` (an exec of `docker version` through
-the kata-agent, 60 s of sustained failure) is what keeps a 6 s blip from triggering the GC in the
-first place. The root cause of the guest freeze itself is still open — see the plan's "Out of
+sandbox. The readiness contract in `sandboxtemplate-std.yaml` + `ready-watchdog.yaml` (an in-guest
+watchdog holds the ready-port open only while virtio-fs and dockerd answer; the kubelet probes it
+over TCP, ~30 s of a closed port = NotReady) is what keeps a 6 s blip from triggering the GC, and
+what makes a real stall visible: `kubectl -n testpool logs <pod> -c control` names the check that
+failed. The root cause of the guest freeze itself is still open — see the plan's "Out of
 scope": Kata debug logging needs the machine config under tofu.
 
 ### Fault injection (validating the reaper, or reproducing a hung teardown on purpose)
@@ -93,9 +95,16 @@ the tool. From `testpool/hack/`, apply a copy of the DaemonSet renamed `env-reap
 ```sh
 POD=$(kubectl -n kube-system get pod -l app.kubernetes.io/name=env-reaper-hack -o name)
 kubectl -n kube-system exec $POD -- sh -c 'for cg in /proc/[0-9]*/cgroup; do grep -q "/kata_" "$cg" 2>/dev/null && p=${cg#/proc/} && p=${p%/cgroup} && [ "$(readlink /proc/$p/exe)" = /usr/local/bin/cloud-hypervisor ] && echo $p; done'
-kubectl -n kube-system exec $POD -- kill -STOP <pid>          # the guest is now frozen for real
-kubectl -n testpool delete sandbox <member>                    # StopContainer hangs: Terminating, stop_* errors
+kubectl -n kube-system exec $POD -- kill -STOP <pid>          # a frozen VMM: Kata's monitor declares it dead in ~13 s
+kubectl -n testpool delete sandbox <member>                    # ...and the shim completes the stop by itself (<30 s)
 ```
+
+That is NOT the incident's hang. The faithful one freezes the sandbox's **virtiofsd** instead (two
+processes, `exe=/usr/local/libexec/virtiofsd`, cgroup `/kata_overhead/<sandbox-id>`): guest
+processes block in D-state on the rootfs while the agent keeps answering — `kubectl exec` into the
+member hangs outright, the delete leaves the pod `Terminating` with `stop_*` errors climbing, and
+only the reaper's stage 1 ends it (validated twice on 2026-09-20, 8.5 min hang → gone within 30 s
+of the reap, zero residuals).
 
 Watch `kubectl -n kube-system logs -f $POD` for `reap stage=1 …`; the pod must be gone within 60 s
 of that line, `talosctl processes` must show no process for the sandbox, `/run/vc/sbs/<id>` and

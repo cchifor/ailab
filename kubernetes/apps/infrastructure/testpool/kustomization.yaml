@@ -6,6 +6,7 @@ resources:
   - namespace.yaml
   - runtime-storage.yaml
   - networkpolicy.yaml
+  - ready-watchdog.yaml # the in-guest ready-port watchdog the template's probes target (2026-09-20)
   - sandboxtemplate-std.yaml
   - prepull-daemonset.yaml
   - tep-access.yaml
