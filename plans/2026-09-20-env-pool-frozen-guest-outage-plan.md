@@ -303,10 +303,6 @@ cannot.
 - `scripts/manifest-lint.sh` (kustomize build + kubeconform, the CI gate) passes; docs exercised
   against the steps that were actually run today.
 
-<!-- codex: [P2] NetworkPolicy (testpool-rules.yaml:20) excludes service/pod CIDRs and API VIP with no cluster-DNS allowance. T2 needs an explicitly permitted and tested API path. Add request timeout, iteration deadline, bounded retries, and failure reporting to kubectl loop. Specify behavior on API/network stall or force-deleted pod disappearing; include resource requests, priority, and heartbeat metrics to distinguish healthy idle from broken reaper. Timing promise: 3-4 min before stage 1, 6-7 min before stage 2, plus cleanup delays; the incident's second hang was ~76 seconds before kubelet wedge. -->
-<!-- opus-pushback: All accepted and applied in T2 except "heartbeat metrics": a heartbeat only tells us the loop runs, while the outcome alert TestpoolEnvTeardownStuckCritical (T3) fires precisely when the reaper failed to unstick a pod — dead, wedged or ineffective alike — and the chart's KubeDaemonSet* rules already cover a missing/crashlooping DaemonSet; a heartbeat log line is kept for forensics, a metric would be an exporter for no extra detection. -->
 
-<!-- codex: Needs firing/recovery and missing-series fixtures. Healthy expressions legitimately return no series. The earlier 50-cycle spike used runc attachment pods, not Kata; does not validate forced-teardown cleanup. -->
-<!-- opus-pushback: Firing/recovery fixtures now come from V3a (the SIGSTOP-frozen guest holds TestpoolEnvTeardownStuck and EnvNodeRuntimeStopErrors through firing and resolution), and V3a/V3b verify forced-teardown residuals directly; the 50-cycle spike is not cited by this plan, so nothing here rests on it. -->
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
