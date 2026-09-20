@@ -13,9 +13,10 @@ What this proves, in the order the cases run:
       content == the fixture's JSON, finish_reason stop, role assistant, usage
       exactly the fixture's -- from ONE upstream POST whose body carries
       text.format == the schema and reasoning.effort medium and NO max_output_tokens;
-  (b) the gpt-6-astra-realjaynesage route (dsh's request shape) still sends the
-      byte-identical body it sent before the handler existed -- no `text` -- even
-      when a wrapped and an unwrapped call run concurrently;
+  (b) the gpt-6-astra-realjaynesage route (dsh's request shape) sends the body it
+      sent before the handler existed PLUS the caller's `text` (dsh's verbosity), even
+      when a wrapped and an unwrapped call run concurrently; and a Codex-CLI
+      `--output-schema` shaped request on that route carries `text.format`;
   (c) streaming through the route yields the role-only first chunk, the text
       deltas, a terminal finish_reason stop and (with include_usage) a usage chunk;
       a consumer that abandons the stream, and an upstream that stalls between
@@ -194,6 +195,16 @@ EXPECTED_DSH_BODY = {
     "store": False,
     "include": ["reasoning.encrypted_content"],
     "reasoning": {"effort": "high", "summary": "auto"},
+    "text": {"verbosity": "low"},  # forwarded since 2026-09-20 (was an "accepted loss", ADR 0026)
+}
+# What the Codex CLI sends for `--output-schema` (text.format), on the route the workstation uses.
+CODEX_SCHEMA_REQUEST = {
+    "model": "gpt-6-astra-realjaynesage",
+    "input": DSH_INPUT,
+    "reasoning": {"effort": "low"},
+    "include": ["reasoning.encrypted_content"],
+    "store": False,
+    "text": {"format": {"type": "json_schema", "name": "review", "strict": True, "schema": SCHEMA}},
 }
 CLOUDFLARE_HTML = ("<html><head><title>Just a moment...</title></head><body><div class=\"container\">"
                    "Enable JavaScript and cookies to continue</div></body></html>")
@@ -490,7 +501,7 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
         self.assertEqual(len(sent), 3, "b: three upstream POSTs, one per call")
         bodies = {json.dumps(e["body"], sort_keys=True) for e in sent}
         self.assertIn(json.dumps(EXPECTED_DSH_BODY, sort_keys=True), bodies,
-                      "b: the dsh route's body is byte-identical to the pre-handler contract (no text)")
+                      "b: the dsh route's body is the pre-handler contract plus the caller's text (verbosity)")
         wrapped = [e for e in sent if e["body"]["model"] == "gpt-5.6-sol"]
         self.assertEqual(len(wrapped), 2)
         for entry in wrapped:
@@ -500,6 +511,30 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
             self.assertEqual(result[0].choices[0].message.content, ANSWER)
         self.assertNotIsInstance(results[1], Exception, f"b: dsh call failed: {results[1]!r}")
         print(json.dumps({"case": "b", "upstream_attempts": len(sent), "concurrent": True}))
+
+    async def _case_b_codex_output_schema(self):
+        """`codex --output-schema` through this proxy: the Responses request carries text.format and
+        nothing else changes. The Codex CLI streams; the fixture answers with the schema's JSON."""
+        _use_token_dir("b-schema")
+        sent, closed = [], []
+        with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, "success", closed)):
+            router = self._router()
+            try:
+                response = await asyncio.wait_for(router.aresponses(**copy.deepcopy(CODEX_SCHEMA_REQUEST), stream=True), timeout=25)
+                texts = []
+                async for event in response:
+                    if getattr(event, "type", None) == "response.output_text.done":
+                        texts.append(event.text)
+            finally:
+                await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+                router.reset()
+        self.assertEqual(len(sent), 1)
+        body = sent[0]["body"]
+        self.assertEqual(body["text"], CODEX_SCHEMA_REQUEST["text"], "b-schema: --output-schema's text.format reaches the backend")
+        self.assertEqual(body["model"], "gpt-6-astra")
+        self.assertNotIn("max_output_tokens", body)
+        self.assertEqual(texts, [ANSWER])
+        print(json.dumps({"case": "b-schema", "wire_keys": sorted(body)}))
 
     # (c) -------------------------------------------------------------------------------------
     async def _case_c_streaming(self):
@@ -690,6 +725,8 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
                     await self._case_a_platform_body()
                 with self.subTest(case="b"):
                     await self._case_b_dsh_route_unchanged_and_concurrent()
+                with self.subTest(case="b-schema"):
+                    await self._case_b_codex_output_schema()
                 with self.subTest(case="c"):
                     await self._case_c_streaming()
                 for kind in ("abandon", "stall-mid"):

@@ -130,10 +130,11 @@ projections everywhere, exactly the shape seat b already has.** The refresh toke
   LiteLLM deployment, not a second route; that is not in scope.
 - **Accepted parameter loss on this path.** `max_output_tokens` is never sent (dsh's `maxTokens`
   sizes the model and is not a per-request cap unless configured; the model's own 128k ceiling
-  applies); `text.verbosity` and `prompt_cache_key` are dropped by LiteLLM's transform (default
-  verbosity; prefix caching relies on the backend `session_id` header LiteLLM sets per call);
-  `parallel_tool_calls` is dropped (backend default). None of these changes an answer's
-  correctness; none is surfaced to the user beyond this record.
+  applies); `prompt_cache_key` is dropped by LiteLLM's transform (prefix caching relies on the
+  backend `session_id` header LiteLLM sets per call); `parallel_tool_calls` is dropped (backend
+  default). `text.verbosity` was on this list until 2026-09-20, when ADR 0027's `chatgpt_chat.py`
+  started re-adding the caller's `text` on every `chatgpt/` call (measured accepted). None of the
+  remaining losses changes an answer's correctness; none is surfaced to the user beyond this record.
 - **The publisher is generalised, and it exports its own freshness.** Config becomes
   `{address, textfile, projections: [{auth_path, email, kv_path, prefix, optional}]}`; each
   projection publishes `<prefix>_ACCESS_TOKEN`, `<prefix>_ACCOUNT_ID`, `<prefix>_ACCOUNT_EMAIL`,

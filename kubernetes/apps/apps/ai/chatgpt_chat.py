@@ -21,11 +21,17 @@ read instead of letting it run on against the subscription. A non-streaming call
 rebuilt into a normal ModelResponse (`litellm.stream_chunk_builder` over the bridge's own chunks, capped at MAX_CONTENT_BYTES of content,
 usage taken from the upstream's response.completed block and refused when there is none -- LiteLLM's
 stream wrapper would otherwise substitute a token-count estimate);
-a streaming caller gets the chunks re-yielded unchanged. Around the inner call a ContextVar
-is set, and a wrapper on the provider's request transform re-adds `text` ONLY while that var is set --
-every other `chatgpt/` call on this proxy (dsh's gpt-6-astra-realjaynesage) sends the byte-identical
-request it sends today. The inner call is `no-log` so the proxy's spend/metrics logging records the
-request once, under the outer model name.
+a streaming caller gets the chunks re-yielded unchanged. The inner call is `no-log` so the proxy's
+spend/metrics logging records the request once, under the outer model name.
+
+SECOND JOB, `text` PASS-THROUGH FOR EVERY `chatgpt/` CALL (2026-09-20, evening). A wrapper on the
+provider's request transform re-adds the caller's `text` block whenever one was given. That serves
+this handler's inner call (the platform's `response_format` -> `text.format`), the Codex CLI's
+`--output-schema` on the `gpt-6-astra-realjaynesage` route (also `text.format`), and dsh's
+`text.verbosity`. Measured on gpt-6-astra: `verbosity` alone, `format` alone and both -> 200,
+`format` enforced; on gpt-5.6-sol the same. Until this the pass-through was scoped to the handler
+by a ContextVar and dsh's `text` was an "accepted loss" (ADR 0026) -- that loss is retired.
+`max_output_tokens` stays dropped (the backend refuses it).
 
 WHAT IT DOES NOT DO. It does not touch auth: the inner call reads $CHATGPT_TOKEN_DIR/auth.json per
 request exactly as the existing route does (litellm-chatgpt-eso.yaml renders it). It adds no retries
@@ -50,7 +56,6 @@ this module in the pinned image in CI so that failure shows at PR time.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import inspect
 import json
 from collections.abc import AsyncIterator
@@ -79,8 +84,6 @@ INNER_MODEL_PREFIX = f"{INNER_PROVIDER}/responses/"
 # ~6x that and still a few hundred MB of retained chunks at most on the shared 6 GiB proxy.
 MAX_CONTENT_BYTES = 4 * 1024**2
 MAX_CHUNKS = 262_144
-# Set only for the duration of THIS provider's inner call; read by the transform wrapper below.
-_PASS_TEXT: contextvars.ContextVar[bool] = contextvars.ContextVar("chatgpt_chat_pass_text", default=False)
 # Chat-completion kwargs the handler owns (or the Router injects) and must not forward into the inner call.
 _OWNED_PARAMS = frozenset({"stream", "stream_options", "no-log", "max_retries", "num_retries"})
 
@@ -95,16 +98,17 @@ if _actual_signature != _EXPECTED_SIGNATURE:  # a pin bump moved the seam: refus
     )
 
 
-def _transform_with_scoped_text(self, model, input, response_api_optional_request_params, litellm_params, headers):
+def _transform_with_text(self, model, input, response_api_optional_request_params, litellm_params, headers):
+    """Upstream's transform, plus the caller's `text` (format and/or verbosity) when one was given.
+    Every other key keeps upstream's decision; `max_output_tokens` in particular stays dropped."""
     request = _UPSTREAM_TRANSFORM(self, model, input, response_api_optional_request_params, litellm_params, headers)
-    if _PASS_TEXT.get():
-        text = response_api_optional_request_params.get("text")
-        if text is not None and "text" not in request:
-            request["text"] = text
+    text = response_api_optional_request_params.get("text")
+    if text is not None and "text" not in request:
+        request["text"] = text
     return request
 
 
-ChatGPTResponsesAPIConfig.transform_responses_api_request = _transform_with_scoped_text  # type: ignore[method-assign]
+ChatGPTResponsesAPIConfig.transform_responses_api_request = _transform_with_text  # type: ignore[method-assign]
 
 
 def _inner_kwargs(model: str, messages: list, optional_params: dict | None, timeout: Any) -> dict:
@@ -171,11 +175,7 @@ def _ensure_model_info(model: str) -> None:
 
 async def _open_inner_stream(model: str, messages: list, optional_params: dict | None, timeout: Any):
     _ensure_model_info(model)
-    token = _PASS_TEXT.set(True)
-    try:
-        return await litellm.acompletion(**_inner_kwargs(model, messages, optional_params, timeout))
-    finally:
-        _PASS_TEXT.reset(token)
+    return await litellm.acompletion(**_inner_kwargs(model, messages, optional_params, timeout))
 
 
 def _delta_bytes(chunk: Any) -> int:
