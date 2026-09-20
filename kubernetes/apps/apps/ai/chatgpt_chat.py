@@ -155,10 +155,10 @@ def _ensure_model_info(model: str) -> None:
     if model in _REGISTERED:
         return
     inner = f"{INNER_PROVIDER}/{model}"
-    try:
-        existing = dict(litellm.get_model_info(inner))
-    except Exception:  # noqa: BLE001 - no entry
-        existing = {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0}
+    # Merge over the RAW map entry, not get_model_info()'s normalised view: that view fills in
+    # derived defaults (supports_* flags, supported_openai_params, zeroed costs) which register_model
+    # would then freeze into the map as if the entry had declared them (reviewer-claude on #802).
+    existing = dict(litellm.model_cost.get(inner) or {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0})
     entries = {inner: {**existing, **_INNER_PINS}}
     outer = f"{PROVIDER}/{model}"
     try:

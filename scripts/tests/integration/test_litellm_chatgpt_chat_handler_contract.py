@@ -107,12 +107,17 @@ CONFIG = yaml.safe_load(next(
 # subscription route and this module SKIPS instead of failing a required check.
 SUBSCRIPTION_ROUTE = next((entry for entry in CONFIG["model_list"]
                            if str(entry["litellm_params"].get("model", "")).startswith("chatgpt-chat/")), None)
-if SUBSCRIPTION_ROUTE is None:
-    print("no chatgpt-chat/ route in the manifest: the subscription handler is retired (ADR 0027); nothing to contract")
-    raise SystemExit(0)
-PAID_ROUTE = next(entry for entry in CONFIG["model_list"]
-                  if entry["litellm_params"].get("model") == "openai/gpt-5.6-sol")
-DSH_ROUTE = next(entry for entry in CONFIG["model_list"] if entry["model_name"] == "gpt-6-astra-realjaynesage")
+RETIRED = "no chatgpt-chat/ route in the manifest: the subscription handler is retired (ADR 0027); nothing to contract"     if SUBSCRIPTION_ROUTE is None else ""
+if RETIRED:
+    # Placeholders so the module-level constants below still build; the TestCase is skipped
+    # (`skipIf`), which every runner -- direct execution, `-m unittest <name>`, discovery, pytest --
+    # reports as a skip, unlike a module-level SystemExit or SkipTest.
+    SUBSCRIPTION_ROUTE = {"model_name": "gpt-5.6-sol", "litellm_params": {"model": "chatgpt-chat/gpt-5.6-sol"}}
+PAID_ROUTE = next((entry for entry in CONFIG["model_list"]
+                   if entry["litellm_params"].get("model") == "openai/gpt-5.6-sol"), None)
+assert PAID_ROUTE is not None, "the retained paid route (openai/gpt-5.6-sol + OPENAI_API_KEY) is missing from model_list"
+DSH_ROUTE = next((entry for entry in CONFIG["model_list"] if entry["model_name"] == "gpt-6-astra-realjaynesage"), None)
+assert DSH_ROUTE is not None, "the gpt-6-astra-realjaynesage route (ADR 0026) is missing from model_list; case (b) contracts it"
 ROUTES = {SUBSCRIPTION_ROUTE["model_name"]: SUBSCRIPTION_ROUTE, PAID_ROUTE["model_name"]: PAID_ROUTE,
           DSH_ROUTE["model_name"]: DSH_ROUTE}
 SUBSCRIPTION_NAME = SUBSCRIPTION_ROUTE["model_name"]
@@ -360,6 +365,7 @@ def _load_handler_like_the_proxy():
     return module
 
 
+@unittest.skipIf(bool(RETIRED), RETIRED)
 class ChatGPTChatHandlerContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -713,6 +719,8 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    if RETIRED:
+        print(RETIRED)
     package = pathlib.Path(litellm.__file__).parent
     sources = ("router.py", "llms/custom_llm.py", "llms/chatgpt/responses/transformation.py",
                "completion_extras/litellm_responses_transformation/transformation.py",
