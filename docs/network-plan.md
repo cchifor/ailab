@@ -42,7 +42,7 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.31` | CI runner VM `ci-runner-9` (moved off `.22` on 2026-09-03; moved ai-node2→ai-node1 on 2026-09-07) | 4109 | `kubernetes/infra/runners/variables.tf` |
 | `.32`–`.35` | **free (static)** | — | — |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
-| `.37` | Talos env-node `talos-env-node-1` (k8s member) | 4401 | ⚠️ unmanaged — see note below |
+| `.37` | Talos env-node `talos-env-node-1` (k8s member; runbook `docs/runbooks/env-pool.md`) | 4401 | ⚠️ unmanaged — see note below |
 | `.38 / .39` | **free (static)** | — | — |
 | `.40` | Talos control-plane VIP (k8s API `:6443`) | — | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `talos-cp1/2/3` | 4001–4003 | `kubernetes/infra/variables.tf` |

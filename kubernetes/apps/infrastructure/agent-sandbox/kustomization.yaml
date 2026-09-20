@@ -1,5 +1,8 @@
-# kubernetes-sigs/agent-sandbox, PINNED at v1.0.0 (vendored release manifest, sha-identical to
-# https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.0/sandbox-with-extensions.yaml).
+# kubernetes-sigs/agent-sandbox, vendored release manifest. The FILE is still named v1.0.0 (its
+# first vendoring, sha-identical to
+# https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.0/sandbox-with-extensions.yaml
+# at the time) but the controller image inside it is PINNED at v1.0.2 (`grep image:` in it — the
+# file name was never bumped with the pin; renaming it is a separate change, not a comment fix).
 # Upgrade procedure: v1beta1 API with a strict version-march — never skip minors past a storage-
 # version migration; vendor the new file + read the release notes BEFORE bumping (test-env-pool plan,
 # "Risks"). The operator was first hand-applied during spike 2 (2026-09-01); Flux SSA adopts it.
@@ -9,10 +12,17 @@ resources:
   - agent-sandbox-v1.0.0.yaml
   - servicemonitor.yaml
 patches:
-  # Raise the warm-pool readiness grace period above the measured env fill time (~86 s) and the
-  # golden-bootstrap window: members not Ready within this window are killed and recreated (upstream
-  # default 5m). 15m also keeps the pool self-healing while a golden snapshot is still being
-  # bootstrapped (PVCs Pending on a missing snapshot are recreated, not wedged).
+  # Warm-pool readiness grace period (upstream default 5m). WHAT THE FLAG ACTUALLY DOES
+  # (v1.0.2 sandboxwarmpool_controller.go, reconcile loop): any pool member observed NotReady
+  # whose creation age exceeds the period is deleted and replaced ON THAT RECONCILE — regardless of
+  # how long it had been Ready before. It is NOT only a fill-time window: on 2026-09-20 it deleted a
+  # member that had been Ready for 66 h on a single NotReady observation, and the unschedulable
+  # hold (#1215) does not reset the clock, so a member that sat Pending past the period is deleted
+  # ~30 s after it finally schedules, before it can become Ready (seen during the recovery).
+  # 15m still covers the measured env fill time (~86 s) and keeps the pool self-healing while a
+  # golden snapshot is being bootstrapped (PVCs Pending on a missing snapshot are recreated, not
+  # wedged). What keeps a healthy member from being replaced on a blip is the template's readiness
+  # contract (testpool/sandboxtemplate-std.yaml: 60 s of sustained failure), not this flag.
   - target:
       kind: Deployment
       name: agent-sandbox-controller

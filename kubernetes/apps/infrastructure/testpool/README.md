@@ -40,6 +40,27 @@ Immutable `golden-vN`; the SandboxTemplate `dataSource.name` IS the pointer; a b
 steps. Keep vN-1 until unreferenced. Refresh monthly or on toolchain/image-set changes; a
 staleness alert is a monitoring follow-up.
 
+## Readiness, teardown, and the env node (2026-09-20 outage)
+
+Runbook: `docs/runbooks/env-pool.md`. Plan with the evidence chain:
+`plans/2026-09-20-env-pool-frozen-guest-outage-plan.md`.
+
+- **Readiness = "a lease can run docker here."** `control`'s readiness probe is an exec of
+  `docker version` through the kata-agent (10 s period, 6 failures ≈ 60 s); the tcp ready-port
+  9099 is only the startup gate. This matters because the warm-pool GC deletes any member older
+  than the 15 m grace the moment it is observed NotReady — a 6 s blip on a healthy 66 h-old env
+  is what started the outage. Known gap: the kubelet prober discards non-timeout CRI transport
+  errors without counting them; the two stalls that matter surface as timeouts.
+- **Teardown is bounded.** `env-reaper.yaml` (DaemonSet in `kube-system`, Role here) SIGKILLs the
+  Cloud Hypervisor VM of a pod `Terminating` > ~2 min, and its shim 2 min later. A frozen guest
+  cannot be killed through the agent, and it was the *accumulation* of such hangs (two, plus a
+  create) that wedged the kubelet. Alerts `TestpoolEnvTeardownStuck{,Critical}` are the outcome
+  check; `env-node-rules.yaml` names the node-side precursors.
+- **Entrypoints trap TERM** and end in `sleep infinity & wait $!`, so a normal stop takes ~1 s
+  instead of the 30 s grace + SIGKILL it used to.
+- **Root cause of the guest freeze is still open** (single-threaded virtiofsd is the suspect);
+  it needs Kata debug logging, which needs the env node's machine config under tofu.
+
 ## Deliberate posture notes
 
 - **Egress amendment** (recorded in `networkpolicy.yaml`): cluster-ward deny (pod/svc CIDRs,
