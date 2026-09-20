@@ -100,10 +100,11 @@ spec:
                 sleep 0.2
               done
               mkdir -p /work/runs /work/src
-              # Ready-port :9099, held open by the watchdog only while virtio-fs and dockerd answer
-              # (ready-watchdog.yaml). Backgrounded: if it closes the port and exits, THIS shell
-              # stays PID 1, so the member turns NotReady without killing a lease in flight; the
-              # warm-pool GC then replaces it. Its log lines are the guest-side evidence.
+              # Ready-port :9099, held open by the watchdog only while virtio-fs and dockerd answer,
+              # reopened after 3 consecutive passes (ready-watchdog.yaml). Backgrounded: THIS shell
+              # stays PID 1, so a stall makes the member NotReady without killing a lease in flight;
+              # a short stall recovers in place, a long one gets the member replaced by the
+              # warm-pool GC. Its log lines are the guest-side evidence.
               python3 /opt/ready-watchdog/ready-watchdog.py &
               echo ENV-CONTROL-READY
               sleep infinity & wait $!

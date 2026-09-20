@@ -47,8 +47,10 @@ Runbook: `docs/runbooks/env-pool.md`. Plan with the evidence chain:
 
 - **Readiness = "a lease can run docker here", decided in the guest.** `ready-watchdog.yaml`
   (a stdlib-Python process in `control`) holds the ready-port 9099 open only while a virtio-fs
-  write+fsync on `/work` and a dockerd `/_ping` each answer within 5 s; both probes are TCP
-  against it (startup 1 s × 600, readiness 5 s × 6 ≈ 30 s). A TCP probe is answered by the
+  write+fsync on `/work` and a dockerd `/_ping` each answer within 5 s, and reopens it after
+  3 consecutive passes (a stall shorter than the probe window costs nothing; a longer one that
+  recovers costs only the NotReady interval); both probes are TCP against it (startup 1 s × 600,
+  readiness 5 s × 6 ≈ 30 s). Unit-tested from the ConfigMap: `scripts/tests/test_ready_watchdog.py`. A TCP probe is answered by the
   kubelet itself — an exec probe was tried first and stayed `Ready=True` through a 7-minute
   virtio-fs freeze, because the kubelet discards non-timeout CRI exec errors. This matters
   because the warm-pool GC deletes any member older than the 15 m grace the moment it is observed

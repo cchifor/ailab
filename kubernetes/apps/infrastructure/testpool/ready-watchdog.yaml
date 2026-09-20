@@ -5,8 +5,14 @@
 #      the container rootfs;
 #   2. get HTTP 200 from dockerd's /_ping over /run/dsock/docker.sock.
 # Two consecutive failures (or one HUNG check — a thread that never returns is the D-state
-# signature of a stalled virtio-fs) close the port and the process exits; the kubelet's TCP
-# readiness probe then fails and the member goes NotReady.
+# signature of a stalled virtio-fs) close the port; the kubelet's TCP readiness probe then fails
+# and the member goes NotReady after its failureThreshold. The watchdog NEVER exits: it keeps
+# checking, and REOPENS the port after READY_SUCCESSES_TO_REOPEN consecutive passes, so a stall
+# shorter than the probe window (~30 s) costs nothing and a longer one that recovers costs only
+# the NotReady interval (codex review, ailab#800: the first version exited on the first hung
+# check, which turned any 6 s hiccup into a deletion by the warm-pool GC for a member older than
+# its grace period). A hung check thread cannot be interrupted; at most ONE is outstanding per
+# check — while it is still running the check keeps reporting "hung" without spawning another.
 #
 # WHY A TCP PROBE AGAINST THIS, and not an exec probe (the plan's first design, rejected by its own
 # fault injection on 2026-09-20): with virtiofsd frozen, a kubelet exec probe cannot even load `sh`
@@ -31,10 +37,10 @@ metadata:
 data:
   ready-watchdog.py: |
     #!/usr/bin/env python3
-    """Hold tcp :9099 open only while virtio-fs and dockerd answer. See ready-watchdog.yaml."""
+    """Hold tcp :9099 open only while virtio-fs and dockerd answer; reopen on recovery.
+    See ready-watchdog.yaml. Tested by scripts/tests/test_ready_watchdog.py."""
     import os
     import socket
-    import sys
     import threading
     import time
 
@@ -44,6 +50,7 @@ data:
     TIMEOUT = float(os.environ.get("READY_CHECK_TIMEOUT", "5"))
     PERIOD = float(os.environ.get("READY_CHECK_PERIOD", "5"))
     FAILS_TO_CLOSE = int(os.environ.get("READY_FAILS_TO_CLOSE", "2"))
+    SUCCESSES_TO_REOPEN = int(os.environ.get("READY_SUCCESSES_TO_REOPEN", "3"))
     HB = os.path.join(WORK, ".ready-heartbeat")
 
 
@@ -72,73 +79,122 @@ data:
             raise RuntimeError("unexpected response %r" % head[:40])
 
 
-    def run_with_timeout(fn):
-        """None on success; an exception on failure; the string 'hung' when fn never returned —
-        the D-state signature. The thread is left behind on purpose (it cannot be interrupted)."""
-        err = [None]
+    class Check:
+        """One named check with at most one outstanding thread. result() starts a run when idle,
+        waits up to TIMEOUT for it, and answers None (passed), an exception (failed) or "hung"
+        (still running — reported again every period until it finally returns)."""
 
-        def wrapper():
-            try:
-                fn()
-            except BaseException as e:  # noqa: BLE001 - any failure is a failed check
-                err[0] = e
+        def __init__(self, name, fn):
+            self.name, self.fn, self.thread, self.err = name, fn, None, None
 
-        t = threading.Thread(target=wrapper, daemon=True)
-        t.start()
-        t.join(TIMEOUT)
-        if t.is_alive():
-            return "hung"
-        return err[0]
+        def _start(self):
+            self.err = None
+
+            def wrapper():
+                try:
+                    self.fn()
+                except BaseException as e:  # noqa: BLE001 - any failure is a failed check
+                    self.err = e
+
+            self.thread = threading.Thread(target=wrapper, daemon=True)
+            self.thread.start()
+
+        def result(self):
+            if self.thread is None:
+                self._start()
+            self.thread.join(TIMEOUT)
+            if self.thread.is_alive():
+                return "hung"
+            err, self.thread = self.err, None
+            return err
 
 
-    def serve(ls):
-        while True:
-            try:
-                c, _ = ls.accept()
-            except OSError:
-                return  # listener closed
-            try:
-                c.close()
-            except OSError:
-                pass
+    class Port:
+        """The ready-port. open() binds and starts a serve thread that accepts+closes probe
+        connections; close() hands the socket back to that thread, which exits on its next
+        accept timeout and closes it — deterministic on every platform (closing a listening
+        socket under a blocked accept() is not)."""
+
+        def __init__(self, port):
+            self.port, self.ls, self.thread = port, None, None
+
+        def is_open(self):
+            return self.ls is not None
+
+        def open(self):
+            ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            ls.settimeout(0.5)
+            ls.bind(("0.0.0.0", self.port))
+            ls.listen(16)
+            self.ls = ls
+            self.thread = threading.Thread(target=self._serve, args=(ls,), daemon=True)
+            self.thread.start()
+
+        def close(self):
+            ls, self.ls = self.ls, None
+            if ls is not None:
+                self.thread.join(2)
+
+        def _serve(self, ls):
+            while self.ls is ls:
+                try:
+                    c, _ = ls.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                try:
+                    c.close()
+                except OSError:
+                    pass
+            ls.close()
+
+
+    class Watchdog:
+        """The decision state: counts consecutive passes/failures and opens/closes the port."""
+
+        def __init__(self, checks, port):
+            self.checks, self.port = checks, port
+            self.fails = self.oks = 0
+            self.opened_once = False
+
+        def tick(self):
+            """One evaluation of every check, then the open/close decision."""
+            bad = None
+            for c in self.checks:
+                r = c.result()
+                if r is not None:
+                    bad = (c.name, r)
+                    break
+            if bad is None:
+                self.oks += 1
+                if self.fails:
+                    log("checks recovered (after %d failure(s))" % self.fails)
+                self.fails = 0
+                # first open needs one pass (startup); a reopen needs SUCCESSES_TO_REOPEN in a row.
+                if not self.port.is_open() and (not self.opened_once or self.oks >= SUCCESSES_TO_REOPEN):
+                    self.port.open()
+                    log("ready-port %s :%d (checks every %.0fs, timeout %.0fs, close after %d failures, reopen after %d passes)"
+                        % ("reopened on" if self.opened_once else "open on", self.port.port, PERIOD, TIMEOUT,
+                           FAILS_TO_CLOSE, SUCCESSES_TO_REOPEN))
+                    self.opened_once = True
+                return
+            self.oks = 0
+            self.fails += 1
+            name, r = bad
+            log("%s check %s consecutive=%d" % (name, "hung" if r == "hung" else "failed (%s)" % r, self.fails))
+            if self.port.is_open() and (r == "hung" or self.fails >= FAILS_TO_CLOSE):
+                self.port.close()
+                log("ready-port closed: %s %s — member goes NotReady after the probe window; reopens after %d passes"
+                    % (name, "hung" if r == "hung" else "failing", SUCCESSES_TO_REOPEN))
 
 
     def main():
-        # Gate on both checks once before opening the port (startupProbe waits for this).
-        for name, fn in (("virtiofs", check_virtiofs), ("dockerd", check_dockerd)):
-            r = run_with_timeout(fn)
-            if r is not None:
-                log("initial %s check failed (%s); not opening the port" % (name, r))
-                sys.exit(1)
-        ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        ls.bind(("0.0.0.0", PORT))
-        ls.listen(16)
-        threading.Thread(target=serve, args=(ls,), daemon=True).start()
-        log("listening on :%d (checks every %.0fs, timeout %.0fs, close after %d failures)"
-            % (PORT, PERIOD, TIMEOUT, FAILS_TO_CLOSE))
-        fails = 0
+        wd = Watchdog([Check("virtiofs", check_virtiofs), Check("dockerd", check_dockerd)], Port(PORT))
         while True:
             time.sleep(PERIOD)
-            failed = None
-            for name, fn in (("virtiofs", check_virtiofs), ("dockerd", check_dockerd)):
-                r = run_with_timeout(fn)
-                if r is not None:
-                    failed = (name, r)
-                    break
-            if failed is None:
-                if fails:
-                    log("checks recovered after %d failure(s)" % fails)
-                fails = 0
-                continue
-            fails += 1
-            name, r = failed
-            log("%s check failed (%s) consecutive=%d" % (name, r, fails))
-            if r == "hung" or fails >= FAILS_TO_CLOSE:
-                ls.close()
-                log("ready-port closed: %s %s — member is NotReady from here; exiting"
-                    % (name, "hung" if r == "hung" else "failing"))
-                os._exit(1)
+            wd.tick()
 
 
     if __name__ == "__main__":
