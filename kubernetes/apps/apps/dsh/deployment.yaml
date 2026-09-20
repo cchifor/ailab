@@ -115,6 +115,31 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
+        # Rebuild one version-pinned client artifact; NEVER write the shared install.
+        # A future DSH upgrade must remove/rebase this hotfix before it can roll.
+        - name: build-command-ui-fix
+          image: mirror.gcr.io/library/node@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0
+          command: [node, /ui-fix-source/build-command-ui-fix.mjs, /app, /ui-client-fix/client.js]
+          env:
+            - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
+            - { name: DSH_BUILD, value: "glibc" }
+          volumeMounts:
+            - { name: app, mountPath: /app, readOnly: true }
+            - { name: command-ui-fix-source, mountPath: /ui-fix-source, readOnly: true }
+            - { name: command-ui-fix, mountPath: /ui-client-fix }
+            # Override token auto-injection for this init ONLY; main retains its API identity.
+            - { name: command-ui-fix-no-api, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+          securityContext:
+            # Explicit as well as pod-inherited: the pinned Node image defaults to root.
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
         - name: seed-settings
           image: mirror.gcr.io/library/node:24
           command: ["/bin/sh", "-c"]
@@ -581,6 +606,13 @@ spec:
             - { name: PATH, value: "/dsh-home/.local/bin:/dsh-home/.npm-global/bin:/app/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
           volumeMounts:
             - { name: app,  mountPath: /app, readOnly: true }
+            # Overlay only the rebuilt Web artifact. Revert restores the untouched original.
+            # Deliberately version-pinned; test_dsh_command_ui_fix.py cross-checks the
+            # install-job version/build against this path. Remove/rebase on upgrades.
+            - name: command-ui-fix
+              mountPath: /app/0.1.5-alpha.2-glibc/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js
+              subPath: client.js
+              readOnly: true
             - { name: home, mountPath: /dsh-home }
             - { name: tmp,  mountPath: /tmp }
             - { name: workspace, mountPath: /workspace }
@@ -658,6 +690,9 @@ spec:
             requests: { cpu: 50m, memory: 64Mi }
             limits:   { cpu: 500m, memory: 256Mi }
       volumes:
+        - { name: command-ui-fix, emptyDir: { sizeLimit: 10Mi } }
+        - { name: command-ui-fix-no-api, emptyDir: { sizeLimit: 1Mi } }
+        - { name: command-ui-fix-source, configMap: { name: dsh-command-ui-fix, defaultMode: 0444 } }
         - { name: app,  persistentVolumeClaim: { claimName: dsh-app } }
         - { name: home, persistentVolumeClaim: { claimName: dsh-home } }
         - { name: workspace, persistentVolumeClaim: { claimName: dsh-workspace } }
