@@ -11,6 +11,8 @@ npx playwright install chromium
 DSH_RUN_LIVE_UI_TEST=1 npm test
 ```
 
+Authentication is deliberately bounded to the last1000 log lines (maximum4MiB) from the current pod. On a long-running or noisy pod the startup URL may have rotated out; this is an authentication prerequisite failure, not evidence of a UI regression. The helper distinguishes an unreadable-log request from a readable log without a launch URL but suppresses raw diagnostics to avoid leaking credentials. Do not disable auth, scrape credential files, expand log collection without review, or restart production merely for this test; the intended post-rollout run uses the freshly started pod's normal launch URL.
+
 For this deployment's pre-extracted native libraries, set `DSH_BROWSER_LIBRARY_PATH` to the two library directories under `/workspace/conductor-ui-e2e/native-deps/root` (`usr/lib/x86_64-linux-gnu` and `lib/x86_64-linux-gnu`, colon-separated). This environment override affects only the browser child. Use an init/subreaper when running repeatedly in containers whose PID1 does not reap Chromium descendants.
 
 Assertions: first `/conductor status` visibly renders in a newly created workspace without a model turn; zero runs; output remains visible after refresh; bare `/conductor` aliases status; unsupported argument yields a visible usage error. The empty-argument command is submitted using Send because Enter can select an autocomplete item rather than execute it.

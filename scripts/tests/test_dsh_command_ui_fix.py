@@ -33,6 +33,9 @@ class CommandUiFixTests(unittest.TestCase):
         self.assertTrue(mounts['command-ui-fix-no-api']['readOnly'])
         self.assertTrue(self.pod['automountServiceAccountToken'])  # existing operator unchanged
         self.assertTrue(self.init['securityContext']['runAsNonRoot'])
+        self.assertEqual(self.init['securityContext']['runAsUser'], 1000)
+        self.assertEqual(self.init['securityContext']['runAsGroup'], 1000)
+        self.assertEqual(self.pod['securityContext']['runAsUser'], 1000)
         self.assertFalse(self.init['securityContext']['allowPrivilegeEscalation'])
         self.assertTrue(self.init['securityContext']['readOnlyRootFilesystem'])
         self.assertEqual(self.init['securityContext']['capabilities']['drop'], ['ALL'])

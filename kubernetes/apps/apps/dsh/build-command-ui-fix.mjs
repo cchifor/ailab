@@ -46,7 +46,8 @@ export function publish(outputFile,bytes){
  const temporary=outputFile+'.new';
  // A previous killed init may leave an incomplete temp file in its OWN emptyDir.
  if(existsNoFollow(temporary)){
-  if(!fs.lstatSync(temporary).isFile()||fs.lstatSync(temporary).isSymbolicLink())throw new Error('Unsafe stale temporary artifact');
+  const stale=fs.lstatSync(temporary);
+  if(!stale.isFile())throw new Error('Unsafe stale temporary artifact'); // lstat never follows symlinks
   fs.unlinkSync(temporary);
  }
  fs.writeFileSync(temporary,bytes,{flag:'wx',mode:0o444});

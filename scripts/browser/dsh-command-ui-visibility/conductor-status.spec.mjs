@@ -47,7 +47,11 @@ test('first command is visible without a chat turn and survives reload',async({}
   await composer.fill('/conductor ');
   await page.getByRole('button',{name:'Send message',exact:true}).click();
   await expect.poll(()=>results.length).toBe(2);
-  expect(results[1].reply.result.value.result).toEqual(results[0].reply.result.value.result);
+  const alias=results[1].reply.result.value.result;
+  expect(results[1].status).toBe(200);expect(alias.kind).toBe('success');
+  const status=JSON.parse(alias.text);
+  expect(status.repository).toBe('cchifor/dsh-team-conductor');expect(status.runs).toEqual([]);
+  await expect(page.getByText(/cchifor\/dsh-team-conductor/).last()).toBeVisible();
   await composer.fill('/conductor __e2e_unknown__');await composer.press('Enter');
   await expect.poll(()=>results.length).toBe(3);
   expect(results[2].reply.result.value.result.kind).toBe('error');

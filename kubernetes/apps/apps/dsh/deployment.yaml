@@ -130,7 +130,10 @@ spec:
             # Override token auto-injection for this init ONLY; main retains its API identity.
             - { name: command-ui-fix-no-api, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
           securityContext:
+            # Explicit as well as pod-inherited: the pinned Node image defaults to root.
             runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
@@ -604,6 +607,8 @@ spec:
           volumeMounts:
             - { name: app,  mountPath: /app, readOnly: true }
             # Overlay only the rebuilt Web artifact. Revert restores the untouched original.
+            # Deliberately version-pinned; test_dsh_command_ui_fix.py cross-checks the
+            # install-job version/build against this path. Remove/rebase on upgrades.
             - name: command-ui-fix
               mountPath: /app/0.1.5-alpha.2-glibc/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js
               subPath: client.js

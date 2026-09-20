@@ -46,4 +46,10 @@ Internal plan review approved (agent c20aab95), with adjustments accepted: init 
 - Kustomize rendered and server-side dry-run admitted the exact ConfigMap/Deployment (`dsh-command-ui-fix-bk5h5th7hm`). No live Deployment apply was performed.
 - Checked-in Playwright regression under `scripts/browser/dsh-command-ui-visibility` failed on the unfixed live GUI as expected (first command visibility after12seconds), and automatically removed its unique workspace, verified after refresh. No interception is available in this test.
 
-External reviews, required CI, external merge, rollout and unmodified-browser post-deploy verification are still required.
+### External review follow-up (PR804)
+
+Reviewer-codex approved the initial head. Reviewer-claude found no blockers but requested confirmation of non-root inheritance and four hardening/documentation nits. Addressed all: explicit init UID/GID1000 (already inherited from the unchanged pod context), CI assertions for both explicit and inherited UID, upgrade-path comment pointing to its guard test, one lstat for stale temporary files, stable alias-status field/visibility assertions, and documented bounded token-log discovery without weakening auth or expanding credential collection. The excluded generated lockfile was manually inspected and `npm ci --ignore-scripts` plus `npm ls` verified the exact Playwright1.63.0 dependency chain (zero audit findings).
+
+Final native probe `dsh-command-ui-probe-e253f5c9fa55` passed with these changes; rebuilt UI bytes remain identical. The final generated ConfigMap is `dsh-command-ui-fix-t724bk2fh2`. Full suite re-run:923 tests,922passed/1existing skip; all11 Node hotfix checks passed.
+
+Fresh external reviews and required CI on the follow-up head, external merge, rollout and unmodified-browser post-deploy verification are still required.
