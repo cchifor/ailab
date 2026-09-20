@@ -4,10 +4,6 @@
 Emits kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml — a ConfigMap labeled
 grafana_dashboard=1 so the kube-prometheus-stack Grafana sidecar auto-loads it (and it is the default
 home dashboard via grafana.ini default_home_dashboard_path). Sections (collapsible rows):
-  Estate Health — FIRST: is anything down right now (nodes, hypervisors, critical alerts, Flux,
-                 stuck teardowns, warm envs, kubelet targets) + a per-node readiness timeline and
-                 the firing-alert table. Added after the 2026-09-20 env-node outage, which this
-                 dashboard could only show as "Envs Ready = 0" in its eighth row.
   Hypervisors  — host-level node_exporter on the 3 Proxmox hosts (job="proxmox-node")
   Instances    — pve-exporter per-guest (VMs + LXCs), label `id` = qemu/<vmid> | lxc/<vmid>
   AI           — amdgpu_* (iGPU) + llamacpp:* + AI-node CPU (node_exporter on the LXCs)
@@ -178,24 +174,16 @@ def table(title, x, y, w, h, targets, rename, exclude, overrides, by="id", order
     }
 
 
-def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None, order=None, sort=None, filterable=False,
-           include=None):
-    # single instant query -> table (no join); for label-carrying gauges like node_cpu_scaling_governor.
-    # `order` lists ORIGINAL column names left to right (unlisted ones keep their place); `sort`
-    # names the RENAMED column rows are sorted by, ascending; `include` (ORIGINAL names) keeps ONLY
-    # those columns — the way to bound a table whose label set varies per row (alerts).
+def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None):
+    # single instant query -> table (no join); for label-carrying gauges like node_cpu_scaling_governor
     return {
         "id": _nid(), "type": "table", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
-        "fieldConfig": {"defaults": {"custom": {"align": "auto", "filterable": filterable,
-                                                "cellOptions": {"type": "auto"}}},
+        "fieldConfig": {"defaults": {"custom": {"align": "auto", "cellOptions": {"type": "auto"}}},
                         "overrides": overrides or []},
         "options": {"showHeader": True, "footer": {"show": False}, "cellHeight": "sm"},
         "transformations": [{"id": "organize", "options": {
-            "excludeByName": {k: True for k in exclude}, "renameByName": rename,
-            "indexByName": {n: i for i, n in enumerate(order or [])},
-            **({"includeByName": {k: True for k in include}} if include else {})}}]
-        + ([{"id": "sortBy", "options": {"sort": [{"field": sort, "desc": False}]}}] if sort else []),
+            "excludeByName": {k: True for k in exclude}, "renameByName": rename, "indexByName": {}}}],
         "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "format": "table", "instant": True}],
     }
 
@@ -718,74 +706,6 @@ panels += [
          '{job="host-journal", unit="reviewbot.service"} '
          '|~ "(?i)(failed|error|quarantin|skipped|exhausted)"'),
 ]
-
-# ───────────────────────── Estate Health (prepended) ─────────────────────────
-# "Is anything down right now" — the question the 2026-09-20 outage showed this dashboard could not
-# answer: talos-env-node-1 was NotReady for 3 h and the only trace was "Envs Ready = 0" in the eighth
-# row. Everything here is a status signal (colour MEANS good/bad, so green/red is used only where
-# a value is a state, and every state also carries a number or a text label — never colour alone).
-# 31 warnings were firing on a healthy day, so the Warnings tile is deliberately NOT red-thresholded;
-# the outage-class tiles (nodes, hypervisors, criticals, Flux, stuck teardowns, warm envs, kubelet)
-# are. The timeline turns an outage into a red bar of its exact duration on the default 6 h range.
-ALERT_SEVERITY_MAP = [{"type": "value", "options": {
-    "critical": {"text": "critical", "color": "red", "index": 0},
-    "warning": {"text": "warning", "color": "orange", "index": 1},
-    "info": {"text": "info", "color": "blue", "index": 2}}}]
-RED_AT_1 = [{"color": "green", "value": None}, {"color": "red", "value": 1}]
-KUBELET_METRICS = 'up{job="kubelet",metrics_path="/metrics"}'
-health = [row("Estate Health (nodes / hypervisors / alerts / Flux / teardowns — what is down right now)", 0)]
-health += [
-    stat("Nodes NotReady", 0, 1, 3, 4,
-         'count(kube_node_status_condition{condition="Ready",status="true"} == 0) or vector(0)',
-         steps=RED_AT_1),
-    stat("Hypervisors Up", 3, 1, 3, 4, f'count(up{{{HOSTS}}} == 1) or vector(0)',
-         steps=[{"color": "red", "value": None}, {"color": "green", "value": 3}]),
-    stat("Critical Alerts", 6, 1, 3, 4,
-         'count(ALERTS{alertstate="firing",severity="critical"}) or vector(0)', steps=RED_AT_1),
-    stat("Warnings", 9, 1, 3, 4,
-         'count(ALERTS{alertstate="firing",severity="warning"}) or vector(0)',
-         steps=[{"color": "blue", "value": None}]),
-    stat("Flux Not Ready", 12, 1, 3, 4, 'count(gotk_resource_info{ready="False"}) or vector(0)',
-         steps=RED_AT_1),
-    # A pod Terminating > 5 m anywhere: the hung-Kata-teardown signature, cluster-wide.
-    stat("Stuck Terminating", 15, 1, 3, 4,
-         'count((time() - kube_pod_deletion_timestamp) > 300) or vector(0)', steps=RED_AT_1),
-    stat("Envs Ready", 18, 1, 3, 4,
-         f'(count((kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}) or vector(0))',
-         steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
-    # The env node's kubelet /metrics target was down 6 h before it wedged; this counts them all.
-    stat("Kubelet Targets Down", 21, 1, 3, 4, f'count({KUBELET_METRICS} == 0) or vector(0)',
-         steps=RED_AT_1),
-    state_timeline("Node Readiness (k8s nodes — a red bar is an outage)", 0, 5, 12, 8,
-                   ['kube_node_status_condition{condition="Ready",status="true"}'], ["{{node}}"],
-                   [{"type": "value", "options": {
-                       "1": {"text": "● Ready", "color": "green", "index": 0},
-                       "0": {"text": "● NotReady", "color": "red", "index": 1}}}]),
-    # Since = ALERTS_FOR_STATE (activeAt, unix seconds -> ms for dateTimeFromNow) where Prometheus
-    # tracks it (rules with `for:`); rules without one get 0 -> "n/a". Watchdog/InfoInhibitor are
-    # the always-firing meta-alerts. `target` folds node/pod/instance into ONE column: an alert's
-    # label set varies, and every label became a column (the table scrolled sideways on the first
-    # render, 2026-09-20) — `include` keeps exactly five.
-    qtable("Firing Alerts (critical first)", 12, 5, 12, 8,
-           'label_join('
-           '(ALERTS_FOR_STATE and ignoring(alertstate) ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"}) * 1000 '
-           'or ignoring(alertstate) (ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"} * 0),'
-           ' "target", " ", "node", "pod", "instance")',
-           rename={"alertname": "Alert", "severity": "Severity", "namespace": "Namespace",
-                   "target": "Node / pod / instance", "Value": "Since"},
-           exclude=[], include=["alertname", "severity", "namespace", "target", "Value"],
-           order=["alertname", "severity", "namespace", "target", "Value"],
-           sort="Severity", filterable=True,
-           overrides=[_ov("Severity", [{"id": "custom.cellOptions", "value": {"type": "color-text"}},
-                                       {"id": "mappings", "value": ALERT_SEVERITY_MAP}]),
-                      _ov("Since", [{"id": "unit", "value": "dateTimeFromNow"},
-                                    {"id": "mappings", "value": [{"type": "value", "options": {
-                                        "0": {"text": "n/a", "index": 0}}}]}])]),
-]
-HEALTH_H = 13  # row (1) + stat tiles (4) + timeline/table (8): every pre-existing row shifts by this
-for _p in panels:
-    _p["gridPos"]["y"] += HEALTH_H
-panels = health + panels
 
 dashboard = {
     "title": "AI Lab Fleet",
