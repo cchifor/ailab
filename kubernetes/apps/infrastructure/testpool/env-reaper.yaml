@@ -159,7 +159,10 @@ data:
     while :; do
       iter=$((iter + 1))
       now=$(date -u +%s)
-      if timeout 20 kubectl --request-timeout=10s get pods -n "$NAMESPACE" \
+      # NO --request-timeout: as a global flag it counts as a kubeconfig override and switches
+      # kubectl OFF the in-cluster config (it then dials localhost:8080 — seen live 2026-09-20).
+      # The outer `timeout` is the bound.
+      if timeout 20 kubectl get pods -n "$NAMESPACE" \
            --field-selector "spec.nodeName=${NODE_NAME}" -o json > /tmp/pods.json 2> /tmp/kubectl.err; then
         jq -r --argjson now "$now" '
           .items[] | select(.metadata.deletionTimestamp != null)
