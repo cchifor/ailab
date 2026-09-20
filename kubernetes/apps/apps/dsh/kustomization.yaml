@@ -18,6 +18,12 @@ resources:
   - operator-ssh-networkpolicy.yaml # dedicated SSH account on explicitly approved hosts
 
 configMapGenerator:
+  # Content hash rolls the pod when the reviewed artifact rebuilder changes.
+  - name: dsh-command-ui-fix
+    options:
+      immutable: true
+    files:
+      - build-command-ui-fix.mjs
   # Reviewable release metadata/configuration; binary bytes live in the separately
   # provisioned immutable artifact ConfigMap, verified against the published hash.
   - name: dsh-conductor-release
@@ -102,6 +108,7 @@ replacements:
       - select: { kind: Deployment, name: dsh }
         fieldPaths:
           - spec.template.spec.initContainers.[name=wait-for-install].env.[name=DSH_VERSION].value
+          - spec.template.spec.initContainers.[name=build-command-ui-fix].env.[name=DSH_VERSION].value
           - spec.template.spec.initContainers.[name=seed-settings].env.[name=DSH_VERSION].value
           - spec.template.spec.containers.[name=dsh].env.[name=DSH_VERSION].value
   # DSH_PLUGINSET travels the same way, and for a sharper reason than the other two. It selects
@@ -129,5 +136,6 @@ replacements:
       - select: { kind: Deployment, name: dsh }
         fieldPaths:
           - spec.template.spec.initContainers.[name=wait-for-install].env.[name=DSH_BUILD].value
+          - spec.template.spec.initContainers.[name=build-command-ui-fix].env.[name=DSH_BUILD].value
           - spec.template.spec.initContainers.[name=seed-settings].env.[name=DSH_BUILD].value
           - spec.template.spec.containers.[name=dsh].env.[name=DSH_BUILD].value
