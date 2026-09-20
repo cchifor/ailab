@@ -181,9 +181,10 @@ class ReadyWatchdog(unittest.TestCase):
         # socket while is_open() stayed True — a silent, permanent NotReady.
         import errno
         self.step(3)  # healthy, port open, oks=3
-        real = self.p.ls
+        orig = self.p.thread
         ls, t = self._serve_with([OSError(errno.EBADF, "bad fd")])
-        real.close()
+        orig.join(2)  # the real serve loop sees p.ls change, exits and releases the real socket
+        self.assertFalse(orig.is_alive())
         t.join(1)
         self.assertFalse(t.is_alive())
         self.assertTrue(ls.closed)
@@ -193,6 +194,25 @@ class ReadyWatchdog(unittest.TestCase):
         self.assertTrue(self.p.is_open())
         self.assertTrue(_connect(self.port), "the port is really accepting again")
         self.assertTrue(any("reopened on" in m for m in self.log))
+
+    @unittest.skipIf(os.name == "nt", "Windows SO_REUSEADDR lets a second listener bind a busy port")
+    def test_open_failure_is_retried_on_the_next_tick_not_fatal(self):
+        # An uncaught error from Port.open() would end the loop with the port closed for good.
+        # Occupy the port so open() raises EADDRINUSE, then release it.
+        blocker = socket.socket()
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("0.0.0.0", self.port))
+        blocker.listen(1)
+        try:
+            self.step()  # must not raise
+            self.assertFalse(self.p.is_open())
+            self.assertTrue(any("open failed" in m for m in self.log))
+        finally:
+            blocker.close()
+        time.sleep(0.2)
+        self.step()
+        self.assertTrue(self.p.is_open(), "the next tick opens the port once it is free")
+        self.assertTrue(_connect(self.port))
 
     def test_status_line_is_read_across_short_reads(self):
         class Sock:

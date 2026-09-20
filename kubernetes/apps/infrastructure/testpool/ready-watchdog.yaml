@@ -149,10 +149,14 @@ data:
 
         def open(self):
             ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            ls.settimeout(0.5)
-            ls.bind(("0.0.0.0", self.port))
-            ls.listen(16)
+            try:
+                ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                ls.settimeout(0.5)
+                ls.bind(("0.0.0.0", self.port))
+                ls.listen(16)
+            except OSError:
+                ls.close()  # e.g. EADDRINUSE while the previous serve thread is still letting go
+                raise
             self.ls = ls
             self.thread = threading.Thread(target=self._serve, args=(ls,), daemon=True)
             self.thread.start()
@@ -213,7 +217,14 @@ data:
                 # SUCCESSES_TO_REOPEN in a row (oks was zeroed by the failure); a listener that died
                 # on its own while checks kept passing has oks already past that and reopens at once.
                 if not self.port.is_open() and (not self.opened_once or self.oks >= SUCCESSES_TO_REOPEN):
-                    self.port.open()
+                    try:
+                        self.port.open()
+                    except OSError as e:
+                        # never let this escape: an uncaught error here ends the loop and the
+                        # port stays closed for good. Typical cause: EADDRINUSE while the previous
+                        # serve thread is still releasing the socket — the next tick succeeds.
+                        log("ready-port open failed (%s); retrying next tick" % e)
+                        return
                     log("ready-port %s :%d (checks every %.0fs, timeout %.0fs, close after %d failures, reopen after %d passes)"
                         % ("reopened on" if self.opened_once else "open on", self.port.port, PERIOD, TIMEOUT,
                            FAILS_TO_CLOSE, SUCCESSES_TO_REOPEN))
