@@ -1,5 +1,13 @@
 # App-model recovery: Knowledge grant (platform) + `gpt-5.6-sol` on the Codex subscription (ailab)
 
+## Codex Review
+
+- The measured provider behavior, separate paid alias, GitOps rollout mechanism, and feature-flag acceptance gate give this a sound foundation.
+- The adapter needs explicit verification of retry suppression, cancellation, incomplete streams, usage preservation, and concurrent request isolation.
+- Close the manifest and CI integration gaps: generated ConfigMap namespace, existing platform integration test, and actual proxy loading of the custom handler.
+- Post-completion token validation does not bound generation or memory use; establish workload limits and verify the actual worker request path.
+- Document a complete GitOps rollback: the shared mutable configuration weakens the claimed protection from retaining the old ReplicaSet.
+
 ## Context
 
 The Codex agent activating the Strive App-model feature on dev-worker-3 filed
@@ -65,6 +73,7 @@ Working clone: `$CLAUDE_JOB_DIR/tmp/platform` (autocrlf=false), branch
    data key, so exactly one leaf re-encrypts and the ciphertext diff stays reviewable.
 2. Verify without printing values: sha256 per `stringData` leaf before/after → exactly one changed;
    decrypted registry == before + `knowledge:write` (structure diff of the svc-airlock audiences only).
+   <!-- codex: Compare the entire decoded registry against the original with exactly the intended grant added; restricting the structural comparison to svc-airlock audiences cannot detect changes to other services inside the same encrypted leaf. -->
 3. `sha256sum deploy/secrets/ailab/gatekeeper-secrets.enc.yaml` → `gatekeeper.serviceRegistry.checksum`
    in `deploy/helm/values/providers/ailab.yaml`; run `deploy/helm/scripts/check-service-registry-checksum.sh`.
 4. Commit only the two files; push `origin` (= git.chifor.me); open the PR with the `chifor` PAT from
@@ -95,9 +104,13 @@ Files (all under `kubernetes/apps/apps/ai/` unless stated):
     drained and rebuilt with `litellm.stream_chunk_builder(chunks, messages=messages)`; the built
     response's `model` is set to the bare model id. `no-log` keeps the proxy's spend/metrics
     logging from counting the inner call a second time.
+    <!-- codex: The outer route's num_retries setting does not by itself establish the inner call's retry behavior; explicitly disable inner retries and assert exactly one generation POST for 429, 5xx, timeouts, and failures after streaming begins. -->
+    <!-- codex: Give stream creation and draining one bounded deadline, propagate cancellation, and close the upstream stream in a finally block. Verify timeout and client-disconnect behavior so abandoned requests do not keep consuming subscription quota. -->
+    <!-- codex: Verify the claimed no-log behavior with callbacks or counters: one outer request should produce one usage/metrics record and no duplicate inner record. Unknown custom-provider pricing must also leave successful responses usable and token usage observable. -->
   - `astreaming`: the same inner call, each `ModelResponseStream` chunk mapped to a
     `GenericStreamingChunk` (`text`, `is_finished`, `finish_reason`, `usage`, `index`), so a
     streaming client (Open WebUI under External) keeps working.
+    <!-- codex: This field mapping establishes only text streaming, not general Open WebUI compatibility; preserve supported tool/refusal deltas or explicitly reject unsupported requests. Include role-only and usage-only chunks, including empty choices, in the streaming contract. -->
   - Sync `completion`/`streaming`: `CustomLLMError(501)` with a message — the proxy only calls the
     async pair.
   - **Scoped allow-list widening.** A module-level `contextvars.ContextVar` is set only around the
@@ -107,15 +120,18 @@ Files (all under `kubernetes/apps/apps/ai/` unless stated):
     (backend 400). Outside the var — every `chatgpt/` call that does not come through this handler,
     i.e. `gpt-6-astra-realjaynesage` — the request is byte-identical to today's; the existing
     image-level test's `EXPECTED_BODY_KEYS` for that route stays true.
+    <!-- codex: Set/reset the ContextVar with its token in try/finally, and verify whether transformation happens during call creation or lazy stream iteration so the scope covers the actual transform. Test concurrent wrapped/unwrapped requests and exception/cancellation paths, comparing the complete unaffected wire body rather than only absence of text. -->
   - Import-time guards: the upstream class, method and its keyword signature are asserted at import;
     a pin bump that moves them makes the proxy **fail to start** (Flux rollout stalls at 1 new pod,
     the old ReplicaSet keeps serving under `maxUnavailable: 0`) rather than silently serving without
     the schema. The image-level test runs in the pinned image in CI, so the failure surfaces at PR
     time for any pin bump that touches `litellm.yaml`.
+    <!-- codex: maxUnavailable: 0 protects currently healthy old pods, but litellm-config is updated in place: an old pod restarting during a failed rollout can read the new custom_handler configuration without having the new handler mount. Specify a Git revert/reconcile rollback covering configuration, handler mount/registration, and generated checksums; import failure affects the whole shared proxy. -->
 - **`kustomization.yaml`**: `configMapGenerator` entry `litellm-handlers` with
   `files: [chatgpt_chat.py]` (hash-suffixed name → Flux/kustomize rewrites the Deployment's volume
   reference → the pod template moves → an automatic roll on any handler change, with no hand-stamped
   checksum to drift).
+  <!-- codex: Include namespace: ai on the generator, matching embedding-bootstrap; the supplied Kustomization declares no default namespace. Verify the generated ConfigMap's namespace as well as the rewritten volume name. -->
 - **`litellm.yaml`**:
   - Deployment: volume `handlers` (configMap `litellm-handlers`) mounted read-only at
     `/etc/litellm-handlers`; env `PYTHONPATH=/etc/litellm-handlers` (`get_instance_fn` looks for
@@ -127,12 +143,16 @@ Files (all under `kubernetes/apps/apps/ai/` unless stated):
     `fallbacks` between them: a fallback to a paid key contradicts the route's "never replay paid
     generation" policy, and the key is dead anyway. Neither has an `api_base`, so neither enters the
     generated pickers (Open WebUI Local, dsh); both stay discoverable under External, as today.
+    <!-- codex: Swapping the names would make gpt-5.6-sol-api serve the subscription, contradicting its advertised contract. Define a switch-back that keeps the API alias on OpenAI, validates the replacement key first, and removes the temporary handler when no route needs it. -->
   - Comment record on the route: the measurements above, the accepted loss (`max_completion_tokens`
     is dropped at the provider — the platform still enforces its 32 000 cap client-side on
     `usage.completion_tokens`), the subscription-quota exposure (document-table drafts are large:
     up to 512 K input / 32 K output per attempt against seat d's weekly window, shared with dsh), the
     cost-map warning (no price for `chatgpt-chat/…`), and the Cloudflare-challenge exposure seen on
     `gpt-6-astra` the same day.
+    <!-- codex: Checking usage after completion limits accepted results, not generated tokens or quota consumption, and the adapter retains chunks before that check can run. Define bounded buffering and concurrency for the shared 6 GiB proxy and document that these safeguards cannot reproduce the rejected upstream token limit. -->
+    <!-- codex: The small live probe does not establish that the subscription endpoint accepts the platform's 512 K input allowance. Establish a supported input/context limit and reject oversized requests before generation rather than inheriting the API route's capacity assumptions. -->
+    <!-- codex: The dollar budget and missing-price warning do not provide a subscription-quota guard, while External exposes this route beyond the document workflow. State the admitted traffic/concurrency policy and how quota exhaustion will be observed, including its impact on the shared dsh seat. -->
   - `checksum/config` bumped by `python scripts/gen-litellm-consumers.py --write` (records the routes
     and `custom_provider_map`; the handler file rolls through the generator hash).
 - **`scripts/tests/test_litellm_platform_routes.py`**: contract updated — exactly one `gpt-5.6-sol`
@@ -140,6 +160,7 @@ Files (all under `kubernetes/apps/apps/ai/` unless stated):
   `gpt-5.6-sol-api` route, `openai/gpt-5.6-sol` + `os.environ/OPENAI_API_KEY` + `num_retries: 0`;
   `custom_provider_map` names `chatgpt_chat.handler`; the generator lists `chatgpt_chat.py`; the
   Deployment mounts it on `PYTHONPATH`; no fallback rule names either route.
+  <!-- codex: Preserve the existing checks against default_fallbacks and wildcard rules, and apply them to both aliases across fallbacks, context_window_fallbacks, and content_policy_fallbacks. Checking only rules that explicitly name either route would weaken the existing no-replay contract. -->
 - **`scripts/tests/integration/test_litellm_chatgpt_chat_handler_contract.py`** (new, image-level,
   sockets denied, same harness as `test_litellm_chatgpt_route_contract.py`): loads the handler from
   the manifest path, registers the provider, builds a Router from the two routes as written, mocks
@@ -154,6 +175,11 @@ Files (all under `kubernetes/apps/apps/ai/` unless stated):
   in seconds; (e) the placeholder auth.json builds the Router with no socket attempt.
   Wired into `.gitea/workflows/litellm-route-contract.yaml` (third `docker run`) with path triggers
   for `chatgpt_chat.py`, `kustomization.yaml` and the new test.
+  <!-- codex: Case (b) needs the existing gpt-6-astra-realjaynesage route as well as the two new aliases. Exercise the manifest's relevant global settings, including drop_params, timeout, and router retry/fallback settings, so a simplified Router does not hide production behavior. -->
+  <!-- codex: Assert exact fixture usage counts, including reasoning-token accounting where present, and reasoning.effort == medium rather than merely integer types or key presence. Missing usage must not be replaced with fabricated zero counts that could pass the consumer's checks. -->
+  <!-- codex: Add negative SSE cases for truncated EOF, failure/incomplete terminal events, refusal, and the observed HTML 403 response. None may become a successful stop completion containing partial text, and streamed errors must terminate predictably. -->
+  <!-- codex: Directly importing the handler and manually registering it bypasses the deployed loader and HTTP serialization. Add a pinned-image proxy startup/request smoke using the configured module path and custom_provider_map, with placeholder credentials and mocked upstream transport, to verify loading, readiness, and the non-streaming HTTP response. -->
+  <!-- codex: The workflow still runs scripts/tests/integration/test_litellm_platform_route_contract.py first, but that existing test is absent from the change list. Inspect and update any original OpenAI-route assumptions, retaining its paid-path wire assertions against gpt-5.6-sol-api where appropriate. -->
 - **`docs/decisions/0027-gpt-5.6-sol-on-the-codex-subscription.md`**: the operator's directive, the
   measurements, the handler design and its scoping, what flips it back (rename), the quota and
   edge-rule exposures, and that the API key remains the intended steady state once replaced.
@@ -163,11 +189,15 @@ Files (all under `kubernetes/apps/apps/ai/` unless stated):
 - Platform: from inside an `airlock` pod, mint the S2S token the way airlock does for `svc-knowledge`
   (its own client credentials, gatekeeper's token endpoint) and call the availability URL; expect
   200 `{"available": true, …}`. Record status + body keys, not the token.
+  <!-- codex: A freshly minted token does not establish that running Airlock processes have discarded cached tokens carrying only the old grant. Check the application's token-cache behavior and verify its normal request path after refresh or expiry before enabling the feature. -->
 - ailab: from inside a litellm pod with its master key from env, `POST /v1/chat/completions` with
   the platform's exact body shape (`response_format` strict schema, `max_completion_tokens`,
   `reasoning_effort`); expect 200, `finish_reason stop`, JSON content matching the schema, integer
   usage. Also one streaming call, and one `gpt-5.6-sol-api` call to show it still answers 401 (the
   retained path is wired, just keyless).
+  <!-- codex: A request inside LiteLLM using its master key does not verify the workflow worker's configured endpoint, credential/model access, DNS, or network policy. Include an acceptance request from the worker using its existing configuration and keep its credential inside that pod. -->
+  <!-- codex: Use the actual document-fields schema and a sanitized representative document-table input for acceptance; the two-field answer/n fixture only establishes basic structured-output transport. Record latency and usage so the result also demonstrates a practical fit for the worker's deadline and workload. -->
+  <!-- codex: This alias has a configured rejected key, not an absent key; distinguish an upstream OpenAI authentication error from a proxy authentication error. A bare HTTP 401 does not establish that the retained alias reached the intended provider. -->
 - Reply: a file beside the request on dev-worker-3
   (`/workspace/c4/app-model-deploy-artifacts/recovery-ailab-operations-response.md`) with PR/merge
   refs, redacted results, the "no key was replaced" statement, and the `gpt-6-astra` 403 finding.
@@ -198,7 +228,8 @@ Files (all under `kubernetes/apps/apps/ai/` unless stated):
 2. CI on the ailab PR: `manifests`, `litellm-route-contract` green; both reviewer personas clean.
 3. Post-merge: Flux `apps` reconciled; `ai/litellm` 2/2 on the new ReplicaSet; proxy log shows the
    custom provider loaded; Part C acceptance results captured.
+   <!-- codex: Confirm the applied revision and exercise the custom route on both new replicas; the configured readiness probe checks /health/liveliness and does not prove model functionality. Also smoke-test an unaffected existing route because handler loading and the class patch run inside the shared gateway. -->
 4. Platform: PR checks green, merged, Flux reconciled, gatekeeper 2/2 rolled, Part C acceptance
    200/`available=true`.
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
