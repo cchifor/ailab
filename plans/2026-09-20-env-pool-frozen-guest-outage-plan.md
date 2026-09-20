@@ -1,5 +1,17 @@
 # env-pool: stop a frozen Kata guest from taking talos-env-node-1 down
 
+## Codex Review
+
+<!-- codex-review-status: complete -->
+
+**Security and correctness issues block implementation; substantial revisions needed before deployment.**
+
+- **P1 credential & process-matching issues:** The reaper (T2) would grant every dev-worker credential access to host processes via hostPID+privileged; literal `comm` matching (15-char truncation) misses the cloud-hypervisor and containerd-shim. Requires namespace isolation and verified process identity chain.
+- **P1 teardown assumption gap:** Killing cloud-hypervisor is plausible but not a completion guarantee; stage 2 (shim kill) is recovery, not proof of cleanup. Existing Kata wait/watch and containerd cleanup implementations have failure modes and races not addressed here.
+- **P1 exec readiness risk:** Switching to `docker version` exec probes risks stale-Ready state when exec errors occur; Kubernetes 1.31 probe worker discards some CRI errors without counting failures. Eight-thousand+ execs/day/container expose leaks and timeouts.
+- **P2 API connectivity & T5 timing gaps:** NetworkPolicy blocks the reaper's API path with no tested exemption; T5's age-based rotation has adoption races and permits 44-hour-old members (vs. proposed 20 hours). Verification steps cannot distinguish healthy behavior from undetected failure.
+- **Positive:** SIGTERM trap design (sleep + wait) is sound; T4 runbook is justified; grace-period comment correction is correct. T1–T4 framework is viable with fixes; T5 should defer until T2 is validated.
+
 ## Context
 
 **Incident 2026-09-20 09:29–12:38 UTC — `talos-env-node-1` NotReady, testpool at 0 warm
@@ -59,11 +71,13 @@ tofu management — see "Out of scope"). The prevention does not depend on knowi
   what the GC is for, once T2 makes the resulting teardown bounded. The template's F5 note ("no
   exec probes") was about `dind`, which is un-exec-able under cgroup-v2 subtree control; `control`
   is the container every lease already execs into.
+  <!-- codex: Exec readiness probe risks stale-Ready state on CRI errors (Kubernetes 1.31 probe worker discards some errors without counting failures); 8000+ execs/day/container expose timeout and leak risks. Test stalled exec, timeout cleanup, and readiness transitions under load. -->
 - Handle SIGTERM in both entrypoints so a graceful stop takes ~1 s instead of the full 30 s grace
   then SIGKILL (today PID 1 is `sh -c` with no trap, so every stop is a SIGKILL after 30 s):
   `dind`: start dockerd with `& DPID=$!`, `trap 'kill -TERM $DPID; wait $DPID; exit 0' TERM`;
   `control`: `trap 'exit 0' TERM`. Both must end with `sleep infinity & wait $!` — a foreground
   `sleep infinity` never returns, so a trap set before it never fires.
+  <!-- codex: SIGTERM trap design with backgrounded sleep and shell wait is sound, but existing listener does not show the claimed 200ms accept gap (sleep 0.2 only runs on nc failure). Test TERM during init and steady state in both images. -->
 - Rewrite the header comment (lines 8–14) to state the new readiness contract.
 
 Template hash change → the warm pool replaces its member on reconcile (expected, one rotation).
@@ -83,6 +97,8 @@ implementation). Loop every 60 s:
    VMM sits in `/kubepods/…/pod<uid>/kata_<sandbox>`; the CH process's cgroup was read from
    `persist.json` during the incident.) The kata shim observes VMM death and completes the
    pending `StopContainer` — this is the assumption V3 validates.
+   <!-- codex: [P1] Moving to infrastructure namespace with cross-namespace RoleBinding is required; dev-worker credentials exec any testpool pod, granting them access to this reaper's hostPID privileges. Process identity must use cgroup + executable + socket paths, not literal comm (16/23 chars vs 15-char truncation); verify chain from pod UID → sandbox → process, excluding transient cleanup commands and other runtimes. -->
+   <!-- codex: [P1] Killing cloud-hypervisor is plausible but not completion guarantee (Kata wait/watch has failure modes, races, and I/O waiter paths). Stage 2 is best-effort recovery, not proof of cleanup. Validate stages separately against deployed Kata/containerd versions, including concurrent cleanup, containerd restart, and residual resources (processes, mounts, network, CRI records, PVs/LUNs). -->
 3. If the same pod is still Terminating after `2 × REAP_AFTER_SECONDS`, kill its
    `containerd-shim-kata-v2` too (containerd treats a dead shim's tasks as exited; the standard
    crashed-shim path).
@@ -91,6 +107,8 @@ implementation). Loop every 60 s:
 Idempotent (nothing to kill → nothing logged), pool-agnostic (matches any `testpool` pod), and
 safe on a healthy node: a pod is only touched after it has been Terminating for 3 minutes, which
 a working teardown never reaches (T1 makes graceful stops take ~1 s; today's worst case is 30 s).
+
+<!-- codex: [P2] NetworkPolicy (testpool-rules.yaml:20) excludes service/pod CIDRs and API VIP with no cluster-DNS allowance. T2 needs an explicitly permitted and tested API path. Add request timeout, iteration deadline, bounded retries, and failure reporting to kubectl loop. Specify behavior on API/network stall or force-deleted pod disappearing; include resource requests, priority, and heartbeat metrics to distinguish healthy idle from broken reaper. Timing promise: 3-4 min before stage 1, 6-7 min before stage 2, plus cleanup delays; the incident's second hang was ~76 seconds before kubelet wedge. -->
 
 ### T3 — Alerts that name the precursors (link 3, link 4, six hours earlier)
 
@@ -101,6 +119,7 @@ a working teardown never reaches (T1 makes graceful stops take ~1 s; today's wor
 - `EnvNodeRuntimeStopErrors` — `sum by (node) (increase(kubelet_runtime_operations_errors_total{
   node=~"talos-env-node-.*", operation_type=~"stop_container|stop_podsandbox"}[15m])) > 0`
   for 30 m, warning. This exact series was non-zero for 3 days.
+  <!-- codex: kubelet_runtime_operations_errors_total presence, node label, and operation values must be verified against rendered scrape targets and relabeling. Missing series makes the selector silently empty; an operation that never returns produces no new error increment. -->
 - `EnvNodeKubeletDegraded` — the env node's kubelet `/metrics/resource` scrape target down for
   10 m (the signal that fired as `KubeletInstanceUnreachable` at 03:11; check that rule's
   definition first — reuse by severity/label if it already carries `node`, otherwise add).
@@ -115,9 +134,11 @@ a working teardown never reaches (T1 makes graceful stops take ~1 s; today's wor
   one Pending replacement before the pool settles), the pre-reset evidence checklist
   (`talosctl logs cri|kubelet|syslogd`, `dmesg`, `processes`, `read /run/vc/sbs/<id>/persist.json`)
   and the dashboards/alerts from T3.
+  <!-- codex: Runbook should document authorized operator credentials and management-network access, verify VM 4401 on ai-node2, bound evidence collection, and confirm reset before force deletion. hostPID exposes Talos VM processes but does not grant Proxmox SSH access. -->
 - `kubernetes/apps/infrastructure/agent-sandbox/kustomization.yaml`: rewrite the grace-period
   comment to what the flag does (any member observed NotReady after 15 m of age is replaced,
   regardless of prior readiness; the unschedulable hold does not reset the clock).
+  <!-- codex: Grace-period comment correction is justified; controller is v1.0.2 (despite stale v1.0.0 filenames) and uses creation age with unschedulable hold for GC. -->
 - `docs/network-plan.md` `.37` row: link the runbook.
 
 ### T5 — Daily rotation of unclaimed members (hedge, cheap)
@@ -129,6 +150,7 @@ keep members young: CronJob `env-rotate` (04:00 UTC, `kubectl` image from T2, SA
 `readyReplicas == replicas` and no `SandboxClaim` exists. Cost: one ~2-min warm gap per day at
 04:00. With T2 in place the rotation is safe even if a teardown hangs. Evidence is n=2; the task
 is flagged as a hedge and can be dropped if codex or the operator judge it not worth a daily gap.
+<!-- codex: [P2] Daily evaluation permits ~44-hour-old members (skipped runs extend this); "no claim" check is not atomic with deletion (adoption race). Permissions cannot read WarmPool status or list SandboxClaims. Two incidents do not establish age as cause or quantify benefit. Defer until T2 validated; if retained, add timeZone, deadline/concurrency controls, failure alerts, removal criterion, and UID/resourceVersion preconditions. -->
 
 ### T6 — Upstream issue (draft only; filing needs operator OK)
 
@@ -169,6 +191,7 @@ goes in the PR description; the operator files it.
   replaced and the new one `Ready=True` within ~3 min; `kubectl -n testpool describe pod
   env-std-pool-<new>` shows the exec readiness probe passing and no `Unhealthy` events over 30 min.
   `hack/` lease smoke test (or `tep` from a dev-worker) runs `docker version` inside a lease.
+  <!-- codex: 30 minutes covers roughly 180 successful probes, but does not establish slow exec/resource leakage, timeout cleanup, stale-Ready after errors, or failure under load. Add process/FD/memory trends and injected failure cases. -->
 - **V2 (T1, graceful stop):** `kubectl -n testpool delete sandbox <member>` → pod gone in <5 s
   (was ≥30 s: SIGKILL after grace). Check `talosctl logs cri` shows `StopContainer … with timeout
   30` followed by an exit *before* any `Kill container` line.
@@ -179,13 +202,16 @@ goes in the PR description; the operator files it.
   afterwards. Then remove the hack copy; the Flux-owned reaper runs at 180 s. If the shim does
   *not* complete on VMM death, stage 2 (shim kill) is validated the same way and stage 1's delay
   is folded into it.
+  <!-- codex: Flat error counters do not prove reaper ran; first demonstrate controlled stall and pending stop, then exercise each stage and verify complete cleanup (processes, mounts, CRI records, PVs/LUNs) and replacement readiness. Does not validate already-hung StopContainer recovery. -->
 - **V4 (T3):** `promtool check rules`; each expression returns data against
   `http://192.168.0.41:30090` (confirm `kube_pod_deletion_timestamp` is exported); the three alerts
   are `inactive` after V3 settles.
+  <!-- codex: Needs firing/recovery and missing-series fixtures. Healthy expressions legitimately return no series. The earlier 50-cycle spike used runc attachment pods, not Kata; does not validate forced-teardown cleanup. -->
 - **V5 (T5):** `kubectl create job --from=cronjob/env-rotate` on a Ready pool: exactly one member
   deleted, replacement Ready within ~3 min, second run is a no-op (member <20 h).
 - **V6 (soak):** 24 h with no `EnvNodeRuntimeStopErrors`, no `TestpoolEnvTeardownStuck`, pool
   `1/1`, node `Ready`.
+  <!-- codex: One day does not establish protection against recurrence at 24/66 hours or on separate days (3 days apart). Observe multiple cycles beyond those ages (preferably week+) as evidence, not proof. Daily rotation would censor the age experiment. -->
 - Docs: `docs/runbooks/env-pool.md` exercised against the steps that were actually run today.
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
