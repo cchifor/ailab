@@ -182,8 +182,10 @@ def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None, order=None,
            include=None):
     # single instant query -> table (no join); for label-carrying gauges like node_cpu_scaling_governor.
     # `order` lists ORIGINAL column names left to right (unlisted ones keep their place); `sort`
-    # names the RENAMED column rows are sorted by, ascending; `include` (ORIGINAL names) keeps ONLY
-    # those columns — the way to bound a table whose label set varies per row (alerts).
+    # names the ORIGINAL column rows are sorted by, ascending, and runs BEFORE organize — so a
+    # helper column (a `rank` label) can decide the order and then be dropped; `include`
+    # (ORIGINAL names) keeps ONLY those columns — the way to bound a table whose label set varies
+    # per row (alerts).
     return {
         "id": _nid(), "type": "table", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
@@ -191,11 +193,11 @@ def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None, order=None,
                                                 "cellOptions": {"type": "auto"}}},
                         "overrides": overrides or []},
         "options": {"showHeader": True, "footer": {"show": False}, "cellHeight": "sm"},
-        "transformations": [{"id": "organize", "options": {
+        "transformations": ([{"id": "sortBy", "options": {"sort": [{"field": sort, "desc": False}]}}] if sort else [])
+        + [{"id": "organize", "options": {
             "excludeByName": {k: True for k in exclude}, "renameByName": rename,
             "indexByName": {n: i for i, n in enumerate(order or [])},
-            **({"includeByName": {k: True for k in include}} if include else {})}}]
-        + ([{"id": "sortBy", "options": {"sort": [{"field": sort, "desc": False}]}}] if sort else []),
+            **({"includeByName": {k: True for k in include}} if include else {})}}],
         "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "format": "table", "instant": True}],
     }
 
@@ -733,11 +735,24 @@ ALERT_SEVERITY_MAP = [{"type": "value", "options": {
     "info": {"text": "info", "color": "blue", "index": 2}}}]
 RED_AT_1 = [{"color": "green", "value": None}, {"color": "red", "value": 1}]
 KUBELET_METRICS = 'up{job="kubelet",metrics_path="/metrics"}'
+# "0 bad things" must be distinguishable from "the exporter is gone" — `or vector(0)` alone renders
+# absent telemetry as a healthy green 0, during exactly the monitoring failure this row exists to
+# expose (the outage story started with a target down for 6 h; reviewer-claude/codex on #801).
+# count(bad) is empty when nothing is bad, so: count(bad) -> else count(all)*0 (the exporter is
+# there, the answer is 0) -> else absent(all)*-1, mapped to an orange "no data".
+NO_DATA_MAP = [{"type": "value", "options": {"-1": {"text": "no data", "color": "orange", "index": 0}}}]
+
+
+def fail_safe_count(bad, live):
+    return f'(count({bad}) or (count({live}) * 0)) or (absent({live}) * -1)'
+
+
 health = [row("Estate Health (nodes / hypervisors / alerts / Flux / teardowns — what is down right now)", 0)]
 health += [
     stat("Nodes NotReady", 0, 1, 3, 4,
-         'count(kube_node_status_condition{condition="Ready",status="true"} == 0) or vector(0)',
-         steps=RED_AT_1),
+         fail_safe_count('kube_node_status_condition{condition="Ready",status="true"} == 0',
+                         'kube_node_status_condition{condition="Ready",status="true"}'),
+         steps=RED_AT_1, mappings=NO_DATA_MAP),
     stat("Hypervisors Up", 3, 1, 3, 4, f'count(up{{{HOSTS}}} == 1) or vector(0)',
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 3}]),
     stat("Critical Alerts", 6, 1, 3, 4,
@@ -745,17 +760,22 @@ health += [
     stat("Warnings", 9, 1, 3, 4,
          'count(ALERTS{alertstate="firing",severity="warning"}) or vector(0)',
          steps=[{"color": "blue", "value": None}]),
-    stat("Flux Not Ready", 12, 1, 3, 4, 'count(gotk_resource_info{ready="False"}) or vector(0)',
-         steps=RED_AT_1),
+    stat("Flux Not Ready", 12, 1, 3, 4,
+         fail_safe_count('gotk_resource_info{ready="False"}', 'gotk_resource_info'),
+         steps=RED_AT_1, mappings=NO_DATA_MAP),
     # A pod Terminating > 5 m anywhere: the hung-Kata-teardown signature, cluster-wide.
+    # kube_pod_deletion_timestamp only exists while something is Terminating, so kube-state-metrics'
+    # liveness is read from kube_pod_info instead.
     stat("Stuck Terminating", 15, 1, 3, 4,
-         'count((time() - kube_pod_deletion_timestamp) > 300) or vector(0)', steps=RED_AT_1),
+         fail_safe_count('(time() - kube_pod_deletion_timestamp) > 300', 'kube_pod_info'),
+         steps=RED_AT_1, mappings=NO_DATA_MAP),
     stat("Envs Ready", 18, 1, 3, 4,
          f'(count((kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}) or vector(0))',
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
     # The env node's kubelet /metrics target was down 6 h before it wedged; this counts them all.
-    stat("Kubelet Targets Down", 21, 1, 3, 4, f'count({KUBELET_METRICS} == 0) or vector(0)',
-         steps=RED_AT_1),
+    stat("Kubelet Targets Down", 21, 1, 3, 4,
+         fail_safe_count(f'{KUBELET_METRICS} == 0', KUBELET_METRICS),
+         steps=RED_AT_1, mappings=NO_DATA_MAP),
     state_timeline("Node Readiness (k8s nodes — a red bar is an outage)", 0, 5, 12, 8,
                    ['kube_node_status_condition{condition="Ready",status="true"}'], ["{{node}}"],
                    [{"type": "value", "options": {
@@ -766,16 +786,21 @@ health += [
     # the always-firing meta-alerts. `target` folds node/pod/instance into ONE column: an alert's
     # label set varies, and every label became a column (the table scrolled sideways on the first
     # render, 2026-09-20) — `include` keeps exactly five.
+    # Ordering: alphabetical severity would put "info" above "warning" (reviewer-claude on #801),
+    # so a `rank` label decides (catch-all 9 first, then critical 1 / warning 2 / info 3 override
+    # it); qtable sorts on it before organize drops the column.
     qtable("Firing Alerts (critical first)", 12, 5, 12, 8,
-           'label_join('
+           'label_replace(label_replace(label_replace(label_replace(label_join('
            '(ALERTS_FOR_STATE and ignoring(alertstate) ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"}) * 1000 '
            'or ignoring(alertstate) (ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"} * 0),'
-           ' "target", " ", "node", "pod", "instance")',
+           ' "target", " ", "node", "pod", "instance"),'
+           ' "rank", "9", "severity", ".*"), "rank", "1", "severity", "critical"),'
+           ' "rank", "2", "severity", "warning"), "rank", "3", "severity", "info")',
            rename={"alertname": "Alert", "severity": "Severity", "namespace": "Namespace",
                    "target": "Node / pod / instance", "Value": "Since"},
            exclude=[], include=["alertname", "severity", "namespace", "target", "Value"],
            order=["alertname", "severity", "namespace", "target", "Value"],
-           sort="Severity", filterable=True,
+           sort="rank", filterable=True,
            overrides=[_ov("Severity", [{"id": "custom.cellOptions", "value": {"type": "color-text"}},
                                        {"id": "mappings", "value": ALERT_SEVERITY_MAP}]),
                       _ov("Since", [{"id": "unit", "value": "dateTimeFromNow"},
