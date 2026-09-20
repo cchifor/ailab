@@ -331,4 +331,4 @@ Files (all under `kubernetes/apps/apps/ai/` unless stated):
 4. Platform: PR checks green, merged, Flux reconciled, gatekeeper 2/2 rolled, Part C acceptance
    200/`available=true` after the token-cache window.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
