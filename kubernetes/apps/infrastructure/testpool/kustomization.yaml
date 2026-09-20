@@ -9,3 +9,4 @@ resources:
   - sandboxtemplate-std.yaml
   - prepull-daemonset.yaml
   - tep-access.yaml
+  - env-reaper.yaml # kube-system DaemonSet + testpool Role: bounded Kata teardown (2026-09-20 outage)
