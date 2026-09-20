@@ -26,3 +26,18 @@ configMapGenerator:
       - prepare-embedding-model.sh
       - embedding-assets.sha256
       - embedding-input-limit.json
+  # chatgpt_chat.py is MERGED INTO litellm-config (the ConfigMap litellm.yaml declares), not a
+  # ConfigMap of its own: LiteLLM's custom_provider_map loader looks for <module>.py beside
+  # config.yaml, and a pod that restarts mid-rollout must read config.yaml and the handler from
+  # the same in-place ConfigMap -- a separate, hash-suffixed ConfigMap that only the new pod
+  # template mounts would let an old pod see a custom_provider_map entry without its module.
+  # disableNameSuffixHash keeps the name litellm-config; the `checksum/chatgpt-chat` pod-template
+  # annotation (gated by scripts/check-inline-hashes.py) is what rolls the Deployment on an edit
+  # to the handler, exactly as `checksum/config` does for config.yaml. ADR 0027.
+  - name: litellm-config
+    namespace: ai
+    behavior: merge
+    options:
+      disableNameSuffixHash: true
+    files:
+      - chatgpt_chat.py

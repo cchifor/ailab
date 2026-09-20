@@ -1,9 +1,16 @@
-"""Exercise the configured document route through the pinned LiteLLM HTTP adapter.
+"""Exercise the configured PAID document route through the pinned LiteLLM HTTP adapter.
 
 Run with the manifest's LiteLLM image and networking disabled:
     python scripts/tests/integration/test_litellm_platform_route_contract.py
 Only the upstream HTTP transport is mocked; routing, parameter transformation,
 SDK serialization, error translation and retry decisions use the real packages.
+
+Since 2026-09-20 (ADR 0027) the caller-facing name `gpt-5.6-sol` is served from
+the ChatGPT subscription (test_litellm_chatgpt_chat_handler_contract.py covers
+that path) and the OpenAI route lives on as `gpt-5.6-sol-api`, retained so a
+replacement key can be proven before the name is pointed back. The wire contract
+here -- api.openai.com/v1/chat/completions, the caller's exact body preserved,
+exactly one attempt per outcome -- moves with the alias, unchanged.
 """
 
 import os
@@ -50,10 +57,12 @@ CONFIG = yaml.safe_load(next(
     if isinstance(document, dict) and document.get("kind") == "ConfigMap"
     and document["metadata"]["name"] == "litellm-config"
 )["data"]["config.yaml"])
+ROUTE_NAME = "gpt-5.6-sol-api"
 ROUTE = next(entry for entry in CONFIG["model_list"]
-             if entry["model_name"] == "gpt-5.6-sol")
+             if entry["model_name"] == ROUTE_NAME)
+UPSTREAM_MODEL = ROUTE["litellm_params"]["model"].split("/", 1)[1]  # openai/<id> -> <id>
 REQUEST = {
-    "model": "gpt-5.6-sol",
+    "model": ROUTE_NAME,
     "messages": [{"role": "user", "content": "Offline adapter fixture."}],
     "max_completion_tokens": 32000,
     "reasoning_effort": "medium",
@@ -122,7 +131,9 @@ class DocumentRouteContract(unittest.TestCase):
                 router.reset()
         self.assertEqual(NETWORK_ATTEMPTS, [], "No socket connection may be attempted")
         self.assertEqual(len(sent), 1, f"{outcome}: expected exactly one upstream attempt; error={error}")
-        self.assertEqual(sent[0], REQUEST, "Do not drop or override the evaluated caller parameters")
+        # The alias resolves to the deployment's upstream id; everything else is byte-for-byte the caller's.
+        self.assertEqual(sent[0], {**REQUEST, "model": UPSTREAM_MODEL},
+                         "Do not drop or override the evaluated caller parameters")
         print(json.dumps({"outcome": outcome, "upstream_attempts": len(sent),
                           "error": error, "exact_request_preserved": True}))
         return response, error
@@ -139,7 +150,7 @@ class DocumentRouteContract(unittest.TestCase):
                         response, error = await self._exercise(outcome)
                         self.assertEqual(error, expected_error)
                         if outcome == "success":
-                            self.assertEqual(response.model, "gpt-5.6-sol")
+                            self.assertEqual(response.model, "gpt-5.6-sol")  # the upstream id, not the alias
                             self.assertEqual(response.choices[0].message.content, '{"ok":true}')
                             self.assertEqual(response.usage.prompt_tokens, 12)
                             self.assertEqual(response.usage.completion_tokens, 4)
