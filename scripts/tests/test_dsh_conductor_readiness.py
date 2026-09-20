@@ -16,7 +16,7 @@ class ConductorDeploymentTests(unittest.TestCase):
         version=subprocess.check_output(['node','--version'],text=True)
         if int(version.lstrip('v').split('.')[0])<24:
             self.skipTest('Node24+ required for dynamic observer tests')
-        result=subprocess.run(['node','--test','scripts/tests/fixtures/conductor-readiness.test.mjs','scripts/tests/fixtures/conductor-command.test.mjs'],cwd=ROOT,capture_output=True,text=True,timeout=30)
+        result=subprocess.run(['node','--unhandled-rejections=strict','--test','scripts/tests/fixtures/conductor-readiness.test.mjs','scripts/tests/fixtures/conductor-command.test.mjs'],cwd=ROOT,capture_output=True,text=True,timeout=30)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
     def test_durable_parent_and_restart_marker(self):
@@ -31,6 +31,16 @@ class ConductorDeploymentTests(unittest.TestCase):
             self.assertNotIn('rm -f /dsh-home/team-conductor/state.sqlite',script)
             self.assertNotIn('rm -rf /dsh-home/team-conductor',script)
         self.assertLess(main.index('readiness.json'),main.index('exec '))
+
+    def test_existing_credential_mount_is_preserved(self):
+        spec=yaml.safe_load((APP/'deployment.yaml').read_text())['spec']['template']['spec']
+        main=next(c for c in spec['containers'] if c['name']=='dsh')
+        mount=next(v for v in main['volumeMounts'] if v['name']=='credentials')
+        self.assertEqual(mount['mountPath'],'/dsh-credentials')
+        self.assertIs(mount['readOnly'],True)
+        volume=next(v for v in spec['volumes'] if v['name']=='credentials')
+        self.assertEqual(volume['secret']['secretName'],'dsh-credentials')
+        self.assertIn('openbao-credentials.mjs',(APP/'cordis.patch.yml').read_text())
 
     def test_authorized_enabled_allowance_and_artifact(self):
         config=json.loads((APP/'conductor.runtime.json').read_text())

@@ -33,4 +33,15 @@ test('restart observation reports retained runs rather than creating or deleting
 test('disposal during preflight never publishes stale readiness',async t=>{const f=fixture(t);let begin,finish;const started=new Promise(r=>begin=r),gate=new Promise(r=>finish=r);f.service.preflight=()=>{begin();return gate;};const pending=f.run();await started;f.dispose();finish();await pending;assert.equal(existsSync(f.markerPath),false);});
 test('old disposer cannot remove another observer nonce',async t=>{const f=fixture(t);await f.run();const newer={...f.read(),nonce:'newer'};writeFileSync(f.markerPath,JSON.stringify(newer));f.dispose();assert.deepEqual(f.read(),newer);});
 test('preflight rejection produces no readiness',async t=>{const f=fixture(t);f.service.preflight=async()=>{throw Error('test preflight failed');};await assert.doesNotReject(f.run());assert.equal(f.warnings.length,1);assert.ok(!f.warnings[0].includes('test preflight failed'));assert.equal(existsSync(f.markerPath),false);f.dispose();});
+test('deadline followed by late preflight rejection stays handled',async t=>{
+ const f=fixture(t),realSetTimeout=globalThis.setTimeout;let rejectLate;
+ f.service.preflight=()=>new Promise((_,reject)=>{rejectLate=reject;});
+ try{
+  globalThis.setTimeout=(fn,ms,...args)=>realSetTimeout(fn,ms===120000?1:ms,...args);
+  await assert.doesNotReject(f.run());assert.equal(f.warnings.length,1);assert.equal(existsSync(f.markerPath),false);
+  rejectLate(new Error('late preflight rejection must remain observed'));
+  await new Promise(resolve=>realSetTimeout(resolve,10));
+  assert.equal(existsSync(f.markerPath),false);
+ }finally{globalThis.setTimeout=realSetTimeout;f.dispose();}
+});
 test('operator state inside model workspace is refused',async t=>{const f=fixture(t);f.config.workspaceRoot=f.dir;f.service.config.workspaceRoot=f.dir;writeFileSync(f.configPath,JSON.stringify(f.config));await assert.doesNotReject(f.run());assert.ok(f.warnings.length);assert.equal(existsSync(f.markerPath),false);});
