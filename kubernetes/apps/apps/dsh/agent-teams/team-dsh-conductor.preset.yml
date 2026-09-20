@@ -1,0 +1,6 @@
+name: Team Conductor (0.1.0)
+description: >-
+  Human-controlled front door to the deployed, bounded team service.
+  Use /conductor status, then explicitly /conductor start <task>.
+  Selecting this preset starts no run. Help-chat inference is outside the run ledger.
+order: 21
