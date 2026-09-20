@@ -6,12 +6,23 @@
 #     with an explicit unix-only --host (no tcp bind, no 15s TLS-warning slowdown)
 #   - entrypoint asserts overlay2 and refuses vfs
 #   - ALL exec traffic targets the control container (dockerd's cgroup-v2 subtree control makes
-#     the dind container un-exec-able); readiness = control's tcp ready-port, no exec probes
+#     the dind container un-exec-able). Probes on control only:
+#       startup   = tcp ready-port 9099 (opens once dockerd has answered `docker version`)
+#       readiness = `docker version` EXEC through the kata-agent, 10 s period, 6 failures (~60 s)
+#     The readiness contract since 2026-09-20 (plans/2026-09-20-env-pool-frozen-guest-outage-plan.md):
+#     "a lease can run docker here". A 6 s blip no longer flips the member NotReady — which the
+#     warm-pool GC turns into an immediate delete for any member older than the grace period.
+#     Known gap: kubelet 1.31's prober discards a probe whose CRI transport errored (non-timeout)
+#     without counting a failure; a frozen agent or a stalled rootfs both surface as TIMEOUTS,
+#     which are counted. The non-timeout path is covered by the testpool alerts, not the probe.
+#   - Both entrypoints trap TERM and end in `sleep infinity & wait $!` (a foreground sleep would
+#     never let the trap run), so a graceful stop takes ~1 s, not 30 s grace + SIGKILL.
 # Both images are estate-built (env-image/, rebuilt by CI on main): env-dind = docker:28.3-dind
 # + e2fsprogs; env-control = the lease toolchain (node 22, uv, docker CLI, rsync/git/jq/nc —
 # deliberately NO browsers, see the PLAYWRIGHT_BROWSERS_PATH note below). Validated before this
-# pin: tool versions + the busybox-style `nc -l -p` ready-port line work under its Debian
-# netcat-openbsd (patchlevel 1.219-1 accepts -p/-s with -l).
+# pin: tool versions + the persistent `nc -lkd -p 9099` ready-port line (one listener for the
+# member's lifetime; the old fork-per-connection loop re-exec'd nc from the virtiofs rootfs after
+# every probe) under its Debian netcat-openbsd (patchlevel 1.219-1 accepts -k/-d/-p/-s with -l).
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
@@ -39,6 +50,9 @@ spec:
           args:
             - |
               set -x
+              # TERM = graceful stop: forward to dockerd, reap it, exit 0. Installed first so a
+              # stop during the init loop below exits too. $DPID is empty until dockerd starts.
+              trap 'kill -TERM "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null; exit 0' TERM
               # e2fsprogs is baked in env-dind (env-image/Dockerfile.dind) — no runtime apk.
               DEV=/dev/dockerblk
               mkdir -p /var/lib/docker
@@ -52,6 +66,7 @@ spec:
               dockerd-entrypoint.sh dockerd \
                 --host=unix:///run/dsock/docker.sock \
                 --registry-mirror=https://registry.chifor.me >/work/dockerd.log 2>&1 &
+              DPID=$!
               export DOCKER_HOST=unix:///run/dsock/docker.sock
               i=0
               until docker version >/dev/null 2>&1; do
@@ -60,7 +75,7 @@ spec:
               done
               docker info --format '{{.Driver}}' | grep -q overlay2 || { echo "FATAL: storage driver is not overlay2"; tail -40 /work/dockerd.log; exit 2; }
               echo ENV-DIND-OK
-              sleep infinity
+              sleep infinity & wait $!
           resources:
             requests: { cpu: "1", memory: 2Gi }     # parked-priced: scheduling by requests, capacity by limits
             limits: { cpu: "5", memory: 12Gi }
@@ -76,15 +91,18 @@ spec:
           command: ["sh", "-c"]
           args:
             - |
+              trap 'exit 0' TERM
               i=0
               until docker version >/dev/null 2>&1; do
                 i=$((i+1)); [ $i -gt 3600 ] && echo CONTROL-GAVE-UP && exit 1
                 sleep 0.2
               done
               mkdir -p /work/runs /work/src
-              ( while true; do nc -l -p 9099 -s 0.0.0.0 </dev/null >/dev/null 2>&1 || sleep 0.2; done ) &
+              # Startup ready-port: ONE listener for the member's lifetime (-k keep listening,
+              # -d never read stdin). Opens only after dockerd answered above.
+              nc -lkd -p 9099 -s 0.0.0.0 >/dev/null 2>&1 &
               echo ENV-CONTROL-READY
-              sleep infinity
+              sleep infinity & wait $!
           env:
             - name: DOCKER_HOST
               value: unix:///run/dsock/docker.sock
@@ -104,9 +122,14 @@ spec:
             tcpSocket: { port: 9099 }
             periodSeconds: 1
             failureThreshold: 600
+          # Lease-equivalent check (see header): exec via the kata-agent, docker over the socket.
+          # timeoutSeconds is what turns a frozen agent / stalled rootfs into a COUNTED failure.
           readinessProbe:
-            tcpSocket: { port: 9099 }
-            periodSeconds: 2
+            exec:
+              command: ["sh", "-c", "docker version >/dev/null"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { cpu: "2", memory: 1Gi }
