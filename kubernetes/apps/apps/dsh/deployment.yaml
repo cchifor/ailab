@@ -218,6 +218,14 @@ spec:
               # it is in that patch, and a profile carrying the row without the file is a
               # MODULE_NOT_FOUND at boot -- so these two must never be able to drift apart.
               install -m 0644 /seed/openbao-credentials.mjs /dsh-home/profiles/web/openbao-credentials.mjs
+              # Host-only observer resolves the installed package from this profile.
+              install -m 0644 /conductor-release/conductor-readiness.mjs /dsh-home/profiles/web/conductor-readiness.mjs
+              install -m 0644 /conductor-release/conductor-command.mjs /dsh-home/profiles/web/conductor-command.mjs
+              # SQLite creates its file, not its parent; preserve existing state on every boot.
+              mkdir -p /dsh-home/team-conductor
+              chmod 0700 /dsh-home/team-conductor
+              # Readiness is per boot, never durable evidence of the current process.
+              rm -f /dsh-home/team-conductor/readiness.json
               # Agent teams (WP-1): project the GitOps-owned preset root.
               #
               # RECREATED FROM SCRATCH each boot, not merged into. A team removed from git
@@ -384,6 +392,7 @@ spec:
           volumeMounts:
             - { name: home, mountPath: /dsh-home }
             - { name: relay, mountPath: /seed, readOnly: true }
+            - { name: conductor-release, mountPath: /conductor-release, readOnly: true }
             - { name: teams, mountPath: /dsh-teams }
             # read-only: this container reads the staged closure the install Job built, and
             # must never write to the shared app volume.
@@ -520,10 +529,15 @@ spec:
           # wait-for-install initContainer fails loudly rather than silently running the old one.
           command: ["/bin/sh", "-c"]
           args:
-            - exec "/app/${DSH_VERSION}-${DSH_BUILD}/node_modules/.bin/dsh" web --no-open --port 3080 --trusted-host dsh.chifor.me
+            # Also clear on main-container restart: init containers do not rerun then.
+            # Observers must additionally compare observedAt with container startedAt.
+            - rm -f /dsh-home/team-conductor/readiness.json; exec "/app/${DSH_VERSION}-${DSH_BUILD}/node_modules/.bin/dsh" web --no-open --port 3080 --trusted-host dsh.chifor.me
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
             - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_TEAM_CONDUCTOR_CONFIG, value: /conductor-release/conductor.runtime.json }
+            - name: DSH_POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
             # The LiteLLM credential, synced from OpenBao by External Secrets (openbao-eso.yaml).
             # settings.yaml references it as `apiKeyEnv: LITELLM_API_KEY` rather than embedding a
             # value, so the secret never lands in git and never lands in the seed ConfigMap either.
@@ -570,6 +584,7 @@ spec:
             - { name: home, mountPath: /dsh-home }
             - { name: tmp,  mountPath: /tmp }
             - { name: workspace, mountPath: /workspace }
+            - { name: conductor-release, mountPath: /conductor-release, readOnly: true }
             # readOnly: a `system`-trust preset root is deployment-owned. dsh-agent-presets
             # already suppresses write-back to a mounted preset file, but the agent runs in
             # THIS container with a shell -- and /dsh-teams sits outside /workspace precisely
@@ -648,6 +663,16 @@ spec:
         - { name: workspace, persistentVolumeClaim: { claimName: dsh-workspace } }
         - { name: tmp,  emptyDir: { sizeLimit: 1Gi } }
         - { name: relay, configMap: { name: dsh-relay, defaultMode: 0444 } }
+        - name: conductor-release
+          projected:
+            defaultMode: 0444
+            sources:
+              - configMap:
+                  name: dsh-conductor-release
+              - configMap:
+                  name: dsh-conductor-artifact-7a97432202131d79
+                  items:
+                    - { key: dsh-team-conductor-0.1.0.tgz, path: dsh-team-conductor-0.1.0.tgz }
         # Agent-team preset root. emptyDir, not a PVC: seed-settings rebuilds it from the
         # content-hashed dsh-relay ConfigMap on every boot, so it holds nothing durable and a
         # team deleted from git cannot survive as a stale, still-selectable directory.

@@ -1,0 +1,17 @@
+{
+  "version": "0.1.0",
+  "distribution": "private Gitea release asset; no registry publication",
+  "repository": "cchifor/dsh-team-conductor",
+  "sourceCommit": "cd1fbc192309df160076fe9af070286618b40cac",
+  "reviewedRuntimeCommit": "eb7356bbc69272cf47c97cb5def830da7f0f6167",
+  "artifact": {"name":"dsh-team-conductor-0.1.0.tgz","sha256":"7a97432202131d79f11bb578708f2a3df32cde65700a28c778ca958ad4bdcb28","bytes":54302,"files":53},
+  "runtimeEquivalence": "Final source adds only the externally accepted documentation file; final package bytes are identical to the reviewed runtime package.",
+  "productReview": {"pr":6,"head":"a0f1d9db2b8c123ce873c83df4e5e903d674b1a8","approvals":[4292,4293],"reviewers":["reviewer-codex","reviewer-claude"],"mergedBy":"reviewer-claude","requiredCI":"test / test (pull_request)","ci":"success"},
+  "validation": {"localTestsPassed":215,"isolatedTestsPassed":215,"isolatedJob":"dsh-suite-acceptance-8e321ab87545","nativeNegativeJob":"dsh-model-denial-48cce760d0ed","nativeNegativeResult":"passed; five synthetic requests, forbidden bodies denied, grants revoked, paired disposal","installTests":"actual DSH CLI inert/configured-disabled/disable/removal, SQLite hash preserved, zero model calls","testedPnpm":["10.11.0","12.4.1"]},
+  "cleanAcceptance": {"runId":"fb737984-0d42-4f28-9207-cd0a928c3295","job":"dsh-external-acceptance-f3d58a1ebeef","artifactSha256":"d3f73ca719e0c6ff5899aeb522435b3d939b70b5c9cd354bae8c4d0f1ccf00b9","state":"MERGED","manualRepair":false,"calls":26,"reservedTokens":26000000,"callCap":28,"pr":7,"head":"54ae306c371fb324c40ffd7b0b2f091481d47ebe","approvals":[4296,4297],"ci":"success before merge","mergedBy":"reviewer-claude","mergedAt":"2026-09-19T11:54:50Z","completedAt":"2026-09-19T11:55:26Z"},
+  "budgetHistory": {"originalCallsPreserved":80,"failedTimeoutCallsPreserved":12,"cleanRetryCalls":26,"totalNativeCalls":118,"additionalAllocationUsed":38,"additionalAllocationCap":40,"historicalDatabaseHashesUnchanged":true,"refunds":false,"monetaryCeilingVerified":false,"exclusions":"External reviewer services, parent/subagents and synthetic fixtures are not included in this native-call ledger."},
+  "compatibility": {"dsh":"0.1.5-alpha.2","cordis":"4.0.2","nodeTested":"24.21.0"},
+  "validator": {"host":"192.168.0.14","isolation":"runc in VM, not Kata","image":"sha256:318b8ae52ecf3656a602ba9edcc29d2130728a5f2ea9ac5ece2658df77fda39d","helperSha256":"892a69f7f47a02dbfc61214c6ef621b58c777b5532b7203b5f3cee27fb22944b","policySha256":"3e9fd01d77bf149b95a93d9713f766ffe153e573143d995bfe54698ddc30896d"},
+  "limitations": ["single coordinator","broad authorized operator SSH/sudo, not least privilege","same-VM image archive, no verified off-host retention","limited soak","no production spending approval implied"],
+  "deploymentAtPublication": "Pending reviewed GitOps rollout; existing GUI unchanged. Initial deployment planned configured-disabled."
+}

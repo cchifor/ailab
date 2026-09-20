@@ -18,6 +18,18 @@ resources:
   - operator-ssh-networkpolicy.yaml # dedicated SSH account on explicitly approved hosts
 
 configMapGenerator:
+  # Reviewable release metadata/configuration; binary bytes live in the separately
+  # provisioned immutable artifact ConfigMap, verified against the published hash.
+  - name: dsh-conductor-release
+    options:
+      immutable: true
+    files:
+      - conductor-release/dsh-team-conductor-0.1.0.tgz.sha256
+      - conductor-release/PROVENANCE.json
+      - stage-private-conductor.mjs
+      - conductor-readiness.mjs
+      - conductor-command.mjs
+      - conductor.runtime.json
   # Generated so the name carries a content hash: editing relay.js rolls the pod automatically
   # instead of leaving the old relay running — the same trap that made a LiteLLM change inert.
   - name: dsh-relay
@@ -81,7 +93,7 @@ configMapGenerator:
 replacements:
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps1
+      name: dsh-install-0-1-5-alpha-2-glibc-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_VERSION].value
     targets:
       - select: { kind: Deployment, name: dsh }
@@ -97,7 +109,7 @@ replacements:
   # perfectly well with the providers simply absent. One source, derived copies.
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps1
+      name: dsh-install-0-1-5-alpha-2-glibc-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_PLUGINSET].value
     targets:
       - select: { kind: Deployment, name: dsh }
@@ -108,7 +120,7 @@ replacements:
   # would wait forever on a path the installer never creates. One source, three copies, derived.
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps1
+      name: dsh-install-0-1-5-alpha-2-glibc-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_BUILD].value
     targets:
       - select: { kind: Deployment, name: dsh }
