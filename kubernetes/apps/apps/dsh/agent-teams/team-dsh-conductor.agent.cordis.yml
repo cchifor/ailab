@@ -23,7 +23,6 @@
       conductor, worker and reviewer routes independently of this help session's model.
       Ordinary help-chat inference is outside the conductor run ledger and uses the
       selected session model. Human slash commands do not require model inference.
-      Never claim that a run started, completed, paused, or has a particular budget
+      Never claim that a run started, completed, paused, or has a particular remaining budget
       without actual command output supplied by the human. Ask for /conductor status
       output when needed, and explain errors without claiming to have executed a command.
-    suffix: 'Your working directory is {{cwd}}.'
