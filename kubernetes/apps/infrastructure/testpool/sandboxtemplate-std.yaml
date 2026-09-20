@@ -6,12 +6,25 @@
 #     with an explicit unix-only --host (no tcp bind, no 15s TLS-warning slowdown)
 #   - entrypoint asserts overlay2 and refuses vfs
 #   - ALL exec traffic targets the control container (dockerd's cgroup-v2 subtree control makes
-#     the dind container un-exec-able); readiness = control's tcp ready-port, no exec probes
+#     the dind container un-exec-able). Both probes are TCP against control's ready-port 9099,
+#     which is held open by ready-watchdog.py (ConfigMap ready-watchdog, mounted read-only) ONLY
+#     while a virtio-fs write+fsync on /work and a dockerd /_ping each answer within 5 s:
+#       startup   = tcp 9099, 1 s period, 600 failures (the port opens after dockerd answered and
+#                   both checks passed once)
+#       readiness = tcp 9099, 5 s period, 6 failures (~30 s of a closed port)
+#     The readiness contract since 2026-09-20 (plans/2026-09-20-env-pool-frozen-guest-outage-plan.md):
+#     "a lease can run docker here", decided IN the guest by a long-lived process and reported
+#     through a probe the kubelet answers itself. An exec probe was the first design and was
+#     rejected by its own fault injection: with virtiofsd frozen the probe's `sh` cannot load, later
+#     execs fail fast with a non-timeout CRI error that kubelet 1.31's prober DISCARDS, and the pod
+#     stayed Ready=True for 7+ min. The old fork-per-connection `nc -l` loop had the opposite flaw:
+#     any exec hiccup closed the port for a moment, and the warm-pool GC deletes any member older
+#     than its grace period the instant it is observed NotReady.
+#   - Both entrypoints trap TERM and end in `sleep infinity & wait $!` (a foreground sleep would
+#     never let the trap run), so a graceful stop takes ~1 s, not 30 s grace + SIGKILL.
 # Both images are estate-built (env-image/, rebuilt by CI on main): env-dind = docker:28.3-dind
-# + e2fsprogs; env-control = the lease toolchain (node 22, uv, docker CLI, rsync/git/jq/nc —
-# deliberately NO browsers, see the PLAYWRIGHT_BROWSERS_PATH note below). Validated before this
-# pin: tool versions + the busybox-style `nc -l -p` ready-port line work under its Debian
-# netcat-openbsd (patchlevel 1.219-1 accepts -p/-s with -l).
+# + e2fsprogs; env-control = the lease toolchain (node 22, uv, docker CLI, rsync/git/jq/nc/python3 —
+# deliberately NO browsers, see the PLAYWRIGHT_BROWSERS_PATH note below).
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
@@ -39,6 +52,9 @@ spec:
           args:
             - |
               set -x
+              # TERM = graceful stop: forward to dockerd, reap it, exit 0. Installed first so a
+              # stop during the init loop below exits too. $DPID is empty until dockerd starts.
+              trap 'kill -TERM "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null; exit 0' TERM
               # e2fsprogs is baked in env-dind (env-image/Dockerfile.dind) — no runtime apk.
               DEV=/dev/dockerblk
               mkdir -p /var/lib/docker
@@ -52,6 +68,7 @@ spec:
               dockerd-entrypoint.sh dockerd \
                 --host=unix:///run/dsock/docker.sock \
                 --registry-mirror=https://registry.chifor.me >/work/dockerd.log 2>&1 &
+              DPID=$!
               export DOCKER_HOST=unix:///run/dsock/docker.sock
               i=0
               until docker version >/dev/null 2>&1; do
@@ -60,7 +77,7 @@ spec:
               done
               docker info --format '{{.Driver}}' | grep -q overlay2 || { echo "FATAL: storage driver is not overlay2"; tail -40 /work/dockerd.log; exit 2; }
               echo ENV-DIND-OK
-              sleep infinity
+              sleep infinity & wait $!
           resources:
             requests: { cpu: "1", memory: 2Gi }     # parked-priced: scheduling by requests, capacity by limits
             limits: { cpu: "5", memory: 12Gi }
@@ -76,15 +93,21 @@ spec:
           command: ["sh", "-c"]
           args:
             - |
+              trap 'exit 0' TERM
               i=0
               until docker version >/dev/null 2>&1; do
                 i=$((i+1)); [ $i -gt 3600 ] && echo CONTROL-GAVE-UP && exit 1
                 sleep 0.2
               done
               mkdir -p /work/runs /work/src
-              ( while true; do nc -l -p 9099 -s 0.0.0.0 </dev/null >/dev/null 2>&1 || sleep 0.2; done ) &
+              # Ready-port :9099, held open by the watchdog only while virtio-fs and dockerd answer,
+              # reopened after 3 consecutive passes (ready-watchdog.yaml). Backgrounded: THIS shell
+              # stays PID 1, so a stall makes the member NotReady without killing a lease in flight;
+              # a short stall recovers in place, a long one gets the member replaced by the
+              # warm-pool GC. Its log lines are the guest-side evidence.
+              python3 /opt/ready-watchdog/ready-watchdog.py &
               echo ENV-CONTROL-READY
-              sleep infinity
+              sleep infinity & wait $!
           env:
             - name: DOCKER_HOST
               value: unix:///run/dsock/docker.sock
@@ -104,16 +127,22 @@ spec:
             tcpSocket: { port: 9099 }
             periodSeconds: 1
             failureThreshold: 600
+          # TCP, answered by the kubelet itself (no CRI path to be discarded — see header). The
+          # watchdog decides when :9099 is open; 6 refusals in a row (~30 s) = NotReady.
           readinessProbe:
             tcpSocket: { port: 9099 }
-            periodSeconds: 2
+            periodSeconds: 5
+            failureThreshold: 6
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { cpu: "2", memory: 1Gi }
           volumeMounts:
             - { name: dsock, mountPath: /run/dsock }
             - { name: work, mountPath: /work }
+            - { name: ready-watchdog, mountPath: /opt/ready-watchdog, readOnly: true }
       volumes:
+        - name: ready-watchdog
+          configMap: { name: ready-watchdog, defaultMode: 0444 }
         - name: shm
           emptyDir: { medium: Memory, sizeLimit: 1Gi } # Chromium needs >=1g shm; charged to the pod limit
         - name: dsock

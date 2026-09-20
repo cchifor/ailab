@@ -1,0 +1,81 @@
+# `promtool test rules` fixtures for testpool-rules.yaml. Run by scripts/rules-lint.sh on every PR,
+# after `promtool check rules`.
+#
+# The teardown rules compare time() with kube_pod_deletion_timestamp. promtool's clock starts at
+# Unix 0, so a pod "deleted at t=0" is a series with value 0, and eval_time IS the age. The `stale`
+# marker models the pod object finally disappearing — kube-state-metrics stops exporting the
+# series, and the alert MUST resolve on that alone (no recovery signal exists for a teardown).
+#
+# `rule_files` is the extracted spec name, because rules-lint.sh hands promtool the `spec:` body of
+# each PrometheusRule (the CRD wrapper is not a promtool rules file) under the manifest's basename.
+rule_files:
+  - testpool-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------ a hung teardown: warning at 5m, critical at 20m
+  - interval: 1m
+    name: a pod Terminating past 5m pages, past 20m pages critical, and a completed teardown resolves both
+    input_series:
+      # deletionTimestamp = t0; the pod object is gone (stale) after 25m.
+      - series: 'kube_pod_deletion_timestamp{namespace="testpool", pod="env-std-pool-xgssp"}'
+        values: "0+0x25 stale"
+      # A second pod deleted at the same time whose teardown completed in 90s (the normal case).
+      - series: 'kube_pod_deletion_timestamp{namespace="testpool", pod="env-std-pool-fresh"}'
+        values: "0+0x1 stale"
+    alert_rule_test:
+      # Too early: 4m < 300s.
+      - eval_time: 4m
+        alertname: TestpoolEnvTeardownStuck
+        exp_alerts: []
+      # 6m: expression true, `for: 2m` still pending.
+      - eval_time: 7m
+        alertname: TestpoolEnvTeardownStuck
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: TestpoolEnvTeardownStuck
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: testpool, pod: env-std-pool-xgssp }
+            exp_annotations:
+              summary: "testpool pod env-std-pool-xgssp has been Terminating for >5m"
+              description: >-
+                A Kata env teardown is hung — the frozen-guest failure of 2026-09-20. The env-reaper
+                on the env node should have killed the VMM by now: kubectl -n kube-system logs
+                ds/env-reaper. Runbook: docs/runbooks/env-pool.md.
+      # The critical variant is silent until 20m past deletion...
+      - eval_time: 19m
+        alertname: TestpoolEnvTeardownStuckCritical
+        exp_alerts: []
+      # ...and firing 2m after the 20m mark.
+      - eval_time: 24m
+        alertname: TestpoolEnvTeardownStuckCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: testpool, pod: env-std-pool-xgssp }
+            exp_annotations:
+              summary: "testpool pod env-std-pool-xgssp Terminating >20m — env-reaper did not unstick it"
+              description: >-
+                The bounded-teardown guarantee failed; the env node is one more hung teardown away from
+                a wedged kubelet. Reset the env node before it accumulates a second one:
+                docs/runbooks/env-pool.md (qm reset 4401 from ai-node2, then force-delete the orphans).
+      # Teardown completed at 25m (series stale): both resolve with no other signal.
+      - eval_time: 28m
+        alertname: TestpoolEnvTeardownStuck
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: TestpoolEnvTeardownStuckCritical
+        exp_alerts: []
+
+  # -------------------------------------------------------- regression: the normal 90s teardown
+  - interval: 1m
+    name: a teardown that completes inside the reaper window never alerts
+    input_series:
+      - series: 'kube_pod_deletion_timestamp{namespace="testpool", pod="env-std-pool-ok"}'
+        values: "0+0x1 stale"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: TestpoolEnvTeardownStuck
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: TestpoolEnvTeardownStuckCritical
+        exp_alerts: []

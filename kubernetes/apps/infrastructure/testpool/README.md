@@ -40,6 +40,32 @@ Immutable `golden-vN`; the SandboxTemplate `dataSource.name` IS the pointer; a b
 steps. Keep vN-1 until unreferenced. Refresh monthly or on toolchain/image-set changes; a
 staleness alert is a monitoring follow-up.
 
+## Readiness, teardown, and the env node (2026-09-20 outage)
+
+Runbook: `docs/runbooks/env-pool.md`. Plan with the evidence chain:
+`plans/2026-09-20-env-pool-frozen-guest-outage-plan.md`.
+
+- **Readiness = "a lease can run docker here", decided in the guest.** `ready-watchdog.yaml`
+  (a stdlib-Python process in `control`) holds the ready-port 9099 open only while a virtio-fs
+  write+fsync on `/work` and a dockerd `/_ping` each answer within 5 s, and reopens it after
+  3 consecutive passes (a stall shorter than the probe window costs nothing; a longer one that
+  recovers costs only the NotReady interval); both probes are TCP against it (startup 1 s × 600,
+  readiness 5 s × 6 ≈ 30 s). Unit-tested from the ConfigMap: `scripts/tests/test_ready_watchdog.py`. A TCP probe is answered by the
+  kubelet itself — an exec probe was tried first and stayed `Ready=True` through a 7-minute
+  virtio-fs freeze, because the kubelet discards non-timeout CRI exec errors. This matters
+  because the warm-pool GC deletes any member older than the 15 m grace the moment it is observed
+  NotReady — a 6 s blip on a healthy 66 h-old env is what started the outage; the old
+  fork-per-connection `nc -l` loop produced exactly such blips.
+- **Teardown is bounded.** `env-reaper.yaml` (DaemonSet in `kube-system`, Role here) SIGKILLs the
+  Cloud Hypervisor VM of a pod `Terminating` > ~2 min, and its shim 2 min later. A frozen guest
+  cannot be killed through the agent, and it was the *accumulation* of such hangs (two, plus a
+  create) that wedged the kubelet. Alerts `TestpoolEnvTeardownStuck{,Critical}` are the outcome
+  check; `env-node-rules.yaml` names the node-side precursors.
+- **Entrypoints trap TERM** and end in `sleep infinity & wait $!`, so a normal stop takes ~1 s
+  instead of the 30 s grace + SIGKILL it used to.
+- **Root cause of the guest freeze is still open** (single-threaded virtiofsd is the suspect);
+  it needs Kata debug logging, which needs the env node's machine config under tofu.
+
 ## Deliberate posture notes
 
 - **Egress amendment** (recorded in `networkpolicy.yaml`): cluster-ward deny (pod/svc CIDRs,

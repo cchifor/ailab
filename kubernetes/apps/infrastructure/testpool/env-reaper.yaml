@@ -1,0 +1,249 @@
+# env-reaper — bounds a Kata env teardown on the env node to ~2 minutes.
+#
+# WHY (2026-09-20 outage, plans/2026-09-20-env-pool-frozen-guest-outage-plan.md): a frozen Kata
+# guest cannot be killed through the kata-agent, so `StopContainer` never returns; kubelet retries
+# forever, the Cloud Hypervisor VM leaks (RAM, a vCPU, a 60 GiB LUN), and the SECOND such hang plus
+# one sandbox create wedged the kubelet and took talos-env-node-1 NotReady for 3 h. One hang did not
+# wedge it — the accumulation did. This DaemonSet guarantees hangs never accumulate: a testpool pod
+# that has been Terminating longer than REAP_AFTER_SECONDS gets its VMM killed from the host
+# (stage 1); if the shim still has not completed the teardown REAP_AFTER_SECONDS later, the shim
+# itself (stage 2 — containerd's crashed-shim path marks the tasks exited).
+#
+# WHERE: kube-system, deliberately NOT testpool. testpool's `env-egress` NetworkPolicy
+# (podSelector: {}) blocks the API VIP and the service CIDR for every pod there, and the
+# `tep-worker` Role grants pods/exec on every testpool pod — a hostPID+privileged pod in testpool
+# would be both unreachable to the API and a root shell on the node for any dev-worker credential.
+# kube-system has no NetworkPolicy, is privileged-PSA, hosts the other node-plumbing DaemonSets
+# (cilium, csi-nfs-node), and no estate credential can exec there. Only the Role/RoleBinding live
+# in testpool. This is the estate's first hostPID workload; the identity chain below is what makes
+# that acceptable.
+#
+# IDENTITY CHAIN (verified live on talos-env-node-1, Kata 3.20 + clh, sandbox_cgroup_only=false):
+#   cloud-hypervisor  cgroup 0::/kubepods/<qos>/pod<uid>/kata_<sandbox-id>   <- ties pod uid to sandbox
+#   virtiofsd, shim   cgroup 0::/kata_overhead/<sandbox-id>
+# A process is signalled only if (a) its cgroup carries the sandbox id derived from the pod uid,
+# (b) its exe is one of the three Kata binaries, and (c) its cmdline names that sandbox id
+# (/run/vc/vm/<id>/ for clh, /run/kata-containers/shared/sandboxes/<id> for virtiofsd, -id <id> for
+# the shim). `comm` is never used (15-char truncation: "cloud-hyperviso"). Once stage 1 has killed
+# the VMM the pod-uid->sandbox link is read from /run/vc/sbs/<id>/persist.json (host, read-only).
+# runc/gvisor tasks, probe execs and transient umounts never match.
+#
+# TIMING: `age` is measured from metadata.deletionTimestamp, which the API sets to the delete
+# request + terminationGracePeriodSeconds (30 s), so stage 1 fires ~150 s after the delete request
+# and stage 2 ~270 s. A working teardown takes ~1 s (TERM traps in the entrypoints) and 30 s at
+# worst; a pod is never touched inside that window.
+#
+# OBSERVABILITY: one log line per action (alloy ships kube-system logs), a heartbeat every
+# HEARTBEAT_ITERATIONS loops, an `api error` line when the list fails (the loop simply retries next
+# interval). The OUTCOME alert is TestpoolEnvTeardownStuckCritical (testpool-rules.yaml): it fires
+# only if a pod is still Terminating 20 min after deletion, i.e. the reaper is dead, wedged, or its
+# kills did not unstick the shim. A dead DaemonSet is the chart's KubeDaemonSet* rules' job.
+#
+# FAULT INJECTION (runbook docs/runbooks/env-pool.md): a hand-applied copy with REAP_AFTER_SECONDS=5
+# plus `kill -STOP` on a member's cloud-hypervisor reproduces a genuinely hung teardown end to end.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: env-reaper
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: env-reaper
+  namespace: testpool
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: env-reaper
+  namespace: testpool
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: env-reaper
+subjects:
+  - kind: ServiceAccount
+    name: env-reaper
+    namespace: kube-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: env-reaper
+  namespace: kube-system
+data:
+  reap.sh: |
+    #!/bin/sh
+    # See the header of env-reaper.yaml for the contract. POSIX sh (busybox ash in alpine/k8s).
+    set -u
+    : "${NODE_NAME:?NODE_NAME (downward API) is required}"
+    NAMESPACE=${TESTPOOL_NAMESPACE:-testpool}
+    REAP_AFTER_SECONDS=${REAP_AFTER_SECONDS:-120}
+    INTERVAL_SECONDS=${INTERVAL_SECONDS:-30}
+    REAP_STAGE1=${REAP_STAGE1:-1}
+    REAP_STAGE2=${REAP_STAGE2:-1}
+    HEARTBEAT_ITERATIONS=${HEARTBEAT_ITERATIONS:-20}
+    VC_SBS=${VC_SBS:-/host/run/vc/sbs}
+    PROC_ROOT=${PROC_ROOT:-/proc}   # overridable so the helpers can be unit-tested on a fake tree
+    CH_EXE=/usr/local/bin/cloud-hypervisor
+    VFS_EXE=/usr/local/libexec/virtiofsd
+    SHIM_EXE=/usr/local/bin/containerd-shim-kata-v2
+
+    log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+    exe_of() { readlink "$PROC_ROOT/$1/exe" 2>/dev/null; }
+    cmdline_of() { tr '\0' ' ' < "$PROC_ROOT/$1/cmdline" 2>/dev/null; }
+
+    # sandbox_of <pod-uid>: the sandbox id — from the live VMM's cgroup, else from the persisted
+    # sandbox state (the VMM is already dead after stage 1). Prints nothing if neither knows the pod.
+    sandbox_of() {
+      _uid=$1
+      for _cg in "$PROC_ROOT"/[0-9]*/cgroup; do
+        _line=$(cat "$_cg" 2>/dev/null) || continue
+        case "$_line" in
+          *"/pod${_uid}/kata_"*) printf '%s\n' "${_line##*/kata_}"; return 0 ;;
+        esac
+      done
+      for _pj in "$VC_SBS"/*/persist.json; do
+        [ -f "$_pj" ] || continue
+        if grep -q "pod${_uid}/kata_" "$_pj" 2>/dev/null; then
+          _d=${_pj%/persist.json}; printf '%s\n' "${_d##*/}"; return 0
+        fi
+      done
+      return 1
+    }
+
+    # procs_of <sandbox-id> <stage>: "<pid> <exe>" lines for processes tied to the sandbox by
+    # cgroup AND exe AND cmdline. Stage 1 = VMM + virtiofsd, stage 2 = the shim.
+    procs_of() {
+      _sbid=$1; _stage=$2
+      for _cg in "$PROC_ROOT"/[0-9]*/cgroup; do
+        _pid=${_cg#"$PROC_ROOT"/}; _pid=${_pid%/cgroup}
+        _line=$(cat "$_cg" 2>/dev/null) || continue
+        case "$_line" in
+          *"/kata_${_sbid}"|*"/kata_overhead/${_sbid}") ;;
+          *) continue ;;
+        esac
+        _exe=$(exe_of "$_pid") || continue
+        [ -n "$_exe" ] || continue
+        _cmd=$(cmdline_of "$_pid") || continue
+        case "$_stage" in
+          1)
+            case "$_exe" in
+              "$CH_EXE")  case "$_cmd" in *"/run/vc/vm/${_sbid}/"*) printf '%s %s\n' "$_pid" "$_exe" ;; esac ;;
+              "$VFS_EXE") case "$_cmd" in *"/run/kata-containers/shared/sandboxes/${_sbid}"*) printf '%s %s\n' "$_pid" "$_exe" ;; esac ;;
+            esac ;;
+          2)
+            case "$_exe" in
+              "$SHIM_EXE") case "$_cmd" in *"-id ${_sbid} "*) printf '%s %s\n' "$_pid" "$_exe" ;; esac ;;
+            esac ;;
+        esac
+      done
+    }
+
+    reap() {
+      _name=$1; _uid=$2; _sbid=$3; _stage=$4; _age=$5
+      procs_of "$_sbid" "$_stage" | while read -r _pid _exe; do
+        if kill -9 "$_pid" 2>/dev/null; then
+          log "reap stage=$_stage pod=$_name uid=$_uid sandbox=$_sbid exe=$_exe pid=$_pid age=${_age}s"
+        fi
+      done
+    }
+
+    log "env-reaper start node=$NODE_NAME namespace=$NAMESPACE after=${REAP_AFTER_SECONDS}s interval=${INTERVAL_SECONDS}s stage1=$REAP_STAGE1 stage2=$REAP_STAGE2"
+    iter=0
+    while :; do
+      iter=$((iter + 1))
+      now=$(date -u +%s)
+      # NO --request-timeout: as a global flag it counts as a kubeconfig override and switches
+      # kubectl OFF the in-cluster config (it then dials localhost:8080 — seen live 2026-09-20).
+      # The outer `timeout` is the bound.
+      if timeout 20 kubectl get pods -n "$NAMESPACE" \
+           --field-selector "spec.nodeName=${NODE_NAME}" -o json > /tmp/pods.json 2> /tmp/kubectl.err; then
+        jq -r --argjson now "$now" '
+          .items[] | select(.metadata.deletionTimestamp != null)
+          | "\(.metadata.name) \(.metadata.uid) \($now - (.metadata.deletionTimestamp | fromdateiso8601))"' \
+          /tmp/pods.json > /tmp/terminating 2>/dev/null || : > /tmp/terminating
+        while read -r name uid age; do
+          [ -n "${uid:-}" ] || continue
+          [ "$age" -ge "$REAP_AFTER_SECONDS" ] || continue
+          if ! sbid=$(sandbox_of "$uid"); then
+            log "skip pod=$name uid=$uid age=${age}s: no kata sandbox for this pod on the host"
+            continue
+          fi
+          if [ "$age" -ge $((REAP_AFTER_SECONDS * 2)) ] && [ "$REAP_STAGE2" = "1" ]; then
+            # stage 2: the shim — and whatever stage 1 left behind.
+            [ "$REAP_STAGE1" = "1" ] && reap "$name" "$uid" "$sbid" 1 "$age"
+            reap "$name" "$uid" "$sbid" 2 "$age"
+          elif [ "$REAP_STAGE1" = "1" ]; then
+            reap "$name" "$uid" "$sbid" 1 "$age"
+          fi
+        done < /tmp/terminating
+      else
+        log "api error: $(tr '\n' ' ' < /tmp/kubectl.err | cut -c1-300)"
+      fi
+      if [ $((iter % HEARTBEAT_ITERATIONS)) -eq 0 ]; then
+        log "heartbeat iter=$iter terminating=$(wc -l < /tmp/terminating 2>/dev/null || echo 0)"
+      fi
+      sleep "$INTERVAL_SECONDS"
+    done
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: env-reaper
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: env-reaper
+    app.kubernetes.io/part-of: testpool
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: env-reaper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: env-reaper
+        app.kubernetes.io/part-of: testpool
+    spec:
+      serviceAccountName: env-reaper
+      priorityClassName: system-node-critical
+      hostPID: true
+      nodeSelector:
+        ailab.io/env-pool: "true"
+      tolerations:
+        - { key: dedicated, operator: Equal, value: env, effect: NoSchedule }
+        - { key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute }
+        - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute }
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: reaper
+          # kubectl 1.32 (+1 minor of the 1.31 API, inside the supported skew) + jq. docker.io pulls
+          # go through the node's mirror.gcr.io hosts.toml. Digest from Docker Hub, 2026-03-23.
+          image: docker.io/alpine/k8s:1.32.13@sha256:ffb0758383fdd5878419930052e2854afe6c0479303a59edaca4143ce8d3c016
+          command: ["/bin/sh", "/opt/env-reaper/reap.sh"]
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - { name: TESTPOOL_NAMESPACE, value: testpool }
+            - { name: REAP_AFTER_SECONDS, value: "120" }
+            - { name: INTERVAL_SECONDS, value: "30" }
+            - { name: REAP_STAGE1, value: "1" }
+            - { name: REAP_STAGE2, value: "1" }
+          securityContext:
+            privileged: true # CAP_KILL + CAP_SYS_PTRACE on host pids (readlink /proc/<pid>/exe)
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          volumeMounts:
+            - { name: script, mountPath: /opt/env-reaper, readOnly: true }
+            - { name: vc-run, mountPath: /host/run/vc, readOnly: true }
+      volumes:
+        - name: script
+          configMap: { name: env-reaper, defaultMode: 0555 }
+        - name: vc-run
+          hostPath: { path: /run/vc, type: Directory } # kata sandbox state (persist.json)

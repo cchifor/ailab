@@ -65,7 +65,7 @@ jobs:
           python3 scripts/check-inline-hashes.py
 
       - name: Local embedding serving and route contracts
-        run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes
+        run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes scripts.tests.test_ready_watchdog
 
       # The three spans derived from litellm.yaml's model_list — Open WebUI's Local-group model_ids,
       # the dsh seed's provider models rows, and litellm.yaml's own checksum/config — must match what

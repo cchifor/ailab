@@ -1,0 +1,251 @@
+# ready-watchdog — the env's readiness signal, run inside the `control` container (see
+# sandboxtemplate-std.yaml). It holds tcp 0.0.0.0:9099 open ONLY while the guest can, within 5 s each:
+#   1. create+write+fsync a file on /work — an emptyDir the guest reaches over virtio-fs, so this
+#      is a round trip through the pod's (single-threaded) virtiofsd, the same daemon that serves
+#      the container rootfs;
+#   2. get HTTP 200 from dockerd's /_ping over /run/dsock/docker.sock.
+# Two consecutive failures (or one HUNG check — a thread that never returns is the D-state
+# signature of a stalled virtio-fs) close the port; the kubelet's TCP readiness probe then fails
+# and the member goes NotReady after its failureThreshold. The watchdog NEVER exits: it keeps
+# checking, and REOPENS the port after READY_SUCCESSES_TO_REOPEN consecutive passes, so a stall
+# shorter than the probe window (~30 s) costs nothing and a longer one that recovers costs only
+# the NotReady interval (codex review, ailab#800: the first version exited on the first hung
+# check, which turned any 6 s hiccup into a deletion by the warm-pool GC for a member older than
+# its grace period). A hung check thread cannot be interrupted; at most ONE is outstanding per
+# check — while it is still running the check keeps reporting "hung" without spawning another.
+#
+# WHY A TCP PROBE AGAINST THIS, and not an exec probe (the plan's first design, rejected by its own
+# fault injection on 2026-09-20): with virtiofsd frozen, a kubelet exec probe cannot even load `sh`
+# from the rootfs; the first exec hangs, every later one fails FAST with "cannot enter container",
+# a non-timeout CRI error that kubelet 1.31's prober DISCARDS without counting — the pod stayed
+# Ready=True for 7+ minutes. A TCP probe is answered by the kubelet itself, never through CRI, and
+# cannot be discarded; the only thing that has to be right is when the port is open, which is
+# what this process decides — from memory, touching the rootfs for nothing after start.
+# WHY NOT THE OLD `nc -l` LOOP: it re-exec'd nc from the virtiofs rootfs after every probe
+# connection, so a stall closed the port only as a side effect and any exec hiccup was a blip that
+# the warm-pool GC turned into a deletion. This listener is one long-lived process.
+#
+# Python 3 stdlib only; the control image (env-image/Dockerfile.control) ships python3. Loaded once
+# at start, mounted read-only from this ConfigMap. Every state change is one log line (kubectl -n
+# testpool logs <pod> -c control) naming WHICH check failed — the first guest-side evidence for the
+# still-open root cause of the freezes (plans/2026-09-20-env-pool-frozen-guest-outage-plan.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ready-watchdog
+  namespace: testpool
+data:
+  ready-watchdog.py: |
+    #!/usr/bin/env python3
+    """Hold tcp :9099 open only while virtio-fs and dockerd answer; reopen on recovery.
+    See ready-watchdog.yaml. Tested by scripts/tests/test_ready_watchdog.py."""
+    import errno
+    import os
+    import socket
+    import threading
+    import time
+
+    PORT = int(os.environ.get("READY_PORT", "9099"))
+    WORK = os.environ.get("READY_WORK_DIR", "/work")
+    SOCK = os.environ.get("DOCKER_SOCK", "/run/dsock/docker.sock")
+    TIMEOUT = float(os.environ.get("READY_CHECK_TIMEOUT", "5"))
+    PERIOD = float(os.environ.get("READY_CHECK_PERIOD", "5"))
+    FAILS_TO_CLOSE = int(os.environ.get("READY_FAILS_TO_CLOSE", "2"))
+    SUCCESSES_TO_REOPEN = int(os.environ.get("READY_SUCCESSES_TO_REOPEN", "3"))
+    HB = os.path.join(WORK, ".ready-heartbeat")
+
+
+    def log(msg):
+        print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ready-watchdog:", msg, flush=True)
+
+
+    def check_virtiofs():
+        # create/write/fsync: three FUSE operations that cannot be served from the guest cache.
+        with open(HB, "w") as f:
+            f.write(str(time.time()))
+            f.flush()
+            os.fsync(f.fileno())
+
+
+    def read_status_line(sock, cap=64):
+        """The first line of an HTTP response, read in as many recv()s as it takes (a short read
+        is legal on a stream socket); stops at the newline, the cap, or EOF."""
+        buf = b""
+        while len(buf) < cap and b"\n" not in buf:
+            chunk = sock.recv(cap - len(buf))
+            if not chunk:
+                break
+            buf += chunk
+        nl = buf.find(b"\n")
+        return buf if nl < 0 else buf[:nl + 1]
+
+
+    def check_dockerd():
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(TIMEOUT)
+        try:
+            s.connect(SOCK)
+            s.sendall(b"GET /_ping HTTP/1.0\r\nHost: docker\r\n\r\n")
+            head = read_status_line(s)
+        finally:
+            s.close()
+        if not head.startswith(b"HTTP/1.") or b" 200 " not in head[:20]:
+            raise RuntimeError("unexpected response %r" % head[:40])
+
+
+    class Check:
+        """One named check with at most one outstanding thread. result() starts a run when idle,
+        waits up to TIMEOUT for it, and answers None (passed), an exception (failed) or "hung"
+        (still running — reported again every period until it finally returns)."""
+
+        def __init__(self, name, fn):
+            self.name, self.fn, self.thread, self.err = name, fn, None, None
+
+        def _start(self):
+            self.err = None
+
+            def wrapper():
+                try:
+                    self.fn()
+                except BaseException as e:  # noqa: BLE001 - any failure is a failed check
+                    self.err = e
+
+            self.thread = threading.Thread(target=wrapper, daemon=True)
+            self.thread.start()
+
+        def result(self):
+            if self.thread is None:
+                self._start()
+            self.thread.join(TIMEOUT)
+            if self.thread.is_alive():
+                return "hung"
+            err, self.thread = self.err, None
+            return err
+
+
+    # accept(2) errors that do not mean the listener is broken: Linux surfaces ECONNABORTED for a
+    # connection the peer dropped mid-handshake, EMFILE/ENFILE/ENOBUFS/ENOMEM under resource
+    # pressure, EINTR/EAGAIN spuriously — the man page says treat them like EAGAIN and retry.
+    ACCEPT_TRANSIENT = frozenset(getattr(errno, n) for n in (
+        "ECONNABORTED", "EAGAIN", "EWOULDBLOCK", "EINTR", "EMFILE", "ENFILE", "ENOBUFS", "ENOMEM",
+        "EPROTO", "ENETDOWN", "ENOPROTOOPT", "EHOSTDOWN", "ENONET", "EHOSTUNREACH", "EOPNOTSUPP",
+        "ENETUNREACH") if hasattr(errno, n))
+
+
+    class Port:
+        """The ready-port. open() binds and starts a serve thread that accepts+closes probe
+        connections; close() hands the socket back to that thread, which exits on its next
+        accept timeout and closes it — deterministic on every platform (closing a listening
+        socket under a blocked accept() is not). A listener that dies for any OTHER reason
+        marks itself closed and says so, so the next tick reopens it — it must never be
+        "open" in the watchdog's eyes while nothing is accepting (a silent permanent
+        NotReady is the class of failure this whole file exists to prevent)."""
+
+        def __init__(self, port):
+            self.port, self.ls, self.thread = port, None, None
+
+        def is_open(self):
+            return self.ls is not None
+
+        def open(self):
+            ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                ls.settimeout(0.5)
+                ls.bind(("0.0.0.0", self.port))
+                ls.listen(16)
+            except OSError:
+                ls.close()  # e.g. EADDRINUSE while the previous serve thread is still letting go
+                raise
+            self.ls = ls
+            self.thread = threading.Thread(target=self._serve, args=(ls,), daemon=True)
+            self.thread.start()
+
+        def close(self):
+            ls, self.ls = self.ls, None
+            if ls is not None:
+                self.thread.join(2)
+
+        def _serve(self, ls):
+            died = None
+            while self.ls is ls:
+                try:
+                    c, _ = ls.accept()
+                except socket.timeout:
+                    continue
+                except OSError as e:
+                    if e.errno in ACCEPT_TRANSIENT:
+                        time.sleep(0.1)
+                        continue
+                    died = e
+                    break
+                try:
+                    c.close()
+                except OSError:
+                    pass
+            try:
+                ls.close()
+            except OSError:
+                pass
+            if died is not None and self.ls is ls:
+                self.ls = None
+                log("ready-port listener died (%s); reopening on the next passing tick" % died)
+
+
+    class Watchdog:
+        """The decision state: counts consecutive passes/failures and opens/closes the port."""
+
+        def __init__(self, checks, port):
+            self.checks, self.port = checks, port
+            self.fails = self.oks = 0
+            self.opened_once = False
+
+        def tick(self):
+            """One evaluation of every check, then the open/close decision."""
+            bad = None
+            for c in self.checks:
+                r = c.result()
+                if r is not None:
+                    bad = (c.name, r)
+                    break
+            if bad is None:
+                self.oks += 1
+                if self.fails:
+                    log("checks recovered (after %d failure(s))" % self.fails)
+                self.fails = 0
+                # first open needs one pass (startup); a reopen after a health closure needs
+                # SUCCESSES_TO_REOPEN in a row (oks was zeroed by the failure); a listener that died
+                # on its own while checks kept passing has oks already past that and reopens at once.
+                if not self.port.is_open() and (not self.opened_once or self.oks >= SUCCESSES_TO_REOPEN):
+                    try:
+                        self.port.open()
+                    except OSError as e:
+                        # never let this escape: an uncaught error here ends the loop and the
+                        # port stays closed for good. Typical cause: EADDRINUSE while the previous
+                        # serve thread is still releasing the socket — the next tick succeeds.
+                        log("ready-port open failed (%s); retrying next tick" % e)
+                        return
+                    log("ready-port %s :%d (checks every %.0fs, timeout %.0fs, close after %d failures, reopen after %d passes)"
+                        % ("reopened on" if self.opened_once else "open on", self.port.port, PERIOD, TIMEOUT,
+                           FAILS_TO_CLOSE, SUCCESSES_TO_REOPEN))
+                    self.opened_once = True
+                return
+            self.oks = 0
+            self.fails += 1
+            name, r = bad
+            log("%s check %s consecutive=%d" % (name, "hung" if r == "hung" else "failed (%s)" % r, self.fails))
+            if self.port.is_open() and (r == "hung" or self.fails >= FAILS_TO_CLOSE):
+                self.port.close()
+                log("ready-port closed: %s %s — member goes NotReady after the probe window; reopens after %d passes"
+                    % (name, "hung" if r == "hung" else "failing", SUCCESSES_TO_REOPEN))
+
+
+    def main():
+        wd = Watchdog([Check("virtiofs", check_virtiofs), Check("dockerd", check_dockerd)], Port(PORT))
+        while True:
+            time.sleep(PERIOD)
+            wd.tick()
+
+
+    if __name__ == "__main__":
+        main()
