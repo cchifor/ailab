@@ -563,9 +563,12 @@ data:
       # model_unavailable). Cost logging WARNS
       # (no price for chatgpt-chat/...); usage is populated and the response is unaffected. The name
       # is reachable by any master-key / virtual-key holder under Open WebUI's External connection,
-      # the same class as gpt-6-astra-realjaynesage (accepted, ADR 0026). Seen the same day: the
-      # chatgpt.com edge answers LiteLLM's client with a Cloudflare JS challenge (403) for
-      # gpt-6-astra while passing gpt-5.6-sol; that rule can change without notice.
+      # the same class as gpt-6-astra-realjaynesage (accepted, ADR 0026). Seen the same day and
+      # corrected the same evening: probe processes started in this pod got a Cloudflare JS challenge
+      # (403) for gpt-6-astra around 13:24-13:30Z while this proxy's own requests for the same model
+      # succeeded at 13:23:30Z and 13:41:40Z (Loki); what the edge keyed on was not established
+      # (ADR 0027 finding 7). A challenge in a fresh probe is not evidence the route is down; the
+      # proxy's own log lines are.
       #
       # NO fallbacks between the two entries, deliberately: falling back to the paid key would be a
       # silent paid replay of a draft the policy above says gets one attempt, and the key is dead.
@@ -923,7 +926,7 @@ spec:
         # parses is byte-identical in effect, no routing change; the cost is one rolling restart
         # of the 2-replica maxUnavailable:0 Deployment, taken because the annotation tracks the
         # ConfigMap, per the rule above.
-        checksum/config: "10295f7e398e"
+        checksum/config: "df4caa4b62f8"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
