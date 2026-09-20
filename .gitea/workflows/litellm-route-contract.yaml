@@ -136,16 +136,22 @@ jobs:
             -v "$work/etc:/etc/litellm:ro" -v "$work/auth:/chatgpt-auth:ro" \
             "$litellm_image" --config /etc/litellm/config.yaml --port 4000 --num_workers 1)
           trap 'docker logs "$ctr" 2>&1 | tail -40; docker rm -f "$ctr" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+          ready=0
           for i in $(seq 1 60); do
             if docker exec "$ctr" python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:4000/health/liveliness", timeout=2).read()' 2>/dev/null; then
-              break
+              ready=1; break
             fi
             if [ "$(docker inspect -f '{{.State.Running}}' "$ctr")" != "true" ]; then
               echo "::error::the proxy exited during startup (a handler import failure looks like this)"; exit 1
             fi
             sleep 2
           done
-          docker exec "$ctr" python - <<'PY'
+          if [ "$ready" != 1 ]; then
+            echo "::error::the proxy never answered /health/liveliness within 120 s"; exit 1
+          fi
+          # -i: forward the heredoc to python. Without it docker exec hands python an EOF and the
+          # assertions below never run (reviewer-codex on #799).
+          docker exec -i "$ctr" python - <<'PY'
           import json, urllib.request
           req = urllib.request.Request("http://127.0.0.1:4000/v1/models", headers={"Authorization": "Bearer sk-smoke"})
           ids = {m["id"] for m in json.load(urllib.request.urlopen(req, timeout=10))["data"]}
