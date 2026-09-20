@@ -18,6 +18,8 @@ What this proves, in the order the cases run:
       when a wrapped and an unwrapped call run concurrently;
   (c) streaming through the route yields the role-only first chunk, the text
       deltas, a terminal finish_reason stop and (with include_usage) a usage chunk;
+      a consumer that abandons the stream, and an upstream that stalls between
+      chunks, both end with the upstream transport closed (the stall at the deadline);
   (d) upstream 401 / 429 / 503 map to AuthenticationError / RateLimitError /
       ServiceUnavailableError from ONE POST each (no inner retry), and a stalled
       upstream hits the handler's deadline from ONE POST with the stream closed;
@@ -28,7 +30,12 @@ What this proves, in the order the cases run:
       MISSING file still sends the first call to the device flow (the existing
       guard is unchanged by the handler);
   (g) one outer request produces exactly one success-callback record, under the
-      outer provider, and the inner `no-log` call produces none.
+      outer provider, and the inner `no-log` call produces none;
+  (h) a cost-map entry for the inner id that says supports_native_streaming false is
+      overridden by the handler's pins, so the upstream call still streams natively.
+The retained-memory bounds (chunk count, content bytes) are exercised with the limits lowered.
+Closure is asserted on the mock TRANSPORT (its aclose()), after a normal drain and after a
+mid-drain stall at the deadline.
 """
 
 import atexit
@@ -94,8 +101,27 @@ CONFIG = yaml.safe_load(next(
     if isinstance(document, dict) and document.get("kind") == "ConfigMap"
     and document["metadata"]["name"] == "litellm-config"
 )["data"]["config.yaml"])
-ROUTES = {name: next(entry for entry in CONFIG["model_list"] if entry["model_name"] == name)
-          for name in ("gpt-5.6-sol", "gpt-5.6-sol-api", "gpt-6-astra-realjaynesage")}
+# The routes are found by SHAPE, not by name: the subscription route is whichever entry is served
+# by the custom provider, the paid route whichever is openai/gpt-5.6-sol + the key. After the ADR 0027
+# switch-back (gpt-5.6-sol pointed back at the API key, the handler retired) there is no
+# subscription route and this module SKIPS instead of failing a required check.
+SUBSCRIPTION_ROUTE = next((entry for entry in CONFIG["model_list"]
+                           if str(entry["litellm_params"].get("model", "")).startswith("chatgpt-chat/")), None)
+RETIRED = "no chatgpt-chat/ route in the manifest: the subscription handler is retired (ADR 0027); nothing to contract"     if SUBSCRIPTION_ROUTE is None else ""
+if RETIRED:
+    # Placeholders so the module-level constants below still build; the TestCase is skipped
+    # (`skipIf`), which every runner -- direct execution, `-m unittest <name>`, discovery, pytest --
+    # reports as a skip, unlike a module-level SystemExit or SkipTest.
+    SUBSCRIPTION_ROUTE = {"model_name": "gpt-5.6-sol", "litellm_params": {"model": "chatgpt-chat/gpt-5.6-sol"}}
+PAID_ROUTE = next((entry for entry in CONFIG["model_list"]
+                   if entry["litellm_params"].get("model") == "openai/gpt-5.6-sol"), None)
+assert PAID_ROUTE is not None, "the retained paid route (openai/gpt-5.6-sol + OPENAI_API_KEY) is missing from model_list"
+DSH_ROUTE = next((entry for entry in CONFIG["model_list"] if entry["model_name"] == "gpt-6-astra-realjaynesage"), None)
+assert DSH_ROUTE is not None, "the gpt-6-astra-realjaynesage route (ADR 0026) is missing from model_list; case (b) contracts it"
+ROUTES = {SUBSCRIPTION_ROUTE["model_name"]: SUBSCRIPTION_ROUTE, PAID_ROUTE["model_name"]: PAID_ROUTE,
+          DSH_ROUTE["model_name"]: DSH_ROUTE}
+SUBSCRIPTION_NAME = SUBSCRIPTION_ROUTE["model_name"]
+INNER_MODEL = SUBSCRIPTION_ROUTE["litellm_params"]["model"].split("/", 1)[1]
 PROVIDER_MAP = CONFIG["litellm_settings"]["custom_provider_map"]
 DEPLOYMENT = next(
     document for document in DOCUMENTS
@@ -120,7 +146,7 @@ SCHEMA = {
     "additionalProperties": False,
 }
 PLATFORM_REQUEST = {
-    "model": "gpt-5.6-sol",
+    "model": SUBSCRIPTION_NAME,
     "messages": [{"role": "user", "content": "Offline adapter fixture."}],
     "max_completion_tokens": 32000,
     "reasoning_effort": "medium",
@@ -136,7 +162,7 @@ USAGE = {"input_tokens": 55, "input_tokens_details": {"cached_tokens": 0},
 # What the wire body of the wrapped call must be, byte for byte: the provider's allow-list plus
 # `text`, which the handler re-adds. `input` is what the bridge makes of the one user message.
 EXPECTED_WRAPPED_BODY = {
-    "model": "gpt-5.6-sol",
+    "model": INNER_MODEL,
     "input": [{"type": "message", "role": "user",
                "content": [{"type": "input_text", "text": "Offline adapter fixture."}]}],
     "instructions": None,  # filled from the Deployment env in setUpClass
@@ -249,10 +275,29 @@ def _use_token_dir(name, auth=PLACEHOLDER_AUTH):
     return path
 
 
+class _ByteStream(httpx.AsyncByteStream):
+    """The upstream SSE body as httpx would stream it, 64 bytes per read, optionally stalling for
+    good part-way through (a mid-drain hang). aclose() is the transport-level closure the handler
+    must reach after a normal drain AND after abandoning the stream."""
+
+    def __init__(self, payload, closed, stall_after=None):
+        self._payload, self._closed, self._stall_after = payload, closed, stall_after
+
+    async def __aiter__(self):
+        for offset in range(0, len(self._payload), 64):
+            if self._stall_after is not None and offset >= self._stall_after:
+                await asyncio.sleep(3600)
+            yield self._payload[offset:offset + 64]
+
+    async def aclose(self):
+        self._closed.append("transport")
+
+
 def _mock_post(sent, outcome, closed):
     """Stand in for AsyncHTTPHandler.post, the one seam the Responses path uses. Records the wire
-    request and answers like the real method: a 2xx Response is returned, a non-2xx raises
-    httpx.HTTPStatusError as raise_for_status() would. `outcome` is a body kind or a status code."""
+    request and answers like the real method: a 2xx Response is returned (a streaming body), a
+    non-2xx raises httpx.HTTPStatusError as raise_for_status() would. `outcome` is a body kind or a
+    status code; "stall" hangs before any response, "stall-mid" hangs inside the body."""
     loads = json.loads
 
     async def post(_self, url, data=None, json=None, params=None, headers=None,
@@ -263,19 +308,18 @@ def _mock_post(sent, outcome, closed):
         request = httpx.Request("POST", url)
         if kind == "stall":
             await asyncio.sleep(3600)
-        if kind in ("success", "truncated", "incomplete", "refusal", "nousage"):
+        if kind in ("success", "stall-mid", "truncated", "incomplete", "refusal", "nousage"):
             payload = {
                 "success": lambda: chatgpt_stream(model=body["model"]),
+                "stall-mid": lambda: chatgpt_stream(model=body["model"]),
                 "truncated": lambda: chatgpt_stream(model=body["model"], terminal="truncated"),
                 "incomplete": lambda: chatgpt_stream(model=body["model"], terminal="incomplete"),
                 "refusal": lambda: chatgpt_stream(model=body["model"], refusal="I can't help with that."),
                 "nousage": lambda: chatgpt_stream(model=body["model"], usage=None),
             }[kind]()
 
-            # Buffered, like the real AsyncHTTPHandler.post returns it to the provider (which reads
-            # .text); the SSE frames inside are what the streaming iterator then walks.
-            return httpx.Response(200, content=payload, headers={"content-type": "text/event-stream"},
-                                  request=request)
+            return httpx.Response(200, stream=_ByteStream(payload, closed, stall_after=256 if kind == "stall-mid" else None),
+                                  headers={"content-type": "text/event-stream"}, request=request)
         if kind == "403html":
             response = httpx.Response(403, content=CLOUDFLARE_HTML.encode(),
                                       headers={"content-type": "text/html"}, request=request)
@@ -321,6 +365,7 @@ def _load_handler_like_the_proxy():
     return module
 
 
+@unittest.skipIf(bool(RETIRED), RETIRED)
 class ChatGPTChatHandlerContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -366,16 +411,9 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
 
     async def _exercise(self, label, outcome, request, auth=PLACEHOLDER_AUTH, **extra):
         _use_token_dir(label, auth)
-        sent, closed = [], []
+        sent, closed = [], []  # closed: transport-level aclose() calls (see _ByteStream)
         started = time.monotonic()
-        real_close = self.module._close
-
-        async def recording_close(stream):
-            closed.append(type(stream).__name__)
-            await real_close(stream)
-
-        with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, outcome, closed)), \
-                mock.patch.object(self.module, "_close", recording_close):
+        with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, outcome, closed)):
             router = self._router()
             litellm.callbacks = [self.logger]  # Router.reset() at the end of the previous case cleared it
             self.logger.successes.clear()
@@ -400,6 +438,7 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
 
     def _assert_wrapped_wire(self, label, entry):
         self.assertEqual(entry["url"], UPSTREAM_URL, label)
+        self.assertIs(entry["stream"], True, f"{label}: native streaming -- never should_fake_stream's plain POST")
         self.assertEqual(entry["headers"].get("Authorization"), "Bearer unconfigured", label)
         self.assertEqual(entry["body"], EXPECTED_WRAPPED_BODY,
                          f"{label}: text and reasoning present, max_output_tokens absent, nothing else changed; "
@@ -423,7 +462,7 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
                          "a: usage is the fixture's, never fabricated")
         details = getattr(response.usage, "completion_tokens_details", None)
         self.assertEqual(getattr(details, "reasoning_tokens", None), USAGE["output_tokens_details"]["reasoning_tokens"])
-        self.assertEqual(len(closed), 1, "a: the handler closes the upstream stream after the drain")
+        self.assertEqual(closed, ["transport"], "a: the upstream transport is closed after the drain")
         # (g) one success record for the OUTER call only, under the outer provider
         self.assertEqual(len(self.logger.successes), 1, f"g: {self.logger.successes}")
         self.assertEqual(self.logger.successes[0]["provider"], "chatgpt-chat")
@@ -484,8 +523,49 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
         self.assertGreater(usages[-1].completion_tokens, 0)
         self.assertGreater(usages[-1].prompt_tokens, 0)
         self.assertTrue(all(c.model == "gpt-5.6-sol" for c in chunks), "c: chunks carry the bare model id")
-        self.assertEqual(len(closed), 1, "c: the handler closes the upstream stream after the last chunk")
+        self.assertEqual(closed, ["transport"], "c: the upstream transport is closed after the last chunk")
         print(json.dumps({"case": "c", "chunks": len(chunks), "finish": finishes}))
+
+    async def _case_c_streaming_cancellation(self, kind):
+        """Streaming, abandoned: (abandon) the consumer stops after two chunks and closes the outer
+        stream -- the proxy's path on a client disconnect -- and the upstream transport must be closed
+        promptly; (stall-mid) the upstream hangs between two chunks and the consumer's next read must
+        hit the handler's deadline, with the transport closed, not hang or cancel elsewhere."""
+        _use_token_dir(f"c-{kind}")
+        sent, closed = [], []
+        outcome = "stall-mid" if kind == "stall-mid" else "success"
+        started = time.monotonic()
+        with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, outcome, closed)):
+            router = self._router()
+            litellm.callbacks = [self.logger]
+            try:
+                stream = await asyncio.wait_for(
+                    router.acompletion(**copy.deepcopy(PLATFORM_REQUEST), stream=True, timeout=2), timeout=25)
+                got, error = [], None
+                try:
+                    async for chunk in stream:
+                        got.append(chunk)
+                        if kind == "abandon" and len(got) == 2:
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    error = exc
+                await stream.aclose()
+                await asyncio.sleep(0.05)
+            finally:
+                await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+                router.reset()
+        elapsed = time.monotonic() - started
+        self.assertEqual(NETWORK_ATTEMPTS, [])
+        self.assertEqual(len(sent), 1, f"c-{kind}: one upstream request")
+        if kind == "abandon":
+            self.assertIsNone(error)
+            self.assertEqual(len(got), 2)
+        else:
+            self.assertEqual(type(error).__name__, "Timeout", f"c-stall-mid: {error!r}")
+            self.assertLess(elapsed, 15, "c-stall-mid: the handler's deadline, delivered to the consumer's read")
+        self.assertEqual(closed, ["transport"], f"c-{kind}: the upstream transport is closed on abandonment")
+        print(json.dumps({"case": f"c-{kind}", "chunks": len(got), "error": type(error).__name__ if error else None,
+                          "closed": closed, "elapsed_s": round(elapsed, 2)}))
 
     # (d) -------------------------------------------------------------------------------------
     async def _case_d_upstream_rejection(self, status, error_name):
@@ -494,12 +574,56 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
         self.assertEqual(len(sent), 1, f"d-{status}: ONE upstream attempt -- no inner retry, no outer retry")
         self.assertIsNone(response)
 
-    async def _case_d_stall(self):
+    async def _case_d_stall(self, kind):
         started = time.monotonic()
-        sent, closed, response, error = await self._exercise("d-stall", "stall", PLATFORM_REQUEST, timeout=2)
-        self.assertEqual(type(error).__name__, "Timeout", f"d-stall: {error!r}")
+        sent, closed, response, error = await self._exercise(f"d-{kind}", kind, PLATFORM_REQUEST, timeout=2)
+        self.assertEqual(type(error).__name__, "Timeout", f"d-{kind}: {error!r}")
+        self.assertEqual(len(sent), 1, f"d-{kind}: one upstream request, no retry after the deadline")
+        self.assertLess(time.monotonic() - started, 15, f"d-{kind}: the handler's deadline, not the stall")
+        if kind == "stall-mid":
+            self.assertEqual(closed, ["transport"],
+                             "d-stall-mid: abandoning the stream at the deadline closes the upstream transport")
+
+    async def _case_e_bounds(self, kind):
+        """The retained-memory bounds, with the limits lowered for the fixture: a stream of more
+        chunks than MAX_CHUNKS, and text over MAX_CONTENT_BYTES. The handler also counts refusal,
+        reasoning and tool-call payloads, but the 1.101.0 bridge emits none of them on its chunks
+        (the refusal case above measures that), so text is the only payload a fixture can reach."""
+        patch = {"many-chunks": ("MAX_CHUNKS", 5), "oversized-text": ("MAX_CONTENT_BYTES", 8)}[kind]
+        with mock.patch.object(self.module, patch[0], patch[1]):
+            sent, closed, response, error = await self._exercise(f"e-{kind}", "success", PLATFORM_REQUEST)
         self.assertEqual(len(sent), 1)
-        self.assertLess(time.monotonic() - started, 15, "d-stall: the handler's deadline, not the stall")
+        self.assertEqual(type(error).__name__, "BadGatewayError", f"e-{kind}: {error!r}")
+        self.assertIsNone(response)
+        self.assertEqual(closed, ["transport"], f"e-{kind}: the abandoned upstream transport is closed")
+
+    async def _case_h_incompatible_map_entry(self):
+        """A map entry for the inner id that says supports_native_streaming false / mode chat (the
+        remote map could ship one) must not put the upstream call on the plain-POST path: the
+        handler pins the capability over the entry, not only when the entry is missing."""
+        inner = f"chatgpt/{INNER_MODEL}"
+        saved = litellm.model_cost.get(inner)
+        litellm.model_cost[inner] = {"litellm_provider": "chatgpt", "mode": "chat", "supports_native_streaming": False,
+                                     "input_cost_per_token": 0.0, "output_cost_per_token": 0.0}
+        self.module._REGISTERED.discard(INNER_MODEL)
+        try:
+            before = litellm.get_model_info(inner)
+            self.assertEqual((before.get("mode"), before.get("supports_native_streaming")), ("chat", False),
+                             "h: the incompatible entry is in place before the call")
+            sent, closed, response, error = await self._exercise("h-map", "success", PLATFORM_REQUEST)
+            after = litellm.get_model_info(inner)  # BEFORE restoration: what the handler merged in
+            self.assertEqual((after.get("mode"), after.get("supports_native_streaming")), ("responses", True),
+                             "h: the pins are merged over the existing entry")
+        finally:
+            if saved is None:
+                litellm.model_cost.pop(inner, None)
+            else:
+                litellm.model_cost[inner] = saved
+            self.module._REGISTERED.discard(INNER_MODEL)
+        self.assertIsNone(error, f"h: {error!r}")
+        self.assertEqual(len(sent), 1)
+        self._assert_wrapped_wire("h", sent[0])  # includes the native-streaming assertion
+        self.assertEqual(response.choices[0].message.content, ANSWER)
 
     # (e) -------------------------------------------------------------------------------------
     async def _case_e_negative(self, kind):
@@ -519,8 +643,14 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
             self.assertEqual(choice.finish_reason, "length",
                              "e-incomplete: response.incomplete(max_output_tokens) is a length stop, never a stop")
         elif kind == "refusal":
-            self.assertTrue(getattr(choice.message, "refusal", None) or not choice.message.content,
-                            "e-refusal: refusal surfaces as message.refusal or empty content, never as an answer")
+            # Measured in the pinned image (ADR 0027 accepted loss): the bridge carries no refusal
+            # text on its chunks, so the refusal comes back as EMPTY content with refusal None --
+            # never as an answer. The consumer fails closed on it (empty content is not its JSON),
+            # though not through its refusal guard. If a pin bump starts carrying the text, the
+            # second assertion flips and this note gets retired.
+            self.assertEqual(choice.message.content, "", "e-refusal: a refusal never yields answer text")
+            self.assertIsNone(getattr(choice.message, "refusal", None),
+                              "e-refusal: 1.101.0 drops the refusal text (measured); revisit on a pin bump")
         print(json.dumps({"case": f"e-{kind}", "finish": choice.finish_reason,
                           "content": (choice.message.content or "")[:40],
                           "refusal": getattr(choice.message, "refusal", None)}))
@@ -562,15 +692,24 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
                     await self._case_b_dsh_route_unchanged_and_concurrent()
                 with self.subTest(case="c"):
                     await self._case_c_streaming()
+                for kind in ("abandon", "stall-mid"):
+                    with self.subTest(case=f"c-{kind}"):
+                        await self._case_c_streaming_cancellation(kind)
                 for status, error_name in (("401", "AuthenticationError"), ("429", "RateLimitError"),
                                            ("503", "ServiceUnavailableError")):
                     with self.subTest(case=f"d-{status}"):
                         await self._case_d_upstream_rejection(status, error_name)
-                with self.subTest(case="d-stall"):
-                    await self._case_d_stall()
+                for kind in ("stall", "stall-mid"):
+                    with self.subTest(case=f"d-{kind}"):
+                        await self._case_d_stall(kind)
                 for kind in ("403html", "truncated", "incomplete", "refusal", "nousage"):
                     with self.subTest(case=f"e-{kind}"):
                         await self._case_e_negative(kind)
+                for kind in ("many-chunks", "oversized-text"):
+                    with self.subTest(case=f"e-{kind}"):
+                        await self._case_e_bounds(kind)
+                with self.subTest(case="h"):
+                    await self._case_h_incompatible_map_entry()
                 with self.subTest(case="f"):
                     await self._case_f_missing_file_device_flow()
             finally:
@@ -580,6 +719,8 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    if RETIRED:
+        print(RETIRED)
     package = pathlib.Path(litellm.__file__).parent
     sources = ("router.py", "llms/custom_llm.py", "llms/chatgpt/responses/transformation.py",
                "completion_extras/litellm_responses_transformation/transformation.py",
