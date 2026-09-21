@@ -243,48 +243,121 @@ class VerdictTests(unittest.TestCase):
         self.assertTrue(any("rebooted" in r for r in rep.recurrences))
 
 
+class FakeLoki:
+    """A corpus served the way Loki serves query_range: `end` EXCLUSIVE, newest `limit` records
+    (ties broken arbitrarily — here by stream order), so a boundary timestamp shared across streams
+    is only fully returned when the next page's end is set to oldest+1."""
+
+    def __init__(self, corpus):
+        self.corpus = sorted(corpus, key=lambda r: -r[0])  # (ts, line) newest first
+        self.calls = []
+
+    def __call__(self, url):
+        import urllib.parse
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        start, end, limit = int(q["start"][0]), int(q["end"][0]), int(q["limit"][0])
+        self.calls.append((start, end, limit))
+        rows = [r for r in self.corpus if start <= r[0] < end][:limit]
+        return {"status": "success", "data": {"result": [{"stream": {}, "values": [[str(t), l] for t, l in rows]}]}}
+
+
 class PaginationTests(unittest.TestCase):
-    """Source.loki_range against a fake HTTP layer: boundary timestamps shared across streams."""
+    """Source.loki_range against a fake that honours Loki's exclusive end and page limit."""
 
-    def make(self, pages):
+    def make(self, corpus):
         src = soak.Source("http://p", "http://l")
-        calls = []
-
-        def fake_get(url):
-            calls.append(url)
-            return pages.pop(0)
-
-        src._get = fake_get
-        return src, calls
-
-    @staticmethod
-    def page(lines):
-        return {"status": "success", "data": {"result": [{"stream": {}, "values": [[str(t), l] for t, l in lines]}]}}
+        fake = FakeLoki(corpus)
+        src._get = fake
+        return src, fake
 
     def test_boundary_timestamp_shared_by_two_streams_is_not_skipped(self):
         soak.LOKI_PAGE, saved = 3, soak.LOKI_PAGE
         try:
-            # page 1 (newest) ends at ts 100 with one of two records at 100; page 2 must start AT 100
-            p1 = self.page([(300, "c"), (200, "b"), (100, "a1")])
-            p2 = self.page([(100, "a2"), (100, "a1"), (50, "z")])
-            src, calls = self.make([p1, p2, self.page([])])
+            # two streams both have a record at ts=100; a page of 3 ending the first page at 100
+            # returns only one of them — the next page must be queried with end=101, not 100
+            corpus = [(300, "c"), (200, "b"), (100, "a1"), (100, "a2"), (50, "z")]
+            src, fake = self.make(corpus)
             lines, truncated = src.loki_range("{x}", 0, 400)
             self.assertFalse(truncated)
             self.assertEqual([l for _, l in lines], ["z", "a1", "a2", "b", "c"])
-            self.assertIn("end=100", calls[1])
+            self.assertEqual(fake.calls[1][1], 101)  # exclusive end re-includes ts=100
         finally:
             soak.LOKI_PAGE = saved
 
     def test_timestamp_that_alone_fills_a_page_is_reported_truncated(self):
         soak.LOKI_PAGE, saved = 2, soak.LOKI_PAGE
         try:
-            same = self.page([(100, "a"), (100, "b")])
-            src, _ = self.make([same, same, same])
+            corpus = [(100, "a"), (100, "b"), (100, "c"), (100, "d"), (10, "z")]
+            src, _ = self.make(corpus)
             lines, truncated = src.loki_range("{x}", 0, 400)
-            self.assertTrue(truncated)
-            self.assertEqual(len(lines), 2)
+            self.assertTrue(truncated)  # ts=100 alone fills every page: cannot be exhausted safely
         finally:
             soak.LOKI_PAGE = saved
+
+    def test_exact_page_boundary_terminates(self):
+        soak.LOKI_PAGE, saved = 2, soak.LOKI_PAGE
+        try:
+            corpus = [(400, "d"), (300, "c"), (200, "b"), (100, "a")]
+            src, fake = self.make(corpus)
+            lines, truncated = src.loki_range("{x}", 0, 500)
+            self.assertFalse(truncated)
+            self.assertEqual([l for _, l in lines], ["a", "b", "c", "d"])
+        finally:
+            soak.LOKI_PAGE = saved
+
+
+class CoverageAndRecoveryTests(unittest.TestCase):
+    def run_report(self, src, now=None):
+        return soak.run(src, T0, T1, ["talos-env-node-1"], now=now or T1 + 60)
+
+    def test_partial_readiness_series_is_incomplete(self):
+        prom = quiet_prom()
+        prom["node_ready"] = [series({"node": "talos-env-node-1"}, samples(T0, T0 + 600, 1))]  # first 10 min only
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("before the window end" in p for p in rep.problems))
+        prom = quiet_prom()
+        prom["node_ready"] = [series({"node": "talos-env-node-1"}, [[T1 - 60, "1"], [T1, "1"]])]  # a single Ready sample at the end
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "INCOMPLETE")
+        self.assertTrue(any("after the window start" in p for p in rep.problems))
+
+    def test_empty_kubelet_up_or_boot_time_is_incomplete(self):
+        for key in ("kubelet_up", "boot_time"):
+            prom = quiet_prom()
+            prom[key] = []
+            rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+            self.assertEqual(rep.verdict, "INCOMPLETE", key)
+
+    def test_stale_capacity_sample_does_not_count_as_recovery(self):
+        # closure at T0+1530 (between steps); member_ready's max_over_time keeps the pre-fault 1 at
+        # T0+1560 and T0+1620 — those must not read as recovery; readiness never returns afterwards
+        loki = quiet_loki()
+        loki["watchdog"] = [(int((T0 + 1530) * 1e9), "ready-watchdog: ready-port closed: virtiofs hung")]
+        prom = capacity_dip(quiet_prom(), T0 + 1680, T1 + 1)
+        rep = self.run_report(FakeSource(prom, loki=loki))
+        self.assertEqual(rep.verdict, "UNRESOLVED", rep.markdown())
+
+    def test_restart_without_recovery_is_unresolved(self):
+        prom = quiet_prom()
+        vals = samples(T0, T1, 0)
+        for s in vals[30:]:
+            s[1] = "1"  # one restart at T0+1800
+        prom["restarts"] = [series({"pod": "env-std-pool-abcde", "container": "control"}, vals)]
+        prom = capacity_dip(prom, T0 + 1800, T1 + 1)
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "UNRESOLVED", rep.markdown())
+        self.assertTrue(any("restart of" in u for u in rep.unresolved))
+
+    def test_checkpoint_only_advances_on_complete_data(self):
+        prom = quiet_prom()
+        prom["alerts"] = [series({"alertname": "TestpoolEnvTeardownStuck", "alertstate": "firing"}, samples(T0 + 600, T0 + 1200, 1))]
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki(), fail={"relay"}))
+        self.assertEqual(rep.verdict, "PREVENTION-FAILED")
+        self.assertFalse(soak.should_advance_checkpoint(rep))
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "PREVENTION-FAILED")
+        self.assertTrue(soak.should_advance_checkpoint(rep))
 
 
 class HelperTests(unittest.TestCase):

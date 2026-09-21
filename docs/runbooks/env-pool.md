@@ -198,21 +198,24 @@ with a shorter `REAP_AFTER_SECONDS` next to the production DaemonSet: it would r
 invalidate the production timing and truncate the evidence window. (The pre-merge validation of
 2026-09-20 used a 5 s hack copy only because the production reaper did not exist yet.) Scope the
 injection to one identified idle member — record its pod UID and sandbox id — and re-validate each
-PID immediately before signalling. Freezing the current member's VMM:
-
-```sh
-POD=$(kubectl -n kube-system get pod -l app.kubernetes.io/name=env-reaper -o name)
-kubectl -n kube-system exec $POD -- sh -c 'for cg in /proc/[0-9]*/cgroup; do grep -q "/kata_" "$cg" 2>/dev/null && p=${cg#/proc/} && p=${p%/cgroup} && [ "$(readlink /proc/$p/exe)" = /usr/local/bin/cloud-hypervisor ] && echo $p; done'
-kubectl -n kube-system exec $POD -- kill -STOP <pid>          # a frozen VMM: Kata's monitor declares it dead in ~13 s
-kubectl -n testpool delete sandbox <member>                    # ...and the shim completes the stop by itself (<30 s)
-```
-
-That is NOT the incident's hang. The faithful one freezes the sandbox's **virtiofsd** instead (two
+PID immediately before signalling. **The faithful injection freezes the member's virtiofsd** (two
 processes, `exe=/usr/local/libexec/virtiofsd`, cgroup `/kata_overhead/<sandbox-id>`): guest
 processes block in D-state on the rootfs while the agent keeps answering — `kubectl exec` into the
 member hangs outright, the delete leaves the pod `Terminating` with `stop_*` errors climbing, and
 only the reaper's stage 1 ends it (validated twice on 2026-09-20, 8.5 min hang → gone within 30 s
-of the reap, zero residuals).
+of the reap, zero residuals):
+
+```sh
+POD=$(kubectl -n kube-system get pod -l app.kubernetes.io/name=env-reaper -o name)
+SB=<sandbox-id>   # from the member's cloud-hypervisor cgroup: kubectl -n kube-system exec $POD -- sh -c 'grep -l "/kata_" /proc/[0-9]*/cgroup' → .../pod<uid>/kata_<id>
+kubectl -n kube-system exec $POD -- sh -c "for cg in /proc/[0-9]*/cgroup; do grep -q \"/kata_overhead/$SB\" \"\$cg\" 2>/dev/null && p=\${cg#/proc/} && p=\${p%/cgroup} && [ \"\$(readlink /proc/\$p/exe)\" = /usr/local/libexec/virtiofsd ] && echo \$p; done"
+kubectl -n kube-system exec $POD -- kill -STOP <pid-1> <pid-2>   # both virtiofsd processes of THAT sandbox, re-listed right before this
+kubectl -n testpool delete sandbox <member>                        # the teardown now hangs until the reaper's stage 1
+```
+
+Freezing the **VMM** instead (`exe=/usr/local/bin/cloud-hypervisor`, cgroup `/kata_<sandbox-id>`) is
+NOT the incident's hang: Kata's monitor declares an unresponsive VMM dead in ~13 s and the shim
+completes the stop by itself (<30 s) — useful only to show that self-heal path.
 
 Watch `kubectl -n kube-system logs -f $POD` for `reap stage=1 …`; the pod must be gone within 60 s
 of that line, `talosctl processes` must show no process for the sandbox, `/run/vc/sbs/<id>` and

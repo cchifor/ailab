@@ -96,6 +96,9 @@ spec:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
+        # fsGroup: the kubelet projects Secret files as root:<fsGroup>; without it the 0440 config
+        # below is root:root and talosctl (uid 65534) gets EACCES — the relay would crash-loop.
+        fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -134,7 +137,7 @@ spec:
             items:
               - key: config
                 path: config
-                mode: 288 # 0440 in decimal (YAML 1.1/1.2 parsers disagree on octal literals)
+                mode: 288 # 0440 in decimal (YAML 1.1/1.2 parsers disagree on octal literals); readable via fsGroup 65534
         - name: tmp
           emptyDir:
             sizeLimit: 8Mi

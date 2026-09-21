@@ -56,6 +56,8 @@ PROM_RETENTION_DAYS = 12  # retentionSize: 36GB binds before retention: 15d (kub
 HEARTBEAT_GAP_SECONDS = 15 * 60  # reaper heartbeat every ~10 min; a 15 min gap = the reaper was silent
 RELAY_GAP_SECONDS = 15 * 60  # at [debug] level the shim/agent chatter is continuous; silence = capture gap
 RECOVERY_BOUND_SECONDS = 10 * 60  # closure → GC → reap (~150 s) → refill (~2 min): capacity back well inside 10 min
+CAPACITY_AGG_SECONDS = 60  # member_ready is max_over_time over the preceding minute: a sample at t covers [t-60, t]
+MIN_COVERAGE = 0.8  # a required series must have ≥ 80 % of the window's steps and touch both boundaries
 ALERT_RE = "Testpool.*|EnvNode.*"
 
 # Every query the report runs, by name — reproduced verbatim in docs/runbooks/env-pool.md.
@@ -119,9 +121,10 @@ class Source:
 
     def loki_range(self, expr: str, start_ns: int, end_ns: int) -> tuple[list[tuple[int, str]], bool]:
         """All (ts_ns, line) in [start, end], newest page first, walked back by timestamp.
-        The next page ends AT the oldest timestamp seen (inclusive) so records sharing a boundary
-        timestamp across streams are not skipped; (ts, line) pairs are deduplicated. A page that
-        makes no progress (every line at one timestamp) cannot be exhausted safely → truncated.
+        Loki's `end` is EXCLUSIVE, so the next page ends at oldest+1 to re-include the boundary
+        timestamp: records sharing it across streams are not skipped and the already-seen ones are
+        deduplicated as (ts, line) pairs. A page that makes no progress (every line at one
+        timestamp) cannot be exhausted safely → truncated.
         Returns (lines, truncated) — truncated=True also when LOKI_MAX_PAGES was hit."""
         out: set[tuple[int, str]] = set()
         end = end_ns
@@ -136,9 +139,9 @@ class Source:
             if len(page) < LOKI_PAGE:
                 return sorted(out), False
             oldest = min(t for t, _ in page)
-            if oldest >= end or len(out) == before:
+            if oldest + 1 >= end or len(out) == before:
                 return sorted(out), True  # no progress possible: a timestamp alone fills a page
-            end = oldest
+            end = oldest + 1  # exclusive end → the boundary timestamp is queried again
             if end <= start_ns:
                 return sorted(out), False
         return sorted(out), True
@@ -232,6 +235,25 @@ def sample_gaps(values: list[tuple[float, float]], step: int = STEP_SECONDS, fac
     return gaps
 
 
+def coverage_problem(name: str, vals: list[tuple[float, float]], start: float, end: float, step: int = STEP_SECONDS) -> str | None:
+    """Why a required series does not cover the window (None = it does)."""
+    expected = max(1, int((end - start) / step))
+    if not vals:
+        return f"{name}: no samples in the window"
+    if vals[0][0] > start + 2 * step:
+        return f"{name}: first sample at {iso(vals[0][0])}, {fmt_dur(vals[0][0] - start)} after the window start"
+    if vals[-1][0] < end - 2 * step:
+        return f"{name}: last sample at {iso(vals[-1][0])}, {fmt_dur(end - vals[-1][0])} before the window end"
+    if len(vals) < MIN_COVERAGE * expected:
+        return f"{name}: only {len(vals)} of ~{expected} samples"
+    return None
+
+
+def should_advance_checkpoint(rep: "Report") -> bool:
+    """The checkpoint moves only over a window whose data is complete — whatever the verdict."""
+    return not rep.problems
+
+
 def _series(result: list) -> dict[tuple, list[tuple[float, float]]]:
     out = {}
     for s in result:
@@ -278,6 +300,9 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
             rep.problems.append(f"no kube_node_status_condition series for expected node {n}")
     for key, vals in sorted(prom["node_ready"].items()):
         node = _label(key, "node")
+        cov = coverage_problem(f"{node} readiness", vals, start, end)
+        if cov:
+            rep.problems.append(cov)
         notready = intervals_where(vals, lambda v: v < 1)
         for a, b in notready:
             rep.failures.append(f"{node} NotReady {iso(a)} → {iso(b)} ({fmt_dur(b - a)})")
@@ -285,9 +310,14 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         for a, b in gaps:
             rep.problems.append(f"{node}: no readiness samples {iso(a)} → {iso(b)} ({fmt_dur(b - a)})")
         kdown = []
-        for k2, v2 in prom["kubelet_up"].items():
-            if _label(k2, "node") == node:
-                kdown = intervals_where(v2, lambda v: v < 1)
+        kup = [v2 for k2, v2 in prom["kubelet_up"].items() if _label(k2, "node") == node]
+        if not kup:
+            rep.problems.append(f"{node}: no kubelet /metrics target series (up{{job=\"kubelet\"}}) in the window")
+        for v2 in kup:
+            cov = coverage_problem(f"{node} kubelet up", v2, start, end)
+            if cov:
+                rep.problems.append(cov)
+            kdown = intervals_where(v2, lambda v: v < 1)
         boots = set()
         for k3, v3 in prom["boot_time"].items():
             boots |= {int(v) for _, v in v3}
@@ -297,6 +327,12 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
             + f" | {len(boots)} ({', '.join(iso(b) for b in sorted(boots))}) | {len(gaps)} |"
         )
     boot_vals = sorted({int(v) for vals in prom["boot_time"].values() for _, v in vals})
+    if not boot_vals:
+        rep.problems.append("no node_boot_time_seconds series for the env node(s) — reboots inside the window cannot be excluded")
+    for key, vals in prom["boot_time"].items():
+        cov = coverage_problem(f"boot_time {_label(key, 'instance')}", vals, start, end)
+        if cov:
+            rep.problems.append(cov)
     if len(boot_vals) > 1:
         rep.recurrences.append(f"node rebooted inside the window (boot times {', '.join(iso(b) for b in boot_vals)}) — new epoch")
 
@@ -309,6 +345,7 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
             continue
         members[pod] = {"first": vals[0][0], "last": vals[-1][0], "max_age": max(v for _, v in vals)}
     restarts = {}
+    restart_events: list[tuple[float, str]] = []
     for key, vals in prom["restarts"].items():
         pod = _label(key, "pod")
         if vals:
@@ -316,6 +353,9 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
             restarts[pod] = restarts.get(pod, 0) + delta
             if delta > 0:
                 rep.recurrences.append(f"{pod}/{_label(key, 'container')} restarted {int(delta)}× inside the window (guest sandbox restart?)")
+            for (t0, v0), (t1, v1) in zip(vals, vals[1:]):
+                if v1 > v0:
+                    restart_events.append((t1, f"restart of {pod}/{_label(key, 'container')}"))
     for pod, m in sorted(members.items(), key=lambda kv: kv[1]["first"]):
         rep.sections.append(f"| {pod} | {iso(m['first'])} | {iso(m['last'])} | {fmt_dur(m['max_age'])} | {int(restarts.get(pod, 0))} |")
     ended = [p for p, m in members.items() if m["last"] < end - 2 * STEP_SECONDS]
@@ -417,10 +457,26 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
     event_times += [(t / 1e9, "reap") for t, l in loki["reaper"] if re.search(r"(^|\s)reap stage=", l)]
     event_times += [(members[p]["last"], f"member {p} gone") for p in ended]
     event_times += [(b, "reboot") for b in boot_vals[1:]]
+    event_times += restart_events
     if event_times and not cap:
         rep.problems.append("events in the window but no Sandbox pod readiness series to prove recovery")
+    if cap:
+        cov = coverage_problem("warm capacity (member readiness)", cap, start, end)
+        if cov:
+            rep.problems.append(cov)
     for et, what in sorted(event_times):
-        back = next((t for t, v in cap if t >= et and v >= 1), None)
+        # Recovery is only meaningful after capacity was OBSERVED to drop following the event (a
+        # pod stays Ready for a probe window after a stall, so a positive sample right after the
+        # event is not recovery). member_ready aggregates the preceding CAPACITY_AGG_SECONDS, so a
+        # positive sample at t proves readiness in [t-agg, t]: it counts only when t-agg >= drop.
+        drop = next((t for t, v in cap if t >= et and v < 1), None)
+        if drop is None:
+            if end - et < 3 * STEP_SECONDS:
+                rep.unresolved.append(f"{what} at {iso(et)}: too close to the window end to observe its effect — still open")
+            else:
+                rep.sections.append(f"- {what} at {iso(et)}: no capacity loss observed afterwards")
+            continue
+        back = next((t for t, v in cap if t - CAPACITY_AGG_SECONDS >= drop and v >= 1), None)
         if back is None:
             if end - et < RECOVERY_BOUND_SECONDS:
                 rep.unresolved.append(f"{what} at {iso(et)}: capacity not back by the window end ({fmt_dur(end - et)} later) — still open")
@@ -474,9 +530,11 @@ def main(argv: list[str] | None = None) -> int:
     rep.sections.append("")
     rep.sections.append(f"Raw export: `{export_dir}` (gitignored; keep for the retention window)")
     sys.stdout.write(rep.markdown())
-    if args.checkpoint and rep.verdict != "INCOMPLETE":
+    if args.checkpoint and should_advance_checkpoint(rep):
         args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
         args.checkpoint.write_text(json.dumps({"to": iso(end), "verdict": rep.verdict}), encoding="utf-8")
+    elif args.checkpoint:
+        sys.stderr.write("checkpoint NOT advanced: the window has incomplete data (see problems); re-run it after the gap is understood\n")
     return 0 if rep.verdict in ("OK", "RECURRENCE-CONTAINED") else 1  # UNRESOLVED/INCOMPLETE/FAILED are non-zero
 
 
