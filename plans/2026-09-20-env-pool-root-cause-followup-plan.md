@@ -1,16 +1,8 @@
 # env-pool follow-up: root-cause the guest freeze, close the pool SPOF, file upstream, run V6
 
-## Codex Review
-
-- The adoption safeguards and separate retirement plan substantially improve scope and rollback control; the new pre-apply output path still needs correction.
-- The relay needs an operator-only namespace, explicit network/placement constraints and a defined Talos credential lifetime; testpool's existing exec access exposes the proposed Secret.
-- Reconnect replay, source identity and continuous capture health must be verified before treating Loki as complete evidence; its LAN API also widens debug-log exposure.
-- Reaper diagnostics need bounded collection, useful thread-level evidence and an explicit rollout; soak verdicts need exhaustive outcomes and proof of recovered capacity.
-- Node 2 needs its own CRI capture and a registration-time scheduling barrier; the degraded recovery check and new upstream reproductions need small but material corrections.
-
 Repo `ailab` · branch `ops/env-pool-root-cause-followup` off `gitea/main` `af16cc83` (worktree
 `.worktrees/env-pool-followup`) · this file: `plans/2026-09-20-env-pool-root-cause-followup-plan.md`
-(approved by the operator on 2026-09-20; codex round 1 addressed 2026-09-21) · prior plan:
+(approved by the operator on 2026-09-20; codex rounds 1 and 2 addressed 2026-09-21, finalized) · prior plan:
 `plans/2026-09-20-env-pool-frozen-guest-outage-plan.md` (PR **#800, merged 2026-09-20 15:09 UTC**).
 
 ## Context
@@ -163,19 +155,19 @@ backend.tf, outputs.tf, terraform.tfvars.example (new), SPIKE-REPORT.md}`, `just
   gets **`no_reboot`** for the adoption apply (Talos refuses anything that would reboot, with the
   diff in the error) and **`staged`** from T2 on (steady state for running env nodes: tofu never
   reboots or live-edits the node; every config change = plan → apply → explicit `talosctl reboot`).
-  `auto` stays the default only for a node's very first apply (maintenance mode). New `kata_debug`
-  (bool, default `false` until T2's gate) and `kata_agent_debug` (bool, default `true`) gate the
-  template block so the T1 tree renders **exactly today's config**.
-- `talos.tf`: `apply_mode = each.value.apply_mode`; `outputs.tf`: `rendered_machine_configuration`
-  (sensitive, per node) so the complete generated-and-patched config can be extracted without
-  parsing plan JSON. **Complete comparison before G1's config apply** (codex blocking item): extract
-  the rendered config to `_out/`, run `talosctl-1112.exe … apply-config --dry-run --mode=auto -f …`
-  against the node — it must report "Applied configuration without a reboot (skipped in dry-run)"
-  **and an empty diff**. The provider's own `no_reboot` is the second guard. Lockfile stays at
-  talos 0.11.0 / bpg 0.113.1 / kubernetes 3.2.1; a stale plan is re-planned, never applied.
-
-<!-- codex: round-2: The new output does not by itself provide a pre-apply configuration: `tofu output` reads the last applied state, so at T2 it would return the T1 config (and it may not exist at G1). Extract the planned output from the saved plan JSON, or specify a separate render-only path, so the dry-run validates exactly the configuration about to be applied. -->
-
+  `auto` stays the default only for a node's very first apply (maintenance mode). A new
+  `kata_debug` bool (default `false` until T2's gate) gates the template block so the T1 tree
+  renders **exactly today's config** — proven with the real engine: `kata_debug=false` renders
+  byte-identical to the pre-change template.
+- `talos.tf`: `apply_mode = each.value.apply_mode`. **Complete comparison before G1's config
+  apply** (codex blocking item): the configuration *about to be applied* is the resource's
+  `machine_configuration` in the **saved plan** (`tofu plan -out=… && tofu show -json …` →
+  `resource_changes[].change.after.machine_configuration`, written under `_out/` — it holds cluster
+  secrets); run `talosctl-1112.exe … apply-config --dry-run --mode=auto -f <that file>` against the
+  node — it must report "Applied configuration without a reboot (skipped in dry-run)" **and an
+  empty diff**. (A `tofu output` would show the *last applied* config — at T2 that is T1's — so no
+  output is added.) The provider's own `no_reboot` is the second guard. Lockfile stays at talos
+  0.11.0 / bpg 0.113.1 / kubernetes 3.2.1; a stale plan is re-planned, never applied.
 - `node-labels.tf`: `provider "kubernetes"` gets `config_context = "admin@ai"` (a merged kubeconfig
   would otherwise select its default context, which is a different cluster). `kubernetes_labels` and
   `kubernetes_node_taint` are "create = adopt" resources (no import); managedFields were inspected:
@@ -196,24 +188,27 @@ unchanged; kubelet not restarted.
 
 ### T2 — Kata debug evidence: config + containerd debug + durable capture (one reboot)
 
-Files: `kubernetes/infra/env-pool/machine-config/{worker.yaml.tftpl, kata/configuration.toml (new,
-verbatim), kata/config.d/10-debug.toml (new)}`, `talos.tf`, `variables.tf`,
-`kubernetes/apps/infrastructure/testpool/{cri-log-relay.yaml (new), env-reaper.yaml}`,
-`kubernetes/apps/infrastructure/testpool/kustomization.yaml`, `docs/runbooks/env-pool.md`.
+Files: `kubernetes/infra/env-pool/machine-config/{worker.yaml.tftpl, cri-20-customization.part (new),
+kata/configuration.toml (new, verbatim), kata/config.d/10-debug.toml (new)}`, `talos.tf`,
+`variables.tf`, `kubernetes/apps/infrastructure/monitoring/{cri-log-relay.yaml (new),
+cri-log-relay-talosconfig.sops.yaml (new, minted at G1/G2), kustomization.yaml}`,
+`kubernetes/apps/infrastructure/testpool/env-reaper.yaml`, `docs/runbooks/env-pool.md`.
 
 - **T2a Kata config.** `kata/configuration.toml` = byte-for-byte copy of the extension's file
   (captured with `MSYS_NO_PATHCONV=1 … talosctl read … > file` in Git Bash — PowerShell redirection
   re-encodes; sha256 above, identical on two reads; single trailing newline). The drop-in
   `config.d/10-debug.toml` sets `[hypervisor.clh] enable_debug = true` (cloud-hypervisor `-v` and the
   guest serial console into the shim log as `vmconsole` lines — guest kernel hung-task traces are the
-  evidence a virtio-fs stall leaves), `[agent.kata] enable_debug = ${kata_agent_debug}` (the chatty
-  one; the volume lever), `[runtime] enable_debug = true`. `debug_console_enabled` stays off (no
+  evidence a virtio-fs stall leaves), `[agent.kata] enable_debug = true` (the chatty one; the volume
+  lever — tier 2 edits this **static** file to `false`; the drop-in is delivered through `file()`,
+  so it is never a template), `[runtime] enable_debug = true`. `debug_console_enabled` stays off (no
   `kata-runtime` on Talos; a frozen guest hangs shells anyway). Its header records the base file's
   sha256, the extension version (`kata-containers 3.20.0`), schematic and Talos version;
   **re-verifying that hash against the node is a documented precondition of any env-node image or
   extension upgrade** (runbook), and V2 checks it after boot. The files are world-readable
   configuration only — no credentials.
-- **T2b containerd + CRI part** (rendered inline in the template, not a separate file):
+- **T2b containerd + CRI part** (`machine-config/cri-20-customization.part`, a real file passed
+  through `file()` like the others):
   ```toml
   [debug]
     level = "debug"
@@ -221,91 +216,90 @@ verbatim), kata/config.d/10-debug.toml (new)}`, `talos.tf`, `variables.tf`,
     ConfigPath = "/var/etc/kata-containers/configuration.toml"
   ```
   Only `ConfigPath` (a scalar; later part wins) and `[debug]` are set; `runtime_type`,
-  `pod_annotations`, `privileged_without_host_devices` are inherited. This affects every pod using
-  handler `kata` **on these env nodes only** (the agent-nodes module has its own template);
+  `pod_annotations`, `privileged_without_host_devices` are inherited. `ConfigPath` is scoped to
+  handler `kata` on these env nodes only (the agent-nodes module has its own template);
+  **`[debug] level` is containerd-wide on the node** — the runc DaemonSets there (cilium, csi,
+  alloy, prepull, the reaper) log at debug too, and every `kubectl exec` into them (the V2
+  injection included) is a debug record; they are part of the volume and privacy assessment.
   `RuntimeClass kata-env` keeps handler `kata`, so no k8s object changes. V2 diffs the complete
   rendered `kata` runtime table in `cri.toml` before/after (only `ConfigPath` may differ) and proves
   a new member runs the Kata guest (`uname -r` = 6.12.42 ≠ node 6.12.48) — the ConfigPath text alone
   is not proof.
-
-<!-- codex: round-2: The new `[debug]` setting is containerd-wide on each env node, not scoped to handler `kata`; only `ConfigPath` is handler-scoped. Include the node's runc/system workloads in the log-volume and privacy assessment. -->
-
 - **Template.** `worker.yaml.tftpl` gets a `%{ if kata_debug }` block with three `machine.files`
   entries (`op: create`, `permissions: 0o644`, paths exactly `/etc/cri/conf.d/20-customization.part`,
   `/var/etc/kata-containers/configuration.toml`, `/var/etc/kata-containers/config.d/10-debug.toml`);
-  the TOML content is passed in from `talos.tf` (`file()` on module-relative paths) and placed with
-  `indent(8, …)` inside `content: |` block scalars (blank lines stay empty, clip chomping leaves one
-  trailing newline → byte-identical). Before G2 the rendered YAML is parsed and the three contents
-  are extracted and diffed against the source files; after the reboot each file is read back and
-  sha256-compared. A future `config.d/20-virtiofs.toml` needs its **own** `machine.files` entry — a
+  the TOML content is passed in from `talos.tf` (`file()` on module-relative paths — no
+  interpolation happens inside those files, by design) and placed with `indent(8, …)` inside
+  `content: |` block scalars. **Rendered with the real engine on 2026-09-21:** all three delivered
+  contents are byte-identical to the source files (the Kata copy hashes to `38d1e30b…`), and
+  `kata_debug=false` renders exactly the pre-change template. After the reboot each file is read
+  back and sha256-compared. A future `config.d/20-virtiofs.toml` needs its **own** `machine.files` entry — a
   repo file alone ships nothing. Every drop-in that may exist on the node is an explicit entry
   (declarative), and V2/V3 list `config.d/` to catch strays. The same template serves env-node-2, so
   both nodes run identical Kata settings by construction.
-
-<!-- codex: round-2: The new `${kata_agent_debug}` interpolation will remain literal if `10-debug.toml` is passed through `file()`; `templatefile(worker.yaml.tftpl, ...)` does not recursively expand strings supplied as variables. Render the parameterized drop-in explicitly and compare its rendered bytes, rather than its template source, with the delivered TOML. -->
-
-- **T2c durable capture (blocking item).** A one-replica Deployment `cri-log-relay` in `testpool`'s
-  Flux Kustomization but scheduled **off** the env node (no `dedicated=env` toleration → lands on a
-  CP), image `ghcr.io/siderolabs/talosctl:v1.11.2` (digest-pinned via the estate mirror), running
-  `while true; do talosctl -n 192.168.0.37 -e 192.168.0.41 logs cri -f --tail 200; sleep 5; done`
-  with a **read-only `os:reader` talosconfig** minted by `talosctl config new --roles os:reader`
-  (a new credential → G2 scope) stored as a SOPS Secret. Its stdout is a pod log → Alloy → Loki
-  (`{namespace="testpool", app="cri-log-relay"}`, 168 h). Reconnects re-emit ≤200 lines (dedupe by
-  timestamp when reading). This is the only durable home for shim/agent/`vmconsole` lines; it must be
-  Ready **before** the reboot, and V2 proves it retained the injected incident through teardown.
-  Alternative kept in reserve: `machine.logging.destinations` (immediate-apply) into an Alloy TCP
-  receiver — more plumbing, no reboot; chosen only if the relay proves unreliable.
-
-<!-- codex: round-2: Blocking: `testpool/tep-access.yaml` grants every dev-worker `pods/exec` and `pods/log` access to every pod in `testpool`, so placing the relay there exposes its mounted Talos credential and host logs despite SOPS encryption in Git. Put the relay and Secret in an operator-only namespace, with a dedicated ServiceAccount, no Kubernetes RBAC grants or automounted API token, and verify worker credentials cannot exec into it. -->
-
-<!-- codex: round-2: `testpool/env-egress` selects every pod and already permits general LAN/internet egress; adding a restrictive relay NetworkPolicy cannot subtract that allowance because policies are additive. Use an isolated namespace or disjoint selectors, permit the required Talos API connections explicitly, and preserve the existing env-pod isolation. -->
-
-<!-- codex: round-2: `os:reader` is a cluster-wide Talos read role, not a credential restricted to `.37` or the CRI log; CLI endpoint/node settings are not authorization boundaries. Specify an explicit certificate lifetime, renewal owner and reload procedure for an extended soak, and document that deleting/reverting the SOPS Secret does not revoke a copied certificate. -->
-
-<!-- codex: round-2: Use explicit required node affinity for the relay; lack of an env toleration can still admit it during T4b's untainted registration window. If host-loss evidence is part of the availability claim, choose a control-plane VM on a different Proxmox host as well. -->
-
-<!-- codex: round-2: The proposed `while`/`sleep` loop needs a shell-capable image and an explicit entrypoint; availability of `/bin/sh` and `sleep` in the pinned talosctl image has not been established. Smoke-test that exact image/command before G2 or specify a minimal pinned wrapper that supplies them. -->
-
-<!-- codex: round-2: `--tail 200` discards every retained line beyond the last 200 after a disconnect, including startup/fault bursts that still fit in Talos's ring. Replay the available ring on reconnect and record unrecoverable gaps, with a disconnect/reconnect test during a burst before calling the capture durable. -->
-
-<!-- codex: round-2: Deduplicating by timestamp alone can delete distinct records emitted at the same timestamp. Preserve raw exports and deduplicate replay using source node/service, original timestamp and line content with overlap multiplicity accounted for. -->
-
-<!-- codex: round-2: A retry loop can keep the pod Ready indefinitely while authentication or streaming fails, so pod readiness and one historical Loki line do not establish ongoing capture. Record per-source connection/gap status and ingestion freshness, mark unobserved intervals `INCOMPLETE`, and test a failed connection plus recovery. -->
-
-<!-- codex: round-2: Alloy currently labels `node` from the relay pod's Kubernetes node and timestamps these records with the outer pod-log time; neither identifies the originating env node/event time after replay. Preserve explicit source-node and original-event-time fields and use them for incident correlation while retaining the collector identity. -->
-
+- **T2c durable capture (blocking item).** A one-replica Deployment `cri-log-relay` in namespace
+  **`monitoring`** (`kubernetes/apps/infrastructure/monitoring/cri-log-relay.yaml`, decrypted by the
+  `infrastructure` Flux Kustomization) — **not `testpool`**, whose `tep-worker` Role gives every
+  dev-worker `pods/exec` + `pods/log` on every pod there (the Secret and the stream would be
+  readable), and whose `env-egress` NetworkPolicy selects every pod (policies are additive, so a
+  restrictive one could not subtract that allowance); not `kube-system`, which needs no node
+  privilege here. Dedicated ServiceAccount with no RBAC and no mounted token; V2 checks
+  `kubectl auth can-i --as=system:serviceaccount:testpool:tep-dw1 create pods/exec -n monitoring`
+  → no. Image `ghcr.io/siderolabs/talosctl:v1.11.2` pinned by index digest — it is **scratch +
+  `/talosctl`**, so there is no shell loop: the container runs `talosctl --endpoints 192.168.0.41
+  --nodes 192.168.0.37 logs cri --follow` and the kubelet restarts it when the stream ends (backoff
+  10 s → 5 min, reset after 10 min up; V2 measures the gap across the env node's reboot). **No
+  `--tail`**: every (re)connect replays the whole retained ring, so a burst that still fits the ring
+  is never cut to the last N lines; readers dedupe on (original timestamp, content), never on the
+  timestamp alone, and raw exports are kept. Source identity: one `--nodes` value = one source;
+  each containerd record carries its own `time=` (Alloy's timestamp and `node` label describe the
+  relay pod); with two nodes talosctl prefixes the node IP. Placement: required nodeAffinity to a
+  control-plane node, preferring any but `talos-cp2` (same Proxmox host as the env node) — explicit,
+  because T4b's fresh node registers untainted for a moment. Credential: `talosctl config new
+  --roles os:reader --crt-ttl 2160h` — Talos's **cluster-wide** read role (logs/read/get on every
+  node; endpoints/nodes are routing, not authorization), 90-day cert, owner = operator, re-minted
+  at each epoch boundary or every 60 days + sops re-encrypt + `rollout restart`; Talos has no CRL,
+  so deleting the Secret does not revoke a copied cert — a suspected leak means rotating the Talos
+  CA. Stream: `{namespace="monitoring", app="cri-log-relay"}` in Loki (168 h). **Capture health is
+  measured, not assumed:** the soak report marks any stretch > 15 min without relay lines (at
+  `[debug]` the shim/agent chatter is continuous) and any reaped sandbox without relay lines as
+  `INCOMPLETE`; V2 tests a forced disconnect during a burst. **Exposure:** Loki is
+  `auth_enabled: false` on LAN NodePort `:30310`, reachable from env pods too; before ordinary
+  leases resume, V2 runs a lease with synthetic secrets in its environment/commands and greps Loki —
+  if they appear, the tier drops (agent debug off, then `[debug]` off) or a redaction stage is
+  added before debug stays on; already-ingested lines are purged with Loki's delete API. Retention
+  bounds: Loki's 168 h applies to ingested records; the relay pod's own log rotates under the
+  kubelet (10 MiB × 5) and the node ring is ~1 MiB, so an Alloy/Loki outage longer than that
+  backlog is an explicit evidence gap, never silently "retained". Alternative kept in reserve:
+  `machine.logging.destinations` into an Alloy TCP receiver.
 - **T2d reaper evidence dump.** `env-reaper.yaml` `reap.sh`: immediately before each stage-1
-  SIGKILL, log (same line format, `evidence pid=<n> exe=<path> wchan=<…> threads=<n>` plus the
-  first 20 lines of `/proc/<pid>/stack`) for the cloud-hypervisor and virtiofsd PIDs, after
-  re-validating the identity chain; failures to read are logged and never block the kill. This is the
-  "host virtiofsd state before cleanup" that a 150 s window otherwise loses. Namespace boundary, RBAC
-  and identity checks are unchanged; #800's untested limits (stage 2, containerd restart mid-reap,
-  simultaneous hangs) stay untested and are restated in the runbook.
-
-<!-- codex: round-2: `/proc/<pid>/stack` and `wchan` describe the thread-group leader, which may be idle while a virtiofsd worker or VMM thread is blocked. Capture a bounded selection of `/proc/<pid>/task/<tid>/{status,wchan,stack}` with node, pod UID, sandbox and TID on each record; do not treat kernel stacks as userspace deadlock backtraces. -->
-
-<!-- codex: round-2: A 20-line limit is not a time bound on synchronous evidence collection. Give collection a small total deadline and test failed or stalled reads so diagnostics cannot delay the stage-1 kill or subsequent pods' recovery. -->
-
-<!-- codex: round-2: The new collection delay widens the PID-reuse window after the stated identity check. Revalidate process start time plus the sandbox identity after collecting evidence and immediately before SIGKILL, with an exited/reused-PID fixture. -->
-
-<!-- codex: round-2: `reap.sh` is loaded by a long-running shell from a ConfigMap, so changing that ConfigMap alone will not reliably activate the new functions or roll them back. Include a DaemonSet pod-template revision/checksum change for both rollout and revert, verify the running revision, and avoid overlapping reaper instances on a node. -->
-
+  SIGKILL, one `evidence … state= wchan= threads= tstates=` line for the process and, per thread
+  (first 16 of `/proc/<pid>/task/*` — the leader may be idle while a virtiofsd worker is stuck),
+  an `evidence-thread … tid= state= wchan=` line plus `evidence-stack … tid= stack=` (kernel stack,
+  12 frames) for threads in D/T — kernel stacks, not userspace backtraces. The whole collection
+  runs under `timeout 5` in a child shell (a stalled `/proc` read cannot delay the kill beyond the
+  bound; unreadable = `?`), and because it widens the match→kill window the identity chain
+  (cgroup + exe + cmdline for the sandbox) is **re-checked immediately before SIGKILL**; a PID that
+  no longer matches is skipped with a `skip-kill … reason=identity-changed` line. `reap.sh` is read
+  once at container start, so the pod template carries an `env-reaper.ailab.io/script-revision`
+  annotation that is bumped on every script change (rolling the DaemonSet, one pod per node — no
+  overlapping reapers) and reverted with it. Functions verified on a real `/proc` (WSL) on
+  2026-09-21. Namespace boundary, RBAC and identity checks are unchanged; #800's untested limits
+  (stage 2, containerd restart mid-reap, simultaneous hangs) stay untested and are restated in the
+  runbook.
 - **Privacy of debug output.** Shim debug logs contain exec commands, environment and mount
   details of leases. V2 inspects the emitted fields for one real `tep` lease before debug stays on;
   raw evidence lives only in `_out/` / Loki, and this repository (mirrored publicly) receives
   redacted excerpts only. If the fields are unacceptable, `kata_agent_debug = false` and, if still
   unacceptable, `[debug] level` is dropped — accepting the loss of guest lines — and the decision is
   recorded.
-
-<!-- codex: round-2: The new durable destination is not private: Loki has `auth_enabled=false` and exposes its query API on LAN NodePort 30310, which env-pod egress permits. Validate with synthetic secrets before ordinary leases resume, then redact sensitive fields before shipping or explicitly restrict/accept that wider access; turning off agent debug alone does not remove shim/containerd fields or already-ingested secrets. -->
-
 - **Apply and reboot (G2).** `kata_debug = true` + `apply_mode = "staged"` in the T2 commit;
   `tofu plan` shows exactly one in-place change on `talos_machine_configuration_apply.worker["env-node-1"]`;
   the extracted rendered config dry-run must say "with a reboot" and diff **only** the three
   `machine.files`. Apply stages it (`talosctl read /system/state/config.yaml` mentions the three
   paths; `talosctl get mc` does not — running config untouched). Pre-reboot, in the agreed window:
   no `SandboxClaim`, no Terminating pods on the node, node Ready, `kubectl exec <member> -c control
-  -- true` answers (a frozen guest hangs `talosctl reboot`), relay pod Ready and shipping. Lease
+  -- true` answers (a frozen guest hangs `talosctl reboot`), relay pod Ready and its lines fresh in Loki. Lease
   acquisition is quiesced by **announcing the window and pausing the dev-worker fan-out**
   (the estate's shared-budget convention) rather than scaling the pool to 0 (Flux drift correction
   would re-set `replicas: 1` within 10 min); the claim check is repeated immediately before
@@ -321,13 +315,11 @@ verbatim), kata/config.d/10-debug.toml (new)}`, `talos.tf`, `variables.tf`,
   content, never a stale experiment. Any additional reboot (rollback, log-level change) starts a
   new soak epoch (T3).
 - **Log volume tiers** (measured in V2, not projected): tier 1 = as designed; if the idle rate
-  exceeds ~10 MB/h or one lease produces > ~100 MB, tier 2 = `kata_agent_debug = false` (keeps the
-  guest console, the highest-value signal); there is no tier 3 short of dropping `[debug] level`,
-  which silences the guest. Startup/fault bursts are reported separately from steady state; the
-  relay + Loki bound is 168 h regardless of rate (Loki ingestion headroom checked in V2).
-
-<!-- codex: round-2: Loki's 168 h retention applies only to successfully ingested records, not to the relay pod's rotated logs or Talos's ring during an Alloy/Loki outage. Bound the recoverable backlog at measured burst rates, check rotation/storage and ingestion rejection, and make any loss an explicit evidence gap rather than asserting a rate-independent end-to-end guarantee. -->
-
+  exceeds ~10 MB/h or one lease produces > ~100 MB, tier 2 = `[agent.kata] enable_debug = false`
+  in the drop-in (keeps the guest console, the highest-value signal); there is no tier 3 short of
+  dropping `[debug] level`, which silences the guest. Startup/fault bursts are reported separately
+  from steady state; after any tier change the agent/console capture check is repeated (forwarded
+  records may be filtered) and a new epoch starts. Loki ingestion headroom is checked in V2.
 - **Deliberately not changed yet:** `virtio_fs_extra_args` / `virtio_fs_cache`. Changing the suspect
   before capturing a recurrence would censor the only experiment that can name the cause. When V6
   produces evidence, `config.d/20-virtiofs.toml` replaces the **complete** array (keeping
@@ -346,42 +338,45 @@ template), this plan's `## Soak record`.
   window exceeds retention — properties a hand-run query set does not have. It stays a small
   read-only helper against the existing NodePorts (no agent, controller or new monitoring service);
   the queries it runs are also written out in the runbook so a human can reproduce any number.
-
-<!-- codex: round-2: Timestamp-only pagination can skip records or loop when multiple streams share a page-boundary timestamp. Add fixtures for tied timestamps and a timestamp that alone fills a page; use overlap with stream-aware deduplication and report `INCOMPLETE` if the boundary cannot be exhausted safely. -->
-
 - **Inputs/outputs:** `--from/--to` (UTC ISO) or `--checkpoint <file>` (last successful `to`,
-  re-queried with 1 h overlap); Prometheus `query_range` at 60 s resolution; raw Loki lines and
-  Prometheus series are exported to `kubernetes/infra/_out/soak/<from>_<to>/` (gitignored); stdout is
-  the markdown block for the soak record. Queries (all scoped and vector-matched):
-
-  <!-- codex: round-2: A raw instant-vector `query_range` every 60 s can miss shorter recorded NotReady/alert intervals and reuse stale samples across scrape gaps. Aggregate each bucket conservatively at the underlying scrape resolution and check coverage, rather than treating those point samples as proof of continuous readiness. -->
-
-  - node readiness: `kube_node_status_condition{node=~"talos-env-node-.*",condition="Ready",status="true"}`
-    (NotReady intervals listed with start/end), `up{job="kubelet",metrics_path="/metrics",node=~"talos-env-node-.*"}`,
+  re-queried with 1 h overlap); Prometheus `query_range` at 60 s steps, with the readiness/alert
+  series aggregated per step (`min_over_time(…[1m])` / `max_over_time(…[1m])`) so a NotReady or
+  firing sample shorter than a step is never stepped over and stale samples are not read as fresh;
+  Loki pages of 5 000 walked back **to the oldest timestamp inclusive** (a boundary timestamp
+  shared across streams is never skipped), deduplicated on (timestamp, content), and a page that
+  cannot make progress (one timestamp filling a page) is reported as truncated → `INCOMPLETE`.
+  Raw Loki lines and Prometheus series are exported to `kubernetes/infra/_out/soak/<from>_<to>/`
+  (gitignored); stdout is the markdown block for the soak record. Queries (all scoped and
+  vector-matched, listed verbatim at the top of the script and in the runbook):
+  - node readiness: `min_over_time(kube_node_status_condition{node=~"talos-env-node-.*",condition="Ready",status="true"}[1m])`
+    (NotReady intervals listed with start/end; sample gaps reported), `min_over_time(up{job="kubelet",metrics_path="/metrics",node=~"talos-env-node-.*"}[1m])`,
     `node_boot_time_seconds{instance=~"192.168.0.3[78]:9100"}` (reboots = epochs);
   - members: `kube_pod_created{namespace="testpool"} * on(namespace,pod) group_left() kube_pod_info{namespace="testpool",created_by_kind="Sandbox"}`
     with age computed **per sample** (`max_over_time` of `time() - created`), plus
     `kube_pod_container_status_restarts_total{namespace="testpool"}` (a guest sandbox restart does
     not create a new pod); warm vs leased membership from `kubectl get sandboxes -l
     agents.x-k8s.io/warm-pool-sandbox` at check-in time and from claim lines in Loki;
-  - alerts: `ALERTS{alertname=~"Testpool.*|EnvNode.*"}` over the window (pending and firing);
+  - warm capacity: `max(max_over_time((kube_pod_status_ready{namespace="testpool",condition="true"} * on(namespace,pod) group_left() kube_pod_info{…created_by_kind="Sandbox"})[1m:30s]))`
+    — the timeline every event is checked against for recovery;
+  - alerts: `max_over_time(ALERTS{alertname=~"Testpool.*|EnvNode.*"}[1m])` over the window (pending and firing);
   - runtime: `sum by (node,operation_type) (increase(kubelet_runtime_operations_errors_total{node=~"talos-env-node-.*",operation_type=~"stop_.*"}[<window>]))`;
-  - Loki: reaper `reap stage=|evidence |api error:|heartbeat iter=` (heartbeat gaps > 15 min are
+  - Loki: reaper `reap stage=|evidence|api error:|heartbeat iter=` (heartbeat gaps > 15 min are
     reported), watchdog `check hung|check failed|ready-port closed|checks recovered`, relay
-    `vmconsole|kata-agent|level=debug` counts per sandbox id (join key = the reaper's `sandbox=`).
-
-    <!-- codex: round-2: The accepted self-heal path has no reap, so using reaper `sandbox=` as the only join key leaves precisely that incident without a host-log identity. Retain the full source-node/time window and obtain sandbox-to-pod mappings from creation/runtime records as well as reaper records. -->
-
-  - **Verdicts:** `OK` (no NotReady, no alert, no reap, no watchdog closure), `RECURRENCE-CONTAINED`
-    (watchdog closure → reap or self-heal, node Ready, no alert), `PREVENTION-FAILED` (any node
-    NotReady, `TestpoolEnvTeardownStuck*` or `EnvNode*` firing), `INCOMPLETE` (failed endpoint,
-    missing expected series/node, truncated page, window outside retention). The unit test feeds
-    canned responses and asserts each verdict, including that a failed endpoint can never yield `OK`.
-
-<!-- codex: round-2: This verdict machine is not exhaustive: `TestpoolNoWarmCapacity` or `TestpoolOperatorDown` firing, pending-only alerts, a closure without a completed outcome, and a known failure plus missing evidence have no unambiguous result. Define an ordered total decision table, preserving known prevention failure alongside a separate completeness flag, and test these combinations rather than only one example per verdict. -->
-
-<!-- codex: round-2: A reap action or restart does not prove containment succeeded; replacement provisioning can fail while the node remains Ready and before the 30-minute capacity alert fires. Require timestamped recovery to usable Ready capacity within the stated bound, and treat a still-open incident at the window boundary as unresolved rather than `RECURRENCE-CONTAINED`. -->
-
+    `vmconsole|kata-agent|level=debug` — counted per reaped sandbox id (the reaper's `sandbox=`)
+    **and**, for the self-heal path that never reaps, per member pod name (containerd's debug
+    records name the pod); relay silence > 15 min is a capture gap.
+  - **Verdicts — a total order:** `PREVENTION-FAILED` (any env node NotReady, or **any**
+    `Testpool*`/`EnvNode*` alert firing — TeardownStuck, NoWarmCapacity, OperatorDown, PVC/PV, the
+    kubelet precursors) > `UNRESOLVED` (an event — closure, reap, replacement, restart, reboot —
+    after which a Ready Sandbox pod was not observed within 10 min, or which is still open at the
+    window's end) > `INCOMPLETE` (failed endpoint, missing expected node/series, truncated page,
+    relay/heartbeat gap, window past retention) > `RECURRENCE-CONTAINED` (events with timestamped
+    recovery inside the bound, node Ready, no firing alert) > `OK`. Pending-only alerts are
+    reported, never decisive; incompleteness is printed under every verdict, so "known failure +
+    missing evidence" reads as both. `scripts/tests/test_env_pool_soak.py` (20 cases, in the CI
+    unittest set) pins each verdict and the combinations: a failed endpoint is never `OK`, a
+    NoWarmCapacity/OperatorDown firing is `PREVENTION-FAILED`, a closure without recovery is
+    `UNRESOLVED`, a failure keeps its incompleteness visible, and the tie-timestamp pagination cases.
 - **Check-ins:** day 1, day 3 (past 66 h = 2 d 18 h), day 7 from the epoch baseline; each appends
   the block plus raw reaper/watchdog/relay lines (redacted) to the soak record. Loki is a rolling
   168 h from each event, so day-0 evidence (the V2 injection) is exported before its own boundary.
@@ -393,22 +388,28 @@ template), this plan's `## Soak record`.
 - **Decision tree (in priority order, decided by the operator):**
   1. `PREVENTION-FAILED` at any time → the recovery runbook **immediately**, then re-plan; the
      record distinguishes failed containment from an evidence-capture failure (relay/Loki gap).
-  2. Recurrence contained **with** evidence → root-cause section from the relay log (`vmconsole`
-     traces, agent timeouts, reaper `evidence` lines) + watchdog discriminator (`virtiofs` vs
-     `dockerd`); a virtio-fs finding → `20-virtiofs.toml` hypothesis test, reboot, new epoch.
-  3. Recurrence contained **without** usable evidence → fix the capture (tier, relay) first;
+  2. `UNRESOLVED` → treat as an open incident: the runbook's verification steps now, then decide
+     whether containment or refill failed before anything else.
+  3. Recurrence contained **with** evidence → root-cause section from the relay log (`vmconsole`
+     traces, agent timeouts, reaper `evidence`/`evidence-thread`/`evidence-stack` lines) + watchdog
+     discriminator (`virtiofs` vs `dockerd`); a virtio-fs finding → `20-virtiofs.toml` hypothesis
+     test, reboot, new epoch.
+  4. Recurrence contained **without** usable evidence → fix the capture (tier, relay) first;
      no config experiment on a guess.
-  4. Self-heal path observed → recorded as its own outcome; evidence criteria are the agent
+  5. Self-heal path observed → recorded as its own outcome; evidence criteria are the agent
      health-check lines, not a hung-task trace (which needs the guest to survive long enough).
-  5. No recurrence by day 7 → keep debug on, extend; age-based rotation stays rejected.
+  6. No recurrence by day 7 → keep debug on, extend; age-based rotation stays rejected.
 
 ### T4a — Free the RAM: retire dev-worker(s) on ai-node3 (own plan + PR-C, gate G3a)
 
 Operator decision 2026-09-21: retire dev-worker(s) to fund env-node-2, keeping **≥ 4 dev-workers**.
 Candidates on ai-node3: `dev-worker-3` (4203, `.10`, 16 GiB / 12 GiB floor, RSS 16.3 GiB — frees
-≈ the whole need) first; `dev-worker-6` (4206, `.13`, 12 GiB, RSS 6.5 GiB) only if the measured
-post-retirement floor leaves the qwen3.8 load less than ~4 GiB margin (models.yaml's own test:
-"a lazy load arrives all at once, so the test is each node's worst case"). A retirement is the
+≈ the whole need) first; `dev-worker-6` (4206, `.13`, 12 GiB, RSS 6.5 GiB) only if the margin
+test fails. **The margin test reserves the future node**: with the model *not* resident (residency
+recorded from the LXC's llama-server RSS at measurement time), the post-retirement weekly floor
+must cover env-node-2's 16 GiB **plus** its VMM overhead (~0.5 GiB) **plus** the 22.45 GiB lazy load
+**plus** a ≥ 4 GiB safety margin — models.yaml's own rule ("a lazy load arrives all at once, so the
+test is each node's worst case"), with the same headroom never counted twice. A retirement is the
 runners precedent (remove the map entry, `tofu apply`, never `qm destroy`) **plus** the worker's
 foot-print across the repo — ~20 tracked files each: `inventory/hosts.yml`,
 `ansible/secrets/{dev-worker,tep-tokens}.sops.yaml`, `ansible/host_vars/*`, helmtest tenant
@@ -419,12 +420,13 @@ ADR 0018/0020, and the OpenBao credentials/tokens of that worker. It gets its ow
 worker(s) is confirmed with the operator at that plan's gate with the live seat/agent usage of each.
 Ordering: PR-C merged and applied (floor re-measured over ≥ 24 h) **before** G3b.
 
-<!-- codex: round-2: Make the new retirement margin test reserve env-node-2 before approving G3b: with the model unloaded, the post-retirement floor must cover 16 GiB plus VM overhead, the 22.45 GiB lazy load and the chosen safety margin. Comparing only the model load with the post-retirement floor can pass while spending the same headroom on the future env VM; record model residency to avoid double-counting. -->
-
 ### T4b — Second env node `env-node-2` on ai-node3 (PR-B, gate G3b)
 
-Files: `kubernetes/infra/env-pool/variables.tf`, `docs/network-plan.md` (`.38` allocated, free list),
-`CLAUDE.md` inventory row, `scripts/gen-reporting-dashboard.py:563` (`ENVNODE` →
+Files: `kubernetes/infra/env-pool/variables.tf`, `kubernetes/apps/infrastructure/monitoring/cri-log-relay.yaml`
+(a second, independently identified relay Deployment for `.38` — verified shipping **before** the
+node-2 capture/parity gate, and deployed separately from the pool-template merge),
+`docs/network-plan.md` (`.38` allocated, free list), `CLAUDE.md` inventory row,
+`scripts/gen-reporting-dashboard.py:563` (`ENVNODE` →
 `instance=~"192.168.0.3[78]:9100"`, regenerated ConfigMap + `dashboard-preview.py check --row "Test
 Env Pool"`), `kubernetes/apps/infrastructure/testpool/sandboxtemplate-std.yaml` (pool `replicas: 2`
 + spread constraint), `docs/runbooks/env-pool.md` (two nodes).
@@ -438,17 +440,14 @@ Env Pool"`), `kubernetes/apps/infrastructure/testpool/sandboxtemplate-std.yaml` 
   alloy pods, and the relay/debug parity verified, is the manifests half (replicas, spread) merged
   and its reconciled Flux revision recorded. Merging manifests first could rotate the only warm
   member while node 2 is absent.
-
-<!-- codex: round-2: T2c's relay command captures only `.37`, and PR-B's file list does not add `.38`; an Alloy pod on node 2 does not collect its CRI ring. Add and verify an independently identified `.38` relay stream before the node-2 capture/parity gate, with deployment ordering separate from the pool-template merge. -->
-
 - **Untainted window:** the spike's first apply failed the label/taint with `node not found` and
-  converged on the second apply. To close the window in which a fresh, untainted node could accept
-  arbitrary pods, the node is **cordoned the moment it registers** (`kubectl cordon
-  talos-env-node-2` in a loop started before the apply) and uncordoned only after `tofu plan` is
-  clean and the taint/label are verified.
-
-<!-- codex: round-2: The new cordon loop still races the scheduler between node registration and its first successful API update. Use a verified registration-time unschedulable setting or equivalent admission barrier, then uncordon after the listed checks; polling cannot establish that the untainted window is closed. -->
-
+  converged on the second apply. NodeRestriction drops self-registered custom taints, so there is no
+  registration-time taint; the barrier is a `kubectl cordon talos-env-node-2` loop started before
+  the apply **plus a post-taint sweep**: once the taint/label are verified, every non-DaemonSet,
+  non-`testpool` pod that landed on the node in the race window is listed
+  (`kubectl get pods -A --field-selector spec.nodeName=talos-env-node-2`) and deleted so it
+  reschedules elsewhere (a `NoSchedule` taint does not evict), and only then is the node uncordoned.
+  Polling cannot prove the window was empty; the sweep proves it is empty afterwards.
 - **Spread:** `topologySpreadConstraints: [{maxSkew: 1, topologyKey: kubernetes.io/hostname,
   whenUnsatisfiable: DoNotSchedule, labelSelector: {app: env-std}, nodeTaintsPolicy: Honor,
   nodeAffinityPolicy: Honor}]` (no `minDomains`): with node 2 NotReady its `unreachable`/`not-ready`
@@ -484,13 +483,14 @@ exactly that scope, at the time it is run.
 | Gate | Mutation | Scope / commands | Rollback |
 |---|---|---|---|
 | G1 | T1 adoption, at the T1 commit (`kata_debug=false`) | `tofu init -backend-config=<main-checkout state>`, `plan -target=<VM>`, `apply -target=<VM>` (import only), full `plan`, dry-run diff via `talosctl-1112.exe apply-config --dry-run` (empty diff required), `apply` (creates the `no_reboot` config apply + label/taint SSA under `admin@ai`) | state backup in `_out/` before each apply; `tofu state rm` only forgets ownership — it cannot undo an apply, so a partial apply is diagnosed from the backup before any state operation; the import block would re-adopt on the next apply, so it is removed together with the state entry if adoption is abandoned |
-| G2 | T2, at the T2 commit | mint the `os:reader` talosconfig (new read-only credential, SOPS), Flux-apply `cri-log-relay` + the reaper `evidence` change (merge PR-A first, or hand-apply from the branch as #800 did — the record says which), `tofu apply` (stages), `talosctl reboot --wait -n 192.168.0.37` in the announced window, **V2's deliberate virtiofsd freeze of the new member from the production reaper pod** and one `tep` lease smoke test, `qm reset 4401` if the reboot stalls > 5 min | `kata_debug=false` → apply → reboot (new epoch); relay/reaper changes revert by PR |
+| G2 | T2, at the T2 commit | mint the `os:reader` talosconfig (new read-only credential, SOPS), Flux-apply `cri-log-relay` + the reaper `evidence` change (merge PR-A first, or hand-apply from the branch as #800 did — the record says which), `tofu apply` (stages), `talosctl reboot --wait -n 192.168.0.37` in the announced window, **V2's deliberate virtiofsd freeze of the new member from the production reaper pod**, one `tep` lease smoke test **with synthetic secrets** (the Loki exposure check), a forced relay disconnect during a burst, `qm reset 4401` if the reboot stalls > 5 min | `kata_debug=false` → apply → reboot (new epoch); relay/reaper changes revert by PR |
 | G3a | T4a retirement | per its own plan: remove the map entry, `tofu apply` in `dev-workers`, secrets/inventory/manifests PR | its own plan |
 | G3b | T4b node create | `tofu apply` creates vmid 4402 on ai-node3 (`.38`); cordon loop; second apply for label/taint; then the manifests merge | ordered: stop new acquisitions, revert the manifests (pool back to 1, spread removed), drain node 2 and verify its PVC/PV/iSCSI cleanup, remove its map entry and inspect the **full** plan (talos.tf/node-labels.tf `depends_on` edges) before applying the removal; node 1 must show no change |
 | — | Flux-applied manifests (T2c/T2d, T4b, kustomization comment) | merge to `main` on Gitea; nothing applied by hand unless the record says so | revert PR |
 
-**Codex round 2:** this revision adds material codex has not seen (ring buffer/relay, containerd
-`[debug]`, T2d, T4a, the verdict machine); it is sent for a second round before finalize.
+**Codex rounds:** round 1 (50 markers) and round 2 (29 markers on the new material) were both
+accepted in full — no pushbacks, nothing escalated; the review trail is in git
+(`codex: review round N` / `opus: address codex review round N`).
 
 ## Critical files
 
@@ -498,18 +498,18 @@ exactly that scope, at the time it is run.
 |---|---|
 | `kubernetes/infra/env-pool/imports.tf` (new) | T1: adopt vmid 4401 (`ai-node2/4401`) |
 | `kubernetes/infra/env-pool/main.tf` | T1: `ignore_changes += disk[0].import_from`, `reboot_after_update = false` |
-| `kubernetes/infra/env-pool/variables.tf` | T1: per-node `apply_mode`, `kata_debug`, `kata_agent_debug`; T4b: `env-node-2` |
+| `kubernetes/infra/env-pool/variables.tf` | T1: per-node `apply_mode` (validated), `kata_debug`; T4b: `env-node-2` |
 | `kubernetes/infra/env-pool/talos.tf` | T1: `apply_mode`; T2: Kata file contents into the template |
-| `kubernetes/infra/env-pool/outputs.tf` | T1: sensitive `rendered_machine_configuration` for the dry-run diff |
 | `kubernetes/infra/env-pool/node-labels.tf` | T1: `config_context = "admin@ai"` |
 | `kubernetes/infra/env-pool/backend.tf`, `SPIKE-REPORT.md` | T1: state location + dated correction of the handover note |
 | `kubernetes/infra/env-pool/terraform.tfvars.example` (new) | T1: the four required inputs |
-| `kubernetes/infra/env-pool/machine-config/worker.yaml.tftpl` | T2: gated `machine.files` block (CRI part inline) |
+| `kubernetes/infra/env-pool/machine-config/worker.yaml.tftpl` | T2: gated `machine.files` block |
+| `kubernetes/infra/env-pool/machine-config/cri-20-customization.part` (new) | T2b: containerd `[debug]` + `kata` `ConfigPath` |
 | `kubernetes/infra/env-pool/machine-config/kata/configuration.toml` (new) | T2a: verbatim extension copy (sha256 + extension identity pinned) |
-| `kubernetes/infra/env-pool/machine-config/kata/config.d/10-debug.toml` (new) | T2a: the debug toggles |
-| `kubernetes/apps/infrastructure/testpool/cri-log-relay.yaml` (new) + SOPS Secret | T2c: durable `logs cri` capture → Loki |
-| `kubernetes/apps/infrastructure/testpool/env-reaper.yaml` | T2d: `evidence` lines before stage-1 kills |
-| `kubernetes/apps/infrastructure/testpool/kustomization.yaml` | register the relay |
+| `kubernetes/infra/env-pool/machine-config/kata/config.d/10-debug.toml` (new) | T2a: the debug toggles (static) |
+| `kubernetes/apps/infrastructure/monitoring/cri-log-relay.yaml` (new) + `cri-log-relay-talosconfig.sops.yaml` | T2c: durable `logs cri` capture → Loki (SA, affinity, no `--tail`) |
+| `kubernetes/apps/infrastructure/monitoring/kustomization.yaml` | register the relay (+ Secret when minted) |
+| `kubernetes/apps/infrastructure/testpool/env-reaper.yaml` | T2d: per-thread `evidence` under a timeout, identity re-check, script-revision annotation |
 | `justfile` | T1: `env-pool-plan/apply` |
 | `scripts/env-pool-soak.py`, `scripts/tests/test_env_pool_soak.py` (new) | T3: read-only soak report + verdict tests |
 | `.gitea/workflows/manifests.yaml` | T3: run the new unittest module |
@@ -545,8 +545,11 @@ every commit, per `feedback_terraform_fmt`).
   member Ready ≤ 3 min; `talosctl processes` shows cloud-hypervisor with `-v`; Loki (relay stream)
   shows for the new sandbox id shim `level=debug` lines, `kata-agent` lines and `vmconsole` lines
   with the guest kernel banner `Linux version 6.12.42`; a `tep` lease from a dev-worker runs `docker
-  version` and its debug fields are inspected (privacy decision recorded); log volume measured over
-  1 h idle and during that lease, startup burst reported separately → tier decision. **Injection**:
+  version` and its debug fields are inspected, a second lease carries synthetic secrets in its
+  environment and commands and Loki is grepped for them (privacy decision recorded; purge with the
+  Loki delete API if found); a forced relay disconnect (`rollout restart`) during a startup burst
+  proves the replay recovers the ring; log volume measured over 1 h idle and during that lease,
+  startup burst reported separately → tier decision. **Injection**:
   from the **production** reaper pod on this node (never a 5 s hack copy alongside it — the runbook
   is corrected to say so), against the identified idle member (pod UID + sandbox id recorded),
   re-validating the virtiofsd PIDs immediately before `kill -STOP`: watchdog `virtiofs check hung`
@@ -566,12 +569,11 @@ every commit, per `feedback_terraform_fmt`).
   `check --row "Test Env Pool"` renders both instances; new node's exporter/kubelet series present;
   ai-node3 `MemAvailable` under a forced qwen3.8 load + one lease stays above the model's own
   floor rule; `tofu plan` = `No changes.` **Degraded-mode check (bounded, announced):** cordon node
-  2, delete its member → the replacement schedules on node 1 within ~3 min; uncordon → the pool
-  returns to one member per node; the claim+refill placement sequence is exercised once and the
+  2, delete its member → the replacement schedules on node 1 within ~3 min; uncordon does **not**
+  rebalance running pods, so a **controlled rotation** follows: delete the idle warm member on node
+  1 → the spread constraint places the replacement on node 2 → one member per node verified, and
+  the epoch change recorded; the claim+refill placement sequence is exercised once and the
   outcome (which node holds warm capacity afterwards) is recorded rather than assumed.
-
-<!-- codex: round-2: Uncordoning does not rebalance already-running pods, so a successful degraded refill can leave both warm members on node 1 indefinitely. Specify a controlled rotation of an idle member after node 2 returns, verify one warm member per node, and record the resulting epoch change. -->
-
 - **V5 (T5):** the draft cites a pinned upstream commit and the deployed controller version on
   filing day.
 - Repo gates on every push: `scripts/manifest-lint.sh`, `scripts/rules-lint.sh`, the manifests
@@ -596,9 +598,11 @@ every commit, per `feedback_terraform_fmt`).
 ## Skill phases (feature-implementation)
 
 Ran: Phase 0 (ground: repo/branch/PR state, AGENTS/TESTING absent → CLAUDE.md + README conventions,
-prior art in `plans/`, reuse check), Phase 1 plan (this file; codex round 1 addressed, round 2
-pending). Not run yet: Phases 2–4 (implement, validate, PR) — each mutation waits for its gate.
-Skipped: HTML UI proposal (no UI change).
+prior art in `plans/`, reuse check), Phase 1 plan (this file; two codex rounds, converged),
+Phase 2 implement (PR-A code, TDD for the soak script, real-engine render of the template, WSL
+check of the reaper functions), Phase 3 validate (unit tests, manifest lint, `tofu validate`, the
+live read-only soak run). Phase 4 (PR, review rounds, codex impl-review) and the gated applies
+follow. Skipped: HTML UI proposal (no UI change).
 
 ## Appendix A — upstream issue draft (kubernetes-sigs/agent-sandbox)
 
@@ -649,17 +653,18 @@ not-Ready*, not age:
 **Workaround in use.** In-guest readiness that only fails for sustained faults, plus a node-side
 reaper that bounds the hung teardown; neither changes the controller's semantics.
 
-**Minimal reproduction.** `SandboxWarmPool` `replicas: 1`, grace `1m`; template with one container
-(`busybox`) running `nc -lk -p 9099` under `readinessProbe: {tcpSocket: {port: 9099}, periodSeconds:
-5, failureThreshold: 3}`. Wait until the Sandbox has been Ready > 1 m, then `kubectl exec` and kill
-`nc` for ≥ 20 s (three probe failures) and watch for the pod's Ready=False transition: on the next
-reconcile the Sandbox is deleted although it was NotReady for well under the grace period. For (2):
-give the template a resource request larger than any node can satisfy, wait > grace, then lower the
-request (or add capacity) and use a container with `sleep 120` before listening so startup exceeds
-the reconcile interval: the sandbox is deleted seconds after scheduling.
-
-<!-- codex: round-2: The listener must be a controllable child of a supervising PID 1: signaling container PID 1 can be ignored or terminate/restart the container, so it does not establish a 20-second readiness-only outage. Disable listener restart for the closure interval and verify that the same pod/container reaches Ready=False before GC. -->
-
-<!-- codex: round-2: Lowering the SandboxTemplate's resource request can rotate the pool member and reset its creation clock, invalidating the unschedulable-age reproduction. Free or add capacity without modifying the held member/template, and assert the sandbox UID and creation time remain unchanged through scheduling. -->
+**Minimal reproduction.** `SandboxWarmPool` `replicas: 1`, grace `1m`; template with one
+`busybox` container whose PID 1 is a supervising shell that starts the listener **once** and never
+restarts it — `sh -c 'nc -lk -p 9099 & sleep infinity & wait'` — under `readinessProbe:
+{tcpSocket: {port: 9099}, periodSeconds: 5, failureThreshold: 3}`. Wait until the Sandbox has been
+Ready > 1 m, then `kubectl exec … -- pkill nc` (the listener, not PID 1, so the container keeps
+running) and wait for the pod's own Ready=False transition (≥ 15 s): on the next reconcile the
+Sandbox is deleted although it was NotReady for well under the grace period; restarting `nc` via
+exec is only needed if you want to show the pod would have recovered. For (2): make the pod
+Unschedulable with a resource request that **no** node can currently satisfy, wait > grace, then
+**add capacity** (uncordon a node or scale down a blocker) rather than editing the template — a
+template change would rotate the member and reset its creation clock; use `sleep 120` before the
+listener so startup exceeds the post-scheduling reconcile interval, and assert the Sandbox UID and
+creationTimestamp are unchanged through scheduling: it is deleted seconds after scheduling.
 
 <!-- codex-review-status: complete -->
