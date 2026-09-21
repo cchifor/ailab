@@ -153,8 +153,17 @@ ansible-playbook dev-workers.yml -t openbao --limit dev-worker-3
 The play fails closed if the vault is unreachable; it prints a `debug` message and renders no
 platform stanzas if the fields are simply not published yet. On success the health block has already
 proven, on that host: both files 0600 and user-owned, the pgpass naming this worker's role,
-`psql`/`pg_isready` present, and `can-i list pods` = yes with `can-i get secrets` /
-`can-i create pods/exec` / `can-i delete deployments` = **no**.
+`psql`/`pg_isready` present, and five **SelfSubjectAccessReviews** answered by the API server —
+`list pods` and `create pods/portforward` allowed, `get secrets` / `create pods/exec` /
+`delete deployments` denied.
+
+> Those are SSARs, not `kubectl auth can-i`, and the difference is not cosmetic. The workers carry
+> kubectl 1.30, whose `can-i` resolves a **subresource** through the RESTMapper — and this identity
+> cannot do discovery, so it answered a confident `no` for `pods/portforward` while the API server
+> allowed it (measured 2026-09-21: it failed the first rollout of this very runbook, and the
+> rollback then worked exactly as designed). The same false `no` would have made the three NEGATIVE
+> checks pass vacuously, which is the half that matters. Anything asserting this boundary should ask
+> the server, not the client.
 
 `-t openbao` is self-sufficient on purpose: `postgresql-client` is installed by the openbao-tagged
 tasks as well as by `packages.yml`, because this tag-limited run is the documented path to an

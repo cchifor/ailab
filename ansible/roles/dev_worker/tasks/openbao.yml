@@ -374,12 +374,22 @@
         # the client `platform psql` needs — without it the credentials verify and the tool fails
         command -v psql >/dev/null || { echo "postgresql-client missing (platform psql would fail)" >&2; exit 1; }
         command -v pg_isready >/dev/null || { echo "pg_isready missing (platform psql would hang)" >&2; exit 1; }
-        KC="kubectl --kubeconfig {{ user.home }}/.platform/kubeconfig"
-        [ "$($KC auth can-i list pods -n strive-ailab)" = yes ]          || { echo "platform kubeconfig cannot list pods" >&2; exit 1; }
-        [ "$($KC auth can-i get secrets -n strive-ailab)" = no ]         || { echo "platform kubeconfig CAN READ SECRETS - wrong ClusterRole" >&2; exit 1; }
-        [ "$($KC auth can-i create pods/exec -n strive-ailab)" = no ]    || { echo "platform kubeconfig CAN EXEC - wrong ClusterRole" >&2; exit 1; }
-        [ "$($KC auth can-i delete deployments -n strive-ailab)" = no ]  || { echo "platform kubeconfig CAN DELETE - wrong ClusterRole" >&2; exit 1; }
-        [ "$($KC auth can-i create pods/portforward -n strive-ailab)" = yes ] || { echo "platform kubeconfig cannot port-forward" >&2; exit 1; }
+        # Asked of the SERVER, not of `kubectl auth can-i`. On kubectl 1.30 (what the workers
+        # carry) can-i answers a subresource question through the RESTMapper, and this identity
+        # cannot do discovery - it answered a WRONG no for pods/portforward while the API server
+        # allowed it. The same false no would have made the NEGATIVE checks below pass vacuously,
+        # which is the failure that matters: a SelfSubjectAccessReview is the server itself.
+        ssar() { # ssar <verb> <resource> <subresource-or-empty> <expected true|false> <label>
+          want="$4"
+          got="$(printf '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{"resourceAttributes":{"namespace":"strive-ailab","verb":"%s","resource":"%s","subresource":"%s"}}}' "$1" "$2" "$3" \
+            | kubectl --kubeconfig {{ user.home }}/.platform/kubeconfig create -f - --validate=false -o jsonpath={.status.allowed} 2>/dev/null)"
+          [ "$got" = "$want" ] || { echo "platform kubeconfig: $5 expected allowed=$want, server said allowed=${got:-<none>}" >&2; exit 1; }
+        }
+        ssar list   pods  ""            true  "list pods"
+        ssar create pods  portforward   true  "port-forward"
+        ssar get    secrets ""          false "read secrets"
+        ssar create pods  exec          false "exec into a pod"
+        ssar delete deployments ""      false "delete a deployment"
         {% endfor %}
         {% endif %}
         echo agent-healthy
