@@ -79,16 +79,30 @@ python scripts/node-ssh.py <host-ip> "ps -eo pid,stat,wchan:24,comm | awk '\$2 ~
 **while sshd is still alive**:
 
 ```bash
-_out/talosctl-1112.exe shutdown -n <cp-ip>            # and any other Talos guest on the host
+# 1. Talos guests (CP + any agent/env node on this host) -- these DRAIN, so they go first
+_out/talosctl-1112.exe shutdown -n <cp-ip>            # repeat per Talos guest on the host
+
+# 2. QEMU VMs (runners, dev-workers)
 python scripts/node-ssh.py <host-ip> "for v in <ubuntu vmids>; do qm shutdown \$v --timeout 300 & done"
-python scripts/node-ssh.py <host-ip> "qm list"        # poll until EVERY VM reads stopped
+
+# 3. CONTAINERS -- every LXC that CAN stop must be stopped here, or step 5 hard-stops it.
+#    `pct shutdown` asks init politely and gives up at --timeout; the WEDGED container is the one
+#    that will not go, and that is expected -- it is the whole reason for step 5.
+#    Do NOT fall back to `pct stop` on it: that is lxc-stop --kill, the call that hangs forever.
+python scripts/node-ssh.py <host-ip> "for c in \$(pct list | awk 'NR>1{print \$1}'); do pct shutdown \$c --timeout 120 & done; wait; pct list"
+
+# 4. GATE: every VM `stopped`, and every LXC `stopped` EXCEPT the wedged one
+python scripts/node-ssh.py <host-ip> "qm list; pct list"
+
+# 5. reboot with the unit stops skipped, while sshd is still alive
 python scripts/node-ssh.py <host-ip> "sync; nohup sh -c 'sleep 1; systemctl reboot --force' >/dev/null 2>&1 &"
 ```
 
 `--force` skips the unit stops (so `lxc-stop --kill` never runs) while still syncing filesystems;
 the D-state task disappears with the kernel. Guests autostart on boot; then run the
-post-maintenance checklist below. **Do not** reach for `--force` with guests still running — that
-is a hard stop for every one of them.
+post-maintenance checklist below. **Step 3 is not optional**: `--force` is a hard stop for
+anything still running, so the only guest that may still be up at step 5 is the one that
+physically cannot be stopped.
 
 Two things that do **not** fix a D-state task, both tried on 2026-09-21: killing it (SIGKILL is
 pending but never delivered in D state), and resetting the GPU. The reset is worth knowing anyway:
@@ -162,8 +176,9 @@ kubectl --context admin@ai taint nodes <node> node.kubernetes.io/out-of-service=
 _out/talosctl-1112.exe -n 192.168.0.41 etcd status                  # 3/3 in-sync
 kubectl --context admin@ai get nodes                                # all Ready, none SchedulingDisabled
 curl -s -m 10 http://<ai-lxc-ip>:8082/v1/models                     # AI LXC: llama-swap answering
-#   then a CONTENT check, not just a 200 -- a wedged backend answers /v1/models fine:
-#   POST /v1/chat/completions "Reply with exactly: OK" must return OK (cold load ~24-70 s)
+# CONTENT check -- a wedged backend serves /v1/models perfectly well, so a 200 there proves
+# nothing. This must print OK (allow a cold model load: ~24 s on node2, up to ~70 s on node3):
+curl -s -m 300 http://<ai-lxc-ip>:8082/v1/chat/completions -H 'Content-Type: application/json'   -d '{"model":"<served-name>","messages":[{"role":"user","content":"Reply with exactly: OK"}],"max_tokens":8,"temperature":0}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
                                                                     # (Talos uncordons on boot; `kubectl uncordon` if stuck)
 python scripts/node-ssh.py <host-ip> "pct status <ctid>"           # AI LXC running (pct start if not)
 kubectl --context admin@ai get pods -A | grep -vE 'Running|Completed'   # nothing stuck
