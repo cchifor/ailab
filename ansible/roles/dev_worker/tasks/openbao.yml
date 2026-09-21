@@ -103,7 +103,10 @@
     cmd: /usr/local/bin/cred list
   register: dev_worker_cred_list
   changed_when: false
-  when: not ansible_check_mode
+  # Read-only, so it runs in CHECK MODE too. Skipping it there would make the fact false on a fully
+  # provisioned worker, and the proposed agent.hcl would then show the platform stanzas being
+  # REMOVED — a check run must describe the run it is checking.
+  check_mode: false
 
 - name: Probe this host's platform_* KV fields (values discarded, never printed)
   ansible.builtin.shell: |
@@ -111,17 +114,26 @@
     host="$(hostname -s)"
     for field in platform_kubeconfig platform_pg_user platform_pg_password; do
       # Redirected to /dev/null: `cred get` prints the VALUE, and ansible registers stdout.
-      /usr/local/bin/cred get "$host" "$field" >/dev/null 2>&1 || { echo "missing:$field"; exit 90; }
+      if /usr/local/bin/cred get "$host" "$field" >/dev/null 2>&1; then continue; fi
+      # `cred get` exits 1 for a MISSING FIELD and for a vault that went away between calls, and the
+      # two must not be conflated: treating an outage as "absent" would drop the platform stanzas
+      # from a worker that has them. A list that still succeeds proves the vault is answering, so
+      # the field really is absent; a list that now fails is an outage and fails the play.
+      if /usr/local/bin/cred list >/dev/null 2>&1; then
+        echo "missing:$field"
+        exit 90
+      fi
+      echo "vault-unreachable-while-reading:$field"
+      exit 91
     done
     echo present
   args:
     executable: /bin/bash
   register: dev_worker_platform_probe
   changed_when: false
-  failed_when: false
-  when:
-    - not ansible_check_mode
-    - dev_worker_cred_list is succeeded
+  failed_when: dev_worker_platform_probe.rc not in [0, 90]
+  check_mode: false # read-only; see the task above
+  when: dev_worker_cred_list is succeeded
 
 - name: Record whether this host has its platform credentials yet
   ansible.builtin.set_fact:
@@ -136,9 +148,7 @@
       ({{ dev_worker_platform_probe.stdout | default('probe skipped') }}); the agent will render no
       platform credentials this run. Check openbao-platform-pg-sync / openbao-k8stoken-sync in the
       cluster, then re-run with -t openbao — docs/runbooks/dev-worker-platform-access.md.
-  when:
-    - not ansible_check_mode
-    - not dev_worker_platform_fields_present | bool
+  when: not dev_worker_platform_fields_present | bool
 
 - name: Install the platform helper
   ansible.builtin.copy:
@@ -345,7 +355,10 @@
           [ "$(stat -c '%a %U' "$f")" = "600 {{ user.name }}" ] || { echo "$f wrong mode/owner" >&2; exit 1; }
         done
         # the pgpass names THIS worker (a wrong slot would authenticate as another worker role)
-        want_role="dw${HOSTNAME##*-}_platform_ro"
+        # The SHORT hostname, derived exactly as the helper does. The bash variable HOSTNAME can
+        # carry the FQDN, which would expect dw3.example_platform_ro and fail a healthy rollout.
+        short_host="$(hostname -s)"
+        want_role="dw${short_host#dev-worker-}_platform_ro"
         [ "$(cut -d: -f4 {{ user.home }}/.platform/pgpass)" = "$want_role" ] || { echo "{{ user.home }}/.platform/pgpass does not name $want_role" >&2; exit 1; }
         KC="kubectl --kubeconfig {{ user.home }}/.platform/kubeconfig"
         [ "$($KC auth can-i list pods -n strive-ailab)" = yes ]          || { echo "platform kubeconfig cannot list pods" >&2; exit 1; }
@@ -494,17 +507,22 @@
       What it cannot, by design — do not work around it, ask instead:
 
       1. **Secrets and `exec` are denied** (`get secrets`, `pods/exec`, `pods/attach` all fail), and
-         so is every write. A one-off wider grant is a PR against `kubernetes/apps/infrastructure/
-         platform-access/rbac.yaml` for this slot with a removal date, not a credential to find.
-      2. **Postgres is SELECT-only by privilege**, not by a setting: an `INSERT` fails
+         so is every write through the Kubernetes API. A one-off wider grant is a PR against
+         `kubernetes/apps/infrastructure/platform-access/rbac.yaml` for this slot with a removal
+         date, not a credential to find.
+      2. **`platform pf` is a plain TCP tunnel.** It reaches any pod port in these namespaces and is
+         only as read-only as the service behind it — Postgres is safe by privilege, but Valkey has
+         no password. Inspect through a forward; never mutate. Changing cache or queue state to test
+         something is a platform PR or an operator action, not something to do down a tunnel.
+      3. **Postgres is SELECT-only by privilege**, not by a setting: an `INSERT` fails
          `permission denied` even if you turn `default_transaction_read_only` off, on the primary as
          much as on a replica.
-      3. **Most `airlock` and `workflow` tables are RLS-scoped** on `current_setting('app.tenant_id')`.
+      4. **Most `airlock` and `workflow` tables are RLS-scoped** on `current_setting('app.tenant_id')`.
          Without `--tenant <id>` they read **EMPTY — zero rows, no error**. An empty result is
          usually a missing tenant, not missing data.
-      4. `--rw` uses the primary (still read-only). Prefer it for a long scan: a replica can cancel a
+      5. `--rw` uses the primary (still read-only). Prefer it for a long scan: a replica can cancel a
          query that conflicts with recovery (`max_standby_streaming_delay`).
-      5. Fixes ship as PRs to the platform repo and through Flux. This credential is for *seeing*.
+      6. Fixes ship as PRs to the platform repo and through Flux. This credential is for *seeing*.
 
       Runbook: `docs/runbooks/dev-worker-platform-access.md` in the ailab repo.
       {% endif %}

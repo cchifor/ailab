@@ -19,7 +19,15 @@
 #   4. FORCE_ROTATE=1 -> rotated.  5. a role dropped by hand -> recreated + rotated ("no longer logs
 #      in"), grants back.  6. retiring a slot: DROP OWNED in every database + DROP ROLE; the re-run
 #      converges.  7. `keycloak` in the allowlist aborts before touching Postgres or KV.
-#   8. no run's stdout/stderr ever contains a password; the stub saw passwords ONLY in KV write bodies.
+#   8. no run's stdout/stderr ever contains a password; the stub saw passwords ONLY in KV write bodies,
+#      and NO cleartext password is ever sent to PostgreSQL: the server receives a SCRAM verifier, so
+#      pg_stat_activity (readable by every pg_monitor member, i.e. every other worker) and the server
+#      log never carry one.
+#   9. a KEPT slot is re-proven read-only, so a write privilege granted out of band is caught;
+#      an unexpected role membership is revoked; an expiry changed behind the sync's back is
+#      reconciled; a database dropped from the allowlist loses its grants and can still be retired;
+#      CONNECTION LIMIT exhaustion does NOT rotate (it exits without touching KV); and a failed
+#      write probe leaves NOTHING behind (the probe transaction is rolled back).
 # Requires docker (the manifests CI job has it). Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -226,7 +234,11 @@ echo "4: FORCE_ROTATE rotated both"
 # ---- 5. a role dropped by hand -> recreated and rotated ---------------------------------------------
 $PSQL -d airlock -c "DROP OWNED BY dw2_platform_ro"; $PSQL -d profile -c "DROP OWNED BY dw2_platform_ro"; $PSQL -d platform_managed -c "DROP OWNED BY dw2_platform_ro"; $PSQL -d postgres -c "DROP OWNED BY dw2_platform_ro; DROP ROLE dw2_platform_ro"
 run "1 2" "" || fail "run 5 failed"
-expect_log 5 "rotated dev-worker-2"; expect_log 5 "published password no longer logs in"; expect_log 5 "kept dev-worker-1"
+# The role is GONE, so the expiry check catches it before the login probe does — either reason is a
+# correct diagnosis of "this slot needs a new credential"; what matters is that it rotated and that
+# the other slot did not.
+expect_log 5 "rotated dev-worker-2"; expect_log 5 "kept dev-worker-1"
+grep -qE "postgres has no expiry for this role|password is rejected by the server" "$STATE/run-5.log"   || fail "run 5: the rotation reason names neither the missing expiry nor a rejected password"
 [ "$(echo 'SELECT id FROM platform_data_abc.rows' | as 2 platform_managed)" = 42 ] || fail "recreated role lost its grants"
 echo "5: hand-dropped role recreated with grants and a fresh password"
 
@@ -268,6 +280,87 @@ for log in glob.glob(os.path.join(state, "run-*.log")):
     assert not re.search(r"PASSWORD '", text), "%s echoes an ALTER ROLE ... PASSWORD statement" % log
 print("8: %d passwords published, none in any run log (%d logs)" % (len(seen), len(glob.glob(os.path.join(state, 'run-*.log')))))
 PY
+
+# ---- 9. the password never reaches the SERVER in cleartext -----------------------------------------
+# Every worker holds pg_monitor, and pg_stat_activity shows other sessions' query text; the server
+# log is readable through pods/log. So the rotation SQL must carry a SCRAM verifier, not a password.
+run "1" "" FORCE_ROTATE=1 || fail "run for the verifier check failed"
+pw_now="$(pw 1)"
+stored="$($PSQL -d postgres -c "SELECT rolpassword FROM pg_authid WHERE rolname='dw1_platform_ro'")"
+case "$stored" in
+  "SCRAM-SHA-256"*) ;;
+  *) fail "the stored password is not a SCRAM verifier: ${stored%%\$*}" ;;
+esac
+case "$stored" in
+  *"$pw_now"*) fail "the published password appears inside the stored verifier" ;;
+esac
+# ... and the credential still works, which is what makes the verifier path load-bearing rather than
+# merely quiet.
+[ "$(echo 'SELECT 1' | as 1 airlock)" = 1 ] || fail "a SCRAM-verifier password does not authenticate"
+grep -RF -- "$pw_now" "$PGDATA"/log 2>/dev/null && fail "a password reached the server log"
+echo "9: rotation stores a SCRAM verifier; the cleartext never reaches the server"
+
+# ---- 10. a KEPT credential is re-proven, and drift is repaired --------------------------------------
+# A write grant made out of band, on a table the one-table behavioural probe would never sample:
+# the run must REPAIR it (revoke), not merely notice it, and say so in the catalog afterwards.
+$PSQL -d airlock -c "GRANT INSERT, UPDATE ON outbox TO dw1_platform_ro"
+$PSQL -d airlock -c "GRANT INSERT (note) ON app_table_drafts TO dw1_platform_ro"   # column-level too
+run "1" "" || fail "the drift-repair run failed"
+expect_log $N "non-SELECT privileges revoked"
+[ "$($PSQL -d airlock -c "SELECT count(*) FROM information_schema.role_table_grants WHERE grantee='dw1_platform_ro' AND privilege_type <> 'SELECT'")" = 0 ]   || fail "a non-SELECT table grant survived the run"
+[ "$($PSQL -d airlock -c "SELECT count(*) FROM information_schema.role_column_grants WHERE grantee='dw1_platform_ro' AND privilege_type <> 'SELECT'")" = 0 ]   || fail "a column-level write grant survived the run"
+printf 'SET default_transaction_read_only = off;
+INSERT INTO outbox DEFAULT VALUES;
+' | as_err 1 airlock | grep -q "permission denied"   || fail "the repaired role can still write"
+$PSQL -d postgres -c "GRANT app TO dw1_platform_ro"
+run "1" "" || fail "the membership-drift run failed"
+expect_log $N "revoked unexpected membership app from dw1_platform_ro"
+[ "$($PSQL -d postgres -c "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid WHERE m.member='dw1_platform_ro'::regrole AND r.rolname<>'pg_monitor'")" = 0 ] \
+  || fail "the stray membership survived"
+echo "10: a kept credential is re-proven and stray privileges are repaired"
+
+# ---- 11. an expiry changed behind the sync's back is reconciled --------------------------------------
+pw_before="$(pw 1)"
+$PSQL -d postgres -c "ALTER ROLE dw1_platform_ro VALID UNTIL 'infinity'"
+run "1" "" || fail "the expiry-drift run failed"
+expect_log $N "postgres expiry disagrees with the published one"
+[ "$(pw 1)" != "$pw_before" ] || fail "an expiry disagreement must rotate"
+[ "$($PSQL -d postgres -c "SELECT rolvaliduntil < now() + interval '15 days' FROM pg_roles WHERE rolname='dw1_platform_ro'")" = t ] \
+  || fail "the expiry was not brought back to the published window"
+echo "11: postgres expiry drift is detected and reconciled"
+
+# ---- 12. a database dropped from the allowlist loses its grants, and retirement still works ---------
+run "1 2" "" PLATFORM_DATABASES="airlock profile platform_managed" || fail "run with profile allowed failed"
+# PUBLIC holds CONNECT on every database by default, so has_database_privilege proves nothing
+# here; the explicit ACL entry is what the grant adds and what DROP OWNED BY must remove.
+[ "$($PSQL -d postgres -c "SELECT count(*) FROM pg_database d, aclexplode(d.datacl) a JOIN pg_roles r ON r.oid = a.grantee WHERE d.datname='profile' AND r.rolname='dw2_platform_ro'")" -gt 0 ] \
+  || fail "the grant in profile was never made"
+run "1 2" "" PLATFORM_DATABASES="airlock platform_managed" || fail "run with profile removed failed"
+[ "$($PSQL -d postgres -c "SELECT count(*) FROM pg_database d, aclexplode(d.datacl) a JOIN pg_roles r ON r.oid = a.grantee WHERE d.datname='profile' AND r.rolname='dw2_platform_ro'")" = 0 ] \
+  || fail "a database dropped from the allowlist kept its grants"
+run "1" "2" PLATFORM_DATABASES="airlock platform_managed" || fail "retirement after allowlist removal failed"
+[ "$($PSQL -d postgres -c "SELECT count(*) FROM pg_roles WHERE rolname='dw2_platform_ro'")" = 0 ] \
+  || fail "the retired role survived because a de-allowlisted database still held its grants"
+echo "12: de-allowlisted grants are revoked and retirement is not blocked by them"
+
+# ---- 13. connection exhaustion must NOT rotate -------------------------------------------------------
+$PSQL -d postgres -c "ALTER ROLE dw1_platform_ro CONNECTION LIMIT 0"
+pw_before="$(pw 1)"
+w_before="$(writes)"
+if run "1" "" PLATFORM_DATABASES="airlock platform_managed"; then fail "a server that refuses connections must fail the run"; fi
+expect_log $N "capacity or transport"
+[ "$(pw 1)" = "$pw_before" ] && [ "$(writes)" = "$w_before" ] \
+  || fail "connection exhaustion rotated the password (it must not)"
+$PSQL -d postgres -c "ALTER ROLE dw1_platform_ro CONNECTION LIMIT 10"
+echo "13: capacity failures never rotate a working credential"
+
+# ---- 14. the write probe leaves nothing behind -------------------------------------------------------
+before_rows="$($PSQL -d airlock -c 'SELECT count(*) FROM outbox')"
+run "1" "" PLATFORM_DATABASES="airlock platform_managed" FORCE_ROTATE=1 || fail "final run failed"
+[ "$($PSQL -d airlock -c 'SELECT count(*) FROM outbox')" = "$before_rows" ] || fail "the probe INSERT was committed"
+[ "$($PSQL -d airlock -c "SELECT count(*) FROM pg_tables WHERE tablename='openbao_platform_pg_sync_probe'")" = 0 ] \
+  || fail "the probe table survived"
+echo "14: the read-only proof mutates nothing"
 
 kill "$STUB_PID" 2>/dev/null || true
 "$BIN/pg_ctl" -w stop >/dev/null 2>&1 || true

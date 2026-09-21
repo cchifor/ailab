@@ -59,16 +59,31 @@ data:
     """Maintain a read-only Postgres login per live dev-worker slot and publish it to OpenBao.
 
     Runs in the CNPG operand image (python 3.9 + psycopg2 — no `match`, no `X | Y` annotations, no
-    f-string `=`). NEVER prints a password or any KV value: role names, database names, field names,
-    timestamps and rotated/kept only. Fail-closed: OpenBao login first (a run that cannot publish must
-    not rotate), every role change for a run in ONE transaction on the primary, every rotated login
-    proven — read-only by privilege — before anything is published.
+    f-string `=`). NEVER puts a password anywhere it can be read: not in a log line, and not in SQL
+    either — the server is sent a client-computed SCRAM-SHA-256 verifier, because every worker holds
+    `pg_monitor` and `pg_stat_activity` shows other sessions' query text verbatim (measured on this
+    cluster 2026-09-21), so a cleartext `ALTER ROLE ... PASSWORD` would hand slot B's new password to
+    slot A. The same reason the session also silences statement logging: `pods/log` is readable by the
+    very same workers.
 
-    Tested by scripts/tests/test-platform-pg-sync.sh under this same image against a throwaway
-    Postgres and a stub OpenBao. The OpenBao client mirrors openbao-k8stoken-sync's sync.py — keep
-    the two in step.
+    Fail-closed: OpenBao login first (a run that cannot publish must not rotate), a cluster-wide
+    advisory lock for the whole run (`concurrencyPolicy: Forbid` serialises the CronJob against itself
+    but NOT against the bootstrap Job or a hand-made one, and two runs could otherwise publish a
+    password the other has already replaced), every role change in one transaction on the primary, and
+    every credential — rotated or kept — proven read-only before anything is published.
+
+    Rotation is WHEN-NEEDED: a slot's password changes only when its KV fields are missing, the
+    published validity has less than PG_ROTATE_BEFORE_SECONDS left, Postgres disagrees with the
+    published expiry, the published password is REJECTED by the server (28xxx — never because the
+    connection failed for capacity or transport reasons), or FORCE_ROTATE=1. Everything else is
+    re-asserted every run. That is what makes a re-run a no-op instead of a rotation.
+
+    Tested by scripts/tests/test-platform-pg-sync.sh under this same image.
     """
+    import base64
     import calendar
+    import hashlib
+    import hmac
     import json
     import os
     import secrets
@@ -92,16 +107,23 @@ data:
     ROTATE_BEFORE = int(os.environ.get("PG_ROTATE_BEFORE_SECONDS", "604800"))     # rotate with < 7 d left
     CONNECTION_LIMIT = int(os.environ.get("PG_CONNECTION_LIMIT", "10"))
     FORCE_ROTATE = os.environ.get("FORCE_ROTATE", "") == "1"
-    # Roles whose FUTURE tables are readable without waiting for the next run: the migrator (`app`
-    # owns every platform database and runs every alembic migration) and the CNPG superuser (the
-    # platform's init Job and the workflow admin DSN connect as it). Database-wide, never IN SCHEMA,
-    # and never for a tenant role: a per-schema default ACL is a dependency of that schema, and a
-    # default ACL FOR a role blocks DROP ROLE — either would break the integration provisioner's
-    # per-tenant teardown. Tables created by any other role become readable on the next run.
+    # Roles whose FUTURE tables are readable without waiting for the next run: the migrator (`app` owns
+    # every platform database and runs every alembic migration) and the CNPG superuser (the platform's
+    # init Job and the workflow admin DSN connect as it). Database-wide, never IN SCHEMA, and never for
+    # a tenant role: a per-schema default ACL is a dependency of that schema, and a default ACL FOR a
+    # role blocks DROP ROLE — either would break the integration provisioner's per-tenant teardown.
     DEFAULT_PRIV_GRANTORS = os.environ.get("PG_DEFAULT_PRIV_GRANTORS", "app postgres").split()
     SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "pg_toast")
     FIELDS = ("platform_pg_user", "platform_pg_password", "platform_pg_valid_until")
+    # The ONLY role membership these logins may hold. Anything else is drift and is revoked: a
+    # membership in `app` (or pg_write_all_data) would make a "read-only" credential writable while
+    # every attribute below still looked right.
+    ALLOWED_MEMBERSHIPS = ("pg_monitor",)
     TS = "%Y-%m-%dT%H:%M:%SZ"
+    LOCK_KEY = 0x706C6174666F726D  # "platform" — one advisory lock for every run of this sync
+    # Postgres SQLSTATEs that mean "this credential is wrong", as opposed to "the server would not talk
+    # to us": 28P01 invalid_password, 28000 invalid_authorization_specification.
+    AUTH_FAILURE_SQLSTATES = ("28P01", "28000")
 
 
     def role_name(slot):
@@ -120,8 +142,28 @@ data:
         return secrets.token_urlsafe(32)
 
 
+    def scram_verifier(password, iterations=4096):
+        """RFC 5802 SCRAM-SHA-256 verifier, the form `ALTER ROLE ... PASSWORD` stores verbatim.
+
+        The password never reaches the server, so it cannot appear in pg_stat_activity (readable by
+        every pg_monitor member, i.e. every other worker) or in a logged statement (readable through
+        pods/log). SASLprep is the identity here: token_urlsafe emits only [A-Za-z0-9_-]."""
+        salt = os.urandom(16)
+        salted = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+        stored_key = hashlib.sha256(client_key).digest()
+        server_key = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+        return "SCRAM-SHA-256$%d:%s$%s:%s" % (
+            iterations, base64.b64encode(salt).decode(),
+            base64.b64encode(stored_key).decode(), base64.b64encode(server_key).decode())
+
+
     def valid_until_from(now):
         return time.strftime(TS, time.gmtime(now + VALID_SECONDS))
+
+
+    def parse_ts(value):
+        return calendar.timegm(time.strptime(value, TS))
 
 
     # ---- Postgres ----------------------------------------------------------------------------------
@@ -134,6 +176,13 @@ data:
         )
 
 
+    def quiet(cur):
+        """Superuser-only: keep this session's statements out of the server log. Belt to the SCRAM
+        verifier's braces — the workers can read the postgres pod's log through pods/log."""
+        cur.execute("SET log_statement = 'none'")
+        cur.execute("SET log_min_duration_statement = -1")
+
+
     def user_schemas(cur):
         cur.execute(
             "SELECT nspname FROM pg_namespace WHERE nspname NOT IN %s "
@@ -142,9 +191,27 @@ data:
         return [r[0] for r in cur.fetchall()]
 
 
-    def assert_role(cur, role, password=None, valid_until=None):
+    def all_databases(cur):
+        """Every connectable database, not just the allowlist. Retirement and allowlist-removal cleanup
+        must reach a database that USED to be granted, or its leftover grants make DROP ROLE fail for
+        ever and the old SELECT rights simply stay."""
+        cur.execute("SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY 1")
+        return [r[0] for r in cur.fetchall()]
+
+
+    def role_expiry(cur, role):
+        """Postgres's own view of the expiry, as an epoch — None for no expiry or no role."""
+        cur.execute("SELECT rolvaliduntil FROM pg_roles WHERE rolname = %s", (role,))
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return calendar.timegm(row[0].utctimetuple())
+
+
+    def assert_role(cur, role, verifier=None, valid_until=None):
         """Create-if-absent, then restate every attribute so a hand edit converges back within a day.
-        PASSWORD / VALID UNTIL only when this run rotates the slot."""
+        PASSWORD/VALID UNTIL only when this run rotates the slot; `verifier` is a SCRAM verifier, never
+        a cleartext password."""
         ident = sql.Identifier(role)
         cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
         if cur.fetchone() is None:
@@ -152,10 +219,18 @@ data:
         cur.execute(sql.SQL(
             "ALTER ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS "
             "NOREPLICATION CONNECTION LIMIT %s").format(ident), (CONNECTION_LIMIT,))
-        if password is not None:
+        if verifier is not None:
             cur.execute(sql.SQL("ALTER ROLE {} WITH PASSWORD %s VALID UNTIL %s").format(ident),
-                        (password, valid_until))
+                        (verifier, valid_until))
         cur.execute(sql.SQL("GRANT pg_monitor TO {}").format(ident))
+        # Drift repair: a membership granted out of band (app, pg_write_all_data, a tenant role) makes
+        # this credential writable while every attribute above still reads correctly.
+        cur.execute(
+            "SELECT r.rolname FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid "
+            "WHERE m.member = %s::regrole AND r.rolname <> ALL(%s)", (role, list(ALLOWED_MEMBERSHIPS)))
+        for (extra,) in cur.fetchall():
+            cur.execute(sql.SQL("REVOKE {} FROM {}").format(sql.Identifier(extra), ident))
+            log("revoked unexpected membership %s from %s" % (extra, role))
         for guc, val in (("default_transaction_read_only", "on"),
                          ("statement_timeout", "300s"),
                          ("idle_in_transaction_session_timeout", "60s")):
@@ -165,11 +240,12 @@ data:
     def grant_database(dbname, roles):
         """Read grants for `roles` in one database: CONNECT, USAGE on every user schema present now,
         SELECT on every table/view/sequence in them, and database-wide default privileges for the
-        grantor roles. Runs in one transaction per database."""
+        grantor roles."""
         conn = pg_connect(dbname)
         try:
             with conn:
                 with conn.cursor() as cur:
+                    quiet(cur)
                     schemas = user_schemas(cur)
                     for role in roles:
                         ident = sql.Identifier(role)
@@ -186,18 +262,45 @@ data:
                                 "ALTER DEFAULT PRIVILEGES FOR ROLE {} GRANT SELECT ON TABLES TO {}").format(g, ident))
                             cur.execute(sql.SQL(
                                 "ALTER DEFAULT PRIVILEGES FOR ROLE {} GRANT SELECT ON SEQUENCES TO {}").format(g, ident))
-                    log("granted %s: %d roles, schemas %s" % (dbname, len(roles), ",".join(schemas)))
+                        # SELECT is granted; everything else is REVOKED on every run, so "read-only" is an
+                        # invariant this job restores rather than an assumption about who else has run a
+                        # GRANT. A table-level REVOKE also removes column-level grants of that privilege.
+                        for schema in schemas:
+                            s_id = sql.Identifier(schema)
+                            cur.execute(sql.SQL(
+                                "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
+                                "ON ALL TABLES IN SCHEMA {} FROM {}").format(s_id, ident))
+                            cur.execute(sql.SQL(
+                                "REVOKE UPDATE ON ALL SEQUENCES IN SCHEMA {} FROM {}").format(s_id, ident))
+                            cur.execute(sql.SQL("REVOKE CREATE ON SCHEMA {} FROM {}").format(s_id, ident))
+                        cur.execute(sql.SQL("REVOKE CREATE, TEMPORARY ON DATABASE {} FROM {}").format(
+                            sql.Identifier(dbname), ident))
+                    # Belt to that brace: prove from the catalog that nothing writable is left anywhere in
+                    # this database, for any of the roles. A behavioural probe samples ONE table; this is
+                    # exhaustive, and it is what catches a grant made out of band on some other table.
+                    cur.execute(
+                        "SELECT grantee, table_schema, table_name, privilege_type "
+                        "FROM information_schema.role_table_grants "
+                        "WHERE grantee = ANY(%s) AND privilege_type <> 'SELECT' LIMIT 5", (list(roles),))
+                    leftover = cur.fetchall()
+                    if leftover:
+                        raise RuntimeError(
+                            "%s: these roles still hold non-SELECT privileges after the revoke pass: %s"
+                            % (dbname, "; ".join("%s on %s.%s: %s" % r for r in leftover)))
+                    log("granted %s: %d roles, schemas %s (non-SELECT privileges revoked)"
+                        % (dbname, len(roles), ",".join(schemas)))
         finally:
             conn.close()
 
 
     def revoke_database(dbname, roles):
-        """DROP OWNED BY strips every grant and default-privilege entry the role holds in this
-        database (it owns nothing, so nothing else is dropped). Skips roles that no longer exist."""
+        """DROP OWNED BY strips every grant and default-privilege entry the role holds in this database
+        (it owns nothing, so nothing else is dropped). Skips roles that no longer exist."""
         conn = pg_connect(dbname)
         try:
             with conn:
                 with conn.cursor() as cur:
+                    quiet(cur)
                     for role in roles:
                         cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
                         if cur.fetchone() is None:
@@ -208,51 +311,70 @@ data:
             conn.close()
 
 
-    def login_works(role, password, dbname):
-        """True when the credential logs in. Any failure (auth, expiry, role gone) is False — the
-        caller decides whether that means 'rotate' (pre-check) or 'abort' (post-rotation proof)."""
+    def login_state(role, password, dbname):
+        """'ok' | 'rejected' | 'unavailable'. The distinction matters: a REJECTED credential must be
+        rotated, but an UNAVAILABLE server (CONNECTION LIMIT exhausted by the worker's own sessions,
+        a network blip, a failover) must NOT be — rotating there would replace a working password and
+        then fail its own proof for the same reason, leaving KV stale and the worker locked out."""
         try:
             conn = pg_connect(dbname, user=role, password=password)
-        except psycopg2.Error:
-            return False
+        except psycopg2.Error as exc:
+            if getattr(exc, "pgcode", None) in AUTH_FAILURE_SQLSTATES:
+                return "rejected"
+            text = str(exc).lower()
+            if "password authentication failed" in text or "role" in text and "does not exist" in text:
+                return "rejected"
+            return "unavailable"
         conn.close()
-        return True
+        return "ok"
 
 
-    def prove_login(role, password, dbname):
-        """The published credential must be one that WORKS and is read-only BY PRIVILEGE: log in as
-        the role over the primary service, check identity and the session default, read a pg_monitor
-        view, flip the read-only default off (any session may) and make sure a write is STILL refused
-        — the role owns nothing and holds only SELECT."""
+    def prove_read_only(role, password, dbname):
+        """The credential must WORK and be read-only BY PRIVILEGE. Every probe runs inside a
+        transaction that is ALWAYS rolled back: if an unexpected privilege did exist, an autocommitted
+        CREATE TABLE/INSERT would leave that change behind in a production database — the safety check
+        must not be the thing that mutates it."""
         conn = pg_connect(dbname, user=role, password=password)
         try:
-            conn.autocommit = True
+            conn.autocommit = False
             with conn.cursor() as cur:
+                # Transaction 1: identity, the role-level read-only default, and a pg_monitor read.
                 cur.execute("SELECT current_user, current_setting('transaction_read_only')")
                 who, ro = cur.fetchone()
                 if who != role or ro != "on":
-                    raise RuntimeError("%s: login proved as %s with transaction_read_only=%s" % (role, who, ro))
+                    raise RuntimeError("%s: logged in as %s with transaction_read_only=%s" % (role, who, ro))
                 cur.execute("SELECT count(*) FROM pg_stat_activity")  # pg_monitor
-                # Session-level, not `SET transaction_read_only` (which in autocommit mode dies with
-                # its one-statement transaction): the role-level default is USERSET and any session
-                # may flip it — which is exactly why it cannot be the enforcement.
-                cur.execute("SET default_transaction_read_only = off")
                 cur.execute("SELECT schemaname, tablename FROM pg_tables WHERE schemaname NOT IN %s "
                             "ORDER BY 1, 2 LIMIT 1", (SYSTEM_SCHEMAS,))
                 row = cur.fetchone()
+                conn.rollback()
+                # Transaction 2: the write probes, with the read-only default turned OFF. The SET has to
+                # be the FIRST statement of its transaction ("transaction read-write mode must be set
+                # before any query"), which is why this is a second transaction rather than a flip in
+                # the middle of the first.
+                cur.execute("SET transaction_read_only = off")
                 probes = [sql.SQL("CREATE TABLE openbao_platform_pg_sync_probe (x int)")]
                 if row is not None:
                     probes.append(sql.SQL("INSERT INTO {}.{} DEFAULT VALUES").format(
                         sql.Identifier(row[0]), sql.Identifier(row[1])))
                 for probe in probes:
+                    cur.execute("SAVEPOINT probe")
                     try:
                         cur.execute(probe)
                     except psycopg2.Error as exc:
-                        if exc.pgcode != "42501":  # insufficient_privilege — the only acceptable answer
-                            raise RuntimeError("%s: write refused with unexpected SQLSTATE %s" % (role, exc.pgcode))
+                        code = exc.pgcode
+                        cur.execute("ROLLBACK TO SAVEPOINT probe")
+                        # 42501 insufficient_privilege is the answer we want. 42P01/3F000 (the probe
+                        # table's schema is unreadable) would mean the grant itself is wrong, and an
+                        # RLS rejection (44000 check_violation on a WITH CHECK policy) is NOT proof of
+                        # missing INSERT privilege — treat both as failures rather than silent passes.
+                        if code != "42501":
+                            raise RuntimeError("%s: write refused with SQLSTATE %s, expected 42501 "
+                                               "(insufficient_privilege)" % (role, code))
                     else:
-                        raise RuntimeError("%s: a write SUCCEEDED — the role is not read-only" % role)
+                        raise RuntimeError("%s: a write SUCCEEDED — the role is NOT read-only" % role)
         finally:
+            conn.rollback()  # nothing this function did may survive
             conn.close()
 
 
@@ -322,8 +444,10 @@ data:
                 sys.exit("create of %s failed: HTTP %s" % (worker, st))
 
 
-    def rotation_reason(fields, role, now):
-        """Why this slot must be rotated this run, or None to keep the published credential."""
+    def rotation_reason(fields, role, now, pg_expiry):
+        """Why this slot must be rotated this run, or None to keep the published credential. Postgres's
+        own rolvaliduntil is part of the decision: a role altered out of band to expire tomorrow (or
+        never) still logs in today, and keeping it would break the published validity contract."""
         if FORCE_ROTATE:
             return "FORCE_ROTATE"
         if any(f not in fields for f in FIELDS):
@@ -331,11 +455,15 @@ data:
         if fields["platform_pg_user"] != role:
             return "published user is not %s" % role
         try:
-            left = calendar.timegm(time.strptime(fields["platform_pg_valid_until"], TS)) - now
+            published = parse_ts(fields["platform_pg_valid_until"])
         except ValueError:
             return "unparseable valid_until"
-        if left < ROTATE_BEFORE:
-            return "%dh of validity left" % max(int(left // 3600), 0)
+        if published - now < ROTATE_BEFORE:
+            return "%dh of validity left" % max(int((published - now) // 3600), 0)
+        if pg_expiry is None:
+            return "postgres has no expiry for this role"
+        if abs(pg_expiry - published) > 300:  # 5 min of slack for clock/rounding
+            return "postgres expiry disagrees with the published one"
         return None
 
 
@@ -354,94 +482,140 @@ data:
         probe_db = DATABASES[0]
         admin_db = os.environ.get("PGDATABASE", "postgres")
 
-        # ---- Decide per slot: rotate or keep ---------------------------------------------------------
-        plan = {}
-        for slot in LIVE_SLOTS:
-            exists, fields = bao.current(worker_name(slot))
-            reason = rotation_reason(fields, role_name(slot), now)
-            plan[slot] = {"exists": exists, "fields": fields, "rotate": reason is not None, "reason": reason}
+        # ---- One run at a time, cluster-wide ----------------------------------------------------------
+        # concurrencyPolicy: Forbid covers this CronJob against itself only. The bootstrap Job, a
+        # `kubectl create job --from=cronjob/...` and the CronJob can all run at once, and two runs
+        # racing between "prove" and "publish" would leave KV holding a password the other has already
+        # replaced. The lock is session-level and held until this connection closes, i.e. for the whole
+        # run including retirement and publication.
+        lock_conn = pg_connect(admin_db)
+        lock_conn.autocommit = True
+        with lock_conn.cursor() as cur:
+            quiet(cur)
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_KEY,))
+            if not cur.fetchone()[0]:
+                sys.exit("another openbao-platform-pg-sync run holds the advisory lock; exiting without "
+                         "touching Postgres or KV (the other run is doing this work)")
+            cur.execute("SELECT pg_is_in_recovery()")
+            if cur.fetchone()[0]:
+                sys.exit("connected to a replica; PGHOST must be the -rw service")
 
-        # ---- Cluster-wide role state, one transaction on the primary ---------------------------------
-        conn = pg_connect(admin_db)
         try:
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT pg_is_in_recovery()")
-                    if cur.fetchone()[0]:
-                        raise RuntimeError("connected to a replica; PGHOST must be the -rw service")
-                    for slot in sorted(plan):
-                        entry = plan[slot]
-                        if entry["rotate"]:
-                            entry["password"] = new_password()
-                            entry["valid_until"] = valid_until_from(now)
-                            assert_role(cur, role_name(slot), entry["password"], entry["valid_until"])
-                        else:
-                            assert_role(cur, role_name(slot))
-        finally:
-            conn.close()
-
-        # ---- Per-database grants for live roles; revocation for retired ones -------------------------
-        live_roles = [role_name(s) for s in sorted(plan)]
-        for dbname in DATABASES:
-            grant_database(dbname, live_roles)
-        retired = [role_name(s) for s in RETIRED_SLOTS]
-        if retired:
-            # DROP OWNED BY must run in EVERY database (grants and default ACLs are per database)
-            # before the role can be dropped — hence a per-database loop, then the role.
-            for dbname in DATABASES + [admin_db]:
-                revoke_database(dbname, retired)
+            # ---- Decide per slot: rotate or keep -------------------------------------------------------
+            plan = {}
             conn = pg_connect(admin_db)
             try:
                 with conn:
                     with conn.cursor() as cur:
-                        for role in retired:
-                            cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
-                            log("retired %s: grants revoked in %d databases, role dropped if present"
-                                % (role, len(DATABASES) + 1))
+                        quiet(cur)
+                        for slot in LIVE_SLOTS:
+                            exists, fields = bao.current(worker_name(slot))
+                            reason = rotation_reason(fields, role_name(slot), now,
+                                                     role_expiry(cur, role_name(slot)))
+                            plan[slot] = {"exists": exists, "fields": fields,
+                                          "rotate": reason is not None, "reason": reason}
             finally:
                 conn.close()
 
-        # ---- A kept slot must still log in with what is published; otherwise rotate it after all ----
-        # (after the grants, so a hand-dropped role recreated above is proven with its grants in place)
-        conn = pg_connect(admin_db)
-        try:
-            with conn:
+            # A kept slot must still be ACCEPTED by the server. 'unavailable' is not a reason to rotate.
+            for slot in sorted(plan):
+                entry = plan[slot]
+                if entry["rotate"]:
+                    continue
+                state = login_state(role_name(slot), entry["fields"]["platform_pg_password"], probe_db)
+                if state == "rejected":
+                    entry.update(rotate=True, reason="published password is rejected by the server")
+                elif state == "unavailable":
+                    sys.exit("%s: the server would not accept a connection for %s (capacity or transport, "
+                             "not credentials); exiting WITHOUT rotating so the working password stands"
+                             % (worker_name(slot), role_name(slot)))
+
+            # ---- Role state, one transaction on the primary --------------------------------------------
+            conn = pg_connect(admin_db)
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        quiet(cur)
+                        for slot in sorted(plan):
+                            entry = plan[slot]
+                            if entry["rotate"]:
+                                entry["password"] = new_password()
+                                entry["valid_until"] = valid_until_from(now)
+                                assert_role(cur, role_name(slot), scram_verifier(entry["password"]),
+                                            entry["valid_until"])
+                            else:
+                                assert_role(cur, role_name(slot))
+            finally:
+                conn.close()
+
+            # ---- Per-database grants; revocation for retired slots and de-allowlisted databases --------
+            live_roles = [role_name(s) for s in sorted(plan)]
+            retired_roles = [role_name(s) for s in RETIRED_SLOTS]
+            conn = pg_connect(admin_db)
+            try:
                 with conn.cursor() as cur:
-                    for slot in sorted(plan):
-                        entry = plan[slot]
-                        if entry["rotate"]:
-                            continue
-                        if login_works(role_name(slot), entry["fields"]["platform_pg_password"], probe_db):
-                            continue
-                        entry.update(rotate=True, reason="published password no longer logs in",
-                                     password=new_password(), valid_until=valid_until_from(now))
-                        assert_role(cur, role_name(slot), entry["password"], entry["valid_until"])
+                    every_db = all_databases(cur)
+            finally:
+                conn.close()
+            # CLEANUP FIRST, THEN GRANT — the order is load-bearing. `DROP OWNED BY` revokes the role's
+            # privileges on SHARED objects too (pg_database is shared), so a cleanup pass run AFTER the
+            # grants strips the database-level CONNECT it just made in EVERY database, not only in the
+            # one it is connected to. Cleaning up first and granting second leaves exactly the intended
+            # state, and the grant pass is what restores CONNECT for the allowlisted databases.
+            #
+            # Databases NOT in the allowlist (removed from it, or never in it) are cleaned for live roles
+            # as well as retired ones: without that, a database dropped from the allowlist would keep its
+            # SELECT rights for ever, and its leftover dependencies would make a later DROP ROLE fail on
+            # every run.
+            for dbname in every_db:
+                roles_to_clean = retired_roles if dbname in DATABASES else live_roles + retired_roles
+                if roles_to_clean:
+                    revoke_database(dbname, roles_to_clean)
+            for dbname in DATABASES:
+                if dbname not in every_db:
+                    sys.exit("PLATFORM_DATABASES names %s, which does not exist on this cluster" % dbname)
+                grant_database(dbname, live_roles)
+            if retired_roles:
+                conn = pg_connect(admin_db)
+                try:
+                    with conn:
+                        with conn.cursor() as cur:
+                            quiet(cur)
+                            for role in retired_roles:
+                                cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+                                log("retired %s: grants revoked in %d databases, role dropped if present"
+                                    % (role, len(every_db)))
+                finally:
+                    conn.close()
+
+            # ---- Prove EVERY live credential read-only before publishing anything ----------------------
+            # Kept ones too: reasserting attributes and adding grants can never remove a write privilege
+            # granted out of band, so "kept" must mean "re-proven", not "assumed".
+            for slot in sorted(plan):
+                entry = plan[slot]
+                password = entry["password"] if entry["rotate"] else entry["fields"]["platform_pg_password"]
+                prove_read_only(role_name(slot), password, probe_db)
+
+            # ---- Publish, one patch per worker so the three fields can never disagree -------------------
+            rotated = kept = 0
+            for slot in sorted(plan):
+                worker, role, entry = worker_name(slot), role_name(slot), plan[slot]
+                if not entry["rotate"]:
+                    kept += 1
+                    log("kept %s: %s valid until %s (re-proven read-only)"
+                        % (worker, role, entry["fields"]["platform_pg_valid_until"]))
+                    continue
+                bao.publish(worker, entry["exists"], {
+                    "platform_pg_user": role,
+                    "platform_pg_password": entry["password"],
+                    "platform_pg_valid_until": entry["valid_until"],
+                })
+                rotated += 1
+                log("rotated %s: %s valid until %s (%s); published %s"
+                    % (worker, role, entry["valid_until"], entry["reason"], ", ".join(FIELDS)))
+            log("published %d/%d slots (rotated %d, kept %d)" % (rotated + kept, len(LIVE_SLOTS), rotated, kept))
         finally:
-            conn.close()
-
-        # ---- Prove every rotated login BEFORE publishing any -------------------------------------------
-        for slot in sorted(plan):
-            entry = plan[slot]
-            if entry["rotate"]:
-                prove_login(role_name(slot), entry["password"], probe_db)
-
-        # ---- Publish, one patch per worker so the three fields can never disagree ---------------------
-        rotated = kept = 0
-        for slot in sorted(plan):
-            worker, role, entry = worker_name(slot), role_name(slot), plan[slot]
-            if not entry["rotate"]:
-                kept += 1
-                log("kept %s: %s valid until %s" % (worker, role, entry["fields"]["platform_pg_valid_until"]))
-                continue
-            bao.publish(worker, entry["exists"], {
-                "platform_pg_user": role,
-                "platform_pg_password": entry["password"],
-                "platform_pg_valid_until": entry["valid_until"],
-            })
-            rotated += 1
-            log("rotated %s: %s valid until %s (%s); published %s"
-                % (worker, role, entry["valid_until"], entry["reason"], ", ".join(FIELDS)))
-        log("published %d/%d slots (rotated %d, kept %d)" % (rotated + kept, len(LIVE_SLOTS), rotated, kept))
+            lock_conn.close()  # releases the advisory lock
 
 
     if __name__ == "__main__":

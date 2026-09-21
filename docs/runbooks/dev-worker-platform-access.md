@@ -47,21 +47,28 @@ platform env                                 # slot, postgres role, file paths (
 ### What is not, and why (do not work around these — ask)
 
 1. **Secrets and exec are denied.** `get secrets`, `pods/exec`, `pods/attach` all fail, as does every
-   write. Exec is denied *because* it reads every mounted file and env var — the same thing as a
-   Secret read.
-2. **Postgres is SELECT-only by privilege.** The role owns nothing; an `INSERT` fails
+   write through the Kubernetes API. Exec is denied *because* it reads every mounted file and env
+   var — the same thing as a Secret read.
+2. **`port-forward` is a TCP path, and it is only as read-only as the service behind it.** The
+   Kubernetes API cannot scope a forward to one Service, so `platform pf` reaches any pod port in
+   these namespaces. Postgres is safe by privilege (below) and anything fronted by gatekeeper still
+   authenticates you — but **Valkey runs with `ALLOW_EMPTY_PASSWORD=yes`**, so a forward to it could
+   issue writes (`SET`, `FLUSHALL`). Treat every non-Postgres endpoint as read-only by discipline:
+   inspect, do not mutate. If you need to change cache or queue state to test something, say so —
+   that is a platform PR or an operator action, not something to do down a debugging tunnel.
+3. **Postgres is SELECT-only by privilege.** The role owns nothing; an `INSERT` fails
    `permission denied` even after `SET default_transaction_read_only = off`, on the primary too.
-3. **RLS: most `airlock` and `workflow` tables read EMPTY without `--tenant`.** 25 of 27 airlock
+4. **RLS: most `airlock` and `workflow` tables read EMPTY without `--tenant`.** 25 of 27 airlock
    tables and 14 of 15 workflow tables have `TO public` policies keyed on
    `current_setting('app.tenant_id')`. Zero rows and no error is almost always a missing tenant. A
    tenant id comes from the App (`apps.tenant_id`), the persona's token claim, or
    `platform_managed`'s `platform_data_<tenant>` schema names.
-4. **`keycloak` connects but reads nothing** (`permission denied`) — by design; use the Keycloak
+5. **`keycloak` connects but reads nothing** (`permission denied`) — by design; use the Keycloak
    admin API for identity questions.
-5. **A tenant-created table is readable only after the next sync run** (the default privileges cover
+6. **A tenant-created table is readable only after the next sync run** (the default privileges cover
    the migrator `app` and `postgres`, never a tenant role — a default ACL for a role would block
    `DROP ROLE`).
-6. **Long scans: prefer `--rw`.** A replica can cancel a query that conflicts with recovery
+7. **Long scans: prefer `--rw`.** A replica can cancel a query that conflicts with recovery
    (`max_standby_streaming_delay`); the primary will not, and is equally read-only.
 
 ## Component map
@@ -157,8 +164,11 @@ platform kubectl get pods | head
 platform kubectl get secrets            # MUST be Forbidden
 platform psql -d airlock -c 'select count(*) from app_table_drafts'         # 0 rows without --tenant
 platform psql -d airlock --tenant <id> -c 'select count(*) from app_table_drafts'
-platform psql --rw -d airlock -c 'set default_transaction_read_only = off; insert into outbox default values'
-#   MUST fail: permission denied for table outbox
+# TWO -c requests on purpose: psql runs each one in its own implicit transaction, and
+# `default_transaction_read_only` takes effect from the NEXT transaction — both statements in one
+# -c would fail with "read-only transaction" and prove nothing about privileges.
+platform psql --rw -d airlock -c 'set default_transaction_read_only = off' -c 'insert into outbox default values'
+#   MUST fail: permission denied for table outbox  (privilege, not the read-only setting)
 ```
 
 ## Rotation

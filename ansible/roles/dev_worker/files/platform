@@ -77,7 +77,9 @@ cmd_kubectl() {
 cmd_pf() {
   [ $# -eq 2 ] || usage
   need_kubeconfig
-  exec kubectl --kubeconfig="$KCFG" -n "$NS" port-forward "svc/$1" "$2"
+  # --address, NOT an address prefix in the port spec: kubectl parses "[LOCAL:]REMOTE", so
+  # "127.0.0.1:8080:5432" is read as the NAMED PORT "127.0.0.1" and fails outright.
+  exec kubectl --kubeconfig="$KCFG" -n "$NS" port-forward --address 127.0.0.1 "svc/$1" "$2"
 }
 
 cmd_psql() {
@@ -122,8 +124,10 @@ cmd_psql() {
   command -v psql >/dev/null 2>&1 || die "psql is not installed (postgresql-client is in the dev_worker role; re-run the playbook)"
 
   # The forward is private to this psql session: background it, wait for readiness, kill it on exit.
+  # `--address 127.0.0.1` binds loopback only; the port spec must stay "LOCAL:REMOTE" (an address
+  # prefix there is parsed as a NAMED PORT and kubectl refuses it).
   port="$(free_port)"
-  kubectl --kubeconfig="$KCFG" -n "$NS" port-forward "svc/$svc" "127.0.0.1:$port:5432" >/dev/null 2>&1 &
+  kubectl --kubeconfig="$KCFG" -n "$NS" port-forward --address 127.0.0.1 "svc/$svc" "$port:5432" >/dev/null 2>&1 &
   pf=$!
   trap 'kill "$pf" 2>/dev/null || true' EXIT INT TERM HUP
   i=0
@@ -137,8 +141,11 @@ cmd_psql() {
   # --tenant: the platform's RLS policies read current_setting('app.tenant_id'); a libpq startup
   # option sets it for the whole session, which is exactly how the services scope themselves. Without
   # it every RLS-protected table (most of airlock and workflow) reads EMPTY rather than erroring.
+  # The explicit --tenant goes LAST: libpq applies the options left to right, so an inherited
+  # PGOPTIONS carrying another app.tenant_id would otherwise win and silently return another
+  # tenant's rows under a flag that says t1.
   if [ -n "$tenant" ]; then
-    PGOPTIONS="-c app.tenant_id=$tenant${PGOPTIONS:+ $PGOPTIONS}"
+    PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c app.tenant_id=$tenant"
     export PGOPTIONS
   fi
   # NOT `exec`: exec would replace this shell and the EXIT trap would never fire, leaving the

@@ -33,6 +33,7 @@ for f in "$HELPER" "$HCL" "$KCTMPL" "$PGTMPL" "$TASKS" "$PACKAGES"; do
   [ -r "$f" ] || { echo "FATAL: cannot read $f"; exit 2; }
 done
 
+PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 BIN="$WORK/bin"
@@ -143,7 +144,10 @@ run kubectl get pods >/dev/null
 saw "kubectl --kubeconfig=$HOME_DIR/.platform/kubeconfig -n strive-ailab get pods" "kubectl argv is wrong"
 : >"$CALLS"
 run pf valkey-master 16379:6379 >/dev/null
-saw "kubectl --kubeconfig=$HOME_DIR/.platform/kubeconfig -n strive-ailab port-forward svc/valkey-master 16379:6379" "pf argv is wrong"
+saw "kubectl --kubeconfig=$HOME_DIR/.platform/kubeconfig -n strive-ailab port-forward --address 127.0.0.1 svc/valkey-master 16379:6379" "pf argv is wrong"
+# kubectl parses the port spec as "[LOCAL_PORT:]REMOTE_PORT" — an address prefix there is read
+# as a NAMED PORT and the command fails outright, so the bind address MUST come via --address.
+not_saw "port-forward svc/valkey-master 127.0.0.1:" "the bind address must not be in the port spec"
 mv "$HOME_DIR/.platform/kubeconfig" "$WORK/kubeconfig.away"
 run kubectl get pods
 out="$(out)"
@@ -157,12 +161,13 @@ echo "[D] psql: private forward, replica default, --rw, --tenant, status, no orp
 run psql -d airlock -c 'select 1'
 out="$(out)"
 [ "$STATUS" = 7 ] || fail "psql's exit status must propagate (got $STATUS, expected 7)"
-saw "port-forward svc/strive-pg-ro 127.0.0.1:" "psql must default to the READ-ONLY replica service"
+saw "port-forward --address 127.0.0.1 svc/strive-pg-ro " "psql must default to the READ-ONLY replica service"
+not_saw "svc/strive-pg-ro 127.0.0.1:" "the bind address must not be in the port spec (kubectl reads it as a named port)"
 saw "-U dw3_platform_ro -d airlock -c select 1" "psql argv is wrong"
 saw "PGPASSFILE=$HOME_DIR/.platform/pgpass" "PGPASSFILE not handed to psql"
 saw "PGSSLMODE=require" "PGSSLMODE not defaulted to require"
 grep -q "psql -h 127.0.0.1 -p [0-9]" "$CALLS" || fail "psql must connect over the loopback forward"
-fwd_port="$(sed -n 's/.*127\.0\.0\.1:\([0-9]*\):5432.*/\1/p' "$CALLS" | head -1)"
+fwd_port="$(sed -n 's/.*svc\/strive-pg-ro \([0-9]*\):5432.*/\1/p' "$CALLS" | head -1)"
 ready_port="$(sed -n 's/.*pg_isready .*-p \([0-9]*\).*/\1/p' "$CALLS" | head -1)"
 psql_port="$(sed -n 's/.*psql -h 127\.0\.0\.1 -p \([0-9]*\) .*/\1/p' "$CALLS" | head -1)"
 [ -n "$fwd_port" ] && [ "$fwd_port" = "$ready_port" ] && [ "$fwd_port" = "$psql_port" ] \
@@ -172,10 +177,18 @@ sleep 0.5
 pgrep -f "port-forward svc/strive-pg-ro" >/dev/null 2>&1 && fail "the port-forward outlived the helper — is psql exec'd?"
 : >"$CALLS"
 run psql --rw -d workflow -c 'select 1' >/dev/null
-saw "port-forward svc/strive-pg-rw " "--rw must target the primary service"
+saw "port-forward --address 127.0.0.1 svc/strive-pg-rw " "--rw must target the primary service"
 : >"$CALLS"
 run psql --tenant 00000000000000000000000000000001 -d airlock >/dev/null
 saw "PGOPTIONS=-c app.tenant_id=00000000000000000000000000000001" "--tenant must reach libpq as app.tenant_id"
+# An inherited PGOPTIONS must not beat the explicit flag: libpq applies options left to right, so the
+# validated --tenant has to come LAST or `--tenant t1` could quietly return t2's rows.
+: >"$CALLS"
+(cd "$WORK" && env -i PATH="$BIN:/usr/bin:/bin" HOME="$HOME_DIR" PGOPTIONS="-c app.tenant_id=other" \
+  sh "$HELPER" psql --tenant mine -d airlock >/dev/null 2>&1)
+grep -q "PGOPTIONS=-c app.tenant_id=other -c app.tenant_id=mine" "$CALLS" \
+  || fail "an inherited PGOPTIONS tenant must be overridden by --tenant, not the other way round"
+
 : >"$CALLS"
 mv "$HOME_DIR/.platform/pgpass" "$WORK/pgpass.away"
 run psql -d airlock
@@ -209,5 +222,60 @@ grep -qE '^\s*cacheable:\s*(true|yes)' "$TASKS" && fail "the pre-flight fact mus
 grep -q 'src: platform$' "$TASKS" || fail "openbao.yml must install the platform helper"
 grep -q 'postgresql-client' "$PACKAGES" || fail "packages.yml must install postgresql-client (platform psql needs it)"
 pass "ctmpl fields, gated agent stanzas, pre-flight fact, helper install, package"
+
+echo "[F] the render chain produces a usable pgpass and kubeconfig"
+# The .j2 -> .ctmpl -> rendered-file chain, executed rather than grepped: ansible renders the Jinja
+# (inventory_hostname), the bao agent renders the consul-template actions (the KV fields). Both are
+# substituted here with fixtures, and the RESULT is checked the way libpq and kubectl would read it.
+"$PY" - "$KCTMPL" "$PGTMPL" "$WORK" <<'PY'
+import io, json, re, sys
+
+kctmpl, pgtmpl, work = sys.argv[1:4]
+HOST = "dev-worker-3"
+FIELDS = {
+    "platform_kubeconfig": json.dumps({
+        "apiVersion": "v1", "kind": "Config", "current-context": "strive-ailab",
+        "clusters": [{"name": "ai", "cluster": {"server": "https://192.168.0.40:6443",
+                                                "certificate-authority-data": "Zm9v"}}],
+        "contexts": [{"name": "strive-ailab",
+                      "context": {"cluster": "ai", "user": "platform-dw3", "namespace": "strive-ailab"}}],
+        "users": [{"name": "platform-dw3", "user": {"token": "stub.jwt.value"}}],
+    }, indent=2),
+    "platform_pg_user": "dw3_platform_ro",
+    "platform_pg_password": "Zm9vYmFyLXBhc3N3b3JkLXdpdGgtbm8tY29sb25z",
+}
+
+
+def render(path):
+    text = io.open(path, encoding="utf-8").read()
+    # ansible/Jinja pass: strip the {# comment #}, unwrap {% raw %}, substitute the one variable
+    text = re.sub(r"\{#.*?#\}", "", text, flags=re.S)
+    text = text.replace("{% raw %}", "").replace("{% endraw %}", "")
+    text = text.replace("{{ inventory_hostname }}", HOST).strip("\n")
+    # bao-agent pass: `{{ with secret "path" }}...{{ end }}` around `{{ .Data.data.<field> }}`
+    body = re.sub(r'^\{\{ with secret "af/data/dev-workers/%s" \}\}(.*)\{\{ end \}\}$' % HOST,
+                  r"\1", text, flags=re.S)
+    assert body != text, "the template is not a single `with secret` block over this host's path: %r" % text[:80]
+    missing = [m for m in re.findall(r"\{\{ \.Data\.data\.([a-z_]+) \}\}", body) if m not in FIELDS]
+    assert not missing, "template reads unknown KV fields: %s" % missing
+    return re.sub(r"\{\{ \.Data\.data\.([a-z_]+) \}\}", lambda m: FIELDS[m.group(1)], body)
+
+
+pgpass = render(pgtmpl)
+assert "\n" not in pgpass.strip(), "a pgpass file must be ONE line, got %r" % pgpass
+parts = pgpass.strip().split(":")
+assert len(parts) == 5, "libpq needs host:port:db:user:password, got %d fields: %r" % (len(parts), parts)
+assert parts[:3] == ["*", "*", "*"], "host/port/database must be wildcards, got %r" % parts[:3]
+assert parts[3] == FIELDS["platform_pg_user"], "the user field is %r" % parts[3]
+assert parts[4] == FIELDS["platform_pg_password"], "the password field is %r" % parts[4]
+
+kubeconfig = render(kctmpl)
+doc = json.loads(kubeconfig)  # JSON is valid YAML; kubectl parses it as-is
+ctx = next(c for c in doc["contexts"] if c["name"] == doc["current-context"])["context"]
+assert ctx["namespace"] == "strive-ailab", ctx
+assert doc["users"][0]["user"]["token"], "the kubeconfig carries no token"
+print("  ok  pgpass renders to one 5-field libpq line; kubeconfig renders to a parseable Config")
+PY
+[ $? -eq 0 ] || fail "the render chain check failed"
 
 echo "test-platform-helper: OK"

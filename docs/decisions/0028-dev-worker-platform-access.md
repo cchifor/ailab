@@ -63,6 +63,18 @@ Absent, deliberately: **`secrets` (any verb)** — every platform credential liv
 (every mounted file and env var in any container); **`serviceaccounts/token`**; and every mutating
 verb.
 
+**`pods/portforward` bounds only what the Kubernetes API can bound.** RBAC cannot scope a forward
+to one Service, so a worker reaches any pod port in these namespaces. That is fine for Postgres
+(read-only by privilege, Decision 3) and for anything that authenticates its own callers, but it
+is NOT a general write boundary: **Valkey runs with `ALLOW_EMPTY_PASSWORD=yes`** (verified
+2026-09-21), so a forward to it could issue `SET`/`FLUSHALL`. Accepted deliberately rather than
+papered over — the cache is rebuildable and airlock carries an in-memory rate-limit fallback (ADR
+0016); enumerating pod names in `resourceNames` breaks on every CNPG instance rename; and
+service-side authz is a change in the platform repo this ADR does not get to assume. The runbook
+and the agents' CLAUDE.md block say plainly that non-Postgres endpoints are read-only by
+discipline, not by enforcement. If that stops being good enough, the fix is Valkey `requirepass`,
+not a narrower rule here.
+
 **The line this draws is worker-side vs cluster-side, not "Secrets are never read".** The pg-sync
 CronJob below mounts `strive-pg-superuser` exactly as the platform's own `strive-pg-init-databases`
 Job already does every ten minutes: a Flux-owned, reviewed, in-cluster workload whose code is in git.
@@ -95,9 +107,14 @@ python3 + psycopg2) maintains `dw<N>_platform_ro` per live slot:
   daily run; the runbook says so.
 - **Read-only is enforced by privilege, not by a setting.** The role owns nothing and holds only
   `SELECT`, so a write fails `permission denied` even after a session turns
-  `default_transaction_read_only` off — on the primary as much as on a replica. The GUC default turns
-  accidents into clearer errors; the `-ro` replicas add the server's own refusal. The sync proves
-  both on every run before publishing.
+  `default_transaction_read_only` off — on the primary as much as on a replica. The GUC default
+  turns accidents into clearer errors; the `-ro` replicas add the server's own refusal. **Every
+  run re-asserts the invariant rather than assuming it:** non-SELECT privileges are REVOKED on
+  every table and sequence in every allowlisted database, role memberships other than
+  `pg_monitor` are revoked, and the catalog is then checked for any remaining non-SELECT grant —
+  a grant made out of band is repaired, not merely undetected. The live proof runs for **every**
+  slot before anything is published, kept ones included, inside a transaction that is always
+  rolled back, so the check itself can never leave a probe table or row behind in production.
 - **RLS is honoured, not bypassed.** With `NOBYPASSRLS` and the platform's `TO public` policies, a
   worker reads a tenant's rows by setting `app.tenant_id` (`platform psql --tenant <id>`, a libpq
   startup option) — the same mechanism the services use. Without it those tables read **empty**.
@@ -112,11 +129,24 @@ python3 + psycopg2) maintains `dw<N>_platform_ro` per live slot:
   nothing — and **a re-run is a no-op**, which is what makes the bootstrap Job's
   reap-and-re-apply retry loop safe and `kubectl create job --from=cronjob/…` always safe. A failed
   run surfaces through the stack's existing `KubeJobFailed` rule; no new alert.
-- Ordering, fail-closed: OpenBao login first (a run that cannot publish must not rotate) → role
-  changes in one transaction on the primary (`pg_is_in_recovery()` must be false) → per-database
-  grants → prove each rotated login (identity, `transaction_read_only`, a `pg_stat_activity` read, a
-  refused write after the read-only default is turned off) → only then patch KV, one patch per
-  worker. Nothing logs a password.
+- Ordering, fail-closed: OpenBao login first (a run that cannot publish must not rotate) → a
+  **cluster-wide advisory lock** for the whole run (`concurrencyPolicy: Forbid` serialises the
+  CronJob against itself but not against the bootstrap Job or a hand-made one, and two overlapping
+  runs could otherwise publish a password the other had already replaced) → role changes in one
+  transaction on the primary (`pg_is_in_recovery()` must be false) → **clean up, then grant**
+  (load-bearing: `DROP OWNED BY` revokes privileges on SHARED objects too, so cleaning up after
+  granting strips the database-level `CONNECT` just made — a real bug the integration test caught)
+  → prove every live credential → only then patch KV, one patch per worker. Nothing logs a
+  password.
+- **The password never reaches the server in cleartext.** `ALTER ROLE … PASSWORD` is given a
+  client-computed SCRAM-SHA-256 verifier, because every worker holds `pg_monitor` and
+  `pg_stat_activity` shows other sessions' query text verbatim (measured 2026-09-21): a cleartext
+  rotation statement would hand slot B's new password to slot A, and `pods/log` would expose it a
+  second way. The sync's own session also disables statement logging.
+- **A failed login triggers rotation only when the SERVER rejects it** (SQLSTATE 28xxx). A
+  connection refused for capacity (`CONNECTION LIMIT` exhausted by the worker's own sessions) or
+  for transport reasons exits the run without touching Postgres or KV: rotating there would
+  replace a working password and then fail its own proof for the same reason.
 - Retiring a slot is `RETIRED_SLOTS`: `DROP OWNED BY` in every database, then `DROP ROLE IF EXISTS` —
   idempotent and resumable, the same shape `devworker-provision-job.yaml` uses for AppRoles.
 
@@ -180,6 +210,9 @@ subtree. Every slot-bearing file says so, so nobody "completes" the list.
 - **The pg-sync holds the CNPG superuser.** It is the third workload that does (the platform's init
   Job and the operator itself), it is Flux-owned, and it only ever creates/alters `dw<N>_platform_ro`
   and grants SELECT. Its logs print role and database names, never a password — asserted by the test.
+- **A worker can write to a service that does not authenticate its callers.** `port-forward` is a
+  TCP path (Decision 2) and Valkey has no password today; that is discipline in the runbook and
+  the CLAUDE.md block, not enforcement. Revisit if the platform adds `requirepass`.
 - **Two copies of the public ailab root CA now exist** (the ansible role's and the ConfigMap's,
   because a pod in `strive-ailab` cannot mount ns `openbao`'s TLS Secret). CI `cmp`s them.
 - **A worker with no platform fields is normal, not broken.** A fresh slot, a wiped vault or a failed

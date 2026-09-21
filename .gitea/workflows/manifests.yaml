@@ -106,6 +106,15 @@ jobs:
           set -euo pipefail
           python3 scripts/check-slot-enumerations.py
 
+      # ...and the checker itself must be able to FAIL: a consistency gate that silently stops
+      # matching is worse than none. Fixtures mutate a COPY of the tree (mismatch, deletion,
+      # reformat, live/retired overlap) and assert a non-zero exit each time.
+      - name: the slot-enumeration gate fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-check-slot-enumerations.sh
+
       # The pg-sync's OpenBao CA ConfigMap is generated from a copy of the public ailab root CA; the
       # workers pin the same PEM from the ansible role. Two copies, one truth.
       - name: ailab root CA copies are identical
