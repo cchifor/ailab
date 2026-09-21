@@ -95,8 +95,9 @@ variable "dev_worker_memory_mib" {
   # Since the testpool went live (2026-09-01) the heavy compose stacks (L/XL/Playwright) lease kata
   # envs via `tep` instead of running on the worker, so this ceiling is oversized: the busiest
   # worker's 10-day peak was 7.9 GiB (dw4, measured 2026-09-01, pre-pool load included). dev-worker-6
-  # runs a 12 GiB POC via the per-worker memory_mib override in dev_worker_nodes; a fleet-wide
-  # reduction follows once the POC has soaked. See docs/runbooks/dev-workers.md.
+  # ran a 12 GiB POC via the per-worker memory_mib override until its retirement (2026-09-2x); it
+  # idled at 3.7 GiB RSS, so the POC never exercised the ceiling — a fleet-wide reduction is decided
+  # from the survivors' measured working sets. See docs/runbooks/dev-workers.md.
   default = 16384
 }
 variable "dev_worker_memory_floating_mib" {
@@ -106,7 +107,7 @@ variable "dev_worker_memory_floating_mib" {
     note there). Low by design (4 GiB): with the heavyweight
     LLMs now idle-unloaded via llama-swap, ballooning works, so the floor only has to cover an
     idle/light worker (~2-3 GiB) with margin and the balloon inflates on demand toward the worker's
-    effective ceiling (dev_worker_memory_mib, or its memory_mib override — dw6 runs 12288).
+    effective ceiling (dev_worker_memory_mib, or a per-worker memory_mib override).
     4 GiB is also what lets a node hold its on-demand heavyweight (~59/71 GiB)
     AND 2 workers-at-floor at once (node3: 71 + cp3 28 + runner 10 + 2*4 = 117 < 125 GiB). During a
     rare heavyweight session the co-located workers are pinned near this floor (light use only).
@@ -138,8 +139,9 @@ variable "dev_worker_ssh_public_key" {
 # The base spec is shared: cores + dev_worker_memory_mib (ceiling) + dev_worker_memory_floating_mib
 # (floor) are module-wide scalars; this map carries identity (node/vmid/ip/hostname) plus two
 # OPTIONAL per-worker sizing overrides (memory_floating_mib and memory_mib, both documented below).
-# Placement stays one-more-per-node
-# (fault isolation): dw1/4 -> node1, dw2/5 -> node2, dw3/6 -> node3.
+# Placement (fault isolation): dw1/4 -> node1, dw2/5 -> node2, dw3 alone on node3 since
+# dev-worker-6's retirement (2026-09-2x); node3 gives up its last dev-worker in PR-C2 and hosts the
+# second testpool env node instead (plans/2026-09-21-retire-dev-workers-3-6-plan.md).
 # IPs: consecutive .8-.13 (free static block, inside the .2-.50 reserve, below the router DHCP pool at
 # .51 — no router change needed). vmids 42xx band (4201-4206) don't collide (Talos 4001-4003, runners
 # 4101-4105, AI LXC 5001-5003, registry 5004). NOTE: cloud-init sets the IP at create and
@@ -195,10 +197,9 @@ variable "dev_worker_nodes" {
     hostname  = string
     # null => use the uniform dev_worker_memory_floating_mib.
     memory_floating_mib = optional(number)
-    # null => use the uniform dev_worker_memory_mib ceiling. Set on dev-worker-6 only: the 12 GiB
-    # downsize POC, viable since heavy compose stacks moved to testpool leases (see the note on
-    # dev_worker_memory_mib above). Hand-applied 2026-09-01 (`qm set 4206 --memory 12288` + reboot),
-    # so the first apply after merge is a no-op for the VM.
+    # null => use the uniform dev_worker_memory_mib ceiling. Was set on dev-worker-6 only (the
+    # 12 GiB downsize POC, 2026-09-01 — 2026-09-2x); unused since its retirement, kept as the
+    # per-worker override for the fleet-wide reduction discussed on dev_worker_memory_mib above.
     memory_mib = optional(number)
   }))
   default = {
@@ -220,6 +221,17 @@ variable "dev_worker_nodes" {
     # recovery; codified here so the next apply keeps it. Shrink back to the uniform floor only
     # after node2's budget has real balloon headroom again (see the runbook budget note).
     "dev-worker-5" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.12", hostname = "dev-worker-5", memory_floating_mib = 6144 }
-    "dev-worker-6" = { node_name = "ai-node3", vm_id = 4206, ip = "192.168.0.13", hostname = "dev-worker-6", memory_mib = 12288 }
+    # dev-worker-6 (vm_id 4206, .13, ai-node3) RETIRED 2026-09-2x — removed from this map so the next
+    # apply destroys it (plans/2026-09-21-retire-dev-workers-3-6-plan.md, PR-C1, gate G3a-1). Retired
+    # to fund the second testpool env node on ai-node3 (`env-node-2`, 16 GiB fixed): the parent
+    # plan's margin test needs ai-node3 to keep 43 GiB available with the qwen3.8 model idle and
+    # the node had 25.2 GiB; dw6 held a MEASURED 3.7 GiB RSS (idle: 7-day CPU 1.7 %, load 0.01) and
+    # dev-worker-3 (retired next, when its work is done — PR-C2) 16.3 GiB. Operator decision
+    # 2026-09-21: retire both, keep four workers, close the numbering gaps (PR-C2 re-slots
+    # dw4 -> dev-worker-3/.10 and dw5 -> dev-worker-4/.11 by state migration; vmids stay).
+    # The 12 GiB-ceiling POC that lived here (memory_mib = 12288, hand-applied 2026-09-01) ends
+    # with the VM: its finding is that the ceiling was never the constraint — dw6 idled at
+    # 3.7 GiB RSS — so the fleet-wide reduction it was meant to justify is decided from the
+    # survivors' measured working sets, not from this POC.
   }
 }

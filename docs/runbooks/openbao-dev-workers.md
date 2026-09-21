@@ -140,7 +140,11 @@ Secret.
 | dev-worker-3 | 192.168.0.10 | 4203 | `dev-worker-3` |
 | dev-worker-4 | 192.168.0.11 | 4204 | `dev-worker-4` |
 | dev-worker-5 | 192.168.0.12 | 4205 | `dev-worker-5` |
-| dev-worker-6 | 192.168.0.13 | 4206 | `dev-worker-6` |
+
+`dev-worker-6` (192.168.0.13, 4206) was retired 2026-09-2x: its role, policy, SecretID accessors,
+issued tokens and KV subtree are revoked declaratively by the provision Job's `RETIRED_SLOTS` step
+(`devworker-provision-job.yaml`), which re-runs daily and converges to "absent" — see the
+retirement plan for the gate and the negative test.
 
 > **The IP column is documentation, not a control.** The roles carry **no** `token_bound_cidrs` /
 > `secret_id_bound_cidrs`: Cilium's default SNAT LB mode plus `externalTrafficPolicy: Cluster` means

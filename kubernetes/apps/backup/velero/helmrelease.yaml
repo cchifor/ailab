@@ -210,7 +210,7 @@ spec:
           # this exclusion without redoing that check). Namespace contents at the time:
           #   - 1 PVC, dockerlib-env-std-pool-* (testpool-iscsi) -- a docker data-root CACHE, rebuilt
           #     from the image on the next lease. No unique state.
-          #   - 6 Secrets tep-dw1..dw6-token -- type kubernetes.io/service-account-token, DECLARED IN
+          #   - 5 Secrets tep-dw1..dw5-token -- type kubernetes.io/service-account-token, DECLARED IN
           #     GIT at kubernetes/apps/infrastructure/testpool/tep-access.yaml and owned by the
           #     `testpool` Flux kustomization. Flux recreates them and Kubernetes repopulates the
           #     token material, so they are recoverable from git, not from a backup. Caveat: the token
@@ -238,7 +238,7 @@ spec:
           # this exclusion without redoing that check). Namespace contents at the time:
           #   - 1 PVC, dockerlib-env-std-pool-* (testpool-iscsi) -- a docker data-root CACHE, rebuilt
           #     from the image on the next lease. No unique state.
-          #   - 6 Secrets tep-dw1..dw6-token -- type kubernetes.io/service-account-token, DECLARED IN
+          #   - 5 Secrets tep-dw1..dw5-token -- type kubernetes.io/service-account-token, DECLARED IN
           #     GIT at kubernetes/apps/infrastructure/testpool/tep-access.yaml and owned by the
           #     `testpool` Flux kustomization. Flux recreates them and Kubernetes repopulates the
           #     token material, so they are recoverable from git, not from a backup. Caveat: the token

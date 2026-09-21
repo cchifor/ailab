@@ -12,7 +12,7 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 `kubernetes/infra/dev-workers/variables.tf` (`dev_worker_cores`, `dev_worker_memory_mib`,
 `dev_worker_memory_floating_mib`); the `dev_worker_nodes` map carries identity plus two optional
 per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw4 — node1 mitigation) and
-`memory_mib` (12 GiB ceiling on dw6 — downsize POC, see the section below).
+`memory_mib` (unused since dev-worker-6's retirement; it carried the 12 GiB-ceiling POC, see below).
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
@@ -21,9 +21,13 @@ per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw4 — node1 
 | dev-worker-3 | ai-node3 | 4203 | 192.168.0.10 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
 | dev-worker-4 | ai-node1 | 4204 | 192.168.0.11 | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
 | dev-worker-5 | ai-node2 | 4205 | 192.168.0.12 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-6 | ai-node3 | 4206 | 192.168.0.13 | 8 vCPU / **12 GiB** (4–12 balloon, downsize POC) / 40+128 GiB |
 
-> **IP renumber (consecutive .8–.13).** cloud-init fixes the IP at create and the tofu module has
+**dev-worker-6** (ai-node3, 4206, 192.168.0.13) was **retired 2026-09-2x** to fund the second
+testpool env node on ai-node3, and **dev-worker-3 follows when its current work is done**; the
+survivors are then renamed `dev-worker-1..4` on `.8`–`.11` (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`
+— the retirement/re-slot procedure, gates and rollbacks live there).
+
+> **IP renumber (consecutive .8–.12).** cloud-init fixes the IP at create and the tofu module has
 > `lifecycle.ignore_changes = [initialization]`, so the live IPs were changed **in-guest** (not by tofu):
 > per worker — add the new IP live, rewrite the address in `/etc/netplan/50-cloud-init.yaml`, write
 > `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` (`network: {config: disabled}`) so cloud-init
@@ -38,14 +42,20 @@ host fits only because the rarely-used heavyweight models on node2/node3 (gpt-os
 actually works, so a worker inflates toward the ceiling on demand. Dev-worker memory defaults to a
 **16 GiB ceiling with a 4 GiB floor** (module scalars
 `dev_worker_memory_mib` / `dev_worker_memory_floating_mib`; per-worker overrides on dw1/dw4 floors
-and the dw6 ceiling) — low floor by design, because ballooning
+and the dw5 floor) — low floor by design, because ballooning
 now inflates busy workers and 4 GiB is what lets a node hold its on-demand heavyweight **plus** its
 two workers-at-floor at once.
 
 (IPs `.37/.38/.39` + `.5/.6/.7` are free static addresses inside the `.2`–`.50` reserve, below the
 DHCP pool — no router change is needed.)
 
-## Post-testpool ceiling downsize (POC on dev-worker-6, 2026-09-01)
+## Post-testpool ceiling downsize (POC on dev-worker-6, 2026-09-01 — closed 2026-09-2x)
+
+> **Closed with dev-worker-6's retirement.** The POC host idled at ~3.7 GiB RSS for its whole run
+> (7-day CPU 1.7 %), so the 12 GiB ceiling was never exercised and proves nothing about a busy
+> worker. The fleet-wide reduction below is decided from the survivors' measured working sets
+> (`node_memory_MemTotal - MemAvailable`, weekly max per worker), not from this POC. The
+> `memory_mib` override stays in the module for that change.
 
 Since the test-env pool went live (`kubernetes/apps/infrastructure/testpool/`, `tep`), the heavy
 compose stacks (L/XL/Playwright class) lease kata envs on talos-env-node-1 instead of running on
@@ -54,12 +64,12 @@ the 16 GiB ceiling is oversized. Measured over the 10 days ending 2026-09-01 (no
 pre-pool load included): peak used was 7.9 GiB (dw4) / 6.9 GiB (dw1), and ≤2.5 GiB on the other
 four.
 
-**POC:** dev-worker-6 runs a **12 GiB ceiling** (`memory_mib = 12288` override in
+**POC (historical):** dev-worker-6 ran a **12 GiB ceiling** (`memory_mib = 12288` override in
 `kubernetes/infra/dev-workers/variables.tf`), hand-applied 2026-09-01 (`qm set 4206 --memory 12288`
-+ `qm reboot 4206`) and codified the same day — the first `tofu apply` after the merge no-ops.
++ `qm reboot 4206`) and codified the same day — the first `tofu apply` after the merge no-op'd.
 Post-resize checks passed: prometheus-node-exporter :9100 up, local `docker run` fine, `tep list`
 reaches the pool. **Fleet-wide plan** (after the POC soaks): drop the ceiling scalar to 12288 for
-all six, freeing 4 GiB × 2 workers of worst-case commitment per node — headroom that feeds the
+all workers, freeing 4 GiB × 2 workers of worst-case commitment per node — headroom that feeds the
 planned env-big (24 GiB) testpool node. On dw1/dw4 a 12 GiB ceiling meets their codified 12 GiB
 floor (floor == ceiling: effectively fixed memory), which matches how node1 already behaves —
 ballooning never inflates guests there. Do NOT lower the dw1/dw4 floors as part of this; that
@@ -68,7 +78,7 @@ mitigation stands until node1 capacity is fixed (see the note in variables.tf).
 Per-node RAM budget (~125 GiB usable): Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB hard** —
 `kubernetes/infra/variables.tf`) + ai-llm LXC (96 GiB cap; **~0 GiB when idle-unloaded**, ~59/71 GiB
 when a heavyweight is loaded on demand) + runner (24 GiB ceiling / **10 GiB floor**, ×2 node1/node2,
-×1 node3) + dev-worker (16 GiB ceiling — 12 GiB on dw6 / **4 GiB floor** — **12 GiB on dw1/dw4**,
+×1 node3) + dev-worker (16 GiB ceiling / **4 GiB floor** — **12 GiB on dw1/dw4**, 6 GiB on dw5,
 ×2 per node; node1's two raised floors add 16 GiB of guaranteed allocation there). In steady
 state (heavyweight unloaded) node3 sits ~45% used and its workers balloon freely toward the
 ceiling. **node2 no longer has that headroom**: `talos-env-node-1` (16 GiB fixed, the test-env
@@ -614,18 +624,17 @@ to, so alerting on it would latch on forever.
 Windows Task Scheduler task **ailab-fleet-converge** on the operator workstation runs
 `scripts/fleet-converge-daily.sh` (staged at `~/.ailab-converge/` in WSL) daily at 06:35:
 it fetches + hard-resets a PRISTINE dedicated clone (`~/.ailab-converge/repo`) to
-origin/main and converges all six workers (dw6 --skip-tags herdr is history; full role
-everywhere now). Never converge the fleet from a working checkout — the 2026-09-03
+origin/main and converges every worker in the inventory (full role everywhere; the dw6
+`--skip-tags herdr` special case went with dev-worker-6's retirement on 2026-09-2x). Never converge the fleet from a working checkout — the 2026-09-03
 incident: an earlier ~06:05 job ran from the operator checkout (stale at Aug 31, on a
 dirty WIP branch), reverting merged work every morning. That stale job's scheduler is
 STILL UNLOCATED — the 06:35 run wins each morning regardless, but remove the old job when
 found. Logs: `~/.ailab-converge/converge.log`.
 
-## herdr pilot (dev-worker-5 + dev-worker-6)
+## herdr pilot (dev-worker-5)
 
-> dev-worker-6's managed takeover completed 2026-09-03 (operator-approved): hand-installed
-> ~/.local/bin/herdr removed, pinned binary + ansible config + system unit + integrations +
-> conductor skill all role-managed, unit active. Both pilot hosts are now fully managed.
+> dev-worker-6 was the second pilot host (managed takeover completed 2026-09-03) until its
+> retirement on 2026-09-2x; dev-worker-5 is the pilot host now, fully role-managed.
 
 [Herdr](https://herdr.dev/) — an agent-native terminal multiplexer — runs on dev-worker-5
 **beside** tmux. This is an evaluation, not a migration: tmux keeps everything load-bearing (the
@@ -753,7 +762,7 @@ triggers Claude Code's auto-attach).
   `home system jobs github docker cluster cheats` — see the dashboard/resurrect note below
 - **memory watch:** node_exporter `node_memory_MemAvailable` + `node_pressure_*`. The 4 GiB
   balloon floor (12 GiB on dw1/dw4) guarantees each guest's idle working set; a busy worker inflates
-  toward its ceiling (16 GiB; 12 GiB on dw6) when the node's LLM is idle-unloaded. If a host shows sustained pressure, the first lever is its
+  toward its ceiling (16 GiB) when the node's LLM is idle-unloaded. If a host shows sustained pressure, the first lever is its
   heavyweight LLM — confirm it idle-unloaded (or shorten the llama-swap TTL, `docs/runbooks/ai-model-swap.md`)
   — then, only if still pressured, downsize that node's Talos CP VM (`control_planes{}`, rolling reboot
   via `talosctl shutdown` — see `ai-host-setup.md`) rather than starving a dev-worker.
