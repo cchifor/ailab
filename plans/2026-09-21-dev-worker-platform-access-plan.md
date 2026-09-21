@@ -348,13 +348,25 @@ Post-merge rollout (in this order; each step has a stop condition):
 7. Hand the dev-worker-3 agent: `~/.platform/kubeconfig`, `platform psql -d airlock --tenant …`, the
    four KV field names, and `app_user_tables_max_columns = 16` (live pod, no override).
 
-<!-- codex: Pre-flight task sets a fact that persists across runs. If a subsequent run fails (OpenBao unreachable), the fact remains true and agent.hcl regenerates with stanzas for missing KV fields, crashing the agent with error_on_missing_key. The health check validates RBAC but not KV presence. Add a secondary check: in the pre-flight task, only set the fact true if a real read of all three KV fields succeeds, not just a probe of the OpenBao login. This matches ADR 0021's mitigation for the same hazard. -->
-<!-- opus-pushback: Verified against ansible/ansible.cfg: jsonfile fact caching applies to gathered facts; a `set_fact` without `cacheable: true` is play-scoped, so nothing persists between runs. The actionable half is taken anyway (Decision 4 / §C: the pre-flight reads all three fields and fails the play when the vault is unreachable instead of dropping stanzas). -->
+## Codex review trail
 
-<!-- codex: Bootstrap Job TTL 3600s but Flux' default interval is 600s. If the Job finishes at time T, Flux reaps it at T+3600s, then reconciles at T+3610s. If an agent re-login happens at T+3605s, the Job is gone; if it happens at T+3620s, it's back. Is this a problem for in-flight credentials? The sync-owned recovery ordering (docs/runbooks/openbao-recovery.md) assumes the bootstrap completes before agents re-login, but TTL doesn't enforce that. Should the Job have a longer TTL or an active re-apply interval? -->
-<!-- opus-pushback: A worker never reads the Job — it reads the KV the Job wrote, which outlives the Job. The real hazard in the reap-and-re-apply loop was different: with forced daily rotation, every re-apply would have rotated the live password (an hourly login-failure window on every worker). Decision 3 now rotates only when due, so re-runs are no-ops and the loop stays as the ordering-race retry it is meant to be. -->
+- **Round 1 (2026-09-21, seat d via LiteLLM):** 15 findings. Accepted and folded in: the
+  worker-vs-cluster boundary statement (Decision 2), when-needed rotation with 14 d validity and the
+  `KubeJobFailed` alert (Decision 3), `CONNECTION LIMIT 10`, database-wide default privileges for
+  `app`/`postgres` only, privilege-enforced read-only with the `-rw` INSERT test, the pre-flight that
+  reads all three fields and fails the play when the vault is unreachable, the cross-file slot
+  enumeration check and retire checklist, the reviewer-VM exclusion comments, the sync integration
+  test under the operand image, the `-field=` (never `-format=json`) validity check, and the
+  stop-condition wording. Corrected on evidence rather than accepted: "the ansible fact persists
+  across runs" (it is a `set_fact` without `cacheable`; jsonfile caching covers gathered facts only),
+  "agents can pick up stale credentials while the bootstrap Job is reaped" (agents read KV, never the
+  Job — the real hazard was forced rotation on every re-apply, fixed by when-needed rotation), and
+  "pg-sync inherits the k8stoken-sync mint grant" (that OpenBao policy is a per-slot KV write grant;
+  minting is Kubernetes RBAC). Those three were sent back as pushbacks.
+- **Round 2: could not run.** Seat d answered `usage_limit_reached` (resets 2026-09-26), the plain
+  `gpt-6-astra` route's API key is dead (401), and the reviewer-2 seats live on ai-node3, which went
+  unreachable at 11:38 UTC. The three pushbacks therefore stand unanswered by codex; the
+  implementation review (Phase B) is to be run on the first route that returns, and the PR body says
+  so.
 
-<!-- codex: token_policies=k8stoken-sync is the EXISTING policy (k8stoken-sync, k8stoken-sync) from the two existing targets. This means pg-sync inherits the per-slot mint grant intended only for k8stoken-sync. Is that correct, or should pg-sync have its own narrower policy granting only KV patch on af/dev-workers? If k8stoken-sync is narrowed in PR-C2, pg-sync may lose the grant it needs. Clarify the policy ownership. -->
-<!-- opus-pushback: The `k8stoken-sync` OpenBao policy contains no mint grant — minting is Kubernetes RBAC (`serviceaccounts/token create`, per namespace). The policy is precisely "read/create/update/patch on af/data/dev-workers/dev-worker-<N> for live slots", which is the whole of what pg-sync needs; PR-C2's narrowing to the surviving slots is the correct narrowing for both writers. A duplicate policy would double the list the provision script's RETIRED_SLOTS step has to keep in step. Kept shared, said so on the role (§B). -->
-
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
