@@ -268,8 +268,12 @@ data:
       # HOW THE ROUTER SPREADS THEM. routing_strategy least-busy picks the deployment with fewer
       # in-flight requests, per proxy replica (two replicas, two counters). A tie goes to the FIRST
       # key inserted into that replica's counter dict, which is the first entry listed -- cloud2 --
-      # unless the replica served its first request for this group while cloud2 was in cooldown
-      # (litellm/router_strategy/least_busy.py, strict `<`, read in the running pod 2026-09-21).
+      # unless the replica served its first request for this group while cloud2 was in cooldown.
+      # That tie-break is an IMPLEMENTATION DETAIL of the pinned image
+      # (ghcr.io/berriai/litellm@sha256:d295634e..., litellm/router_strategy/least_busy.py:
+      # `_get_available_deployments` walks the counter dict with a strict `<`; read in the running
+      # pod 2026-09-21). It is not a documented guarantee -- re-read it on an image bump, and do not
+      # build anything that NEEDS stickiness on it; for that, use `order` instead.
       # So a single sequential conversation stays on cloud2 and only concurrent load spills to
       # cloud3. What a spill costs: cloud3 holds ONE model at a time, so a request that lands there
       # while another cloud3 model is resident first evicts it -- measured 2026-09-21: first reply
@@ -278,6 +282,18 @@ data:
       # by-name request for that other model pays the swap back. A conversation that alternates
       # boxes also loses its prefix cache on each hop (cold prefill ~1k tok/s, section 11).
       # Per-request attribution: the x-litellm-model-api-base response header.
+      #
+      # THE COLD-SWAP COST IS PAID BY FAILING REQUESTS TOO, and an over-length prompt is the one
+      # that matters here: llama-swap loads the engine BEFORE it proxies, so a request that lands on
+      # cloud3 with the engine unloaded waits out the load and only then gets vLLM's 400. Worst case
+      # ~109 s (idle) or ~100 s (another model resident) for an answer the caller could have had in
+      # 0.4 s from cloud2. It is NOT amplified by a retry onto the sibling: in the pinned image
+      # `Router.should_retry_this_error` re-raises immediately when `litellm._should_retry(status)`
+      # is False, and 400 is False (401/403 are the only exceptions) -- verified in the running pod
+      # 2026-09-21 -- so a context error goes straight to the fallback chain, one backend call per
+      # hop. What bounds the exposure is that the engine is this box's `default`, preloaded at boot
+      # with a 7200 s TTL, and that ties go to cloud2; what would remove it is
+      # enable_pre_call_checks (deliberately still off, see the note on the -local route).
       #
       # THE TWO BLOCKS MUST AGREE on everything but `model` and `api_base` (and this comment).
       # scripts/gen-litellm-consumers.py de-duplicates on model_name FIRST-WINS, so the FIRST
@@ -1047,7 +1063,7 @@ spec:
         # parses is byte-identical in effect, no routing change; the cost is one rolling restart
         # of the 2-replica maxUnavailable:0 Deployment, taken because the annotation tracks the
         # ConfigMap, per the rule above.
-        checksum/config: "0be0b6a2db72"
+        checksum/config: "9e655ff9c1a0"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an

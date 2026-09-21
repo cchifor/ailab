@@ -60,13 +60,20 @@ Conventions the comments around the existing entries enforce, and the generator 
   checkpoints under one name; LiteLLM would route silently to the slower one with no way to tell
   which answered. The one carve-out is a **same-checkpoint pair**: two deployments that serve the
   identical weights with identical request-shaping `litellm_params` (sampling, `extra_body`) and
-  identical `model_info`, differing only in `api_base` (and TP/box). That is a router-balanced
-  HA/capacity pool, not two engines — `qwen3.8-27b-ailab` (node2 + node3, 2026-09-16) and
+  identical `model_info`. What may differ is the backend address and the name that backend answers
+  to — `api_base`, and `model` where the two hosts advertise different served names (cloud2 serves
+  `qwen3.8-27b`, cloud3 `qwen3.8-27b-w4a16`, the same weights) — plus host-side facts the request
+  never sees, such as tensor-parallel width. That is a router-balanced HA/capacity pool, not two
+  engines — `qwen3.8-27b-ailab` (node2 + node3, 2026-09-16, identical `model` too) and
   `qwen3.8-27b-vllm-cloud` (cloud2 + cloud3, 2026-09-21) are the two. The comments on those entries
   carry the invariants: `model_info` byte-identical (the consumer generator de-duplicates
   first-wins), the first-listed deployment wins least-busy ties, and each deployment's vision claim
   was probed on *that* box before the shared `supports_vision` was allowed to stand. Per-request
   attribution is the `x-litellm-model-api-base` response header.
+  Before pooling a **swap host** (one model resident at a time, llama-swap), price the cold start:
+  every request routed there while the engine is unloaded waits for the load, **including one that
+  will be rejected** — llama-swap loads before it proxies. Measure it and put the number in the
+  route comment, as the cloud pair does.
 - **A dated comment block above the entry** with the measured numbers and the context arithmetic.
 - **Visibility is derived, not declared.** The route is listed in dsh and in Open WebUI's Local
   group when `api_base` is a private IPv4 or a `.svc.cluster.local` host, `model_info.mode` is
