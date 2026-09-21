@@ -77,6 +77,15 @@ case "$1 $2" in
       -mount*|-*) echo "flag provided but not defined: ${3%%=*}" >&2; exit 1 ;;
       auth/approle/role/dev-worker-6/secret-id)
         if [ -f "$STATE/FAIL_SID_LIST_ONCE" ]; then rm -f "$STATE/FAIL_SID_LIST_ONCE"; echo "Error listing $3: connection refused" >&2; exit 2; fi
+        # A CONVERGED retirement: the role itself is gone, so this listing is a 400 with OpenBao's
+        # own wording — NOT "no value found". Measured live 2026-09-21 on a vault where slot 6 had
+        # already been retired; the run aborted here on every daily pass until the guard learned it.
+        if [ -f "$STATE/role-gone" ]; then
+          echo "Error listing $3: Error making API request." >&2
+          echo "Code: 400. Errors:" >&2
+          echo "* role \"dev-worker-6\" does not exist" >&2
+          exit 2
+        fi
         { [ -f "$STATE/sids-gone-acc1" ] && [ -f "$STATE/sids-gone-acc2" ]; } && nvf "$3" || echo '["acc1", "acc2"]' ;;
       auth/token/accessors)
         if [ -f "$STATE/FAIL_ACCESSOR_LIST_ONCE" ]; then rm -f "$STATE/FAIL_ACCESSOR_LIST_ONCE"; echo "Error listing auth/token/accessors: Vault is sealed" >&2; exit 2; fi
@@ -203,6 +212,26 @@ outE2="$(run)"; echo "$outE2" | sed 's/^/  E2: /'
 expect "$outE2" "retired KV leaf dev-workers/dev-worker-6/sub1/credential: metadata deleted"
 expect "$outE2" "retired KV dev-workers/dev-worker-6: metadata deleted"
 expect "$outE2" "devworker provision complete"
+
+# ---- F. a CONVERGED retirement stays converged -------------------------------------------------
+# Run 1 deletes the role; run 2 therefore gets OpenBao's 400 `role "..." does not exist` from every
+# listing that names it. That must read as "nothing left to do" and the run must reach the seed
+# loop. The estate's daily Job was red from the moment slot 6's retirement finished until this was
+# fixed (2026-09-21) — nothing watches a Job that only runs itself.
+reset_state
+out1="$(run 2>&1)" || { echo "F: run 1 failed"; echo "$out1" >&2; exit 1; }
+[ -f "$WORK/state/role-gone" ] || { echo "F: run 1 did not delete the role, so run 2 cannot exercise the 400 path" >&2; exit 1; }
+out2="$(run 2>&1)" || { echo "F: run 2 (role already gone) aborted instead of converging"; echo "$out2" >&2; exit 1; }
+# the 400 wording MUST appear — otherwise run 2 fell through the old "No value found" path and
+# this scenario would pass without ever testing the guard (a vacuous pass, the very thing this
+# suite exists to prevent).
+# the WHOLE line, path included: a prefix-only match hid the fact that the message printed the
+# command word (`list`) instead of the path it skipped.
+expect "$out2" "dev-worker-6: role already absent; nothing to enumerate at auth/approle/role/dev-worker-6/secret-id"
+expect "$out2" "devworker provision complete"
+expect "$out2" "retired dev-worker-6: converged"
+forbid "$out2" "failed and was not a not-found"
+echo "F: a converged retirement does not abort the next run (and took the 400 path)"
 
 # ---- C. a failed token-accessor listing aborts BEFORE anything irreversible ---------------------
 reset_state; touch "$WORK/state/FAIL_ACCESSOR_LIST_ONCE"
