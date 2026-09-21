@@ -3,10 +3,12 @@
 The single Talos **worker** that hosts the leasable Kata DinD environments (`testpool`,
 `kubernetes/apps/infrastructure/testpool/`): VM **4401 on ai-node2**, `192.168.0.37`, 16 GiB fixed /
 8 vCPU, label `ailab.io/env-pool=true`, taint `dedicated=env:NoSchedule`. Tofu module
-`kubernetes/infra/env-pool/` — but **its state was never moved out of the spike's scratchpad clone**
-(`SPIKE-REPORT.md`, "State / handover"), so today the VM is tracked in no state; `docs/network-plan.md`
-is its only record. Nothing but DaemonSets and env pods run here; losing the node loses warm
-capacity, nothing else.
+`kubernetes/infra/env-pool/`, state in the main checkout (`terraform.tfstate`, gitignored) since
+the adoption on 2026-09-21 — the spike's state had been lost, the VM was imported and the
+module proven to reproduce the running machine config (`talosctl apply-config --dry-run`: "No
+changes"; full `tofu plan`: `No changes.`). Running nodes apply in `staged` mode: tofu never
+reboots or live-edits this node (section "Changing the env node's machine config"). Nothing but
+DaemonSets and env pods run here; losing the node loses warm capacity, nothing else.
 
 Incident that produced this runbook: 2026-09-20, `plans/2026-09-20-env-pool-frozen-guest-outage-plan.md`
 (the full evidence chain). Short form: a long-lived Kata guest freezes → its teardown never completes
