@@ -585,7 +585,7 @@ every commit, per `feedback_terraform_fmt`).
 | Field | Value |
 |---|---|
 | Epoch 0 baseline (UTC) | *(set at G2: creation time of the member after the V2 injection + lease smoke test)* |
-| Applied commits | T1: `9d50aadc` (G1 applied 2026-09-21 ~07:10–07:14 UTC: import → `No changes.`; boot id `b225163c…` unchanged) · T2: *(sha)* · relay/reaper Flux revision: *(sha)* |
+| Applied commits | T1: `9d50aadc` (G1 applied 2026-09-21 ~07:10–07:14 UTC: import → `No changes.`; boot id `b225163c…` unchanged) · T2: *(the G2 commit, applied at gate G2)* · relay/reaper/KSM Flux revision: `1fc8c43d` (PR #806 merged 2026-09-21 07:53Z; relay Running on talos-cp3, reaper at script-revision evidence-2, `agentsandbox_warmpool_ready_replicas` live) |
 | Node boot id / `node_boot_time_seconds` | *(after the G2 reboot)* |
 | Kata base sha256 / extension | `38d1e30b…a4c6` / kata-containers 3.20.0, schematic `0839748e…`, Talos v1.11.2 |
 | Member pod name / UID / sandbox id | *(epoch 0)* |
