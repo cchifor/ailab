@@ -59,12 +59,21 @@ data:
       # `-c 131072 --parallel 2`, so per-slot is 65536 and 49152 leaves the same 16K output headroom
       # the main proxy uses. Keep in sync with models.yaml `ctx`/`parallel`.
       #
-      # NODE2 DEPLOYMENT WITHDRAWN 2026-09-21: ai-node2's llama-server is wedged in the amdgpu driver
-      # (D state since 2026-09-18, every request runs to the caller's timeout; the full record is on
-      # the same route in litellm.yaml). node3 alone until ai-node2 is rebooted and its backend answers
-      # a smoke request; then re-add the node2 block ABOVE this one, identical except api_base
-      # (http://llm-qwen38.ai.svc.cluster.local:8082/v1, ai-llm-2 / node2 / .45), and re-stamp
-      # checksum/config with the recipe below.
+      # Node2 was withdrawn from this pair on 2026-09-21 while its llama-server was wedged in the
+      # amdgpu driver (D state since 2026-09-18, every request running to the caller's timeout) and
+      # RESTORED the same day after the host reboot, verified with a smoke request on .45 before the
+      # entry went back. The full record, including why a GPU reset and a plain host reboot both
+      # fail to clear that state, is on the same route in litellm.yaml.
+      - model_name: qwen3.8-27b-ailab
+        litellm_params:
+          model: openai/qwen3.8-27b-ailab
+          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1   # ai-llm-2 / node2 / .45
+          api_key: "sk-noauth"
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000001
+        model_info:
+          supports_vision: true
+          max_input_tokens: 49152
       - model_name: qwen3.8-27b-ailab
         litellm_params:
           model: openai/qwen3.8-27b-ailab
@@ -120,7 +129,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "6f53e1dde769"
+        checksum/config: "10c5f6282afb"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux

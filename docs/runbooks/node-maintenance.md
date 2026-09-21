@@ -57,6 +57,60 @@ python scripts/node-ssh.py <host-ip> "pct start <ctid>"
 # 6. gates before the next node: see the post-maintenance checklist below.
 ```
 
+### ⚠️ A wedged AI LXC turns step 4's reboot into a physical visit (2026-09-21)
+
+If the node's AI LXC has a process stuck in **D state** (uninterruptible), `reboot` **hangs
+forever** and takes SSH with it. `pve-guests.service` has `TimeoutSec=infinity`, and its
+`ExecStop` runs `pvesh create /nodes/localhost/stopall`, which stops a container with
+`lxc-stop --kill` — and per `/usr/share/perl5/PVE/LXC.pm` that path *"doesn't allow timeouts"*.
+Container init cannot exit while a D-state child sits in its pid namespace, so systemd waits
+forever with sshd and pveproxy already stopped. The host answers ping and nothing else; with no
+BMC on these boxes that is a **physical power cycle**. ai-node3 sat like that for ~27 minutes on
+2026-09-21 before someone pressed the button.
+
+Spot it before you reboot:
+
+```bash
+python scripts/node-ssh.py <host-ip> "ps -eo pid,stat,wchan:24,comm | awk '\$2 ~ /D/'"
+# a D-state llama-server with wchan drm_suballoc_new is the amdgpu wedge; /proc/<pid>/stack confirms
+```
+
+**The sequence that works** — stop every guest yourself, then reboot with the unit stops skipped
+**while sshd is still alive**:
+
+```bash
+# 1. Talos guests (CP + any agent/env node on this host) -- these DRAIN, so they go first
+_out/talosctl-1112.exe shutdown -n <cp-ip>            # repeat per Talos guest on the host
+
+# 2. QEMU VMs (runners, dev-workers)
+python scripts/node-ssh.py <host-ip> "for v in <ubuntu vmids>; do qm shutdown \$v --timeout 300 & done"
+
+# 3. CONTAINERS -- every LXC that CAN stop must be stopped here, or step 5 hard-stops it.
+#    `pct shutdown` asks init politely and gives up at --timeout; the WEDGED container is the one
+#    that will not go, and that is expected -- it is the whole reason for step 5.
+#    Do NOT fall back to `pct stop` on it: that is lxc-stop --kill, the call that hangs forever.
+python scripts/node-ssh.py <host-ip> "for c in \$(pct list | awk 'NR>1{print \$1}'); do pct shutdown \$c --timeout 120 & done; wait; pct list"
+
+# 4. GATE: every VM `stopped`, and every LXC `stopped` EXCEPT the wedged one
+python scripts/node-ssh.py <host-ip> "qm list; pct list"
+
+# 5. reboot with the unit stops skipped, while sshd is still alive
+python scripts/node-ssh.py <host-ip> "sync; nohup sh -c 'sleep 1; systemctl reboot --force' >/dev/null 2>&1 &"
+```
+
+`--force` skips the unit stops (so `lxc-stop --kill` never runs) while still syncing filesystems;
+the D-state task disappears with the kernel. Guests autostart on boot; then run the
+post-maintenance checklist below. **Step 3 is not optional**: `--force` is a hard stop for
+anything still running, so the only guest that may still be up at step 5 is the one that
+physically cannot be stopped.
+
+Two things that do **not** fix a D-state task, both tried on 2026-09-21: killing it (SIGKILL is
+pending but never delivered in D state), and resetting the GPU. The reset is worth knowing anyway:
+this kernel runs `integrity` lockdown (Secure Boot), so *writing*
+`/sys/kernel/debug/dri/<pci>/amdgpu_gpu_recover` is refused while **`cat` of it triggers the
+reset** — both nodes logged `GPU reset(1) succeeded … device wedged, but recovered through reset`
+and neither released the process, because the wait is on the DRM suballocator's list, not the GPU.
+
 **Workloads-only variant** (node stays up, e.g. testing eviction behaviour):
 `kubectl --context admin@ai drain <node> --ignore-daemonsets --delete-emptydir-data` … then
 `kubectl --context admin@ai uncordon <node>`.
@@ -121,6 +175,10 @@ kubectl --context admin@ai taint nodes <node> node.kubernetes.io/out-of-service=
 ```bash
 _out/talosctl-1112.exe -n 192.168.0.41 etcd status                  # 3/3 in-sync
 kubectl --context admin@ai get nodes                                # all Ready, none SchedulingDisabled
+curl -s -m 10 http://<ai-lxc-ip>:8082/v1/models                     # AI LXC: llama-swap answering
+# CONTENT check -- a wedged backend serves /v1/models perfectly well, so a 200 there proves
+# nothing. This must print OK (allow a cold model load: ~24 s on node2, up to ~70 s on node3):
+curl -s -m 300 http://<ai-lxc-ip>:8082/v1/chat/completions -H 'Content-Type: application/json'   -d '{"model":"<served-name>","messages":[{"role":"user","content":"Reply with exactly: OK"}],"max_tokens":8,"temperature":0}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
                                                                     # (Talos uncordons on boot; `kubectl uncordon` if stuck)
 python scripts/node-ssh.py <host-ip> "pct status <ctid>"           # AI LXC running (pct start if not)
 kubectl --context admin@ai get pods -A | grep -vE 'Running|Completed'   # nothing stuck
