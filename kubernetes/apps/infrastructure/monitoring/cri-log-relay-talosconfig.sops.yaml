@@ -1,0 +1,37 @@
+# os:reader talosconfig for monitoring/cri-log-relay.yaml — READ-ONLY Talos API access (logs/read/
+# get), cluster-wide, 90-day certificate minted 2026-09-21 with
+#   talosctl config new --roles os:reader --crt-ttl 2160h
+# Re-mint every 60 days or at each soak epoch boundary, re-encrypt (sops -e), then
+# `kubectl -n monitoring rollout restart deploy/cri-log-relay`. Talos has no CRL: deleting this file
+# does NOT revoke a copied certificate (docs/runbooks/env-pool.md).
+apiVersion: v1
+kind: Secret
+metadata:
+    name: cri-log-relay-talosconfig
+    namespace: monitoring
+    labels:
+        app.kubernetes.io/name: cri-log-relay
+        app.kubernetes.io/part-of: env-pool
+type: Opaque
+stringData:
+    config: ENC[AES256_GCM,data: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,iv:3ow9o7Q8FqViDHkI068vSGhWEJQcu+rnoIguu6D5FIs=,tag:zqWXo2ehI1SYsloD6AjMwQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB3SFFRWmU4bU1tSVl1Yjhz
+            NmJYOTd3RTQ0Z1NIYUJCdzVwN2NpbVNSZUJFCmtNbEZYaWlkRm5rZGxDYS8zUUdD
+            TGtpK3pYQnVzRlhleGF1enJQY29INU0KLS0tIFpLMEhwVWxKa1JnMVh5amxZRFRX
+            cTZPVHdmRFI2WjBBRVFlYjF6Rkw2V3cKSo1/DpSmS9a2wiq50m7dz8owMiK1jIA7
+            cTh6UJni05L5P3Nu0TncWdtyLNIkhHyaPUf1FSlVm1v2xiP8MBxMtg==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-21T07:12:19Z"
+    mac: ENC[AES256_GCM,data:tnl5YbRqJMIYMM42lr+hySbHfbxWirWSTDYidV31msdXBaCyjJEeJiiGaKHXS+cvSqFD99Ozf7BblYnFU2FV7TiMNRuLPfPWF/+nX2GcxACiJcepYI9j3Z/VfulXH0qHKR9lIIZu1n5hO/Bmeerf/1Q4YB4Yay1iL+haU8W8MEk=,iv:Btof5e7DiHIZsWEqdhgn4tiXdQ77vZJn5io5vfNTE78=,tag:S23j7d3kEYf8QRON10HYBg==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4
