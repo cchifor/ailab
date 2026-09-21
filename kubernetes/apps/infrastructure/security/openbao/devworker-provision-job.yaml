@@ -201,24 +201,31 @@ data:
     # array (or nothing) on stdout. ALWAYS captured into a variable first — `x="$(list_or_empty …)"`
     # fails the script under `set -e` when the function exits 1, whereas the same substitution in a
     # `for` word list would only kill the subshell and iterate over nothing.
+    # $2, where given, is the ONE role whose absence is benign for this call — see _or_empty.
     list_or_empty() {          # generic list: auth paths (bao list -format=json <path>)
-      _or_empty bao list -format=json "$1"
+      _or_empty "${2:-}" bao list -format=json "$1"
     }
     kv_list_or_empty() {       # KV v2 listing: `bao kv list` is the mount-aware form (generic `bao list`
-      _or_empty bao kv list -format=json -mount=af "$1"   # has no -mount and would need af/metadata/…)
+      _or_empty "" bao kv list -format=json -mount=af "$1"   # has no -mount and would need af/metadata/…)
     }
-    _or_empty() {
+    _or_empty() {   # _or_empty <benign-missing-role-or-empty> <command...>
+      _oe_role="$1"
+      shift
       if out="$("$@" 2>&1)"; then
         printf '%s' "$out"
-      # `role "<name>" does not exist` is the SAME benign case as "no value found", and it is the
-      # one a CONVERGED retirement produces: once the role itself is deleted, listing its secret-ids
-      # is a 400 with that wording rather than an empty list. Without it the daily Job aborts on
-      # every run after a retirement finishes — which is exactly what happened to slot 6 between
-      # PR #809 converging and 2026-09-21 (the Job had been red since, silently, because nothing
-      # watches a Job that only runs itself). Matched narrowly (the quoted role name) so a missing
-      # MOUNT or any other "does not exist" still aborts.
-      elif printf '%s' "$out" | grep -qiE 'no value found|not found|role "[^"]*" does not exist'; then
+      elif printf '%s' "$out" | grep -qiE 'no value found|not found'; then
         :
+      # `role "<name>" does not exist` is the SAME benign case as "no value found", and it is the one
+      # a CONVERGED retirement produces: once the role itself is deleted, listing its secret-ids is a
+      # 400 with that wording rather than an empty list. Without this the daily Job aborts on every
+      # run after a retirement finishes — which is exactly what happened to slot 6 between PR #809
+      # converging and 2026-09-21 (red the whole time, silently: nothing watches a Job that only runs
+      # itself). Accepted ONLY for the role the CALLER named, so a missing mount, a different role
+      # that must exist, or any other "does not exist" still aborts.
+      elif [ -n "$_oe_role" ] && printf '%s' "$out" | grep -qF "role \"$_oe_role\" does not exist"; then
+        # Say so: an operator reading this log should be able to tell "the role is already gone" from
+        # "the listing was empty", and it is what lets the test prove which branch it took.
+        echo "${_oe_role}: role already absent; nothing to enumerate at $2" >&2
       else
         echo "$* failed and was not a not-found; aborting" >&2
         printf '%s\n' "$out" >&2
@@ -251,7 +258,7 @@ data:
     for host in $RETIRED_SLOTS; do
       # 1. SecretIDs: destroy every accessor the role still lists (absent role/none = empty list).
       n_sid=0
-      sids="$(list_or_empty "auth/approle/role/${host}/secret-id")"
+      sids="$(list_or_empty "auth/approle/role/${host}/secret-id" "$host")"
       for acc in $(printf '%s' "$sids" | json_words); do
         bao write "auth/approle/role/${host}/secret-id-accessor/destroy" secret_id_accessor="$acc" >/dev/null
         n_sid=$((n_sid + 1))
