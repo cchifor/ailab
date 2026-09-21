@@ -253,10 +253,79 @@ data:
       # VISION: images work (host VISION=1). Verified with distinct-image probe 2026-09-07 --
       # red/blue/green -> RED/Blue/Green, 3/3 distinct AND correct. VIDEO IS UNTESTED: this
       # INT4 export ships no video_preprocessor_config.json, so do not advertise video.
+      # TWO BOXES, ONE CHECKPOINT, since 2026-09-21: the entry below is cloud2's persistent vLLM unit
+      # (:18020, TP=2 while its 03:00.0 slot is empty -- cloudlab runbook section 11), and the one
+      # after it is cloud3's `qwen3.8-27b-w4a16` llama-swap entry -- the SAME
+      # Qwen3.8-27B-W4A16-AutoRound-fast directory (config.json sha256 5a3e7312..., verified on
+      # both boxes that day), vLLM 0.28.0 at TP=4, launched with cloud2's own flags (image budget
+      # 64/prompt, the same pixel bounds, async scheduling, MTP k=4; cloudlab
+      # plans/2026-09-21-cloud3-qwen38-default-litellm-pool-plan.md and runbook section 13a).
+      # Same checkpoint + identical request-shaping params below is what makes pooling them under
+      # one model_name honest (runbook model-registration.md section 2, the same-checkpoint
+      # carve-out); the FP8 uncensored entry further down stays under its OWN name for the same
+      # reason in reverse.
+      #
+      # HOW THE ROUTER SPREADS THEM. routing_strategy least-busy picks the deployment with fewer
+      # in-flight requests, per proxy replica (two replicas, two counters). A tie goes to the FIRST
+      # key inserted into that replica's counter dict, which is the first entry listed -- cloud2 --
+      # unless the replica served its first request for this group while cloud2 was in cooldown.
+      # That tie-break is an IMPLEMENTATION DETAIL of the pinned image
+      # (ghcr.io/berriai/litellm@sha256:d295634e..., litellm/router_strategy/least_busy.py:
+      # `_get_available_deployments` walks the counter dict with a strict `<`; read in the running
+      # pod 2026-09-21). It is not a documented guarantee -- re-read it on an image bump, and do not
+      # build anything that NEEDS stickiness on it; for that, use `order` instead.
+      # So a single sequential conversation stays on cloud2 and only concurrent load spills to
+      # cloud3. What a spill costs: cloud3 holds ONE model at a time, so a request that lands there
+      # while another cloud3 model is resident first evicts it -- measured 2026-09-21: first reply
+      # 109 s with the engine unloaded, 100 s over the resident coder model (the box's preload and
+      # 7200 s TTL keep the engine resident when nothing else is asked of it) -- and the next
+      # by-name request for that other model pays the swap back. A conversation that alternates
+      # boxes also loses its prefix cache on each hop (cold prefill ~1k tok/s, section 11).
+      # Per-request attribution: the x-litellm-model-api-base response header.
+      #
+      # THE COLD-SWAP COST IS PAID BY FAILING REQUESTS TOO, and an over-length prompt is the one
+      # that matters here: llama-swap loads the engine BEFORE it proxies, so a request that lands on
+      # cloud3 with the engine unloaded waits out the load and only then gets vLLM's 400. Worst case
+      # ~109 s (idle) or ~100 s (another model resident) for an answer the caller could have had in
+      # 0.4 s from cloud2. It is NOT amplified by a retry onto the sibling: in the pinned image
+      # `Router.should_retry_this_error` re-raises immediately when `litellm._should_retry(status)`
+      # is False, and 400 is False (401/403 are the only exceptions) -- verified in the running pod
+      # 2026-09-21 -- so a context error goes straight to the fallback chain, one backend call per
+      # hop. What bounds the exposure is that the engine is this box's `default`, preloaded at boot
+      # with a 7200 s TTL, and that ties go to cloud2; what would remove it is
+      # enable_pre_call_checks (deliberately still off, see the note on the -local route).
+      #
+      # THE TWO BLOCKS MUST AGREE on everything but `model` and `api_base` (and this comment).
+      # scripts/gen-litellm-consumers.py de-duplicates on model_name FIRST-WINS, so the FIRST
+      # block's model_info alone reaches dsh and Open WebUI; a sampling tweak on one and not the
+      # other would make "which box answered" a behavioural question. supports_vision is claimed
+      # for BOTH on their own probes: cloud2 2026-09-07 (red/blue/green 3/3), cloud3 2026-09-21
+      # (vision-probe.py on the aligned entry, correct; 64 images accepted, 65 rejected).
+      #
+      # MEASURED on cloud3's deployment 2026-09-21 (cloudlab scripts/cloud3-w4a16-gate.sh, through
+      # llama-swap): 143.5 tok/s single stream, MTP position-0 acceptance 78.3%, 291 tok/s
+      # aggregate at 8 streams, streaming and tool calls parsed. cloud2 at TP=2: ~180 tok/s single
+      # stream (section 11). Health: cloud3's engine is the box's `default` and preloads at boot;
+      # the same HTTP-200-is-not-health caveat as cloud2 applies, and cloud3 has NO content-
+      # validating Gatus probe yet (a probe there would itself trigger a swap on a shared box --
+      # follow-up).
       - model_name: qwen3.8-27b-vllm-cloud
         litellm_params:
           model: openai/qwen3.8-27b
           api_base: http://192.168.0.28:18020/v1
+          api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+          extra_body:
+            top_k: 20
+            chat_template_kwargs: { reasoning_effort: xhigh }
+        model_info: { supports_vision: true, max_input_tokens: 81920 }
+      # cloud3 -- the second deployment (see the block comment above). max_input_tokens 81920 is the
+      # same arithmetic as cloud2's: host --max-model-len 131072 minus 49152 for xhigh reasoning.
+      - model_name: qwen3.8-27b-vllm-cloud
+        litellm_params:
+          model: openai/qwen3.8-27b-w4a16
+          api_base: http://192.168.0.26:8080/v1
           api_key: "sk-noauth"
           temperature: 1.0
           top_p: 0.95
@@ -819,15 +888,22 @@ data:
       #      been pure latency on the night path before ailab. (For context errors it fired whenever
       #      a prompt was too long, which is reason 1.)
       # CONSEQUENCE, deliberate: an over-length request now fails instead of being answered by a
-      # different model. Expected shape: ContextWindowExceeded on the cloud deployment(s) ->
-      # qwen3.8-27b-ailab, 65536 per slot, rejects it too -> the proxy re-raises the last error to the
-      # caller (run_async_fallback re-raises the LAST error, see the -fast note below). The exact
-      # status and message the caller sees is RECORDED after this rolls, with one deliberate
-      # over-length request through the proxy -- not asserted here. dsh maps this exception class to
-      # a friendly context_window_exceeded (platform PR #636); whether it then compacts on its own is
-      # NOT verified and is the follow-up. An honest error was chosen over a silent hop onto a slower
-      # model with no more room. qwen3.5-122b-cloud stays routable by name; nothing else changes
-      # for it.
+      # different model. RECORDED after the roll (2026-09-21 12:16 UTC, from inside a proxy pod, a
+      # 100,058-token prompt with max_tokens 32768): the caller gets HTTP 400 in 0.4 s, body
+      # `litellm.ContextWindowExceededError ... maximum context length is 131072 tokens ...`; the
+      # proxy log shows the hop -- cloud2 rejects, `Falling back to model_group = qwen3.8-27b-ailab`,
+      # llama-server there answers `request (100058 tokens) exceeds the available context size
+      # (65536 tokens)` in 0.3 s (no compute), and the router re-raises. A prompt that FITS the cloud
+      # window (70k or 125k tokens with a small max_tokens) is simply answered by cloud; the
+      # rejection is about prompt + max_tokens, and dsh's failing shape is 98k + 32768. dsh maps this
+      # exception class to a friendly context_window_exceeded (platform PR #636); whether it then
+      # compacts on its own is NOT verified and is the follow-up. An honest error was chosen over a
+      # silent hop onto a slower model with no more room. qwen3.5-122b-cloud stays routable by
+      # name; nothing else changes for it.
+      #
+      # cloud3's Qwen3.8 engine joined THIS route as the second deployment on 2026-09-21 (the block
+      # comment on the route). The chain is unchanged by that: both deployments are daytime-only
+      # cloud boxes, so the on-prem terminal is still the only hop.
       #
       # ⚠️ THIS CHAIN DOES NOT COVER THE 2026-09-10 FAILURE MODE. Do not read its presence as
       # "the qwen3.8-27b-vllm-cloud route is covered" -- it is covered for ONE of the two OUTAGES
@@ -987,7 +1063,7 @@ spec:
         # parses is byte-identical in effect, no routing change; the cost is one rolling restart
         # of the 2-replica maxUnavailable:0 Deployment, taken because the annotation tracks the
         # ConfigMap, per the rule above.
-        checksum/config: "0cea5eca24e1"
+        checksum/config: "9e655ff9c1a0"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
