@@ -51,6 +51,9 @@ cat > "$WORK/stub/bao" <<'STUB'
 STATE=/state; LOG=/state/calls.log
 echo "bao $*" >> "$LOG"
 nvf() { echo "No value found at $1" >&2; exit 2; }
+# `bao ... -format=json` renders that same condition as an EMPTY JSON object on STDOUT, still
+# exiting non-zero. The KV listing of a purged subtree does exactly this on the real thing.
+jvf() { echo "{}"; exit 2; }
 case "$1 $2" in
   "token lookup")
     case "$*" in
@@ -97,8 +100,8 @@ case "$1 $2" in
     case "$5" in
       dev-workers/dev-worker-6/)
         if [ -f "$STATE/FAIL_KV_LIST_ONCE" ]; then rm -f "$STATE/FAIL_KV_LIST_ONCE"; echo "Error listing af/metadata/$5: Vault is sealed" >&2; exit 2; fi
-        { [ -f "$STATE/kv-flat-gone" ] && [ -f "$STATE/kv-sub-gone" ]; } && nvf "$5" || echo '["flat", "sub1/"]' ;;
-      dev-workers/dev-worker-6/sub1/) [ -f "$STATE/kv-sub-gone" ] && nvf "$5" || echo '["credential"]' ;;
+        { [ -f "$STATE/kv-flat-gone" ] && [ -f "$STATE/kv-sub-gone" ]; } && jvf || echo '["flat", "sub1/"]' ;;
+      dev-workers/dev-worker-6/sub1/) [ -f "$STATE/kv-sub-gone" ] && jvf || echo '["credential"]' ;;
       *) nvf "$5" ;;
     esac ;;
   "kv metadata")

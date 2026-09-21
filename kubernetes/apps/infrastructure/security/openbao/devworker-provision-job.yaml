@@ -218,6 +218,13 @@ data:
         printf '%s' "$out"
       elif printf '%s' "$out" | grep -qiE 'no value found|not found'; then
         :
+      # `-format=json` renders "no value found" as an EMPTY JSON object and still exits non-zero, so a
+      # listing of a path that has been fully purged comes back as `{}` with no message to match.
+      # Narrow on purpose: a sealed vault or any other failure renders a NON-empty object
+      # ({"errors":[...]}) and still aborts. Measured live 2026-09-21 on the retired slot 6 subtree,
+      # which the AppRole abort above had been masking.
+      elif [ "$(printf '%s' "$out" | tr -d '[:space:]')" = "{}" ] || [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+        echo "${_oe_role:-listing}: empty JSON answer from ${_oe_path}; treating as nothing to enumerate" >&2
       # `role "<name>" does not exist` is the SAME benign case as "no value found", and it is the one
       # a CONVERGED retirement produces: once the role itself is deleted, listing its secret-ids is a
       # 400 with that wording rather than an empty list. Without this the daily Job aborts on every
