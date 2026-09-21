@@ -667,4 +667,4 @@ template change would rotate the member and reset its creation clock; use `sleep
 listener so startup exceeds the post-scheduling reconcile interval, and assert the Sandbox UID and
 creationTimestamp are unchanged through scheduling: it is deleted seconds after scheduling.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
