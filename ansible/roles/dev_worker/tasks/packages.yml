@@ -20,6 +20,7 @@
       - lsb-release
       - ufw
       - acl # lets ansible `become` an unprivileged user (per-user npm + ACL tasks)
+      - postgresql-client # `platform psql` (ADR 0028): psql + pg_isready against the platform's CNPG cluster
       - qemu-guest-agent # not in the minimal cloud image; gives PVE graceful shutdown + guest info
     state: present
     update_cache: true

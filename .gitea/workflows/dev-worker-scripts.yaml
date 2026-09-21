@@ -68,3 +68,13 @@ jobs:
         run: |
           set -euo pipefail
           bash ansible/roles/dev_worker/tests/test-cred-helper.sh
+
+      # The `platform` helper (ADR 0028) against stub kubectl/psql/pg_isready/hostname, plus the
+      # render wiring it depends on: slot derivation, the kubectl/psql argv, the private port-forward
+      # lifecycle, --tenant reaching libpq, and the gated agent stanzas. Named explicitly for the same
+      # reason as the suite above — a glob would silently stop running a renamed file.
+      - name: platform helper + platform render wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ansible/roles/dev_worker/tests/test-platform-helper.sh

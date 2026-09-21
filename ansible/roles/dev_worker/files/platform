@@ -1,0 +1,188 @@
+#!/bin/sh
+# platform — this dev worker's door into the Strive platform on the ailab cluster (ADR 0028).
+# Read-only by construction: the kubeconfig is bound to the dev-worker-platform-observer ClusterRole
+# (no secrets, no exec, no writes) and the Postgres login holds SELECT and nothing else. Both files
+# are rendered and refreshed by the local bao agent from this worker's own OpenBao KV path — never
+# edit, copy or paste their contents anywhere.
+#
+#   platform kubectl <args...>          kubectl in namespace strive-ailab with the observer kubeconfig
+#   platform pf <svc> <local:remote>    foreground port-forward to a Service (Ctrl-C to stop)
+#   platform psql [-d db] [--tenant id] [--rw] [psql args...]
+#                                       psql through a private port-forward: strive-pg-ro (the
+#                                       replicas) by default, --rw for the primary (still read-only
+#                                       by privilege), --tenant sets app.tenant_id so the platform's
+#                                       RLS-scoped tables answer instead of reading empty
+#   platform env                        the non-secret facts (slot, role, file paths)
+#
+# The slot number comes from the hostname (dev-worker-N) — the same load-bearing fact `cred` relies
+# on. Runbook: docs/runbooks/dev-worker-platform-access.md.
+set -eu
+
+PLATFORM_DIR="${PLATFORM_DIR:-$HOME/.platform}"
+KCFG="${PLATFORM_KUBECONFIG:-$PLATFORM_DIR/kubeconfig}"
+PGPASS="${PLATFORM_PGPASS:-$PLATFORM_DIR/pgpass}"
+NS="${PLATFORM_NAMESPACE:-strive-ailab}"
+PG_RO_SVC="${PLATFORM_PG_RO_SVC:-strive-pg-ro}"
+PG_RW_SVC="${PLATFORM_PG_RW_SVC:-strive-pg-rw}"
+PG_DEFAULT_DB="${PLATFORM_PG_DEFAULT_DB:-airlock}"
+PF_WAIT_S="${PLATFORM_PF_WAIT_S:-20}"
+
+die() { echo "platform: $*" >&2; exit 1; }
+usage() {
+  cat >&2 <<'EOF'
+usage: platform kubectl <args...>
+       platform pf <svc> <local:remote>
+       platform psql [-d db] [--tenant id] [--rw] [psql args...]
+       platform env
+Read-only access to the Strive platform (ADR 0028); see
+docs/runbooks/dev-worker-platform-access.md.
+EOF
+  exit 2
+}
+
+# dev-worker-N -> N, into SLOT and PG_ROLE. A hostname this does not match is a hard error, never a
+# guess: the wrong slot means the wrong Postgres role name and a confusing auth failure.
+#
+# Sets variables rather than echoing, because `die` inside a `$( )` exits only the SUBSHELL — an
+# `echo "$(slot)"` would print an empty slot and carry on with the role name `dw_platform_ro`.
+resolve_slot() {
+  _h="$(hostname -s)"
+  case "$_h" in
+  dev-worker-[0-9] | dev-worker-[0-9][0-9]) SLOT="${_h#dev-worker-}" ;;
+  *) die "hostname '$_h' is not dev-worker-N; cannot derive this worker's slot" ;;
+  esac
+  PG_ROLE="dw${SLOT}_platform_ro"
+}
+
+need_kubeconfig() {
+  [ -r "$KCFG" ] || die "no kubeconfig at $KCFG — the bao agent renders it once
+  af/dev-workers/$(hostname -s).platform_kubeconfig exists (openbao-k8stoken-sync publishes it).
+  See docs/runbooks/dev-worker-platform-access.md."
+}
+
+free_port() {
+  python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()'
+}
+
+cmd_kubectl() {
+  [ $# -ge 1 ] || usage
+  need_kubeconfig
+  exec kubectl --kubeconfig="$KCFG" -n "$NS" "$@"
+}
+
+cmd_pf() {
+  [ $# -eq 2 ] || usage
+  need_kubeconfig
+  # --address, NOT an address prefix in the port spec: kubectl parses "[LOCAL:]REMOTE", so
+  # "127.0.0.1:8080:5432" is read as the NAMED PORT "127.0.0.1" and fails outright.
+  exec kubectl --kubeconfig="$KCFG" -n "$NS" port-forward --address 127.0.0.1 "svc/$1" "$2"
+}
+
+cmd_psql() {
+  db="$PG_DEFAULT_DB"
+  svc="$PG_RO_SVC"
+  tenant=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+    -d)
+      [ $# -ge 2 ] || usage
+      db="$2"
+      shift 2
+      ;;
+    --tenant)
+      [ $# -ge 2 ] || usage
+      tenant="$2"
+      shift 2
+      ;;
+    --rw)
+      svc="$PG_RW_SVC"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -h | --help) usage ;;
+    *) break ;;
+    esac
+  done
+  # Validate before ANY side effect (no kubeconfig read, no port-forward): a bad value must fail
+  # cheaply, and it must never reach the libpq startup-option string.
+  if [ -n "$tenant" ]; then
+    case "$tenant" in
+    *[!A-Za-z0-9_-]*) die "--tenant must match [A-Za-z0-9_-]+" ;;
+    esac
+  fi
+  resolve_slot
+  need_kubeconfig
+  [ -r "$PGPASS" ] || die "no pgpass at $PGPASS — the bao agent renders it once
+  af/dev-workers/$(hostname -s).platform_pg_* exist (openbao-platform-pg-sync publishes them)."
+  command -v psql >/dev/null 2>&1 || die "psql is not installed (postgresql-client is in the dev_worker role; re-run the playbook)"
+
+  # The forward is private to this psql session: background it, wait for readiness, kill it on exit.
+  # `--address 127.0.0.1` binds loopback only; the port spec must stay "LOCAL:REMOTE" (an address
+  # prefix there is parsed as a NAMED PORT and kubectl refuses it).
+  port="$(free_port)"
+  kubectl --kubeconfig="$KCFG" -n "$NS" port-forward --address 127.0.0.1 "svc/$svc" "$port:5432" >/dev/null 2>&1 &
+  pf=$!
+  trap 'kill "$pf" 2>/dev/null || true' EXIT INT TERM HUP
+  i=0
+  until pg_isready -q -h 127.0.0.1 -p "$port" 2>/dev/null; do
+    kill -0 "$pf" 2>/dev/null || die "the port-forward to svc/$svc exited — check: platform kubectl auth can-i create pods/portforward"
+    i=$((i + 1))
+    [ "$i" -lt $((PF_WAIT_S * 5)) ] || die "svc/$svc did not answer through the port-forward within ${PF_WAIT_S}s"
+    sleep 0.2
+  done
+
+  # --tenant: the platform's RLS policies read current_setting('app.tenant_id'); a libpq startup
+  # option sets it for the whole session, which is exactly how the services scope themselves. Without
+  # it every RLS-protected table (most of airlock and workflow) reads EMPTY rather than erroring.
+  # The explicit --tenant goes LAST: libpq applies the options left to right, so an inherited
+  # PGOPTIONS carrying another app.tenant_id would otherwise win and silently return another
+  # tenant's rows under a flag that says t1.
+  if [ -n "$tenant" ]; then
+    PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c app.tenant_id=$tenant"
+    export PGOPTIONS
+  fi
+  # NOT `exec`: exec would replace this shell and the EXIT trap would never fire, leaving the
+  # port-forward running for the life of the login session. Run it, then tear the forward down and
+  # exit with psql's own status.
+  rc=0
+  PGPASSFILE="$PGPASS" PGSSLMODE="${PGSSLMODE:-require}" \
+    psql -h 127.0.0.1 -p "$port" -U "$PG_ROLE" -d "$db" "$@" || rc=$?
+  kill "$pf" 2>/dev/null || true
+  exit "$rc"
+}
+
+cmd_env() {
+  resolve_slot
+  printf 'slot=%s\n' "$SLOT"
+  printf 'pg_role=%s\n' "$PG_ROLE"
+  printf 'namespace=%s\n' "$NS"
+  printf 'kubeconfig=%s (%s)\n' "$KCFG" "$([ -r "$KCFG" ] && echo present || echo absent)"
+  printf 'pgpass=%s (%s)\n' "$PGPASS" "$([ -r "$PGPASS" ] && echo present || echo absent)"
+}
+
+case "${1:-}" in
+kubectl)
+  shift
+  cmd_kubectl "$@"
+  ;;
+pf)
+  shift
+  cmd_pf "$@"
+  ;;
+psql)
+  shift
+  cmd_psql "$@"
+  ;;
+env)
+  [ $# -eq 1 ] || usage
+  cmd_env
+  ;;
+*) usage ;;
+esac

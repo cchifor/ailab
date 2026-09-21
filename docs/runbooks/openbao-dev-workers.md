@@ -37,6 +37,8 @@ Secret.
 | sink `/run/openbao-agent/token` | tmpfs (systemd `RuntimeDirectory=`) | Group-readable (`openbao-agent`) token for `cred`. Gone on reboot; re-created on login. |
 | `/usr/local/bin/cred` | `ansible/roles/dev_worker/files/cred` | `cred list` · `cred get <name> <field>` · `cred exec <name> <field> <VAR> -- <cmd>`. |
 | managed CLAUDE.md block | per user, `~/.claude/CLAUDE.md` | Tells the agents to use `cred` and to never print values. |
+| CronJob `openbao-platform-pg-sync` (+ its script/CA ConfigMaps and bootstrap Job) | `kubernetes/apps/infrastructure/platform-access/pg-sync.yaml` | ADR 0028: maintains the per-slot read-only Postgres login on the platform's CNPG cluster and publishes `platform_pg_*` into this same KV subtree. Runs in ns `strive-ailab` (it mounts the CNPG superuser Secret) and logs in with the k8s-auth role `platform-pg-sync`, which shares this file's `k8stoken-sync` KV-write policy. |
+| ClusterRole `dev-worker-platform-observer` + per-slot SAs | `kubernetes/apps/infrastructure/platform-access/rbac.yaml` | ADR 0028: the observe-only identities behind `platform_kubeconfig` (no secrets, no exec, no writes). |
 
 > **Precedence: this subtree is seed-WINS, and that is no longer the estate-wide default.** The
 > `openbao-devworker-provision` Job is a shell `bao kv patch` loop: a key present in
@@ -129,6 +131,19 @@ Secret.
   Both are readable with `cred get <hostname> tep_kubeconfig` — the per-worker policy already
   granted `read` on this subtree, so ADR 0021 needed no policy change. The agents consume them as
   rendered files (`~/.tep/kubeconfig`, `~/.helmtest/kubeconfig`), not via `cred`.
+
+  **Since ADR 0028 the same per-worker path also carries four SYNC-OWNED platform-access fields**,
+  and they are the same precedence class as the two above (cluster-derived, deliberately unseeded, a
+  wipe loses them until a successful sync):
+  `platform_kubeconfig` — written by the SAME `openbao-k8stoken-sync` CronJob (a third target class
+  per slot: SA `platform-access/platform-dw<N>`, context namespace `strive-ailab`), rendered to
+  `~/.platform/kubeconfig`; and `platform_pg_user` / `platform_pg_password` /
+  `platform_pg_valid_until` — written by a SECOND sync, `openbao-platform-pg-sync` (ns
+  `strive-ailab`, daily 03:47 UTC), the read-only Postgres login `dw<N>_platform_ro` on the
+  platform's CNPG cluster, rendered to `~/.platform/pgpass`. Both are consumed through
+  `/usr/local/bin/platform`, not `cred`. A worker with none of them is normal (new slot, or the syncs
+  have not run): the agent simply emits no platform stanzas. Full contract, rollout and the
+  retire-a-slot checklist: `docs/runbooks/dev-worker-platform-access.md`.
 
 **Worker → IP → role** (the provision script's list must mirror this and
 `kubernetes/infra/dev-workers/variables.tf`):

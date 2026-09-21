@@ -90,6 +90,9 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/infrastructure/autoscaling/kro",
         "./kubernetes/apps/infrastructure/security/openbao-canary",
         "./kubernetes/apps/infrastructure/security/openbao",
+        # ADR 0028 — the dev-worker platform access plane (per-slot observer SAs + the
+        # openbao-platform-pg-sync CronJob). Added deliberately, same reason as helmtest above.
+        "./kubernetes/apps/infrastructure/platform-access",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/qnap-storage",
         "./kubernetes/apps/infrastructure/testpool",

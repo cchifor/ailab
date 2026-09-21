@@ -34,6 +34,8 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 - Proxmox hosts (root): `python scripts/node-ssh.py <192.168.0.2|.3|.4> "<cmd>"`
 - LXCs: `python scripts/lxc-exec.py <host> <ctid>`
 - Runner VMs: `ssh ubuntu@<ip>` · dev-workers: `ssh c4@<ip>` (key `~/.ssh/id_ed25519`)
+- **Strive platform, from a dev-worker:** `platform kubectl|psql|pf` — read-only observe + SELECT
+  (ADR 0028, `docs/runbooks/dev-worker-platform-access.md`). No secrets, no exec, no writes.
 
 ## Talos / control-plane safety
 - Graceful CP reboot = **`talosctl shutdown -n <cp-ip>`** — **`qm shutdown`/ACPI does NOT stop Talos** (falls back to a hard stop). Then `qm set <vmid> --memory …` + `qm start`.

@@ -87,6 +87,42 @@ jobs:
           set -euo pipefail
           bash scripts/tests/test-devworker-provision.sh
 
+      # The openbao-platform-pg-sync script (ADR 0028) under the CronJob's OWN image (the CNPG operand,
+      # python3 + psycopg2) against a throwaway Postgres + a stub OpenBao: create / keep / rotate /
+      # force / recreate / retire / keycloak-abort, RLS via the tenant GUC, read-only BY PRIVILEGE,
+      # and no password in any log line. Docker required, no soft skip.
+      - name: platform-pg-sync under the CronJob image
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-platform-pg-sync.sh
+
+      # Every dev-worker slot enumeration in the repo (AppRoles, both credential syncs, the per-slot
+      # ServiceAccounts in three trees, tofu, inventory) must name the same live and retired slots —
+      # a slot retirement that misses one file fails here, not as a red sync a day later.
+      - name: dev-worker slot enumerations agree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-slot-enumerations.py
+
+      # ...and the checker itself must be able to FAIL: a consistency gate that silently stops
+      # matching is worse than none. Fixtures mutate a COPY of the tree (mismatch, deletion,
+      # reformat, live/retired overlap) and assert a non-zero exit each time.
+      - name: the slot-enumeration gate fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-check-slot-enumerations.sh
+
+      # The pg-sync's OpenBao CA ConfigMap is generated from a copy of the public ailab root CA; the
+      # workers pin the same PEM from the ansible role. Two copies, one truth.
+      - name: ailab root CA copies are identical
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp ansible/roles/openbao_agent/files/ailab-root-ca.crt kubernetes/apps/infrastructure/platform-access/ailab-root-ca.crt
+
       # The three spans derived from litellm.yaml's model_list — Open WebUI's Local-group model_ids,
       # the dsh seed's provider models rows, and litellm.yaml's own checksum/config — must match what
       # the generator renders. Same fail-closed shape as the step above: a drifted span, a missing
