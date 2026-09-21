@@ -39,8 +39,28 @@
 # only if a pod is still Terminating 20 min after deletion, i.e. the reaper is dead, wedged, or its
 # kills did not unstick the shim. A dead DaemonSet is the chart's KubeDaemonSet* rules' job.
 #
-# FAULT INJECTION (runbook docs/runbooks/env-pool.md): a hand-applied copy with REAP_AFTER_SECONDS=5
-# plus `kill -STOP` on a member's cloud-hypervisor reproduces a genuinely hung teardown end to end.
+# EVIDENCE (plans/2026-09-20-env-pool-root-cause-followup-plan.md, T2d): right before each stage-1
+# kill the reaper logs what the kernel knows about the process it is about to destroy — one
+# `evidence … state= wchan= threads= tstates=` line for the process, then per thread (first
+# EVIDENCE_MAX_THREADS of /proc/<pid>/task/*, the leader may be idle while a virtiofsd worker is
+# stuck) an `evidence-thread … tid= state= wchan=` line, plus `evidence-stack … tid= stack=` (kernel
+# stack, first 12 frames, '|'-joined) for threads in D or T — kernel stacks, not userspace
+# backtraces. The whole collection runs under `timeout EVIDENCE_TIMEOUT_SECONDS`, is read-only and
+# best-effort ('?' when unreadable), and never delays the kill beyond that bound. Because it adds
+# time between matching and killing, the identity chain (cgroup + exe + cmdline for the sandbox)
+# is re-checked immediately before SIGKILL; a PID that no longer matches is skipped and logged.
+# Joined to the shim/agent/guest console lines in Loki by the sandbox id (cri-log-relay stream,
+# monitoring/cri-log-relay.yaml).
+#
+# ROLLOUT: reap.sh is read once at container start from the ConfigMap, so a ConfigMap edit alone
+# changes nothing running. Every change to the script bumps the pod-template annotation
+# `env-reaper.ailab.io/script-revision` (below), which rolls the DaemonSet (one pod per node, so
+# no overlapping reapers); reverting = reverting both.
+#
+# FAULT INJECTION (runbook docs/runbooks/env-pool.md): `kill -STOP` on a member's virtiofsd from
+# THIS pod (it is the only hostPID process on the node) reproduces the incident's hang end to end;
+# never run a second copy of this DaemonSet with a shorter REAP_AFTER_SECONDS next to the
+# production one — it would reap first and truncate the evidence window.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -88,6 +108,8 @@ data:
     REAP_STAGE1=${REAP_STAGE1:-1}
     REAP_STAGE2=${REAP_STAGE2:-1}
     HEARTBEAT_ITERATIONS=${HEARTBEAT_ITERATIONS:-20}
+    EVIDENCE_TIMEOUT_SECONDS=${EVIDENCE_TIMEOUT_SECONDS:-5}   # hard bound on evidence collection per pid
+    EVIDENCE_MAX_THREADS=${EVIDENCE_MAX_THREADS:-16}          # per-thread lines are capped (virtiofsd: 1 + pool)
     VC_SBS=${VC_SBS:-/host/run/vc/sbs}
     PROC_ROOT=${PROC_ROOT:-/proc}   # overridable so the helpers can be unit-tested on a fake tree
     CH_EXE=/usr/local/bin/cloud-hypervisor
@@ -145,16 +167,59 @@ data:
       done
     }
 
+    # evidence_body <pod> <uid> <sandbox-id> <pid> <exe>: the process's and its threads' kernel-side
+    # state right before stage 1 kills it (see EVIDENCE above). Read-only, best-effort.
+    evidence_body() {
+      _p=$4
+      _st=$(awk '/^State:/{print $2}' "$PROC_ROOT/$_p/status" 2>/dev/null); _st=${_st:-?}
+      _th=$(awk '/^Threads:/{print $2}' "$PROC_ROOT/$_p/status" 2>/dev/null); _th=${_th:-?}
+      _wc=$(cat "$PROC_ROOT/$_p/wchan" 2>/dev/null); _wc=${_wc:-?}
+      _ts=$(for _t in "$PROC_ROOT/$_p"/task/*/stat; do awk '{print $3}' "$_t" 2>/dev/null; done | sort | uniq -c | awk '{printf "%s:%s,", $2, $1}')
+      log "evidence stage=1 pod=$1 uid=$2 sandbox=$3 exe=$5 pid=$_p state=$_st wchan=$_wc threads=$_th tstates=${_ts%,}"
+      _n=0
+      for _td in "$PROC_ROOT/$_p"/task/*; do
+        _n=$((_n + 1)); [ "$_n" -gt "$EVIDENCE_MAX_THREADS" ] && { log "evidence-thread stage=1 pod=$1 sandbox=$3 pid=$_p tid=... truncated after $EVIDENCE_MAX_THREADS threads"; break; }
+        _tid=${_td##*/}
+        _tst=$(awk '/^State:/{print $2}' "$_td/status" 2>/dev/null); _tst=${_tst:-?}
+        _twc=$(cat "$_td/wchan" 2>/dev/null); _twc=${_twc:-?}
+        log "evidence-thread stage=1 pod=$1 sandbox=$3 pid=$_p tid=$_tid state=$_tst wchan=$_twc"
+        case "$_tst" in
+          D|T|t)
+            _sk=$(head -n 12 "$_td/stack" 2>/dev/null | tr '\n' '|')
+            [ -n "$_sk" ] && log "evidence-stack stage=1 pod=$1 sandbox=$3 pid=$_p tid=$_tid stack=$_sk" ;;
+        esac
+      done
+      return 0
+    }
+    # The timeout wrapper re-sources this file in a child shell with REAP_LIB_ONLY=1 (functions +
+    # defaults only, no loop — an env var, because `. file args` sets $1 in bash but not in dash/ash).
+    evidence() { REAP_LIB_ONLY=1 timeout "$EVIDENCE_TIMEOUT_SECONDS" sh -c '. /opt/env-reaper/reap.sh; evidence_body "$@"' _ "$@" || log "evidence stage=1 pod=$1 sandbox=$3 pid=$4 incomplete (timeout ${EVIDENCE_TIMEOUT_SECONDS}s or read error)"; return 0; }
+
+    # still_ours <sandbox-id> <stage> <pid> <exe>: re-run the identity chain for ONE pid right before
+    # the kill (the evidence collection widened the window in which the PID could have been reused).
+    still_ours() {
+      procs_of "$1" "$2" | grep -q "^$3 $4\$"
+    }
+
     reap() {
       _name=$1; _uid=$2; _sbid=$3; _stage=$4; _age=$5
       procs_of "$_sbid" "$_stage" | while read -r _pid _exe; do
+        [ "$_stage" = 1 ] && evidence "$_name" "$_uid" "$_sbid" "$_pid" "$_exe"
+        if ! still_ours "$_sbid" "$_stage" "$_pid" "$_exe"; then
+          log "skip-kill stage=$_stage pod=$_name sandbox=$_sbid pid=$_pid exe=$_exe reason=identity-changed"
+          continue
+        fi
         if kill -9 "$_pid" 2>/dev/null; then
           log "reap stage=$_stage pod=$_name uid=$_uid sandbox=$_sbid exe=$_exe pid=$_pid age=${_age}s"
         fi
       done
     }
 
-    log "env-reaper start node=$NODE_NAME namespace=$NAMESPACE after=${REAP_AFTER_SECONDS}s interval=${INTERVAL_SECONDS}s stage1=$REAP_STAGE1 stage2=$REAP_STAGE2"
+    # REAP_LIB_ONLY=1 (evidence()'s timeout wrapper) loads functions + defaults and stops here.
+    [ "${REAP_LIB_ONLY:-0}" = "1" ] && return 0
+
+
+    log "env-reaper start node=$NODE_NAME namespace=$NAMESPACE after=${REAP_AFTER_SECONDS}s interval=${INTERVAL_SECONDS}s stage1=$REAP_STAGE1 stage2=$REAP_STAGE2 evidence_timeout=${EVIDENCE_TIMEOUT_SECONDS}s"
     iter=0
     while :; do
       iter=$((iter + 1))
@@ -209,6 +274,9 @@ spec:
       labels:
         app.kubernetes.io/name: env-reaper
         app.kubernetes.io/part-of: testpool
+      annotations:
+        # Bump on EVERY reap.sh change (see ROLLOUT in the header): the script is read at start.
+        env-reaper.ailab.io/script-revision: "2026-09-21-evidence-1"
     spec:
       serviceAccountName: env-reaper
       priorityClassName: system-node-critical
