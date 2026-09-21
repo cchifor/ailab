@@ -225,7 +225,9 @@ out2="$(run 2>&1)" || { echo "F: run 2 (role already gone) aborted instead of co
 # the 400 wording MUST appear — otherwise run 2 fell through the old "No value found" path and
 # this scenario would pass without ever testing the guard (a vacuous pass, the very thing this
 # suite exists to prevent).
-expect "$out2" "dev-worker-6: role already absent; nothing to enumerate"
+# the WHOLE line, path included: a prefix-only match hid the fact that the message printed the
+# command word (`list`) instead of the path it skipped.
+expect "$out2" "dev-worker-6: role already absent; nothing to enumerate at auth/approle/role/dev-worker-6/secret-id"
 expect "$out2" "devworker provision complete"
 expect "$out2" "retired dev-worker-6: converged"
 forbid "$out2" "failed and was not a not-found"

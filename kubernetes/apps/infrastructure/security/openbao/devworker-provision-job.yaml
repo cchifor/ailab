@@ -211,6 +211,9 @@ data:
     _or_empty() {   # _or_empty <benign-missing-role-or-empty> <command...>
       _oe_role="$1"
       shift
+      # The path the wrapped command lists is its LAST argument. POSIX way to get it (no arrays, and
+      # $2 after the shift is the command word `list`, not the path).
+      for _oe_path in "$@"; do :; done
       if out="$("$@" 2>&1)"; then
         printf '%s' "$out"
       elif printf '%s' "$out" | grep -qiE 'no value found|not found'; then
@@ -225,7 +228,7 @@ data:
       elif [ -n "$_oe_role" ] && printf '%s' "$out" | grep -qF "role \"$_oe_role\" does not exist"; then
         # Say so: an operator reading this log should be able to tell "the role is already gone" from
         # "the listing was empty", and it is what lets the test prove which branch it took.
-        echo "${_oe_role}: role already absent; nothing to enumerate at $2" >&2
+        echo "${_oe_role}: role already absent; nothing to enumerate at ${_oe_path}" >&2
       else
         echo "$* failed and was not a not-found; aborting" >&2
         printf '%s\n' "$out" >&2
