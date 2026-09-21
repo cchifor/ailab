@@ -190,7 +190,8 @@ data:
       # 15,996-38,897 reasoning tokens per answer (litellm.yaml) -- a probe must not.
       #
       # It posts STRAIGHT AT THE ENGINE, never through LiteLLM: that proxy carries num_retries: 2
-      # and a fallback chain to qwen3.5-122b-cloud, so a probe sent there could be answered by a
+      # and a fallback chain (qwen3.5-122b-cloud then qwen3.8-27b-ailab when this was written;
+      # qwen3.8-27b-ailab alone since 2026-09-21), so a probe sent there could be answered by a
       # DIFFERENT model and score green while :18020 served '!'. The plan flags the same trap for
       # the eval harness (Phase B1).
       #

@@ -666,12 +666,17 @@ data:
       # (models.yaml `alias`), so /v1/models on :8082 advertises exactly this id and the name here is
       # not a rename that only LiteLLM knows about.
       #
-      # NOT A FALLBACK TARGET FOR THE CLOUD ROUTES, and that is deliberate rather than an omission.
-      # It is ~14x slower (11.49 tok/s measured on-prem vs 158.6-200.4 on cloud2's 4x RTX 3090 --
-      # a memory-bandwidth ratio, 256 GB/s against ~3,744 GB/s aggregate, not an engine defect), and
-      # llama.cpp here rejects the vLLM-only sampling those routes carry (chat_template_kwargs /
-      # reasoning_effort would 400). Silently demoting a caller from 200 tok/s to 11 mid-conversation
-      # is worse than an honest error. Adding it to a chain is a routing decision for the operator.
+      # THE TERMINAL FALLBACK for qwen3.8-27b-vllm-cloud since 2026-09-16 (router_settings.fallbacks
+      # below), and since 2026-09-21 the ONLY hop in that chain. When it was added (2026-09-12) it was
+      # deliberately kept out of every chain: it is ~14x slower (11.49 tok/s measured on-prem vs
+      # 158.6-200.4 on cloud2's 4x RTX 3090 -- a memory-bandwidth ratio, 256 GB/s against ~3,744 GB/s
+      # aggregate, not an engine defect), and a caller demoted from 200 tok/s to 11 mid-conversation
+      # notices. The 2026-09-16 rewiring took that demotion over an empty chain overnight, when it is
+      # the only Qwen3.8 in the estate that is on. The cloud route's vLLM-only sampling
+      # (chat_template_kwargs / reasoning_effort) is DEPLOYMENT-scoped and is not carried across the
+      # hop (the -fast route's comment below says why that matters), so llama.cpp here receives a
+      # plain request. What this hop CANNOT absorb is an over-length prompt: it serves 65536 per slot,
+      # so a request the cloud rejected at 131072 is rejected here too -- see the fallbacks block.
       #
       # max_input_tokens 49152 = per-slot n_ctx 65536 (ctx 131072 / parallel 2) less 16K output and
       # reasoning headroom. `ctx` is TOTAL KV shared across slots in llama.cpp, so changing either
@@ -768,10 +773,31 @@ data:
       # default chat model and its title/tag generation were both simply broken for a day. The host
       # pinged and :22 was open; only the vLLM unit was down, and nothing watched it.
       #
-      # Ordered deliberately: the daytime cloud route first (same family, comparable quality), then
-      # the always-on local route. Both cloud hosts power off nightly, so without the local entry the
-      # chain is empty exactly overnight. A fallback list whose members share an outage window is not
-      # a fallback list.
+      # The chain first shipped as [qwen3.5-122b-cloud, qwen3.8-27b-ailab]: the daytime cloud route
+      # first (same family, comparable quality), then the always-on local route -- both cloud hosts
+      # power off nightly, so without the local entry the chain is empty exactly overnight. A fallback
+      # list whose members share an outage window is not a fallback list.
+      #
+      # 2026-09-21: the 122b hop is REMOVED; the chain is the on-prem route alone. Two reasons, both
+      # read off the live proxy that morning:
+      #   1. The hop was carrying a workload it was never meant for. dsh was sending ~98k-token
+      #      prompts with max_tokens 32768 to qwen3.8-27b-vllm-cloud; cloud2 answered
+      #      ContextWindowExceededError (131072), and with no context_window_fallbacks set the router
+      #      "Default[s] to fallbacks" (its own log line) -- 59 times in one replica's 4-hour log --
+      #      so every one of those requests landed on cloud3's 122b, a DIFFERENT model whose slots
+      #      (131072 each, -c 262144 --parallel 2) are no larger than the window that had just
+      #      rejected the request. Each landing also SWAPPED cloud3 off
+      #      its default engine (cloud3 holds one model at a time), which is what the next change --
+      #      cloud3's Qwen3.8 W4A16 engine joining THIS route as a second deployment (cloudlab
+      #      plans/2026-09-21-cloud3-qwen38-default-litellm-pool-plan.md) -- needs to stop.
+      #   2. With cloud3 about to be a peer of the primary, the hop would only have fired when BOTH
+      #      cloud boxes were unreachable, i.e. as pure latency on the night path before ailab.
+      # CONSEQUENCE, deliberate: an over-length request now fails LOUDLY. ContextWindowExceeded on the
+      # cloud deployment(s) -> qwen3.8-27b-ailab, which serves 65536 per slot and rejects it too ->
+      # the caller gets a 4xx. dsh already maps this class to a friendly context_window_exceeded
+      # (platform PR #636); whether it then compacts on its own is NOT verified and is the follow-up.
+      # An honest error was chosen over a silent hop onto a slower model that could not finish the
+      # request. qwen3.5-122b-cloud stays routable by name; nothing else changes for it.
       #
       # ⚠️ THIS CHAIN DOES NOT COVER THE 2026-09-10 FAILURE MODE. Do not read its presence as
       # "the qwen3.8-27b-vllm-cloud route is covered" -- it is covered for ONE of the two OUTAGES
@@ -817,9 +843,9 @@ data:
       # Keep the chain -- it is correct for what it covers, and it is still the only thing standing
       # between a user and a 500 when the unit is actually down. Just do not mistake it for health
       # monitoring of the model's OUTPUT.
-      # REWIRED 2026-09-16 with the qwen3.6 removal.
+      # REWIRED 2026-09-16 with the qwen3.6 removal, and again 2026-09-21 (the 122b hop, above).
       #
-      # qwen3.8-27b-vllm-cloud keeps a terminal on-prem hop, now qwen3.8-27b-ailab. Both cloud routes
+      # qwen3.8-27b-vllm-cloud keeps a terminal on-prem hop, qwen3.8-27b-ailab. Both cloud routes
       # live on cloudlab hosts that POWER OFF NIGHTLY (measured `up` over 7d: 0.34-0.38), so without an
       # on-prem terminal this route has no backstop for roughly two-thirds of the day.
       #
@@ -832,7 +858,7 @@ data:
       # not validate that fallback targets exist, and run_async_fallback re-raises the LAST error, so a
       # dangling name would MASK the true upstream failure with "no healthy deployment".
       fallbacks:
-        - qwen3.8-27b-vllm-cloud: ["qwen3.5-122b-cloud", "qwen3.8-27b-ailab"]
+        - qwen3.8-27b-vllm-cloud: ["qwen3.8-27b-ailab"]
       num_retries: 2
       allowed_fails: 2
       cooldown_time: 30
@@ -930,7 +956,7 @@ spec:
         # parses is byte-identical in effect, no routing change; the cost is one rolling restart
         # of the 2-replica maxUnavailable:0 Deployment, taken because the annotation tracks the
         # ConfigMap, per the rule above.
-        checksum/config: "9e68009da031"
+        checksum/config: "6a78ccbb8ef6"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
