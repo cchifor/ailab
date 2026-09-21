@@ -110,7 +110,11 @@ python3 + psycopg2) maintains `dw<N>_platform_ro` per live slot:
   `default_transaction_read_only` off — on the primary as much as on a replica. The GUC default
   turns accidents into clearer errors; the `-ro` replicas add the server's own refusal. **Every
   run re-asserts the invariant rather than assuming it:** non-SELECT privileges are REVOKED on
-  every table and sequence in every allowlisted database, role memberships other than
+  every table in every allowlisted database — and on every SEQUENCE, `USAGE` as well as `UPDATE`,
+  because `USAGE` alone permits `nextval()`, which advances an application's id counter and is
+  therefore a write (verified 2026-09-21; `information_schema.role_table_grants` does not cover
+  sequences, so the audit reads `pg_class.relacl` for `relkind='S'` separately) — role memberships
+  other than
   `pg_monitor` are revoked, and the catalog is then checked for any remaining non-SELECT grant —
   a grant made out of band is repaired, not merely undetected. The live proof runs for **every**
   slot before anything is published, kept ones included, inside a transaction that is always
@@ -145,8 +149,12 @@ python3 + psycopg2) maintains `dw<N>_platform_ro` per live slot:
   second way. The sync's own session also disables statement logging.
 - **A failed login triggers rotation only when the SERVER rejects it** (SQLSTATE 28xxx). A
   connection refused for capacity (`CONNECTION LIMIT` exhausted by the worker's own sessions) or
-  for transport reasons exits the run without touching Postgres or KV: rotating there would
-  replace a working password and then fail its own proof for the same reason.
+  for transport reasons exits the run without touching Postgres or KV — and that probe runs for
+  every slot that has a published password, **including the ones already due for rotation**. That
+  ordering is the point: a rotation commits the new password before it can be proven, so a proof
+  that then fails for capacity would leave Postgres holding a password KV never received. (If it
+  happens anyway — the proof can fail for other reasons — nothing unproven is published and the
+  next run self-heals: the published password is rejected, so the slot rotates again.)
 - Retiring a slot is `RETIRED_SLOTS`: `DROP OWNED BY` in every database, then `DROP ROLE IF EXISTS` —
   idempotent and resumable, the same shape `devworker-provision-job.yaml` uses for AppRoles.
 

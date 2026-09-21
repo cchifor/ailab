@@ -150,6 +150,17 @@
       cluster, then re-run with -t openbao — docs/runbooks/dev-worker-platform-access.md.
   when: not dev_worker_platform_fields_present | bool
 
+# DUPLICATED from packages.yml on purpose — the same pattern git_forge.yml's credential-store task
+# uses. The documented rollout is `-t openbao`, which does NOT run packages.yml, so without this an
+# existing worker gets the helper and the credentials and then fails at first use with "psql is not
+# installed". apt is idempotent, so the base run is unaffected.
+- name: Ensure the postgres client is installed (platform psql)
+  ansible.builtin.apt:
+    name: postgresql-client
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
 - name: Install the platform helper
   ansible.builtin.copy:
     src: platform
@@ -360,6 +371,9 @@
         short_host="$(hostname -s)"
         want_role="dw${short_host#dev-worker-}_platform_ro"
         [ "$(cut -d: -f4 {{ user.home }}/.platform/pgpass)" = "$want_role" ] || { echo "{{ user.home }}/.platform/pgpass does not name $want_role" >&2; exit 1; }
+        # the client `platform psql` needs — without it the credentials verify and the tool fails
+        command -v psql >/dev/null || { echo "postgresql-client missing (platform psql would fail)" >&2; exit 1; }
+        command -v pg_isready >/dev/null || { echo "pg_isready missing (platform psql would hang)" >&2; exit 1; }
         KC="kubectl --kubeconfig {{ user.home }}/.platform/kubeconfig"
         [ "$($KC auth can-i list pods -n strive-ailab)" = yes ]          || { echo "platform kubeconfig cannot list pods" >&2; exit 1; }
         [ "$($KC auth can-i get secrets -n strive-ailab)" = no ]         || { echo "platform kubeconfig CAN READ SECRETS - wrong ClusterRole" >&2; exit 1; }

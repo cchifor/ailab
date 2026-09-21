@@ -152,9 +152,13 @@ ansible-playbook dev-workers.yml -t openbao --limit dev-worker-3
 
 The play fails closed if the vault is unreachable; it prints a `debug` message and renders no
 platform stanzas if the fields are simply not published yet. On success the health block has already
-proven, on that host: both files 0600 and user-owned, the pgpass naming this worker's role, and
-`can-i list pods` = yes with `can-i get secrets` / `can-i create pods/exec` / `can-i delete
-deployments` = **no**.
+proven, on that host: both files 0600 and user-owned, the pgpass naming this worker's role,
+`psql`/`pg_isready` present, and `can-i list pods` = yes with `can-i get secrets` /
+`can-i create pods/exec` / `can-i delete deployments` = **no**.
+
+`-t openbao` is self-sufficient on purpose: `postgresql-client` is installed by the openbao-tagged
+tasks as well as by `packages.yml`, because this tag-limited run is the documented path to an
+EXISTING worker and would otherwise deliver the helper without the client it shells out to.
 
 ### 6. Prove it from the worker
 
@@ -234,6 +238,6 @@ denials on every playbook run (it would go red, which is the point).
 | `platform: no kubeconfig at …` / `no pgpass at …` | the field exists but the agent has not rendered it (or the stanzas are not emitted yet) | `systemctl status openbao-agent`; re-run `-t openbao` |
 | `openbao-agent` restart-looping right after a run | a rendered field disappeared from KV (`error_on_missing_key`) | check the syncs; the agent recovers once the field is back. This is why the pre-flight reads all three fields |
 | `platform psql`: "no password supplied" / auth failed | the published password expired (both syncs down > 14 d) or the slot/hostname mismatch | run the pg-sync; `platform env` must name this host's role |
-| `platform psql`: "FATAL: too many connections for role" | more than 10 concurrent sessions for this slot | close sessions; `pg_stat_activity` (readable via `pg_monitor`) shows them |
+| `platform psql`: "FATAL: too many connections for role" | more than 10 concurrent sessions for this slot | close sessions; `pg_stat_activity` (readable via `pg_monitor`) shows them. The sync also refuses to rotate while a slot is at its limit (it would commit a password it could not then prove), so a run may exit with "capacity or transport" until the sessions drain — that is the safe outcome, not a fault |
 | A query on a replica is cancelled mid-scan | `max_standby_streaming_delay` | re-run with `--rw` |
 | `KubeJobFailed` on `openbao-platform-pg-sync` | see the Job's log — OpenBao login (role missing / sealed), Postgres unreachable, or a proof failure | nothing expires for 14 days; fix and let the next run converge |

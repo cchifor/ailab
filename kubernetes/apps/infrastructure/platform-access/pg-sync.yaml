@@ -270,8 +270,11 @@ data:
                             cur.execute(sql.SQL(
                                 "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
                                 "ON ALL TABLES IN SCHEMA {} FROM {}").format(s_id, ident))
+                            # USAGE as well as UPDATE: USAGE alone permits nextval(), which WRITES the
+                            # sequence's state — a "read-only" role could advance an application's id
+                            # counter. SELECT survives, so reading last_value still works.
                             cur.execute(sql.SQL(
-                                "REVOKE UPDATE ON ALL SEQUENCES IN SCHEMA {} FROM {}").format(s_id, ident))
+                                "REVOKE USAGE, UPDATE ON ALL SEQUENCES IN SCHEMA {} FROM {}").format(s_id, ident))
                             cur.execute(sql.SQL("REVOKE CREATE ON SCHEMA {} FROM {}").format(s_id, ident))
                         cur.execute(sql.SQL("REVOKE CREATE, TEMPORARY ON DATABASE {} FROM {}").format(
                             sql.Identifier(dbname), ident))
@@ -287,6 +290,22 @@ data:
                         raise RuntimeError(
                             "%s: these roles still hold non-SELECT privileges after the revoke pass: %s"
                             % (dbname, "; ".join("%s on %s.%s: %s" % r for r in leftover)))
+                    # information_schema.role_table_grants does NOT cover sequences, and a sequence USAGE
+                    # grant is a write capability (nextval). Audit the relacl of every sequence directly.
+                    cur.execute(
+                        "SELECT r.rolname, n.nspname, c.relname, a.privilege_type "
+                        "FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace, "
+                        "aclexplode(c.relacl) a "
+                        "JOIN pg_roles r ON r.oid = a.grantee "
+                        "WHERE c.relkind = 'S' AND r.rolname = ANY(%s) AND a.privilege_type <> 'SELECT' "
+                        "LIMIT 5", (list(roles),))
+                    seq_leftover = cur.fetchall()
+                    if seq_leftover:
+                        raise RuntimeError(
+                            "%s: these roles still hold non-SELECT SEQUENCE privileges (nextval is a "
+                            "write) after the revoke pass: %s"
+                            % (dbname, "; ".join("%s on %s.%s: %s" % r for r in seq_leftover)))
                     log("granted %s: %d roles, schemas %s (non-SELECT privileges revoked)"
                         % (dbname, len(roles), ",".join(schemas)))
         finally:
@@ -517,18 +536,28 @@ data:
             finally:
                 conn.close()
 
-            # A kept slot must still be ACCEPTED by the server. 'unavailable' is not a reason to rotate.
+            # Every slot with a published password is probed BEFORE anything is committed — kept ones to
+            # learn whether the credential still works, rotating ones to learn whether the server is even
+            # able to talk to this role right now.
+            #
+            # `unavailable` is fatal for BOTH, and the rotating case is the one that bites: the new
+            # password is committed by the role transaction below, and the proof happens after it. If the
+            # server is refusing connections for capacity (the slot's own CONNECTION LIMIT exhausted by
+            # the worker's sessions) the proof fails AFTER Postgres has the new password, and KV is left
+            # holding the old one — the worker is locked out until a later run re-rotates it. Refusing to
+            # start is strictly better, and it costs nothing: the next run rotates when there is room.
             for slot in sorted(plan):
                 entry = plan[slot]
-                if entry["rotate"]:
-                    continue
-                state = login_state(role_name(slot), entry["fields"]["platform_pg_password"], probe_db)
-                if state == "rejected":
-                    entry.update(rotate=True, reason="published password is rejected by the server")
-                elif state == "unavailable":
+                published = entry["fields"].get("platform_pg_password")
+                if published is None:
+                    continue  # nothing published yet: no working credential to strand
+                state = login_state(role_name(slot), published, probe_db)
+                if state == "unavailable":
                     sys.exit("%s: the server would not accept a connection for %s (capacity or transport, "
-                             "not credentials); exiting WITHOUT rotating so the working password stands"
-                             % (worker_name(slot), role_name(slot)))
+                             "not credentials); exiting WITHOUT touching Postgres or KV so the working "
+                             "password stands" % (worker_name(slot), role_name(slot)))
+                if state == "rejected" and not entry["rotate"]:
+                    entry.update(rotate=True, reason="published password is rejected by the server")
 
             # ---- Role state, one transaction on the primary --------------------------------------------
             conn = pg_connect(admin_db)
@@ -591,6 +620,12 @@ data:
             # ---- Prove EVERY live credential read-only before publishing anything ----------------------
             # Kept ones too: reasserting attributes and adding grants can never remove a write privilege
             # granted out of band, so "kept" must mean "re-proven", not "assumed".
+            #
+            # A failure here, AFTER a rotation has committed, leaves Postgres with a password KV does not
+            # have. That is deliberately not papered over by publishing an unproven credential: the next
+            # run reads the published password, the server rejects it, and the slot is rotated and
+            # published again — so the state self-heals within a run, and the capacity pre-check above is
+            # what stops the common cause of getting here at all.
             for slot in sorted(plan):
                 entry = plan[slot]
                 password = entry["password"] if entry["rotate"] else entry["fields"]["platform_pg_password"]

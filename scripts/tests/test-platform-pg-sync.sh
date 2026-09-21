@@ -28,6 +28,10 @@
 #      reconciled; a database dropped from the allowlist loses its grants and can still be retired;
 #      CONNECTION LIMIT exhaustion does NOT rotate (it exits without touching KV); and a failed
 #      write probe leaves NOTHING behind (the probe transaction is rolled back).
+#  10. a stray `GRANT USAGE ON SEQUENCE` (nextval is a WRITE, and information_schema.role_table_grants
+#      does not cover sequences) is revoked and audited; and a slot that is DUE for rotation is not
+#      rotated at all while the server refuses connections — Postgres and KV both stay untouched, so
+#      a capacity blip cannot strand a worker between a committed password and an unpublished one.
 # Requires docker (the manifests CI job has it). Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -361,6 +365,40 @@ run "1" "" PLATFORM_DATABASES="airlock platform_managed" FORCE_ROTATE=1 || fail 
 [ "$($PSQL -d airlock -c "SELECT count(*) FROM pg_tables WHERE tablename='openbao_platform_pg_sync_probe'")" = 0 ] \
   || fail "the probe table survived"
 echo "14: the read-only proof mutates nothing"
+
+# ---- 15. a stray sequence USAGE grant is a write capability; it must be repaired ---------------------
+$PSQL -d airlock -c "CREATE SEQUENCE IF NOT EXISTS probe_seq" >/dev/null
+$PSQL -d airlock -c "GRANT USAGE ON SEQUENCE probe_seq TO dw1_platform_ro"
+printf 'SET default_transaction_read_only = off;\nSELECT nextval(%s);\n' "'probe_seq'" | as 1 airlock >/dev/null 2>&1 \
+  || fail "fixture: nextval should succeed while the stray USAGE grant is in place"
+run "1" "" PLATFORM_DATABASES="airlock platform_managed" || fail "the sequence-drift run failed"
+[ "$($PSQL -d airlock -c "SELECT count(*) FROM pg_class c, aclexplode(c.relacl) a JOIN pg_roles r ON r.oid=a.grantee WHERE c.relkind='S' AND r.rolname='dw1_platform_ro' AND a.privilege_type <> 'SELECT'")" = 0 ] \
+  || fail "a non-SELECT sequence privilege survived the run"
+printf 'SET default_transaction_read_only = off;\nSELECT nextval(%s);\n' "'probe_seq'" | as_err 1 airlock | grep -q "permission denied" \
+  || fail "nextval must be denied after the repair (it writes the sequence)"
+[ -n "$(echo 'SELECT last_value FROM probe_seq' | as 1 airlock)" ] || fail "SELECT on the sequence must still work"
+echo "15: a stray sequence USAGE grant is revoked, audited, and nextval is denied"
+
+# ---- 16. a slot DUE for rotation is not rotated while the server refuses connections ----------------
+# The dangerous shape: the new password commits in the role transaction, then the proof fails for
+# capacity — Postgres would hold a password KV never received. The run must refuse before that.
+python3 - "$STATE/kv.json" <<'PY'
+import json, sys, time
+p = sys.argv[1]; kv = json.load(open(p))
+kv["dev-worker-1"]["platform_pg_valid_until"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))
+json.dump(kv, open(p, "w"))
+PY
+pw_before="$(pw 1)"; w_before="$(writes)"
+$PSQL -d postgres -c "ALTER ROLE dw1_platform_ro CONNECTION LIMIT 0"
+if run "1" "" PLATFORM_DATABASES="airlock platform_managed"; then fail "a due-for-rotation slot must not rotate while the server refuses connections"; fi
+expect_log $N "capacity or transport"
+[ "$(pw 1)" = "$pw_before" ] && [ "$(writes)" = "$w_before" ] || fail "KV changed during the refused run"
+$PSQL -d postgres -c "ALTER ROLE dw1_platform_ro CONNECTION LIMIT 10"
+# the published password must still be the one Postgres accepts — i.e. nothing was committed
+[ "$(echo 'SELECT 1' | as 1 airlock)" = 1 ] || fail "the published password no longer works — a rotation was committed after all"
+run "1" "" PLATFORM_DATABASES="airlock platform_managed" || fail "the run must rotate once there is capacity again"
+expect_log $N "rotated dev-worker-1"
+echo "16: a capacity refusal never strands a rotation half-done"
 
 kill "$STUB_PID" 2>/dev/null || true
 "$BIN/pg_ctl" -w stop >/dev/null 2>&1 || true

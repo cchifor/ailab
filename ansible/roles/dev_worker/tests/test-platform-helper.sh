@@ -52,12 +52,19 @@ cat >"$BIN/hostname" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "$STUB_HOST"
 EOF
-# kubectl: logs argv. A port-forward call must BLOCK (the helper backgrounds it and kills it), so it
-# sleeps; anything else returns at once.
+# A port-forward call BLOCKS (the helper backgrounds it and must kill it) and records its own
+# PID — that is how the no-orphan check below identifies the exact process. An argv pattern
+# would silently stop matching the day the flags change, and `pgrep` does not exist everywhere.
 cat >"$BIN/kubectl" <<EOF
 #!/usr/bin/env bash
 printf 'kubectl %s\n' "\$*" >>"$CALLS"
-for a in "\$@"; do [ "\$a" = port-forward ] && { sleep 30; exit 0; }; done
+for a in "\$@"; do
+  if [ "\$a" = port-forward ]; then
+    echo \$\$ >>"$WORK/pf.pids"
+    sleep 30
+    exit 0
+  fi
+done
 exit 0
 EOF
 # python3: the helper uses it only to pick a free loopback port. A stub keeps the port deterministic
@@ -172,9 +179,18 @@ ready_port="$(sed -n 's/.*pg_isready .*-p \([0-9]*\).*/\1/p' "$CALLS" | head -1)
 psql_port="$(sed -n 's/.*psql -h 127\.0\.0\.1 -p \([0-9]*\) .*/\1/p' "$CALLS" | head -1)"
 [ -n "$fwd_port" ] && [ "$fwd_port" = "$ready_port" ] && [ "$fwd_port" = "$psql_port" ] \
   || fail "the forward, the readiness probe and psql must use the SAME port ($fwd_port/$ready_port/$psql_port)"
-# The backgrounded port-forward must not outlive the helper (the EXIT trap, i.e. no `exec psql`).
+# The backgrounded port-forward must not outlive the helper (the EXIT trap — i.e. psql must NOT
+# be exec'd). Checked BY PID, not by an argv pattern: the stub recorded its own PID, so this is
+# non-vacuous by construction (no PID recorded = no forward was started = failure) and it cannot
+# rot when the kubectl flags change. `pgrep` is not available on every host this suite runs on.
+[ -s "$WORK/pf.pids" ] || fail "the helper never started a port-forward (no PID was recorded)"
 sleep 0.5
-pgrep -f "port-forward svc/strive-pg-ro" >/dev/null 2>&1 && fail "the port-forward outlived the helper — is psql exec'd?"
+while read -r pf_pid; do
+  if kill -0 "$pf_pid" 2>/dev/null; then
+    kill "$pf_pid" 2>/dev/null
+    fail "port-forward PID $pf_pid outlived the helper — is psql exec'd?"
+  fi
+done <"$WORK/pf.pids"
 : >"$CALLS"
 run psql --rw -d workflow -c 'select 1' >/dev/null
 saw "port-forward --address 127.0.0.1 svc/strive-pg-rw " "--rw must target the primary service"
