@@ -86,21 +86,18 @@ watchdog holds the ready-port open only while virtio-fs and dockerd answer; the 
 over TCP, ~30 s of a closed port = NotReady) is what keeps a 6 s blip from triggering the GC, and
 what makes a real stall visible: `kubectl -n testpool logs <pod> -c control` names the check that
 failed. The root cause of the guest freeze itself is still open; the Kata debug evidence (next
-section) is built to capture the next stall, not just contain it — **it is active only once gate G2
-of the plan has been applied and recorded** (`plans/2026-09-20-env-pool-root-cause-followup-plan.md`,
-soak record); until then `var.kata_debug` is `false` and `env-node-1` applies in `no_reboot` mode.
+section) is built to capture the next stall, not just contain it — active since gate G2 of the plan
+was applied on 2026-09-21 (`plans/2026-09-20-env-pool-root-cause-followup-plan.md`, soak record).
 
-## Kata debug evidence (plan T2 — configured in the repo, ACTIVE ONLY AFTER GATE G2)
+## Kata debug evidence (plan T2 — active on `talos-env-node-1` since G2, 2026-09-21)
 
 What it is, where it lands, and how to read it. Everything here is delivered by tofu from
 `kubernetes/infra/env-pool/machine-config/` behind `var.kata_debug`, so the node's state is the
-repo's state. **Status:** `kata_debug = false` and `env_nodes["env-node-1"].apply_mode = "no_reboot"`
-until G2. G2 = one commit flipping both (`kata_debug = true`, `apply_mode = "staged"`), the staged
-apply and the announced reboot of the next section, then the acceptance checks: the relay stream
-shows shim `level=debug`, `kata-agent` and `vmconsole` lines for the new sandbox; one lease's debug
-fields are inspected and a lease carrying synthetic secrets is grepped for in Loki (privacy tier
-decision recorded); a forced relay disconnect during the boot burst replays the ring. Only when
-those are recorded in the plan's soak record is the description below true of the live node.
+repo's state. **Status:** `kata_debug = true` and `env_nodes["env-node-1"].apply_mode = "staged"`
+(G2 = the staged apply + the announced reboot of 2026-09-21 08:06 UTC, node Ready again 08:07:47);
+the acceptance checks — shim `level=debug`, `kata-agent` and `vmconsole` lines for the new sandbox,
+a lease's debug fields, the synthetic-secret grep in Loki, the forced relay disconnect, the
+virtiofsd freeze — are recorded with timestamps in the plan's soak record (epoch 0).
 
 - **containerd at `[debug] level = "debug"`** (`cri-20-customization.part` → `/etc/cri/conf.d/20-customization.part`).
   This is what makes the kata shim emit anything at all: containerd passes `-debug` to shims only
@@ -137,15 +134,20 @@ those are recorded in the plan's soak record is the description below true of th
 - **Privacy.** At `[debug]` level containerd logs every `Exec … with command [...]` verbatim and
   dumps each container's OCI spec (`Env`/`Args`), and the kata-agent echoes `process command: [...]`
   on the guest console — **verified at G2 (2026-09-21) with a synthetic secret: both paths reached
-  Loki**, which is unauthenticated on the LAN. `monitoring/alloy.yaml` therefore redacts those
-  payloads for the `cri-log-relay` stream only (`stage.match` + `stage.replace`; sandbox ids,
-  timings and kernel/agent state are kept). Re-run the synthetic-secret probe after any change to
+  Loki**, which is unauthenticated on the LAN. `monitoring/alloy.yaml` therefore drops the OCI
+  spec dumps and redacts the command payloads for the `cri-log-relay` stream only (`stage.match`
+  + `stage.drop`/`stage.replace`, every capture greedy to the last `]` of the record so a bracket
+  inside an argument cannot end it early; sandbox ids, timings and kernel/agent state are kept).
+  Re-run the synthetic-secret probe — with a `]` inside the secret's argv — after any change to
   that stage. Raw exports stay under `kubernetes/infra/_out/`; this repository is mirrored
   publicly, so plans/PRs carry redacted excerpts only.
-- **Volume tiers.** Measured at rollout (V2 in the plan) — idle and during one lease. Tier 2 = set
-  `[agent.kata] enable_debug = false` in `10-debug.toml` (keeps the guest console); there is no
-  tier 3 short of dropping `[debug] level`, which silences the guest entirely. Either change is a
-  machine-config change (below) and starts a new soak epoch.
+- **Volume tiers.** Measured at G2 (2026-09-21): a member's boot burst ≈ 40 MiB/h-equivalent for
+  its first minutes, then ≈ 12 MiB/h idle, ~70 % of it the agent's per-second `Scanning path`
+  watcher chatter — ≈ 0.3 GiB/day, ≈ 2 GiB over Loki's 168 h, kept for epoch 0 (tier 1: everything
+  on). Tier 2 = set `[agent.kata] enable_debug = false` in `10-debug.toml` (keeps the guest
+  console and the shim's monitor lines); there is no tier 3 short of dropping `[debug] level`,
+  which silences the guest entirely. Either change is a machine-config change (below) and starts a
+  new soak epoch.
 - **Before any env-node image or extension upgrade:** re-verify the base file —
   `MSYS_NO_PATHCONV=1 kubernetes/infra/_out/talosctl-1112.exe -e 192.168.0.41 -n 192.168.0.37 read /usr/local/share/kata-containers/configuration.toml | sha256sum`
   must equal the hash above. If it differs, refresh `kata/configuration.toml` from the new
@@ -191,9 +193,12 @@ Every reboot, rollback or tier change **starts a new soak epoch** (next section)
 `scripts/env-pool-soak.py` is the read-only check-in report: Prometheus (`:30090`) and Loki
 (`:30310`) over an explicit UTC window, raw export under `kubernetes/infra/_out/soak/`, one
 markdown block for the plan's soak record with a verdict — `OK`, `RECURRENCE-CONTAINED`,
-`PREVENTION-FAILED` or `INCOMPLETE` (a failed endpoint, missing node, truncated page or a window
-past Loki's 168 h can never read as a clean soak). Run it from the MAIN checkout at day 1, day 3
-(past 66 h) and day 7 of each epoch, from the last checkpoint:
+`UNRESOLVED`, `PREVENTION-FAILED` or `INCOMPLETE` (a failed endpoint, missing node, truncated
+page, a series gap, a signal in the last 5 minutes or a window past Loki's 168 h can never read
+as a clean soak; a metric split across a replaced scrape target, or a relay line without its own
+`time=` field, is merged or counted, not a gap). The window ends 5 min before now unless `--to`
+says otherwise — the newest minutes are still being scraped. Run it from the MAIN checkout at
+day 1, day 3 (past 66 h) and day 7 of each epoch, from the last checkpoint:
 
 ```sh
 python scripts/env-pool-soak.py --checkpoint kubernetes/infra/_out/soak/checkpoint.json
@@ -215,12 +220,9 @@ with a shorter `REAP_AFTER_SECONDS` next to the production DaemonSet: it would r
 invalidate the production timing and truncate the evidence window. (The pre-merge validation of
 2026-09-20 used a 5 s hack copy only because the production reaper did not exist yet.) Scope the
 injection to one identified idle member — record its pod UID and sandbox id — and re-validate each
-PID immediately before signalling. **The faithful injection freezes the member's virtiofsd** (two
-processes, `exe=/usr/local/libexec/virtiofsd`, cgroup `/kata_overhead/<sandbox-id>`): guest
-processes block in D-state on the rootfs while the agent keeps answering — `kubectl exec` into the
-member hangs outright, the delete leaves the pod `Terminating` with `stop_*` errors climbing, and
-only the reaper's stage 1 ends it (validated twice on 2026-09-20, 8.5 min hang → gone within 30 s
-of the reap, zero residuals):
+PID immediately before signalling. The injection freezes the member's virtiofsd (two processes,
+`exe=/usr/local/libexec/virtiofsd`, cgroup `/kata_overhead/<sandbox-id>`); **what happens next
+depends on whether a teardown is already in flight**, so say which of the two tests you ran:
 
 ```sh
 POD=$(kubectl -n kube-system get pod -l app.kubernetes.io/name=env-reaper -o name)
@@ -229,17 +231,32 @@ kubectl -n kube-system exec $POD -- sh -c "for cg in /proc/[0-9]*/cgroup; do gre
 kubectl -n kube-system exec $POD -- kill -STOP <pid-1> <pid-2>   # both virtiofsd processes of THAT sandbox, re-listed right before this
 ```
 
-**Let the prevention path run — do not delete the Sandbox yourself.** The full V2 sequence is the
-one a real freeze takes: the member must be **older than the pool's 15-minute readiness grace**
-(`agent-sandbox/kustomization.yaml`; a member frozen younger than that is held, not deleted, and
-proves nothing about the GC path), then the freeze → `ready-watchdog: … virtiofs check hung` /
-`ready-port closed` (`kubectl -n testpool logs <pod> -c control`) → pod `Ready=False` (~30 s) →
-the warm-pool GC deletes the Sandbox on its next reconcile → `Terminating` with `stop_*` errors
-climbing → reaper `evidence`/`evidence-thread`/`evidence-stack` lines → `reap stage=1` at ~+150 s →
-pod gone, replacement Ready. Record every timestamp (closure, NotReady, deletion, reap, Ready)
-in the plan's soak record. A manual `kubectl -n testpool delete sandbox <member>` after the
-freeze is a **separate, teardown-only test** (it exercises the reaper but bypasses the watchdog
-and the controller) — say which one you ran.
+1. **Freeze, then `kubectl -n testpool delete sandbox <member>` within ~30 s = the hung-teardown
+   test (reaper).** The in-flight stop RPCs hang on the agent, the pod stays `Terminating` with
+   `stop_*` errors climbing, and only the reaper's stage 1 ends it (validated twice on 2026-09-20:
+   8.5 min hang → gone within 30 s of the reap, zero residuals). It exercises the reaper and the
+   evidence lines, and bypasses the watchdog and the controller.
+2. **Freeze and leave it = Kata's own self-heal (evidence-path test, no reaper).** Observed at G2
+   (2026-09-21, member 12 min old): the shim's sandbox monitor keeps pinging the agent with a
+   30 s deadline, the agent is stuck behind the frozen shared directory, and at **+33 s** the
+   shim logs `failed to ping agent: … CheckRequest timed out` → `sandbox stopped unexpectedly` →
+   `Agent did not stop sandbox … Dead agent`, force-stops the VM (guest console:
+   `EXT4-fs (vda): shut down`, `Aborting journal`) and reports exit 255 for the sandbox and both
+   containers; kubelet answers with `SandboxChanged` → `RunPodSandbox … Attempt:1` **in the same
+   pod** → both containers restart (restart count +1) → `Ready` again at **+75 s** (freeze
+   08:19:23Z, exit 08:19:56Z, new sandbox 08:20:00Z, Ready 08:20:30Z). No `NotReady` long enough
+   for the GC, no deletion, no reap — and **no watchdog line reaches Loki**: the container's stdout
+   is proxied through the dead agent, so only the guest console and the shim's own lines survive.
+   This is the path a *fully* hung guest takes; the two real incidents did **not** self-heal, so in
+   them the agent was still answering while the workload hung — a fault this host-side injection
+   cannot reproduce. Candidate for that path (not run yet): stop dockerd *inside* the guest
+   (`kubectl -n testpool exec <member> -c dind -- sh -c 'kill -STOP $(pgrep -x dockerd)'`) on a member **older than the
+   pool's 15-minute readiness grace** — `dockerd check hung` → `ready-port closed` → `Ready=False`
+   → GC delete → a normal teardown (a stopped process still takes SIGKILL), so it proves the
+   watchdog + GC leg, not the reaper.
+
+Record every timestamp (freeze, closure, NotReady, deletion or `SandboxChanged`, reap, Ready)
+in the plan's soak record, with the sandbox ids before and after.
 
 Freezing the **VMM** instead (`exe=/usr/local/bin/cloud-hypervisor`, cgroup `/kata_<sandbox-id>`) is
 NOT the incident's hang: Kata's monitor declares an unresponsive VMM dead in ~13 s and the shim

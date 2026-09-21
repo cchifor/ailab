@@ -58,6 +58,7 @@ HEARTBEAT_GAP_SECONDS = 15 * 60  # reaper heartbeat every ~10 min; a 15 min gap 
 RELAY_GAP_SECONDS = 15 * 60  # at [debug] level the shim/agent chatter is continuous; silence = capture gap
 RECOVERY_BOUND_SECONDS = 10 * 60  # closure → GC → reap (~150 s) → refill (~2 min): capacity back well inside 10 min
 EVENT_ATTACH_SECONDS = 5 * 60  # a signal (closure, reap, …) belongs to a capacity incident starting within ±5 min
+SPEC_CARRY_STEPS = 3  # warm_spec is carried forward over a gap of this many steps — the sample_gaps() tolerance
 MIN_COVERAGE = 0.8  # a required series must have ≥ 80 % of the window's steps and touch both boundaries
 REQUIRED_SERIES = ("node_ready", "kubelet_up", "boot_time", "member_age", "warm_ready", "warm_spec", "restarts")
 ALERT_RE = "Testpool.*|EnvNode.*"
@@ -279,12 +280,31 @@ def source_ts(line: str) -> float | None:
         return None
 
 
-def _series(result: list) -> dict[tuple, list[tuple[float, float]]]:
-    out = {}
+# The labels that identify a series for this report. Everything else on a sample (the scrape
+# target's `pod`/`instance`, KSM's own `uid`) is incidental: a kube-state-metrics or node-exporter
+# pod replaced mid-window — every reboot replaces the node-exporter pod — would otherwise split one
+# metric into two half-window series, each failing coverage, and the capacity evaluation would
+# silently read only the first of them.
+SERIES_IDENTITY = {
+    "node_ready": ("node", "condition", "status"),
+    "kubelet_up": ("node",),
+    "boot_time": ("instance",),
+    "member_age": ("namespace", "pod"),
+    "warm_ready": ("exported_namespace", "name"),
+    "warm_spec": ("exported_namespace", "name"),
+    "restarts": ("namespace", "pod", "container"),
+    "alerts": ("alertname", "alertstate"),
+}
+
+
+def _series(result: list, identity: tuple[str, ...] = ()) -> dict[tuple, list[tuple[float, float]]]:
+    """Range-query result → {identity labels: sorted samples}, series sharing an identity merged."""
+    out: dict[tuple, dict[float, float]] = {}
     for s in result:
-        key = tuple(sorted(s["metric"].items()))
-        out[key] = [(float(t), float(v)) for t, v in s.get("values", [])]
-    return out
+        labels = s["metric"]
+        key = tuple(sorted((k, v) for k, v in labels.items() if not identity or k in identity))
+        out.setdefault(key, {}).update((float(t), float(v)) for t, v in s.get("values", []))
+    return {k: sorted(v.items()) for k, v in out.items()}
 
 
 def _label(key: tuple, name: str) -> str:
@@ -304,7 +324,7 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
     prom: dict[str, dict] = {}
     for name, expr in PROM_RANGE_QUERIES.items():
         try:
-            prom[name] = _series(src.prom_range(expr, start, end))
+            prom[name] = _series(src.prom_range(expr, start, end), SERIES_IDENTITY.get(name, ()))
         except SourceError as e:
             rep.problems.append(f"prometheus {name}: {e}")
             prom[name] = {}
@@ -324,7 +344,7 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         if name in ("member_age", "restarts"):
             continue  # pods start/end inside the window: covered per member lifetime below
         for key, vals in prom[name].items():
-            who = f"{name} {_label(key, 'node') if 'node' in dict(key) else _label(key, 'name')}".strip()
+            who = f"{name} {next((_label(key, l) for l in ('node', 'instance', 'name') if l in dict(key)), '')}".strip()
             cov = coverage_problem(who, vals, start, end)
             if cov:
                 rep.problems.append(cov)
@@ -457,7 +477,9 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         relay_src.setdefault((st, l), None)
     relay = sorted(relay_src)
     if unparsed:
-        rep.problems.append(f"{unparsed} of {len(relay_raw)} relay lines carry no containerd time= field — excluded from capture/evidence (replay cannot be told from fresh capture)")
+        # report-only: those lines are already excluded from capture/evidence (the safety property);
+        # making them a problem would hold the checkpoint on the same malformed line forever
+        rep.sections.append(f"- {unparsed} of {len(relay_raw)} relay lines carry no containerd time= field (relay diagnostics or truncated records) — excluded from capture/evidence")
     sandboxes = sorted({sb for _, sb, _, _ in reaps})
     relay_per_sb = {sb: sum(1 for _, l in relay if sb in l) for sb in sandboxes}
 
@@ -502,10 +524,22 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
 
     # --- capacity incidents (from the warm pool's own accounting) ------------------------------
     ready = next(iter(prom["warm_ready"].values()), [])
-    spec_at = {t: v for t, v in next(iter(prom["warm_spec"].values()), [])}
-    # deficits only where BOTH the observed ready count and the desired count exist for that step —
-    # a missing target is unknown data (already INCOMPLETE above), never an invented outage
-    cap = [(t, v - spec_at[t]) for t, v in ready if t in spec_at]
+    spec = next(iter(prom["warm_spec"].values()), [])
+    # The desired count changes rarely, so the last observed spec is carried forward across gaps
+    # inside the sample_gaps() tolerance; a ready sample with no spec observation within
+    # that reach is not evaluated AND is reported — never an invented outage, never a silent skip.
+    cap = []
+    unmatched = []
+    j = 0
+    for t, v in ready:
+        while j + 1 < len(spec) and spec[j + 1][0] <= t:
+            j += 1
+        if spec and spec[j][0] <= t and t - spec[j][0] <= SPEC_CARRY_STEPS * STEP_SECONDS:
+            cap.append((t, v - spec[j][1]))
+        else:
+            unmatched.append(t)
+    if unmatched:
+        rep.problems.append(f"{len(unmatched)} warm_ready sample(s) with no warm_spec observation within {SPEC_CARRY_STEPS * STEP_SECONDS}s ({iso(unmatched[0])} …) — not evaluated for capacity")
     incidents = intervals_where(cap, lambda d: d < 0)
     open_at_end = bool(cap) and cap[-1][1] < 0
     rep.sections += ["", "Warm-capacity incidents (SandboxWarmPool readyReplicas < replicas, matched samples only):"]
@@ -515,7 +549,10 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         is_last = k == len(incidents) - 1
         underway = bool(cap) and a <= cap[0][0]  # already deficient at the first matched sample: true start unknown
         if is_last and open_at_end:
-            rep.unresolved.append(f"capacity incident from {iso(a)} still open at the window end ({fmt_dur(end - a)} so far)")
+            if underway:
+                rep.unresolved.append(f"capacity incident already underway at the first sample {iso(a)} and still open at the window end — its start (and so its duration) is unknown; re-run with an earlier --from")
+            else:
+                rep.unresolved.append(f"capacity incident from {iso(a)} still open at the window end ({fmt_dur(end - a)} so far)")
             rep.open_incident = True
         elif underway:
             rep.problems.append(f"capacity incident underway at the first sample {iso(a)}, recovered {iso(b)} — its start (and so its duration) is outside this window; re-run with an earlier --from before classifying it")
@@ -534,7 +571,12 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
     signals += restart_events
     for st, what in sorted(signals):
         inc = next(((a, b) for a, b in incidents if abs(a - st) <= EVENT_ATTACH_SECONDS or a <= st <= b), None)
-        if inc:
+        inc_open = inc is not None and open_at_end and inc == incidents[-1]
+        # A signal too close to the window end has an unobservable outcome (probe window + reconcile
+        # + refill have not shown in the capacity series yet). A CLOSED incident nearby cannot vouch
+        # for it — it may already have recovered before the signal — so the pending check comes
+        # first; only an incident still open at the end (already unresolved) absorbs such a signal.
+        if inc and (inc_open or end - st >= EVENT_ATTACH_SECONDS):
             rep.sections.append(f"- signal {what} at {iso(st)} → capacity incident {iso(inc[0])}→{iso(inc[1])}")
         elif end - st < EVENT_ATTACH_SECONDS:
             # probe window + controller reconcile + refill have not had time to show in the capacity
@@ -564,7 +606,7 @@ def export(rep: Report, export_dir: pathlib.Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--from", dest="start", help="window start, UTC ISO (default: checkpoint - overlap, or --to - 24h)")
-    ap.add_argument("--to", dest="end", help="window end, UTC ISO (default: now)")
+    ap.add_argument("--to", dest="end", help="window end, UTC ISO (default: now - 5 min: the newest minutes are still being scraped, and any signal that close to the end is pending by design)")
     ap.add_argument("--checkpoint", type=pathlib.Path, help="JSON file holding the last successful `to`; read for --from, updated on success")
     ap.add_argument("--overlap-hours", type=float, default=1.0)
     ap.add_argument("--nodes", default="talos-env-node-1", help="comma-separated env nodes that MUST have readiness series")
@@ -574,7 +616,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     now = dt.datetime.now(dt.timezone.utc).timestamp()
-    end = parse_ts(args.end) if args.end else now
+    end = parse_ts(args.end) if args.end else now - EVENT_ATTACH_SECONDS
     if args.start:
         start = parse_ts(args.start)
     elif args.checkpoint and args.checkpoint.exists():

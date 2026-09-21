@@ -584,16 +584,16 @@ every commit, per `feedback_terraform_fmt`).
 
 | Field | Value |
 |---|---|
-| Epoch 0 baseline (UTC) | *(set at G2: creation time of the member after the V2 injection + lease smoke test)* |
-| Applied commits | T1: `9d50aadc` (G1 applied 2026-09-21 ~07:10–07:14 UTC: import → `No changes.`; boot id `b225163c…` unchanged) · T2: *(the G2 commit, applied at gate G2)* · relay/reaper/KSM Flux revision: `1fc8c43d` (PR #806 merged 2026-09-21 07:53Z; relay Running on talos-cp3, reaper at script-revision evidence-2, `agentsandbox_warmpool_ready_replicas` live) |
-| Node boot id / `node_boot_time_seconds` | *(after the G2 reboot)* |
-| Kata base sha256 / extension | `38d1e30b…a4c6` / kata-containers 3.20.0, schematic `0839748e…`, Talos v1.11.2 |
-| Member pod name / UID / sandbox id | *(epoch 0)* |
+| Epoch 0 baseline (UTC) | **2026-09-21 08:20:00Z** = start of the guest that is soaking (sandbox attempt 1 of the member, re-created in place after the V2 freeze — see below). The pod itself was created 08:06:31Z, which is the clock the warm-pool GC measures; the 24 h / 66 h marks are read against **both** (guest: 09-22 08:20Z / 09-24 02:20Z; pod: 09-22 08:06Z / 09-24 02:06Z); day 7 = 2026-09-28 08:20Z. The V2 lease smoke test (synthetic secrets) ran on this pod before the freeze. |
+| Applied commits | T1: `9d50aadc` (G1 applied 2026-09-21 ~07:10–07:14 UTC: import → `No changes.`; boot id `b225163c…` unchanged) · T2: `9f9a7db1` (G2: staged apply 2026-09-21 ~08:05Z, `talosctl reboot` 08:06:29Z, node Ready 08:07:47Z) · relay/reaper/KSM Flux revision: `1fc8c43d` (PR #806 merged 2026-09-21 07:53Z; relay Running on talos-cp3, reaper at script-revision evidence-2, `agentsandbox_warmpool_ready_replicas` live) |
+| Node boot id / `node_boot_time_seconds` | `04017704-d4cb-4ab3-ba74-942b60357dc0` / `node_boot_time_seconds` = 2026-09-21 08:07:22Z (the G2 reboot; the previous id `b225163c…` was the 2026-09-20 12:37:54Z boot of the outage recovery) |
+| Kata base sha256 / extension | `38d1e30b…a4c6` / kata-containers 3.20.0, schematic `0839748e…`, Talos v1.11.2 — re-verified byte-identical on the node after the reboot, `cri.toml` shows `level = 'debug'` and the `kata` runtime `ConfigPath` override |
+| Member pod name / UID / sandbox id | `env-std-pool-chjqs` / `965f208d-f79c-46ab-a2d3-52ba992f51fb` / sandbox attempt 0 `ad524e64…d602614` (08:09–08:19:56Z, frozen by V2), **attempt 1 `4dde68aa41613e2950b38d28c3d904ead8e2e36414b23a0a299d673bc46ea322`** (08:20:00Z →; CH pid 7643, virtiofsd 7642/7658; pod IP 10.244.6.228) |
 | Check-in owner | operator + this session |
 
 | Check-in | Window (UTC) | Verdict | Node Ready | Alerts | Reap / watchdog / relay | Per-member exposure | Notes |
 |---|---|---|---|---|---|---|---|
-| day 0 | | | | | | | |
+| day 0 | 2026-09-21 08:06 → 08:45Z (G2 + V2, by hand; the script's first run is the day-1 check-in) | RECURRENCE-CONTAINED by hand: one deliberate freeze, contained in 75 s | Ready except the announced reboot (08:06:29 → 08:07:47Z) | none fired | **V2 freeze** (`kill -STOP 5569 5583` from the production reaper pod at 08:19:23Z): +33 s shim `CheckRequest timed out` → `sandbox stopped unexpectedly` → exit 255 → kubelet `SandboxChanged`, new sandbox `4dde68aa…` 08:20:00Z, Ready 08:20:30Z; **no GC delete, no reap** (0 `reap stage=` lines), watchdog stdout lost with the agent; relay: shim debug + `kata-agent` + `vmconsole` lines for both sandboxes in Loki (guest boot `Linux version 6.12.42`, `EXT4-fs (vda): shut down` at the stop); privacy probe: synthetic secret reached Loki via `Exec … with command [...]` and the agent's `process command: [...]` → redaction stage added (PR #807), canary deleted from Loki; forced relay restart 08:44:25Z (`rollout restart`): new pod Running 08:44:28Z, ring replay = 3385 records with source time up to 340 s before the restart re-ingested (3415 duplicates by source time + content), no source-time gap > 60 s (the earlier 3 container restarts at ~08:08Z were the node reboot: the `--follow` stream ends with apid, kubelet restarts the container with backoff, the ring replays) | pod 0 h (guest 0 h) | Runbook §"Fault injection" rewritten from this run: a host-side virtiofsd freeze self-heals through Kata's monitor and does not reach the GC/reaper; the hung-teardown test needs the delete within ~30 s of the freeze. |
 
 ## Skill phases (feature-implementation)
 
@@ -634,6 +634,17 @@ follow. Skipped: HTML UI proposal (no UI change).
 - **G1 was applied from `9d50aadc`** (import → `No changes.`; node boot id unchanged); the T2 flip
   (`kata_debug = true`, `apply_mode = "staged"`) is a separate commit applied at G2, after PR-A
   merges — the runbook says so explicitly.
+- **V2's virtiofsd freeze did not take the GC → reaper path the plan expected.** Left alone, a
+  frozen virtiofsd stalls the kata-agent's own shared-directory watcher, the shim's sandbox monitor
+  (agent ping, 30 s deadline) declares the agent dead at +33 s and force-stops the VM, and kubelet
+  re-creates the pod sandbox in place (`SandboxChanged`, +75 s to Ready, restart count +1) — no
+  NotReady long enough for the GC, no deletion, no `reap` line, and the watchdog's stdout is lost
+  with the agent (only the guest console and the shim lines survive, which the relay captured).
+  The two real incidents did not self-heal, so their agent was still answering while the workload
+  hung; that fault needs an in-guest injection (runbook §"Fault injection", candidate: stop
+  dockerd inside the guest on a member past the readiness grace). The reaper's own test remains
+  "freeze, then delete within ~30 s" (validated 2026-09-20). The soak epoch therefore starts at
+  the re-created sandbox (08:20:00Z) of the *same* pod, and the record tracks both clocks.
 
 ## Appendix A — upstream issue draft (kubernetes-sigs/agent-sandbox)
 
