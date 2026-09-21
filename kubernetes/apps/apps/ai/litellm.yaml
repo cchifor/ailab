@@ -690,26 +690,44 @@ data:
       # supports_vision: the unit DOES pass --mmproj (unlike node2's, which is why that route declares
       # false). Not re-probed since the re-provision, so it is claimed on the launch flags rather than
       # on a fresh measurement -- probe it before relying on images here.
-      - model_name: qwen3.8-27b-ailab
-        litellm_params:
-          model: openai/qwen3.8-27b-ailab
-          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1   # ai-llm-2 / node2 / .45
-          api_key: "sk-noauth"
-          temperature: 1.0
-          top_p: 0.95
-        model_info: { supports_vision: true, max_input_tokens: 49152 }
-      # SECOND DEPLOYMENT of the SAME model_name, added 2026-09-16 -> the router load-balances the
-      # two with routing_strategy least-busy, retries the other on a failed call, and parks a bad one
-      # for cooldown_time after allowed_fails. Paid for by retiring ci-runner-7 from ai-node3.
       #
-      # model_info MUST stay BYTE-IDENTICAL to the entry above. scripts/gen-litellm-consumers.py
-      # de-duplicates on model_name FIRST-WINS, so the FIRST entry's model_info alone decides what the
-      # consumers see. If these two disagreed on supports_vision, dsh would SILENTLY lose
-      # `input: [text, image]` on this route with nothing failing. There is a regression test for this
-      # in scripts/tests/test_gen_litellm_consumers.py -- do not "tidy" one of these and not the other.
+      # NODE2 DEPLOYMENT WITHDRAWN 2026-09-21 -- ai-node2's backend is WEDGED, not slow. Its
+      # llama-server (LXC 5002) has sat in D state inside the amdgpu driver since 2026-09-18 ~20:38 UTC
+      # (dmesg: 21x `WARNING: lib/list_debug.c:62 __list_del_entry_valid_or_report` from
+      # llama-server, then `task llama-server blocked for more than 1228 seconds`; /proc/<pid>/stack
+      # ends in drm_suballoc_new <- amdgpu_cs_ioctl). llama-swap only health-checks at start, so it
+      # kept forwarding to a port that never answers: in its journal the last real reply is
+      # 2026-09-18T16:37Z and every POST since ran to the caller's timeout -- 900 s here, 29 of them
+      # by 2026-09-21 10:30Z. An amdgpu reset through debugfs (2026-09-21 13:33 EEST) reported
+      # `GPU reset(1) succeeded ... device wedged, but recovered through reset` and did NOT release
+      # the process: the wait is on the suballocator's corrupted list, not on the GPU. Only a host
+      # reboot of ai-node2 clears it, and that is a scheduled maintenance (talos-cp2 lives there).
+      #
+      # Until then the route is node3 ALONE, exactly as it was before 2026-09-16, and the terminal
+      # fallback below is one backend with no HA. RESTORE, after the reboot, once
+      # `curl http://192.168.0.45:8082/v1/chat/completions` answers a fixed greedy prompt with content:
+      # re-add the block below, BYTE-IDENTICAL to node3's except api_base
+      # (http://llm-qwen38.ai.svc.cluster.local:8082/v1, ai-llm-2 / node2 / .45) and its comment,
+      # ABOVE node3's so ties keep going to node2 (least-busy breaks ties first-inserted), then
+      # `just af-gen-litellm`. The same block was withdrawn from litellm-local.yaml the same day; it
+      # goes back there too. Follow-up: background health checks in router_settings, so a wedged
+      # backend is parked instead of hanging callers for request_timeout.
+      #
+      # The block below was the SECOND deployment of the SAME model_name, added 2026-09-16 -> the
+      # router load-balances the two with routing_strategy least-busy, retries the other on a failed
+      # call, and parks a bad one for cooldown_time after allowed_fails. Paid for by retiring
+      # ci-runner-7 from ai-node3. (Parking is after FAILED calls; a hang is not a failure until
+      # request_timeout, which is why the wedge above went unnoticed by the router for 2.7 days.)
+      #
+      # When node2 is back, model_info MUST stay BYTE-IDENTICAL across the two entries.
+      # scripts/gen-litellm-consumers.py de-duplicates on model_name FIRST-WINS, so the FIRST entry's
+      # model_info alone decides what the consumers see. If the two disagreed on supports_vision, dsh
+      # would SILENTLY lose `input: [text, image]` on this route with nothing failing. There is a
+      # regression test for this in scripts/tests/test_gen_litellm_consumers.py -- do not "tidy" one
+      # of them and not the other.
       #
       # least-busy breaks TIES first-in-dict, so under purely SEQUENTIAL traffic (a dsh agent turn, a
-      # single OWUI chat) the second deployment is rarely selected. Treat it as HA + concurrency
+      # single OWUI chat) a second deployment is rarely selected. Treat the pair as HA + concurrency
       # headroom, not as load-spreading: its value is that one node going down or going slow no longer
       # takes the on-prem qwen3.8 route with it.
       - model_name: qwen3.8-27b-ailab
@@ -722,8 +740,8 @@ data:
         model_info: { supports_vision: true, max_input_tokens: 49152 }
       # --------------------------------------------------------------- always-on fallback route
       # qwen3.6-35b-a3b-local REMOVED 2026-09-16. Its role -- the estate's only always-on on-prem
-      # terminal fallback -- is now served by qwen3.8-27b-ailab above, which since this change runs as
-      # TWO deployments (node2 + node3) instead of one.
+      # terminal fallback -- is now served by qwen3.8-27b-ailab above, which from that change ran as
+      # TWO deployments (node2 + node3) instead of one -- node3 alone since 2026-09-21, see above.
       #
       # It had to go: it held a measured 22.38 GiB of iGPU GTT on node2, and node2 is the only node
       # that could host a qwen3.8-27b instance (22.38 + 22.45 = 44.83 GiB will not fit). It was also
@@ -859,7 +877,8 @@ data:
       #
       # qwen3.8-27b-vllm-cloud keeps a terminal on-prem hop, qwen3.8-27b-ailab. Both cloud routes
       # live on cloudlab hosts that POWER OFF NIGHTLY (measured `up` over 7d: 0.34-0.38), so without an
-      # on-prem terminal this route has no backstop for roughly two-thirds of the day.
+      # on-prem terminal this route has no backstop for roughly two-thirds of the day. That terminal is
+      # node3 alone while ai-node2 is wedged (2026-09-21, the withdrawal note on that route).
       #
       # qwen3.8-27b-vllm-fast-cloud deliberately gets NO fallbacks entry at all. It is Open WebUI's
       # TASK_MODEL_EXTERNAL (chat titles, tags), and its `max_tokens: 512` / `enable_thinking: false`
@@ -968,7 +987,7 @@ spec:
         # parses is byte-identical in effect, no routing change; the cost is one rolling restart
         # of the 2-replica maxUnavailable:0 Deployment, taken because the annotation tracks the
         # ConfigMap, per the rule above.
-        checksum/config: "c6d7ae0736c7"
+        checksum/config: "0cea5eca24e1"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
