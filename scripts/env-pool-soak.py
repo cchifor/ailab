@@ -7,12 +7,13 @@ used, and prints ONE markdown block for the plan's soak record with a verdict:
 
   OK                     no NotReady, no Testpool*/EnvNode* alert, no reap, no watchdog closure,
                          no replacement, no restart, no reboot
-  RECURRENCE-CONTAINED   a stall/rotation happened (watchdog closure, reap, member replacement,
-                         container restart, reboot) AND warm capacity (a Ready Sandbox pod) was
-                         back within RECOVERY_BOUND_SECONDS of every such event, node Ready, no
-                         firing alert — the prevention worked
-  UNRESOLVED             an event happened but Ready capacity did not return within the bound, or
-                         the incident is still open at the window's end — not yet contained
+  RECURRENCE-CONTAINED   warm capacity (the SandboxWarmPool's OWN readyReplicas < replicas) was
+                         lost and back within RECOVERY_BOUND_SECONDS, and/or a stall/rotation
+                         signal (watchdog closure, reap, member replacement, restart, reboot) was
+                         seen, with the node Ready and no firing alert — the prevention worked
+  UNRESOLVED             a capacity-loss incident lasted longer than the bound or is still open at
+                         the window's end — not yet contained (incidents are derived from the
+                         capacity series itself, so an outage needs no "event" to be seen)
   PREVENTION-FAILED      an env node went NotReady, or ANY Testpool*/EnvNode* alert FIRED
                          (TeardownStuck, NoWarmCapacity, OperatorDown, PVC/PV, EnvNode*)
   INCOMPLETE             a query failed, an expected node/series is missing, a Loki page could not
@@ -56,8 +57,10 @@ PROM_RETENTION_DAYS = 12  # retentionSize: 36GB binds before retention: 15d (kub
 HEARTBEAT_GAP_SECONDS = 15 * 60  # reaper heartbeat every ~10 min; a 15 min gap = the reaper was silent
 RELAY_GAP_SECONDS = 15 * 60  # at [debug] level the shim/agent chatter is continuous; silence = capture gap
 RECOVERY_BOUND_SECONDS = 10 * 60  # closure → GC → reap (~150 s) → refill (~2 min): capacity back well inside 10 min
-CAPACITY_AGG_SECONDS = 60  # member_ready is max_over_time over the preceding minute: a sample at t covers [t-60, t]
+EVENT_ATTACH_SECONDS = 5 * 60  # a signal (closure, reap, …) belongs to a capacity incident starting within ±5 min
 MIN_COVERAGE = 0.8  # a required series must have ≥ 80 % of the window's steps and touch both boundaries
+SOURCE_TS_MIN_FRACTION = 0.5  # relay lines must mostly carry their own containerd time= field
+REQUIRED_SERIES = ("node_ready", "kubelet_up", "boot_time", "member_age", "warm_ready", "warm_spec", "restarts")
 ALERT_RE = "Testpool.*|EnvNode.*"
 
 # Every query the report runs, by name — reproduced verbatim in docs/runbooks/env-pool.md.
@@ -70,8 +73,11 @@ PROM_RANGE_QUERIES = {
     "boot_time": 'node_boot_time_seconds{instance=~"192.168.0.3[78]:9100"}',
     "member_age": '(time() - kube_pod_created{namespace="testpool"}) * on(namespace,pod) group_left() '
     'kube_pod_info{namespace="testpool",created_by_kind="Sandbox"}',
-    "member_ready": 'max(max_over_time((kube_pod_status_ready{namespace="testpool",condition="true"} * on(namespace,pod) group_left() '
-    'kube_pod_info{namespace="testpool",created_by_kind="Sandbox"})[1m:30s]))',
+    # Warm capacity = the SandboxWarmPool's own accounting (kube-state-metrics customResourceState,
+    # monitoring/kube-prometheus-stack.yaml). Pods of LEASED sandboxes are Ready too, so
+    # kube_pod_status_ready cannot stand in for this: a healthy lease would mask an empty pool.
+    "warm_ready": 'min_over_time(agentsandbox_warmpool_ready_replicas{exported_namespace="testpool"}[1m])',
+    "warm_spec": 'max_over_time(agentsandbox_warmpool_spec_replicas{exported_namespace="testpool"}[1m])',
     "restarts": 'kube_pod_container_status_restarts_total{namespace="testpool"}',
     "alerts": f'max_over_time(ALERTS{{alertname=~"{ALERT_RE}"}}[1m])',
 }
@@ -250,8 +256,26 @@ def coverage_problem(name: str, vals: list[tuple[float, float]], start: float, e
 
 
 def should_advance_checkpoint(rep: "Report") -> bool:
-    """The checkpoint moves only over a window whose data is complete — whatever the verdict."""
-    return not rep.problems
+    """The checkpoint moves only over a window whose data is complete and holds no open incident —
+    otherwise the next run (last `to` minus the overlap) could skip the unavailable stretch or the
+    open incident's trigger."""
+    return not rep.problems and not rep.unresolved
+
+
+_SRC_TS = re.compile(r'(?:"time":"|\btime=")(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))"')
+
+
+def source_ts(line: str) -> float | None:
+    """The containerd record's OWN timestamp (JSON `"time":"…"` or logfmt `time="…"`), which is the
+    event time — Loki's ingestion timestamp is when the RELAY emitted it, and a relay reconnect
+    replays the node's whole ring with fresh ingestion timestamps."""
+    m = _SRC_TS.search(line)
+    if not m:
+        return None
+    try:
+        return parse_ts(m.group(1))
+    except ValueError:
+        return None
 
 
 def _series(result: list) -> dict[tuple, list[tuple[float, float]]]:
@@ -291,78 +315,65 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
     rep.exports["prometheus"] = {n: {json.dumps(dict(k)): v for k, v in s.items()} for n, s in prom.items()}
     rep.exports["prometheus"]["stop_errors"] = stop_errors
 
+    # --- required telemetry: present, covering the window, without interior gaps ----------------
+    for name in REQUIRED_SERIES:
+        if not prom[name]:
+            rep.problems.append(f"no {name} series in the window — absence of observations proves nothing")
+            continue
+        for key, vals in prom[name].items():
+            who = f"{name} {_label(key, 'node') if 'node' in dict(key) else _label(key, 'pod') if 'pod' in dict(key) else _label(key, 'name')}".strip()
+            cov = coverage_problem(who, vals, start, end)
+            if cov and name not in ("member_age", "restarts"):  # pods legitimately start/end inside the window
+                rep.problems.append(cov)
+            for a, b in sample_gaps(vals):
+                if name in ("member_age", "restarts") and (b - a) < 6 * STEP_SECONDS:
+                    continue
+                rep.problems.append(f"{who}: no samples {iso(a)} → {iso(b)} ({fmt_dur(b - a)})")
+
     # --- nodes --------------------------------------------------------------------------------
-    rep.sections.append("| Node | Ready samples | NotReady intervals | kubelet /metrics down | boots seen | sample gaps |")
-    rep.sections.append("|---|---|---|---|---|---|")
+    rep.sections.append("| Node | Ready samples | NotReady intervals | kubelet /metrics down | boots seen |")
+    rep.sections.append("|---|---|---|---|---|")
     seen_nodes = {_label(k, "node") for k in prom["node_ready"]}
     for n in nodes:
         if n not in seen_nodes:
             rep.problems.append(f"no kube_node_status_condition series for expected node {n}")
+        if n not in {_label(k, "node") for k in prom["kubelet_up"]}:
+            rep.problems.append(f"{n}: no kubelet /metrics target series (up{{job=\"kubelet\"}}) in the window")
+    boot_vals = sorted({int(v) for vals in prom["boot_time"].values() for _, v in vals})
     for key, vals in sorted(prom["node_ready"].items()):
         node = _label(key, "node")
-        cov = coverage_problem(f"{node} readiness", vals, start, end)
-        if cov:
-            rep.problems.append(cov)
         notready = intervals_where(vals, lambda v: v < 1)
         for a, b in notready:
             rep.failures.append(f"{node} NotReady {iso(a)} → {iso(b)} ({fmt_dur(b - a)})")
-        gaps = sample_gaps(vals)
-        for a, b in gaps:
-            rep.problems.append(f"{node}: no readiness samples {iso(a)} → {iso(b)} ({fmt_dur(b - a)})")
         kdown = []
-        kup = [v2 for k2, v2 in prom["kubelet_up"].items() if _label(k2, "node") == node]
-        if not kup:
-            rep.problems.append(f"{node}: no kubelet /metrics target series (up{{job=\"kubelet\"}}) in the window")
-        for v2 in kup:
-            cov = coverage_problem(f"{node} kubelet up", v2, start, end)
-            if cov:
-                rep.problems.append(cov)
-            kdown = intervals_where(v2, lambda v: v < 1)
-        boots = set()
-        for k3, v3 in prom["boot_time"].items():
-            boots |= {int(v) for _, v in v3}
+        for k2, v2 in prom["kubelet_up"].items():
+            if _label(k2, "node") == node:
+                kdown = intervals_where(v2, lambda v: v < 1)
         rep.sections.append(
             f"| {node} | {len(vals)} | {len(notready)} | "
             + (", ".join(f"{iso(a)}→{iso(b)}" for a, b in kdown) or "none")
-            + f" | {len(boots)} ({', '.join(iso(b) for b in sorted(boots))}) | {len(gaps)} |"
+            + f" | {len(boot_vals)} ({', '.join(iso(b) for b in boot_vals)}) |"
         )
-    boot_vals = sorted({int(v) for vals in prom["boot_time"].values() for _, v in vals})
-    if not boot_vals:
-        rep.problems.append("no node_boot_time_seconds series for the env node(s) — reboots inside the window cannot be excluded")
-    for key, vals in prom["boot_time"].items():
-        cov = coverage_problem(f"boot_time {_label(key, 'instance')}", vals, start, end)
-        if cov:
-            rep.problems.append(cov)
-    if len(boot_vals) > 1:
-        rep.recurrences.append(f"node rebooted inside the window (boot times {', '.join(iso(b) for b in boot_vals)}) — new epoch")
 
-    # --- members --------------------------------------------------------------------------------
-    rep.sections += ["", "| Member pod | first seen | last seen | max age reached | restarts |", "|---|---|---|---|---|"]
+    # --- members (Sandbox-owned pods: warm AND leased) -----------------------------------------
+    rep.sections += ["", "| Sandbox pod | first seen | last seen | max age reached | restarts |", "|---|---|---|---|---|"]
     members = {}
     for key, vals in prom["member_age"].items():
         pod = _label(key, "pod")
-        if not vals:
-            continue
-        members[pod] = {"first": vals[0][0], "last": vals[-1][0], "max_age": max(v for _, v in vals)}
-    restarts = {}
+        if vals:
+            members[pod] = {"first": vals[0][0], "last": vals[-1][0], "max_age": max(v for _, v in vals)}
+    restarts: dict[str, float] = {}
     restart_events: list[tuple[float, str]] = []
     for key, vals in prom["restarts"].items():
         pod = _label(key, "pod")
         if vals:
-            delta = vals[-1][1] - vals[0][1]
-            restarts[pod] = restarts.get(pod, 0) + delta
-            if delta > 0:
-                rep.recurrences.append(f"{pod}/{_label(key, 'container')} restarted {int(delta)}× inside the window (guest sandbox restart?)")
+            restarts[pod] = restarts.get(pod, 0) + vals[-1][1] - vals[0][1]
             for (t0, v0), (t1, v1) in zip(vals, vals[1:]):
                 if v1 > v0:
                     restart_events.append((t1, f"restart of {pod}/{_label(key, 'container')}"))
     for pod, m in sorted(members.items(), key=lambda kv: kv[1]["first"]):
         rep.sections.append(f"| {pod} | {iso(m['first'])} | {iso(m['last'])} | {fmt_dur(m['max_age'])} | {int(restarts.get(pod, 0))} |")
     ended = [p for p, m in members.items() if m["last"] < end - 2 * STEP_SECONDS]
-    for p in ended:
-        rep.recurrences.append(f"member {p} disappeared at {iso(members[p]['last'])} after reaching {fmt_dur(members[p]['max_age'])} (replacement/rotation)")
-    if not members:
-        rep.problems.append("no testpool Sandbox-owned pod series in the window (kube-state-metrics or pool absent?)")
 
     # --- alerts ---------------------------------------------------------------------------------
     rep.sections += ["", "| Alert | state | intervals |", "|---|---|---|"]
@@ -377,8 +388,8 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
 
     # --- runtime stop errors ------------------------------------------------------------------
     rep.sections += ["", f"Kubelet `stop_*` runtime errors over the window ({window}):"]
-    for s in stop_errors:
-        rep.sections.append(f"- {s['metric'].get('node')} {s['metric'].get('operation_type')}: {float(s['value'][1]):.0f}")
+    for se in stop_errors:
+        rep.sections.append(f"- {se['metric'].get('node')} {se['metric'].get('operation_type')}: {float(se['value'][1]):.0f}")
     if not stop_errors:
         rep.sections.append("- none")
 
@@ -392,42 +403,60 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
             rep.problems.append(f"loki {name}: {e}")
             lines, truncated = [], False
         if truncated:
-            rep.problems.append(f"loki {name}: more than {LOKI_MAX_PAGES} pages of {LOKI_PAGE} lines — export truncated")
+            rep.problems.append(f"loki {name}: more than {LOKI_MAX_PAGES} pages of {LOKI_PAGE} lines, or a page that cannot be exhausted — export truncated")
         loki[name] = lines
     rep.exports["loki"] = {n: [(t, l) for t, l in v] for n, v in loki.items()}
 
-    reap = [l for _, l in loki["reaper"] if re.search(r"(^|\s)reap stage=", l)]
-    evid = [l for _, l in loki["reaper"] if re.search(r"(^|\s)evidence(-thread|-stack)? stage=", l)]
+    reap_re = re.compile(r"(^|\s)reap stage=1 .*?sandbox=(\S+) .*?pid=(\d+)")
+    evid_re = re.compile(r"(^|\s)evidence stage=1 .*?sandbox=(\S+) .*?pid=(\d+) state=")
+    reaps = [(t, m.group(2), m.group(3)) for t, l in loki["reaper"] for m in [reap_re.search(l)] if m]
+    evid_ok = {(m.group(2), m.group(3)) for _, l in loki["reaper"] for m in [evid_re.search(l)] if m}
+    evid_incomplete = [l for _, l in loki["reaper"] if re.search(r"(^|\s)evidence stage=1 .* incomplete", l)]
     api_err = [l for _, l in loki["reaper"] if "api error:" in l]
     beats = [t for t, l in loki["reaper"] if "heartbeat iter=" in l]
-    closures = [l for _, l in loki["watchdog"] if "ready-port closed" in l or "check hung" in l or "check failed" in l]
+    closures = [(t, l) for t, l in loki["watchdog"] if "ready-port closed" in l or "check hung" in l or "check failed" in l]
     recovered = [l for _, l in loki["watchdog"] if "checks recovered" in l]
-    relay = loki["relay"]
-    sandboxes = sorted({m.group(1) for l in reap for m in [re.search(r"sandbox=([0-9a-f]+)", l)] if m})
+
+    # relay: dedupe on the containerd record's OWN time + content; freshness/gaps on that time
+    relay_raw = loki["relay"]
+    relay_src: dict[tuple[float, str], None] = {}
+    unparsed = 0
+    for t, l in relay_raw:
+        st = source_ts(l)
+        if st is None:
+            unparsed += 1
+            st = t / 1e9
+        relay_src.setdefault((st, l), None)
+    relay = sorted(relay_src)
+    if relay_raw and unparsed > (1 - SOURCE_TS_MIN_FRACTION) * len(relay_raw):
+        rep.problems.append(f"{unparsed} of {len(relay_raw)} relay lines carry no containerd time= field — replay cannot be told from fresh capture")
+    sandboxes = sorted({sb for _, sb, _ in reaps})
     relay_per_sb = {sb: sum(1 for _, l in relay if sb in l) for sb in sandboxes}
 
     rep.sections += [
         "",
         "| Stream | lines |",
         "|---|---|",
-        f"| reaper `reap stage=` | {len(reap)} |",
-        f"| reaper `evidence` | {len(evid)} |",
+        f"| reaper `reap stage=1` kills | {len(reaps)} |",
+        f"| reaper complete `evidence` (sandbox,pid) | {len(evid_ok)} |",
+        f"| reaper incomplete `evidence` | {len(evid_incomplete)} |",
         f"| reaper `api error` | {len(api_err)} |",
         f"| reaper heartbeats | {len(beats)} |",
         f"| watchdog closures (`check hung`/`check failed`/`ready-port closed`) | {len(closures)} |",
         f"| watchdog `checks recovered` | {len(recovered)} |",
-        f"| relay (`vmconsole`/`kata-agent`/`level=debug`) | {len(relay)} |",
+        f"| relay records (deduplicated on source time + content; {len(relay_raw)} raw) | {len(relay)} |",
     ]
     if sandboxes:
-        rep.sections.append("| relay lines per reaped sandbox | " + ", ".join(f"{sb[:12]}..={n}" for sb, n in relay_per_sb.items()) + " |")
-    if reap:
-        rep.recurrences.append(f"{len(reap)} reaper kill line(s) for sandbox(es) {', '.join(s[:12] for s in sandboxes)}")
-    if closures:
-        rep.recurrences.append(f"{len(closures)} watchdog closure line(s)")
-    if reap and not evid:
-        rep.problems.append("reap lines without evidence lines — the T2d reaper change is not deployed or failed")
-    if reap and sandboxes and any(n == 0 for n in relay_per_sb.values()):
-        rep.problems.append("a reaped sandbox has no relay (shim/agent/console) lines — host-log capture gap")
+        rep.sections.append("| relay records per reaped sandbox | " + ", ".join(f"{sb[:12]}..={n}" for sb, n in relay_per_sb.items()) + " |")
+    for pod in members:
+        n = sum(1 for _, l in relay if pod in l)
+        if n:
+            rep.sections.append(f"| relay records naming {pod} | {n} |")
+    for t, sb, pid in reaps:
+        if (sb, pid) not in evid_ok:
+            rep.problems.append(f"reap of sandbox {sb[:12]}.. pid {pid} at {iso(t / 1e9)} has no complete evidence line (T2d not deployed, timed out, or unreadable)")
+        if relay_per_sb.get(sb, 0) == 0:
+            rep.problems.append(f"reaped sandbox {sb[:12]}.. has no relay (shim/agent/console) records — host-log capture gap")
     if not beats:
         rep.problems.append("no reaper heartbeat in the window — reaper not running, or its log stream is not in Loki")
     else:
@@ -436,60 +465,53 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
             if b - a > HEARTBEAT_GAP_SECONDS:
                 rep.problems.append(f"reaper heartbeat gap {iso(a)} → {iso(b)} ({fmt_dur(b - a)})")
     if not relay:
-        rep.problems.append("no cri-log-relay lines in the window — durable host-log capture is not shipping")
+        rep.problems.append("no cri-log-relay records in the window — durable host-log capture is not shipping")
     else:
-        relay_s = sorted(t / 1e9 for t, _ in relay)
+        relay_s = [t for t, _ in relay]
         for a, b in zip([start] + relay_s, relay_s + [end]):
             if b - a > RELAY_GAP_SECONDS:
-                rep.problems.append(f"relay capture gap {iso(a)} → {iso(b)} ({fmt_dur(b - a)}) — host-log evidence for that stretch does not exist")
-    # best-effort per-member join: shim/containerd debug records name the pod (RunPodSandbox … Name:<pod>)
-    for pod in members:
-        n = sum(1 for _, l in relay if pod in l)
-        if n:
-            rep.sections.append(f"| relay lines naming {pod} | {n} |")
+                rep.problems.append(f"relay capture gap {iso(a)} → {iso(b)} ({fmt_dur(b - a)}) by source time — host-log evidence for that stretch does not exist")
 
-    # --- recovery to usable capacity after every event -----------------------------------------
-    cap = []
-    for vals in prom["member_ready"].values():
-        cap = vals
-    event_times: list[tuple[float, str]] = []
-    event_times += [(t / 1e9, "watchdog closure") for t, l in loki["watchdog"] if "ready-port closed" in l or "check hung" in l or "check failed" in l]
-    event_times += [(t / 1e9, "reap") for t, l in loki["reaper"] if re.search(r"(^|\s)reap stage=", l)]
-    event_times += [(members[p]["last"], f"member {p} gone") for p in ended]
-    event_times += [(b, "reboot") for b in boot_vals[1:]]
-    event_times += restart_events
-    if event_times and not cap:
-        rep.problems.append("events in the window but no Sandbox pod readiness series to prove recovery")
-    if cap:
-        cov = coverage_problem("warm capacity (member readiness)", cap, start, end)
-        if cov:
-            rep.problems.append(cov)
-    for et, what in sorted(event_times):
-        # Recovery is only meaningful after capacity was OBSERVED to drop following the event (a
-        # pod stays Ready for a probe window after a stall, so a positive sample right after the
-        # event is not recovery). member_ready aggregates the preceding CAPACITY_AGG_SECONDS, so a
-        # positive sample at t proves readiness in [t-agg, t]: it counts only when t-agg >= drop.
-        drop = next((t for t, v in cap if t >= et and v < 1), None)
-        if drop is None:
-            if end - et < 3 * STEP_SECONDS:
-                rep.unresolved.append(f"{what} at {iso(et)}: too close to the window end to observe its effect — still open")
-            else:
-                rep.sections.append(f"- {what} at {iso(et)}: no capacity loss observed afterwards")
-            continue
-        back = next((t for t, v in cap if t - CAPACITY_AGG_SECONDS >= drop and v >= 1), None)
-        if back is None:
-            if end - et < RECOVERY_BOUND_SECONDS:
-                rep.unresolved.append(f"{what} at {iso(et)}: capacity not back by the window end ({fmt_dur(end - et)} later) — still open")
-            else:
-                rep.unresolved.append(f"{what} at {iso(et)}: no Ready member observed afterwards in the window")
-        elif back - et > RECOVERY_BOUND_SECONDS:
-            rep.unresolved.append(f"{what} at {iso(et)}: Ready capacity only back at {iso(back)} ({fmt_dur(back - et)} > {fmt_dur(RECOVERY_BOUND_SECONDS)} bound)")
+    # --- capacity incidents (from the warm pool's own accounting) ------------------------------
+    ready = next(iter(prom["warm_ready"].values()), [])
+    spec = next(iter(prom["warm_spec"].values()), [])
+    spec_at = {t: v for t, v in spec}
+    cap = [(t, v - spec_at.get(t, max((s for _, s in spec), default=1))) for t, v in ready]  # < 0 = capacity missing
+    incidents = intervals_where(cap, lambda d: d < 0)
+    open_at_end = bool(cap) and cap[-1][1] < 0
+    rep.sections += ["", "Warm-capacity incidents (SandboxWarmPool readyReplicas < replicas):"]
+    if not incidents:
+        rep.sections.append("- none")
+    for k, (a, b) in enumerate(incidents):
+        is_last = k == len(incidents) - 1
+        if is_last and open_at_end:
+            rep.unresolved.append(f"capacity incident from {iso(a)} still open at the window end ({fmt_dur(end - a)} so far)")
+        elif b - a > RECOVERY_BOUND_SECONDS:
+            rep.unresolved.append(f"capacity incident {iso(a)} → {iso(b)} lasted {fmt_dur(b - a)} > {fmt_dur(RECOVERY_BOUND_SECONDS)} bound")
         else:
-            rep.sections.append(f"- recovery: {what} at {iso(et)} → Ready capacity at {iso(back)} ({fmt_dur(back - et)})")
-    rep.evidence += [l for _, l in loki["reaper"] if "heartbeat" not in l][:100]
-    rep.evidence += closures[:50] + recovered[:20]
-    return rep.finish()
+            rep.recurrences.append(f"capacity incident {iso(a)} → {iso(b)} ({fmt_dur(b - a)}), back inside the bound" + (" — underway at the window start" if a <= start + STEP_SECONDS else ""))
+        rep.sections.append(f"- {iso(a)} → {iso(b)} ({fmt_dur(b - a)})" + (" OPEN" if is_last and open_at_end else ""))
 
+    # --- signals: attach to incidents (±5 min), otherwise transient ----------------------------
+    signals: list[tuple[float, str]] = []
+    signals += [(t / 1e9, "watchdog closure") for t, _ in closures]
+    signals += [(t / 1e9, f"reap of {sb[:12]}..") for t, sb, _ in reaps]
+    signals += [(members[p]["last"], f"pod {p} gone") for p in ended]
+    signals += [(b, "node reboot") for b in boot_vals[1:]]
+    signals += restart_events
+    for st, what in sorted(signals):
+        inc = next(((a, b) for a, b in incidents if abs(a - st) <= EVENT_ATTACH_SECONDS or a <= st <= b), None)
+        if inc:
+            rep.sections.append(f"- signal {what} at {iso(st)} → capacity incident {iso(inc[0])}→{iso(inc[1])}")
+        elif what.startswith("pod ") and what.endswith(" gone"):
+            rep.sections.append(f"- {what} at {iso(st)} with no capacity loss — lease turnover, not a warm-member failure")
+        else:
+            rep.recurrences.append(f"{what} at {iso(st)} with no capacity loss observed (transient)")
+    if signals and not cap:
+        rep.problems.append("signals in the window but no warm-capacity series to prove recovery")
+    rep.evidence += [l for _, l in loki["reaper"] if "heartbeat" not in l][:100]
+    rep.evidence += [l for _, l in closures][:50] + recovered[:20]
+    return rep.finish()
 
 def export(rep: Report, export_dir: pathlib.Path) -> None:
     export_dir.mkdir(parents=True, exist_ok=True)

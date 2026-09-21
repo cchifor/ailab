@@ -85,14 +85,22 @@ sandbox. The readiness contract in `sandboxtemplate-std.yaml` + `ready-watchdog.
 watchdog holds the ready-port open only while virtio-fs and dockerd answer; the kubelet probes it
 over TCP, ~30 s of a closed port = NotReady) is what keeps a 6 s blip from triggering the GC, and
 what makes a real stall visible: `kubectl -n testpool logs <pod> -c control` names the check that
-failed. The root cause of the guest freeze itself is still open; the node now runs with Kata
-debug evidence switched on (next section) so that the next stall is captured, not just contained.
+failed. The root cause of the guest freeze itself is still open; the Kata debug evidence (next
+section) is built to capture the next stall, not just contain it — **it is active only once gate G2
+of the plan has been applied and recorded** (`plans/2026-09-20-env-pool-root-cause-followup-plan.md`,
+soak record); until then `var.kata_debug` is `false` and `env-node-1` applies in `no_reboot` mode.
 
-## Kata debug evidence (2026-09-21, plan T2)
+## Kata debug evidence (plan T2 — configured in the repo, ACTIVE ONLY AFTER GATE G2)
 
-What is on, where it lands, and how to read it. Everything here is delivered by tofu from
-`kubernetes/infra/env-pool/machine-config/` (`var.kata_debug = true`), so the node's state is the
-repo's state.
+What it is, where it lands, and how to read it. Everything here is delivered by tofu from
+`kubernetes/infra/env-pool/machine-config/` behind `var.kata_debug`, so the node's state is the
+repo's state. **Status:** `kata_debug = false` and `env_nodes["env-node-1"].apply_mode = "no_reboot"`
+until G2. G2 = one commit flipping both (`kata_debug = true`, `apply_mode = "staged"`), the staged
+apply and the announced reboot of the next section, then the acceptance checks: the relay stream
+shows shim `level=debug`, `kata-agent` and `vmconsole` lines for the new sandbox; one lease's debug
+fields are inspected and a lease carrying synthetic secrets is grepped for in Loki (privacy tier
+decision recorded); a forced relay disconnect during the boot burst replays the ring. Only when
+those are recorded in the plan's soak record is the description below true of the live node.
 
 - **containerd at `[debug] level = "debug"`** (`cri-20-customization.part` → `/etc/cri/conf.d/20-customization.part`).
   This is what makes the kata shim emit anything at all: containerd passes `-debug` to shims only
@@ -121,7 +129,11 @@ repo's state.
   ```
   `evidence` lines (`state=`, `wchan=`, `threads=`, `tstates=`, and `evidence-stack … stack=`) are
   what the kernel knew about the VMM/virtiofsd right before the reaper killed them. The relay
-  re-emits its last 200 lines on every reconnect (after the node reboots): dedupe by timestamp.
+  replays the node's **whole retained ring** on every (re)connect — after the node reboots, after a
+  relay restart — with fresh Loki ingestion timestamps: deduplicate on the record's own `time=`
+  field **plus** its content (never on a timestamp alone), and judge freshness by that source time,
+  which is what `scripts/env-pool-soak.py` does. The relay pins all three CP apids as endpoints,
+  so a single CP reboot does not stop the capture.
 - **Privacy.** Shim debug records include exec commands, environment and mount details of leases.
   Raw exports stay under `kubernetes/infra/_out/` or in Loki; this repository is mirrored publicly,
   so plans/PRs carry redacted excerpts only.
@@ -210,8 +222,19 @@ POD=$(kubectl -n kube-system get pod -l app.kubernetes.io/name=env-reaper -o nam
 SB=<sandbox-id>   # from the member's cloud-hypervisor cgroup: kubectl -n kube-system exec $POD -- sh -c 'grep -l "/kata_" /proc/[0-9]*/cgroup' → .../pod<uid>/kata_<id>
 kubectl -n kube-system exec $POD -- sh -c "for cg in /proc/[0-9]*/cgroup; do grep -q \"/kata_overhead/$SB\" \"\$cg\" 2>/dev/null && p=\${cg#/proc/} && p=\${p%/cgroup} && [ \"\$(readlink /proc/\$p/exe)\" = /usr/local/libexec/virtiofsd ] && echo \$p; done"
 kubectl -n kube-system exec $POD -- kill -STOP <pid-1> <pid-2>   # both virtiofsd processes of THAT sandbox, re-listed right before this
-kubectl -n testpool delete sandbox <member>                        # the teardown now hangs until the reaper's stage 1
 ```
+
+**Let the prevention path run — do not delete the Sandbox yourself.** The full V2 sequence is the
+one a real freeze takes: the member must be **older than the pool's 15-minute readiness grace**
+(`agent-sandbox/kustomization.yaml`; a member frozen younger than that is held, not deleted, and
+proves nothing about the GC path), then the freeze → `ready-watchdog: … virtiofs check hung` /
+`ready-port closed` (`kubectl -n testpool logs <pod> -c control`) → pod `Ready=False` (~30 s) →
+the warm-pool GC deletes the Sandbox on its next reconcile → `Terminating` with `stop_*` errors
+climbing → reaper `evidence`/`evidence-thread`/`evidence-stack` lines → `reap stage=1` at ~+150 s →
+pod gone, replacement Ready. Record every timestamp (closure, NotReady, deletion, reap, Ready)
+in the plan's soak record. A manual `kubectl -n testpool delete sandbox <member>` after the
+freeze is a **separate, teardown-only test** (it exercises the reaper but bypasses the watchdog
+and the controller) — say which one you ran.
 
 Freezing the **VMM** instead (`exe=/usr/local/bin/cloud-hypervisor`, cgroup `/kata_<sandbox-id>`) is
 NOT the incident's hang: Kata's monitor declares an unresponsive VMM dead in ~13 s and the shim
