@@ -123,6 +123,13 @@ against the pinned image `ghcr.io/berriai/litellm@sha256:d295634e…` (1.101.0) 
   upstream with a 401 rather than silently serving stale traffic.
 * `af/litellm/*` gains a second document beside `chatgpt`, under the same `af-app-litellm` policy
   and the same SecretStore. No new vault identity, no new egress exception, no new ESO store.
+* **The ADR 0022 generator is left to ignore this route, and must stay that way.**
+  `gen-litellm-consumers.py` writes dsh's `litellm` (`openai-completions`) provider block from
+  `litellm.yaml` under `dsh_visible() = eligible and (private_base or dsh_only)`. This entry has
+  no `api_base`, so it is correctly not generated there. Setting `model_info.dsh_only: true` on it
+  — the key that exists to offer a paid route to dsh's picker — would list `claude-fable-5-1`
+  inside the `openai-completions` provider *as well as* the `anthropic-messages` one this ADR
+  adds: one model on two protocols, one of them wrong. That key must not be set here.
 * The `/v1/messages` lazy-registration behaviour (finding 2) is now recorded. It has already
   produced one wrong conclusion in this estate's investigation of it, and it will produce another
   on the next image bump unless the 401-vs-404 probe is used instead of the route table.
