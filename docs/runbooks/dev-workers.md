@@ -187,6 +187,11 @@ Activation is not just a toggle: the cluster side (Service, cert SAN, provision 
 land first, and each worker's secret-id is minted by hand once. Full ceremony, rotation, and failure
 modes: **`docs/runbooks/openbao-dev-workers.md`**.
 
+Since ADR 0028 the same plumbing also carries **read-only access to the running Strive platform** —
+`/usr/local/bin/platform` (`kubectl`, `psql`, `pf`) against namespace `strive-ailab` and the platform
+databases, with no secrets, no exec and no writes:
+**`docs/runbooks/dev-worker-platform-access.md`**.
+
 ## Optional features (off by default)
 
 Enable in `ansible/group_vars/dev_workers.yml`, add the secret, re-run `just dev-workers`:
