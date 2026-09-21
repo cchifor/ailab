@@ -626,15 +626,17 @@ data:
             # run reads the published password, the server rejects it, and the slot is rotated and
             # published again — so the state self-heals within a run, and the capacity pre-check above is
             # what stops the common cause of getting here at all.
-            for slot in sorted(plan):
-                entry = plan[slot]
-                password = entry["password"] if entry["rotate"] else entry["fields"]["platform_pg_password"]
-                prove_read_only(role_name(slot), password, probe_db)
-
-            # ---- Publish, one patch per worker so the three fields can never disagree -------------------
+            # PROVE AND PUBLISH ONE SLOT AT A TIME. A rotated slot's password is already committed in
+            # Postgres by now, so the interval between that commit and its publication is the window in
+            # which the worker would be locked out. Proving every slot before publishing any would make
+            # slot 1's window as long as slot N's proof — one unrelated failure stranding every rotated
+            # slot. Per-slot keeps each window to its own proof, which is as short as this can be without
+            # two passwords per role (Postgres has no such thing).
             rotated = kept = 0
             for slot in sorted(plan):
                 worker, role, entry = worker_name(slot), role_name(slot), plan[slot]
+                password = entry["password"] if entry["rotate"] else entry["fields"]["platform_pg_password"]
+                prove_read_only(role, password, probe_db)
                 if not entry["rotate"]:
                     kept += 1
                     log("kept %s: %s valid until %s (re-proven read-only)"
