@@ -93,9 +93,10 @@ fallback (§Not in scope) is decided by the operator before any `env-node-2` wor
   `helmtest-protect-reserved` excludes only the two Flux controllers: Flux itself deletes the
   objects it manages, but the **namespace controller** deletes whatever is left (chart-created
   NetworkPolicies, quotas) and would be **denied**, leaving `helmtest-dwN` `Terminating`. The PR
-  therefore adds `system:serviceaccount:kube-system:namespace-controller` and
-  `…:generic-garbage-collector` to the guard's `exclude` (they act only while a namespace is already
-  being deleted by cluster-admin, which the guard never protected against), and the gate checks
+  therefore adds `system:serviceaccount:kube-system:namespace-controller` to the guard's `exclude`
+  (it acts only while a namespace is already being deleted by cluster-admin, which the guard never
+  protected against; the generic garbage collector is *not* excluded — it cascades ownerReferences
+  at any time in a live namespace and a teardown does not need it), and the gate checks
   `helm ls -n helmtest-dw6` is empty **before** merge (a release is uninstalled by the worker, which
   is allowed, or its PVC data is copied off).
 - **Credentials.** Issuing new credentials revokes nothing: an AppRole *periodic* token (72 h,
@@ -157,8 +158,8 @@ Repo change (all in one PR):
   connectors; the rollout of both connectors is waited for before the Access app is deleted),
   `apps/homepage/configmap.yaml` (tile), `monitoring/dev-workers-node.yaml` + `monitoring/agentforge.yaml`
   (`.13` targets), `infrastructure/helmtest/{namespaces,rbac,networkpolicy}.yaml` (`helmtest-dw6`
-  objects), `infrastructure/helmtest/kyverno-protect-reserved.yaml` (the namespace-controller /
-  garbage-collector `exclude`), `security/openbao/k8stoken-sync.yaml` (`range(1, 7)` → the live
+  objects), `infrastructure/helmtest/kyverno-protect-reserved.yaml` (the namespace-controller
+  `exclude`), `security/openbao/k8stoken-sync.yaml` (`range(1, 7)` → the live
   slot list, `helmtest-dw6` RBAC and `tep-dw6` in `resourceNames` removed — otherwise the sync targets
   a missing identity and fails before publishing anything; after C1 it must report **10 fields**
   written/validated, after C2 **8**), `security/openbao/devworker-provision-job.yaml` (host loop

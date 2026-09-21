@@ -179,41 +179,73 @@ data:
     # the token metadata — NEVER by the auth/approle/login path prefix, which would revoke every
     # worker at once. Nothing here prints a credential: accessors only, values never.
     RETIRED_SLOTS="dev-worker-6" # dev-worker-6 (vmid 4206, .13) retired 2026-09-2x, PR-C1
-    for host in $RETIRED_SLOTS; do
-      if bao read "auth/approle/role/${host}" >/dev/null 2>&1; then
-        n_sid=0
-        if sids="$(bao list -format=json "auth/approle/role/${host}/secret-id" 2>/dev/null)"; then
-          for acc in $(printf '%s' "$sids" | grep -o '"[^"]*"' | tr -d '"'); do
-            bao write "auth/approle/role/${host}/secret-id-accessor/destroy" secret_id_accessor="$acc" >/dev/null
-            n_sid=$((n_sid + 1))
-          done
-        fi
-        # `bao token lookup -format=json` prints indented JSON with `"key": "value"` pairs; the
-        # match is anchored on that shape (the image has no jq). An AppRole token carries its
-        # role in the metadata as role_name.
-        n_tok=0
-        for acc in $(bao list -format=json auth/token/accessors | grep -o '"[^"]*"' | tr -d '"'); do
-          if bao token lookup -format=json -accessor "$acc" 2>/dev/null | grep -q "\"role_name\": *\"${host}\""; then
-            bao token revoke -accessor "$acc" >/dev/null
-            n_tok=$((n_tok + 1))
-          fi
-        done
-        bao delete "auth/approle/role/${host}" >/dev/null
-        bao policy delete "${host}" >/dev/null
-        echo "retired ${host}: ${n_sid} secret-id accessors destroyed, ${n_tok} tokens revoked, role/policy deleted"
+
+    # `bao list` answers "No value found" for an empty or absent path; anything else on stderr is an
+    # operational failure (sealed, auth, network) and must fail the run rather than read as "nothing
+    # to do" — a silent empty list would delete the role while its tokens live on. Prints the JSON
+    # array (or nothing) on stdout.
+    bao_list_or_empty() {
+      if out="$(bao list -format=json "$@" 2>&1)"; then
+        printf '%s' "$out"
+      elif printf '%s' "$out" | grep -qiE 'no value found|not found'; then
+        :
       else
-        echo "retired ${host}: role already absent (converged)"
+        echo "bao list $* failed and was not a not-found; aborting" >&2
+        printf '%s\n' "$out" >&2
+        exit 1
       fi
-      # KV: metadata delete removes every version; descendants are not covered by it, so list first.
-      if kids="$(bao kv list -format=json -mount=af "dev-workers/${host}/" 2>/dev/null)"; then
-        for kid in $(printf '%s' "$kids" | grep -o '"[^"]*"' | tr -d '"'); do
-          bao kv metadata delete -mount=af "dev-workers/${host}/${kid}" >/dev/null
-          echo "retired ${host}: KV descendant ${kid} metadata deleted"
-        done
+    }
+    json_words() { grep -o '"[^"]*"' | tr -d '"'; }
+
+    # KV v2 metadata delete covers every version of ONE path and nothing below it, and `kv list`
+    # shows one level, with a nested folder as `name/`. Recurse into folders, delete the leaves,
+    # then the path itself (a path can be both a secret and a folder).
+    kv_purge() {
+      for kid in $(bao_list_or_empty -mount=af "$1/" | json_words); do
+        case "$kid" in
+          */) kv_purge "$1/${kid%/}" ;;
+          *)  bao kv metadata delete -mount=af "$1/$kid" >/dev/null
+              echo "retired KV leaf $1/$kid: metadata deleted" ;;
+        esac
+      done
+      if bao kv metadata get -mount=af "$1" >/dev/null 2>&1; then
+        bao kv metadata delete -mount=af "$1" >/dev/null
+        echo "retired KV $1: metadata deleted"
       fi
-      if bao kv metadata get -mount=af "dev-workers/${host}" >/dev/null 2>&1; then
-        bao kv metadata delete -mount=af "dev-workers/${host}" >/dev/null
-        echo "retired ${host}: KV metadata deleted"
+    }
+
+    # Every sub-step below is independent and idempotent — none is gated on another's state — so a
+    # run that dies half-way (or a role deleted out of band by the breakglass runbook) is finished by
+    # the next run instead of being reported as converged with tokens or a policy left behind.
+    for host in $RETIRED_SLOTS; do
+      # 1. SecretIDs: destroy every accessor the role still lists (absent role/none = empty list).
+      n_sid=0
+      for acc in $(bao_list_or_empty "auth/approle/role/${host}/secret-id" | json_words); do
+        bao write "auth/approle/role/${host}/secret-id-accessor/destroy" secret_id_accessor="$acc" >/dev/null
+        n_sid=$((n_sid + 1))
+      done
+      # 2. Issued tokens: sweep ALL accessors and revoke those whose metadata names this role
+      #    (`bao token lookup -format=json` prints indented `"key": "value"` JSON; an AppRole token
+      #    carries role_name in its metadata; the image has no jq). A lookup that fails is a token
+      #    that expired between list and lookup — skipped, not fatal. The list itself must succeed:
+      #    a failed enumeration is an aborted run, never "0 tokens".
+      n_tok=0
+      accs="$(bao_list_or_empty auth/token/accessors)"
+      for acc in $(printf '%s' "$accs" | json_words); do
+        if bao token lookup -format=json -accessor "$acc" 2>/dev/null | grep -q "\"role_name\": *\"${host}\""; then
+          bao token revoke -accessor "$acc" >/dev/null
+          n_tok=$((n_tok + 1))
+        fi
+      done
+      # 3. Role and policy: unconditional deletes (both are 204 on an absent object).
+      bao delete "auth/approle/role/${host}" >/dev/null
+      bao policy delete "${host}" >/dev/null
+      # 4. The KV subtree, recursively.
+      kv_purge "dev-workers/${host}"
+      if [ "$n_sid" = 0 ] && [ "$n_tok" = 0 ]; then
+        echo "retired ${host}: converged (no secret-ids, no tokens; role/policy/KV absent)"
+      else
+        echo "retired ${host}: ${n_sid} secret-id accessors destroyed, ${n_tok} tokens revoked, role/policy deleted"
       fi
     done
 

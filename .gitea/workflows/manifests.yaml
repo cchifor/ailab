@@ -78,8 +78,9 @@ jobs:
 
       # The openbao-devworker-provision script under the Job's OWN image (openbao 2.6.2's busybox sh,
       # `bao` shadowed by a stub): a retired slot's revocation is complete (secret-id accessors,
-      # tokens by role, role/policy, KV metadata + descendants), idempotent on the second run, skips
-      # the retired seed, and never prints a credential value. Docker required, no soft skip.
+      # tokens by role, role/policy, the KV subtree recursively), converges on the second run,
+      # resumes after a partial failure, aborts on a failed enumeration before anything irreversible,
+      # skips the retired seed, and never prints a credential value. Docker required, no soft skip.
       - name: devworker-provision RETIRED_SLOTS under the Job image
         shell: bash
         run: |

@@ -3,11 +3,16 @@
 # kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml) under the Job's OWN
 # image (busybox sh + the real `bao` binary shadowed by a stub on PATH), against canned OpenBao
 # answers. It proves the RETIRED_SLOTS step's contract without a vault:
-#   run 1: every SecretID accessor of the retired role destroyed, ONLY the tokens whose metadata names
-#          that role revoked, role + policy deleted, KV descendants + metadata deleted, a seed named
-#          after the retired slot skipped, the live slots still upserted;
-#   run 2: converged — nothing destroyed again, the seed still skipped, exit 0;
-#   and NO credential value ever reaches stdout/stderr (the stub plants a canary secret-id value).
+#   A. run 1: every SecretID accessor of the retired role destroyed, ONLY the tokens whose metadata
+#      names that role revoked, role + policy deleted, the KV subtree purged RECURSIVELY (a nested
+#      folder `sub1/` with a leaf under it, plus a flat leaf), a seed named after the retired slot
+#      skipped, the live slots still upserted; run 2: converged — nothing destroyed again, exit 0;
+#      and NO credential value ever reaches stdout/stderr (the stub plants a canary secret-id value).
+#   B. partial failure: `bao policy delete` fails once AFTER the role was deleted -> run 1 exits
+#      non-zero; run 2 (role already absent) still deletes the policy — cleanup is resumable and is
+#      never reported "converged" while something is left.
+#   C. a token-accessor listing failure aborts the run BEFORE the role is deleted (never "0 tokens
+#      revoked" on a failed enumeration).
 # Requires docker (the manifests CI job has it). Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -33,45 +38,61 @@ echo '{"gitea_pat":"x"}' > "$WORK/seeds/common.json"
 echo '{"strive_test_user":"x"}' > "$WORK/seeds/dev-worker-3.json"
 echo '{"stale":"x"}' > "$WORK/seeds/dev-worker-6.json"   # names a retired slot: must be skipped
 
-# The stub answers like bao 2.6.x would (JSON lists, a role that disappears once deleted, KV
-# descendants that disappear once their metadata is deleted) and logs every call. The canary
-# CANARY-SECRET-ID-VALUE is what a `bao write .../secret-id` response would carry; nothing in the
-# provision script may ever print it.
+# The stub answers like bao 2.6.x would (JSON lists, "No value found" for empty/absent paths, a role
+# that disappears once deleted, KV entries that disappear once their metadata is deleted, a folder
+# listed as `sub1/`) and logs every call to /state/calls.log. Fault injection via marker files in
+# /state: FAIL_POLICY_DELETE_ONCE, FAIL_ACCESSOR_LIST_ONCE. The canary CANARY-SECRET-ID-VALUE is what
+# a `bao write .../secret-id` response would carry; nothing in the provision script may print it.
 cat > "$WORK/stub/bao" <<'STUB'
 #!/bin/sh
 STATE=/state; LOG=/state/calls.log
 echo "bao $*" >> "$LOG"
+nvf() { echo "No value found at $1" >&2; exit 2; }
 case "$1 $2" in
   "token lookup")
     case "$*" in
       *"-accessor t2"*) echo '{"data": {"accessor": "t2", "meta": {"role_name": "dev-worker-6"}}}' ;;
+      *"-accessor t3"*) echo "token not found" >&2; exit 2 ;;   # expired between list and lookup
       *"-accessor "*)   echo '{"data": {"accessor": "tX", "meta": {"role_name": "dev-worker-1"}}}' ;;
       *) echo '{"data": {"id": "root"}}' ;;
     esac ;;
   "auth list") echo '{"approle/": {"type": "approle"}}' ;;
-  "policy write"|"policy delete"|"token revoke") exit 0 ;;
+  "policy write") exit 0 ;;
+  "token revoke") touch "$STATE/tok-gone-$4"; exit 0 ;;   # a revoked accessor leaves the list
+  "policy delete")
+    if [ -f "$STATE/FAIL_POLICY_DELETE_ONCE" ]; then rm -f "$STATE/FAIL_POLICY_DELETE_ONCE"; echo "Error deleting policy: connection reset" >&2; exit 2; fi
+    touch "$STATE/policy-gone"; exit 0 ;;
   "write "*)
     case "$3" in
       auth/approle/role/*/secret-id) echo '{"data": {"secret_id": "CANARY-SECRET-ID-VALUE", "secret_id_accessor": "acc-new"}}' ;;
+      auth/approle/role/dev-worker-6/secret-id-accessor/destroy) touch "$STATE/sids-gone"; exit 0 ;;
       *) exit 0 ;;
     esac ;;
-  "read auth/approle/role/dev-worker-6") [ -f "$STATE/role-gone" ] && { echo "no role" >&2; exit 2; } || exit 0 ;;
   "delete auth/approle/role/dev-worker-6") touch "$STATE/role-gone"; exit 0 ;;
   "list -format=json")
     case "$3" in
-      auth/approle/role/dev-worker-6/secret-id) echo '["acc1", "acc2"]' ;;
-      auth/token/accessors) echo '["t1", "t2", "t3"]' ;;
-      *) echo "no list" >&2; exit 2 ;;
+      auth/approle/role/dev-worker-6/secret-id) [ -f "$STATE/sids-gone" ] || [ -f "$STATE/role-gone" ] && nvf "$3" || echo '["acc1", "acc2"]' ;;
+      auth/token/accessors)
+        if [ -f "$STATE/FAIL_ACCESSOR_LIST_ONCE" ]; then rm -f "$STATE/FAIL_ACCESSOR_LIST_ONCE"; echo "Error listing auth/token/accessors: Vault is sealed" >&2; exit 2; fi
+        [ -f "$STATE/tok-gone-t2" ] && echo '["t1", "t3"]' || echo '["t1", "t2", "t3"]' ;;
+      -mount=af)
+        case "$4" in
+          dev-workers/dev-worker-6/) { [ -f "$STATE/kv-flat-gone" ] && [ -f "$STATE/kv-sub-gone" ]; } && nvf "$4" || echo '["flat", "sub1/"]' ;;
+          dev-workers/dev-worker-6/sub1/) [ -f "$STATE/kv-sub-gone" ] && nvf "$4" || echo '["credential"]' ;;
+          *) nvf "$4" ;;
+        esac ;;
+      *) nvf "$3" ;;
     esac ;;
-  "kv list") [ -f "$STATE/kid-gone" ] && { echo "No value found" >&2; exit 2; } || echo '["sub1"]' ;;
   "kv metadata")
     case "$3 $4 $5" in
       "get -mount=af dev-workers/dev-worker-6") [ -f "$STATE/kv-gone" ] && exit 2 || exit 0 ;;
-      "delete -mount=af dev-workers/dev-worker-6/sub1") touch "$STATE/kid-gone"; exit 0 ;;
+      "get -mount=af dev-workers/dev-worker-6/sub1") exit 2 ;;  # a pure folder, not a secret
+      "delete -mount=af dev-workers/dev-worker-6/flat") touch "$STATE/kv-flat-gone"; exit 0 ;;
+      "delete -mount=af dev-workers/dev-worker-6/sub1/credential") touch "$STATE/kv-sub-gone"; exit 0 ;;
       "delete -mount=af dev-workers/dev-worker-6") touch "$STATE/kv-gone"; exit 0 ;;
-      *) exit 0 ;;
+      *) echo "stub: unexpected kv metadata op: $*" >&2; exit 3 ;;
     esac ;;
-  "kv get") echo "No value found at af/data/$4" >&2; exit 2 ;;
+  "kv get") nvf "af/data/$4" ;;
   "kv put"|"kv patch") exit 0 ;;
   *) echo "stub: unhandled: bao $*" >&2; exit 3 ;;
 esac
@@ -82,54 +103,82 @@ chmod +x "$WORK/stub/bao"
 HOSTWORK="$WORK"
 if command -v cygpath >/dev/null 2>&1; then HOSTWORK="$(cygpath -m "$WORK")"; export MSYS_NO_PATHCONV=1; fi
 
-run() {  # $1 = run number; prints the script's combined output
+# The image runs as its own `openbao` user (uid 100) and mktemp dirs are 0700: open the scratch tree
+# for reading and the state dir for the stub's call log and fault markers.
+mkdir -p "$WORK/state"
+chmod 755 "$WORK" "$WORK/stub" "$WORK/seeds" "$WORK/stub/bao"
+chmod 644 "$WORK/provision.sh" "$WORK/seeds"/*.json
+chmod 777 "$WORK/state"
+
+run() {  # prints the script's combined output; returns its exit status
   docker run --rm -v "$HOSTWORK:/w" -v "$HOSTWORK/state:/state" -e BAO_TOKEN=stub -e BAO_ADDR=http://stub \
     --entrypoint /bin/sh "$IMAGE" -c '
       export PATH=/w/stub:$PATH
       sed "s#SEED_DIR=/etc/openbao-devworker-seeds#SEED_DIR=/w/seeds#" /w/provision.sh > /tmp/p.sh
       sh /tmp/p.sh 2>&1'
 }
-# The image runs as its own `openbao` user (uid 100) and mktemp dirs are 0700: open the scratch tree
-# for reading and the state dir for the stub's call log, or every read inside the container fails.
-mkdir -p "$WORK/state"
-chmod 755 "$WORK" "$WORK/stub" "$WORK/seeds" "$WORK/stub/bao"
-chmod 644 "$WORK/provision.sh" "$WORK/seeds"/*.json
-chmod 777 "$WORK/state"
-out1="$(run 1)"; echo "$out1" | sed 's/^/  run1: /'
-out2="$(run 2)"; echo "$out2" | sed 's/^/  run2: /'
-log="$WORK/state/calls.log"
-
+reset_state() { rm -rf "$WORK/state"; mkdir -p "$WORK/state"; chmod 777 "$WORK/state"; }
 expect() { grep -qF -- "$2" <<<"$1" || { echo "MISSING: $2" >&2; exit 1; }; }
-forbid() { grep -qF -- "$2" <<<"$1" && { echo "FORBIDDEN OUTPUT: $2" >&2; exit 1; } || true; }
+forbid() { grep -qF -- "$2" <<<"$1" && { echo "FORBIDDEN: $2" >&2; exit 1; } || true; }
+count()  { grep -cF -- "$2" <<<"$1" || true; }
+forbid_line() { grep -qxF -- "$2" <<<"$1" && { echo "FORBIDDEN LINE: $2" >&2; exit 1; } || true; }
 
+# ---- A. happy path, then convergence -------------------------------------------------------------
+reset_state
+out1="$(run)"; rc1=$?; echo "$out1" | sed 's/^/  A1: /'; [ "$rc1" = 0 ] || { echo "run A1 exit $rc1" >&2; exit 1; }
+out2="$(run)"; rc2=$?; echo "$out2" | sed 's/^/  A2: /'; [ "$rc2" = 0 ] || { echo "run A2 exit $rc2" >&2; exit 1; }
+calls="$(cat "$WORK/state/calls.log")"
 expect "$out1" "retired dev-worker-6: 2 secret-id accessors destroyed, 1 tokens revoked, role/policy deleted"
-expect "$out1" "retired dev-worker-6: KV descendant sub1 metadata deleted"
-expect "$out1" "retired dev-worker-6: KV metadata deleted"
+expect "$out1" "retired KV leaf dev-workers/dev-worker-6/flat: metadata deleted"
+expect "$out1" "retired KV leaf dev-workers/dev-worker-6/sub1/credential: metadata deleted"
+expect "$out1" "retired KV dev-workers/dev-worker-6: metadata deleted"
 expect "$out1" "seed dev-worker-6.json names a retired slot; skipped"
 expect "$out1" "devworker provision complete"
-expect "$out2" "retired dev-worker-6: role already absent (converged)"
+expect "$out2" "retired dev-worker-6: converged (no secret-ids, no tokens; role/policy/KV absent)"
 expect "$out2" "seed dev-worker-6.json names a retired slot; skipped"
 expect "$out2" "devworker provision complete"
 forbid "$out1$out2" "CANARY-SECRET-ID-VALUE"
-
-calls="$(cat "$log")"
 expect "$calls" "bao write auth/approle/role/dev-worker-6/secret-id-accessor/destroy secret_id_accessor=acc1"
 expect "$calls" "bao write auth/approle/role/dev-worker-6/secret-id-accessor/destroy secret_id_accessor=acc2"
 expect "$calls" "bao token revoke -accessor t2"
 forbid "$calls" "bao token revoke -accessor t1"
 forbid "$calls" "bao token revoke -accessor t3"
 forbid "$calls" "bao token revoke -mode"
-expect "$calls" "bao delete auth/approle/role/dev-worker-6"
-expect "$calls" "bao policy delete dev-worker-6"
-expect "$calls" "bao kv metadata delete -mount=af dev-workers/dev-worker-6/sub1"
-expect "$calls" "bao kv metadata delete -mount=af dev-workers/dev-worker-6"
-[ "$(grep -c 'bao delete auth/approle/role/dev-worker-6' "$log")" = 1 ] || { echo "role deleted more than once" >&2; exit 1; }
-[ "$(grep -c 'bao kv metadata delete -mount=af dev-workers/dev-worker-6$' "$log")" = 1 ] || { echo "KV metadata deleted more than once" >&2; exit 1; }
+expect "$calls" "bao kv metadata delete -mount=af dev-workers/dev-worker-6/sub1/credential"
+# a folder entry is recursed into, never handed to `metadata delete` as a path (whole-line checks)
+forbid_line "$calls" "bao kv metadata delete -mount=af dev-workers/dev-worker-6/sub1/"
+forbid_line "$calls" "bao kv metadata delete -mount=af dev-workers/dev-worker-6/sub1"
+[ "$(count "$calls" 'bao kv metadata delete -mount=af dev-workers/dev-worker-6/flat')" = 1 ] || { echo "flat leaf deleted != once" >&2; exit 1; }
+[ "$(count "$calls" 'bao kv metadata delete -mount=af dev-workers/dev-worker-6/sub1/credential')" = 1 ] || { echo "nested leaf deleted != once" >&2; exit 1; }
+[ "$(grep -c 'bao kv metadata delete -mount=af dev-workers/dev-worker-6$' "$WORK/state/calls.log")" = 1 ] || { echo "KV root metadata deleted != once" >&2; exit 1; }
+# the deletes are unconditional and idempotent: both runs issue them, neither run fails on absence
+[ "$(count "$calls" 'bao delete auth/approle/role/dev-worker-6')" = 2 ] || { echo "role delete not issued on both runs" >&2; exit 1; }
+[ "$(count "$calls" 'bao policy delete dev-worker-6')" = 2 ] || { echo "policy delete not issued on both runs" >&2; exit 1; }
 forbid "$calls" "bao kv patch -mount=af dev-workers/dev-worker-6"
 forbid "$calls" "bao kv put -cas=0 -mount=af dev-workers/dev-worker-6 "
 expect "$calls" "bao kv put -cas=0 -mount=af dev-workers/dev-worker-3"
-# the live slots are still provisioned, the retired one is not re-created
 for h in dev-worker-1 dev-worker-2 dev-worker-3 dev-worker-4 dev-worker-5; do expect "$calls" "bao write auth/approle/role/$h "; done
 forbid "$calls" "bao write auth/approle/role/dev-worker-6 "
 forbid "$calls" "bao policy write dev-worker-6"
-echo "test-devworker-provision: OK (retired-slot revocation is complete, idempotent and silent about values)"
+
+# ---- B. partial failure after the role delete: the rerun finishes the job -----------------------
+reset_state; touch "$WORK/state/FAIL_POLICY_DELETE_ONCE"
+set +e; outB1="$(run)"; rcB1=$?; set -e; echo "$outB1" | sed 's/^/  B1: /'
+[ "$rcB1" != 0 ] || { echo "B1 must fail when the policy delete fails" >&2; exit 1; }
+forbid "$outB1" "converged"
+[ -f "$WORK/state/role-gone" ] || { echo "B1: the role should already be gone when the policy delete failed" >&2; exit 1; }
+[ ! -f "$WORK/state/policy-gone" ] || { echo "B1: policy must not be gone yet" >&2; exit 1; }
+outB2="$(run)"; echo "$outB2" | sed 's/^/  B2: /'
+[ -f "$WORK/state/policy-gone" ] || { echo "B2 did not delete the policy left behind" >&2; exit 1; }
+expect "$outB2" "devworker provision complete"
+
+# ---- C. a failed token-accessor listing aborts BEFORE anything irreversible ---------------------
+reset_state; touch "$WORK/state/FAIL_ACCESSOR_LIST_ONCE"
+set +e; outC="$(run)"; rcC=$?; set -e; echo "$outC" | sed 's/^/  C: /'
+[ "$rcC" != 0 ] || { echo "C must fail when the accessor listing fails" >&2; exit 1; }
+expect "$outC" "bao list auth/token/accessors failed and was not a not-found; aborting"
+[ ! -f "$WORK/state/role-gone" ] || { echo "C: the role must NOT be deleted after a failed enumeration" >&2; exit 1; }
+forbid "$outC" "0 tokens revoked"
+forbid "$outC" "converged"
+
+echo "test-devworker-provision: OK (recursive, resumable, fail-closed, silent about values)"

@@ -142,7 +142,7 @@ variable "dev_worker_ssh_public_key" {
 # Placement (fault isolation): dw1/4 -> node1, dw2/5 -> node2, dw3 alone on node3 since
 # dev-worker-6's retirement (2026-09-2x); node3 gives up its last dev-worker in PR-C2 and hosts the
 # second testpool env node instead (plans/2026-09-21-retire-dev-workers-3-6-plan.md).
-# IPs: consecutive .8-.13 (free static block, inside the .2-.50 reserve, below the router DHCP pool at
+# IPs: consecutive .8-.12 (.13 freed 2026-09-2x; free static block, inside the .2-.50 reserve, below the router DHCP pool at
 # .51 — no router change needed). vmids 42xx band (4201-4205; 4206 retired 2026-09-2x) don't collide (Talos 4001-4003, runners
 # 4101-4105, AI LXC 5001-5003, registry 5004). NOTE: cloud-init sets the IP at create and
 # lifecycle.ignore_changes=[initialization] means editing `ip` here is DOCUMENTATION ONLY — the live IP

@@ -76,14 +76,14 @@ spec:
               # A retired slot's namespace is pruned by Flux, but Flux only deletes the objects it
               # manages; the namespace controller then deletes whatever a chart left behind (a
               # NetworkPolicy, a quota-shaped object) and would be DENIED here, leaving the namespace
-              # Terminating forever. These two controllers only ever act inside a namespace that
-              # cluster-admin is already deleting — a case this guard never protected against.
-              # (2026-09-2x, dev-worker-6 retirement, plans/2026-09-21-retire-dev-workers-3-6-plan.md)
+              # Terminating forever. The namespace controller acts ONLY while a namespace is being
+              # deleted — by cluster-admin, a case this guard never protected against. The generic
+              # garbage collector is deliberately NOT excluded: it cascades ownerReferences at any
+              # time in a live namespace, and a namespace teardown does not need it (the namespace
+              # controller deletes every remaining object itself). (2026-09-2x, dev-worker-6
+              # retirement, plans/2026-09-21-retire-dev-workers-3-6-plan.md)
               - kind: ServiceAccount
                 name: namespace-controller
-                namespace: kube-system
-              - kind: ServiceAccount
-                name: generic-garbage-collector
                 namespace: kube-system
       validate:
         failureAction: Enforce
@@ -116,14 +116,14 @@ spec:
               # A retired slot's namespace is pruned by Flux, but Flux only deletes the objects it
               # manages; the namespace controller then deletes whatever a chart left behind (a
               # NetworkPolicy, a quota-shaped object) and would be DENIED here, leaving the namespace
-              # Terminating forever. These two controllers only ever act inside a namespace that
-              # cluster-admin is already deleting — a case this guard never protected against.
-              # (2026-09-2x, dev-worker-6 retirement, plans/2026-09-21-retire-dev-workers-3-6-plan.md)
+              # Terminating forever. The namespace controller acts ONLY while a namespace is being
+              # deleted — by cluster-admin, a case this guard never protected against. The generic
+              # garbage collector is deliberately NOT excluded: it cascades ownerReferences at any
+              # time in a live namespace, and a namespace teardown does not need it (the namespace
+              # controller deletes every remaining object itself). (2026-09-2x, dev-worker-6
+              # retirement, plans/2026-09-21-retire-dev-workers-3-6-plan.md)
               - kind: ServiceAccount
                 name: namespace-controller
-                namespace: kube-system
-              - kind: ServiceAccount
-                name: generic-garbage-collector
                 namespace: kube-system
       validate:
         failureAction: Enforce
