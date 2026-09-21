@@ -50,7 +50,9 @@ data:
       # Access enforces at the CF edge for ALL paths/methods incl. the ttyd /ws WebSocket upgrade,
       # BEFORE the tunnel — cloudflared + Caddy only ever see authenticated traffic.
       # noTLSVerify: Caddy's cert is local-CA; httpHostHeader: so Caddy matches its IP site block.
-      # Dev-worker web terminals — consecutive IPs .8-.13 (dw1->.8 .. dw6->.13; 2 per node).
+      # Dev-worker web terminals — consecutive IPs .8-.12 (dw1->.8 .. dw5->.12). dw6/.13 retired
+      # 2026-09-2x (plans/2026-09-21-retire-dev-workers-3-6-plan.md); its Access app + DNS record
+      # go with the cloudflare module's apply AFTER this ingress change has rolled out.
       - hostname: dw1.chifor.me
         service: https://192.168.0.8
         originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.8" }
@@ -66,9 +68,6 @@ data:
       - hostname: dw5.chifor.me
         service: https://192.168.0.12
         originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.12" }
-      - hostname: dw6.chifor.me
-        service: https://192.168.0.13
-        originRequest: { noTLSVerify: true, httpHostHeader: "192.168.0.13" }
       # In-cluster k8s tools: Headlamp (read-only cluster explorer) + Hubble UI (Cilium L3/L4/L7
       # network flows). GATED by Cloudflare Access (kubernetes/infra/cloudflare/access.tf k8s_tools).
       - hostname: k8s.chifor.me
@@ -169,7 +168,7 @@ spec:
         # routes until something restarts them. A new hostname then looks deployed but 404s at the
         # edge. Bump this whenever the ingress list changes -- it is the rollout trigger. (Same trap
         # cloud-power's kustomization documents for app code.)
-        chifor.me/config-revision: "2026-09-12-searxng"
+        chifor.me/config-revision: "2026-09-21-retire-dw6"
       labels:
         app.kubernetes.io/name: cloudflared
     spec:

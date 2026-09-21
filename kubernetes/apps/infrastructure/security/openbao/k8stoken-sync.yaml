@@ -86,8 +86,8 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["serviceaccounts/token"]
-    # All six tep SAs live in this ONE namespace, so they are enumerated here.
-    resourceNames: ["tep-dw1", "tep-dw2", "tep-dw3", "tep-dw4", "tep-dw5", "tep-dw6"]
+    # All the tep SAs live in this ONE namespace, so they are enumerated here (one per live slot).
+    resourceNames: ["tep-dw1", "tep-dw2", "tep-dw3", "tep-dw4", "tep-dw5"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -182,22 +182,6 @@ subjects:
   - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
 roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw6 }
-rules:
-  - apiGroups: [""]
-    resources: ["serviceaccounts/token"]
-    resourceNames: ["helmtest-dw6"]
-    verbs: ["create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw6 }
-subjects:
-  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
-roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -234,9 +218,12 @@ data:
     FLOOR = int(os.environ.get("TOKEN_FLOOR_SECONDS", "259200"))
 
     # worker -> (field, namespace, serviceaccount). The other copies of this list: helmtest/rbac.yaml,
-    # testpool/tep-access.yaml, devworker-provision-job.yaml, inventory/hosts.yml.
+    # testpool/tep-access.yaml, devworker-provision-job.yaml, inventory/hosts.yml,
+    # scripts/tep-render-kubeconfigs.py. Slots are listed, not ranged: dev-worker-6 was retired
+    # 2026-09-2x (plans/2026-09-21-retire-dev-workers-3-6-plan.md) and a target whose SA no longer
+    # exists would fail this run before anything is published.
     TARGETS = []
-    for _n in range(1, 7):
+    for _n in (1, 2, 3, 4, 5):
         TARGETS.append((f"dev-worker-{_n}", "tep_kubeconfig", "testpool", f"tep-dw{_n}"))
         TARGETS.append((f"dev-worker-{_n}", "helmtest_kubeconfig", f"helmtest-dw{_n}", f"helmtest-dw{_n}"))
 

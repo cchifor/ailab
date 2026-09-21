@@ -41,7 +41,6 @@ subjects:
   - { kind: ServiceAccount, name: tep-dw3, namespace: testpool }
   - { kind: ServiceAccount, name: tep-dw4, namespace: testpool }
   - { kind: ServiceAccount, name: tep-dw5, namespace: testpool }
-  - { kind: ServiceAccount, name: tep-dw6, namespace: testpool }
 roleRef:
   kind: Role
   name: tep-worker
@@ -66,10 +65,6 @@ metadata: { name: tep-dw4, namespace: testpool }
 apiVersion: v1
 kind: ServiceAccount
 metadata: { name: tep-dw5, namespace: testpool }
----
-apiVersion: v1
-kind: ServiceAccount
-metadata: { name: tep-dw6, namespace: testpool }
 ---
 apiVersion: v1
 kind: Secret
@@ -109,12 +104,4 @@ metadata:
   name: tep-dw5-token
   namespace: testpool
   annotations: { kubernetes.io/service-account.name: tep-dw5 }
-type: kubernetes.io/service-account-token
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: tep-dw6-token
-  namespace: testpool
-  annotations: { kubernetes.io/service-account.name: tep-dw6 }
 type: kubernetes.io/service-account-token

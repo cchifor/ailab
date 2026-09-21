@@ -44,9 +44,9 @@ fi
   # to the scheduler, so a persistently failing converge shows as a failed task rather than a
   # green one that quietly changed nothing.
   rc=0
-  # dw6's herdr takeover stays operator-scheduled (pane-killing); everything else full-role.
-  ansible-playbook dev-workers.yml --limit 'dev_workers:!dev-worker-6' 2>&1 | tail -10 || rc=$?
-  ansible-playbook dev-workers.yml --limit dev-worker-6 --skip-tags herdr 2>&1 | tail -4 || rc=$?
+  # Full role on every worker. (Until dev-worker-6's retirement on 2026-09-2x its herdr takeover
+  # was operator-scheduled and it ran with --skip-tags herdr here; that special case went with it.)
+  ansible-playbook dev-workers.yml 2>&1 | tail -10 || rc=$?
   # The reviewer VMs converge here too. Until 2026-09-06 they converged NOWHERE: this script
   # only ran dev-workers.yml, so every reviewbot.py change merged to main sat undeployed
   # until somebody remembered to run the playbook by hand. That is not hypothetical — the

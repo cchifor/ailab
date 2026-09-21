@@ -73,10 +73,12 @@ data:
     # can never rotate it. `read` on the DATA path only — no metadata, no list, no write.
     CODEX_AUTH_GRANT='path "af/data/dev-workers/codex-auth" { capabilities = ["read"] }'
 
-    # The six dev workers (inventory/hosts.yml, group dev_workers). Role and policy are both named
-    # after the ansible inventory_hostname, so an audit entry names the machine. Adding a worker is
-    # one word here plus the mint ceremony in docs/runbooks/openbao-dev-workers.md.
-    for host in dev-worker-1 dev-worker-2 dev-worker-3 dev-worker-4 dev-worker-5 dev-worker-6; do
+    # The dev workers (inventory/hosts.yml, group dev_workers — one per LIVE slot; a retired slot
+    # moves to RETIRED_SLOTS below). Role and policy are both named after the ansible
+    # inventory_hostname, so an audit entry names the machine. Adding a worker is one word here plus
+    # the mint ceremony in docs/runbooks/openbao-dev-workers.md; retiring one is the reverse: out of
+    # this list, into RETIRED_SLOTS, and the same change drops it from the k8stoken-sync policy.
+    for host in dev-worker-1 dev-worker-2 dev-worker-3 dev-worker-4 dev-worker-5; do
       # Read-only, scoped to this worker's own subtree plus the shared one. The metadata `list`
       # grants are what make `cred list` work; nothing here can create, update or delete, so a
       # compromised worker cannot rewrite another worker's credentials.
@@ -155,7 +157,6 @@ data:
     path "af/data/dev-workers/dev-worker-3" { capabilities = ["read", "create", "update", "patch"] }
     path "af/data/dev-workers/dev-worker-4" { capabilities = ["read", "create", "update", "patch"] }
     path "af/data/dev-workers/dev-worker-5" { capabilities = ["read", "create", "update", "patch"] }
-    path "af/data/dev-workers/dev-worker-6" { capabilities = ["read", "create", "update", "patch"] }
     EOF
     # The kubernetes auth mount itself is created by provision-job.yaml (AF_OB_K8S_HOST, with
     # token_reviewer_jwt deliberately unset so the OpenBao SERVER pod's own SA does the TokenReview).
@@ -168,6 +169,96 @@ data:
       token_ttl=15m \
       token_max_ttl=30m
 
+    # ---- Retired slots (plans/2026-09-21-retire-dev-workers-3-6-plan.md) -----------------------
+    # This Job is the ONE owner of a retired worker's revocation: declarative, re-run daily by Flux,
+    # idempotent (an object that is already gone is skipped, so every re-run converges to "absent").
+    # It sits AFTER the k8stoken-sync policy above has been narrowed to the live slots — so the sync
+    # CronJob can no longer re-create a retired KV path — and BEFORE the seed loop, which skips these
+    # names. Deleting a role revokes nothing it issued and re-minting revokes nothing either: the
+    # SecretID accessors and the issued token accessors are destroyed explicitly, by role name in
+    # the token metadata — NEVER by the auth/approle/login path prefix, which would revoke every
+    # worker at once. Nothing here prints a credential: accessors only, values never.
+    RETIRED_SLOTS="dev-worker-6" # dev-worker-6 (vmid 4206, .13) retired 2026-09-2x, PR-C1
+
+    # A listing answers "No value found" for an empty or absent path; anything else on stderr is an
+    # operational failure (sealed, auth, network) and must fail the run rather than read as "nothing
+    # to do" — a silent empty list would delete the role while its tokens live on. Prints the JSON
+    # array (or nothing) on stdout. ALWAYS captured into a variable first — `x="$(list_or_empty …)"`
+    # fails the script under `set -e` when the function exits 1, whereas the same substitution in a
+    # `for` word list would only kill the subshell and iterate over nothing.
+    list_or_empty() {          # generic list: auth paths (bao list -format=json <path>)
+      _or_empty bao list -format=json "$1"
+    }
+    kv_list_or_empty() {       # KV v2 listing: `bao kv list` is the mount-aware form (generic `bao list`
+      _or_empty bao kv list -format=json -mount=af "$1"   # has no -mount and would need af/metadata/…)
+    }
+    _or_empty() {
+      if out="$("$@" 2>&1)"; then
+        printf '%s' "$out"
+      elif printf '%s' "$out" | grep -qiE 'no value found|not found'; then
+        :
+      else
+        echo "$* failed and was not a not-found; aborting" >&2
+        printf '%s\n' "$out" >&2
+        exit 1
+      fi
+    }
+    json_words() { grep -o '"[^"]*"' | tr -d '"'; }
+
+    # KV v2 metadata delete covers every version of ONE path and nothing below it, and `kv list`
+    # shows one level, with a nested folder as `name/`. Recurse into folders, delete the leaves,
+    # then the path itself (a path can be both a secret and a folder).
+    kv_purge() {
+      kids="$(kv_list_or_empty "$1/")"
+      for kid in $(printf '%s' "$kids" | json_words); do
+        case "$kid" in
+          */) kv_purge "$1/${kid%/}" ;;
+          *)  bao kv metadata delete -mount=af "$1/$kid" >/dev/null
+              echo "retired KV leaf $1/$kid: metadata deleted" ;;
+        esac
+      done
+      if bao kv metadata get -mount=af "$1" >/dev/null 2>&1; then
+        bao kv metadata delete -mount=af "$1" >/dev/null
+        echo "retired KV $1: metadata deleted"
+      fi
+    }
+
+    # Every sub-step below is independent and idempotent — none is gated on another's state — so a
+    # run that dies half-way (or a role deleted out of band by the breakglass runbook) is finished by
+    # the next run instead of being reported as converged with tokens or a policy left behind.
+    for host in $RETIRED_SLOTS; do
+      # 1. SecretIDs: destroy every accessor the role still lists (absent role/none = empty list).
+      n_sid=0
+      sids="$(list_or_empty "auth/approle/role/${host}/secret-id")"
+      for acc in $(printf '%s' "$sids" | json_words); do
+        bao write "auth/approle/role/${host}/secret-id-accessor/destroy" secret_id_accessor="$acc" >/dev/null
+        n_sid=$((n_sid + 1))
+      done
+      # 2. Issued tokens: sweep ALL accessors and revoke those whose metadata names this role
+      #    (`bao token lookup -format=json` prints indented `"key": "value"` JSON; an AppRole token
+      #    carries role_name in its metadata; the image has no jq). A lookup that fails is a token
+      #    that expired between list and lookup — skipped, not fatal. The list itself must succeed:
+      #    a failed enumeration is an aborted run, never "0 tokens".
+      n_tok=0
+      accs="$(list_or_empty auth/token/accessors)"
+      for acc in $(printf '%s' "$accs" | json_words); do
+        if bao token lookup -format=json -accessor "$acc" 2>/dev/null | grep -q "\"role_name\": *\"${host}\""; then
+          bao token revoke -accessor "$acc" >/dev/null
+          n_tok=$((n_tok + 1))
+        fi
+      done
+      # 3. Role and policy: unconditional deletes (both are 204 on an absent object).
+      bao delete "auth/approle/role/${host}" >/dev/null
+      bao policy delete "${host}" >/dev/null
+      # 4. The KV subtree, recursively.
+      kv_purge "dev-workers/${host}"
+      if [ "$n_sid" = 0 ] && [ "$n_tok" = 0 ]; then
+        echo "retired ${host}: converged (no secret-ids, no tokens; role/policy/KV absent)"
+      else
+        echo "retired ${host}: ${n_sid} secret-id accessors destroyed, ${n_tok} tokens revoked, role/policy deleted"
+      fi
+    done
+
     # Seed the KV subtree: one file per path, `<name>.json` -> af/dev-workers/<name>. `kv patch` is
     # the read-modify-write that gives the seed-wins-others-survive contract; it needs an existing
     # version, so a never-written path is created with `kv put` of the same file.
@@ -175,6 +266,9 @@ data:
     for seed in "$SEED_DIR"/*.json; do
       [ -f "$seed" ] || continue
       name="$(basename "$seed" .json)"
+      case " $RETIRED_SLOTS " in
+        *" $name "*) echo "seed ${name}.json names a retired slot; skipped" >&2; continue ;;
+      esac
       # Stderr is captured into a VARIABLE, not a temp file: this container runs with
       # readOnlyRootFilesystem: true, so /tmp is not writable and a `2>/tmp/...` redirect fails
       # before the probe even runs. `2>&1 >/dev/null` keeps stderr and discards stdout (the order

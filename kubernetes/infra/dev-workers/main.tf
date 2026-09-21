@@ -47,8 +47,7 @@ resource "proxmox_virtual_environment_vm" "dev_worker" {
   # and inflates a busy worker toward the ceiling. See variables.tf + docs/runbooks/dev-workers.md.
   # Floor and ceiling are the uniform scalars UNLESS this worker carries an override: ai-node1's two
   # workers pin a 12 GiB floor (that node is oversubscribed enough that ballooning never inflates
-  # them) and dev-worker-6 runs the 12 GiB-ceiling downsize POC — see the notes on dev_worker_nodes
-  # in variables.tf. `memory` is deliberately NOT in lifecycle.ignore_changes below: ignoring it
+  # them) and dev-worker-5 pins 6 GiB (node2) — see the notes on dev_worker_nodes in variables.tf. `memory` is deliberately NOT in lifecycle.ignore_changes below: ignoring it
   # would stop tofu managing memory at all and hide the next divergence, where codifying the
   # override keeps the drift visible and reviewable.
   memory {
