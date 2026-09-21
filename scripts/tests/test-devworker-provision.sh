@@ -167,6 +167,9 @@ forbid "$calls" "bao kv patch -mount=af dev-workers/dev-worker-6"
 forbid "$calls" "bao kv put -cas=0 -mount=af dev-workers/dev-worker-6 "
 expect "$calls" "bao kv put -cas=0 -mount=af dev-workers/dev-worker-3"
 for h in dev-worker-1 dev-worker-2 dev-worker-3 dev-worker-4 dev-worker-5; do expect "$calls" "bao write auth/approle/role/$h "; done
+# Both sync-owned writers get a k8s-auth role on the same KV-write policy (ADR 0021 / ADR 0028).
+expect "$calls" "bao write auth/kubernetes/role/k8stoken-sync bound_service_account_names=openbao-k8stoken-sync bound_service_account_namespaces=openbao token_policies=k8stoken-sync"
+expect "$calls" "bao write auth/kubernetes/role/platform-pg-sync bound_service_account_names=openbao-platform-pg-sync bound_service_account_namespaces=strive-ailab token_policies=k8stoken-sync"
 forbid "$calls" "bao write auth/approle/role/dev-worker-6 "
 forbid "$calls" "bao policy write dev-worker-6"
 

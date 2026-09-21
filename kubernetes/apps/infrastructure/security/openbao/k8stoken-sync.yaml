@@ -29,10 +29,12 @@
 #
 # ORDERING: this needs (a) the `af` KV mount and the `kubernetes` auth mount that provision-job.yaml
 # creates, (b) the k8stoken-sync auth role that devworker-provision-job.yaml creates, and (c) the
-# ServiceAccounts in helmtest-dw<N>/testpool. Nothing sequences those, exactly as devworker-provision
-# is unsequenced against provision-job today. That is self-healing rather than a manual step: a run
-# that loses the race fails, the Job is reaped by ttlSecondsAfterFinished, and Flux recreates it. The
-# job is the sequencer for Phase 3 — its "validated 12/12" line is what the rollout gate consumes.
+# ServiceAccounts in helmtest-dw<N>/testpool and platform-access (the platform observer, ADR 0028 —
+# its mint Role lives in platform-access/rbac.yaml next to the SAs). Nothing sequences those, exactly
+# as devworker-provision is unsequenced against provision-job today. That is self-healing rather than
+# a manual step: a run that loses the race fails, the Job is reaped by ttlSecondsAfterFinished, and
+# Flux recreates it. The job is the sequencer for Phase 3 — its "validated N/N" line (12/12 at the
+# time, 3 fields x live slots now) is what the rollout gate consumes.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -217,15 +219,20 @@ data:
     TTL = int(os.environ.get("TOKEN_TTL_SECONDS", "2592000"))
     FLOOR = int(os.environ.get("TOKEN_FLOOR_SECONDS", "259200"))
 
-    # worker -> (field, namespace, serviceaccount). The other copies of this list: helmtest/rbac.yaml,
-    # testpool/tep-access.yaml, devworker-provision-job.yaml, inventory/hosts.yml,
-    # scripts/tep-render-kubeconfigs.py. Slots are listed, not ranged: dev-worker-6 was retired
+    # worker -> (field, SA namespace, serviceaccount, kubeconfig context namespace). The other copies
+    # of this list: helmtest/rbac.yaml, testpool/tep-access.yaml, platform-access/rbac.yaml (SAs +
+    # mint Role, ADR 0028), platform-access/pg-sync.yaml, devworker-provision-job.yaml,
+    # inventory/hosts.yml, scripts/tep-render-kubeconfigs.py — scripts/check-slot-enumerations.py
+    # (CI) fails when they disagree. Slots are listed, not ranged: dev-worker-6 was retired
     # 2026-09-2x (plans/2026-09-21-retire-dev-workers-3-6-plan.md) and a target whose SA no longer
     # exists would fail this run before anything is published.
+    # The context namespace equals the SA namespace for tep/helmtest; the platform observer's SA
+    # lives in platform-access but its kubeconfig must land the agent in strive-ailab.
     TARGETS = []
     for _n in (1, 2, 3, 4, 5):
-        TARGETS.append((f"dev-worker-{_n}", "tep_kubeconfig", "testpool", f"tep-dw{_n}"))
-        TARGETS.append((f"dev-worker-{_n}", "helmtest_kubeconfig", f"helmtest-dw{_n}", f"helmtest-dw{_n}"))
+        TARGETS.append((f"dev-worker-{_n}", "tep_kubeconfig", "testpool", f"tep-dw{_n}", "testpool"))
+        TARGETS.append((f"dev-worker-{_n}", "helmtest_kubeconfig", f"helmtest-dw{_n}", f"helmtest-dw{_n}", f"helmtest-dw{_n}"))
+        TARGETS.append((f"dev-worker-{_n}", "platform_kubeconfig", "platform-access", f"platform-dw{_n}", "strive-ailab"))
 
     k8s_ctx = ssl.create_default_context(cafile=f"{SA_DIR}/ca.crt")
     bao_ctx = ssl.create_default_context(cafile=os.environ["BAO_CACERT"])
@@ -306,15 +313,16 @@ data:
         return tok, remaining
 
 
-    def kubeconfig(ns, sa, tok):
-        """JSON is valid YAML, so this needs no YAML library and kubectl/helm parse it as-is."""
+    def kubeconfig(ns, sa, tok, ctx_ns):
+        """JSON is valid YAML, so this needs no YAML library and kubectl/helm parse it as-is.
+        `ns` is where the SA lives (the identity); `ctx_ns` is the namespace the context lands in."""
         doc = {
-            "apiVersion": "v1", "kind": "Config", "current-context": ns,
+            "apiVersion": "v1", "kind": "Config", "current-context": ctx_ns,
             # The WORKER-reachable endpoint, not kubernetes.default.svc — the dev-workers are outside
             # the cluster and cannot resolve or route to a ClusterIP.
             "clusters": [{"name": "ai", "cluster": {"server": PUBLIC_SERVER,
                                                     "certificate-authority-data": CA_B64}}],
-            "contexts": [{"name": ns, "context": {"cluster": "ai", "user": sa, "namespace": ns}}],
+            "contexts": [{"name": ctx_ns, "context": {"cluster": "ai", "user": sa, "namespace": ctx_ns}}],
             "users": [{"name": sa, "user": {"token": tok}}],
         }
         rendered = json.dumps(doc, indent=2)
@@ -322,7 +330,7 @@ data:
         # KV becomes a bao-agent render that exits the agent on every worker that consumes it.
         parsed = json.loads(rendered)
         ctx = next(c for c in parsed["contexts"] if c["name"] == parsed["current-context"])["context"]
-        assert ctx["namespace"] == ns and ctx["user"] == sa
+        assert ctx["namespace"] == ctx_ns and ctx["user"] == sa
         cl = next(c for c in parsed["clusters"] if c["name"] == ctx["cluster"])["cluster"]
         assert cl["server"] == PUBLIC_SERVER
         assert base64.b64decode(cl["certificate-authority-data"]).startswith(b"-----BEGIN CERTIFICATE")
@@ -339,12 +347,12 @@ data:
     BAO_TOKEN = body["auth"]["client_token"]
 
     # ---- Mint everything BEFORE writing anything -----------------------------------------------------
-    # Both fields for a worker are written in one patch, so a partial mint cannot leave a worker with a
-    # fresh tep kubeconfig and a stale helmtest one.
+    # All three fields for a worker are written in one patch, so a partial mint cannot leave a worker
+    # with a fresh tep kubeconfig and a stale helmtest or platform one.
     pending, lifetimes = {}, {}
-    for worker, field, ns, sa in TARGETS:
+    for worker, field, ns, sa, ctx_ns in TARGETS:
         tok, remaining = mint(ns, sa)
-        pending.setdefault(worker, {})[field] = kubeconfig(ns, sa, tok)
+        pending.setdefault(worker, {})[field] = kubeconfig(ns, sa, tok, ctx_ns)
         lifetimes[f"{worker}/{field}"] = remaining
         print(f"minted {ns}/{sa} -> {worker}.{field} ({remaining // 3600}h remaining)", flush=True)
 

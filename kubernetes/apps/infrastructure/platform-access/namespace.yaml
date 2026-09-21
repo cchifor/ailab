@@ -1,0 +1,16 @@
+# platform-access — holds ONLY the per-slot ServiceAccounts the dev workers use to observe the Strive
+# platform (ADR 0028). Nothing runs here; PSA restricted is belt-and-braces for a namespace that must
+# never gain a pod. The identities live outside the platform-owned namespaces (strive-ailab,
+# strive-sandboxes-ailab, platform-edge) on purpose: the platform repo's Flux Kustomizations prune
+# their own labelled objects only, so an ailab-owned SA there would survive — but it would read as the
+# platform's, and ownership should be legible from the namespace alone.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform-access
+  labels:
+    app.kubernetes.io/name: platform-access
+    app.kubernetes.io/part-of: agentforge
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

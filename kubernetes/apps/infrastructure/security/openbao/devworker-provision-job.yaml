@@ -169,6 +169,21 @@ data:
       token_ttl=15m \
       token_max_ttl=30m
 
+    # openbao-platform-pg-sync (ADR 0028) — the SECOND sync-owned writer to the same per-slot
+    # documents: it maintains a read-only Postgres login per live slot on the platform's CNPG
+    # cluster and publishes af/dev-workers/<slot>.platform_pg_{user,password,valid_until}
+    # (platform-access/pg-sync.yaml, ns strive-ailab — it must mount the CNPG superuser Secret,
+    # which only a pod in that namespace can). SHARES the k8stoken-sync policy ON PURPOSE: that
+    # policy is exactly "read/create/update/patch on af/data/dev-workers/dev-worker-<N> for the live
+    # slots" — a KV write grant, nothing about minting (that is Kubernetes RBAC) — which is the whole
+    # of what a second writer needs, and one slot list here is one list for RETIRED_SLOTS to narrow.
+    bao write auth/kubernetes/role/platform-pg-sync \
+      bound_service_account_names=openbao-platform-pg-sync \
+      bound_service_account_namespaces=strive-ailab \
+      token_policies=k8stoken-sync \
+      token_ttl=15m \
+      token_max_ttl=30m
+
     # ---- Retired slots (plans/2026-09-21-retire-dev-workers-3-6-plan.md) -----------------------
     # This Job is the ONE owner of a retired worker's revocation: declarative, re-run daily by Flux,
     # idempotent (an object that is already gone is skipped, so every re-run converges to "absent").

@@ -66,11 +66,11 @@
     owner: "{{ item.0.name }}"
     group: "{{ item.0.name }}"
     mode: "0700"
-  loop: "{{ dev_worker_users | product(['.tep', '.helmtest']) | list }}"
+  loop: "{{ dev_worker_users | product(['.tep', '.helmtest', '.platform']) | list }}"
   loop_control:
     label: "{{ item.0.name }}:{{ item.1 }}"
 
-- name: Lay down the kubeconfig render templates
+- name: Lay down the kubeconfig and platform render templates
   ansible.builtin.template:
     src: "{{ item }}.ctmpl.j2"
     dest: "/etc/openbao-agent/{{ item }}.ctmpl"
@@ -80,7 +80,73 @@
   loop:
     - tep-kubeconfig
     - helmtest-kubeconfig
+    - platform-kubeconfig # ADR 0028
+    - platform-pgpass # ADR 0028
   notify: Restart openbao-agent
+
+# ---- platform access (ADR 0028) ------------------------------------------------------------------
+# A DIFFERENT question from the ADR 0021 marker above, and deliberately not durable state: that one
+# answers "who owns this host's kubeconfigs" (two writers, so it must survive a run); this one
+# answers "are the platform_* fields in this host's KV yet", which is a fact about the vault RIGHT
+# NOW and must be re-derived on every run — hence a plain set_fact (no `cacheable`), so nothing is
+# carried over from a previous run by ansible's jsonfile fact cache.
+#
+# FAIL-CLOSED on an UNREACHABLE vault, not just on an absent field: `cred list` failing (sealed
+# vault, network, expired sink token) fails the play. Treating that as "fields absent" would drop the
+# stanzas from agent.hcl and REMOVE working platform access from a host on a transient outage; the
+# opposite mistake — emitting a stanza for a field that is not there — exits the agent and takes
+# ~/.git-credentials down with it (error_on_missing_key + exit_on_retry_failure). So: reachable and
+# all three fields readable => render; reachable and any field missing => no stanza, retry next run;
+# unreachable => stop.
+- name: Check that the vault is reachable under this host's own AppRole
+  ansible.builtin.command:
+    cmd: /usr/local/bin/cred list
+  register: dev_worker_cred_list
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Probe this host's platform_* KV fields (values discarded, never printed)
+  ansible.builtin.shell: |
+    set -o pipefail
+    host="$(hostname -s)"
+    for field in platform_kubeconfig platform_pg_user platform_pg_password; do
+      # Redirected to /dev/null: `cred get` prints the VALUE, and ansible registers stdout.
+      /usr/local/bin/cred get "$host" "$field" >/dev/null 2>&1 || { echo "missing:$field"; exit 90; }
+    done
+    echo present
+  args:
+    executable: /bin/bash
+  register: dev_worker_platform_probe
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - dev_worker_cred_list is succeeded
+
+- name: Record whether this host has its platform credentials yet
+  ansible.builtin.set_fact:
+    # NOT cacheable on purpose (see the block comment above).
+    dev_worker_platform_fields_present: >-
+      {{ (dev_worker_platform_probe.rc | default(1)) == 0 }}
+
+- name: Report that platform access is not provisioned yet on this host
+  ansible.builtin.debug:
+    msg: >-
+      af/dev-workers/{{ inventory_hostname }} has no platform_* fields yet
+      ({{ dev_worker_platform_probe.stdout | default('probe skipped') }}); the agent will render no
+      platform credentials this run. Check openbao-platform-pg-sync / openbao-k8stoken-sync in the
+      cluster, then re-run with -t openbao — docs/runbooks/dev-worker-platform-access.md.
+  when:
+    - not ansible_check_mode
+    - not dev_worker_platform_fields_present | bool
+
+- name: Install the platform helper
+  ansible.builtin.copy:
+    src: platform
+    dest: /usr/local/bin/platform
+    owner: root
+    group: root
+    mode: "0755"
 
 # ---- the per-host cutover gate -------------------------------------------------------------------
 # Adding the template stanzas is the one genuinely dangerous step in ADR 0021: a stanza pointing at a
@@ -269,6 +335,26 @@
         kubectl --kubeconfig {{ user.home }}/.helmtest/kubeconfig auth can-i create secrets >/dev/null           || { echo "helmtest kubeconfig does not authenticate" >&2; exit 1; }
         {% endfor %}
         {% endif %}
+        {% if dev_worker_platform_fields_present | default(false) | bool %}
+        # 5. platform access (ADR 0028). The NEGATIVE checks are the load-bearing ones: they prove the
+        #    kubeconfig is bound to the observer ClusterRole and not to something wider. `auth can-i`
+        #    is a SelfSubjectAccessReview — it needs no extra grant and reads nothing.
+        {% for user in dev_worker_users %}
+        for f in {{ user.home }}/.platform/kubeconfig {{ user.home }}/.platform/pgpass; do
+          [ -s "$f" ] || { echo "$f not rendered" >&2; exit 1; }
+          [ "$(stat -c '%a %U' "$f")" = "600 {{ user.name }}" ] || { echo "$f wrong mode/owner" >&2; exit 1; }
+        done
+        # the pgpass names THIS worker (a wrong slot would authenticate as another worker role)
+        want_role="dw${HOSTNAME##*-}_platform_ro"
+        [ "$(cut -d: -f4 {{ user.home }}/.platform/pgpass)" = "$want_role" ] || { echo "{{ user.home }}/.platform/pgpass does not name $want_role" >&2; exit 1; }
+        KC="kubectl --kubeconfig {{ user.home }}/.platform/kubeconfig"
+        [ "$($KC auth can-i list pods -n strive-ailab)" = yes ]          || { echo "platform kubeconfig cannot list pods" >&2; exit 1; }
+        [ "$($KC auth can-i get secrets -n strive-ailab)" = no ]         || { echo "platform kubeconfig CAN READ SECRETS - wrong ClusterRole" >&2; exit 1; }
+        [ "$($KC auth can-i create pods/exec -n strive-ailab)" = no ]    || { echo "platform kubeconfig CAN EXEC - wrong ClusterRole" >&2; exit 1; }
+        [ "$($KC auth can-i delete deployments -n strive-ailab)" = no ]  || { echo "platform kubeconfig CAN DELETE - wrong ClusterRole" >&2; exit 1; }
+        [ "$($KC auth can-i create pods/portforward -n strive-ailab)" = yes ] || { echo "platform kubeconfig cannot port-forward" >&2; exit 1; }
+        {% endfor %}
+        {% endif %}
         echo agent-healthy
       args:
         executable: /bin/bash
@@ -385,6 +471,42 @@
       4. You cannot deploy into `testpool`, into another worker's namespace, or anywhere else.
          If you need more than this namespace allows, say so — do not go looking for a wider
          credential.
+      {% endif %}
+      {% if dev_worker_platform_fields_present | default(false) | bool %}
+
+      ## Platform (Strive) access — read-only, for debugging and analysis
+
+      `platform` is this worker's door into the running Strive platform on the ailab cluster. Both
+      credentials behind it are rendered and rotated by the local bao agent — never edit, copy or
+      print them.
+
+          platform kubectl get pods                  # namespace strive-ailab
+          platform kubectl logs deploy/airlock --tail 100
+          platform psql -d airlock -c '\dt'          # replicas, read-only
+          platform psql -d airlock --tenant <tenant_id> -c 'select ...'
+          platform pf valkey-master 16379:6379       # any ClusterIP, foreground
+          platform env                               # slot, postgres role, file paths
+
+      What it can reach: the `strive-ailab`, `strive-sandboxes-ailab` and `platform-edge` namespaces
+      (workloads, pods/logs, services, configmaps, events, PVCs, CNPG/Traefik/Flux/ESO objects,
+      `kubectl top`, port-forward) and every platform database EXCEPT `keycloak`.
+
+      What it cannot, by design — do not work around it, ask instead:
+
+      1. **Secrets and `exec` are denied** (`get secrets`, `pods/exec`, `pods/attach` all fail), and
+         so is every write. A one-off wider grant is a PR against `kubernetes/apps/infrastructure/
+         platform-access/rbac.yaml` for this slot with a removal date, not a credential to find.
+      2. **Postgres is SELECT-only by privilege**, not by a setting: an `INSERT` fails
+         `permission denied` even if you turn `default_transaction_read_only` off, on the primary as
+         much as on a replica.
+      3. **Most `airlock` and `workflow` tables are RLS-scoped** on `current_setting('app.tenant_id')`.
+         Without `--tenant <id>` they read **EMPTY — zero rows, no error**. An empty result is
+         usually a missing tenant, not missing data.
+      4. `--rw` uses the primary (still read-only). Prefer it for a long scan: a replica can cancel a
+         query that conflicts with recovery (`max_standby_streaming_delay`).
+      5. Fixes ship as PRs to the platform repo and through Flux. This credential is for *seeing*.
+
+      Runbook: `docs/runbooks/dev-worker-platform-access.md` in the ailab repo.
       {% endif %}
   loop: "{{ dev_worker_users }}"
   loop_control:

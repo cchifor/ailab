@@ -1,0 +1,631 @@
+# openbao-platform-pg-sync — maintains one read-only Postgres login per LIVE dev-worker slot on the
+# platform's CNPG cluster (strive-pg) and publishes it to the slot's OpenBao KV path as SYNC-OWNED
+# fields: platform_pg_user / platform_pg_password / platform_pg_valid_until (ADR 0028). The worker's
+# bao agent renders ~/.platform/pgpass from them; `platform psql` uses it through a port-forward.
+#
+# WHY HERE (ns strive-ailab) AND NOT NEXT TO THE OTHER SYNC: it needs the CNPG superuser to create
+# roles and grant, and a Secret can only be mounted by a pod in its own namespace. This is the SAME
+# Secret, mounted the SAME way, as the platform repo's own strive-pg-init-databases Job — an
+# in-cluster, Flux-owned, reviewed workload. What ADR 0028 bounds is what a WORKER can read; this Job
+# is on the cluster side of that line (plan §Decision 2).
+#
+# WHY WHEN-NEEDED ROTATION: a slot's password changes only when its KV fields are missing, the
+# published validity has < PG_ROTATE_BEFORE_SECONDS left, the published password no longer logs in,
+# or FORCE_ROTATE=1. Everything else (attributes, GUC defaults, grants) is re-asserted on every run.
+# A re-run is therefore a no-op — which is what makes the bootstrap Job's reap-and-re-apply retry
+# loop (below) safe, and `kubectl create job --from=cronjob/openbao-platform-pg-sync` always safe.
+# Validity 14 d, rotate with 7 d left: a password is replaced roughly weekly, a leaked one dies within
+# two weeks, and a week of missed runs expires nothing. A failed run is `KubeJobFailed` (the stack's
+# existing kube-state-metrics rule, 15 m) — no new alert.
+#
+# WHY NOT pg_read_all_data: it is cluster-wide and cannot leave a database out without revoking
+# PUBLIC's CONNECT there, which the platform's per-tenant roles rely on. The grants below are explicit
+# per database, and `keycloak` (the identity store) is never in PLATFORM_DATABASES — the script
+# refuses to start if it is. RLS is honoured (NOBYPASSRLS): airlock/workflow rows answer only with
+# app.tenant_id set for the session — `platform psql --tenant <id>`.
+#
+# THE SLOT LIST (LIVE_SLOTS / RETIRED_SLOTS) is one of the enumerations scripts/check-slot-enumerations.py
+# keeps in step with platform-access/rbac.yaml, k8stoken-sync.yaml and devworker-provision-job.yaml.
+# Retiring a slot = move it from LIVE_SLOTS to RETIRED_SLOTS: the next run DROP OWNED BYs it in every
+# database and DROPs the role (idempotent, resumable). Reviewer VMs are excluded on purpose (rbac.yaml).
+#
+# NEVER PRINTS A PASSWORD. Role names, database names, field names, timestamps, rotated/kept only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao-platform-pg-sync
+  namespace: strive-ailab
+  labels:
+    app.kubernetes.io/name: openbao-platform-pg-sync
+    app.kubernetes.io/component: credential-sync
+    app.kubernetes.io/part-of: agentforge
+# No Kubernetes RBAC at all: the SA token is used ONLY to log in to OpenBao (k8s auth role
+# platform-pg-sync, created by devworker-provision-job.yaml with the k8stoken-sync KV-write policy —
+# a per-slot `read/create/update/patch` on af/data/dev-workers/dev-worker-<N>, shared on purpose so
+# PR-C2's narrowing covers both writers). Postgres is reached with the mounted superuser Secret.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-platform-pg-sync-script
+  namespace: strive-ailab
+  labels:
+    app.kubernetes.io/name: openbao-platform-pg-sync
+    app.kubernetes.io/component: credential-sync
+    app.kubernetes.io/part-of: agentforge
+data:
+  sync.py: |
+    #!/usr/bin/env python3
+    """Maintain a read-only Postgres login per live dev-worker slot and publish it to OpenBao.
+
+    Runs in the CNPG operand image (python 3.9 + psycopg2 — no `match`, no `X | Y` annotations, no
+    f-string `=`). NEVER prints a password or any KV value: role names, database names, field names,
+    timestamps and rotated/kept only. Fail-closed: OpenBao login first (a run that cannot publish must
+    not rotate), every role change for a run in ONE transaction on the primary, every rotated login
+    proven — read-only by privilege — before anything is published.
+
+    Tested by scripts/tests/test-platform-pg-sync.sh under this same image against a throwaway
+    Postgres and a stub OpenBao. The OpenBao client mirrors openbao-k8stoken-sync's sync.py — keep
+    the two in step.
+    """
+    import calendar
+    import json
+    import os
+    import secrets
+    import ssl
+    import sys
+    import time
+    import urllib.error
+    import urllib.request
+
+    import psycopg2
+    from psycopg2 import sql
+
+    SA_DIR = os.environ.get("SA_DIR", "/var/run/secrets/kubernetes.io/serviceaccount")
+    BAO = os.environ["BAO_ADDR"]
+    BAO_ROLE = os.environ.get("BAO_ROLE", "platform-pg-sync")
+    MOUNT = os.environ.get("BAO_KV_MOUNT", "af")
+    LIVE_SLOTS = [int(s) for s in os.environ["LIVE_SLOTS"].split()]
+    RETIRED_SLOTS = [int(s) for s in os.environ.get("RETIRED_SLOTS", "").split()]
+    DATABASES = os.environ["PLATFORM_DATABASES"].split()
+    VALID_SECONDS = int(os.environ.get("PG_PASSWORD_VALID_SECONDS", "1209600"))   # 14 d
+    ROTATE_BEFORE = int(os.environ.get("PG_ROTATE_BEFORE_SECONDS", "604800"))     # rotate with < 7 d left
+    CONNECTION_LIMIT = int(os.environ.get("PG_CONNECTION_LIMIT", "10"))
+    FORCE_ROTATE = os.environ.get("FORCE_ROTATE", "") == "1"
+    # Roles whose FUTURE tables are readable without waiting for the next run: the migrator (`app`
+    # owns every platform database and runs every alembic migration) and the CNPG superuser (the
+    # platform's init Job and the workflow admin DSN connect as it). Database-wide, never IN SCHEMA,
+    # and never for a tenant role: a per-schema default ACL is a dependency of that schema, and a
+    # default ACL FOR a role blocks DROP ROLE — either would break the integration provisioner's
+    # per-tenant teardown. Tables created by any other role become readable on the next run.
+    DEFAULT_PRIV_GRANTORS = os.environ.get("PG_DEFAULT_PRIV_GRANTORS", "app postgres").split()
+    SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "pg_toast")
+    FIELDS = ("platform_pg_user", "platform_pg_password", "platform_pg_valid_until")
+    TS = "%Y-%m-%dT%H:%M:%SZ"
+
+
+    def role_name(slot):
+        return "dw%d_platform_ro" % slot
+
+
+    def worker_name(slot):
+        return "dev-worker-%d" % slot
+
+
+    def log(msg):
+        print(msg, flush=True)
+
+
+    def new_password():
+        return secrets.token_urlsafe(32)
+
+
+    def valid_until_from(now):
+        return time.strftime(TS, time.gmtime(now + VALID_SECONDS))
+
+
+    # ---- Postgres ----------------------------------------------------------------------------------
+    def pg_connect(dbname, user=None, password=None):
+        return psycopg2.connect(
+            host=os.environ["PGHOST"], port=os.environ.get("PGPORT", "5432"), dbname=dbname,
+            user=user or os.environ["PGUSER"], password=password or os.environ["PGPASSWORD"],
+            sslmode=os.environ.get("PGSSLMODE", "require"), connect_timeout=15,
+            application_name="openbao-platform-pg-sync",
+        )
+
+
+    def user_schemas(cur):
+        cur.execute(
+            "SELECT nspname FROM pg_namespace WHERE nspname NOT IN %s "
+            "AND nspname NOT LIKE 'pg\\_temp%%' AND nspname NOT LIKE 'pg\\_toast\\_temp%%' ORDER BY 1",
+            (SYSTEM_SCHEMAS,))
+        return [r[0] for r in cur.fetchall()]
+
+
+    def assert_role(cur, role, password=None, valid_until=None):
+        """Create-if-absent, then restate every attribute so a hand edit converges back within a day.
+        PASSWORD / VALID UNTIL only when this run rotates the slot."""
+        ident = sql.Identifier(role)
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+        if cur.fetchone() is None:
+            cur.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(ident))
+        cur.execute(sql.SQL(
+            "ALTER ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS "
+            "NOREPLICATION CONNECTION LIMIT %s").format(ident), (CONNECTION_LIMIT,))
+        if password is not None:
+            cur.execute(sql.SQL("ALTER ROLE {} WITH PASSWORD %s VALID UNTIL %s").format(ident),
+                        (password, valid_until))
+        cur.execute(sql.SQL("GRANT pg_monitor TO {}").format(ident))
+        for guc, val in (("default_transaction_read_only", "on"),
+                         ("statement_timeout", "300s"),
+                         ("idle_in_transaction_session_timeout", "60s")):
+            cur.execute(sql.SQL("ALTER ROLE {} SET {} = %s").format(ident, sql.Identifier(guc)), (val,))
+
+
+    def grant_database(dbname, roles):
+        """Read grants for `roles` in one database: CONNECT, USAGE on every user schema present now,
+        SELECT on every table/view/sequence in them, and database-wide default privileges for the
+        grantor roles. Runs in one transaction per database."""
+        conn = pg_connect(dbname)
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    schemas = user_schemas(cur)
+                    for role in roles:
+                        ident = sql.Identifier(role)
+                        cur.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                            sql.Identifier(dbname), ident))
+                        for schema in schemas:
+                            s = sql.Identifier(schema)
+                            cur.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(s, ident))
+                            cur.execute(sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(s, ident))
+                            cur.execute(sql.SQL("GRANT SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}").format(s, ident))
+                        for grantor in DEFAULT_PRIV_GRANTORS:
+                            g = sql.Identifier(grantor)
+                            cur.execute(sql.SQL(
+                                "ALTER DEFAULT PRIVILEGES FOR ROLE {} GRANT SELECT ON TABLES TO {}").format(g, ident))
+                            cur.execute(sql.SQL(
+                                "ALTER DEFAULT PRIVILEGES FOR ROLE {} GRANT SELECT ON SEQUENCES TO {}").format(g, ident))
+                    log("granted %s: %d roles, schemas %s" % (dbname, len(roles), ",".join(schemas)))
+        finally:
+            conn.close()
+
+
+    def revoke_database(dbname, roles):
+        """DROP OWNED BY strips every grant and default-privilege entry the role holds in this
+        database (it owns nothing, so nothing else is dropped). Skips roles that no longer exist."""
+        conn = pg_connect(dbname)
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    for role in roles:
+                        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+                        if cur.fetchone() is None:
+                            continue
+                        cur.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+                        log("revoked %s in %s" % (role, dbname))
+        finally:
+            conn.close()
+
+
+    def login_works(role, password, dbname):
+        """True when the credential logs in. Any failure (auth, expiry, role gone) is False — the
+        caller decides whether that means 'rotate' (pre-check) or 'abort' (post-rotation proof)."""
+        try:
+            conn = pg_connect(dbname, user=role, password=password)
+        except psycopg2.Error:
+            return False
+        conn.close()
+        return True
+
+
+    def prove_login(role, password, dbname):
+        """The published credential must be one that WORKS and is read-only BY PRIVILEGE: log in as
+        the role over the primary service, check identity and the session default, read a pg_monitor
+        view, flip the read-only default off (any session may) and make sure a write is STILL refused
+        — the role owns nothing and holds only SELECT."""
+        conn = pg_connect(dbname, user=role, password=password)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_user, current_setting('transaction_read_only')")
+                who, ro = cur.fetchone()
+                if who != role or ro != "on":
+                    raise RuntimeError("%s: login proved as %s with transaction_read_only=%s" % (role, who, ro))
+                cur.execute("SELECT count(*) FROM pg_stat_activity")  # pg_monitor
+                # Session-level, not `SET transaction_read_only` (which in autocommit mode dies with
+                # its one-statement transaction): the role-level default is USERSET and any session
+                # may flip it — which is exactly why it cannot be the enforcement.
+                cur.execute("SET default_transaction_read_only = off")
+                cur.execute("SELECT schemaname, tablename FROM pg_tables WHERE schemaname NOT IN %s "
+                            "ORDER BY 1, 2 LIMIT 1", (SYSTEM_SCHEMAS,))
+                row = cur.fetchone()
+                probes = [sql.SQL("CREATE TABLE openbao_platform_pg_sync_probe (x int)")]
+                if row is not None:
+                    probes.append(sql.SQL("INSERT INTO {}.{} DEFAULT VALUES").format(
+                        sql.Identifier(row[0]), sql.Identifier(row[1])))
+                for probe in probes:
+                    try:
+                        cur.execute(probe)
+                    except psycopg2.Error as exc:
+                        if exc.pgcode != "42501":  # insufficient_privilege — the only acceptable answer
+                            raise RuntimeError("%s: write refused with unexpected SQLSTATE %s" % (role, exc.pgcode))
+                    else:
+                        raise RuntimeError("%s: a write SUCCEEDED — the role is not read-only" % role)
+        finally:
+            conn.close()
+
+
+    # ---- OpenBao (mirrors openbao-k8stoken-sync's sync.py) -------------------------------------------
+    def call(url, ctx, method="GET", body=None, token=None, ctype="application/json"):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Accept", "application/json")
+        if data:
+            req.add_header("Content-Type", ctype)
+        if token:
+            req.add_header("Authorization", "Bearer " + token)
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else {})
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            try:
+                return exc.code, json.loads(raw) if raw else {}
+            except ValueError:
+                return exc.code, {"raw": "<unparseable>"}
+
+
+    class Bao(object):
+        def __init__(self):
+            cafile = os.environ.get("BAO_CACERT")
+            self.ctx = ssl.create_default_context(cafile=cafile) if cafile else None
+            with open(SA_DIR + "/token", encoding="utf-8") as fh:
+                sa_jwt = fh.read().strip()
+            status, body = call(BAO + "/v1/auth/kubernetes/login", self.ctx, "POST",
+                                {"role": BAO_ROLE, "jwt": sa_jwt})
+            if status != 200:
+                sys.exit("OpenBao k8s-auth login failed as role '%s': HTTP %s (role not created yet by "
+                         "openbao-devworker-provision, or vault sealed)" % (BAO_ROLE, status))
+            self.token = body["auth"]["client_token"]
+
+        def _call(self, path, method="GET", body=None, ctype="application/json"):
+            return call(BAO + "/v1/" + path, self.ctx, method, body, self.token, ctype)
+
+        def current(self, worker):
+            """(exists, fields) — the published platform_pg_* subset, {} when absent. Any status other
+            than 200/404 aborts: an auth/network error must never read as 'absent'."""
+            status, body = self._call("%s/data/dev-workers/%s" % (MOUNT, worker))
+            if status == 200:
+                data = (body.get("data") or {}).get("data") or {}
+                return True, dict((k, data[k]) for k in FIELDS if k in data)
+            if status == 404:
+                return False, {}
+            sys.exit("probe of %s returned HTTP %s; refusing to guess whether it exists" % (worker, status))
+
+        def publish(self, worker, exists, fields):
+            path = "%s/data/dev-workers/%s" % (MOUNT, worker)
+            if exists:
+                st, _ = self._call(path, "PATCH", {"data": fields}, "application/merge-patch+json")
+                if st not in (200, 204):
+                    sys.exit("patch of %s failed: HTTP %s — existing fields left untouched" % (worker, st))
+                return
+            # Create-only CAS: openbao-k8stoken-sync and openbao-devworker-provision write the same
+            # documents and can observe absence at the same moment; a bare write would replace theirs.
+            st, _ = self._call(path, "POST", {"data": fields, "options": {"cas": 0}})
+            if st in (400, 409):
+                st, _ = self._call(path, "PATCH", {"data": fields}, "application/merge-patch+json")
+                if st not in (200, 204):
+                    sys.exit("%s: lost the create race and the follow-up patch failed: HTTP %s" % (worker, st))
+            elif st not in (200, 204):
+                sys.exit("create of %s failed: HTTP %s" % (worker, st))
+
+
+    def rotation_reason(fields, role, now):
+        """Why this slot must be rotated this run, or None to keep the published credential."""
+        if FORCE_ROTATE:
+            return "FORCE_ROTATE"
+        if any(f not in fields for f in FIELDS):
+            return "fields missing"
+        if fields["platform_pg_user"] != role:
+            return "published user is not %s" % role
+        try:
+            left = calendar.timegm(time.strptime(fields["platform_pg_valid_until"], TS)) - now
+        except ValueError:
+            return "unparseable valid_until"
+        if left < ROTATE_BEFORE:
+            return "%dh of validity left" % max(int(left // 3600), 0)
+        return None
+
+
+    def main():
+        if not LIVE_SLOTS:
+            sys.exit("LIVE_SLOTS is empty; refusing to run")
+        if set(LIVE_SLOTS) & set(RETIRED_SLOTS):
+            sys.exit("a slot is both live and retired: %s" % sorted(set(LIVE_SLOTS) & set(RETIRED_SLOTS)))
+        if "keycloak" in DATABASES:
+            sys.exit("keycloak is the identity store and is never in PLATFORM_DATABASES")
+        if not DATABASES:
+            sys.exit("PLATFORM_DATABASES is empty; refusing to run")
+
+        bao = Bao()  # first: a run that cannot publish must not rotate anything
+        now = time.time()
+        probe_db = DATABASES[0]
+        admin_db = os.environ.get("PGDATABASE", "postgres")
+
+        # ---- Decide per slot: rotate or keep ---------------------------------------------------------
+        plan = {}
+        for slot in LIVE_SLOTS:
+            exists, fields = bao.current(worker_name(slot))
+            reason = rotation_reason(fields, role_name(slot), now)
+            plan[slot] = {"exists": exists, "fields": fields, "rotate": reason is not None, "reason": reason}
+
+        # ---- Cluster-wide role state, one transaction on the primary ---------------------------------
+        conn = pg_connect(admin_db)
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_is_in_recovery()")
+                    if cur.fetchone()[0]:
+                        raise RuntimeError("connected to a replica; PGHOST must be the -rw service")
+                    for slot in sorted(plan):
+                        entry = plan[slot]
+                        if entry["rotate"]:
+                            entry["password"] = new_password()
+                            entry["valid_until"] = valid_until_from(now)
+                            assert_role(cur, role_name(slot), entry["password"], entry["valid_until"])
+                        else:
+                            assert_role(cur, role_name(slot))
+        finally:
+            conn.close()
+
+        # ---- Per-database grants for live roles; revocation for retired ones -------------------------
+        live_roles = [role_name(s) for s in sorted(plan)]
+        for dbname in DATABASES:
+            grant_database(dbname, live_roles)
+        retired = [role_name(s) for s in RETIRED_SLOTS]
+        if retired:
+            # DROP OWNED BY must run in EVERY database (grants and default ACLs are per database)
+            # before the role can be dropped — hence a per-database loop, then the role.
+            for dbname in DATABASES + [admin_db]:
+                revoke_database(dbname, retired)
+            conn = pg_connect(admin_db)
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        for role in retired:
+                            cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+                            log("retired %s: grants revoked in %d databases, role dropped if present"
+                                % (role, len(DATABASES) + 1))
+            finally:
+                conn.close()
+
+        # ---- A kept slot must still log in with what is published; otherwise rotate it after all ----
+        # (after the grants, so a hand-dropped role recreated above is proven with its grants in place)
+        conn = pg_connect(admin_db)
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    for slot in sorted(plan):
+                        entry = plan[slot]
+                        if entry["rotate"]:
+                            continue
+                        if login_works(role_name(slot), entry["fields"]["platform_pg_password"], probe_db):
+                            continue
+                        entry.update(rotate=True, reason="published password no longer logs in",
+                                     password=new_password(), valid_until=valid_until_from(now))
+                        assert_role(cur, role_name(slot), entry["password"], entry["valid_until"])
+        finally:
+            conn.close()
+
+        # ---- Prove every rotated login BEFORE publishing any -------------------------------------------
+        for slot in sorted(plan):
+            entry = plan[slot]
+            if entry["rotate"]:
+                prove_login(role_name(slot), entry["password"], probe_db)
+
+        # ---- Publish, one patch per worker so the three fields can never disagree ---------------------
+        rotated = kept = 0
+        for slot in sorted(plan):
+            worker, role, entry = worker_name(slot), role_name(slot), plan[slot]
+            if not entry["rotate"]:
+                kept += 1
+                log("kept %s: %s valid until %s" % (worker, role, entry["fields"]["platform_pg_valid_until"]))
+                continue
+            bao.publish(worker, entry["exists"], {
+                "platform_pg_user": role,
+                "platform_pg_password": entry["password"],
+                "platform_pg_valid_until": entry["valid_until"],
+            })
+            rotated += 1
+            log("rotated %s: %s valid until %s (%s); published %s"
+                % (worker, role, entry["valid_until"], entry["reason"], ", ".join(FIELDS)))
+        log("published %d/%d slots (rotated %d, kept %d)" % (rotated + kept, len(LIVE_SLOTS), rotated, kept))
+
+
+    if __name__ == "__main__":
+        main()
+---
+# STEADY STATE: daily at 03:47 UTC, half an hour after openbao-k8stoken-sync (03:17), so the two
+# writers to af/dev-workers/<slot> never run at once (they would be safe anyway — KV patch — but a
+# quiet log is a readable log). Forbid serialises this CronJob against ITSELF only; the bootstrap Job
+# below is a separate object, which is why the script never does check-then-write on KV.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: openbao-platform-pg-sync
+  namespace: strive-ailab
+  labels:
+    app.kubernetes.io/name: openbao-platform-pg-sync
+    app.kubernetes.io/component: credential-sync
+    app.kubernetes.io/part-of: agentforge
+spec:
+  schedule: "47 3 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 4
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: openbao-platform-pg-sync
+            app.kubernetes.io/part-of: agentforge
+        spec:
+          restartPolicy: OnFailure
+          enableServiceLinks: false
+          serviceAccountName: openbao-platform-pg-sync
+          automountServiceAccountToken: true # the OpenBao k8s-auth login; nothing else uses it
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: sync
+              # The CNPG operand image the platform's Cluster runs (python3 + psycopg2 bundled with
+              # barman-cloud, verified 2026-09-21) — psycopg2's protocol stays in step with the server.
+              image: ghcr.io/cloudnative-pg/postgresql:16.9
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "-u", "/scripts/sync.py"]
+              env:
+                - { name: HOME, value: /tmp }
+                - { name: PGHOST, value: strive-pg-rw.strive-ailab.svc.cluster.local } # the PRIMARY; the script refuses a replica
+                - { name: PGPORT, value: "5432" }
+                - { name: PGDATABASE, value: postgres }
+                - { name: PGSSLMODE, value: require }
+                - name: PGUSER
+                  valueFrom: { secretKeyRef: { name: strive-pg-superuser, key: username } }
+                - name: PGPASSWORD
+                  valueFrom: { secretKeyRef: { name: strive-pg-superuser, key: password } }
+                # Headless per-pod name, as the sibling syncs use: resolves even when the vault pod is
+                # up but SEALED, so this fails with a real error instead of a DNS miss.
+                - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+                - { name: BAO_CACERT, value: /tls/ca.crt }
+                - { name: BAO_ROLE, value: platform-pg-sync }
+                - { name: BAO_KV_MOUNT, value: af }
+                # SLOT LIST — see the header and scripts/check-slot-enumerations.py.
+                - { name: LIVE_SLOTS, value: "1 2 3 4 5" }
+                - { name: RETIRED_SLOTS, value: "6" } # slot 6 retired 2026-09-2x (PR-C1); role never existed, kept as the worked example
+                # Every platform database EXCEPT keycloak (the identity store — the script refuses it).
+                - { name: PLATFORM_DATABASES, value: "airlock profile knowledge mcp workflow hatchet integration notification digest platform_managed tms sentinel" }
+                - { name: PG_PASSWORD_VALID_SECONDS, value: "1209600" } # 14 d
+                - { name: PG_ROTATE_BEFORE_SECONDS, value: "604800" } # rotate with < 7 d left
+                - { name: PG_CONNECTION_LIMIT, value: "10" }
+              volumeMounts:
+                - { name: tls, mountPath: /tls, readOnly: true }
+                - { name: script, mountPath: /scripts, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+              resources:
+                requests: { cpu: 10m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                readOnlyRootFilesystem: true
+                seccompProfile: { type: RuntimeDefault }
+          volumes:
+            - name: tls
+              # The OpenBao server CA (ailab-root-ca, public). The sibling syncs mount ns openbao's
+              # openbao-tls Secret; a pod here cannot, so kustomization.yaml generates this ConfigMap
+              # from the same PEM the workers pin (CI cmp-checks the two copies).
+              configMap:
+                name: openbao-platform-pg-sync-ca
+            - name: script
+              configMap:
+                name: openbao-platform-pg-sync-script
+                defaultMode: 0555
+            - name: tmp
+              emptyDir:
+                sizeLimit: 16Mi
+---
+# BOOTSTRAP / RECOVERY RUN — the same shape as openbao-k8stoken-sync-bootstrap. Applying a CronJob
+# does not run it; this Job is the first run on apply. The kustomize force annotation is the
+# immutable-Job wedge guard (a script or image edit deletes+recreates THIS Job instead of failing the
+# whole Kustomization). ttlSecondsAfterFinished reaps it (Failed as well as Complete) and Flux
+# re-applies it on the next reconcile: that loop is the retry when the OpenBao role does not exist
+# yet (devworker-provision runs daily), and because a run is a no-op unless rotation is due, the loop
+# never rotates a live credential. Workers read KV, never this Job.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-platform-pg-sync-bootstrap
+  namespace: strive-ailab
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: openbao-platform-pg-sync
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-platform-pg-sync
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      serviceAccountName: openbao-platform-pg-sync
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sync
+          image: ghcr.io/cloudnative-pg/postgresql:16.9
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-u", "/scripts/sync.py"]
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: PGHOST, value: strive-pg-rw.strive-ailab.svc.cluster.local }
+            - { name: PGPORT, value: "5432" }
+            - { name: PGDATABASE, value: postgres }
+            - { name: PGSSLMODE, value: require }
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: strive-pg-superuser, key: username } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: strive-pg-superuser, key: password } }
+            - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: BAO_CACERT, value: /tls/ca.crt }
+            - { name: BAO_ROLE, value: platform-pg-sync }
+            - { name: BAO_KV_MOUNT, value: af }
+            - { name: LIVE_SLOTS, value: "1 2 3 4 5" }
+            - { name: RETIRED_SLOTS, value: "6" }
+            - { name: PLATFORM_DATABASES, value: "airlock profile knowledge mcp workflow hatchet integration notification digest platform_managed tms sentinel" }
+            - { name: PG_PASSWORD_VALID_SECONDS, value: "1209600" }
+            - { name: PG_ROTATE_BEFORE_SECONDS, value: "604800" }
+            - { name: PG_CONNECTION_LIMIT, value: "10" }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          configMap:
+            name: openbao-platform-pg-sync-ca
+        - name: script
+          configMap:
+            name: openbao-platform-pg-sync-script
+            defaultMode: 0555
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

@@ -95,3 +95,34 @@ template {
 }
 {% endfor %}
 {% endif %}
+{% if dev_worker_platform_fields_present | default(false) | bool %}
+
+// ---- Strive platform access (ADR 0028) ---------------------------------------------------------
+// EMITTED ONLY when this run proved, under this host's own AppRole, that all three platform_* fields
+// are readable in af/dev-workers/{{ inventory_hostname }} (tasks/openbao.yml). Same hazard as the
+// kubeconfig stanzas above and a stricter gate than theirs: these fields are written by TWO syncs
+// (openbao-k8stoken-sync for the kubeconfig, openbao-platform-pg-sync for the Postgres login), so a
+// host can legitimately have one and not the other for a while — and a stanza pointing at a field
+// that is not there yet EXITS the agent, taking ~/.git-credentials with it on this host. The gate is
+// re-derived every run (a plain set_fact, never cached), so a host picks these up on the next
+// `-t openbao` run once the syncs have published, and loses them only if a field is really gone.
+{% for user in dev_worker_users %}
+template {
+  source      = "/etc/openbao-agent/platform-kubeconfig.ctmpl"
+  destination = "{{ user.home }}/.platform/kubeconfig"
+  perms       = "0600"
+  command     = "chown {{ user.name }}:{{ user.name }} {{ user.home }}/.platform/kubeconfig"
+  error_on_missing_key = true
+}
+
+// libpq refuses a password file that is group- or world-readable, so 0600 here is functional, not
+// only hygienic.
+template {
+  source      = "/etc/openbao-agent/platform-pgpass.ctmpl"
+  destination = "{{ user.home }}/.platform/pgpass"
+  perms       = "0600"
+  command     = "chown {{ user.name }}:{{ user.name }} {{ user.home }}/.platform/pgpass"
+  error_on_missing_key = true
+}
+{% endfor %}
+{% endif %}

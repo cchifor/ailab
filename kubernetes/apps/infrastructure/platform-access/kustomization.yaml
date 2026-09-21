@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Dev-worker platform access plane (ADR 0028). Reconciled by the DEDICATED clusters/ai/platform-access.yaml
+# Flux Kustomization (wait:false, no decryption — nothing here is a secret, which is the point: every
+# credential this plane hands out is minted by a sync from cluster state, never seeded from git).
+resources:
+  - namespace.yaml # ns platform-access — the observer ServiceAccounts and nothing else
+  - rbac.yaml # ClusterRole dev-worker-platform-observer, per-slot SAs, RoleBindings in the platform namespaces, the mint Role
+  - pg-sync.yaml # openbao-platform-pg-sync: per-slot read-only Postgres logins -> af/dev-workers/<slot>.platform_pg_* (sync-owned)
+
+# The OpenBao server CA for the pg-sync (it runs in ns strive-ailab and cannot mount ns openbao's
+# openbao-tls Secret). This is the PUBLIC ailab-root-ca certificate — the same bytes the workers pin in
+# ansible/roles/openbao_agent/files/ailab-root-ca.crt; the manifests workflow `cmp`s the two copies so
+# they cannot drift apart. Fixed name (no hash suffix): the CronJob references it by name.
+configMapGenerator:
+  - name: openbao-platform-pg-sync-ca
+    namespace: strive-ailab
+    files:
+      - ca.crt=ailab-root-ca.crt
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/name: openbao-platform-pg-sync
+        app.kubernetes.io/part-of: agentforge

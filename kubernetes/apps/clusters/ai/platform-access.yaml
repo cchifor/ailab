@@ -1,0 +1,24 @@
+# Dev-worker platform access plane (ADR 0028): the observer ServiceAccounts + read-only RBAC in the
+# Strive platform namespaces, and the openbao-platform-pg-sync CronJob. DEDICATED Kustomization,
+# wait:false, no decryption — nothing here is a secret.
+#
+# No dependsOn, on purpose (the helmtest/testpool reasoning): the RoleBindings and the CronJob land in
+# namespaces the `platform` Kustomization creates, and the two syncs that consume this tree live in
+# `openbao`. Coupling this layer to either with dependsOn would let an unrelated platform or vault
+# failure freeze a read-only RBAC change; a missing namespace is just an apply error retried every
+# retryInterval, and openbao-k8stoken-sync retries on a missing SA until "validated 15/15 fields".
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform-access
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/platform-access
+  prune: true
+  wait: false

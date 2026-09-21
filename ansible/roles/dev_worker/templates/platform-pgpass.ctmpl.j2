@@ -1,0 +1,17 @@
+{#- Managed by ansible (role: dev_worker, ADR 0028). consul-template markup consumed by the bao
+    agent, NOT by ansible. Renders ~/.platform/pgpass — a libpq password file, so the line must be
+    exactly `hostname:port:database:username:password` and nothing else.
+
+    host/port/database are `*` on purpose: `platform psql` reaches Postgres through a port-forward on
+    a FRESH LOOPBACK PORT each time and may target any platform database, so pinning any of the three
+    would silently stop matching. The username field is NOT wildcarded — it is the published
+    platform_pg_user, so a wrong-user connection fails with "no password supplied" instead of
+    offering this password to some other role.
+
+    A literal ':' or '\' inside a field would need escaping; the sync's password alphabet is
+    base64url (token_urlsafe: A-Za-z0-9-_), which contains neither, and the role name is
+    dw<N>_platform_ro. Both fields are read verbatim with plain field access so that a missing field
+    fails the render CLOSED under error_on_missing_key rather than writing "<no value>".
+
+    Nothing outside the {{ }} actions may appear on the credential line. -#}
+{% raw %}{{ with secret "af/data/dev-workers/{% endraw %}{{ inventory_hostname }}{% raw %}" }}*:*:*:{{ .Data.data.platform_pg_user }}:{{ .Data.data.platform_pg_password }}{{ end }}{% endraw %}

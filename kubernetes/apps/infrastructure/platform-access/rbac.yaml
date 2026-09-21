@@ -1,0 +1,226 @@
+# Dev-worker platform observer (ADR 0028): one ServiceAccount per LIVE dev-worker slot, one read-only
+# ClusterRole bound by RoleBinding in each platform namespace, and the mint Role that lets
+# openbao-k8stoken-sync (ns openbao) issue bound tokens for exactly these SAs. The sync publishes the
+# rendered kubeconfig as af/dev-workers/dev-worker-<N>.platform_kubeconfig (sync-owned, never seeded)
+# and the worker's bao agent renders it to ~/.platform/kubeconfig. Runbook:
+# docs/runbooks/dev-worker-platform-access.md.
+#
+# THE SLOT LIST APPEARS FIVE TIMES IN THIS FILE — the SAs, the mint Role's resourceNames, and the
+# three RoleBindings' subjects — and once each in platform-access/pg-sync.yaml (LIVE_SLOTS /
+# RETIRED_SLOTS), security/openbao/k8stoken-sync.yaml (the `for _n in (...)` loop) and
+# security/openbao/devworker-provision-job.yaml (`for host in ...` and RETIRED_SLOTS).
+# scripts/check-slot-enumerations.py (CI, manifests.yaml) fails when any of them disagree; the retire
+# checklist in the runbook is the human-readable form of the same list.
+#
+# REVIEWER VMs ARE EXCLUDED ON PURPOSE (reviewer-1 / reviewer-2, ansible group `reviewers`). They
+# review diffs, have no `cred`, no per-host KV subtree and no kubeconfig plumbing; do not "complete"
+# the list with them — ADR 0028 §5.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dev-worker-platform-observer
+  labels:
+    app.kubernetes.io/name: platform-access
+    app.kubernetes.io/part-of: agentforge
+# WHAT IS DELIBERATELY ABSENT, and why (the negative checks in ansible's health block prove the first
+# two hold on every rollout):
+#   - secrets (any verb): the whole point of the boundary. Every platform credential lives in a
+#     Secret; a worker that could read them would hold the platform, not observe it.
+#   - pods/exec, pods/attach, pods/ephemeralcontainers: exec is a Secret read by another door — every
+#     mounted file and env-injected value in any container. Escalation for one investigation is a git
+#     change: a purpose-named Role + RoleBinding for ONE slot with a removal date in the PR body.
+#   - serviceaccounts/token, and every create/update/patch/delete on anything but pods/portforward:
+#     "enhancements" ship through PRs and Flux, never through a worker's kubeconfig.
+#   - Nothing cluster-scoped: this is only ever bound by RoleBinding, so it confers nothing outside
+#     the namespaces listed below.
+# pods/portforward is what reaches every ClusterIP (Postgres, Valkey, Hatchet, Keycloak admin, any
+# service's internal API) over the authenticated, audited API-server path instead of a LAN NodePort.
+# create+get on it mirrors tep-access.yaml (the 1.31->1.37 SPDY/WebSocket RBAC-verb transition).
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/status
+      - services
+      - endpoints
+      - configmaps
+      - events
+      - persistentvolumeclaims
+      - serviceaccounts
+      - resourcequotas
+      - limitranges
+      - replicationcontrollers
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets", "controllerrevisions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"] # kubectl top
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters", "backups", "scheduledbackups", "poolers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["traefik.io"]
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+      - middlewares
+      - middlewaretcps
+      - serverstransports
+      - tlsoptions
+      - tlsstores
+      - traefikservices
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies", "ciliumendpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"] # values verified secret-free 2026-09-21 (plan §Decision 2)
+    resources: ["helmreleases"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["external-secrets.io"] # spec = key references, status = sync state; never a value
+    resources: ["externalsecrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["podmonitors", "servicemonitors", "prometheusrules", "probes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "scaledjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kyverno.io"]
+    resources: ["policies", "policyexceptions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["wgpolicyk8s.io"]
+    resources: ["policyreports"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"] # App sandboxes in strive-sandboxes-ailab
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
+    verbs: ["get", "list", "watch"]
+---
+# Minting rights for openbao-k8stoken-sync, scoped by resourceNames to the observer SAs and nothing
+# else in this namespace — the same shape as the tep/helmtest mint Roles in k8stoken-sync.yaml, kept
+# HERE next to the SAs it names so a slot change touches one file for this plane.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-k8stoken-sync
+  namespace: platform-access
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["platform-dw1", "platform-dw2", "platform-dw3", "platform-dw4", "platform-dw5"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-k8stoken-sync
+  namespace: platform-access
+subjects:
+  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
+roleRef:
+  kind: Role
+  name: openbao-k8stoken-sync
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: platform-dw1, namespace: platform-access }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: platform-dw2, namespace: platform-access }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: platform-dw3, namespace: platform-access }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: platform-dw4, namespace: platform-access }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: platform-dw5, namespace: platform-access }
+automountServiceAccountToken: false
+---
+# One RoleBinding per platform namespace. The ClusterRole is never ClusterRoleBound: a worker sees
+# these three namespaces and nothing else. strive-ailab = the services, the CNPG cluster, Valkey,
+# Hatchet, Keycloak; strive-sandboxes-ailab = the App sandboxes airlock runs; platform-edge = the
+# platform's own Traefik (routing questions). The subject list is the live slot list (header comment).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dev-worker-platform-observer
+  namespace: strive-ailab
+subjects:
+  - { kind: ServiceAccount, name: platform-dw1, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw3, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw5, namespace: platform-access }
+roleRef:
+  kind: ClusterRole
+  name: dev-worker-platform-observer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dev-worker-platform-observer
+  namespace: strive-sandboxes-ailab
+subjects:
+  - { kind: ServiceAccount, name: platform-dw1, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw3, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw5, namespace: platform-access }
+roleRef:
+  kind: ClusterRole
+  name: dev-worker-platform-observer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dev-worker-platform-observer
+  namespace: platform-edge
+subjects:
+  - { kind: ServiceAccount, name: platform-dw1, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw3, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw5, namespace: platform-access }
+roleRef:
+  kind: ClusterRole
+  name: dev-worker-platform-observer
+  apiGroup: rbac.authorization.k8s.io
