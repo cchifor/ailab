@@ -12,7 +12,10 @@
 #      non-zero; run 2 (role already absent) still deletes the policy — cleanup is resumable and is
 #      never reported "converged" while something is left.
 #   C. a token-accessor listing failure aborts the run BEFORE the role is deleted (never "0 tokens
-#      revoked" on a failed enumeration).
+#      revoked" on a failed enumeration); D. the same for the secret-id listing; E. a failed KV
+#      listing aborts the run (the KV purge is never reported done) and the rerun purges the subtree.
+#   The stub mimics the real CLI surface: generic `bao list` rejects `-mount` (only `bao kv list`
+#   takes it), so a traversal built on the wrong command fails the test instead of passing it.
 # Requires docker (the manifests CI job has it). Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -41,7 +44,7 @@ echo '{"stale":"x"}' > "$WORK/seeds/dev-worker-6.json"   # names a retired slot:
 # The stub answers like bao 2.6.x would (JSON lists, "No value found" for empty/absent paths, a role
 # that disappears once deleted, KV entries that disappear once their metadata is deleted, a folder
 # listed as `sub1/`) and logs every call to /state/calls.log. Fault injection via marker files in
-# /state: FAIL_POLICY_DELETE_ONCE, FAIL_ACCESSOR_LIST_ONCE. The canary CANARY-SECRET-ID-VALUE is what
+# /state: FAIL_POLICY_DELETE_ONCE, FAIL_ACCESSOR_LIST_ONCE, FAIL_SID_LIST_ONCE, FAIL_KV_LIST_ONCE. The canary CANARY-SECRET-ID-VALUE is what
 # a `bao write .../secret-id` response would carry; nothing in the provision script may print it.
 cat > "$WORK/stub/bao" <<'STUB'
 #!/bin/sh
@@ -63,25 +66,31 @@ case "$1 $2" in
     if [ -f "$STATE/FAIL_POLICY_DELETE_ONCE" ]; then rm -f "$STATE/FAIL_POLICY_DELETE_ONCE"; echo "Error deleting policy: connection reset" >&2; exit 2; fi
     touch "$STATE/policy-gone"; exit 0 ;;
   "write "*)
-    case "$3" in
+    case "$2" in
       auth/approle/role/*/secret-id) echo '{"data": {"secret_id": "CANARY-SECRET-ID-VALUE", "secret_id_accessor": "acc-new"}}' ;;
-      auth/approle/role/dev-worker-6/secret-id-accessor/destroy) touch "$STATE/sids-gone"; exit 0 ;;
+      auth/approle/role/dev-worker-6/secret-id-accessor/destroy) touch "$STATE/sids-gone-${3#secret_id_accessor=}"; exit 0 ;;
       *) exit 0 ;;
     esac ;;
   "delete auth/approle/role/dev-worker-6") touch "$STATE/role-gone"; exit 0 ;;
-  "list -format=json")
+  "list -format=json")   # generic list: `bao list -format=json <path>` — NO -mount flag here
     case "$3" in
-      auth/approle/role/dev-worker-6/secret-id) [ -f "$STATE/sids-gone" ] || [ -f "$STATE/role-gone" ] && nvf "$3" || echo '["acc1", "acc2"]' ;;
+      -mount*|-*) echo "flag provided but not defined: ${3%%=*}" >&2; exit 1 ;;
+      auth/approle/role/dev-worker-6/secret-id)
+        if [ -f "$STATE/FAIL_SID_LIST_ONCE" ]; then rm -f "$STATE/FAIL_SID_LIST_ONCE"; echo "Error listing $3: connection refused" >&2; exit 2; fi
+        { [ -f "$STATE/sids-gone-acc1" ] && [ -f "$STATE/sids-gone-acc2" ]; } && nvf "$3" || echo '["acc1", "acc2"]' ;;
       auth/token/accessors)
         if [ -f "$STATE/FAIL_ACCESSOR_LIST_ONCE" ]; then rm -f "$STATE/FAIL_ACCESSOR_LIST_ONCE"; echo "Error listing auth/token/accessors: Vault is sealed" >&2; exit 2; fi
         [ -f "$STATE/tok-gone-t2" ] && echo '["t1", "t3"]' || echo '["t1", "t2", "t3"]' ;;
-      -mount=af)
-        case "$4" in
-          dev-workers/dev-worker-6/) { [ -f "$STATE/kv-flat-gone" ] && [ -f "$STATE/kv-sub-gone" ]; } && nvf "$4" || echo '["flat", "sub1/"]' ;;
-          dev-workers/dev-worker-6/sub1/) [ -f "$STATE/kv-sub-gone" ] && nvf "$4" || echo '["credential"]' ;;
-          *) nvf "$4" ;;
-        esac ;;
       *) nvf "$3" ;;
+    esac ;;
+  "kv list")             # KV v2: `bao kv list -format=json -mount=af <path>`
+    [ "$3" = "-format=json" ] && [ "$4" = "-mount=af" ] || { echo "stub: unexpected kv list form: $*" >&2; exit 3; }
+    case "$5" in
+      dev-workers/dev-worker-6/)
+        if [ -f "$STATE/FAIL_KV_LIST_ONCE" ]; then rm -f "$STATE/FAIL_KV_LIST_ONCE"; echo "Error listing af/metadata/$5: Vault is sealed" >&2; exit 2; fi
+        { [ -f "$STATE/kv-flat-gone" ] && [ -f "$STATE/kv-sub-gone" ]; } && nvf "$5" || echo '["flat", "sub1/"]' ;;
+      dev-workers/dev-worker-6/sub1/) [ -f "$STATE/kv-sub-gone" ] && nvf "$5" || echo '["credential"]' ;;
+      *) nvf "$5" ;;
     esac ;;
   "kv metadata")
     case "$3 $4 $5" in
@@ -172,11 +181,31 @@ outB2="$(run)"; echo "$outB2" | sed 's/^/  B2: /'
 [ -f "$WORK/state/policy-gone" ] || { echo "B2 did not delete the policy left behind" >&2; exit 1; }
 expect "$outB2" "devworker provision complete"
 
+# ---- D. a failed secret-id listing aborts BEFORE anything irreversible -------------------------
+reset_state; touch "$WORK/state/FAIL_SID_LIST_ONCE"
+set +e; outD="$(run)"; rcD=$?; set -e; echo "$outD" | sed 's/^/  D: /'
+[ "$rcD" != 0 ] || { echo "D must fail when the secret-id listing fails" >&2; exit 1; }
+expect "$outD" "failed and was not a not-found; aborting"
+[ ! -f "$WORK/state/role-gone" ] || { echo "D: the role must NOT be deleted after a failed secret-id enumeration" >&2; exit 1; }
+forbid "$outD" "converged"
+
+# ---- E. a failed KV listing aborts the run; the rerun purges the subtree -----------------------
+reset_state; touch "$WORK/state/FAIL_KV_LIST_ONCE"
+set +e; outE1="$(run)"; rcE1=$?; set -e; echo "$outE1" | sed 's/^/  E1: /'
+[ "$rcE1" != 0 ] || { echo "E1 must fail when the KV listing fails" >&2; exit 1; }
+forbid "$outE1" "retired KV dev-workers/dev-worker-6: metadata deleted"
+forbid "$outE1" "converged"
+[ ! -f "$WORK/state/kv-sub-gone" ] || { echo "E1: nothing under the subtree may be deleted after a failed listing" >&2; exit 1; }
+outE2="$(run)"; echo "$outE2" | sed 's/^/  E2: /'
+expect "$outE2" "retired KV leaf dev-workers/dev-worker-6/sub1/credential: metadata deleted"
+expect "$outE2" "retired KV dev-workers/dev-worker-6: metadata deleted"
+expect "$outE2" "devworker provision complete"
+
 # ---- C. a failed token-accessor listing aborts BEFORE anything irreversible ---------------------
 reset_state; touch "$WORK/state/FAIL_ACCESSOR_LIST_ONCE"
 set +e; outC="$(run)"; rcC=$?; set -e; echo "$outC" | sed 's/^/  C: /'
 [ "$rcC" != 0 ] || { echo "C must fail when the accessor listing fails" >&2; exit 1; }
-expect "$outC" "bao list auth/token/accessors failed and was not a not-found; aborting"
+expect "$outC" "bao list -format=json auth/token/accessors failed and was not a not-found; aborting"
 [ ! -f "$WORK/state/role-gone" ] || { echo "C: the role must NOT be deleted after a failed enumeration" >&2; exit 1; }
 forbid "$outC" "0 tokens revoked"
 forbid "$outC" "converged"

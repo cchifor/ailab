@@ -180,17 +180,25 @@ data:
     # worker at once. Nothing here prints a credential: accessors only, values never.
     RETIRED_SLOTS="dev-worker-6" # dev-worker-6 (vmid 4206, .13) retired 2026-09-2x, PR-C1
 
-    # `bao list` answers "No value found" for an empty or absent path; anything else on stderr is an
+    # A listing answers "No value found" for an empty or absent path; anything else on stderr is an
     # operational failure (sealed, auth, network) and must fail the run rather than read as "nothing
     # to do" — a silent empty list would delete the role while its tokens live on. Prints the JSON
-    # array (or nothing) on stdout.
-    bao_list_or_empty() {
-      if out="$(bao list -format=json "$@" 2>&1)"; then
+    # array (or nothing) on stdout. ALWAYS captured into a variable first — `x="$(list_or_empty …)"`
+    # fails the script under `set -e` when the function exits 1, whereas the same substitution in a
+    # `for` word list would only kill the subshell and iterate over nothing.
+    list_or_empty() {          # generic list: auth paths (bao list -format=json <path>)
+      _or_empty bao list -format=json "$1"
+    }
+    kv_list_or_empty() {       # KV v2 listing: `bao kv list` is the mount-aware form (generic `bao list`
+      _or_empty bao kv list -format=json -mount=af "$1"   # has no -mount and would need af/metadata/…)
+    }
+    _or_empty() {
+      if out="$("$@" 2>&1)"; then
         printf '%s' "$out"
       elif printf '%s' "$out" | grep -qiE 'no value found|not found'; then
         :
       else
-        echo "bao list $* failed and was not a not-found; aborting" >&2
+        echo "$* failed and was not a not-found; aborting" >&2
         printf '%s\n' "$out" >&2
         exit 1
       fi
@@ -201,7 +209,8 @@ data:
     # shows one level, with a nested folder as `name/`. Recurse into folders, delete the leaves,
     # then the path itself (a path can be both a secret and a folder).
     kv_purge() {
-      for kid in $(bao_list_or_empty -mount=af "$1/" | json_words); do
+      kids="$(kv_list_or_empty "$1/")"
+      for kid in $(printf '%s' "$kids" | json_words); do
         case "$kid" in
           */) kv_purge "$1/${kid%/}" ;;
           *)  bao kv metadata delete -mount=af "$1/$kid" >/dev/null
@@ -220,7 +229,8 @@ data:
     for host in $RETIRED_SLOTS; do
       # 1. SecretIDs: destroy every accessor the role still lists (absent role/none = empty list).
       n_sid=0
-      for acc in $(bao_list_or_empty "auth/approle/role/${host}/secret-id" | json_words); do
+      sids="$(list_or_empty "auth/approle/role/${host}/secret-id")"
+      for acc in $(printf '%s' "$sids" | json_words); do
         bao write "auth/approle/role/${host}/secret-id-accessor/destroy" secret_id_accessor="$acc" >/dev/null
         n_sid=$((n_sid + 1))
       done
@@ -230,7 +240,7 @@ data:
       #    that expired between list and lookup — skipped, not fatal. The list itself must succeed:
       #    a failed enumeration is an aborted run, never "0 tokens".
       n_tok=0
-      accs="$(bao_list_or_empty auth/token/accessors)"
+      accs="$(list_or_empty auth/token/accessors)"
       for acc in $(printf '%s' "$accs" | json_words); do
         if bao token lookup -format=json -accessor "$acc" 2>/dev/null | grep -q "\"role_name\": *\"${host}\""; then
           bao token revoke -accessor "$acc" >/dev/null
