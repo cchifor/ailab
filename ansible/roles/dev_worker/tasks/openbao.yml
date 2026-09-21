@@ -375,21 +375,34 @@
         command -v psql >/dev/null || { echo "postgresql-client missing (platform psql would fail)" >&2; exit 1; }
         command -v pg_isready >/dev/null || { echo "pg_isready missing (platform psql would hang)" >&2; exit 1; }
         # Asked of the SERVER, not of `kubectl auth can-i`. On kubectl 1.30 (what the workers
-        # carry) can-i answers a subresource question through the RESTMapper, and this identity
-        # cannot do discovery - it answered a WRONG no for pods/portforward while the API server
-        # allowed it. The same false no would have made the NEGATIVE checks below pass vacuously,
-        # which is the failure that matters: a SelfSubjectAccessReview is the server itself.
-        ssar() { # ssar <verb> <resource> <subresource-or-empty> <expected true|false> <label>
-          want="$4"
-          got="$(printf '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{"resourceAttributes":{"namespace":"strive-ailab","verb":"%s","resource":"%s","subresource":"%s"}}}' "$1" "$2" "$3" \
-            | kubectl --kubeconfig {{ user.home }}/.platform/kubeconfig create -f - --validate=false -o jsonpath={.status.allowed} 2>/dev/null)"
-          [ "$got" = "$want" ] || { echo "platform kubeconfig: $5 expected allowed=$want, server said allowed=${got:-<none>}" >&2; exit 1; }
+        # carry) can-i resolves a subresource through the RESTMapper, and this identity cannot do
+        # discovery - it answered a WRONG no for pods/portforward while the API server allowed it.
+        # The same false no would have made the NEGATIVE checks pass vacuously, which is the half
+        # that matters. So: POST a SelfSubjectAccessReview to a HARDCODED path with --raw, which
+        # bypasses client-side mapping altogether (create -f - would still need discovery to find
+        # the kind), and keep kubectl stderr so a broken token reads differently from a denial.
+        ssar() { # ssar <group> <verb> <resource> <subresource-or-empty> <expected true|false> <label>
+          _err="$(mktemp)"
+          _resp="$(printf '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{"resourceAttributes":{"namespace":"strive-ailab","group":"%s","verb":"%s","resource":"%s","subresource":"%s"}}}' "$1" "$2" "$3" "$4" \
+            | kubectl --kubeconfig {{ user.home }}/.platform/kubeconfig create --raw /apis/authorization.k8s.io/v1/selfsubjectaccessreviews -f - 2>"$_err")"
+          # no jq on a worker: the field is a non-omitempty bool, so the literal is unambiguous
+          case "$_resp" in
+            *'"allowed":true'*)  _got=true ;;
+            *'"allowed":false'*) _got=false ;;
+            *) _got="" ;;
+          esac
+          [ "$_got" = "$5" ] || { echo "platform kubeconfig: $6 expected allowed=$5, got ${_got:-<no answer>} ($(tr -d "\n" <"$_err" | cut -c1-200))" >&2; rm -f "$_err"; exit 1; }
+          rm -f "$_err"
         }
-        ssar list   pods  ""            true  "list pods"
-        ssar create pods  portforward   true  "port-forward"
-        ssar get    secrets ""          false "read secrets"
-        ssar create pods  exec          false "exec into a pod"
-        ssar delete deployments ""      false "delete a deployment"
+        ssar ""     list   pods        ""          true  "list pods"
+        ssar ""     create pods        portforward true  "port-forward"
+        ssar ""     get    secrets     ""          false "read secrets"
+        ssar ""     create pods        exec        false "exec into a pod"
+        # The POSITIVE control for the apps group: if the group were wrong (deployments are NOT in
+        # the core group - the mistake this very check used to make) this would come back false and
+        # fail here, instead of the delete check passing vacuously below.
+        ssar apps   get    deployments ""          true  "list deployments (apps group wired)"
+        ssar apps   delete deployments ""          false "delete a deployment"
         {% endfor %}
         {% endif %}
         echo agent-healthy
