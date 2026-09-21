@@ -1,6 +1,6 @@
 # Implementation review — env-pool-root-cause-followup — round 2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
