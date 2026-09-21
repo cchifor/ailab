@@ -106,8 +106,8 @@ fallback (§Not in scope) is decided by the operator before any `env-node-2` wor
   of one version and is not recursive), and reassigned slots get **rotation with revocation of the
   previous holder's material**. The owner of the retired-slot revocation is the
   `devworker-provision-job` (declarative, idempotent, re-created by Flux after its 24 h TTL): a
-  `RETIRED_SLOTS` list in its ConfigMap, processed *before* the upsert loop and **skipping any seed
-  whose name is a retired slot** — which also means the KV retention decision is taken **before
+  `RETIRED_SLOTS` list in its ConfigMap, processed *after* the `k8stoken-sync` policy has been
+  narrowed and *before* the seed loop, **skipping any seed whose name is a retired slot** — which also means the KV retention decision is taken **before
   merge**, because the Job may run at the first reconcile after it. A retired path can still be
   re-created by an *independent* writer: the `openbao-k8stoken-sync` CronJob writes its fields into
   the same `af/dev-workers/<slot>` documents and keeps its old write grant until the provision Job
