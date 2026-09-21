@@ -100,9 +100,14 @@ case "$1 $2" in
     case "$5" in
       dev-workers/dev-worker-6/)
         if [ -f "$STATE/FAIL_KV_LIST_ONCE" ]; then rm -f "$STATE/FAIL_KV_LIST_ONCE"; echo "Error listing af/metadata/$5: Vault is sealed" >&2; exit 2; fi
+        # a process that dies without writing anything: NOT evidence of an empty listing
+        if [ -f "$STATE/FAIL_KV_LIST_SILENT" ]; then rm -f "$STATE/FAIL_KV_LIST_SILENT"; exit 2; fi
         { [ -f "$STATE/kv-flat-gone" ] && [ -f "$STATE/kv-sub-gone" ]; } && jvf || echo '["flat", "sub1/"]' ;;
       dev-workers/dev-worker-6/sub1/) [ -f "$STATE/kv-sub-gone" ] && jvf || echo '["credential"]' ;;
-      *) nvf "$5" ;;
+      # `kv list` is always -format=json here, and that renders an absent path as `{}` — the plain
+      # text form below belongs to the generic `bao list` arm, where the wording is unobserved and
+      # the guard's legacy branch still covers it.
+      *) jvf ;;
     esac ;;
   "kv metadata")
     case "$3 $4 $5" in
@@ -215,6 +220,17 @@ outE2="$(run)"; echo "$outE2" | sed 's/^/  E2: /'
 expect "$outE2" "retired KV leaf dev-workers/dev-worker-6/sub1/credential: metadata deleted"
 expect "$outE2" "retired KV dev-workers/dev-worker-6: metadata deleted"
 expect "$outE2" "devworker provision complete"
+
+# ---- G. a non-zero exit with NO output must ABORT ------------------------------------------------
+# `{}` is evidence of an empty listing; silence is not. A bao that is killed (OOM, SIGKILL, a broken
+# wrapper) writes nothing, and treating that as "nothing to enumerate" would skip the purge while
+# reporting success — the exact failure mode the `{}` branch must not be widened into.
+reset_state; touch "$WORK/state/FAIL_KV_LIST_SILENT"
+out1="$(run 2>&1)" && { echo "G: a silent non-zero listing must abort the run"; echo "$out1" >&2; exit 1; }
+expect "$out1" "failed and was not a not-found; aborting"
+forbid "$out1" "nothing to enumerate"
+forbid "$out1" "devworker provision complete"
+echo "G: a silent failure aborts instead of converging"
 
 # ---- F. a CONVERGED retirement stays converged -------------------------------------------------
 # Run 1 deletes the role; run 2 therefore gets OpenBao's 400 `role "..." does not exist` from every
