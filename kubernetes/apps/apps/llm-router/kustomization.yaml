@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# LLM Router control plane (single-authority, single replica, namespace llm-router).
+# Initial rollout runs the digest-pinned public Node image against an
+# operator-staged, versioned, read-only release on the RWX router-releases
+# PVC (subPath per release); data PVC is RWO qnap-iscsi (SQLite WAL, not
+# NFS). The Dockerfile in the llm-router repo is kept for migrating to a
+# dedicated OCI image once registry push is authorized.
+# NOT created here (operator/vault prerequisites):
+#   * Secret llm-router-auth (key admin-token, >= 24 chars) — the pod fails
+#     its startup gate until it exists (fail closed, no default credentials).
+#   * The "edge" namespace label and the Cloudflare tunnel in edge-connector.
+resources:
+  - router.yaml

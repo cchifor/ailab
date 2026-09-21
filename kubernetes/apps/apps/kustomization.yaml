@@ -14,3 +14,4 @@ resources:
   - vaultwarden # password manager at vault.chifor.me (own auth; /admin behind CF Access)
   - renovate # dependency-update bot (CronJob; opens PRs against this repo)
   - dsh # DeepSeek Harness agent UI at dsh.chifor.me (models via LiteLLM)
+  - llm-router # bearer-authenticated router at router.chifor.me; no live accounts by default
