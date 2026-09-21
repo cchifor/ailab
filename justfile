@@ -94,6 +94,17 @@ agent-nodes-plan:
 agent-nodes-apply: nested-virt-verify
     tofu -chdir=kubernetes/infra/agent-nodes apply
 
+# OpenTofu: plan/apply ONLY the Talos ENV-POOL node(s) (testpool warm envs; separate state, reads
+# infra/'s state READ-ONLY for the cluster secrets like agent-nodes). Windows in practice (talos
+# provider is windows_amd64). State lives in the MAIN checkout — from a worktree, init with
+# -backend-config=path=<main checkout>/kubernetes/infra/env-pool/terraform.tfstate (backend.tf).
+# Running nodes apply in "staged" mode: a config change needs an explicit `talosctl reboot`
+# afterwards (docs/runbooks/env-pool.md).
+env-pool-plan:
+    tofu -chdir=kubernetes/infra/env-pool plan
+env-pool-apply: nested-virt-verify
+    tofu -chdir=kubernetes/infra/env-pool apply
+
 # OpenTofu: plan/apply ONLY the Zot registry LXC (separate state from runners/dev-workers/Talos).
 registry-plan:
     tofu -chdir=kubernetes/infra/registry-lxc plan

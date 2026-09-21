@@ -1,0 +1,143 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cri-log-relay
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: cri-log-relay
+    app.kubernetes.io/part-of: env-pool
+# No RoleBinding anywhere references this account and the pod does not mount its token: the relay
+# talks to the Talos API only, never to Kubernetes.
+automountServiceAccountToken: false
+---
+# cri-log-relay — the durable home of the env node's containerd/Kata debug log.
+#
+# WHY (plans/2026-09-20-env-pool-root-cause-followup-plan.md, T2c): `talosctl logs cri` on Talos
+# v1.11.2 is a ~1 MiB in-memory ring (64 KiB live + 15 zstd chunks), not a file, and Alloy tails
+# only /var/log/pods. With containerd at [debug] level and Kata's enable_debug on (the env node's
+# machine config, kubernetes/infra/env-pool), the ring holds MINUTES — the shim/agent/`vmconsole`
+# lines a frozen guest leaves behind are gone before anyone looks unless something streams them
+# off the node continuously. This Deployment does exactly that: `talosctl logs cri -f` against the
+# env node, printed to stdout, which Alloy ships to Loki like any pod log
+# ({namespace="monitoring", app="cri-log-relay"}, 168 h retention).
+#
+# WHERE: namespace `monitoring`, NOT `testpool` — every tep-worker credential has pods/exec on every
+# testpool pod and would be able to read the talosconfig below; NOT kube-system — this needs no
+# node privileges. Scheduled off the env node by construction (no `dedicated=env` toleration; the
+# agent pool's taint is likewise untolerated), so it lands on a control-plane node and survives
+# the env node's reboots — the moment it must be streaming.
+#
+# CREDENTIAL: cri-log-relay-talosconfig (SOPS, same directory) holds a talosconfig minted with
+#   talosctl config new --roles os:reader --crt-ttl 2160h cri-log-relay.talosconfig
+# — Talos's read-only role (logs/read/get/list), no apply/reboot/reset/etcd. It is CLUSTER-WIDE
+# read access to every node's Talos API: --endpoints/--nodes below are routing, not authorization.
+# 90-day certificate; the owner is the operator, re-minted at each soak epoch boundary or every
+# 60 days, re-encrypted with sops, then `kubectl -n monitoring rollout restart deploy/cri-log-relay`
+# (the Secret is mounted, not env — a rollout is required for the pod to see the new file).
+# Talos has no CRL: deleting or reverting the SOPS Secret does NOT revoke a copied certificate;
+# a suspected leak means rotating the Talos CA (docs/runbooks/env-pool.md).
+#
+# RECONNECTS: the image is scratch + /talosctl (no shell), so there is no retry loop inside the
+# container; the stream ends when apid restarts (node reboot) and the kubelet restarts the
+# container (backoff 10 s doubling to 5 min, reset after 10 min up). No --tail: every (re)connect
+# replays the node's whole retained ring (~1 MiB) so a burst that still fits the ring is never cut
+# to the last N lines; readers dedupe on (original timestamp, line content) — never on the
+# timestamp alone — and treat a replayed line as the same event. Gaps are gaps: the soak report
+# marks any stretch without relay lines as INCOMPLETE rather than assuming nothing happened.
+#
+# SOURCE IDENTITY: with a single --nodes value every line is from that node; each containerd
+# record carries its own time= field (the original event time) — Alloy's timestamp and `node`
+# label describe the RELAY pod, not the env node. With two nodes (T4b) talosctl prefixes every line
+# with the source node IP.
+#
+# PLACEMENT: required affinity to a control-plane node (the CPs are also workers here), preferring
+# any CP but talos-cp2 — that one shares ai-node2 with the env node, so a host loss would take the
+# capture with the evidence. Explicit, not just "no env toleration": T4b's fresh node registers
+# untainted for a moment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cri-log-relay
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: cri-log-relay
+    app.kubernetes.io/part-of: env-pool
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # two relays would double-ship the same stream
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cri-log-relay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cri-log-relay
+        app.kubernetes.io/part-of: env-pool
+    spec:
+      serviceAccountName: cri-log-relay # dedicated, no RBAC, no token (below)
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: ["talos-cp2"] # same Proxmox host as the env node
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        # fsGroup: the kubelet projects Secret files as root:<fsGroup>; without it the 0440 config
+        # below is root:root and talosctl (uid 65534) gets EACCES — the relay would crash-loop.
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          # ghcr.io/siderolabs/talosctl:v1.11.2 — the cluster's Talos version (CLAUDE.md: the
+          # pinned talosctl-1112 everywhere else). Index digest resolved 2026-09-21.
+          image: ghcr.io/siderolabs/talosctl:v1.11.2@sha256:3534753ae3dae8ab3f45b0c426f1a3b2c0e65f460ee37b7de8a570479b9ae5cc
+          args:
+            - --talosconfig=/etc/talos/config
+            - --endpoints=192.168.0.41,192.168.0.42,192.168.0.43 # any CP apid proxies to the node; talosctl fails over across the list, so a cp1 reboot does not stop the capture
+            - --nodes=192.168.0.37 # talos-env-node-1 (docs/network-plan.md)
+            - logs
+            - cri
+            - --follow
+          env:
+            - name: HOME
+              value: /tmp # talosctl must never look for ~/.talos; the config is explicit above
+          volumeMounts:
+            - name: talosconfig
+              mountPath: /etc/talos
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: talosconfig
+          secret:
+            secretName: cri-log-relay-talosconfig
+            items:
+              - key: config
+                path: config
+                mode: 288 # 0440 in decimal (YAML 1.1/1.2 parsers disagree on octal literals); readable via fsGroup 65534
+        - name: tmp
+          emptyDir:
+            sizeLimit: 8Mi

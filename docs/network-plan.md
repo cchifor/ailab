@@ -42,7 +42,7 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.31` | CI runner VM `ci-runner-9` (moved off `.22` on 2026-09-03; moved ai-node2→ai-node1 on 2026-09-07) | 4109 | `kubernetes/infra/runners/variables.tf` |
 | `.32`–`.35` | **free (static)** | — | — |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
-| `.37` | Talos env-node `talos-env-node-1` (k8s member; runbook `docs/runbooks/env-pool.md`) | 4401 | ⚠️ unmanaged — see note below |
+| `.37` | Talos env-node `talos-env-node-1` (k8s member; runbook `docs/runbooks/env-pool.md`) | 4401 | `kubernetes/infra/env-pool/variables.tf` (adopted 2026-09-21) |
 | `.38 / .39` | **free (static)** | — | — |
 | `.40` | Talos control-plane VIP (k8s API `:6443`) | — | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `talos-cp1/2/3` | 4001–4003 | `kubernetes/infra/variables.tf` |
@@ -61,10 +61,15 @@ Nothing else in `.2`–`.50` is available.
 
 #### ⚠️ VMs not managed by OpenTofu
 
-`reviewer-1/2` (4501–4502) and `talos-env-node-1` (4401) are **running but tracked in no tofu
-state**. They were created out-of-band, so `tofu plan` cannot see their addresses and will not warn
-when a managed module is given one of them. Until they are imported, this table is their only
-record — treat it as load-bearing.
+`reviewer-1/2` (4501–4502) are **running but tracked in no tofu state**. They were created
+out-of-band, so `tofu plan` cannot see their addresses and will not warn when a managed module is
+given one of them. Until they are imported, this table is their only record — treat it as
+load-bearing.
+
+> **ADOPTED 2026-09-21:** `talos-env-node-1` (4401, `.37`) was listed here as unmanaged. The spike's
+> state was lost, so the VM was imported into `kubernetes/infra/env-pool` (state in the main
+> checkout) and the module proven to reproduce its running config with no changes —
+> `plans/2026-09-20-env-pool-root-cause-followup-plan.md`, T1.
 
 > **CORRECTED 2026-09-16:** `ci-runner-6..10` were listed here as unmanaged. They were IMPORTED on
 > 2026-09-07 and are in `terraform.tfstate` (serial 43), so that claim had been wrong for nine days.

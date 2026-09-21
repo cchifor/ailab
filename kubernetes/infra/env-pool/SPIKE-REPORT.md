@@ -83,6 +83,11 @@ pools pay this at fill time, invisibly.
   it (worktree-isolated session could not write the main checkout). After merge:
   move `terraform.tfstate` with the module directory into the main checkout,
   `tofu init`, verify a **no-op plan**.
+  - **CORRECTED 2026-09-21:** that handover never happened and the scratchpad state is
+    lost (only empty directories survive; no copy anywhere on the workstation).
+    `talos-env-node-1` was re-adopted into the main checkout's state via `imports.tf`
+    (`plans/2026-09-20-env-pool-root-cause-followup-plan.md`, T1); `backend.tf` records
+    the authoritative state path.
 - Spike manifests under `spike/` are throwaway records — everything they created
   was deleted (namespace, RuntimeClass, snapshot, PVs); only `talos-env-node-1`
   remains, plus this module.

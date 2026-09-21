@@ -21,8 +21,8 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 ## Workflow / GitOps
 - **Kubernetes** (`kubernetes/apps/**`): **Flux** reconciles `main` **from the GitHub mirror** (`github.com/cchifor/ailab`, W5 — see the box above) — merge to Gitea to ship; it mirrors in ~4s. Push/PRs still go to **Gitea** (squash-merge).
 - **VMs/LXCs** (`kubernetes/infra/**`): **OpenTofu**, applied by hand via `just` (Flux does NOT manage these).
-  Modules: `infra/` (Talos CPs) · `infra/runners/` · `infra/dev-workers/` · `infra/agent-nodes/` (Talos workers, AgentForge v2) · `infra/ai-lxc/` · `infra/registry-lxc/`.
-  Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just agent-nodes-plan/apply` · `just registry` (+ `*-plan/apply`). `just --list` for all.
+  Modules: `infra/` (Talos CPs) · `infra/runners/` · `infra/dev-workers/` · `infra/agent-nodes/` (Talos workers, AgentForge v2) · `infra/env-pool/` (the testpool env node; `staged` applies) · `infra/ai-lxc/` · `infra/registry-lxc/`.
+  Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just agent-nodes-plan/apply` · `just env-pool-plan/apply` · `just registry` (+ `*-plan/apply`). `just --list` for all.
 - Secrets = **SOPS + age** (`.sops.yaml`, key at **`kubernetes/infra/_out/age.agekey`** — matches README; `_out/` is gitignored so it does NOT exist in a git worktree, resolve the main checkout's copy via `"$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)"`). **Never commit `_out/`** — kubeconfig, talosconfig, age key, and tofu creds all live there (gitignored).
 - Run **tofu on Windows** (`~/.tofubin/tofu.exe`): providers are `windows_amd64` and **WSL has no internet**, so Ansible-over-`/mnt/c` and tofu provider downloads fail there. State is **local** (`kubernetes/infra/**/terraform.tfstate`).
 
@@ -54,7 +54,7 @@ Free static space is only `.5`–`.7`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`
 | CI runners (adopted into tofu 2026-09-07; `ci-runner-8`/.30/4108 retired 2026-09-12) | .19 / .29 / .31 / .23 | 4106, 4107, 4109, 4110 |
 | dev-workers | .8–.13 (user `c4`; also the agentforge hosts, ADR 0018) | 4201–4206 |
 | Agent nodes (Talos workers, AgentForge v2, ADR 0019) | .47 / .48 / .49 | 4301–4303 |
-| Talos env-node (out-of-band, not in tofu) | .37 | 4401 |
+| Talos env-node (`infra/env-pool/`, adopted 2026-09-21; `staged` applies — reboot via talosctl) | .37 | 4401 |
 | Reviewer VMs (out-of-band, not in tofu) | .24 / .25 | 4501–4502 |
 | AI LLM LXCs | .44 / .45 / .46 | 5001–5003 |
 | registry LXC (node1) | .36 | 5004 |

@@ -38,4 +38,27 @@ machine:
       docker.io:
         endpoints:
           - https://mirror.gcr.io
+%{ if kata_debug ~}
+  # Kata debug evidence (var.kata_debug, plans/2026-09-20-env-pool-root-cause-followup-plan.md T2).
+  # Talos writes machine.files during BOOT (userSetup): a change here = tofu apply (staged) +
+  # `talosctl reboot`. `create` is only allowed under /var or at exactly the CRI customization
+  # path below (Talos injects that one into cri.toml); a wrong path fails the boot phase, not the
+  # apply. Contents come from kubernetes/infra/env-pool/machine-config/ verbatim (talos.tf).
+  files:
+    - path: /etc/cri/conf.d/20-customization.part
+      op: create
+      permissions: 0o644
+      content: |
+        ${indent(8, cri_customization_part)}
+    - path: /var/etc/kata-containers/configuration.toml
+      op: create
+      permissions: 0o644
+      content: |
+        ${indent(8, kata_configuration_toml)}
+    - path: /var/etc/kata-containers/config.d/10-debug.toml
+      op: create
+      permissions: 0o644
+      content: |
+        ${indent(8, kata_debug_dropin)}
+%{ endif ~}
 # NO cluster: stanza — plain worker.

@@ -22,7 +22,11 @@ patches:
   # 15m still covers the measured env fill time (~86 s) and keeps the pool self-healing while a
   # golden snapshot is being bootstrapped (PVCs Pending on a missing snapshot are recreated, not
   # wedged). What keeps a healthy member from being replaced on a blip is the template's readiness
-  # contract (testpool/sandboxtemplate-std.yaml: 60 s of sustained failure), not this flag.
+  # contract (testpool/sandboxtemplate-std.yaml + ready-watchdog.yaml: the in-guest watchdog closes
+  # the ready-port only on a hung check or two consecutive failures, and the kubelet's TCP probe
+  # needs ~30 s of a closed port — 5 s × 6 — before NotReady), not this flag. Upstream issue:
+  # drafted in plans/2026-09-20-env-pool-root-cause-followup-plan.md (Appendix A); the URL goes
+  # here once the operator files it.
   - target:
       kind: Deployment
       name: agent-sandbox-controller
