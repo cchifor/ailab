@@ -31,6 +31,11 @@ resource "proxmox_virtual_environment_vm" "env" {
     enabled = true # Talos ships qemu-guest-agent (baked in the image)
   }
   stop_on_destroy = true
+  # NEVER let the provider power-cycle a running env node: with the default (true) any in-place
+  # change bpg flags as reboot-required (agent, serial_device, cpu, memory, scsi_hardware, ...)
+  # becomes a stop/start of the pool's node. With false the provider only reports that a reboot
+  # is required; the operator reboots via talosctl at an announced window (docs/runbooks/env-pool.md).
+  reboot_after_update = false
 
   cpu {
     cores = var.env_node_cores
@@ -86,6 +91,10 @@ resource "proxmox_virtual_environment_vm" "env" {
   serial_device {} # Talos prefers a serial console
 
   lifecycle {
-    ignore_changes = [initialization] # avoid churn after first boot
+    # initialization: avoid churn after first boot (ipconfig0 drift is therefore INVISIBLE to plan —
+    # verify it with `qm config <vmid>` when it matters, docs/network-plan.md).
+    # disk[0].import_from: create-only; bpg never reads it back, so an adopted VM would otherwise carry
+    # a permanent in-place diff that re-sends the live disk spec on every apply (runners precedent).
+    ignore_changes = [initialization, disk[0].import_from]
   }
 }

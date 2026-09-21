@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars (gitignored). Same Proxmox token as ../ (infra), runners, dev-workers,
+# agent-nodes. Both path variables are ABSOLUTE and point into the MAIN checkout even when this
+# module is applied from a worktree (the CP state and _out/ exist only there).
+pve_endpoint     = "https://192.168.0.2:8006/"
+pve_api_token    = "tofu@pve!tofu=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+pve_insecure     = true
+pve_ssh_username = "root"
+pve_ssh_key_path = "~/.ssh/id_ed25519"
+
+# Read-only link to the CP root module's state (machine_secrets / client_configuration).
+infra_state_path = "C:/Users/chifo/work/home/ailab/kubernetes/infra/terraform.tfstate"
+# Admin kubeconfig for the cluster-side label/taint (its only context is admin@ai; node-labels.tf
+# pins that context).
+kubeconfig_path = "C:/Users/chifo/work/home/ailab/kubernetes/infra/_out/kubeconfig"
+
+# env_nodes, sizing, talos/kubernetes versions: defaults in variables.tf.

@@ -19,15 +19,23 @@ data "talos_machine_configuration" "worker" {
 }
 
 locals {
+  # Kata debug evidence files (T2). Read verbatim; the template indents them into `content: |`
+  # block scalars, so the node receives them byte-for-byte (V2 compares sha256 after boot).
+  kata_files = {
+    cri_customization_part  = file("${path.module}/machine-config/cri-20-customization.part")
+    kata_configuration_toml = file("${path.module}/machine-config/kata/configuration.toml")
+    kata_debug_dropin       = file("${path.module}/machine-config/kata/config.d/10-debug.toml")
+  }
   worker_patches = {
-    for k, v in var.env_nodes : k => templatefile("${path.module}/machine-config/worker.yaml.tftpl", {
+    for k, v in var.env_nodes : k => templatefile("${path.module}/machine-config/worker.yaml.tftpl", merge({
       node_ip            = v.ip
       prefix             = var.network_prefix
       gateway            = var.gateway
       nameservers        = jsonencode(var.nameservers)
       host_ip            = v.host_ip
       storage_service_ip = var.storage_service_ip
-    })
+      kata_debug         = var.kata_debug
+    }, local.kata_files))
   }
 }
 
@@ -39,6 +47,7 @@ resource "talos_machine_configuration_apply" "worker" {
   machine_configuration_input = data.talos_machine_configuration.worker.machine_configuration
   node                        = each.value.ip
   config_patches              = [local.worker_patches[each.key]]
+  apply_mode                  = each.value.apply_mode # see variables.tf: staged for running nodes
 
   depends_on = [proxmox_virtual_environment_vm.env]
 }

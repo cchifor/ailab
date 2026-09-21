@@ -1,0 +1,15 @@
+# Talos CRI customization part for the env-pool nodes (delivered to /etc/cri/conf.d/ by machine.files,
+# gated by var.kata_debug; merged AFTER the kata-containers extension's 10-kata-containers.part —
+# scalars from a later part win, slices concatenate, so nothing else about the `kata` runtime is
+# restated here; runtime_type, pod_annotations and privileged_without_host_devices are inherited).
+#
+# [debug] level: containerd passes -debug to a shim only when it runs at debug/trace itself, and the
+# kata shim logs at Warn otherwise — without this line the kata enable_debug toggles print nothing.
+# The kubelet's polling CRI calls are logged at Trace, so debug is not a flood.
+[debug]
+  level = "debug"
+
+# Point the `kata` runtime (the handler behind RuntimeClass kata-env) at the pool's own Kata config
+# so the config.d/ drop-ins apply.
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.kata.options]
+  ConfigPath = "/var/etc/kata-containers/configuration.toml"

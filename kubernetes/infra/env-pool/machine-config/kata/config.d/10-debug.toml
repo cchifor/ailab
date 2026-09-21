@@ -1,0 +1,25 @@
+# Kata debug logging for the env pool (plans/2026-09-20-env-pool-root-cause-followup-plan.md, T2).
+# Drop-in merged by the kata shim on top of ../configuration.toml (Kata 3.20 loads
+# <dir-of-ConfigPath>/config.d/*.toml in name order). Delivered by Talos machine.files from
+# worker.yaml.tftpl (gated by var.kata_debug); a change here = tofu apply (staged) + talosctl reboot.
+# NOTE the shim only EMITS debug records when containerd itself runs at [debug] level = "debug"
+# (machine-config/cri-20-customization.part) — these toggles alone print nothing.
+#
+# Base file ../configuration.toml is a verbatim copy of the extension's file:
+#   kata-containers 3.20.0 (Talos v1.11.2, schematic 0839748e...), read from talos-env-node-1 on
+#   2026-09-20, sha256 38d1e30b0dc4ad59742bf807ddbc9363deb354e94a27c06883ca6f5d8074a4c6.
+# Re-verify that hash against /usr/local/share/kata-containers/configuration.toml on the node
+# BEFORE any env-node image or extension upgrade (docs/runbooks/env-pool.md).
+
+[hypervisor.clh]
+# cloud-hypervisor -v AND the guest serial console captured into the shim log as "vmconsole"
+# lines — kernel hung-task traces from the guest are the evidence a virtio-fs stall leaves behind.
+enable_debug = true
+
+[agent.kata]
+# kata-agent debug lines forwarded over vsock into the shim log. The chattiest of the three and the
+# volume lever: tier 2 of the runbook sets this to false and keeps the guest console.
+enable_debug = true
+
+[runtime]
+enable_debug = true

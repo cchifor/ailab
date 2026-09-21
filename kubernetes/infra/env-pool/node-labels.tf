@@ -6,6 +6,10 @@
 # tolerate — ordering enforced by construction, per the plan).
 provider "kubernetes" {
   config_path = var.kubeconfig_path
+  # Pin the context: the workstation's merged ~/.kube/config defaults to `home-lab`, a DIFFERENT
+  # cluster (CLAUDE.md). _out/kubeconfig has only this context, but the pin makes a wrong
+  # kubeconfig_path fail instead of labelling a node somewhere else.
+  config_context = "admin@ai"
 }
 
 resource "kubernetes_labels" "env_pool" {
@@ -13,8 +17,8 @@ resource "kubernetes_labels" "env_pool" {
   api_version = "v1"
   kind        = "Node"
   metadata { name = "talos-${each.value.hostname}" }
-  labels      = { "ailab.io/env-pool" = "true" }
-  depends_on  = [talos_machine_configuration_apply.worker]
+  labels     = { "ailab.io/env-pool" = "true" }
+  depends_on = [talos_machine_configuration_apply.worker]
 }
 
 resource "kubernetes_node_taint" "env" {
