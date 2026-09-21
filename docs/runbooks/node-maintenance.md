@@ -175,11 +175,19 @@ kubectl --context admin@ai taint nodes <node> node.kubernetes.io/out-of-service=
 ```bash
 _out/talosctl-1112.exe -n 192.168.0.41 etcd status                  # 3/3 in-sync
 kubectl --context admin@ai get nodes                                # all Ready, none SchedulingDisabled
+                                                                    # (Talos uncordons on boot; `kubectl uncordon` if stuck)
 curl -s -m 10 http://<ai-lxc-ip>:8082/v1/models                     # AI LXC: llama-swap answering
 # CONTENT check -- a wedged backend serves /v1/models perfectly well, so a 200 there proves
-# nothing. This must print OK (allow a cold model load: ~24 s on node2, up to ~70 s on node3):
-curl -s -m 300 http://<ai-lxc-ip>:8082/v1/chat/completions -H 'Content-Type: application/json'   -d '{"model":"<served-name>","messages":[{"role":"user","content":"Reply with exactly: OK"}],"max_tokens":8,"temperature":0}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
-                                                                    # (Talos uncordons on boot; `kubectl uncordon` if stuck)
+# nothing. This must print `OK stop` (allow a cold model load: ~24 s on node2, ~70 s on node3):
+curl -s -m 300 http://<ai-lxc-ip>:8082/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<served-name>","messages":[{"role":"user","content":"Reply with exactly: OK"}],"max_tokens":8,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}' \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin)["choices"][0]; print(d["message"]["content"], d["finish_reason"])'
+# Expect exactly `OK stop`. **`enable_thinking:false` is load-bearing**: qwen3.8-27b-ailab runs
+# --reasoning-format deepseek --reasoning-budget 16384, so WITHOUT it this same request spends
+# the budget thinking and returns EMPTY content with finish_reason=length on a perfectly
+# HEALTHY backend -- measured on node2 2026-09-21, direct to the backend, not through the proxy.
+# finish_reason is printed so an empty answer can never be read as a pass.
 python scripts/node-ssh.py <host-ip> "pct status <ctid>"           # AI LXC running (pct start if not)
 kubectl --context admin@ai get pods -A | grep -vE 'Running|Completed'   # nothing stuck
 kubectl --context admin@ai get pdb -A                               # ALLOWED DISRUPTIONS back >0 (except *-primary: 0 by design)
