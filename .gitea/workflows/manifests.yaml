@@ -67,6 +67,15 @@ jobs:
       - name: Local embedding serving and route contracts
         run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes scripts.tests.test_ready_watchdog scripts.tests.test_env_pool_soak
 
+      # The env-reaper's shell helpers under the DaemonSet's OWN image (busybox ash, digest-pinned in
+      # the manifest) against a synthetic /proc: identity chain, PID reuse, evidence timeout,
+      # thread truncation. Same fail-closed shape as manifest-lint (docker required, no soft skip).
+      - name: env-reaper helpers under busybox ash
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-env-reaper.sh
+
       # The three spans derived from litellm.yaml's model_list — Open WebUI's Local-group model_ids,
       # the dsh seed's provider models rows, and litellm.yaml's own checksum/config — must match what
       # the generator renders. Same fail-closed shape as the step above: a drifted span, a missing

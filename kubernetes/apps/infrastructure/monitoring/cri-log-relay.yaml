@@ -108,7 +108,7 @@ spec:
           image: ghcr.io/siderolabs/talosctl:v1.11.2@sha256:3534753ae3dae8ab3f45b0c426f1a3b2c0e65f460ee37b7de8a570479b9ae5cc
           args:
             - --talosconfig=/etc/talos/config
-            - --endpoints=192.168.0.41 # any CP apid proxies to the node
+            - --endpoints=192.168.0.41,192.168.0.42,192.168.0.43 # any CP apid proxies to the node; talosctl fails over across the list, so a cp1 reboot does not stop the capture
             - --nodes=192.168.0.37 # talos-env-node-1 (docs/network-plan.md)
             - logs
             - cri

@@ -330,6 +330,12 @@ spec:
           - apiGroups: ["source.toolkit.fluxcd.io"]
             resources: ["gitrepositories", "helmrepositories", "helmcharts", "ocirepositories", "buckets"]
             verbs: ["list", "watch"]
+          # agent-sandbox warm pools (testpool): the pool's own readyReplicas is the WARM capacity —
+          # kube_pod_status_ready over Sandbox-owned pods counts leased members too and can read 1
+          # while the warm pool is empty (codex impl-review of ailab#806).
+          - apiGroups: ["extensions.agents.x-k8s.io"]
+            resources: ["sandboxwarmpools"]
+            verbs: ["list", "watch"]
       customResourceState:
         enabled: true
         config:
@@ -461,3 +467,30 @@ spec:
                       ready: [status, conditions, "[type=Ready]", status]
                       suspended: [spec, suspend]
                       revision: [status, artifact, revision]
+              # agent-sandbox SandboxWarmPool → agentsandbox_warmpool_ready_replicas / _spec_replicas
+              # {exported_namespace, name}: the warm pool's OWN accounting (scripts/env-pool-soak.py
+              # derives capacity-loss incidents from ready < spec). Pods of leased sandboxes are not
+              # warm capacity, which is why kube_pod_status_ready cannot stand in for this.
+              - groupVersionKind: { group: extensions.agents.x-k8s.io, version: v1beta1, kind: SandboxWarmPool }
+                metricNamePrefix: agentsandbox
+                metrics:
+                  - name: warmpool_ready_replicas
+                    help: "SandboxWarmPool status.readyReplicas — warm members Ready for a claim."
+                    each:
+                      type: Gauge
+                      gauge:
+                        path: [status, readyReplicas]
+                        nilIsZero: true
+                    labelsFromPath:
+                      exported_namespace: [metadata, namespace]
+                      name: [metadata, name]
+                  - name: warmpool_spec_replicas
+                    help: "SandboxWarmPool spec.replicas — the warm capacity the pool is asked to keep."
+                    each:
+                      type: Gauge
+                      gauge:
+                        path: [spec, replicas]
+                        nilIsZero: true
+                    labelsFromPath:
+                      exported_namespace: [metadata, namespace]
+                      name: [metadata, name]

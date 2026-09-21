@@ -112,6 +112,7 @@ data:
     EVIDENCE_MAX_THREADS=${EVIDENCE_MAX_THREADS:-16}          # per-thread lines are capped (virtiofsd: 1 + pool)
     VC_SBS=${VC_SBS:-/host/run/vc/sbs}
     PROC_ROOT=${PROC_ROOT:-/proc}   # overridable so the helpers can be unit-tested on a fake tree
+    REAP_SCRIPT=${REAP_SCRIPT:-/opt/env-reaper/reap.sh}   # this file, re-sourced by evidence()'s timeout wrapper
     CH_EXE=/usr/local/bin/cloud-hypervisor
     VFS_EXE=/usr/local/libexec/virtiofsd
     SHIM_EXE=/usr/local/bin/containerd-shim-kata-v2
@@ -193,12 +194,34 @@ data:
     }
     # The timeout wrapper re-sources this file in a child shell with REAP_LIB_ONLY=1 (functions +
     # defaults only, no loop — an env var, because `. file args` sets $1 in bash but not in dash/ash).
-    evidence() { REAP_LIB_ONLY=1 timeout "$EVIDENCE_TIMEOUT_SECONDS" sh -c '. /opt/env-reaper/reap.sh; evidence_body "$@"' _ "$@" || log "evidence stage=1 pod=$1 sandbox=$3 pid=$4 incomplete (timeout ${EVIDENCE_TIMEOUT_SECONDS}s or read error)"; return 0; }
+    evidence() { REAP_LIB_ONLY=1 timeout "$EVIDENCE_TIMEOUT_SECONDS" sh -c ". \"$REAP_SCRIPT\"; evidence_body \"\$@\"" _ "$@" || log "evidence stage=1 pod=$1 sandbox=$3 pid=$4 incomplete (timeout ${EVIDENCE_TIMEOUT_SECONDS}s or read error)"; return 0; }
 
-    # still_ours <sandbox-id> <stage> <pid> <exe>: re-run the identity chain for ONE pid right before
-    # the kill (the evidence collection widened the window in which the PID could have been reused).
+    # still_ours <sandbox-id> <stage> <pid> <exe>: the identity chain for ONE pid (cgroup + exe +
+    # cmdline), re-run right before the kill because evidence collection widened the window in
+    # which the PID could have been reused. Reads only that pid's /proc entries — never a scan.
+    # (POSIX sh has no locals: the _so_* names must not collide with reap()'s _pid/_exe/_sbid.)
     still_ours() {
-      procs_of "$1" "$2" | grep -q "^$3 $4\$"
+      _so_sbid=$1; _so_stage=$2; _so_pid=$3; _so_want=$4
+      _so_line=$(cat "$PROC_ROOT/$_so_pid/cgroup" 2>/dev/null) || return 1
+      case "$_so_line" in
+        *"/kata_${_so_sbid}"|*"/kata_overhead/${_so_sbid}") ;;
+        *) return 1 ;;
+      esac
+      _so_exe=$(exe_of "$_so_pid") || return 1
+      [ "$_so_exe" = "$_so_want" ] || return 1
+      _so_cmd=$(cmdline_of "$_so_pid") || return 1
+      case "$_so_stage" in
+        1)
+          case "$_so_exe" in
+            "$CH_EXE")  case "$_so_cmd" in *"/run/vc/vm/${_so_sbid}/"*) return 0 ;; esac ;;
+            "$VFS_EXE") case "$_so_cmd" in *"/run/kata-containers/shared/sandboxes/${_so_sbid}"*) return 0 ;; esac ;;
+          esac ;;
+        2)
+          case "$_so_exe" in
+            "$SHIM_EXE") case "$_so_cmd" in *"-id ${_so_sbid} "*) return 0 ;; esac ;;
+          esac ;;
+      esac
+      return 1
     }
 
     reap() {
@@ -276,7 +299,7 @@ spec:
         app.kubernetes.io/part-of: testpool
       annotations:
         # Bump on EVERY reap.sh change (see ROLLOUT in the header): the script is read at start.
-        env-reaper.ailab.io/script-revision: "2026-09-21-evidence-1"
+        env-reaper.ailab.io/script-revision: "2026-09-21-evidence-2"
     spec:
       serviceAccountName: env-reaper
       priorityClassName: system-node-critical
