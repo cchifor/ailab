@@ -1,12 +1,17 @@
 # Retire dev-worker-6 and dev-worker-3; re-slot the survivors to dev-worker-1..4 (.8–.11)
 
+## Codex Review
+
+- Round 2 drops the parent-plan concern: the tracked parent is available and contains the T4a/T4b capacity criteria.
+- The credential concern is narrowed: the stated helmtest residual can be accepted, but recreating the TEP ServiceAccounts invalidates the replacement tokens prepared before merge and needs explicit legacy-Secret handling.
+- The new retirement cleanup must fence concurrent credential writers; the provision Job also needs a valid, revision-verified rerun procedure.
+- The re-slot sequence needs reboot-persistent service quiescence and must perform SA recreation before waiting for the resulting token-sync validation.
+- The new maintenance deadline needs a rollback path for a merged C2 whose reconciliation or apply has not completed. Review complete; these findings remain open.
+
 Repo `ailab` · branch `ops/retire-dev-worker-3-6` off `gitea/main` `9b775872` (worktree
 `.worktrees/retire-dw36`) · parent plan: `plans/2026-09-20-env-pool-root-cause-followup-plan.md`
 (on `main`) §T4a (the RAM for `env-node-2`, §T4b) · precedent: `ci-runner-7` retirement, PR #746
 (`af4cca83`).
-
-<!-- codex: This checkout contains the review input at repository root, not at the requested plans/ path, and the referenced parent plan is absent. This is a repository/precedent review, not live verification; make the parent's ENV_POOL/T4a/T4b acceptance criteria available before approving G3b. -->
-<!-- opus-pushback: The parent plan is tracked at plans/2026-09-20-env-pool-root-cause-followup-plan.md on main (merged in #806/#807) and its T4a/T4b criteria are quoted in Context below; the dispatcher's worktree layout is not a property of this plan. -->
 
 ## Context
 
@@ -112,6 +117,7 @@ fallback (§Not in scope) is decided by the operator before any `env-node-2` wor
   `RETIRED_SLOTS` list in its ConfigMap, processed *before* the upsert loop, so a seed or a stale
   token-sync run cannot resurrect a retired slot — which also means the KV retention decision is
   taken **before merge**, because the Job may run at the first reconcile after it.
+  <!-- codex: NEW: Processing RETIRED_SLOTS before the upserts does not prevent resurrection by independent writers. In devworker-provision-job.yaml the k8stoken-sync policy is written later, so an already-running sync can recreate a deleted KV path while its old write grant still exists; the seed loop also accepts every mounted *.json, independently of the host loop. Fence old provision/sync runs and narrow the sync policy before deleting retired KV, explicitly skip retired seed names, then verify that another provision/sync run cannot recreate the retired paths. Otherwise the new cleanup can report success while leaving live retired-slot data until the next daily run. -->
 - `af/dev-workers/dev-worker-3` holds an estate-class credential (`strive_test_user/password`,
   `openbao-estate-credentials.md:102`) and the seed job patches **seed-wins**: its destination (stay
   with slot 3 = inherited by ex-dw4, or move to another slot) is decided by the operator **before
@@ -218,6 +224,7 @@ Gate G3a-1 sequence (operator present; each step read back before the next):
    `role_id`/`secret_id` pair from the pre-merge SOPS file fails to log in (checked without printing
    either value), and `bao kv get af/dev-workers/dev-worker-6` = not found (metadata deleted, the
    `common` subtree untouched).
+   <!-- codex: NEW: openbao-devworker-provision is a standalone Job, whereas kubectl create job --from supports a CronJob source. A ConfigMap-only change also does not rerun a completed Job just because its force annotation is enabled. Use the existing runbook's delete-Job then reconcile-openbao procedure after verifying the merged script and seed revisions, and wait for the new Job UID to complete before accepting revocation. Use the actual openbao-k8stoken-sync CronJob for explicit sync runs at both reconciliation barriers; do not rely on a completed bootstrap Job rerunning when only its ConfigMap changes. -->
 7. **Ansible.** No convergence of the busy dw3. The inventory/secrets edits are proven with
    `ansible-inventory --graph` (5 hosts), `ansible-playbook dev-workers.yml --syntax-check`, and a
    `--check --diff --limit dev-worker-2` run (idle host) that reports no changes; a full run stays
@@ -257,7 +264,7 @@ Repo change:
 - The slot-3/4 artifacts that stay: `dw3`/`dw4` Cloudflare + tunnel + homepage + monitoring targets
   (`.10`/`.11` unchanged), `helmtest-dw3`/`dw4` namespaces, `tep-dw3`/`dw4` SAs.
 
-  <!-- codex: Reissuing TokenRequest tokens does not invalidate previous tokens: this sync requests 30-day tokens for both TEP and helmtest, and old dw4 also retains slot-4 credentials when becoming dw3. Define a narrowly scoped, Kyverno-compatible replacement of the slot-3/4 ServiceAccounts with new UIDs, including legacy TEP token Secrets, then remint; ordinary administrator deletion of protected helmtest SAs is denied by the guard. -->
+  <!-- codex: round-2: The stated residual helmtest access on trusted 4204 can be accepted without replacing guarded helmtest SAs; record that exception and its expiry in the plan body. The TEP recreation is not cost-free, however: changing the SA UIDs in G3a-2 step 6 invalidates the new tep-dw3/tep-dw4 tokens committed before merge as well as the old tokens. tep-access.yaml also declares legacy token Secrets whose stored SA UIDs and tokens must be replaced or explicitly retired. Mint replacement TEP credentials only after the new UIDs exist, verify both old tokens fail and both new tokens authenticate, and either regenerate the SOPS fallback afterward or explicitly retire that fallback after proving both hosts use OpenBao rendering. The current promise of valid pre-merge TEP tokens and no post-merge credential update cannot survive the proposed UID change. -->
   <!-- opus-pushback: Only two machines ever held slot-3/4 tokens: 4203, which is destroyed (its tokens have no holder), and 4204, which becomes dw3 and is the same trusted survivor whose rendered kubeconfigs the converge overwrites. The unguarded `tep-dw3`/`tep-dw4` SAs are recreated (delete → Flux re-creates → new UID invalidates every earlier token) at no cost; replacing the guarded `helmtest-dw3`/`dw4` SAs would mean loosening the guard for a token whose only holder is a VM we are about to delete — the plan records the residual (4204's old slot-4 helmtest token, 30-day expiry, held by a survivor) instead of touching the guard. -->
 
 Gate G3a-2 sequence:
@@ -296,10 +303,12 @@ Gate G3a-2 sequence:
    with a scoped Alertmanager silence (`instance="192.168.0.12:9100"`, `NodeExporterDown`, ≤ 2 h)
    and a hard abort deadline — if C2 has not merged and reconciled by then, step 4 is reversed
    (rollback B below) before the silence expires.
+   <!-- codex: NEW: The new quiescence step names bao-agent, but the installed unit is openbao-agent.service (tasks/openbao.yml and the shared openbao_agent role). Moreover, systemctl stop does not survive the immediately following reboot: both openbao-agent and herdr are enabled and can restart with the old role/config before step 6. Use the correct unit, persistently inhibit credential consumers across both reboots, and verify they remain stopped after boot. Define the controlled release after the destination credentials/configs are staged, accounting for the Ansible role's own start tasks and restart handlers; otherwise the re-slot can resume work under the previous slot's identity. -->
 5. **Merge PR-C2**, reconciliation barrier as in G3a-1 (slot 5 pruned everywhere; both connectors
    rolled; no `.12` targets; k8stoken-sync at 8 fields **after** the SA recreation below);
    `tofu apply` of the regenerated dev-workers plan (destroy 4203; `name` on 4204/4205) and of the
    cloudflare plan (`dw5`).
+   <!-- codex: NEW: This reconciliation barrier requires eight validated fields after SA recreation, but SA recreation and the explicit sync run are in step 6, which is reached only after this barrier and the destructive apply. Split the barrier: first verify merged manifests and pruning, then recreate the TEP SAs and run/validate the new sync, then finish the barrier and apply. A pre-recreation eight-field log is not evidence that the credentials survive the UID change. -->
 6. **Identities.** Retired slot 5: the declarative revocation (Job log read, negative login test,
    KV gone). Reassigned slots 3/4: the *previous* SecretID accessors of roles `dev-worker-3` and
    `dev-worker-4` destroyed and their issued token accessors revoked (by role, via
@@ -378,6 +387,8 @@ fallback if the measured floor still misses 43 GiB; `env-node-2` itself (PR-B, �
 | G3a-1 | merge PR-C1; reconciliation barrier; `qm shutdown 4206`; `tofu apply` dev-workers (destroy 4206) + cloudflare (`dw6`); declarative OpenBao revocation; inventory validation | **before the destroy:** revert the PR (Flux re-creates slot 6's cluster objects; the `RETIRED_SLOTS` entry is removed *first* so the provision Job re-mints instead of revoking), re-mint a SecretID for the re-created role, restore DNS/ingress only with the Access app present, `tofu plan` = no changes. **After the destroy:** the VM is gone — re-add the map entry, `tofu apply` creates a fresh 4206, Ansible bootstraps it, workspace restored from the copy-off; never apply the `before-G3a-1` state copy over a destroyed VM. |
 | G3a-2 | converge suspended; rehearsal; `qm shutdown 4203`; live `state mv`; in-guest re-IP/rename of 4204, 4205 (+ `ipconfig0`); merge PR-C2; `tofu apply` (destroy 4203, rename); revocation/rotation; limited converge | **A — before the state migration:** nothing changed; re-enable the converge. **B — after the migration, before merge/apply** (incl. the re-IP window): reverse in the only collision-free order — 4205 back to `.12` (+ `ipconfig0`), then 4204 back to `.11`, then `.10` is free and 4203 may be started again; state reversed through the temporary key with the *current* vmids (`["dev-worker-4"] → ["dev-worker-5"]`, `["dev-worker-3"] → ["dev-worker-4"]`, `["retired-4203"] → ["dev-worker-3"]`) against the *old* config, `tofu plan` = no changes; expire the silence; re-enable the converge. **C — after apply/destroy:** forward is the only way for 4203 (rebuild from the module if the slot must come back); reversing the survivors means the in-guest steps of B, Proxmox names via the old map, inventory/host_vars/secrets from the pre-merge revision with **freshly minted** SecretIDs (the revoked ones cannot be restored), slot-5 Flux/Cloudflare objects re-created by reverting the PR, Access before DNS. Every partial gate has a written abort deadline (the silence length); workloads and the converge resume only after the chosen end state passes its verification. |
 | G3b | (parent plan) `env-node-2` after the 24 h floor measurement | parent plan |
+
+<!-- codex: NEW: The two-hour deadline says to use rollback B if C2 has not merged and reconciled, but B explicitly applies only before merge, while C starts after apply/destroy. A merged C2 with failed reconciliation is an uncovered state: Flux may already have pruned slot 5 and revoked its credentials even though 4203 still exists. Add a post-merge/pre-destroy rollback branch that fences new-revision jobs and convergence, reverts/reconciles the manifests and RETIRED_SLOTS entry, restores slot-5 access with fresh credentials, and only then reverses the survivors and resumes workloads. Reversing IPs/state alone under B would leave the old slot-5 host without its identity and let main keep reconciling the new slot layout. -->
 
 ## Skill phases (feature-implementation)
 
