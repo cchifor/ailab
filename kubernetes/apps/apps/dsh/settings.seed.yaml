@@ -135,3 +135,44 @@ llm-pi-ai:
           maxTokens: 128000
           input: [text, image]
           reasoningEfforts: { minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }
+    # Claude Fable 5.1 through LiteLLM's METERED Anthropic key (ADR 0029). Unlike both Codex
+    # providers above, this route is NOT a subscription: Anthropic's Consumer Terms forbid using a
+    # Pro/Max OAuth token in a third-party tool (enforced 2026-04-04), so this bills pay-as-you-go
+    # at $10/$50 per MTok. ADR 0029 records the subscription design that was built and abandoned.
+    # IT IS THE MOST EXPENSIVE MODEL IN THIS PICKER; the route's own comment in litellm.yaml says so.
+    anthropic-fable:
+      displayName: Claude Fable 5.1
+      # api: anthropic-messages -- the ONLY provider here that is not OpenAI-shaped. Fable's
+      # thinking blocks must be replayed UNCHANGED between turns, so the conversation has to stay
+      # on the Anthropic protocol end to end. LiteLLM serves that natively at /v1/messages; the
+      # route reaches the stock `anthropic/` provider, which is the only kind
+      # get_provider_anthropic_messages_config admits to that path (a custom provider would be
+      # silently downgraded to chat-completions and the thinking blocks lost).
+      api: anthropic-messages
+      # NO `/v1` SUFFIX, unlike the litellm provider block above -- this is the one field most
+      # likely to be "fixed" into a 404. pi-ai hands baseURL to the official @anthropic-ai/sdk,
+      # which appends `/v1/messages` itself (verified in the pod: sdk 0.123.0 posts '/v1/messages').
+      # The `/v1` form the Codex blocks use would produce /v1/v1/messages.
+      baseURL: http://litellm.ai.svc.cluster.local:4000
+      apiKeyEnv: LITELLM_API_KEY
+      compat:
+        # Without this pi-ai takes its LEGACY thinking branch and sends
+        # `thinking: {type: enabled, budget_tokens, display}`. LiteLLM rewrites that to
+        # `{type: adaptive}` + output_config.effort and DROPS `display`, so Fable falls back to
+        # display: omitted, every thinking block comes back with empty text, and LiteLLM's
+        # strip_empty_content_blocks_from_anthropic_messages then DELETES those blocks on the next
+        # replay -- signature or not. The model's reasoning context would be discarded every turn.
+        # Forcing the adaptive branch is what keeps `display: summarized` on the wire.
+        forceAdaptiveThinking: true
+      models:
+        - id: claude-fable-5-1
+          name: Claude Fable 5.1
+          contextWindow: 1000000
+          maxTokens: 128000
+          input: [text, image]
+          # NO `off` ROW, deliberately. A declared `off` makes pi-ai send
+          # `thinking: {type: disabled}`, which Fable rejects with a 400 -- thinking is always on
+          # for this model. Omitting the row leaves the map's `off` an explicit null, and pi-ai
+          # then omits `thinking` entirely. Same shape as the gpt-6-astra block above, and for the
+          # same class of reason.
+          reasoningEfforts: { minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }

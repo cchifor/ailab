@@ -566,6 +566,36 @@ data:
         litellm_params:
           model: anthropic/claude-sonnet-5
           api_key: os.environ/ANTHROPIC_API_KEY
+      # ---- Claude Fable 5.1, for dsh's anthropic-fable provider (ADR 0029) ----
+      # ON THE METERED KEY, and that is the decision rather than an oversight. This route was
+      # designed against the operator's Claude Max SUBSCRIPTION (chifor@gmail.com) and that design
+      # was abandoned: Anthropic's Consumer Terms prohibit using a Free/Pro/Max OAuth token in any
+      # other product, tool or service, terms updated 2026-02-20 and enforced from 2026-04-04, with
+      # pay-as-you-go API billing named as the required alternative. dsh is such a third-party tool.
+      # The abandoned design is recorded in ADR 0029 so nobody re-derives it: it was technically
+      # sound and is not permitted. A ban would also have taken chifor@gmail.com, which is
+      # reviewer-1 claude seat `a`, and the claude review persona with it.
+      #
+      # THIS COSTS REAL MONEY, unlike every other route dsh can reach. Fable is $10/$50 per MTok,
+      # and dsh resends conversation state every turn: one 100K-in/10K-out turn prices at exactly
+      # $1.50 (measured 2026-09-21 in the pinned image). It is the most expensive thing on this
+      # gateway by a wide margin -- claude-sonnet-5 is $2/$10 -- so it is offered to dsh
+      # deliberately and should be reviewed if the bill moves.
+      #
+      # No `drop_params` here: litellm_settings.drop_params (:840) is already global. No cost
+      # override either -- the catalog price is the true price on this key and must be counted.
+      - model_name: claude-fable-5-1
+        litellm_params:
+          model: anthropic/claude-fable-5-1
+          api_key: os.environ/ANTHROPIC_API_KEY
+          # CONCURRENCY, NOT A RATE CAP -- say it plainly, because the name invites the other
+          # reading and the difference matters for a route that bills per token. With
+          # enable_pre_call_checks unset on this proxy (deliberately; see :834 and :296), LiteLLM
+          # turns `rpm` into max_parallel_requests (utils.py calculate_max_parallel_requests), so
+          # this bounds simultaneous in-flight Fable calls and bounds NOTHING per minute. It
+          # limits a runaway parallel fan-out; it does not limit spend. Cost control for this
+          # route is litellm_settings.max_budget and reading the bill.
+          rpm: 4
       # GPT-5.x flagship tier — completes the Strive platform's 8 "online" catalog
       # ids. Bare model_name = exactly what pydantic-ai sends over the wire; no
       # api_base (direct to api.openai.com) reusing the same litellm-cloud-keys key.
@@ -1076,7 +1106,7 @@ spec:
         # parses is byte-identical in effect, no routing change; the cost is one rolling restart
         # of the 2-replica maxUnavailable:0 Deployment, taken because the annotation tracks the
         # ConfigMap, per the rule above.
-        checksum/config: "5c909d46b8c9"
+        checksum/config: "e0df6fc2d5c2"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
