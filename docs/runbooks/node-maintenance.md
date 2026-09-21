@@ -178,7 +178,7 @@ kubectl --context admin@ai get nodes                                # all Ready,
                                                                     # (Talos uncordons on boot; `kubectl uncordon` if stuck)
 curl -s -m 10 http://<ai-lxc-ip>:8082/v1/models                     # AI LXC: llama-swap answering
 # CONTENT check -- a wedged backend serves /v1/models perfectly well, so a 200 there proves
-# nothing. This must print OK (allow a cold model load: ~24 s on node2, up to ~70 s on node3):
+# nothing. This must print `OK stop` (allow a cold model load: ~24 s on node2, ~70 s on node3):
 curl -s -m 300 http://<ai-lxc-ip>:8082/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"<served-name>","messages":[{"role":"user","content":"Reply with exactly: OK"}],"max_tokens":8,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}' \
