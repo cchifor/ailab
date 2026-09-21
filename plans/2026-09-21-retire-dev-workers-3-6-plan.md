@@ -108,8 +108,8 @@ Repo change (all in one PR):
   `security/openbao/devworker-seeds.sops.yaml` (the `dev-worker-6` keys removed via `sops`, so the
   files stay decryptable and the MAC stays valid), `ansible/roles/dev_worker/tasks/tep.yml` comment,
   `scripts/fleet-converge-daily.sh` (the dw6 `--skip-tags herdr` special case goes),
-  `scripts/oom-protect-guests.sh` (4206 out of the list), `.gitea/workflows/dev-worker-scripts.yaml`
-  if it enumerates hosts.
+  `scripts/oom-protect-guests.sh` (4206 out of the list). (`.gitea/workflows/dev-worker-scripts.yaml`
+  and `scripts/validate-codex-fleet.sh` only mention workers in comments — untouched.)
 - Docs: `docs/runbooks/dev-workers.md` (table, POC section closed, herdr pilot = dw5 only),
   `docs/network-plan.md` (`.13` free), `CLAUDE.md` inventory row (`.8–.12`, `4201–4205` until PR-C2),
   `README.md` (its dev-worker row is stale — `.37/.38/.39`, `4201–4203` — corrected to the live
@@ -197,7 +197,7 @@ fallback if the re-measured floor still misses 43 GiB; `env-node-2` itself (PR-B
 | `kubernetes/apps/infrastructure/testpool/tep-access.yaml` | C1, C2 | `tep-dw6` / `dw5` |
 | `kubernetes/apps/backup/velero/helmrelease.yaml` | C1, C2 | Secret-count comments |
 | `inventory/hosts.yml`, `ansible/host_vars/*`, `ansible/secrets/{dev-worker,tep-tokens}.sops.yaml`, `ansible/roles/dev_worker/tasks/tep.yml` | C1, C2 | hosts, per-host config, credentials |
-| `scripts/{fleet-converge-daily,oom-protect-guests,validate-codex-fleet}.sh`, `.gitea/workflows/dev-worker-scripts.yaml` | C1, C2 | host lists |
+| `scripts/{fleet-converge-daily,oom-protect-guests}.sh` | C1, C2 | host / vmid lists |
 | `docs/runbooks/{dev-workers,agentforge,openbao-dev-workers,cloudflare-access-apps,passkeys}.md`, `docs/network-plan.md`, `CLAUDE.md`, `README.md`, ADR 0018 / 0020 | C1, C2 | the fleet as documented |
 
 ## Verification
