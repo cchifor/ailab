@@ -91,6 +91,33 @@ spec:
               expression          = "remotecfg.+noop client"
               drop_counter_reason = "alloy_remotecfg_noop"
             }
+            // cri-log-relay ships the env node's containerd log at [debug] level (ailab#806/#807, the
+            // Kata debug evidence). At that level containerd logs every `Exec … with command [...]`
+            // verbatim and dumps each container's OCI spec (Env/Args), and the kata-agent echoes
+            // `process command: [...]` on the guest console — a lease's tokens in argv/env would land
+            // in Loki, which is unauthenticated on the LAN (loki-lan.yaml). Verified live with a
+            // synthetic secret at gate G2 (2026-09-21): both paths leaked. Redact the payloads and
+            // keep the sandbox ids, timings and kernel/agent state the investigation needs. Only this
+            // stream: the selector keeps every other pod's log untouched.
+            stage.match {
+              selector = "{app=\"cri-log-relay\"}"
+              stage.replace {
+                expression = "with command \\[([^\\]]*)\\]"
+                replace    = "<redacted>"
+              }
+              stage.replace {
+                expression = "process command: \\[([^\\]]*)\\]"
+                replace    = "<redacted>"
+              }
+              stage.replace {
+                expression = "(?:Env|Args):\\(\\[\\]string\\)\\[([^\\]]*)\\]"
+                replace    = "<redacted>"
+              }
+              stage.replace {
+                expression = "(?i)(?:[A-Z0-9_]*(?:token|secret|password|passwd|credential|api_?key)[A-Z0-9_]*)=([^\\s\\]\\\\\"]+)"
+                replace    = "<redacted>"
+              }
+            }
             forward_to = [loki.write.default.receiver]
           }
           loki.write "default" {

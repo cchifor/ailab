@@ -134,9 +134,14 @@ those are recorded in the plan's soak record is the description below true of th
   field **plus** its content (never on a timestamp alone), and judge freshness by that source time,
   which is what `scripts/env-pool-soak.py` does. The relay pins all three CP apids as endpoints,
   so a single CP reboot does not stop the capture.
-- **Privacy.** Shim debug records include exec commands, environment and mount details of leases.
-  Raw exports stay under `kubernetes/infra/_out/` or in Loki; this repository is mirrored publicly,
-  so plans/PRs carry redacted excerpts only.
+- **Privacy.** At `[debug]` level containerd logs every `Exec … with command [...]` verbatim and
+  dumps each container's OCI spec (`Env`/`Args`), and the kata-agent echoes `process command: [...]`
+  on the guest console — **verified at G2 (2026-09-21) with a synthetic secret: both paths reached
+  Loki**, which is unauthenticated on the LAN. `monitoring/alloy.yaml` therefore redacts those
+  payloads for the `cri-log-relay` stream only (`stage.match` + `stage.replace`; sandbox ids,
+  timings and kernel/agent state are kept). Re-run the synthetic-secret probe after any change to
+  that stage. Raw exports stay under `kubernetes/infra/_out/`; this repository is mirrored
+  publicly, so plans/PRs carry redacted excerpts only.
 - **Volume tiers.** Measured at rollout (V2 in the plan) — idle and during one lease. Tier 2 = set
   `[agent.kata] enable_debug = false` in `10-debug.toml` (keeps the guest console); there is no
   tier 3 short of dropping `[debug] level`, which silences the guest entirely. Either change is a
