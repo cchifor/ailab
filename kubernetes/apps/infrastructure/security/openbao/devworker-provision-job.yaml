@@ -188,6 +188,9 @@ data:
             n_sid=$((n_sid + 1))
           done
         fi
+        # `bao token lookup -format=json` prints indented JSON with `"key": "value"` pairs; the
+        # match is anchored on that shape (the image has no jq). An AppRole token carries its
+        # role in the metadata as role_name.
         n_tok=0
         for acc in $(bao list -format=json auth/token/accessors | grep -o '"[^"]*"' | tr -d '"'); do
           if bao token lookup -format=json -accessor "$acc" 2>/dev/null | grep -q "\"role_name\": *\"${host}\""; then

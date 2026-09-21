@@ -143,7 +143,7 @@ variable "dev_worker_ssh_public_key" {
 # dev-worker-6's retirement (2026-09-2x); node3 gives up its last dev-worker in PR-C2 and hosts the
 # second testpool env node instead (plans/2026-09-21-retire-dev-workers-3-6-plan.md).
 # IPs: consecutive .8-.13 (free static block, inside the .2-.50 reserve, below the router DHCP pool at
-# .51 — no router change needed). vmids 42xx band (4201-4206) don't collide (Talos 4001-4003, runners
+# .51 — no router change needed). vmids 42xx band (4201-4205; 4206 retired 2026-09-2x) don't collide (Talos 4001-4003, runners
 # 4101-4105, AI LXC 5001-5003, registry 5004). NOTE: cloud-init sets the IP at create and
 # lifecycle.ignore_changes=[initialization] means editing `ip` here is DOCUMENTATION ONLY — the live IP
 # was changed in-guest (netplan), see docs/runbooks/dev-workers.md. The 2nd worker per node fits because

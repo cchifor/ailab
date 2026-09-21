@@ -76,6 +76,16 @@ jobs:
           set -euo pipefail
           bash scripts/tests/test-env-reaper.sh
 
+      # The openbao-devworker-provision script under the Job's OWN image (openbao 2.6.2's busybox sh,
+      # `bao` shadowed by a stub): a retired slot's revocation is complete (secret-id accessors,
+      # tokens by role, role/policy, KV metadata + descendants), idempotent on the second run, skips
+      # the retired seed, and never prints a credential value. Docker required, no soft skip.
+      - name: devworker-provision RETIRED_SLOTS under the Job image
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-devworker-provision.sh
+
       # The three spans derived from litellm.yaml's model_list — Open WebUI's Local-group model_ids,
       # the dsh seed's provider models rows, and litellm.yaml's own checksum/config — must match what
       # the generator renders. Same fail-closed shape as the step above: a drifted span, a missing
