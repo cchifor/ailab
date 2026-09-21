@@ -1,6 +1,6 @@
 # Implementation review — retire-dev-workers-3-6 (PR-C1) — round 1
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
