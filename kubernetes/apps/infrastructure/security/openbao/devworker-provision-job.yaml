@@ -210,7 +210,14 @@ data:
     _or_empty() {
       if out="$("$@" 2>&1)"; then
         printf '%s' "$out"
-      elif printf '%s' "$out" | grep -qiE 'no value found|not found'; then
+      # `role "<name>" does not exist` is the SAME benign case as "no value found", and it is the
+      # one a CONVERGED retirement produces: once the role itself is deleted, listing its secret-ids
+      # is a 400 with that wording rather than an empty list. Without it the daily Job aborts on
+      # every run after a retirement finishes — which is exactly what happened to slot 6 between
+      # PR #809 converging and 2026-09-21 (the Job had been red since, silently, because nothing
+      # watches a Job that only runs itself). Matched narrowly (the quoted role name) so a missing
+      # MOUNT or any other "does not exist" still aborts.
+      elif printf '%s' "$out" | grep -qiE 'no value found|not found|role "[^"]*" does not exist'; then
         :
       else
         echo "$* failed and was not a not-found; aborting" >&2

@@ -77,6 +77,15 @@ case "$1 $2" in
       -mount*|-*) echo "flag provided but not defined: ${3%%=*}" >&2; exit 1 ;;
       auth/approle/role/dev-worker-6/secret-id)
         if [ -f "$STATE/FAIL_SID_LIST_ONCE" ]; then rm -f "$STATE/FAIL_SID_LIST_ONCE"; echo "Error listing $3: connection refused" >&2; exit 2; fi
+        # A CONVERGED retirement: the role itself is gone, so this listing is a 400 with OpenBao's
+        # own wording — NOT "no value found". Measured live 2026-09-21 on a vault where slot 6 had
+        # already been retired; the run aborted here on every daily pass until the guard learned it.
+        if [ -f "$STATE/role-gone" ]; then
+          echo "Error listing $3: Error making API request." >&2
+          echo "Code: 400. Errors:" >&2
+          echo "* role \"dev-worker-6\" does not exist" >&2
+          exit 2
+        fi
         { [ -f "$STATE/sids-gone-acc1" ] && [ -f "$STATE/sids-gone-acc2" ]; } && nvf "$3" || echo '["acc1", "acc2"]' ;;
       auth/token/accessors)
         if [ -f "$STATE/FAIL_ACCESSOR_LIST_ONCE" ]; then rm -f "$STATE/FAIL_ACCESSOR_LIST_ONCE"; echo "Error listing auth/token/accessors: Vault is sealed" >&2; exit 2; fi
@@ -185,6 +194,19 @@ outB2="$(run)"; echo "$outB2" | sed 's/^/  B2: /'
 expect "$outB2" "devworker provision complete"
 
 # ---- D. a failed secret-id listing aborts BEFORE anything irreversible -------------------------
+# F. a CONVERGED retirement stays converged. Run 1 deletes the role; run 2 therefore gets the 400
+# `role "..." does not exist` from every listing that names it. That must read as "nothing left to
+# do" and the run must reach the seed loop — the estate's daily Job was red from the moment slot 6's
+# retirement finished until this was fixed (2026-09-21), and nothing watches a Job that only runs
+# itself.
+reset_state
+out1="$(run)" || { echo "F: run 1 failed"; echo "$out1" >&2; exit 1; }
+out2="$(run)" || { echo "F: run 2 (role already gone) aborted instead of converging"; echo "$out2" >&2; exit 1; }
+expect "$out2" "devworker provision complete"
+expect "$out2" "retired dev-worker-6: converged"
+forbid "$out2" "failed and was not a not-found"
+echo "F: a converged retirement does not abort the next run"
+
 reset_state; touch "$WORK/state/FAIL_SID_LIST_ONCE"
 set +e; outD="$(run)"; rcD=$?; set -e; echo "$outD" | sed 's/^/  D: /'
 [ "$rcD" != 0 ] || { echo "D must fail when the secret-id listing fails" >&2; exit 1; }
