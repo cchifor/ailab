@@ -1,90 +1,74 @@
-# Implementation review — env-pool-root-cause-followup — round 1
+# Implementation review — env-pool-root-cause-followup — round 2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
-### Missing telemetry can still produce a clean verdict
+### A partial evidence dump still counts as complete
 
-**Location:** scripts/env-pool-soak.py:461  
-**Severity:** important  
-**Resolution:** Resolved in e2fc579d: every required series (node_ready, kubelet_up, boot_time, member_age, warm_ready, warm_spec, restarts) must be present, cover both window boundaries and have no interior gap > 3 steps, or the run is INCOMPLETE; tests: empty required series, 10-minute hole under 80 % coverage.
+**Location:** scripts/env-pool-soak.py:411
+**Severity:** important
+**Resolution (round 2):** the incomplete marker now wins per (sandbox, pid): a state= header followed by a timeout line is not a complete dump. Test: header-then-timeout → INCOMPLETE.
 
-### Capacity loss is ignored without an event inside the window
+### Partial member and restart telemetry still permits OK
 
-**Location:** scripts/env-pool-soak.py:455; scripts/env-pool-soak.py:252  
-**Severity:** important  
-**Resolution:** Resolved in e2fc579d + 3329e93e: incidents are derived from the SandboxWarmPool's own readyReplicas < replicas (new kube-state-metrics customResourceState series), so an outage underway at the window start or a loss shorter than the alert delay is seen without any signal; the checkpoint no longer advances while an incident is open. Tests added for both.
+**Location:** scripts/env-pool-soak.py:326
+**Severity:** important
+**Resolution (round 2):** restart counters must cover each member's observed lifetime and the union of member observations must cover the window. Tests: counter truncated to one sample; both histories truncated with no successor.
 
-### Separate incidents are joined into a false slow recovery
+### Fresh closures are declared contained before their effects appear
 
-**Location:** scripts/env-pool-soak.py:472  
-**Severity:** important  
-**Resolution:** Resolved in e2fc579d: signals attach to an incident only within ±5 min of its start (or inside it); otherwise they are reported as transient. Test: failure at minute 10 + unrelated dip at minutes 40–44 → contained, nothing unresolved.
+**Location:** scripts/env-pool-soak.py:503
+**Severity:** important
+**Resolution (round 2):** a signal within EVENT_ATTACH_SECONDS of the window end is pending — INCOMPLETE with the checkpoint held (open_incident). Test added.
 
-### Leased sandboxes can mask missing warm capacity
+### Stage-2 reaps disappear from verdict decisions
 
-**Location:** scripts/env-pool-soak.py:71; scripts/env-pool-soak.py:361  
-**Severity:** important  
-**Resolution:** Resolved in 3329e93e + e2fc579d: warm capacity is the pool's own accounting (agentsandbox_warmpool_ready_replicas), never pod readiness; a Sandbox pod gone without a capacity incident is reported as lease turnover. Tests: Ready leased pod + empty pool → UNRESOLVED; lease turnover → OK.
+**Location:** scripts/env-pool-soak.py:410
+**Severity:** important
+**Resolution (round 2):** both stages are parsed; stage-2 kills are signals and need in-window relay correlation; the pre-kill dump is required for stage 1 only. Test added.
 
-### Failed evidence collection counts as successful evidence
+### Untimestamped replay can still manufacture fresh coverage
 
-**Location:** scripts/env-pool-soak.py:400; scripts/env-pool-soak.py:427  
-**Severity:** important  
-**Resolution:** Resolved in e2fc579d: evidence is matched per (sandbox, pid) against each stage-1 kill; only lines carrying state= (a completed dump) count and 'incomplete' lines never do. Tests: timeout-only, mixed success across two sandboxes.
+**Location:** scripts/env-pool-soak.py:426
+**Severity:** important
+**Resolution (round 2):** records without a valid containerd time= are excluded from capture/evidence regardless of their share (kept in the raw export, counted in the report). Test: 3 old + 1 untimestamped every 5 min → no in-window capture.
 
-### Relay replay is mistaken for fresh source evidence
+### Replay outside the window creates fictitious capture gaps
 
-**Location:** scripts/env-pool-soak.py:129; scripts/env-pool-soak.py:441; docs/runbooks/env-pool.md:124  
-**Severity:** important  
-**Resolution:** Resolved in e2fc579d: relay records are deduplicated on the containerd record's own time= field + content and freshness/gaps use that source time; lines without a source time are flagged. Runbook corrected (whole-ring replay, dedupe on time+content). Test: yesterday's record replayed every 5 min → gap → INCOMPLETE.
+**Location:** scripts/env-pool-soak.py:470
+**Severity:** important
+**Resolution (round 2):** only records with a source time inside [from, to] count for coverage and per-sandbox evidence; earlier replay is reported as history. Test: a pre-window record in a fully covered window → OK.
 
-### The final identity check rescans unrelated host processes
+### An incident already underway gets an invented start time
 
-**Location:** kubernetes/apps/infrastructure/testpool/env-reaper.yaml:200  
-**Severity:** important  
-**Resolution:** Resolved in 3329e93e: still_ours reads only the given pid's cgroup/exe/cmdline; scripts/tests/test-env-reaper.sh runs the helpers under the DaemonSet's busybox image against a synthetic /proc (changed/vanished identity, evidence timeout via a FIFO, unreadable entries, thread truncation, skip-kill) and is a CI step.
+**Location:** scripts/env-pool-soak.py:492
+**Severity:** important
+**Resolution (round 2):** an incident deficient at the first matched sample is reported with unknown start/duration (INCOMPLETE, re-run with an earlier --from) instead of being certified contained. Test added.
 
-### Fault injection bypasses the watchdog and controller path
+### Missing desired capacity fabricates an unresolved incident
 
-**Location:** docs/runbooks/env-pool.md:212  
-**Severity:** important  
-**Resolution:** Resolved in e2fc579d (runbook): the V2 sequence freezes a member older than the 15-minute grace and lets watchdog → NotReady → GC → reaper run with timestamps recorded; the manual Sandbox delete is documented as a separate teardown-only test.
+**Location:** scripts/env-pool-soak.py:479
+**Severity:** important
+**Resolution (round 2):** deficits are evaluated only where ready and spec are both observed for the same step; a missing target is INCOMPLETE, never an outage. Tests: spec absent with ready=0; spec unobserved where the dip falls.
 
-### The runbook describes G2 as already applied
+### A closed slow incident permanently blocks the checkpoint
 
-**Location:** docs/runbooks/env-pool.md:88; docs/runbooks/env-pool.md:139  
-**Severity:** nit  
-**Resolution:** Resolved in e2fc579d (runbook): the section is marked active only after gate G2, names the two settings that flip there (kata_debug, apply_mode) and the acceptance checks that make the description true.
+**Location:** scripts/env-pool-soak.py:262
+**Severity:** important
+**Resolution (round 2):** Report.open_incident is tracked separately; a fully observed incident past the bound keeps UNRESOLVED but the checkpoint advances; only open incidents/pending signals hold it. Test added.
 
 ## Diff stat
 
 ```text
- .gitea/workflows/manifests.yaml                    |   2 +-
- CLAUDE.md                                          |   6 +-
- docs/network-plan.md                               |  15 +-
- docs/runbooks/env-pool.md                          | 160 +++++-
- justfile                                           |  11 +
- .../agent-sandbox/kustomization.yaml               |   6 +-
- .../monitoring/cri-log-relay-talosconfig.sops.yaml |  37 ++
- .../infrastructure/monitoring/cri-log-relay.yaml   | 143 ++++++
- .../infrastructure/monitoring/kustomization.yaml   |   2 +
- .../apps/infrastructure/testpool/env-reaper.yaml   |  74 ++-
- kubernetes/infra/env-pool/SPIKE-REPORT.md          |   5 +
- kubernetes/infra/env-pool/backend.tf               |  12 +-
- kubernetes/infra/env-pool/imports.tf               |  10 +
- .../machine-config/cri-20-customization.part       |  15 +
- .../machine-config/kata/config.d/10-debug.toml     |  25 +
- .../machine-config/kata/configuration.toml         | 469 ++++++++++++++++++
- .../env-pool/machine-config/worker.yaml.tftpl      |  23 +
- kubernetes/infra/env-pool/main.tf                  |  11 +-
- kubernetes/infra/env-pool/node-labels.tf           |   8 +-
- kubernetes/infra/env-pool/talos.tf                 |  13 +-
- kubernetes/infra/env-pool/terraform.tfvars.example |  16 +
- kubernetes/infra/env-pool/variables.tf             |  40 +-
- ...2026-09-20-env-pool-root-cause-followup-plan.md |   2 +-
- scripts/env-pool-soak.py                           | 542 +++++++++++++++++++++
- scripts/tests/test_env_pool_soak.py                | 374 ++++++++++++++
- 25 files changed, 1972 insertions(+), 49 deletions(-)
+ .gitea/workflows/manifests.yaml                    |   9 +
+ docs/runbooks/env-pool.md                          |  39 ++-
+ .../infrastructure/monitoring/cri-log-relay.yaml   |   2 +-
+ .../monitoring/kube-prometheus-stack.yaml          |  33 ++
+ .../apps/infrastructure/testpool/env-reaper.yaml   |  33 +-
+ plans/env-pool-root-cause-followup-impl-review.md  |  28 +-
+ scripts/env-pool-soak.py                           | 268 ++++++++-------
+ scripts/tests/test-env-reaper.sh                   | 130 ++++++++
+ scripts/tests/test_env_pool_soak.py                | 367 +++++++++++----------
+ 9 files changed, 579 insertions(+), 330 deletions(-)
 ```

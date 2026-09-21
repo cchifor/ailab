@@ -104,14 +104,25 @@ def quiet_loki():
     return {"reaper": beats, "watchdog": [], "relay": relay}
 
 
-def reap_lines(loki, at, sb=SB, pid=5, with_evidence=True, incomplete=False):
-    if incomplete:
-        loki["reaper"].append((int(at * 1e9), f"evidence stage=1 pod={POD} sandbox={sb} pid={pid} incomplete (timeout 5s or read error)"))
-    elif with_evidence:
+def reap_lines(loki, at, sb=SB, pid=5, with_evidence=True, incomplete=False, stage=1, header_then_timeout=False):
+    if header_then_timeout:  # the shape the shell harness produces: state= header, then the timeout marker
         loki["reaper"].append((int(at * 1e9), f"evidence stage=1 pod={POD} uid=u sandbox={sb} exe=/usr/local/libexec/virtiofsd pid={pid} state=D wchan=fuse_wait threads=3 tstates=D:1,S:2"))
-    loki["reaper"].append((int((at + 1) * 1e9), f"reap stage=1 pod={POD} uid=u sandbox={sb} exe=/usr/local/libexec/virtiofsd pid={pid} age=153s"))
+        loki["reaper"].append((int((at + 0.5) * 1e9), f"evidence stage=1 pod={POD} sandbox={sb} pid={pid} incomplete (timeout 5s or read error)"))
+    elif incomplete:
+        loki["reaper"].append((int(at * 1e9), f"evidence stage=1 pod={POD} sandbox={sb} pid={pid} incomplete (timeout 5s or read error)"))
+    elif with_evidence and stage == 1:
+        loki["reaper"].append((int(at * 1e9), f"evidence stage=1 pod={POD} uid=u sandbox={sb} exe=/usr/local/libexec/virtiofsd pid={pid} state=D wchan=fuse_wait threads=3 tstates=D:1,S:2"))
+    exe = "/usr/local/libexec/virtiofsd" if stage == 1 else "/usr/local/bin/containerd-shim-kata-v2"
+    loki["reaper"].append((int((at + 1) * 1e9), f"reap stage={stage} pod={POD} uid=u sandbox={sb} exe={exe} pid={pid} age=153s"))
     loki["relay"].append((int((at - 60) * 1e9), src_line(at - 60, f"sandbox={sb} vmconsole: INFO: task dockerd blocked")))
     return loki
+
+
+def with_pod(prom, pod, first, last, age0=100):
+    """A second Sandbox pod observed in [first, last] with its own (quiet) restart counter."""
+    prom["member_age"].append(series({"pod": pod, "namespace": "testpool"}, [[t, str(t - first + age0)] for t in range(int(first), int(last) + 1, STEP)]))
+    prom["restarts"].append(series({"pod": pod, "container": "control"}, samples(first, last, 0)))
+    return prom
 
 
 class VerdictTests(unittest.TestCase):
@@ -132,7 +143,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(rep.verdict, "RECURRENCE-CONTAINED", rep.markdown())
         self.assertTrue(any("capacity incident" in r and "inside the bound" in r for r in rep.recurrences))
         self.assertTrue(any("signal watchdog closure" in s_ and "capacity incident" in s_ for s_ in rep.sections))
-        self.assertTrue(any("signal reap of" in s_ for s_ in rep.sections))
+        self.assertTrue(any("signal stage-1 reap of" in s_ for s_ in rep.sections))
 
     def test_incident_open_at_window_end_is_unresolved(self):
         prom = capacity_dip(quiet_prom(), T0 + 1500, T1 + 1)
@@ -145,6 +156,7 @@ class VerdictTests(unittest.TestCase):
         prom = capacity_dip(quiet_prom(), T0, T1 + 1)
         rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
         self.assertEqual(rep.verdict, "UNRESOLVED", rep.markdown())
+        self.assertTrue(any("already underway at the first sample" in u and "still open" in u and "--from" in u for u in rep.unresolved))
         # and a short loss (below the alert's 30-minute delay) is contained, not invisible
         prom = capacity_dip(quiet_prom(), T0 + 600, T0 + 780)
         rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
@@ -165,15 +177,13 @@ class VerdictTests(unittest.TestCase):
         self.assertFalse(rep.unresolved)
 
     def test_leased_pod_ready_does_not_mask_empty_warm_pool(self):
-        prom = quiet_prom()
-        prom["member_age"].append(series({"pod": "env-std-pool-leased", "namespace": "testpool"}, samples(T0, T1, 5000)))
+        prom = with_pod(quiet_prom(), "env-std-pool-leased", T0, T1, 5000)
         prom = capacity_dip(prom, T0 + 300, T1 + 1)  # the pool's own readyReplicas is 0 while the leased pod stays Ready
         rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
         self.assertEqual(rep.verdict, "UNRESOLVED", rep.markdown())
 
     def test_lease_turnover_is_not_a_recurrence(self):
-        prom = quiet_prom()
-        prom["member_age"].append(series({"pod": "env-std-pool-leased", "namespace": "testpool"}, [[t, str(t - T0 + 100)] for t in range(int(T0), int(T0) + 1200, STEP)]))
+        prom = with_pod(quiet_prom(), "env-std-pool-leased", T0, T0 + 1140)
         rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
         self.assertEqual(rep.verdict, "OK", rep.markdown())
         self.assertTrue(any("lease turnover" in s_ for s_ in rep.sections))
@@ -255,6 +265,26 @@ class CompletenessTests(unittest.TestCase):
         self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
         self.assertTrue(any("no samples" in p for p in rep.problems))
 
+    def test_scrape_target_churn_does_not_split_a_series(self):
+        # the node-exporter pod is replaced on every reboot and KSM can roll mid-window: the same
+        # metric then arrives as two half-window series that differ only in the target's pod label
+        prom = quiet_prom()
+        half = T0 + 1800
+        prom["boot_time"] = [
+            series({"instance": "192.168.0.37:9100", "pod": "node-exporter-old"}, samples(T0, half - STEP, 1_799_000_000)),
+            series({"instance": "192.168.0.37:9100", "pod": "node-exporter-new"}, samples(half, T1, 1_799_000_000)),
+        ]
+        prom["warm_ready"] = [
+            series({"name": "env-std-pool", "exported_namespace": "testpool", "pod": "ksm-old"}, samples(T0, half - STEP, 1)),
+            series({"name": "env-std-pool", "exported_namespace": "testpool", "pod": "ksm-new"}, samples(half, T1, 1)),
+        ]
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "OK", rep.markdown())
+        # and a dip in the second half is evaluated (not lost with the "first series only")
+        prom["warm_ready"][1]["values"] = [[t_, "0" if half + 600 <= t_ < half + 720 else v] for t_, v in prom["warm_ready"][1]["values"]]
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "RECURRENCE-CONTAINED", rep.markdown())
+
     def test_missing_expected_node_is_incomplete(self):
         rep = self.run_report(FakeSource(quiet_prom(node="talos-env-node-9"), loki=quiet_loki()))
         self.assertEqual(rep.verdict, "INCOMPLETE")
@@ -283,22 +313,30 @@ class CompletenessTests(unittest.TestCase):
         loki["relay"] = [(int((T0 + 300 * i) * 1e9), old) for i in range(0, 13)]
         rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
         self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
-        self.assertTrue(any("relay capture gap" in p for p in rep.problems))
-        self.assertIn("| relay records (deduplicated on source time + content; 13 raw) | 1 |", rep.markdown())
+        self.assertTrue(any("no cri-log-relay records in the window" in p for p in rep.problems))
+        self.assertIn("13 raw, 13 replayed from outside the window, 0 untimestamped) | 0 |", rep.markdown())
 
-    def test_relay_lines_without_source_time_are_flagged(self):
+    def test_relay_lines_without_source_time_are_reported_not_problems(self):
         loki = quiet_loki()
         loki["relay"] = [(t, "no time field here") for t, _ in loki["relay"]]
         rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
-        self.assertEqual(rep.verdict, "INCOMPLETE")
-        self.assertTrue(any("no containerd time= field" in p for p in rep.problems))
+        self.assertEqual(rep.verdict, "INCOMPLETE")  # nothing timestamped → no capture at all
+        self.assertTrue(any("no cri-log-relay records in the window" in p for p in rep.problems))
+        # one garbled line among a healthy stream is counted, not a problem: it must not hold the
+        # checkpoint on the same malformed record forever
+        loki = quiet_loki()
+        loki["relay"].append((int((T0 + 1000) * 1e9), "relay: connection reset, reconnecting"))
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "OK", rep.markdown())
+        self.assertTrue(soak.should_advance_checkpoint(rep))
+        self.assertIn("1 of 14 relay lines carry no containerd time= field", rep.markdown())
 
     def test_reap_without_complete_evidence_is_incomplete(self):
         for kind in ("none", "incomplete"):
             loki = reap_lines(quiet_loki(), T0 + 1650, with_evidence=False, incomplete=(kind == "incomplete"))
             rep = self.run_report(FakeSource(capacity_dip(quiet_prom(), T0 + 1560, T0 + 1980), loki=loki))
             self.assertEqual(rep.verdict, "INCOMPLETE", kind)
-            self.assertTrue(any("no complete evidence line" in p for p in rep.problems), kind)
+            self.assertTrue(any("no complete evidence dump" in p for p in rep.problems), kind)
 
     def test_evidence_is_matched_per_sandbox_and_pid(self):
         loki = reap_lines(quiet_loki(), T0 + 1650, sb=SB, pid=5)  # complete
@@ -318,7 +356,118 @@ class CompletenessTests(unittest.TestCase):
         loki["relay"] = [l for l in loki["relay"] if SB not in l[1]]
         rep = self.run_report(FakeSource(capacity_dip(quiet_prom(), T0 + 1560, T0 + 1980), loki=loki))
         self.assertEqual(rep.verdict, "INCOMPLETE")
-        self.assertTrue(any("no relay" in p for p in rep.problems))
+        self.assertTrue(any("no in-window relay" in p for p in rep.problems))
+
+    def test_header_then_timeout_dump_is_not_complete(self):
+        loki = reap_lines(quiet_loki(), T0 + 1650, header_then_timeout=True)
+        rep = self.run_report(FakeSource(capacity_dip(quiet_prom(), T0 + 1560, T0 + 1980), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("timed out after its header" in p for p in rep.problems))
+
+    def test_stage2_reap_is_a_signal_without_needing_evidence(self):
+        loki = reap_lines(quiet_loki(), T0 + 1800, stage=2, pid=11)
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertNotEqual(rep.verdict, "OK", rep.markdown())
+        self.assertTrue(any("stage-2 reap" in r for r in rep.recurrences))
+        self.assertFalse(any("evidence dump" in p for p in rep.problems))
+        loki["relay"] = [l for l in loki["relay"] if SB not in l[1]]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertTrue(any("no in-window relay" in p for p in rep.problems))
+
+    def test_signal_just_before_window_end_is_pending(self):
+        loki = quiet_loki()
+        loki["watchdog"] = [(int((T1 - 5) * 1e9), "ready-watchdog: ready-port closed: virtiofs hung")]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("outcome not observable yet" in p for p in rep.problems))
+        self.assertFalse(soak.should_advance_checkpoint(rep))
+
+    def test_recovered_incident_does_not_absorb_a_fresh_closure(self):
+        # an incident that recovered 3 min before the window end sits within ±5 min of a closure
+        # 5 s before the end — but it cannot show that closure's outcome
+        loki = quiet_loki()
+        loki["watchdog"] = [(int((T1 - 5) * 1e9), "ready-watchdog: ready-port closed: virtiofs hung")]
+        prom = capacity_dip(quiet_prom(), T1 - 240, T1 - 180)
+        rep = self.run_report(FakeSource(prom, loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("outcome not observable yet" in p for p in rep.problems))
+        self.assertFalse(any("signal watchdog closure" in s_ for s_ in rep.sections))
+        self.assertFalse(soak.should_advance_checkpoint(rep))
+        # an incident still OPEN at the end is already unresolved and does absorb it
+        prom = capacity_dip(quiet_prom(), T1 - 240, T1 + 1)
+        rep = self.run_report(FakeSource(prom, loki=loki))
+        self.assertEqual(rep.verdict, "UNRESOLVED", rep.markdown())
+        self.assertTrue(any("signal watchdog closure" in s_ for s_ in rep.sections))
+        self.assertFalse(soak.should_advance_checkpoint(rep))
+
+    def test_untimestamped_records_never_count_as_capture(self):
+        loki = quiet_loki()
+        old = src_line(T0 - 86400, "yesterday's line")
+        loki["relay"] = []
+        for i in range(0, 13):
+            loki["relay"] += [(int((T0 + 300 * i) * 1e9), old)] * 3 + [(int((T0 + 300 * i) * 1e9), "untimestamped replay")]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("no cri-log-relay records in the window" in p for p in rep.problems))
+        self.assertIn("carry no containerd time= field", rep.markdown())
+        self.assertFalse(any("time= field" in p for p in rep.problems))
+
+    def test_pre_window_replay_does_not_create_a_gap(self):
+        loki = quiet_loki()
+        loki["relay"].append((int((T0 + 10) * 1e9), src_line(T0 - 3600, "an hour before the window")))
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "OK", rep.markdown())
+
+    def test_incident_underway_at_start_is_not_certified_contained(self):
+        prom = capacity_dip(quiet_prom(), T0, T0 + 120)  # deficient at the first sample, back 2 min later
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("underway at the first sample" in p for p in rep.problems))
+        self.assertFalse(rep.recurrences)
+
+    def test_missing_spec_is_incomplete_not_an_outage(self):
+        prom = capacity_dip(quiet_prom(), T0, T1 + 1)
+        prom["warm_spec"] = []
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertFalse(rep.unresolved)
+        prom = quiet_prom()
+        prom["warm_spec"][0]["values"] = prom["warm_spec"][0]["values"][:20]  # spec unobserved for the rest
+        prom = capacity_dip(prom, T0 + 1800, T0 + 1860)
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "INCOMPLETE")
+        self.assertFalse(rep.recurrences)  # the dip fell where the target was unobserved: not evaluated
+        self.assertTrue(any("no warm_spec observation within" in p for p in rep.problems))
+
+    def test_dip_inside_a_short_spec_gap_is_still_an_incident(self):
+        # two missing warm_spec scrapes (inside the sample_gaps tolerance) around a 2-sample dip:
+        # the last observed target is carried forward, the deficit is evaluated, not dropped
+        prom = capacity_dip(quiet_prom(), T0 + 1800, T0 + 1920)
+        prom["warm_spec"][0]["values"] = [s_ for s_ in prom["warm_spec"][0]["values"] if not (T0 + 1800 <= s_[0] <= T0 + 1860)]
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "RECURRENCE-CONTAINED", rep.markdown())
+        self.assertTrue(any("capacity incident" in r for r in rep.recurrences))
+        self.assertFalse(any("no warm_spec observation" in p for p in rep.problems))
+
+    def test_closed_slow_incident_keeps_verdict_but_frees_checkpoint(self):
+        prom = capacity_dip(quiet_prom(), T0 + 600, T0 + 600 + 15 * 60)
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "UNRESOLVED")
+        self.assertTrue(soak.should_advance_checkpoint(rep))
+        rep = self.run_report(FakeSource(capacity_dip(quiet_prom(), T0 + 3000, T1 + 1), loki=quiet_loki()))
+        self.assertFalse(soak.should_advance_checkpoint(rep))
+
+    def test_truncated_restart_or_member_history_is_incomplete(self):
+        prom = quiet_prom()
+        prom["restarts"][0]["values"] = prom["restarts"][0]["values"][:1]  # member observed all hour, counter once
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        prom = quiet_prom()
+        prom["member_age"][0]["values"] = prom["member_age"][0]["values"][:20]
+        prom["restarts"][0]["values"] = prom["restarts"][0]["values"][:20]  # both histories end at minute 20, no successor
+        rep = self.run_report(FakeSource(prom, loki=quiet_loki()))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("Sandbox pods (union)" in p for p in rep.problems))
 
 
 class FakeLoki:

@@ -96,7 +96,7 @@ variable "kata_debug" {
     worker.yaml.tftpl — a file under machine-config/ alone ships nothing.
   EOT
   type        = bool
-  default     = false
+  default     = true # G2 (2026-09-21): applied in staged mode, activated by the announced reboot
 }
 
 # ---- Env-node sizing ----
@@ -139,7 +139,7 @@ variable "env_nodes" {
     apply_mode = optional(string, "auto")
   }))
   default = {
-    "env-node-1" = { node_name = "ai-node2", vm_id = 4401, ip = "192.168.0.37", host_ip = "192.168.0.3", hostname = "env-node-1", apply_mode = "no_reboot" }
+    "env-node-1" = { node_name = "ai-node2", vm_id = 4401, ip = "192.168.0.37", host_ip = "192.168.0.3", hostname = "env-node-1", apply_mode = "staged" }
   }
   validation {
     condition     = alltrue([for n in values(var.env_nodes) : contains(["auto", "reboot", "no_reboot", "staged"], n.apply_mode)])
