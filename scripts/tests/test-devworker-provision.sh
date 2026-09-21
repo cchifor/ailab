@@ -89,7 +89,12 @@ run() {  # $1 = run number; prints the script's combined output
       sed "s#SEED_DIR=/etc/openbao-devworker-seeds#SEED_DIR=/w/seeds#" /w/provision.sh > /tmp/p.sh
       sh /tmp/p.sh 2>&1'
 }
+# The image runs as its own `openbao` user (uid 100) and mktemp dirs are 0700: open the scratch tree
+# for reading and the state dir for the stub's call log, or every read inside the container fails.
 mkdir -p "$WORK/state"
+chmod 755 "$WORK" "$WORK/stub" "$WORK/seeds" "$WORK/stub/bao"
+chmod 644 "$WORK/provision.sh" "$WORK/seeds"/*.json
+chmod 777 "$WORK/state"
 out1="$(run 1)"; echo "$out1" | sed 's/^/  run1: /'
 out2="$(run 2)"; echo "$out2" | sed 's/^/  run2: /'
 log="$WORK/state/calls.log"
