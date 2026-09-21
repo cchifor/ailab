@@ -604,6 +604,37 @@ check of the reaper functions), Phase 3 validate (unit tests, manifest lint, `to
 live read-only soak run). Phase 4 (PR, review rounds, codex impl-review) and the gated applies
 follow. Skipped: HTML UI proposal (no UI change).
 
+## Implementation notes (deviations from the finalized plan, with the evidence that forced them)
+
+- **Warm capacity is the SandboxWarmPool's own accounting, not pod readiness.** The plan's T3 used
+  `kube_pod_status_ready` over Sandbox-owned pods; the codex implementation review showed a Ready
+  *leased* pod keeps that aggregate at 1 while the warm pool is empty. PR-A adds a kube-state-metrics
+  `customResourceState` entry (`agentsandbox_warmpool_ready_replicas` / `_spec_replicas`, RBAC on
+  `sandboxwarmpools`) in `monitoring/kube-prometheus-stack.yaml`, and the soak script derives
+  capacity-loss incidents from `ready < spec` — so an outage needs no signal to be seen, lease
+  turnover is not a recurrence, and the report is `INCOMPLETE` until that metric is scraped.
+- **The drop-in is a static file; there is no `kata_agent_debug` variable.** `templatefile()` does
+  not expand `${…}` inside strings passed through `file()`, so tier 2 is an edit of
+  `config.d/10-debug.toml` (a commit), not a variable flip.
+- **No `rendered_machine_configuration` output.** `tofu output` reads the last *applied* state; the
+  configuration about to be applied is the resource's `machine_configuration` in the saved plan
+  (`tofu show -json`), which is what G1 dry-ran against the node (result: "without a reboot … No
+  changes").
+- **The reaper's identity re-check is per pid, and the helpers have a test harness.** `still_ours`
+  re-reads one pid's cgroup/exe/cmdline (no scan between check and kill); `scripts/tests/
+  test-env-reaper.sh` runs the ConfigMap's script under the DaemonSet's digest-pinned image against
+  a synthetic `/proc` (CI step). `. file --lib` does not set `$1` in dash/ash, so the library guard
+  is an env var (`REAP_LIB_ONLY=1`), and the re-sourced path is `REAP_SCRIPT`.
+- **Relay details fixed by review:** `fsGroup: 65534` (the 0440 Secret projection was root:root),
+  all three CP apids as endpoints, no `--tail` (whole-ring replay), deduplication on the containerd
+  record's own `time=` + content.
+- **Verdict machine grew an `UNRESOLVED` rung and a completeness gate on the checkpoint** (codex
+  plan round 2 + impl-review): PREVENTION-FAILED > UNRESOLVED > INCOMPLETE > RECURRENCE-CONTAINED
+  > OK; the checkpoint moves only with complete data and no open incident.
+- **G1 was applied from `9d50aadc`** (import → `No changes.`; node boot id unchanged); the T2 flip
+  (`kata_debug = true`, `apply_mode = "staged"`) is a separate commit applied at G2, after PR-A
+  merges — the runbook says so explicitly.
+
 ## Appendix A — upstream issue draft (kubernetes-sigs/agent-sandbox)
 
 **Title:** SandboxWarmPool stuck-member GC measures the readiness grace period from
