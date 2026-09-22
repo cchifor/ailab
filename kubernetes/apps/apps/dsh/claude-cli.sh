@@ -133,6 +133,12 @@ export DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 # that would run inside a process holding the subscription token. The CLI has its own second line
 # of defence (an untrusted workspace has its permissions.allow ignored, observed in the same
 # measurement), but this route should not be relying on a trust dialog nobody can answer.
+#
+# THE MCP FLAGS ARRIVE TWICE and that is fine. The cordis row keeps isolateTools: true, so the
+# adapter sends --strict-mcp-config --mcp-config too, and "$@" carries them in ahead of these.
+# Verified in this pod 2026-09-22: the duplicated argv is accepted, "tools":[] and
+# "mcp_servers":[]. They are repeated here rather than left to the adapter because a direct
+# invocation -- the case this whole block exists for -- would not carry the adapter's copy.
 exec "$BIN" "$@" \
   --tools "" \
   --disallowed-tools "*" \
