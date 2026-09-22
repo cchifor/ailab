@@ -177,35 +177,17 @@ and bumping it would force a pointless re-stage of the codex closure.
 
 ### 7. The credential — one operator write, no new plumbing
 
-Claude seat b is `clauderun2`, whose account is the one behind `claude-max-2`; the *Claude seat
-capacity* dashboard panel labels that row `constantin.chifor@strive.us`. **Cite the panel, not
-`dev-workers.md`** — that runbook attributes the same address to a *Codex* seat on reviewer-2, and
-the Claude seat table carries account uuids only, because ADR 0025 decision 5 keeps the email out
-of git deliberately. An earlier draft of this section cited the runbook and was wrong.
+Seat b (`clauderun2`) is `constantin.chifor@strive.us`, per `docs/runbooks/dev-workers.md` and the
+*Claude seat capacity* dashboard panel. Its setup-token already exists in OpenBao at
+`operator/broker/anthropic/claude-max-2/oauth`, field `CLAUDE_CODE_OAUTH_TOKEN`.
 
-The seat's setup-token already exists in OpenBao at
-`operator/broker/anthropic/claude-max-2/oauth`, field `CLAUDE_CODE_OAUTH_TOKEN`. The operator
-copies that value into `af/dsh/credentials` as `DSH_CLAUDE_CODE_OAUTH_TOKEN` with the breakglass
-ceremony (`bao kv patch`, never `put`). Nothing else is needed: the `dsh-credentials`
-ExternalSecret uses `dataFrom.extract` over that whole document, so a new field appears in the pod
-at the next 5-minute refresh **with no change to this repo** — which is exactly what that design
-exists for. The field is still listed in `openbao-eso.yaml`; see there for why documentation and
-transport are different questions.
+The operator copies that value into `af/dsh/credentials` as `DSH_CLAUDE_CODE_OAUTH_TOKEN`. Nothing
+else is needed: the `dsh-credentials` ExternalSecret uses `dataFrom.extract` over that whole
+document, so a new field appears in the pod at the next 5-minute refresh **with no change to this
+repo** — which is exactly what that design exists for.
 
-**Why a copy, and what it costs.** Not the reason an earlier draft of this section gave: it argued
-from ADR 0025 decision 2, and ADR 0030 decision 5 explicitly withdraws that as misapplied — that
-decision is about seeding not invalidating sibling seats, and says nothing about a copy landing
-somewhere with a wider blast radius. The copy stands on a different argument, and it is the
-operator's decision (2026-09-22) against this plan's own first recommendation: **minting a second
-`claude setup-token` for one account is not documented to leave the first valid**, and if it does
-not, the blast radius is the whole `claude-max-2` broker fleet, discovered when the estate needs
-it. A copy has a known failure mode; minting has an unknown one.
-
-The cost is not waved away. `operator/broker/anthropic/claude-max-2/oauth` is a RESCUE-class path
-with `cas_required` that `openbao-recovery.md` tracks in one place, so this becomes the only broker
-oauth value with a second home: a leak from the dsh pod is a leak of the broker's credential, and a
-rescue must patch both. That instruction now sits beside the rescue step in `openbao-recovery.md`,
-which is the only thing keeping the two copies in step.
+A copy is safe here for the reason ADR 0025 decision 2 already gives: a setup-token does not rotate,
+so the refresh-token-family hazard that shaped the Codex design does not apply.
 
 ## Critical files
 
@@ -240,33 +222,16 @@ which is the only thing keeping the two copies in step.
 4. **Module resolution.** `@deepseek-ai/dsh-llm` imports from `/dsh-home/profiles/web` and exposes
    `LlmAdapter`, `LlmError` and `LlmAdapter.prototype.prepareCall`.
 
-### Before merge — all done
+### Before merge
 
-5. `npm test` on the vendored source: **34/34** in the three I/O-free suites. The image and timeout
-   suites fail on the Windows host only (path separators; `spawn EFTYPE` on shell-script stubs).
-6. The runbook's non-destructive dry run: `--dump-config` against a throwaway `DSH_HOME` carrying
-   the candidate patch and the three files — **exit 0 with empty stderr**, the row and all three
-   models resolved, searxng / credentials-openbao / subagent-codex untouched. Re-run after the
-   review changes, same result.
-7. The full argv parses, and the duplicated MCP flags the adapter and wrapper now both send are
-   accepted: `"tools":[]`, `"mcp_servers":[]`, clean stderr.
-8. `python3 -m unittest`: **206 tests**, failure counts identical to `origin/main`, nothing failing
-   that does not also fail on the base. `kubectl kustomize` renders and the `CLAUDE_CODE_VERSION`
-   replacement lands in both the Job and the Deployment.
-9. **The install Job's download block was RUN, not just read** — extracted from the manifest and
-   executed in the pod against a writable prefix, everything else untouched. Five cases:
-
-   | case | result |
-   |---|---|
-   | fresh download with the real pins | verified, published 0755, 217,013,744 bytes |
-   | re-run with the binary already correct | cache hit in **1 s**, no re-download |
-   | binary corrupted on disk | re-downloaded and re-verified — a marker is not trusted |
-   | version that 404s | 3 attempts, warns, **exit 0**, no partial binary left |
-   | real version, wrong pinned sha | refuses to publish, **exit 0** |
-
-   The last two are the ones that mattered: they prove the non-fatal design holds **under
-   `set -eu`**. A fault there would have aborted the whole install Job — taking the plugin closure
-   and therefore the codex provider with it — rather than leaving this one route absent.
+5. `npm test` in a checkout of the vendored source (34 tests upstream) plus a case for the `images:
+   false` deviation.
+6. The runbook's non-destructive dry run: candidate `cordis.patch.yml` and the three files into a
+   throwaway `DSH_HOME`, `dsh --profile web --dump-config`, **reading stderr** — a dropped row logs
+   one line and still exits 0.
+7. `--disallowed-tools '*'` parses: an unauthenticated run carrying the full argv still fails with
+   `Not logged in`, not an option error.
+8. `python3 -m unittest discover -s scripts/tests` and `kustomize build` clean.
 
 ### After merge, needs the operator's OpenBao write
 

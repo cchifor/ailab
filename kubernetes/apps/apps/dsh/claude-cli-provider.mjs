@@ -14,13 +14,8 @@
 //      saying so in the prompt instead. Upstream hardcodes ['text','image'] and writes the bytes
 //      out for Claude to open with its Read tool -- which the text-only tier does not have, so
 //      the catalog would claim a capability the route cannot honour.
-//   3. an empty 'error' listener on the child's STDIN, for a concern that did not reproduce --
+//   3. an empty 'error' listener on the child's stdin, for a concern that did not reproduce --
 //      see the comment at the listener, which says so rather than implying a fixed bug.
-//   4. an 'error' listener on the CHILD ITSELF, recorded and raced into the awaited exit. Unlike
-//      3 this is a real, measured crash: without it a spawn failure is an uncaught exception that
-//      terminates the whole dsh process. `child` and `child.stdin` are different emitters, which
-//      is exactly how having 3 made 4 look already handled -- twice, to two reviewers, before the
-//      probe was run. Covered behaviourally by scripts/tests/dsh-claude-cli-spawn.test.mjs.
 // Nothing else.
 //
 // WHAT THIS FILE DELIBERATELY DOES NOT DO. It does not handle the credential and it does not set
@@ -170,27 +165,6 @@ class ClaudeCliAdapter extends LlmAdapter {
       env: { ...process.env, ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '' },
     });
 
-    // ESTATE DEVIATION. ATTACHED IMMEDIATELY AFTER spawn, before anything awaits.
-    //
-    // An unhandled 'error' on a ChildProcess is an uncaught exception, and on this 1-replica
-    // Recreate Deployment that is the web UI going down rather than one failed turn. The stdin
-    // listener below does NOT cover it: `child` and `child.stdin` are different emitters, and an
-    // async generator's try/finally cannot catch an unhandled EventEmitter error either.
-    //
-    // MEASURED in this pod (2026-09-22), with only the stdin listener attached, both of these
-    // printed an uncaught ENOENT and exited the process:
-    //   * the wrapper missing or not executable;
-    //   * the configured `cwd` absent -- and note spawn applies cwd BEFORE the wrapper runs, so
-    //     the mkdir inside claude-cli.sh can never rescue its own working directory.
-    // Add EAGAIN/ENOMEM under the concurrent-children fan-out ADR 0030 records as unbounded.
-    //
-    // Recorded rather than thrown here: throwing from a listener is the same uncaught exception
-    // by another route. The turn fails through its normal path below, so `finally` still runs.
-    let spawnError;
-    const spawnFailed = new Promise((resolve) => {
-      child.once('error', (err) => { spawnError = err; resolve(); });
-    });
-
     const state = { nextIndex: 0, usage: undefined, stopReason: undefined, sawResult: false, errorText: undefined , ownsToolLoop: isolated,
       observeTools: options.observeTools ?? observeTools };
     let stderr = '';
@@ -265,13 +239,7 @@ class ClaudeCliAdapter extends LlmAdapter {
           : '');
     child.stdin.end(renderPrompt(options.messages, options.system) + (described ? `\n\n${described}` : ''));
 
-    // RACED against the spawn failure, not just 'close'. A child that never started may never
-    // emit 'close', and an await on it alone would hang the turn forever -- trading a crash for a
-    // wedge, which on a single-replica deployment is barely better.
-    const exited = Promise.race([
-      new Promise((resolve) => child.on('close', (code, signal) => resolve({ code, signal }))),
-      spawnFailed.then(() => ({ code: null, signal: null })),
-    ]);
+    const exited = new Promise((resolve) => child.on('close', (code, signal) => resolve({ code, signal })));
 
     try {
       for await (const line of rl) {
@@ -290,17 +258,6 @@ class ClaudeCliAdapter extends LlmAdapter {
       // A cancelled turn is not a failing CLI, and must not be dressed up as an idle timeout:
       // the child produced nothing because we killed it.
       if (aborted) throw new LlmError('claude CLI turn aborted by caller', 'ABORTED');
-      // BEFORE the exit-code checks: a child that never started has no meaningful code, and
-      // reporting it as `exited null` would name neither the cause nor the fix. This is the
-      // message an operator sees when the wrapper or its cwd is missing.
-      if (spawnError) {
-        const where = cwd ? ` (cwd ${cwd})` : '';
-        throw new Error(
-          `claude CLI could not be started: ${spawnError.code || spawnError.message} on ` +
-            `${command}${where}. The wrapper is installed by the seed-settings initContainer and ` +
-            `the binary by the dsh-install Job; check both before assuming a credential problem.`,
-        );
-      }
       if (killedIdle) {
         throw new Error(
           `claude CLI killed after ${idleLabel} with no output (idle timeout)` +
