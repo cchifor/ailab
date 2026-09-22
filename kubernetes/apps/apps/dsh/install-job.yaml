@@ -16,7 +16,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dsh-install-0-1-5-alpha-2-glibc-ps2
+  name: dsh-install-0-1-5-alpha-2-glibc-ps2-cc267
   annotations:
     # A Job's spec.template is IMMUTABLE, so any edit Flux applies to this object under the SAME
     # name is rejected with "field is immutable" — which fails the whole dsh Kustomization, not
@@ -84,6 +84,18 @@ spec:
             # Private release bytes are pinned and locally staged; never resolve conductor from a registry.
             - { name: CONDUCTOR_ARTIFACT_SHA256, value: "7a97432202131d79f11bb578708f2a3df32cde65700a28c778ca958ad4bdcb28" }
             - { name: DSH_PLUGINS, value: "@deepseek-ai/dsh-subagent-codex@0.1.5-alpha.2 dsh-team-conductor@file:/app/conductor-artifacts/7a97432202131d79f11bb578708f2a3df32cde65700a28c778ca958ad4bdcb28/dsh-team-conductor-0.1.0.tgz" }
+            # The Claude Code CLI pin, for the `claude-cli` model provider (ADR 0030). BOTH values
+            # move together and with this Job's name; the sha256 is the one Anthropic publishes in
+            # its signed release manifest for this exact version. 2.1.267 is the `stable` channel
+            # release; Claude Fable 5.1 needs >= 2.1.255, so do not pin below that while the
+            # provider's model list names it.
+            #
+            # CLAUDE_CODE_VERSION is ALSO consumed by the Deployment (kustomization.yaml derives it
+            # from here, exactly as DSH_VERSION is): claude-cli.sh builds the binary path from it.
+            # A bump edited here alone would leave the wrapper pointing at a version this Job
+            # staged and the Deployment never heard of -- which is why it is derived, not copied.
+            - { name: CLAUDE_CODE_VERSION, value: "2.1.267" }
+            - { name: CLAUDE_CODE_SHA256, value: "0399c793ff571d5946ef923d80b4f330d05ac4b6842a6b0775468f5d389403c0" }
             - { name: npm_config_cache, value: /app/.npm }   # shared across versions; harmless
           command: ["/bin/sh", "-c"]
           args:
@@ -139,6 +151,71 @@ spec:
                   echo "WARNING: uv could not be installed -- the agent will have no way to install"
                   echo "WARNING: Python packages. dsh itself is unaffected. Re-run this Job to retry."
                 fi
+              fi
+
+              # ---- Claude Code CLI: the binary behind the `claude-cli` model provider ---------
+              # BEFORE the dsh install, for the same reason the uv block above is: the phases
+              # below are guarded by conditions that legitimately skip work, and anything appended
+              # downstream of one eventually stops running. This file family has been bitten by
+              # that three times; see the uv header.
+              #
+              # WHY HERE AND NOT IN THE DEPLOYMENT. This Job is the container with egress, so pod
+              # startup never depends on reaching downloads.claude.ai. /app/tools is OUTSIDE the
+              # version-keyed prefix, so a DSH_VERSION bump does not re-download ~217 MB, and /app
+              # is mounted READ-ONLY in the dsh container -- model-authored code cannot alter the
+              # binary that is about to answer its turns.
+              #
+              # NON-FATAL, like uv here and install-kubectl in deployment.yaml. A failed download
+              # must leave the claude-cli ROUTE absent, never the harness dead: claude-cli.sh exits
+              # 78 with a message naming this Job, and every other provider is untouched.
+              #
+              # VERIFY-THEN-PUBLISH, cache keyed on the SHA ALONE, so a version-only edit is a
+              # no-op and a checksum mismatch is what forces a re-download. The sha256 is the value
+              # Anthropic publishes in its own signed release manifest:
+              #   https://downloads.claude.ai/claude-code-releases/<version>/manifest.json
+              # TO BUMP: edit CLAUDE_CODE_VERSION and CLAUDE_CODE_SHA256 together AND this Job's
+              # name (its pod template is immutable). Old versions stay for rollback per this
+              # file's header; at ~217 MB each, prune them deliberately and never to force an
+              # upgrade.
+              CC_DIR="/app/tools/claude-code/${CLAUDE_CODE_VERSION}"
+              CC_BIN="${CC_DIR}/claude"
+              # linux-x64, NOT -musl. The runtime image is Debian (DSH_BUILD=glibc) and so is this
+              # one; the musl build would install cleanly here and fail at exec in a way that reads
+              # as a corrupt download rather than the wrong build.
+              CC_URL="https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/linux-x64/claude"
+              ccsum() { sha256sum "$1" 2>/dev/null | cut -c1-64; }
+              cc_degrade() {
+                rm -f /tmp/claude "$CC_BIN.new" "$CC_BIN" 2>/dev/null
+                echo "WARNING: Claude Code ${CLAUDE_CODE_VERSION} is NOT installed: $1"
+                echo "WARNING: the dsh claude-cli provider will refuse every turn with a message"
+                echo "WARNING: naming this Job. The rest of dsh is unaffected. Re-run this Job to retry."
+              }
+              if [ "$(uname -m)" != "x86_64" ]; then
+                cc_degrade "node architecture $(uname -m) is not x86_64 (only the amd64 checksum is pinned)"
+              elif [ -f "$CC_BIN" ] && [ "$(ccsum "$CC_BIN")" = "$CLAUDE_CODE_SHA256" ]; then
+                chmod 0755 "$CC_BIN" 2>/dev/null || true
+                echo "claude code already present at $CC_BIN: sha256 matches the pin"
+              else
+                mkdir -p "$CC_DIR" || true
+                rm -f "$CC_BIN" "$CC_BIN.new" 2>/dev/null || true
+                n=0
+                while [ "$n" -lt 3 ]; do
+                  n=$((n + 1))
+                  rm -f /tmp/claude
+                  # --max-time bounds the WHOLE transfer, connect included; ~217 MB needs room.
+                  if curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 600 \
+                       -o /tmp/claude "$CC_URL" && [ "$(ccsum /tmp/claude)" = "$CLAUDE_CODE_SHA256" ]; then
+                    if install -m 0755 /tmp/claude "$CC_BIN.new" && mv -f "$CC_BIN.new" "$CC_BIN"; then
+                      rm -f /tmp/claude
+                      echo "claude code ${CLAUDE_CODE_VERSION} installed to $CC_BIN (sha256 $(ccsum "$CC_BIN"))"
+                      break
+                    fi
+                    cc_degrade "verified download could not be published to $CC_BIN"
+                    break
+                  fi
+                  echo "claude code download attempt ${n}/3 failed or did not match the pinned checksum"
+                  if [ "$n" -ge 3 ]; then cc_degrade "3 download attempts failed"; else sleep 5; fi
+                done
               fi
 
               # Versioned prefix, NOT a shared /app. dsh-app is ReadWriteMany, so the Job and the

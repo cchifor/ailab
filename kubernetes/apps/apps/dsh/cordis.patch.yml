@@ -311,6 +311,77 @@
       CODEX_API_KEY: !!js process.env.CODEX_API_KEY
 
 # ---------------------------------------------------------------------------
+# THE CLAUDE-CLI MODEL PROVIDER (ADR 0030) — Claude on the estate's Max subscription.
+#
+# WHAT IT IS. A model route, not a delegation tool: the row registers the provider `claude-cli`,
+# whose adapter spawns the Claude Code CLI in print mode and translates its NDJSON stream into
+# dsh chunks. Nothing here grants any agent anything; a person picks the model in /model.
+#
+# WHY THE BINARY IS IN THE LOOP AT ALL. ADR 0029 rejected putting a Max token behind the LiteLLM
+# Anthropic route, and that reasoning stands. What is permitted is the published Claude Code
+# binary, run on the subscription owner's own `claude setup-token` — ADR 0030 carries the
+# citations. So the binary stays; it is what makes this route legitimate, not an implementation
+# detail to optimise away.
+#
+# `insert:`, NOT an override — this row does not exist in any shipped bundle, and an override of
+# an absent id is SKIPPED with one stderr line while everything downstream fails at runtime.
+#
+# A FILE, not a package, for the reason searxng-search.mjs documents at length: a row's `name:`
+# resolves from the PROFILE directory, whose node_modules is a symlink farm of dsh's own closure.
+# The three files are installed together by seed-settings and ride one content hash.
+- insert:
+    - id: claude-cli-provider
+      name: './claude-cli-provider.mjs'
+      config:
+        # The wrapper, never the binary. It supplies the subscription credential from the ESO
+        # mount and clears the two variables that outrank it. See claude-cli.sh.
+        command: /dsh-home/.local/bin/claude-cli
+        # BOTH of the next two are needed for a text-only tier, and only one of them is obvious.
+        #
+        # isolateTools passes --strict-mcp-config --mcp-config '{"mcpServers":{}}', which removes
+        # MCP servers and NOTHING ELSE. Upstream's README calls that "stripping Claude's tooling";
+        # for MCP it is, for the BUILT-INS it is not — Bash, Read, Edit and the rest survive it,
+        # inside this pod, with this pod's cluster-admin token on disk.
+        #
+        # --disallowed-tools '*' is what actually empties the tool list. MEASURED 2026-09-22 in
+        # this pod: with both flags the CLI's own init event reports "tools":[] and
+        # "mcp_servers":[]. Without the second it reports its full built-in set. Removing this
+        # line turns a text tier into a full agent with a shell, silently.
+        isolateTools: true
+        extraArgs: ['--disallowed-tools', '*']
+        # Consequence of the above, declared rather than discovered: with no Read tool the model
+        # cannot open a materialised attachment, so the catalog must not claim images. The turn
+        # says so in the prompt instead of dropping them silently.
+        images: false
+        # IDLE timeout, not a ceiling: re-armed on every byte the CLI writes, so a long streaming
+        # turn is never killed while a genuinely hung one still is after 10 minutes of silence.
+        timeoutMs: 600000
+        # Declared explicitly rather than inherited from the adapter's defaults, which name
+        # claude-fable-5 rather than 5.1 and carry an opus[1m] entry this plan does not offer.
+        #
+        # contextWindow is what dsh sizes compaction against. UNDER-declaring only makes it
+        # compact sooner; OVER-declaring overflows the turn — so where the per-surface figure is
+        # not certain, the smaller number is the safe one. Fable 5.1's maximum IS its default, so
+        # 1M is right for it; the [1m] opt-in variants of opus/sonnet are deliberately NOT offered
+        # because whether they are included on this plan is not established here.
+        #
+        # Fable 5.1 needs Claude Code >= 2.1.255; install-job.yaml pins 2.1.267.
+        models:
+          - id: claude-fable-5-1
+            name: Claude Fable 5.1 (subscription)
+            contextWindow: 1000000
+          - id: claude-opus-5
+            name: Claude Opus 5 (subscription)
+            contextWindow: 200000
+          - id: claude-sonnet-5
+            name: Claude Sonnet 5 (subscription)
+            contextWindow: 200000
+
+# NB: `agent-default-model` is deliberately NOT set to this provider, and the upstream README's
+# example that does so must not be copied. A model that can never emit a tool call cannot drive
+# dsh's agent loop; this is a route you switch TO for a question and away from to act on it.
+
+# ---------------------------------------------------------------------------
 # OPENBAO-BACKED CREDENTIAL RESOLUTION.
 #
 # DISABLE-THEN-INSERT, NOT A RENAME, and this is the whole reason the first
