@@ -36,6 +36,11 @@ data:
         service: http://dsh.dsh.svc.cluster.local:80
       - hostname: api.chifor.me
         service: http://litellm.ai.svc.cluster.local:4000
+      # LLM Router has its own mandatory bearer authentication on /admin/v1/* and /v1/*.
+      # Keep Access-free so ordinary OpenAI-compatible API clients work; no live accounts
+      # are enabled by deployment. The public SPA is only a sign-in screen without a token.
+      - hostname: router.chifor.me
+        service: http://llm-router.llm-router.svc.cluster.local:80
       # SearXNG web UI — the estate's own metasearch instance, which exists for dsh (apps/dsh/searxng.yaml)
       # and now also answers a browser. NOT behind Cloudflare Access, and NOT pointed at the searxng
       # Service: it terminates on that namespace's oauth2-proxy, which is an OIDC client of Authelia and
@@ -168,7 +173,7 @@ spec:
         # routes until something restarts them. A new hostname then looks deployed but 404s at the
         # edge. Bump this whenever the ingress list changes -- it is the rollout trigger. (Same trap
         # cloud-power's kustomization documents for app code.)
-        chifor.me/config-revision: "2026-09-21-retire-dw6"
+        chifor.me/config-revision: "2026-09-21-router"
       labels:
         app.kubernetes.io/name: cloudflared
     spec:

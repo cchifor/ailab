@@ -1,0 +1,255 @@
+# ============================================================================
+# LLM Router — production deployment, namespace llm-router
+#
+#   kubectl apply -f deploy/kubernetes.yaml
+#
+#   Prerequisites (intentionally NOT created by this file):
+#   * StorageClass "qnap-iscsi" — RWO, real filesystem (ext4/xfs). The
+#     SQLite store runs in WAL mode and must not be served from NFS.
+#   * Secret "llm-router-auth" in this namespace with key "admin-token"
+#     (>= 24 chars), created externally (vault/operator tooling). This
+#     manifest only references it — it deliberately contains no Secret
+#     object and no literal token. Until it exists the pod fails its
+#     startup gate: the app refuses to start without the token (fail
+#     closed, no default credentials).
+#   * Initial rollout uses the digest-pinned public Node image and an operator-staged,
+#     versioned, read-only release on router-releases. See deploy/README.md.
+#     Application dependencies are frozen and installed BEFORE deployment, never at boot.
+#     Dockerfile supports migration to a dedicated OCI image when registry push is authorized.
+#   * The "edge" namespace must carry the label name=edge and host the
+#     Cloudflare tunnel pods labeled app.kubernetes.io/name=cloudflared.
+# ============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-router
+  labels:
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/part-of: llm-router
+    # The pod spec below satisfies every restricted-PSS requirement
+    # (non-root uid 1000, no privilege escalation, all capabilities
+    # dropped, RuntimeDefault seccomp, read-only root filesystem, no
+    # host namespaces/paths), so the namespace is restricted-safe.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: router-releases
+  namespace: llm-router
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: nfs-csi
+  resources:
+    requests: {storage: 2Gi}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-router-data
+  namespace: llm-router
+  labels:
+    app: llm-router
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/component: router
+    app.kubernetes.io/part-of: llm-router
+spec:
+  accessModes:
+    - ReadWriteOnce # single replica; RWO iSCSI filesystem, not NFS (WAL)
+  storageClassName: qnap-iscsi
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-router
+  namespace: llm-router
+  labels:
+    app: llm-router
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/component: router
+    app.kubernetes.io/part-of: llm-router
+spec:
+  selector:
+    app: llm-router
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http # -> containerPort 8787
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-router
+  namespace: llm-router
+  labels:
+    app: llm-router
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/component: router
+    app.kubernetes.io/part-of: llm-router
+spec:
+  replicas: 1
+  # RWO volume: the old pod must terminate before a new one mounts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llm-router
+  template:
+    metadata:
+      labels:
+        app: llm-router
+    spec:
+      automountServiceAccountToken: false # the router needs no API access
+      tolerations:
+        - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000 # makes the PVC root group-writable for uid 1000
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60 # let SIGTERM close HTTP + SQLite
+      containers:
+        - name: router
+          image: docker.io/library/node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: [node, dist/apps/router/main.js]
+          ports:
+            - name: http
+              containerPort: 8787
+              protocol: TCP
+          env:
+            - name: ROUTER_HOST
+              value: "0.0.0.0" # default is 127.0.0.1; containers must be reachable
+            - name: ROUTER_PORT
+              value: "8787"
+            - name: ROUTER_DATABASE
+              value: /data/router.sqlite
+            - name: ROUTER_WEB_ROOT
+              value: /app/dist/web
+            - name: ROUTER_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: llm-router-auth
+                  key: admin-token
+          # Actual routes in packages/plugins/http-api.ts: GET /health
+          # (liveness, {status:"ok"}) and GET /ready (200 when all required
+          # plugins are active and storage answers, 503 otherwise). There is
+          # no /health/live path in this codebase.
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 3
+            timeoutSeconds: 3
+            failureThreshold: 60 # up to ~3 min for Node + SQLite init
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: releases
+              mountPath: /app
+              subPath: router-0.1.0-20260921
+              readOnly: true
+            - name: data
+              mountPath: /data # SQLite file + WAL/SHM sidecars
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: releases
+          persistentVolumeClaim:
+            claimName: router-releases
+            readOnly: true
+        - name: data
+          persistentVolumeClaim:
+            claimName: llm-router-data
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-router
+  namespace: llm-router
+  labels:
+    app: llm-router
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/component: router
+    app.kubernetes.io/part-of: llm-router
+spec:
+  podSelector:
+    matchLabels:
+      app: llm-router
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the Cloudflare tunnel in the "edge" namespace may reach the
+    # router, and only on 8787 (the Service front door is 80).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      ports:
+        - protocol: TCP
+          port: 8787
+  egress:
+    # Cluster DNS (kube-dns runs in kube-system).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Public upstream provider endpoints (HTTPS only), RFC1918 excluded.
+    # No live providers are configured yet (tests use the offline mock),
+    # but outbound 443 is required for the subscription/API adapters.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
