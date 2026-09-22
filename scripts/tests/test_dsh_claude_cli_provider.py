@@ -248,6 +248,27 @@ class TheCredentialGoesThroughTheWrapper(unittest.TestCase):
                 msg=f"{var} outranks CLAUDE_CODE_OAUTH_TOKEN; unset it rather than blanking it",
             )
 
+    def test_the_child_process_has_its_own_error_listener(self):
+        # `child` and `child.stdin` are DIFFERENT emitters. Having a listener on stdin made this
+        # look handled to two reviewers and to me; an unhandled 'error' on the ChildProcess is an
+        # uncaught exception that terminates dsh, measured in the pod for both a missing wrapper
+        # and a missing cwd. The behavioural coverage is dsh-claude-cli-spawn.test.mjs; this gate
+        # exists so the listener cannot be dropped as redundant with the stdin one.
+        text = PROVIDER.read_text(encoding="utf-8")
+        self.assertRegex(
+            text, r"child\.once\('error'",
+            "the ChildProcess itself needs an 'error' listener, not just child.stdin",
+        )
+        self.assertRegex(
+            text, r"Promise\.race\(\[",
+            "the exit must be raced against the spawn failure; a child that never starts may "
+            "never emit 'close', and awaiting that alone wedges the turn instead of failing it",
+        )
+        self.assertIn(
+            "could not be started", text,
+            "a spawn failure must be reported as such, not as `exited null`",
+        )
+
     def test_the_adapter_itself_carries_no_token_logic(self):
         # The adapter runs inside the process that executes model-authored tool calls. Credential
         # handling belongs in the wrapper; this keeps that seam from eroding.
