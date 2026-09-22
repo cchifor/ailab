@@ -177,17 +177,35 @@ and bumping it would force a pointless re-stage of the codex closure.
 
 ### 7. The credential — one operator write, no new plumbing
 
-Seat b (`clauderun2`) is `constantin.chifor@strive.us`, per `docs/runbooks/dev-workers.md` and the
-*Claude seat capacity* dashboard panel. Its setup-token already exists in OpenBao at
-`operator/broker/anthropic/claude-max-2/oauth`, field `CLAUDE_CODE_OAUTH_TOKEN`.
+Claude seat b is `clauderun2`, whose account is the one behind `claude-max-2`; the *Claude seat
+capacity* dashboard panel labels that row `constantin.chifor@strive.us`. **Cite the panel, not
+`dev-workers.md`** — that runbook attributes the same address to a *Codex* seat on reviewer-2, and
+the Claude seat table carries account uuids only, because ADR 0025 decision 5 keeps the email out
+of git deliberately. An earlier draft of this section cited the runbook and was wrong.
 
-The operator copies that value into `af/dsh/credentials` as `DSH_CLAUDE_CODE_OAUTH_TOKEN`. Nothing
-else is needed: the `dsh-credentials` ExternalSecret uses `dataFrom.extract` over that whole
-document, so a new field appears in the pod at the next 5-minute refresh **with no change to this
-repo** — which is exactly what that design exists for.
+The seat's setup-token already exists in OpenBao at
+`operator/broker/anthropic/claude-max-2/oauth`, field `CLAUDE_CODE_OAUTH_TOKEN`. The operator
+copies that value into `af/dsh/credentials` as `DSH_CLAUDE_CODE_OAUTH_TOKEN` with the breakglass
+ceremony (`bao kv patch`, never `put`). Nothing else is needed: the `dsh-credentials`
+ExternalSecret uses `dataFrom.extract` over that whole document, so a new field appears in the pod
+at the next 5-minute refresh **with no change to this repo** — which is exactly what that design
+exists for. The field is still listed in `openbao-eso.yaml`; see there for why documentation and
+transport are different questions.
 
-A copy is safe here for the reason ADR 0025 decision 2 already gives: a setup-token does not rotate,
-so the refresh-token-family hazard that shaped the Codex design does not apply.
+**Why a copy, and what it costs.** Not the reason an earlier draft of this section gave: it argued
+from ADR 0025 decision 2, and ADR 0030 decision 5 explicitly withdraws that as misapplied — that
+decision is about seeding not invalidating sibling seats, and says nothing about a copy landing
+somewhere with a wider blast radius. The copy stands on a different argument, and it is the
+operator's decision (2026-09-22) against this plan's own first recommendation: **minting a second
+`claude setup-token` for one account is not documented to leave the first valid**, and if it does
+not, the blast radius is the whole `claude-max-2` broker fleet, discovered when the estate needs
+it. A copy has a known failure mode; minting has an unknown one.
+
+The cost is not waved away. `operator/broker/anthropic/claude-max-2/oauth` is a RESCUE-class path
+with `cas_required` that `openbao-recovery.md` tracks in one place, so this becomes the only broker
+oauth value with a second home: a leak from the dsh pod is a leak of the broker's credential, and a
+rescue must patch both. That instruction now sits beside the rescue step in `openbao-recovery.md`,
+which is the only thing keeping the two copies in step.
 
 ## Critical files
 
