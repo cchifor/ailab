@@ -96,11 +96,23 @@ data:
       #
       # THE TWO ENTRIES ARE A VERBATIM COPY of the main gateway's pair (litellm.yaml, same image
       # digest on both deployments: ghcr.io/berriai/litellm@sha256:d295634e…) — same `model`,
-      # `api_base`, sampling params, extra_body and model_info — so a request through this gateway
-      # exercises the same proxy version + the same transformation on the same two engines. What
-      # differs is ONLY the synthetic per-token cost (needed so the diagnostic key's budget meters;
-      # not sent upstream) and the proxy instance. Keep the two files in lockstep: an edit to the
-      # main route that is not mirrored here makes "which gateway" a behavioural question again.
+      # `api_base`, sampling params, extra_body and model_info, same order — so a request through
+      # this gateway exercises the same proxy version + the same per-route transformation on the
+      # same two engines. At the ROUTE level the only difference is the synthetic per-token cost
+      # (needed so the diagnostic key's budget meters; not sent upstream). The lockstep is
+      # ENFORCED, not asked for: scripts/check-litellm-mirrored-routes.py (CI, manifests.yaml)
+      # fails when the two pairs differ modulo cost, or when a copy here lacks the cost fields.
+      #
+      # WHAT IS NOT MIRRORED, and matters for reading a repro: the GATEWAY-LEVEL settings differ.
+      # The main gateway runs litellm_settings (drop_params: true, request_timeout: 900, the
+      # chatgpt-chat custom provider map, a global budget) and router_settings (least-busy,
+      # num_retries: 2, allowed_fails: 2 / cooldown_time: 30, and a FALLBACK
+      # qwen3.8-27b-vllm-cloud -> qwen3.8-27b-ailab). This gateway runs NEITHER block — it is
+      # the tenants' gateway and keeps LiteLLM's defaults. So a request here goes to the vLLM
+      # route and ONLY the vLLM route, with no param dropping and no retry/fallback. If a repro
+      # passes here while production keeps failing, look at those settings next — the fallback
+      # in particular can hand a llama.cpp (qwen3.8-27b-ailab) response to a caller that asked for
+      # the vLLM route, and drop_params silently removes request fields the route rejects.
       #
       # This does NOT erode the local-only boundary this deployment exists for: cloudlab (cloud2 .28,
       # cloud3 .26) is the operator's own GPU estate, `sk-noauth`, zero cloud dollars — the boundary
@@ -179,7 +191,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "50bf65166dcd"
+        checksum/config: "e8ae9460c852"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux

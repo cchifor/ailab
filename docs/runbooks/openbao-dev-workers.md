@@ -85,7 +85,12 @@ Secret.
   of `litellm_diag_base`), org `dev-workers-diag` in `kubernetes/apps/apps/ai/litellm-vkeys.yaml`,
   whitelisted to exactly the models in `litellm_diag_models` (`qwen3.8-27b-vllm-cloud`, the route the
   production platform calls on the main gateway, mirrored verbatim onto litellm-local for this
-  purpose, and `qwen3.8-27b-ailab`), budget ~5M tokens per 30 days, 30 rpm. Reach it with
+  purpose, and `qwen3.8-27b-ailab`), `max_budget` 5 synthetic credit units per 30 days — both
+  whitelisted routes on litellm-local carry the same synthetic `0.000001`/token cost, so that is
+  ~5M tokens on either route (the estimate holds only while the two costs stay equal), 30 rpm.
+  The mirror of the vLLM route is enforced by `scripts/check-litellm-mirrored-routes.py`; the
+  gateway-level settings (main-gateway fallback/retries/drop_params) are deliberately NOT mirrored
+  and are listed on the route in `litellm-local.yaml`. Reach it with
   `cred exec common litellm_diag_key OPENAI_API_KEY -- <cmd>` and
   `cred get common litellm_diag_base`. **It is deliberately NOT a master key**: the main gateway's
   master key unlocks the paid cloud models and has no per-key budget, and litellm-local's master key is

@@ -146,3 +146,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/check-vkey-models.py
+
+      # The FIFTH: litellm-local carries qwen3.8-27b-vllm-cloud as a DIAGNOSTIC mirror of the main
+      # gateway's route (2026-09-22, ailab #822) so a dev worker holding the fleet's virtual key can
+      # replay a production LLM failure through a gateway. That is evidence only while the two pairs
+      # stay identical modulo litellm-local's synthetic cost fields -- and the lockstep was a comment
+      # until reviewer-claude pointed out that nothing here compared them. The test proves the
+      # checker bites (drift, missing cost, missing route); the checker then runs on the tree.
+      - name: LiteLLM diagnostic routes on litellm-local mirror the main gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-check-litellm-mirrored-routes.sh
+          python3 scripts/check-litellm-mirrored-routes.py
