@@ -84,6 +84,56 @@ data:
         model_info:
           supports_vision: true
           max_input_tokens: 49152
+      # qwen3.8-27b-vllm-cloud — ADDED 2026-09-22 as a DIAGNOSTIC route, not a tenant route. The
+      # production platform (strive-ailab) calls this model_name on the MAIN `litellm` gateway
+      # (deepagent DEEPAGENT_MODEL=openai:qwen3.8-27b-vllm-cloud), and a document-review run there
+      # failed decoding the proposal response while exact-source reproductions against the vLLM
+      # backend itself passed. The main gateway has no virtual-key store (no DATABASE_URL), so its
+      # only credential is the master key — which also unlocks the paid cloud models — and that
+      # must never reach a dev worker. This gateway HAS the DB-backed key store, so the
+      # diagnostic key (litellm-vkeys.yaml org `dev-workers-diag`, projected to
+      # af/dev-workers/common as litellm_diag_key) is issued here and whitelisted to this name.
+      #
+      # THE TWO ENTRIES ARE A VERBATIM COPY of the main gateway's pair (litellm.yaml, same image
+      # digest on both deployments: ghcr.io/berriai/litellm@sha256:d295634e…) — same `model`,
+      # `api_base`, sampling params, extra_body and model_info — so a request through this gateway
+      # exercises the same proxy version + the same transformation on the same two engines. What
+      # differs is ONLY the synthetic per-token cost (needed so the diagnostic key's budget meters;
+      # not sent upstream) and the proxy instance. Keep the two files in lockstep: an edit to the
+      # main route that is not mirrored here makes "which gateway" a behavioural question again.
+      #
+      # This does NOT erode the local-only boundary this deployment exists for: cloudlab (cloud2 .28,
+      # cloud3 .26) is the operator's own GPU estate, `sk-noauth`, zero cloud dollars — the boundary
+      # is "no PAID cloud, no cloud credentials", and both still hold. The tenant `example`
+      # whitelist is unchanged (qwen3.8-27b-ailab only); the 2026-09-08 decision not to route
+      # TENANTS at cloudlab (nightly power-off) stands — this route is whitelisted to the
+      # diagnostic key alone (scripts/check-vkey-models.py keeps the whitelist ⊆ this list).
+      - model_name: qwen3.8-27b-vllm-cloud
+        litellm_params:
+          model: openai/qwen3.8-27b
+          api_base: http://192.168.0.28:18020/v1   # cloud2 vLLM, TP=2 (see litellm.yaml)
+          api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+          extra_body:
+            top_k: 20
+            chat_template_kwargs: { reasoning_effort: xhigh }
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000001
+        model_info: { supports_vision: true, max_input_tokens: 81920 }
+      - model_name: qwen3.8-27b-vllm-cloud
+        litellm_params:
+          model: openai/qwen3.8-27b-w4a16
+          api_base: http://192.168.0.26:8080/v1   # cloud3 llama-swap → vLLM w4a16 (see litellm.yaml)
+          api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+          extra_body:
+            top_k: 20
+            chat_template_kwargs: { reasoning_effort: xhigh }
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000001
+        model_info: { supports_vision: true, max_input_tokens: 81920 }
       # qwen3.5-122b REMOVED 2026-09-08. It moved to the cloudlab estate (cloud3, llama-swap on
       # 192.168.0.26) where 72 GiB of Q4_K_M weights fit entirely in 96 GiB of VRAM -- MEASURED
       # 60.6-66.2 tok/s fully resident, against 16.6 tok/s here where it spilled MoE experts to
@@ -129,7 +179,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "10c5f6282afb"
+        checksum/config: "50bf65166dcd"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux

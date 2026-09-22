@@ -21,7 +21,7 @@ hosts: nothing in this repo ever provisioned that file — it came from the *hom
 `platform/main.tf`, for claude-worker VMs — so it only ever printed "not provisioned" and exited 1.
 
 **The credentials agents do have are distributed by a second channel.** `af/dev-workers/common`
-carries exactly `gitea_pat` and `proxmox_ssh_key`. The tep kubeconfig — a real Kubernetes bearer
+carries exactly `gitea_pat` and `proxmox_ssh_key` (as of this ADR; `litellm_diag_*` joined it on 2026-09-22 — see the runbook). The tep kubeconfig — a real Kubernetes bearer
 token — lives instead in `ansible/secrets/tep-tokens.sops.yaml`, is extracted by a hand-run script
 (`scripts/tep-render-kubeconfigs.py`), and is distributed by `just dev-workers`. That is a second
 durable home for a credential, in git, rotated by a three-step ceremony. ADR 0020 built a credential

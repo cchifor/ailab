@@ -56,6 +56,15 @@ data:
   # The whitelist entry is a LiteLLM model_name, not a backend: qwen3.8-27b-ailab is ONE name carrying TWO
   # deployments (node2 .45 + node3 .46), so a tenant key whitelisting it reaches both and inherits the
   # router's failover. Whitelisting a backend Service would be wrong here and is not possible anyway.
+  #
+  # `dev-workers-diag` (2026-09-22) is NOT a tenant: it is the dev-worker fleet's DIAGNOSTIC key, the
+  # "normal LiteLLM credential" an agent reaches with `cred get common litellm_diag_key` (projected from
+  # the SAME VKEY_DEV_WORKERS_DIAG value into af/dev-workers/common by devworker-seeds.sops.yaml —
+  # rotate both in one change; docs/runbooks/openbao-dev-workers.md). It exists so a worker can
+  # reproduce a production LLM failure THROUGH a gateway instead of against a bare backend, without
+  # ever holding a master key: whitelisted to the vLLM cloud route mirrored from the main gateway plus
+  # the local llama.cpp route, budget 5 (~5M tokens/30d), 30 rpm — enough for reproductions, not for
+  # running an agent loop. The Job seeds it like any org; alias tenant-dev-workers-diag.
   orgs.json: |
     [
       {
@@ -65,6 +74,15 @@ data:
         "max_budget": 20,
         "budget_duration": "30d",
         "rpm_limit": 60,
+        "tpm_limit": 200000
+      },
+      {
+        "org": "dev-workers-diag",
+        "key_env": "VKEY_DEV_WORKERS_DIAG",
+        "models": ["qwen3.8-27b-vllm-cloud", "qwen3.8-27b-ailab"],
+        "max_budget": 5,
+        "budget_duration": "30d",
+        "rpm_limit": 30,
         "tpm_limit": 200000
       }
     ]
