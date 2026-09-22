@@ -556,8 +556,16 @@ Old versions are kept for rollback per the app volume's policy, at ~217 MB each.
 kubectl --context admin@ai -n dsh exec deploy/dsh -c dsh -- ls -l /dsh-credentials/DSH_CLAUDE_CODE_OAUTH_TOKEN
 ```
 Absent means the operator write has not happened (ADR 0030 decision 5). Present means the token is
-rejected — it is a `setup-token`, so it cannot be checked with the usage or profile endpoints
-(403 `oauth_scope_insufficient`); re-mint it.
+rejected, and it cannot be diagnosed in place — a `setup-token` answers 403
+`oauth_scope_insufficient` on the usage and profile endpoints.
+
+> **This value is the `claude-max-2` broker's token, copied.** So before re-minting anything, check
+> whether the broker is failing too (`/readyz` `credential_generation` on :8700): if it is, the
+> credential is revoked at the issuer and both copies need replacing; if it is not, the copy has
+> drifted and only the dsh field needs patching. **Re-minting for dsh alone is not a local fix** —
+> it may invalidate the value the broker fleet runs on, which is the exact risk that made the copy
+> the operator's choice over a dedicated token. The write is a `patch`, never a `put`, and
+> `openbao-recovery.md` carries it beside the broker rescue step so the two stay in step.
 
 ```bash
 # the route refuses with "claude-cli: ... is missing or not executable" (exit 78)

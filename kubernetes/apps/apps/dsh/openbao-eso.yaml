@@ -196,9 +196,17 @@ spec:
 #                             IT DOES NOT ROTATE and carries no expiry field, unlike the Codex
 #                             projection above. A setup-token is valid for about a year and is
 #                             revoked only at the issuer, so the blast radius of a leak is bounded
-#                             by revocation, not by time. That is the argument for it being a
-#                             DEDICATED token minted for dsh rather than a second copy of the
-#                             broker's -- see ADR 0030.
+#                             by revocation, not by time.
+#
+#                             IT IS THE SAME VALUE AS THE BROKER'S, deliberately: a copy of
+#                             operator/broker/anthropic/claude-max-2/oauth. Operator decision
+#                             (ADR 0030 decision 5) -- minting a second setup-token for one
+#                             account is not documented to leave the first valid, and the
+#                             unknown failure mode is the whole claude-max-2 broker fleet.
+#                             So a leak HERE is a leak of the broker's credential: revoke at
+#                             the issuer and re-seed both. docs/runbooks/openbao-recovery.md
+#                             carries that instruction beside the rescue step, which is the
+#                             only thing keeping the two copies in step.
 # Whatever else lands here is readable by the agent, which is why the document must hold only
 # credentials dsh is meant to have (see the volume comment in deployment.yaml).
 apiVersion: external-secrets.io/v1

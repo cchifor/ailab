@@ -155,24 +155,33 @@ In the live dsh pod, 2026-09-22, before any of this was wired:
    from the ESO mount per turn, unsets the two variables that outrank it, and execs the pinned
    binary. The adapter — JavaScript running inside the process that executes model-authored tool
    calls — carries no token logic at all.
-5. **The credential is a token minted for dsh, not a copy of the broker's**, written once by the
+5. **The credential is a copy of the `claude-max-2` broker's existing token**, written once by the
    operator into `af/dsh/credentials` as `DSH_CLAUDE_CODE_OAUTH_TOKEN`. No new ExternalSecret, env
    var or publisher — the `dataFrom.extract` discovery secret picks the field up at its next
    refresh (the field is listed in `openbao-eso.yaml` all the same; see there for why).
 
-   The first draft copied `operator/broker/anthropic/claude-max-2/oauth`, and that was wrong on two
-   counts. It is a **RESCUE-class** path with `cas_required` that `openbao-recovery.md` tracks in
-   exactly one place, so a copy in a pod running model-authored code means a leak forces a re-mint
-   *and* a re-seed across the broker chain. And the justification offered — ADR 0025 decision 2 —
-   does not apply: that decision says the absence of a refresh-token family means seeding cannot
-   invalidate sibling seats. It says nothing about a copy landing somewhere with a wider blast
-   radius, and non-rotating cuts the *other* way there. A separate token is revoked on its own.
+   **Operator decision, 2026-09-22, against the recommendation in the first draft of this ADR.**
+   That draft called for a token minted for dsh alone, on the grounds that
+   `operator/broker/anthropic/claude-max-2/oauth` is a **RESCUE-class** path with `cas_required`
+   that `openbao-recovery.md` tracks in exactly one place, so a second home for it in a pod running
+   model-authored code means a leak forces a re-mint *and* a re-seed across the broker chain. That
+   cost is real and is not withdrawn.
 
-   **Operator step, and the one thing to check while doing it:** mint with `claude setup-token`
-   signed in as the `claude-max-2` account, write it to the field, then confirm the broker still
-   serves — its `/readyz` `credential_generation` unchanged and a probe through it. Minting a
-   second setup-token for one account is not documented to revoke the first, but this estate would
-   notice that the expensive way, so verify rather than assume.
+   The operator chose the copy, and the argument for it is the stronger one on the evidence
+   available: **minting a second setup-token for one account is not documented to leave the first
+   valid.** If it revokes it, the blast radius is the whole `claude-max-2` broker fleet, discovered
+   at the moment the estate needs it. A copy has a known failure mode; minting has an unknown one.
+   One credential in two places also beats two credentials to track when neither rotates.
+
+   Note for a later reader that the *original* justification offered for a copy was wrong and is
+   not what carries it: ADR 0025 decision 2 says the absence of a refresh-token family means
+   seeding cannot invalidate sibling seats. It says nothing about a copy landing somewhere with a
+   wider blast radius, and non-rotating cuts the other way there. The copy stands on the minting
+   risk, not on that decision.
+
+   **Retained risk, recorded so it is not rediscovered:** a leak from the dsh pod now requires
+   revoking a credential the broker fleet also runs on. `openbao-recovery.md` names the second
+   location for exactly that reason — update both places or neither.
 6. **`agent-default-model` is not changed.** A model that can never emit a tool call cannot drive
    dsh's agent loop.
 7. **`anthropic-fable` is untouched.** The metered Fable route stays exactly as ADR 0029 left it,
