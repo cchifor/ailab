@@ -899,7 +899,7 @@ The providers in `DSH_PLUGINS` reach the profile through the install Job's **sta
 
 ```bash
 kubectl -n dsh logs deploy/dsh -c seed-settings | grep -E 'staging state|closure'
-kubectl -n dsh logs job/dsh-install-0-1-5-alpha-2-glibc-ps1 | tail -5
+kubectl --context admin@ai -n dsh logs job/dsh-install-0-1-5-alpha-2-glibc-ps2 | tail -5
 ```
 
 `staging state: failed` with `/bin/sh: pnpm: not found` in the Job log was the 2026-09-11 shape:
