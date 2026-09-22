@@ -176,13 +176,13 @@ spec:
                 # DSH_PROVIDER_REMOVE=1 here for ONE boot (dropping the seed block alone leaves
                 # the PVC copy in place), then delete this line. ADR 0026.
                 DSH_PROVIDER=openai-codex-realjaynesage node /seed/reconcile-provider.js
-                # anthropic-fable: Claude Fable 5.1 on LiteLLM's METERED Anthropic key (ADR 0029).
-                # Reconciled per boot for the same reason as the two above -- settings.yaml lives
-                # on the PVC and has existed since 2026-09-07, so a provider added to the seed
-                # alone never reaches it. Rollback = DSH_PROVIDER=anthropic-fable
-                # DSH_PROVIDER_REMOVE=1 here for ONE boot (dropping the seed block by itself
-                # leaves the PVC copy serving), then delete this line.
-                DSH_PROVIDER=anthropic-fable node /seed/reconcile-provider.js
+                # anthropic-fable: REMOVED (ADR 0031 -- no Claude integrations in dsh). The
+                # provider block was reconciled onto the PVC copy of settings.yaml from
+                # 2026-09-21 until 2026-09-22, and dropping the seed block alone leaves that
+                # copy serving a model_list entry LiteLLM no longer has. Same shape as the
+                # `codex` removal above, and SAFE TO KEEP INDEFINITELY for the same reason:
+                # once the block is gone it prints "not present; nothing to remove" and exits 0.
+                DSH_PROVIDER=anthropic-fable DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
               else
                 echo "seeding settings.yaml with the LiteLLM provider"
                 # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp
@@ -250,26 +250,6 @@ spec:
               # it is in that patch, and a profile carrying the row without the file is a
               # MODULE_NOT_FOUND at boot -- so these two must never be able to drift apart.
               install -m 0644 /seed/openbao-credentials.mjs /dsh-home/profiles/web/openbao-credentials.mjs
-              # The claude-cli model provider (ADR 0030), beside them and for the same resolution
-              # reason. THREE files, and all three are named by one row: claude-cli-provider.mjs
-              # imports the other two by relative specifier, so a partial install is a
-              # MODULE_NOT_FOUND at boot exactly like a missing single file. They are installed
-              # together, unconditionally, and they ride one ConfigMap content hash -- there is no
-              # state in which the profile can hold some of them.
-              install -m 0644 /seed/claude-cli-provider.mjs /dsh-home/profiles/web/claude-cli-provider.mjs
-              install -m 0644 /seed/claude-cli-translate.mjs /dsh-home/profiles/web/claude-cli-translate.mjs
-              install -m 0644 /seed/claude-cli-images.mjs /dsh-home/profiles/web/claude-cli-images.mjs
-              # The wrapper that hands that provider's child process the subscription credential,
-              # scrubs the estate's other credentials out of its environment, and applies the tool
-              # policy. An executable the adapter spawns, not a module anything imports.
-              #
-              # DELIBERATELY NOT IN .local/bin BESIDE THE GIT HELPER. That directory is the FIRST
-              # entry of this container's PATH, so a wrapper there is one word away from the
-              # agent's own shell. Here it has to be named by absolute path, which the cordis row
-              # does. That is friction rather than a boundary -- the policy itself is enforced
-              # inside the wrapper precisely because friction is all this is.
-              mkdir -p /dsh-home/.claude-cli/bin /dsh-home/.claude-cli/cwd
-              install -m 0755 /seed/claude-cli.sh /dsh-home/.claude-cli/bin/claude-cli
               # Host-only observer resolves the installed package from this profile.
               install -m 0644 /conductor-release/conductor-readiness.mjs /dsh-home/profiles/web/conductor-readiness.mjs
               install -m 0644 /conductor-release/conductor-command.mjs /dsh-home/profiles/web/conductor-command.mjs
@@ -617,16 +597,6 @@ spec:
               valueFrom: { secretKeyRef: { name: dsh-codex, key: api_key, optional: true } }
             - { name: DSH_HOME, value: /dsh-home }
             - { name: HOME, value: /dsh-home }
-            # Which Claude Code build claude-cli.sh execs (ADR 0030). NOT a credential and not a
-            # feature switch: the wrapper builds /app/tools/claude-code/<this>/claude from it and
-            # refuses with exit 78 if the binary is not there.
-            #
-            # DERIVED, NOT WRITTEN. kustomize replaces this value from the install Job's own
-            # CLAUDE_CODE_VERSION (kustomization.yaml), which is the single source. The literal
-            # here is what a bare `kubectl apply` of this file alone would use and what makes the
-            # replacement's target field exist at all -- keep it in step with the Job, but the
-            # Job is what wins through Flux.
-            - { name: CLAUDE_CODE_VERSION, value: "2.1.267" }
             # Feedback submission can export session data. Off for a private deployment.
             - { name: DSH_TELEMETRY_DISABLED, value: "1" }
             # Lets the agent install its own tools, which it could not do at all before.

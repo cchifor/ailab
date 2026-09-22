@@ -1,5 +1,6 @@
 # ADR 0030 — Claude on the Max subscription in dsh, through the unmodified Claude Code CLI
 
+**Status:** SUPERSEDED by ADR 0031 (2026-09-22) — the provider was removed; the findings below remain the record. Original status:
 **Status:** ACCEPTED (2026-09-22), operator-directed: *"I'm paying the subscription… I just need to
 use claude model in my own dsh harness"*, and, when the compliant options were put: *"Wire
 dsh-claude-cli-provider"*. Design, measurements and the review trail in

@@ -1,5 +1,6 @@
 # ADR 0029 — Claude Fable 5.1 in dsh, on the metered key (the Max subscription is not permitted)
 
+**Status:** SUPERSEDED by ADR 0031 (2026-09-22) — the route was removed; the findings below remain the record. Original status:
 **Status:** ACCEPTED (2026-09-21), operator-directed: *"Add support in dsh for claude fable model
 (chifor@gmail.com) subscription"*. **The subscription half of that request cannot be honoured** —
 see decision 1 — so Fable is served on the estate's existing metered Anthropic key instead.

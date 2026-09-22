@@ -432,155 +432,15 @@ curl -s 'http://127.0.0.1:9090/api/v1/query?query=dsh_codex_projection_token_exp
 
 ---
 
-## Claude Fable 5.1 — the one route in dsh that costs money
+## Claude: none, by decision
 
-Provider **`anthropic-fable`** (`settings.seed.yaml`), model `claude-fable-5-1`, served by the
-LiteLLM route of the same name. ADR 0029.
-
-**It is NOT a subscription, and that is deliberate.** Every other subscription-backed route here
-(both Codex providers above) is fed by a reviewer seat's OAuth token. Fable is not, because
-Anthropic's Consumer Terms forbid using a Pro/Max OAuth token in a third-party tool — terms updated
-2026-02-20, enforced 2026-04-04. The subscription version of this route was built, measured and
-works; it was abandoned on those grounds, and ADR 0029 records the autopsy so it is not
-re-derived. **Do not repoint this route at a `sk-ant-oat…` token,** and do not add the Claude Code
-identity system message that would make such a token succeed: that is evasion, and the account it
-would burn is chifor@gmail.com — reviewer-1 claude seat `a`, the claude persona's top rung.
-
-So this route bills **pay-as-you-go on `ANTHROPIC_API_KEY`**, at **$10/$50 per MTok**. dsh resends
-conversation state every turn, so one 100K-in/10K-out turn is **$1.50** and roughly 33 turns is
-$50. `claude-sonnet-5` is $2/$10 for comparison. `rpm: 4` on the route bounds **concurrency, not
-rate** (`enable_pre_call_checks` is off on this proxy), so it limits a parallel fan-out and limits
-no spend at all. If the bill moves, this is the route to look at first.
-
-Three details in the provider block are load-bearing and each has a failure mode that looks like
-something else:
-
-| Field | Why | If wrong |
-|---|---|---|
-| `baseURL` has **no `/v1`** | pi-ai hands it to `@anthropic-ai/sdk`, which appends `/v1/messages` | every call 404s on `/v1/v1/messages` |
-| `compat.forceAdaptiveThinking: true` | keeps `display: summarized` on the wire; otherwise LiteLLM rewrites legacy thinking and drops `display`, Fable returns empty thinking blocks, and LiteLLM strips them on the next replay | reasoning context silently discarded every turn |
-| **no `off`** row in `reasoningEfforts` | a declared `off` sends `thinking: {type: disabled}` | 400 — thinking is always on for Fable |
-
-Rollback is the same shape as the Codex providers: set
-`DSH_PROVIDER=anthropic-fable DSH_PROVIDER_REMOVE=1` in `deployment.yaml` for **one** boot, *then*
-delete the line. Dropping the seed block alone leaves the PVC copy serving.
-
----
-
-## Claude on the subscription — the `claude-cli` route
-
-Provider **`claude-cli`** (`cordis.patch.yml`), models `claude-fable-5-1`, `claude-opus-5`,
-`claude-sonnet-5`, all marked *(subscription)* in the picker. ADR 0030.
-
-**It is the opposite of the `anthropic-fable` route above.** That one bills real money per token and
-touches no subscription; this one spends the Max plan behind `claude-max-2` and costs nothing extra.
-Both are Claude; pick deliberately.
-
-dsh does not talk to Anthropic here. It spawns `/dsh-home/.claude-cli/bin/claude-cli`, a wrapper
-around the **pinned, published Claude Code binary** at `/app/tools/claude-code/<version>/claude`,
-and reads its NDJSON stream. The binary being unmodified and the credential being the account
-owner's own is what makes this permitted at all — ADR 0030 carries the citations and the conditions,
-including the one nothing in code enforces: **Cloudflare Access must admit only that account's
-holder.** dsh has no per-person identity, so a second person admitted turns this into one
-subscription serving whoever arrives.
-
-### What it cannot do
-
-**No tools. None.** Not dsh's — the adapter never passes its tool schemas — and not Claude Code's
-own, which the wrapper removes. Ask for a file edit and you get a sentence saying it cannot.
-
-Two consequences that read as bugs:
-
-* **Plan mode traps the session.** `plan-mode` requires `exit_plan_mode`, which is a tool call, so
-  a session switched to `claude-cli` while in plan mode cannot leave it. Change the session mode by
-  hand. `tool-todo` and `tool-skill` are inert here for the same reason.
-* **Attachments are refused in words.** The catalog declares text only, and a turn carrying images
-  says so in the prompt rather than dropping them silently.
-
-Also: every turn replays the whole conversation (`claude -p` is one-shot), so long threads spend
-the weekly window faster than an incremental API route would, and streaming arrives in blocks
-rather than tokens.
-
-### The tool policy, and why it is where it is
-
-The deny flags live in **`claude-cli.sh`**, not in the cordis row. Flags in the row apply to one
-call site, and the agent has a shell in this container — `claude-cli -p '…'` from its own Bash
-would otherwise have started a fully-tooled Claude Code on the subscription. The wrapper is also
-off PATH for that reason, which is friction rather than a boundary.
-
-Measured in the pod, reading the tool list out of the CLI's own init event (it emits that before
-authenticating, so this costs nothing):
-
-| flags | tools |
-|---|---|
-| none | 22 |
-| `--strict-mcp-config` (what `isolateTools` sends) | **22** |
-| an explicit deny list | 14 |
-| `--tools ""` or `--disallowed-tools '*'` | 0 |
-
-The second row is the one to remember: `isolateTools` removes MCP servers and leaves `Bash`, `Read`
-and `Edit` in place. It is not the text-only switch and must not be mistaken for it.
-
-`--setting-sources ""` is the other load-bearing flag: without it the CLI reads
-`.claude/settings.json` from its working directory, which can carry `PreToolUse` hooks — arbitrary
-shell in a process holding the token. The row also pins `cwd` outside `/workspace` so the agent
-cannot leave one there.
-
-### Bumping the CLI
-
-Auto-update is off (the binary is on a read-only mount), so the pin ages by design. Three edits,
-all in `install-job.yaml`, all together:
-
-1. `CLAUDE_CODE_VERSION`
-2. `CLAUDE_CODE_SHA256` — from `https://downloads.claude.ai/claude-code-releases/<ver>/manifest.json`
-3. the **Job name** (`…-cc<pin>-ps<set>`), because a Job's pod template is immutable
-
-The Deployment's copy of the version is derived by kustomize, so do not hand-edit it. Keep the
-plugin-set suffix **last** in the Job name: `test_dsh_conductor_readiness` asserts it.
-
-> The rename is a convention, not a mechanism. This Job carries
-> `kustomize.toolkit.fluxcd.io/force: "enabled"`, so Flux force-recreates it and a bump *without*
-> a rename would not fail loudly the way the file header implies.
-
-**Expect a window where every Claude turn fails.** On a CLI-only bump `DSH_VERSION` is unchanged,
-so `wait-for-install` passes at once and the pod rolls while the Job is still fetching ~217 MB (up
-to 600 s × 3 attempts). Turns exit 78 with a message naming the Job until it lands. It self-heals —
-the wrapper re-checks per turn — but it is the expected shape, not an incident.
-
-Old versions are kept for rollback per the app volume's policy, at ~217 MB each. Prune deliberately.
-
-### Diagnosing
-
-```bash
-# the route refuses every turn with "Not logged in - Please run /login"
-kubectl --context admin@ai -n dsh exec deploy/dsh -c dsh -- ls -l /dsh-credentials/DSH_CLAUDE_CODE_OAUTH_TOKEN
-```
-Absent means the operator write has not happened (ADR 0030 decision 5). Present means the token is
-rejected, and it cannot be diagnosed in place — a `setup-token` answers 403
-`oauth_scope_insufficient` on the usage and profile endpoints.
-
-> **This value is the `claude-max-2` broker's token, copied.** So before re-minting anything, check
-> whether the broker is failing too (`/readyz` `credential_generation` on :8700): if it is, the
-> credential is revoked at the issuer and both copies need replacing; if it is not, the copy has
-> drifted and only the dsh field needs patching. **Re-minting for dsh alone is not a local fix** —
-> it may invalidate the value the broker fleet runs on, which is the exact risk that made the copy
-> the operator's choice over a dedicated token. The write is a `patch`, never a `put`, and
-> `openbao-recovery.md` carries it beside the broker rescue step so the two stay in step.
-
-```bash
-# the route refuses with "claude-cli: ... is missing or not executable" (exit 78)
-kubectl --context admin@ai -n dsh logs job/dsh-install-0-1-5-alpha-2-glibc-cc267-ps2 | grep -i "claude code"
-```
-The install step is non-fatal by design, so a failed download leaves this route absent and the rest
-of dsh working. Re-run the Job.
-
-**Usage is not separately attributable.** The *Claude seat capacity* panel reads seat `b`'s browser
-login, which measures the **account** — dsh's spend is in there, mixed with the PR reviewer's and
-AgentForge's, and no query separates them.
-
-**CLI state** lives in `/dsh-home/.claude-cli/config`. The wrapper deletes transcripts older than
-seven days on every turn; nothing else reads them. If the home volume fills, that directory is the
-first place to look.
+dsh has **no Claude route** since 2026-09-22 (ADR 0031). Two were built and withdrawn the day
+after each shipped: `anthropic-fable` on LiteLLM's metered key (ADR 0029, never answered — the
+key is rejected by Anthropic) and `claude-cli`, the Claude Code CLI as a child process on the Max
+subscription (ADR 0030, never authenticated). The deployment still runs
+`DSH_PROVIDER=anthropic-fable DSH_PROVIDER_REMOVE=1` each boot to unwrite the PVC copy of the
+provider block; that line is safe to keep. "LiteLLM is the ONLY model path" holds again. Adding
+Claude back is a new ADR, and both old ones still describe the constraints accurately.
 
 ---
 
@@ -1039,7 +899,7 @@ The providers in `DSH_PLUGINS` reach the profile through the install Job's **sta
 
 ```bash
 kubectl -n dsh logs deploy/dsh -c seed-settings | grep -E 'staging state|closure'
-kubectl -n dsh logs job/dsh-install-0-1-5-alpha-2-glibc-cc267-ps2 | tail -5
+kubectl --context admin@ai -n dsh logs job/dsh-install-0-1-5-alpha-2-glibc-ps2 | tail -5
 ```
 
 `staging state: failed` with `/bin/sh: pnpm: not found` in the Job log was the 2026-09-11 shape:
