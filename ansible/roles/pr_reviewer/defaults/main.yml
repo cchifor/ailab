@@ -209,8 +209,13 @@ pr_reviewer_merge_authors_by_repo:
   # ailab since the same day (branches + PRs only: main's push whitelist is chifor/gitea_admin and
   # the 1 required approval comes from the reviewers). Same gate as everyone else - both personas
   # clean at the current head, CI green, no `no-automerge` label - and the unattended-author
-  # guard below still holds `.gitea/workflows/` edits for a human. docs/runbooks/dsh.md § Git
-  # access to the forge records the grant.
+  # guard below still holds `.gitea/workflows/` edits for a human. BLAST RADIUS IS REPO-WIDE BY
+  # DESIGN (reviewer-claude on ailab#827): guarded_paths is global, there is no per-author path
+  # allowlist, so any ailab manifest dsh authors merges on the two clean verdicts. Accepted
+  # because dsh already holds cluster-admin on the same cluster (ADR 0025) - a reviewed PR is a
+  # narrower door than the kubectl it has today, not a wider one. A per-author allowlist
+  # (llm-router only) is the follow-up if that changes. docs/runbooks/dsh.md § Git access to the
+  # forge records the grant.
   cchifor/ailab: [dsh]
 # UNATTENDED authors: automation whose PRs merge with no human in the loop. When one of them
 # touches a guarded path, the review carries a BLOCKER finding and is never APPROVED, so branch

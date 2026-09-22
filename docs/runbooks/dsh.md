@@ -138,9 +138,12 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 > `PUT /repos/cchifor/ailab/collaborators/dsh {"permission":"write"}`; verified from the pod:
 > `GET /repos/cchifor/ailab` reports `push: true`, a probe branch pushes and deletes. `main` was
 > NOT probed (a successful probe would be a junk commit on main); what keeps it closed is the
-> protection's push whitelist, read back from `GET /branch_protections` the same day. The PAT already carried `write:repository` (it pushes to `dsh-team-conductor`), so no
-> re-mint and no vault patch - the step-1 note below that it was minted `read:repository` only is
-> the 2026-09-11 state, superseded on 2026-09-18.
+> protection's push whitelist, read back from `GET /branch_protections` the same day. The PAT
+> already carried `write:repository` (step 1 below records when that changed), so the grant needed
+> no re-mint and no vault patch. The merge-author entry is repo-wide: the reviewer has one global
+> `guarded_paths` list and no per-author path allowlist, so any ailab manifest `dsh` authors
+> merges on two clean verdicts - accepted because the same identity already holds cluster-admin
+> (ADR 0025); a reviewed PR is the narrower of its two doors.
 
 The agent's shell can clone, fetch and push `https://git.chifor.me/...` repositories **without
 being handed a token**, once the operator has provisioned one in OpenBao. Everything on the forge
@@ -226,6 +229,10 @@ contents**; the fields are operator-owned by design.
    `login_name` (and `source_id`) in the body or answers 422 `[LoginName]: Required`**. The token was
    minted *as dsh* (`POST /api/v1/users/dsh/tokens`, Basic auth from a 0600 file) with scope
    `read:repository` only: `read:organization` is inert for a non-member of the private org.
+   **Superseded:** the PAT in the vault now carries `write:repository` - it went with the
+   2026-09-18 `dsh-team-conductor` push access, and a real branch push to `cchifor/ailab` from the
+   pod on 2026-09-22 proves it (scope is checked before the repo grant). The `read:repository`
+   mint is the 2026-09-11 record only.
    Collaborator grants went through the shared PAT (repo admin suffices). Proven before the vault
    write: `info/refs?service=git-upload-pack` 200 on `platform`, `permissions: pull only` on the
    three repos, 404 on another private repo, 403 on an issue create.
