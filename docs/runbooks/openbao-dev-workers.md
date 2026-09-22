@@ -77,7 +77,27 @@ Secret.
   use the token but can never rotate it, and cannot even fetch the refresh token to try. See
   § "The shared codex login" below. The grant is `read` on the DATA path only (no metadata, no list).
 
-- `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `proxmox_ssh_key`.
+- `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `proxmox_ssh_key`,
+  `litellm_diag_key`, `litellm_diag_base`, `litellm_diag_models`.
+
+  `litellm_diag_*` (added 2026-09-22) is the fleet's **LiteLLM diagnostic credential**: a per-org
+  VIRTUAL key on the `litellm-local` gateway (LAN NodePort `http://192.168.0.41:30400/v1`, the value
+  of `litellm_diag_base`), org `dev-workers-diag` in `kubernetes/apps/apps/ai/litellm-vkeys.yaml`,
+  whitelisted to exactly the models in `litellm_diag_models` (`qwen3.8-27b-vllm-cloud`, the route the
+  production platform calls on the main gateway, mirrored verbatim onto litellm-local for this
+  purpose, and `qwen3.8-27b-ailab`), `max_budget` 5 synthetic credit units per 30 days — both
+  whitelisted routes on litellm-local carry the same synthetic `0.000001`/token cost, so that is
+  ~5M tokens on either route (the estimate holds only while the two costs stay equal), 30 rpm.
+  The mirror of the vLLM route is enforced by `scripts/check-litellm-mirrored-routes.py`; the
+  gateway-level settings (main-gateway fallback/retries/drop_params) are deliberately NOT mirrored
+  and are listed on the route in `litellm-local.yaml`. Reach it with
+  `cred exec common litellm_diag_key OPENAI_API_KEY -- <cmd>` and
+  `cred get common litellm_diag_base`. **It is deliberately NOT a master key**: the main gateway's
+  master key unlocks the paid cloud models and has no per-key budget, and litellm-local's master key is
+  the `/key/*` admin credential; neither is ever projected to a worker. Same value in two homes —
+  `VKEY_DEV_WORKERS_DIAG` in `litellm-vkeys-secret.sops.yaml` (what LiteLLM stores) and `common.json`
+  here (what `cred` serves) — so rotation = new value in both files, re-run the vkeys seeding Job, let
+  the provision Job converge (or force it, *Rotation* step 4).
 
   `proxmox_ssh_key` is an Ed25519 PRIVATE key (comment `agent@dev-workers`) whose public half is in
   `/root/.ssh/authorized_keys` on cloud1/cloud2/cloud3. It exists because an agent had no way to
