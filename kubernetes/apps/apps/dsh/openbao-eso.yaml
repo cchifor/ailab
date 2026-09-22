@@ -180,6 +180,33 @@ spec:
 #                             projection identity (the ChatGPT account id, a JWT claim -- added
 #                             2026-09-19 so every projection carries one field set, ADR 0026) and
 #                             expiry metadata, never refresh credentials. Nothing in dsh reads the id.
+#   DSH_CLAUDE_CODE_OAUTH_TOKEN
+#                             the Claude Max subscription credential for the `claude-cli` model
+#                             provider (ADR 0030), read by claude-cli.sh and exported into the
+#                             Claude Code child as CLAUDE_CODE_OAUTH_TOKEN. A `claude setup-token`
+#                             for the account behind claude-max-2 (reviewer-1 claude seat b).
+#
+#                             LISTED HERE DELIBERATELY, even though `dataFrom.extract` means no
+#                             manifest change was needed to carry it. "Discovered, not enumerated"
+#                             is about the TRANSPORT, not the documentation -- and this is the one
+#                             field class where an undocumented arrival would be worst: a
+#                             subscription credential landing in a pod whose own manifests say the
+#                             agent can read this mount, with no git artifact recording it.
+#
+#                             IT DOES NOT ROTATE and carries no expiry field, unlike the Codex
+#                             projection above. A setup-token is valid for about a year and is
+#                             revoked only at the issuer, so the blast radius of a leak is bounded
+#                             by revocation, not by time.
+#
+#                             IT IS THE SAME VALUE AS THE BROKER'S, deliberately: a copy of
+#                             operator/broker/anthropic/claude-max-2/oauth. Operator decision
+#                             (ADR 0030 decision 5) -- minting a second setup-token for one
+#                             account is not documented to leave the first valid, and the
+#                             unknown failure mode is the whole claude-max-2 broker fleet.
+#                             So a leak HERE is a leak of the broker's credential: revoke at
+#                             the issuer and re-seed both. docs/runbooks/openbao-recovery.md
+#                             carries that instruction beside the rescue step, which is the
+#                             only thing keeping the two copies in step.
 # Whatever else lands here is readable by the agent, which is why the document must hold only
 # credentials dsh is meant to have (see the volume comment in deployment.yaml).
 apiVersion: external-secrets.io/v1

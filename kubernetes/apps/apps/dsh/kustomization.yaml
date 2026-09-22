@@ -63,6 +63,22 @@ configMapGenerator:
       # the pod, which is required because seed-settings installs it at boot.
       - git-credential-openbao.sh
       - gitconfig.seed
+      # The `claude-cli` model provider (ADR 0030): Claude on the Max subscription, served by the
+      # Claude Code CLI the install Job pins and verifies. Files for the same reason
+      # searxng-search.mjs and openbao-credentials.mjs are files -- a row's `name:` resolves from
+      # the PROFILE directory, whose node_modules is a symlink farm of dsh's own closure, so an
+      # npm-installed sibling is a boot crash-loop rather than a missing feature.
+      #
+      # All four ride the content hash, which is required rather than incidental: seed-settings
+      # installs them at boot, so a change that did not roll the pod would leave the previous
+      # adapter and the previous wrapper resolving turns.
+      - claude-cli-provider.mjs
+      - claude-cli-translate.mjs
+      - claude-cli-images.mjs
+      # The wrapper is what puts the subscription credential in front of the binary. It is a
+      # sibling of git-credential-openbao.sh in every respect: same ESO mount, same install step,
+      # same reason it is not baked into an image.
+      - claude-cli.sh
       # User-global agent instructions, installed to $DSH_HOME/AGENTS.md. COMPLEMENTARY to the
       # agent teams below, not in competition with them: this is instruction CONTENT, read by
       # dsh-agent-instructions from $DSH_HOME (its `dshHome` default, and DSH_HOME=/dsh-home
@@ -102,7 +118,7 @@ configMapGenerator:
 replacements:
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps2
+      name: dsh-install-0-1-5-alpha-2-glibc-cc267-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_VERSION].value
     targets:
       - select: { kind: Deployment, name: dsh }
@@ -119,7 +135,7 @@ replacements:
   # perfectly well with the providers simply absent. One source, derived copies.
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps2
+      name: dsh-install-0-1-5-alpha-2-glibc-cc267-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_PLUGINSET].value
     targets:
       - select: { kind: Deployment, name: dsh }
@@ -130,7 +146,7 @@ replacements:
   # would wait forever on a path the installer never creates. One source, three copies, derived.
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps2
+      name: dsh-install-0-1-5-alpha-2-glibc-cc267-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_BUILD].value
     targets:
       - select: { kind: Deployment, name: dsh }
@@ -139,3 +155,18 @@ replacements:
           - spec.template.spec.initContainers.[name=build-command-ui-fix].env.[name=DSH_BUILD].value
           - spec.template.spec.initContainers.[name=seed-settings].env.[name=DSH_BUILD].value
           - spec.template.spec.containers.[name=dsh].env.[name=DSH_BUILD].value
+  # CLAUDE_CODE_VERSION travels the same way, and the failure it prevents is the same shape as
+  # DSH_BUILD's. The Job STAGES /app/tools/claude-code/${CLAUDE_CODE_VERSION}/claude and
+  # claude-cli.sh EXECS that path; a hand-maintained copy that drifted would point the wrapper at
+  # a version nobody staged, and the whole claude-cli route would refuse every turn while the
+  # binary sat on disk under a different name. One source, one derived copy.
+  #
+  # Only the dsh container needs it -- no initContainer touches the CLI.
+  - source:
+      kind: Job
+      name: dsh-install-0-1-5-alpha-2-glibc-cc267-ps2
+      fieldPath: spec.template.spec.containers.[name=install].env.[name=CLAUDE_CODE_VERSION].value
+    targets:
+      - select: { kind: Deployment, name: dsh }
+        fieldPaths:
+          - spec.template.spec.containers.[name=dsh].env.[name=CLAUDE_CODE_VERSION].value
