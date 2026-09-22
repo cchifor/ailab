@@ -124,6 +124,27 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 > answers the old path with a 301, git and API alike, so existing clones keep working - but point
 > the agent's remote at the new path rather than living on the redirect.
 
+> **`dsh` has `write` on `cchifor/ailab` since 2026-09-22** (operator-directed; was `read`). The
+> agent stages llm-router releases on the `router-releases` PVC and rolls one live by bumping the
+> single `subPath:` line in `kubernetes/apps/apps/llm-router/router.yaml`; with `read` the push of
+> that branch died in the pre-receive hook (the receive-pack *advertisement* passes for a read
+> collaborator, so `git push --dry-run` lies - only a real push shows the refusal) and the change
+> went through a human (ailab#826). What `write` adds is branches and PRs, nothing more: `main`'s
+> push whitelist is `chifor`/`gitea_admin`, its one required approval comes from the reviewers, and
+> a PR authored by `dsh` merges on the estate's normal gate (both personas clean at the head, CI
+> green, no `no-automerge`) because `dsh` is a merge author for ailab in
+> `pr_reviewer_merge_authors_by_repo`. It stays an *unattended* author, so a PR touching
+> `.gitea/workflows/` is never approved by the bots. Applied with the shared PAT as
+> `PUT /repos/cchifor/ailab/collaborators/dsh {"permission":"write"}`; verified from the pod:
+> `GET /repos/cchifor/ailab` reports `push: true`, a probe branch pushes and deletes. `main` was
+> NOT probed (a successful probe would be a junk commit on main); what keeps it closed is the
+> protection's push whitelist, read back from `GET /branch_protections` the same day. The PAT
+> already carried `write:repository` (step 1 below records when that changed), so the grant needed
+> no re-mint and no vault patch. The merge-author entry is repo-wide: the reviewer has one global
+> `guarded_paths` list and no per-author path allowlist, so any ailab manifest `dsh` authors
+> merges on two clean verdicts - accepted because the same identity already holds cluster-admin
+> (ADR 0025); a reviewed PR is the narrower of its two doors.
+
 The agent's shell can clone, fetch and push `https://git.chifor.me/...` repositories **without
 being handed a token**, once the operator has provisioned one in OpenBao. Everything on the forge
 is private (`REQUIRE_SIGNIN_VIEW` is on: even the API answers 403 anonymously), so without this an
@@ -208,6 +229,10 @@ contents**; the fields are operator-owned by design.
    `login_name` (and `source_id`) in the body or answers 422 `[LoginName]: Required`**. The token was
    minted *as dsh* (`POST /api/v1/users/dsh/tokens`, Basic auth from a 0600 file) with scope
    `read:repository` only: `read:organization` is inert for a non-member of the private org.
+   **Superseded:** the PAT in the vault now carries `write:repository` - it went with the
+   2026-09-18 `dsh-team-conductor` push access, and a real branch push to `cchifor/ailab` from the
+   pod on 2026-09-22 proves it (scope is checked before the repo grant). The `read:repository`
+   mint is the 2026-09-11 record only.
    Collaborator grants went through the shared PAT (repo admin suffices). Proven before the vault
    write: `info/refs?service=git-upload-pack` 200 on `platform`, `permissions: pull only` on the
    three repos, 404 on another private repo, 403 on an issue create.
