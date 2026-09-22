@@ -176,13 +176,6 @@ spec:
                 # DSH_PROVIDER_REMOVE=1 here for ONE boot (dropping the seed block alone leaves
                 # the PVC copy in place), then delete this line. ADR 0026.
                 DSH_PROVIDER=openai-codex-realjaynesage node /seed/reconcile-provider.js
-                # anthropic-fable: Claude Fable 5.1 on LiteLLM's METERED Anthropic key (ADR 0029).
-                # Reconciled per boot for the same reason as the two above -- settings.yaml lives
-                # on the PVC and has existed since 2026-09-07, so a provider added to the seed
-                # alone never reaches it. Rollback = DSH_PROVIDER=anthropic-fable
-                # DSH_PROVIDER_REMOVE=1 here for ONE boot (dropping the seed block by itself
-                # leaves the PVC copy serving), then delete this line.
-                DSH_PROVIDER=anthropic-fable node /seed/reconcile-provider.js
               else
                 echo "seeding settings.yaml with the LiteLLM provider"
                 # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp

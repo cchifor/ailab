@@ -432,41 +432,6 @@ curl -s 'http://127.0.0.1:9090/api/v1/query?query=dsh_codex_projection_token_exp
 
 ---
 
-## Claude Fable 5.1 — the one route in dsh that costs money
-
-Provider **`anthropic-fable`** (`settings.seed.yaml`), model `claude-fable-5-1`, served by the
-LiteLLM route of the same name. ADR 0029.
-
-**It is NOT a subscription, and that is deliberate.** Every other subscription-backed route here
-(both Codex providers above) is fed by a reviewer seat's OAuth token. Fable is not, because
-Anthropic's Consumer Terms forbid using a Pro/Max OAuth token in a third-party tool — terms updated
-2026-02-20, enforced 2026-04-04. The subscription version of this route was built, measured and
-works; it was abandoned on those grounds, and ADR 0029 records the autopsy so it is not
-re-derived. **Do not repoint this route at a `sk-ant-oat…` token,** and do not add the Claude Code
-identity system message that would make such a token succeed: that is evasion, and the account it
-would burn is chifor@gmail.com — reviewer-1 claude seat `a`, the claude persona's top rung.
-
-So this route bills **pay-as-you-go on `ANTHROPIC_API_KEY`**, at **$10/$50 per MTok**. dsh resends
-conversation state every turn, so one 100K-in/10K-out turn is **$1.50** and roughly 33 turns is
-$50. `claude-sonnet-5` is $2/$10 for comparison. `rpm: 4` on the route bounds **concurrency, not
-rate** (`enable_pre_call_checks` is off on this proxy), so it limits a parallel fan-out and limits
-no spend at all. If the bill moves, this is the route to look at first.
-
-Three details in the provider block are load-bearing and each has a failure mode that looks like
-something else:
-
-| Field | Why | If wrong |
-|---|---|---|
-| `baseURL` has **no `/v1`** | pi-ai hands it to `@anthropic-ai/sdk`, which appends `/v1/messages` | every call 404s on `/v1/v1/messages` |
-| `compat.forceAdaptiveThinking: true` | keeps `display: summarized` on the wire; otherwise LiteLLM rewrites legacy thinking and drops `display`, Fable returns empty thinking blocks, and LiteLLM strips them on the next replay | reasoning context silently discarded every turn |
-| **no `off`** row in `reasoningEfforts` | a declared `off` sends `thinking: {type: disabled}` | 400 — thinking is always on for Fable |
-
-Rollback is the same shape as the Codex providers: set
-`DSH_PROVIDER=anthropic-fable DSH_PROVIDER_REMOVE=1` in `deployment.yaml` for **one** boot, *then*
-delete the line. Dropping the seed block alone leaves the PVC copy serving.
-
----
-
 ## Dedicated operator SSH
 
 Provisioned on 2026-09-17 in the existing **`af/dsh/credentials`** KV-v2 document:
