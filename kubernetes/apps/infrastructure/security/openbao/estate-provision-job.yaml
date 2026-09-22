@@ -17,6 +17,10 @@
 # deploy/secrets/ailab/keycloak-secrets.enc.yaml, and escrowing it was an explicit operator
 # decision (break-glass reach into the realm without the platform repo's age key) that buys a
 # SECOND home. Rotating it must touch the platform SOPS file AND this seed in the same change.
+# ops_admin_username/ops_admin_password (2026-09-22) are the same shape: the dedicated App-upgrade
+# administrator persona's password is Flux+SOPS in the platform repo (deploy/secrets/ailab/
+# ops-admin-secrets.enc.yaml) AND a Gitea Actions secret on cchifor/platform; escrowed here so
+# the realm's persona set stays complete in one place. Rotate all three in the same change.
 # Be precise about WHY, because the obvious guess is wrong: seed-wins cannot revert the live
 # credential -- nothing reads af/estate/* back into Keycloak or into the platform Secret (see
 # ACCESS below: no policy, no SecretStore), so this Job only ever writes the VAULT copy. A
@@ -95,7 +99,8 @@ data:
       oauth:github_client_id oauth:github_client_secret \
       strive-realm:keycloak_admin_user strive-realm:keycloak_admin_password \
       strive-realm:e2e_worker_usernames strive-realm:e2e_worker_password \
-      strive-realm:load_persona_username strive-realm:load_persona_password"
+      strive-realm:load_persona_username strive-realm:load_persona_password \
+      strive-realm:ops_admin_username strive-realm:ops_admin_password"
 
     # PASS 1 — the SEED must contain every matrix field, non-empty. This is NOT redundant with pass
     # 2: pass 2 probes LIVE KV after seeding, so a stale live value happily masks a seed that never
