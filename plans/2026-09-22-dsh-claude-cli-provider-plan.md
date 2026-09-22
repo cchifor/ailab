@@ -222,16 +222,33 @@ so the refresh-token-family hazard that shaped the Codex design does not apply.
 4. **Module resolution.** `@deepseek-ai/dsh-llm` imports from `/dsh-home/profiles/web` and exposes
    `LlmAdapter`, `LlmError` and `LlmAdapter.prototype.prepareCall`.
 
-### Before merge
+### Before merge — all done
 
-5. `npm test` in a checkout of the vendored source (34 tests upstream) plus a case for the `images:
-   false` deviation.
-6. The runbook's non-destructive dry run: candidate `cordis.patch.yml` and the three files into a
-   throwaway `DSH_HOME`, `dsh --profile web --dump-config`, **reading stderr** — a dropped row logs
-   one line and still exits 0.
-7. `--disallowed-tools '*'` parses: an unauthenticated run carrying the full argv still fails with
-   `Not logged in`, not an option error.
-8. `python3 -m unittest discover -s scripts/tests` and `kustomize build` clean.
+5. `npm test` on the vendored source: **34/34** in the three I/O-free suites. The image and timeout
+   suites fail on the Windows host only (path separators; `spawn EFTYPE` on shell-script stubs).
+6. The runbook's non-destructive dry run: `--dump-config` against a throwaway `DSH_HOME` carrying
+   the candidate patch and the three files — **exit 0 with empty stderr**, the row and all three
+   models resolved, searxng / credentials-openbao / subagent-codex untouched. Re-run after the
+   review changes, same result.
+7. The full argv parses, and the duplicated MCP flags the adapter and wrapper now both send are
+   accepted: `"tools":[]`, `"mcp_servers":[]`, clean stderr.
+8. `python3 -m unittest`: **206 tests**, failure counts identical to `origin/main`, nothing failing
+   that does not also fail on the base. `kubectl kustomize` renders and the `CLAUDE_CODE_VERSION`
+   replacement lands in both the Job and the Deployment.
+9. **The install Job's download block was RUN, not just read** — extracted from the manifest and
+   executed in the pod against a writable prefix, everything else untouched. Five cases:
+
+   | case | result |
+   |---|---|
+   | fresh download with the real pins | verified, published 0755, 217,013,744 bytes |
+   | re-run with the binary already correct | cache hit in **1 s**, no re-download |
+   | binary corrupted on disk | re-downloaded and re-verified — a marker is not trusted |
+   | version that 404s | 3 attempts, warns, **exit 0**, no partial binary left |
+   | real version, wrong pinned sha | refuses to publish, **exit 0** |
+
+   The last two are the ones that mattered: they prove the non-fatal design holds **under
+   `set -eu`**. A fault there would have aborted the whole install Job — taking the plugin closure
+   and therefore the codex provider with it — rather than leaving this one route absent.
 
 ### After merge, needs the operator's OpenBao write
 
