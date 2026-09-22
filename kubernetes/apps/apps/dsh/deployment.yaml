@@ -176,6 +176,13 @@ spec:
                 # DSH_PROVIDER_REMOVE=1 here for ONE boot (dropping the seed block alone leaves
                 # the PVC copy in place), then delete this line. ADR 0026.
                 DSH_PROVIDER=openai-codex-realjaynesage node /seed/reconcile-provider.js
+                # anthropic-fable: REMOVED (ADR 0031 -- no Claude integrations in dsh). The
+                # provider block was reconciled onto the PVC copy of settings.yaml from
+                # 2026-09-21 until 2026-09-22, and dropping the seed block alone leaves that
+                # copy serving a model_list entry LiteLLM no longer has. Same shape as the
+                # `codex` removal above, and SAFE TO KEEP INDEFINITELY for the same reason:
+                # once the block is gone it prints "not present; nothing to remove" and exits 0.
+                DSH_PROVIDER=anthropic-fable DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
               else
                 echo "seeding settings.yaml with the LiteLLM provider"
                 # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp

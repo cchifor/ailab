@@ -432,6 +432,18 @@ curl -s 'http://127.0.0.1:9090/api/v1/query?query=dsh_codex_projection_token_exp
 
 ---
 
+## Claude: none, by decision
+
+dsh has **no Claude route** since 2026-09-22 (ADR 0031). Two were built and withdrawn the day
+after each shipped: `anthropic-fable` on LiteLLM's metered key (ADR 0029, never answered — the
+key is rejected by Anthropic) and `claude-cli`, the Claude Code CLI as a child process on the Max
+subscription (ADR 0030, never authenticated). The deployment still runs
+`DSH_PROVIDER=anthropic-fable DSH_PROVIDER_REMOVE=1` each boot to unwrite the PVC copy of the
+provider block; that line is safe to keep. "LiteLLM is the ONLY model path" holds again. Adding
+Claude back is a new ADR, and both old ones still describe the constraints accurately.
+
+---
+
 ## Dedicated operator SSH
 
 Provisioned on 2026-09-17 in the existing **`af/dsh/credentials`** KV-v2 document:
