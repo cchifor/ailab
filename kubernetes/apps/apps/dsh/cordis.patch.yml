@@ -333,25 +333,31 @@
     - id: claude-cli-provider
       name: './claude-cli-provider.mjs'
       config:
-        # The wrapper, never the binary. It supplies the subscription credential from the ESO
-        # mount and clears the two variables that outrank it. See claude-cli.sh.
-        command: /dsh-home/.local/bin/claude-cli
-        # BOTH of the next two are needed for a text-only tier, and only one of them is obvious.
+        # The wrapper, never the binary, and named by ABSOLUTE path because it deliberately does
+        # not sit on PATH. It supplies the subscription credential, scrubs the estate's other
+        # credentials out of the child's environment, and — see below — owns the tool policy.
+        command: /dsh-home/.claude-cli/bin/claude-cli
+        # THE TOOL POLICY IS NOT HERE. It is in claude-cli.sh, deliberately.
         #
-        # isolateTools passes --strict-mcp-config --mcp-config '{"mcpServers":{}}', which removes
-        # MCP servers and NOTHING ELSE. Upstream's README calls that "stripping Claude's tooling";
-        # for MCP it is, for the BUILT-INS it is not — Bash, Read, Edit and the rest survive it,
-        # inside this pod, with this pod's cluster-admin token on disk.
+        # Flags placed in this row apply to ONE call site: the adapter. The agent has a shell in
+        # the same container, so `claude-cli -p '...'` from its own Bash would have bypassed them
+        # and started a fully-tooled Claude Code on the subscription. Enforcing in the wrapper
+        # makes the policy a property of the route rather than of how dsh happens to call it.
+        # (Review finding, 2026-09-22.) Read claude-cli.sh for the measurements.
         #
-        # --disallowed-tools '*' is what actually empties the tool list. MEASURED 2026-09-22 in
-        # this pod: with both flags the CLI's own init event reports "tools":[] and
-        # "mcp_servers":[]. Without the second it reports its full built-in set. Removing this
-        # line turns a text tier into a full agent with a shell, silently.
+        # isolateTools stays true so the adapter also passes the MCP flags, but it is NOT what
+        # makes this a text tier and must not be mistaken for it: measured here, --strict-mcp-config
+        # leaves all 22 built-in tools standing.
         isolateTools: true
-        extraArgs: ['--disallowed-tools', '*']
-        # Consequence of the above, declared rather than discovered: with no Read tool the model
-        # cannot open a materialised attachment, so the catalog must not claim images. The turn
-        # says so in the prompt instead of dropping them silently.
+        # cwd, NOT the container's /workspace default. Claude Code reads CLAUDE.md and
+        # .claude/settings.json from its working directory, and /workspace is precisely the tree
+        # model-authored code is allowed to write — so the default let the agent leave instructions,
+        # and potentially PreToolUse hooks, for a later Claude turn to pick up. The wrapper also
+        # passes --setting-sources "" so no settings file is loaded from anywhere.
+        cwd: /dsh-home/.claude-cli/cwd
+        # With no tools the model cannot open a materialised attachment, so the catalog must not
+        # claim images. The turn says so in the prompt instead of dropping them silently. This is
+        # COUPLED to the tool policy above and a test pins the pair.
         images: false
         # IDLE timeout, not a ceiling: re-armed on every byte the CLI writes, so a long streaming
         # turn is never killed while a genuinely hung one still is after 10 minutes of silence.

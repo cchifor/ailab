@@ -118,7 +118,7 @@ configMapGenerator:
 replacements:
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps2-cc267
+      name: dsh-install-0-1-5-alpha-2-glibc-cc267-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_VERSION].value
     targets:
       - select: { kind: Deployment, name: dsh }
@@ -135,7 +135,7 @@ replacements:
   # perfectly well with the providers simply absent. One source, derived copies.
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps2-cc267
+      name: dsh-install-0-1-5-alpha-2-glibc-cc267-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_PLUGINSET].value
     targets:
       - select: { kind: Deployment, name: dsh }
@@ -146,7 +146,7 @@ replacements:
   # would wait forever on a path the installer never creates. One source, three copies, derived.
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps2-cc267
+      name: dsh-install-0-1-5-alpha-2-glibc-cc267-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=DSH_BUILD].value
     targets:
       - select: { kind: Deployment, name: dsh }
@@ -164,7 +164,7 @@ replacements:
   # Only the dsh container needs it -- no initContainer touches the CLI.
   - source:
       kind: Job
-      name: dsh-install-0-1-5-alpha-2-glibc-ps2-cc267
+      name: dsh-install-0-1-5-alpha-2-glibc-cc267-ps2
       fieldPath: spec.template.spec.containers.[name=install].env.[name=CLAUDE_CODE_VERSION].value
     targets:
       - select: { kind: Deployment, name: dsh }

@@ -14,8 +14,16 @@
 //      saying so in the prompt instead. Upstream hardcodes ['text','image'] and writes the bytes
 //      out for Claude to open with its Read tool -- which the text-only tier does not have, so
 //      the catalog would claim a capability the route cannot honour.
-// Nothing else. Credential handling stays in the wrapper so that the JavaScript running inside
-// the process that executes model-authored tool calls carries no token logic at all.
+//   3. an empty 'error' listener on the child's stdin, for a concern that did not reproduce --
+//      see the comment at the listener, which says so rather than implying a fixed bug.
+// Nothing else.
+//
+// WHAT THIS FILE DELIBERATELY DOES NOT DO. It does not handle the credential and it does not set
+// the tool policy; both live in claude-cli.sh. Upstream spawns the child with the whole of
+// process.env and blanks two variables inline, which would hand the Claude Code child
+// LITELLM_API_KEY, CODEX_API_KEY and every DSH_* besides. The wrapper scrubs those before exec, so
+// that is not patched here -- but note that the upstream line REMAINS below, and a future edit
+// that removes the wrapper's scrub as "redundant" would restore exactly the leak it prevents.
 //
 // To re-vendor: diff against upstream at the new commit, re-apply these deviations and the
 // sibling files', then bump the commit in all three headers together.
@@ -208,6 +216,18 @@ class ClaudeCliAdapter extends LlmAdapter {
     const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
     child.stdout.on('data', rearm);
     rearm();
+
+    // ESTATE DEVIATION. A raised concern that did NOT reproduce, kept as insurance and labelled
+    // honestly so nobody later "confirms" a bug that was never shown.
+    //
+    // The concern: claude-cli.sh exits 78 when the pinned binary is missing -- this design's own
+    // degraded state -- so the write below can land on an already-closed pipe, and an unhandled
+    // 'error' on a stream is a process-level throw, which on a 1-replica Recreate Deployment is
+    // the web UI going down. MEASURED in this pod on node 24 (2026-09-22): a child that exits
+    // immediately followed by a 200 KB stdin write does NOT raise an uncaught exception, with or
+    // without this listener. The listener costs nothing and removes the question on a future
+    // runtime; the real reporting of that case is the exit code and stderr handled further down.
+    child.stdin.on('error', () => {});
 
     // one-shot prompt on stdin, then EOF
     // ESTATE DEVIATION. Said plainly rather than dropped silently: a model asked about a

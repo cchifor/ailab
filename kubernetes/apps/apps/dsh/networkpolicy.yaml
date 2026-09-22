@@ -60,8 +60,16 @@ spec:
     - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
              podSelector: { matchLabels: { k8s-app: kube-dns } } }]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
-    # LiteLLM is the ONLY model path. dsh reaches every model through the proxy, so it never needs
-    # egress to the internet for inference -- no OpenAI, no Anthropic, no DeepSeek.
+    # LiteLLM is the model path for every route EXCEPT claude-cli. This said "the ONLY model path
+    # ... it never needs egress to the internet for inference", which stopped being true on
+    # 2026-09-22 (ADR 0030): the claude-cli provider spawns the Claude Code CLI, which talks to
+    # api.anthropic.com itself over the general HTTPS rule below. Corrected here rather than left
+    # to mislead, because this comment is what a reader checks the invariant against.
+    #
+    # NO RULE CHANGED FOR IT. That reach has existed since general HTTP(S) egress was granted on
+    # 2026-09-09 (see the long note below); claude-cli is simply the first route that depends on
+    # it. If the internet rule is ever narrowed again, api.anthropic.com is a destination that
+    # must survive the narrowing or that provider stops working.
     - to:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ai } }
           podSelector: { matchLabels: { app.kubernetes.io/name: litellm } }

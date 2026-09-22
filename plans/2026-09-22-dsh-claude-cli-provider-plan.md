@@ -97,7 +97,7 @@ re-vendor can re-apply them:
 
 ### 2. The wrapper
 
-`claude-cli.sh`, installed to `/dsh-home/.local/bin/claude-cli`, is the provider's `command`. It:
+`claude-cli.sh`, installed to `/dsh-home/.claude-cli/bin/claude-cli`, is the provider's `command`. It:
 
 * reads `/dsh-credentials/DSH_CLAUDE_CODE_OAUTH_TOKEN` if present and exports
   `CLAUDE_CODE_OAUTH_TOKEN`; if absent, execs anyway and the CLI returns a clean
@@ -149,7 +149,7 @@ line and everything downstream fails at runtime):
     - id: claude-cli-provider
       name: './claude-cli-provider.mjs'
       config:
-        command: /dsh-home/.local/bin/claude-cli
+        command: /dsh-home/.claude-cli/bin/claude-cli
         isolateTools: true
         images: false
         extraArgs: ['--disallowed-tools', '*']
@@ -167,7 +167,7 @@ the difference is the whole security posture of this row.
 agent loop; Claude is something you switch to in the picker for a question and switch away from to
 act on the answer.
 
-Models exposed: `claude-fable-5-1` (1M), `claude-opus-5[1m]` (1M), `claude-sonnet-5` (200K —
+Models exposed: `claude-fable-5-1` (1M), `claude-opus-5` (200K), `claude-sonnet-5` (200K —
 conservative; under-declaring only makes dsh compact sooner, over-declaring overflows the turn).
 
 The Job's pod template is immutable, so its name changes with its contents
@@ -265,4 +265,46 @@ so the refresh-token-family hazard that shaped the Codex design does not apply.
 * **`--disallowed-tools '*'` is load-bearing** and its effect is invisible in the row's name. A test
   pins it.
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
+
+---
+
+## Review
+
+**Codex was unavailable.** Both dispatch attempts (`plan-review` profile) were refused upstream with
+`usage_limit_reached` before the first token; the CLI seat's weekly window is spent. Nothing in the
+LiteLLM gateway logs shows the refusal, which is consistent with the codex CLI seat authenticating
+on its own credential rather than through the gateway. `plans/2026-09-21-…-plan.md` hit the same
+wall the day before and recorded the same workaround, so this is the estate's normal state this
+week rather than a surprise.
+
+**An independent reviewer stood in**, read-only, against the committed branch, with the same six
+challenges Codex was given. Twenty findings. Dispositions, with the code that answered them:
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | The carve-out needs per-end-user auth; dsh cannot tell users apart | **Accepted.** ADR 0030 condition 3 now names the Cloudflare Access policy as the only thing carrying it, as an operator obligation. Escalated to the operator. |
+| 2 | Deny flags were in the adapter's argv only; the agent could call the wrapper directly and get a fully-tooled CLI | **Accepted — the most serious finding.** Policy moved into `claude-cli.sh`; wrapper moved off PATH. |
+| 3 | `--disallowed-tools '*'` may be inert (reviewbot saw `"LS" matches no known tool`); the measurement was unauthenticated | **Refuted by measurement, and the fix kept anyway.** Init-event tool counts: none 22, `--strict-mcp-config` 22, explicit deny list **14**, `'*'` 0, `--tools ""` 0. The wildcard works and the recommended explicit list is the weaker option. The route now sends both forms. |
+| 4 | cwd is `/workspace`, so the agent can plant `.claude/settings.json` with `PreToolUse` hooks | **Accepted.** `cwd` moved outside `/workspace`; `--setting-sources ""` added. Verified against a planted hostile settings file. |
+| 5 | The adapter hands the child the whole pod environment | **Accepted, and fixed harder than proposed.** The wrapper now applies an **allowlist**. The denylist written first was exercised with planted variables and `GITEA_PAT` walked through it. |
+| 6 | Unhandled `EPIPE` on child stdin turns the degraded path into a crash | **Did not reproduce** (node 24, immediate child exit, 200 KB write, guarded and unguarded both survived). Listener added as insurance and labelled as unproven rather than as a fixed bug. |
+| 7 | The credential is the broker's RESCUE-class token; ADR 0025 decision 2 was misapplied | **Accepted.** Decision 5 now mints a token *for dsh* instead of copying, with a post-mint check that the broker still serves. |
+| 8 | Seat-b attribution miscited to `dev-workers.md`, which names that address as a *Codex* seat | **Accepted.** ADR 0030 now cites the runtime dashboard label, says the email is deliberately not in git, and asks the operator to confirm ownership. |
+| 9 | ADR 0029's blocker is broader than the line drawn; the new argument leans on a *paused* policy | **Accepted.** The legal page (permission) and the Help Center banner (billing) are now separated, and the ADR says plainly why the earlier reading was a summary of half the question. |
+| 10 | "No repo change needed" leaves the credential inventory false | **Accepted.** Field documented in `openbao-eso.yaml`. |
+| 11 | Plan mode is unexitable on a tool-less route | **Accepted.** ADR consequence + runbook. |
+| 12 | No bound on concurrent 217 MB children against a 4 Gi limit | **Accepted as a recorded risk.** The adapter offers no cap; named in ADR consequences. |
+| 13 | Unbounded CLI transcripts, and the runbook section the wrapper cited did not exist | **Accepted.** Seven-day prune in the wrapper; the runbook section now exists. |
+| 14 | NetworkPolicy invariant left false | Already fixed in the working tree when reviewed. |
+| 15 | Promised tests absent | Already written when reviewed; now 26, covering the new enforcement points. |
+| 16 | `images` not coupled to the tool policy; `claude-cli-images.mjs` is dead weight | **Coupling accepted** (test added). Module **kept**: `images` defaults to upstream's behaviour, so dropping it would be a larger deviation and a harder re-vendor. |
+| 17 | dsh's own usage is unobservable on a setup-token; the 50 % Fable cap is uncited | **Accepted.** Both corrected in ADR consequences, with the cap cited to its source and dated. |
+| 18 | Plan out of step with the code | **Accepted.** This section and the corrections above. |
+| 19 | Job rename is convention, not mechanism (`force: enabled`); stale `-ps1` in the runbook | **Accepted.** Both noted in the runbook; stale names fixed. |
+| 20 | Unnamed window where a CLI-only bump leaves turns failing | **Accepted.** Documented in the runbook as the expected shape. |
+
+Findings 1 and 7 need the operator, not code: who may pass Cloudflare Access, and minting the
+dedicated token. Everything else is in the branch.
+
+<!-- codex-review-status: finalized -->

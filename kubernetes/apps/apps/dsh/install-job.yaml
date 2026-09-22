@@ -16,7 +16,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dsh-install-0-1-5-alpha-2-glibc-ps2-cc267
+  name: dsh-install-0-1-5-alpha-2-glibc-cc267-ps2
   annotations:
     # A Job's spec.template is IMMUTABLE, so any edit Flux applies to this object under the SAME
     # name is rejected with "field is immutable" — which fails the whole dsh Kustomization, not

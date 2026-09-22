@@ -259,10 +259,17 @@ spec:
               install -m 0644 /seed/claude-cli-provider.mjs /dsh-home/profiles/web/claude-cli-provider.mjs
               install -m 0644 /seed/claude-cli-translate.mjs /dsh-home/profiles/web/claude-cli-translate.mjs
               install -m 0644 /seed/claude-cli-images.mjs /dsh-home/profiles/web/claude-cli-images.mjs
-              # The wrapper that hands that provider's child process the subscription credential.
-              # It goes in .local/bin beside the git helper rather than in the profile: it is an
-              # executable the adapter spawns, not a module anything imports.
-              install -m 0755 /seed/claude-cli.sh /dsh-home/.local/bin/claude-cli
+              # The wrapper that hands that provider's child process the subscription credential,
+              # scrubs the estate's other credentials out of its environment, and applies the tool
+              # policy. An executable the adapter spawns, not a module anything imports.
+              #
+              # DELIBERATELY NOT IN .local/bin BESIDE THE GIT HELPER. That directory is the FIRST
+              # entry of this container's PATH, so a wrapper there is one word away from the
+              # agent's own shell. Here it has to be named by absolute path, which the cordis row
+              # does. That is friction rather than a boundary -- the policy itself is enforced
+              # inside the wrapper precisely because friction is all this is.
+              mkdir -p /dsh-home/.claude-cli/bin /dsh-home/.claude-cli/cwd
+              install -m 0755 /seed/claude-cli.sh /dsh-home/.claude-cli/bin/claude-cli
               # Host-only observer resolves the installed package from this profile.
               install -m 0644 /conductor-release/conductor-readiness.mjs /dsh-home/profiles/web/conductor-readiness.mjs
               install -m 0644 /conductor-release/conductor-command.mjs /dsh-home/profiles/web/conductor-command.mjs
