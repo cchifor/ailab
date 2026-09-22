@@ -48,7 +48,3 @@ __pycache__/
 Thumbs.db
 *.log
 .venv/
-
-# Scratch files written by the codex review dispatcher into the worktree root.
-codex-prompt.txt
-codex-out.txt

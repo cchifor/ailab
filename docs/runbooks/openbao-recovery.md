@@ -174,30 +174,6 @@ more privileged consumers do **not** ride that image:
    **The `bao kv put` is classifier-BLOCKED (shared-infra mutation) — the OPERATOR runs the ready
    script.** Codex (`codex-pro/oauth`) additionally rotates nightly, so rescue it every wipe or the
    refresh chain dies at the next expiry.
-
-   > **`claude-max-2` LIVES IN TWO PLACES since 2026-09-22 (ADR 0030).** Its
-   > `CLAUDE_CODE_OAUTH_TOKEN` is also copied into `af/dsh/credentials` as
-   > `DSH_CLAUDE_CODE_OAUTH_TOKEN`, where dsh's `claude-cli` model provider reads it. This is the
-   > ONLY broker oauth value with a second home, and it was an operator decision taken with the
-   > blast radius stated: the alternative was minting a second setup-token for that account, which
-   > is not documented to leave the first valid, and finding out otherwise would take the broker
-   > fleet down.
-   >
-   > **Consequences for this ceremony and for rotation.** A rescue that re-seeds this broker must
-   > patch the dsh copy too, or dsh keeps authenticating on a value the broker no longer uses —
-   > which fails silently, as a `Not logged in` on one route while everything else looks healthy.
-   > A LEAK from the dsh pod is a leak of the broker's credential: revoke at the issuer and rescue
-   > both. The dsh side is a `patch`, never a `put` (a `put` drops the canary and every other
-   > field), and its shape is in `docs/runbooks/dsh.md` § "Git access to the forge":
-   >
-   > ```bash
-   > BAO_TOKEN="$(kubectl --context admin@ai -n openbao get secret openbao-breakglass-token \
-   >   -o jsonpath='{.data.root_token}' | base64 -d)" \
-   >   bao kv patch -mount=af dsh/credentials DSH_CLAUDE_CODE_OAUTH_TOKEN=@/tmp/f
-   > ```
-   >
-   > Then prove the pod holds the new bytes by comparing digests, never values — the same
-   > `sha256sum < /dsh-credentials/<FIELD>` loop that runbook uses for `GITEA_PAT`.
 6. **Re-escrow the NEW seal** in `kubernetes/infra/openbao-unseal.sops.yaml`. The file MUST stay a
    `kind: Secret` manifest with `stringData:` — the SOPS creation rules encrypt ONLY
    Secret-shaped keys; a flat yaml passes through **PLAINTEXT** while sops still adds
