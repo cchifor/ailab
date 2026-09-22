@@ -124,6 +124,24 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 > answers the old path with a 301, git and API alike, so existing clones keep working - but point
 > the agent's remote at the new path rather than living on the redirect.
 
+> **`dsh` has `write` on `cchifor/ailab` since 2026-09-22** (operator-directed; was `read`). The
+> agent stages llm-router releases on the `router-releases` PVC and rolls one live by bumping the
+> single `subPath:` line in `kubernetes/apps/apps/llm-router/router.yaml`; with `read` the push of
+> that branch died in the pre-receive hook (the receive-pack *advertisement* passes for a read
+> collaborator, so `git push --dry-run` lies - only a real push shows the refusal) and the change
+> went through a human (ailab#826). What `write` adds is branches and PRs, nothing more: `main`'s
+> push whitelist is `chifor`/`gitea_admin`, its one required approval comes from the reviewers, and
+> a PR authored by `dsh` merges on the estate's normal gate (both personas clean at the head, CI
+> green, no `no-automerge`) because `dsh` is a merge author for ailab in
+> `pr_reviewer_merge_authors_by_repo`. It stays an *unattended* author, so a PR touching
+> `.gitea/workflows/` is never approved by the bots. Applied with the shared PAT as
+> `PUT /repos/cchifor/ailab/collaborators/dsh {"permission":"write"}`; verified from the pod:
+> `GET /repos/cchifor/ailab` reports `push: true`, a probe branch pushes and deletes. `main` was
+> NOT probed (a successful probe would be a junk commit on main); what keeps it closed is the
+> protection's push whitelist, read back from `GET /branch_protections` the same day. The PAT already carried `write:repository` (it pushes to `dsh-team-conductor`), so no
+> re-mint and no vault patch - the step-1 note below that it was minted `read:repository` only is
+> the 2026-09-11 state, superseded on 2026-09-18.
+
 The agent's shell can clone, fetch and push `https://git.chifor.me/...` repositories **without
 being handed a token**, once the operator has provisioned one in OpenBao. Everything on the forge
 is private (`REQUIRE_SIGNIN_VIEW` is on: even the API answers 403 anonymously), so without this an

@@ -203,6 +203,15 @@ pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot, renovate-bot]
 # (reviewer-claude on ailab#782: `dsh` has read on two of them, and a fork-PR is one read away).
 pr_reviewer_merge_authors_by_repo:
   cchifor/dsh-team-conductor: [dsh]
+  # ailab added 2026-09-22 (operator-directed): dsh stages llm-router releases on the PVC and
+  # rolls them live by bumping ONE subPath line in kubernetes/apps/apps/llm-router/router.yaml;
+  # until now that hand-off went through a human (ailab#826). `dsh` is a WRITE collaborator on
+  # ailab since the same day (branches + PRs only: main's push whitelist is chifor/gitea_admin and
+  # the 1 required approval comes from the reviewers). Same gate as everyone else - both personas
+  # clean at the current head, CI green, no `no-automerge` label - and the unattended-author
+  # guard below still holds `.gitea/workflows/` edits for a human. docs/runbooks/dsh.md § Git
+  # access to the forge records the grant.
+  cchifor/ailab: [dsh]
 # UNATTENDED authors: automation whose PRs merge with no human in the loop. When one of them
 # touches a guarded path, the review carries a BLOCKER finding and is never APPROVED, so branch
 # protection holds the merge for a human - the workflow is the one file whose edit would let
