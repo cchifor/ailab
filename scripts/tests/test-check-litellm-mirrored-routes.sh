@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # test-check-litellm-mirrored-routes.sh — prove scripts/check-litellm-mirrored-routes.py bites.
 #
-# Four cases against COPIES of the real manifests (the checker takes the two paths as arguments):
+# Five cases against COPIES of the real manifests (the checker takes the two paths as arguments):
 #   1. the repo as committed passes;
 #   2. a sampling drift on the main gateway's route (temperature) fails, naming the field;
 #   3. a litellm-local copy without the synthetic cost fields fails (its spend would never meter);
-#   4. a litellm-local without the route at all fails.
+#   4. a litellm-local without the route at all fails;
+#   5. a ONE-path invocation fails closed (it used to fall back to the repo files and print OK).
 # A checker that passes on 2-4 would let the mirror rot silently, which is the whole bug class.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -56,4 +57,9 @@ PY
 if "$PY" "$CHECK" "$MAIN" "$T/local-noroute.yaml" 2>"$T/err4" >/dev/null; then fail "a litellm-local without the route must fail"; fi
 grep -q 'absent from local-noroute.yaml' "$T/err4" || fail "the absence must be named (got: $(cat "$T/err4"))"
 
-echo "test-check-litellm-mirrored-routes: OK (passes as committed; drift, missing cost, missing route all fail and are named)"
+# 5. a malformed invocation (ONE path) fails closed with a usage message instead of quietly checking
+#    the repo files and printing OK about them.
+if "$PY" "$CHECK" "$T/main-drift.yaml" 2>"$T/err5" >/dev/null; then fail "a single-path invocation must fail, not fall back to the repo files"; fi
+grep -q 'expected 0 or 2 arguments, got 1' "$T/err5" || fail "the argc error must be named (got: $(cat "$T/err5"))"
+
+echo "test-check-litellm-mirrored-routes: OK (passes as committed; drift, missing cost, missing route, one-path invocation all fail and are named)"

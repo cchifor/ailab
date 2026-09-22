@@ -135,9 +135,24 @@ def _describe_diff(a: dict, b: dict) -> str:
     return "; ".join(out) or "(unequal, no field-level detail)"
 
 
+USAGE = (
+    "usage: check-litellm-mirrored-routes.py            # the repo's litellm.yaml + litellm-local.yaml\n"
+    "       check-litellm-mirrored-routes.py MAIN LOCAL # explicit paths (test harness / drift hunting)\n"
+    "exactly zero or two paths — one path would silently check the repo files instead of yours"
+)
+
+
 def main() -> int:
-    main_path = pathlib.Path(sys.argv[1]) if len(sys.argv) > 2 else MAIN
-    local_path = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else LOCAL
+    args = sys.argv[1:]
+    if len(args) == 0:
+        main_path, local_path = MAIN, LOCAL
+    elif len(args) == 2:
+        main_path, local_path = pathlib.Path(args[0]), pathlib.Path(args[1])
+    else:
+        # Fail closed on a malformed invocation: a single path used to be ignored and the run
+        # then reported OK about files the caller never named (reviewer-claude, ailab #822).
+        print(f"ERROR expected 0 or 2 arguments, got {len(args)}\n{USAGE}", file=sys.stderr)
+        return 2
     try:
         problems = check(main_path, local_path)
     except CheckError as exc:
