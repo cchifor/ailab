@@ -16,6 +16,7 @@ import math
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -41,7 +42,9 @@ def paged(token, path, key):
     while True:
         batch = get(token, path, {"page": page, "limit": 50}).get(key) or []
         out.extend(batch)
-        if len(batch) < 50:
+        # Stop on an EMPTY page, not a short one: Gitea clamps `limit` to MAX_RESPONSE_ITEMS
+        # (admin-configurable), and a clamp below 50 would make every full page look short.
+        if not batch:
             return out
         page += 1
 
@@ -63,7 +66,7 @@ def runs_since(token, repo, cutoff):
             if created is not None and created < cutoff:
                 return out
             out.append(r)
-        if len(batch) < 50:
+        if not batch:  # empty, not short: see paged()
             return out
         page += 1
 

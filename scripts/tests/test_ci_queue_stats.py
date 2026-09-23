@@ -47,9 +47,6 @@ class Summarize(unittest.TestCase):
         self.assertGreater(cqs.summarize([self.job(0, 1, 2)], days=0)["jobs_per_day"], 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class NearestRank(unittest.TestCase):
     def test_distinguishes_from_rounded_index(self):
@@ -80,7 +77,9 @@ class Render(unittest.TestCase):
 
 class Paged(unittest.TestCase):
     def test_walks_pages_until_short(self):
-        pages = {1: {"jobs": [{"i": n} for n in range(50)]}, 2: {"jobs": [{"i": 50}]}}
+        # page 3 is EMPTY: the walk stops there, not on the short page 2 (a clamped MAX_RESPONSE_ITEMS
+        # would make every full page look short)
+        pages = {1: {"jobs": [{"i": n} for n in range(50)]}, 2: {"jobs": [{"i": 50}]}, 3: {"jobs": []}}
         calls = []
 
         def fake_get(token, path, params=None):
@@ -94,4 +93,16 @@ class Paged(unittest.TestCase):
         finally:
             cqs.get = orig
         self.assertEqual(len(out), 51)
-        self.assertEqual(calls, [1, 2])
+        self.assertEqual(calls, [1, 2, 3])
+
+    def test_clamped_page_size_is_still_walked(self):
+        pages = {1: {"jobs": [{"i": n} for n in range(30)]}, 2: {"jobs": [{"i": n} for n in range(30, 45)]}, 3: {"jobs": []}}
+        orig = cqs.get
+        cqs.get = lambda token, path, params=None: pages[params["page"]]
+        try:
+            self.assertEqual(len(cqs.paged("t", "/x", "jobs")), 45)
+        finally:
+            cqs.get = orig
+
+if __name__ == "__main__":
+    unittest.main()
