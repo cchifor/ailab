@@ -1,0 +1,29 @@
+# Scrape the watchdog's hand-rendered /metrics (ci_rerun_watchdog_*). Same shape as
+# gatus/servicemonitor.yaml: lives in the workload's namespace, carries the `release` label the
+# operator's serviceMonitorSelector matches (without it this file is inert), targets the SERVICE
+# port name. networkpolicy.yaml admits the Prometheus pod to :8128 - without that half this file
+# yields a permanently-down target.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ci-rerun-watchdog
+  namespace: ci-rerun-watchdog
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [ci-rerun-watchdog]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ci-rerun-watchdog
+  endpoints:
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 60s # the scan interval; scraping faster only re-reads the same values
+      relabelings:
+        # A PIN, NOT A RENAME (agentforge/servicemonitor.yaml): the operator derives `job` from
+        # the Service name already; this fixes it so a jobLabel default change cannot silently
+        # detach prometheusrule.yaml's selectors.
+        - targetLabel: job
+          replacement: ci-rerun-watchdog

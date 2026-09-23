@@ -1,0 +1,59 @@
+# Default-deny both directions, then exactly what app.py demonstrably opens (dsh/networkpolicy.yaml
+# shape). This pod holds a Gitea token with write:repository; the boundary that matters is that
+# it can reach Gitea, the API server and DNS, and NOTHING else - no internet egress at all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ci-rerun-watchdog-default-deny
+  namespace: ci-rerun-watchdog
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: ci-rerun-watchdog } }
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ci-rerun-watchdog-allow
+  namespace: ci-rerun-watchdog
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: ci-rerun-watchdog } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Prometheus, for the ServiceMonitor. Both selectors in ONE `from` item (AND): as two items
+    # they would be OR'ed and admit the whole monitoring namespace. The labels were read off the
+    # live cluster (agentforge/networkpolicy.yaml records the same pair, 2026-09-11); a chart
+    # upgrade that changes them makes CIRerunWatchdogMissing fire, which is the intended signal.
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/instance: kube-prometheus-stack-prometheus
+      ports: [{ port: 8128, protocol: TCP }]
+  egress:
+    # The in-cluster Gitea, by pod label, on its http port (Service gitea-http:3000). NOT
+    # git.chifor.me: that path leaves the cluster, goes through Cloudflare and comes back.
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: gitea } }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gitea
+              app.kubernetes.io/instance: gitea
+      ports: [{ port: 3000, protocol: TCP }]
+    # The Kubernetes API for the state ConfigMap: the ClusterIP AND the control-plane
+    # endpoints it translates to, both needed (dsh/networkpolicy.yaml).
+    - to:
+        - ipBlock: { cidr: 10.96.0.1/32 }
+      ports:
+        - { protocol: TCP, port: 443 }
+    - to:
+        - ipBlock: { cidr: 192.168.0.41/32 }
+        - ipBlock: { cidr: 192.168.0.42/32 }
+        - ipBlock: { cidr: 192.168.0.43/32 }
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 6443 }
+    # CoreDNS specifically, not every pod in kube-system.
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]

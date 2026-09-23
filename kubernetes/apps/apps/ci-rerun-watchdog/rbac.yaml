@@ -1,0 +1,38 @@
+# The watchdog's ONLY cluster access: its own state ConfigMap (ci-rerun-watchdog-state), which it
+# creates at first start and rewrites every scan (runner observations, the live and shadow
+# ledgers). The object is deliberately NOT in git: Flux `prune: true` removes only what is in
+# its inventory, so a runtime-created ConfigMap survives reconciles, and an operator can
+# `kubectl patch` the kill switch into it without a PR:
+#   kubectl --context admin@ai -n ci-rerun-watchdog patch cm ci-rerun-watchdog-state -p '{"data":{"disabled":"true"}}'
+#
+# CONTAINMENT, agentforge/rbac-flux.yaml shape: `create` cannot be resourceName-scoped (the name
+# does not exist yet), so it stands alone; everything else is pinned to the one name. list/watch
+# are absent - the pod reads a known name and never enumerates the namespace. `delete` is absent:
+# nothing in app.py deletes, and losing the ledger is the one thing the RBAC should make hard.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-rerun-watchdog-state
+  namespace: ci-rerun-watchdog
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["ci-rerun-watchdog-state"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-rerun-watchdog-state
+  namespace: ci-rerun-watchdog
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ci-rerun-watchdog-state
+subjects:
+  - kind: ServiceAccount
+    name: ci-rerun-watchdog
+    namespace: ci-rerun-watchdog

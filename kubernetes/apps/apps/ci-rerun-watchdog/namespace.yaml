@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ci-rerun-watchdog
+  labels:
+    app.kubernetes.io/part-of: ci-rerun-watchdog
+    # Restricted, like gatus: ordinary pod networking, non-root, read-only rootfs, no
+    # capabilities. The one thing the pod needs beyond cloud-power's posture is a projected SA
+    # token (rbac.yaml), which `restricted` does not care about.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

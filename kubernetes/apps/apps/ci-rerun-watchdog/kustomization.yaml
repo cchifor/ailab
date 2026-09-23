@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# ci-rerun-watchdog - bounded auto-rerun of Gitea Actions jobs lost with a cloud CI runner.
+namespace: ci-rerun-watchdog
+resources:
+  - namespace.yaml
+  # SOPS: the Gitea PAT (read:admin,read:organization,write:repository). Not yet encrypted - the
+  # pod stays CreateContainerConfigError until it is. Mint + encrypt per secret.sops.yaml.example,
+  # then uncomment. created by: sops --encrypt --in-place secret.sops.yaml
+  # - secret.sops.yaml
+  - rbac.yaml # the state ConfigMap is created at runtime by the pod - not in git (see rbac.yaml)
+  - deployment.yaml
+  - networkpolicy.yaml # default-deny; Gitea :3000, API server, DNS out; Prometheus in
+  - servicemonitor.yaml
+  - ci-rerun-watchdog-rules.yaml # + .test.yaml fixture, run by scripts/rules-lint.sh
+
+configMapGenerator:
+  # Generated so the name carries a content hash: editing app.py renames the ConfigMap, which
+  # rewrites the Deployment's volume reference and rolls the pod (cloud-power's reasoning).
+  - name: ci-rerun-watchdog-app
+    files:
+      - app.py

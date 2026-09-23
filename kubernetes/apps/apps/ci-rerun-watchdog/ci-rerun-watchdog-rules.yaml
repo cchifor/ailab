@@ -1,0 +1,75 @@
+# Alerts for the ci-rerun-watchdog. Every one has a firing AND a quiet fixture in
+# ci-rerun-watchdog-rules.test.yaml, run by scripts/rules-lint.sh (discovery by `kind: PrometheusRule`;
+# the basename is unique repo-wide because its extractor refuses duplicates, and gatus already
+# owns `prometheusrule.yaml`).
+# All alerts route to ntfy today; severity is documentation until routing splits.
+#
+# Metric names are the ones app.py renders (ci_rerun_watchdog_*); `job="ci-rerun-watchdog"` is
+# pinned by servicemonitor.yaml's relabeling, so the selectors here never depend on a default.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ci-rerun-watchdog
+  namespace: ci-rerun-watchdog
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: ci-rerun-watchdog
+      rules:
+        # The gauge is set ONLY on a fully successful scan (app.py), so a watchdog that is up but
+        # aborting every scan on an API error goes stale here - and CIRerunWatchdogErrors names
+        # the stage.
+        - alert: CIRerunWatchdogScanStale
+          expr: time() - ci_rerun_watchdog_last_scan_timestamp_seconds > 600
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "ci-rerun-watchdog has not completed a scan for >10 min"
+            description: "No fully successful scan for more than 600s (the interval is 60s). Lost-runner jobs are not being re-run. Check `kubectl --context admin@ai -n ci-rerun-watchdog logs deploy/ci-rerun-watchdog` for `scan aborted stage=...` lines and ci_rerun_watchdog_errors_total by stage."
+        # ScanStale needs the series to exist. A pod that never came up (missing Secret, image
+        # pull, NetworkPolicy dropping the scrape) has NO series, and only absent() sees that.
+        - alert: CIRerunWatchdogMissing
+          expr: absent(ci_rerun_watchdog_last_scan_timestamp_seconds)
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "ci-rerun-watchdog metrics are absent"
+            description: "ci_rerun_watchdog_last_scan_timestamp_seconds has not been scraped for 15m. The pod is down (ci-rerun-watchdog-gitea Secret missing is the first-deploy cause), the ServiceMonitor is not selected, or the NetworkPolicy no longer admits the Prometheus pod (label drift after a chart upgrade)."
+        # The design bound is a handful of reruns at a nightly power-off. More than 5 LIVE reruns
+        # in an hour means a gate is not holding (or a cloud host is flapping) - stop it:
+        # `kubectl -n ci-rerun-watchdog patch cm ci-rerun-watchdog-state -p '{"data":{"disabled":"true"}}'`.
+        # mode="live" only: the shadow ledger is expected to be busy during the shadow week.
+        - alert: CIRerunWatchdogRerunStorm
+          expr: sum(increase(ci_rerun_watchdog_reruns_total{mode="live"}[1h])) > 5
+          labels: { severity: critical }
+          annotations:
+            summary: "ci-rerun-watchdog issued more than 5 live reruns in an hour"
+            description: "More than 5 live rerun-failed-jobs POSTs in the last hour. The per-scan/per-day caps still bound it, but this rate is outside the design (a few lost jobs at a nightly power-off). Disable it now with the state ConfigMap kill switch and read the `rerun repo=... run=...` log lines before re-enabling."
+        - alert: CIRerunWatchdogErrors
+          expr: sum(increase(ci_rerun_watchdog_errors_total[30m])) > 3
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "ci-rerun-watchdog scans keep aborting"
+            description: "More than 3 aborted scans in 30 minutes. Every abort is fail-closed (no reruns that scan), so this is lost coverage, not a wrong action. ci_rerun_watchdog_errors_total by `stage` says which call fails; a `runners` stage points at the token's read:admin/read:organization scopes, `state_write` at RBAC on the state ConfigMap."
+        # A run for a NEWER sha of the same PR/branch that turned cancelled within 2 min of our
+        # POST was most likely cancelled by the jobs we queued (concurrency cancel-in-progress).
+        # app.py compensates by re-running that newest run once; this alert exists because the
+        # compensation is itself an action taken on someone's PR and must never be routine.
+        - alert: CIRerunWatchdogCollateralCancel
+          expr: sum(increase(ci_rerun_watchdog_collateral_cancel_total[1h])) > 0
+          labels: { severity: critical }
+          annotations:
+            summary: "a ci-rerun-watchdog rerun cancelled a newer run"
+            description: "A rerun issued by the watchdog raced a newer push and the newer run was cancelled (cancel-in-progress). The watchdog re-ran that newest run once (`collateral_cancel repo=... run=...` in its log). Verify on the PR that the current head is green or running; if this repeats, the check-to-POST window is wider than assumed and the watchdog should be disabled."
+        # An `unresolved` entry is a POST whose effect is still unknown after the retry. The
+        # gauge stays up until an operator acknowledges it (app.py: ack_unresolved_before), so
+        # `for: 15m` is not a debounce, it is the time a scan needs to settle a fresh one.
+        - alert: CIRerunWatchdogUnresolved
+          expr: ci_rerun_watchdog_unresolved > 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "ci-rerun-watchdog has reruns with an unknown outcome"
+            description: "At least one live reservation's rerun-failed-jobs POST timed out (or answered an unexpected status) twice and the run still reads `failure`. Check the run in Gitea by hand (`reconcile repo=... run=... outcome=unresolved` in the log names it). Once handled: `kubectl --context admin@ai -n ci-rerun-watchdog patch cm ci-rerun-watchdog-state -p '{\"data\":{\"ack_unresolved_before\":\"<unix seconds, now>\"}}'` retires entries updated before that time from the gauge."

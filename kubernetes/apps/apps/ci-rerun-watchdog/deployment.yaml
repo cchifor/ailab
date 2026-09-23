@@ -1,0 +1,108 @@
+# ci-rerun-watchdog - re-runs Gitea Actions jobs that were lost with a cloud CI runner
+# (cloud-ci-N on the cloudlab hosts, which power off nightly). The selection gates, ledgers and
+# caps are documented in app.py; the plan is the 2026-09-23 cloud CI runners plan, Phase 3.
+#
+# SHIPS IN SHADOW MODE. DRY_RUN=true records every would-be rerun in the shadow ledger and POSTs
+# nothing; flipping it to "false" is its own PR after a week of hand-verified `would-rerun` lines.
+# The instant stop that needs no PR is the `disabled` key in the state ConfigMap (rbac.yaml).
+#
+# Stock python:3.14-slim + stdlib only, like cloud-power: no custom image, nothing depends on a
+# build pipeline. app.py rides in via a hash-rolled ConfigMap (kustomization.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-rerun-watchdog
+  namespace: ci-rerun-watchdog
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ci-rerun-watchdog
+  namespace: ci-rerun-watchdog
+spec:
+  replicas: 1 # the ledger has ONE writer; a second replica would double-reserve and double-POST
+  strategy:
+    type: Recreate # ...and a rolling update would briefly be that second writer
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ci-rerun-watchdog
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ci-rerun-watchdog
+    spec:
+      serviceAccountName: ci-rerun-watchdog
+      # The one deviation from cloud-power: the pod talks to the API server to keep its state
+      # ConfigMap. What that token may do is rbac.yaml (one ConfigMap, no list/watch/delete).
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: ci-rerun-watchdog
+          image: mirror.gcr.io/library/python:3.14-slim
+          command: ["python3", "-u", "/app/app.py"]
+          env:
+            - { name: GITEA_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000" }
+            - { name: GITEA_ORG, value: "cchifor" }
+            # pr_reviewer_repos (ansible/roles/pr_reviewer/defaults/main.yml). Org repos with
+            # Actions that are NOT listed here are exported as ci_rerun_watchdog_unlisted_repos.
+            - name: REPOS
+              value: "cchifor/ailab,cchifor/agentforge,cchifor/platform,cchifor/agentforge-platform,cchifor/dsh-team-conductor"
+            - { name: SCAN_INTERVAL, value: "60" }
+            - { name: LOOKBACK_SECONDS, value: "7200" }
+            # A failed job correlates with its runner's loss when it ended no earlier than this
+            # many seconds BEFORE the watchdog saw the runner go offline (drain cancel) - or any
+            # time after (zombie reap, ~10 min later). Widening it admits genuine failures.
+            - { name: LOSS_CORRELATION_SECONDS, value: "180" }
+            - { name: MAX_RERUNS_PER_SCAN, value: "3" }
+            - { name: MAX_RERUNS_PER_DAY, value: "20" }
+            - { name: DRY_RUN, value: "true" } # shadow mode: ledger + log line, no POST
+            - { name: STATE_CONFIGMAP, value: "ci-rerun-watchdog-state" }
+            - name: STATE_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - { name: PORT, value: "8128" }
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" } # rootfs is read-only
+            # Gitea PAT, scopes read:admin,read:organization (org runners list) +
+            # write:repository (rerun-failed-jobs). Minting: secret.sops.yaml.example.
+            - name: GITEA_TOKEN
+              valueFrom: { secretKeyRef: { name: ci-rerun-watchdog-gitea, key: token } }
+          ports:
+            - { name: http, containerPort: 8128, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8128 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8128 }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: app, mountPath: /app, readOnly: true }
+      volumes:
+        - name: app
+          configMap: { name: ci-rerun-watchdog-app }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ci-rerun-watchdog
+  namespace: ci-rerun-watchdog
+  labels:
+    app.kubernetes.io/name: ci-rerun-watchdog # servicemonitor.yaml selects on this
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ci-rerun-watchdog
+  ports:
+    - { name: http, port: 8128, targetPort: 8128, protocol: TCP }

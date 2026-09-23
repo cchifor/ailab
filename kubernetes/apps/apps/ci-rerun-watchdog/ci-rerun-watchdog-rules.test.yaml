@@ -1,0 +1,153 @@
+# `promtool test rules` fixtures for ci-rerun-watchdog-rules.yaml: every alert fires when it must and stays
+# quiet when it must not. promtool's clock starts at 0, so `time()` at eval_time 20m is 1200.
+rule_files:
+  - ci-rerun-watchdog-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: ScanStale fires on a stale timestamp and not on a fresh one
+    input_series:
+      # Last successful scan at t=0, never again.
+      - series: 'ci_rerun_watchdog_last_scan_timestamp_seconds{job="ci-rerun-watchdog"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 12m          # 720 s stale, but under for: 5m
+        alertname: CIRerunWatchdogScanStale
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CIRerunWatchdogScanStale
+        exp_alerts:
+          - exp_labels: { severity: warning, job: ci-rerun-watchdog }
+            exp_annotations:
+              summary: "ci-rerun-watchdog has not completed a scan for >10 min"
+              description: "No fully successful scan for more than 600s (the interval is 60s). Lost-runner jobs are not being re-run. Check `kubectl --context admin@ai -n ci-rerun-watchdog logs deploy/ci-rerun-watchdog` for `scan aborted stage=...` lines and ci_rerun_watchdog_errors_total by stage."
+      - eval_time: 20m
+        alertname: CIRerunWatchdogMissing
+        exp_alerts: []          # the series exists, so absent() is quiet
+
+  - interval: 1m
+    name: ScanStale is quiet while scans keep landing
+    input_series:
+      # The timestamp tracks the clock: a scan every minute.
+      - series: 'ci_rerun_watchdog_last_scan_timestamp_seconds{job="ci-rerun-watchdog"}'
+        values: "0+60x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CIRerunWatchdogScanStale
+        exp_alerts: []
+
+  - interval: 1m
+    name: Missing fires when the series never appears, after for 15m
+    input_series:
+      - series: 'ci_rerun_watchdog_dry_run{job="ci-rerun-watchdog"}'
+        values: "1+0x40"        # an unrelated series, so the fixture is not empty
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CIRerunWatchdogMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CIRerunWatchdogMissing
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "ci-rerun-watchdog metrics are absent"
+              description: "ci_rerun_watchdog_last_scan_timestamp_seconds has not been scraped for 15m. The pod is down (ci-rerun-watchdog-gitea Secret missing is the first-deploy cause), the ServiceMonitor is not selected, or the NetworkPolicy no longer admits the Prometheus pod (label drift after a chart upgrade)."
+
+  - interval: 1m
+    name: RerunStorm fires on 6 live reruns in an hour
+    input_series:
+      - series: 'ci_rerun_watchdog_reruns_total{job="ci-rerun-watchdog", repo="cchifor/ailab", mode="live"}'
+        values: "0 1 2 3 4 5 6+0x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CIRerunWatchdogRerunStorm
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "ci-rerun-watchdog issued more than 5 live reruns in an hour"
+              description: "More than 5 live rerun-failed-jobs POSTs in the last hour. The per-scan/per-day caps still bound it, but this rate is outside the design (a few lost jobs at a nightly power-off). Disable it now with the state ConfigMap kill switch and read the `rerun repo=... run=...` log lines before re-enabling."
+
+  - interval: 1m
+    name: RerunStorm is quiet on 3 live reruns and on ANY number of shadow reruns
+    input_series:
+      - series: 'ci_rerun_watchdog_reruns_total{job="ci-rerun-watchdog", repo="cchifor/ailab", mode="live"}'
+        values: "0 1 2 3+0x60"
+      - series: 'ci_rerun_watchdog_reruns_total{job="ci-rerun-watchdog", repo="cchifor/platform", mode="dry_run"}'
+        values: "0+1x60"        # the shadow week is expected to be busy
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CIRerunWatchdogRerunStorm
+        exp_alerts: []
+
+  - interval: 1m
+    name: Errors fires on 4 aborted scans in 30m, after for 10m
+    input_series:
+      - series: 'ci_rerun_watchdog_errors_total{job="ci-rerun-watchdog", stage="jobs"}'
+        values: "0 1 2 3 4+0x40"
+    alert_rule_test:
+      - eval_time: 8m           # over the threshold, under for: 10m
+        alertname: CIRerunWatchdogErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CIRerunWatchdogErrors
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "ci-rerun-watchdog scans keep aborting"
+              description: "More than 3 aborted scans in 30 minutes. Every abort is fail-closed (no reruns that scan), so this is lost coverage, not a wrong action. ci_rerun_watchdog_errors_total by `stage` says which call fails; a `runners` stage points at the token's read:admin/read:organization scopes, `state_write` at RBAC on the state ConfigMap."
+
+  - interval: 1m
+    name: Errors is quiet on 2 aborted scans
+    input_series:
+      - series: 'ci_rerun_watchdog_errors_total{job="ci-rerun-watchdog", stage="jobs"}'
+        values: "0 1 2+0x40"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CIRerunWatchdogErrors
+        exp_alerts: []
+
+  - interval: 1m
+    name: CollateralCancel fires on the first increment and is quiet at zero
+    input_series:
+      - series: 'ci_rerun_watchdog_collateral_cancel_total{job="ci-rerun-watchdog"}'
+        values: "0 0 0 0 0 1+0x40"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: CIRerunWatchdogCollateralCancel
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CIRerunWatchdogCollateralCancel
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "a ci-rerun-watchdog rerun cancelled a newer run"
+              description: "A rerun issued by the watchdog raced a newer push and the newer run was cancelled (cancel-in-progress). The watchdog re-ran that newest run once (`collateral_cancel repo=... run=...` in its log). Verify on the PR that the current head is green or running; if this repeats, the check-to-POST window is wider than assumed and the watchdog should be disabled."
+
+  - interval: 1m
+    name: Unresolved fires after 15m above zero and is quiet at zero
+    input_series:
+      - series: 'ci_rerun_watchdog_unresolved{job="ci-rerun-watchdog"}'
+        values: "0 0 0 0 0 1+0x40"
+    alert_rule_test:
+      - eval_time: 15m          # 10 min above zero, under for: 15m
+        alertname: CIRerunWatchdogUnresolved
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CIRerunWatchdogUnresolved
+        exp_alerts:
+          - exp_labels: { severity: warning, job: ci-rerun-watchdog }
+            exp_annotations:
+              summary: "ci-rerun-watchdog has reruns with an unknown outcome"
+              description: "At least one live reservation's rerun-failed-jobs POST timed out (or answered an unexpected status) twice and the run still reads `failure`. Check the run in Gitea by hand (`reconcile repo=... run=... outcome=unresolved` in the log names it). Once handled: `kubectl --context admin@ai -n ci-rerun-watchdog patch cm ci-rerun-watchdog-state -p '{\"data\":{\"ack_unresolved_before\":\"<unix seconds, now>\"}}'` retires entries updated before that time from the gauge."
+
+  - interval: 1m
+    name: Unresolved is quiet after an acknowledgement drops the gauge to zero
+    input_series:
+      - series: 'ci_rerun_watchdog_unresolved{job="ci-rerun-watchdog"}'
+        values: "1 1 1 1 1 0+0x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CIRerunWatchdogUnresolved
+        exp_alerts: []
