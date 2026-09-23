@@ -57,4 +57,6 @@ for the residual.
   any online labelled runner (ailab at full power-off; another cloud runner if only one host died,
   which is acceptable — it is up); the race is shrunk and compensated, not eliminated.
 - Two live bugs fixed on the way (cloudlab): the RTC wake hook never ran at a real shutdown
-  (`Conflicts=shutdown.target` was missing), and `cluster-power.sh` hard-killed guests at 120 s.
+  (`Conflicts=shutdown.target` was missing), and `cluster-power.sh` gave guests a 120 s shutdown
+  attempt followed by an unconditional host poweroff (effectively ~5 min with `pve-guests`' default,
+  not the 720 s a draining runner needs).

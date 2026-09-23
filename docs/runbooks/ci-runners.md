@@ -289,15 +289,17 @@ for "no co-located runner" — an empty string falls back to the GitHub unit).
    Homepage OFF button and a plain `poweroff` wait for the drain.
 3. Script: `cluster-power.sh down` (cloudlab `just power-down`) runs the drain detached on the host.
 
-**The residual — hard power loss, VM crash, a job longer than the drain window** — is covered by
-the `ci-rerun-watchdog` (`kubernetes/apps/apps/ci-rerun-watchdog/`): it re-runs a run's failed jobs
-once when the failure is correlated with the loss of the cloud runner it ran on and the run is still
-the current head of its PR/branch; the re-queued jobs go to whichever labelled runner is online (at
-the nightly power-off, necessarily an ailab one). Shadow mode (`DRY_RUN=true`) first. Kill switch
-without a PR: `kubectl --context admin@ai -n ci-rerun-watchdog patch cm ci-rerun-watchdog-state -p
-'{"data":{"disabled":"true"}}'` (takes effect next scan, ≤ 60 s). Gitea never re-queues an orphaned
-task by itself: the zombie reaper fails it after 10 min (`ZOMBIE_TASK_TIMEOUT`, global — do NOT
-lower it, a >2 min infra-pg stall would reap every live job).
+**The residual — hard power loss, VM crash, a job longer than the drain window.** Gitea never
+re-queues an orphaned task by itself: the zombie reaper fails it after 10 min (`ZOMBIE_TASK_TIMEOUT`,
+global — do NOT lower it, a >2 min infra-pg stall would reap every live job). **Until the
+`ci-rerun-watchdog` is deployed (separate PR; `kubernetes/apps/apps/ci-rerun-watchdog/`), such a job
+needs a MANUAL rerun**: `POST /api/v1/repos/{o}/{r}/actions/runs/{run}/rerun-failed-jobs` (201; the run
+id is in the commit status `target_url`). The watchdog, once live, re-runs a run's failed jobs once
+when the failure is correlated with the loss of the cloud runner it ran on and the run is still the
+current head of its PR/branch; re-queued jobs go to whichever labelled runner is online (at the
+nightly power-off, necessarily an ailab one). It ships in shadow mode (`DRY_RUN=true`) first, and its
+kill switch is `kubectl --context admin@ai -n ci-rerun-watchdog patch cm ci-rerun-watchdog-state -p
+'{"data":{"disabled":"true"}}'` (next scan, ≤ 60 s). Its runbook lines replace this paragraph when it lands.
 
 **Reading an `offline` `cloud-ci-*`.** Check whether the host is up first (`up{job="cloud-node"}`
 or cloudlab `just power-status`). Host down = nightly state, nothing to do. Host up + runner offline

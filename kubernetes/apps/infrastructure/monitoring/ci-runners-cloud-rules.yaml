@@ -54,6 +54,26 @@ spec:
               Runner {{ $labels.nodename }} is about to fail jobs with ENOSPC. gitea-runner-cleanup.sh
               treats >=92% as CRITICAL and prunes through a live job; check `docker system df` and
               `journalctl -t gitea-runner-cleanup` on the VM.
+        # The staleness rule below needs the beacon series to exist. A cleanup timer that never
+        # wrote its beacon (or a textfile that vanished) produces NO series, so that rule is silent
+        # exactly when the maintenance is most broken — the absent-series trap ci-runners-rules.yaml
+        # closes for the 24/7 pool with CIRunnerMaintenanceBeaconMissing. Same shape here, host-gated
+        # (codex review of ailab#838). `for: 30m` rides over first boot and the morning rejoin.
+        - alert: CloudCIRunnerCleanupBeaconMissing
+          expr: >-
+            (
+              up{job="ci-runner-cloud"} == 1
+                unless on (instance) gitea_runner_cleanup_last_run_seconds{job="ci-runner-cloud"}
+            ) and on (cloud_host) cloud_host:up == 1
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} emits no cleanup beacon"
+            description: >-
+              {{ $labels.nodename }} is scraped and its host {{ $labels.cloud_host }} is up, but no
+              gitea_runner_cleanup_last_run_seconds series exists for it — the cleanup timer has never
+              written its beacon or the node_exporter textfile collector is off. Check
+              `systemctl status gitea-runner-cleanup.timer` and --collector.textfile.directory.
         - alert: CloudCIRunnerCleanupStale
           # Same rule as CIRunnerCleanupStale for the 24/7 pool, host-gated. The beacon is a gauge
           # that persists across the night, so a runner that was off for 10h reads "stale" for its

@@ -161,3 +161,42 @@ tests:
                 for >1h while the VM is scraped and its host is up — docker/storage reclamation is
                 stalled. Check `systemctl status gitea-runner-cleanup.timer` + `journalctl -t
                 gitea-runner-cleanup`.
+
+  # ---------------------------------------- beacon ABSENT (not stale): the silent-when-broken trap
+  - interval: 1m
+    name: a scraped runner with no cleanup beacon series fires after 30m while its host is up, not while off
+    input_series:
+      - series: 'up{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-1", instance="192.168.0.32:9100"}'
+        values: "1+0x60"
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1+0x60"
+      # a runner WITH a beacon on the same host must not fire
+      - series: 'up{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-2", instance="192.168.0.33:9100"}'
+        values: "1+0x60"
+      - series: 'gitea_runner_cleanup_last_run_seconds{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-2", instance="192.168.0.33:9100"}'
+        values: "1000000+60x60"
+      # a beacon-less runner on a host that is OFF stays silent
+      - series: 'up{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-3", instance="192.168.0.34:9100"}'
+        values: "1+0x60"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "0+0x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CloudCIRunnerCleanupBeaconMissing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: CloudCIRunnerCleanupBeaconMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ci-runner-cloud
+              cloud_host: cloud1
+              nodename: cloud-ci-1
+              instance: 192.168.0.32:9100
+            exp_annotations:
+              summary: "cloud CI runner cloud-ci-1 emits no cleanup beacon"
+              description: >-
+                cloud-ci-1 is scraped and its host cloud1 is up, but no
+                gitea_runner_cleanup_last_run_seconds series exists for it — the cleanup timer has never
+                written its beacon or the node_exporter textfile collector is off. Check
+                `systemctl status gitea-runner-cleanup.timer` and --collector.textfile.directory.

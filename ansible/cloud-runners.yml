@@ -21,13 +21,13 @@
       tags: [cloud-runners]
       when: gitea_runner_enabled | default(false)
   roles:
+    # Unconditional: time sync and the node_exporter scrape (the up{job="ci-runner-cloud"} series
+    # and the cleanup beacon every alert here reads) must not inherit the toolchain flag's lifecycle.
     - role: host_time
       tags: [cloud-runners, time]
-      when: github_runner_enabled | default(false)
 
     - role: node_exporter
       tags: [cloud-runners, monitoring]
-      when: github_runner_enabled | default(false)
 
     # Base toolchain only (github_runner_agent_enabled=false in group_vars/cloud_gitea_runners.yml).
     - role: github_runner
