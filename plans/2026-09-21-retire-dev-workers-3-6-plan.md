@@ -481,9 +481,13 @@ after approval; each gate waits for the operator. Skipped: UI proposal (no UI).
   by `git mv`); the estate credential seed `devworker-seeds.sops.yaml` `dev-worker-3.json` **stays
   with slot 3** (the plan's default — inherited by ex-dw4); `scripts/dw-paste.ps1` follows the
   pilot machine to `.11`.
-- Credentials: new SecretIDs minted 2026-09-23 against roles `dev-worker-3` and `dev-worker-4`
-  (accessors in the G3a-2 record, values only in `ansible/secrets/dev-worker.sops.yaml`); the
-  slot-5 entry removed from `dev-worker.sops.yaml` and `tep-tokens.sops.yaml` (`sops unset`).
+- Credentials — **pending, a separate commit on this branch before the merge hold is lifted**: new
+  SecretIDs minted against roles `dev-worker-3` and `dev-worker-4` (the operator's mint ceremony,
+  `docs/runbooks/openbao-dev-workers.md` (e); the agent session preparing PR-C2 is not permitted
+  to write the secret store), their values into `ansible/secrets/dev-worker.sops.yaml` (role_ids
+  unchanged), and the slot-5 entry `sops unset` from that file and from `tep-tokens.sops.yaml`.
+  The previous holders' accessors on 2026-09-23 (to destroy at gate step 6, never the new ones):
+  dev-worker-3 `01c40900…`, dev-worker-4 `4924a141…`; slot 5's `176a3328…` goes with the role.
   The tep SOPS fallback for slots 3/4 is regenerated in **PR-C2b** after the gate re-creates
   `tep-dw3`/`tep-dw4` (new SA UIDs); until then the hosts render their tep kubeconfig from OpenBao
   (`openbao-k8stoken-sync`), which is the primary path.
