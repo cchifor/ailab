@@ -132,7 +132,7 @@ data:
             chat_template_kwargs: { reasoning_effort: xhigh }
           input_cost_per_token: 0.000001
           output_cost_per_token: 0.000001
-        model_info: { supports_vision: true, max_input_tokens: 81920 }
+        model_info: { supports_vision: true, max_input_tokens: 212992 }   # 262144 - 49152; mirrors litellm.yaml (native window since 2026-09-23)
       - model_name: qwen3.8-27b-vllm-cloud
         litellm_params:
           model: openai/qwen3.8-27b-w4a16
@@ -145,7 +145,7 @@ data:
             chat_template_kwargs: { reasoning_effort: xhigh }
           input_cost_per_token: 0.000001
           output_cost_per_token: 0.000001
-        model_info: { supports_vision: true, max_input_tokens: 81920 }
+        model_info: { supports_vision: true, max_input_tokens: 212992 }   # 262144 - 49152; mirrors litellm.yaml (native window since 2026-09-23)
       # qwen3.5-122b REMOVED 2026-09-08. It moved to the cloudlab estate (cloud3, llama-swap on
       # 192.168.0.26) where 72 GiB of Q4_K_M weights fit entirely in 96 GiB of VRAM -- MEASURED
       # 60.6-66.2 tok/s fully resident, against 16.6 tok/s here where it spilled MoE experts to
@@ -191,7 +191,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "e8ae9460c852"
+        checksum/config: "422b24ab77f8"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux
