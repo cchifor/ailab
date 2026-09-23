@@ -1,0 +1,14 @@
+---
+# `cleanup` — interactive reclaim tool for the dev-workers (files/cleanup, stdlib Python 3).
+# Shows a table of exactly what it will remove (stale compose stacks, old stopped containers,
+# unused images and anonymous volumes, old build cache; tool caches only with --caches), asks
+# yes/no, then removes exactly that. `cleanup --y` skips the question; `cleanup --dry-run` only
+# shows the plan. Tested by scripts/tests/test_dev_worker_cleanup.py.
+# Own tag so it can be rolled out alone: --tags cleanup.
+- name: Install the cleanup tool
+  ansible.builtin.copy:
+    src: cleanup
+    dest: /usr/local/bin/cleanup
+    owner: root
+    group: root
+    mode: "0755"

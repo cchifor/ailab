@@ -1,0 +1,609 @@
+#!/usr/bin/env python3
+"""cleanup — reclaim disk and memory on a dev-worker, safely.
+
+Shows a table of exactly what it will remove, asks yes/no, then removes exactly that (by ID).
+
+  cleanup                 show the plan, ask, then remove
+  cleanup --y             no question (also -y / --yes)
+  cleanup --dry-run       show the plan only
+  cleanup --caches        also empty tool caches (npm, uv, old Playwright browsers)
+  cleanup --stale-days 7  treat stacks idle for 7+ days as stale (default 14)
+
+Removed by default:
+  * stale compose stacks: nothing in the stack created or started for --stale-days, or its
+    compose working directory no longer exists (worktree deleted). Named volumes go with the
+    stack only when it is orphaned, or with --volumes.
+  * stopped containers finished more than --stopped-hours ago (default 24) that are NOT part
+    of a stack with running containers (those are a live stack's one-shot jobs).
+  * images older than --image-days (default 7) that no surviving container uses.
+  * anonymous volumes no container uses.
+  * build cache beyond the newest --cache-keep-gb (default 10 GB), least recently used first.
+    (Not an age filter: `buildx prune --filter until=` removes nothing on buildx 0.37.)
+Opt-in (--caches): emptying these under a running `npm ci` / `uv sync` breaks that run.
+
+Installed by ansible (roles/dev_worker, tasks/cleanup.yml); source of truth is the ailab repo.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+
+PROJECT = "com.docker.compose.project"
+WORKDIR = "com.docker.compose.project.working_dir"
+ANON_VOLUME = re.compile(r"^[0-9a-f]{64}$")
+
+
+# ----------------------------------------------------------------------------- model
+
+@dataclass(frozen=True)
+class Container:
+    id: str
+    name: str
+    image_id: str
+    labels: dict
+    running: bool
+    created: datetime
+    started: datetime | None
+    finished: datetime | None
+    mounts: tuple = ()          # volume names
+    restart_count: int = 0      # restarts by the restart policy since the last manual start
+
+
+@dataclass(frozen=True)
+class Image:
+    id: str
+    tags: tuple
+    created: datetime
+    size: int
+
+
+@dataclass(frozen=True)
+class Volume:
+    name: str
+    labels: dict
+    size: int
+
+
+@dataclass(frozen=True)
+class CacheItem:
+    name: str
+    path: str
+    size: int
+    command: list
+    exact: bool = True          # False: `size` is the whole cache, the command frees part of it
+
+
+@dataclass
+class Options:
+    stale_days: int
+    stopped_hours: int
+    image_days: int
+    cache_keep_gb: int
+    keep_stacks: bool
+    volumes: bool
+    caches: bool
+
+
+@dataclass
+class Action:
+    kind: str                   # stack | container | image | volume | buildcache | cache
+    label: str
+    detail: str
+    age: str
+    size: int | None            # bytes; None = unknown
+    ids: list = field(default_factory=list)
+    command: list | None = None
+
+
+CATEGORY = {
+    "stack": "Stale compose stack",
+    "container": "Stopped container",
+    "image": "Unused image",
+    "volume": "Unused volume",
+    "buildcache": "Build cache",
+    "cache": "Tool cache (--caches)",
+}
+
+
+# ----------------------------------------------------------------------------- helpers
+
+_UNITS = {"B": 1, "KB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12,
+          "KIB": 2**10, "MIB": 2**20, "GIB": 2**30, "TIB": 2**40}
+
+
+def parse_size(text):
+    """Docker's human sizes ("575.5MB*", "12.5kB", "97B") -> bytes."""
+    m = re.match(r"^\s*([\d.]+)\s*([A-Za-z]*)", text or "")
+    if not m:
+        return 0
+    return int(round(float(m.group(1)) * _UNITS.get((m.group(2) or "B").upper(), 1)))
+
+
+def parse_time(text):
+    """RFC3339 (inspect) or 'YYYY-mm-dd HH:MM:SS.nnn +0000 UTC' (buildx/df) -> aware datetime."""
+    if not text or text.startswith("0001-01-01"):
+        return None
+    t = text.strip().replace(" UTC", "").replace("Z", "+00:00")
+    t = re.sub(r"^(\S+) (\S+) ([+-]\d{2})(\d{2})$", r"\1T\2\3:\4", t)
+    t = re.sub(r"(\.\d{6})\d+", r"\1", t)
+    try:
+        return datetime.fromisoformat(t)
+    except ValueError:
+        return None
+
+
+def fmt_age(delta):
+    days = delta.days
+    if days >= 7:
+        w, d = divmod(days, 7)
+        return f"{w}w{d}d" if d else f"{w}w"
+    if days >= 1:
+        return f"{days}d"
+    return f"{max(int(delta.total_seconds() // 3600), 0)}h"
+
+
+def fmt_size(n):
+    if n is None:
+        return "?"
+    for unit in ("B", "kB", "MB", "GB", "TB"):
+        if abs(n) < 1000 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1000
+    return f"{n:.1f} TB"
+
+
+def confirm(yes, interactive, ask):
+    """--y wins; otherwise only an interactive 'y'/'yes' proceeds."""
+    if yes:
+        return True
+    if not interactive:
+        return False
+    return ask().strip().lower() in ("y", "yes")
+
+
+# ----------------------------------------------------------------------------- planning
+
+BOOT_GRACE = timedelta(minutes=15)
+
+
+def activity(c, boot_times):
+    """When someone last touched this container: created, or started — but a start within
+    BOOT_GRACE of ANY boot is the daemon's restart policy after a reboot, not a person or an
+    agent. Every boot counts, not only the current one: a stopped container keeps the StartedAt
+    of the boot that last restarted it (seen live on dev-worker-3: stale workers stamped by the
+    2026-09-11 reboot). The window is symmetric because docker can stamp the start slightly
+    before the computed boot time when the clock is stepped during boot."""
+    started = c.started
+    if c.restart_count > 0:
+        # The daemon's restart policy restarted it (a crash loop, seen live: 2137 restarts in
+        # 3 weeks on dev-worker-4), so StartedAt says nothing about anyone using it.
+        started = None
+    if started and any(abs(started - b) <= BOOT_GRACE for b in boot_times or ()):
+        started = None
+    return max(c.created, started or c.created)
+
+
+def build_plan(containers, images, volumes, build_cache_bytes, tool_caches, opts, now,
+               dir_exists=os.path.isdir, boot_times=()):
+    plan = []
+    removed = set()
+
+    # stacks
+    stacks = {}
+    for c in containers:
+        if c.labels.get(PROJECT):
+            stacks.setdefault(c.labels[PROJECT], []).append(c)
+    live_projects = set()
+    orphaned_projects = set()
+    if not opts.keep_stacks:
+        for proj, cs in sorted(stacks.items()):
+            touched = max(activity(c, boot_times) for c in cs)
+            workdir = next((c.labels.get(WORKDIR) for c in cs if c.labels.get(WORKDIR)), "")
+            orphaned = bool(workdir) and not dir_exists(workdir)
+            stale = now - touched > timedelta(days=opts.stale_days)
+            if not (stale or orphaned):
+                continue
+            running = sum(c.running for c in cs)
+            why = "worktree gone" if orphaned else f"idle > {opts.stale_days}d"
+            plan.append(Action("stack", proj, f"{len(cs)} ctr ({running} running), {why}: {workdir}",
+                               fmt_age(now - touched), None, [c.id for c in cs]))
+            removed.update(c.id for c in cs)
+            if orphaned:
+                orphaned_projects.add(proj)
+            elif opts.volumes:
+                orphaned_projects.add(proj)  # same volume treatment, by request
+    for proj, cs in stacks.items():
+        if any(c.running for c in cs) and not all(c.id in removed for c in cs):
+            live_projects.add(proj)
+
+    # stopped containers
+    for c in sorted(containers, key=lambda c: c.created):
+        if c.id in removed or c.running or c.labels.get(PROJECT) in live_projects:
+            continue
+        ended = c.finished or c.created
+        if now - ended <= timedelta(hours=opts.stopped_hours):
+            continue
+        plan.append(Action("container", c.name, c.labels.get(PROJECT) or "(no stack)",
+                           fmt_age(now - ended), None, [c.id]))
+        removed.add(c.id)
+
+    survivors = [c for c in containers if c.id not in removed]
+
+    # images
+    used = {c.image_id for c in survivors}
+    for im in sorted(images, key=lambda i: i.created):
+        if im.id in used or now - im.created <= timedelta(days=opts.image_days):
+            continue
+        name = im.tags[0] if im.tags else "<none>"
+        # By every tag, not by ID: `docker rmi <id>` refuses an image with several tags
+        # ("referenced in multiple repositories"); removing its last tag deletes it.
+        plan.append(Action("image", name, im.id.replace("sha256:", "")[:12],
+                           fmt_age(now - im.created), im.size, [im.id],
+                           ["docker", "rmi", *(im.tags or (im.id,))]))
+
+    # volumes
+    attached = {m for c in survivors for m in c.mounts}
+    for v in sorted(volumes, key=lambda v: v.name):
+        if v.name in attached:
+            continue
+        proj = v.labels.get(PROJECT)
+        anonymous = ANON_VOLUME.match(v.name) and not proj
+        if anonymous or (proj and proj in orphaned_projects):
+            plan.append(Action("volume", v.name[:40], proj or "anonymous", "", v.size, [v.name]))
+
+    # build cache: keep the most recently used N GB. `--filter until=` is a silent no-op on
+    # buildx 0.37 / BuildKit 0.33 (the weekly timer logged "Total: 0B" over 20 GB of cache).
+    excess = build_cache_bytes - opts.cache_keep_gb * 10**9
+    if excess > 0:
+        plan.append(Action("buildcache", f"keep newest {opts.cache_keep_gb} GB",
+                           f"of {fmt_size(build_cache_bytes)}, least recently used first", "",
+                           excess, [],
+                           ["docker", "buildx", "prune", "-f", "--max-used-space",
+                            f"{opts.cache_keep_gb}GB"]))
+
+    # tool caches (opt-in)
+    if opts.caches:
+        for tc in tool_caches:
+            if tc.size > 0:
+                if tc.exact:
+                    plan.append(Action("cache", tc.name, tc.path, "", tc.size, [], tc.command))
+                else:
+                    plan.append(Action("cache", tc.name, f"{tc.path}: part of {fmt_size(tc.size)}",
+                                       "", None, [], tc.command))
+    return plan
+
+
+# ----------------------------------------------------------------------------- docker I/O
+
+def sh(args, check=True):
+    r = subprocess.run(args, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"{' '.join(args)}: {r.stderr.strip() or r.stdout.strip()}")
+    return r
+
+
+def load_containers():
+    ids = sh(["docker", "ps", "-aq", "--no-trunc"]).stdout.split()
+    if not ids:
+        return []
+    out = []
+    for d in json.loads(sh(["docker", "inspect", *ids]).stdout):
+        st = d.get("State", {})
+        out.append(Container(
+            id=d["Id"], name=d["Name"].lstrip("/"), image_id=d.get("Image", ""),
+            labels=(d.get("Config") or {}).get("Labels") or {}, running=bool(st.get("Running")),
+            created=parse_time(d["Created"]), started=parse_time(st.get("StartedAt")),
+            finished=parse_time(st.get("FinishedAt")),
+            mounts=tuple(m["Name"] for m in d.get("Mounts") or [] if m.get("Type") == "volume"),
+            restart_count=int(d.get("RestartCount") or 0),
+        ))
+    return out
+
+
+def load_images():
+    ids = sorted(set(sh(["docker", "image", "ls", "-aq", "--no-trunc"]).stdout.split()))
+    if not ids:
+        return []
+    sizes = {}
+    df = sh(["docker", "system", "df", "-v", "--format", "json"], check=False)
+    if df.returncode == 0:
+        for im in json.loads(df.stdout).get("Images") or []:
+            sizes[im.get("ID", "")] = parse_size(im.get("UniqueSize") or im.get("Size"))
+    out = []
+    for d in json.loads(sh(["docker", "image", "inspect", *ids]).stdout):
+        iid = d["Id"]
+        short = iid.replace("sha256:", "")
+        size = next((v for k, v in sizes.items() if k and short.startswith(k.replace("sha256:", ""))),
+                    d.get("Size", 0))
+        out.append(Image(id=iid, tags=tuple(d.get("RepoTags") or []),
+                         created=parse_time(d["Created"]), size=size))
+    return out
+
+
+def load_volumes():
+    names = sh(["docker", "volume", "ls", "-q"]).stdout.split()
+    if not names:
+        return []
+    sizes = {}
+    df = sh(["docker", "system", "df", "-v", "--format", "json"], check=False)
+    if df.returncode == 0:
+        for v in json.loads(df.stdout).get("Volumes") or []:
+            sizes[v.get("Name")] = parse_size(v.get("Size"))
+    return [Volume(name=d["Name"], labels=d.get("Labels") or {}, size=sizes.get(d["Name"], 0))
+            for d in json.loads(sh(["docker", "volume", "inspect", *names]).stdout)]
+
+
+def build_cache_bytes():
+    """Reclaimable build cache (not in use), from `docker system df`."""
+    r = sh(["docker", "system", "df", "--format", "{{json .}}"], check=False)
+    for line in r.stdout.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("Type") == "Build Cache":
+            return parse_size(rec.get("Reclaimable"))
+    return 0
+
+
+def du(path):
+    r = sh(["du", "-sb", path], check=False)
+    try:
+        return int(r.stdout.split()[0])
+    except (IndexError, ValueError):
+        return 0
+
+
+def load_tool_caches():
+    home = os.path.expanduser("~")
+    items = []
+    npm = os.path.join(home, ".npm", "_cacache")
+    if os.path.isdir(npm) and shutil.which("npm"):
+        items.append(CacheItem("npm cache", npm, du(npm), ["npm", "cache", "clean", "--force"]))
+    uv = os.path.join(home, ".cache", "uv")
+    if os.path.isdir(uv) and shutil.which("uv"):
+        items.append(CacheItem("uv cache (prune unused)", uv, du(uv), ["uv", "cache", "prune"],
+                               exact=False))
+    pw = os.path.join(home, ".cache", "ms-playwright")
+    if os.path.isdir(pw):
+        newest = {}
+        for d in os.listdir(pw):
+            m = re.match(r"^(.*)-(\d+)$", d)
+            if m and (m.group(1) not in newest or int(m.group(2)) > newest[m.group(1)][0]):
+                newest[m.group(1)] = (int(m.group(2)), d)
+        keep = {d for _, d in newest.values()}
+        old = [os.path.join(pw, d) for d in os.listdir(pw)
+               if re.match(r"^.*-\d+$", d) and d not in keep]
+        if old:
+            items.append(CacheItem(f"Playwright browsers ({len(old)} old builds)", pw,
+                                   sum(du(p) for p in old), ["rm", "-rf", *old]))
+    return items
+
+
+def boot_times():
+    """Every boot the journal remembers, plus the current one from /proc/uptime."""
+    out = []
+    try:
+        with open("/proc/uptime") as f:
+            out.append(datetime.now(timezone.utc) - timedelta(seconds=float(f.read().split()[0])))
+    except OSError:
+        pass
+    r = sh(["journalctl", "--list-boots", "-o", "json", "--no-pager"], check=False)
+    if r.returncode == 0:
+        try:
+            for b in json.loads(r.stdout or "[]"):
+                if b.get("first_entry"):
+                    out.append(datetime.fromtimestamp(b["first_entry"] / 1e6, timezone.utc))
+        except ValueError:
+            pass
+    return out
+
+
+def disk_line(path):
+    try:
+        u = shutil.disk_usage(path)
+        return f"{path} {u.used / 1e9:.0f}/{u.total / 1e9:.0f} GB ({u.used * 100 // u.total}%)"
+    except OSError:
+        return f"{path} ?"
+
+
+def docker_root():
+    r = sh(["docker", "info", "-f", "{{.DockerRootDir}}"], check=False)
+    return r.stdout.strip() or "/var/lib/docker"
+
+
+# ----------------------------------------------------------------------------- output
+
+IMAGE_ROWS = 10
+
+
+def display_rows(plan, show_all):
+    """Table rows. The plan stays one entry per object (execution is exact); the table groups
+    stopped containers per stack, anonymous volumes into one row, and shows the largest images
+    plus an 'N more' row — unless show_all."""
+    if show_all:
+        return [[CATEGORY[a.kind], a.label, a.detail, a.age, fmt_size(a.size)] for a in plan]
+    rows = []
+    stopped = {}
+    anon = []
+    images = []
+    for a in plan:
+        if a.kind == "container":
+            stopped.setdefault(a.detail, []).append(a)
+        elif a.kind == "volume" and a.detail == "anonymous":
+            anon.append(a)
+        elif a.kind == "image":
+            images.append(a)
+        else:
+            rows.append([CATEGORY[a.kind], a.label, a.detail, a.age, fmt_size(a.size)])
+    for stack, acts in stopped.items():
+        rows.append([CATEGORY["container"], stack, f"{len(acts)} stopped containers",
+                     min((a.age for a in acts), key=_age_key), "?"])
+    if anon:
+        rows.append([CATEGORY["volume"], f"{len(anon)} anonymous volumes", "no container uses them",
+                     "", fmt_size(sum(a.size or 0 for a in anon))])
+    images.sort(key=lambda a: a.size or 0, reverse=True)
+    for a in images[:IMAGE_ROWS]:
+        rows.append([CATEGORY["image"], a.label, a.detail, a.age, fmt_size(a.size)])
+    rest = images[IMAGE_ROWS:]
+    if rest:
+        rows.append([CATEGORY["image"], f"… {len(rest)} more images", "cleanup --dry-run --all lists them",
+                     "", fmt_size(sum(a.size or 0 for a in rest))])
+    order = list(CATEGORY.values())
+    return sorted(rows, key=lambda r: order.index(r[0]))
+
+
+def _age_key(age):
+    m = re.match(r"^(?:(\d+)w)?(?:(\d+)d)?(?:(\d+)h)?$", age or "")
+    if not m:
+        return 0
+    w, d, h = (int(x or 0) for x in m.groups())
+    return (w * 7 + d) * 24 + h
+
+
+def render(plan, width, show_all=False):
+    headers = ["#", "Category", "Item", "Detail", "Age", "Size"]
+    rows = [[str(i + 1), *r] for i, r in enumerate(display_rows(plan, show_all))]
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    budget = max(width - (sum(widths) - widths[2] - widths[3]) - 3 * len(headers) - 1, 30)
+    widths[2] = min(widths[2], max(budget // 2, 14))
+    widths[3] = min(widths[3], max(budget - widths[2], 16))
+
+    def cut(s, w):
+        return s if len(s) <= w else s[: w - 1] + "…"
+
+    def line(l, m, r):
+        return l + m.join("─" * (w + 2) for w in widths) + r
+
+    out = [line("┌", "┬", "┐"),
+           "│" + "│".join(f" {h:<{w}} " for h, w in zip(headers, widths)) + "│",
+           line("├", "┼", "┤")]
+    for r in rows:
+        cells = [cut(c, w) for c, w in zip(r, widths)]
+        out.append("│" + "│".join(
+            f" {c:>{w}} " if i in (0, 5) else f" {c:<{w}} " for i, (c, w) in enumerate(zip(cells, widths))
+        ) + "│")
+    out.append(line("└", "┴", "┘"))
+    return "\n".join(out)
+
+
+def summary(plan):
+    known = sum(a.size or 0 for a in plan)
+    n = {k: sum(1 for a in plan if a.kind == k) for k in CATEGORY}
+    parts = []
+    if n["stack"]:
+        ctrs = sum(len(a.ids) for a in plan if a.kind == "stack")
+        parts.append(f"{n['stack']} stale stack(s) ({ctrs} containers)")
+    for k, word in (("container", "stopped container(s)"), ("image", "image(s)"),
+                    ("volume", "volume(s)"), ("cache", "tool cache(s)")):
+        if n[k]:
+            parts.append(f"{n[k]} {word}")
+    if n["buildcache"]:
+        parts.append("old build cache")
+    return (f"Will remove: {', '.join(parts)}. Frees at least {fmt_size(known)} "
+            f"(stack containers free their images above; shared layers are not counted).")
+
+
+# ----------------------------------------------------------------------------- execution
+
+def execute(plan):
+    failures = 0
+    for i, a in enumerate(plan, 1):
+        cmds = []
+        if a.kind in ("stack", "container"):
+            cmds = [["docker", "rm", "-f", "-v", *a.ids]]  # -v: anonymous volumes of these ctrs
+            if a.kind == "stack":
+                nets = sh(["docker", "network", "ls", "-q", "--filter",
+                           f"label={PROJECT}={a.label}"], check=False).stdout.split()
+                if nets:
+                    cmds.append(["docker", "network", "rm", *nets])
+        elif a.kind == "volume":
+            cmds = [["docker", "volume", "rm", *a.ids]]
+        elif a.command:
+            cmds = [a.command]
+        ok = True
+        for cmd in cmds:
+            r = sh(cmd, check=False)
+            if r.returncode != 0:
+                ok = False
+                err = (r.stderr or r.stdout).strip().splitlines()
+                print(f"  ✗ {i:>3} {CATEGORY[a.kind]}: {a.label} — {err[-1] if err else 'failed'}")
+                break
+        if ok:
+            print(f"  ✓ {i:>3} {CATEGORY[a.kind]}: {a.label}")
+        else:
+            failures += 1
+    return failures
+
+
+# ----------------------------------------------------------------------------- main
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog="cleanup", description=__doc__.split("\n\n")[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog=__doc__.split("\n\n", 1)[1])
+    p.add_argument("-y", "--y", "--yes", dest="yes", action="store_true",
+                   help="do not ask; remove everything in the plan")
+    p.add_argument("--dry-run", action="store_true", help="show the plan and exit")
+    p.add_argument("--all", action="store_true", help="list every item (no grouping)")
+    p.add_argument("--stale-days", type=int, default=14, help="stack idle threshold (default 14)")
+    p.add_argument("--stopped-hours", type=int, default=24,
+                   help="stopped-container threshold (default 24)")
+    p.add_argument("--image-days", type=int, default=7, help="unused-image age (default 7)")
+    p.add_argument("--cache-keep-gb", type=int, default=10,
+                   help="build cache to keep, most recently used first (default 10 GB)")
+    p.add_argument("--keep-stacks", action="store_true", help="never remove compose stacks")
+    p.add_argument("--volumes", action="store_true",
+                   help="also remove named volumes of stale stacks (orphaned stacks always)")
+    p.add_argument("--caches", action="store_true",
+                   help="also empty npm/uv caches and old Playwright browsers")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if not shutil.which("docker"):
+        print("cleanup: docker not found", file=sys.stderr)
+        return 2
+    opts = Options(args.stale_days, args.stopped_hours, args.image_days, args.cache_keep_gb,
+                   args.keep_stacks, args.volumes, args.caches)
+    now = datetime.now(timezone.utc)
+    root = docker_root()
+    print(f"cleanup on {os.uname().nodename}   disk: {disk_line('/')}   docker: {disk_line(root)}")
+    print("Scanning docker state…", flush=True)
+    plan = build_plan(load_containers(), load_images(), load_volumes(),
+                      build_cache_bytes(),
+                      load_tool_caches() if opts.caches else [], opts, now, boot_times=boot_times())
+    if not plan:
+        print("Nothing to clean up.")
+        return 0
+    print(render(plan, shutil.get_terminal_size((140, 40)).columns, args.all))
+    print(summary(plan))
+    if not args.caches:
+        print("Tool caches (npm, uv, old Playwright browsers) are not included; add --caches.")
+    if args.dry_run:
+        return 0
+    interactive = sys.stdin.isatty()
+    if not args.yes and not interactive:
+        print("Not a terminal and no --y: nothing removed.", file=sys.stderr)
+        return 1
+    if not confirm(args.yes, interactive, lambda: input(f"Remove the {len(plan)} items above? [y/N] ")):
+        print("Aborted. Nothing removed.")
+        return 0
+    before = (shutil.disk_usage("/").used, shutil.disk_usage(root).used)
+    failures = execute(plan)
+    after = (shutil.disk_usage("/").used, shutil.disk_usage(root).used)
+    freed = (before[0] - after[0]) + ((before[1] - after[1]) if root != "/" and
+                                       os.stat(root).st_dev != os.stat("/").st_dev else 0)
+    print(f"Done: {len(plan) - failures} ok, {failures} failed. Freed {fmt_size(max(freed, 0))}.")
+    print(f"disk: {disk_line('/')}   docker: {disk_line(root)}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
