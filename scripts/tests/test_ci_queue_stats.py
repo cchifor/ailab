@@ -35,7 +35,7 @@ class Summarize(unittest.TestCase):
         return {"created": created, "started": started, "completed": completed, "runner": runner}
 
     def test_wait_and_run_split(self):
-        jobs = [self.job(0, 100, 130), self.job(0, 600, 620, "cloud-ci-1"), self.job(0, None, None)]
+        jobs = [self.job(0, 100, 130), self.job(0, 600, 620, "cloud-ci-1"), self.job(0, None, None, "")]
         s = cqs.summarize(jobs, days=1)
         self.assertEqual(s["jobs"], 3)
         self.assertEqual(s["wait_s"]["n"], 2)  # the never-started job counts as a job, not a wait
