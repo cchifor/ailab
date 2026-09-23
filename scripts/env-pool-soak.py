@@ -638,11 +638,13 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
                 rep.problems.append(f"relay ingestion gap {iso(a)} → {iso(b - RELAY_BUCKET_SECONDS)}: silent for {fmt_dur(silence)} (up to {fmt_dur(silence + 2 * RELAY_BUCKET_SECONDS)} with {RELAY_BUCKET_SECONDS} s buckets) — nothing reached Loki from the relay; the node's ring replays at most ~{RING_REPLAY_SECONDS} s on reconnect, so host-log evidence for that stretch is gone")
         for s_start, s_end, n in stale_slices:
             rep.problems.append(f"relay freshness {iso(s_start)} → {iso(s_end)}: the newest timestamped record of the last {n} ingested was not sourced within {RING_REPLAY_SECONDS} s of its own ingestion (replayed history only) — nothing current was captured in that hour")
-        if relay_raw and not relay:
-            # replayed history or untimestamped diagnostics only: the stream is alive but nothing in
-            # it is this window's capture (a quiet member that emits only chatter is NOT this case:
-            # its evidence-class fetch is empty and its ingestion buckets are full)
-            rep.problems.append(f"relay shipped {len(relay_raw)} evidence-class lines but none carries an in-window source time (replayed history or untimestamped) — nothing was captured for this window")
+        if historical and not relay:
+            # replayed history only: timestamped evidence-class lines arrived, none of them from this
+            # window. A quiet member is NOT this case — its evidence-class fetch holds at most the
+            # relay's own untimestamped diagnostics (reported above, and the freshness sample proves
+            # the stream is live); the first production run after the bounded fetch hit exactly that
+            # (4 untimestamped lines, 2696/2695 buckets, 0 stale slices) and was wrongly INCOMPLETE
+            rep.problems.append(f"relay shipped {len(relay_raw)} evidence-class lines but none carries an in-window source time (replayed history only) — nothing was captured for this window")
 
     # --- capacity incidents (from the warm pool's own accounting) ------------------------------
     ready = next(iter(prom["warm_ready"].values()), [])

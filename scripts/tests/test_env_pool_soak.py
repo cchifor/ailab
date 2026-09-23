@@ -366,6 +366,18 @@ class CompletenessTests(unittest.TestCase):
         self.assertIn("| relay ingestion (1-min buckets with containerd records, chatter included) | 13 of ~60 |", rep.markdown())
         self.assertIn("0 raw, 0 replayed from outside the window, 0 untimestamped) | 0 |", rep.markdown())
 
+    def test_quiet_member_with_only_relay_diagnostics_is_ok(self):
+        # the shape of the first production run after the bounded fetch: a live, chatter-only
+        # stream (fresh) whose evidence-class fetch holds nothing but 4 untimestamped relay
+        # diagnostics — reported, never a problem (the freshness sample already proves liveness)
+        loki = quiet_loki()
+        loki["relay"] = [(int((T0 + 300 * i) * 1e9), src_line(T0 + 300 * i, "reading guest console")) for i in range(0, 13)]
+        loki["relay"] += [(int((T0 + 700 * i) * 1e9), "ERROR: rpc error: code = Unavailable desc = transient") for i in range(1, 5)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "OK", rep.markdown())
+        self.assertIn("4 of 4 relay lines carry no containerd time= field", rep.markdown())
+        self.assertTrue(soak.should_advance_checkpoint(rep))
+
     def test_replayed_chatter_alone_is_not_capture(self):
         # the relay reconnects and replays yesterday's chatter every 5 min: the evidence fetch is
         # empty (chatter), the count metric sees timestamped records — only the freshness sample
