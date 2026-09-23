@@ -4,10 +4,9 @@ kind: Kustomization
 namespace: ci-rerun-watchdog
 resources:
   - namespace.yaml
-  # SOPS: the Gitea PAT (read:admin,read:organization,write:repository). Not yet encrypted - the
-  # pod stays CreateContainerConfigError until it is. Mint + encrypt per secret.sops.yaml.example,
-  # then uncomment. created by: sops --encrypt --in-place secret.sops.yaml
-  # - secret.sops.yaml
+  # SOPS (age): the Gitea PAT the watchdog reads runs/jobs/runners with and POSTs reruns with.
+  # Rotation = mint a new token (secret.sops.yaml.example has the command), re-encrypt, commit.
+  - secret.sops.yaml # SOPS (age): the Gitea token minted 2026-09-23 for user chifor, scopes read:admin,read:organization,write:repository
   - rbac.yaml # the state ConfigMap is created at runtime by the pod - not in git (see rbac.yaml)
   - deployment.yaml
   - networkpolicy.yaml # default-deny; Gitea :3000, API server, DNS out; Prometheus in
