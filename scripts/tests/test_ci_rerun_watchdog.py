@@ -113,7 +113,7 @@ class FakeGitea:
             if params.get("status") == "failure":
                 runs = [r for r in runs if not isinstance(r, dict) or (r.get("status") == "completed" and r.get("conclusion") == "failure")]
             if params.get("head_sha"):
-                runs = [r for r in runs if isinstance(r, dict) and r["head_sha"] == params["head_sha"]]
+                runs = [r for r in runs if isinstance(r, dict) and r.get("head_sha") == params["head_sha"]]
             return self._page(runs, "workflow_runs", page, limit)
         m = re.fullmatch(r"/repos/([^/]+/[^/]+)/actions/runs/(\d+)/jobs", path)
         if m:
@@ -518,7 +518,7 @@ class Pagination(Base):
 
     def test_malformed_run_in_the_list_is_skipped_cleanly(self):
         self.gitea.runs[REPO].append("not-a-run")
-        self.gitea.runs[REPO].append({"path": WF, "status": "completed"})  # no id
+        self.gitea.runs[REPO].append({"path": WF, "status": "completed", "conclusion": "failure"})  # no id
         self.candidate_pr_run()
         s = self.scan()
         self.assertTrue(s["ok"], s["errors"])
