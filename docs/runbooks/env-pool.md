@@ -222,9 +222,9 @@ containerd record (chatter included; the relay's own untimestamped `ERROR: rpc e
 not count — they were the only records during the 09-21 node outage): a silence that could reach
 15 min counting the two boundary buckets is a `relay ingestion gap` (the node's ring replays
 ~340 s on reconnect, nothing older). Freshness is a third, independent check: per 1 h slice the
-newest 20 records of the unfiltered stream must carry a source time within ~340 s of their own
-ingestion time (a record re-shipped long after it was written is replay, wherever the window
-starts) — a relay
+newest timestamped record among the last 20 ingested must carry a source time within ~340 s of
+its own ingestion time (a record re-shipped long after it was written is replay, wherever the
+window starts; the relay's own diagnostics have no source time and are skipped) — a relay
 that only replays old chatter looks continuous to the count and empty to the evidence fetch,
 and this is what tells it from a healthy quiet member. A stream whose only in-window evidence
 lines are replayed history or untimestamped diagnostics is "nothing captured". The day-1 run on 2026-09-23 over a
