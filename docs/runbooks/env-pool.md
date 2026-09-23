@@ -212,6 +212,20 @@ target, `node_boot_time_seconds` (epochs), per-member `max_over_time` age and co
 the reaper's `reap`/`evidence`/`heartbeat` lines, the watchdog's closures and the relay's counts
 per reaped sandbox.
 
+**Loki load is bounded by construction** (since 2026-09-23): line queries run in slices of at
+most 1 h (`LOKI_SLICE_SECONDS`, up to 40 pages of 5000 each, 150 000 lines in total before the
+export is marked truncated), count queries in slices of 6 h, and the relay LINES fetched are
+evidence-class only — the selector excludes the three steady chatter shapes (`reading guest
+console`, `Stats()`, `Scanning path`), which are ~99.9 % of the ~20k lines/h at `[debug]`. Whether
+the relay is shipping, and continuously, is read from `sum(count_over_time(…[5m]))` over every
+containerd record (chatter included; the relay's own untimestamped `ERROR: rpc error …` lines do
+not count — they were the only records during the 09-21 node outage): an empty stretch longer
+than 15 min is a `relay ingestion gap` (the node's ring
+replays ~340 s on reconnect, nothing older), and a stream whose only in-window lines are replayed
+history or untimestamped diagnostics is "nothing captured". The day-1 run on 2026-09-23 over a
+46 h window with the previous whole-window relay fetch **OOM-killed `loki-0`** (1 GiB limit) and
+then reported the relay absent — a window of any length inside the retention is safe now.
+
 ### Fault injection (validating the reaper, or reproducing a hung teardown on purpose)
 
 The only thing on Talos that can signal a host process is a hostPID pod, so the **production
