@@ -178,7 +178,7 @@ dev_worker_agentforge_memory_high: "6G"
 dev_worker_agentforge_memory_max: "8G"
 dev_worker_agentforge_memory_swap_max: "2G"
 
-# ---- herdr pilot (enabled ONLY on dev-worker-5 via host_vars, NOT in group_vars) ----
+# ---- herdr pilot (enabled ONLY on dev-worker-4 via host_vars, NOT in group_vars) ----
 # Agent-native terminal multiplexer (herdr.dev) trialled BESIDE tmux — tmux keeps the 'main'
 # session, ttyd parity, the dashboard, and reboot persistence; herdr adds the agent attention queue
 # and native `claude --resume` after a server restart. Evaluation criteria + rollback:

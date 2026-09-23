@@ -29,8 +29,9 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.1` | LAN gateway | — | router |
 | `.2 / .3 / .4` | Proxmox hosts `ai-node1/2/3` | — | `inventory/hosts.yml` |
 | `.5 / .6 / .7` | **free (static)** | — | — |
-| `.8`–`.12` | Dev-worker VMs `dev-worker-1..5` | 4201–4205 | `kubernetes/infra/dev-workers/variables.tf` |
-| `.13` | **free (static)** — was `dev-worker-6`, retired 2026-09-2x (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | — | — |
+| `.8`–`.11` | Dev-worker VMs `dev-worker-1..4` — **slot ≠ vmid** since the 2026-09-23 re-slot: `.10` = `dev-worker-3` = vmid 4204, `.11` = `dev-worker-4` = vmid 4205 | 4201, 4202, 4204, 4205 | `kubernetes/infra/dev-workers/variables.tf` |
+| `.12` | **free (static)** — was `dev-worker-5`; its VM 4205 moved to `.11` as `dev-worker-4` on 2026-09-23 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | — | — |
+| `.13` | **free (static)** — was `dev-worker-6`, retired 2026-09-21 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | — | — |
 | `.14`–`.18` | CI runner VMs `ci-runner-1..5` (GitHub + Gitea Actions) | 4101–4105 | `kubernetes/infra/runners/variables.tf` |
 | `.19` | CI runner VM `ci-runner-6` | 4106 | `kubernetes/infra/runners/variables.tf` |
 | `.20 / .21 / .22` | 🔒 **cloudlab** GPU hosts `cloud1/2/3` (bare metal, static) | — | `../cloudlab/inventory/hosts.yml` |
@@ -52,10 +53,10 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | **free (static)** | — | — |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.5`–`.7`, `.13`, `.29`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`** (13 addresses; `.30`
-freed 2026-09-12 by retiring `ci-runner-8`, `.29` freed 2026-09-16 by retiring `ci-runner-7`, `.13`
-freed 2026-09-2x by retiring `dev-worker-6` — `.12` follows when dev-worker-3 retires and the
-survivors are renumbered to `.8`–`.11`).
+**Free static space: `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`** (14 addresses;
+`.30` freed 2026-09-12 by retiring `ci-runner-8`, `.29` freed 2026-09-16 by retiring `ci-runner-7`,
+`.13` freed 2026-09-21 by retiring `dev-worker-6`, `.12` freed 2026-09-23 by the dev-worker re-slot —
+its VM 4205 is `dev-worker-4` on `.11` now).
 Nothing else in `.2`–`.50` is available.
 
 > **Keep all lab static IPs inside `.2`–`.50`.** The DHCP pool starts at `.51`, so anything `.51`+

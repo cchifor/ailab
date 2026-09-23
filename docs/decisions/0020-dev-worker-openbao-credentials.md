@@ -14,10 +14,15 @@ The six dev-worker VMs (`dev-worker-1..6`, 192.168.0.8–.13 — `docs/runbooks/
 where the interactive Claude Code / Codex agents actually run. Their credential story today is a
 single line of Ansible:
 
-> **Amendment 2026-09-2x:** the fleet is five workers (`dev-worker-6` retired) on its way to four;
+> **Amendment 2026-09-21:** the fleet is five workers (`dev-worker-6` retired) on its way to four;
 > a retired slot's AppRole, policy, SecretID accessors, issued tokens and KV subtree are revoked
 > declaratively by the provision Job's `RETIRED_SLOTS` step, so "adding a worker is one word" now
 > has a symmetric "retiring one is one word" — `plans/2026-09-21-retire-dev-workers-3-6-plan.md`.
+>
+> **Amendment 2026-09-23:** four workers (`dev-worker-1..4`). Slot 5 went through `RETIRED_SLOTS`;
+> slots 3 and 4 changed machines (the re-slot) and were RE-MINTED against their destination roles
+> with the previous holders' SecretID accessors and issued tokens revoked by role at the gate — a
+> role's name follows the slot, its credential follows the machine.
 
 - `ansible/roles/dev_worker/tasks/git_forge.yml` writes **one shared `chifor` read/write Gitea PAT**
   (`dev_worker_gitea_token`, SOPS) into `~/.git-credentials` on every worker, for every user in

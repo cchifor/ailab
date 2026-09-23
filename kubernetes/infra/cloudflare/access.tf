@@ -85,9 +85,9 @@ resource "cloudflare_zero_trust_access_identity_provider" "authelia" {
 # shell. The single allow_me policy is the whole allow-list — do not add a `bypass`/`allow` policy here
 # without understanding that it would open the shell.
 resource "cloudflare_zero_trust_access_application" "dev_worker" {
-  # dw6 retired 2026-09-2x (plans/2026-09-21-retire-dev-workers-3-6-plan.md): its Access app and DNS
+  # dw6 retired 2026-09-21 (plans/2026-09-21-retire-dev-workers-3-6-plan.md): its Access app and DNS
   # record are destroyed by the apply at gate G3a-1, AFTER the tunnel ingress for it is gone.
-  for_each = toset(["dw1", "dw2", "dw3", "dw4", "dw5"])
+  for_each = toset(["dw1", "dw2", "dw3", "dw4"])
 
   account_id       = var.cloudflare_account_id
   name             = "${each.value} dev-worker terminal"

@@ -60,21 +60,21 @@ echo "  ok  unmodified tree passes"
 
 echo "[B] a mismatched enumeration fails"
 edit kubernetes/apps/infrastructure/platform-access/rbac.yaml \
-  's.replace("  - { kind: ServiceAccount, name: platform-dw5, namespace: platform-access }\n", "", 1)'
+  's.replace("  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }\n", "", 1)'
 expect_fail "a RoleBinding missing one subject" "DIFF"
 restore kubernetes/apps/infrastructure/platform-access/rbac.yaml
 
 edit kubernetes/apps/infrastructure/testpool/tep-access.yaml \
-  's.replace("metadata: { name: tep-dw5, namespace: testpool }", "metadata: { name: tep-dwX, namespace: testpool }", 1)'
+  's.replace("metadata: { name: tep-dw4, namespace: testpool }", "metadata: { name: tep-dwX, namespace: testpool }", 1)'
 expect_fail "a tep ServiceAccount removed" "DIFF"
 restore kubernetes/apps/infrastructure/testpool/tep-access.yaml
 
-edit inventory/hosts.yml 's.replace("        dev-worker-5:\n", "", 1)'
+edit inventory/hosts.yml 's.replace("        dev-worker-4:\n", "", 1)'
 expect_fail "an inventory host removed" "DIFF"
 restore inventory/hosts.yml
 
 edit kubernetes/infra/dev-workers/variables.tf \
-  's.replace(chr(34) + "dev-worker-5" + chr(34) + " = {", chr(34) + "dev-worker-9" + chr(34) + " = {", 1)'
+  's.replace(chr(34) + "dev-worker-4" + chr(34) + " = {", chr(34) + "dev-worker-9" + chr(34) + " = {", 1)'
 expect_fail "a tofu map key renumbered" "DIFF"
 restore kubernetes/infra/dev-workers/variables.tf
 
@@ -85,26 +85,26 @@ expect_fail "a whole RoleBinding deleted" "no dev-worker-platform-observer RoleB
 restore kubernetes/apps/infrastructure/platform-access/rbac.yaml
 
 edit kubernetes/apps/infrastructure/platform-access/pg-sync.yaml \
-  's.replace(chr(34) + "1 2 3 4 5" + chr(34), chr(34) + "1 2 3 4" + chr(34), 1)'
+  's.replace(chr(34) + "1 2 3 4" + chr(34), chr(34) + "1 2 3" + chr(34), 1)'
 expect_fail "the CronJob and bootstrap Job disagreeing on LIVE_SLOTS" "disagree on LIVE_SLOTS"
 restore kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
 
 edit kubernetes/apps/infrastructure/platform-access/pg-sync.yaml \
-  's.replace("                - { name: RETIRED_SLOTS, value: " + chr(34) + "6" + chr(34) + " }", "", 1)'
+  's.replace("                - { name: RETIRED_SLOTS, value: " + chr(34) + "5 6" + chr(34) + " }", "", 1)'
 expect_fail "one RETIRED_SLOTS env entry deleted" "RETIRED_SLOTS env entries, expected 2"
 restore kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
 
 edit kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml \
-  's.replace("    for _n in (1, 2, 3, 4, 5):", "    for _n in LIVE:  # reformatted away from a literal")'
+  's.replace("    for _n in (1, 2, 3, 4):", "    for _n in LIVE:  # reformatted away from a literal")'
 expect_fail "the sync loop reformatted" "no match for"
 restore kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml
 
 echo "[D] a slot that is both live and retired fails"
 edit kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml \
-  's.replace("RETIRED_SLOTS=" + chr(34) + "dev-worker-6" + chr(34), "RETIRED_SLOTS=" + chr(34) + "dev-worker-5 dev-worker-6" + chr(34), 1)'
+  's.replace("RETIRED_SLOTS=" + chr(34) + "dev-worker-5 dev-worker-6" + chr(34), "RETIRED_SLOTS=" + chr(34) + "dev-worker-4 dev-worker-5 dev-worker-6" + chr(34), 1)'
 edit kubernetes/apps/infrastructure/platform-access/pg-sync.yaml \
-  's.replace("{ name: RETIRED_SLOTS, value: " + chr(34) + "6" + chr(34) + " }", "{ name: RETIRED_SLOTS, value: " + chr(34) + "5 6" + chr(34) + " }")'
-expect_fail "slot 5 listed as both live and retired" "both live and retired"
+  's.replace("{ name: RETIRED_SLOTS, value: " + chr(34) + "5 6" + chr(34) + " }", "{ name: RETIRED_SLOTS, value: " + chr(34) + "4 5 6" + chr(34) + " }")'
+expect_fail "slot 4 listed as both live and retired" "both live and retired"
 restore kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml
 restore kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
 

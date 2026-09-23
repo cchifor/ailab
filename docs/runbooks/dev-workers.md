@@ -11,23 +11,24 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 **The base spec is shared** — cores + ceiling + floor are module-wide scalars in
 `kubernetes/infra/dev-workers/variables.tf` (`dev_worker_cores`, `dev_worker_memory_mib`,
 `dev_worker_memory_floating_mib`); the `dev_worker_nodes` map carries identity plus two optional
-per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw4 — node1 mitigation) and
+per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw3 — node1 mitigation — and 6 GiB on dw4, node2) and
 `memory_mib` (unused since dev-worker-6's retirement; it carried the 12 GiB-ceiling POC, see below).
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
 | dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
 | dev-worker-2 | ai-node2 | 4202 | 192.168.0.9  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-3 | ai-node3 | 4203 | 192.168.0.10 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-4 | ai-node1 | 4204 | 192.168.0.11 | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
-| dev-worker-5 | ai-node2 | 4205 | 192.168.0.12 | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
+| dev-worker-3 | ai-node1 | 4204 | 192.168.0.10 | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
+| dev-worker-4 | ai-node2 | 4205 | 192.168.0.11 | 8 vCPU / 16 GiB (**6**–16 balloon, node2 floor) / 40+128 GiB |
 
-**dev-worker-6** (ai-node3, 4206, 192.168.0.13) was **retired 2026-09-2x** to fund the second
-testpool env node on ai-node3, and **dev-worker-3 follows when its current work is done**; the
-survivors are then renamed `dev-worker-1..4` on `.8`–`.11` (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`
-— the retirement/re-slot procedure, gates and rollbacks live there).
+**Slot ≠ vmid since 2026-09-23.** **dev-worker-6** (ai-node3, 4206, 192.168.0.13) was **retired
+2026-09-21** and **slot 3's original VM** (ai-node3, 4203) on **2026-09-23**, both to fund the second
+testpool env node on ai-node3; the survivors were re-slotted the same day to close the numbering
+gap — vmid 4204 (ex-dw4) is `dev-worker-3`/`.10` and vmid 4205 (ex-dw5) is `dev-worker-4`/`.11`
+(`plans/2026-09-21-retire-dev-workers-3-6-plan.md` — the retirement/re-slot procedure, gates and
+rollbacks live there). No dev-worker runs on ai-node3 any more.
 
-> **IP renumber (consecutive .8–.12).** cloud-init fixes the IP at create and the tofu module has
+> **IP renumber (consecutive .8–.11).** cloud-init fixes the IP at create and the tofu module has
 > `lifecycle.ignore_changes = [initialization]`, so the live IPs were changed **in-guest** (not by tofu):
 > per worker — add the new IP live, rewrite the address in `/etc/netplan/50-cloud-init.yaml`, write
 > `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` (`network: {config: disabled}`) so cloud-init
@@ -41,15 +42,15 @@ host fits only because the rarely-used heavyweight models on node2/node3 (gpt-os
 `docs/runbooks/ai-model-swap.md`. With the model idle, the host drops to ~45% used and ballooning
 actually works, so a worker inflates toward the ceiling on demand. Dev-worker memory defaults to a
 **16 GiB ceiling with a 4 GiB floor** (module scalars
-`dev_worker_memory_mib` / `dev_worker_memory_floating_mib`; per-worker overrides on dw1/dw4 floors
-and the dw5 floor) — low floor by design, because ballooning
+`dev_worker_memory_mib` / `dev_worker_memory_floating_mib`; per-worker overrides on dw1/dw3 floors
+and the dw4 floor, node2) — low floor by design, because ballooning
 now inflates busy workers and 4 GiB is what lets a node hold its on-demand heavyweight **plus** its
 two workers-at-floor at once.
 
 (IPs `.37/.38/.39` + `.5/.6/.7` are free static addresses inside the `.2`–`.50` reserve, below the
 DHCP pool — no router change is needed.)
 
-## Post-testpool ceiling downsize (POC on dev-worker-6, 2026-09-01 — closed 2026-09-2x)
+## Post-testpool ceiling downsize (POC on dev-worker-6, 2026-09-01 — closed 2026-09-21)
 
 > **Closed with dev-worker-6's retirement.** The POC host idled at ~3.7 GiB RSS for its whole run
 > (7-day CPU 1.7 %), so the 12 GiB ceiling was never exercised and proves nothing about a busy
@@ -78,14 +79,14 @@ mitigation stands until node1 capacity is fixed (see the note in variables.tf).
 Per-node RAM budget (~125 GiB usable): Talos CP (**cp1 24 / cp2 24 / cp3 28 GiB hard** —
 `kubernetes/infra/variables.tf`) + ai-llm LXC (96 GiB cap; **~0 GiB when idle-unloaded**, ~59/71 GiB
 when a heavyweight is loaded on demand) + runner (24 GiB ceiling / **10 GiB floor**, ×2 node1/node2,
-×1 node3) + dev-worker (16 GiB ceiling / **4 GiB floor** — **12 GiB on dw1/dw4**, 6 GiB on dw5,
+×1 node3) + dev-worker (16 GiB ceiling / **4 GiB floor** — **12 GiB on dw1/dw3**, 6 GiB on dw4,
 ×2 per node; node1's two raised floors add 16 GiB of guaranteed allocation there). In steady
 state (heavyweight unloaded) node3 sits ~45% used and its workers balloon freely toward the
 ceiling. **node2 no longer has that headroom**: `talos-env-node-1` (16 GiB fixed, the test-env
 pool node — `kubernetes/infra/env-pool/`) joined it 2026-09-01 and steady-state sits ~93% used,
 above PVE's ~80% auto-balloon threshold — node2's workers are effectively floor-pinned. That
-floor-pinned dw5 into swap-death during a working session the same day (the dw1 2026-08-11
-signature: swap full, huge major-fault rate, SSH banner timeouts while ping answers); dw5 now
+floor-pinned the node2 worker (dw5 then, dw4 since the 2026-09-23 re-slot — vmid 4205) into swap-death during a working session the same day (the dw1 2026-08-11
+signature: swap full, huge major-fault rate, SSH banner timeouts while ping answers); it now
 carries a codified 6 GiB floor (`memory_floating_mib = 6144`). Recovery that worked, twice now:
 raise the floor (`qm set <vmid> --balloon <MiB>`) so pvestatd cannot re-pin, then force-inflate
 via `qm monitor <vmid>` → `balloon <MiB>` — `qm set` alone never inflates a running guest. **Time-share rule:** a
@@ -201,7 +202,7 @@ Enable in `ansible/group_vars/dev_workers.yml`, add the secret, re-run `just dev
 | `dev_worker_enable_restic` | `dev_worker_restic_password` | Targets a restic REST server on the QNAP by default (`dev_worker_restic_backend: rest`); QNAP-side rest-server setup is out of scope. `nfs` and `none` backends also supported. |
 | `dev_worker_enable_cloudflared` | `dev_worker_cf_tunnel_token` | Public access via CF tunnel + CF Access. |
 | `dev_worker_enable_password_auth` | `dev_worker_admin_password` | Enables sshd PasswordAuthentication for c4. |
-| `dev_worker_enable_herdr` | — (no secret) | PILOT — per-host in `host_vars/dev-worker-5.yml`, not group_vars. See § "herdr pilot" below. |
+| `dev_worker_enable_herdr` | — (no secret) | PILOT — per-host in `host_vars/dev-worker-4.yml`, not group_vars. See § "herdr pilot" below. |
 | `dev_worker_enable_openbao` | `dev_worker_openbao_credentials` (per-host `role_id`/`secret_id` map) | Per-VM OpenBao AppRole + `bao agent` + `cred` helper (ADR 0020). Not a pure toggle: the cluster side must be live and each worker's secret-id minted first — `docs/runbooks/openbao-dev-workers.md`. |
 
 Create the encrypted secrets file:
@@ -630,18 +631,19 @@ Windows Task Scheduler task **ailab-fleet-converge** on the operator workstation
 `scripts/fleet-converge-daily.sh` (staged at `~/.ailab-converge/` in WSL) daily at 06:35:
 it fetches + hard-resets a PRISTINE dedicated clone (`~/.ailab-converge/repo`) to
 origin/main and converges every worker in the inventory (full role everywhere; the dw6
-`--skip-tags herdr` special case went with dev-worker-6's retirement on 2026-09-2x). Never converge the fleet from a working checkout — the 2026-09-03
+`--skip-tags herdr` special case went with dev-worker-6's retirement on 2026-09-21). Never converge the fleet from a working checkout — the 2026-09-03
 incident: an earlier ~06:05 job ran from the operator checkout (stale at Aug 31, on a
 dirty WIP branch), reverting merged work every morning. That stale job's scheduler is
 STILL UNLOCATED — the 06:35 run wins each morning regardless, but remove the old job when
 found. Logs: `~/.ailab-converge/converge.log`.
 
-## herdr pilot (dev-worker-5)
+## herdr pilot (dev-worker-4)
 
 > dev-worker-6 was the second pilot host (managed takeover completed 2026-09-03) until its
-> retirement on 2026-09-2x; dev-worker-5 is the pilot host now, fully role-managed.
+> retirement on 2026-09-21; the pilot host is the VM that was dev-worker-5 (vmid 4205) — `dev-worker-4`
+> on `.11` since the 2026-09-23 re-slot — fully role-managed.
 
-[Herdr](https://herdr.dev/) — an agent-native terminal multiplexer — runs on dev-worker-5
+[Herdr](https://herdr.dev/) — an agent-native terminal multiplexer — runs on dev-worker-4
 **beside** tmux. This is an evaluation, not a migration: tmux keeps everything load-bearing (the
 shared `main` session, ttyd/SSH parity, the `sessions` dashboard, resurrect/continuum reboot
 persistence). Herdr adds the two things tmux cannot express: an attention queue over agent panes
@@ -652,11 +654,11 @@ restore is shape-only (non-agent panes return as fresh shells), it has no select
 one-person company — so it gets one host, a memory cap, and a kill switch.
 
 - **Enable/disable:** `dev_worker_enable_herdr` (default off; flipped only in
-  `host_vars/dev-worker-5.yml`). Deploy with `just dev-workers`, or targeted (the explicit
+  `host_vars/dev-worker-4.yml`). Deploy with `just dev-workers`, or targeted (the explicit
   `ANSIBLE_CONFIG` matters — on WSL the world-writable `/mnt/c` CWD makes an implicit
   `ansible.cfg` silently ignored, which drops the inventory and "deploys" to zero hosts; same
   trap as the ci-runners runbook):
-  `cd ansible && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible-playbook dev-workers.yml -l dev-worker-5 -t herdr`.
+  `cd ansible && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible-playbook dev-workers.yml -l dev-worker-4 -t herdr`.
   A `-t herdr` run needs an already-provisioned worker (it asserts `/workspace/c4` rather than
   creating it).
 - **What it installs:** pinned static binary `/usr/local/bin/herdr-<version>` + `herdr` symlink
@@ -665,7 +667,7 @@ one-person company — so it gets one host, a memory cap, and a kill switch.
   secrets; agent-resume on: the point of the pilot), the `herdr.service` system unit (runs
   `herdr server` headless as c4, memory-capped like agentforge), and the `herdr-pilot-reset` hatch.
 - **Attach:** SSH in (you land in tmux `main` via the auto-attach) and run `herdr` in a pane — or
-  bypass tmux entirely with `ssh -t c4@192.168.0.12 herdr` (a remote command runs a non-login
+  bypass tmux entirely with `ssh -t c4@192.168.0.11 herdr` (a remote command runs a non-login
   shell, so the `/etc/profile.d` hook is never sourced; the hook itself fires for login shells
   with an SSH tty). **Prefix collision:** tmux and herdr both use `ctrl+b`; inside a tmux pane,
   `ctrl+b ctrl+b <key>` reaches herdr.
@@ -713,14 +715,14 @@ live in the agentforge `AGENTS.md`.
   `notification show`. Workers run acceptEdits + the Bash sandbox; merge/push authority
   stays with the conductor; disable auto-memory for ephemeral workers (one shared project
   memory dir across worktrees leaks context between them).
-- **Capacity:** plan for conductor + ONE active heavy worker — dw5's balloon can pin near
+- **Capacity:** plan for conductor + ONE active heavy worker — dw4's balloon can pin near
   the 4 GiB floor under node load, and the 1-member tep pool serializes PW-class runs anyway.
 - **Teardown:** `herdr worktree remove --workspace <ws>` only after verification (never
   `--force` first); keep briefs/reports out of product commits.
 - **Upgrade:** bump `dev_worker_herdr_version` + `dev_worker_herdr_sha256` together. A herdr server
   restart kills every pane process (pre-1.0, no compatibility guarantee across versions), so treat
   a bump as a maintenance action on the pilot host, not a background refresh.
-- **Rollback:** flip the toggle off (or delete `host_vars/dev-worker-5.yml`), then on the VM:
+- **Rollback:** flip the toggle off (or delete `host_vars/dev-worker-4.yml`), then on the VM:
   `systemctl disable --now herdr`, remove `/usr/local/bin/herdr*`, `/usr/local/bin/herdr-pilot-reset`,
   `/etc/systemd/system/herdr.service`, and `~c4/.config/herdr/`. The role installs but — like the
   other optional features — never uninstalls.
@@ -734,9 +736,9 @@ materializing the image as a **remote file** and handing the agent its **path** 
 paste of an image path auto-attaches as `[Image #N]` in Claude Code; Codex also attaches pasted
 paths, or takes `codex -i <path>`.
 
-**Path 1 — herdr remote attach (dev-worker-5).** Install herdr ≥ 0.8.2 on the workstation
+**Path 1 — herdr remote attach (dev-worker-4).** Install herdr ≥ 0.8.2 on the workstation
 (`powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"` — 0.8.2 is the
-first stable with Windows `--remote`), then attach with `herdr --remote ssh://c4@192.168.0.12`.
+first stable with Windows `--remote`), then attach with `herdr --remote ssh://c4@192.168.0.11`.
 Copy a screenshot, focus the pane running the agent, press `ctrl+v`: herdr ships the PNG over the
 existing SSH connection (16 MiB cap), stages it on the worker under
 `/tmp/herdr-clipboard-images-<uid>/` (0600; deleted when the client disconnects and after 24h — so
@@ -745,7 +747,7 @@ server-side config. If the terminal swallows `ctrl+v`, rebind `keys.remote_image
 **local** `%APPDATA%\herdr\config.toml` (e.g. `"ctrl+alt+v"`).
 
 **Path 2 — plain tmux, any worker: `scripts/dw-paste.ps1`.** Copy a screenshot (or copy an image
-file in Explorer), run `powershell -File scripts\dw-paste.ps1` (defaults to dev-worker-5; override
+file in Explorer), run `powershell -File scripts\dw-paste.ps1` (defaults to dev-worker-4; override
 with `-SshTarget c4@192.168.0.N`). It saves the clipboard image as PNG (a copied image file is
 uploaded as-is, original extension kept), scp's it to
 `/workspace/c4/pastes/` (created by the role, 0700, aged out after 14 days via tmpfiles.d),

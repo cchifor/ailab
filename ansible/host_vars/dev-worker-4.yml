@@ -1,0 +1,6 @@
+---
+# dev-worker-4 — vmid 4205, the VM that was dev-worker-5 until the 2026-09-23 re-slot — is the herdr
+# pilot host, the only one. The toggle defaults off in the role, so enabling it here leaves the
+# other three workers untouched. What/why/rollback:
+# docs/runbooks/dev-workers.md § "herdr pilot".
+dev_worker_enable_herdr: true

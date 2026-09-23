@@ -45,7 +45,7 @@ See [`docs/network-plan.md`](docs/network-plan.md) for the authoritative IP plan
 | Talos control planes (also workers) | .41 / .42 / .43 — API VIP **.40:6443** | 4001–4003 |
 | AI LLM GPU LXCs (privileged, llama.cpp/Vulkan) | .44 / .45 / .46 | 5001–5003 |
 | CI runner VMs (GitHub + Gitea Actions) | .14 / .15 / .16 / .17 / .18 | 4101–4105 |
-| Dev-worker VMs (user `c4`; `docs/runbooks/dev-workers.md`) | .8–.12 | 4201–4205 |
+| Dev-worker VMs `dev-worker-1..4` (user `c4`; `docs/runbooks/dev-workers.md`; slot ≠ vmid since 2026-09-23) | .8–.11 | 4201, 4202, 4204, 4205 |
 | Registry pull-through LXC (node1) | — | 5004 |
 
 ---

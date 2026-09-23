@@ -106,14 +106,10 @@ data:
             icon: mdi-console
         - dev-worker-3:
             href: https://dw3.chifor.me
-            description: Web terminal · Claude Code + Codex (ai-node3)
+            description: Web terminal · Claude Code + Codex (ai-node1)
             icon: mdi-console
         - dev-worker-4:
             href: https://dw4.chifor.me
-            description: Web terminal · Claude Code + Codex (ai-node1)
-            icon: mdi-console
-        - dev-worker-5:
-            href: https://dw5.chifor.me
             description: Web terminal · Claude Code + Codex (ai-node2)
             icon: mdi-console
         - Renovate:

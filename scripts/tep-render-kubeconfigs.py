@@ -20,9 +20,9 @@ import tempfile
 REPO = pathlib.Path(__file__).resolve().parents[1]
 OUT = REPO / "ansible/secrets/tep-tokens.sops.yaml"
 # One entry per LIVE slot — the same list as tep-access.yaml / k8stoken-sync.yaml / inventory/hosts.yml.
-# dev-worker-6 retired 2026-09-2x (plans/2026-09-21-retire-dev-workers-3-6-plan.md): its tep-dw6
+# dev-worker-6 retired 2026-09-21, slot 5 on 2026-09-23 (plans/2026-09-21-retire-dev-workers-3-6-plan.md): a retired slot's tep-dwN
 # Secret is gone, and a renderer that still asked for it would fail before writing anything.
-WORKERS = [f"dev-worker-{i}" for i in (1, 2, 3, 4, 5)]
+WORKERS = [f"dev-worker-{i}" for i in (1, 2, 3, 4)]
 KC = ["kubectl", "--context", "admin@ai", "-n", "testpool"]
 
 

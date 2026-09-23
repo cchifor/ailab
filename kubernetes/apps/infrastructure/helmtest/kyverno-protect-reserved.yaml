@@ -80,7 +80,7 @@ spec:
               # deleted — by cluster-admin, a case this guard never protected against. The generic
               # garbage collector is deliberately NOT excluded: it cascades ownerReferences at any
               # time in a live namespace, and a namespace teardown does not need it (the namespace
-              # controller deletes every remaining object itself). (2026-09-2x, dev-worker-6
+              # controller deletes every remaining object itself). (2026-09-21, dev-worker-6
               # retirement, plans/2026-09-21-retire-dev-workers-3-6-plan.md)
               - kind: ServiceAccount
                 name: namespace-controller
@@ -120,7 +120,7 @@ spec:
               # deleted — by cluster-admin, a case this guard never protected against. The generic
               # garbage collector is deliberately NOT excluded: it cascades ownerReferences at any
               # time in a live namespace, and a namespace teardown does not need it (the namespace
-              # controller deletes every remaining object itself). (2026-09-2x, dev-worker-6
+              # controller deletes every remaining object itself). (2026-09-21, dev-worker-6
               # retirement, plans/2026-09-21-retire-dev-workers-3-6-plan.md)
               - kind: ServiceAccount
                 name: namespace-controller

@@ -415,4 +415,87 @@ Phase 0 ground (footprint grep, precedents #746 / `variables.tf` history, live b
 per-worker activity), Phase 1 plan (this file; codex round via LiteLLM, max 2). Phases 2–4 per PR
 after approval; each gate waits for the operator. Skipped: UI proposal (no UI).
 
+## Gate records
+
+### Gate G3a-1 record (2026-09-21, dev-worker-6)
+
+- PR #809 merged 10:58:45Z (`0ce2137f`, reviewer-codex). Reconciliation barrier at that revision:
+  Flux `helmtest`/`testpool`/`openbao`/`apps` Ready; `helmtest-dw6` gone (not Terminating);
+  `tep-dw6` SA + `tep-dw6-token` gone; k8stoken-sync bootstrap re-run `validated 10/10 fields`;
+  Prometheus: no `192.168.0.13` targets, dev-worker-node = .8/.9/.10/.11/.12; cloudflared at
+  `config-revision 2026-09-21-retire-dw6`, 2/2 rolled; homepage tile gone.
+- Pre-flight (read-only, 11:2xZ): dw6 idle (load 0.01), no docker/compose stacks, no tep lease
+  (its SA was already pruned — `tep list` failed to authenticate, as expected), 1 docker volume,
+  one `claude --resume` tmux session, herdr server idle, no restic/backup timer (only
+  `dpkg-db-backup.timer`), one unpushed commit `658250f` on `/home/c4/work/agentforge-platform`
+  `main`. Operator decision: **destroy as-is, discard 658250f**.
+- State backups: `_out/dev-workers.tfstate.20260921T113540Z.before-G3a-1`,
+  `_out/cloudflare.tfstate.20260921T113540Z.before-G3a-1`. Fresh plans: dev-workers
+  `0 add / 0 change / 1 destroy` (`["dev-worker-6"]`), cloudflare `2 to destroy` (`dw6` DNS +
+  Access app).
+- 11:35Z herdr stopped + tmux killed on dw6; `qm shutdown 4206` (ACPI) → `stopped` 11:36:12Z
+  (PVE task `qmshutdown 4206` 11:36:09Z OK).
+- 11:36:2xZ `tofu apply` dev-workers: `Destruction complete after 2s` (PVE task `qmdestroy 4206`
+  11:36:21Z OK); cloudflare: `cloudflare_dns_record.tunnel["dw6"]` and
+  `cloudflare_zero_trust_access_application.dev_worker["dw6"]` destroyed. Cloudflare plan
+  afterwards = `No changes`. Authoritative NS (`keaton.ns.cloudflare.com`) has no `dw6.chifor.me`.
+  `.13` silent on ping.
+- 11:37Z provision Job re-run (delete + Flux reconcile): **aborted** on
+  `bao list … auth/approle/role/dev-worker-6/secret-id` → `400 * role "dev-worker-6" does not exist`
+  (the AppRole plugin's phrasing for a missing role; the matcher only knew "No value found") →
+  CrashLoopBackOff, fail-closed, live slots re-upserted each attempt. Hotfix **PR #810**.
+  Why the role was already absent at the first re-run is unproven (the first container attempt's
+  log was rotated away); the audit/OpenBao logs are checked once the Job converges.
+- **11:39:47Z ai-node3 ran the host shutdown sequence** (`stopall`: qmshutdown 4203, 4106, 4103,
+  4502, 4501; `vzshutdown 5003` → "container did not stop"); corosync lost the node 11:46:06Z; the
+  host reached `reboot.target` 11:47:31Z and sshd was back 12:06:49Z. Read on 2026-09-23 from
+  `journalctl -b -1` / `last -x`: an orderly `reboot` requested over SSH from the operator
+  workstation at 11:39:01Z — the operator's parallel node-maintenance session (its runbook commits
+  landed 12:49–13:06Z), not this gate. ai-node2 followed with a hard power-cycle (~12:14→12:33Z;
+  its previous boot ends in `crash`), which took `talos-env-node-1` down 12:19→12:34Z and replaced
+  the parent plan's soak member (recorded in that plan's soak record). Consequences at the time:
+  talos-cp3 + talos-agent-node-3 Unknown (etcd 2/3), dev-worker-3 (busy) down, reviewer-1/-2 down
+  (no PR reviews), ci-runner-3/-6 down, ai-llm-3 down; every guest came back with its host.
+- V-C1 closed 2026-09-23: `qm list` on ai-node3 has no 4206 and `lvs` no `vm-4206-*`; MemAvailable
+  26.5 GiB (load 7, model loaded — not the G3b measurement). PR #810 was superseded by the
+  operator's PRs #816 (AppRole `role "…" does not exist` guard) and #818 (`{}` JSON empty listing)
+  and closed unmerged; the daily provision Job logged `retired dev-worker-6: converged (no
+  secret-ids, no tokens; role/policy/KV absent)` on 2026-09-22 09:22Z (Loki) — the declarative
+  revocation converged without a hand step. `ansible-inventory --graph` = 5 hosts (validated at
+  review time).
+
+### PR-C2 implementation notes (2026-09-23)
+
+- Operator declaration 2026-09-23: "PR-C2 (retire dev-worker-3, re-slot 4 and 5) can be retired,
+  please do it" — read as the "dev-worker-3 is free" declaration. Pre-flight on 4203 found the
+  operator's tasks finished but their test stacks still running (`document-profiles` 25 containers,
+  `storage-browser` 17, Playwright inside them, load ~7, 21 docker volumes, no unpushed commits, the
+  `cloudlab-model-diagnostics` repo with 105 staged deletions and an upstream-less `ailab` clone).
+  Copy-off (the plan's record): `~/work/home/_copyoff/dev-worker-3-20260923T075128Z/` —
+  `manifest.txt` (repos + HEADs, compose stacks, volumes, tmux), `cloudlab-model-diagnostics.tgz`
+  (whole repo) + its `.diff`, `ailab-local.bundle` (`git bundle --all`), `docker-volumes.tgz`
+  (368 MB, `/workspace/docker/volumes`, one pg_wal segment changed during the read),
+  `home-dotfiles.tgz` (`.claude/settings.json`, `.codex/config.toml`, `.tmux`). Restore
+  spot-check: `tar tzf` lists 23 543 volume entries; the bundle verifies with `git bundle verify`.
+- Slot artifacts: the herdr pilot host is the VM (`host_vars/dev-worker-5.yml` → `dev-worker-4.yml`
+  by `git mv`); the estate credential seed `devworker-seeds.sops.yaml` `dev-worker-3.json` **stays
+  with slot 3** (the plan's default — inherited by ex-dw4); `scripts/dw-paste.ps1` follows the
+  pilot machine to `.11`.
+- Credentials — **pending, a separate commit on this branch before the merge hold is lifted**: new
+  SecretIDs minted against roles `dev-worker-3` and `dev-worker-4` (the operator's mint ceremony,
+  `docs/runbooks/openbao-dev-workers.md` (e); the agent session preparing PR-C2 is not permitted
+  to write the secret store), their values into `ansible/secrets/dev-worker.sops.yaml` (role_ids
+  unchanged), and the slot-5 entry `sops unset` from that file and from `tep-tokens.sops.yaml`.
+  The previous holders' accessors on 2026-09-23 (to destroy at gate step 6, never the new ones):
+  dev-worker-3 `01c40900…`, dev-worker-4 `4924a141…`; slot 5's `176a3328…` goes with the role.
+  The tep SOPS fallback for slots 3/4 is regenerated in **PR-C2b** after the gate re-creates
+  `tep-dw3`/`tep-dw4` (new SA UIDs); until then the hosts render their tep kubeconfig from OpenBao
+  (`openbao-k8stoken-sync`), which is the primary path.
+- Merge hold: the reviewer bot auto-merges an approved PR unless it carries the `no-automerge`
+  label, so PR-C2 is opened WITH that label, reviewed while the fleet is untouched (rollback A), and
+  the label is removed only after gate steps 1–4 (state migration + re-IP) are done — the plan's
+  "merge after step 4" ordering without a long open window.
+- Also folded in: the `2026-09-2x` placeholders PR-C1 left for dev-worker-6's retirement date are
+  resolved to 2026-09-21 in every non-plan file this PR touches.
+
 <!-- codex-review-status: finalized -->

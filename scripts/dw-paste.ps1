@@ -13,11 +13,11 @@ In the remote session:
   - Codex: paste the path the same way, or run `codex -i <path>`.
 
 Usage:
-  powershell -File scripts\dw-paste.ps1                       # defaults to dev-worker-5
+  powershell -File scripts\dw-paste.ps1                       # defaults to dev-worker-4 (the herdr pilot host)
   powershell -File scripts\dw-paste.ps1 -SshTarget c4@192.168.0.9
 #>
 param(
-    [string]$SshTarget = 'c4@192.168.0.12',
+    [string]$SshTarget = 'c4@192.168.0.11',
     [string]$RemoteDir = '/workspace/c4/pastes'
 )
 $ErrorActionPreference = 'Stop'

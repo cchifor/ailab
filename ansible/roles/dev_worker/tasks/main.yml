@@ -133,7 +133,7 @@
   ansible.builtin.import_tasks: dashboard.yml
   when: dev_worker_enable_dashboard | bool
 
-# Pilot, dev-worker-5 only (host_vars): herdr beside tmux. Own tag like statusline, so the pilot can
+# Pilot, dev-worker-4 only (host_vars): herdr beside tmux. Own tag like statusline, so the pilot can
 # be (re)deployed without a full role run: --tags herdr.
 - name: herdr agent multiplexer (pilot)
   ansible.builtin.import_tasks: herdr.yml
