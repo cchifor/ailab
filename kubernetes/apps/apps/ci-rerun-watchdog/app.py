@@ -13,11 +13,13 @@ WHAT IT MUST NOT DO, and the gate that prevents it (2026-09-23 cloud CI runners 
   G2  never look further back than LOOKBACK_SECONDS
   G3  never re-run a run twice within the 90-day tombstone retention (live AND shadow ledgers)
   G5  never re-run a genuine failure: every failed/cancelled job must be on a cloud runner whose
-      status THIS service saw flip to offline, and the job's end must sit within
-      LOSS_CORRELATION_SECONDS before that observation or any time after it (the reap lands after
-      the loss; the drain cancel just before). A cancelled job that is NOT a lost-cloud job blocks
-      the run - `rerun-failed-jobs` replays every failed AND cancelled job, so the replay set must
-      be exactly the lost work.
+      status THIS service saw flip to offline, and the job's end must sit in a bounded window
+      around that loss: up to LOSS_REAP_WINDOW_SECONDS after it (the zombie reap lands ~10 min
+      later, possibly after the runner is back) and, for a CANCELLED job only, up to
+      LOSS_CORRELATION_SECONDS before it (the drain deadline cancels just before the runner
+      goes). A failed job that ended before the loss is a genuine failure. A cancelled job that
+      is NOT a lost-cloud job blocks the run - `rerun-failed-jobs` replays every failed AND
+      cancelled job, so the replay set must be exactly the lost work.
   G6  never re-run a stale head: a pull_request run must match an OPEN PR's head sha (its
       head_branch is empty in the API); a push/schedule/dispatch run must match its branch tip
   G7  never race the concurrency group: no non-terminal sibling (same workflow path, same ref
@@ -78,6 +80,12 @@ class Config:
         self.scan_interval = 60
         self.lookback_seconds = 7200
         self.loss_correlation_seconds = 180
+        # How long after an observed loss a job end still counts as caused by it: the zombie
+        # reap at ~10 min, plus two scans of observation lag, plus margin.
+        self.loss_reap_window_seconds = 1200
+        # Full ledger entries kept per ledger before the oldest settled ones are compacted to
+        # tombstones (the ConfigMap has a 1 MiB ceiling).
+        self.ledger_full_cap = 500
         self.max_reruns_per_scan = 3
         self.max_reruns_per_day = 20
         self.dry_run = True
@@ -126,6 +134,7 @@ class Config:
             scan_interval=_int("SCAN_INTERVAL", 60),
             lookback_seconds=_int("LOOKBACK_SECONDS", 7200),
             loss_correlation_seconds=_int("LOSS_CORRELATION_SECONDS", 180),
+            loss_reap_window_seconds=_int("LOSS_REAP_WINDOW_SECONDS", 1200),
             max_reruns_per_scan=_int("MAX_RERUNS_PER_SCAN", 3),
             max_reruns_per_day=_int("MAX_RERUNS_PER_DAY", 20),
             dry_run=_bool("DRY_RUN", True),
@@ -428,6 +437,15 @@ class KubeState:
 
 
 LEDGERS = ("live", "shadow")
+SETTLED_OUTCOMES = ("confirmed", "rejected", "unresolved_acked", "would_rerun")
+PENDING_OUTCOMES = ("reserved", "uncertain", "unresolved")
+
+
+def compact_entry(e):
+    return {"repo": e.get("repo"), "run_id": e.get("run_id"), "reserved_at": e.get("reserved_at"),
+            "outcome": e.get("outcome"), "compact": True}
+
+
 # Keys an operator writes by `kubectl patch`; a 409 retry takes THEIR fresh values, never ours.
 OPERATOR_KEYS = ("disabled", "ack_unresolved_before")
 
@@ -530,12 +548,26 @@ class State:
         self.ledgers[ledger].append(entry)
         return entry
 
-    def prune(self, now, retention):
+    def prune(self, now, retention, lookback=None, full_cap=None):
+        """Drop entries past retention; compact settled entries older than the lookback - and
+        the oldest settled ones beyond `full_cap` - down to tombstones. A tombstone keeps
+        exactly what G3 and the day cap read (repo, run_id, reserved_at) plus the outcome word.
+        Pending entries (reserved/uncertain/unresolved) are never compacted: reconcile and the
+        alert need them whole."""
         for name in LEDGERS:
-            self.ledgers[name] = [
+            kept = [
                 e for e in self.ledgers[name]
                 if isinstance(e.get("reserved_at"), (int, float)) and now - e["reserved_at"] <= retention
             ]
+            if lookback is not None:
+                kept = [compact_entry(e) if e.get("outcome") in SETTLED_OUTCOMES and not e.get("compact")
+                        and now - e["reserved_at"] > lookback else e for e in kept]
+            if full_cap is not None:
+                full = sorted((e for e in kept if not e.get("compact") and e.get("outcome") in SETTLED_OUTCOMES),
+                              key=lambda e: e["reserved_at"])
+                for e in full[:max(0, len(full) - full_cap)]:
+                    kept[kept.index(e)] = compact_entry(e)
+            self.ledgers[name] = kept
         self.runner_seen = {
             k: v for k, v in self.runner_seen.items()
             if isinstance(v, dict) and now - max(v.get("last_online_ts") or 0, v.get("last_offline_ts") or 0) <= retention
@@ -549,10 +581,16 @@ class State:
         return [e for e in self.ledgers["live"] if e.get("outcome") == "unresolved"]
 
 
+MAX_LOSSES_KEPT = 5
+
+
 def observe_runners(state, runners, now):
-    """Stamp lost_at on a runner whose status flipped online -> offline under our watch. A runner
-    first seen offline gets no lost_at (its loss is not correlated with anything we saw), and a
-    runner that comes back clears it (a later failure on it is a real failure)."""
+    """Record a loss on a runner whose status flipped online -> offline under our watch. A runner
+    first seen offline gets no loss (nothing we saw correlates with it). A runner that comes
+    BACK keeps its losses: a VM that crashed and restarted is a named target, and the zombie
+    reap of the job it was running lands ~10 min after the loss - possibly after the restart.
+    `lost_at` is the most recent loss, `losses` the last few (a runner flapping inside one
+    lookback); the reap window in classify() bounds how long either one stays relevant."""
     seen = state.runner_seen
     for r in runners:
         if not isinstance(r, dict) or not isinstance(r.get("id"), int):
@@ -568,9 +606,10 @@ def observe_runners(state, runners, now):
             entry["last_offline_ts"] = now
             if prev is not None and prev != "offline":
                 entry["lost_at"] = now
+                losses = [t for t in (entry.get("losses") or []) if isinstance(t, (int, float))]
+                entry["losses"] = (losses + [now])[-MAX_LOSSES_KEPT:]
         else:
             entry["last_online_ts"] = now
-            entry.pop("lost_at", None)
         entry["status"] = status
         seen[key] = entry
 
@@ -620,6 +659,12 @@ class Metrics:
             for k in [k for k in self._values if k[0] == name]:
                 del self._values[k]
 
+    def touch(self, name, labels=None):
+        """Publish a 0 for a series that has not happened yet, so Prometheus's first sample is
+        0 and increase() sees the first event instead of a series that appears at 1."""
+        with self._lock:
+            self._values.setdefault(self._key(name, labels), 0)
+
     def get(self, name, labels=None):
         with self._lock:
             return self._values.get(self._key(name, labels), 0)
@@ -644,6 +689,19 @@ def _num(v):
 
 
 METRICS = Metrics()
+KNOWN_STAGES = ("runners", "org_repos", "runs", "jobs", "pulls", "branch", "siblings",
+                "state_read", "state_write", "scan")
+
+
+def init_metrics(metrics, cfg):
+    """Every series an alert reads exists at 0 from the first scrape."""
+    for stage in KNOWN_STAGES:
+        metrics.touch("errors_total", {"stage": stage})
+    for name in ("collateral_cancel_total", "unresolved", "scans_total", "unlisted_repos"):
+        metrics.touch(name)
+    for repo in cfg.repos:
+        for mode in ("live", "dry_run"):
+            metrics.touch("reruns_total", {"repo": repo, "mode": mode})
 
 
 # --- selection ------------------------------------------------------------------------------
@@ -710,18 +768,36 @@ def classify(run, jobs, ctx):
             # non-cloud replayed job makes the whole run ineligible: rerun-failed-jobs would
             # replay it too, and that is a genuine failure being retried for free.
             return "skip", "job_not_cloud"
-        seen = ctx.runner_seen.get(str(rid)) or {}
-        lost_at = seen.get("lost_at")
-        if not isinstance(lost_at, (int, float)):
-            return "skip", "runner_not_lost"  # online now, or never seen online by us
+        losses = runner_losses(ctx.runner_seen.get(str(rid)))
+        if not losses:
+            return "skip", "runner_not_lost"  # never seen going offline by us
         done = parse_ts(job.get("completed_at"))
         if done is None:
             return "skip", "job_completed_at_unset"
-        if done < lost_at - ctx.cfg.loss_correlation_seconds:
-            # The job ended well before the runner was lost: a real failure that happened to sit
-            # on a runner which later went to bed with the rest of the cloud.
+        if not loss_correlated(done, job.get("conclusion"), losses, ctx.cfg):
             return "skip", "loss_uncorrelated"
     return "candidate", "lost_cloud_jobs"
+
+
+def runner_losses(seen):
+    """Every loss recorded for a runner (most recent `lost_at` + the short `losses` history)."""
+    if not isinstance(seen, dict):
+        return []
+    losses = [t for t in (seen.get("losses") or []) if isinstance(t, (int, float))]
+    if isinstance(seen.get("lost_at"), (int, float)) and seen["lost_at"] not in losses:
+        losses.append(seen["lost_at"])
+    return losses
+
+
+def loss_correlated(done, conclusion, losses, cfg):
+    """A job end is caused by a loss when it sits in [loss - before, loss + reap] for some
+    recorded loss. `before` is LOSS_CORRELATION_SECONDS for a CANCELLED job only: the drain
+    deadline cancels the job just before the runner goes. A FAILED job that ended before the
+    loss is a genuine failure - the zombie reap always lands after the loss, and a runner that
+    is still up never fails a job because of it. The upper bound is what makes a loss hours ago
+    irrelevant to a failure now, even though the loss is never erased."""
+    before = cfg.loss_correlation_seconds if conclusion == "cancelled" else 0
+    return any(loss - before <= done <= loss + cfg.loss_reap_window_seconds for loss in losses)
 
 
 def head_check(api, repo, run):
@@ -816,23 +892,28 @@ class Scan:
         self.mode_label = "dry_run" if cfg.dry_run else "live"
         self.budget = None
         self.skip_keys = set()
+        self.halted = False  # the kill switch appeared mid-scan: no further submissions
 
     def skip(self, repo, run, reason, gate=""):
         self.metrics.inc("skipped_total", {"repo": repo, "reason": reason})
         self.summary["skipped"][reason] = self.summary["skipped"].get(reason, 0) + 1
         # The same stale failed run is re-evaluated every scan; the metric counts every time,
         # the log line is written once per (run, reason) so the log stays grep-able.
-        key = (repo, run.get("id"))
+        field = (lambda k: run.get(k)) if isinstance(run, dict) else (lambda k: None)  # malformed_run
+        key = (repo, field("id"))
         self.skip_keys.add(key)
         if _LOGGED_SKIPS.get(key) != reason:
             _LOGGED_SKIPS[key] = reason
             log.info("skip repo=%s run=%s gate=%s reason=%s sha=%s event=%s path=%s",
-                     repo, run.get("id"), gate, reason, run.get("head_sha"), run.get("event"), run.get("path"))
+                     repo, field("id"), gate, reason, field("head_sha"), field("event"), field("path"))
 
     def act(self, repo, run, ref, collateral_of=None):
         """Reserve, then (live only) re-check the head and POST. The reservation is persisted
         BEFORE the POST so a crash in between leaves a `reserved` entry for reconcile, never a
         second rerun of the same run."""
+        if self.halted:
+            self.skip(repo, run, "disabled", "kill")
+            return None
         cap = self.budget.check()
         if cap:
             self.skip(repo, run, cap, "cap")
@@ -840,6 +921,15 @@ class Scan:
         self.budget.take()
         entry = self.state.reserve(self.mode, repo, run, ref, self.now, collateral_of=collateral_of)
         self.state.save()
+        if self.state.disabled:
+            # The reservation's 409 merge imported an operator patch of `disabled` that landed
+            # after this scan's kill-switch check. Honour it now and submit nothing else.
+            entry.update({"outcome": "rejected", "reason": "disabled", "updated_at": self.now})
+            self.state.save()
+            self.halted = True
+            log.warning("rerun repo=%s run=%s outcome=rejected reason=disabled (kill switch imported during the reservation)",
+                        repo, run["id"])
+            return entry
         self.metrics.inc("reruns_total", {"repo": repo, "mode": self.mode_label})
         self.summary["reruns"].append({"repo": repo, "run_id": run["id"], "mode": self.mode_label})
         if self.cfg.dry_run:
@@ -858,9 +948,14 @@ class Scan:
         return entry
 
     def post(self, repo, run_id, entry):
+        """The attempt is persisted BEFORE the POST: if the outcome write after it fails, the
+        ConfigMap already says an attempt was made, so reconcile can never exceed
+        max_post_attempts by re-counting a POST it cannot see. A failed pre-POST write aborts
+        the scan with no POST at all."""
         entry["attempts"] = int(entry.get("attempts") or 0) + 1
         entry["posted_at"] = self.now
         entry["updated_at"] = self.now
+        self.state.save()
         try:
             outcome = self.api.rerun_failed_jobs(repo, run_id)
             entry["outcome"] = outcome
@@ -910,6 +1005,18 @@ class Scan:
                 self.state.save()
                 log.info("reconcile repo=%s run=%s outcome=rejected reason=%s", repo, run["id"], info)
                 continue
+            # A retry is a submission like any other: it shares this scan's budget with fresh
+            # candidates and stops with the kill switch. A deferred retry stays `uncertain`
+            # and is looked at again next scan.
+            if self.halted or self.state.disabled:
+                log.info("reconcile repo=%s run=%s retry deferred reason=disabled", repo, run["id"])
+                continue
+            cap = self.budget.check()
+            if cap:
+                self.metrics.inc("skipped_total", {"repo": repo, "reason": cap})
+                log.info("reconcile repo=%s run=%s retry deferred reason=%s", repo, run["id"], cap)
+                continue
+            self.budget.take()
             self.post(repo, run["id"], entry)
 
     def post_check(self):
@@ -962,7 +1069,7 @@ class Scan:
                  if isinstance(r, dict) and isinstance(r.get("id"), int)
                  and isinstance(r.get("name"), str) and cfg.cloud_re.match(r["name"])}
         observe_runners(state, runners, now)
-        state.prune(now, cfg.tombstone_retention_seconds)
+        state.prune(now, cfg.tombstone_retention_seconds, cfg.lookback_seconds, cfg.ledger_full_cap)
         # Acknowledged unresolved entries leave the gauge (operator: ack_unresolved_before=<epoch>).
         ack = state.ack_unresolved_before
         if ack is not None:
@@ -1038,7 +1145,7 @@ _GATES = {
     "job_not_cloud": "G5", "runner_not_lost": "G5", "job_completed_at_unset": "G5",
     "loss_uncorrelated": "G5", "jobs_unavailable": "G5", "no_sha": "G6", "pr_not_open": "G6",
     "no_ref": "G6", "branch_gone": "G6", "branch_moved": "G6", "sibling_live": "G7",
-    "superseded": "G7", "cap_scan": "cap", "cap_day": "cap", "malformed_run": "G1",
+    "superseded": "G7", "cap_scan": "cap", "cap_day": "cap", "malformed_run": "G1", "disabled": "kill",
 }
 
 
@@ -1061,6 +1168,7 @@ def scan(api, store, cfg, now=None, metrics=None):
     metrics = METRICS if metrics is None else metrics
     summary = {"ok": False, "reruns": [], "skipped": {}, "candidates": {}, "collateral": [],
                "errors": [], "disabled": False}
+    init_metrics(metrics, cfg)
     metrics.inc("scans_total")
     state = State(store)
     try:
@@ -1128,6 +1236,7 @@ def main():
                    page_limit=cfg.page_limit, max_pages=cfg.max_pages)
     store = KubeState(cfg.state_namespace, cfg.state_configmap)
     HEALTH["started"] = time.time()
+    init_metrics(METRICS, cfg)  # zeros are scrapeable before the first scan completes
     serve(cfg.port)
     log.info("starting dry_run=%s org=%s repos=%s interval=%ss lookback=%ss port=%s",
              cfg.dry_run, cfg.gitea_org, ",".join(cfg.repos), cfg.scan_interval, cfg.lookback_seconds, cfg.port)

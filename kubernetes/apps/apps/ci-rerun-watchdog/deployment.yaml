@@ -57,6 +57,11 @@ spec:
             # many seconds BEFORE the watchdog saw the runner go offline (drain cancel) - or any
             # time after (zombie reap, ~10 min later). Widening it admits genuine failures.
             - { name: LOSS_CORRELATION_SECONDS, value: "180" }
+            # ...and no later than this many seconds AFTER the loss: the zombie reap at ~10 min,
+            # plus two scans of observation lag, plus margin. A loss is never erased when the
+            # runner comes back (a crashed VM restarts before its job is reaped), so this bound
+            # is what stops an old loss from excusing a genuine failure hours later.
+            - { name: LOSS_REAP_WINDOW_SECONDS, value: "1200" }
             - { name: MAX_RERUNS_PER_SCAN, value: "3" }
             - { name: MAX_RERUNS_PER_DAY, value: "20" }
             - { name: DRY_RUN, value: "true" } # shadow mode: ledger + log line, no POST

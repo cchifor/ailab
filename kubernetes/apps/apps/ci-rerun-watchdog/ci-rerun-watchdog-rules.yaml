@@ -57,6 +57,10 @@ spec:
         # POST was most likely cancelled by the jobs we queued (concurrency cancel-in-progress).
         # app.py compensates by re-running that newest run once; this alert exists because the
         # compensation is itself an action taken on someone's PR and must never be routine.
+        # increase()-based, NOT `> 0`: a plain threshold would page until the pod restarted,
+        # long after the one event was handled. increase() needs a 0 sample before the 1, which
+        # is why app.py publishes every alert-read counter at 0 from the first scrape (the
+        # fixture "a series that first appears at 1" is the failure mode that guards against).
         - alert: CIRerunWatchdogCollateralCancel
           expr: sum(increase(ci_rerun_watchdog_collateral_cancel_total[1h])) > 0
           labels: { severity: critical }

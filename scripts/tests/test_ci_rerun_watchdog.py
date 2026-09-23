@@ -8,6 +8,7 @@ Run:
     python -m unittest discover -s scripts/tests -p "test_*.py"
 """
 import importlib.util
+import io
 import json
 import logging
 import pathlib
@@ -108,11 +109,11 @@ class FakeGitea:
             return self._page(self.org_repos, None, page, limit)
         m = re.fullmatch(r"/repos/([^/]+/[^/]+)/actions/runs", path)
         if m:
-            runs = sorted(self.runs.get(m.group(1), []), key=lambda r: -r["id"])
+            runs = sorted(self.runs.get(m.group(1), []), key=lambda r: -r.get("id", 0) if isinstance(r, dict) else 0)
             if params.get("status") == "failure":
-                runs = [r for r in runs if r["status"] == "completed" and r["conclusion"] == "failure"]
+                runs = [r for r in runs if not isinstance(r, dict) or (r.get("status") == "completed" and r.get("conclusion") == "failure")]
             if params.get("head_sha"):
-                runs = [r for r in runs if r["head_sha"] == params["head_sha"]]
+                runs = [r for r in runs if isinstance(r, dict) and r["head_sha"] == params["head_sha"]]
             return self._page(runs, "workflow_runs", page, limit)
         m = re.fullmatch(r"/repos/([^/]+/[^/]+)/actions/runs/(\d+)/jobs", path)
         if m:
@@ -378,14 +379,50 @@ class PureGates(Base):
         jobs = [mk_job(1, 100, CLOUD_UP)]
         self.assertEqual(app.classify(mk_run(100), jobs, self.ctx()), ("skip", "runner_not_lost"))
 
-    def test_runner_online_again_clears_lost_at(self):
-        # Seeded as lost; this scan sees it idle again -> a failure on it is a real one.
+    def test_runner_back_online_keeps_the_loss_and_still_correlates(self):
+        # Lost 15 min ago, back now; the job was reaped 10 min after the loss - inside the reap
+        # window, so it is ours even though the runner is up again.
         self.gitea.runners[0]["status"] = "idle"
         self.candidate_pr_run()
         s = self.scan()
+        self.assertEqual(self.posted_ids(), [100], s["skipped"])
+        seen = json.loads(self.store.data["runner_seen"])[str(CLOUD_LOST)]
+        self.assertEqual(seen["lost_at"], LOST_AT)
+        self.assertEqual(seen["status"], "idle")
+
+    def test_crash_restart_then_reap_is_a_candidate(self):
+        # VM crashed 8 min ago, restarted since (idle now); Gitea reaps the orphaned job now.
+        self.store.seed(runner_seen=seen_lost(lost_at=NOW - 480))
+        self.gitea.runners[0]["status"] = "idle"
+        self.candidate_pr_run(completed=NOW)
+        self.scan()
+        self.assertEqual(self.posted_ids(), [100])
+
+    def test_old_loss_does_not_excuse_a_failure_now(self):
+        # Lost 3 h ago, back since, a job FAILS now: outside the reap window -> genuine.
+        self.store.seed(runner_seen=seen_lost(lost_at=NOW - 3 * 3600))
+        self.gitea.runners[0]["status"] = "idle"
+        self.candidate_pr_run(completed=NOW)
+        s = self.scan()
         self.assertNoPosts()
-        self.assertEqual(s["skipped"], {"runner_not_lost": 1})
-        self.assertNotIn("lost_at", json.loads(self.store.data["runner_seen"])[str(CLOUD_LOST)])
+        self.assertEqual(s["skipped"], {"loss_uncorrelated": 1})
+
+    def test_losses_history_is_kept_and_bounded(self):
+        self.store.seed(runner_seen={})
+        for i in range(8):  # flap 8 times: online, offline, online, ...
+            self.gitea.runners[0]["status"] = "idle"
+            self.scan(now=NOW - 2000 + i * 200)
+            self.gitea.runners[0]["status"] = "offline"
+            self.scan(now=NOW - 1900 + i * 200)
+        seen = json.loads(self.store.data["runner_seen"])[str(CLOUD_LOST)]
+        self.assertEqual(len(seen["losses"]), app.MAX_LOSSES_KEPT)
+        self.assertEqual(seen["lost_at"], seen["losses"][-1])
+        # A job reaped after the FIRST kept loss still correlates via the history.
+        self.gitea.runners[0]["status"] = "idle"
+        first_kept = seen["losses"][0]
+        self.candidate_pr_run(completed=first_kept + 600)
+        self.scan(now=NOW)
+        self.assertEqual(self.posted_ids(), [100])
 
     def test_runner_never_observed(self):
         self.store.seed(runner_seen={})  # first scan ever: cloud-ci-1 is offline, but we never saw it online
@@ -412,6 +449,22 @@ class PureGates(Base):
         jobs = [mk_job(1, 100, CLOUD_LOST, completed=LOST_AT - 3 * 3600)]
         run = mk_run(100, completed=LOST_AT - 3 * 3600)
         self.assertEqual(app.classify(run, jobs, self.ctx(lookback_seconds=6 * 3600)), ("skip", "loss_uncorrelated"))
+
+    def test_genuine_failure_just_before_the_power_off_is_skipped(self):
+        # Failed 2 min before the nightly shutdown took the runner: the pre-loss allowance is
+        # for the drain CANCEL only; a FAILED job never ends before its loss because of it.
+        jobs = [mk_job(1, 100, CLOUD_LOST, completed=LOST_AT - 120)]
+        self.assertEqual(app.classify(mk_run(100), jobs, self.ctx()), ("skip", "loss_uncorrelated"))
+        jobs = [mk_job(1, 100, CLOUD_LOST, completed=LOST_AT - 1)]
+        self.assertEqual(app.classify(mk_run(100), jobs, self.ctx()), ("skip", "loss_uncorrelated"))
+        jobs = [mk_job(1, 100, CLOUD_LOST, completed=LOST_AT)]
+        self.assertEqual(app.classify(mk_run(100), jobs, self.ctx()), ("candidate", "lost_cloud_jobs"))
+
+    def test_reap_window_upper_bound(self):
+        jobs = [mk_job(1, 100, CLOUD_LOST, completed=LOST_AT + 1200)]
+        self.assertEqual(app.classify(mk_run(100), jobs, self.ctx()), ("candidate", "lost_cloud_jobs"))
+        jobs = [mk_job(1, 100, CLOUD_LOST, completed=LOST_AT + 1201)]
+        self.assertEqual(app.classify(mk_run(100), jobs, self.ctx()), ("skip", "loss_uncorrelated"))
 
     def test_zombie_reap_timing(self):
         jobs = [mk_job(1, 100, CLOUD_LOST, completed=LOST_AT + 600)]
@@ -462,6 +515,15 @@ class Pagination(Base):
         self.assertTrue(s["ok"], s["errors"])
         self.assertEqual(self.posted_ids(), [100])
         self.assertEqual(s["skipped"], {"job_not_cloud": 12})
+
+    def test_malformed_run_in_the_list_is_skipped_cleanly(self):
+        self.gitea.runs[REPO].append("not-a-run")
+        self.gitea.runs[REPO].append({"path": WF, "status": "completed"})  # no id
+        self.candidate_pr_run()
+        s = self.scan()
+        self.assertTrue(s["ok"], s["errors"])
+        self.assertEqual(s["skipped"], {"malformed_run": 2})
+        self.assertEqual(self.posted_ids(), [100])
 
     def test_runs_walk_stops_at_the_lookback(self):
         for i in range(30):
@@ -583,6 +645,111 @@ class Ledgers(Base):
         self.scan(now=NOW + 60)
         self.assertEqual(sorted(self.posted_ids()), [100, 101, 102, 103])
 
+    def test_reconcile_retries_share_the_per_scan_budget(self):
+        # 3 uncertain entries whose runs are unchanged + 3 fresh candidates: at most 3 POSTs.
+        live = []
+        for i in range(3):
+            rid, sha, pr = 300 + i, "u%d" % i, 30 + i
+            self.gitea.runs[REPO].append(mk_run(rid, sha=sha))
+            self.gitea.jobs[(REPO, rid)] = [mk_job(rid * 10, rid, CLOUD_LOST)]
+            self.gitea.pulls[REPO].append({"number": pr, "head": {"sha": sha}, "state": "open"})
+            live.append(entry(REPO, rid, NOW - 60, outcome="uncertain", attempts=1, sha=sha,
+                              ref={"kind": "pr", "number": pr, "head_sha": sha}))
+        self.store.seed(runner_seen=seen_lost(), live=live)
+        for i in range(3):
+            self.candidate_pr_run(rid=100 + i, sha="s%d" % i, pr=7 + i)
+        s = self.scan()
+        self.assertTrue(s["ok"], s["errors"])
+        self.assertEqual(len(self.gitea.posts), 3)
+        self.assertEqual(sorted(self.posted_ids()), [300, 301, 302])  # reconcile runs first
+        self.assertEqual(s["skipped"], {"cap_scan": 3, "tombstone": 3})  # the uncertain runs are G3-skipped
+        # Deferred fresh candidates are not tombstoned: the next scan takes them.
+        self.scan(now=NOW + 60)
+        self.assertEqual(len(self.gitea.posts), 6)
+
+    def test_reconcile_retry_deferred_by_cap_stays_uncertain(self):
+        self.gitea.runs[REPO].append(mk_run(300, sha="u0"))
+        self.gitea.jobs[(REPO, 300)] = [mk_job(3000, 300, CLOUD_LOST)]
+        self.gitea.pulls[REPO].append({"number": 30, "head": {"sha": "u0"}, "state": "open"})
+        self.store.seed(runner_seen=seen_lost(),
+                        live=[entry(REPO, 300, NOW - 60, outcome="uncertain", attempts=1, sha="u0",
+                                    ref={"kind": "pr", "number": 30, "head_sha": "u0"})])
+        self.scan(self.cfg(max_reruns_per_scan=0))
+        self.assertNoPosts()
+        self.assertEqual(self.store.ledger("live")[0]["outcome"], "uncertain")
+        self.assertEqual(self.metrics.get("skipped_total", {"repo": REPO, "reason": "cap_scan"}), 1)
+
+    def test_kill_switch_patched_during_the_reservation_stops_the_post(self):
+        for i in range(2):
+            self.candidate_pr_run(rid=100 + i, sha="s%d" % i, pr=7 + i)
+        real_write = self.store.write
+        flipped = {"done": False}
+
+        def operator_races(data, rv):
+            # The operator's `kubectl patch disabled=true` lands between our read and the
+            # reservation write: our PUT conflicts, the retry re-reads and imports the switch.
+            if not flipped["done"] and any(e.get("outcome") == "reserved" for e in json.loads(data.get("live", "[]"))):
+                flipped["done"] = True
+                self.store.data["disabled"] = "true"
+                self.store.rv = str(int(self.store.rv) + 1)
+                raise app.StateConflict("409: patched underneath")
+            return real_write(data, rv)
+
+        self.store.write = operator_races
+        s = self.scan()
+        self.assertTrue(s["ok"], s["errors"])
+        self.assertNoPosts()
+        live = self.store.ledger("live")
+        self.assertEqual([(e["outcome"], e["reason"]) for e in live], [("rejected", "disabled")])
+        self.assertEqual(s["skipped"], {"disabled": 1})  # the second candidate: nothing else submitted
+        self.assertEqual(self.metrics.get("reruns_total", {"repo": REPO, "mode": "live"}), 0)
+        self.assertEqual(self.store.data["disabled"], "true")
+
+    def test_alert_read_series_exist_at_zero_from_the_first_scan(self):
+        self.scan()
+        out = self.metrics.render()
+        for line in ("ci_rerun_watchdog_collateral_cancel_total 0",
+                     'ci_rerun_watchdog_errors_total{stage="jobs"} 0',
+                     'ci_rerun_watchdog_errors_total{stage="state_write"} 0',
+                     'ci_rerun_watchdog_reruns_total{mode="live",repo="%s"} 0' % REPO,
+                     'ci_rerun_watchdog_reruns_total{mode="dry_run",repo="%s"} 0' % REPO,
+                     "ci_rerun_watchdog_unresolved 0"):
+            self.assertIn(line + "\n", out)
+        # touch() never overwrites a live value.
+        self.metrics.inc("collateral_cancel_total")
+        app.init_metrics(self.metrics, self.cfg())
+        self.assertEqual(self.metrics.get("collateral_cancel_total"), 1)
+
+    def test_settled_entries_older_than_the_lookback_compact_to_tombstones(self):
+        old = entry(REPO, 900, NOW - 3 * 3600, outcome="confirmed", posted_at=NOW - 3 * 3600, post_checked=True)
+        pending = entry(REPO, 901, NOW - 3 * 3600, outcome="uncertain")
+        self.store.seed(runner_seen=seen_lost(), live=[old, pending])
+        self.gitea.runs[REPO].append(mk_run(901, sha="old"))  # unchanged: stays uncertain -> unresolved path
+        self.scan()
+        live = {e["run_id"]: e for e in self.store.ledger("live")}
+        self.assertEqual(live[900], {"repo": REPO, "run_id": 900, "reserved_at": NOW - 3 * 3600,
+                                     "outcome": "confirmed", "compact": True})
+        self.assertNotIn("compact", live[901])  # pending entries are never compacted
+
+    def test_full_entry_cap_compacts_the_oldest_and_tombstones_still_block(self):
+        live = [entry(REPO, 1000 + i, NOW - 60 - i, outcome="confirmed", posted_at=NOW - 60 - i, post_checked=True)
+                for i in range(2000)]
+        live.append(entry(REPO, 100, NOW - 30, outcome="confirmed", post_checked=True))  # the candidate's tombstone
+        self.store.seed(runner_seen=seen_lost(), live=live)
+        self.candidate_pr_run()
+        s = self.scan()
+        self.assertTrue(s["ok"], s["errors"])
+        self.assertNoPosts()
+        self.assertEqual(s["skipped"], {"tombstone": 1})
+        ledger = self.store.ledger("live")
+        full = [e for e in ledger if not e.get("compact")]
+        self.assertEqual(len(ledger), 2001)
+        self.assertLessEqual(len(full), 500)
+        # The newest full entries survive; the oldest were compacted.
+        self.assertIn(100, [e["run_id"] for e in full])
+        self.assertNotIn(2999, [e["run_id"] for e in full])
+        self.assertLess(len(self.store.data["live"]), 400_000)  # well under the 1 MiB ConfigMap ceiling
+
     def test_per_day_cap(self):
         self.store.seed(runner_seen=seen_lost(), live=[entry(REPO, 900 + i, NOW - 3600) for i in range(20)])
         self.candidate_pr_run()
@@ -639,6 +806,55 @@ class Ledgers(Base):
                      if any(e["run_id"] == 100 and e["outcome"] == "reserved" for e in json.loads(data["live"]))]
         self.assertTrue(reserving, "no write carried the reservation")
         self.assertLess(min(reserving), self.gitea.posts[0][0])
+
+    def test_attempt_is_persisted_before_the_post(self):
+        self.candidate_pr_run()
+        self.scan()
+        attempt_writes = [seq for seq, data in self.store.writes
+                          if any(e["run_id"] == 100 and e.get("attempts") == 1 and e["outcome"] == "reserved"
+                                 for e in json.loads(data["live"]))]
+        self.assertTrue(attempt_writes, "no write carried attempts=1 before the outcome")
+        self.assertLess(min(attempt_writes), self.gitea.posts[0][0])
+
+    def test_failed_attempt_write_means_no_post(self):
+        self.candidate_pr_run()
+        real_write = self.store.write
+
+        def fail_attempt_write(data, rv):
+            if any(e.get("attempts") == 1 for e in json.loads(data.get("live", "[]"))):
+                raise app.StateError("disk on fire")
+            return real_write(data, rv)
+
+        self.store.write = fail_attempt_write
+        s = self.scan()
+        self.assertFalse(s["ok"])
+        self.assertNoPosts()
+        self.assertEqual(self.store.ledger("live")[0]["attempts"], 0)  # the disk never saw an attempt
+
+    def test_outcome_write_failure_after_the_post_cannot_exceed_max_attempts(self):
+        # The POST went out, the write of its outcome failed: the disk already carries
+        # attempts=1, so reconcile retries at most ONCE more and never a third time.
+        self.candidate_pr_run()
+        self.gitea.post_responses[(REPO, 100)] = "timeout"
+        real_write = self.store.write
+
+        def fail_outcome_write(data, rv):
+            if any(e.get("outcome") == "uncertain" for e in json.loads(data.get("live", "[]"))):
+                raise app.StateError("disk on fire")
+            return real_write(data, rv)
+
+        self.store.write = fail_outcome_write
+        s = self.scan()
+        self.assertFalse(s["ok"])
+        self.assertEqual(self.posted_ids(), [100])
+        e = self.store.ledger("live")[0]
+        self.assertEqual((e["outcome"], e["attempts"]), ("reserved", 1))
+        self.store.write = real_write
+        self.scan(now=NOW + 60)   # reconcile: unchanged, attempts 1 < 2 -> one retry
+        self.scan(now=NOW + 120)  # reconcile: unchanged, attempts 2 -> unresolved
+        self.scan(now=NOW + 180)
+        self.assertEqual(self.posted_ids(), [100, 100])
+        self.assertEqual(self.store.ledger("live")[0]["outcome"], "unresolved")
 
     def test_failed_reservation_write_means_no_post(self):
         self.candidate_pr_run()
@@ -868,7 +1084,7 @@ class KubeStateStore(unittest.TestCase):
         if isinstance(status, Exception):
             raise status
         if status >= 400:
-            raise app.urllib.error.HTTPError(req.full_url, status, "err", {}, None)
+            raise app.urllib.error.HTTPError(req.full_url, status, "err", {}, io.BytesIO(b""))
 
         class Resp:
             def __init__(s):
@@ -960,6 +1176,8 @@ class Plumbing(unittest.TestCase):
         self.assertEqual(cfg.repos, ["a/b", "c/d"])
         self.assertEqual(cfg.max_reruns_per_day, 7)
         self.assertEqual(cfg.gitea_url, "http://g:3000")
+        self.assertEqual(cfg.loss_reap_window_seconds, 1200)
+        self.assertEqual(app.Config.from_env({"STATE_NAMESPACE": "ns", "LOSS_REAP_WINDOW_SECONDS": "900"}).loss_reap_window_seconds, 900)
         self.assertTrue(app.Config.from_env({"STATE_NAMESPACE": "ns"}).dry_run)  # the default is shadow
         with self.assertRaises(TypeError):
             app.Config(nope=1)

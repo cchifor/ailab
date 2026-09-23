@@ -126,6 +126,16 @@ tests:
               description: "A rerun issued by the watchdog raced a newer push and the newer run was cancelled (cancel-in-progress). The watchdog re-ran that newest run once (`collateral_cancel repo=... run=...` in its log). Verify on the PR that the current head is green or running; if this repeats, the check-to-POST window is wider than assumed and the watchdog should be disabled."
 
   - interval: 1m
+    name: CollateralCancel does NOT fire for a series that first appears at 1 (why app.py initialises counters to 0)
+    input_series:
+      - series: 'ci_rerun_watchdog_collateral_cancel_total{job="ci-rerun-watchdog"}'
+        values: "1+0x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CIRerunWatchdogCollateralCancel
+        exp_alerts: []
+
+  - interval: 1m
     name: Unresolved fires after 15m above zero and is quiet at zero
     input_series:
       - series: 'ci_rerun_watchdog_unresolved{job="ci-rerun-watchdog"}'
