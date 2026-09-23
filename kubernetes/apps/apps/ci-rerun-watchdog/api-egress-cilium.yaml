@@ -1,0 +1,22 @@
+# Cilium-native allowance for the kube-apiserver. The K8s NetworkPolicy ipBlock rules in
+# networkpolicy.yaml (10.96.0.1/32 and the control-plane IPs :6443) do NOT admit it: under Cilium
+# the API server's endpoints carry the `kube-apiserver` / `remote-node` identities, and CIDR-based
+# rules never match entity identities. Proven on the first rollout (2026-09-23): the pod reached
+# Gitea but every state-ConfigMap read timed out (every scan aborted with stage=state_read), and an
+# in-pod probe showed 10.96.0.1:443 and 192.168.0.41-43:6443 all unreachable. dsh runs the same
+# pair (dsh/api-egress-cilium.yaml beside its netpol); this is that file for the watchdog.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ci-rerun-watchdog-api-egress
+  namespace: ci-rerun-watchdog
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ci-rerun-watchdog
+  egress:
+    - toEntities: [kube-apiserver]
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }
+            - { port: "6443", protocol: TCP }

@@ -10,6 +10,7 @@ resources:
   - rbac.yaml # the state ConfigMap is created at runtime by the pod - not in git (see rbac.yaml)
   - deployment.yaml
   - networkpolicy.yaml # default-deny; Gitea :3000, API server, DNS out; Prometheus in
+  - api-egress-cilium.yaml # CiliumNetworkPolicy toEntities kube-apiserver: the ipBlock rules above cannot admit the API server under Cilium
   - servicemonitor.yaml
   - ci-rerun-watchdog-rules.yaml # + .test.yaml fixture, run by scripts/rules-lint.sh
 
