@@ -98,6 +98,7 @@ class Action:
     size: int | None            # bytes; None = unknown
     ids: list = field(default_factory=list)
     command: list | None = None
+    fingerprint: frozenset | None = None   # stacks: {(id, started, finished)} at scan time
 
 
 CATEGORY = {
@@ -218,7 +219,8 @@ def build_plan(containers, images, volumes, build_cache_bytes, tool_caches, opts
             running = sum(c.running for c in cs)
             why = "worktree gone" if orphaned else f"idle > {opts.stale_days}d"
             plan.append(Action("stack", proj, f"{len(cs)} ctr ({running} running), {why}: {workdir}",
-                               fmt_age(now - touched), None, [c.id for c in cs]))
+                               fmt_age(now - touched), None, [c.id for c in cs],
+                               fingerprint=frozenset((c.id, c.started, c.finished) for c in cs)))
             removed.update(c.id for c in cs)
             stale_projects.add(proj)
             if orphaned:
@@ -523,6 +525,24 @@ def summary(plan):
 
 # ----------------------------------------------------------------------------- execution
 
+def live_stack_fingerprint(label):
+    """The stack's containers right now, as {(id, started, finished)}."""
+    ids = sh(["docker", "ps", "-aq", "--no-trunc", "--filter", f"label={PROJECT}={label}"],
+             check=False).stdout.split()
+    if not ids:
+        return frozenset()
+    r = sh(["docker", "inspect", *ids], check=False)
+    if r.returncode != 0:
+        return frozenset()
+    return frozenset((d["Id"], parse_time(d["State"].get("StartedAt")),
+                      parse_time(d["State"].get("FinishedAt"))) for d in json.loads(r.stdout))
+
+
+def tag_image_id(tag):
+    r = sh(["docker", "image", "inspect", "-f", "{{.Id}}", tag], check=False)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def still_planned(action, fresh_plan):
     """After the prompt, only act on what a fresh scan would still remove (review, #847): a
     container started in the meantime, or a stack that changed, drops out."""
@@ -548,11 +568,22 @@ def execute(plan, fresh_plan):
         if a.kind == "container":
             cmds = [["docker", "rm", *a.ids]]          # stopped: no force, a started one fails
         elif a.kind == "stack":
+            # Right before the forced removal, not just at the rescan (review round 2, #847): any
+            # container added, started or stopped since the plan was shown skips the stack.
+            if live_stack_fingerprint(a.label) != a.fingerprint:
+                print(f"  – {i:>3} {CATEGORY[a.kind]}: {a.label} — changed since the scan, skipped")
+                skipped += 1
+                continue
             cmds = [["docker", "rm", "-f", *a.ids]]
             nets = sh(["docker", "network", "ls", "-q", "--filter",
                        f"label={PROJECT}={a.label}"], check=False).stdout.split()
             if nets:
                 cmds.append(["docker", "network", "rm", *nets])
+        elif a.kind == "image":
+            # Re-resolve every tag (review round 2, #847): a tag moved to a new image since the
+            # scan is dropped; with no tag left, remove the planned image by ID.
+            tags = [t for t in a.command[2:] if t != a.ids[0] and tag_image_id(t) == a.ids[0]]
+            cmds = [["docker", "rmi", *tags]] if tags else [["docker", "rmi", a.ids[0]]]
         elif a.kind == "volume":
             cmds = [["docker", "volume", "rm", *a.ids]]
         elif a.command:

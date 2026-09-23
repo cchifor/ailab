@@ -248,8 +248,11 @@ class DisplayTest(unittest.TestCase):
 
 
 class ExecuteTest(unittest.TestCase):
-    def run_exec(self, plan, fresh=None):
+    def run_exec(self, plan, fresh=None, stack_now=None, tag_ids=None):
         calls = []
+        orig_fp, orig_tag = cl.live_stack_fingerprint, cl.tag_image_id
+        cl.live_stack_fingerprint = lambda label: (stack_now or {}).get(label, frozenset())
+        cl.tag_image_id = lambda tag: (tag_ids or {}).get(tag)
 
         class R:
             returncode, stdout, stderr = 0, "", ""
@@ -260,15 +263,16 @@ class ExecuteTest(unittest.TestCase):
             failures, skipped = cl.execute(plan, fresh_plan=fresh if fresh is not None else plan)
         finally:
             cl.sh = orig
+            cl.live_stack_fingerprint, cl.tag_image_id = orig_fp, orig_tag
         return calls, failures, skipped
 
     def test_container_removal_leaves_volumes_to_the_volume_actions(self):
         # review (#847): `docker rm -v` deleted anonymous volumes that were ALSO planned as volume
         # actions, so the later `volume rm` failed and the run exited 1.
-        plan = [cl.Action("stack", "old", "", "", None, ["c1"]),
+        plan = [cl.Action("stack", "old", "", "", None, ["c1"], fingerprint=frozenset({("c1", None, None)})),
                 cl.Action("container", "lone", "", "", None, ["c2"]),
                 cl.Action("volume", "v", "anonymous", "", 1, ["v" * 64])]
-        calls, failures, _ = self.run_exec(plan)
+        calls, failures, _ = self.run_exec(plan, stack_now={"old": frozenset({("c1", None, None)})})
         rms = [c for c in calls if c[:2] == ["docker", "rm"]]
         self.assertTrue(rms)
         self.assertTrue(all("-v" not in c for c in rms), rms)
@@ -278,12 +282,34 @@ class ExecuteTest(unittest.TestCase):
 
     def test_items_that_changed_since_the_scan_are_skipped(self):
         # review (#847): something started while the prompt was open must not be force-removed.
-        plan = [cl.Action("stack", "old", "", "", None, ["c1"]),
+        fp = frozenset({("c1", None, None)})
+        plan = [cl.Action("stack", "old", "", "", None, ["c1"], fingerprint=fp),
                 cl.Action("container", "lone", "", "", None, ["c2"])]
-        fresh = [cl.Action("stack", "old", "", "", None, ["c1"])]   # c2 got started meanwhile
-        calls, _, skipped = self.run_exec(plan, fresh)
+        fresh = [cl.Action("stack", "old", "", "", None, ["c1"], fingerprint=fp)]  # c2 started
+        calls, _, skipped = self.run_exec(plan, fresh, stack_now={"old": fp})
         self.assertEqual(skipped, 1)
         self.assertFalse(any("c2" in c for c in calls))
+
+
+class ExecuteRound2Test(ExecuteTest):
+    def test_stack_touched_during_execution_is_skipped(self):
+        # review round 2 (#847): re-check each stack right before `rm -f`, not only at the rescan.
+        fp = frozenset({("c1", ago(days=30), None)})
+        plan = [cl.Action("stack", "old", "", "", None, ["c1"], fingerprint=fp)]
+        restarted = frozenset({("c1", ago(seconds=5), None)})
+        calls, _, skipped = self.run_exec(plan, stack_now={"old": restarted})
+        self.assertEqual(skipped, 1)
+        self.assertFalse(any(c[:3] == ["docker", "rm", "-f"] for c in calls))
+
+    def test_image_tags_are_re_resolved_before_removal(self):
+        # review round 2 (#847): a tag moved to a new image since the scan must not be removed.
+        plan = [cl.Action("image", "app:1", "x", "9d", 1, ["sha256:old"],
+                          ["docker", "rmi", "app:1", "app:latest"])]
+        calls, _, _ = self.run_exec(plan, tag_ids={"app:1": "sha256:old", "app:latest": "sha256:new"})
+        self.assertIn(["docker", "rmi", "app:1"], calls)
+        calls, _, _ = self.run_exec(plan, tag_ids={"app:1": "sha256:new", "app:latest": "sha256:new"})
+        self.assertIn(["docker", "rmi", "sha256:old"], calls)    # no tag left: remove by ID
+        self.assertFalse(any("app:1" in c or "app:latest" in c for c in calls))
 
 
 class HelpersTest(unittest.TestCase):
