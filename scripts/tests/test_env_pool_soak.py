@@ -377,6 +377,19 @@ class CompletenessTests(unittest.TestCase):
         self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
         self.assertTrue(any("relay freshness" in p and "replayed history only" in p for p in rep.problems), rep.problems)
         self.assertFalse(soak.should_advance_checkpoint(rep))
+        # the sharper shape: the replayed record is sourced a minute BEFORE the window and re-shipped
+        # every 5 min — a slice-relative allowance would accept it all hour; against each record's own
+        # ingestion time it is stale from the second replay on
+        loki = quiet_loki()
+        loki["relay"] = [(int((T0 + 300 * i) * 1e9), src_line(T0 - 60, "reading guest console")) for i in range(0, 13)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("relay freshness" in p for p in rep.problems), rep.problems)
+        # ...while a genuine reconnect replay (source time within the ring depth of its ingestion) is fresh
+        loki = quiet_loki()
+        loki["relay"] = [(int((T0 + 300 * i) * 1e9), src_line(T0 + 300 * i - 300, "reading guest console")) for i in range(0, 13)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "OK", rep.markdown())
         # a failed sample is a problem too, never a silent pass
         rep = self.run_report(FakeSource(quiet_prom(), loki=quiet_loki(), fail={"relay_sample"}))
         self.assertEqual(rep.verdict, "INCOMPLETE")

@@ -529,9 +529,11 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         rate = None
     rep.exports["loki_metrics"] = {"relay_rate": rate or []}
     # freshness: per line-slice, the newest records of the UNFILTERED stream must carry a source time
-    # inside the slice (a reconnect replays the ring, so up to RING_REPLAY_SECONDS before it is fine);
-    # independent of the evidence selector, so a stream that replays only old chatter cannot pass
-    # as a quiet member — the count metric cannot tell them apart, this can
+    # close to their OWN ingestion time — within RING_REPLAY_SECONDS before it (what a reconnect
+    # legitimately replays) or a bucket after it (clock skew). Against ingestion, not the slice: a
+    # record sourced a minute before the window and re-shipped every 5 min would satisfy a slice-
+    # relative test all hour long. Independent of the evidence selector, so a stream that replays
+    # only old chatter cannot pass as a quiet member — the count metric cannot tell them apart, this can
     stale_slices: list[tuple[float, float, int]] = []
     s_end = end
     while s_end > start:
@@ -543,7 +545,10 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
                 rep.problems.append(f"loki relay sample {iso(s_start)}: {e}")
                 sample = None
             if sample is not None:
-                fresh = any(st is not None and s_start - RING_REPLAY_SECONDS <= st <= s_end + RELAY_BUCKET_SECONDS for st in map(source_ts, (l for _, l in sample)))
+                fresh = any(
+                    st is not None and ing / 1e9 - RING_REPLAY_SECONDS <= st <= ing / 1e9 + RELAY_BUCKET_SECONDS
+                    for ing, st in ((t, source_ts(l)) for t, l in sample)
+                )
                 if not fresh:
                     stale_slices.append((s_start, s_end, len(sample)))
         s_end = s_start
@@ -595,7 +600,7 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         f"| watchdog `checks recovered` | {len(recovered)} |",
         f"| relay records in-window (evidence-class lines, deduplicated on source time + content; {len(relay_raw)} raw, {historical} replayed from outside the window, {unparsed} untimestamped) | {len(relay)} |",
         f"| relay ingestion ({RELAY_BUCKET_SECONDS // 60}-min buckets with containerd records, chatter included) | {'query failed' if rate is None else len(rate)} of ~{max(1, int((end - start) / RELAY_BUCKET_SECONDS))} |",
-        f"| relay freshness samples (newest {LOKI_SAMPLE_LINES} unfiltered records per {LOKI_SLICE_SECONDS // 3600} h slice carry an in-slice source time) | {len(stale_slices)} stale slice(s) |",
+        f"| relay freshness samples (newest {LOKI_SAMPLE_LINES} unfiltered records per {LOKI_SLICE_SECONDS // 3600} h slice sourced within {RING_REPLAY_SECONDS} s of their ingestion) | {len(stale_slices)} stale slice(s) |",
     ]
     if sandboxes:
         rep.sections.append("| relay records per reaped sandbox | " + ", ".join(f"{sb[:12]}..={n}" for sb, n in relay_per_sb.items()) + " |")
@@ -631,7 +636,7 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
             if silence + 2 * RELAY_BUCKET_SECONDS >= RELAY_GAP_SECONDS:
                 rep.problems.append(f"relay ingestion gap {iso(a)} → {iso(b - RELAY_BUCKET_SECONDS)}: silent for {fmt_dur(silence)} (up to {fmt_dur(silence + 2 * RELAY_BUCKET_SECONDS)} with {RELAY_BUCKET_SECONDS} s buckets) — nothing reached Loki from the relay; the node's ring replays at most ~{RING_REPLAY_SECONDS} s on reconnect, so host-log evidence for that stretch is gone")
         for s_start, s_end, n in stale_slices:
-            rep.problems.append(f"relay freshness {iso(s_start)} → {iso(s_end)}: the newest {n} records ingested carry no source time inside the slice (replayed history only) — nothing was captured for that hour")
+            rep.problems.append(f"relay freshness {iso(s_start)} → {iso(s_end)}: none of the newest {n} records ingested was sourced within {RING_REPLAY_SECONDS} s of its own ingestion (replayed history only) — nothing was captured for that hour")
         if relay_raw and not relay:
             # replayed history or untimestamped diagnostics only: the stream is alive but nothing in
             # it is this window's capture (a quiet member that emits only chatter is NOT this case:
