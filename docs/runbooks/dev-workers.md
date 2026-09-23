@@ -46,6 +46,8 @@ rollbacks live there). No dev-worker runs on ai-node3 any more.
 > purpose fails at "Check that the vault is reachable under this host's own AppRole" (`cred list`
 > needs the agent's token) before the play-end handler would start the agent: once the new
 > credentials are in place, `systemctl enable --now openbao-agent` by hand, then converge.
+> `enable --now` is the un-quiesce — it reverses both halves of the `disable --now` below (enabled
+> at boot again AND started); `start` alone would leave the unit disabled after the next reboot.
 > `systemctl mask` is not available for these units (they live in `/etc/systemd/system`);
 > `disable --now` plus the disabled daily converge is the quiesce.
 
