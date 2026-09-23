@@ -191,6 +191,8 @@ def entry(repo, run_id, reserved_at, outcome="confirmed", **extra):
          "ref": {"kind": "pr", "number": 1, "head_sha": "old"}, "reserved_at": reserved_at,
          "updated_at": reserved_at, "outcome": outcome, "attempts": 1}
     e.update(extra)
+    if "posts" not in e:  # a posted entry carries one durable timestamp per attempt
+        e["posts"] = [reserved_at] * int(e["attempts"] or 0) if outcome != "would_rerun" else []
     return e
 
 
@@ -705,6 +707,96 @@ class Ledgers(Base):
         self.assertEqual(self.metrics.get("reruns_total", {"repo": REPO, "mode": "live"}), 0)
         self.assertEqual(self.store.data["disabled"], "true")
 
+    def _disable_lands_on_write_where(self, predicate):
+        """The operator's `kubectl patch disabled=true` lands between our read and the first
+        write matching `predicate`: that PUT conflicts, the retry re-reads and imports it."""
+        real_write = self.store.write
+        flipped = {"done": False}
+
+        def operator_races(data, rv):
+            if not flipped["done"] and any(predicate(e) for e in json.loads(data.get("live", "[]"))):
+                flipped["done"] = True
+                self.store.data["disabled"] = "true"
+                self.store.rv = str(int(self.store.rv) + 1)
+                raise app.StateConflict("409: patched underneath")
+            return real_write(data, rv)
+
+        self.store.write = operator_races
+
+    def test_kill_switch_imported_by_the_attempt_write_stops_an_initial_submission(self):
+        for i in range(2):
+            self.candidate_pr_run(rid=100 + i, sha="s%d" % i, pr=7 + i)
+        self._disable_lands_on_write_where(lambda e: e.get("attempts") == 1 and e["outcome"] == "reserved")
+        s = self.scan()
+        self.assertTrue(s["ok"], s["errors"])
+        self.assertNoPosts()
+        live = self.store.ledger("live")
+        self.assertEqual([(e["outcome"], e["reason"], e["attempts"], e["posts"]) for e in live],
+                         [("rejected", "disabled", 0, [])])
+        self.assertEqual(s["skipped"], {"disabled": 1})
+        self.assertEqual(self.store.data["disabled"], "true")
+
+    def test_kill_switch_imported_by_the_attempt_write_stops_a_reconcile_retry(self):
+        self.gitea.runs[REPO].append(mk_run(300, sha="u0"))
+        self.gitea.jobs[(REPO, 300)] = [mk_job(3000, 300, CLOUD_LOST)]
+        self.gitea.pulls[REPO].append({"number": 30, "head": {"sha": "u0"}, "state": "open"})
+        self.store.seed(runner_seen=seen_lost(),
+                        live=[entry(REPO, 300, NOW - 60, outcome="uncertain", attempts=1, sha="u0",
+                                    ref={"kind": "pr", "number": 30, "head_sha": "u0"})])
+        self.candidate_pr_run()  # a fresh candidate behind the retry: must not be submitted either
+        self._disable_lands_on_write_where(lambda e: e.get("attempts") == 2)
+        s = self.scan()
+        self.assertTrue(s["ok"], s["errors"])
+        self.assertNoPosts()
+        live = {e["run_id"]: e for e in self.store.ledger("live")}
+        self.assertEqual((live[300]["outcome"], live[300]["reason"], live[300]["attempts"]), ("rejected", "disabled", 1))
+        self.assertEqual(live[300]["posts"], [NOW - 60])
+        self.assertEqual(s["skipped"], {"disabled": 1, "tombstone": 1})  # run 300 is G3-skipped in the list
+
+    def test_day_cap_counts_submissions_including_retries_across_scans(self):
+        # Cap 4. Three recent POSTs on disk (two confirmed, one uncertain). The uncertain entry's
+        # retry takes the 4th slot; the fresh candidate is cap_day - and stays so next scan,
+        # because the retry is a durable submission, not a reservation that vanishes.
+        self.gitea.runs[REPO].append(mk_run(300, sha="u0"))
+        self.gitea.jobs[(REPO, 300)] = [mk_job(3000, 300, CLOUD_LOST)]
+        self.gitea.pulls[REPO].append({"number": 30, "head": {"sha": "u0"}, "state": "open"})
+        live = [entry(REPO, 900, NOW - 3600), entry(REPO, 901, NOW - 3600),
+                entry(REPO, 300, NOW - 60, outcome="uncertain", attempts=1, sha="u0",
+                      ref={"kind": "pr", "number": 30, "head_sha": "u0"})]
+        self.store.seed(runner_seen=seen_lost(), live=live)
+        self.candidate_pr_run()
+        cfg = self.cfg(max_reruns_per_day=4)
+        s = self.scan(cfg)
+        self.assertTrue(s["ok"], s["errors"])
+        self.assertEqual(self.posted_ids(), [300])
+        self.assertEqual(s["skipped"], {"cap_day": 1, "tombstone": 1})
+        self.assertEqual(self.metrics.get("reruns_last_24h", {"mode": "live"}), 4)
+        s = self.scan(cfg, now=NOW + 60)
+        self.assertEqual(self.posted_ids(), [300])  # a second scan does not reset the budget
+        self.assertEqual(s["skipped"], {"cap_day": 1, "tombstone": 1})
+        posts = {e["run_id"]: e.get("posts") for e in self.store.ledger("live")}
+        self.assertEqual(posts[300], [NOW - 60, NOW])
+
+    def test_retry_of_an_uncertain_entry_is_itself_capped_by_the_day(self):
+        self.gitea.runs[REPO].append(mk_run(300, sha="u0"))
+        self.gitea.jobs[(REPO, 300)] = [mk_job(3000, 300, CLOUD_LOST)]
+        self.gitea.pulls[REPO].append({"number": 30, "head": {"sha": "u0"}, "state": "open"})
+        live = [entry(REPO, 900 + i, NOW - 3600) for i in range(19)]
+        live.append(entry(REPO, 300, NOW - 60, outcome="uncertain", attempts=1, sha="u0",
+                          ref={"kind": "pr", "number": 30, "head_sha": "u0"}))
+        self.store.seed(runner_seen=seen_lost(), live=live)
+        self.scan()  # 20 posts on disk already: the retry must wait
+        self.assertNoPosts()
+        self.assertEqual(self.store.ledger("live")[-1]["outcome"], "uncertain")
+
+    def test_rejected_before_post_does_not_consume_the_day(self):
+        # A reservation whose head moved before the POST submitted nothing: no `posts`, no slot.
+        self.store.seed(runner_seen=seen_lost(),
+                        live=[entry(REPO, 900 + i, NOW - 3600, outcome="rejected", attempts=0, posts=[]) for i in range(20)])
+        self.candidate_pr_run()
+        self.scan()
+        self.assertEqual(self.posted_ids(), [100])
+
     def test_alert_read_series_exist_at_zero_from_the_first_scan(self):
         self.scan()
         out = self.metrics.render()
@@ -728,7 +820,7 @@ class Ledgers(Base):
         self.scan()
         live = {e["run_id"]: e for e in self.store.ledger("live")}
         self.assertEqual(live[900], {"repo": REPO, "run_id": 900, "reserved_at": NOW - 3 * 3600,
-                                     "outcome": "confirmed", "compact": True})
+                                     "outcome": "confirmed", "posts": [NOW - 3 * 3600], "compact": True})
         self.assertNotIn("compact", live[901])  # pending entries are never compacted
 
     def test_full_entry_cap_compacts_the_oldest_and_tombstones_still_block(self):

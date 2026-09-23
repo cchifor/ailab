@@ -442,8 +442,11 @@ PENDING_OUTCOMES = ("reserved", "uncertain", "unresolved")
 
 
 def compact_entry(e):
+    # `posts` stays: the day cap counts submissions for 24 h and compaction starts at the 2 h
+    # lookback; it is at most max_post_attempts timestamps.
     return {"repo": e.get("repo"), "run_id": e.get("run_id"), "reserved_at": e.get("reserved_at"),
-            "outcome": e.get("outcome"), "compact": True}
+            "outcome": e.get("outcome"), "posts": [t for t in (e.get("posts") or []) if isinstance(t, (int, float))],
+            "compact": True}
 
 
 # Keys an operator writes by `kubectl patch`; a 409 retry takes THEIR fresh values, never ours.
@@ -551,7 +554,7 @@ class State:
     def prune(self, now, retention, lookback=None, full_cap=None):
         """Drop entries past retention; compact settled entries older than the lookback - and
         the oldest settled ones beyond `full_cap` - down to tombstones. A tombstone keeps
-        exactly what G3 and the day cap read (repo, run_id, reserved_at) plus the outcome word.
+        exactly what G3 and the day cap read (repo, run_id, reserved_at, posts) plus the outcome word.
         Pending entries (reserved/uncertain/unresolved) are never compacted: reconcile and the
         alert need them whole."""
         for name in LEDGERS:
@@ -576,6 +579,11 @@ class State:
     def count_recent(self, ledger, now, window):
         return sum(1 for e in self.ledgers[ledger]
                    if isinstance(e.get("reserved_at"), (int, float)) and now - e["reserved_at"] <= window)
+
+    def count_recent_posts(self, ledger, now, window):
+        """Submissions (POSTs) in the window, from every entry's durable `posts` list."""
+        return sum(1 for e in self.ledgers[ledger]
+                   for t in (e.get("posts") or []) if isinstance(t, (int, float)) and now - t <= window)
 
     def unresolved(self):
         return [e for e in self.ledgers["live"] if e.get("outcome") == "unresolved"]
@@ -625,7 +633,7 @@ METRIC_HELP = {
     "unresolved": ("gauge", "Live reservations whose POST outcome is still unknown after retries."),
     "dry_run": ("gauge", "1 when DRY_RUN (shadow ledger, no POST)."),
     "disabled": ("gauge", "1 when the state ConfigMap's kill switch is on."),
-    "reruns_last_24h": ("gauge", "Reservations in the last 24h, by mode (from the ledgers)."),
+    "reruns_last_24h": ("gauge", "Submissions in the last 24h by mode: live POSTs (retries included), dry_run reservations - what the day cap counts."),
     "unlisted_repos": ("gauge", "Org repos with Actions that are not in REPOS."),
     "scans_total": ("counter", "Scans attempted."),
 }
@@ -862,11 +870,19 @@ def current_head_sha(api, repo, ref):
 
 # --- the scan -------------------------------------------------------------------------------
 class Budget:
+    """Per-scan and per-day submission caps. The day count is rebuilt from what was actually
+    SUBMITTED in the last 24 h - every POST, retries included, from the durable `posts` lists -
+    not from reservations, which would let each recent reservation retry for free. The shadow
+    ledger never POSTs, so there the reservations themselves are the submissions."""
+
     def __init__(self, cfg, state, ledger, now):
         self.cfg = cfg
         self.ledger = ledger
         self.this_scan = 0
-        self.today = state.count_recent(ledger, now, 86400)
+        if ledger == "live":
+            self.today = state.count_recent_posts(ledger, now, 86400)
+        else:
+            self.today = state.count_recent(ledger, now, 86400)
 
     def check(self):
         if self.this_scan >= self.cfg.max_reruns_per_scan:
@@ -951,11 +967,27 @@ class Scan:
         """The attempt is persisted BEFORE the POST: if the outcome write after it fails, the
         ConfigMap already says an attempt was made, so reconcile can never exceed
         max_post_attempts by re-counting a POST it cannot see. A failed pre-POST write aborts
-        the scan with no POST at all."""
-        entry["attempts"] = int(entry.get("attempts") or 0) + 1
+        the scan with no POST at all. `posts` is the durable record the day cap is rebuilt
+        from (every submission, retries included); `attempts` is what max_post_attempts reads.
+        Both initial submissions and reconcile retries come through here, so this is the one
+        place the kill switch is re-read after the write that precedes a POST."""
+        prev_attempts = int(entry.get("attempts") or 0)
+        entry["attempts"] = prev_attempts + 1
         entry["posted_at"] = self.now
         entry["updated_at"] = self.now
+        entry["posts"] = [t for t in (entry.get("posts") or []) if isinstance(t, (int, float))] + [self.now]
         self.state.save()
+        if self.state.disabled:
+            # That save's 409 merge imported an operator patch of `disabled`: the attempt was
+            # persisted but nothing was submitted, so take it back and stop the scan's submissions.
+            entry.update({"attempts": prev_attempts, "posts": entry["posts"][:-1], "outcome": "rejected",
+                          "reason": "disabled", "updated_at": self.now})
+            entry.pop("posted_at", None)
+            self.state.save()
+            self.halted = True
+            log.warning("rerun repo=%s run=%s outcome=rejected reason=disabled (kill switch imported before the POST)",
+                        repo, run_id)
+            return
         try:
             outcome = self.api.rerun_failed_jobs(repo, run_id)
             entry["outcome"] = outcome
@@ -1133,7 +1165,7 @@ class Scan:
         for key in [k for k in _LOGGED_SKIPS if k not in self.skip_keys]:
             del _LOGGED_SKIPS[key]  # bounded to the runs the last scan saw
         metrics.set("unresolved", len(state.unresolved()))
-        metrics.set("reruns_last_24h", state.count_recent("live", now, 86400), {"mode": "live"})
+        metrics.set("reruns_last_24h", state.count_recent_posts("live", now, 86400), {"mode": "live"})
         metrics.set("reruns_last_24h", state.count_recent("shadow", now, 86400), {"mode": "dry_run"})
 
 
