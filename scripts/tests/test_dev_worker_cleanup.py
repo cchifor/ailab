@@ -126,6 +126,28 @@ class PlanTest(unittest.TestCase):
               ctr("seed", project="a7", created=ago(days=22), finished=ago(days=22))]
         self.assertEqual(self.ids(self.plan(cs), "stack"), ["loop", "seed"])
 
+    def test_fully_stopped_recent_stack_is_kept_whole(self):
+        # review (#847): `compose stop` on WIP two days ago must not lose its containers after
+        # --stopped-hours; only the 14-day stack rule may remove a stack's containers.
+        cs = [ctr("s1", project="wip", created=ago(days=3), finished=ago(days=2)),
+              ctr("s2", project="wip", created=ago(days=3), finished=ago(days=2))]
+        p = self.plan(cs)
+        self.assertEqual(self.ids(p, "container"), [])
+        self.assertEqual(self.ids(p, "stack"), [])
+
+    def test_recent_exit_is_activity_but_not_a_shutdown_or_crash_loop(self):
+        # review (#847): a long job that exited an hour ago is in use...
+        cs = [ctr("job", project="batch", created=ago(days=30), started=ago(days=30),
+                  finished=ago(hours=1))]
+        self.assertEqual(self.ids(self.plan(cs), "stack"), [])
+        # ...but a stop caused by a reboot (finish right before a boot) is not,
+        boot = ago(hours=10)
+        cs2 = [ctr("r", project="old", created=ago(days=30), finished=boot - timedelta(seconds=20))]
+        self.assertEqual(self.ids(self.plan(cs2, boot_times=[boot]), "stack"), ["r"])
+        # ...and neither is a crash-loop exit.
+        cs3 = [ctr("c", project="loop", created=ago(days=30), finished=ago(minutes=1), restarts=40)]
+        self.assertEqual(self.ids(self.plan(cs3), "stack"), ["c"])
+
     def test_keep_stacks_disables_stack_removal(self):
         cs = [ctr("old1", project="old", running=True, created=ago(days=35))]
         self.assertEqual(self.ids(self.plan(cs, keep_stacks=True), "stack"), [])
@@ -223,6 +245,45 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("5 more", more[0][1])                      # the 5 smallest roll up
         self.assertEqual(more[0][4], cl.fmt_size(sum(100 * i for i in range(5))))
         self.assertEqual(len(cl.display_rows(plan, show_all=True)), 5 + 4 + 15)
+
+
+class ExecuteTest(unittest.TestCase):
+    def run_exec(self, plan, fresh=None):
+        calls = []
+
+        class R:
+            returncode, stdout, stderr = 0, "", ""
+
+        orig = cl.sh
+        cl.sh = lambda args, check=True: (calls.append(list(args)), R())[1]
+        try:
+            failures, skipped = cl.execute(plan, fresh_plan=fresh if fresh is not None else plan)
+        finally:
+            cl.sh = orig
+        return calls, failures, skipped
+
+    def test_container_removal_leaves_volumes_to_the_volume_actions(self):
+        # review (#847): `docker rm -v` deleted anonymous volumes that were ALSO planned as volume
+        # actions, so the later `volume rm` failed and the run exited 1.
+        plan = [cl.Action("stack", "old", "", "", None, ["c1"]),
+                cl.Action("container", "lone", "", "", None, ["c2"]),
+                cl.Action("volume", "v", "anonymous", "", 1, ["v" * 64])]
+        calls, failures, _ = self.run_exec(plan)
+        rms = [c for c in calls if c[:2] == ["docker", "rm"]]
+        self.assertTrue(rms)
+        self.assertTrue(all("-v" not in c for c in rms), rms)
+        self.assertIn(["docker", "rm", "c2"], rms)              # stopped: no force
+        self.assertIn(["docker", "volume", "rm", "v" * 64], calls)
+        self.assertEqual(failures, 0)
+
+    def test_items_that_changed_since_the_scan_are_skipped(self):
+        # review (#847): something started while the prompt was open must not be force-removed.
+        plan = [cl.Action("stack", "old", "", "", None, ["c1"]),
+                cl.Action("container", "lone", "", "", None, ["c2"])]
+        fresh = [cl.Action("stack", "old", "", "", None, ["c1"])]   # c2 got started meanwhile
+        calls, _, skipped = self.run_exec(plan, fresh)
+        self.assertEqual(skipped, 1)
+        self.assertFalse(any("c2" in c for c in calls))
 
 
 class HelpersTest(unittest.TestCase):
