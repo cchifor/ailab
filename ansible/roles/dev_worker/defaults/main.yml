@@ -263,3 +263,7 @@ dev_worker_openbao_kubeconfig_cutover: false
 # The per-worker Helm deploy namespace (kubernetes/apps/infrastructure/helmtest). Documentation for
 # the CLAUDE.md block below; the authoritative value is inside the kubeconfig the sync mints.
 dev_worker_helmtest_namespace: "helmtest-{{ inventory_hostname | regex_replace('^dev-worker-', 'dw') }}"
+
+# Weekly buildx prune (tasks/docker.yml): keep at most this much build cache, evicting least
+# recently used records. A size cap, because the age filter is a no-op on buildx 0.37.
+dev_worker_buildx_cache_max: "20GB"

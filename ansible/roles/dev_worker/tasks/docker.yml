@@ -126,7 +126,12 @@
   notify: Reload systemd
 
 # Section 15: weekly buildx cache prune so containerd's overlayfs snapshotter doesn't grow unbounded.
+# Size-capped, NOT age-filtered: `buildx prune --filter=until=168h` removes nothing on buildx 0.37 /
+# BuildKit 0.33 — this timer logged "Total: 0B" every week while 20+ GB of cache sat unused on every
+# worker (found 2026-09-23). --max-used-space evicts least-recently-used records above the cap.
+# Own tag so it can be rolled out alone: --tags buildx_prune.
 - name: Install docker buildx-prune unit + timer
+  tags: [buildx_prune]
   ansible.builtin.copy:
     dest: "/etc/systemd/system/{{ item.dest }}"
     mode: "0644"
@@ -135,13 +140,13 @@
     - dest: docker-buildx-prune.service
       content: |
         [Unit]
-        Description=Prune docker buildkit cache older than 7 days
+        Description=Cap docker buildkit cache at {{ dev_worker_buildx_cache_max }} (LRU eviction)
         Requires=docker.service
         After=docker.service
 
         [Service]
         Type=oneshot
-        ExecStart=/usr/bin/docker buildx prune -f --filter=until=168h
+        ExecStart=/usr/bin/docker buildx prune -f --max-used-space {{ dev_worker_buildx_cache_max }}
     - dest: docker-buildx-prune.timer
       content: |
         [Unit]
