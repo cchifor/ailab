@@ -209,7 +209,8 @@ data:
       # max_input_tokens = 262144 - 49152 = 212992. That output headroom is deliberately large:
       # xhigh reasoning measured 15,996-38,897 tokens per answer here, and under-budgeting a
       # reasoning model yields finish_reason=length with EMPTY content. It is a RECORD, not a gate
-      # (enable_pre_call_checks is off, see :834) -- the 98k prompts above reached the engine.
+      # (enable_pre_call_checks is unset in router_settings, deliberately -- the note above that
+      # block explains) -- the 98k prompts above reached the engine.
       #
       # SAMPLING PARAMS ARE LOAD-BEARING -- without them this model does not stop. vLLM's own
       # defaults leave top_k DISABLED, and with no top-k truncation the sampler wanders and never
@@ -1128,7 +1129,7 @@ spec:
         # (ADR 0031 -- every Claude integration is withdrawn from dsh). A route is dropped, so
         # the config LiteLLM parses changes; the cost is one rolling restart of the 2-replica
         # maxUnavailable:0 Deployment.
-        checksum/config: "b167b8e7cdd6"
+        checksum/config: "00545c49be4c"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
