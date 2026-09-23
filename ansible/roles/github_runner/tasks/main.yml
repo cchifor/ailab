@@ -1,11 +1,16 @@
 ---
 # Provision a self-hosted GitHub Actions runner VM (Ubuntu 24.04). Idempotent; safe to re-run.
-# The role is gated as a whole by site.yml (when: github_runner_enabled), so no per-task guards.
+# The role is gated as a whole by the playbook (when: github_runner_enabled). Inside it, ONLY the
+# GitHub agent itself (tasks/agent.yml: download, App key, ephemeral wrapper, hooks, unit) is gated
+# again, by github_runner_agent_enabled: the cloud_gitea_runners group runs this role for the base
+# toolchain that gitea_runner depends on (Docker, compose, Node, uv, k6, the `runner` user) and
+# has no GitHub agent at all. Node/uv/k6 keep their own opt-out flags.
 # Day-2 note: a re-run may restart the runner service (handler) and interrupt at most one in-flight
 # job — GitHub re-queues it. Run when the pool is mostly idle for a clean apply.
 
-# ── 0. preflight: App credentials must be present ────────────────────────────
+# ── 0. preflight: App credentials must be present (agent hosts only) ─────────
 - name: Assert GitHub App credentials are configured
+  when: github_runner_agent_enabled | bool
   ansible.builtin.assert:
     that:
       - github_runner_app_id | string | length > 0
@@ -204,123 +209,9 @@
     group: "{{ github_runner_group }}"
     mode: "0755"
 
-- name: Download runner agent {{ github_runner_version }}
-  ansible.builtin.get_url:
-    url: "https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-{{ github_runner_arch }}-{{ github_runner_version }}.tar.gz"
-    dest: "/tmp/actions-runner-{{ github_runner_version }}.tar.gz"
-    mode: "0644"
-
-- name: Unpack runner agent (re-extracts on a version bump)
-  ansible.builtin.unarchive:
-    src: "/tmp/actions-runner-{{ github_runner_version }}.tar.gz"
-    dest: "{{ github_runner_dir }}"
-    remote_src: true
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_group }}"
-    creates: "{{ github_runner_dir }}/.runner-version-{{ github_runner_version }}"
-
-- name: Mark installed runner version
-  ansible.builtin.copy:
-    content: "{{ github_runner_version }}\n"
-    dest: "{{ github_runner_dir }}/.runner-version-{{ github_runner_version }}"
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_group }}"
-    mode: "0644"
-    force: false
-
-- name: Install runner agent OS dependencies
-  ansible.builtin.command: ./bin/installdependencies.sh
-  args:
-    chdir: "{{ github_runner_dir }}"
-    creates: "{{ github_runner_dir }}/.deps-installed"
-
-- name: Mark runner deps installed
-  ansible.builtin.copy:
-    content: "ok\n"
-    dest: "{{ github_runner_dir }}/.deps-installed"
-    mode: "0644"
-    force: false
-
-# ── 6. the ported contract: ephemeral wrapper, hook, reclaim, systemd unit + drop-ins ──
-- name: Ensure /etc/runner dir (holds the GitHub App key)
-  ansible.builtin.file:
-    path: /etc/runner
-    state: directory
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_group }}"
-    mode: "0700"
-
-- name: Install GitHub App private key
-  ansible.builtin.copy:
-    content: "{{ github_app_private_key }}"
-    dest: "{{ github_runner_app_key_dest }}"
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_group }}"
-    mode: "0400"
-  no_log: true
-
-- name: Install ephemeral-runner.sh (GitHub App auth → one ephemeral cycle)
-  ansible.builtin.template:
-    src: ephemeral-runner.sh.j2
-    dest: "{{ github_runner_home }}/ephemeral-runner.sh"
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_group }}"
-    mode: "0755"
-  notify: Restart github-runner
-
-- name: Ensure runner hooks dir
-  ansible.builtin.file:
-    path: "{{ github_runner_dir }}/hooks"
-    state: directory
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_group }}"
-    mode: "0755"
-
-- name: Install job-started hook (pre-checkout workspace reclaim)
-  ansible.builtin.template:
-    src: job-started.sh.j2
-    dest: "{{ github_runner_dir }}/hooks/job-started.sh"
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_group }}"
-    mode: "0755"
-
-- name: Install between-jobs reclaim script
-  ansible.builtin.template:
-    src: runner-reclaim.sh.j2
-    dest: /usr/local/bin/runner-reclaim.sh
-    mode: "0755"
-
-- name: Install the runner systemd unit
-  ansible.builtin.template:
-    src: actions.runner.cchifor-platform.service.j2
-    dest: "/etc/systemd/system/{{ github_runner_service }}"
-    mode: "0644"
-  notify: Restart github-runner
-
-- name: Ensure systemd drop-in dir
-  ansible.builtin.file:
-    path: "/etc/systemd/system/{{ github_runner_service }}.d"
-    state: directory
-    mode: "0755"
-
-- name: Install job-started-hook drop-in (env in systemd, NOT runner .env — config.sh rewrites .env)
-  ansible.builtin.template:
-    src: 10-job-started-hook.conf.j2
-    dest: "/etc/systemd/system/{{ github_runner_service }}.d/10-job-started-hook.conf"
-    mode: "0644"
-  notify: Restart github-runner
-
-- name: Install reclaim drop-in (ExecStartPre between ephemeral cycles)
-  ansible.builtin.template:
-    src: 20-reclaim.conf.j2
-    dest: "/etc/systemd/system/{{ github_runner_service }}.d/20-reclaim.conf"
-    mode: "0644"
-  notify: Restart github-runner
-
-# ── 7. enable + start ────────────────────────────────────────────────────────
-- name: Enable + start the runner service
-  ansible.builtin.systemd:
-    name: "{{ github_runner_service }}"
-    enabled: true
-    state: started
-    daemon_reload: true
+# ── 5-7. the GitHub agent itself: download, App key, ephemeral wrapper, hooks, unit, enable ──
+# Skipped where github_runner_agent_enabled is false (the cloud Gitea-only runners). Everything
+# above is the shared base toolchain; nothing in agent.yml is needed by the gitea_runner role.
+- name: Install the GitHub Actions agent (tasks/agent.yml)
+  ansible.builtin.include_tasks: agent.yml
+  when: github_runner_agent_enabled | bool

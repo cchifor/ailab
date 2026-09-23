@@ -11,6 +11,7 @@ resources:
   - pve-exporter.yaml # Proxmox VE metrics (hypervisors + VMs/CTs + storage pools)
   - proxmox-node.yaml # host node_exporter on the 3 Proxmox hosts (scrape target)
   - ci-runners-node.yaml # host node_exporter on the CI runner VMs (Gitea Actions; scrape target)
+  - ci-runners-cloud.yaml # host node_exporter on the OPPORTUNISTIC cloudlab runner VMs (cloud-ci-N, ADR 0032). Own job (ci-runner-cloud) + per-host cloud_host label so its rules can be gated on the host being up — the hosts are off at night. Endpoints ship EMPTY until the VMs exist
   - dev-workers-node.yaml # host node_exporter on the 6 dev-worker VMs (scrape target)
   - reviewers-node.yaml # host node_exporter + reviewbot_* textfile metrics on the 2 reviewer VMs
   - reviewbot-rules.yaml # reviewer VM + reviewbot service alerts (the 2026-09-04 silent-failure gap)
@@ -46,6 +47,7 @@ resources:
   - qnap-snmp-exporter.yaml # the NAS itself — disks/SMART, temps, fans. It was the one major component with NO scrape at all; a failed drive in the RAID-Z1 would have alerted nobody (2026-08-16 storage audit)
   - qnap-rules.yaml # alerts on the above; QnapDiskSmartNotGood is the load-bearing one
   - ci-runners-rules.yaml # alerts on the runner VMs (down / disk / memory / buildx self-heal beacon)
+  - ci-runners-cloud-rules.yaml # host-gated alerts on the cloudlab runner VMs (down-while-host-up / disk / cleanup beacon) — the 24/7 rules above would page every evening. Fixtures in ci-runners-cloud-rules.test.yaml (NOT a resource — promtool only)
   - dev-workers-rules.yaml # alerts on the 6 dev-worker VMs. The scrape target existed with ZERO rules against it, so dev-worker-1's kernel panic (2026-08-11) was covered only by the generic TargetDown at severity warning while the VM sat dead 12h and PVE still called it `running`
   - testpool-rules.yaml # alerts on the test-environment pool (operator down / pool drained / PVC stuck / Released-PV thin-LUN leak / env teardown stuck — the 2026-09-20 frozen-guest failure, the env-reaper's outcome alert) — kube-state-metrics only, so the rules survive an operator-scrape outage; NoWarmCapacity pages until golden-v1 is bootstrapped (testpool README activation order). Fixtures in testpool-rules.test.yaml (NOT a resource — promtool only)
   - env-node-rules.yaml # the env NODE's kubelet-sourced precursors of the 2026-09-20 wedge (stop_* runtime errors for 30m; the kubelet /metrics target down 10m = CRI hanging, six hours of lead last time) — separate file because testpool-rules.yaml is deliberately kube-state-metrics-only. Fixtures in env-node-rules.test.yaml (NOT a resource — promtool only)

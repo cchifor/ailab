@@ -257,6 +257,62 @@ live daemon + a static `.runner` file cannot prove. Exit 0 = pool fit; exit 1 = 
 agent-nodes** (`kubernetes/infra/agent-nodes`, now live at .47/.48/.49). `infra/runners` IPs are
 `lifecycle.ignore_changes=[initialization]` (cloud-init sets them once), so the map is documentation.
 
+## 9. Cloud opportunistic runners (`cloud-ci-N` on the cloudlab cluster — ADR 0032)
+
+Extra act_runners on the **cloudlab** Proxmox cluster (cloud1/cloud3 today; cloud2 once its BIOS SVM
+is really on), same label and same roles as the pool above, so they take the same jobs. The cloud
+hosts are **powered off at night by a human**, so these runners are `offline` in Gitea for hours
+every day **by design** — nothing registers or deregisters at runtime: act_runner registration is
+persistent, Gitea only hands a task to a runner that polls, and a runner is `offline` one minute
+after its last poll and back the minute the VM boots (`onboot`, `Restart=always`).
+
+**Where things live.** VMs: `../cloudlab/kubernetes/infra/ci-runners` (`just ci-runners-plan|apply`
+there; vmids 61xx, IPs in `docs/network-plan.md`). Config + registration: **this repo**,
+`ansible/cloud-runners.yml` → `just cloud-runners` (`inventory/hosts.yml` group
+`cloud_gitea_runners`, `group_vars/cloud_gitea_runners.yml`). The group is deliberately NOT a child
+of `github_runners`/`gitea_runners`: `just runners`, `just gitea-runners` and
+`scripts/check-ci-runners.py` (which asserts every `DEFAULT_RUNNERS` entry is online) never see
+it; `--include-cloud` lists them as info. Monitoring: job `ci-runner-cloud`
+(`ci-runners-cloud.yaml`, one Service+Endpoints per cloud host carrying a `cloud_host` label) with
+rules **gated on the host being up** (`ci-runners-cloud-rules.yaml`) — the 24/7 rules would page
+every evening.
+
+**The roles, minus the GitHub agent.** `github_runner` runs for its base toolchain only
+(`github_runner_agent_enabled: false` skips `tasks/agent.yml`: no App key, no ephemeral wrapper, no
+unit); `gitea_runner` runs unmodified with `gitea_runner_cleanup_peer_services: "none"` (the sentinel
+for "no co-located runner" — an empty string falls back to the GitHub unit).
+
+**Shutdown drains, in three layers (all needed).**
+1. In-guest (§7): `shutdown_timeout: 10m` + `KillMode=mixed` + `TimeoutStopSec=11min`.
+2. Hypervisor: every `cloud-ci-*` VM has `startup: order=3,down=720`, which PVE's `pve-guests` stop
+   honours at node shutdown (`stopall` uses the guest's `down` before its own default) — so the
+   Homepage OFF button and a plain `poweroff` wait for the drain.
+3. Script: `cluster-power.sh down` (cloudlab `just power-down`) runs the drain detached on the host.
+
+**The residual — hard power loss, VM crash, a job longer than the drain window.** Gitea never
+re-queues an orphaned task by itself: the zombie reaper fails it after 10 min (`ZOMBIE_TASK_TIMEOUT`,
+global — do NOT lower it, a >2 min infra-pg stall would reap every live job). **Until the
+`ci-rerun-watchdog` is deployed (separate PR; `kubernetes/apps/apps/ci-rerun-watchdog/`), such a job
+needs a MANUAL rerun**: `POST /api/v1/repos/{o}/{r}/actions/runs/{run}/rerun-failed-jobs` (201; the run
+id is in the commit status `target_url`). The watchdog, once live, re-runs a run's failed jobs once
+when the failure is correlated with the loss of the cloud runner it ran on and the run is still the
+current head of its PR/branch; re-queued jobs go to whichever labelled runner is online (at the
+nightly power-off, necessarily an ailab one). It ships in shadow mode (`DRY_RUN=true`) first, and its
+kill switch is `kubectl --context admin@ai -n ci-rerun-watchdog patch cm ci-rerun-watchdog-state -p
+'{"data":{"disabled":"true"}}'` (next scan, ≤ 60 s). Its runbook lines replace this paragraph when it lands.
+
+**Reading an `offline` `cloud-ci-*`.** Check whether the host is up first (`up{job="cloud-node"}`
+or cloudlab `just power-status`). Host down = nightly state, nothing to do. Host up + runner offline
+= `CloudCIRunnerDownWhileHostUp` territory: `qm status <vmid>` on the host, then the daemon.
+**Never delete a `cloud-ci-*` registration while a job of theirs may be within the watchdog's
+2 h lookback** — the API resolves `runner_name`/`runner_id` from the live runner row and the
+watchdog fails closed on an unknown runner.
+
+**Rollback.** One runner: `systemctl stop gitea-act-runner` (drains), `tofu destroy -target` in
+cloudlab, wait > 2 h, `DELETE /api/v1/orgs/cchifor/actions/runners/<id>` (else it lingers offline,
+as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of the above ×N, remove
+`ci-runners-cloud*.yaml`, the inventory group and playbook, release the IPs.
+
 ## Day-2
 - **Runner version bump:** set `github_runner_version` (role defaults) → `just runners` (re-extracts;
   the agent also auto-updates on connect).

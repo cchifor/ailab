@@ -1,0 +1,39 @@
+---
+# Opportunistic Gitea Actions runner VMs on the CLOUDLAB cluster (cloud-ci-N, ADR 0032). A dedicated
+# playbook (NOT part of site.yml, NOT runners.yml/gitea-runners.yml) so nothing that iterates the
+# ailab runner groups ever touches these — they are offline for hours every day by design.
+# Create the VMs first (../cloudlab: `just ci-runners-apply`), then:
+#   just cloud-runners                  # base toolchain + act_runner, registers cloud-ci-N
+#   just cloud-runners --check --diff   # any ansible-playbook args pass through
+#   just ping-cloud-runners             # connectivity check
+# See docs/runbooks/ci-runners.md §9.
+- name: Configure cloudlab Gitea Actions runner VMs (base toolchain + act_runner)
+  hosts: cloud_gitea_runners
+  become: true
+  gather_facts: true
+  pre_tasks:
+    # Only the Gitea registration token: the GitHub App key is NOT loaded here, because
+    # github_runner_agent_enabled=false skips every task that would need it.
+    - name: Load Gitea runner registration token (SOPS)
+      community.sops.load_vars:
+        file: "{{ playbook_dir }}/secrets/gitea-runner.sops.yaml"
+      no_log: true
+      tags: [cloud-runners]
+      when: gitea_runner_enabled | default(false)
+  roles:
+    # Unconditional: time sync and the node_exporter scrape (the up{job="ci-runner-cloud"} series
+    # and the cleanup beacon every alert here reads) must not inherit the toolchain flag's lifecycle.
+    - role: host_time
+      tags: [cloud-runners, time]
+
+    - role: node_exporter
+      tags: [cloud-runners, monitoring]
+
+    # Base toolchain only (github_runner_agent_enabled=false in group_vars/cloud_gitea_runners.yml).
+    - role: github_runner
+      tags: [cloud-runners]
+      when: github_runner_enabled | default(false)
+
+    - role: gitea_runner
+      tags: [cloud-runners]
+      when: gitea_runner_enabled | default(false)

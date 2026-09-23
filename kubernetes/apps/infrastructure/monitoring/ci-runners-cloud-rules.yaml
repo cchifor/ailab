@@ -1,0 +1,94 @@
+# Alerts for the OPPORTUNISTIC CI runner VMs on the cloudlab cluster (job=ci-runner-cloud, from
+# ci-runners-cloud.yaml; ADR 0032). Every rule is gated on the runner's cloud HOST being up: the
+# hosts are powered off at night, so an ungated `up == 0` would page every evening and be muted by
+# Friday. The join is `on (cloud_host)` between this job's `cloud_host` target label and
+# job="cloud-node"'s `nodename` (cloud1/2/3, from cloudlab's cloud-node.yaml Endpoints hostname),
+# renamed with label_replace so the two sides share a label. A join on a label that exists on only one
+# side is an EMPTY vector and the alert can never fire — which is why ci-runners-cloud-rules.test.yaml
+# asserts the firing case and not just the silence, and why the live join is proven non-empty against
+# Prometheus (with a runner daemon stopped and its host up) before the Endpoints addresses land.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ci-runners-cloud
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: ci-runners-cloud
+      rules:
+        # Recording rule: "this cloud host is up" keyed by cloud_host, so each alert below can join
+        # `and on (cloud_host)` without repeating the label_replace.
+        - record: cloud_host:up
+          expr: >-
+            max by (cloud_host) (
+              label_replace(up{job="cloud-node"}, "cloud_host", "$1", "nodename", "(.*)")
+            )
+        - alert: CloudCIRunnerDownWhileHostUp
+          # The VM's node_exporter is unscrapeable while its hypervisor answers: the runner VM is
+          # down or wedged (never "the cluster is off for the night", which the join excludes).
+          expr: >-
+            up{job="ci-runner-cloud"} == 0
+              and on (cloud_host) cloud_host:up == 1
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} is down while {{ $labels.cloud_host }} is up"
+            description: >-
+              node_exporter on {{ $labels.nodename }} ({{ $labels.instance }}) has been unscrapeable for
+              >10m while its cloudlab host {{ $labels.cloud_host }} answers. The runner VM did not come
+              up after the host booted (onboot), or crashed. Check `qm status <vmid>` on the host and
+              the org runners API. A powered-off cluster does NOT fire this — that is the nightly state.
+        - alert: CloudCIRunnerDiskCritical
+          expr: >-
+            (
+              node_filesystem_avail_bytes{job="ci-runner-cloud",mountpoint="/"}
+                / node_filesystem_size_bytes{job="ci-runner-cloud",mountpoint="/"} < 0.05
+            ) and on (cloud_host) cloud_host:up == 1
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} root filesystem <5% free"
+            description: >-
+              Runner {{ $labels.nodename }} is about to fail jobs with ENOSPC. gitea-runner-cleanup.sh
+              treats >=92% as CRITICAL and prunes through a live job; check `docker system df` and
+              `journalctl -t gitea-runner-cleanup` on the VM.
+        # The staleness rule below needs the beacon series to exist. A cleanup timer that never
+        # wrote its beacon (or a textfile that vanished) produces NO series, so that rule is silent
+        # exactly when the maintenance is most broken — the absent-series trap ci-runners-rules.yaml
+        # closes for the 24/7 pool with CIRunnerMaintenanceBeaconMissing. Same shape here, host-gated
+        # (codex review of ailab#838). `for: 30m` rides over first boot and the morning rejoin.
+        - alert: CloudCIRunnerCleanupBeaconMissing
+          expr: >-
+            (
+              up{job="ci-runner-cloud"} == 1
+                unless on (instance) gitea_runner_cleanup_last_run_seconds{job="ci-runner-cloud"}
+            ) and on (cloud_host) cloud_host:up == 1
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} emits no cleanup beacon"
+            description: >-
+              {{ $labels.nodename }} is scraped and its host {{ $labels.cloud_host }} is up, but no
+              gitea_runner_cleanup_last_run_seconds series exists for it — the cleanup timer has never
+              written its beacon or the node_exporter textfile collector is off. Check
+              `systemctl status gitea-runner-cleanup.timer` and --collector.textfile.directory.
+        - alert: CloudCIRunnerCleanupStale
+          # Same rule as CIRunnerCleanupStale for the 24/7 pool, host-gated. The beacon is a gauge
+          # that persists across the night, so a runner that was off for 10h reads "stale" for its
+          # first minutes back — the 15-min timer rewrites it well inside `for: 15m`.
+          expr: >-
+            (
+              up{job="ci-runner-cloud"} == 1
+                and (time() - gitea_runner_cleanup_last_run_seconds{job="ci-runner-cloud"}) > 3600
+            ) and on (cloud_host) cloud_host:up == 1
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} docker cleanup hasn't run in >1h"
+            description: >-
+              gitea-runner-cleanup.timer (15-min) has not written its beacon on {{ $labels.nodename }}
+              for >1h while the VM is scraped and its host is up — docker/storage reclamation is
+              stalled. Check `systemctl status gitea-runner-cleanup.timer` + `journalctl -t
+              gitea-runner-cleanup`.
