@@ -37,8 +37,8 @@
     "maxReservedTokens":40000000,
     "routes": {
       "openai-codex/gpt-6-astra":{"maxTokensPerCall":1000000},
-      "litellm/qwen3.8-27b-vllm-cloud":{"maxTokensPerCall":1000000},
-      "litellm/qwen3.8-flash-next-cloud":{"maxTokensPerCall":1000000}
+      "litellm/qwen3.8-27b-vllm-cloud":{"maxTokensPerCall":212992},
+      "litellm/qwen3.8-flash-next-cloud":{"maxTokensPerCall":229376}
     }
   }
 }

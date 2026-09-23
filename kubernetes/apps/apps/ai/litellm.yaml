@@ -196,10 +196,21 @@ data:
       # turn 1 = 22.6 s with 0 cached, turn 10 = 9.9 s with 24,192 of 25,779 cached.
       # Per-sample quality is IDENTICAL under TP -- same weights, same all-gathered logits.
       #
-      # CONTEXT: host runs --max-model-len 131072 (ceiling is 262144 if one huge prompt ever
-      # needs it, at 3.83x). max_input_tokens = 131072 - 49152 = 81920. That output headroom is
-      # deliberately large: xhigh reasoning measured 15,996-38,897 tokens per answer here, and
-      # under-budgeting a reasoning model yields finish_reason=length with EMPTY content.
+      # CONTEXT: host runs --max-model-len 262144 since 2026-09-23, the checkpoint's NATIVE window
+      # (max_position_embeddings; rope type `default`, so no YaRN). It ran 131072 before, and in
+      # the 72 h up to that day this proxy logged 24 rejections of one shape -- 98,305 prompt +
+      # 32,768 requested output = 131,073 -- each then failed AGAIN by the fallback hop (65536 per
+      # slot on-prem). All of them sit inside 262144. What the raise costs is concurrency at FULL
+      # length only (KV is allocated per real token, the pool did not change): cloud2 TP=2 is 1.5x
+      # at 262144 (engine log 395,251 tokens) against 3.02x at 131072, cloud3 TP=4 3.7x against
+      # 7.4x; a request that does not fit QUEUES in vLLM (Waiting, reason=capacity), it is not
+      # rejected. 1M via YaRN factor 4 was evaluated and does NOT fit: one 1M-token sequence is
+      # ~61 GiB of bf16 KV, more than either box's whole pool (cloudlab runbook section 11).
+      # max_input_tokens = 262144 - 49152 = 212992. That output headroom is deliberately large:
+      # xhigh reasoning measured 15,996-38,897 tokens per answer here, and under-budgeting a
+      # reasoning model yields finish_reason=length with EMPTY content. It is a RECORD, not a gate
+      # (enable_pre_call_checks is unset in router_settings, deliberately -- the note above that
+      # block explains) -- the 98k prompts above reached the engine.
       #
       # SAMPLING PARAMS ARE LOAD-BEARING -- without them this model does not stop. vLLM's own
       # defaults leave top_k DISABLED, and with no top-k truncation the sampler wanders and never
@@ -336,9 +347,11 @@ data:
           extra_body:
             top_k: 20
             chat_template_kwargs: { reasoning_effort: xhigh }
-        model_info: { supports_vision: true, max_input_tokens: 81920 }
-      # cloud3 -- the second deployment (see the block comment above). max_input_tokens 81920 is the
-      # same arithmetic as cloud2's: host --max-model-len 131072 minus 49152 for xhigh reasoning.
+        model_info: { supports_vision: true, max_input_tokens: 212992 }
+      # cloud3 -- the second deployment (see the block comment above). max_input_tokens 212992 is the
+      # same arithmetic as cloud2's: host --max-model-len 262144 minus 49152 for xhigh reasoning.
+      # Both hosts moved 131072 -> 262144 on 2026-09-23 TOGETHER: the same-checkpoint carve-out
+      # that lets them share this name assumes the same request-shaping, and the window is part of it.
       - model_name: qwen3.8-27b-vllm-cloud
         litellm_params:
           model: openai/qwen3.8-27b-w4a16
@@ -349,7 +362,7 @@ data:
           extra_body:
             top_k: 20
             chat_template_kwargs: { reasoning_effort: xhigh }
-        model_info: { supports_vision: true, max_input_tokens: 81920 }
+        model_info: { supports_vision: true, max_input_tokens: 212992 }
       # qwen3.8-27b-vllm-fast — SAME cloud2 engine, thinking OFF. Exists for Open WebUI's
       # TASK_MODEL_EXTERNAL (chat titles, tags, retrieval query generation), which needs a backend that
       # is fast AND always warm. Review of PR #524 correctly flagged that pointing the task model at
@@ -379,7 +392,9 @@ data:
           extra_body:
             top_k: 20
             chat_template_kwargs: { enable_thinking: false }
-        model_info: { max_input_tokens: 81920 }
+        # Same engine, same window: 262144 - 49152 = 212992 since 2026-09-23 (the thinking-off
+        # alias keeps the route's headroom figure rather than inventing a second one).
+        model_info: { max_input_tokens: 212992 }
       # ---- cloud3 vLLM: qwen3.8-27b-fp8 — the UNCENSORED FP8 checkpoint, TP=4 over all four RTX 3090s ---
       # orcarouter/Qwen3.8-27B-Uncensored-FP8 at HF 0f3cdb83, served by vLLM 0.28.0 (cu129 wheel: cloud3
       # runs driver 550 / CUDA 12.4) UNDER llama-swap on 192.168.0.26:8080 as a swap target, beside the
@@ -472,9 +487,15 @@ data:
       # 'qwen4exp'". That is a serving-side detail — see cloudlab host/llama-swap.yaml — but it
       # is why this model appeared later than the other three on the same endpoint.
       #
-      # host -c 262144 --parallel 1, so the whole 256K window serves ONE request; minus 32768
+      # host -c 524288 --parallel 2 with q8_0 KV (cloudlab host/llama-swap.yaml; it was
+      # `-c 262144 --parallel 1` when this entry was written), so each of the 2 slots has the full
+      # native 262144 -- the GGUF's qwen4exp.context_length, no RoPE scaling keys; minus 32768
       # output headroom = 229376. The window is large because it is nearly free on this
-      # architecture: 4x the context cost 11.6 GiB and no measurable speed change.
+      # architecture: 4x the context cost 11.6 GiB and no measurable speed change. It is NOT free
+      # beyond that: the box sits at 84.0 of 96 GiB with those two slots (2026-09-23), and a 1M
+      # window (Qwen's YaRN factor-4 recipe) is ~110 GiB by the measured per-token cost, so 1M
+      # was evaluated and rejected; a single 524288 slot at factor 2 is the only larger option and
+      # is not configured (it needs a measured gate on a shared box).
       - model_name: qwen3.8-flash-next-cloud
         litellm_params:
           model: openai/qwen3.8-flash-next
@@ -986,6 +1007,17 @@ data:
       # on-prem terminal this route has no backstop for roughly two-thirds of the day. That terminal is
       # both on-prem nodes again since 2026-09-21 (the wedge note on that route).
       #
+      # A CONTEXT error takes this same hop, and the hop is SMALLER (65536 per slot against the cloud
+      # window of 262144), so an over-length prompt fails twice and the caller reads both messages.
+      # That is deliberate, reviewed 2026-09-23 when the cloud window was raised: the pinned router
+      # sends ContextWindowExceededError to `context_window_fallbacks` when that key is set and to
+      # this list when it is not (router.py, read in the running pod), and the only route with a
+      # larger window is qwen3.8-flash-next-cloud -- a DIFFERENT model. Answering a request for this
+      # model from that one, silently, is exactly the wrong-model-without-saying-so failure this
+      # file refuses elsewhere (the gpt-oss-120b retirement note above), so no context_window
+      # fallback is configured. The second failure is cosmetic; the fix for an over-length prompt
+      # is on the caller, and the raise to the native window removed every case seen in the logs.
+      #
       # qwen3.8-27b-vllm-fast-cloud deliberately gets NO fallbacks entry at all. It is Open WebUI's
       # TASK_MODEL_EXTERNAL (chat titles, tags), and its `max_tokens: 512` / `enable_thinking: false`
       # are DEPLOYMENT-scoped -- they are NOT carried across a fallback hop. Pointing it at the local
@@ -1097,7 +1129,7 @@ spec:
         # (ADR 0031 -- every Claude integration is withdrawn from dsh). A route is dropped, so
         # the config LiteLLM parses changes; the cost is one rolling restart of the 2-replica
         # maxUnavailable:0 Deployment.
-        checksum/config: "62625e8ff082"
+        checksum/config: "00545c49be4c"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
