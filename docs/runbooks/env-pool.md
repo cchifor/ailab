@@ -6,9 +6,14 @@ The Talos **workers** that host the leasable Kata DinD environments (`testpool`,
 added at gate G3b once ai-node3's 24 h memory floor held ≥ 43 GiB with the model idle — the
 dev-worker retirements of 2026-09-21/23 paid for it). Each: 16 GiB fixed / 8 vCPU, label
 `ailab.io/env-pool=true`, taint `dedicated=env:NoSchedule`. The warm pool keeps **2 members, one
-per node** (`topologySpreadConstraints` in the template), so losing a node — or rebooting one for
-a machine-config change — leaves one warm member; every per-node procedure below is run one
-node at a time. The soak check-in takes both: `--nodes talos-env-node-1,talos-env-node-2`. Tofu module
+per node** (`topologySpreadConstraints` in the template, counted on the warm-only
+`agents.x-k8s.io/warm-pool-sandbox` label — a leased environment loses it on adoption, so leases
+never pull the warm members onto one node), so losing a node — or rebooting one for a
+machine-config change — leaves one warm member; every per-node procedure below is run one node
+at a time. Verify the spread after a lease + refill, not only after a scale-up: `kubectl -n
+testpool get pods -l agents.x-k8s.io/warm-pool-sandbox -o wide` must show one member per node
+(the reconcile that drops the label races the replacement's scheduling by seconds). The soak
+check-in takes both nodes: `--nodes talos-env-node-1,talos-env-node-2`. Tofu module
 `kubernetes/infra/env-pool/`, state in the main checkout (`terraform.tfstate`, gitignored) since
 the adoption on 2026-09-21 — the spike's state had been lost, the VM was imported and the
 module proven to reproduce the running machine config (`talosctl apply-config --dry-run`: "No

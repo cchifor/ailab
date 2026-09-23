@@ -43,17 +43,25 @@ spec:
       dnsConfig:
         nameservers: ["1.1.1.1", "9.9.9.9"]
       terminationGracePeriodSeconds: 30
-      # One warm member per env node. Placement is otherwise only the kata-env RuntimeClass
-      # (label + toleration), so without this both members could land on one node and a node loss
-      # would still take the whole warm capacity. DoNotSchedule: a member that cannot spread stays
-      # Pending (visible: TestpoolNoWarmCapacity) rather than silently doubling up.
+      # One WARM member per env node. Placement is otherwise only the kata-env RuntimeClass (label +
+      # toleration), so without this both members could land on one node and a node loss would still
+      # take the whole warm capacity. The spread is counted on the WARM-ONLY label, not on app=env-std:
+      # leased environments keep app=env-std, and counting them lets two warm members share a node
+      # whenever two leases sit on the other (maxSkew 1 over four pods). agent-sandbox v1.0.2
+      # (controllers/sandbox_controller.go: computeExtensionPodLabels + updatePodMetadata) puts
+      # agents.x-k8s.io/warm-pool-sandbox=<pool hash> on the pod while the Sandbox is owned by the
+      # SandboxWarmPool and DELETES it from the running pod on the reconcile after a SandboxClaim adopts
+      # it — so the constraint sees warm members only. Residual: that reconcile races the replacement
+      # member's scheduling by seconds, so the distribution is verified after a lease + refill, not only
+      # after scale-up (runbook § verify). DoNotSchedule: a member that cannot spread stays Pending
+      # (visible: TestpoolNoWarmCapacity) rather than silently doubling up.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
-            matchLabels:
-              app: env-std
+            matchExpressions:
+              - { key: agents.x-k8s.io/warm-pool-sandbox, operator: Exists }
       containers:
         - name: dind
           image: registry.chifor.me/testpool/env-dind:20260906-9c48b627@sha256:86280ae7ccc0f28506d97c1c4127b878da0b6e9b390ba8d106a50cb55593dc5f
