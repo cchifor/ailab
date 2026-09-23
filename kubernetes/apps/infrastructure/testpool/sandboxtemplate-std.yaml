@@ -43,6 +43,17 @@ spec:
       dnsConfig:
         nameservers: ["1.1.1.1", "9.9.9.9"]
       terminationGracePeriodSeconds: 30
+      # One warm member per env node. Placement is otherwise only the kata-env RuntimeClass
+      # (label + toleration), so without this both members could land on one node and a node loss
+      # would still take the whole warm capacity. DoNotSchedule: a member that cannot spread stays
+      # Pending (visible: TestpoolNoWarmCapacity) rather than silently doubling up.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: env-std
       containers:
         - name: dind
           image: registry.chifor.me/testpool/env-dind:20260906-9c48b627@sha256:86280ae7ccc0f28506d97c1c4127b878da0b6e9b390ba8d106a50cb55593dc5f
@@ -166,15 +177,18 @@ spec:
           requests:
             storage: 60Gi
 ---
-# Warm pool: 1 member. A parked env costs ~100 Mi working set (spike-measured), and adoption is
-# 0.2-1 s; the cold chain (~90-150 s) is paid here, off the lease path. Until golden-v1 exists
-# (bootstrap runbook in README) members cycle Pending harmlessly under the 15m readiness grace.
+# Warm pool: 2 members, one per env node (the template's topologySpreadConstraints) — since
+# env-node-2 (parent plan T4, gate G3b): a node loss, a Talos upgrade or host maintenance on one
+# node leaves one warm member. A parked env costs ~100 Mi working set (spike-measured), and
+# adoption is 0.2-1 s; the cold chain (~90-150 s) is paid here, off the lease path. Until golden-v1
+# exists (bootstrap runbook in README) members cycle Pending harmlessly under the 15m readiness
+# grace. The namespace quota (pods 6, requests.memory 24Gi) holds two members plus leases.
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata:
   name: env-std-pool
   namespace: testpool
 spec:
-  replicas: 1
+  replicas: 2
   sandboxTemplateRef:
     name: env-std

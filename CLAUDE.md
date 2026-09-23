@@ -46,7 +46,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 
 **`docs/network-plan.md` is the IPAM registry — read it before allocating ANY address.** The LAN is
 shared with the `cloudlab` GPU cluster (`.20`–`.22`, `.26`–`.28`), which is invisible to ailab tooling.
-Free static space is only `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`.
+Free static space is only `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`, `.39`, `.50`.
 
 | Role | IPs | vmid |
 |---|---|---|
@@ -56,7 +56,7 @@ Free static space is only `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`
 | CI runners (adopted into tofu 2026-09-07; `ci-runner-8`/.30/4108 retired 2026-09-12, `ci-runner-7`/.29/4107 retired 2026-09-16) | .19 / .31 / .23 | 4106, 4109, 4110 |
 | dev-workers `dev-worker-1..4` (**slot ≠ vmid** since the 2026-09-23 re-slot: dw3 = vmid 4204, dw4 = vmid 4205; 4206 retired 2026-09-21, 4203 on 2026-09-23 — `plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | .8–.11 (user `c4`; also the agentforge hosts, ADR 0018) | 4201, 4202, 4204, 4205 |
 | Agent nodes (Talos workers, AgentForge v2, ADR 0019) | .47 / .48 / .49 | 4301–4303 |
-| Talos env-node (`infra/env-pool/`, adopted 2026-09-21; `staged` applies — reboot via talosctl) | .37 | 4401 |
+| Talos env-nodes (`infra/env-pool/`; `talos-env-node-1` adopted 2026-09-21, `talos-env-node-2` on ai-node3 added at gate G3b; `staged` applies — reboot via talosctl) | .37 / .38 | 4401–4402 |
 | Reviewer VMs (out-of-band, not in tofu) | .24 / .25 | 4501–4502 |
 | AI LLM LXCs | .44 / .45 / .46 | 5001–5003 |
 | registry LXC (node1) | .36 | 5004 |

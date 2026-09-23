@@ -1,14 +1,20 @@
-# Runbook — test-env-pool node (`talos-env-node-1`)
+# Runbook — test-env-pool nodes (`talos-env-node-1`, `talos-env-node-2`)
 
-The single Talos **worker** that hosts the leasable Kata DinD environments (`testpool`,
-`kubernetes/apps/infrastructure/testpool/`): VM **4401 on ai-node2**, `192.168.0.37`, 16 GiB fixed /
-8 vCPU, label `ailab.io/env-pool=true`, taint `dedicated=env:NoSchedule`. Tofu module
+The Talos **workers** that host the leasable Kata DinD environments (`testpool`,
+`kubernetes/apps/infrastructure/testpool/`): `talos-env-node-1` = VM **4401 on ai-node2**,
+`192.168.0.37`; `talos-env-node-2` = VM **4402 on ai-node3**, `192.168.0.38` (parent plan T4,
+added at gate G3b once ai-node3's 24 h memory floor held ≥ 43 GiB with the model idle — the
+dev-worker retirements of 2026-09-21/23 paid for it). Each: 16 GiB fixed / 8 vCPU, label
+`ailab.io/env-pool=true`, taint `dedicated=env:NoSchedule`. The warm pool keeps **2 members, one
+per node** (`topologySpreadConstraints` in the template), so losing a node — or rebooting one for
+a machine-config change — leaves one warm member; every per-node procedure below is run one
+node at a time. The soak check-in takes both: `--nodes talos-env-node-1,talos-env-node-2`. Tofu module
 `kubernetes/infra/env-pool/`, state in the main checkout (`terraform.tfstate`, gitignored) since
 the adoption on 2026-09-21 — the spike's state had been lost, the VM was imported and the
 module proven to reproduce the running machine config (`talosctl apply-config --dry-run`: "No
 changes"; full `tofu plan`: `No changes.`). Running nodes apply in `staged` mode: tofu never
 reboots or live-edits this node (section "Changing the env node's machine config"). Nothing but
-DaemonSets and env pods run here; losing the node loses warm capacity, nothing else.
+DaemonSets and env pods run here; losing a node loses one warm member, nothing else.
 
 Incident that produced this runbook: 2026-09-20, `plans/2026-09-20-env-pool-frozen-guest-outage-plan.md`
 (the full evidence chain). Short form: a long-lived Kata guest freezes → its teardown never completes

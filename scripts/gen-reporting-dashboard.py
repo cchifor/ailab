@@ -574,7 +574,7 @@ panels += [
 # worker). Sources: kube-state-metrics (env pods are created_by_kind="Sandbox"; the pre-pull
 # DaemonSet is deliberately excluded by that filter), node_exporter on the env node(s), and
 # kubelet volume stats. cAdvisor is BLIND to kata pods on this estate — node-level panels instead.
-ENVNODE = 'instance=~"192.168.0.37:9100"'   # env-pool Talos worker node_exporter (extend when env-node-2 lands)
+ENVNODE = 'instance=~"192.168.0.3[78]:9100"'   # env-pool Talos workers' node_exporter: env-node-1 (.37), env-node-2 (.38)
 TP = 'namespace="testpool"'
 TPPOD = f'kube_pod_info{{{TP},created_by_kind="Sandbox"}}'
 panels.append(row("Test Env Pool (leasable Kata DinD environments — testpool)", 124))

@@ -45,7 +45,8 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.32`–`.35` | **free (static)** | — | — |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
 | `.37` | Talos env-node `talos-env-node-1` (k8s member; runbook `docs/runbooks/env-pool.md`) | 4401 | `kubernetes/infra/env-pool/variables.tf` (adopted 2026-09-21) |
-| `.38 / .39` | **free (static)** | — | — |
+| `.38` | Talos env-node `talos-env-node-2` (k8s member, ai-node3; runbook `docs/runbooks/env-pool.md`) | 4402 | `kubernetes/infra/env-pool/variables.tf` (parent plan T4, gate G3b) |
+| `.39` | **free (static)** | — | — |
 | `.40` | Talos control-plane VIP (k8s API `:6443`) | — | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `talos-cp1/2/3` | 4001–4003 | `kubernetes/infra/variables.tf` |
 | `.44 / .45 / .46` | AI LLM LXCs `ai-llm-1/2/3` | 5001–5003 | `kubernetes/infra/ai-lxc/variables.tf` |
@@ -53,7 +54,7 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | **free (static)** | — | — |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`** (14 addresses;
+**Free static space: `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`, `.39`, `.50`** (13 addresses;
 `.30` freed 2026-09-12 by retiring `ci-runner-8`, `.29` freed 2026-09-16 by retiring `ci-runner-7`,
 `.13` freed 2026-09-21 by retiring `dev-worker-6`, `.12` freed 2026-09-23 by the dev-worker re-slot —
 its VM 4205 is `dev-worker-4` on `.11` now).
