@@ -12,6 +12,7 @@ Cloudflare 403s default python UAs (code 1010).
 """
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -32,6 +33,17 @@ def parse_ts(v):
     except ValueError:
         return None
     return t if t > EPOCH_UNSET else None
+
+
+def paged(token, path, key):
+    """Every page of a list endpoint, stopping on a short page (Gitea's default page is 30)."""
+    out, page = [], 1
+    while True:
+        batch = get(token, path, {"page": page, "limit": 50}).get(key) or []
+        out.extend(batch)
+        if len(batch) < 50:
+            return out
+        page += 1
 
 
 def get(token, path, params=None):
@@ -59,8 +71,8 @@ def runs_since(token, repo, cutoff):
 def percentile(xs, p):
     if not xs:
         return None
-    xs = sorted(xs)
-    k = max(0, min(len(xs) - 1, round(p / 100 * (len(xs) - 1))))
+    xs = sorted(xs)  # nearest-rank: the smallest value with at least p% of the samples at or below it
+    k = max(0, min(len(xs) - 1, math.ceil(p / 100 * len(xs)) - 1))
     return xs[k]
 
 
@@ -81,6 +93,28 @@ def summarize(jobs, days):
     }
 
 
+def _f(v):
+    return "-" if v is None else f"{v:.0f}s"  # an uncomputable percentile renders, never crashes
+
+
+def render(s):
+    """Pure: the text report for a summarize() result (None-safe)."""
+    w, r = s["wait_s"], s["run_s"]
+    lines = [f"last {s['days']:g} days: {s['jobs']} completed jobs ({s['jobs_per_day']}/day)"]
+    if w["n"]:
+        lines.append(f"  queue wait  p50 {_f(w['p50'])}  p90 {_f(w['p90'])}  p99 {_f(w['p99'])}  (>5 min: {w['over_5min']} of {w['n']})")
+    else:
+        lines.append("  queue wait  no samples (no job with both created_at and started_at)")
+    if r["n"]:
+        lines.append(f"  job runtime p50 {_f(r['p50'])}  p90 {_f(r['p90'])}  p99 {_f(r['p99'])}")
+    else:
+        lines.append("  job runtime no samples")
+    lines.append("  by runner: " + (", ".join(f"{k}={v}" for k, v in s["by_runner"].items()) or "-"))
+    if s.get("skipped_repos"):
+        lines.append("  skipped repos: " + ", ".join(s["skipped_repos"]))
+    return chr(10).join(lines)
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=float, default=7)
@@ -92,25 +126,29 @@ def main(argv):
         print("GITEA_TOKEN (read:repository) is required", file=sys.stderr)
         return 2
     cutoff = time.time() - a.days * 86400
-    jobs = []
+    jobs, skipped = [], []
     for repo in [r.strip() for r in a.repos.split(",") if r.strip()]:
-        for run in runs_since(token, repo, cutoff):
-            for j in get(token, f"/repos/{repo}/actions/runs/{run['id']}/jobs").get("jobs") or []:
-                if j.get("status") != "completed":
-                    continue
-                jobs.append({"repo": repo, "created": parse_ts(j.get("created_at")), "started": parse_ts(j.get("started_at")),
-                             "completed": parse_ts(j.get("completed_at")), "runner": j.get("runner_name") or ""})
+        try:
+            for run in runs_since(token, repo, cutoff):
+                for j in paged(token, f"/repos/{repo}/actions/runs/{run['id']}/jobs", "jobs"):
+                    if j.get("status") != "completed":
+                        continue
+                    jobs.append({"repo": repo, "created": parse_ts(j.get("created_at")), "started": parse_ts(j.get("started_at")),
+                                 "completed": parse_ts(j.get("completed_at")), "runner": j.get("runner_name") or ""})
+        except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+            # One repo with Actions off / a 404 / a transient 5xx must not void the measurement:
+            # report it as skipped and keep the partial result (comparable V0-vs-V9 as long as the
+            # same repos answer both times, which the report shows).
+            skipped.append(f"{repo}: {type(e).__name__} {getattr(e, 'code', '')}".strip())
+            print(f"warning: skipping {skipped[-1]}", file=sys.stderr)
     s = summarize(jobs, a.days)
+    s["skipped_repos"] = skipped
     s["days"] = a.days
     s["measured_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if a.json:
         print(json.dumps(s, indent=2))
     else:
-        w, r = s["wait_s"], s["run_s"]
-        print(f"last {a.days:g} days: {s['jobs']} completed jobs ({s['jobs_per_day']}/day)")
-        print(f"  queue wait  p50 {w['p50']:.0f}s  p90 {w['p90']:.0f}s  p99 {w['p99']:.0f}s  (>5 min: {w['over_5min']} of {w['n']})")
-        print(f"  job runtime p50 {r['p50']:.0f}s  p90 {r['p90']:.0f}s  p99 {r['p99']:.0f}s")
-        print("  by runner: " + ", ".join(f"{k}={v}" for k, v in s["by_runner"].items()))
+        print(render(s))
     return 0
 
 

@@ -49,3 +49,49 @@ class Summarize(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NearestRank(unittest.TestCase):
+    def test_distinguishes_from_rounded_index(self):
+        # the reviewbots' case: nearest-rank p90 of six samples is the 6th value, not the 5th
+        self.assertEqual(cqs.percentile([10, 20, 30, 40, 50, 60], 90), 60)
+        self.assertEqual(cqs.percentile([10, 20, 30, 40, 50, 60], 50), 30)
+
+
+class Render(unittest.TestCase):
+    def test_no_samples_does_not_crash(self):
+        s = cqs.summarize([], days=7)
+        s["days"] = 7
+        out = cqs.render(s)
+        self.assertIn("0 completed jobs", out)
+        self.assertIn("no samples", out)
+
+    def test_unset_timestamps_render_not_typeerror(self):
+        s = cqs.summarize([{"created": None, "started": None, "completed": None, "runner": ""}], days=1)
+        s["days"] = 1
+        self.assertIn("no samples", cqs.render(s))
+
+    def test_skipped_repos_listed(self):
+        s = cqs.summarize([{"created": 0, "started": 5, "completed": 9, "runner": "r"}], days=1)
+        s["days"] = 1
+        s["skipped_repos"] = ["cchifor/x: HTTPError 404"]
+        self.assertIn("skipped repos: cchifor/x: HTTPError 404", cqs.render(s))
+
+
+class Paged(unittest.TestCase):
+    def test_walks_pages_until_short(self):
+        pages = {1: {"jobs": [{"i": n} for n in range(50)]}, 2: {"jobs": [{"i": 50}]}}
+        calls = []
+
+        def fake_get(token, path, params=None):
+            calls.append(params["page"])
+            return pages[params["page"]]
+
+        orig = cqs.get
+        cqs.get = fake_get
+        try:
+            out = cqs.paged("t", "/x", "jobs")
+        finally:
+            cqs.get = orig
+        self.assertEqual(len(out), 51)
+        self.assertEqual(calls, [1, 2])
