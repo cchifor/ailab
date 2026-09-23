@@ -571,8 +571,9 @@ def _globs(key, default):
     reporting-dashboard ConfigMap; Gitea's PR .diff ignores .gitattributes `-diff`, so this
     list is the only exclusion that reaches the bot)."""
     v = CFG.get(key)
-    extra = tuple(x for x in v if x not in default) if isinstance(v, (list, tuple)) else ()
-    return tuple(default) + extra
+    extra = v if isinstance(v, (list, tuple)) else ()
+    # dict.fromkeys keeps first-seen order and drops repeats among the configured entries too
+    return tuple(dict.fromkeys(tuple(default) + tuple(extra)))
 
 
 def split_sections(raw):
