@@ -66,6 +66,9 @@ Free static space is only `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`
 > `lifecycle { ignore_changes = [initialization] }`, so `tofu plan` is BLIND to `ipconfig0` drift —
 > skipping the third edit leaves a stale address that cloud-init re-applies on the next reboot. That
 > is what produced the 2026-09-03 collisions with the Talos nodes. See `docs/network-plan.md`.
+> The third edit also changes the cloud-init instance-id: the next boot **regenerates the guest's
+> SSH host keys** and re-applies the hostname from the VM name — pass `--name` with `--ipconfig0`,
+> and re-pin `known_hosts` only after confirming the MAC (`docs/runbooks/dev-workers.md` § IP renumber).
 
 ## Where to look
 `docs/decisions/` = ADRs (living decisions) · `docs/runbooks/` = operations (`ci-runners`, `dev-workers`, `ai-host-setup`, `internet-exposure`) · `plans/` = dated planning records (historical — don't rewrite) · `README.md` = repo overview.

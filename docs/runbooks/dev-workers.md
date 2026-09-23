@@ -33,6 +33,21 @@ rollbacks live there). No dev-worker runs on ai-node3 any more.
 > per worker — add the new IP live, rewrite the address in `/etc/netplan/50-cloud-init.yaml`, write
 > `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` (`network: {config: disabled}`) so cloud-init
 > won't revert it, then `netplan apply`. The map IPs above are kept in sync as documentation.
+>
+> **Learned at the 2026-09-23 re-slot (4204 → dev-worker-3/.10, 4205 → dev-worker-4/.11):**
+> (1) the third edit — `qm set <vmid> --ipconfig0 … --name <slot>` + `qm cloudinit update` — gives
+> the guest a NEW cloud-init instance-id, so the next boot re-runs the per-instance modules: cloud-init
+> **regenerates the SSH host keys** and, with `preserve_hostname: false`, sets the hostname from the
+> VM name. Set `--name` together with the address, expect `REMOTE HOST IDENTIFICATION HAS CHANGED`
+> on the first SSH after the reboot, confirm the identity out of band (`ip neigh show <ip>` on the
+> PVE host must be the VM's `net0` MAC; `/etc/machine-id` unchanged) and only then re-pin
+> `known_hosts` — on the workstation AND in the WSL converge clone (`ansible.cfg` has
+> `host_key_checking = True`). (2) A converge of a host whose `openbao-agent` was stopped on
+> purpose fails at "Check that the vault is reachable under this host's own AppRole" (`cred list`
+> needs the agent's token) before the play-end handler would start the agent: once the new
+> credentials are in place, `systemctl enable --now openbao-agent` by hand, then converge.
+> `systemctl mask` is not available for these units (they live in `/etc/systemd/system`);
+> `disable --now` plus the disabled daily converge is the quiesce.
 
 ## Pre-flight gate (clear BEFORE `tofu apply`)
 
