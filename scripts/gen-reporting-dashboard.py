@@ -511,33 +511,43 @@ panels += [
        "s", legends=["{{fabric}} @ {{node}}"]),
 ]
 
-# ───────────────────────── GitHub Actions Runners ─────────────────────────
-RUNNERS = 'job="ci-runner-node"'       # the 5 GHA runner VMs' node_exporter
-panels.append(row("GitHub Actions Runners (host node_exporter)", 86))
+# ───────────────────────── CI Runners (Gitea Actions) ─────────────────────────
+# Two scrape jobs, one pool: the 8 always-on ailab runner VMs (job="ci-runner-node") and the
+# opportunistic cloud-ci-N VMs on the cloudlab cluster (job="ci-runner-cloud", ADR 0032), which are
+# OFF at night by design — so "Up" is split: the ailab count has a floor (red below 8), the cloud
+# count is informational (0 every night is normal). Per-runner panels carry `nodename` (set by the
+# cloud scrape's Endpoints hostname; empty on the ailab job) beside the instance IP.
+RUNNERS = 'job=~"ci-runner-node|ci-runner-cloud"'
+RUNNERS_AILAB = 'job="ci-runner-node"'
+RUNNERS_CLOUD = 'job="ci-runner-cloud"'
+RUNNER_LEGEND = "{{nodename}} {{instance}}"
+panels.append(row("CI Runners (host node_exporter: ailab 24/7 + cloud opportunistic)", 86))
 panels += [
-    stat("Runners Up", 0, 87, 4, 4, f'count(up{{{RUNNERS}}} == 1) or vector(0)',
-         steps=[{"color": "red", "value": None}, {"color": "green", "value": 5}]),
-    stat("Runner Cores", 4, 87, 4, 4, f'count(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}) or vector(0)'),
-    stat("Runner Memory", 8, 87, 4, 4, f'sum(node_memory_MemTotal_bytes{{{RUNNERS}}}) or vector(0)', unit="bytes", decimals=1),
-    stat("Fleet CPU Used", 12, 87, 6, 4,
+    stat("ailab Runners Up", 0, 87, 4, 4, f'count(up{{{RUNNERS_AILAB}}} == 1) or vector(0)',
+         steps=[{"color": "red", "value": None}, {"color": "green", "value": 8}]),
+    stat("Cloud Runners Up", 4, 87, 4, 4, f'count(up{{{RUNNERS_CLOUD}}} == 1) or vector(0)',
+         steps=[{"color": "blue", "value": None}, {"color": "green", "value": 1}]),
+    stat("Runner Cores", 8, 87, 4, 4, f'count(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}) or vector(0)'),
+    stat("Runner Memory", 12, 87, 4, 4, f'sum(node_memory_MemTotal_bytes{{{RUNNERS}}}) or vector(0)', unit="bytes", decimals=1),
+    stat("Fleet CPU Used", 16, 87, 4, 4,
          f'100 * (1 - avg(rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))',
          unit="percent", decimals=1, steps=PCT),
-    stat("Fleet Memory Used", 18, 87, 6, 4,
+    stat("Fleet Memory Used", 20, 87, 4, 4,
          f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{RUNNERS}}}) / sum(node_memory_MemTotal_bytes{{{RUNNERS}}}))',
          unit="percent", decimals=1, steps=PCT),
     ts("CPU % per Runner", 0, 91, 12, 7,
-       [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))'],
-       "percent", maxv=100),
+       [f'100 * (1 - avg by (instance, nodename) (rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))'],
+       "percent", maxv=100, legends=[RUNNER_LEGEND]),
     ts("Memory % per Runner", 12, 91, 12, 7,
        [f'100 * (1 - node_memory_MemAvailable_bytes{{{RUNNERS}}} / node_memory_MemTotal_bytes{{{RUNNERS}}})'],
-       "percent", maxv=100),
+       "percent", maxv=100, legends=[RUNNER_LEGEND]),
     ts("Root Disk Used % per Runner", 0, 98, 12, 7,
        [f'100 * (1 - node_filesystem_avail_bytes{{{RUNNERS},mountpoint="/"}} / node_filesystem_size_bytes{{{RUNNERS},mountpoint="/"}})'],
-       "percent", maxv=100),
+       "percent", maxv=100, legends=[RUNNER_LEGEND]),
     ts("Network per Runner (RX+ / TX-)", 12, 98, 12, 7,
-       [f'sum by (instance) (rate(node_network_receive_bytes_total{{{RUNNERS},{NETDEV}}}[5m]))',
-        f'0 - sum by (instance) (rate(node_network_transmit_bytes_total{{{RUNNERS},{NETDEV}}}[5m]))'],
-       "Bps", legends=["{{instance}} rx", "{{instance}} tx"]),
+       [f'sum by (instance, nodename) (rate(node_network_receive_bytes_total{{{RUNNERS},{NETDEV}}}[5m]))',
+        f'0 - sum by (instance, nodename) (rate(node_network_transmit_bytes_total{{{RUNNERS},{NETDEV}}}[5m]))'],
+       "Bps", legends=[RUNNER_LEGEND + " rx", RUNNER_LEGEND + " tx"]),
 ]
 
 # ───────────────────────── Dev Workers ─────────────────────────
