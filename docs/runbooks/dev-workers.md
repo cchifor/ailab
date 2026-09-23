@@ -42,7 +42,7 @@ host fits only because the rarely-used heavyweight models on node2/node3 (gpt-os
 `docs/runbooks/ai-model-swap.md`. With the model idle, the host drops to ~45% used and ballooning
 actually works, so a worker inflates toward the ceiling on demand. Dev-worker memory defaults to a
 **16 GiB ceiling with a 4 GiB floor** (module scalars
-`dev_worker_memory_mib` / `dev_worker_memory_floating_mib`; per-worker overrides on dw1/dw4 floors
+`dev_worker_memory_mib` / `dev_worker_memory_floating_mib`; per-worker overrides on dw1/dw3 floors
 and the dw4 floor, node2) — low floor by design, because ballooning
 now inflates busy workers and 4 GiB is what lets a node hold its on-demand heavyweight **plus** its
 two workers-at-floor at once.

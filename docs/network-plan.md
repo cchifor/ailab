@@ -53,10 +53,10 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | **free (static)** | — | — |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.5`–`.7`, `.13`, `.29`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`** (13 addresses; `.30`
-freed 2026-09-12 by retiring `ci-runner-8`, `.29` freed 2026-09-16 by retiring `ci-runner-7`, `.13`
-freed 2026-09-21 by retiring `dev-worker-6` — `.12` follows when dev-worker-3 retires and the
-survivors are renumbered to `.8`–`.11`).
+**Free static space: `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`** (14 addresses;
+`.30` freed 2026-09-12 by retiring `ci-runner-8`, `.29` freed 2026-09-16 by retiring `ci-runner-7`,
+`.13` freed 2026-09-21 by retiring `dev-worker-6`, `.12` freed 2026-09-23 by the dev-worker re-slot —
+its VM 4205 is `dev-worker-4` on `.11` now).
 Nothing else in `.2`–`.50` is available.
 
 > **Keep all lab static IPs inside `.2`–`.50`.** The DHCP pool starts at `.51`, so anything `.51`+

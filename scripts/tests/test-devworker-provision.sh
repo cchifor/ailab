@@ -14,9 +14,11 @@
 #   C. a token-accessor listing failure aborts the run BEFORE the role is deleted (never "0 tokens
 #      revoked" on a failed enumeration); D. the same for the secret-id listing; E. a failed KV
 #      listing aborts the run (the KV purge is never reported done) and the rerun purges the subtree.
-#   Two retired slots since PR-C2 (2026-09-23): dev-worker-5 is the already-converged one (every
-#   listing empty, nothing to destroy — it must still get its unconditional role/policy deletes and
-#   be reported converged), dev-worker-6 is the one with material to revoke. The fault markers
+#   Two retired slots since PR-C2 (2026-09-23): dev-worker-5 is the already-converged one — its
+#   role is gone, so the secret-id listing answers AppRole's 400 `role "…" does not exist` (the shape
+#   every day-2 production run takes; it crashed the Job on 2026-09-21 until #816's guard) and the
+#   KV subtree lists as `{}`; nothing to destroy, yet its unconditional role/policy deletes must
+#   still be issued and it must be reported converged. dev-worker-6 has material to revoke. The fault markers
 #   (policy delete, secret-id/KV listings) are scoped to dev-worker-6's calls so each scenario
 #   still exercises the slot that has something to lose.
 #   The stub mimics the real CLI surface: generic `bao list` rejects `-mount` (only `bao kv list`
@@ -86,6 +88,11 @@ case "$1 $2" in
   "list -format=json")   # generic list: `bao list -format=json <path>` — NO -mount flag here
     case "$3" in
       -mount*|-*) echo "flag provided but not defined: ${3%%=*}" >&2; exit 1 ;;
+      auth/approle/role/dev-worker-5/secret-id)   # the converged slot: its role is already gone — AppRole's 400
+        echo "Error listing $3: Error making API request." >&2
+        echo "Code: 400. Errors:" >&2
+        echo "* role \"dev-worker-5\" does not exist" >&2
+        exit 2 ;;
       auth/approle/role/dev-worker-6/secret-id)
         if [ -f "$STATE/FAIL_SID_LIST_ONCE" ]; then rm -f "$STATE/FAIL_SID_LIST_ONCE"; echo "Error listing $3: connection refused" >&2; exit 2; fi
         # A CONVERGED retirement: the role itself is gone, so this listing is a 400 with OpenBao's
@@ -165,6 +172,7 @@ out2="$(run)"; rc2=$?; echo "$out2" | sed 's/^/  A2: /'; [ "$rc2" = 0 ] || { ech
 calls="$(cat "$WORK/state/calls.log")"
 expect "$out1" "retired dev-worker-6: 2 secret-id accessors destroyed, 1 tokens revoked, role/policy deleted"
 expect "$out1" "retired dev-worker-5: converged (no secret-ids, no tokens; role/policy/KV absent)"
+expect "$out1" "dev-worker-5: role already absent; nothing to enumerate at auth/approle/role/dev-worker-5/secret-id"
 expect "$out2" "retired dev-worker-5: converged (no secret-ids, no tokens; role/policy/KV absent)"
 expect "$out1" "retired KV leaf dev-workers/dev-worker-6/flat: metadata deleted"
 expect "$out1" "retired KV leaf dev-workers/dev-worker-6/sub1/credential: metadata deleted"
