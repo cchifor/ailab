@@ -9,10 +9,9 @@
 # Endpoints scrape can carry, and `cloud_host` is what the host-up join needs. `nodename` comes from
 # the Endpoints hostname field (as cloud-node.yaml does) so legends read cloud-ci-N.
 #
-# The Endpoints ship with NO addresses (subsets: []) on purpose: the targets are added in the SAME
-# ailab change that follows the VMs' creation on the cloud side, after they register and answer on
-# :9100. Adding an address before the VM exists is `up == 0` while the host is up — a firing alert
-# for a runner that was never built (codex review of the 2026-09-23 plan). IPAM: docs/network-plan.md.
+# Addresses are added ONLY after a VM exists, is registered and answers on :9100 (the cloud2 set
+# is still empty): an address without a VM is `up == 0` while the host is up — a firing alert for a
+# runner that was never built (codex review of the 2026-09-23 plan). IPAM: docs/network-plan.md.
 apiVersion: v1
 kind: Service
 metadata:
@@ -34,10 +33,13 @@ metadata:
   labels:
     app.kubernetes.io/name: ci-runner-cloud
     cloud_host: cloud1
-# cloud-ci-1 (.32, vmid 6101) / cloud-ci-2 (.33, vmid 6102) — added once the VMs are up and registered:
-#   - { ip: 192.168.0.32, hostname: cloud-ci-1 }
-#   - { ip: 192.168.0.33, hostname: cloud-ci-2 }
-subsets: []
+# cloud-ci-1/2 built 2026-09-23 (cloudlab #20), registered + online in Gitea the same evening.
+subsets:
+  - addresses:
+      - { ip: 192.168.0.32, hostname: cloud-ci-1 } # vmid 6101
+      - { ip: 192.168.0.33, hostname: cloud-ci-2 } # vmid 6102
+    ports:
+      - { name: metrics, port: 9100, protocol: TCP }
 ---
 apiVersion: v1
 kind: Service
@@ -84,9 +86,14 @@ metadata:
   labels:
     app.kubernetes.io/name: ci-runner-cloud
     cloud_host: cloud3
-# cloud-ci-3 (.34, vmid 6103) / cloud-ci-4 (.35, vmid 6104) — added once the VMs are up and registered.
+# cloud-ci-3/4 built 2026-09-23 (cloudlab #20), registered + online in Gitea the same evening.
 # cloud-ci-5 (.30, vmid 6105) is gated on the cloud3 sizing measurement (plan Phase 4).
-subsets: []
+subsets:
+  - addresses:
+      - { ip: 192.168.0.34, hostname: cloud-ci-3 } # vmid 6103
+      - { ip: 192.168.0.35, hostname: cloud-ci-4 } # vmid 6104
+    ports:
+      - { name: metrics, port: 9100, protocol: TCP }
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
