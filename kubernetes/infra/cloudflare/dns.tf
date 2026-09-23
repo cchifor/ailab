@@ -20,6 +20,10 @@ resource "cloudflare_dns_record" "tunnel" {
   content = local.tunnel_target
   ttl     = 1    # 1 = automatic (required while proxied)
   proxied = true # tunnel CNAMEs must be proxied
+  # Free-text note on the record, kept per hostname (the API never returns it unless set): a
+  # record adopted with a comment already on it (router, 2026-09-21) would otherwise lose it on
+  # the first apply, because a missing attribute means "clear it" for this provider.
+  comment = lookup(var.tunnel_record_comments, each.key, null)
 
   # Create the dev-worker Access apps (access.tf) BEFORE any of these CNAMEs, so dwN.chifor.me is
   # already Access-gated the moment it resolves — never an unauthenticated window to the ttyd shell.

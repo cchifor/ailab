@@ -43,3 +43,11 @@ variable "authelia_access_client_secret" {
   # which is the safe reading of "no secret".
   nullable = false
 }
+
+variable "tunnel_record_comments" {
+  description = "Per-hostname free-text comment on the tunnel CNAME (Cloudflare DNS record comment). Only records that already carry one need an entry; the rest stay without."
+  type        = map(string)
+  default = {
+    router = "LLM Router; ingress managed by AILab Flux; bearer-authenticated APIs" # set out of band 2026-09-21 with the record; adopted by the import
+  }
+}
