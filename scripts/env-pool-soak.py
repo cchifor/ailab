@@ -51,11 +51,18 @@ PROM_DEFAULT = "http://192.168.0.41:30090"
 LOKI_DEFAULT = "http://192.168.0.41:30310"
 STEP_SECONDS = 60
 LOKI_PAGE = 5000
-LOKI_MAX_PAGES = 40
+LOKI_MAX_PAGES = 40  # per slice
+LOKI_SLICE_SECONDS = 3600  # one Loki LINE query never spans more than this: the relay ships ~20k lines/h at [debug] and a
+#   single 46 h relay query OOM-killed loki-0 (1 GiB limit) on 2026-09-23 — the run then reported the relay absent
+LOKI_MAX_LINES = 150_000  # lines one query may return across its slices before it is reported truncated
+LOKI_METRIC_SLICE_SECONDS = 6 * 3600  # a count_over_time query reads the same chunks (no lines come back) — sliced, just wider
+RELAY_BUCKET_SECONDS = 60  # the relay-rate metric's range: at [debug] the relay ships > 1 line/s, so an empty 1-min bucket is silence
+RING_REPLAY_SECONDS = 340  # the node's ~1 MiB cri ring holds this much idle [debug] chatter: what a reconnect legitimately replays
+LOKI_SAMPLE_LINES = 20  # freshness sample per line-slice: the newest records of the UNFILTERED relay stream
 LOKI_RETENTION_HOURS = 168  # monitoring/loki.yaml limits_config.retention_period
 PROM_RETENTION_DAYS = 12  # retentionSize: 36GB binds before retention: 15d (kube-prometheus-stack.yaml)
 HEARTBEAT_GAP_SECONDS = 15 * 60  # reaper heartbeat every ~10 min; a 15 min gap = the reaper was silent
-RELAY_GAP_SECONDS = 15 * 60  # at [debug] level the shim/agent chatter is continuous; silence = capture gap
+RELAY_GAP_SECONDS = 15 * 60  # at [debug] level the shim/agent chatter is continuous; empty 5-min buckets for this long = the relay was not shipping
 RECOVERY_BOUND_SECONDS = 10 * 60  # closure → GC → reap (~150 s) → refill (~2 min): capacity back well inside 10 min
 EVENT_ATTACH_SECONDS = 5 * 60  # a signal (closure, reap, …) belongs to a capacity incident starting within ±5 min
 SPEC_CARRY_STEPS = 3  # warm_spec is carried forward over a gap of this many steps — the sample_gaps() tolerance
@@ -88,7 +95,23 @@ PROM_INSTANT_QUERIES = {
 LOKI_QUERIES = {
     "reaper": '{namespace="kube-system", app="env-reaper"} |~ "reap stage=|evidence|api error:|heartbeat iter="',
     "watchdog": '{namespace="testpool", container="control"} |~ "check hung|check failed|ready-port closed|checks recovered"',
-    "relay": '{namespace="monitoring", app="cri-log-relay"} |~ "vmconsole|kata-agent|level=debug"',
+    # Evidence-class lines only. The three steady chatter shapes — the shim's `reading guest console`
+    # and `Stats()` polling, the agent's shared-dir `Scanning path` — are ~99.9 % of the ~20k lines/h
+    # at [debug] (measured 2026-09-23: 1 line per 6 h is left on an idle member) and carry no
+    # evidence; excluding them keeps a 7-day fetch at a few thousand lines. Whether the relay is
+    # shipping at all, and continuously, is read from LOKI_METRIC_QUERIES over the UNFILTERED stream.
+    "relay": '{namespace="monitoring", app="cri-log-relay"} |~ "vmconsole|kata-agent|level=debug"'
+    ' != "reading guest console" != "Scanning path" != "Stats() "',
+}
+# The relay stream, unfiltered: the freshness sample reads its newest records per slice.
+RELAY_STREAM = '{namespace="monitoring", app="cri-log-relay"}'
+LOKI_METRIC_QUERIES = {
+    # containerd records per 1-min bucket from the relay, chatter included: presence + continuity of
+    # capture. Only lines with the record's own time field count — the relay's untimestamped
+    # diagnostics (`ERROR: rpc error … dial tcp <node>:50000` every few seconds while apid is
+    # unreachable) were the ONLY records during the 2026-09-21 12:17→12:33Z node outage and would
+    # have hidden exactly the gap this metric exists to show.
+    "relay_rate": r'sum(count_over_time({namespace="monitoring", app="cri-log-relay"} |~ "time=\"|\"time\":\"" [' + str(RELAY_BUCKET_SECONDS) + "s]))",
 }
 
 
@@ -126,12 +149,31 @@ class Source:
         return d["data"]["result"]
 
     def loki_range(self, expr: str, start_ns: int, end_ns: int) -> tuple[list[tuple[int, str]], bool]:
-        """All (ts_ns, line) in [start, end], newest page first, walked back by timestamp.
-        Loki's `end` is EXCLUSIVE, so the next page ends at oldest+1 to re-include the boundary
-        timestamp: records sharing it across streams are not skipped and the already-seen ones are
-        deduplicated as (ts, line) pairs. A page that makes no progress (every line at one
-        timestamp) cannot be exhausted safely → truncated.
-        Returns (lines, truncated) — truncated=True also when LOKI_MAX_PAGES was hit."""
+        """All (ts_ns, line) in [start, end) — fetched in slices of at most LOKI_SLICE_SECONDS, newest
+        slice first, so no single request makes Loki open more than an hour of chunks (the whole-
+        window relay fetch OOM-killed loki-0 on 2026-09-23); inside a slice the pages walk back by
+        timestamp. Loki's `end` is EXCLUSIVE, so a slice's exclusive end is the next-newer slice's
+        inclusive start (no overlap, no gap) and the next page ends at oldest+1 to re-include the
+        boundary timestamp: records sharing it across streams are not skipped and the already-seen
+        ones are deduplicated as (ts, line) pairs. Returns (lines, truncated): truncated when a slice
+        hit LOKI_MAX_PAGES, a page could not be exhausted (every line at one timestamp), or the
+        query passed LOKI_MAX_LINES in total."""
+        out: set[tuple[int, str]] = set()
+        truncated = False
+        slice_ns = LOKI_SLICE_SECONDS * 10**9
+        s_end = end_ns
+        while s_end > start_ns:
+            s_start = max(start_ns, s_end - slice_ns)
+            lines, trunc = self._loki_pages(expr, s_start, s_end)
+            out.update(lines)
+            truncated = truncated or trunc
+            if len(out) > LOKI_MAX_LINES:
+                return sorted(out), True
+            s_end = s_start
+        return sorted(out), truncated
+
+    def _loki_pages(self, expr: str, start_ns: int, end_ns: int) -> tuple[set[tuple[int, str]], bool]:
+        """One slice: newest page first, walked back by timestamp (see loki_range)."""
         out: set[tuple[int, str]] = set()
         end = end_ns
         for _ in range(LOKI_MAX_PAGES):
@@ -143,14 +185,42 @@ class Source:
             before = len(out)
             out.update(page)
             if len(page) < LOKI_PAGE:
-                return sorted(out), False
+                return out, False
             oldest = min(t for t, _ in page)
             if oldest + 1 >= end or len(out) == before:
-                return sorted(out), True  # no progress possible: a timestamp alone fills a page
+                return out, True  # no progress possible: a timestamp alone fills a page
             end = oldest + 1  # exclusive end → the boundary timestamp is queried again
             if end <= start_ns:
-                return sorted(out), False
-        return sorted(out), True
+                return out, False
+        return out, True
+
+    def loki_sample(self, expr: str, start_ns: int, end_ns: int, limit: int = LOKI_SAMPLE_LINES) -> list[tuple[int, str]]:
+        """The newest `limit` (ts_ns, line) of a stream in [start, end) — one request, no paging."""
+        q = urllib.parse.urlencode({"query": expr, "start": start_ns, "end": end_ns, "limit": limit, "direction": "backward"})
+        d = self._get(f"{self.loki}/loki/api/v1/query_range?{q}")
+        if d.get("status") != "success":
+            raise SourceError(f"loki query_range {expr!r}: {d.get('error')}")
+        return sorted((int(v[0]), v[1]) for s_ in d["data"]["result"] for v in s_["values"])
+
+    def loki_metric_range(self, expr: str, start: float, end: float, step: int = RELAY_BUCKET_SECONDS) -> list[tuple[float, float]]:
+        """A LogQL metric query (no lines come back) as sorted [(ts_seconds, value)], sliced by
+        LOKI_METRIC_SLICE_SECONDS for the same reason as loki_range. A bucket Loki omits (no records
+        in its range) is simply absent; a bucket on a slice boundary is evaluated twice with the same
+        value and stored once."""
+        out: dict[float, float] = {}
+        s_end = end
+        while s_end > start:
+            s_start = max(start, s_end - LOKI_METRIC_SLICE_SECONDS)
+            q = urllib.parse.urlencode({"query": expr, "start": int(s_start * 1e9), "end": int(s_end * 1e9), "step": step})
+            d = self._get(f"{self.loki}/loki/api/v1/query_range?{q}")
+            if d.get("status") != "success":
+                raise SourceError(f"loki query_range {expr!r}: {d.get('error')}")
+            for series in d["data"]["result"]:
+                for t, v in series.get("values", []):
+                    if float(v) > 0:
+                        out[float(t)] = float(v)
+            s_end = s_start
+        return sorted(out.items())
 
 
 @dataclasses.dataclass
@@ -445,9 +515,44 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
             rep.problems.append(f"loki {name}: {e}")
             lines, truncated = [], False
         if truncated:
-            rep.problems.append(f"loki {name}: more than {LOKI_MAX_PAGES} pages of {LOKI_PAGE} lines, or a page that cannot be exhausted — export truncated")
+            rep.problems.append(f"loki {name}: more than {LOKI_MAX_PAGES} pages of {LOKI_PAGE} lines in one {LOKI_SLICE_SECONDS // 3600} h slice, a page that cannot be exhausted, or more than {LOKI_MAX_LINES} lines in total — export truncated")
         loki[name] = lines
     rep.exports["loki"] = {n: [(t, l) for t, l in v] for n, v in loki.items()}
+    # presence + continuity of the relay from its containerd-record counts (5-min buckets, chatter included)
+    # rate is None when the count query itself failed (a Loki hiccup is not evidence of an outage —
+    # the report says the question could not be asked, never that the relay stopped)
+    rate: list[tuple[float, float]] | None = []
+    try:
+        rate = src.loki_metric_range(LOKI_METRIC_QUERIES["relay_rate"], start, end)
+    except SourceError as e:
+        rep.problems.append(f"loki relay_rate: {e}")
+        rate = None
+    rep.exports["loki_metrics"] = {"relay_rate": rate or []}
+    # freshness: per line-slice, the newest records of the UNFILTERED stream must carry a source time
+    # close to their OWN ingestion time — within RING_REPLAY_SECONDS before it (what a reconnect
+    # legitimately replays) or a bucket after it (clock skew). Against ingestion, not the slice: a
+    # record sourced a minute before the window and re-shipped every 5 min would satisfy a slice-
+    # relative test all hour long. Independent of the evidence selector, so a stream that replays
+    # only old chatter cannot pass as a quiet member — the count metric cannot tell them apart, this can
+    stale_slices: list[tuple[float, float, int]] = []
+    s_end = end
+    while s_end > start:
+        s_start = max(start, s_end - LOKI_SLICE_SECONDS)
+        if any(s_start < t <= s_end + RELAY_BUCKET_SECONDS for t, _ in (rate or [])):  # a silent slice is the gap check's business
+            try:
+                sample = src.loki_sample(RELAY_STREAM, int(s_start * 1e9), int(s_end * 1e9))
+            except SourceError as e:
+                rep.problems.append(f"loki relay sample {iso(s_start)}: {e}")
+                sample = None
+            if sample is not None:
+                # the NEWEST timestamped record decides (the relay's own diagnostics carry no source time
+                # and are skipped): a stream re-shipping one old record every few minutes has a fresh
+                # first copy and a stale newest one; a live stream's newest record is always fresh
+                newest = [(t, st) for t, st in ((t, source_ts(l)) for t, l in sample) if st is not None]
+                fresh = bool(newest) and newest[-1][0] / 1e9 - RING_REPLAY_SECONDS <= newest[-1][1] <= newest[-1][0] / 1e9 + RELAY_BUCKET_SECONDS
+                if not fresh:
+                    stale_slices.append((s_start, s_end, len(sample)))
+        s_end = s_start
 
     reap_re = re.compile(r"(^|\s)reap stage=([12]) .*?sandbox=(\S+) .*?pid=(\d+)")
     evid_re = re.compile(r"(^|\s)evidence stage=1 .*?sandbox=(\S+) .*?pid=(\d+) state=")
@@ -494,7 +599,9 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         f"| reaper heartbeats | {len(beats)} |",
         f"| watchdog closures (`check hung`/`check failed`/`ready-port closed`) | {len(closures)} |",
         f"| watchdog `checks recovered` | {len(recovered)} |",
-        f"| relay records in-window (deduplicated on source time + content; {len(relay_raw)} raw, {historical} replayed from outside the window, {unparsed} untimestamped) | {len(relay)} |",
+        f"| relay records in-window (evidence-class lines, deduplicated on source time + content; {len(relay_raw)} raw, {historical} replayed from outside the window, {unparsed} untimestamped) | {len(relay)} |",
+        f"| relay ingestion ({RELAY_BUCKET_SECONDS // 60}-min buckets with containerd records, chatter included) | {'query failed' if rate is None else len(rate)} of ~{max(1, int((end - start) / RELAY_BUCKET_SECONDS))} |",
+        f"| relay freshness samples (per {LOKI_SLICE_SECONDS // 3600} h slice, the newest timestamped record of the last {LOKI_SAMPLE_LINES} ingested is sourced within {RING_REPLAY_SECONDS} s of its ingestion) | {len(stale_slices)} stale slice(s) |",
     ]
     if sandboxes:
         rep.sections.append("| relay records per reaped sandbox | " + ", ".join(f"{sb[:12]}..={n}" for sb, n in relay_per_sb.items()) + " |")
@@ -514,13 +621,28 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         for a, b in zip([start] + beats_s, beats_s + [end]):
             if b - a > HEARTBEAT_GAP_SECONDS:
                 rep.problems.append(f"reaper heartbeat gap {iso(a)} → {iso(b)} ({fmt_dur(b - a)})")
-    if not relay:
+    if rate is None:
+        pass  # already a problem above; nothing observed, so nothing claimed about the relay
+    elif not rate:
         rep.problems.append("no cri-log-relay records in the window — durable host-log capture is not shipping")
     else:
-        relay_s = [t for t, _ in relay]
-        for a, b in zip([start] + relay_s, relay_s + [end]):
-            if b - a > RELAY_GAP_SECONDS:
-                rep.problems.append(f"relay capture gap {iso(a)} → {iso(b)} ({fmt_dur(b - a)}) by source time — host-log evidence for that stretch does not exist")
+        # continuity by ingestion time: a bucket at t holds the records of (t - RELAY_BUCKET_SECONDS, t], so
+        # consecutive buckets (t_i, t_j) enclose a silence of AT LEAST t_j - t_i - RELAY_BUCKET_SECONDS and at
+        # most that plus two buckets (both boundary buckets may hold records from outside the silence).
+        # Reported when the silence COULD reach the gap bound — a 16-min outage that starts mid-bucket
+        # must never round below a 15-min limit
+        edges = [start] + [t for t, _ in rate] + [end + RELAY_BUCKET_SECONDS]
+        for a, b in zip(edges, edges[1:]):
+            silence = b - a - RELAY_BUCKET_SECONDS
+            if silence + 2 * RELAY_BUCKET_SECONDS >= RELAY_GAP_SECONDS:
+                rep.problems.append(f"relay ingestion gap {iso(a)} → {iso(b - RELAY_BUCKET_SECONDS)}: silent for {fmt_dur(silence)} (up to {fmt_dur(silence + 2 * RELAY_BUCKET_SECONDS)} with {RELAY_BUCKET_SECONDS} s buckets) — nothing reached Loki from the relay; the node's ring replays at most ~{RING_REPLAY_SECONDS} s on reconnect, so host-log evidence for that stretch is gone")
+        for s_start, s_end, n in stale_slices:
+            rep.problems.append(f"relay freshness {iso(s_start)} → {iso(s_end)}: the newest timestamped record of the last {n} ingested was not sourced within {RING_REPLAY_SECONDS} s of its own ingestion (replayed history only) — nothing current was captured in that hour")
+        if relay_raw and not relay:
+            # replayed history or untimestamped diagnostics only: the stream is alive but nothing in
+            # it is this window's capture (a quiet member that emits only chatter is NOT this case:
+            # its evidence-class fetch is empty and its ingestion buckets are full)
+            rep.problems.append(f"relay shipped {len(relay_raw)} evidence-class lines but none carries an in-window source time (replayed history or untimestamped) — nothing was captured for this window")
 
     # --- capacity incidents (from the warm pool's own accounting) ------------------------------
     ready = next(iter(prom["warm_ready"].values()), [])
@@ -600,6 +722,7 @@ def export(rep: Report, export_dir: pathlib.Path) -> None:
         with (export_dir / f"loki-{name}.log").open("w", encoding="utf-8") as f:
             for t, l in lines:
                 f.write(f"{iso(t / 1e9)} {l}\n")
+    (export_dir / "loki-metrics.json").write_text(json.dumps(rep.exports.get("loki_metrics", {}), indent=1), encoding="utf-8")
     (export_dir / "report.md").write_text(rep.markdown(), encoding="utf-8")
 
 

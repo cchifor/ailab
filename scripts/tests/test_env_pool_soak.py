@@ -7,7 +7,9 @@ pool's own readyReplicas, per-PID evidence matching, source-timestamp freshness,
 exclusive-end pagination against a corpus-backed fake.
 Run: python3 -m unittest scripts.tests.test_env_pool_soak  (CI: .gitea/workflows/manifests.yaml)
 """
+import collections
 import importlib.util
+import math
 import pathlib
 import sys
 import unittest
@@ -68,11 +70,35 @@ class FakeSource:
             raise soak.SourceError("stop_errors unreachable")
         return self.instant.get("stop_errors", [])
 
+    CHATTER = ("reading guest console", "Scanning path", "Stats() ")  # what the relay selector excludes
+
     def loki_range(self, expr, start_ns, end_ns):
         name = self._name(soak.LOKI_QUERIES, expr)
         if name in self.fail:
             raise soak.SourceError(f"{name} unreachable")
-        return self.loki.get(name, []), name in self.loki.get("_truncated", ())
+        lines = self.loki.get(name, [])
+        if name == "relay":  # evidence-class only, the way the selector filters the stream
+            lines = [(t, l) for t, l in lines if not any(c in l for c in self.CHATTER)]
+        return lines, name in self.loki.get("_truncated", ())
+
+    def loki_sample(self, expr, start_ns, end_ns, limit=soak.LOKI_SAMPLE_LINES):
+        """The newest `limit` UNFILTERED relay lines ingested in [start, end)."""
+        if "relay_sample" in self.fail:
+            raise soak.SourceError("relay sample unreachable")
+        rows = sorted((t, l) for t, l in self.loki.get("relay", []) if start_ns <= t < end_ns)
+        return rows[-limit:]
+
+    def loki_metric_range(self, expr, start, end, step=soak.RELAY_BUCKET_SECONDS):
+        """The relay-rate buckets: explicit under loki["relay_rate"], else derived from the canned relay
+        lines' INGESTION timestamps (a bucket at t holds (t - step, t]), containerd records only —
+        the way Loki counts them under the metric query's time-field filter."""
+        name = self._name(soak.LOKI_METRIC_QUERIES, expr)
+        if name in self.fail:
+            raise soak.SourceError(f"{name} unreachable")
+        if name in self.loki:
+            return [(float(t), float(v)) for t, v in self.loki[name] if start <= t <= end]
+        counts = collections.Counter(math.ceil(t / 1e9 / step) * step for t, l in self.loki.get("relay", []) if soak.source_ts(l) is not None)
+        return sorted((float(t), float(n)) for t, n in counts.items() if start <= t <= end)
 
 
 def quiet_prom(node=NODE, pod=POD):
@@ -242,7 +268,7 @@ class CompletenessTests(unittest.TestCase):
         return soak.run(src, T0, T1, [NODE], now=now or T1 + 60)
 
     def test_failed_endpoint_is_never_ok(self):
-        for failing in ("node_ready", "alerts", "reaper", "stop_errors", "warm_ready"):
+        for failing in ("node_ready", "alerts", "reaper", "relay_rate", "stop_errors", "warm_ready"):
             rep = self.run_report(FakeSource(quiet_prom(), loki=quiet_loki(), fail={failing}))
             self.assertEqual(rep.verdict, "INCOMPLETE", failing)
 
@@ -298,12 +324,100 @@ class CompletenessTests(unittest.TestCase):
         self.assertEqual(self.run_report(FakeSource(quiet_prom(), loki=loki)).verdict, "INCOMPLETE")
         self.assertEqual(self.run_report(FakeSource(quiet_prom(), loki=quiet_loki()), now=T0 + 200 * 3600).verdict, "INCOMPLETE")
 
-    def test_relay_gap_by_source_time_is_incomplete(self):
+    def test_relay_ingestion_gap_is_incomplete(self):
+        # 35 min without a record reaching Loki (by ingestion time, the unfiltered stream's buckets)
         loki = quiet_loki()
         loki["relay"] = [l for l in loki["relay"] if l[0] < int((T0 + 600) * 1e9) or l[0] > int((T0 + 2700) * 1e9)]
         rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
         self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
-        self.assertTrue(any("relay capture gap" in p for p in rep.problems))
+        b = soak.RELAY_BUCKET_SECONDS
+        self.assertTrue(any(f"relay ingestion gap {soak.iso(T0 + 300)} → {soak.iso(T0 + 3000 - b)}: silent for {soak.fmt_dur(2700 - b)}" in p for p in rep.problems), rep.problems)
+
+    def test_outage_starting_between_bucket_boundaries_is_still_reported(self):
+        # records every 30 s, silent from 00:01:00+1 s to 00:17:00+1 s (16 min, both ends mid-bucket): the
+        # boundary buckets hold records from outside the silence, so the measured silence rounds
+        # down — the report must still flag it against the 15-min bound
+        loki = quiet_loki()
+        loki["relay"] = [(int(t * 1e9), src_line(t, "health check ok")) for t in range(int(T0), int(T1) + 1, 30) if not (T0 + 61 <= t <= T0 + 17 * 60 + 1)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("relay ingestion gap" in p for p in rep.problems), rep.problems)
+        # ...and a 12-min silence measured the same way is NOT a gap even with the boundary allowance
+        loki = quiet_loki()
+        loki["relay"] = [(int(t * 1e9), src_line(t, "health check ok")) for t in range(int(T0), int(T1) + 1, 30) if not (T0 + 61 <= t <= T0 + 13 * 60 + 1)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "OK", rep.markdown())
+
+    def test_relay_not_shipping_is_incomplete(self):
+        loki = quiet_loki()
+        loki["relay"] = []  # no lines at all → no buckets either
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("no cri-log-relay records in the window" in p for p in rep.problems))
+
+    def test_quiet_member_that_emits_only_chatter_is_ok(self):
+        # the evidence-class fetch is empty (everything was `reading guest console` / `Stats()` /
+        # `Scanning path`, excluded by the selector) while the unfiltered stream is continuous AND fresh
+        loki = quiet_loki()
+        loki["relay"] = [(int((T0 + 300 * i) * 1e9), src_line(T0 + 300 * i, "reading guest console")) for i in range(0, 13)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "OK", rep.markdown())
+        self.assertTrue(soak.should_advance_checkpoint(rep))
+        self.assertIn("| relay ingestion (1-min buckets with containerd records, chatter included) | 13 of ~60 |", rep.markdown())
+        self.assertIn("0 raw, 0 replayed from outside the window, 0 untimestamped) | 0 |", rep.markdown())
+
+    def test_replayed_chatter_alone_is_not_capture(self):
+        # the relay reconnects and replays yesterday's chatter every 5 min: the evidence fetch is
+        # empty (chatter), the count metric sees timestamped records — only the freshness sample
+        # (newest unfiltered records per slice, source time inside the slice) tells this from a
+        # healthy quiet member
+        loki = quiet_loki()
+        loki["relay"] = [(int((T0 + 300 * i) * 1e9), src_line(T0 - 86400, "reading guest console")) for i in range(0, 13)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("relay freshness" in p and "replayed history only" in p for p in rep.problems), rep.problems)
+        self.assertFalse(soak.should_advance_checkpoint(rep))
+        # the sharper shape: the replayed record is sourced a minute BEFORE the window and re-shipped
+        # every 5 min — a slice-relative allowance would accept it all hour; against each record's own
+        # ingestion time it is stale from the second replay on
+        loki = quiet_loki()
+        loki["relay"] = [(int((T0 + 300 * i) * 1e9), src_line(T0 - 60, "reading guest console")) for i in range(0, 13)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("relay freshness" in p for p in rep.problems), rep.problems)
+        # ...while a genuine reconnect replay (source time within the ring depth of its ingestion) is fresh
+        loki = quiet_loki()
+        loki["relay"] = [(int((T0 + 300 * i) * 1e9), src_line(T0 + 300 * i - 300, "reading guest console")) for i in range(0, 13)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "OK", rep.markdown())
+        # a failed sample is a problem too, never a silent pass
+        rep = self.run_report(FakeSource(quiet_prom(), loki=quiet_loki(), fail={"relay_sample"}))
+        self.assertEqual(rep.verdict, "INCOMPLETE")
+
+    def test_failed_count_query_is_not_reported_as_an_outage(self):
+        # a Loki hiccup on the count query is INCOMPLETE (the question could not be asked) but must
+        # never read as "the relay is not shipping"
+        rep = self.run_report(FakeSource(quiet_prom(), loki=quiet_loki(), fail={"relay_rate"}))
+        self.assertEqual(rep.verdict, "INCOMPLETE")
+        self.assertTrue(any("loki relay_rate" in p for p in rep.problems))
+        self.assertFalse(any("not shipping" in p or "ingestion gap" in p for p in rep.problems), rep.problems)
+        self.assertIn("| query failed of ~60 |", rep.markdown())
+
+    def test_relay_selector_excludes_the_chatter_shapes(self):
+        for chatter in ('!= "reading guest console"', '!= "Scanning path"', '!= "Stats() "'):
+            self.assertIn(chatter, soak.LOKI_QUERIES["relay"])
+        self.assertNotIn("!=", soak.LOKI_METRIC_QUERIES["relay_rate"])  # continuity counts every containerd record …
+        self.assertIn('time=', soak.LOKI_METRIC_QUERIES["relay_rate"])  # … and only those (the relay's own diagnostics have no time field)
+
+    def test_relay_diagnostics_alone_do_not_hide_an_outage(self):
+        # the 2026-09-21 12:17→12:33Z shape: apid unreachable, the relay logs `ERROR: rpc error …` every
+        # few seconds and nothing else — those are records in the stream but not capture
+        loki = quiet_loki()
+        loki["relay"] = [l for l in loki["relay"] if l[0] < int((T0 + 600) * 1e9) or l[0] > int((T0 + 2700) * 1e9)]
+        loki["relay"] += [(int((T0 + 600 + 30 * i) * 1e9), "ERROR: rpc error: code = Unavailable desc = dial tcp 192.168.0.37:50000") for i in range(1, 70)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("relay ingestion gap" in p for p in rep.problems), rep.problems)
 
     def test_replayed_old_records_are_not_fresh_evidence(self):
         # the relay reconnects every 5 min and replays the same day-old record with a new ingestion
@@ -313,14 +427,14 @@ class CompletenessTests(unittest.TestCase):
         loki["relay"] = [(int((T0 + 300 * i) * 1e9), old) for i in range(0, 13)]
         rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
         self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
-        self.assertTrue(any("no cri-log-relay records in the window" in p for p in rep.problems))
+        self.assertTrue(any("none carries an in-window source time" in p for p in rep.problems))
         self.assertIn("13 raw, 13 replayed from outside the window, 0 untimestamped) | 0 |", rep.markdown())
 
     def test_relay_lines_without_source_time_are_reported_not_problems(self):
         loki = quiet_loki()
         loki["relay"] = [(t, "no time field here") for t, _ in loki["relay"]]
         rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
-        self.assertEqual(rep.verdict, "INCOMPLETE")  # nothing timestamped → no capture at all
+        self.assertEqual(rep.verdict, "INCOMPLETE")  # nothing timestamped → not one containerd record shipped
         self.assertTrue(any("no cri-log-relay records in the window" in p for p in rep.problems))
         # one garbled line among a healthy stream is counted, not a problem: it must not hold the
         # checkpoint on the same malformed record forever
@@ -408,7 +522,7 @@ class CompletenessTests(unittest.TestCase):
             loki["relay"] += [(int((T0 + 300 * i) * 1e9), old)] * 3 + [(int((T0 + 300 * i) * 1e9), "untimestamped replay")]
         rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
         self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
-        self.assertTrue(any("no cri-log-relay records in the window" in p for p in rep.problems))
+        self.assertTrue(any("none carries an in-window source time" in p for p in rep.problems))
         self.assertIn("carry no containerd time= field", rep.markdown())
         self.assertFalse(any("time= field" in p for p in rep.problems))
 
@@ -511,6 +625,47 @@ class PaginationTests(unittest.TestCase):
             self.assertTrue(truncated)
         finally:
             soak.LOKI_PAGE = saved
+
+    def test_long_window_is_fetched_in_bounded_slices(self):
+        # 5.5 h window, records spread over it: every request spans ≤ LOKI_SLICE_SECONDS, nothing
+        # is lost or duplicated across the slice boundaries (exclusive end = next slice's start)
+        h = int(3600 * 1e9)
+        corpus = [(0, "a"), (h, "b"), (2 * h, "c"), (2 * h + h // 2, "d"), (4 * h, "e"), (5 * h, "f")]
+        src, fake = self.make(corpus)
+        lines, truncated = src.loki_range("{x}", 0, 5 * h + h // 2)
+        self.assertFalse(truncated)
+        self.assertEqual([l for _, l in lines], ["a", "b", "c", "d", "e", "f"])
+        self.assertGreaterEqual(len(fake.calls), 6)
+        self.assertTrue(all(end - start <= soak.LOKI_SLICE_SECONDS * 1e9 for start, end, _ in fake.calls), fake.calls)
+        self.assertEqual({(s_, e_) for s_, e_, _ in fake.calls}.__len__(), len(fake.calls))  # no slice requested twice
+
+    def test_line_budget_marks_the_export_truncated(self):
+        soak.LOKI_MAX_LINES, saved = 3, soak.LOKI_MAX_LINES
+        try:
+            h = int(3600 * 1e9)
+            src, _ = self.make([(i * h, str(i)) for i in range(6)])
+            _, truncated = src.loki_range("{x}", 0, 6 * h)
+            self.assertTrue(truncated)
+        finally:
+            soak.LOKI_MAX_LINES = saved
+
+    def test_metric_query_is_sliced_and_boundary_buckets_stored_once(self):
+        src = soak.Source("http://p", "http://l")
+        calls = []
+
+        def fake(url):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            start, end = int(q["start"][0]) / 1e9, int(q["end"][0]) / 1e9
+            calls.append((start, end))
+            pts = [[t, "7"] for t in range(int(start), int(end) + 1, 300)]  # Loki evaluates start..end inclusive
+            return {"status": "success", "data": {"result": [{"metric": {}, "values": pts}]}}
+
+        src._get = fake
+        out = src.loki_metric_range("sum(count_over_time({x}[300s]))", 0, 20 * 3600)
+        self.assertTrue(all(end - start <= soak.LOKI_METRIC_SLICE_SECONDS for start, end in calls), calls)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(out), 20 * 12 + 1)  # every 5-min point once, boundary points not doubled
+        self.assertTrue(all(v == 7.0 for _, v in out))
 
     def test_exact_page_boundary_terminates(self):
         soak.LOKI_PAGE, saved = 2, soak.LOKI_PAGE
