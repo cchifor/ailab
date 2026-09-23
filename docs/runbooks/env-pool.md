@@ -217,12 +217,15 @@ most 1 h (`LOKI_SLICE_SECONDS`, up to 40 pages of 5000 each, 150 000 lines in to
 export is marked truncated), count queries in slices of 6 h, and the relay LINES fetched are
 evidence-class only — the selector excludes the three steady chatter shapes (`reading guest
 console`, `Stats()`, `Scanning path`), which are ~99.9 % of the ~20k lines/h at `[debug]`. Whether
-the relay is shipping, and continuously, is read from `sum(count_over_time(…[5m]))` over every
+the relay is shipping, and continuously, is read from `sum(count_over_time(…[1m]))` over every
 containerd record (chatter included; the relay's own untimestamped `ERROR: rpc error …` lines do
-not count — they were the only records during the 09-21 node outage): an empty stretch longer
-than 15 min is a `relay ingestion gap` (the node's ring
-replays ~340 s on reconnect, nothing older), and a stream whose only in-window lines are replayed
-history or untimestamped diagnostics is "nothing captured". The day-1 run on 2026-09-23 over a
+not count — they were the only records during the 09-21 node outage): a silence that could reach
+15 min counting the two boundary buckets is a `relay ingestion gap` (the node's ring replays
+~340 s on reconnect, nothing older). Freshness is a third, independent check: per 1 h slice the
+newest 20 records of the unfiltered stream must carry a source time inside the slice — a relay
+that only replays old chatter looks continuous to the count and empty to the evidence fetch,
+and this is what tells it from a healthy quiet member. A stream whose only in-window evidence
+lines are replayed history or untimestamped diagnostics is "nothing captured". The day-1 run on 2026-09-23 over a
 46 h window with the previous whole-window relay fetch **OOM-killed `loki-0`** (1 GiB limit) and
 then reported the relay absent — a window of any length inside the retention is safe now.
 

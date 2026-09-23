@@ -70,11 +70,23 @@ class FakeSource:
             raise soak.SourceError("stop_errors unreachable")
         return self.instant.get("stop_errors", [])
 
+    CHATTER = ("reading guest console", "Scanning path", "Stats() ")  # what the relay selector excludes
+
     def loki_range(self, expr, start_ns, end_ns):
         name = self._name(soak.LOKI_QUERIES, expr)
         if name in self.fail:
             raise soak.SourceError(f"{name} unreachable")
-        return self.loki.get(name, []), name in self.loki.get("_truncated", ())
+        lines = self.loki.get(name, [])
+        if name == "relay":  # evidence-class only, the way the selector filters the stream
+            lines = [(t, l) for t, l in lines if not any(c in l for c in self.CHATTER)]
+        return lines, name in self.loki.get("_truncated", ())
+
+    def loki_sample(self, expr, start_ns, end_ns, limit=soak.LOKI_SAMPLE_LINES):
+        """The newest `limit` UNFILTERED relay lines ingested in [start, end)."""
+        if "relay_sample" in self.fail:
+            raise soak.SourceError("relay sample unreachable")
+        rows = sorted((t, l) for t, l in self.loki.get("relay", []) if start_ns <= t < end_ns)
+        return rows[-limit:]
 
     def loki_metric_range(self, expr, start, end, step=soak.RELAY_BUCKET_SECONDS):
         """The relay-rate buckets: explicit under loki["relay_rate"], else derived from the canned relay
@@ -318,7 +330,23 @@ class CompletenessTests(unittest.TestCase):
         loki["relay"] = [l for l in loki["relay"] if l[0] < int((T0 + 600) * 1e9) or l[0] > int((T0 + 2700) * 1e9)]
         rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
         self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
-        self.assertTrue(any("relay ingestion gap 2027-01-15T08:05:00Z → 2027-01-15T08:45:00Z (40m00s)" in p for p in rep.problems), rep.problems)
+        b = soak.RELAY_BUCKET_SECONDS
+        self.assertTrue(any(f"relay ingestion gap {soak.iso(T0 + 300)} → {soak.iso(T0 + 3000 - b)}: silent for {soak.fmt_dur(2700 - b)}" in p for p in rep.problems), rep.problems)
+
+    def test_outage_starting_between_bucket_boundaries_is_still_reported(self):
+        # records every 30 s, silent from 00:01:00+1 s to 00:17:00+1 s (16 min, both ends mid-bucket): the
+        # boundary buckets hold records from outside the silence, so the measured silence rounds
+        # down — the report must still flag it against the 15-min bound
+        loki = quiet_loki()
+        loki["relay"] = [(int(t * 1e9), src_line(t, "health check ok")) for t in range(int(T0), int(T1) + 1, 30) if not (T0 + 61 <= t <= T0 + 17 * 60 + 1)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("relay ingestion gap" in p for p in rep.problems), rep.problems)
+        # ...and a 12-min silence measured the same way is NOT a gap even with the boundary allowance
+        loki = quiet_loki()
+        loki["relay"] = [(int(t * 1e9), src_line(t, "health check ok")) for t in range(int(T0), int(T1) + 1, 30) if not (T0 + 61 <= t <= T0 + 13 * 60 + 1)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "OK", rep.markdown())
 
     def test_relay_not_shipping_is_incomplete(self):
         loki = quiet_loki()
@@ -329,14 +357,38 @@ class CompletenessTests(unittest.TestCase):
 
     def test_quiet_member_that_emits_only_chatter_is_ok(self):
         # the evidence-class fetch is empty (everything was `reading guest console` / `Stats()` /
-        # `Scanning path`, excluded by the selector) while the unfiltered stream is continuous
+        # `Scanning path`, excluded by the selector) while the unfiltered stream is continuous AND fresh
         loki = quiet_loki()
-        loki["relay"] = []
-        loki["relay_rate"] = [(T0 + 300 * i, 6000.0) for i in range(0, 13)]
+        loki["relay"] = [(int((T0 + 300 * i) * 1e9), src_line(T0 + 300 * i, "reading guest console")) for i in range(0, 13)]
         rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
         self.assertEqual(rep.verdict, "OK", rep.markdown())
         self.assertTrue(soak.should_advance_checkpoint(rep))
-        self.assertIn("| relay ingestion (5-min buckets with containerd records, chatter included) | 13 of ~12 |", rep.markdown())
+        self.assertIn("| relay ingestion (1-min buckets with containerd records, chatter included) | 13 of ~60 |", rep.markdown())
+        self.assertIn("0 raw, 0 replayed from outside the window, 0 untimestamped) | 0 |", rep.markdown())
+
+    def test_replayed_chatter_alone_is_not_capture(self):
+        # the relay reconnects and replays yesterday's chatter every 5 min: the evidence fetch is
+        # empty (chatter), the count metric sees timestamped records — only the freshness sample
+        # (newest unfiltered records per slice, source time inside the slice) tells this from a
+        # healthy quiet member
+        loki = quiet_loki()
+        loki["relay"] = [(int((T0 + 300 * i) * 1e9), src_line(T0 - 86400, "reading guest console")) for i in range(0, 13)]
+        rep = self.run_report(FakeSource(quiet_prom(), loki=loki))
+        self.assertEqual(rep.verdict, "INCOMPLETE", rep.markdown())
+        self.assertTrue(any("relay freshness" in p and "replayed history only" in p for p in rep.problems), rep.problems)
+        self.assertFalse(soak.should_advance_checkpoint(rep))
+        # a failed sample is a problem too, never a silent pass
+        rep = self.run_report(FakeSource(quiet_prom(), loki=quiet_loki(), fail={"relay_sample"}))
+        self.assertEqual(rep.verdict, "INCOMPLETE")
+
+    def test_failed_count_query_is_not_reported_as_an_outage(self):
+        # a Loki hiccup on the count query is INCOMPLETE (the question could not be asked) but must
+        # never read as "the relay is not shipping"
+        rep = self.run_report(FakeSource(quiet_prom(), loki=quiet_loki(), fail={"relay_rate"}))
+        self.assertEqual(rep.verdict, "INCOMPLETE")
+        self.assertTrue(any("loki relay_rate" in p for p in rep.problems))
+        self.assertFalse(any("not shipping" in p or "ingestion gap" in p for p in rep.problems), rep.problems)
+        self.assertIn("| query failed of ~60 |", rep.markdown())
 
     def test_relay_selector_excludes_the_chatter_shapes(self):
         for chatter in ('!= "reading guest console"', '!= "Scanning path"', '!= "Stats() "'):

@@ -56,7 +56,9 @@ LOKI_SLICE_SECONDS = 3600  # one Loki LINE query never spans more than this: the
 #   single 46 h relay query OOM-killed loki-0 (1 GiB limit) on 2026-09-23 — the run then reported the relay absent
 LOKI_MAX_LINES = 150_000  # lines one query may return across its slices before it is reported truncated
 LOKI_METRIC_SLICE_SECONDS = 6 * 3600  # a count_over_time query reads the same chunks (no lines come back) — sliced, just wider
-RELAY_BUCKET_SECONDS = 300  # the relay-rate metric's range: at [debug] the relay ships > 1 line/s, so an empty 5-min bucket is silence
+RELAY_BUCKET_SECONDS = 60  # the relay-rate metric's range: at [debug] the relay ships > 1 line/s, so an empty 1-min bucket is silence
+RING_REPLAY_SECONDS = 340  # the node's ~1 MiB cri ring holds this much idle [debug] chatter: what a reconnect legitimately replays
+LOKI_SAMPLE_LINES = 20  # freshness sample per line-slice: the newest records of the UNFILTERED relay stream
 LOKI_RETENTION_HOURS = 168  # monitoring/loki.yaml limits_config.retention_period
 PROM_RETENTION_DAYS = 12  # retentionSize: 36GB binds before retention: 15d (kube-prometheus-stack.yaml)
 HEARTBEAT_GAP_SECONDS = 15 * 60  # reaper heartbeat every ~10 min; a 15 min gap = the reaper was silent
@@ -101,8 +103,10 @@ LOKI_QUERIES = {
     "relay": '{namespace="monitoring", app="cri-log-relay"} |~ "vmconsole|kata-agent|level=debug"'
     ' != "reading guest console" != "Scanning path" != "Stats() "',
 }
+# The relay stream, unfiltered: the freshness sample reads its newest records per slice.
+RELAY_STREAM = '{namespace="monitoring", app="cri-log-relay"}'
 LOKI_METRIC_QUERIES = {
-    # containerd records per 5-min bucket from the relay, chatter included: presence + continuity of
+    # containerd records per 1-min bucket from the relay, chatter included: presence + continuity of
     # capture. Only lines with the record's own time field count — the relay's untimestamped
     # diagnostics (`ERROR: rpc error … dial tcp <node>:50000` every few seconds while apid is
     # unreachable) were the ONLY records during the 2026-09-21 12:17→12:33Z node outage and would
@@ -189,6 +193,14 @@ class Source:
             if end <= start_ns:
                 return out, False
         return out, True
+
+    def loki_sample(self, expr: str, start_ns: int, end_ns: int, limit: int = LOKI_SAMPLE_LINES) -> list[tuple[int, str]]:
+        """The newest `limit` (ts_ns, line) of a stream in [start, end) — one request, no paging."""
+        q = urllib.parse.urlencode({"query": expr, "start": start_ns, "end": end_ns, "limit": limit, "direction": "backward"})
+        d = self._get(f"{self.loki}/loki/api/v1/query_range?{q}")
+        if d.get("status") != "success":
+            raise SourceError(f"loki query_range {expr!r}: {d.get('error')}")
+        return sorted((int(v[0]), v[1]) for s_ in d["data"]["result"] for v in s_["values"])
 
     def loki_metric_range(self, expr: str, start: float, end: float, step: int = RELAY_BUCKET_SECONDS) -> list[tuple[float, float]]:
         """A LogQL metric query (no lines come back) as sorted [(ts_seconds, value)], sliced by
@@ -507,12 +519,34 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         loki[name] = lines
     rep.exports["loki"] = {n: [(t, l) for t, l in v] for n, v in loki.items()}
     # presence + continuity of the relay from its containerd-record counts (5-min buckets, chatter included)
-    rate: list[tuple[float, float]] = []
+    # rate is None when the count query itself failed (a Loki hiccup is not evidence of an outage —
+    # the report says the question could not be asked, never that the relay stopped)
+    rate: list[tuple[float, float]] | None = []
     try:
         rate = src.loki_metric_range(LOKI_METRIC_QUERIES["relay_rate"], start, end)
     except SourceError as e:
         rep.problems.append(f"loki relay_rate: {e}")
-    rep.exports["loki_metrics"] = {"relay_rate": rate}
+        rate = None
+    rep.exports["loki_metrics"] = {"relay_rate": rate or []}
+    # freshness: per line-slice, the newest records of the UNFILTERED stream must carry a source time
+    # inside the slice (a reconnect replays the ring, so up to RING_REPLAY_SECONDS before it is fine);
+    # independent of the evidence selector, so a stream that replays only old chatter cannot pass
+    # as a quiet member — the count metric cannot tell them apart, this can
+    stale_slices: list[tuple[float, float, int]] = []
+    s_end = end
+    while s_end > start:
+        s_start = max(start, s_end - LOKI_SLICE_SECONDS)
+        if any(s_start < t <= s_end + RELAY_BUCKET_SECONDS for t, _ in (rate or [])):  # a silent slice is the gap check's business
+            try:
+                sample = src.loki_sample(RELAY_STREAM, int(s_start * 1e9), int(s_end * 1e9))
+            except SourceError as e:
+                rep.problems.append(f"loki relay sample {iso(s_start)}: {e}")
+                sample = None
+            if sample is not None:
+                fresh = any(st is not None and s_start - RING_REPLAY_SECONDS <= st <= s_end + RELAY_BUCKET_SECONDS for st in map(source_ts, (l for _, l in sample)))
+                if not fresh:
+                    stale_slices.append((s_start, s_end, len(sample)))
+        s_end = s_start
 
     reap_re = re.compile(r"(^|\s)reap stage=([12]) .*?sandbox=(\S+) .*?pid=(\d+)")
     evid_re = re.compile(r"(^|\s)evidence stage=1 .*?sandbox=(\S+) .*?pid=(\d+) state=")
@@ -560,7 +594,8 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         f"| watchdog closures (`check hung`/`check failed`/`ready-port closed`) | {len(closures)} |",
         f"| watchdog `checks recovered` | {len(recovered)} |",
         f"| relay records in-window (evidence-class lines, deduplicated on source time + content; {len(relay_raw)} raw, {historical} replayed from outside the window, {unparsed} untimestamped) | {len(relay)} |",
-        f"| relay ingestion ({RELAY_BUCKET_SECONDS // 60}-min buckets with containerd records, chatter included) | {len(rate)} of ~{max(1, int((end - start) / RELAY_BUCKET_SECONDS))} |",
+        f"| relay ingestion ({RELAY_BUCKET_SECONDS // 60}-min buckets with containerd records, chatter included) | {'query failed' if rate is None else len(rate)} of ~{max(1, int((end - start) / RELAY_BUCKET_SECONDS))} |",
+        f"| relay freshness samples (newest {LOKI_SAMPLE_LINES} unfiltered records per {LOKI_SLICE_SECONDS // 3600} h slice carry an in-slice source time) | {len(stale_slices)} stale slice(s) |",
     ]
     if sandboxes:
         rep.sections.append("| relay records per reaped sandbox | " + ", ".join(f"{sb[:12]}..={n}" for sb, n in relay_per_sb.items()) + " |")
@@ -580,16 +615,23 @@ def run(src: Source, start: float, end: float, nodes: list[str], now: float | No
         for a, b in zip([start] + beats_s, beats_s + [end]):
             if b - a > HEARTBEAT_GAP_SECONDS:
                 rep.problems.append(f"reaper heartbeat gap {iso(a)} → {iso(b)} ({fmt_dur(b - a)})")
-    if not rate:
+    if rate is None:
+        pass  # already a problem above; nothing observed, so nothing claimed about the relay
+    elif not rate:
         rep.problems.append("no cri-log-relay records in the window — durable host-log capture is not shipping")
     else:
-        # continuity by ingestion time: a bucket at t holds the records of (t - RELAY_BUCKET_SECONDS, t];
-        # consecutive buckets (t_i, t_j) enclose a silent stretch of t_j - t_i - RELAY_BUCKET_SECONDS, and
-        # a silence of the gap bound or longer is reported (the buckets round a 16-min outage down to 15)
+        # continuity by ingestion time: a bucket at t holds the records of (t - RELAY_BUCKET_SECONDS, t], so
+        # consecutive buckets (t_i, t_j) enclose a silence of AT LEAST t_j - t_i - RELAY_BUCKET_SECONDS and at
+        # most that plus two buckets (both boundary buckets may hold records from outside the silence).
+        # Reported when the silence COULD reach the gap bound — a 16-min outage that starts mid-bucket
+        # must never round below a 15-min limit
         edges = [start] + [t for t, _ in rate] + [end + RELAY_BUCKET_SECONDS]
         for a, b in zip(edges, edges[1:]):
-            if b - a - RELAY_BUCKET_SECONDS >= RELAY_GAP_SECONDS:
-                rep.problems.append(f"relay ingestion gap {iso(a)} → {iso(b - RELAY_BUCKET_SECONDS)} ({fmt_dur(b - RELAY_BUCKET_SECONDS - a)}) — nothing reached Loki from the relay; the node's ring replays at most ~340 s on reconnect, so host-log evidence for that stretch is gone")
+            silence = b - a - RELAY_BUCKET_SECONDS
+            if silence + 2 * RELAY_BUCKET_SECONDS >= RELAY_GAP_SECONDS:
+                rep.problems.append(f"relay ingestion gap {iso(a)} → {iso(b - RELAY_BUCKET_SECONDS)}: silent for {fmt_dur(silence)} (up to {fmt_dur(silence + 2 * RELAY_BUCKET_SECONDS)} with {RELAY_BUCKET_SECONDS} s buckets) — nothing reached Loki from the relay; the node's ring replays at most ~{RING_REPLAY_SECONDS} s on reconnect, so host-log evidence for that stretch is gone")
+        for s_start, s_end, n in stale_slices:
+            rep.problems.append(f"relay freshness {iso(s_start)} → {iso(s_end)}: the newest {n} records ingested carry no source time inside the slice (replayed history only) — nothing was captured for that hour")
         if relay_raw and not relay:
             # replayed history or untimestamped diagnostics only: the stream is alive but nothing in
             # it is this window's capture (a quiet member that emits only chatter is NOT this case:
