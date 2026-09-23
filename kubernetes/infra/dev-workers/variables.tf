@@ -95,7 +95,7 @@ variable "dev_worker_memory_mib" {
   # Since the testpool went live (2026-09-01) the heavy compose stacks (L/XL/Playwright) lease kata
   # envs via `tep` instead of running on the worker, so this ceiling is oversized: the busiest
   # worker's 10-day peak was 7.9 GiB (dw4, measured 2026-09-01, pre-pool load included). dev-worker-6
-  # ran a 12 GiB POC via the per-worker memory_mib override until its retirement (2026-09-2x); it
+  # ran a 12 GiB POC via the per-worker memory_mib override until its retirement (2026-09-21); it
   # idled at 3.7 GiB RSS, so the POC never exercised the ceiling — a fleet-wide reduction is decided
   # from the survivors' measured working sets. See docs/runbooks/dev-workers.md.
   default = 16384
@@ -139,11 +139,14 @@ variable "dev_worker_ssh_public_key" {
 # The base spec is shared: cores + dev_worker_memory_mib (ceiling) + dev_worker_memory_floating_mib
 # (floor) are module-wide scalars; this map carries identity (node/vmid/ip/hostname) plus two
 # OPTIONAL per-worker sizing overrides (memory_floating_mib and memory_mib, both documented below).
-# Placement (fault isolation): dw1/4 -> node1, dw2/5 -> node2, dw3 alone on node3 since
-# dev-worker-6's retirement (2026-09-2x); node3 gives up its last dev-worker in PR-C2 and hosts the
-# second testpool env node instead (plans/2026-09-21-retire-dev-workers-3-6-plan.md).
-# IPs: consecutive .8-.12 (.13 freed 2026-09-2x; free static block, inside the .2-.50 reserve, below the router DHCP pool at
-# .51 — no router change needed). vmids 42xx band (4201-4205; 4206 retired 2026-09-2x) don't collide (Talos 4001-4003, runners
+# Placement (fault isolation): dw1/3 -> node1, dw2/4 -> node2, NO dev-worker on node3 since PR-C2
+# (2026-09-23): dev-worker-6 was retired 2026-09-21 and slot 3's original VM (4203) on 2026-09-23,
+# and node3 hosts the second testpool env node instead (plans/2026-09-21-retire-dev-workers-3-6-plan.md).
+# SLOT != VMID since that re-slot: the surviving VMs kept their vmids and moved DOWN a slot to close
+# the numbering gap (4204 -> dev-worker-3, 4205 -> dev-worker-4) by a `tofu state mv` through a
+# temporary key — a bare map-key edit would be destroy + create, and Proxmox cannot rename a vmid.
+# IPs: consecutive .8-.11 (.12 and .13 freed 2026-09-23 / 2026-09-21; free static block, inside the .2-.50 reserve, below the router DHCP pool at
+# .51 — no router change needed). vmids 42xx band (4201, 4202, 4204, 4205; 4203 and 4206 retired) don't collide (Talos 4001-4003, runners
 # 4101-4105, AI LXC 5001-5003, registry 5004). NOTE: cloud-init sets the IP at create and
 # lifecycle.ignore_changes=[initialization] means editing `ip` here is DOCUMENTATION ONLY — the live IP
 # was changed in-guest (netplan), see docs/runbooks/dev-workers.md. The 2nd worker per node fits because
@@ -162,7 +165,7 @@ variable "dev_worker_ssh_public_key" {
 #   dev-worker-1   node1  12 GiB   ~40M / 13d     230.1M     <- panicked 2026-08-11 22:32
 #   dev-worker-4   node1  12 GiB   3.1M / 10d       2.0M
 #   dev-worker-2   node2  (float)  70k / 21d      150k
-#   dev-worker-3   node3  16 GiB   0               11k       <- NO LONGER TRUE, see 2026-09-11 below
+#   dev-worker-3   node3  16 GiB   0               11k       <- NO LONGER TRUE, see 2026-09-11 below (that VM, 4203, retired 2026-09-23)
 #
 # UPDATE 2026-09-11 — node3 followed node1 and node2; that last row is now the WORST in the fleet.
 # dw3 re-measured at pswpout 35.2M / pgmajfault 46.5M (it was 0 / 11k a month ago), ballooned down to
@@ -198,37 +201,36 @@ variable "dev_worker_nodes" {
     # null => use the uniform dev_worker_memory_floating_mib.
     memory_floating_mib = optional(number)
     # null => use the uniform dev_worker_memory_mib ceiling. Was set on dev-worker-6 only (the
-    # 12 GiB downsize POC, 2026-09-01 — 2026-09-2x); unused since its retirement, kept as the
+    # 12 GiB downsize POC, 2026-09-01 — 2026-09-21); unused since its retirement, kept as the
     # per-worker override for the fleet-wide reduction discussed on dev_worker_memory_mib above.
     memory_mib = optional(number)
   }))
   default = {
     "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.8", hostname = "dev-worker-1", memory_floating_mib = 12288 }
     "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.9", hostname = "dev-worker-2" }
-    # dw3 floor: 2026-09-11 starvation — ai-node3 crossed the auto-balloon threshold when ~69 GiB of
-    # new guests landed on it (see the UPDATE above), so dw3 was pinned at the uniform 4 GiB floor with
-    # 145 MiB free and 46.5M major faults. 12288 (not 8192) because the measured working set was
-    # ~7.6 GiB and still climbing as swap drained — an 8 GiB floor would have re-thrashed. Hand-applied
-    # during recovery (`qm set 4203 --balloon 12288` + `balloon 12288` over the QEMU monitor, because
-    # `qm set` alone does NOT inflate a running guest); codified here so the next apply keeps it.
-    # Shrink back to the uniform floor only once node3's budget has real balloon headroom again.
-    "dev-worker-3" = { node_name = "ai-node3", vm_id = 4203, ip = "192.168.0.10", hostname = "dev-worker-3", memory_floating_mib = 12288 }
-    "dev-worker-4" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.11", hostname = "dev-worker-4", memory_floating_mib = 12288 }
-    # dw5 floor: 2026-09-01 swap-death incident — ai-node2 sits ~93% used since talos-env-node-1
-    # (16 GiB fixed, env pool) joined it, so ballooning never inflates dw5 and a 4 GiB floor
-    # thrashed a working session to death (swap full, 20M major faults; same signature as the
-    # dw1 2026-08-11 panic). Hand-applied `qm set 4205 --balloon 6144` + monitor-inflate during
-    # recovery; codified here so the next apply keeps it. Shrink back to the uniform floor only
-    # after node2's budget has real balloon headroom again (see the runbook budget note).
-    "dev-worker-5" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.12", hostname = "dev-worker-5", memory_floating_mib = 6144 }
-    # dev-worker-6 (vm_id 4206, .13, ai-node3) RETIRED 2026-09-2x — removed from this map so the next
-    # apply destroys it (plans/2026-09-21-retire-dev-workers-3-6-plan.md, PR-C1, gate G3a-1). Retired
-    # to fund the second testpool env node on ai-node3 (`env-node-2`, 16 GiB fixed): the parent
-    # plan's margin test needs ai-node3 to keep 43 GiB available with the qwen3.8 model idle and
-    # the node had 25.2 GiB; dw6 held a MEASURED 3.7 GiB RSS (idle: 7-day CPU 1.7 %, load 0.01) and
-    # dev-worker-3 (retired next, when its work is done — PR-C2) 16.3 GiB. Operator decision
-    # 2026-09-21: retire both, keep four workers, close the numbering gaps (PR-C2 re-slots
-    # dw4 -> dev-worker-3/.10 and dw5 -> dev-worker-4/.11 by state migration; vmids stay).
+    # Slot 3 = the VM that was dev-worker-4 until 2026-09-23 (vmid 4204, ai-node1), re-slotted by
+    # `tofu state mv` (PR-C2, gate G3a-2) with its node1 12 GiB floor; its IP moved .11 -> .10 and its
+    # hostname to dev-worker-3 IN-GUEST plus `qm set 4204 --ipconfig0` (initialization is
+    # ignore_changes, so the ip/hostname fields here are documentation of that state).
+    "dev-worker-3" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.10", hostname = "dev-worker-3", memory_floating_mib = 12288 }
+    # Slot 4 = the VM that was dev-worker-5 until 2026-09-23 (vmid 4205, ai-node2), re-slotted the same
+    # way (.12 -> .11, hostname dev-worker-4). It KEEPS its 6 GiB floor: the 2026-09-01 swap-death
+    # incident — ai-node2 sits ~93% used since talos-env-node-1 (16 GiB fixed, env pool) joined it,
+    # so ballooning never inflates this worker and a 4 GiB floor thrashed a working session to
+    # death (swap full, 20M major faults; same signature as the dw1 2026-08-11 panic). Hand-applied
+    # `qm set 4205 --balloon 6144` + monitor-inflate during recovery; codified so every apply keeps
+    # it. Shrink back to the uniform floor only after node2's budget has real balloon headroom.
+    "dev-worker-4" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.11", hostname = "dev-worker-4", memory_floating_mib = 6144 }
+    # Slot 3's ORIGINAL VM (vm_id 4203, .10, ai-node3) RETIRED 2026-09-23 (PR-C2, gate G3a-2) once the
+    # operator declared its work done: the last dev-worker on node3, 16.3 GiB measured, retired to fund
+    # the second testpool env node there. Its 2026-09-11 starvation story (pinned at the 4 GiB floor
+    # with 145 MiB free and 46.5M major faults when ~69 GiB of new guests landed on node3; the fix was
+    # a hand-applied 12 GiB floor) went with it — the new slot 3 sits on node1 with node1's floor.
+    # dev-worker-6 (vm_id 4206, .13, ai-node3) RETIRED 2026-09-21 (PR-C1, gate G3a-1) for the same
+    # reason: the parent plan's margin test needs ai-node3 to keep 43 GiB available with the qwen3.8
+    # model idle and the node had 25.2 GiB; dw6 held a MEASURED 3.7 GiB RSS (idle: 7-day CPU 1.7 %,
+    # load 0.01). Operator decision 2026-09-21: retire both, keep four workers, close the numbering
+    # gaps (dw4 -> dev-worker-3/.10 and dw5 -> dev-worker-4/.11 by state migration; vmids stay).
     # The 12 GiB-ceiling POC that lived here (memory_mib = 12288, hand-applied 2026-09-01) ends
     # with the VM: its finding is that the ceiling was never the constraint — dw6 idled at
     # 3.7 GiB RSS — so the fleet-wide reduction it was meant to justify is decided from the

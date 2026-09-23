@@ -3,7 +3,7 @@
 # tmux keeps the shared 'main' session, ttyd parity, the dashboard, and resurrect/continuum reboot
 # persistence. Herdr adds what tmux cannot express — an attention queue over agent panes
 # (working/blocked/done/idle) and native conversation resume (`claude --resume <id>`) after a server
-# restart. Enabled per-host (host_vars/dev-worker-5.yml); evaluation criteria + rollback in
+# restart. Enabled per-host (host_vars/dev-worker-4.yml); evaluation criteria + rollback in
 # docs/runbooks/dev-workers.md § "herdr pilot". Own tag (--tags herdr) like statusline, so the pilot
 # deploys without a full role run — which is why linger/getent are repeated here instead of leaning
 # on dashboard.yml's copies.

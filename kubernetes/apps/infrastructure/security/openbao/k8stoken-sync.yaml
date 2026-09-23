@@ -89,7 +89,7 @@ rules:
   - apiGroups: [""]
     resources: ["serviceaccounts/token"]
     # All the tep SAs live in this ONE namespace, so they are enumerated here (one per live slot).
-    resourceNames: ["tep-dw1", "tep-dw2", "tep-dw3", "tep-dw4", "tep-dw5"]
+    resourceNames: ["tep-dw1", "tep-dw2", "tep-dw3", "tep-dw4"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -168,22 +168,6 @@ subjects:
   - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
 roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw5 }
-rules:
-  - apiGroups: [""]
-    resources: ["serviceaccounts/token"]
-    resourceNames: ["helmtest-dw5"]
-    verbs: ["create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: { name: openbao-k8stoken-sync, namespace: helmtest-dw5 }
-subjects:
-  - { kind: ServiceAccount, name: openbao-k8stoken-sync, namespace: openbao }
-roleRef: { kind: Role, name: openbao-k8stoken-sync, apiGroup: rbac.authorization.k8s.io }
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -224,12 +208,13 @@ data:
     # mint Role, ADR 0028), platform-access/pg-sync.yaml, devworker-provision-job.yaml,
     # inventory/hosts.yml, scripts/tep-render-kubeconfigs.py — scripts/check-slot-enumerations.py
     # (CI) fails when they disagree. Slots are listed, not ranged: dev-worker-6 was retired
-    # 2026-09-2x (plans/2026-09-21-retire-dev-workers-3-6-plan.md) and a target whose SA no longer
-    # exists would fail this run before anything is published.
+    # 2026-09-21 and slot 5 on 2026-09-23 (plans/2026-09-21-retire-dev-workers-3-6-plan.md; the
+    # surviving VMs were re-slotted into 3 and 4), and a target whose SA no longer exists would
+    # fail this run before anything is published.
     # The context namespace equals the SA namespace for tep/helmtest; the platform observer's SA
     # lives in platform-access but its kubeconfig must land the agent in strive-ailab.
     TARGETS = []
-    for _n in (1, 2, 3, 4, 5):
+    for _n in (1, 2, 3, 4):
         TARGETS.append((f"dev-worker-{_n}", "tep_kubeconfig", "testpool", f"tep-dw{_n}", "testpool"))
         TARGETS.append((f"dev-worker-{_n}", "helmtest_kubeconfig", f"helmtest-dw{_n}", f"helmtest-dw{_n}", f"helmtest-dw{_n}"))
         TARGETS.append((f"dev-worker-{_n}", "platform_kubeconfig", "platform-access", f"platform-dw{_n}", "strive-ailab"))

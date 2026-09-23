@@ -27,6 +27,7 @@ set_adj() { # <adj> <vmid...>
 
 # Talos control planes (cp1/cp2/cp3) — protected.
 set_adj -1000 4001 4002 4003
-# GHA runners (4101-4105) + dev-workers (4201-4205; 4206 retired 2026-09-2x) — rebuildable,
+# GHA runners (4101-4105) + dev-workers (4201, 4202, 4204, 4205; 4206 retired 2026-09-21, 4203 on
+# 2026-09-23 — vmids listed by VALUE, the slot names moved in the re-slot) — rebuildable,
 # preferred OOM victims.
-set_adj 750 4101 4102 4103 4104 4105 4201 4202 4203 4204 4205
+set_adj 750 4101 4102 4103 4104 4105 4201 4202 4204 4205

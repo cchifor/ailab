@@ -44,7 +44,7 @@ fi
   # to the scheduler, so a persistently failing converge shows as a failed task rather than a
   # green one that quietly changed nothing.
   rc=0
-  # Full role on every worker. (Until dev-worker-6's retirement on 2026-09-2x its herdr takeover
+  # Full role on every worker. (Until dev-worker-6's retirement on 2026-09-21 its herdr takeover
   # was operator-scheduled and it ran with --skip-tags herdr here; that special case went with it.)
   ansible-playbook dev-workers.yml 2>&1 | tail -10 || rc=$?
   # The reviewer VMs converge here too. Until 2026-09-06 they converged NOWHERE: this script

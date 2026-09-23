@@ -78,7 +78,7 @@ data:
     # inventory_hostname, so an audit entry names the machine. Adding a worker is one word here plus
     # the mint ceremony in docs/runbooks/openbao-dev-workers.md; retiring one is the reverse: out of
     # this list, into RETIRED_SLOTS, and the same change drops it from the k8stoken-sync policy.
-    for host in dev-worker-1 dev-worker-2 dev-worker-3 dev-worker-4 dev-worker-5; do
+    for host in dev-worker-1 dev-worker-2 dev-worker-3 dev-worker-4; do
       # Read-only, scoped to this worker's own subtree plus the shared one. The metadata `list`
       # grants are what make `cred list` work; nothing here can create, update or delete, so a
       # compromised worker cannot rewrite another worker's credentials.
@@ -156,7 +156,6 @@ data:
     path "af/data/dev-workers/dev-worker-2" { capabilities = ["read", "create", "update", "patch"] }
     path "af/data/dev-workers/dev-worker-3" { capabilities = ["read", "create", "update", "patch"] }
     path "af/data/dev-workers/dev-worker-4" { capabilities = ["read", "create", "update", "patch"] }
-    path "af/data/dev-workers/dev-worker-5" { capabilities = ["read", "create", "update", "patch"] }
     EOF
     # The kubernetes auth mount itself is created by provision-job.yaml (AF_OB_K8S_HOST, with
     # token_reviewer_jwt deliberately unset so the OpenBao SERVER pod's own SA does the TokenReview).
@@ -193,7 +192,10 @@ data:
     # SecretID accessors and the issued token accessors are destroyed explicitly, by role name in
     # the token metadata — NEVER by the auth/approle/login path prefix, which would revoke every
     # worker at once. Nothing here prints a credential: accessors only, values never.
-    RETIRED_SLOTS="dev-worker-6" # dev-worker-6 (vmid 4206, .13) retired 2026-09-2x, PR-C1
+    # dev-worker-6 (vmid 4206, .13) retired 2026-09-21 (PR-C1); slot 5 retired 2026-09-23 (PR-C2):
+    # its VM 4205 lives on as dev-worker-4, so the slot-5 identity is revoked here while the
+    # machine re-logs in as dev-worker-4 with a freshly minted SecretID (the gate rotates slots 3/4).
+    RETIRED_SLOTS="dev-worker-5 dev-worker-6"
 
     # A listing answers "No value found" for an empty or absent path; anything else on stderr is an
     # operational failure (sealed, auth, network) and must fail the run rather than read as "nothing

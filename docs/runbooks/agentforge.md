@@ -1,6 +1,6 @@
 # Runbook: AgentForge (autonomous dev agents on the dev-workers)
 
-Operations for the AgentForge fleet (ADR 0018): the dev-worker VMs (dw1–dw5, 192.168.0.8–.12; dw6 retired 2026-09-2x)
+Operations for the AgentForge fleet (ADR 0018): the dev-worker VMs (dw1–dw4, 192.168.0.8–.11; dw6 retired 2026-09-21, slot 5 on 2026-09-23 — its VM is dw4 now)
 run the `agentforge` orchestrator as a host systemd service, driving `claude`/`codex` subscription
 CLIs + litellm-local against Gitea issues (label state machine, `state: 1-needs-plan` … `5-completed`).
 
@@ -42,14 +42,15 @@ CLIs + litellm-local against Gitea issues (label state machine, `state: 1-needs-
 ## Subscription logins (which account on which worker)
 
 Topology is BINDING (config `accounts` block must match): **Max#1 → dw1+dw2** (Planner/Reviewer),
-**Max#2 → dw3+dw4** (Implementer), **Codex Pro → dw5** (cross-reviewer; dw6 retired 2026-09-2x). Tester uses
+**Max#2 → dw3** (Implementer), **Codex Pro → dw4** (cross-reviewer). Since the 2026-09-23 re-slot dw3 is the
+VM that was dw4 and dw4 the one that was dw5 (their logins moved with the machines); dw5/dw6 are retired. Tester uses
 litellm-local (no login).
 
 ```bash
 ssh c4@192.168.0.8            # dw1 (repeat per worker with its account)
 claude login                  # browser OAuth; then mint a long-lived headless token:
 claude setup-token            # survives non-interactive systemd starts
-codex login                   # dw5 only (Codex Pro)
+codex login                   # dw4 only (Codex Pro)
 ```
 
 **Reboot auth validation (required before go-live):** reboot each worker and prove the service
@@ -96,7 +97,7 @@ Symptom: `/readyz` degraded with an auth-canary failure; 2 consecutive auth fail
 
 ```bash
 ssh c4@<worker-ip>
-claude login && claude setup-token     # or: codex login (dw5)
+claude login && claude setup-token     # or: codex login (dw4)
 sudo systemctl restart agentforge      # re-runs the startup auth canary
 curl -s localhost:8700/readyz          # must be ready again
 ```

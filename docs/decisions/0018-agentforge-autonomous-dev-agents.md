@@ -16,11 +16,15 @@ and hard guardrails around spend, privilege, and runaway behavior. No new statef
 (queues/Redis/DBs) and no per-token cloud spend: engines are the existing Claude Max / Codex Pro
 subscriptions plus the local models.
 
-> **Amendment 2026-09-2x:** `dev-worker-6` retired (and `dev-worker-3` retires when its work is
+> **Amendment 2026-09-21:** `dev-worker-6` retired (and `dev-worker-3` retires when its work is
 > done; the survivors are renumbered `dev-worker-1..4` on `.8`–`.11`) to fund the second testpool
 > env node — `plans/2026-09-21-retire-dev-workers-3-6-plan.md`. The seat map becomes Max#1 dw1/dw2,
 > Max#2 dw3, Codex Pro dw4 (the Codex Pro host is dw5 until the re-slot). The AgentForge v1
 > runtime on the workers is no longer active (v2 runs on the Talos agent nodes, ADR 0019).
+>
+> **Amendment 2026-09-23:** the re-slot happened (PR-C2, gate G3a-2): slot 3's original VM (4203)
+> retired, vmid 4204 re-slotted as `dev-worker-3`/`.10` and vmid 4205 as `dev-worker-4`/`.11`. The
+> seat map is Max#1 dw1/dw2, Max#2 dw3, Codex Pro dw4, and slot ≠ vmid from here on.
 
 ## Decision
 

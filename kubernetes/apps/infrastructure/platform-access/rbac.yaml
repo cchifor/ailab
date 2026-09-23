@@ -133,7 +133,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["serviceaccounts/token"]
-    resourceNames: ["platform-dw1", "platform-dw2", "platform-dw3", "platform-dw4", "platform-dw5"]
+    resourceNames: ["platform-dw1", "platform-dw2", "platform-dw3", "platform-dw4"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -168,11 +168,6 @@ kind: ServiceAccount
 metadata: { name: platform-dw4, namespace: platform-access }
 automountServiceAccountToken: false
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata: { name: platform-dw5, namespace: platform-access }
-automountServiceAccountToken: false
----
 # One RoleBinding per platform namespace. The ClusterRole is never ClusterRoleBound: a worker sees
 # these three namespaces and nothing else. strive-ailab = the services, the CNPG cluster, Valkey,
 # Hatchet, Keycloak; strive-sandboxes-ailab = the App sandboxes airlock runs; platform-edge = the
@@ -187,7 +182,6 @@ subjects:
   - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw3, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
-  - { kind: ServiceAccount, name: platform-dw5, namespace: platform-access }
 roleRef:
   kind: ClusterRole
   name: dev-worker-platform-observer
@@ -203,7 +197,6 @@ subjects:
   - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw3, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
-  - { kind: ServiceAccount, name: platform-dw5, namespace: platform-access }
 roleRef:
   kind: ClusterRole
   name: dev-worker-platform-observer
@@ -219,7 +212,6 @@ subjects:
   - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw3, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
-  - { kind: ServiceAccount, name: platform-dw5, namespace: platform-access }
 roleRef:
   kind: ClusterRole
   name: dev-worker-platform-observer

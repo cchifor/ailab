@@ -48,7 +48,7 @@
 
 # Live config apply — no pane kills (see the note at the config template task). Runs as the
 # agent user against their HOME-based server socket (verified working under env -i with just
-# HOME on dw5). FAIL-CLOSED: only a dead server is tolerated (the unit start reads fresh
+# HOME on the pilot host). FAIL-CLOSED: only a dead server is tolerated (the unit start reads fresh
 # config anyway); any other failure (invalid config, socket errors, missing subcommand)
 # fails the converge — failed_when: false here converged green while the server kept stale
 # settings (both reviewers' catch on the PR).

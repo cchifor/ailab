@@ -31,7 +31,7 @@ lose them.
 | Gate | Hosts | Login after this change |
 |---|---|---|
 | **Authelia** | `git` `chat` `grafana` `home` `registry` `agentforge` | **Passkey** (Windows Hello), password still accepted |
-| **Cloudflare Access** | `dw1`–`dw5` `dsh` `k8s` `hubble` `proxmox` `qnap` `prometheus` `alertmanager` `openbao` `vault/admin` | Still an **emailed one-time PIN** until Authelia is wired as the Access OIDC IdP |
+| **Cloudflare Access** | `dw1`–`dw4` `dsh` `k8s` `hubble` `proxmox` `qnap` `prometheus` `alertmanager` `openbao` `vault/admin` | Still an **emailed one-time PIN** until Authelia is wired as the Access OIDC IdP |
 
 ## One-time: register Windows Hello
 

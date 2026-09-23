@@ -168,7 +168,7 @@ variable "runner_ssh_public_key" {
 # docs/runbooks/ci-runners.md). The ORIGINAL allocation .47/.48/.49 (1-3) + .33/.34 (4-5) was later
 # VACATED by that renumber and reused by the ADR 0019 agent-nodes (kubernetes/infra/agent-nodes). All sit
 # inside the static-reserved block (.2-.50, outside the router DHCP pool that bit the AI LXCs at .51-.53).
-# vmids 4101-4105 don't collide (Talos 4001-4003, dev-workers 4201-4203, AI LXC 5001-5003, registry 5004).
+# vmids 4101-4105 don't collide (Talos 4001-4003, dev-workers 42xx, AI LXC 5001-5003, registry 5004).
 #
 # ci-runner-6 (node3, .19 / vmid 4106) was DEFERRED here per ADR 0013 (2026-07-01: node3 had no room
 # for a second runner while its qwen3.5-122b LLM was loaded). The deferral was lifted 2026-08-25 and

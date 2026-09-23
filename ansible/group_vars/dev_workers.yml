@@ -15,4 +15,4 @@ dev_worker_enabled: true
 # missing its entry fails the role's assert rather than deploying a broken agent.
 dev_worker_enable_openbao: true
 # dev_worker_enable_herdr — PILOT, deliberately NOT flipped here: it is per-host in
-# host_vars/dev-worker-5.yml so only that worker runs it (runbook § "herdr pilot").
+# host_vars/dev-worker-4.yml so only that worker runs it (runbook § "herdr pilot").

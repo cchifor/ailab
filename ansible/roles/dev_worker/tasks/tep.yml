@@ -11,7 +11,7 @@
 # (run by the operator with admin kubectl AFTER the testpool tree is merged & Flux-applied — the
 # tep-dwN token Secrets must exist in-cluster first). Shape:
 #   tep_cluster_ca_b64: <base64 CA>
-#   tep_tokens: { dev-worker-1: <token>, ... one key per live slot (dev-worker-5 today) }
+#   tep_tokens: { dev-worker-1: <token>, ... one key per live slot (dev-worker-1..4 today) }
 # Whole flow skips gracefully while that file is absent.
 
 - name: Check for the tep tokens secrets file (control node)
