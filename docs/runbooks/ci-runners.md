@@ -291,15 +291,19 @@ for "no co-located runner" — an empty string falls back to the GitHub unit).
 
 **The residual — hard power loss, VM crash, a job longer than the drain window.** Gitea never
 re-queues an orphaned task by itself: the zombie reaper fails it after 10 min (`ZOMBIE_TASK_TIMEOUT`,
-global — do NOT lower it, a >2 min infra-pg stall would reap every live job). **Until the
-`ci-rerun-watchdog` is deployed (separate PR; `kubernetes/apps/apps/ci-rerun-watchdog/`), such a job
-needs a MANUAL rerun**: `POST /api/v1/repos/{o}/{r}/actions/runs/{run}/rerun-failed-jobs` (201; the run
-id is in the commit status `target_url`). The watchdog, once live, re-runs a run's failed jobs once
-when the failure is correlated with the loss of the cloud runner it ran on and the run is still the
-current head of its PR/branch; re-queued jobs go to whichever labelled runner is online (at the
-nightly power-off, necessarily an ailab one). It ships in shadow mode (`DRY_RUN=true`) first, and its
-kill switch is `kubectl --context admin@ai -n ci-rerun-watchdog patch cm ci-rerun-watchdog-state -p
-'{"data":{"disabled":"true"}}'` (next scan, ≤ 60 s). Its runbook lines replace this paragraph when it lands.
+global — do NOT lower it, a >2 min infra-pg stall would reap every live job). The
+`ci-rerun-watchdog` (`kubernetes/apps/apps/ci-rerun-watchdog/`, deployed 2026-09-23, ailab#839) re-runs
+a run's failed jobs once when the failure is correlated with the loss of the cloud runner it ran on
+(its own observation of the runner going offline, within a bounded window) and the run is still the
+current head of its open PR / branch; re-queued jobs go to whichever labelled runner is online (at
+the nightly power-off, necessarily an ailab one). **It is in SHADOW mode (`DRY_RUN=true`) for its
+first week**: it logs `would-rerun …` and counts `ci_rerun_watchdog_reruns_total{mode="dry_run"}`
+but POSTs nothing, so until the `DRY_RUN=false` PR lands a lost job still needs a MANUAL rerun:
+`POST /api/v1/repos/{o}/{r}/actions/runs/{run}/rerun-failed-jobs` (201; the run id is in the commit
+status `target_url`). Kill switch without a PR: `kubectl --context admin@ai -n ci-rerun-watchdog patch
+cm ci-rerun-watchdog-state -p '{"data":{"disabled":"true"}}'` (next scan, ≤ 60 s). Read it via
+`kubectl -n ci-rerun-watchdog logs deploy/ci-rerun-watchdog` (one line per decision) and the
+`ci_rerun_watchdog_*` metrics; `CIRerunWatchdogScanStale` / `…Missing` fire when it stops scanning.
 
 **Reading an `offline` `cloud-ci-*`.** Check whether the host is up first (`up{job="cloud-node"}`
 or cloudlab `just power-status`). Host down = nightly state, nothing to do. Host up + runner offline
