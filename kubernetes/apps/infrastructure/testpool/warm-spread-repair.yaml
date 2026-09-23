@@ -15,12 +15,23 @@
 # never the oldest, which may be the member a soak is ageing — and let the pool refill it: by then
 # the leased pod has lost the label, so the constraint places the new member on the empty node.
 # One deletion per run, and only when the pool asks for >= 2 members and >= 2 nodes are eligible.
+#
+# SAFETY (the same stale label the job exists to repair could name a just-LEASED environment as
+# the "youngest warm member"): the victim's Sandbox object is fetched and must still be controlled
+# by the SandboxWarmPool and still carry the warm label ON THE SANDBOX (adoption rewrites both
+# first, before the pod catches up); the delete is then sent with a resourceVersion precondition
+# (DeleteOptions.preconditions, raw API via curl — kubectl delete cannot express it), so an
+# adoption between the check and the delete makes the API server answer 409 and nothing is
+# deleted. A leased environment is never destroyed by this job; a skipped run is logged as such.
+#
 # Runs in kube-system like env-reaper: testpool's default-deny NetworkPolicy covers every pod in
 # that namespace, and this pod needs the API server. Reads nodes cluster-wide (ClusterRole), and
 # pods + sandboxes only in testpool (Role). Nothing else is touched.
 #
 # ROLLOUT: repair.sh is read at container start; every change bumps the script-revision annotation
-# below. Unit test under the image: scripts/tests/test-warm-spread-repair.sh (CI: manifests.yaml).
+# below. Unit test under the image: scripts/tests/test-warm-spread-repair.sh (CI: manifests.yaml),
+# with kubectl and curl stubbed to the shapes the real API produces (a schedulable node has NO
+# spec.unschedulable field — the listing is tab-delimited for that reason).
 # Verify by hand: kubectl -n testpool get pods -l agents.x-k8s.io/warm-pool-sandbox -o wide
 # (one member per node), kubectl -n kube-system logs job/<latest warm-spread-repair job>.
 apiVersion: v1
@@ -96,21 +107,26 @@ data:
     WARM_LABEL=${WARM_LABEL:-agents.x-k8s.io/warm-pool-sandbox}
     NODE_LABEL=${ENV_NODE_LABEL:-ailab.io/env-pool=true}
     DRY_RUN=${DRY_RUN:-0}
+    KUBE_API=${KUBE_API:-https://kubernetes.default.svc}
+    SA_DIR=${SA_DIR:-/var/run/secrets/kubernetes.io/serviceaccount}
+    TAB=$(printf '\t')
     log() { echo "$(date -u +%FT%TZ) $*"; }
 
     # Every read is fail-closed: an unreadable pool, node list or pod list ends the run non-zero
-    # (a Job failure, visible) instead of reading as "nothing to do".
+    # (a Job failure, visible) instead of reading as "nothing to do". Listings are TAB-delimited:
+    # a schedulable node has no spec.unschedulable field at all and a Pending pod has no nodeName,
+    # and whitespace splitting would shift the columns of exactly those rows.
     replicas=$(kubectl -n "$NAMESPACE" get sandboxwarmpool "$POOL" -o jsonpath='{.spec.replicas}') \
       || { log "error: cannot read sandboxwarmpool $NAMESPACE/$POOL"; exit 1; }
     nodes=$(kubectl get nodes -l "$NODE_LABEL" \
-      -o jsonpath='{range .items[*]}{.metadata.name} {.spec.unschedulable} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}') \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.unschedulable}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}') \
       || { log "error: cannot list env nodes ($NODE_LABEL)"; exit 1; }
     pods=$(kubectl -n "$NAMESPACE" get pods -l "$WARM_LABEL" \
-      -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName} {.metadata.creationTimestamp}{"\n"}{end}') \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.nodeName}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}') \
       || { log "error: cannot list warm members ($WARM_LABEL)"; exit 1; }
 
-    # nodes that can take a member: Ready and schedulable
-    eligible=$(printf '%s\n' "$nodes" | awk '$1 != "" && $2 != "true" && $3 == "True" { print $1 }')
+    # nodes that can take a member: Ready and not cordoned (unschedulable absent or false)
+    eligible=$(printf '%s\n' "$nodes" | awk -F"$TAB" '$1 != "" && $2 != "true" && $3 == "True" { print $1 }')
     n_nodes=$(printf '%s\n' "$eligible" | grep -c .)
     if [ "${replicas:-0}" -lt 2 ] || [ "$n_nodes" -lt 2 ]; then
       log "nothing to spread: replicas=${replicas:-0} eligible-nodes=$n_nodes"
@@ -119,7 +135,7 @@ data:
 
     # warm members per eligible node (a Pending member has no node and counts nowhere)
     counts=$(for n in $eligible; do
-      c=$(printf '%s\n' "$pods" | awk -v n="$n" '$2 == n' | grep -c .)
+      c=$(printf '%s\n' "$pods" | awk -F"$TAB" -v n="$n" '$2 == n' | grep -c .)
       echo "$n $c"
     done)
     summary=$(printf '%s\n' "$counts" | awk '{ printf "%s=%s ", $1, $2 }')
@@ -131,15 +147,41 @@ data:
     fi
 
     # the youngest warm member on the crowded node goes; the oldest may be a soak's member
-    victim=$(printf '%s\n' "$pods" | awk -v n="$crowded" '$2 == n { print $3, $1 }' | sort | tail -1 | awk '{ print $2 }')
+    victim=$(printf '%s\n' "$pods" | awk -F"$TAB" -v n="$crowded" '$2 == n { print $3, $1 }' | sort | tail -1 | awk '{ print $2 }')
     [ -n "$victim" ] || { log "error: no warm member found on $crowded"; exit 1; }
-    if [ "$DRY_RUN" = 1 ]; then
-      log "would delete sandbox $victim on $crowded ($summary; $empty has none)"
+
+    # SAFETY: the pod label can lag an adoption; the Sandbox object is the truth. It must still be
+    # controlled by the SandboxWarmPool and still carry the warm label there, and the delete is
+    # pinned to the resourceVersion just read.
+    sb=$(kubectl -n "$NAMESPACE" get sandbox "$victim" -o json) \
+      || { log "error: cannot read sandbox $NAMESPACE/$victim"; exit 1; }
+    owner=$(printf '%s' "$sb" | jq -r '[.metadata.ownerReferences[]? | select(.controller == true) | .kind] | first // ""')
+    sb_label=$(printf '%s' "$sb" | jq -r --arg k "$WARM_LABEL" '.metadata.labels[$k] // ""')
+    rv=$(printf '%s' "$sb" | jq -r '.metadata.resourceVersion // ""')
+    if [ "$owner" != "SandboxWarmPool" ] || [ -z "$sb_label" ] || [ -z "$rv" ]; then
+      log "skip: sandbox $victim is no longer the pool's (controller=${owner:-none}, warm-label=${sb_label:-absent}) - adopted by a lease, its pod label is stale; nothing deleted"
       exit 0
     fi
-    kubectl -n "$NAMESPACE" delete sandbox "$victim" --wait=false >/dev/null \
-      || { log "error: delete sandbox $NAMESPACE/$victim failed"; exit 1; }
-    log "repair: deleted sandbox $victim on $crowded ($summary; $empty had none) - the pool refills it, placed by the warm-only spread"
+    if [ "$DRY_RUN" = 1 ]; then
+      log "would delete sandbox $victim on $crowded at resourceVersion $rv ($summary; $empty has none)"
+      exit 0
+    fi
+    code=$(curl -sS -o /tmp/delete-response.json -w '%{http_code}' \
+      --cacert "$SA_DIR/ca.crt" -H "Authorization: Bearer $(cat "$SA_DIR/token")" \
+      -H 'Content-Type: application/json' -X DELETE \
+      "$KUBE_API/apis/agents.x-k8s.io/v1beta1/namespaces/$NAMESPACE/sandboxes/$victim" \
+      -d "{\"preconditions\":{\"resourceVersion\":\"$rv\"}}") \
+      || { log "error: delete request for $victim failed to complete"; exit 1; }
+    case "$code" in
+      200|202)
+        log "repair: deleted sandbox $victim on $crowded at resourceVersion $rv ($summary; $empty had none) - the pool refills it, placed by the warm-only spread" ;;
+      409)
+        log "skip: sandbox $victim changed between the check and the delete (resourceVersion $rv is stale) - adopted or already gone; nothing deleted" ;;
+      404)
+        log "skip: sandbox $victim is already gone; nothing deleted" ;;
+      *)
+        log "error: delete sandbox $NAMESPACE/$victim answered HTTP $code: $(head -c 300 /tmp/delete-response.json 2>/dev/null)"; exit 1 ;;
+    esac
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -167,7 +209,7 @@ spec:
             app.kubernetes.io/part-of: testpool
           annotations:
             # Bump on EVERY repair.sh change (see ROLLOUT in the header).
-            warm-spread-repair.ailab.io/script-revision: "2026-09-23-1"
+            warm-spread-repair.ailab.io/script-revision: "2026-09-23-2"
         spec:
           serviceAccountName: warm-spread-repair
           restartPolicy: Never
@@ -178,7 +220,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: repair
-              # Same image as env-reaper (kubectl 1.32 + busybox sh), digest-pinned there.
+              # Same image as env-reaper (kubectl 1.32 + busybox sh + jq + curl), digest-pinned there.
               image: docker.io/alpine/k8s:1.32.13@sha256:ffb0758383fdd5878419930052e2854afe6c0479303a59edaca4143ce8d3c016
               command: ["/bin/sh", "/opt/warm-spread-repair/repair.sh"]
               env:
