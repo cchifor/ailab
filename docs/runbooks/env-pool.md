@@ -10,9 +10,13 @@ per node** (`topologySpreadConstraints` in the template, counted on the warm-onl
 `agents.x-k8s.io/warm-pool-sandbox` label — a leased environment loses it on adoption, so leases
 never pull the warm members onto one node), so losing a node — or rebooting one for a
 machine-config change — leaves one warm member; every per-node procedure below is run one node
-at a time. Verify the spread after a lease + refill, not only after a scale-up: `kubectl -n
-testpool get pods -l agents.x-k8s.io/warm-pool-sandbox -o wide` must show one member per node
-(the reconcile that drops the label races the replacement's scheduling by seconds). The soak
+at a time. The reconcile that drops the label races the replacement's scheduling by seconds
+and a spread never moves a scheduled pod, so the **`warm-spread-repair` CronJob**
+(`testpool/warm-spread-repair.yaml`, kube-system, every 5 min) repairs a doubled-up node: it
+deletes the youngest warm member of a node holding two while an eligible env node holds none,
+and the refill lands on the empty node (never the oldest member — a soak's). Verify:
+`kubectl -n testpool get pods -l agents.x-k8s.io/warm-pool-sandbox -o wide` = one member per
+node, and `kubectl -n kube-system logs job/<latest warm-spread-repair>` = `spread ok`. The soak
 check-in takes both nodes: `--nodes talos-env-node-1,talos-env-node-2`. Tofu module
 `kubernetes/infra/env-pool/`, state in the main checkout (`terraform.tfstate`, gitignored) since
 the adoption on 2026-09-21 — the spike's state had been lost, the VM was imported and the

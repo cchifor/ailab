@@ -11,3 +11,4 @@ resources:
   - prepull-daemonset.yaml
   - tep-access.yaml
   - env-reaper.yaml # kube-system DaemonSet + testpool Role: bounded Kata teardown (2026-09-20 outage)
+  - warm-spread-repair.yaml # kube-system CronJob + testpool Role: keeps one warm member per env node (parent plan T4, PR #835 review)

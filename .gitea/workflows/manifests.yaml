@@ -76,6 +76,15 @@ jobs:
           set -euo pipefail
           bash scripts/tests/test-env-reaper.sh
 
+      # The warm-spread-repair script under the CronJob's OWN image with kubectl stubbed: balanced =
+      # no-op, a doubled-up node loses its YOUNGEST warm member (never the oldest), NotReady/cordoned
+      # nodes and a 1-replica pool are no-ops, a failed listing fails the run, dry-run deletes nothing.
+      - name: warm-spread-repair under busybox ash
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-warm-spread-repair.sh
+
       # The openbao-devworker-provision script under the Job's OWN image (openbao 2.6.2's busybox sh,
       # `bao` shadowed by a stub): a retired slot's revocation is complete (secret-id accessors,
       # tokens by role, role/policy, the KV subtree recursively), converges on the second run,

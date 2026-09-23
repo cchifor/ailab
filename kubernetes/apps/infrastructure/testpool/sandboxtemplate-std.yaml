@@ -52,9 +52,11 @@ spec:
       # agents.x-k8s.io/warm-pool-sandbox=<pool hash> on the pod while the Sandbox is owned by the
       # SandboxWarmPool and DELETES it from the running pod on the reconcile after a SandboxClaim adopts
       # it — so the constraint sees warm members only. Residual: that reconcile races the replacement
-      # member's scheduling by seconds, so the distribution is verified after a lease + refill, not only
-      # after scale-up (runbook § verify). DoNotSchedule: a member that cannot spread stays Pending
-      # (visible: TestpoolNoWarmCapacity) rather than silently doubling up.
+      # member's scheduling by seconds, and a spread never relocates a pod once scheduled, so the
+      # warm-spread-repair CronJob (warm-spread-repair.yaml, every 5 min) deletes the youngest warm
+      # member of a node holding two while an eligible env node holds none; the refill lands on the
+      # empty node. DoNotSchedule: a member that cannot spread stays Pending (visible:
+      # TestpoolNoWarmCapacity) rather than silently doubling up.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

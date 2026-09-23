@@ -1,0 +1,201 @@
+# warm-spread-repair — placement repair for the warm pool's "one member per env node" guarantee.
+#
+# WHY: the template's topologySpreadConstraints (sandboxtemplate-std.yaml) is counted on the
+# warm-only label agents.x-k8s.io/warm-pool-sandbox, which agent-sandbox removes from a pod on
+# the reconcile AFTER a SandboxClaim adopts it. The pool creates the replacement member at
+# adoption time too, so the scheduler can still see the just-leased pod as "warm" for a few
+# seconds and place the replacement next to the other warm member. A topology spread never
+# relocates a pod that is already scheduled, so that outcome would be permanent: both warm
+# members on one node, and losing that node loses all warm capacity — the exact single point of
+# failure env-node-2 exists to remove (parent plan T4; review of PR #835).
+#
+# WHAT: every 5 minutes, list the warm members (pods carrying the warm-only label) per env node
+# that can take one (label ailab.io/env-pool=true, Ready, schedulable). If some node has >= 2 warm
+# members while another has none, delete the YOUNGEST warm member's Sandbox on the crowded node —
+# never the oldest, which may be the member a soak is ageing — and let the pool refill it: by then
+# the leased pod has lost the label, so the constraint places the new member on the empty node.
+# One deletion per run, and only when the pool asks for >= 2 members and >= 2 nodes are eligible.
+# Runs in kube-system like env-reaper: testpool's default-deny NetworkPolicy covers every pod in
+# that namespace, and this pod needs the API server. Reads nodes cluster-wide (ClusterRole), and
+# pods + sandboxes only in testpool (Role). Nothing else is touched.
+#
+# ROLLOUT: repair.sh is read at container start; every change bumps the script-revision annotation
+# below. Unit test under the image: scripts/tests/test-warm-spread-repair.sh (CI: manifests.yaml).
+# Verify by hand: kubectl -n testpool get pods -l agents.x-k8s.io/warm-pool-sandbox -o wide
+# (one member per node), kubectl -n kube-system logs job/<latest warm-spread-repair job>.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: warm-spread-repair
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: warm-spread-repair
+  namespace: testpool
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxwarmpools"]
+    verbs: ["get"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: warm-spread-repair
+  namespace: testpool
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: warm-spread-repair
+subjects:
+  - kind: ServiceAccount
+    name: warm-spread-repair
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: warm-spread-repair
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: warm-spread-repair
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: warm-spread-repair
+subjects:
+  - kind: ServiceAccount
+    name: warm-spread-repair
+    namespace: kube-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: warm-spread-repair
+  namespace: kube-system
+data:
+  repair.sh: |
+    #!/bin/sh
+    # See the header of warm-spread-repair.yaml for the contract. POSIX sh (busybox ash in alpine/k8s).
+    set -u
+    NAMESPACE=${TESTPOOL_NAMESPACE:-testpool}
+    POOL=${WARM_POOL:-env-std-pool}
+    WARM_LABEL=${WARM_LABEL:-agents.x-k8s.io/warm-pool-sandbox}
+    NODE_LABEL=${ENV_NODE_LABEL:-ailab.io/env-pool=true}
+    DRY_RUN=${DRY_RUN:-0}
+    log() { echo "$(date -u +%FT%TZ) $*"; }
+
+    # Every read is fail-closed: an unreadable pool, node list or pod list ends the run non-zero
+    # (a Job failure, visible) instead of reading as "nothing to do".
+    replicas=$(kubectl -n "$NAMESPACE" get sandboxwarmpool "$POOL" -o jsonpath='{.spec.replicas}') \
+      || { log "error: cannot read sandboxwarmpool $NAMESPACE/$POOL"; exit 1; }
+    nodes=$(kubectl get nodes -l "$NODE_LABEL" \
+      -o jsonpath='{range .items[*]}{.metadata.name} {.spec.unschedulable} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}') \
+      || { log "error: cannot list env nodes ($NODE_LABEL)"; exit 1; }
+    pods=$(kubectl -n "$NAMESPACE" get pods -l "$WARM_LABEL" \
+      -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName} {.metadata.creationTimestamp}{"\n"}{end}') \
+      || { log "error: cannot list warm members ($WARM_LABEL)"; exit 1; }
+
+    # nodes that can take a member: Ready and schedulable
+    eligible=$(printf '%s\n' "$nodes" | awk '$1 != "" && $2 != "true" && $3 == "True" { print $1 }')
+    n_nodes=$(printf '%s\n' "$eligible" | grep -c .)
+    if [ "${replicas:-0}" -lt 2 ] || [ "$n_nodes" -lt 2 ]; then
+      log "nothing to spread: replicas=${replicas:-0} eligible-nodes=$n_nodes"
+      exit 0
+    fi
+
+    # warm members per eligible node (a Pending member has no node and counts nowhere)
+    counts=$(for n in $eligible; do
+      c=$(printf '%s\n' "$pods" | awk -v n="$n" '$2 == n' | grep -c .)
+      echo "$n $c"
+    done)
+    summary=$(printf '%s\n' "$counts" | awk '{ printf "%s=%s ", $1, $2 }')
+    empty=$(printf '%s\n' "$counts" | awk '$2 == 0 { print $1 }' | head -1)
+    crowded=$(printf '%s\n' "$counts" | awk '$2 >= 2 { print $1 }' | head -1)
+    if [ -z "$empty" ] || [ -z "$crowded" ]; then
+      log "spread ok: $summary"
+      exit 0
+    fi
+
+    # the youngest warm member on the crowded node goes; the oldest may be a soak's member
+    victim=$(printf '%s\n' "$pods" | awk -v n="$crowded" '$2 == n { print $3, $1 }' | sort | tail -1 | awk '{ print $2 }')
+    [ -n "$victim" ] || { log "error: no warm member found on $crowded"; exit 1; }
+    if [ "$DRY_RUN" = 1 ]; then
+      log "would delete sandbox $victim on $crowded ($summary; $empty has none)"
+      exit 0
+    fi
+    kubectl -n "$NAMESPACE" delete sandbox "$victim" --wait=false >/dev/null \
+      || { log "error: delete sandbox $NAMESPACE/$victim failed"; exit 1; }
+    log "repair: deleted sandbox $victim on $crowded ($summary; $empty had none) - the pool refills it, placed by the warm-only spread"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: warm-spread-repair
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: warm-spread-repair
+    app.kubernetes.io/part-of: testpool
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: warm-spread-repair
+            app.kubernetes.io/part-of: testpool
+          annotations:
+            # Bump on EVERY repair.sh change (see ROLLOUT in the header).
+            warm-spread-repair.ailab.io/script-revision: "2026-09-23-1"
+        spec:
+          serviceAccountName: warm-spread-repair
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: repair
+              # Same image as env-reaper (kubectl 1.32 + busybox sh), digest-pinned there.
+              image: docker.io/alpine/k8s:1.32.13@sha256:ffb0758383fdd5878419930052e2854afe6c0479303a59edaca4143ce8d3c016
+              command: ["/bin/sh", "/opt/warm-spread-repair/repair.sh"]
+              env:
+                - { name: TESTPOOL_NAMESPACE, value: testpool }
+                - { name: WARM_POOL, value: env-std-pool }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 20m, memory: 32Mi }
+                limits: { cpu: 200m, memory: 64Mi }
+              volumeMounts:
+                - { name: script, mountPath: /opt/warm-spread-repair, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: script
+              configMap: { name: warm-spread-repair, defaultMode: 0555 }
+            - name: tmp
+              emptyDir: {}
