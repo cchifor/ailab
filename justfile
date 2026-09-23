@@ -65,6 +65,16 @@ gitea-runners:
 ping-gitea-runners:
     cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible gitea_runners -m ping
 
+# Ansible: the opportunistic Gitea runners on the CLOUDLAB cluster (cloud-ci-N, ADR 0032): base
+# toolchain (no GitHub agent) + act_runner. Create the VMs first (../cloudlab `just ci-runners-apply`).
+# Extra args pass through (`just cloud-runners --check --diff`, `-l cloud-ci-1`, `--syntax-check`).
+cloud-runners *args:
+    cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey       ansible-playbook cloud-runners.yml {{args}}
+
+# Ansible: connectivity check for the cloudlab runner VMs (offline at night by design)
+ping-cloud-runners:
+    cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible cloud_gitea_runners -m ping
+
 # OpenTofu: plan/apply ONLY the dev-worker VMs (separate state from runners + Talos).
 dev-workers-plan:
     tofu -chdir=kubernetes/infra/dev-workers plan

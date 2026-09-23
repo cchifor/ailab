@@ -40,9 +40,10 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.26` | 🔒 **cloudlab** LXC `cloud-llm-3` | 5101 | `../cloudlab/README.md` |
 | `.27 / .28` | 🔒 **cloudlab** LXCs `cloud-exec-1/2` | 5102–5103 | `../cloudlab/kubernetes/infra/executor-lxc/variables.tf` |
 | `.29` | **free (static)** — was `ci-runner-7`, retired 2026-09-16 | — | — |
-| `.30` | **free (static)** — was `ci-runner-8`, retired 2026-09-12 | — | — |
+| `.30` | 🔒 **RESERVED — cloudlab** CI runner VM `cloud-ci-5` (cloud3; gated on the cloud3 sizing measurement, plan 2026-09-23) — was `ci-runner-8`, retired 2026-09-12 | 6105 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.31` | CI runner VM `ci-runner-9` (moved off `.22` on 2026-09-03; moved ai-node2→ai-node1 on 2026-09-07) | 4109 | `kubernetes/infra/runners/variables.tf` |
-| `.32`–`.35` | **free (static)** | — | — |
+| `.32 / .33` | 🔒 **cloudlab** CI runner VMs `cloud-ci-1/2` (cloud1, opportunistic Gitea Actions runners — online only while the cloud cluster is up; ADR 0032) | 6101–6102 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
+| `.34 / .35` | 🔒 **cloudlab** CI runner VMs `cloud-ci-3/4` (cloud3, same) — cloudlab's unbuilt Talos-GPU-worker spec had pencilled `.32`–`.34`; it re-reserves elsewhere when built | 6103–6104 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
 | `.37` | Talos env-node `talos-env-node-1` (k8s member; runbook `docs/runbooks/env-pool.md`) | 4401 | `kubernetes/infra/env-pool/variables.tf` (adopted 2026-09-21) |
 | `.38 / .39` | **free (static)** | — | — |
@@ -53,8 +54,9 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | **free (static)** | — | — |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`, `.38`, `.39`, `.50`** (14 addresses;
-`.30` freed 2026-09-12 by retiring `ci-runner-8`, `.29` freed 2026-09-16 by retiring `ci-runner-7`,
+**Free static space: `.5`–`.7`, `.12`, `.13`, `.29`, `.38`, `.39`, `.50`** (9 addresses; `.30` and
+`.32`–`.35` went to the cloudlab CI runner VMs on 2026-09-23, `.30` as a gated reservation;
+`.29` freed 2026-09-16 by retiring `ci-runner-7`,
 `.13` freed 2026-09-21 by retiring `dev-worker-6`, `.12` freed 2026-09-23 by the dev-worker re-slot —
 its VM 4205 is `dev-worker-4` on `.11` now).
 Nothing else in `.2`–`.50` is available.

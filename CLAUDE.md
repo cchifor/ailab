@@ -60,6 +60,7 @@ Free static space is only `.5`–`.7`, `.12`, `.13`, `.29`, `.30`, `.32`–`.35`
 | Reviewer VMs (out-of-band, not in tofu) | .24 / .25 | 4501–4502 |
 | AI LLM LXCs | .44 / .45 / .46 | 5001–5003 |
 | registry LXC (node1) | .36 | 5004 |
+| Cloud CI runner VMs (`cloud-ci-1..4` on **cloudlab** cloud1/cloud3; opportunistic, offline at night by design; `../cloudlab/kubernetes/infra/ci-runners`, ailab `just cloud-runners`, ADR 0032) | .32 / .33 / .34 / .35 (`.30` reserved) | 6101–6104 |
 
 > **Renumbering a guest takes THREE edits**: the guest (netplan), the tofu variable, AND the Proxmox
 > `ipconfig0` (`qm set <vmid> --ipconfig0 …` + `qm cloudinit update <vmid>`). Both VM modules set

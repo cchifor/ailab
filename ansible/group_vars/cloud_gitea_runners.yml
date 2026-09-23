@@ -1,0 +1,25 @@
+---
+# Opportunistic Gitea Actions runners on the cloudlab cluster (cloud-ci-N; ADR 0032). Same contract
+# as the ailab pool so the roles apply unmodified, minus the GitHub agent: these VMs serve Gitea only.
+# Registration token: ansible/secrets/gitea-runner.sops.yaml (the org token, shared with gitea_runners),
+# loaded by cloud-runners.yml. Setup: docs/runbooks/ci-runners.md §9.
+
+# github_runner supplies the base toolchain gitea_runner depends on (Docker + buildx + compose,
+# daemon.json, swap, Node/uv/k6, the `runner` user) — enabled, but WITHOUT the agent itself.
+github_runner_enabled: true
+github_runner_agent_enabled: false
+
+gitea_runner_enabled: true
+gitea_runner_instance_url: https://git.chifor.me
+# The CURRENT org label (RUNNER_LABEL / STATIC_RUNNER_LABEL = self-hosted-hv), so these runners take
+# the same jobs as ci-runner-N from day one. The label rename is separate work; act_runner re-declares
+# labels from config.yaml on every restart, so changing it later is a config change, not a re-register.
+gitea_runner_label: self-hosted-hv
+
+# No co-located GitHub agent to coordinate the cleanup timer with. `none` is the sentinel the script
+# understands; an empty string would fall back to the GitHub unit (see the role defaults).
+gitea_runner_cleanup_peer_services: "none"
+
+# node_exporter textfile collector for the gitea_runner reclaim/cleanup beacons (same as
+# group_vars/github_runners.yml — this group is not a child of it, so the flag is repeated here).
+node_exporter_extra_args: "--collector.textfile.directory=/var/lib/prometheus/node-exporter"

@@ -1,0 +1,113 @@
+# Host-level node_exporter on the OPPORTUNISTIC CI runner VMs that live on the cloudlab cluster
+# (cloud-ci-N, ADR 0032; docs/runbooks/ci-runners.md §9). Deliberately NOT part of ci-runners-node.yaml:
+# those hosts are powered off at night, so every rule written for the 24/7 pool (CIRunnerNodeDown at
+# `up == 0`, the beacon-absence rules, CIRunnerTargetNotARunner's `ci-runner-*` nodename check) would
+# page every evening. This job's rules (ci-runners-cloud-rules.yaml) are GATED on the cloud HOST being
+# up, joined through the `cloud_host` label below against job="cloud-node"'s `nodename`.
+#
+# One Service+Endpoints per cloud host: the Service label is the only per-target metadata a static
+# Endpoints scrape can carry, and `cloud_host` is what the host-up join needs. `nodename` comes from
+# the Endpoints hostname field (as cloud-node.yaml does) so legends read cloud-ci-N.
+#
+# The Endpoints ship with NO addresses (subsets: []) on purpose: the targets are added in the SAME
+# ailab change that follows the VMs' creation on the cloud side, after they register and answer on
+# :9100. Adding an address before the VM exists is `up == 0` while the host is up — a firing alert
+# for a runner that was never built (codex review of the 2026-09-23 plan). IPAM: docs/network-plan.md.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ci-runner-cloud1
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: ci-runner-cloud
+    cloud_host: cloud1
+spec:
+  clusterIP: None
+  ports:
+    - { name: metrics, port: 9100, targetPort: 9100, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: ci-runner-cloud1
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: ci-runner-cloud
+    cloud_host: cloud1
+# cloud-ci-1 (.32, vmid 6101) / cloud-ci-2 (.33, vmid 6102) — added once the VMs are up and registered:
+#   - { ip: 192.168.0.32, hostname: cloud-ci-1 }
+#   - { ip: 192.168.0.33, hostname: cloud-ci-2 }
+subsets: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ci-runner-cloud2
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: ci-runner-cloud
+    cloud_host: cloud2
+spec:
+  clusterIP: None
+  ports:
+    - { name: metrics, port: 9100, targetPort: 9100, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: ci-runner-cloud2
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: ci-runner-cloud
+    cloud_host: cloud2
+# cloud2 has no runner VMs until its BIOS SVM is actually on (probed OFF 2026-09-23; plan Phase 4).
+subsets: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ci-runner-cloud3
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: ci-runner-cloud
+    cloud_host: cloud3
+spec:
+  clusterIP: None
+  ports:
+    - { name: metrics, port: 9100, targetPort: 9100, protocol: TCP }
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: ci-runner-cloud3
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: ci-runner-cloud
+    cloud_host: cloud3
+# cloud-ci-3 (.34, vmid 6103) / cloud-ci-4 (.35, vmid 6104) — added once the VMs are up and registered.
+# cloud-ci-5 (.30, vmid 6105) is gated on the cloud3 sizing measurement (plan Phase 4).
+subsets: []
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ci-runner-cloud
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [monitoring]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ci-runner-cloud
+  endpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: ci-runner-cloud
+        - sourceLabels: [__meta_kubernetes_service_label_cloud_host]
+          targetLabel: cloud_host
+        - sourceLabels: [__meta_kubernetes_endpoint_hostname]
+          targetLabel: nodename

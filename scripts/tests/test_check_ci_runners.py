@@ -182,6 +182,29 @@ class EvaluateApi(unittest.TestCase):
         self.assertTrue(r.ok, r.failures)
         self.assertTrue(any("old-hv-runner-9" in w for w in r.warnings))
 
+    def test_cloud_runner_offline_never_warns_or_fails(self):
+        # cloud-ci-N (ADR 0032) are offline for hours every night by design: not gated, not a warning
+        runners = self.all_online() + [self.runner("cloud-ci-3", status="offline")]
+        r = ccr.evaluate_api(runners, self.EXPECTED)
+        self.assertTrue(r.ok, r.failures)
+        self.assertEqual(r.warnings, [])
+        self.assertEqual(r.info, [])
+
+    def test_cloud_runner_listed_only_with_include_cloud(self):
+        runners = self.all_online() + [self.runner("cloud-ci-1"), self.runner("cloud-ci-2", status="offline")]
+        r = ccr.evaluate_api(runners, self.EXPECTED, include_cloud=True)
+        self.assertTrue(r.ok, r.failures)
+        self.assertEqual(r.warnings, [])
+        self.assertEqual(len(r.info), 2)
+        self.assertTrue(any("cloud-ci-2 status=offline" in i for i in r.info))
+
+    def test_cloud_regex_is_anchored(self):
+        # a lookalike must still warn: the exemption is exactly cloud-ci-<digits>
+        for lookalike in ("cloud-ci-", "cloud-ci-1x", "xcloud-ci-1", "cloud-ci"):
+            runners = self.all_online() + [self.runner(lookalike, status="offline")]
+            r = ccr.evaluate_api(runners, self.EXPECTED)
+            self.assertTrue(any(lookalike in w for w in r.warnings), lookalike)
+
     def test_malformed_item_missing_status_fails(self):
         runners = self.all_online()
         del runners[1]["status"]
@@ -313,6 +336,14 @@ class MainIntegration(unittest.TestCase):
                              query_exc=RuntimeError("Gitea API HTTP 403 (auth/scope?)"))
         self.assertEqual(rc, 1)
         self.assertNotIn(TOKEN_SENTINEL, text)
+
+    def test_include_cloud_prints_info_and_still_passes(self):
+        runners = [{"name": f"ci-runner-{i}", "status": "online"} for i in range(1, 6)]
+        runners.append({"name": "cloud-ci-1", "status": "offline"})
+        rc, text = self._run(["--include-cloud"], {"GITEA_TOKEN": TOKEN_SENTINEL}, runners=runners)
+        self.assertEqual(rc, 0)
+        self.assertIn("[INFO] api: cloud runner cloud-ci-1 status=offline", text)
+        self.assertNotIn("[WARN]", text)
 
     def test_api_subpool_still_gates_full_pool(self):
         # probing one host but only 4 runners online -> API must still FAIL (whole pool is the gate)

@@ -8,6 +8,7 @@ mutates a VM, a registration, or local trust state.
 
     python scripts/check-ci-runners.py                 # probe the default pool (.14-.18) + Gitea API
     python scripts/check-ci-runners.py --skip-api       # host-side only (no GITEA_TOKEN needed)
+    python scripts/check-ci-runners.py --include-cloud  # also LIST the cloud-ci-N runners (informational)
     python scripts/check-ci-runners.py 192.168.0.14     # target one runner
 
 Per host (SSH as `ubuntu`, key ~/.ssh/id_ed25519), asserts: the act_runner daemon is active; the `runner`
@@ -39,6 +40,11 @@ DEFAULT_RUNNERS = [
     ("192.168.0.18", "ci-runner-5"),
 ]
 KNOWN_BY_IP = dict(DEFAULT_RUNNERS)
+# The cloudlab opportunistic runners (cloud-ci-N, ADR 0032) are NEVER part of DEFAULT_RUNNERS: their
+# hosts are powered off at night, so they are `offline` for hours every day by design, and this gate
+# asserts every expected runner is online. They are reported (not gated) with --include-cloud, and the
+# "stale/unexpected runner" warning below stays quiet about them.
+CLOUD_RUNNER_RE = re.compile(r"^cloud-ci-\d+$")
 
 # ---- invariants ----
 # NB: the registry/gitea URLs are also hardcoded inline in PROBE (a static remote shell string that can't
@@ -94,6 +100,7 @@ class ApiResult:
     ok: bool
     failures: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    info: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -164,11 +171,14 @@ def evaluate_host(fields: dict) -> HostResult:
     return HostResult(ok=not failures, failures=failures, details=dict(fields))
 
 
-def evaluate_api(runners, expected_names) -> ApiResult:
+def evaluate_api(runners, expected_names, include_cloud: bool = False) -> ApiResult:
     """Assert every expected ci-runner-N is present + online in the Gitea org runners list. Pure.
-    Unexpected extra registrations only warn (unrelated org runners must not fail the gate)."""
+    Unexpected extra registrations only warn (unrelated org runners must not fail the gate); the
+    cloud-ci-N runners never warn (offline is their normal night state) and are listed as info
+    lines when include_cloud is set."""
     failures = []
     warnings = []
+    info = []
     if not isinstance(runners, list):
         return ApiResult(ok=False, failures=["api: runners payload is not a list (schema mismatch)"])
 
@@ -193,10 +203,15 @@ def evaluate_api(runners, expected_names) -> ApiResult:
             failures.append(f"api: {name} status={by_name[name]} (want online)")
 
     for name in sorted(by_name):
-        if name not in expected_names:
-            warnings.append(f"api: stale/unexpected runner {name} (status={by_name[name]}) — not gating")
+        if name in expected_names:
+            continue
+        if CLOUD_RUNNER_RE.match(name):
+            if include_cloud:
+                info.append(f"api: cloud runner {name} status={by_name[name]} (opportunistic — not gating)")
+            continue
+        warnings.append(f"api: stale/unexpected runner {name} (status={by_name[name]}) — not gating")
 
-    return ApiResult(ok=not failures, failures=failures, warnings=warnings)
+    return ApiResult(ok=not failures, failures=failures, warnings=warnings, info=info)
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +304,7 @@ def _reconfigure_streams():
 def main(argv) -> int:
     _reconfigure_streams()
     skip_api = "--skip-api" in argv
+    include_cloud = "--include-cloud" in argv
     positional = [a for a in argv if not a.startswith("-")]
 
     if positional:
@@ -336,9 +352,11 @@ def main(argv) -> int:
                 print(f"[FAIL] Gitea API online-check: {exc}")  # exc is pre-sanitized (no token)
                 ok = False
             else:
-                api = evaluate_api(runners, expected_names)
+                api = evaluate_api(runners, expected_names, include_cloud=include_cloud)
                 for w in api.warnings:
                     print(f"[WARN] {w}")
+                for i in api.info:
+                    print(f"[INFO] {i}")
                 if api.ok:
                     online = sorted(expected_names)
                     print(f"[ OK ] Gitea API: {len(online)}/{len(online)} expected runners online "

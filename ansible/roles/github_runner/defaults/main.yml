@@ -6,6 +6,11 @@
 # that repo's runner-health.yml canary — keep these in sync with it. The only intentional change vs
 # the live pool is registration auth: a GitHub App (here) instead of a static PAT.
 github_runner_enabled: false # opt-in, like storage_router (flip in group_vars/github_runners.yml)
+# Install the GitHub agent itself (tasks/agent.yml) on top of the base toolchain. false = base
+# toolchain only: Docker + buildx + compose, daemon.json, swap, Node/uv/k6, the `runner` user. That is
+# what the gitea_runner role depends on, and all the cloud_gitea_runners group wants — those VMs
+# serve Gitea Actions only and register no GitHub agent (plan 2026-09-23, ADR 0032).
+github_runner_agent_enabled: true
 
 # ---- pool identity (must match the live self-hosted-hv pool so jobs route to both) ----
 github_runner_repo: cchifor/platform

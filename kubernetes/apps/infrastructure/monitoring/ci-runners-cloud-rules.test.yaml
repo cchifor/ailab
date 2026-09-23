@@ -1,0 +1,163 @@
+# `promtool test rules` fixtures for ci-runners-cloud-rules.yaml (run by scripts/rules-lint.sh).
+#
+# The point of every case here is the HOST GATE: each alert must fire when the runner is sick and its
+# cloudlab host is up, stay silent when the whole host is off (the nightly state), and stay silent
+# when there is no target series at all (the Endpoints ship empty until the VMs exist).
+# `rule_files` is the extracted spec name, per rules-lint.sh.
+rule_files:
+  - ci-runners-cloud-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------- runner VM down, host up -> fires after 10m
+  - interval: 1m
+    name: runner unscrapeable while its cloud host answers fires; the other host's runner does not
+    input_series:
+      - series: 'up{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-1", instance="192.168.0.32:9100"}'
+        values: "1+0x5 0+0x30"
+      - series: 'up{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-3", instance="192.168.0.34:9100"}'
+        values: "1+0x36"
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1+0x36"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1+0x36"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: CloudCIRunnerDownWhileHostUp
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: CloudCIRunnerDownWhileHostUp
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ci-runner-cloud
+              cloud_host: cloud1
+              nodename: cloud-ci-1
+              instance: 192.168.0.32:9100
+            exp_annotations:
+              summary: "cloud CI runner cloud-ci-1 is down while cloud1 is up"
+              description: >-
+                node_exporter on cloud-ci-1 (192.168.0.32:9100) has been unscrapeable for
+                >10m while its cloudlab host cloud1 answers. The runner VM did not come
+                up after the host booted (onboot), or crashed. Check `qm status <vmid>` on the host and
+                the org runners API. A powered-off cluster does NOT fire this — that is the nightly state.
+
+  # ---------------------------------------- the nightly state: host AND runner down -> silent
+  - interval: 1m
+    name: a powered-off cloud host takes its runner down without firing
+    input_series:
+      - series: 'up{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-1", instance="192.168.0.32:9100"}'
+        values: "1+0x5 0+0x60"
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1+0x5 0+0x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CloudCIRunnerDownWhileHostUp
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: CloudCIRunnerDownWhileHostUp
+        exp_alerts: []
+
+  # ---------------------------------------- the join must not match across hosts
+  - interval: 1m
+    name: cloud3 being up does not vouch for a runner on cloud1
+    input_series:
+      - series: 'up{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-1", instance="192.168.0.32:9100"}'
+        values: "0+0x30"
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "0+0x30"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CloudCIRunnerDownWhileHostUp
+        exp_alerts: []
+
+  # ---------------------------------------- no runner target series at all (pre-provisioning) -> silent
+  - interval: 1m
+    name: with no ci-runner-cloud targets nothing fires even though the hosts are up
+    input_series:
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CloudCIRunnerDownWhileHostUp
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CloudCIRunnerDiskCritical
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CloudCIRunnerCleanupStale
+        exp_alerts: []
+
+  # ---------------------------------------- disk critical, host-gated both ways
+  - interval: 1m
+    name: root fs under 5 percent fires only while the host is up
+    input_series:
+      - series: 'node_filesystem_avail_bytes{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-3", instance="192.168.0.34:9100", mountpoint="/"}'
+        values: "4e9+0x40"
+      - series: 'node_filesystem_size_bytes{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-3", instance="192.168.0.34:9100", mountpoint="/"}'
+        values: "200e9+0x40"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1+0x20 0+0x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CloudCIRunnerDiskCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ci-runner-cloud
+              cloud_host: cloud3
+              nodename: cloud-ci-3
+              instance: 192.168.0.34:9100
+              mountpoint: /
+            exp_annotations:
+              summary: "cloud CI runner cloud-ci-3 root filesystem <5% free"
+              description: >-
+                Runner cloud-ci-3 is about to fail jobs with ENOSPC. gitea-runner-cleanup.sh
+                treats >=92% as CRITICAL and prunes through a live job; check `docker system df` and
+                `journalctl -t gitea-runner-cleanup` on the VM.
+      # host off from 21m: the gate drops the alert even though the (stale) fs series persist
+      - eval_time: 35m
+        alertname: CloudCIRunnerDiskCritical
+        exp_alerts: []
+
+  # ---------------------------------------- cleanup beacon stale, host-gated
+  - interval: 1m
+    name: a stale cleanup beacon fires on a scraped runner whose host is up, not on one whose host is off
+    input_series:
+      - series: 'up{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-2", instance="192.168.0.33:9100"}'
+        values: "1+0x90"
+      # beacon last written at fixture t=0; stale (>3600 s) from 60m on
+      - series: 'gitea_runner_cleanup_last_run_seconds{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-2", instance="192.168.0.33:9100"}'
+        values: "0+0x90"
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1+0x90"
+      - series: 'up{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-4", instance="192.168.0.35:9100"}'
+        values: "1+0x90"
+      - series: 'gitea_runner_cleanup_last_run_seconds{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-4", instance="192.168.0.35:9100"}'
+        values: "0+0x90"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "0+0x90"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: CloudCIRunnerCleanupStale
+        exp_alerts: []
+      # stale from ~60m; `for: 15m` -> fires from ~75m. cloud-ci-4's host is off -> silent.
+      - eval_time: 80m
+        alertname: CloudCIRunnerCleanupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ci-runner-cloud
+              cloud_host: cloud1
+              nodename: cloud-ci-2
+              instance: 192.168.0.33:9100
+            exp_annotations:
+              summary: "cloud CI runner cloud-ci-2 docker cleanup hasn't run in >1h"
+              description: >-
+                gitea-runner-cleanup.timer (15-min) has not written its beacon on cloud-ci-2
+                for >1h while the VM is scraped and its host is up — docker/storage reclamation is
+                stalled. Check `systemctl status gitea-runner-cleanup.timer` + `journalctl -t
+                gitea-runner-cleanup`.
