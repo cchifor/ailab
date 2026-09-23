@@ -565,8 +565,14 @@ def section_paths(data):
 
 
 def _globs(key, default):
+    """The module defaults PLUS what the config lists under `key` (order kept, no duplicates).
+    A configured list EXTENDS the built-ins, never replaces them: adding one repo artifact must
+    not silently drop the lock-file/vendor rules (2026-09-23, ailab#835 — the generated
+    reporting-dashboard ConfigMap; Gitea's PR .diff ignores .gitattributes `-diff`, so this
+    list is the only exclusion that reaches the bot)."""
     v = CFG.get(key)
-    return tuple(v) if isinstance(v, (list, tuple)) and v else default
+    extra = tuple(x for x in v if x not in default) if isinstance(v, (list, tuple)) else ()
+    return tuple(default) + extra
 
 
 def split_sections(raw):

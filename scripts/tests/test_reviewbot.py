@@ -1334,6 +1334,16 @@ class SectionReasonTest(unittest.TestCase):
     def _reason(self, path, body=b"+x\n", old=None):
         return self.m.section_reason(self.m.split_sections(_sec(path, body, old))[0])
 
+    def test_configured_exclude_globs_extend_the_builtins(self):
+        # ailab#835: one repo artifact added by config must not drop the lock-file/vendor rules
+        art = "kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml"
+        self.m.CFG["exclude_globs"] = [art]
+        self.assertEqual("generated", self._reason(art))
+        self.assertEqual("generated", self._reason("uv.lock"))
+        self.assertEqual("generated", self._reason("vendor/x.go"))
+        self.assertIsNone(self._reason("scripts/gen-reporting-dashboard.py"))
+        self.assertEqual(1, self.m._globs("exclude_globs", self.m.GENERATED_GLOBS).count(art))
+
     def test_lockfiles_and_vendor_are_generated(self):
         for path in ("uv.lock", "sub/poetry.lock", "package-lock.json",
                      "vendor/x.go", "src/vendored/y.py", "node_modules/z.js", "a.min.js"):
