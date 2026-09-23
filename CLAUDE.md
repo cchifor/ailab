@@ -46,7 +46,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 
 **`docs/network-plan.md` is the IPAM registry — read it before allocating ANY address.** The LAN is
 shared with the `cloudlab` GPU cluster (`.20`–`.22`, `.26`–`.28`), which is invisible to ailab tooling.
-Free static space is only `.5`–`.7`, `.12`, `.13`, `.29`, `.38`, `.39`, `.50` (`.30` and `.32`–`.35` went to the cloudlab CI runner VMs on 2026-09-23 — see `docs/network-plan.md`).
+Free static space is only `.5`–`.7`, `.12`, `.13`, `.38`, `.39`, `.50` (`.29`, `.30` and `.32`–`.35` went to the cloudlab CI runner VMs on 2026-09-23 — see `docs/network-plan.md`).
 
 | Role | IPs | vmid |
 |---|---|---|
@@ -60,7 +60,7 @@ Free static space is only `.5`–`.7`, `.12`, `.13`, `.29`, `.38`, `.39`, `.50` 
 | Reviewer VMs (out-of-band, not in tofu) | .24 / .25 | 4501–4502 |
 | AI LLM LXCs | .44 / .45 / .46 | 5001–5003 |
 | registry LXC (node1) | .36 | 5004 |
-| Cloud CI runner VMs (`cloud-ci-1..4` on **cloudlab** cloud1/cloud3; opportunistic, offline at night by design; `../cloudlab/kubernetes/infra/ci-runners`, ailab `just cloud-runners`, ADR 0032) | .32 / .33 / .34 / .35 (`.30` reserved) | 6101–6104 |
+| Cloud CI runner VMs (`cloud-ci-1..6` on **cloudlab** cloud1 ×3 / cloud3 ×3; opportunistic, offline at night by design; `../cloudlab/kubernetes/infra/ci-runners`, ailab `just cloud-runners`, ADR 0032) | .32 / .33 / .29 (cloud1) · .34 / .35 / .30 (cloud3) | 6101–6106 |
 
 > **Renumbering a guest takes THREE edits**: the guest (netplan), the tofu variable, AND the Proxmox
 > `ipconfig0` (`qm set <vmid> --ipconfig0 …` + `qm cloudinit update <vmid>`). Both VM modules set
