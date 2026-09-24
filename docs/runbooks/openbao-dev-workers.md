@@ -77,8 +77,17 @@ Secret.
   use the token but can never rotate it, and cannot even fetch the refresh token to try. See
   § "The shared codex login" below. The grant is `read` on the DATA path only (no metadata, no list).
 
-- `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `proxmox_ssh_key`,
-  `litellm_diag_key`, `litellm_diag_base`, `litellm_diag_models`.
+- `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `gitea_repo_pat`,
+  `proxmox_ssh_key`, `litellm_diag_key`, `litellm_diag_base`, `litellm_diag_models`.
+
+  `gitea_repo_pat` (added 2026-09-24) is a second `chifor` Gitea PAT, token name
+  `dev-workers-repo-create`, scopes **`write:organization,write:repository`**, so an agent can
+  create repositories in org `cchifor` (`POST /api/v1/orgs/cchifor/repos`). It deliberately has no
+  `write:user` scope, so it cannot create repos in the personal `chifor` namespace (`POST
+  /user/repos` → 403). Reach it with `cred exec common gitea_repo_pat GITEA_TOKEN -- <cmd>`.
+  It is not rendered into `~/.git-credentials`; that file stays on `gitea_pat`. Rotation works like
+  `gitea_pat`: mint a replacement in-pod, re-seed, then revoke the old token by name in the UI
+  (Settings → Applications). Token auth cannot revoke itself.
 
   `litellm_diag_*` (added 2026-09-22) is the fleet's **LiteLLM diagnostic credential**: a per-org
   VIRTUAL key on the `litellm-local` gateway (LAN NodePort `http://192.168.0.41:30400/v1`, the value
