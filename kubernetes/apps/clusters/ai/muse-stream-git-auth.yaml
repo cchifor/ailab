@@ -1,0 +1,21 @@
+# The root clusters/ai reconciliation has no SOPS decryption. Keep the encrypted
+# read-only repository key in its own decrypting Kustomization, as other apps do.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: muse-stream-git-auth
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/muse-stream-bootstrap
+  prune: true
+  wait: true
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
