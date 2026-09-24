@@ -99,6 +99,9 @@ data:
         service: http://ntfy.monitoring.svc.cluster.local:80
       # Gitea — NOT behind Cloudflare Access: git clone/push over HTTPS uses Gitea's own auth/tokens,
       # which an Access browser login would break. Web UI login is Authelia OIDC; registration is off.
+      # Muse uses native user/agent/mobile authentication; published songs are public.
+      - hostname: muse.chifor.me
+        service: http://muse-stream.muse-stream.svc.cluster.local:80
       - hostname: git.chifor.me
         service: http://gitea-http.gitea.svc.cluster.local:3000
       # AgentForge v2 control plane (ADR 0019) — NOT behind Cloudflare Access: the CP does its OWN
@@ -172,7 +175,7 @@ spec:
         # routes until something restarts them. A new hostname then looks deployed but 404s at the
         # edge. Bump this whenever the ingress list changes -- it is the rollout trigger. (Same trap
         # cloud-power's kustomization documents for app code.)
-        chifor.me/config-revision: "2026-09-23-retire-dw5"
+        chifor.me/config-revision: "2026-09-24-muse-stream"
       labels:
         app.kubernetes.io/name: cloudflared
     spec:
