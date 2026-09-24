@@ -308,6 +308,19 @@ cm ci-rerun-watchdog-state -p '{"data":{"disabled":"true"}}'` (next scan, ≤ 60
 **Reading an `offline` `cloud-ci-*`.** Check whether the host is up first (`up{job="cloud-node"}`
 or cloudlab `just power-status`). Host down = nightly state, nothing to do. Host up + runner offline
 = `CloudCIRunnerDownWhileHostUp` territory: `qm status <vmid>` on the host, then the daemon.
+**Quarantining a runner that corrupts jobs.** Symptom: one `cloud-ci-N` fails jobs the rest of the
+pool passes, with host-level errors rather than test failures: git `inflate: data stream error
+(incorrect data check)`, segfaults (`exit code: 139`) in npm, pip or python, and checkout failing
+in seconds. Prove it before acting. Job logs are overwritten by re-runs, so take the task IDs from
+the runner's own journal (`journalctl -u gitea-act-runner | grep 'task .* repo is'`) and look up each
+task's outcome in `GET /repos/{o}/{r}/actions/tasks`, then compare failure rates across runners.
+To quarantine: `sudo systemctl stop gitea-act-runner` on the VM (drains, and stops new jobs at once);
+then set `started = false` on it in cloudlab `runner_nodes` and `just ci-runners-apply` (VM off and
+not booted with its host; disk and registration kept); and comment its address out of
+`ci-runners-cloud.yaml` in the same ailab PR as the inventory note, or `CloudCIRunnerDownWhileHostUp`
+fires. Undo all three together after a clean memory test of the host. cloud-ci-6 was quarantined
+this way on 2026-09-24 (#848).
+
 **Never delete a `cloud-ci-*` registration while a job of theirs may be within the watchdog's
 2 h lookback** — the API resolves `runner_name`/`runner_id` from the live runner row and the
 watchdog fails closed on an unknown runner.
