@@ -141,10 +141,9 @@ spec:
                 secretKeyRef:
                   name: llm-router-auth
                   key: admin-token
-          # Actual routes in packages/plugins/http-api.ts: GET /health
-          # (liveness, {status:"ok"}) and GET /ready (200 when all required
-          # plugins are active and storage answers, 503 otherwise). There is
-          # no /health/live path in this codebase.
+          # Probe routes come from the router's kernel (packages/kernel/index.ts):
+          # GET /health (liveness, {status:"ok"}) and GET /ready (200 when every
+          # required plugin is active and storage answers, 503 otherwise).
           startupProbe:
             httpGet:
               path: /ready
@@ -182,7 +181,7 @@ spec:
           volumeMounts:
             - name: releases
               mountPath: /app
-              subPath: router-0.1.0-20260924
+              subPath: router-0.1.0-20260924-chat
               readOnly: true
             - name: data
               mountPath: /data # SQLite file + WAL/SHM sidecars
