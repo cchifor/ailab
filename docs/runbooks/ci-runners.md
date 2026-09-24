@@ -314,10 +314,12 @@ pool passes, with host-level errors rather than test failures: git `inflate: dat
 in seconds. Prove it before acting. Job logs are overwritten by re-runs, so take the task IDs from
 the runner's own journal (`journalctl -u gitea-act-runner | grep 'task .* repo is'`) and look up each
 task's outcome in `GET /repos/{o}/{r}/actions/tasks`, then compare failure rates across runners.
-To quarantine: `sudo systemctl stop gitea-act-runner` on the VM (drains, and stops new jobs at once);
+To quarantine: `sudo systemctl stop gitea-act-runner` on the VM. It stops taking jobs at once and lets
+a running job finish for up to 10 minutes (`shutdown_timeout: 10m`, `TimeoutStopSec=11min`, #745);
+a longer job is killed, so stop it while the runner is idle if you can;
 then set `started = false` on it in cloudlab `runner_nodes` and `just ci-runners-apply` (VM off and
 not booted with its host; disk and registration kept); and comment its address out of
-`ci-runners-cloud.yaml` in the same ailab PR as the inventory note, or `CloudCIRunnerDownWhileHostUp`
+`ci-runners-cloud.yaml` and its entry out of `inventory/hosts.yml` in one ailab PR, or `CloudCIRunnerDownWhileHostUp`
 fires. Undo all three together after a clean memory test of the host. cloud-ci-6 was quarantined
 this way on 2026-09-24 (#848).
 
