@@ -47,22 +47,10 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 #: The full set of Flux Kustomization paths in kubernetes/apps/clusters/ai that this checkout can
 #: actually `kustomize build` — i.e. sourceRef resolves to THIS repo's own flux-system source, per
 #: kubernetes/apps/clusters/ai/flux-system/gotk-sync.yaml (GitRepository flux-system's url IS
-#: cchifor/ailab.git). Two Kustomizations in that directory are deliberately NOT in this set:
-#: `agentforge-tenants` (sourceRef -> GitRepository "agentforge-tenants", path "./tenants") and
-#: `platform` (sourceRef -> GitRepository "platform", path "./deploy/gitops/flux/clusters/ailab")
-#: each name a path in a DIFFERENT repo that does not exist in this checkout at all.
-#:
-#: PR C-P0-05's spec (tests_first) describes this as "the 24 Flux Kustomization paths listed in
-#: clusters/ai" — the anchor has moved since the plan was written: clusters/ai currently holds 26
-#: Kustomization documents total (24 locally-sourced + the 2 externally-sourced ones above), not
-#: 24+2. The 24-path set below is independently re-derived (every path checked for a real
-#: kustomization.yaml, every exclusion checked against its manifest's own sourceRef) rather than
-#: hand-copied from the spec text; see deviations_from_spec in the implement report. The 2
-#: exclusions are not just "not local", either — mp.EXPECTED_EXTERNAL_SOURCES is a closed,
-#: reviewed allowlist of exactly those two GitRepository objects; a THIRD externally-sourced
-#: Kustomization appearing in clusters/ai without a matching entry there makes discover_paths()
-#: raise DiscoveryError rather than silently grow this exclusion set (round-1 codex cross-review
-#: finding; see FailClosedOnABrokenFixture.test_unrecognized_external_source_ref_fails_closed).
+#: cchifor/ailab.git). Three Kustomizations deliberately name paths in other repos:
+#: agentforge-tenants, platform and muse-stream. Their source objects form a closed,
+#: reviewed allowlist; a new external source without an entry fails discovery.
+#: The local paths below are checked against actual kustomization.yaml files.
 EXPECTED_LOCAL_PATHS = frozenset(
     {
         "./kubernetes/apps/infrastructure/agent-sandbox",
@@ -94,12 +82,13 @@ EXPECTED_LOCAL_PATHS = frozenset(
         # openbao-platform-pg-sync CronJob). Added deliberately, same reason as helmtest above.
         "./kubernetes/apps/infrastructure/platform-access",
         "./kubernetes/apps/platform-bootstrap",
+        "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/qnap-storage",
         "./kubernetes/apps/infrastructure/testpool",
     }
 )
 
-EXCLUDED_EXTERNAL_PATHS = frozenset({"./tenants", "./deploy/gitops/flux/clusters/ailab"})
+EXCLUDED_EXTERNAL_PATHS = frozenset({"./tenants", "./deploy/gitops/flux/clusters/ailab", "./deploy/kubernetes/overlays/ailab"})
 
 #: The url the REAL gotk-sync.yaml declares for GitRepository flux-system/flux-system (ADR 0017:
 #: the in-cluster Gitea forge is the master; GitHub is a push-mirror backup of the SAME repo).
@@ -248,18 +237,19 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
         for _namespace, name in mp.EXPECTED_EXTERNAL_SOURCES:
             self.assertIn(name, stderr)
 
-    def test_real_tree_declares_exactly_the_three_git_repositories(self):
+    def test_real_tree_declares_exactly_the_four_git_repositories(self):
         # The resolution table discovery classifies against: this repo's own bootstrap source plus
-        # the two reviewed external ones — nothing else, and each with a url that identifies the
+        # the three reviewed external ones — nothing else, and each with a url that identifies the
         # repo it really points at.
         sources = mp.declared_git_repositories()
         self.assertEqual(
             set(sources),
-            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform")},
+            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream")},
         )
         self.assertTrue(mp.is_this_repo(sources[("flux-system", "flux-system")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "agentforge-tenants")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "platform")]))
+        self.assertFalse(mp.is_this_repo(sources[("flux-system", "muse-stream")]))
 
     def test_every_discovered_path_has_a_kustomization_yaml(self):
         # This is verify_buildable()'s own job; re-proving it here means a future edit to
