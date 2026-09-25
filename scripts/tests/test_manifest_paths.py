@@ -47,8 +47,8 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 #: The full set of Flux Kustomization paths in kubernetes/apps/clusters/ai that this checkout can
 #: actually `kustomize build` — i.e. sourceRef resolves to THIS repo's own flux-system source, per
 #: kubernetes/apps/clusters/ai/flux-system/gotk-sync.yaml (GitRepository flux-system's url IS
-#: cchifor/ailab.git). Three Kustomizations deliberately name paths in other repos:
-#: agentforge-tenants, platform and muse-stream. Their source objects form a closed,
+#: cchifor/ailab.git). Four Kustomizations deliberately name paths in other repos:
+#: agentforge-tenants, platform, muse-stream and trueswarm. Their source objects form a closed,
 #: reviewed allowlist; a new external source without an entry fails discovery.
 #: The local paths below are checked against actual kustomization.yaml files.
 EXPECTED_LOCAL_PATHS = frozenset(

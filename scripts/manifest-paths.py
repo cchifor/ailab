@@ -8,10 +8,10 @@ from, not a manifest under test here). Every `kind: Kustomization` document
 in that directory names a `spec.path` this repo's own tooling can attempt to
 `kustomize build`.
 
-NOT EVERY ONE OF THOSE PATHS IS LOCAL, though. Three Kustomizations in that
+NOT EVERY ONE OF THOSE PATHS IS LOCAL, though. Four Kustomizations in that
 directory (`agentforge-tenants`, `platform`, `muse-stream`, `trueswarm`) point `spec.sourceRef` at a
 DIFFERENT `GitRepository` — the CP-written `cchifor/agentforge-tenants` repo
-the `cchifor/platform` repo and the `cchifor/muse-stream` repo, respectively — and `spec.path` is then a
+the `cchifor/platform`, `cchifor/muse-stream` and `cchifor/trueswarm` repos, respectively — and `spec.path` is then a
 path in THAT repo, not this one (`./tenants`, `./deploy/gitops/flux/clusters
 /ailab`, `./deploy/kubernetes/overlays/ailab`; these directories do not exist
 in this checkout). Feeding them to
