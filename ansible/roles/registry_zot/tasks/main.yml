@@ -137,6 +137,18 @@
   no_log: true
   notify: restart zot
 
+- name: Generate bcrypt htpasswd for the read-only pull user
+  community.general.htpasswd:
+    path: "{{ registry_zot_config_dir }}/htpasswd"
+    name: "{{ registry_zot_pull_user }}"
+    password: "{{ registry_pull_password }}"
+    crypt_scheme: bcrypt
+    owner: root
+    group: "{{ registry_zot_group }}"
+    mode: "0640"
+  no_log: true
+  notify: restart zot
+
 # Optional Docker Hub credentials for the pull-through cache's UPSTREAM (sync.credentialsFile).
 # Only rendered when registry_zot_sync_dockerhub_user is set; config.json references it only then.
 # Lifts the cache's own Docker Hub egress off the anonymous 100-pulls/6h limit (see defaults).

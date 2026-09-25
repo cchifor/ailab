@@ -43,6 +43,22 @@ lacks an image. On a cache miss the failover pulls Docker Hub directly (anonymou
 Leaving `registry_zot_sync_dockerhub_user` empty runs the cache anonymously (works; cold fetches can
 be rate-limited). quay.io / mcr.microsoft.com are not rate-limited.
 
+## Pulling with Docker: the read-only `pull` identity
+
+Anonymous clients have `read`, and curl/containerd/crane pull anonymously. **Docker on the classic
+overlay2 image store does not**: zot answers its `/v2/` ping (any `docker/*` User-Agent) with a
+basic-auth challenge, and dockerd then fails client-side with `no basic auth credentials` — the
+manifest GET is never sent. Log in with the read-only user `pull` (zot policy `read` only):
+
+```bash
+# on a dev-worker (OpenBao af/dev-workers/common):
+cred get common registry_pull_password | docker login registry.chifor.me -u pull --password-stdin
+```
+
+Its password is `registry_pull_password` in `ansible/secrets/registry.sops.yaml` (rendered into the
+htpasswd by `just registry`), escrowed at `af/estate/registry` `pull_password`. Never hand out `ci`
+(read/write) for pulls.
+
 ## Refresh a stale cached tag
 
 On-demand sync caches a tag's content on first fetch and won't re-pull a mutable tag (e.g. upstream

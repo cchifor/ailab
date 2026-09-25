@@ -71,6 +71,10 @@
             {
               "users": ["{{ registry_zot_ci_user }}"],
               "actions": ["read", "create", "update", "delete"]
+            },
+            {
+              "users": ["{{ registry_zot_pull_user }}"],
+              "actions": ["read"]
             }{% if registry_zot_admin_group %},
             {
               "groups": ["{{ registry_zot_admin_group }}"],
