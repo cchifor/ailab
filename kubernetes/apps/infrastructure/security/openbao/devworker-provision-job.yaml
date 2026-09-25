@@ -340,6 +340,35 @@ data:
     done
     [ "$seeded" -gt 0 ] || { echo "no *.json under $SEED_DIR; aborting" >&2; exit 1; }
 
+    # Fields that MOVED out of a per-host seed. Seed-wins only ever overwrites: dropping a key from a
+    # seed leaves the live copy behind, unowned, and after the next rotation it is a stale credential
+    # that still looks right. So a move also strips the old copy, here, on every run. One entry per
+    # line: `<path under dev-workers/> <field>...`.
+    #   dev-worker-3 strive_test_*: moved to `common` 2026-09-25 so every worker can reach the e2e
+    #   persona (docs/runbooks/openbao-dev-workers.md). Drop the line once slot 3 is retired.
+    # The KV-v2 PATCH is a JSON merge patch: a null value DELETES that key and leaves the rest of the
+    # document alone; nulling a key that is already gone is a no-op (both measured on 2.6.2). The JSON
+    # carries field NAMES only, never a value, so nothing here can print a credential.
+    MOVED_FIELDS="dev-worker-3 strive_test_user strive_test_password"
+    printf '%s\n' "$MOVED_FIELDS" | while read -r mpath mfields; do
+      [ -n "$mpath" ] || continue
+      case " $RETIRED_SLOTS " in
+        *" $mpath "*) continue ;;   # the retirement purge above owns that subtree
+      esac
+      if probe_err="$(bao kv get -mount=af "dev-workers/${mpath}" 2>&1 >/dev/null)"; then
+        body=""
+        for f in $mfields; do body="${body:+$body,}\"$f\":null"; done
+        printf '{"data":{%s}}' "$body" | bao patch "af/data/dev-workers/${mpath}" - >/dev/null
+        echo "moved fields stripped from dev-workers/${mpath}: ${mfields}"
+      elif printf '%s' "$probe_err" | grep -qiE 'no value found|not found'; then
+        echo "moved fields: dev-workers/${mpath} absent; nothing to strip"
+      else
+        echo "probe of dev-workers/${mpath} failed and was not a not-found; aborting" >&2
+        echo "$probe_err" >&2
+        exit 1
+      fi
+    done
+
     echo "devworker provision complete"
 ---
 apiVersion: batch/v1

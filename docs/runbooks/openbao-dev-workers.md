@@ -84,9 +84,10 @@ Secret.
   "the strive realm admin login" is nearly always this persona instead.
   The escrow copy stays root-only at `af/estate/strive-realm`. Rotation = the live Secret
   `strive-ailab/e2e-secrets` (and the Keycloak user) + `af/estate/strive-realm` + `common.json`
-  here, in one change. The old `dev-worker-3.strive_test_*` fields are no longer seeded; the live
-  copy sits unchanged until slot 3 retires and the provision Job's `kv_purge` deletes that subtree.
-  Do not use it.
+  here, in one change. The old `dev-worker-3.strive_test_*` copy is gone: the provision Job's
+  `MOVED_FIELDS` step deletes those two keys from `af/dev-workers/dev-worker-3` on every run (a KV
+  merge patch with `null`, which leaves the sync-owned fields alone), because seed-wins never removes
+  a key a seed stops carrying.
 
   `gitea_repo_pat` (added 2026-09-24) is a second `chifor` Gitea PAT, token name
   `dev-workers-repo-create`, scopes **`write:organization,write:repository`**, so an agent can
