@@ -28,7 +28,7 @@ creation_rules:
   # Registry secrets. Same reason as dev-worker above — MUST precede the generic ansible/secrets rule
   # (which would otherwise encrypt only github_app_private_key and leave these two keys plaintext).
   - path_regex: ansible[/\\]secrets[/\\]registry\.sops\.ya?ml$
-    encrypted_regex: ^(registry_ci_password|cloudflare_dns_api_token|registry_oidc_client_secret|registry_sync_dockerhub_token|registry_pull_password)$
+    encrypted_regex: ^(registry_ci_password|cloudflare_dns_api_token|registry_oidc_client_secret|registry_sync_dockerhub_token|registry_pull_password|registry_scoped_push_passwords)$
     age: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
   # Gitea act_runner registration token. Same reason as dev-worker/registry above — MUST precede the
   # generic ansible/secrets rule (which encrypts only github_app_private_key and would leave this

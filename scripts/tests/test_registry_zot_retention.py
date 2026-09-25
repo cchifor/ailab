@@ -91,6 +91,8 @@ def _render_config() -> str:
     context = _load_defaults()
     context.update(_EXTRA_VARS)
     env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    # Ansible's `to_json` is json.dumps with default arguments; plain jinja2 does not ship it.
+    env.filters["to_json"] = json.dumps
     template = env.from_string(TEMPLATE_PATH.read_text())
     return template.render(**context)
 
@@ -271,6 +273,38 @@ class RegistryZotRetentionTest(unittest.TestCase):
         catchall = policies[catchall_idx]
         self.assertFalse(catchall["deleteUntagged"])
         self.assertEqual(catchall["keepTags"], [{"patterns": [".*"]}])
+
+class RegistryZotScopedPushAccessTest(unittest.TestCase):
+    """registry_zot_scoped_push_users: per-project push identities (cchifor/trueswarm publish CI).
+
+    zot authorizes a repository by its LONGEST matching accessControl pattern only -- policies are
+    NOT merged with `**` -- so a scoped entry that forgot a base grant would silently revoke it
+    (e.g. anonymous or `pull` reads of trueswarm/* images the cluster pulls)."""
+
+    def setUp(self):
+        self.defaults = _load_defaults()
+        self.repos = json.loads(_render_config())["http"]["accessControl"]["repositories"]
+
+    def test_every_scoped_entry_repeats_the_base_grants(self):
+        base = self.repos["**"]
+        scoped = self.defaults["registry_zot_scoped_push_users"]
+        self.assertTrue(scoped, "expected at least the trueswarm-ci entry")
+        for p in scoped:
+            entry = self.repos[p["repositories"]]
+            self.assertEqual(entry["anonymousPolicy"], base["anonymousPolicy"])
+            for grant in base["policies"]:
+                self.assertIn(grant, entry["policies"], f"{p['repositories']} drops {grant}")
+
+    def test_scoped_user_can_push_only_its_prefix_and_never_delete(self):
+        for p in self.defaults["registry_zot_scoped_push_users"]:
+            mine = [g for g in self.repos[p["repositories"]]["policies"] if g.get("users") == [p["user"]]]
+            self.assertEqual(mine, [{"users": [p["user"]], "actions": ["read", "create", "update"]}])
+            for pattern, entry in self.repos.items():
+                if pattern != p["repositories"]:
+                    self.assertFalse(
+                        any(p["user"] in g.get("users", []) for g in entry["policies"]),
+                        f"{p['user']} leaks into {pattern}",
+                    )
 
 
 if __name__ == "__main__":
