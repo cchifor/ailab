@@ -49,5 +49,6 @@ variable "tunnel_record_comments" {
   type        = map(string)
   default = {
     router = "LLM Router; ingress managed by AILab Flux; bearer-authenticated APIs" # set out of band 2026-09-21 with the record; adopted by the import
+    muse   = "Muse Stream on ailab; managed by ailab OpenTofu"                      # set out of band 2026-09-24 with the record; adopted by muse-import.tf
   }
 }
