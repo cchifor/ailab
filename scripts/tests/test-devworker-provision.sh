@@ -134,8 +134,20 @@ case "$1 $2" in
       "delete -mount=af dev-workers/dev-worker-6") touch "$STATE/kv-gone"; exit 0 ;;
       *) echo "stub: unexpected kv metadata op: $*" >&2; exit 3 ;;
     esac ;;
-  "kv get") nvf "af/data/$4" ;;
-  "kv put"|"kv patch") exit 0 ;;
+  "kv get")
+    # dev-worker-3 exists once the seed loop has created it, so the moved-fields strip patches it
+    if [ "$4" = dev-workers/dev-worker-3 ] && [ -f "$STATE/dw3-exists" ]; then
+      # FAIL_DW3_PROBE: the moved-fields probe (the first probe AFTER the seed created the path) fails
+      [ -f "$STATE/FAIL_DW3_PROBE" ] && { echo "Error reading af/data/dev-workers/dev-worker-3: permission denied" >&2; exit 2; }
+      exit 0
+    fi
+    nvf "af/data/$4" ;;
+  "patch af/data/dev-workers/dev-worker-3")   # KV-v2 merge patch, JSON body on stdin
+    [ "$3" = "-" ] || { echo "stub: patch without stdin body: $*" >&2; exit 3; }
+    cat >> "$STATE/patch-body"; echo >> "$STATE/patch-body"; exit 0 ;;
+  "kv put"|"kv patch")
+    case "$*" in *" dev-workers/dev-worker-3 "*) touch "$STATE/dw3-exists" ;; esac
+    exit 0 ;;
   *) echo "stub: unhandled: bao $*" >&2; exit 3 ;;
 esac
 STUB
@@ -179,6 +191,10 @@ expect "$out1" "retired KV leaf dev-workers/dev-worker-6/sub1/credential: metada
 expect "$out1" "retired KV dev-workers/dev-worker-6: metadata deleted"
 expect "$out1" "seed dev-worker-6.json names a retired slot; skipped"
 expect "$out1" "devworker provision complete"
+expect "$out1" "moved fields stripped from dev-workers/dev-worker-3: strive_test_user strive_test_password"
+expect "$out2" "moved fields stripped from dev-workers/dev-worker-3: strive_test_user strive_test_password"
+# field NAMES nulled, nothing else in the body; issued on both runs (idempotent)
+[ "$(grep -cxF '{"data":{"strive_test_user":null,"strive_test_password":null}}' "$WORK/state/patch-body")" = 2 ]   || { echo "moved-fields patch body wrong or not issued on both runs" >&2; cat "$WORK/state/patch-body" >&2; exit 1; }
 expect "$out2" "retired dev-worker-6: converged (no secret-ids, no tokens; role/policy/KV absent)"
 expect "$out2" "seed dev-worker-6.json names a retired slot; skipped"
 expect "$out2" "devworker provision complete"
@@ -255,6 +271,16 @@ expect "$out1" "failed and was not a not-found; aborting"
 forbid "$out1" "dev-workers/dev-worker-6/; nothing to enumerate"   # slot 5 (converged, `{}`) may say so; slot 6's silent failure must not
 forbid "$out1" "devworker provision complete"
 echo "G: a silent failure aborts instead of converging"
+
+# ---- H. a failed moved-fields probe aborts the WHOLE run -----------------------------------------
+# The strip loop must end the script, not just a subshell: no "complete" line, no patch issued.
+reset_state; touch "$WORK/state/FAIL_DW3_PROBE"
+outH="$(run 2>&1)" && { echo "H: a failed moved-fields probe must abort the run"; echo "$outH" >&2; exit 1; }
+expect "$outH" "probe of dev-workers/dev-worker-3 failed and was not a not-found; aborting"
+forbid "$outH" "moved fields stripped"
+forbid "$outH" "devworker provision complete"
+[ ! -s "$WORK/state/patch-body" ] || { echo "H: a patch was issued after the probe failed" >&2; exit 1; }
+echo "H: a failed moved-fields probe aborts the run"
 
 # ---- F. a CONVERGED retirement stays converged -------------------------------------------------
 # Run 1 deletes the role; run 2 therefore gets OpenBao's 400 `role "..." does not exist` from every

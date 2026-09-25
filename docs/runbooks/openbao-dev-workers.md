@@ -55,17 +55,6 @@ Secret.
 
 **KV layout** (mount `af`, KV v2 — the same mount ADR 0019 uses):
 
-- `af/dev-workers/dev-worker-3` — fields `strive_test_user` / `strive_test_password` (added
-  2026-09-12). A HOST PROJECTION of the `strive` realm's seeded **e2e persona** login
-  (`e2e-w0@localhost`), the credential the platform repo's live suites take as
-  `STRIVE_TEST_USER` / `STRIVE_TEST_PASSWORD` — see `live-ailab-e2e.yml`, whose precheck names
-  `e2e-secrets/worker-password` as the value. Reach it with
-  `cred exec dev-worker-3 strive_test_password STRIVE_TEST_PASSWORD -- <cmd>`.
-  **This is deliberately NOT the Keycloak admin login.** That one is master-realm admin (all of
-  `master`/`app`/`strive`), and it is unusable from a worker anyway: the edge 404s
-  `/realms/master/*` and `/admin/*`, so it cannot even authenticate from here. A request for
-  "the strive realm admin login" is nearly always this persona instead.
-  The escrow copy stays root-only at `af/estate/strive-realm`.
 - `af/dev-workers/codex-auth` — **read-only from every worker AND both reviewer VMs** (field
   `auth_json` — dot-free on purpose, so the host template can use plain field access that fails
   closed; `index` on a dotted key would render `<no value>`). The HOST PROJECTION of the estate's ONE codex login: the `af-codex-refresh` CronJob
@@ -78,7 +67,27 @@ Secret.
   § "The shared codex login" below. The grant is `read` on the DATA path only (no metadata, no list).
 
 - `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `gitea_repo_pat`,
-  `proxmox_ssh_key`, `litellm_diag_key`, `litellm_diag_base`, `litellm_diag_models`.
+  `strive_test_user`, `strive_test_password`, `proxmox_ssh_key`, `litellm_diag_key`,
+  `litellm_diag_base`, `litellm_diag_models`.
+
+  `strive_test_user` / `strive_test_password` (moved here 2026-09-25 from
+  `af/dev-workers/dev-worker-3`, where they were added 2026-09-12, so every live worker can run the
+  platform's live Playwright lane, not just one). A HOST PROJECTION of the `strive` realm's seeded
+  **e2e persona** login (`e2e-w0@localhost`), the credential the platform repo's live suites take as
+  `STRIVE_TEST_USER` / `STRIVE_TEST_PASSWORD` — see `live-ailab-e2e.yml`, whose precheck names
+  `e2e-secrets/worker-password` as the value. Reach it with
+  `cred exec common strive_test_password STRIVE_TEST_PASSWORD -- <cmd>` (and
+  `cred get common strive_test_user`, which is not a secret).
+  **This is deliberately NOT the Keycloak admin login.** That one is master-realm admin (all of
+  `master`/`app`/`strive`), and it is unusable from a worker anyway: the edge 404s
+  `/realms/master/*` and `/admin/*`, so it cannot even authenticate from here. A request for
+  "the strive realm admin login" is nearly always this persona instead.
+  The escrow copy stays root-only at `af/estate/strive-realm`. Rotation = the live Secret
+  `strive-ailab/e2e-secrets` (and the Keycloak user) + `af/estate/strive-realm` + `common.json`
+  here, in one change. The old `dev-worker-3.strive_test_*` copy is gone: the provision Job's
+  `MOVED_FIELDS` step deletes those two keys from `af/dev-workers/dev-worker-3` on every run (a KV
+  merge patch with `null`, which leaves the sync-owned fields alone), because seed-wins never removes
+  a key a seed stops carrying.
 
   `gitea_repo_pat` (added 2026-09-24) is a second `chifor` Gitea PAT, token name
   `dev-workers-repo-create`, scopes **`write:organization,write:repository`**, so an agent can
