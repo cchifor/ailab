@@ -181,7 +181,7 @@ spec:
           volumeMounts:
             - name: releases
               mountPath: /app
-              subPath: router-0.1.0-20260925-defaults
+              subPath: router-0.1.0-20260925-claude
               readOnly: true
             - name: data
               mountPath: /data # SQLite file + WAL/SHM sidecars
