@@ -38,10 +38,38 @@ lacks an image. On a cache miss the failover pulls Docker Hub directly (anonymou
      && sops -e -i ansible/secrets/registry.sops.yaml && rm -f /tmp/r.yaml
    grep registry_sync_dockerhub_token ansible/secrets/registry.sops.yaml   # MUST show ENC[...]
    ```
+   A fresh encryption rotates EVERY ciphertext in the file (new IVs), so the diff cannot show whether
+   the existing values survived the round-trip. Prove it by comparing plaintext hashes against `main`
+   (prints no secrets), then confirm on the apply that the `ci` htpasswd and certbot-credentials
+   tasks report `ok` (unchanged), not `changed`:
+   ```bash
+   git show main:ansible/secrets/registry.sops.yaml > /tmp/old.yaml
+   for k in registry_ci_password cloudflare_dns_api_token registry_oidc_client_secret; do
+     a=$(sops -d --input-type yaml --output-type yaml --extract "[\"$k\"]" /tmp/old.yaml | sha256sum)
+     b=$(sops -d --extract "[\"$k\"]" ansible/secrets/registry.sops.yaml | sha256sum)
+     [ "$a" = "$b" ] && echo "$k SAME" || echo "$k CHANGED"
+   done; rm -f /tmp/old.yaml
+   ```
 4. `just registry` — renders `/etc/zot/sync-credentials.json` (mode 0640, root:zot) and restarts Zot.
 
 Leaving `registry_zot_sync_dockerhub_user` empty runs the cache anonymously (works; cold fetches can
 be rate-limited). quay.io / mcr.microsoft.com are not rate-limited.
+
+## Pulling with Docker: the read-only `pull` identity
+
+Anonymous clients have `read`, and curl/containerd/crane pull anonymously. **Docker on the classic
+overlay2 image store does not**: zot answers its `/v2/` ping (any `docker/*` User-Agent) with a
+basic-auth challenge, and dockerd then fails client-side with `no basic auth credentials` — the
+manifest GET is never sent. Log in with the read-only user `pull` (zot policy `read` only):
+
+```bash
+# on a dev-worker (OpenBao af/dev-workers/common):
+cred get common registry_pull_password | docker login registry.chifor.me -u pull --password-stdin
+```
+
+Its password is `registry_pull_password` in `ansible/secrets/registry.sops.yaml` (rendered into the
+htpasswd by `just registry`), escrowed at `af/estate/registry` `pull_password`. Never hand out `ci`
+(read/write) for pulls.
 
 ## Refresh a stale cached tag
 

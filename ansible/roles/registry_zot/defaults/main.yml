@@ -19,6 +19,13 @@ registry_zot_data_dir: "/var/lib/registry/store"
 # clients get read-only (pull) per config.json.
 registry_zot_ci_user: "ci"
 
+# Read-only pull identity (password: SOPS registry_pull_password; projected to dev-workers as
+# af/dev-workers/common registry_pull_{user,password}). Anonymous pull already has `read`, but zot
+# answers the /v2/ ping with a basic challenge for docker/* User-Agents, and a dockerd on the classic
+# overlay2 image store then fails client-side with "no basic auth credentials" before ever sending the
+# manifest GET. `docker login` with this user fixes that WITHOUT handing out the rw `ci` identity.
+registry_zot_pull_user: "pull"
+
 # Web-UI SSO via Authelia (zot-native OIDC). Docker push (ci/htpasswd) + anonymous pull are
 # UNAFFECTED — only the browser UI gains a "Login with Authelia" button. The plaintext client
 # secret (registry_oidc_client_secret) comes from SOPS (registry.sops.yaml); the Authelia client +

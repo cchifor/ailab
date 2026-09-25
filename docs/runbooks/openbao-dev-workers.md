@@ -117,6 +117,17 @@ Secret.
   here (what `cred` serves) — so rotation = new value in both files, re-run the vkeys seeding Job, let
   the provision Job converge (or force it, *Rotation* step 4).
 
+  `registry_{host,pull_user,pull_password}` (added 2026-09-25) is the **read-only zot pull
+  identity** for `registry.chifor.me` (user `pull`, zot policy `read` on `**`, nothing else).
+  Anonymous pull already has `read`, but zot answers Docker's `/v2/` ping with a basic-auth
+  challenge, and a dockerd on the classic overlay2 image store then fails client-side with
+  `no basic auth credentials` without ever sending the manifest GET. Log in once per Docker config:
+  `cred get common registry_pull_password | docker login registry.chifor.me -u pull --password-stdin`
+  (`cred get common registry_pull_user` is not a secret). It cannot push; the rw `ci` identity is
+  never projected to a worker. Three homes, one change on rotation: `ansible/secrets/registry.sops.yaml`
+  `registry_pull_password` (zot htpasswd, `just registry`), `af/estate/registry` `pull_password`
+  (estate escrow), and `common.json` here.
+
   `proxmox_ssh_key` is an Ed25519 PRIVATE key (comment `agent@dev-workers`) whose public half is in
   `/root/.ssh/authorized_keys` on cloud1/cloud2/cloud3. It exists because an agent had no way to
   reach a Proxmox host: `scripts/node-ssh.py` tries key auth and falls back to `NODE_ROOT_PASSWORD`
