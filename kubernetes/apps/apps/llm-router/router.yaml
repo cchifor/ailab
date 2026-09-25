@@ -179,6 +179,11 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            # One immutable release directory per rollout, built from one llm-router commit:
+            # router-0.1.0-20260925-claude = dsh/llm-router main@fac7f8a (never rewritten in place;
+            # a new build gets a new directory). Swapping it replaces the pod safely: the
+            # Deployment is `strategy: Recreate` and the SQLite volume (llm-router-data) is RWO
+            # iSCSI, so the old pod has stopped before the new one opens the database.
             - name: releases
               mountPath: /app
               subPath: router-0.1.0-20260925-claude
