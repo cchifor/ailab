@@ -87,7 +87,13 @@ The password is `registry_scoped_push_passwords[<user>]` in `registry.sops.yaml`
 **never projected to dev-workers**. An agent ships an image by pushing a `v*` tag (or
 `workflow_dispatch`) on its repo and then pinning the digest in the repo's deploy overlay, which
 Flux reconciles. Adding a project = a new list entry + a SOPS key + `just registry` + the two repo
-secrets.
+secrets (the role asserts the SOPS key exists before touching the htpasswd).
+
+**Retiring a project:** removing the list entry drops its policy, but the htpasswd task only
+adds/updates, so the user would still AUTHENTICATE. Remove it explicitly, then the other homes:
+`ssh registry 'sudo htpasswd -D /etc/zot/htpasswd <user> && sudo systemctl restart zot'`, delete
+the SOPS key and the `af/estate/registry` `<user, - as _>_password` seed field, and delete the app
+repo's `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` Actions secrets.
 
 ## Refresh a stale cached tag
 
