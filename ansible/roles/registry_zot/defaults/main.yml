@@ -26,6 +26,15 @@ registry_zot_ci_user: "ci"
 # manifest GET. `docker login` with this user fixes that WITHOUT handing out the rw `ci` identity.
 registry_zot_pull_user: "pull"
 
+# Per-project push identities, each confined to ONE repository prefix (read/create/update; no delete).
+# For an application repo's own publish CI, so it never needs the global rw `ci` user. Each password
+# is SOPS `registry_scoped_push_passwords[<user>]` (registry.sops.yaml), escrowed at af/estate/registry
+# `<user, - as _>_password` (trueswarm_ci_password), and handed to the app repo as Gitea Actions secrets REGISTRY_USERNAME /
+# REGISTRY_PASSWORD. Never projected to dev-workers (docs/runbooks/registry-cache.md).
+registry_zot_scoped_push_users:
+  - user: "trueswarm-ci"
+    repositories: "trueswarm/**"   # cchifor/trueswarm .gitea/workflows/publish.yml
+
 # Web-UI SSO via Authelia (zot-native OIDC). Docker push (ci/htpasswd) + anonymous pull are
 # UNAFFECTED — only the browser UI gains a "Login with Authelia" button. The plaintext client
 # secret (registry_oidc_client_secret) comes from SOPS (registry.sops.yaml); the Authelia client +

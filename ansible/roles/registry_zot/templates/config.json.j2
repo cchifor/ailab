@@ -65,9 +65,9 @@
     },
     "accessControl": {
       "repositories": {
-        "**": {
-          "anonymousPolicy": ["read"],
-          "policies": [
+{#- zot authorizes a repo by its LONGEST matching pattern only (policies are NOT merged), so every
+    scoped entry below must repeat the base grants; the macro keeps them in one place. #}
+{%- macro base_policies() %}
             {
               "users": ["{{ registry_zot_ci_user }}"],
               "actions": ["read", "create", "update", "delete"]
@@ -80,8 +80,21 @@
               "groups": ["{{ registry_zot_admin_group }}"],
               "actions": ["read", "create", "update", "delete"]
             }{% endif %}
+{%- endmacro %}
+        "**": {
+          "anonymousPolicy": ["read"],
+          "policies": [{{ base_policies() }}
           ]
-        }
+        }{% for p in registry_zot_scoped_push_users %},
+        "{{ p.repositories }}": {
+          "anonymousPolicy": ["read"],
+          "policies": [{{ base_policies() }},
+            {
+              "users": ["{{ p.user }}"],
+              "actions": ["read", "create", "update"]
+            }
+          ]
+        }{% endfor %}
       }{% if registry_zot_admin_group %},
       "adminPolicy": {
         "groups": ["{{ registry_zot_admin_group }}"],

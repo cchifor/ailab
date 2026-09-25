@@ -71,6 +71,24 @@ Its password is `registry_pull_password` in `ansible/secrets/registry.sops.yaml`
 htpasswd by `just registry`), escrowed at `af/estate/registry` `pull_password`. Never hand out `ci`
 (read/write) for pulls.
 
+## Per-project push identities (app repos' publish CI)
+
+An application repo's image-publish workflow gets its OWN zot user, confined to one repository
+prefix (`read`/`create`/`update`, no `delete`), listed in `registry_zot_scoped_push_users`:
+
+| user | repositories | consumer |
+|---|---|---|
+| `trueswarm-ci` | `trueswarm/**` | `cchifor/trueswarm` `.gitea/workflows/publish.yml` (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`) |
+
+zot authorizes a repo by its **longest matching pattern only** — policies are not merged — so each
+scoped entry repeats the `**` grants (anonymous read, `ci`, `pull`, admins) via the template macro.
+The password is `registry_scoped_push_passwords[<user>]` in `registry.sops.yaml` (escrow:
+`af/estate/registry` `<user, - as _>_password`); it is set on the app repo as Actions secrets, and is
+**never projected to dev-workers**. An agent ships an image by pushing a `v*` tag (or
+`workflow_dispatch`) on its repo and then pinning the digest in the repo's deploy overlay, which
+Flux reconciles. Adding a project = a new list entry + a SOPS key + `just registry` + the two repo
+secrets.
+
 ## Refresh a stale cached tag
 
 On-demand sync caches a tag's content on first fetch and won't re-pull a mutable tag (e.g. upstream
