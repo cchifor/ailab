@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: trueswarm-repository-identity
+    namespace: flux-system
+type: Opaque
+stringData:
+    identity: ENC[AES256_GCM,data:OccXZ4lKTFv9prU2p1+lDhgVso2OXzPHoofW03ZMsob8haZ3pkWkPuh8JVrUqijQDxt/3M69+79CJMocCxqSweBtklgSS3aYuqsS1OqwAT9f1nXDCBLKtA/iC0AV9NtT3ycU09j0VfOTcwyxx+rBD2qYC7Slm/0zT6Tzla1xG7gMARUP9M4z/xts5CzlOYmKMEdaXWr99BypfOidJ4Aa0BiuWWjHnJ6RxZzY5bKdZxs4CjipEAoqgSBouIg6UdOYwtxLhV15cQ0J4cSEivMu6zqrPQk3TKUiUNQfkushJMZr7CatDhhpzE8M2ky4x0p9aYEZj4gTgrkHyOwbgC5mfNt53vQ1tPVnagqFWfG8V86Ou/6HCTlsy0eSukbOecxIb82QvOE3D7NUc5zeUo5TRXW71SmNdPqEJxhzYwWkXN2BdgH8MQx2Hb7U8pZH1zPikKSerVDwCFW2Fzq0A1maEyLFUXwsjZqcdgZE6KwAZHDQHIUzRLwbS65MuljWs7PsyChDrELNTGvlgY/1DAqoSeo0z1TA11rAq9ivKGZE53Qsyh4=,iv:g53Q2B8E+Lm7kdfC+SUznTqHZp4im/a2SEaXY8SCnAU=,tag:pvHU8gh/eLEX/vFJK/zSJA==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBRNnY1STNQeWNOYXpWeTFV
+            b0RBbys1Yk1WTk96S0l6UnV0blZGT2lpS1EwCjFHQTBHeThCRENBVmNxQUpNOXBU
+            U2ZpVGhkMHU5ak1yWFlkSWJ4cm5rckUKLS0tIDRCRzdJTEV2U2Q4dXk1TzI3Tm5F
+            WWtMK3ZoZmZFUU5raVVxZlRyRGtlRTgKOOvg71fySzdnBMMzzZAO1AxSy521OTdR
+            tXzjRjiEnbNrNIYpBW8zHO61pclfUlv2w/1Y5gCQ5qSLiX1rxwz0lQ==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-09-25T18:49:44Z"
+    mac: ENC[AES256_GCM,data:B4tmOFZSqJi6U47U+2DL3O5LylxBd1dRcv8yHCKc7bybsxL8mOXSOA6V2NBYNNm3X0nWkOAEu6Miyj/r15ypGynSnanNcz471fTrK4VnGKFhPmtRoo/0+Vtylzgv+ExQ2gbD58BolzxLsKqYL8KHiaGAdGqwCFVJTa21Voxp/1w=,iv:7+bMGG+wxc6hdqRwtpqkq7JbZIuCZ/hQQlgkMevqjhM=,tag:G8H+McpV6UPoazg7lRLmbA==,type:str]
+    version: 3.13.3

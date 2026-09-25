@@ -1,0 +1,45 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trueswarm-observer
+  namespace: flux-system
+rules:
+- apiGroups:
+  - source.toolkit.fluxcd.io
+  resources:
+  - gitrepositories
+  resourceNames:
+  - trueswarm
+  verbs:
+  - get
+- apiGroups:
+  - kustomize.toolkit.fluxcd.io
+  resources:
+  - kustomizations
+  resourceNames:
+  - trueswarm
+  - trueswarm-git-auth
+  verbs:
+  - get
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  resourceNames:
+  - trueswarm-git-bootstrap
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trueswarm-observer
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trueswarm-observer
+subjects:
+- kind: ServiceAccount
+  name: platform-dw4
+  namespace: platform-access

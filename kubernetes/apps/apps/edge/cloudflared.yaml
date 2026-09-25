@@ -100,6 +100,13 @@ data:
       # Gitea — NOT behind Cloudflare Access: git clone/push over HTTPS uses Gitea's own auth/tokens,
       # which an Access browser login would break. Web UI login is Authelia OIDC; registration is off.
       # Muse uses native user/agent/mobile authentication; published songs are public.
+      # Trueswarm owns authentication. Keep agent APIs accessible without an Access login.
+      # Only native media and ticket-bound upload paths reach the isolated Muse instance.
+      - hostname: trueswarm.chifor.me
+        path: ^/(media/[^/]+|art/[^/]+|api/v1/uploads/[^/]+/content)$
+        service: http://trueswarm-muse.trueswarm.svc.cluster.local:80
+      - hostname: trueswarm.chifor.me
+        service: http://trueswarm.trueswarm.svc.cluster.local:80
       - hostname: muse.chifor.me
         service: http://muse-stream.muse-stream.svc.cluster.local:80
       - hostname: git.chifor.me
@@ -175,7 +182,7 @@ spec:
         # routes until something restarts them. A new hostname then looks deployed but 404s at the
         # edge. Bump this whenever the ingress list changes -- it is the rollout trigger. (Same trap
         # cloud-power's kustomization documents for app code.)
-        chifor.me/config-revision: "2026-09-24-muse-stream"
+        chifor.me/config-revision: "2026-09-25-trueswarm"
       labels:
         app.kubernetes.io/name: cloudflared
     spec:

@@ -83,6 +83,7 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/infrastructure/platform-access",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
+        "./kubernetes/apps/trueswarm-bootstrap",
         "./kubernetes/apps/qnap-storage",
         "./kubernetes/apps/infrastructure/testpool",
     }
@@ -237,19 +238,20 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
         for _namespace, name in mp.EXPECTED_EXTERNAL_SOURCES:
             self.assertIn(name, stderr)
 
-    def test_real_tree_declares_exactly_the_four_git_repositories(self):
+    def test_real_tree_declares_exactly_the_five_git_repositories(self):
         # The resolution table discovery classifies against: this repo's own bootstrap source plus
-        # the three reviewed external ones — nothing else, and each with a url that identifies the
+        # the four reviewed external ones — nothing else, and each with a url that identifies the
         # repo it really points at.
         sources = mp.declared_git_repositories()
         self.assertEqual(
             set(sources),
-            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream")},
+            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm")},
         )
         self.assertTrue(mp.is_this_repo(sources[("flux-system", "flux-system")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "agentforge-tenants")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "platform")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "muse-stream")]))
+        self.assertFalse(mp.is_this_repo(sources[("flux-system", "trueswarm")]))
 
     def test_every_discovered_path_has_a_kustomization_yaml(self):
         # This is verify_buildable()'s own job; re-proving it here means a future edit to

@@ -309,6 +309,18 @@ identity_providers:
         # Put groups+email in the id_token (the CP reads id_token claims, not the userinfo endpoint).
         claims_policy: 'agentforge_id_token'
         token_endpoint_auth_method: 'client_secret_basic'
+      - client_id: 'trueswarm'
+        client_name: 'Trueswarm'
+        # The plaintext client secret lives in Trueswarm's SOPS-encrypted runtime Secret.
+        client_secret: '$pbkdf2-sha512$310000$2kIt8d7etxY9NSh7Oe4JUA$tEgB0dFnglmckjh2AsOojvfZaixRpvzTscE9XygfE50nbZk3/KlOPWRjrcGd7JPp/xCDKXrLf4x7U0w03rR19w'
+        public: false
+        authorization_policy: 'one_factor'
+        consent_mode: 'implicit'
+        require_pkce: true
+        pkce_challenge_method: 'S256'
+        redirect_uris: ['https://trueswarm.chifor.me/auth/callback']
+        scopes: ['openid', 'profile', 'email']
+        token_endpoint_auth_method: 'client_secret_post'
       - client_id: 'cloudflare-access'
         client_name: 'Cloudflare Access'
         # THE EDGE GATE ITSELF is the relying party here — this is the inversion that makes the

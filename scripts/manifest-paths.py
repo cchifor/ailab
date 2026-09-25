@@ -9,7 +9,7 @@ in that directory names a `spec.path` this repo's own tooling can attempt to
 `kustomize build`.
 
 NOT EVERY ONE OF THOSE PATHS IS LOCAL, though. Three Kustomizations in that
-directory (`agentforge-tenants`, `platform`, `muse-stream`) point `spec.sourceRef` at a
+directory (`agentforge-tenants`, `platform`, `muse-stream`, `trueswarm`) point `spec.sourceRef` at a
 DIFFERENT `GitRepository` — the CP-written `cchifor/agentforge-tenants` repo
 the `cchifor/platform` repo and the `cchifor/muse-stream` repo, respectively — and `spec.path` is then a
 path in THAT repo, not this one (`./tenants`, `./deploy/gitops/flux/clusters
@@ -40,7 +40,7 @@ then classifies each Kustomization by looking its reference UP in that table:
                is a reviewed entry in `EXPECTED_EXTERNAL_SOURCES`, the closed
                allowlist of externally-sourced objects this step is ALLOWED
                to skip (currently exactly `agentforge-tenants`, `platform` and
-               `muse-stream`). The path is excluded and the exclusion is printed
+               `muse-stream`, `trueswarm`). The path is excluded and the exclusion is printed
                to stderr so a CI log makes the gate's real coverage visible.
   * ANYTHING ELSE is a `DiscoveryError` — fail closed. That covers: no
                `sourceRef` at all; a `sourceRef` that is not a mapping or
@@ -132,6 +132,7 @@ EXPECTED_EXTERNAL_SOURCES = frozenset(
         ("flux-system", "agentforge-tenants"),
         ("flux-system", "platform"),
         ("flux-system", "muse-stream"),
+        ("flux-system", "trueswarm"),
     }
 )
 
