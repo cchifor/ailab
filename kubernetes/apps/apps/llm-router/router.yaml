@@ -181,7 +181,7 @@ spec:
           volumeMounts:
             - name: releases
               mountPath: /app
-              subPath: router-0.1.0-20260924-chat
+              subPath: router-0.1.0-20260925-login
               readOnly: true
             - name: data
               mountPath: /data # SQLite file + WAL/SHM sidecars
@@ -240,8 +240,9 @@ spec:
         - protocol: TCP
           port: 53
     # Public upstream provider endpoints (HTTPS only), RFC1918 excluded.
-    # No live providers are configured yet (tests use the offline mock),
-    # but outbound 443 is required for the subscription/API adapters.
+    # Also covers the chat's subscription sign-in (subscription-login plugin):
+    # the on-demand CLI install from registry.npmjs.org and the Codex device
+    # login / token renewal at auth.openai.com.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -252,3 +253,14 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    # Claude subscription seat hosts (dsh/llm-router seat-host, port 8791):
+    # the chat's Claude sign-in hands the setup-token to the seat host
+    # (PUT /credential) and inference goes there. Seat hosts run in this
+    # namespace with this label; LAN addresses stay blocked above.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: seat-host
+      ports:
+        - protocol: TCP
+          port: 8791
