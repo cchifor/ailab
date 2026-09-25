@@ -350,7 +350,10 @@ data:
     # document alone; nulling a key that is already gone is a no-op (both measured on 2.6.2). The JSON
     # carries field NAMES only, never a value, so nothing here can print a credential.
     MOVED_FIELDS="dev-worker-3 strive_test_user strive_test_password"
-    printf '%s\n' "$MOVED_FIELDS" | while read -r mpath mfields; do
+    # Fed by a here-doc, NOT a pipe: a piped `while` runs in a subshell, where `exit 1` ends only
+    # that subshell and the run aborts only because set -e sees the pipeline's status. Here the loop
+    # runs in THIS shell, so `exit 1` ends the run directly (the test's H case proves it).
+    while read -r mpath mfields; do
       [ -n "$mpath" ] || continue
       case " $RETIRED_SLOTS " in
         *" $mpath "*) continue ;;   # the retirement purge above owns that subtree
@@ -367,7 +370,9 @@ data:
         echo "$probe_err" >&2
         exit 1
       fi
-    done
+    done <<MOVED
+    $MOVED_FIELDS
+    MOVED
 
     echo "devworker provision complete"
 ---

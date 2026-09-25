@@ -136,7 +136,11 @@ case "$1 $2" in
     esac ;;
   "kv get")
     # dev-worker-3 exists once the seed loop has created it, so the moved-fields strip patches it
-    [ "$4" = dev-workers/dev-worker-3 ] && [ -f "$STATE/dw3-exists" ] && exit 0
+    if [ "$4" = dev-workers/dev-worker-3 ] && [ -f "$STATE/dw3-exists" ]; then
+      # FAIL_DW3_PROBE: the moved-fields probe (the first probe AFTER the seed created the path) fails
+      [ -f "$STATE/FAIL_DW3_PROBE" ] && { echo "Error reading af/data/dev-workers/dev-worker-3: permission denied" >&2; exit 2; }
+      exit 0
+    fi
     nvf "af/data/$4" ;;
   "patch af/data/dev-workers/dev-worker-3")   # KV-v2 merge patch, JSON body on stdin
     [ "$3" = "-" ] || { echo "stub: patch without stdin body: $*" >&2; exit 3; }
@@ -267,6 +271,16 @@ expect "$out1" "failed and was not a not-found; aborting"
 forbid "$out1" "dev-workers/dev-worker-6/; nothing to enumerate"   # slot 5 (converged, `{}`) may say so; slot 6's silent failure must not
 forbid "$out1" "devworker provision complete"
 echo "G: a silent failure aborts instead of converging"
+
+# ---- H. a failed moved-fields probe aborts the WHOLE run -----------------------------------------
+# The strip loop must end the script, not just a subshell: no "complete" line, no patch issued.
+reset_state; touch "$WORK/state/FAIL_DW3_PROBE"
+outH="$(run 2>&1)" && { echo "H: a failed moved-fields probe must abort the run"; echo "$outH" >&2; exit 1; }
+expect "$outH" "probe of dev-workers/dev-worker-3 failed and was not a not-found; aborting"
+forbid "$outH" "moved fields stripped"
+forbid "$outH" "devworker provision complete"
+[ ! -s "$WORK/state/patch-body" ] || { echo "H: a patch was issued after the probe failed" >&2; exit 1; }
+echo "H: a failed moved-fields probe aborts the run"
 
 # ---- F. a CONVERGED retirement stays converged -------------------------------------------------
 # Run 1 deletes the role; run 2 therefore gets OpenBao's 400 `role "..." does not exist` from every
