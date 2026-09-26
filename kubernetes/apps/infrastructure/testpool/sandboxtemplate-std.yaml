@@ -1,4 +1,4 @@
-# env-std — the std flavor (L/PW/parallel-M class; 16 Gi limit). Two-container shape and every
+# env-std — the std flavor (L/PW/parallel-M class; 9 Gi of container limits, see dind resources). Two-container shape and every
 # entrypoint quirk below is spike-proven (kubernetes/infra/env-pool/SPIKE-REPORT.md, F1-F7):
 #   - /var/lib/docker MUST be a Block-mode PVC (Filesystem mode rides virtio-fs -> vfs fallback)
 #   - try-mount-else-mkfs (busybox blkid exits 0 on blank devices)
@@ -80,7 +80,14 @@ spec:
               sleep infinity & wait $!
           resources:
             requests: { cpu: "1", memory: 2Gi }     # parked-priced: scheduling by requests, capacity by limits
-            limits: { cpu: "5", memory: 12Gi }
+            # 8 Gi, not 12 (ailab#865). Kata sizes the guest as default_memory (2 GiB) + ALL container
+            # limits, and with no balloon/free-page reporting every guest page a build touches (page
+            # cache included) stays charged to the node until release. 12 Gi made the guest ~15 GiB
+            # on a 15.1 GiB-allocatable node that also holds the refill warm member: the node ran out
+            # before the pod did (the 2026-09-23 OOM). 8 Gi => ~11 GiB guest, ~87 % of the node worst
+            # case with the refill + daemonsets, under the lease guard's 92 %. A build that needs more
+            # now OOMs inside the guest instead of taking the node down.
+            limits: { cpu: "5", memory: 8Gi }
           volumeDevices:
             - name: dockerlib
               devicePath: /dev/dockerblk

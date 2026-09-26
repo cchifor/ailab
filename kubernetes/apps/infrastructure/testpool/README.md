@@ -76,7 +76,7 @@ Runbook: `docs/runbooks/env-pool.md`. Plan with the evidence chain:
   Playwright deps, rsync, tep-supervisor, e2fsprogs baked — kills the runtime `apk add` and
   enables real L/XL host-side suites) is the next iteration and slots into the template + pre-pull
   DaemonSet without shape changes.
-- **Flavors**: only `env-std` (16 Gi limit) exists; `env-big` (24 Gi) is gated on freeing host RAM
+- **Flavors**: only `env-std` (8 Gi dind + 1 Gi control; ~11 GiB Kata guest) exists; `env-big` (24 Gi) is gated on freeing host RAM
   for a larger env node (companion plan `2026-09-01-dynamic-dev-infra-plan.md`).
 - **tep** here = RBAC only; the CLI (supervisor runs, extend-on-submit TTL, drained-pool
   queueing, lost-race protocol) ships with the dev_worker ansible role.
