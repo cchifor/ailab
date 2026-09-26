@@ -29,6 +29,7 @@
   ansible.builtin.command: cat /sys/kernel/security/apparmor/profiles
   register: dev_worker_apparmor_loaded
   changed_when: false
+  check_mode: false # read-only; --check would otherwise skip it and the assert would see no stdout
 
 - name: Refuse to run next to the stock bwrap-userns-restrict profile
   ansible.builtin.assert:
@@ -77,5 +78,9 @@
   ansible.builtin.command: bwrap --unshare-user --uid 0 --cap-add ALL --ro-bind / / unshare -m /bin/true
   register: dev_worker_bwrap_child_caps
   changed_when: false
-  failed_when: dev_worker_bwrap_child_caps.rc == 0
+  # Pass only on the expected denial: any other non-zero exit (bwrap failing its own setup, no
+  # `unshare` in the rootfs) says nothing about the restriction.
+  failed_when: >-
+    dev_worker_bwrap_child_caps.rc == 0 or
+    'unshare failed: Operation not permitted' not in dev_worker_bwrap_child_caps.stderr
   when: not ansible_check_mode
