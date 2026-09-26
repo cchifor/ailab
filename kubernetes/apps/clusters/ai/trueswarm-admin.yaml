@@ -155,3 +155,41 @@ spec:
     name: trueswarm-admin
   dependsOn:
   - name: trueswarm-admin-foundation
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-platform-migration
+  namespace: flux-system
+spec:
+  suspend: true
+  interval: 5m
+  retryInterval: 1m
+  timeout: 5m
+  path: ./deploy/platform-migration
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-admin-foundation
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-platform-owner-rotation
+  namespace: flux-system
+spec:
+  suspend: true
+  interval: 5m
+  retryInterval: 1m
+  timeout: 5m
+  path: ./deploy/platform-owner-rotation
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-platform-migration
