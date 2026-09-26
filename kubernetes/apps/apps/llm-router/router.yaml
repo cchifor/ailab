@@ -145,8 +145,14 @@ spec:
             # scan is the mgmt LAN, on the model-server ports below (the same list as the egress rule), and
             # these known servers are checked on every full scan: cloudlab vLLM (.28:18020) and llama-swap
             # (.26:8080), the AI LXCs' llama-swap (.45/.46:8082). Nothing becomes an account without an
-            # administrator's approval. server-registration (off until an administrator turns it on) rate-limits
-            # enrolment per real client: behind the Cloudflare tunnel that is cf-connecting-ip.
+            # administrator's approval. What a scan does to a host: a TCP connect on these ports, then (if open) an
+            # unauthenticated GET /v1/models and GET /api/tags, no redirects, bounded body; admin-only, audited,
+            # on demand (no schedule). It reads model lists, nothing else, so an admin service on one of these
+            # ports only sees two harmless GETs (the .189:8080 403 in the smoke test was exactly that).
+            # server-registration (off until an administrator turns it on) rate-limits enrolment per real client
+            # using cf-connecting-ip. That header is trustworthy here: ingress admits only the edge cloudflared
+            # pods (NetworkPolicy below), and Cloudflare's edge sets/overwrites CF-Connecting-IP on every request,
+            # so a client cannot supply its own value through the tunnel.
             - name: ROUTER_PLUGIN_CONFIG
               value: >-
                 {"discovery-network":{"networks":["192.168.0.0/24"],"ports":[8080,8081,8082,18020,11434,1234,8000],
