@@ -22,8 +22,26 @@ Manifests: `kubernetes/apps/apps/llm-router/` (wired into the apps Kustomization
 - Node runtime pinned to `docker.io/library/node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6` (Node 24.21.0 at deployment).
 - Requests 100m CPU/256Mi memory; limits 2 CPU/768Mi memory. May schedule on the existing `dedicated=agent` worker pool; no existing taints, cordons or workloads were changed.
 - `llm-router-data`: 5Gi RWO `qnap-iscsi`, mounted at `/data`, SQLite `/data/router.sqlite`. **Never move WAL onto NFS.**
-- `router-releases`: 2Gi RWX `nfs-csi`, **application code only**, versioned directory `router-0.1.0-20260921` mounted read-only at `/app`. All production dependencies were installed from the frozen pnpm lockfile before deployment. There is no dependency install at startup.
-- NetworkPolicy admits :8787 only from `edge` cloudflared pods; egress permits cluster DNS and public HTTPS, excluding RFC1918. No live provider is enabled.
+- `router-releases`: 2Gi RWX `nfs-csi`, **application code only**, one versioned directory per release (`router-0.1.0-<date>-<name>`), the live one mounted read-only at `/app` via `subPath`. All production dependencies were installed from the frozen pnpm lockfile before deployment. There is no dependency install at startup.
+- NetworkPolicy admits :8787 only from `edge` cloudflared pods. Egress permits cluster DNS, public HTTPS (RFC1918 excluded), seat hosts in the namespace on :8791, and the mgmt LAN `192.168.0.0/24` on the model-server ports only (8080, 8081, 8082, 18020, 11434, 1234, 8000).
+
+### Releasing a new version
+
+A release is a new directory on `router-releases`, never a change to a mounted one.
+
+1. **Build** `dist` from the merged `dsh/llm-router` main after **deleting `dist/` first**. The web build does not empty it, and old bundles pile up.
+2. **Package** it: tar a directory named `router-0.1.0-<date>-<name>` containing `dist/`, `package.json` and `pnpm-lock.yaml`.
+3. **Stage** it:
+   - Start the staging pod: `kubectl --context admin@ai apply -f kubernetes/apps/apps/llm-router/staging/router-stage.yaml`. It is not in the Flux kustomization.
+   - Its `fsGroupChangePolicy: OnRootMismatch` keeps start-up to seconds. Without it the kubelet re-applied group ownership to every file on the NFS volume, which took up to 22 min.
+   - Copy the tarball in, extract it under `/releases`, and run `npx -y pnpm@10.32.1 install --prod --frozen-lockfile --ignore-scripts --store-dir /releases/.pnpm-store`.
+4. **Smoke-test against a copy of the live database.**
+   - Back it up first with `VACUUM INTO /releases/.backups/<date>-pre-<name>/router.sqlite`, copying `router.secrets.key` and `plugins.yml` alongside.
+   - Start the release on a spare port against a copy of that backup, with the production `ROUTER_PLUGIN_CONFIG`.
+   - Check health, plugins, limits and anything new.
+5. **Roll** it: a PR here bumping `subPath` (and the source-commit comment beside it) in `router.yaml`. After merge, annotate `gitrepository/flux-system` and `kustomization/apps` with `reconcile.fluxcd.io/requestedAt`, then `kubectl rollout status`.
+6. **Prune:** copy `staging/prune-releases.sh` into the pod and run it with the live and rollback release names. It is a dry run until `--apply`. It keeps those two releases and the newest five backups, deletes other release directories, and prunes the pnpm store.
+7. **Delete** the staging pod.
 
 ### Why a staged release rather than a new OCI image?
 
