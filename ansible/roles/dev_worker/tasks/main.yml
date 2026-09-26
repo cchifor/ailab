@@ -96,6 +96,13 @@
   when: dev_worker_enable_openbao | bool
   tags: [openbao]
 
+# Needs docker.yml (the CLI) and openbao.yml (`cred`). Replaces any login that is not the read-only
+# `pull` user — the rw `ci` identity is never on a worker (ailab#865).
+- name: registry.chifor.me login as the read-only pull user
+  ansible.builtin.import_tasks: registry_login.yml
+  when: dev_worker_enable_openbao | bool
+  tags: [registry_login]
+
 - name: Language toolchains (python/go/rust)
   ansible.builtin.import_tasks: toolchains.yml
   when: dev_worker_install_toolchains | bool

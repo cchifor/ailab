@@ -1,0 +1,40 @@
+---
+# registry.chifor.me login for every dev-worker user's Docker config: the read-only zot `pull`
+# identity, never the read-write `ci` one. `ci` was typed in by hand on two workers in June/July
+# (found 2026-09-26, ailab#865) — nothing here managed the login, so nothing noticed. This task
+# owns it now: any login that is not `pull` (including `ci`, or none at all) is replaced.
+#
+# Why log in at all when anonymous read exists: zot answers Docker's `/v2/` ping with a basic-auth
+# challenge whenever anonymous and authenticated policies coexist, and a classic-store dockerd then
+# fails with `no basic auth credentials` (docs/runbooks/openbao-dev-workers.md, `registry_*`).
+#
+# The password comes from `cred get common registry_pull_password` (af/dev-workers/common, #860) and
+# goes straight into `docker login --password-stdin`: it is never in argv, never in a registered
+# variable, and the script prints only the previous USERNAME. Fail-closed like openbao.yml: a vault
+# that cannot be read fails the play rather than leaving a `ci` login in place.
+
+- name: Log each user's Docker into {{ dev_worker_registry_host }} as the read-only pull user
+  ansible.builtin.shell: |
+    set -eu -o pipefail
+    cfg="{{ item.home }}/.docker/config.json"
+    current="$(python3 - "$cfg" "{{ dev_worker_registry_host }}" <<'PY'
+    import base64, json, sys
+    try:
+        auth = json.load(open(sys.argv[1]))["auths"][sys.argv[2]]["auth"]
+        print(base64.b64decode(auth).decode().split(":", 1)[0])
+    except Exception:
+        print("")
+    PY
+    )"
+    if [ "$current" = pull ]; then echo unchanged; exit 0; fi
+    /usr/local/bin/cred get common registry_pull_password \
+      | runuser -u "{{ item.name }}" -- env HOME="{{ item.home }}" \
+          docker login "{{ dev_worker_registry_host }}" -u pull --password-stdin >/dev/null
+    echo "changed:was=${current:-none}"
+  args:
+    executable: /bin/bash
+  register: dev_worker_registry_login
+  changed_when: "'changed:' in dev_worker_registry_login.stdout"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
