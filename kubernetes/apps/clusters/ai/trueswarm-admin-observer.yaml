@@ -24,6 +24,7 @@ rules:
   - trueswarm-admin-security
   - trueswarm-admin-migration
   - trueswarm-admin-qualification
+  - trueswarm-admin-live-checks
   - trueswarm-platform-migration
   - trueswarm-platform-owner-rotation
   verbs:
