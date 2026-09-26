@@ -24,6 +24,21 @@ DNS/Access token. Do not initialize a replacement state on a worker or runner.
 The change manages only one DNS record, one Access application, one dedicated OIDC
 identity provider, and one named-email policy. Both enable flags default to false.
 
+The helper automates the secret read and audience handoff. With this PR checked out
+on the workstation and the private admin repository available locally, run:
+
+```sh
+TRUESWARM_ADMIN_CHECKOUT=/path/to/trueswarm-admin \
+  bash scripts/trueswarm-admin-access.sh --apply-access
+```
+
+It uses the already-loaded `CLOUDFLARE_API_TOKEN` and the existing state. It refuses
+CI, missing state, deletions and unrelated resource changes. It decrypts only the
+dedicated OIDC client secret, applies only the Access gate, then commits the generated
+**non-secret** audience to the private deployment. It does not publish DNS. No secret
+or audience needs to be copied into chat. The following is the equivalent manual
+sequence for operators who prefer separate plan/apply steps.
+
 First provision the gate without DNS. From the private admin checkout, use the
 operator's SOPS identity to read **only the dedicated client secret** into the
 current shell; never echo it or use shell tracing:
