@@ -81,3 +81,37 @@
        ]) | list }}
   loop_control:
     label: "{{ item.0.name }} {{ item.1.key }}"
+
+# Network inside the workspace-write sandbox (defaults/main.yml: dev_worker_codex_sandbox_network). A
+# TOML table, so ini_file WITH a section: it edits only the `[sandbox_workspace_write]` table, creates
+# the table at the end of the file when it is missing, and never touches top-level keys or other
+# tables. Unquoted value: TOML boolean, not a string.
+# Checked once, up front: `null` (a blank YAML value) would otherwise read as "managed" and `| bool`
+# would write `false` (flipping the sandbox offline), and a typo would fail per user deep in the loop.
+# Strings "true"/"false" are accepted because that is what `-e dev_worker_codex_sandbox_network=false` passes.
+- name: Validate dev_worker_codex_sandbox_network
+  ansible.builtin.assert:
+    that:
+      - >-
+        dev_worker_codex_sandbox_network is boolean
+        or dev_worker_codex_sandbox_network in ['', 'true', 'false']
+    fail_msg: >-
+      dev_worker_codex_sandbox_network must be true, false, or "" (unmanaged); got
+      {{ dev_worker_codex_sandbox_network | string }}.
+    quiet: true
+
+- name: Codex workspace-write sandbox network access per user
+  community.general.ini_file:
+    path: "{{ item.home }}/.codex/config.toml"
+    section: sandbox_workspace_write
+    option: network_access
+    value: "{{ dev_worker_codex_sandbox_network | string | lower }}"
+    no_extra_spaces: false
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0600"
+  when: dev_worker_codex_sandbox_network | string | length > 0
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"

@@ -183,6 +183,14 @@ capability. That way bwrap is not a general way to get a full-capability user na
 refuses to run if the stock profile is also loaded (two profiles on one path). Check a worker with
 `codex sandbox -c sandbox_mode='"workspace-write"' -- sh -c 'touch x && echo ok'` from a scratch dir.
 
+**The Codex sandbox has network** (`[sandbox_workspace_write] network_access = true` in each user's
+`~/.codex/config.toml`, set by `tasks/codex.yml` from `dev_worker_codex_sandbox_network`). Without it,
+every sandboxed command runs in an empty network namespace, and `git push` fails with
+`Could not resolve host: git.chifor.me` although the worker's own DNS is fine. That was the
+2026-09-26 dev-worker-4 report, which read as a DNS outage. Inside the sandbox, git's `store` credential
+helper also logs `unable to get credential storage lock ... Read-only file system` after a successful
+auth. That line is harmless: the file is rendered by the OpenBao agent, not by git.
+
 ### Optional: sandboxed separate agent account
 To isolate the headless agent from `c4`'s sudo, set `dev_worker_agent_user: claude-agent` in
 `group_vars/dev_workers.yml` and re-run. That restores the homelab two-user split: `claude-agent`
