@@ -4,13 +4,59 @@
 # unconfined binary is moved into the `unprivileged_userns` profile, which denies every capability.
 # Bubblewrap then cannot bring up loopback in its fresh netns and dies before running anything:
 #   bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted
-# This is the fix Ubuntu itself uses for sandboxing apps (see chrome, flatpak in /etc/apparmor.d):
-# attach an unconfined profile that grants `userns` to ONE root-owned binary.
+#
+# This is Ubuntu's own `bwrap-userns-restrict` (apparmor-profiles 4.0.1, extra-profiles/, shipped
+# disabled), renamed so it cannot collide with that file: bwrap itself may create the namespace and
+# use capabilities inside it (to set up loopback, mounts, pivot_root), but everything bwrap execs is
+# stacked under `unpriv_bwrap`, which denies EVERY capability. So bwrap is not a general way for a
+# local user to get a full-capability user namespace -- which an `unconfined` + `userns` profile was:
+# `bwrap --unshare-user --uid 0 --cap-add ALL` handed the child CapEff=1ffffffffff (measured
+# 2026-09-26 on dev-worker-1). Codex's sandboxed commands already run with no capabilities, so they
+# lose nothing.
+#
+# If the stock profile is ever enabled too (aa-enforce on extra-profiles/bwrap-userns-restrict), two
+# profiles would attach to /usr/bin/bwrap and which one wins depends on load order. The role refuses
+# to run in that state (tasks/codex_sandbox.yml).
 abi <abi/4.0>,
 include <tunables/global>
 
-profile bwrap-userns /usr/bin/bwrap flags=(unconfined) {
-  userns,
+profile bwrap-userns /usr/bin/bwrap flags=(attach_disconnected) {
+  allow capability,
+  # Not `allow all`, so the children can be stacked; `m` everywhere is what lets them run under the stack.
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+  allow px /** -> bwrap-userns//&unpriv_bwrap,
 
   include if exists <local/bwrap-userns>
+}
+
+profile unpriv_bwrap flags=(attach_disconnected) {
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+
+  allow pix /** -> &unpriv_bwrap,
+
+  audit deny capability,
+
+  include if exists <local/unpriv_bwrap>
 }
