@@ -35,7 +35,8 @@ spec:
   containers:
     - name: stage
       image: docker.io/library/node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
-      command: ["sh", "-c", "sleep 3600"]
+      # Room for a whole release (staging, smoke tests, review, rollout, pruning); delete the pod when done.
+      command: ["sh", "-c", "sleep 43200"]
       securityContext:
         allowPrivilegeEscalation: false
         capabilities: {drop: [ALL]}

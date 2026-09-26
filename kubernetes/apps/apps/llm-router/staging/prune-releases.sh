@@ -9,9 +9,23 @@
 # named as one of the two kept; read it from the Deployment first:
 #   kubectl -n llm-router get deploy llm-router -o jsonpath='{.spec.template.spec.containers[0].volumeMounts[?(@.name=="releases")].subPath}'
 set -eu
-LIVE="${1:?usage: prune-releases.sh <live-release> <rollback-release> [--apply]}"
-ROLLBACK="${2:?usage: prune-releases.sh <live-release> <rollback-release> [--apply]}"
+USAGE="usage: prune-releases.sh <live-release> <rollback-release> [--apply]"
+# The kept names are compared exactly with the directory names below, so they are normalised and checked first:
+# a trailing slash (tab completion) or a path would otherwise pass an existence check yet match nothing, and
+# --apply would delete the very release meant to be kept.
+keep_name() {
+  n=$(printf '%s' "$1" | sed 's#/*$##')
+  case "$n" in
+    router-*) ;;
+    *) echo "refusing: '$1' is not a release directory name (router-...)" >&2; exit 1 ;;
+  esac
+  case "$n" in */*|*..*|*' '*) echo "refusing: '$1' must be a bare directory name, not a path" >&2; exit 1 ;; esac
+  printf '%s' "$n"
+}
+LIVE=$(keep_name "${1:?$USAGE}")
+ROLLBACK=$(keep_name "${2:?$USAGE}")
 APPLY="${3:-}"
+case "$APPLY" in ""|--apply) ;; *) echo "$USAGE" >&2; exit 1 ;; esac
 KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 ROOT=/releases
 cd "$ROOT"
@@ -23,6 +37,10 @@ remove=""
 for d in router-*; do
   [ -d "$d" ] || continue
   [ "$d" = "$LIVE" ] || [ "$d" = "$ROLLBACK" ] || remove="$remove $d"
+done
+# Belt and braces: both kept releases must still be present after the selection.
+for keep in "$LIVE" "$ROLLBACK"; do
+  case " $remove " in *" $keep "*) echo "refusing: $keep was selected for removal" >&2; exit 1 ;; esac
 done
 old_backups=""
 if [ -d .backups ]; then
