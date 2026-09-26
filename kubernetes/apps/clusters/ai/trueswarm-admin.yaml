@@ -40,10 +40,10 @@ metadata:
 spec:
   interval: 5m
   retryInterval: 1m
-  timeout: 15m
+  timeout: 5m
   path: ./deploy/foundation
   prune: true
-  wait: true
+  wait: false
   sourceRef:
     kind: GitRepository
     name: trueswarm-admin
@@ -53,6 +53,11 @@ spec:
     provider: sops
     secretRef:
       name: sops-age
+  healthChecks:
+  - apiVersion: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: trueswarm-admin-pg
+    namespace: trueswarm-admin
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization

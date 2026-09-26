@@ -21,6 +21,9 @@ rules:
   - trueswarm-admin-git-auth
   - trueswarm-admin
   - trueswarm-admin-executor-auth
+  - trueswarm-admin-security
+  - trueswarm-admin-migration
+  - trueswarm-admin-qualification
   verbs:
   - get
 - apiGroups:
