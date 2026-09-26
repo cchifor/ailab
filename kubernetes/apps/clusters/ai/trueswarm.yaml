@@ -18,14 +18,16 @@ metadata:
   namespace: flux-system
 spec:
   interval: 5m
-  retryInterval: 1m
+  retryInterval: 15s
   timeout: 15m
   sourceRef:
     kind: GitRepository
-    name: trueswarm
+    name: trueswarm-admin
   dependsOn:
-  - name: trueswarm-git-auth
-  path: ./deploy/kubernetes/overlays/ailab
+  - name: trueswarm-admin-foundation
+  - name: trueswarm-admin-security
+  - name: trueswarm-platform-owner-rotation
+  path: ./deploy/platform
   prune: true
   wait: true
   decryption:

@@ -18,7 +18,7 @@ metadata:
   namespace: flux-system
 spec:
   interval: 5m
-  retryInterval: 1m
+  retryInterval: 15s
   timeout: 15m
   path: ./kubernetes/apps/trueswarm-admin-bootstrap
   prune: true
@@ -39,11 +39,11 @@ metadata:
   namespace: flux-system
 spec:
   interval: 5m
-  retryInterval: 1m
-  timeout: 15m
+  retryInterval: 15s
+  timeout: 5m
   path: ./deploy/foundation
   prune: true
-  wait: true
+  wait: false
   sourceRef:
     kind: GitRepository
     name: trueswarm-admin
@@ -53,6 +53,11 @@ spec:
     provider: sops
     secretRef:
       name: sops-age
+  healthChecks:
+  - apiVersion: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: trueswarm-admin-pg
+    namespace: trueswarm-admin
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
@@ -61,7 +66,7 @@ metadata:
   namespace: flux-system
 spec:
   interval: 5m
-  retryInterval: 1m
+  retryInterval: 15s
   timeout: 15m
   path: ./kubernetes/apps/trueswarm-admin-executor-bootstrap
   prune: true
@@ -75,3 +80,153 @@ spec:
     provider: sops
     secretRef:
       name: sops-age
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin-security
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 15s
+  timeout: 5m
+  path: ./deploy/security
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-admin-git-auth
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin-migration
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 15s
+  timeout: 5m
+  path: ./deploy/ailab-migration
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-admin-foundation
+  - name: trueswarm-admin-security
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 15s
+  timeout: 10m
+  path: ./deploy/ailab
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-admin-migration
+  - name: trueswarm-admin-executor-auth
+  - name: trueswarm-admin-security
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin-qualification
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 15s
+  timeout: 5m
+  path: ./deploy/qualification
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-admin-foundation
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-platform-migration
+  namespace: flux-system
+spec:
+  suspend: false
+  interval: 5m
+  retryInterval: 15s
+  timeout: 5m
+  path: ./deploy/platform-migration
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-admin-foundation
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-platform-owner-rotation
+  namespace: flux-system
+spec:
+  suspend: false
+  interval: 5m
+  retryInterval: 15s
+  timeout: 5m
+  path: ./deploy/platform-owner-rotation
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-platform-migration
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin-live-checks
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 15s
+  timeout: 5m
+  path: ./deploy/security-checks
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-admin
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin-monitoring
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 15s
+  timeout: 5m
+  path: ./deploy/monitoring
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm
+  - name: trueswarm-admin

@@ -189,6 +189,11 @@ identity_providers:
     # user by design (Gitea, Grafana, Open WebUI; the AgentForge CP fails shut on its own without an
     # `af:*` group).
     authorization_policies:
+      trueswarm_admin_mfa:
+        default_policy: 'deny'
+        rules:
+          - policy: 'two_factor'
+            subject: ['user:chifor']
       admins_only:
         default_policy: 'deny'
         rules:
@@ -361,3 +366,36 @@ identity_providers:
         # JSON there rather than a signed JWT (same reason zot and grafana set this).
         userinfo_signed_response_alg: 'none'
         token_endpoint_auth_method: 'client_secret_basic'
+      - client_id: trueswarm-admin
+        client_name: Trueswarm Administration
+        client_secret: $pbkdf2-sha512$310000$GNbycIYtofsPw9IaA9krGw$k6tJofdlSeEmn0TQlapLn6puaIoc6OVdJfQCtlVCPCi8wXUydn5UKav2gDz8V0AlxDJTgx3MTiMx3/IOLnQSQQ
+        authorization_policy: trueswarm_admin_mfa
+        claims_policy: cloudflare_id_token
+        public: false
+        require_pkce: true
+        pkce_challenge_method: S256
+        redirect_uris:
+        - https://trueswarm-admin.chifor.me/auth/callback
+        scopes:
+        - openid
+        - email
+        - profile
+        token_endpoint_auth_method: client_secret_basic
+        id_token_signed_response_alg: RS256
+      - client_id: cloudflare-trueswarm-admin
+        client_name: Trueswarm administrator access gate
+        client_secret: $pbkdf2-sha512$310000$SmJ/oJLDViJVZLSxenifdw$1OMIFnl5/UF74BWkkbLxRnOZ9QyYL7bl.wCPVdPz7mw.wcKxvHxEVjMT1fx1V7y0AP1P53uPK1Gi3fgZFSCDOg
+        authorization_policy: trueswarm_admin_mfa
+        public: false
+        require_pkce: true
+        pkce_challenge_method: S256
+        claims_policy: cloudflare_id_token
+        redirect_uris:
+        - https://chifor.cloudflareaccess.com/cdn-cgi/access/callback
+        scopes:
+        - openid
+        - email
+        - profile
+        - groups
+        token_endpoint_auth_method: client_secret_basic
+        id_token_signed_response_alg: RS256
