@@ -8,16 +8,11 @@ from, not a manifest under test here). Every `kind: Kustomization` document
 in that directory names a `spec.path` this repo's own tooling can attempt to
 `kustomize build`.
 
-NOT EVERY ONE OF THOSE PATHS IS LOCAL, though. Four Kustomizations in that
-directory (`agentforge-tenants`, `platform`, `muse-stream`, `trueswarm`) point `spec.sourceRef` at a
-DIFFERENT `GitRepository` — the CP-written `cchifor/agentforge-tenants` repo
-the `cchifor/platform`, `cchifor/muse-stream` and `cchifor/trueswarm` repos, respectively — and `spec.path` is then a
-path in THAT repo, not this one (`./tenants`, `./deploy/gitops/flux/clusters
-/ailab`, `./deploy/kubernetes/overlays/ailab`; these directories do not exist
-in this checkout). Feeding them to
-`kustomize build` here fails for a reason that has nothing to do with this
-repo's manifests being wrong, which is not what a fail-closed gate should
-report.
+NOT EVERY ONE OF THOSE PATHS IS LOCAL. The agentforge-tenants, platform,
+muse-stream, and Trueswarm deployment stages reference other repositories.
+Trueswarm's runtime and administrative stages are now sourced from the private
+cchifor/trueswarm-admin repository. Their paths are built and validated by that
+repository's own CI; building those paths in this checkout cannot validate them.
 
 SO A `sourceRef` IS RESOLVED, NOT STRING-MATCHED. `spec.sourceRef` is a
 reference — `kind` + `name` + `namespace` (defaulting, as in Flux, to the
@@ -40,7 +35,7 @@ then classifies each Kustomization by looking its reference UP in that table:
                is a reviewed entry in `EXPECTED_EXTERNAL_SOURCES`, the closed
                allowlist of externally-sourced objects this step is ALLOWED
                to skip (currently exactly `agentforge-tenants`, `platform` and
-               `muse-stream`, `trueswarm`). The path is excluded and the exclusion is printed
+               `muse-stream`, `trueswarm`, and `trueswarm-admin`). The path is excluded and the exclusion is printed
                to stderr so a CI log makes the gate's real coverage visible.
   * ANYTHING ELSE is a `DiscoveryError` — fail closed. That covers: no
                `sourceRef` at all; a `sourceRef` that is not a mapping or
@@ -133,6 +128,7 @@ EXPECTED_EXTERNAL_SOURCES = frozenset(
         ("flux-system", "platform"),
         ("flux-system", "muse-stream"),
         ("flux-system", "trueswarm"),
+        ("flux-system", "trueswarm-admin"),
     }
 )
 

@@ -212,6 +212,8 @@ dev_worker_herdr_memory_swap_max: "2G"
 # the group-readable sink token. Activation ceremony: docs/runbooks/openbao-dev-workers.md.
 dev_worker_enable_openbao: false
 dev_worker_openbao_addr: "https://openbao.lan.chifor.me:30820" # openbao-lan NodePort (SAN on openbao-tls)
+# Registry every user's Docker is logged into as the read-only `pull` user (tasks/registry_login.yml).
+dev_worker_registry_host: registry.chifor.me
 # /etc/hosts rows for the LAN name — the workers resolve via the LAN resolver cloud-init gave them
 # and the name has no public record, so it is pinned host-side. All three node IPs: the Go dialer
 # walks the resolved addresses in turn, so a drained node is a retry, not an outage.
