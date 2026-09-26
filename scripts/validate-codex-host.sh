@@ -9,8 +9,8 @@
 #      § "The shared codex login") or a hand-copied login that still carries a refresh token;
 #   2. how many days the access token has left;
 #   3. a REAL `codex exec` round-trip to the API with a fixed prompt, checking the reply.
-# --dangerously-bypass-approvals-and-sandbox: the prompt uses no tools, and the dev workers'
-# bubblewrap cannot set up its namespace anyway (the known bwrap loopback failure).
+# --dangerously-bypass-approvals-and-sandbox: the prompt uses no tools, so there is nothing to sandbox.
+# (The dev workers' old bwrap loopback failure is fixed by the dev_worker role's codex_sandbox.yml.)
 set -u
 h=$(hostname -s)
 case "$h" in

@@ -1,0 +1,16 @@
+# Managed by ansible (dev_worker role, tasks/codex_sandbox.yml) -- do not edit by hand.
+#
+# Ubuntu 24.04 sets kernel.apparmor_restrict_unprivileged_userns=1: a user namespace created by an
+# unconfined binary is moved into the `unprivileged_userns` profile, which denies every capability.
+# Bubblewrap then cannot bring up loopback in its fresh netns and dies before running anything:
+#   bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted
+# This is the fix Ubuntu itself uses for sandboxing apps (see chrome, flatpak in /etc/apparmor.d):
+# attach an unconfined profile that grants `userns` to ONE root-owned binary.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap-userns /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap-userns>
+}
