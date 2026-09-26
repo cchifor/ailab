@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trueswarm-admin-executor-bootstrap
+  namespace: flux-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: admin-gitops
+  namespace: trueswarm-admin
+type: Opaque
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trueswarm-admin-executor-bootstrap
+  namespace: trueswarm-admin
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - admin-gitops
+  verbs:
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trueswarm-admin-executor-bootstrap
+  namespace: trueswarm-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trueswarm-admin-executor-bootstrap
+subjects:
+- kind: ServiceAccount
+  name: trueswarm-admin-executor-bootstrap
+  namespace: flux-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: trueswarm-recovery-gitops
+  namespace: trueswarm
+type: Opaque
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trueswarm-admin-executor-bootstrap
+  namespace: trueswarm
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - trueswarm-recovery-gitops
+  verbs:
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trueswarm-admin-executor-bootstrap
+  namespace: trueswarm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trueswarm-admin-executor-bootstrap
+subjects:
+- kind: ServiceAccount
+  name: trueswarm-admin-executor-bootstrap
+  namespace: flux-system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trueswarm-admin-executor-bootstrap
+  namespace: flux-system
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 180
+  template:
+    spec:
+      serviceAccountName: trueswarm-admin-executor-bootstrap
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: configure
+        image: registry.chifor.me/library/python:3.12-alpine
+        command:
+        - python3
+        - -B
+        - -c
+        - "import base64,json,pathlib,ssl,urllib.request,os\nmount=pathlib.Path('/var/run/secrets/kubernetes.io/serviceaccount')\n\
+          identity=pathlib.Path('/identity/identity').read_bytes()\nhosts=pathlib.Path('/trusted-hosts/known_hosts').read_bytes()\n\
+          if len(hosts.strip()) < 32: raise SystemExit('Trusted Gitea host keys are\
+          \ empty')\nbody=json.dumps({'data':{'identity':base64.b64encode(identity).decode(),'known_hosts':base64.b64encode(hosts).decode()}}).encode()\n\
+          for namespace,name in [('trueswarm-admin','admin-gitops'),('trueswarm','trueswarm-recovery-gitops')]:\n\
+          \    url='https://'+os.environ['KUBERNETES_SERVICE_HOST']+':'+os.environ['KUBERNETES_SERVICE_PORT']+'/api/v1/namespaces/'+namespace+'/secrets/'+name\n\
+          \    req=urllib.request.Request(url,data=body,method='PATCH',headers={'Authorization':'Bearer\
+          \ '+(mount/'token').read_text(),'Content-Type':'application/merge-patch+json'})\n\
+          \    with urllib.request.urlopen(req,context=ssl.create_default_context(cafile=str(mount/'ca.crt'))):pass\n\
+          print('Repository-specific SSH identities assembled with trusted host keys.')\n"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: identity
+          mountPath: /identity
+          readOnly: true
+        - name: trusted-hosts
+          mountPath: /trusted-hosts
+          readOnly: true
+      volumes:
+      - name: identity
+        secret:
+          secretName: trueswarm-admin-executor-identity
+          items:
+          - key: identity
+            path: identity
+      - name: trusted-hosts
+        secret:
+          secretName: muse-stream-deploy-key
+          items:
+          - key: known_hosts
+            path: known_hosts

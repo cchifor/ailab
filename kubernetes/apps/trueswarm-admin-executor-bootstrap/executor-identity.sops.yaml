@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: trueswarm-admin-executor-identity
+    namespace: flux-system
+stringData:
+    identity: ENC[AES256_GCM,data:mHVuR2kOrtRpkBu4h55FOkAUaY5fj7Cnoyn+GgrtqrSPN4xpNwCuMPpif7DuofDPZXcBUqMPDMyvJotzAb4K/lBQ9WKKur0kr4QLBtOH2gRHDJzaRmqnmbWRqgWEcLM/qsNsjINFDCawX+xMOckTanshvp6OfD9WrgJtCsRC2PB/sNOTLM7u13v8GyBcExOWqgn3DJL4pWJZIiAPriUY05UsYQ5VAO3EBxAFc7pIdobQmELmwcikhBxs7ee+l3HaBmrgMOWa3bWwEdNexS+sFJl01pfxkQBjG55nY1Ii0ti09ASXlmX2ZwXV59Y+FoS53lepr3J+UuyzsyFTHN53rOLuBkowmrkmQW9S6J0DkJKh+d+YdJ+6BZ8vT8x3ndptpT3FdV0s659I6FDiG5FyzZ4XVMM5pMsRFa2xKkrqyKPhZ4JHMGMBkhvyM7qc9p836bnga9sANFCwokhbmEddnHySOiJaxRnq+tNgcE9VMj86HAasZs4tl68aSyt9fHY3Ruwt,iv:VEC8ns57lzW5/ju9VXHCUr2MKy5YIYQgl1CQsOiUMrQ=,tag:nGDsxE3A0zDW1ibZ5oOdQg==,type:str]
+type: Opaque
+sops:
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBKNVlZN3N5djAzSDU5Tkxs
+            ajNZcWVlUEMzTDBUWWZjZEJveFVVd3JJRjBnCjZGZUtPMWhyNC9qWVc0blFneTJC
+            a0V5VzdFbnFEUzlxTGJDeEZFak5yMHcKLS0tIGxjYkJPdGREeVJlM0hmbUlFbkRM
+            cVZtQko2K1ArZWU3ZnRKci95M2hOUm8K6qBe9znsd0d4wHVHHfwlEDKZ4csi/T+k
+            fp6Eo03paBve2jhfoyHyT6bg7No61u44+TccHr8mPfNMiadPATrBtA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-26T12:06:44Z"
+    mac: ENC[AES256_GCM,data:3JPjPqPJd+G2QbVgREAqT7hxFWBAMmvOqXRu/LjuBX1qdJ11rWSgOwP7/2xEbYNfNvLfdgEna27dgY3Qz/d729OCFQCNlKRwnsYL5/5rCJm2itVSVsNVbV8LLV7PozQzBv8E5xPJN2eM97tIwTEeXAJXTrh1nJ3tnWFIljCOfeg=,iv:3YY2IQBwPrRuCbt70A6lq/5n+99sNnuZUMVisWy0xQU=,tag:kitqt5oaX8cuLifQWyUyIw==,type:str]
+    encrypted_regex: ^(data|stringData)$
+    version: 3.10.2

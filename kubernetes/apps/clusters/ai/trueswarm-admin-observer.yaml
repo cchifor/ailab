@@ -20,6 +20,7 @@ rules:
   - trueswarm-admin-foundation
   - trueswarm-admin-git-auth
   - trueswarm-admin
+  - trueswarm-admin-executor-auth
   verbs:
   - get
 - apiGroups:
@@ -28,6 +29,7 @@ rules:
   - jobs
   resourceNames:
   - trueswarm-admin-git-bootstrap
+  - trueswarm-admin-executor-bootstrap
   verbs:
   - get
 ---
