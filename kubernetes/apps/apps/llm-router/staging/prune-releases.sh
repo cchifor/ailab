@@ -33,9 +33,13 @@ for keep in "$LIVE" "$ROLLBACK"; do
   [ -d "$ROOT/$keep" ] || { echo "refusing: $ROOT/$keep does not exist (typo?)" >&2; exit 1; }
 done
 
+# Only plain names are ever selected (letters, digits, . _ -): the lists below are split on spaces, so a name
+# with whitespace or other characters could otherwise turn into a different path. Such entries are reported and left.
+plain() { case "$1" in ""|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
 remove=""
 for d in router-*; do
   [ -d "$d" ] || continue
+  plain "$d" || { echo "skipping (unusual name, remove by hand if intended): $d" >&2; continue; }
   [ "$d" = "$LIVE" ] || [ "$d" = "$ROLLBACK" ] || remove="$remove $d"
 done
 # Belt and braces: both kept releases must still be present after the selection.
@@ -44,7 +48,10 @@ for keep in "$LIVE" "$ROLLBACK"; do
 done
 old_backups=""
 if [ -d .backups ]; then
-  old_backups=$(ls -1t .backups | tail -n +"$((KEEP_BACKUPS + 1))" | sed 's#^#.backups/#' | tr '\n' ' ')
+  # Read whole lines (never split a name), and keep plain names only, as for releases.
+  old_backups=$(ls -1t .backups | tail -n +"$((KEEP_BACKUPS + 1))" | while IFS= read -r b; do
+    if plain "$b"; then printf ' .backups/%s' "$b"; else echo "skipping (unusual name, remove by hand if intended): .backups/$b" >&2; fi
+  done)
 fi
 
 echo "keep:    $LIVE $ROLLBACK (and the newest $KEEP_BACKUPS backups)"
