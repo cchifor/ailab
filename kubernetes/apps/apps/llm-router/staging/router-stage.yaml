@@ -1,0 +1,57 @@
+# Release staging pod for llm-router (docs/runbooks/llm-router.md, "Releasing a new version").
+# NOT part of the Flux kustomization (../kustomization.yaml lists only router.yaml): an operator applies it for
+# the duration of a release and deletes it afterwards:
+#   kubectl --context admin@ai apply -f kubernetes/apps/apps/llm-router/staging/router-stage.yaml
+#   ... stage, smoke-test, prune ...
+#   kubectl --context admin@ai -n llm-router delete pod router-stage
+# It mounts router-releases read-write (to add a release) and llm-router-data (to back up / smoke-test against a
+# copy of the database), so it runs on the router's node: the data volume is RWO.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: router-stage
+  namespace: llm-router
+  labels:
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/component: release-staging
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  nodeSelector:
+    kubernetes.io/hostname: talos-agent-node-2
+  tolerations:
+    - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    # Without this the kubelet re-applies fsGroup to EVERY file on router-releases (NFS, fsGroupPolicy File) on
+    # each mount: tens of thousands of files (one node_modules per release plus the pnpm store), one NAS round
+    # trip each. That took ~22 min on 2026-09-26 and grew with every release. OnRootMismatch skips the walk when
+    # the volume root already has the right group, which it has after the first mount.
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: stage
+      image: docker.io/library/node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+      command: ["sh", "-c", "sleep 3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+      env:
+        - {name: HOME, value: /tmp}
+      resources:
+        requests: {cpu: 100m, memory: 256Mi}
+        limits: {cpu: "2", memory: 1Gi}
+      volumeMounts:
+        - {name: releases, mountPath: /releases}
+        - {name: data, mountPath: /data}
+        - {name: tmp, mountPath: /tmp}
+  volumes:
+    - name: releases
+      persistentVolumeClaim: {claimName: router-releases}
+    - name: data
+      persistentVolumeClaim: {claimName: llm-router-data}
+    - name: tmp
+      emptyDir: {}
