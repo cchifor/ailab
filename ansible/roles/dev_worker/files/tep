@@ -28,6 +28,7 @@ MAX_TTL_MIN="${TEP_MAX_TTL_MIN:-480}"
 BIND_TIMEOUT_S="${TEP_BIND_TIMEOUT_S:-20}"      # lost-race window: unbound after this => yield+retry
 QUEUE_TIMEOUT_S="${TEP_QUEUE_TIMEOUT_S:-900}"   # max time to wait for warm capacity
 RUN_GRACE_MIN=10                                 # extend-on-submit slack beyond the run timeout
+REGISTRY="${TEP_REGISTRY:-registry.chifor.me}"
 
 K() { kubectl --kubeconfig="$KCFG" "$@"; }
 die() { echo "tep: $*" >&2; exit 1; }
@@ -48,6 +49,22 @@ warn_owner() {
 }
 cexec() { pod=$1; shift; K exec "$pod" -c control -- sh -c "$*"; }
 cexec_i() { pod=$1; shift; K exec -i "$pod" -c control -- sh -c "$*"; }
+
+# Log the lease's docker in to the estate registry as the read-only `pull` user (ailab#865). zot
+# answers docker's /v2/ ping with a basic-auth challenge (anonymous and authenticated policies
+# coexist), and the env's classic-store dockerd then refuses anonymous pulls of $REGISTRY/strive/*
+# with "no basic auth credentials". The password goes from `cred` (af/dev-workers/common) straight
+# into --password-stdin; the login lives in the control container, which the env's destruction on
+# release takes with it. Soft on purpose: without it a lease still builds and runs, it only cannot
+# pull the prebuilt images — so warn, never fail the lease.
+registry_login() {
+  if command -v cred >/dev/null 2>&1 &&
+     cred get common registry_pull_password 2>/dev/null |
+       cexec_i "$1" "docker login $REGISTRY -u pull --password-stdin >/dev/null 2>&1"; then
+    return 0
+  fi
+  echo "tep: WARNING could not log the lease in to $REGISTRY as 'pull' — pulls of $REGISTRY/* will fail with 'no basic auth credentials' (check: cred get common registry_pull_user)" >&2
+}
 
 pool_ready() { K get sandboxwarmpool "$POOL" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0; }
 
@@ -101,6 +118,7 @@ cmd_lease() {
       K delete sandboxclaim "$NAME" --wait=false >/dev/null 2>&1 || true
       sleep 3; continue
     fi
+    registry_login "$POD"
     T1=$(date +%s)
     echo "$NAME" > "$TEP_DIR/current"
     echo "LEASED $NAME pod=$POD in $((T1-T0))s expires=$EXP"
