@@ -57,7 +57,12 @@ tofu output -raw trueswarm_admin_access_audience
 
 The initial allowlist is `chifor@gmail.com`. The two dedicated Authelia clients use
 the `trueswarm_admin_mfa` authorization policy, which allows only `user:chifor` and
-requires two-factor authentication. Access selects only its dedicated OIDC IdP;
+requires two-factor authentication. Access sessions expire after one hour. Its policy
+requires both the dedicated IdP and the RFC 8176 `mfa` authentication-method claim.
+Authelia includes this claim after multi-factor login (including verified passkeys).
+See [Authelia AMR values](https://www.authelia.com/reference/guides/authentication-method-references/)
+and [Cloudflare OIDC MFA requirements](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/mfa-requirements/).
+Access selects only its dedicated OIDC IdP;
 one-time PIN and shared service-token bypasses are not enabled for this application.
 
 Supply the non-secret Access audience to the private deployment. Its issuer is
@@ -77,5 +82,14 @@ administrator can complete native OIDC MFA, and other identities cannot enter.
 Publishing DNS depends on the Access application resource. The explicit publication
 flag is an operator gate, not a claim that application qualification has completed.
 
-Validation performed in the worker: OpenTofu 1.12.2 `fmt` and `validate` with
-Cloudflare provider 5.26.0 and backend disabled. No plan or apply was run there.
+Keep `enable_trueswarm_admin=true` and the selected publication flag in the existing
+workstation variable configuration after provisioning. Future module operations also
+need the dedicated client secret loaded from SOPS; the defaults deliberately do not
+adopt or preserve enabled resources. Do not apply a later plan that removes this gate.
+
+Validation: OpenTofu 1.12.2 `fmt` and `validate` with Cloudflare provider 5.26.0
+and backend disabled. `python3 -m unittest scripts.tests.test_trueswarm_admin_access`
+exercises the actual helper using isolated Git repositories and fake cloud commands:
+CI/missing prerequisites, unrelated changes, DNS publication and deletion are rejected;
+valid Access changes commit and push the audience, reruns do not create empty commits,
+and temporary sensitive plans are removed. These fixture checks are not a real apply.

@@ -13,7 +13,9 @@ fi
 ailab_root="$(cd "$(dirname "$0")/.." && pwd)"
 admin_checkout="${TRUESWARM_ADMIN_CHECKOUT:?Set the private trueswarm-admin checkout path}"
 cloudflare_root="$ailab_root/kubernetes/infra/cloudflare"
-for tool in tofu sops python3 git; do command -v "$tool" >/dev/null; done
+for tool in tofu sops python3 git; do
+  command -v "$tool" >/dev/null || { echo "Required executable not found: $tool" >&2; exit 1; }
+done
 [[ -s "$cloudflare_root/terraform.tfstate" ]] || { echo "Existing workstation state is required; refusing a fresh state." >&2; exit 1; }
 [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || { echo "Load the existing workstation DNS/Access token into CLOUDFLARE_API_TOKEN first." >&2; exit 1; }
 [[ -z "$(git -C "$admin_checkout" status --porcelain)" ]] || { echo "The private admin checkout must be clean." >&2; exit 1; }

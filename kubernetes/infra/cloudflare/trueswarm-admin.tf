@@ -68,6 +68,12 @@ resource "cloudflare_zero_trust_access_policy" "trueswarm_admin" {
   name       = "Trueswarm named administrators"
   decision   = "allow"
   include    = [for email in sort(tolist(var.trueswarm_admin_emails)) : { email = { email = email } }]
+  # Require both the dedicated IdP and its RFC 8176 MFA claim, even if someone
+  # later changes the application's login-method list.
+  require = [
+    { login_method = { id = cloudflare_zero_trust_access_identity_provider.trueswarm_admin[0].id } },
+    { auth_method = { auth_method = "mfa" } },
+  ]
 }
 
 resource "cloudflare_zero_trust_access_application" "trueswarm_admin" {
@@ -76,7 +82,7 @@ resource "cloudflare_zero_trust_access_application" "trueswarm_admin" {
   name                      = "Trueswarm Administration"
   type                      = "self_hosted"
   domain                    = "trueswarm-admin.chifor.me"
-  session_duration          = "8h"
+  session_duration          = "1h"
   allowed_idps              = [cloudflare_zero_trust_access_identity_provider.trueswarm_admin[0].id]
   auto_redirect_to_identity = true
   policies                  = [{ id = cloudflare_zero_trust_access_policy.trueswarm_admin[0].id, precedence = 1 }]

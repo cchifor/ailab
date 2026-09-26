@@ -47,8 +47,8 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 #: The full set of Flux Kustomization paths in kubernetes/apps/clusters/ai that this checkout can
 #: actually `kustomize build` — i.e. sourceRef resolves to THIS repo's own flux-system source, per
 #: kubernetes/apps/clusters/ai/flux-system/gotk-sync.yaml (GitRepository flux-system's url IS
-#: cchifor/ailab.git). Four Kustomizations deliberately name paths in other repos:
-#: agentforge-tenants, platform, muse-stream and trueswarm. Their source objects form a closed,
+#: cchifor/ailab.git). External stages name paths in agentforge-tenants, platform,
+#: muse-stream and the private trueswarm-admin repo. Their source objects form a closed,
 #: reviewed allowlist; a new external source without an entry fails discovery.
 #: The local paths below are checked against actual kustomization.yaml files.
 EXPECTED_LOCAL_PATHS = frozenset(
@@ -84,12 +84,19 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/trueswarm-bootstrap",
+        "./kubernetes/apps/trueswarm-admin-bootstrap",
+        "./kubernetes/apps/trueswarm-admin-executor-bootstrap",
         "./kubernetes/apps/qnap-storage",
         "./kubernetes/apps/infrastructure/testpool",
     }
 )
 
-EXCLUDED_EXTERNAL_PATHS = frozenset({"./tenants", "./deploy/gitops/flux/clusters/ailab", "./deploy/kubernetes/overlays/ailab"})
+EXCLUDED_EXTERNAL_PATHS = frozenset({
+    "./tenants", "./deploy/gitops/flux/clusters/ailab", "./deploy/kubernetes/overlays/ailab",
+    "./deploy/foundation", "./deploy/security", "./deploy/ailab-migration", "./deploy/ailab",
+    "./deploy/qualification", "./deploy/platform-migration", "./deploy/platform-owner-rotation",
+    "./deploy/security-checks", "./deploy/monitoring", "./deploy/platform",
+})
 
 #: The url the REAL gotk-sync.yaml declares for GitRepository flux-system/flux-system (ADR 0017:
 #: the in-cluster Gitea forge is the master; GitHub is a push-mirror backup of the SAME repo).
@@ -238,20 +245,24 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
         for _namespace, name in mp.EXPECTED_EXTERNAL_SOURCES:
             self.assertIn(name, stderr)
 
-    def test_real_tree_declares_exactly_the_five_git_repositories(self):
+    def test_real_tree_declares_exactly_the_reviewed_git_repositories(self):
         # The resolution table discovery classifies against: this repo's own bootstrap source plus
-        # the four reviewed external ones — nothing else, and each with a url that identifies the
+        # the five reviewed external ones — nothing else, and each with a url that identifies the
         # repo it really points at.
         sources = mp.declared_git_repositories()
         self.assertEqual(
             set(sources),
-            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm")},
+            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin")},
         )
         self.assertTrue(mp.is_this_repo(sources[("flux-system", "flux-system")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "agentforge-tenants")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "platform")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "muse-stream")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "trueswarm")]))
+        self.assertEqual(
+            sources[("flux-system", "trueswarm-admin")],
+            "ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/trueswarm-admin.git",
+        )
 
     def test_every_discovered_path_has_a_kustomization_yaml(self):
         # This is verify_buildable()'s own job; re-proving it here means a future edit to
