@@ -70,6 +70,12 @@
   ansible.builtin.import_tasks: codex.yml
   tags: [codex]
 
+# Codex's managed sandbox needs bubblewrap to create a user namespace, which Ubuntu 24.04's AppArmor
+# userns restriction blocks by default. Own tag so it can be rolled out alone: --tags codex-sandbox.
+- name: Codex sandbox prerequisites (bubblewrap + AppArmor userns profile)
+  ansible.builtin.import_tasks: codex_sandbox.yml
+  tags: [codex, codex-sandbox]
+
 # Needs both users + their npm dirs to exist.
 - name: Shared Claude/Codex credential ACLs
   ansible.builtin.import_tasks: credentials.yml

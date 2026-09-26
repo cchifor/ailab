@@ -171,6 +171,15 @@ written as top-level keys into each user's `~/.codex/config.toml` in place and s
 the documented `-t reviewbot` rollout includes them), and reviewer-2's review model is
 `pr_reviewer_llm_model` in its host_vars.
 
+**Codex's managed sandbox needs a bubblewrap AppArmor profile** (`tasks/codex_sandbox.yml`, tags
+`codex` / `codex-sandbox`). Ubuntu 24.04 sets `kernel.apparmor_restrict_unprivileged_userns=1`, so
+without it every command in a sandboxed session (anything but `--yolo`) dies before starting with
+`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`; dmesg shows
+`apparmor="DENIED" profile="unprivileged_userns" capname="net_admin"`. The role installs the distro
+`bubblewrap` (codex prefers a `bwrap` on PATH over its bundled copy) and loads
+`/etc/apparmor.d/bwrap-userns`, which grants `userns` to `/usr/bin/bwrap` only. Check a worker with
+`codex sandbox -c sandbox_mode='"workspace-write"' -- sh -c 'touch x && echo ok'` from a scratch dir.
+
 ### Optional: sandboxed separate agent account
 To isolate the headless agent from `c4`'s sudo, set `dev_worker_agent_user: claude-agent` in
 `group_vars/dev_workers.yml` and re-run. That restores the homelab two-user split: `claude-agent`
