@@ -64,7 +64,8 @@ dev_worker_codex_reasoning_effort: "xhigh"
 # with NO network unless this is on, so `git push`, `npm install` and even DNS fail inside it
 # ("Could not resolve host: git.chifor.me", dev-worker-4, 2026-09-26). These are agent workstations
 # whose job includes pushing to the forge; the sandbox still confines writes to the workspace.
-# false = write `network_access = false` (explicitly offline); "" = leave the key unmanaged.
+# false = write `network_access = false` (explicitly offline); "" = leave the key unmanaged. Anything
+# else, including null / a blank value, fails the play (tasks/codex.yml validates it once).
 dev_worker_codex_sandbox_network: true
 
 # ---- feature toggles ----
