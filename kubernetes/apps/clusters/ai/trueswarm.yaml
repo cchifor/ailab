@@ -25,7 +25,9 @@ spec:
     name: trueswarm-admin
   dependsOn:
   - name: trueswarm-admin-foundation
-  path: ./deploy/transition
+  - name: trueswarm-admin-security
+  - name: trueswarm-platform-owner-rotation
+  path: ./deploy/platform
   prune: true
   wait: true
   decryption:

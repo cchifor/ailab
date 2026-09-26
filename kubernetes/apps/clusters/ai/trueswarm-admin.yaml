@@ -162,7 +162,7 @@ metadata:
   name: trueswarm-platform-migration
   namespace: flux-system
 spec:
-  suspend: true
+  suspend: false
   interval: 5m
   retryInterval: 1m
   timeout: 5m
@@ -181,7 +181,7 @@ metadata:
   name: trueswarm-platform-owner-rotation
   namespace: flux-system
 spec:
-  suspend: true
+  suspend: false
   interval: 5m
   retryInterval: 1m
   timeout: 5m
@@ -210,4 +210,23 @@ spec:
     kind: GitRepository
     name: trueswarm-admin
   dependsOn:
+  - name: trueswarm-admin
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin-monitoring
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 1m
+  timeout: 5m
+  path: ./deploy/monitoring
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm
   - name: trueswarm-admin
