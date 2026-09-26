@@ -22,10 +22,10 @@ spec:
   timeout: 15m
   sourceRef:
     kind: GitRepository
-    name: trueswarm
+    name: trueswarm-admin
   dependsOn:
-  - name: trueswarm-git-auth
-  path: ./deploy/kubernetes/overlays/ailab
+  - name: trueswarm-admin-foundation
+  path: ./deploy/transition
   prune: true
   wait: true
   decryption:
