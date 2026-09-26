@@ -138,3 +138,23 @@ for the same non-determinism reason as the strive knob. See `docs/runbooks/regis
 "Disk / retention" for the operator-facing summary and the immediate-unblock steps (grow the disk
 / delete old tags by hand) this ADR update does not itself perform — this is a role change only;
 the operator applies it (`ansible-playbook ansible/registry.yml`).
+
+## Update (2026-09-26) — docker.io is an allowlist again, never `**` (ailab#420)
+
+The 2026-06-23 catch-all (`"**"`) also matched the namespaces this registry **publishes**
+(`strive/**`, `agentforge/**`, `testpool/**`, `trueswarm*/**`, `muse-stream/**`). Every tag lookup
+of our own images then started an on-demand docker.io sync for an image that cannot exist upstream
+(9,036 `failed to sync image` on 2026-09-26, almost all `strive/*`), and a sync that never settled
+wedged every later read of that reference (`image already demanded, waiting on channel`): tag
+manifest reads hung while `/v2/` and `tags/list` stayed green, failing platform builds and the
+`ailab-pins` gate (cchifor/platform#788). A restart clears it for hours, not for good.
+
+An explicit allowlist fixed it on 2026-08-26, but it was applied by hand, and the role's next
+render (2026-09-25) silently reverted it. It now lives in the role:
+`registry_zot_sync_dockerhub_prefixes` (every namespace in the store plus every docker.io reference
+in the platform and ailab repos), with `registry_zot_local_namespaces` asserted disjoint at apply
+time and both pinned by `scripts/tests/test_registry_zot_sync_allowlist.py`.
+
+**Accepted cost:** a docker.io namespace missing from the list 404s on the mirror and falls back to
+anonymous Docker Hub, i.e. the pre-2026-06-23 failure mode, now for NEW dependencies only. The
+remedy is one line in `defaults/main.yml` plus `just registry`.

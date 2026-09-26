@@ -64,12 +64,75 @@ registry_zot_manage_ufw: true
 # which is what a Docker daemon `registry-mirrors` and a BuildKit `[registry."docker.io"] mirrors`
 # require — proven end-to-end by cchifor/platform's scripts/ci/verify-registry-mirror.sh.
 # Prefix layering (config.json.j2): quay.io (keycloak/**) and mcr (playwright*) keep SPECIFIC
-# prefixes and are listed FIRST, so they win on those repos; docker.io is the catch-all (prefix
-# "**") and is listed LAST. The earlier disjoint design (docker.io = library/** + nginxinc/** only)
-# missed the platform stacks' other docker.io images (pgvector, grafana, prom, qdrant, valkey,
-# rustfs, curlimages, dpage, …) → those 404'd on the mirror → fell back to Docker Hub → 429.
-# Ordering (specific upstreams first, docker.io catch-all last) preserves "no upstream confusion".
+# prefixes and are listed FIRST; docker.io is listed LAST with the explicit allowlist below.
 # See docs/decisions/0014-registry-pull-through-cache.md.
+#
+# docker.io is an ALLOWLIST, NEVER "**" (ailab#420; recurred 2026-09-26). A "**" catch-all also
+# matches the namespaces we PUSH (strive/**, agentforge/**, …): every TAG lookup of our own images
+# then starts an on-demand upstream sync for something that cannot exist upstream (9,036
+# `failed to sync image` in one day), and one that never settles wedges every later read of that
+# reference ("image already demanded, waiting on channel") — tag-manifest reads hang while `/v2/`
+# stays green (cchifor/platform#788). Zot content filters have no negation, so an explicit list is
+# the only way to say "never proxy our own namespaces". The fix was first applied by hand on
+# 2026-08-26 and silently lost when this role re-rendered the config on 2026-09-25 — hence here,
+# pinned by scripts/tests/test_registry_zot_sync_allowlist.py and asserted at apply time.
+#
+# THE TRADE-OFF: a docker.io namespace NOT listed here 404s on the mirror, and a daemon with
+# `registry-mirrors` then falls back to anonymous Docker Hub (the 429 this cache exists to avoid).
+# A new upstream dependency = add its namespace here + `just registry`. The earlier disjoint design
+# (library/** + nginxinc/** only) failed exactly that way, so the list is generous: every namespace
+# in the live store (2026-09-26) plus every docker.io reference in the platform and ailab repos.
+registry_zot_sync_dockerhub_prefixes:
+  # official images (`python`, `node`, … resolve to library/*) + root repos pulled by short path
+  - "library/**"
+  - "debian"
+  - "postgres"
+  # namespaced docker.io images
+  - "alpine/**"
+  - "binwiederhier/**"
+  - "brave/**"
+  - "cloudflare/**"
+  - "curlimages/**"
+  - "docker/**"
+  - "dpage/**"
+  - "gitea/**"
+  - "grafana/**"
+  - "hashicorp/**"
+  - "headlamp-k8s/**"
+  - "jaegertracing/**"
+  - "koalaman/**"
+  - "mcp/**"
+  - "minio/**"
+  - "modelcontextprotocol/**"
+  - "moby/**"
+  - "nginxinc/**"
+  - "openbao/**"
+  - "otel/**"
+  - "pgvector/**"
+  - "prom/**"
+  - "qdrant/**"
+  - "rancher/**"
+  - "rclone/**"
+  - "renovate/**"
+  - "rustfs/**"
+  - "searxng/**"
+  - "tecnativa/**"
+  - "testcontainers/**"
+  - "valkey/**"
+  - "vaultwarden/**"
+  - "velero/**"
+  - "verdaccio/**"
+
+# Namespaces CI/agents PUSH to this registry. None may appear in the sync allowlist above — the
+# role fails the play if one does (tasks/main.yml).
+registry_zot_local_namespaces:
+  - strive
+  - agentforge
+  - testpool
+  - trueswarm
+  - trueswarm-admin
+  - muse-stream
+  - test
 #
 # Docker Hub anonymous 429: solved by pointing the docker.io sync UPSTREAM at Google's anonymous
 # Docker Hub pull-through `mirror.gcr.io` (primary), with `registry-1.docker.io` kept as failover
