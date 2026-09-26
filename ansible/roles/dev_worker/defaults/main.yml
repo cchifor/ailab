@@ -59,6 +59,13 @@ dev_worker_codex_version: "0.153.4"
 # Empty string = leave that key unmanaged.
 dev_worker_codex_model: "gpt-6-astra"
 dev_worker_codex_reasoning_effort: "xhigh"
+# `[sandbox_workspace_write] network_access` in each user's ~/.codex/config.toml. Codex's workspace-write
+# sandbox (the default once a session leaves --yolo) runs every command in a fresh network namespace
+# with NO network unless this is on, so `git push`, `npm install` and even DNS fail inside it
+# ("Could not resolve host: git.chifor.me", dev-worker-4, 2026-09-26). These are agent workstations
+# whose job includes pushing to the forge; the sandbox still confines writes to the workspace.
+# false = write `network_access = false` (explicitly offline); "" = leave the key unmanaged.
+dev_worker_codex_sandbox_network: true
 
 # ---- feature toggles ----
 dev_worker_install_docker: true
