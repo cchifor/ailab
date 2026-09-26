@@ -98,3 +98,22 @@ spec:
     name: trueswarm-admin
   dependsOn:
   - name: trueswarm-admin-git-auth
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin-migration
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 1m
+  timeout: 5m
+  path: ./deploy/ailab-migration
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-admin-foundation
+  - name: trueswarm-admin-security
