@@ -4,6 +4,12 @@ Use `https://trueswarm-admin.chifor.me`. This single-level name uses the existin
 `*.chifor.me` edge certificate. No Advanced Certificate Manager purchase or SSL API
 permission is required.
 
+DNS was published on **2026-09-26 at 18:54 UTC**, after the operator explicitly
+lifted the publication hold and authorized a temporary Cloudflare CLI login. Normal
+DNS resolution, valid HTTPS and the dedicated Access/Authelia redirect passed in a
+fresh browser, including rejection of forged identity headers. Human login and
+action-specific MFA still require authenticated acceptance checks.
+
 The operator created the dedicated **locally managed** tunnel with:
 
 ```sh
@@ -39,7 +45,9 @@ dedicated OIDC client secret, applies only the Access gate, then commits the gen
 or audience needs to be copied into chat. The following is the equivalent manual
 sequence for operators who prefer separate plan/apply steps.
 
-First provision the gate without DNS. From the private admin checkout, use the
+For a new installation, first provision the gate without DNS. The live gate is
+already applied; use the adoption procedure below for the published installation.
+From the private admin checkout, use the
 operator's SOPS identity to read **only the dedicated client secret** into the
 current shell; never echo it or use shell tracing:
 
@@ -106,6 +114,37 @@ The resulting record is a **proxied CNAME** from `trueswarm-admin.chifor.me` to
 `d2452442-efae-4056-ac82-a5c348033971.cfargotunnel.com`, behind the existing Access
 application. No temporary bypass, alternate hostname, SSL resource or Tunnel API
 permission is introduced. Estate credentials and state remain on the workstation.
+
+### Adopt the CLI-published record
+
+The operator-authorized publication used:
+
+```sh
+cloudflared tunnel route dns d2452442-efae-4056-ac82-a5c348033971 trueswarm-admin.chifor.me
+```
+
+Cloudflare confirmed the proxied CNAME with TTL `1` (automatic). Its non-secret
+record ID is `0286010c0496bb660172f7b89713142d` in zone
+`c967ce7dbbf43b1d7599eb4d213efa57`. The temporary CLI login certificate was removed
+after verification. This temporary authorization was used for CLI publication and
+target-record verification. Workstation state was not copied or replaced, and no
+credential was put in Actions.
+
+`trueswarm-admin-import.tf` adopts this existing record when **both** enable and
+publication flags are true; it does nothing when either flag is false. On the
+workstation that retains the Access state, pull this change and use the same
+`--publish-dns` helper above. The saved plan should import the existing DNS record,
+possibly adding its descriptive comment, while leaving all Access resources
+unchanged. It must not create a second record or replace/delete the current record.
+The import remains harmless after adoption. Keep both flags true in the workstation
+configuration for future applies. Do not rerun `--apply-access` on the adopted live
+installation: that mode sets publication false and its guard refuses DNS deletion.
+
+The CLI publication is live independently of this state adoption. To repeat the
+read-only public edge checks from the private admin checkout, use
+`node scripts/qualify-access-edge.mjs --published`; this mode uses normal browser
+DNS resolution, validates TLS, and checks the exact Access audience and dedicated
+OIDC client/PKCE route. It does not complete human MFA or privileged operations.
 
 Recovery is an independent gate: leave `recovery_qualified=false` and
 `backup_hour_utc=null` until off-site coverage and recovery/promotion qualification
