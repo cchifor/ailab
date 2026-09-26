@@ -54,7 +54,8 @@ content,count=re.subn(r'(?m)^(  ACCESS_AUDIENCE: ).+$',lambda m:m[1]+json.dumps(
 if count!=1:raise SystemExit('Expected exactly one private deployment audience setting')
 content,count=re.subn(r'(?m)^(\s+trueswarm\.chifor\.me/access-config: ).+$',lambda m:m[1]+hashlib.sha256(audience.encode()).hexdigest()[:16],content)
 if count!=1:raise SystemExit('Expected exactly one admin rollout marker')
-path.write_text(content)
+# newline='\n': Windows Python would otherwise CRLF the whole file (a 400-line diff).
+path.write_text(content,newline='\n')
 print('Stored the non-secret Access audience in the private deployment.')
 PY
 if ! git -C "$admin_checkout" diff --quiet -- deploy/ailab/workloads.yaml; then

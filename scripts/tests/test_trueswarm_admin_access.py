@@ -90,6 +90,11 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         self.assertEqual(self.git('rev-parse','HEAD'), self.git('rev-parse','refs/heads/main',cwd=self.origin))
         self.assertEqual(self.calls.read_text().splitlines(), ['plan','show','apply','output'])
 
+    def test_audience_commit_changes_only_the_two_bound_lines(self):
+        self.assertEqual(self.run_helper().returncode, 0)
+        self.assertNotIn(b'\r', self.workloads.read_bytes())
+        self.assertEqual(self.git('diff','--numstat','HEAD~1','HEAD').split()[:2], ['2','2'])
+
     def test_rerun_does_not_create_an_empty_commit(self):
         self.assertEqual(self.run_helper().returncode, 0)
         previous = self.git('rev-parse','HEAD')
