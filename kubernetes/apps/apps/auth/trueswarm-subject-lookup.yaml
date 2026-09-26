@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: trueswarm-admin-subject-lookup
+  namespace: auth
+  labels:
+    app.kubernetes.io/name: trueswarm-admin-bootstrap
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  activeDeadlineSeconds: 120
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 26
+    runAsGroup: 26
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: lookup
+    image: registry.chifor.me/trueswarm/postgresql:17.11@sha256:3751df220f3dd3a01c07b532336a6ba63138cea302b9c2fea335de5ef375b1dc
+    command:
+    - psql
+    - postgresql://authelia@infra-pg-rw.databases.svc.cluster.local:5432/authelia?sslmode=require
+    - --no-psqlrc
+    - --tuples-only
+    - --no-align
+    - --set=ON_ERROR_STOP=1
+    - --command
+    - SELECT service, sector_id, identifier FROM user_opaque_identifier WHERE username
+      = 'chifor' ORDER BY service, sector_id;
+    env:
+    - name: PGPASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: authelia-secrets
+          key: storage_postgres_password
+    - name: PGOPTIONS
+      value: -c default_transaction_read_only=on -c statement_timeout=10000
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trueswarm-admin-subject-lookup
+  namespace: auth
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - pods/log
+  resourceNames:
+  - trueswarm-admin-subject-lookup
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trueswarm-admin-subject-lookup
+  namespace: auth
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trueswarm-admin-subject-lookup
+subjects:
+- kind: ServiceAccount
+  name: platform-dw4
+  namespace: platform-access

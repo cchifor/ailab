@@ -7,6 +7,7 @@ resources:
   - limitrange.yaml
   - authelia-secret.sops.yaml
   - authelia.yaml
+  - trueswarm-subject-lookup.yaml
   - valkey.yaml # auth-valkey: shared (ephemeral) session store enabling authelia x2 (ADR 0016)
 
 # authelia-config is GENERATED rather than committed as a static ConfigMap, and the name suffix
