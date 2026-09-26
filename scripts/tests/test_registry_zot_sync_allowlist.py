@@ -41,6 +41,10 @@ MUST_MIRROR = [
 ]
 
 
+#: Same pattern tasks/main.yml asserts on each prefix's first path component.
+NAMESPACE_RE = r"^[a-z0-9][a-z0-9._-]*$"
+
+
 def _dockerhub_entry(parsed: dict) -> dict:
     for reg in parsed["extensions"]["sync"]["registries"]:
         if "https://mirror.gcr.io" in reg["urls"]:
@@ -56,6 +60,18 @@ class RegistryZotSyncAllowlistTest(unittest.TestCase):
     def test_no_catch_all(self):
         for p in self.prefixes:
             self.assertFalse(p.startswith("*"), f"wildcard-leading prefix {p!r} matches everything")
+
+    def test_namespace_is_literal(self):
+        # A glob in the namespace (`str*/**`) would dodge the membership check below and still
+        # match strive/*; tasks/main.yml asserts the same pattern at apply time.
+        for p in self.prefixes:
+            self.assertRegex(p.split("/", 1)[0], NAMESPACE_RE, f"{p!r}: namespace must be literal")
+
+    def test_literal_rule_rejects_a_wildcard_namespace(self):
+        import re
+
+        for bad in ("**", "*", "str*/**", "stri?e/**", "[s]trive/**"):
+            self.assertIsNone(re.match(NAMESPACE_RE, bad.split("/", 1)[0]), bad)
 
     def test_no_local_namespace_is_synced(self):
         for p in self.prefixes:

@@ -7,8 +7,10 @@
 # every tag read of our own images attempt an upstream sync, and a stuck one hangs all later reads).
 - name: Refuse a docker.io sync prefix that is a catch-all or matches a local namespace
   ansible.builtin.assert:
+    # The namespace must be LITERAL: a glob like `str*/**` would pass a plain membership check and
+    # still match strive/*.
     that:
-      - item is not match('[*]')
+      - item.split('/')[0] is match('^[a-z0-9][a-z0-9._-]*$')
       - item.split('/')[0] not in registry_zot_local_namespaces
     fail_msg: >-
       registry_zot_sync_dockerhub_prefixes entry {{ item | to_json }} would sync a namespace
