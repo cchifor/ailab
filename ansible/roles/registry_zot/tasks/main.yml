@@ -3,6 +3,19 @@
 # DNS-01 (Cloudflare), bcrypt htpasswd push auth + anonymous pull. Config policy mirrors
 # kubernetes/infra/registry/config.json, templated to listen on :443.
 
+# ailab#420: the docker.io sync allowlist must never match a namespace we push (a match makes
+# every tag read of our own images attempt an upstream sync, and a stuck one hangs all later reads).
+- name: Refuse a docker.io sync prefix that is a catch-all or matches a local namespace
+  ansible.builtin.assert:
+    that:
+      - item is not match('[*]')
+      - item.split('/')[0] not in registry_zot_local_namespaces
+    fail_msg: >-
+      registry_zot_sync_dockerhub_prefixes entry {{ item | to_json }} would sync a namespace
+      registry.chifor.me publishes itself (or everything) -- see defaults/main.yml, ailab#420.
+    quiet: true
+  loop: "{{ registry_zot_sync_dockerhub_prefixes }}"
+
 - name: Install packages (certbot DNS-01, htpasswd, ufw)
   ansible.builtin.apt:
     name:
