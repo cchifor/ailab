@@ -122,8 +122,9 @@ Secret.
   Anonymous pull already has `read`, but zot answers Docker's `/v2/` ping with a basic-auth
   challenge, and a dockerd on the classic overlay2 image store then fails client-side with
   `no basic auth credentials` without ever sending the manifest GET. The dev_worker role logs every
-  user's Docker in with it (`tasks/registry_login.yml`, `-t registry_login`) and replaces any other
-  login it finds there, `ci` included; by hand it is
+  user's Docker in with it (`tasks/registry_login.yml`, `-t registry_login`): any other login for the
+  registry (`ci` included) is logged out first, on every worker, before the vault is read, and a
+  `pull` login holding an old password is refreshed, so a rotation propagates on the next run; by hand it is
   `cred get common registry_pull_password | docker login registry.chifor.me -u pull --password-stdin`
   (`cred get common registry_pull_user` is not a secret). It cannot push; the rw `ci` identity is
   never projected to a worker. Three homes, one change on rotation: `ansible/secrets/registry.sops.yaml`

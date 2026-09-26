@@ -96,11 +96,11 @@
   when: dev_worker_enable_openbao | bool
   tags: [openbao]
 
-# Needs docker.yml (the CLI) and openbao.yml (`cred`). Replaces any login that is not the read-only
-# `pull` user — the rw `ci` identity is never on a worker (ailab#865).
+# Needs docker.yml (the CLI) and, for the login half, openbao.yml (`cred`). Deliberately NOT gated on
+# dev_worker_enable_openbao: removing a non-`pull` login needs no vault, so the rw `ci` identity is
+# kept off every worker (ailab#865); only the `pull` login itself is skipped without openbao.
 - name: registry.chifor.me login as the read-only pull user
   ansible.builtin.import_tasks: registry_login.yml
-  when: dev_worker_enable_openbao | bool
   tags: [registry_login]
 
 - name: Language toolchains (python/go/rust)

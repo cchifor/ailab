@@ -2,36 +2,73 @@
 # registry.chifor.me login for every dev-worker user's Docker config: the read-only zot `pull`
 # identity, never the read-write `ci` one. `ci` was typed in by hand on two workers in June/July
 # (found 2026-09-26, ailab#865) — nothing here managed the login, so nothing noticed. This task
-# owns it now: any login that is not `pull` (including `ci`, or none at all) is replaced.
+# owns it now.
 #
 # Why log in at all when anonymous read exists: zot answers Docker's `/v2/` ping with a basic-auth
 # challenge whenever anonymous and authenticated policies coexist, and a classic-store dockerd then
 # fails with `no basic auth credentials` (docs/runbooks/openbao-dev-workers.md, `registry_*`).
 #
-# The password comes from `cred get common registry_pull_password` (af/dev-workers/common, #860) and
-# goes straight into `docker login --password-stdin`: it is never in argv, never in a registered
-# variable, and the script prints only the previous USERNAME. Fail-closed like openbao.yml: a vault
-# that cannot be read fails the play rather than leaving a `ci` login in place.
+# Order is what makes it fail-closed:
+#   1. any login for the registry that is not `pull` is LOGGED OUT first — this needs no vault, so it
+#      runs on every worker, openbao or not;
+#   2. only then (openbao workers) is the `pull` password read with `cred`. A failed read or login
+#      fails the play with NO login left for the registry, never with the old one;
+#   3. an existing `pull` login is compared against the CURRENT vault password, so rotating
+#      `registry_pull_password` propagates on the next run.
+# The password lives only in a non-exported shell variable and on stdin (docker login
+# --password-stdin, the python comparison): never in argv, a registered variable, or output — the
+# script prints only usernames and state words.
+#
+# Classic file store only: a config with `credsStore`/`credHelpers` would hide the login from this
+# check and never converge, so it fails loudly instead.
 
-- name: Log each user's Docker into {{ dev_worker_registry_host }} as the read-only pull user
-  ansible.builtin.shell: |
-    set -eu -o pipefail
-    cfg="{{ item.home }}/.docker/config.json"
-    current="$(python3 - "$cfg" "{{ dev_worker_registry_host }}" <<'PY'
-    import base64, json, sys
-    try:
-        auth = json.load(open(sys.argv[1]))["auths"][sys.argv[2]]["auth"]
-        print(base64.b64decode(auth).decode().split(":", 1)[0])
-    except Exception:
-        print("")
-    PY
-    )"
-    if [ "$current" = pull ]; then echo unchanged; exit 0; fi
-    /usr/local/bin/cred get common registry_pull_password \
-      | runuser -u "{{ item.name }}" -- env HOME="{{ item.home }}" \
-          docker login "{{ dev_worker_registry_host }}" -u pull --password-stdin >/dev/null
-    echo "changed:was=${current:-none}"
-  args:
+- name: Reconcile each user's {{ dev_worker_registry_host }} login to the read-only pull user
+  ansible.builtin.shell:
+    # `cmd:`, not the free-form string: free-form is argument-split, and one apostrophe in a
+    # comment below would be an "unbalanced quotes" load error.
+    cmd: |
+      set -eu -o pipefail
+      cfg="{{ item.home }}/.docker/config.json"
+      host="{{ dev_worker_registry_host }}"
+      as_user() { runuser -u "{{ item.name }}" -- env HOME="{{ item.home }}" "$@"; }
+      # State of the stored login. stdin = the wanted pull password (empty = do not compare). The
+      # program goes in via -c, NOT `python3 -` + heredoc: that would make the heredoc python's stdin
+      # and silently discard the piped password.
+      prog="$(cat <<'PY'
+      import base64, json, sys
+      cfg, host = sys.argv[1], sys.argv[2]
+      want = sys.stdin.read()
+      try:
+          d = json.load(open(cfg))
+      except FileNotFoundError:
+          print("none"); sys.exit()
+      if d.get("credsStore") or host in d.get("credHelpers", {}):
+          print("helper"); sys.exit()
+      auth = d.get("auths", {}).get(host, {}).get("auth")
+      if not auth:
+          print("none"); sys.exit()
+      user, _, stored = base64.b64decode(auth).decode().partition(":")
+      print("current" if user == "pull" and want and stored == want else "user:" + user)
+      PY
+      )"
+      state() { python3 -c "$prog" "$cfg" "$host"; }
+      changed=""
+      s="$(state </dev/null)"
+      case "$s" in
+        helper) echo "FAIL: $cfg uses a credential helper; dev-workers use the classic file store" >&2; exit 3 ;;
+        user:pull|none) ;;
+        user:*) as_user docker logout "$host" >/dev/null; changed="changed:removed=${s#user:}" ;;
+      esac
+      if [ "{{ dev_worker_enable_openbao | bool | ternary('1', '0') }}" != 1 ]; then
+        echo "${changed:-unchanged} (openbao off: no pull login)"; exit 0
+      fi
+      pw="$(/usr/local/bin/cred get common registry_pull_password)"
+      [ -n "$pw" ] || { echo "FAIL: empty registry_pull_password" >&2; exit 4; }
+      if [ "$(printf '%s' "$pw" | state)" = current ]; then
+        echo "${changed:-unchanged}"; exit 0
+      fi
+      printf '%s' "$pw" | as_user docker login "$host" -u pull --password-stdin >/dev/null
+      echo "changed:login=pull ${changed}"
     executable: /bin/bash
   register: dev_worker_registry_login
   changed_when: "'changed:' in dev_worker_registry_login.stdout"
