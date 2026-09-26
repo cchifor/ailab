@@ -65,16 +65,52 @@ and [Cloudflare OIDC MFA requirements](https://developers.cloudflare.com/cloudfl
 Access selects only its dedicated OIDC IdP;
 one-time PIN and shared service-token bypasses are not enabled for this application.
 
-Supply the non-secret Access audience to the private deployment. Its issuer is
-`https://chifor.cloudflareaccess.com`. Complete internal health, signed command,
-network denial and recovery qualification checks before publishing:
+## Publication and browser qualification
+
+Access-only provisioning intentionally creates no DNS record. Until publication,
+`https://trueswarm-admin.chifor.me/` returns a DNS error (`NXDOMAIN`) in a normal
+browser even when the application, tunnel and Access gate are healthy.
+
+There are two release checks:
+
+1. **Before publication:** internal health, current-pod network denial, origin JWT
+   rejection, mTLS/signed-request enforcement, admission/RBAC and local restore
+   checks must pass. Confirm Flux has rolled out the committed Access audience.
+   The private repo's `node scripts/qualify-access-edge.mjs` verifies the existing
+   edge certificate and dedicated Access/OIDC/PKCE route with a browser-only DNS
+   override. It cannot establish a successful administrator login or action MFA.
+2. **After controlled publication:** use the routable hostname to verify named
+   administrator login, native OIDC MFA, denial of other identities, logout/session
+   expiry/revocation, and operation-specific MFA. Do not declare the admin console
+   production-ready until these authenticated browser checks pass.
+
+The operator's publication hold remains authoritative. Successful automated checks
+are evidence for that decision, not automatic permission to publish. Once the
+operator lifts the hold for the authenticated browser rehearsal, run from the AILab
+checkout on the workstation that owns the existing Cloudflare state and token:
 
 ```sh
-export TF_VAR_publish_trueswarm_admin=true
-tofu plan -out=trueswarm-admin-publish.plan
-tofu apply trueswarm-admin-publish.plan
-unset TF_VAR_trueswarm_admin_access_client_secret
+TRUESWARM_ADMIN_CHECKOUT=/path/to/trueswarm-admin \
+  bash scripts/trueswarm-admin-access.sh --publish-dns
 ```
+
+This mode loads the dedicated client secret from SOPS exactly as Access mode does.
+Its saved-plan guard requires all three Access resources to exist unchanged and
+checks that the Access audience matches private GitOps and its rollout marker. It
+requires that DNS record to be a proxied CNAME to the tunnel in private GitOps and
+permits only changes to `cloudflare_dns_record.trueswarm_admin[0]`; Access changes,
+deletions and unrelated changes are rejected. It does not change the private repo.
+It cannot inspect live Flux from the workstation, so verify that rollout separately.
+
+The resulting record is a **proxied CNAME** from `trueswarm-admin.chifor.me` to
+`d2452442-efae-4056-ac82-a5c348033971.cfargotunnel.com`, behind the existing Access
+application. No temporary bypass, alternate hostname, SSL resource or Tunnel API
+permission is introduced. Estate credentials and state remain on the workstation.
+
+Recovery is an independent gate: leave `recovery_qualified=false` and
+`backup_hour_utc=null` until off-site coverage and recovery/promotion qualification
+are explicitly approved. Local restore success or DNS publication does not enable
+recovery operations.
 
 Store the plans/state as sensitive operator files; Access client secrets can be
 present in them. Confirm anonymous requests encounter the Access gate, the approved
@@ -92,4 +128,7 @@ and backend disabled. `python3 -m unittest scripts.tests.test_trueswarm_admin_ac
 exercises the actual helper using isolated Git repositories and fake cloud commands:
 CI/missing prerequisites, unrelated changes, DNS publication and deletion are rejected;
 valid Access changes commit and push the audience, reruns do not create empty commits,
-and temporary sensitive plans are removed. These fixture checks are not a real apply.
+and temporary sensitive plans are removed. Publication tests accept a DNS-only plan
+with the existing matching gate, and reject Access changes, absent gate resources,
+missing/mismatched audiences, stale rollout markers, deletions and unrelated DNS
+changes. These fixture checks are not a real apply.
