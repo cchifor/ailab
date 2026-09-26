@@ -45,11 +45,13 @@ PY
 tofu -chdir="$cloudflare_root" apply -input=false "$plan_dir/access.plan"
 tofu -chdir="$cloudflare_root" output -raw trueswarm_admin_access_audience > "$plan_dir/audience"
 python3 - "$admin_checkout/deploy/ailab/workloads.yaml" "$plan_dir/audience" <<'PY'
-import json,pathlib,re,sys
+import hashlib,json,pathlib,re,sys
 path=pathlib.Path(sys.argv[1]);audience=pathlib.Path(sys.argv[2]).read_text().strip()
 if not re.fullmatch(r'[A-Za-z0-9_-]{20,256}',audience):raise SystemExit('Cloudflare returned an invalid audience')
 content,count=re.subn(r'(?m)^(  ACCESS_AUDIENCE: ).+$',lambda m:m[1]+json.dumps(audience),path.read_text())
 if count!=1:raise SystemExit('Expected exactly one private deployment audience setting')
+content,count=re.subn(r'(?m)^(\s+trueswarm\.chifor\.me/access-config: ).+$',lambda m:m[1]+hashlib.sha256(audience.encode()).hexdigest()[:16],content)
+if count!=1:raise SystemExit('Expected exactly one admin rollout marker')
 path.write_text(content)
 print('Stored the non-secret Access audience in the private deployment.')
 PY
