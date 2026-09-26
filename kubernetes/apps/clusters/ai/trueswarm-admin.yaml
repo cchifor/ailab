@@ -1,0 +1,55 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: trueswarm-admin
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/trueswarm-admin.git
+  ref:
+    branch: main
+  secretRef:
+    name: trueswarm-admin-deploy-key
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin-git-auth
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 1m
+  timeout: 15m
+  path: ./kubernetes/apps/trueswarm-admin-bootstrap
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  dependsOn: []
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-admin-foundation
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 1m
+  timeout: 15m
+  path: ./deploy/foundation
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: trueswarm-admin
+  dependsOn:
+  - name: trueswarm-admin-git-auth
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

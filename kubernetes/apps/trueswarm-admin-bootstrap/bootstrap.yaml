@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: trueswarm-admin-deploy-key
+  namespace: flux-system
+type: Opaque
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trueswarm-admin-git-bootstrap
+  namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trueswarm-admin-git-bootstrap
+  namespace: flux-system
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - trueswarm-admin-deploy-key
+  verbs:
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trueswarm-admin-git-bootstrap
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trueswarm-admin-git-bootstrap
+subjects:
+- kind: ServiceAccount
+  name: trueswarm-admin-git-bootstrap
+  namespace: flux-system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trueswarm-admin-git-bootstrap
+  namespace: flux-system
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 180
+  template:
+    spec:
+      serviceAccountName: trueswarm-admin-git-bootstrap
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: configure
+        image: registry.chifor.me/library/python:3.12-alpine
+        command:
+        - python3
+        - -B
+        - -c
+        - 'import base64,json,pathlib,ssl,urllib.request,os
+
+          mount=pathlib.Path(''/var/run/secrets/kubernetes.io/serviceaccount'')
+
+          identity=pathlib.Path(''/identity/identity'').read_bytes()
+
+          hosts=pathlib.Path(''/trusted-hosts/known_hosts'').read_bytes()
+
+          if len(hosts.strip()) < 32: raise SystemExit(''Trusted Gitea host keys are
+          empty'')
+
+          body=json.dumps({''data'':{''identity'':base64.b64encode(identity).decode(),''known_hosts'':base64.b64encode(hosts).decode()}}).encode()
+
+          url=''https://''+os.environ[''KUBERNETES_SERVICE_HOST'']+'':''+os.environ[''KUBERNETES_SERVICE_PORT'']+''/api/v1/namespaces/flux-system/secrets/trueswarm-admin-deploy-key''
+
+          req=urllib.request.Request(url,data=body,method=''PATCH'',headers={''Authorization'':''Bearer
+          ''+(mount/''token'').read_text(),''Content-Type'':''application/merge-patch+json''})
+
+          with urllib.request.urlopen(req,context=ssl.create_default_context(cafile=str(mount/''ca.crt''))):
+          pass
+
+          print(''Trueswarm admin read-only repository credential assembled from the trusted
+          Gitea host keys.'')
+
+          '
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: identity
+          mountPath: /identity
+          readOnly: true
+        - name: trusted-hosts
+          mountPath: /trusted-hosts
+          readOnly: true
+      volumes:
+      - name: identity
+        secret:
+          secretName: trueswarm-admin-repository-identity
+          items:
+          - key: identity
+            path: identity
+      - name: trusted-hosts
+        secret:
+          secretName: muse-stream-deploy-key
+          items:
+          - key: known_hosts
+            path: known_hosts
