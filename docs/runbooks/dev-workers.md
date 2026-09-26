@@ -177,7 +177,10 @@ without it every command in a sandboxed session (anything but `--yolo`) dies bef
 `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`; dmesg shows
 `apparmor="DENIED" profile="unprivileged_userns" capname="net_admin"`. The role installs the distro
 `bubblewrap` (codex prefers a `bwrap` on PATH over its bundled copy) and loads
-`/etc/apparmor.d/bwrap-userns`, which grants `userns` to `/usr/bin/bwrap` only. Check a worker with
+`/etc/apparmor.d/bwrap-userns` (Ubuntu's own `bwrap-userns-restrict`, renamed): `/usr/bin/bwrap` may
+create the namespace, but everything it runs is stacked under `unpriv_bwrap`, which denies every
+capability. That way bwrap is not a general way to get a full-capability user namespace. The role
+refuses to run if the stock profile is also loaded (two profiles on one path). Check a worker with
 `codex sandbox -c sandbox_mode='"workspace-write"' -- sh -c 'touch x && echo ok'` from a scratch dir.
 
 ### Optional: sandboxed separate agent account

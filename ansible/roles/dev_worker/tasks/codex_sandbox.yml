@@ -14,11 +14,33 @@
 # without chasing per-user, per-version paths under ~/.npm-global and ~/.codex/packages. Profiling a
 # root-owned binary also matters: a profile on those user-writable paths would let any user
 # drop a binary there and get unconfined userns. The system-wide sysctl stays on for everything else.
+# The profile is Ubuntu's restricted one (see the file's header): bwrap gets userns + capabilities,
+# everything it runs gets none -- not `unconfined`, which gave any local user a full-capability
+# namespace through bwrap (ailab#867 review).
 - name: Install bubblewrap (Codex uses the system bwrap when one is on PATH)
   ansible.builtin.apt:
     name: bubblewrap
     state: present
 
+# Two profiles attaching to /usr/bin/bwrap make the winner load-order dependent, so refuse to run if
+# Ubuntu's own copy (profile `bwrap`, from apparmor-profiles' extra-profiles/) has been enabled.
+# Reads the kernel's loaded-profile list, which covers `aa-enforce` on the extra-profiles path too.
+- name: Read the loaded AppArmor profiles
+  ansible.builtin.command: cat /sys/kernel/security/apparmor/profiles
+  register: dev_worker_apparmor_loaded
+  changed_when: false
+  check_mode: false # read-only; --check would otherwise skip it and the assert would see no stdout
+
+- name: Refuse to run next to the stock bwrap-userns-restrict profile
+  ansible.builtin.assert:
+    that:
+      - dev_worker_apparmor_loaded.stdout_lines | select('match', '^bwrap [(]') | list | length == 0
+    fail_msg: >-
+      Ubuntu's stock `bwrap` profile (bwrap-userns-restrict) is loaded and would compete with
+      /etc/apparmor.d/bwrap-userns for /usr/bin/bwrap. Unload one of them (`apparmor_parser -R`).
+
+# validate: a bad edit to the source is rejected before it replaces the live profile (which would
+# then also fail to load at boot). --skip-kernel-load parses without touching the kernel.
 - name: AppArmor profile letting /usr/bin/bwrap create user namespaces
   ansible.builtin.copy:
     src: apparmor-bwrap-userns
@@ -26,6 +48,7 @@
     owner: root
     group: root
     mode: "0644"
+    validate: apparmor_parser --skip-kernel-load -Q %s
   register: dev_worker_bwrap_apparmor
 
 # Loaded here, not from a handler: a later task in the same run (or the agent that runs right after)
@@ -36,11 +59,28 @@
   changed_when: true
 
 # The same check as the reported failure: a new user + net namespace with loopback brought up. Run as
-# the first dev-worker user, since root does not go through the unprivileged-userns restriction.
-# Skipped under --check: on a host being converged, bwrap is not installed yet.
+# the admin user (always defined, unlike an index into a list), since root does not go through the
+# unprivileged-userns restriction. Skipped under --check: on a host being converged, bwrap is not
+# installed yet.
 - name: Verify bubblewrap can build its sandbox as an unprivileged user
   become: true
-  become_user: "{{ dev_worker_users[0].name }}"
+  become_user: "{{ dev_worker_admin_user }}"
   ansible.builtin.command: bwrap --unshare-user --unshare-net --ro-bind / / /bin/true
   changed_when: false
+  when: not ansible_check_mode
+
+# And the other half: what bwrap runs must NOT be able to use the capabilities bwrap hands it. Under
+# the old `unconfined` profile this succeeded (a nested mount namespace from inside
+# `--cap-add ALL`); under unpriv_bwrap it is denied. A success here means the restriction is gone.
+- name: Verify bubblewrap's children get no usable capabilities
+  become: true
+  become_user: "{{ dev_worker_admin_user }}"
+  ansible.builtin.command: bwrap --unshare-user --uid 0 --cap-add ALL --ro-bind / / unshare -m /bin/true
+  register: dev_worker_bwrap_child_caps
+  changed_when: false
+  # Pass only on the expected denial: any other non-zero exit (bwrap failing its own setup, no
+  # `unshare` in the rootfs) says nothing about the restriction.
+  failed_when: >-
+    dev_worker_bwrap_child_caps.rc == 0 or
+    'unshare failed: Operation not permitted' not in dev_worker_bwrap_child_caps.stderr
   when: not ansible_check_mode
