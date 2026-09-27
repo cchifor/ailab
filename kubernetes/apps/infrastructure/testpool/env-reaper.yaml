@@ -328,8 +328,14 @@ spec:
           securityContext:
             privileged: true # CAP_KILL + CAP_SYS_PTRACE on host pids (readlink /proc/<pid>/exe)
           resources:
+            # cpu limit 200m -> 1 (2026-09-27): average use is ~8m, but every 30s pass forks
+            # kubectl (a multi-threaded Go binary) and walks /proc/*/cgroup, and those sub-second
+            # bursts hit a 200m quota in 68% of CFS periods — CPUThrottlingHigh fired continuously
+            # for a pod that was healthy. A throttled reaper is also a SLOWER reaper during exactly
+            # the teardown storm it exists for. Kept bounded rather than removed: it is privileged
+            # and signals host pids, so a runaway loop must not be able to take the env node.
             requests: { cpu: 50m, memory: 64Mi }
-            limits: { cpu: 200m, memory: 128Mi }
+            limits: { cpu: "1", memory: 128Mi }
           volumeMounts:
             - { name: script, mountPath: /opt/env-reaper, readOnly: true }
             - { name: vc-run, mountPath: /host/run/vc, readOnly: true }

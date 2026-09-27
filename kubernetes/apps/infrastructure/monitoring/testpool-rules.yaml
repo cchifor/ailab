@@ -32,12 +32,21 @@ spec:
           # No Ready sandbox-owned pod in testpool for 30m — the warm SLO (0.2-1s leases) is
           # gone and tep queues. Counts pods created by Sandboxes only (the pre-pull DaemonSet
           # and one-off pods do not mask a drained pool).
+          #
+          # SILENT WHILE DELIBERATELY PAUSED (2026-09-27): #880 set the pool to 0 replicas after the
+          # golden-clone target loss, and this fired for the whole pause on a pool that was doing
+          # exactly what it was told. `unless` drops the alert only while the SandboxWarmPool spec
+          # asks for ZERO; it is FAIL-OPEN on purpose — if kube-state-metrics stops exporting the
+          # custom-resource metric the right-hand side is empty and the rule behaves as before.
+          # Scaling the pool back up re-arms it immediately (spec > 0 and nothing Ready).
           expr: >-
-            (count(
+            ((count(
               (kube_pod_status_ready{namespace="testpool",condition="true"} == 1)
               * on (namespace, pod) group_left ()
               kube_pod_info{namespace="testpool",created_by_kind="Sandbox"}
-            ) or vector(0)) == 0
+            ) or vector(0)) == 0)
+            unless on ()
+            (sum(agentsandbox_warmpool_spec_replicas{exported_namespace="testpool"}) == 0)
           for: 30m
           labels:
             severity: warning

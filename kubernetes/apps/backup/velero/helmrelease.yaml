@@ -255,7 +255,13 @@ spec:
           # stops the chain's last-success timestamp advancing, so it masks real backup failure.
           excludedNamespaces: [kube-system, velero, trivy-system, testpool] # trivy DB cache is rebuildable — keep it out of the off-site chain
     resources:
-      requests: { cpu: 50m, memory: 256Mi }
+      # ephemeral-storage request (2026-09-27): all 13 lingering velero-594c8b58fd-* pods were evicted
+      # from talos-cp1 under DiskPressure (09-09 "Container velero was using 361712Ki, request is 0";
+      # 09-14 twelve more). With request 0 every byte it writes counts as over-request, so the kubelet
+      # ranks it FIRST for eviction — during the nightly backup it is the largest local-disk user. 1Gi
+      # covers its measured 361-725 MB. Request only, no limit: a limit would itself be an eviction
+      # trigger mid-backup.
+      requests: { cpu: 50m, memory: 256Mi, ephemeral-storage: 1Gi }
       # 1Gi -> 2Gi (2026-08-05 storage audit): the server was OOMKilled at 02:00:31 on 2026-08-03
       # mid-backup (26 lifetime restarts), failing that night's daily ("found a backup with status
       # InProgress during the server starting"); 1Gi is not enough headroom at backup start.

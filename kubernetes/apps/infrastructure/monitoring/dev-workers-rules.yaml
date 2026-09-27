@@ -57,19 +57,31 @@ spec:
         # Swap is the 4 GiB safety valve (dev_worker role, swappiness 10). Sustained use means the
         # guest is reclaiming constantly rather than absorbing a spike. dev-worker-1 had pushed 165 GB
         # through that 4 GiB file with 230M major page faults before it died.
+        #
+        # GATED ON MEMORY PRESSURE (PSI) since 2026-09-27. Swap OCCUPANCY alone is a stale-page
+        # counter: dev-worker-1 held this alert for 271h with 97% swap used while PSI memory "some"
+        # stalled <0.01% of the time — the pages were an idle TUI and a parked compose stack, evicted
+        # once and never wanted back. An alert nobody can act on trained ntfy's only reader to ignore
+        # it. Now it needs the working set to actually be starving as well: tasks stalled on memory
+        # >5% of wall time over 15m (measured 7d max: <=1.4% on the unstressed workers, 26.8% on dw2 and
+        # 38.7% on dw1 in real pressure episodes). Sustained heavy paging is DevWorkerThrashing's job below.
         - alert: DevWorkerSwapPressure
           expr: |
-            node_memory_SwapTotal_bytes{job="dev-worker-node"} > 0
-              and (node_memory_SwapTotal_bytes{job="dev-worker-node"} - node_memory_SwapFree_bytes{job="dev-worker-node"})
-                  / node_memory_SwapTotal_bytes{job="dev-worker-node"} > 0.5
+            (
+              node_memory_SwapTotal_bytes{job="dev-worker-node"} > 0
+                and (node_memory_SwapTotal_bytes{job="dev-worker-node"} - node_memory_SwapFree_bytes{job="dev-worker-node"})
+                    / node_memory_SwapTotal_bytes{job="dev-worker-node"} > 0.5
+            )
+            and on (instance)
+            rate(node_pressure_memory_waiting_seconds_total{job="dev-worker-node"}[15m]) > 0.05
           for: 30m
           labels: { severity: warning }
           annotations:
             summary: "Dev worker {{ $labels.instance }} using >50% of its swap"
             description: >-
-              {{ $labels.instance }} is >50% into its 4 GiB safety-valve swap for >30m. Swappiness is
-              10, so this is not casual paging — the working set no longer fits. Same remedy as
-              DevWorkerLowMemory: host RAM headroom on the owning node.
+              {{ $labels.instance }} is >50% into its 4 GiB safety-valve swap AND tasks have stalled on
+              memory >5% of the time (PSI) for >30m — the working set no longer fits. Same remedy as
+              DevWorkerLowMemory: host RAM headroom on the owning node, or stop what is resident.
         # SUSTAINED PAGING, which is the signal the two thresholds above both miss. A guest can sit
         # just under every threshold while thrashing: dev-worker-1 averaged ~205 major faults/s for the
         # WHOLE 13-day uptime before it panicked (230.1M cumulative / 13.02d) against dev-worker-3's
