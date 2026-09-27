@@ -38,7 +38,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: prepare-model
-          image: ghcr.io/huggingface/text-embeddings-inference@sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d
+          image: ghcr.io/huggingface/text-embeddings-inference@sha256:590dd56833f1b1fc03d9380ab4c4b83f369bf3fcaabead3ca7c34e91cf6b3330
           command: [/bin/sh, /bootstrap/prepare-embedding-model.sh]
           securityContext:
             allowPrivilegeEscalation: false
@@ -54,7 +54,7 @@ spec:
             - {name: tmp, mountPath: /tmp}
       containers:
         - name: embeddings
-          image: ghcr.io/huggingface/text-embeddings-inference@sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d
+          image: ghcr.io/huggingface/text-embeddings-inference@sha256:590dd56833f1b1fc03d9380ab4c4b83f369bf3fcaabead3ca7c34e91cf6b3330
           args:
             - --model-id
             - /data/bge-m3-5617a9f61b028005a4858fdac845db406aefb181/model
