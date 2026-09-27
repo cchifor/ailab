@@ -261,4 +261,4 @@ poll the operation until `succeeded` (any other terminal status is a failure, st
    after captured from `describe node talos-cp{1,2,3}` (the pods may land on different nodes than
    before, so compare the sum and each node).
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
