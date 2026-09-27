@@ -61,10 +61,16 @@ github_runner_tasks_max: 16384
 # in any case a FLOOR (space to keep), not a cap: the runners sat at 14-27.5 GB of build cache under a
 # nominal "10GB" setting, which pinned root-fs use in the 60-82% band, permanently arming the cleanup
 # timer's disk-pressure path (2026-08-08 RCA — that pressure path is what reded ~10 CI jobs/day).
-#   reservedSpace — never GC below this much cache (keeps warm layers so builds stay fast)
-#   maxUsedSpace  — the actual CAP; GC prunes back down whenever the cache exceeds it
-#   minFreeSpace  — additionally GC whenever the filesystem has less than this free
-# Schema verified against the live daemon with `dockerd --validate --config-file` (Docker 29.6.2, OK).
+#   defaultReservedSpace — never GC below this much cache (keeps warm layers so builds stay fast)
+#   defaultMaxUsedSpace  — the actual CAP; GC prunes back down whenever the cache exceeds it
+#   defaultMinFreeSpace  — additionally GC whenever the filesystem has less than this free
+# KEY NAMES MATTER (2026-09-27): at the `builder.gc` level moby's BuilderGCConfig only has
+# Default{Reserved,MaxUsed,MinFree}Space; the unprefixed names exist only inside `policy[]` rules.
+# Until this date the template used the unprefixed names, dockerd dropped them as unknown fields,
+# `dockerd --validate` still printed "configuration OK" (it does not reject unknown keys), and every
+# runner ran BuildKit's disk-proportional default (MaxUsedSpace ~86GiB) — 20-70 GB of cache fleet-wide
+# and CIRunnerBuildCacheHigh firing. `--validate` is NOT evidence; the proof is
+# `docker buildx inspect default --bootstrap` showing "Max Used Space: 10GiB" in the GC policy.
 # Changing these RESTARTS docker (role handler) — roll one runner at a time, and only while idle.
 github_runner_builder_gc_reserved_space: "4GB"
 github_runner_builder_gc_max_used_space: "10GB"
