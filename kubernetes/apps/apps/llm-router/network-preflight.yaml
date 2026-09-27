@@ -1,5 +1,5 @@
 # One-shot connectivity check requested by the review of AILab#900.
-# Same network-policy labels and runtime image as the router. No credentials,
+# Same NetworkPolicy object and runtime image as the router. No credentials,
 # data mounts, listening ports, service account token or changes to the router.
 apiVersion: batch/v1
 kind: Job
@@ -12,7 +12,7 @@ spec:
   template:
     metadata:
       labels:
-        app: llm-router
+        app: llm-router-preflight
         app.kubernetes.io/component: network-preflight
     spec:
       restartPolicy: Never
@@ -34,17 +34,19 @@ spec:
             - |
               node --input-type=module <<'JS'
               import {lookup} from 'node:dns/promises';
+              import {createHash} from 'node:crypto';
               import assert from 'node:assert/strict';
               await lookup('kubernetes.default.svc.cluster.local');
               await lookup('registry.npmjs.org');
               const r=await fetch('https://registry.npmjs.org/pnpm/10.32.1',{redirect:'error',signal:AbortSignal.timeout(20000)});
               assert.equal(r.status,200);assert.equal((await r.json()).version,'10.32.1');
-              console.log('Cluster DNS and verified npm HTTPS passed.');
+              const archive=await fetch('https://registry.npmjs.org/pnpm/-/pnpm-10.32.1.tgz',{redirect:'error',signal:AbortSignal.timeout(30000)});
+              assert.equal(archive.status,200);
+              const hash=createHash('sha512');let bytes=0;
+              for await(const chunk of archive.body) {bytes+=chunk.length;assert(bytes<=8*1024*1024);hash.update(chunk);}
+              assert.equal(hash.digest('base64'),'pwaTjw6JrBRWtlY+q07fHR+vM2jRGR/FxZeQ6W3JGORFarLmfWE94QQ9LoyB+HMD5rQNT/7KnfFe8a1Wc0jyvg==');
+              console.log(JSON.stringify({cluster_dns:true,registry_dns:true,registry_https:true,pnpm_archive_integrity:true,result:'passed'}));
               JS
-              export npm_config_cache=/tmp/npm-cache
-              npx --yes pnpm@10.32.1 --version > /tmp/pnpm-version
-              test "$(cat /tmp/pnpm-version)" = 10.32.1
-              echo '{"cluster_dns":true,"registry_dns":true,"registry_https":true,"pnpm_version":"10.32.1","result":"passed"}'
           # Stay unready throughout: never become a public Service endpoint.
           # No port named "http" is declared or listened on, either.
           readinessProbe:
@@ -56,7 +58,7 @@ spec:
             capabilities: {drop: [ALL]}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
-            limits: {cpu: '2', memory: 2Gi}
+            limits: {cpu: '1', memory: 256Mi}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
           terminationMessagePolicy: FallbackToLogsOnError

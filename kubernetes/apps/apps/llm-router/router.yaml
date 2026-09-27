@@ -234,9 +234,13 @@ metadata:
     app.kubernetes.io/component: router
     app.kubernetes.io/part-of: llm-router
 spec:
+  # The temporary canary uses a distinct app label so it cannot match the
+  # router Service/PDB. Both workloads are governed by this exact policy.
   podSelector:
-    matchLabels:
-      app: llm-router
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [llm-router, llm-router-preflight]
   policyTypes:
     - Ingress
     - Egress
