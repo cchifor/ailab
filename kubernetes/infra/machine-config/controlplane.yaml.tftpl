@@ -89,13 +89,21 @@ cluster:
     extraArgs:
       bind-address: 0.0.0.0
 ---
-# etcd client + peer ports accept only the three control planes (2026-09-27). Talos ingress firewall
-# with the default action left at ACCEPT: this rule blocks 2379-2380 from every other source and
+# etcd client + peer ports accept only the three control planes (2026-09-27). Talos ingress firewall,
+# default action pinned to ACCEPT just below (so this rule's meaning cannot silently invert if a
+# later change flips the default to block): the rule drops 2379-2380 from every other source and
 # touches nothing else; loopback is always allowed (the apiserver reaches etcd on ::1/127.0.0.1).
 # Measured before applying: the only 2379 clients were loopback, the only 2380 peers the CPs.
-# Why now: the etcd CA private key was exposed in an operator session transcript that day. Rotating
-# the etcd CA is not supported by `talosctl rotate-ca`; with this rule a leaked CA key cannot be used
-# from anywhere on the LAN except a control-plane node itself. :2381 (plain /metrics) is unaffected.
+# Why: the etcd CA private key was exposed in an operator session transcript that day, and
+# `talosctl rotate-ca` does not cover the etcd CA. This is CONTAINMENT, not a fix: source-IP
+# filtering is not authentication — an on-link host that spoofs a CP address, or anything that
+# egresses from a CP node with the node IP (hostNetwork pods, SNAT'd pod traffic), still passes.
+# The actual remedy is a planned manual etcd CA rotation (ailab#914). :2381 (plain /metrics) is a
+# different port and unaffected.
+apiVersion: v1alpha1
+kind: NetworkDefaultActionConfig
+ingress: accept
+---
 apiVersion: v1alpha1
 kind: NetworkRuleConfig
 name: etcd-ingress
