@@ -100,6 +100,12 @@ cluster:
 # egresses from a CP node with the node IP (hostNetwork pods, SNAT'd pod traffic), still passes.
 # The actual remedy is a planned manual etcd CA rotation (ailab#914). :2381 (plain /metrics) is a
 # different port and unaffected.
+# How the rule compiles (verify after any change — rule semantics depend on the default action):
+# `talosctl -n <cp> get nftableschains ingress -o yaml` shows, under `policy: accept`, a rule with
+# `matchSourceAddress.includeSubnets: [<the 3 CP /32s>]`, `invert: true`, dport 2379-2380,
+# `verdict: drop` — i.e. NON-CP sources are dropped, CPs fall through to accept (checked 2026-09-27;
+# a review suspected the inverse). Black-box: from a non-CP host, `curl -k https://<cp>:2379` must
+# time out (it did: exit 28; exit 56 = TLS refusal = the rule is NOT in effect).
 apiVersion: v1alpha1
 kind: NetworkDefaultActionConfig
 ingress: accept
