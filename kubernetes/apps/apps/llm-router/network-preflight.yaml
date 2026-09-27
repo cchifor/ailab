@@ -7,7 +7,7 @@ metadata:
   name: router-network-preflight-20260927
   namespace: llm-router
 spec:
-  backoffLimit: 0
+  backoffLimit: 2
   activeDeadlineSeconds: 180
   template:
     metadata:

@@ -91,3 +91,8 @@ extra NetworkPolicy selector value through a cleanup PR; this is a one-shot
 release gate, not a permanent workload. The bridge rollout's staging cleanup may
 include that removal. If the bridge rollout is postponed, clean this canary up
 separately after preserving the result in the release record.
+
+The canary allows two pod retries within its 180-second overall deadline for
+transient DNS/registry failures. If all attempts fail, preserve the failure result;
+correct the cause and create a new versioned Job name in GitOps for another run.
+Do not delete failed evidence or bypass the rollout gate.
