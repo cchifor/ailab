@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: admin-bridge-verifier
+  namespace: llm-router
+data:
+  public.pem: '-----BEGIN PUBLIC KEY-----
+
+    MCowBQYDK2VwAyEAF0FO0qSiBUOLtqPFokgRYzo1hK8vJNjDrBQZptd9C90=
+
+    -----END PUBLIC KEY-----
+
+    '

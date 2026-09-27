@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: router-release-readonly
+    namespace: llm-router
+type: Opaque
+stringData:
+    identity: ENC[AES256_GCM,data:KxpCortHx166jEFTSHT14nKDqKwHYGiB1gBuuFFm7xTQiusxQ9lin9ZUYjoh7o1JsIkNOQyCbBJrcdEPu/25+GZeDz0ZF0IqL0JzSpbALcaPlc2jp9aSONRUaE+dQpSBbEUfPt/ugLoGhLZk+WQy8BWoWCY825+ddd3rgVFmRwDleeb/43QopYtwsZjOe3j4vjFjDhtnLCfuJJGZnw52IEwL4O2u3CnzXVt8XkosNMURPveR5yhgUp8fI4Wz+0xLMI6Ij5g7NmU1GYYqlGOvJfpEbG8/DiySUS0Ap19cL8umBiSIJstQr6Oz807GT/UGYmR1LQ+vbd6mQNzeCYtPFJme/x3RfZQDHURHblI+KWLrKMRQNdvRBmo/Yls5is9rmXlbH5S0W8OTQC92Y9N0dLE1FOZadaHH81vDpU2+gfrgQsDKIqg7B+nn4Yp+rH1GHWcbGzVdVsCDuz5t42oFfA+Xxy5+TA7oDHDRR8cslYVD+lRKWL0jgfq80Iay2F7/hM/7FSbeEC/zoAPj+ndyuFpDafVLikeFDh+2fw9qFLE8OwmjVjf6rw5m/K0Nq4jCngy89zz+I33ADvV3,iv:Y39/un+xqj2+OjlyF63C2Jw9VhvXyM4F37Tz5q0jHOc=,tag:kDYpxfCVDGBPAXKXA115CA==,type:str]
+sops:
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBBY2dxcDk2RkQ1RUI2VzRL
+            YVRvWkFDVE5lc1MxS0FzMko2ckVLQUFYSW1rCnJObStyTWlyS2VlV1IyMUNmWVdG
+            WkZrekFCOEZtWGo5MHErd3pLcThJS2cKLS0tIFVIRzR0VG0rUG9QeHNxaityR3lB
+            REJ4NllyRXRhWWpVYnRvNzFQVmx4d3cKm4zpH71+6smpnEMVY/7z1QnrX5myIHbe
+            kspNDzpubqGUKIwXgmE2ZITmQW8kDmBbpzzBfvTubNdd8It9ZjvHQA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-27T14:29:23Z"
+    mac: ENC[AES256_GCM,data:CAvyp5poXFnviPS/eHYDFyrbiuaih0lkOR/ha45yH+BsBiVGBaSdeilhaYHiZNrhfUGBbF8AOwnYL56balYS91RyxNZHMxzWK4dVEpL66WwwZ4UFmiNCuB5jrJzgPuxXeLUNlnORytlJ5YNaeuuw4RnLNUu0/LDcDxMtLcxrEck=,iv:GxZp9zAhGQ7m06Hl35yUy3K8TnevQEIYDeK/4Rsck00=,tag:9QgWZFEJ/ReJJjtih/wwEQ==,type:str]
+    encrypted_regex: ^(data|stringData)$
+    version: 3.10.2

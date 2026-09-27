@@ -114,9 +114,81 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000 # makes the PVC root group-writable for uid 1000
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # let SIGTERM close HTTP + SQLite
+      initContainers:
+      - name: fetch-release
+        image: docker.io/alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+        command:
+        - sh
+        - /stage-scripts/fetch.sh
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: &id001
+            drop:
+            - ALL
+          runAsUser: 65534
+          runAsGroup: 1000
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: '1'
+            memory: 256Mi
+        volumeMounts:
+        - &id002
+          name: stage
+          mountPath: /stage
+        - &id003
+          name: stage-tmp
+          mountPath: /tmp
+        - &id004
+          name: releases
+          mountPath: /releases
+        - &id005
+          name: stage-scripts
+          mountPath: /stage-scripts
+          readOnly: true
+        - name: release-key
+          mountPath: /deploy-key
+          readOnly: true
+      - name: stage-release
+        image: docker.io/library/node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+        command:
+        - sh
+        - /stage-scripts/stage.sh
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: *id001
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        env:
+        - name: ADMIN_BRIDGE_VERIFY_KEY
+          value: /admin-bridge/public.pem
+        - name: ROUTER_PLUGIN_CONFIG
+          value: '{"discovery-network":{"networks":["192.168.0.0/24"],"ports":[8080,8081,8082,18020,11434,1234,8000],
+            "servers":["http://192.168.0.28:18020","http://192.168.0.26:8080","http://192.168.0.45:8082","http://192.168.0.46:8082"]},
+            "server-registration":{"clientAddressHeader":"cf-connecting-ip"}, "api-keys":{"publicUrl":"https://router.chifor.me","clientAddressHeader":"cf-connecting-ip"}}'
+        volumeMounts:
+        - *id002
+        - *id003
+        - *id004
+        - *id005
+        - name: data
+          mountPath: /data
+        - name: admin-bridge
+          mountPath: /admin-bridge
+          readOnly: true
       containers:
         - name: router
           image: docker.io/library/node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
@@ -136,6 +208,8 @@ spec:
               value: /data/router.sqlite
             - name: ROUTER_WEB_ROOT
               value: /app/dist/web
+            - name: ADMIN_BRIDGE_VERIFY_KEY
+              value: /admin-bridge/public.pem
             - name: ROUTER_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -200,13 +274,16 @@ spec:
                 - ALL
           volumeMounts:
             # One immutable release directory per rollout, built from one llm-router commit:
-            # router-0.1.0-20260927-keys2 = dsh/llm-router main@46841fa (never rewritten in place;
+            # router-0.1.0-20260927-admin-bridge = dsh/llm-router main@a2a3b20 (never rewritten in place;
             # a new build gets a new directory). Swapping it replaces the pod safely: the
             # Deployment is `strategy: Recreate` and the SQLite volume (llm-router-data) is RWO
             # iSCSI, so the old pod has stopped before the new one opens the database.
             - name: releases
               mountPath: /app
-              subPath: router-0.1.0-20260927-keys2
+              subPath: router-0.1.0-20260927-admin-bridge
+              readOnly: true
+            - name: admin-bridge
+              mountPath: /admin-bridge
               readOnly: true
             - name: data
               mountPath: /data # SQLite file + WAL/SHM sidecars
@@ -216,12 +293,21 @@ spec:
         - name: releases
           persistentVolumeClaim:
             claimName: router-releases
-            readOnly: true
         - name: data
           persistentVolumeClaim:
             claimName: llm-router-data
         - name: tmp
           emptyDir: {}
+        - name: stage
+          emptyDir: {sizeLimit: 2Gi}
+        - name: stage-tmp
+          emptyDir: {sizeLimit: 3Gi}
+        - name: release-key
+          secret: {secretName: router-release-readonly, defaultMode: 288}
+        - name: stage-scripts
+          configMap: {name: router-stage-admin-bridge}
+        - name: admin-bridge
+          configMap: {name: admin-bridge-verifier}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -303,3 +389,22 @@ spec:
         - {protocol: TCP, port: 11434}
         - {protocol: TCP, port: 1234}
         - {protocol: TCP, port: 8000}
+---
+# Temporary source-fetch permission, removed with the staging init containers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: router-release-fetch
+  namespace: llm-router
+spec:
+  podSelector:
+    matchLabels: {app: llm-router}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: gitea}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: gitea}
+      ports:
+        - {protocol: TCP, port: 2222}

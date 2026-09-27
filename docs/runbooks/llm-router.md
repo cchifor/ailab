@@ -72,3 +72,31 @@ curl -s -o /dev/null -w '%{http_code}\n' https://router.chifor.me/admin/v1/confi
 Pre-exposure checks passed inside the running pod: `/health`, `/ready` and SPA return 200; unauthenticated config/models return 401; authenticated Responses works with the offline `demo` model. Backend tests: 103; browser tests: 13; compiled production smoke and dependency audit passed before staging.
 
 For backup, use SQLite's online backup API or stop the singleton and copy a consistent database together with any WAL; do not copy only a live `.sqlite` file. Retain the release archive and authentication Secret separately. The data PVC's storage class uses Retain, but neither that nor this manifest proves an offsite restore drill. Single-authority availability and live subscription integration remain explicit limitations of the first implementation.
+
+### Trueswarm Admin bridge release (2026-09-27)
+
+The `router-0.1.0-20260927-admin-bridge` release pins source
+`dsh/llm-router@a2a3b20e4dd7fa7f0e1a2350d5fe3a5ca495d48a` and adds the optional
+`/register/admin-bridge` endpoint. It verifies body-bound, short-lived Ed25519
+assertions from Trueswarm Admin using `admin-bridge-verifier/public.pem`; it does
+not share the router administrator token. Only Admin stores the private key.
+Existing router credentials, plugin configuration and database remain in place.
+
+This rollout stages through two temporary init containers because the deploying
+worker has no router pod/exec access. Recreate stops the old singleton first.
+The init containers fetch the exact reviewed Git commit with a new read-only
+deploy key (Gitea key 6), retain a consistent SQLite backup plus the existing
+secret-store key and plugin settings under
+`/releases/.backups/20260927-pre-admin-bridge`, build with frozen pnpm 10.32.1,
+and test a copy of that snapshot before atomically publishing the new release
+directory. The build may add a few minutes of downtime. No live release directory
+is overwritten. The existing release remains available for rollback.
+
+The SSH client bootstraps its known-hosts file from the internal Gitea service,
+then enforces that host key and the full source commit hash. A temporary egress
+rule admits only Gitea SSH. The encrypted deploy key is mounted only in the fetch
+init container, and grants no repository writes or cluster access. After public
+readiness and the signed bridge are verified, remove the staging init containers,
+key Secret, scripts ConfigMap and temporary egress rule through a follow-up PR,
+then revoke deploy key 6. Keep the bridge public key mount and the new subPath.
+Do not remove the rollback release or backup as part of this deployment.

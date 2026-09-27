@@ -12,3 +12,13 @@ kind: Kustomization
 #   * The "edge" namespace label and the Cloudflare tunnel in edge-connector.
 resources:
   - router.yaml
+  - admin-bridge.yaml
+  - router-release-readonly.sops.yaml
+configMapGenerator:
+  - name: router-stage-admin-bridge
+    namespace: llm-router
+    files:
+      - staging/admin-bridge/fetch.sh
+      - staging/admin-bridge/stage.sh
+      - staging/admin-bridge/backup.mjs
+      - staging/admin-bridge/smoke.mjs
