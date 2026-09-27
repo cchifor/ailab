@@ -51,6 +51,12 @@
       "description": "Hold ghcr.io/cloudnative-pg/postgresql at 17.x. A PostgreSQL MAJOR upgrade is not an image swap: it needs a pg_upgrade of the on-disk data, a restore rehearsal against the new major, and a maintenance window -- none of which Renovate can perform or verify, and a grouped PR would look deceptively complete. #649 proposed exactly that (17.11 -> 18.6) against a live 17.10 server and was closed. 17.x minors still flow normally. Written as a regex rather than a `<18` range because this is the docker versioning scheme, where range syntax is not dependable. Lift this bound in the same change that performs the 17 -> 18 upgrade.",
       "matchPackageNames": ["/^ghcr\\.io\\/cloudnative-pg\\/postgresql(-[a-z0-9]+)?$/"],
       "allowedVersions": "/^17\\./"
+    },
+    {
+      "description": "Digest-only bumps of MOVING tags never auto-merge. litellm tracks main-stable (it had moved 2.5 months when #898 opened) and text-embeddings tracks cpu-1.9; a digest bump on either is an unreviewed upgrade of a moving tag. #899 (2026-09-27) auto-merged a digest bump of a then-tagless TEI pin onto the CUDA `latest` build and took embeddings down for hours. The `no-automerge` label makes the PR reviewbot hold these for a human; tag/version changes are unaffected.",
+      "matchPackageNames": ["ghcr.io/berriai/litellm", "ghcr.io/huggingface/text-embeddings-inference"],
+      "matchUpdateTypes": ["digest"],
+      "addLabels": ["no-automerge"]
     }
   ]
 }
