@@ -1,13 +1,5 @@
 # Trident attach timeout (IaC), CNPG required anti-affinity, sandbox recycle path
 
-## Codex Review
-
-- The Kyverno approach is viable, but the nested-loop patch needs explicit 1.13.4-compatible syntax and tests for indices, argument matching, and idempotence.
-- Admission mutation can prevent timeout drift without stopping repeated operator reconciliation. The existing hand patch also makes the proposed verification vulnerable to a false pass.
-- CNPG requests 250m CPU per instance, so ~500m spare CPU alone does not imply a stall. Node eligibility, memory, placement, storage delays, and recovery sequencing still need explicit gates.
-- The recycle script needs stronger credential handling and tenant verification. Its asynchronous polling contract also conflicts with the inspected local Airlock source.
-- Resolve the missing cluster contexts, rollout rollback procedures, and verification gaps before execution.
-
 ## Context
 
 2026-09-27, after the QNAP LUN-9 repair (ailab#865): the QNAP CSI driver (qnap-csi v1.6.0, Trident
@@ -19,7 +11,8 @@ is saturated. Observed: a publish that ran 09:29:37→09:34:58Z, then `client ra
 returned an error: context canceled`; two `strive-pg-9` detaches stuck for 3 h.
 
 Imperative state left in the cluster today (the debt this plan retires):
-- `deploy/trident-controller` container 3 (`csi-attacher`) args[1] patched to `--timeout=600s`;
+- `deploy/trident-controller` container `csi-attacher` args `--timeout=60s` → `--timeout=600s`, by
+  hand;
 - `deploy/trident-operator` scaled to 0 replicas, because the operator (qnap-csi-operator v1.6.0,
   `TridentOrchestrator` exposes only `debug/namespace/tridentImage`; the chart hard-codes
   `replicas: 1` for the operator and the sidecar args live inside the operator image) reverted the
@@ -29,84 +22,119 @@ Imperative state left in the cluster today (the debt this plan retires):
 
 Two related items from the same program: (a) `strive-pg`'s three instances had doubled up on
 talos-cp3 since the 09-21 CP reboots because CNPG's default `preferred` anti-affinity is
-IgnoredDuringExecution (verified analysis on platform#1672); the #1672 roll re-spread them by luck of
-headroom, not by rule. (b) The three `forever` sandboxes in `strive-sandboxes-ailab` each reserve a
-full core (Guaranteed); platform#1644 (in the sweep build, airlock rolled 09:25:13Z) makes new
-sandboxes request 100m, but pod resources are immutable, so they must be recycled through airlock's
-own lifecycle (teardown → deploy), which requires a member of tenant `dbe45925-…` — the only members
-are the two human accounts; `ops-admin@localhost` is a tenant admin of `…0001` and
-`_resolve_fleet_scope` lets only `platform:support` act across tenants.
+IgnoredDuringExecution (verified analysis on platform#1672); the #1672 roll happened to re-spread them
+one per CP (cp1/cp2/cp3 since 15:47Z) because there was headroom, not because of a rule — `required`
+is also IgnoredDuringExecution, so it never moves a running pod either; what it changes is the
+placement of every pod CNPG creates from now on (the roll it triggers, and every future drain/reboot
+replacement). (b) The three `forever` sandboxes in `strive-sandboxes-ailab` each reserve a full
+core (Guaranteed); platform#1644 (in the sweep build, airlock rolled 09:25:13Z) makes new sandboxes
+request 100m, but pod resources are immutable, so they must be recycled through airlock's own
+lifecycle (teardown → deploy), which requires a member of tenant `dbe45925-…` — the only members are
+the two human accounts; `ops-admin@localhost` is a tenant admin of `…0001` and `_resolve_fleet_scope`
+lets only `platform:support` act across tenants.
 
-<!-- codex: Required anti-affinity is also IgnoredDuringExecution: it constrains newly scheduled pods but does not itself evict or rebalance existing colocated instances. The redistribution claim depends on CNPG actually recreating the affected pods. -->
+Every cluster command below is `kubectl --context admin@ai …` (the default context is a different
+cluster; CLAUDE.md).
 
 ## Approach
 
 ### 1. Make the attacher timeout GitOps state: a Kyverno mutate policy (ailab)
 
-Kyverno 1.13.4 is installed cluster-wide and ailab already ships a ClusterPolicy through Flux
-(`kubernetes/apps/infrastructure/helmtest/kyverno-protect-reserved.yaml`). Add
-`kubernetes/apps/infrastructure/storage/kyverno-trident-attacher-timeout.yaml` (listed in the storage
-`kustomization.yaml`, next to `iscsi-recovery-tmo.yaml`, which fixes the driver's other timeout bug):
+**Where it lives.** Kyverno (v1.13.4) is delivered by the `platform-kyverno` Kustomization in
+`kubernetes/apps/clusters/ai/platform.yaml`, which `dependsOn: infrastructure`. A ClusterPolicy in
+`infrastructure/storage` would make the base layer depend on a CRD that is installed after it (a
+cycle Flux would never resolve), so the policy gets its own tree and Kustomization:
+`kubernetes/apps/storage-policies/{kustomization.yaml,trident-attacher-timeout.yaml}` +
+`kubernetes/apps/clusters/ai/storage-policies.yaml` with `dependsOn: [{name: platform-kyverno}]`,
+`wait: true`, `retryInterval: 1m` (the same CRD-ordering pattern as `qnap-storage.yaml`).
 
-<!-- codex: The existing validation policy does not prove that Deployment mutation is covered by the admission webhook. Check webhook rules, namespace/resource exclusions, and Kyverno availability. Document the CRD/webhook bootstrap dependency and failurePolicy choice: Fail can block controller recovery during a Kyverno outage; Ignore can admit the original timeout. -->
+**Webhook coverage (checked live).** `autoUpdateWebhooks=true`; `kyverno-resource-mutating-webhook-cfg`
+exists with 0 webhooks today because no mutate policy exists — Kyverno adds the Deployment rule when
+the policy is created. The namespace selector excludes only `kube-system, kyverno, cert-manager,
+external-secrets`; `trident` is covered. The policy sets `spec.failurePolicy: Ignore` on purpose: with
+`Fail`, a Kyverno outage would block every update of `trident-controller`, including the operator's
+own repair path; with `Ignore`, the worst case is one un-mutated write during an outage, which the
+post-check in §3 (a `kubectl … get deploy … -o jsonpath` line in the runbook, and the same check in
+the attach-latency alert's runbook) catches and the next operator write repairs.
 
-- `ClusterPolicy trident-attacher-timeout`, `background: false`, admission-time mutate on
-  CREATE/UPDATE of `Deployment` `trident-controller` in namespace `trident`.
-- `foreach` over `request.object.spec.template.spec.containers` with precondition
-  `{{element.name}} == csi-attacher`, nested `foreach` over `element.args` replacing the element that
-  matches `^--timeout=` with `--timeout=600s` (same value as the provisioner sidecar; a detach uses
-  the same flag). No fixed indices, so an operator upgrade that reorders containers/args still gets
-  mutated; if the sidecar is renamed the policy is a no-op and the verification step catches it.
+**The rule (concrete, no fixed indices).** Outer `foreach` over
+`request.object.spec.template.spec.containers` with `preconditions` `{{ element.name }} Equals
+csi-attacher`; inner `foreach` over `element.args` with `preconditions`
+`{{ starts_with(element, '--timeout=') }} Equals true` (a JMESPath function, not a regex);
+`patchesJson6902` `replace /spec/template/spec/containers/{{elementIndex0}}/args/{{elementIndex1}}`
+value `--timeout=600s`. Both loops iterate the ORIGINAL arrays, so the indices address the right
+element; every other container and every non-matching argument is untouched by construction (a JSON
+patch at one path, never a strategic merge of the list). Defined behaviour: missing `args`, a missing
+`--timeout=` flag, or the two-token form `--timeout 60s` → the rule matches nothing and is a no-op
+(documented; the §3 post-check exists for exactly this); a duplicate flag → every occurrence is set
+to 600s; an already-600s value → identical output (idempotent). If Kyverno 1.13.4 rejects
+`preconditions` on the inner loop, fall back to a single outer loop with a `patchStrategicMerge`
+that anchors `(name): csi-attacher` and `args: [ "--timeout=600s" ]` is NOT acceptable (it replaces
+the list); instead use the inner loop without preconditions and a JMESPath value expression
+`{{ starts_with(element, '--timeout=') && '--timeout=600s' || element }}` — either shape is proven
+by the tests below before it reaches the cluster.
 
-<!-- codex: Nested foreach is supported, but this prose is not yet a verifiable policy. Express the outer name check as Kyverno preconditions, then use patchesJson6902 with /spec/template/spec/containers/{{elementIndex0}}/args/{{elementIndex1}}. Inside the inner loop, element is the argument string. Kyverno 1.13 documents preconditions only at the top-level loop, so do not implement the timeout match as an inner-loop precondition; use a supported conditional replacement that preserves nonmatches. Equals does not interpret a regex, and filtering either list before using its loop index would address the wrong original array position. -->
+**Why 600 s, and its limits.** The sweep cost is inside QNAP's `storage-api-server`; only 3 of the
+45 LUNs are removable orphans (LUNs 4, 43, 44), so the count cannot drop under the ~20 that a 60 s
+budget needs. 600 s is a mitigation, not a demonstrated bound: it is one RPC budget (publish or
+unpublish), not the end-to-end pod-start budget, and it does not touch the provisioner (600 s already),
+resizer or snapshotter (300 s) deadlines. Acceptance: attach and detach p95 under 5 min at ≤50 LUNs
+with no `DeadlineExceeded` retries in `csi-attacher` logs over 24 h; the policy is removed when a
+qnap-csi release exposes the sidecar timeout or fixes the per-LUN sweep (tracked in the runbook).
 
-<!-- codex: Define behavior for absent/null args, missing timeout, duplicate timeout flags, and the alternate two-argument form "--timeout", "60s". A replace-only rule silently misses absent flags. Preserve every unrelated argument and all five other containers, including provisioner 600s and resizer/snapshotter 300s; a strategic-merge patch containing one scalar args entry can replace the entire args list. Add a post-upgrade check because this one-time verification cannot detect a future rename or a higher upstream timeout being overwritten. -->
+**Admission-only, and what triggers it.** No `mutateExistingOnPolicyUpdate`/`targets`, so the
+background controller needs no new write grant (the helmtest policy header warns against widening
+Kyverno's RBAC); `background: false` only disables scanning. Installing the policy does not touch
+the live Deployment. The trigger is any UPDATE of the Deployment that passes admission: the operator
+issues one on restart (observed today: it rewrote the args within 30 s of the hand patch), and the
+proof step (§2) issues a server-side dry-run UPDATE first. Fallback trigger if the operator does not
+write: a harmless metadata annotation update on the Deployment goes through the same webhook with
+the full object and is mutated the same way.
 
-- Why 600 s and not "fix the sweep": the sweep cost is inside QNAP's `storage-api-server`; only 3 of
-  the 45 LUNs are removable orphans (LUNs 4, 43, 44; the rest are live or intentionally retained), so
-  the count cannot drop under the ~20 that a 60 s budget would need.
+**Operator interaction is verified, not assumed.** The operator's write carries 60s; admission turns
+it into 600s, which equals the stored object, so the API server persists nothing and no ReplicaSet
+rolls. Whether qnap-csi-operator v1.6.0 then keeps issuing updates (comparing its 60s intent with the
+600s it reads back) is unknown — its reconcile loop is in the image, not in the chart. §2 observes
+Deployment `generation`, `metadata.resourceVersion`, ReplicaSet and pod UIDs, and the operator's log
+volume over ≥3 cycles and one operator restart. Rollback trigger: resourceVersion churn on
+`trident-controller` or a fresh ReplicaSet → scale the operator to 0 again, confirm args are 600s,
+and fix the policy before resuming; never delete the policy while the operator runs (that restores
+60s within one reconcile).
 
-<!-- codex: Treat 600s as mitigation, not a demonstrated upper bound: queueing, concurrent operations, and LUN growth can consume it. Record attach/detach latency and retry/backlog acceptance criteria, plus a removal condition when the driver exposes a supported timeout or fixes the sweep. The attacher flag does not change provisioner DeleteVolume or other sidecar deadlines. -->
+### 2. Prove the mutation, then restore the operator (ailab, operational)
 
-- Why admission-only (no `mutateExistingOnPolicyUpdate`): it needs no extra RBAC for the background
-  controller (the helmtest policy's header warns against widening Kyverno's grants), and the operator
-  re-applies the Deployment on every start, so restoring the operator is the trigger.
+Order matters because the live Deployment is already at 600s, so simple value checks cannot tell a
+working policy from a dead one:
+1. Flux: `storage-policies` Kustomization Ready; `get clusterpolicy trident-attacher-timeout` READY.
+2. Proof with the operator still at 0: fetch the Deployment, set the attacher arg to `--timeout=60s`
+   in the copy, `kubectl replace --dry-run=server -o json` it, and assert the returned object carries
+   `--timeout=600s`. Also assert the dry-run of the UNCHANGED object returns byte-identical args.
+3. `scale deploy trident-operator --replicas=1`. The operator re-applies on start. Within 2 min: the
+   Deployment template and the running controller pod both show `--timeout=600s`,
+   `tridentorchestrator/trident` `.status.status == Installed`. Then watch 15 min: no new ReplicaSet,
+   pod UID stable, resourceVersion stable, operator log free of repeating update errors. Then
+   `rollout restart deploy/trident-operator` once and repeat the check (an operator restart is the
+   realistic future event).
+4. Attach test (Verification 3). Only after that: close the timeout incident on ailab#865 (the NAS
+   orphan cleanup #880 and the driver performance question stay open, linked).
 
-<!-- codex: Ordinary admission mutation needs no background write grant, but background:false controls scanning; omission of mutate-existing targets is what keeps this an admission-only rule. Installing the policy does not repair an existing Deployment. Prove the operator submits a matching admission request on restart, or define an explicit harmless Deployment update as the trigger. -->
+### 3. Runbook (ailab)
 
-- Operator interaction: the operator's re-apply is mutated at admission to the same object it already
-  is, so the API server records no change and no rollout happens; the operator does not fight a
-  no-op. Verified in the verification step, not assumed.
-
-<!-- codex: This conclusion is too strong. The operator may repeatedly compare desired 60s with observed 600s and issue updates even when admission preserves the stored PodSpec. Other metadata changes or delete/recreate reconciliation can still cause churn. Inspect the v1.6.0 reconciliation path and observe requests/logs, Deployment UID/generation, ReplicaSets, and pod UIDs over multiple cycles; stable generation alone proves neither zero writes nor a quiet operator. -->
-
-### 2. Restore the operator and remove the hand patch (ailab, operational)
-
-After Flux reports the policy Ready: `kubectl -n trident scale deploy trident-operator --replicas=1`
-(that is the chart's declared state, so this is un-doing the imperative drift, not new drift). Watch
-`deploy/trident-controller` args stay `--timeout=600s`, `tridentorchestrator/trident` status
-`Installed`, and run a real attach test (step 5).
-
-<!-- codex: Add --context admin@ai to this command and every subsequent cluster command. CLAUDE.md explicitly says the default context is home-lab, a different k3s cluster. The attach test is Verification step 3, not step 5. -->
-
-<!-- codex: Do not restore 60s merely to "remove" the hand patch: the intended transition is to retain 600s under policy enforcement. Before enabling the operator, prove mutation with a server-side dry-run UPDATE carrying 60s. Define rollback: stop a churning operator, verify/restore the known-good controller args, and revert or repair the policy before resuming. Removing the policy while the operator runs can immediately restore the failing timeout. -->
-
-### 3. Runbook + issue closure (ailab)
-
-Add a section to `docs/runbooks/qnap-storage-setup.md`: the O(n²) sweep, the attacher timeout policy,
-stale `tridenttransactions` wedging bootstrap (`CSI driver probe failed: Trident initialization
-failed; … Resource was not found` → check PV/PVC/tridentvolume, then delete), and the
-`Retain`-flip for orphan PVs pending NAS cleanup. Post the closure on ailab#865.
-
-<!-- codex: "Check ... then delete" is unsafe as a general transaction-recovery instruction. Specify the exact transaction, operation, backend/LUN identity, evidence that no live operation owns it, and a saved CR before deletion; that bootstrap error alone does not establish staleness. Close the timeout incident only after attach/detach verification, keeping NAS cleanup and any driver performance fix linked as separate work. -->
+`docs/runbooks/qnap-storage-setup.md` gets an operations section: the O(n²) sweep and the 600s
+policy (with the post-check one-liner and the removal condition); stale `tridenttransactions` —
+precisely: the bootstrap error names ONE transaction; a transaction is stale only if `kubectl -n
+trident get tridenttransaction <name> -o yaml` shows an `addVolume` whose volume has no PV, no PVC,
+no `tridentvolume`, and `qcli_iscsi -l` on the NAS shows no LUN of that name; save the CR
+(`-o yaml > _out/`) before deleting; a transaction with a live PV/PVC/tridentvolume is NOT stale and
+must be left to Trident; the `Retain` flip for orphan PVs pending NAS cleanup (#880); the
+airlock-recycle wrapper.
 
 ### 4. CNPG required anti-affinity (platform repo, separate PR)
 
 `deploy/components/cnpg-cluster/cluster.yaml` on `C:/Users/chifo/work/platform` (remote `gitea`):
-replace header lines 15–17 ("Anti-affinity stays the CNPG DEFAULT `preferred` (NOT required…") with
-one line pointing at the affinity block, and add after `primaryUpdateMethod: switchover`:
-
-<!-- codex: Line 17 also contains "No off-cluster backup." Preserve that independent warning when replacing the affinity explanation, and establish the available restore path before a storage-dependent database roll. -->
+replace the anti-affinity sentence in header lines 15–17 with one line pointing at the affinity
+block, **keeping "No off-cluster backup." and "Bootstrap is from-scratch initdb" intact** (they are
+independent warnings), and add after `primaryUpdateMethod: switchover`:
 
 ```yaml
   affinity:
@@ -115,95 +143,122 @@ one line pointing at the affinity block, and add after `primaryUpdateMethod: swi
     topologyKey: kubernetes.io/hostname
 ```
 
-<!-- codex: These fields express hostname anti-affinity, not control-plane placement. The inspected component has no CP nodeSelector. Check the rendered Cluster and actual pod selectors, tolerations, hostname labels, and volume topology to establish which nodes are eligible; one instance per CP follows only if those three CPs are the eligible destinations. -->
+Eligible nodes (checked live 2026-09-27): the Cluster sets no nodeSelector/tolerations; the agent
+nodes carry `dedicated=agent:NoSchedule`, the env node `dedicated=env:NoSchedule`, so only
+talos-cp1/2/3 are schedulable for the instances; the 6 PVs carry no `nodeAffinity` (Immediate
+binding, iSCSI reachable from every CP). So `required` on `kubernetes.io/hostname` with 3 instances
+means exactly one per CP.
 
-with the comment from the verified #1672 analysis (why `required` with 3 instances on 3 CP nodes,
-what a drain does now: the evicted instance stays Pending until its node returns, 2/3 keep serving,
-roll ONE CP at a time — which is already the rule in CLAUDE.md). CNPG 1.24.1 treats the affinity
-change as a PodSpec diff and rolls once (replicas, then a switchover); each recreation
-detaches/attaches two volumes, which is why step 1–2 must be live first.
+**Pre-merge gate (GitOps starts the unsupervised roll at once).** The instances are already one per
+node, so each recreated pod's only eligible node is its current node; it needs that node to keep
+≥500m CPU and ≥2Gi memory free after its old pod is gone (the pod's own requests are released when
+it terminates; CNPG deletes then recreates, no surge). Gate: for each CP, `Allocatable − (requested
+by everything except that instance) ≥ 500m / 2Gi`, plus PDBs allow 1 disruption, replication lag < 1 s,
+Trident policy live (§2 done), no cordoned CP. If any node fails the gate, do the sandbox recycle (§5)
+first and re-check.
 
-<!-- codex: Add a scheduling gate before merging. This manifest requests 250m CPU and 1Gi memory per instance, so ~500m spare CPU does not by itself prove a stall. Check effective requests of the rendered pods, including init containers/overhead, memory, and competing reservations on each eligible destination. Confirm CNPG's delete/recreate ordering rather than assuming Deployment-style surge capacity. If capacity is insufficient, recycle sandboxes and verify node-specific headroom before this step; the current ordering otherwise makes a capacity prerequisite arrive too late. -->
+**During the roll (CNPG 1.24.1: affinity is a PodSpec diff → one rolling update: replicas first, then
+a switchover of the primary):** watch `kubectl … get pods -l cnpg.io/cluster=strive-pg -o wide -w`,
+`get events --field-selector reason=FailedScheduling|FailedAttachVolume`, and `get volumeattachments`.
+Same-node recreation may or may not produce a fresh unpublish/publish pair; either way each RPC has the
+600s budget, and a full instance replacement is expected to take 1–8 min. **Stop condition:** a
+replacement Pending > 10 min → free CPU/memory on ITS node (scale a non-critical workload there; the
+sandboxes and the trueswarm right-sizing are the known levers), never delete a second instance and
+never flip the affinity back mid-roll (the Pending pod already carries `required`). After the roll:
+three pods with `requiredDuringSchedulingIgnoredDuringExecution` + `topologyKey:
+kubernetes.io/hostname` in their rendered affinity, one per CP, cluster 3/3 healthy, two `streaming`
+replicas with lag < 1 s, an application round-trip through `strive-pg-rw` (a `SELECT 1` from a
+platform pod via the service DNS name), switchover minute recorded on the PR.
 
-<!-- codex: Hard anti-affinity can leave a replacement Pending when its only usable node is cordoned, unavailable, full, or still occupied by a matching pod. CNPG can then stop the roll while waiting for a healthy replica. Define a bounded stop condition and recovery procedure for a stuck replacement; reverting the Cluster field may not immediately repair an already-created Pending pod. Do not delete a second instance to unblock the first. -->
+**What a CP drain means now:** the evicted replica stays Pending until its node returns; a drained
+primary is switched over first (brief write interruption); 2/3 serve only if the cluster was healthy
+and spread before the drain — so the node-maintenance runbook's pre-checks gain "CNPG 3/3 healthy,
+PDBs 1 allowed, lag < 1 s" and its post-checks "all three instances back and streaming" before the
+next CP, alongside etcd 3/3.
 
-<!-- codex: Confirm the 1.24.1 affinity-change rollout behavior and monitor it explicitly. Same-node recreation need not cause a fresh ControllerPublish/Unpublish pair; test an actual cross-node move. Where moves do occur, two volumes and several serial 2–5 minute operations can exceed a ten-minute end-to-end budget. -->
-
-<!-- codex: "2/3 keep serving" assumes the cluster was healthy and already spread, and primary eviction can require failover with a service interruption. Check CNPG PDBs and replication lag before a drain, then wait for all three database instances to recover before the next CP, in addition to etcd health. Async replication and the shared NAS still limit the availability guarantee. -->
-
-Open the PR on Gitea with
-the sign-off note for the documented-decision reversal (`strive.io/owner: data-eng`), let the
-reviewbot review; if it stalls on the `E2E Tests / smoke*` required-check glob (deploy-only PRs get
-no smoke status — see platform#1672), merge with `force_merge` at the reviewed head, and record the
-switchover minute on the PR.
-
-<!-- codex: Treat force_merge as a narrowly evidenced exception for this PR, not an automatic consequence of the earlier issue. Require the documented decision sign-off, successful applicable render/schema checks, and confirmation that only the known absent smoke status blocks the unchanged reviewed head; never bypass an actual failing check. -->
+PR mechanics: open on Gitea with the explicit sign-off line for reversing the documented decision
+(`strive.io/owner: data-eng`, the operator approves on the PR), let the reviewbot review. `force_merge`
+only if the reviewed head is unchanged, both reviewer verdicts are clean, every check that ran is
+green and the only thing blocking is the absent `E2E Tests / smoke*` status of a deploy-only PR
+(platform#1672 precedent); a failing check is never bypassed.
 
 ### 5. Sandbox recycle: codify the platform path, hand the credential step to the operator
 
-Add `scripts/airlock-recycle-sandbox.sh` (bash + curl + jq; POSIX, LF): for one `app_id`, POST
-`/api/airlock/v1/apps/<id>/teardown`, poll `/api/airlock/v1/app-operations/<op>` until terminal,
-POST `/deploy`, poll again, then print the new pod's `requests.cpu/limits.cpu/qosClass` via
-`kubectl --context admin@ai -n strive-sandboxes-ailab`.
+**Contract (verified on the deployed build).** The running airlock is the sweep build (`0455699f2`,
+pod created 09:25:13Z) with `APP__AIRLOCK__APP_ASYNC_LIFECYCLE_ENABLED=true`; on `gitea/main`,
+`services/airlock/src/app/api/v1/endpoints/apps.py` returns **202 + `AppOperationOut`** from
+`POST /apps/{app_id}/deploy` (L1152) and `POST /apps/{app_id}/teardown` (L1195) in that mode (204/
+`AppOut` when the flag is off), and `api/v1/api.py:41` mounts `GET /app-operations/{id}` and
+`/app-operations/latest` (`app_operations.py`, since d92d526fb 2026-08-15). The codex worktree read an
+older platform checkout (`ed627012c`) that predates this. The script handles both contracts: 202 →
+poll the operation until `succeeded` (any other terminal status is a failure, stop); 200/204 → poll
+`GET /apps/{app_id}` until `status` is `STOPPED` (after teardown) / `ACTIVE` with a sandbox
+(after deploy).
 
-<!-- codex: The inspected platform checkout at ed627012c contradicts this API contract: services/airlock/src/app/api/v1/endpoints/apps.py:631 returns AppOut from deploy, teardown at :648 returns 204, and api/v1/api.py registers no app-operations router. Verify the deployed image/OpenAPI before implementation. If it uses this synchronous contract, poll the app's sandbox state rather than inventing operation IDs; otherwise document the newer deployed contract and its version dependency. -->
-
-<!-- codex: Define HTTP error handling and bounded request/poll deadlines. Advance only after successful teardown, not any terminal state; handle 401/403, conflicts, malformed responses, and interrupted or ambiguous POST results without blindly repeating destructive steps. An expired token after teardown can leave the app stopped: report a non-secret recovery phase and support resuming deployment after reauthorization. Confirm state persistence and application readiness before recycling the next sandbox. -->
-
-Inputs: `AIRLOCK_BASE_URL`, `AIRLOCK_TOKEN`
-(Bearer, from a tenant member's session — never stored, never echoed), the app id. Refuses to run
-without a token; never deletes pods.
-
-<!-- codex: An environment variable plus "never echoed" is not a sufficient secret-handling design. Exported tokens are inherited by child processes, curl -H with an expanded token exposes it in argv, and shell history/xtrace can capture it. Specify hidden prompt or inherited-FD input, pass the header through stdin/FD rather than argv, disable tracing/verbose credential output, and avoid persistent credential files or raw error dumps. Do not promise the environment-based design never exposes or stores the token. -->
-
-<!-- codex: Bind AIRLOCK_BASE_URL to a trusted HTTPS ingress origin with certificate verification and no credential-forwarding redirects; an arbitrary destination can receive the bearer. This route relies on Gatekeeper authentication and path rewriting, so a raw Airlock service URL is not interchangeable. Preflight the authenticated app and compare its returned tenant_id with an explicit expected tenant before teardown: membership in some tenant or a nonempty token is insufficient, and app IDs may repeat across tenants. -->
-
-The operator runs it three times (`ryan`, `billing-desk`,
-`smart-demo`) with their own session; the script is the reusable, reviewable part. Expected result:
-each pod `100m / 1 / Burstable`, control-plane requested CPU −2.7 cores.
-
-<!-- codex: Verify the deployed Airlock build actually supplies the new resource defaults before the first teardown. Identify replacements by tenant/app labels and a changed pod UID, wait for Ready and an application check, and inspect every container's resources before asserting QoS. The 2.7-core reduction is aggregate; it does not guarantee capacity on the particular node needed by CNPG. -->
+`scripts/airlock-recycle-sandbox.sh` (bash, LF; curl + jq):
+- Inputs: `--app <id>`, `--tenant <uuid>` (required; the app's returned `tenant_id` must equal it, else
+  abort before any write), `--base-url` fixed default `https://<platform edge host>` (must be
+  `https://`, certificate verification on, `--max-redirs 0`, so no redirect can forward the bearer);
+  a raw in-cluster airlock URL is refused (it bypasses Gatekeeper and its `X-Gatekeeper-Tenant`).
+- Token: never an argument, never an exported env var, never a file. Read from a hidden prompt
+  (`read -rs`) or `--token-fd N`; passed to curl through `--config` on stdin (`header = "Authorization:
+  Bearer …"`), so it is in no argv, no history, no log; `set +x` enforced; error bodies are printed
+  with the `Authorization` line stripped; the token variable is unset on exit.
+- Flow per app: preflight `GET /apps/{id}` (auth, tenant, current status, sandbox present) →
+  `POST teardown` → poll (bounded: 15 min, 10 s interval) → **only on success** `POST deploy` →
+  poll → wait for the new pod (`kubectl --context admin@ai -n strive-sandboxes-ailab get pod -l
+  airlock.strive.io/app-id=<id>`, new UID, Ready) → print every container's requests/limits and the
+  pod QoS. Phases are printed as `PHASE=<name>` lines; a failure after teardown exits with a distinct
+  code and prints the resume command (`--resume-deploy`) so an expired token does not leave the app
+  stopped without a documented way back. 401/403 → stop, no retry; a POST that times out is NOT
+  repeated automatically (the operation may have started) — the script re-reads app status and asks.
+- Tests: `bash -n`; shellcheck (via `pip install shellcheck-py` into the job tmp, or skip with a
+  note if unavailable); `tests/airlock-recycle-mock.py` — a stdlib `http.server` mock of the four
+  endpoints that drives the script through: happy path (202 contract), 204 contract, wrong tenant
+  (must not POST), 401 before teardown, 401 after teardown (resume path), teardown operation failed
+  (must not deploy), deploy timeout, and an assertion that the mock never sees the token in a query
+  string and that the process argv/env never contain it.
+- Operator step: run it three times (`ryan`, `billing-desk`, `smart-demo`) with your own session
+  token, one at a time; the expected result per pod is `100m / 1 / Burstable` (verify the deployed
+  build sets those defaults first: `GET /apps/{id}` after deploy shows the sandbox, the pod's
+  container resources show 100m). Aggregate effect −2.7 cores of requests, but it lands on whichever
+  CPs the new pods schedule to; the §4 gate checks the specific nodes.
 
 ## Critical files
 
-- `kubernetes/apps/infrastructure/storage/kyverno-trident-attacher-timeout.yaml` — new ClusterPolicy.
-- `kubernetes/apps/infrastructure/storage/kustomization.yaml` — add the policy.
-- `docs/runbooks/qnap-storage-setup.md` — operations section (timeout, sweep, transactions).
-- `scripts/airlock-recycle-sandbox.sh` — the recycle wrapper.
+- `kubernetes/apps/storage-policies/kustomization.yaml`, `…/trident-attacher-timeout.yaml` — new tree + ClusterPolicy.
+- `kubernetes/apps/clusters/ai/storage-policies.yaml` — Flux Kustomization, `dependsOn platform-kyverno`.
+- `docs/runbooks/qnap-storage-setup.md` — operations section; `docs/runbooks/node-maintenance.md` — CNPG pre/post checks.
+- `scripts/airlock-recycle-sandbox.sh`, `scripts/tests/airlock-recycle-mock.py` — the wrapper and its mock tests.
 - platform `deploy/components/cnpg-cluster/cluster.yaml` — affinity block + header comment (own PR).
 
 ## Verification
 
-<!-- codex: Before rollout, render the storage Kustomization and validate/test the concrete policy against Kyverno 1.13.4. Fixtures should cover CREATE and UPDATE, reordered containers/args, 60s and already-600s input, absent/duplicate/split timeout flags, a missing sidecar, and nonmatching names/namespaces. Assert preservation of unrelated fields and identical output on a second mutation. -->
-
-1. `kubectl --context admin@ai get clusterpolicy trident-attacher-timeout` → `READY True`; Flux
-   `infrastructure` Kustomization reconciled at the merge sha.
-
-<!-- codex: READY and Flux reconciliation do not prove mutation. While the operator remains stopped, submit a server-side dry-run UPDATE of the actual Deployment with the attacher timeout set to 60s and assert the returned value is 600s. The already-patched live Deployment would otherwise let a nonmatching policy pass all simple value checks. -->
-
-2. `kubectl -n trident scale deploy trident-operator --replicas=1`; within 2 min:
-   `kubectl -n trident get deploy trident-controller -o jsonpath='{.spec.template.spec.containers[?(@.name=="csi-attacher")].args}'`
-   contains `--timeout=600s`; `kubectl -n trident get tridentorchestrator trident -o jsonpath='{.status.status}'`
-   is `Installed`; the controller's `generation` does not keep incrementing (no fight).
-
-<!-- codex: Use --context admin@ai throughout and inspect the running controller pod args as well as the Deployment template. Two minutes is only an initial check: observe multiple reconciliations and an operator restart, checking reconcile/error logs and request activity alongside stable Deployment/ReplicaSet/pod identities. Record a rollback trigger for repeated updates or replacement. -->
-
-3. Attach test: a 1Gi `qnap-iscsi` PVC + busybox pod in a scratch namespace → pod Running within
-   10 min, no `FailedAttachVolume DeadlineExceeded` events; delete both; PV gone within 10 min.
-
-<!-- codex: Add a write/read check, then move the same PVC between two eligible nodes sequentially and verify data after detach/reattach. A single initial attach and deletion do not exercise the database migration path. Observe VolumeAttachment state and controller/attacher logs; use stage-specific deadlines because 600s is one RPC budget, not the combined provisioning/attach/detach/delete budget. Verify this scratch PV has Delete reclaim policy and track its exact backend volume cleanup, leaving the eight retained PVs untouched. -->
-
-4. Affinity PR: after merge, `kubectl -n strive-ailab get pods -l cnpg.io/cluster=strive-pg -o wide`
-   shows one instance per CP node, the rendered pod affinity has
-   `requiredDuringSchedulingIgnoredDuringExecution` with `topologyKey: kubernetes.io/hostname`,
-   cluster 3/3 healthy, two streaming replicas; switchover minute recorded on the PR.
-
-<!-- codex: Make the capacity/storage-health checks a pre-merge gate because GitOps can start the unsupervised roll immediately. During rollout inspect Pending/Terminating pods and scheduler/attachment events before the next replacement; afterward verify all three pods' affinity selectors, replication lag, and application connectivity through the primary service. Three scheduled pods and a switchover timestamp alone do not establish database recovery. -->
-
-5. Recycle script: `bash -n`, `shellcheck` clean, and a dry-run against a missing token exits non-zero
-   without calling the API. Real run by the operator: the three sandbox pods report `100m / 1 /
-   Burstable`, `kubectl describe node talos-cp{1,2}` show ~2.7 cores less requested.
-
-<!-- codex: Syntax checks and missing-token handling miss the dangerous branches. Add mocked tests for the verified API contract, wrong tenant, expired credentials before/after teardown, teardown failure, deployment failure, timeout/interruption recovery, and secret-free argv/logs. Verify node-request deltas across the actual before/after placements with --context admin@ai; do not assume only cp1/cp2 changed or confuse aggregate requested CPU with observed usage. -->
+0. Policy fixtures before merge: download the Kyverno CLI (v1.13.x) into the job tmp and run
+   `kyverno apply` against fixture Deployments: CREATE and UPDATE, containers reordered, args
+   reordered, `60s` input, already-`600s` input (identical output), duplicate flag (both replaced),
+   absent flag and split `--timeout 60s` (no-op), sidecar renamed (no-op), a Deployment of another
+   name/namespace (unmatched). Assert all other containers/args are byte-identical. The policy's
+   match stays exact (`trident/trident-controller`), so the fixtures can only run offline with the
+   CLI; the live server-side dry-run of the real Deployment (§2 step 2) is the integration proof. If
+   the CLI cannot run on this workstation, run it on a dev-worker (Linux) — the fixtures are plain
+   files.
+1. Flux `storage-policies` Ready at the merge sha; `get clusterpolicy trident-attacher-timeout` READY;
+   `get mutatingwebhookconfiguration kyverno-resource-mutating-webhook-cfg` now lists a Deployment rule.
+2. §2 steps 2–3 exactly, with the operator observation window (15 min + one operator restart) and the
+   rollback trigger recorded in the runbook.
+3. Attach test in a scratch namespace: 1Gi `qnap-iscsi` PVC (reclaim Delete) + a busybox pod that
+   writes a marker file; pod Running (stage deadlines: PVC Bound ≤ 10 min, attach ≤ 10 min); then
+   delete the pod and recreate it pinned to a DIFFERENT CP (`nodeName`), verify the marker survives
+   (real detach → publish on another node, the database-migration path); watch `volumeattachments`
+   and `csi-attacher` logs for zero `DeadlineExceeded`; delete pod + PVC; PV gone within 10 min and
+   the LUN gone from `qcli_iscsi -l` (the eight `Retain` PVs untouched).
+4. Affinity PR: the §4 pre-merge gate output pasted on the PR; during the roll the watch commands
+   above; afterwards the rendered affinity on all three pods, 3/3 healthy, two `streaming` replicas
+   with lag < 1 s, `SELECT 1` through `strive-pg-rw` from a platform pod, switchover minute on the PR.
+5. Recycle script: the mock test suite green; operator run: three new pod UIDs, each container
+   `100m / 1`, QoS `Burstable`, `GET /apps/{id}` ACTIVE with a sandbox; per-node requested CPU before/
+   after captured from `describe node talos-cp{1,2,3}` (the pods may land on different nodes than
+   before, so compare the sum and each node).
 
 <!-- codex-review-status: complete -->
