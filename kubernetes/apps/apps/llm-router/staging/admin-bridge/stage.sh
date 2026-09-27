@@ -23,6 +23,11 @@ node /stage-scripts/smoke.mjs
 staged=$(mktemp -d /releases/.admin-bridge-XXXXXXXX)
 cp -a /tmp/router-release/. "$staged/"
 node -e 'require("node:fs").writeFileSync(process.argv[1],JSON.stringify({commit:"a2a3b20e4dd7fa7f0e1a2350d5fe3a5ca495d48a",backup:"/releases/.backups/20260927-pre-admin-bridge",smokePassed:true})+"\n")' "$staged/RELEASE.json"
+# The fetch init runs as uid 65534, gid 1000; it must read the completion
+# marker on restart without fetching again. Keep writes owned by uid 1000.
+chgrp 1000 "$staged" "$staged/RELEASE.json"
+chmod 0750 "$staged"
+chmod 0640 "$staged/RELEASE.json"
 test ! -e "$release"
 mv "$staged" "$release"
 echo 'Router release staged; backup and isolated smoke passed.'

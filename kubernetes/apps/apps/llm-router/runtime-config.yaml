@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: router-runtime-config
+  namespace: llm-router
+data:
+  plugins.json: '{"discovery-network":{"networks":["192.168.0.0/24"],"ports":[8080,8081,8082,18020,11434,1234,8000],
+    "servers":["http://192.168.0.28:18020","http://192.168.0.26:8080","http://192.168.0.45:8082","http://192.168.0.46:8082"]},
+    "server-registration":{"clientAddressHeader":"cf-connecting-ip"}, "api-keys":{"publicUrl":"https://router.chifor.me","clientAddressHeader":"cf-connecting-ip"}}'

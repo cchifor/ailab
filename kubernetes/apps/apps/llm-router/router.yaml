@@ -176,9 +176,8 @@ spec:
         - name: ADMIN_BRIDGE_VERIFY_KEY
           value: /admin-bridge/public.pem
         - name: ROUTER_PLUGIN_CONFIG
-          value: '{"discovery-network":{"networks":["192.168.0.0/24"],"ports":[8080,8081,8082,18020,11434,1234,8000],
-            "servers":["http://192.168.0.28:18020","http://192.168.0.26:8080","http://192.168.0.45:8082","http://192.168.0.46:8082"]},
-            "server-registration":{"clientAddressHeader":"cf-connecting-ip"}, "api-keys":{"publicUrl":"https://router.chifor.me","clientAddressHeader":"cf-connecting-ip"}}'
+          valueFrom:
+            configMapKeyRef: {name: router-runtime-config, key: plugins.json}
         volumeMounts:
         - *id002
         - *id003
@@ -186,6 +185,7 @@ spec:
         - *id005
         - name: data
           mountPath: /data
+          readOnly: true
         - name: admin-bridge
           mountPath: /admin-bridge
           readOnly: true
@@ -230,11 +230,8 @@ spec:
             # public agent access requests (/agent/v1/*: per-address limits), and publicUrl for the public skill
             # (/agent/skill.md) and approved keys' replies: never the request's Host header.
             - name: ROUTER_PLUGIN_CONFIG
-              value: >-
-                {"discovery-network":{"networks":["192.168.0.0/24"],"ports":[8080,8081,8082,18020,11434,1234,8000],
-                "servers":["http://192.168.0.28:18020","http://192.168.0.26:8080","http://192.168.0.45:8082","http://192.168.0.46:8082"]},
-                "server-registration":{"clientAddressHeader":"cf-connecting-ip"},
-                "api-keys":{"publicUrl":"https://router.chifor.me","clientAddressHeader":"cf-connecting-ip"}}
+              valueFrom:
+                configMapKeyRef: {name: router-runtime-config, key: plugins.json}
           # Probe routes come from the router's kernel (packages/kernel/index.ts):
           # GET /health (liveness, {status:"ok"}) and GET /ready (200 when every
           # required plugin is active and storage answers, 503 otherwise).
@@ -391,6 +388,8 @@ spec:
         - {protocol: TCP, port: 8000}
 ---
 # Temporary source-fetch permission, removed with the staging init containers.
+# NetworkPolicy rules are additive: the existing llm-router policy above already
+# permits public HTTPS, including registry.npmjs.org for pnpm and dependencies.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

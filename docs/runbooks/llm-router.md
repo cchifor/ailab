@@ -100,3 +100,17 @@ readiness and the signed bridge are verified, remove the staging init containers
 key Secret, scripts ConfigMap and temporary egress rule through a follow-up PR,
 then revoke deploy key 6. Keep the bridge public key mount and the new subPath.
 Do not remove the rollback release or backup as part of this deployment.
+
+The live data mount is read-only during staging. After Recreate stops the only
+writer, the backup code copies the database and any WAL/hot journal to scratch
+storage and lets SQLite recover that private copy before taking the canonical
+backup. This also covers an unclean previous shutdown without modifying live data.
+The source-fetch policy adds internal SSH; the existing router policy continues
+to permit public HTTPS for npm (NetworkPolicy egress allowances are additive).
+
+If an init container fails, the singleton remains unavailable. Revert this PR's
+Deployment changes to `router-0.1.0-20260927-keys2`, removing the two init containers
+and their mounts, through the normal reviewed GitOps path. Failed staging never
+opens the live SQLite database and does not rewrite the previous release, so it
+does not require a database restore. Once the new runtime has started, inspect
+its migration compatibility before choosing an older runtime; preserve the backup.
