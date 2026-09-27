@@ -87,6 +87,7 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/trueswarm-admin-bootstrap",
         "./kubernetes/apps/trueswarm-admin-executor-bootstrap",
         "./kubernetes/apps/qnap-storage",
+        "./kubernetes/apps/storage-policies",
         "./kubernetes/apps/infrastructure/testpool",
     }
 )

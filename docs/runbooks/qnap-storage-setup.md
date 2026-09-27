@@ -337,6 +337,75 @@ would put fragile code in the one path that must never fail.
 > **Gotcha — the NAS's `base64` rejects a trailing newline.** `echo "$b64" | base64 -d` decodes
 > correctly but **exits 1**, which silently aborts any `set -e` script. Use `printf '%s'`.
 
+## 9. Attach/detach timeout — the per-LUN sweep, the Kyverno policy, stale transactions (2026-09-27)
+
+**What the driver does (qnap-csi v1.6.0, ailab#865).** Every ControllerPublish/Unpublish/Delete is
+served by the `storage-api-server` sidecar as a full `Qvolume List` + one `Get Volume` per LUN,
+~2.5–3 s each; each Get is one `disk_manage.cgi` call on the NAS that walks ALL volume labels
+(`/var/log/storage_lib.log` shows ~490 `Volume_Get_Label` lines per 3 min, 41 distinct volumes per
+CGI pid) — O(n²) per sweep. At 45 LUNs a sweep is ≈110–135 s, so the `csi-attacher` sidecar's stock
+`--timeout=60s` fails EVERY attach and detach (`FailedAttachVolume … DeadlineExceeded`, then
+Trident logs `client rate limiter Wait returned an error: context canceled` when it finally tries
+to save the publication record). Retries re-queue sweeps until the controller is saturated. A
+publish was observed to take 5 min; two detaches of a dead pod's volumes sat 3 h.
+
+**The fix is GitOps state, not a hand patch.** `kubernetes/apps/storage-policies/trident-attacher-timeout.yaml`
+is a Kyverno mutate policy (Flux Kustomization `storage-policies`, after `platform-kyverno`) that
+rewrites the attacher's `--timeout=*` to `--timeout=600s` at admission on `trident/trident-controller`.
+It is needed because the Deployment is rendered by `qnap-csi-operator` from a template inside its
+image (`TridentOrchestrator` exposes only `debug/namespace/tridentImage`) and the operator reverts a
+direct patch within 30 s. Offline fixtures: `python kubernetes/apps/storage-policies/tests/run.py`
+(needs the kyverno CLI). 600 s is a mitigation, not a bound: it is ONE RPC budget (the provisioner
+already runs 600 s, resizer/snapshotter 300 s), and queueing or LUN growth can still consume it.
+
+```bash
+# Post-check (run after any Trident/operator upgrade, and if attaches start failing again):
+kubectl --context admin@ai -n trident get deploy trident-controller \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="csi-attacher")].args}'   # must contain --timeout=600s
+kubectl --context admin@ai get clusterpolicy trident-attacher-timeout               # READY True
+# Integration proof (the live object is already 600s, so a value check alone cannot tell a working
+# policy from a dead one): send the operator's 60s through the webhook as a server-side dry-run.
+kubectl --context admin@ai -n trident get deploy trident-controller -o json \
+  | python -c 'import json,sys; d=json.load(sys.stdin); d.pop("status",None)
+[c.__setitem__("args",["--timeout=60s" if a.startswith("--timeout=") else a for a in c["args"]]) for c in d["spec"]["template"]["spec"]["containers"] if c["name"]=="csi-attacher"]
+print(json.dumps(d))' > /tmp/dep60.json
+kubectl --context admin@ai -n trident replace --dry-run=server -f /tmp/dep60.json -o jsonpath='{.spec.template.spec.containers[?(@.name=="csi-attacher")].args}'
+# expect --timeout=600s in the answer, and the live generation/resourceVersion unchanged.
+```
+
+**Why `failurePolicy: Ignore`.** With `Fail`, a Kyverno outage blocks every update of
+`trident-controller`, including the operator's own repair path. With `Ignore` the worst case is one
+un-mutated write during an outage — the post-check above catches it and the next operator write
+repairs it. The policy is admission-only (no `mutateExisting`), so installing it does NOT touch the
+live Deployment: the operator's next UPDATE (it re-applies on every start) is what gets mutated.
+
+**Operator interaction / rollback.** The operator's write carries 60s; admission turns it into 600s,
+which equals the stored object, so nothing is persisted and no ReplicaSet rolls. Rollback trigger:
+`resourceVersion` churn on `trident-controller`, a fresh ReplicaSet, or repeating update errors in the
+operator log → `kubectl --context admin@ai -n trident scale deploy trident-operator --replicas=0`,
+confirm the args are 600s, fix the policy, then scale back. Never delete the policy while the
+operator runs: the next reconcile restores 60s and every attach breaks again. Remove the policy only
+when a qnap-csi release exposes the sidecar timeout or fixes the per-LUN sweep.
+
+**Stale `tridenttransactions` wedge Trident's bootstrap.** After a controller restart,
+`csi-attacher` logs `CSI driver probe failed: Trident initialization failed; error attempting to
+clean up volume pvc-… from backend qts: Resource was not found` and NOTHING provisions or attaches
+until that one transaction is gone. The error names ONE transaction; it is stale only if ALL of
+these hold — `kubectl --context admin@ai -n trident get tridenttransaction <name> -o yaml` is an
+`addVolume` for a volume that has no PV, no PVC, no `tridentvolume`, and `qcli_iscsi -l` on the NAS
+shows no LUN of that name. Save the CR (`-o yaml > kubernetes/infra/_out/…`) before deleting it. A
+transaction whose volume still has a PV/PVC/`tridentvolume` or a LUN is NOT stale and must be left to
+Trident. Each failed provisioning retry also leaves an `addVolume` transaction behind
+("unable to process the preexisting transaction"); the same test applies.
+
+**Orphan PVs pending NAS cleanup** (`Released`, annotation `ailab.io/retain-reason`): their reclaim
+policy was flipped to `Retain` on 2026-09-27 because each failed delete re-queued a full sweep. They
+are ailab#880's scope (NAS-side LUN/target removal). Do not flip them back to `Delete` before that.
+
+**Recycling airlock sandboxes** (so a new pod picks up new resource defaults): never delete the
+pod; `scripts/airlock-recycle-sandbox.sh` runs airlock's own teardown → deploy with a tenant
+member's session and verifies the new pod.
+
 ## Open items this audit did NOT close
 
 | Gap | Why it is still open |

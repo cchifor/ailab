@@ -39,6 +39,18 @@ kubectl --context admin@ai get pods -A -l cnpg.io/instanceRole=primary -o wide
 # name") — for `cnpg` commands the --context goes AFTER:
 kubectl cnpg status strive-pg -n strive-ailab --context admin@ai           # needs the cnpg kubectl plugin
 kubectl cnpg promote strive-pg <replica-not-on-that-node> -n strive-ailab --context admin@ai
+# 1b. strive-pg runs REQUIRED per-hostname anti-affinity (platform cluster.yaml, since 2026-09-27):
+#     the instance evicted from this node stays Pending until the node is back — that is expected,
+#     and the reason to roll ONE CP at a time. Before the drain the cluster must be healthy and
+#     spread, or 2/3 does not hold:
+kubectl --context admin@ai -n strive-ailab get cluster strive-pg            # 3/3, "Cluster in healthy state"
+kubectl --context admin@ai -n strive-ailab get pods -l cnpg.io/cluster=strive-pg -o wide   # one per CP
+kubectl --context admin@ai -n strive-ailab get pdb                          # strive-pg ALLOWED DISRUPTIONS 1
+kubectl --context admin@ai -n strive-ailab exec <primary-pod> -c postgres -- \
+  psql -U postgres -Atc "select application_name, state, replay_lag from pg_stat_replication"  # 2 rows streaming, lag < 1s
+# 1c. Trident attach/detach takes 2–5 min per volume here (QNAP per-LUN sweep; runbook
+#     qnap-storage-setup.md §9) — a replaced instance needs up to ~8 min. Confirm the timeout policy
+#     is live before draining: `kubectl --context admin@ai get clusterpolicy trident-attacher-timeout`.
 
 # 2. know your alerting blind spot: if alertmanager/ntfy live on this node, pushes pause during the
 #    move — watch gatus (status.chifor.me) instead.
@@ -192,6 +204,11 @@ python scripts/node-ssh.py <host-ip> "pct status <ctid>"           # AI LXC runn
 kubectl --context admin@ai get pods -A | grep -vE 'Running|Completed'   # nothing stuck
 kubectl --context admin@ai get pdb -A                               # ALLOWED DISRUPTIONS back >0 (except *-primary: 0 by design)
 kubectl --context admin@ai get cluster -A 2>/dev/null               # CNPG: "Cluster in healthy state"
+# strive-pg specifically: all THREE instances back (the evicted one re-attaches its two volumes,
+# 2–5 min each) and both replicas streaming again before the next CP — required anti-affinity
+# means a still-Pending instance has nowhere else to go, so a second drain now would leave 1/3.
+kubectl --context admin@ai -n strive-ailab get pods -l cnpg.io/cluster=strive-pg -o wide   # 3 Running, one per CP
+kubectl --context admin@ai get volumeattachments | grep -vE 'true'  # nothing stuck detaching/attaching
 ```
 
 - gatus green (status.chifor.me); Prometheus targets up; `ha` PrometheusRule alerts resolved.

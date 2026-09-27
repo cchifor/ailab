@@ -1,0 +1,86 @@
+# Raise the QNAP Trident csi-attacher timeout from 60s to 600s — as GitOps state, not a hand patch.
+#
+# WHY THIS EXISTS (ailab#865, 2026-09-27): the QNAP CSI driver (qnap-csi v1.6.0) serves every
+# ControllerPublish/Unpublish with a full `Qvolume List` + one `Get Volume` per LUN (~2.5–3 s each;
+# each Get is one NAS `disk_manage.cgi` call that walks ALL volume labels, so a sweep is O(n²)). At
+# 45 LUNs a sweep is ≈110–135 s, above the sidecar's stock `--timeout=60s`, so every attach and
+# detach ended in `DeadlineExceeded` and the retries re-queued sweeps until the controller was
+# saturated (a publish observed at 5 min; two detaches stuck 3 h; strive-pg-11 could not join).
+#
+# WHY A MUTATE POLICY: the trident-controller Deployment is rendered by qnap-csi-operator from a
+# template inside its image. `TridentOrchestrator` exposes only debug/namespace/tridentImage and the
+# chart only the operator image, so there is no value to set — and the operator reverts a direct
+# patch within 30 s. Mutating the operator's own write at admission is the one place the value
+# sticks without pausing the operator.
+#
+# HOW IT WORKS: admission-time only (no mutateExisting → no extra RBAC for the background
+# controller; `background: false` disables scanning). Both loops iterate the ORIGINAL arrays, so
+# `elementIndex0/1` address the right container/argument; the JSON patch touches ONE path — every
+# other container (provisioner 600s, resizer/snapshotter 300s) and every other argument is left
+# byte-identical. Defined behaviour: no `args`, no `--timeout=` flag, or the two-token form
+# `--timeout 60s` → no match, no-op (the runbook post-check catches that); a duplicate flag → every
+# occurrence set; already 600s → identical output (idempotent).
+#
+# failurePolicy Ignore, deliberately: with Fail, a Kyverno outage would block every update of
+# trident-controller — including the operator's own repair path. With Ignore the worst case is one
+# un-mutated write during an outage, which the post-check catches and the next operator write repairs.
+#
+# TRIGGER: installing this policy does not touch the live Deployment; the operator's next UPDATE
+# (it re-applies on every start) is what gets mutated. Proof and rollback procedure:
+# docs/runbooks/qnap-storage-setup.md § "Attach/detach timeout".
+#
+# REMOVE WHEN a qnap-csi release exposes the sidecar timeout or fixes the per-LUN sweep.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: trident-attacher-timeout
+  annotations:
+    policies.kyverno.io/title: Trident csi-attacher timeout
+    policies.kyverno.io/category: storage
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Deployment
+    policies.kyverno.io/description: >-
+      Rewrites the csi-attacher sidecar's --timeout=<anything> to --timeout=600s on the
+      trident/trident-controller Deployment at admission, so the QNAP operator's rendered 60s
+      (too short for the driver's per-LUN sweep at 45+ LUNs) never reaches the cluster.
+  labels:
+    app.kubernetes.io/part-of: qnap-storage
+spec:
+  background: false
+  # Top-level spec.failurePolicy is deprecated since Kyverno 1.12; this is the current field, and the
+  # Ignore semantics are load-bearing (see the header), so it must not fall back to Fail on an upgrade.
+  webhookConfiguration:
+    failurePolicy: Ignore
+  rules:
+    - name: raise-csi-attacher-timeout
+      match:
+        any:
+          - resources:
+              kinds:
+                - apps/v1/Deployment
+              namespaces:
+                - trident
+              names:
+                - trident-controller
+      mutate:
+        foreach:
+          - list: request.object.spec.template.spec.containers
+            # A loop that nests another loop may hold nothing else (Kyverno: "a nested foreach
+            # cannot contain other declarations"), so the container-name check lives in the inner
+            # loop, where the outer element is reachable as `element0`.
+            foreach:
+              # `|| `[]`` keeps a container without `args` a clean skip instead of a rule error
+              # (the operator always renders args; this is for the fixtures and for safety).
+              - list: element.args || `[]`
+                preconditions:
+                  all:
+                    - key: "{{ element0.name }}"
+                      operator: Equals
+                      value: csi-attacher
+                    - key: "{{ starts_with(element, '--timeout=') }}"
+                      operator: Equals
+                      value: true
+                patchesJson6902: |-
+                  - op: replace
+                    path: /spec/template/spec/containers/{{elementIndex0}}/args/{{elementIndex1}}
+                    value: "--timeout=600s"
