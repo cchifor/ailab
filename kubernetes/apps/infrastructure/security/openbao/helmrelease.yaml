@@ -55,6 +55,16 @@ spec:
     csi:
       enabled: false
     server:
+      # RollingUpdate, not the chart's OnDelete default (2026-09-27). Under OnDelete a chart bump only
+      # writes a new StatefulSet revision and waits for someone to delete the pod: the 0.28.4 -> 0.29.4
+      # bump (6c59fd3e, 09-10, OpenBao 2.5.5 -> 2.6.2) sat un-rolled for 17 days, with
+      # KubeStatefulSetUpdateNotRolledOut firing and the provisioning Jobs already running the 2.6.2
+      # CLI against a 2.5.5 server — the exact skew that bump existed to remove. At replicas: 1 a
+      # rolling update IS "delete the pod": same downtime as a node drain (which this file already
+      # accepts — see disruptionBudget), and openbao-unsealer re-unseals the replacement. Revisit
+      # when growing to HA: with 3 raft peers, OnDelete + a manual standby-first roll is the safer
+      # choice, because RollingUpdate goes by ordinal and can take the active node first.
+      updateStrategyType: RollingUpdate
       # PIN the server SA name so the auth-delegator ClusterRoleBinding (provision-job.yaml) targets a
       # deterministic identity — OpenBao runs as this SA and uses its (auto-refreshed) token for TokenReview.
       serviceAccount:
