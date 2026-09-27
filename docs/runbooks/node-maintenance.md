@@ -51,6 +51,11 @@ kubectl --context admin@ai -n strive-ailab exec <primary-pod> -c postgres -- \
 # 1c. Trident attach/detach takes 2–5 min per volume here (QNAP per-LUN sweep; runbook
 #     qnap-storage-setup.md §9) — a replaced instance needs up to ~8 min. Confirm the timeout policy
 #     is live before draining: `kubectl --context admin@ai get clusterpolicy trident-attacher-timeout`.
+# 1d. BREAK-GLASS if a CP never comes back (hardware loss): with required anti-affinity the cluster
+#     runs 2/3 with ONE streaming replica until someone acts — flip `podAntiAffinityType` back to
+#     `preferred` (or lower `instances`) in platform deploy/components/cnpg-cluster/cluster.yaml,
+#     deliberately, so the third instance can double up on a survivor; flip it back once the node
+#     is replaced. Do not leave it at 2/3 "until the node is fixed".
 
 # 2. know your alerting blind spot: if alertmanager/ntfy live on this node, pushes pause during the
 #    move — watch gatus (status.chifor.me) instead.
