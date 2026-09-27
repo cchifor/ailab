@@ -19,10 +19,20 @@ spec:
   upgrade:
     crds: CreateReplace
   values:
-    # kube-proxy is off (Cilium). etcd metrics deferred (needs a careful per-node etcd restart).
-    # controller-manager + scheduler now bind 0.0.0.0 via the Talos machine-config, so scrape them.
+    # kube-proxy is off (Cilium). controller-manager + scheduler bind 0.0.0.0 via the Talos
+    # machine-config, so scrape them.
     kubeProxy: { enabled: false }
-    kubeEtcd: { enabled: false }
+    # etcd (#598, 2026-09-27): Talos `cluster.etcd.extraArgs.listen-metrics-urls` serves plain-HTTP
+    # /metrics + /health on each CP's NODE IP :2381 (kubernetes/infra/machine-config, rolled per CP
+    # with a reboot — etcd cannot be restarted via the Talos API). The client port stays mTLS-only.
+    # Wanted for the recurring "etcdserver: request timed out" leader-lease losses (csi-nfs,
+    # agent-sandbox, kube-controller-manager, kube-scheduler) that had no fsync/commit-latency data.
+    # Also enables the chart's etcd alert group (etcdHighFsyncDurations & co.).
+    kubeEtcd:
+      enabled: true
+      endpoints: ["192.168.0.41", "192.168.0.42", "192.168.0.43"]
+      service: { enabled: true, port: 2381, targetPort: 2381 }
+      serviceMonitor: { scheme: http }
     kubeControllerManager:
       enabled: true
       endpoints: ["192.168.0.41", "192.168.0.42", "192.168.0.43"]
