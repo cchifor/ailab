@@ -1,0 +1,30 @@
+# Velero resource policy: never fs-back-up emptyDir volumes. Referenced by BOTH schedules in
+# helmrelease.yaml (template.resourcePolicy). Velero validates the reference at backup creation, so
+# this ConfigMap must exist whenever a schedule names it — keep it in the same Kustomization.
+#
+# WHY (2026-09-27). With defaultVolumesToFsBackup: true every pod-mounted volume goes through Kopia,
+# emptyDirs included. The 09-27 daily ran 184 PodVolumeBackups and 141 of them were emptyDirs
+# (~1.1 GB: dsh tmp, flux source-controller cache, CNPG scratch-data, ...) — scratch space that is by
+# definition discarded when the pod goes, and that a restore should never resurrect. Worse, a
+# short-lived pod (the platform e2e/load persona seed Jobs, airlock-reaper) is often gone before its
+# turn comes, and that is what turned the 09-13, 09-21 and 09-27 dailies PartiallyFailed:
+# "error to expose PVB: error getting client pod ...: pods ... not found". A PartiallyFailed daily
+# also hides real failures behind a status that is always yellow. Skipping the volume TYPE fixes the
+# whole class in one place, including Jobs nobody has written yet, rather than annotating every
+# ephemeral pod in two repos.
+#
+# PVC-backed volumes are untouched: this matches volumeTypes: [emptyDir] only.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: velero-volume-policy
+  namespace: velero
+data:
+  volume-policy.yaml: |
+    version: v1
+    volumePolicies:
+      - conditions:
+          volumeTypes:
+            - emptyDir
+        action:
+          type: skip

@@ -1,0 +1,77 @@
+# `promtool test rules` fixtures for dev-workers-rules.yaml. Run by scripts/rules-lint.sh on every PR,
+# after `promtool check rules`. Covers DevWorkerSwapPressure's PSI gate (2026-09-27): swap occupancy
+# alone fired for 271h on an idle guest, so the rule now also needs memory stall time — and fails OPEN
+# when PSI is not exported, rather than going quiet.
+#
+# Swap: 4 GiB total; "3.9 GiB used" = SwapFree 0.1 GiB. PSI waiting_seconds_total is a counter of
+# stalled seconds: +18 per 1m sample = 30% stalled, +0.006 per 1m = 0.01% (dw1's measured idle rate).
+rule_files:
+  - dev-workers-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: full swap with the working set starving (PSI 30%) pages
+    input_series:
+      - series: 'node_memory_SwapTotal_bytes{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "4294967296x90"
+      - series: 'node_memory_SwapFree_bytes{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "107374182x90"
+      - series: 'node_pressure_memory_waiting_seconds_total{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "0+18x90"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DevWorkerSwapPressure
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: DevWorkerSwapPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.8:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.8:9100 using >50% of its swap"
+              description: >-
+                192.168.0.8:9100 is >50% into its 4 GiB safety-valve swap AND tasks have stalled on
+                memory >5% of the time (PSI) for >30m — the working set no longer fits. Same remedy as
+                DevWorkerLowMemory: host RAM headroom on the owning node, or stop what is resident.
+
+  # The 2026-09-15..27 shape: 97% swap held by idle pages, PSI ~0.01%. Must stay silent.
+  - interval: 1m
+    name: full swap holding stale idle pages (PSI ~0) does not page
+    input_series:
+      - series: 'node_memory_SwapTotal_bytes{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "4294967296x90"
+      - series: 'node_memory_SwapFree_bytes{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "107374182x90"
+      - series: 'node_pressure_memory_waiting_seconds_total{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "0+0.006x90"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: DevWorkerSwapPressure
+        exp_alerts: []
+
+  # Fail-open: no PSI series at all keeps the pre-2026-09-27 occupancy-only behaviour.
+  - interval: 1m
+    name: without PSI metrics the rule falls back to swap occupancy alone
+    input_series:
+      - series: 'node_memory_SwapTotal_bytes{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "4294967296x90"
+      - series: 'node_memory_SwapFree_bytes{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "107374182x90"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: DevWorkerSwapPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.9:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.9:9100 using >50% of its swap"
+              description: >-
+                192.168.0.9:9100 is >50% into its 4 GiB safety-valve swap AND tasks have stalled on
+                memory >5% of the time (PSI) for >30m — the working set no longer fits. Same remedy as
+                DevWorkerLowMemory: host RAM headroom on the owning node, or stop what is resident.

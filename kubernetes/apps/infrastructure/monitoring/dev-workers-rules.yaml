@@ -65,6 +65,9 @@ spec:
         # it. Now it needs the working set to actually be starving as well: tasks stalled on memory
         # >5% of wall time over 15m (measured 7d max: <=1.4% on the unstressed workers, 26.8% on dw2 and
         # 38.7% on dw1 in real pressure episodes). Sustained heavy paging is DevWorkerThrashing's job below.
+        # `unless ... <= 0.05`, not `and ... > 0.05`: FAIL-OPEN. A worker whose node_exporter stops
+        # exporting PSI (kernel without CONFIG_PSI, collector disabled) keeps the old occupancy-only
+        # behaviour instead of silently losing the alert.
         - alert: DevWorkerSwapPressure
           expr: |
             (
@@ -72,8 +75,8 @@ spec:
                 and (node_memory_SwapTotal_bytes{job="dev-worker-node"} - node_memory_SwapFree_bytes{job="dev-worker-node"})
                     / node_memory_SwapTotal_bytes{job="dev-worker-node"} > 0.5
             )
-            and on (instance)
-            rate(node_pressure_memory_waiting_seconds_total{job="dev-worker-node"}[15m]) > 0.05
+            unless on (instance)
+            rate(node_pressure_memory_waiting_seconds_total{job="dev-worker-node"}[15m]) <= 0.05
           for: 30m
           labels: { severity: warning }
           annotations:
