@@ -143,7 +143,8 @@ roll), and before anything else that touches `/openbao/data`. First taken 2026-0
 before the 2.6.2 roll; it is ~0.7 MB.
 
 ```sh
-OUT=kubernetes/infra/_out/openbao-raft-$(date -u +%Y%m%d)-<why>.snap   # _out/ is gitignored
+WHY=pre-upgrade   # a word saying why this snapshot exists
+OUT=kubernetes/infra/_out/openbao-raft-$(date -u +%Y%m%d)-$WHY.snap   # _out/ is gitignored
 umask 077
 kubectl --context admin@ai -n openbao get secret openbao-breakglass-token     -o jsonpath='{.data.root_token}' | base64 -d |
   MSYS_NO_PATHCONV=1 kubectl --context admin@ai -n openbao exec -i openbao-0 -c openbao -- sh -c '
