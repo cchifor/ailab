@@ -1,19 +1,12 @@
 # Implementation review — trident-attacher-timeout-and-cnpg-affinity — round 1
 
-<!-- codex-impl-review-status: pending -->
-
-## Summary
-
-- Critical issue found: The pod verification step uses a label selector for airlock.strive.io/app-id, but Airlock stores this as a pod annotation. Verification will timeout because no pods will match the selector.
-- The Kyverno policy structure is correct: nested foreach with proper elementIndex0/elementIndex1 indices, preconditions well-placed, failurePolicy Ignore as intended.
-- Token handling in the recycle script is correct: read securely, passed via curl --config stdin, never in argv/env, error bodies sanitized.
-- Mock test suite has good coverage (8 test cases covering both 202 and 200/204 contracts, auth failures, timeouts, resume path, token leak assertions).
-- Flux wiring is correct: storage-policies Kustomization properly depends on platform-kyverno.
-- Platform CNPG affinity block added correctly with proper header comment preservation.
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
 ### Pod label selector uses labels instead of annotations (CRITICAL)
+
+**Resolution (opus):** ACCEPTED and fixed in `66cd8fb9` — airlock labels the pod with `airlock.strive.io/tenant` and `sandbox-id` and carries `app-id` as an annotation (verified on a live pod); `find_pod()` now selects on the tenant label and filters the app-id annotation in jq; mock suite 8/8 after the change.
 
 **Location:** scripts/airlock-recycle-sandbox.sh:142, :181
 
