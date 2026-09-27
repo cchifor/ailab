@@ -56,6 +56,7 @@
       "description": "Digest-only bumps of MOVING tags never auto-merge. litellm tracks main-stable (it had moved 2.5 months when #898 opened) and text-embeddings tracks cpu-1.9; a digest bump on either is an unreviewed upgrade of a moving tag. #899 (2026-09-27) auto-merged a digest bump of a then-tagless TEI pin onto the CUDA `latest` build and took embeddings down for hours. The `no-automerge` label makes the PR reviewbot hold these for a human; tag/version changes are unaffected.",
       "matchPackageNames": ["ghcr.io/berriai/litellm", "ghcr.io/huggingface/text-embeddings-inference"],
       "matchUpdateTypes": ["digest"],
+      "automerge": false,
       "addLabels": ["no-automerge"]
     }
   ]
