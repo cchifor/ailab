@@ -1,0 +1,93 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "trident-controller",
+    "namespace": "trident"
+  },
+  "spec": {
+    "selector": {
+      "matchLabels": {
+        "app": "controller.csi.trident.qnap.io"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "controller.csi.trident.qnap.io"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "storage-api-server",
+            "image": "qnapsystem/qnap-csi-backend-qts-sidecar:v1.6.0",
+            "args": []
+          },
+          {
+            "name": "trident-main",
+            "image": "qnapsystem/qnap-csi:v1.6.0",
+            "args": [
+              "--crd_persistence",
+              "--k8s_pod",
+              "--https_rest",
+              "--https_port=8443",
+              "--csi_node_name=$(KUBE_NODE_NAME)",
+              "--csi_endpoint=$(CSI_ENDPOINT)",
+              "--csi_role=controller",
+              "--log_format=text",
+              "--log_level=debug",
+              "--log_workflows=",
+              "--log_layers=",
+              "--disable_audit_log=true",
+              "--address=127.0.0.1",
+              "--http_request_timeout=90s",
+              "--enable_force_detach=false",
+              "--metrics",
+              "-debug"
+            ]
+          },
+          {
+            "name": "csi-provisioner",
+            "image": "registry.k8s.io/sig-storage/csi-provisioner:v4.0.0",
+            "args": [
+              "--v=8",
+              "--timeout=600s",
+              "--csi-address=$(ADDRESS)",
+              "--retry-interval-start=8s",
+              "--retry-interval-max=30s"
+            ]
+          },
+          {
+            "name": "csi-attacher",
+            "image": "registry.k8s.io/sig-storage/csi-attacher:v4.5.0",
+            "args": [
+              "--v=8",
+              "--timeout=60s",
+              "--retry-interval-start=10s",
+              "--csi-address=$(ADDRESS)"
+            ]
+          },
+          {
+            "name": "csi-resizer",
+            "image": "registry.k8s.io/sig-storage/csi-resizer:v1.9.3",
+            "args": [
+              "--v=8",
+              "--timeout=300s",
+              "--csi-address=$(ADDRESS)"
+            ]
+          },
+          {
+            "name": "csi-snapshotter",
+            "image": "registry.k8s.io/sig-storage/csi-snapshotter:v6.3.3",
+            "args": [
+              "--v=8",
+              "--timeout=300s",
+              "--csi-address=$(ADDRESS)"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
