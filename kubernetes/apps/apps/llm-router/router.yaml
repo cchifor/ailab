@@ -152,12 +152,15 @@ spec:
             # server-registration (off until an administrator turns it on) rate-limits enrolment per real client
             # using cf-connecting-ip. That header is trustworthy here: ingress admits only the edge cloudflared
             # pods (NetworkPolicy below), and Cloudflare's edge sets/overwrites CF-Connecting-IP on every request,
-            # so a client cannot supply its own value through the tunnel.
+            # so a client cannot supply its own value through the tunnel. api-keys uses it the same way for the
+            # public agent access requests (/agent/v1/*: per-address limits), and publicUrl for the public skill
+            # (/agent/skill.md) and approved keys' replies: never the request's Host header.
             - name: ROUTER_PLUGIN_CONFIG
               value: >-
                 {"discovery-network":{"networks":["192.168.0.0/24"],"ports":[8080,8081,8082,18020,11434,1234,8000],
                 "servers":["http://192.168.0.28:18020","http://192.168.0.26:8080","http://192.168.0.45:8082","http://192.168.0.46:8082"]},
-                "server-registration":{"clientAddressHeader":"cf-connecting-ip"}}
+                "server-registration":{"clientAddressHeader":"cf-connecting-ip"},
+                "api-keys":{"publicUrl":"https://router.chifor.me","clientAddressHeader":"cf-connecting-ip"}}
           # Probe routes come from the router's kernel (packages/kernel/index.ts):
           # GET /health (liveness, {status:"ok"}) and GET /ready (200 when every
           # required plugin is active and storage answers, 503 otherwise).
@@ -197,13 +200,13 @@ spec:
                 - ALL
           volumeMounts:
             # One immutable release directory per rollout, built from one llm-router commit:
-            # router-0.1.0-20260927-emails = dsh/llm-router main@6a9843b (never rewritten in place;
+            # router-0.1.0-20260927-keys = dsh/llm-router main@cd5bea1 (never rewritten in place;
             # a new build gets a new directory). Swapping it replaces the pod safely: the
             # Deployment is `strategy: Recreate` and the SQLite volume (llm-router-data) is RWO
             # iSCSI, so the old pod has stopped before the new one opens the database.
             - name: releases
               mountPath: /app
-              subPath: router-0.1.0-20260927-emails
+              subPath: router-0.1.0-20260927-keys
               readOnly: true
             - name: data
               mountPath: /data # SQLite file + WAL/SHM sidecars
