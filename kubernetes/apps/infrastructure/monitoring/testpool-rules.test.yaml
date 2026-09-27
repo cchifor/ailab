@@ -79,3 +79,58 @@ tests:
       - eval_time: 24m
         alertname: TestpoolEnvTeardownStuckCritical
         exp_alerts: []
+
+  # ------------------------------------ TestpoolNoWarmCapacity: quiet while the pool is paused at 0
+  # 2026-09-27: #880 paused the pool (spec.replicas 0) and the alert fired for the whole pause. The
+  # three cases pin the gate: paused = silent, running-but-empty = fires, and the custom-resource
+  # metric missing = fires (fail-open — losing the KSM metric must not silence a drained pool).
+  - interval: 1m
+    name: a deliberately paused pool (spec 0) with no Ready env does not page
+    input_series:
+      - series: 'agentsandbox_warmpool_spec_replicas{exported_namespace="testpool", name="env-std-pool"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: TestpoolNoWarmCapacity
+        exp_alerts: []
+
+  - interval: 1m
+    name: a pool that should hold envs (spec > 0) but has none Ready pages after 30m
+    input_series:
+      - series: 'agentsandbox_warmpool_spec_replicas{exported_namespace="testpool", name="env-std-pool"}'
+        values: "2x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: TestpoolNoWarmCapacity
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: TestpoolNoWarmCapacity
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "testpool has had no Ready environment for 30m"
+              description: >-
+                Warm pool drained and not refilling (golden snapshot missing? fill failing under the
+                readiness grace? env node NotReady — the 2026-09-20 shape?). tep leases are queueing.
+                Check: kubectl -n testpool get sandboxwarmpools,sandboxes,pvc and the env node.
+                Runbook: docs/runbooks/env-pool.md.
+
+  - interval: 1m
+    name: with the pool spec metric absent the rule fails open and still pages
+    input_series:
+      - series: 'up{job="kube-state-metrics"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: TestpoolNoWarmCapacity
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "testpool has had no Ready environment for 30m"
+              description: >-
+                Warm pool drained and not refilling (golden snapshot missing? fill failing under the
+                readiness grace? env node NotReady — the 2026-09-20 shape?). tep leases are queueing.
+                Check: kubectl -n testpool get sandboxwarmpools,sandboxes,pvc and the env node.
+                Runbook: docs/runbooks/env-pool.md.
