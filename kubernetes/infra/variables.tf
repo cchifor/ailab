@@ -88,10 +88,19 @@ variable "control_planes" {
   # the VM — roll ONE node at a time (3-CP HA tolerates one down), graceful-stop via `talosctl shutdown`
   # (ACPI/`qm shutdown` does NOT stop Talos), and verify `talosctl etcd status` 3/3 in-sync between nodes.
   # See docs/runbooks/ai-host-setup.md.
+  #
+  # disk_gb 40 -> 80 (2026-09-27). /var (EPHEMERAL) was 38.6 GB with 20-27 GB of container images
+  # per CP; cp2/cp3 dipped below the kubelet's ~3.86 GB eviction threshold in the week before
+  # (DiskPressure), and 13 velero pods were evicted from cp1. local-lvm is thin with 0.57-1.28 TB
+  # free per host. Growing is one-way (a disk cannot shrink). Talos grows EPHEMERAL into the new
+  # space at BOOT, so the resize only lands after a reboot: roll one CP at a time — talosctl
+  # shutdown, `tofu apply -target='proxmox_virtual_environment_vm.cp["cpN"]'` (NOT the machine
+  # config resource first: it depends on ALL three VMs, so targeting it pulls every pending resize
+  # in), start, then check `talosctl get volumestatus EPHEMERAL` and etcd 3/3.
   default = {
-    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", host_ip = "192.168.0.2", storage_tier = "thunderbolt", cores = 8, memory = 24576, disk_gb = 40 }
-    cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", host_ip = "192.168.0.3", storage_tier = "thunderbolt", cores = 8, memory = 24576, disk_gb = 40 }
-    cp3 = { host_node = "ai-node3", vm_id = 4003, ip = "192.168.0.43", host_ip = "192.168.0.4", storage_tier = "ethernet", cores = 8, memory = 28672, disk_gb = 40 }
+    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", host_ip = "192.168.0.2", storage_tier = "thunderbolt", cores = 8, memory = 24576, disk_gb = 80 }
+    cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", host_ip = "192.168.0.3", storage_tier = "thunderbolt", cores = 8, memory = 24576, disk_gb = 80 }
+    cp3 = { host_node = "ai-node3", vm_id = 4003, ip = "192.168.0.43", host_ip = "192.168.0.4", storage_tier = "ethernet", cores = 8, memory = 28672, disk_gb = 80 }
   }
 }
 

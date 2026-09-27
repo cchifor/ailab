@@ -69,7 +69,17 @@ cluster:
     disabled: true
   # Expose controller-manager + scheduler metrics on the pod network (they bind 127.0.0.1 by
   # default) so kube-prometheus-stack can scrape them. Stateless static pods → safe restart.
-  # (followup #4; etcd metrics deferred — needs a careful per-node etcd restart.)
+  # (followup #4.)
+  #
+  # etcd metrics (2026-09-27, #598): etcd serves /metrics on its client port behind mTLS only, so
+  # nothing scraped it and the leader-lease timeouts ("etcdserver: request timed out") that restart
+  # csi-nfs, agent-sandbox, kube-controller-manager and kube-scheduler had no fsync / commit-latency
+  # evidence to diagnose them with. A plain-HTTP metrics listener on the NODE IP (not 0.0.0.0 — it
+  # is unauthenticated) serves /metrics and /health only, no keyspace. Changing etcd args restarts
+  # etcd on that node: apply ONE CP at a time and wait for `talosctl etcd status` 3/3 in-sync.
+  etcd:
+    extraArgs:
+      listen-metrics-urls: http://${node_ip}:2381
   controllerManager:
     extraArgs:
       bind-address: 0.0.0.0
