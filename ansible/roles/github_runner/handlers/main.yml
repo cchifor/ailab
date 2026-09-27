@@ -13,18 +13,24 @@
   ansible.builtin.command: docker buildx inspect default --bootstrap
   register: github_runner_buildkit_inspect
   changed_when: false
+  # In --check mode docker is not really restarted, so there is nothing to verify (and the skipped
+  # command would leave no stdout for the assert).
+  when: not ansible_check_mode
   listen: verify buildkit gc
 
 - name: Assert the configured build-cache cap is in effect
   ansible.builtin.assert:
+    # Compare number + unit letter on both sides: dockerd parses "10GB" with binary multipliers and
+    # buildx prints it as "10GiB"; "512MB" prints as "512MiB"; an already-binary "10GiB" matches too.
     that: >-
-      ("Max Used Space: " ~ (github_runner_builder_gc_max_used_space | regex_replace('GB$', 'GiB')))
-      in github_runner_buildkit_inspect.stdout
+      (github_runner_builder_gc_max_used_space | upper | regex_replace('I?B$', ''))
+      in (github_runner_buildkit_inspect.stdout | regex_findall('Max Used Space: *([0-9.]+[KMGT])i?B'))
     fail_msg: >-
       BuildKit did not adopt builder.gc.defaultMaxUsedSpace={{ github_runner_builder_gc_max_used_space }}
       (dockerd drops unknown keys without an error). `docker buildx inspect default --bootstrap` shows:
       {{ github_runner_buildkit_inspect.stdout_lines | select('search', 'Space') | list }}
     quiet: true
+  when: not ansible_check_mode
   listen: verify buildkit gc
 
 - name: Restart github-runner
