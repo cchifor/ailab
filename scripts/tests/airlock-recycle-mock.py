@@ -31,7 +31,8 @@ API = "/api/airlock/v1"
 class State:
     def __init__(self, scenario):
         self.scenario = scenario
-        self.sandbox = "RUNNING"
+        # post-teardown state for the resume scenarios: the sandbox is gone, the App row stays ACTIVE
+        self.sandbox = None if scenario.startswith("resume-") else "RUNNING"
         self.ops = {}
         self.calls = []          # (method, path, has_auth)
         self.token_leak = False
@@ -71,7 +72,8 @@ def make_handler(state: State):
         def do_GET(self):
             ok = self._record()
             if state.scenario == "auth-before" or not ok:
-                return self._send(401, {"detail": "not authenticated"})
+                # echo the header back: the script must never print it un-redacted
+                return self._send(401, {"detail": "not authenticated", "echo": self.headers.get("Authorization", "")})
             if self.path.startswith(f"{API}/apps/"):
                 return self._send(200, self._app(self.path.rsplit("/", 1)[1]))
             if self.path.startswith(f"{API}/app-operations/"):
@@ -149,7 +151,9 @@ CASES = [
     ("auth-after", (), 5, ["preflight", "teardown", "deploy"], []),
     ("teardown-fails", (), 4, ["preflight", "teardown"], ["/deploy"]),
     ("deploy-timeout", (), 5, ["preflight", "teardown", "deploy"], []),
-    ("happy-202", ("--resume-deploy",), 0, ["preflight", "teardown-skipped", "deploy"], ["/teardown"]),
+    ("resume-after-teardown", ("--resume-deploy",), 0, ["preflight", "teardown-skipped", "deploy"], ["/teardown"]),
+    # resume while the sandbox is still RUNNING must refuse before any write
+    ("happy-202", ("--resume-deploy",), 3, ["preflight"], ["/teardown", "/deploy"]),
 ]
 
 

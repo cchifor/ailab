@@ -87,7 +87,17 @@ api() {
   [ $rc -eq 0 ] || { say "curl failed (exit $rc) on $method $path"; return $rc; }
   printf '%s' "$code"
 }
-show_error() { say "$1: HTTP $2 $(jq -c 'del(.token) | .' "$BODY" 2>/dev/null | cut -c1-300 || cut -c1-300 "$BODY")"; }
+# redact: the exact token (literal split/join, not a regex) and any "Bearer <…>" — the token reaches
+# jq through ITS environment only (never argv); jq is a short-lived child of this shell.
+redact() { AIRLOCK_TOKEN_REDACT="$TOKEN" jq -Rr 'split(env.AIRLOCK_TOKEN_REDACT) | join("<redacted>") | gsub("Bearer [A-Za-z0-9._~+/=-]+"; "Bearer <redacted>")'; }
+# show_error LABEL CODE: prints only selected, redacted diagnostics; a non-JSON body (an edge error
+# page) is shown as redacted text, never the raw response.
+show_error() {
+  local msg
+  msg=$( (jq -r '[.detail, .message, .error.message, .error.code] | map(select(. != null) | tostring) | join(" | ")' "$BODY" 2>/dev/null || cat "$BODY") | tr -d '
+' | cut -c1-300 | redact)
+  say "$1: HTTP $2 ${msg:-<no body>}"
+}
 
 # poll_operation OP_ID -> 0 on succeeded, 1 otherwise
 poll_operation() {
@@ -99,7 +109,7 @@ poll_operation() {
     say "  operation $op: $status ($(jq -r '.phase // ""' "$BODY"))"
     case "$status" in
       succeeded) return 0 ;;
-      failed|needs_attention) say "  error: $(jq -c '.error // {}' "$BODY" | cut -c1-300)"; return 1 ;;
+      failed|needs_attention) say "  error: $(jq -r '[.error.code, .error.message] | map(select(. != null) | tostring) | join(": ")' "$BODY" 2>/dev/null | cut -c1-300 | redact)"; return 1 ;;
     esac
     [ $SECONDS -lt $deadline ] || { say "  timed out after ${POLL_TIMEOUT}s"; return 1; }
     sleep "$INTERVAL"
@@ -136,17 +146,24 @@ got_tenant=$(jq -r '.tenant_id // ""' "$BODY")
 [ "$got_tenant" = "$TENANT" ] || { say "app $APP belongs to tenant '$got_tenant', expected '$TENANT' — refusing"; exit 3; }
 app_status=$(jq -r '.status // ""' "$BODY"); sbx_status=$(jq -r '.sandbox.status // "none"' "$BODY")
 say "app $APP tenant ok; status=$app_status sandbox=$sbx_status lifecycle=$(jq -r '.lifecycle_mode // ""' "$BODY")"
+# The App row stays ACTIVE across teardown/deploy (ARCHIVED/DELETING/… are different lifecycles);
+# the SANDBOX state is what teardown changes. Resume is only valid once teardown has completed.
 [ "$app_status" = ACTIVE ] || { say "app is $app_status, not ACTIVE — refusing"; exit 3; }
+if [ "$RESUME" = 1 ]; then
+  case "$sbx_status" in
+    none|STOPPED|FAILED) ;;
+    *) say "--resume-deploy requires a torn-down sandbox (none/STOPPED/FAILED); it is $sbx_status — run without --resume-deploy, or wait for the teardown to finish. Nothing was changed"; exit 3 ;;
+  esac
+fi
 # airlock LABELS its pods with airlock.strive.io/tenant and airlock.strive.io/sandbox-id (a new value
 # per deploy) and carries the app id as an ANNOTATION, so: label selector on the tenant, then filter
 # the app id in jq. Prints the pod object or nothing.
-find_pod() {
-  kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" get pods -l "airlock.strive.io/tenant=$TENANT" -o json 2>/dev/null \
-    | jq --arg app "$APP" '[.items[] | select(.metadata.annotations["airlock.strive.io/app-id"] == $app)] | first // empty'
+find_pods() {
+  kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" get pods -l "airlock.strive.io/tenant=$TENANT" -o json 2>/dev/null     | jq --arg app "$APP" '[.items[] | select(.metadata.annotations["airlock.strive.io/app-id"] == $app)]'
 }
 old_uid=""
 if [ "$SKIP_KUBE" = 0 ]; then
-  old_uid=$(find_pod | jq -r '.metadata.uid // ""')
+  old_uid=$(find_pods | jq -r 'sort_by(.metadata.creationTimestamp) | last | .metadata.uid // ""')
   say "current pod uid: ${old_uid:-none}"
 fi
 
@@ -184,7 +201,8 @@ phase verify
 [ "$SKIP_KUBE" = 1 ] && { say "kube verify skipped"; exit 0; }
 deadline=$((SECONDS + POLL_TIMEOUT))
 while :; do
-  pod_json=$(find_pod)
+  # newest pod for this app that is not the pre-recycle one (the old pod may linger Terminating)
+  pod_json=$(find_pods | jq --arg old "$old_uid" '[.[] | select(.metadata.uid != $old)] | sort_by(.metadata.creationTimestamp) | last // empty')
   new_uid=$(printf '%s' "${pod_json:-null}" | jq -r '.metadata.uid // ""')
   ready=$(printf '%s' "${pod_json:-null}" | jq -r '[.status.conditions[]? | select(.type=="Ready") | .status] | first // "Unknown"')
   if [ -n "$new_uid" ] && [ "$new_uid" != "$old_uid" ] && [ "$ready" = True ]; then break; fi

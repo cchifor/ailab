@@ -47,7 +47,10 @@ metadata:
     app.kubernetes.io/part-of: qnap-storage
 spec:
   background: false
-  failurePolicy: Ignore
+  # Top-level spec.failurePolicy is deprecated since Kyverno 1.12; this is the current field, and the
+  # Ignore semantics are load-bearing (see the header), so it must not fall back to Fail on an upgrade.
+  webhookConfiguration:
+    failurePolicy: Ignore
   rules:
     - name: raise-csi-attacher-timeout
       match:
