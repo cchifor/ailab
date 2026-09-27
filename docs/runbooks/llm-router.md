@@ -72,3 +72,27 @@ curl -s -o /dev/null -w '%{http_code}\n' https://router.chifor.me/admin/v1/confi
 Pre-exposure checks passed inside the running pod: `/health`, `/ready` and SPA return 200; unauthenticated config/models return 401; authenticated Responses works with the offline `demo` model. Backend tests: 103; browser tests: 13; compiled production smoke and dependency audit passed before staging.
 
 For backup, use SQLite's online backup API or stop the singleton and copy a consistent database together with any WAL; do not copy only a live `.sqlite` file. Retain the release archive and authentication Secret separately. The data PVC's storage class uses Retain, but neither that nor this manifest proves an offsite restore drill. Single-authority availability and live subscription integration remain explicit limitations of the first implementation.
+
+
+### One-shot network preflight for the admin bridge
+
+AILab#901 adds `router-network-preflight-20260927` before the pending bridge
+rollout in #900. It resolves cluster DNS and the npm registry, verifies HTTPS,
+and downloads a bounded pnpm 10.32.1 archive checked against its pinned SHA-512.
+It does not execute registry code. A distinct `app: llm-router-preflight` label
+excludes the router Service; the existing NetworkPolicy selects both app labels
+so the same DNS/public-HTTPS rules apply. No RBAC, credentials or data volumes
+are added. The failing readiness probe is an additional endpoint safeguard.
+
+An authorized operator records `kubectl -n llm-router logs
+job/router-network-preflight-20260927` (the final JSON must say `result: passed`).
+After recording the result, remove the Job, its kustomization resource and the
+extra NetworkPolicy selector value through a cleanup PR; this is a one-shot
+release gate, not a permanent workload. The bridge rollout's staging cleanup may
+include that removal. If the bridge rollout is postponed, clean this canary up
+separately after preserving the result in the release record.
+
+The canary allows two pod retries within its 180-second overall deadline for
+transient DNS/registry failures. If all attempts fail, preserve the failure result;
+correct the cause and create a new versioned Job name in GitOps for another run.
+Do not delete failed evidence or bypass the rollout gate.

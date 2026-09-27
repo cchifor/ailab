@@ -12,3 +12,4 @@ kind: Kustomization
 #   * The "edge" namespace label and the Cloudflare tunnel in edge-connector.
 resources:
   - router.yaml
+  - network-preflight.yaml

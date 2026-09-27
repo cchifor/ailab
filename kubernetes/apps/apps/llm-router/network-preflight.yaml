@@ -1,0 +1,67 @@
+# One-shot connectivity check requested by the review of AILab#900.
+# Same NetworkPolicy object and runtime image as the router. No credentials,
+# data mounts, listening ports, service account token or changes to the router.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: router-network-preflight-20260927
+  namespace: llm-router
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        app: llm-router-preflight
+        app.kubernetes.io/component: network-preflight
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      tolerations:
+        - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: network-preflight
+          image: docker.io/library/node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+          command: [sh, -ec]
+          args:
+            - |
+              node --input-type=module <<'JS'
+              import {lookup} from 'node:dns/promises';
+              import {createHash} from 'node:crypto';
+              import assert from 'node:assert/strict';
+              await lookup('kubernetes.default.svc.cluster.local');
+              await lookup('registry.npmjs.org');
+              const r=await fetch('https://registry.npmjs.org/pnpm/10.32.1',{redirect:'error',signal:AbortSignal.timeout(20000)});
+              assert.equal(r.status,200);assert.equal((await r.json()).version,'10.32.1');
+              const archive=await fetch('https://registry.npmjs.org/pnpm/-/pnpm-10.32.1.tgz',{redirect:'error',signal:AbortSignal.timeout(30000)});
+              assert.equal(archive.status,200);
+              const hash=createHash('sha512');let bytes=0;
+              for await(const chunk of archive.body) {bytes+=chunk.length;assert(bytes<=8*1024*1024);hash.update(chunk);}
+              assert.equal(hash.digest('base64'),'pwaTjw6JrBRWtlY+q07fHR+vM2jRGR/FxZeQ6W3JGORFarLmfWE94QQ9LoyB+HMD5rQNT/7KnfFe8a1Wc0jyvg==');
+              console.log(JSON.stringify({cluster_dns:true,registry_dns:true,registry_https:true,pnpm_archive_integrity:true,result:'passed'}));
+              JS
+          # Stay unready throughout: never become a public Service endpoint.
+          # No port named "http" is declared or listened on, either.
+          readinessProbe:
+            exec: {command: [sh, -c, 'exit 1']}
+            periodSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: '1', memory: 256Mi}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+          terminationMessagePolicy: FallbackToLogsOnError
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
