@@ -94,8 +94,8 @@ redact() { AIRLOCK_TOKEN_REDACT="$TOKEN" jq -Rr 'split(env.AIRLOCK_TOKEN_REDACT)
 # page) is shown as redacted text, never the raw response.
 show_error() {
   local msg
-  msg=$( (jq -r '[.detail, .message, .error.message, .error.code] | map(select(. != null) | tostring) | join(" | ")' "$BODY" 2>/dev/null || cat "$BODY") | tr -d '
-' | cut -c1-300 | redact)
+  # redact BEFORE truncating: a token straddling the cut would otherwise leave an unmatched prefix
+  msg=$( (jq -r '[.detail, .message, .error.message, .error.code] | map(select(. != null) | tostring) | join(" | ")' "$BODY" 2>/dev/null || cat "$BODY") | tr -d '\r\n' | redact | cut -c1-300)
   say "$1: HTTP $2 ${msg:-<no body>}"
 }
 
@@ -109,7 +109,7 @@ poll_operation() {
     say "  operation $op: $status ($(jq -r '.phase // ""' "$BODY"))"
     case "$status" in
       succeeded) return 0 ;;
-      failed|needs_attention) say "  error: $(jq -r '[.error.code, .error.message] | map(select(. != null) | tostring) | join(": ")' "$BODY" 2>/dev/null | cut -c1-300 | redact)"; return 1 ;;
+      failed|needs_attention) say "  error: $(jq -r '[.error.code, .error.message] | map(select(. != null) | tostring) | join(": ")' "$BODY" 2>/dev/null | tr -d '\r\n' | redact | cut -c1-300)"; return 1 ;;
     esac
     [ $SECONDS -lt $deadline ] || { say "  timed out after ${POLL_TIMEOUT}s"; return 1; }
     sleep "$INTERVAL"

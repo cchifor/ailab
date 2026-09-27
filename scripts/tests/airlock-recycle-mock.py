@@ -23,7 +23,8 @@ SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "airlock-recycle-sandbox.
 # (usr/bin/bash.exe, not the bin/bash.exe launcher wrapper, which does not pass extra fds through)
 BASH = next((b for b in (r"C:/Program Files/Git/usr/bin/bash.exe", r"C:/Program Files/Git/bin/bash.exe")
              if os.path.exists(b)), "bash")
-TOKEN = "tok-SECRET-9f3e"
+# long enough that, echoed after ~290 chars of padding, it straddles the script's 300-char cut
+TOKEN = "tok-SECRET-" + "9f3e" * 40
 TENANT = "dbe45925-7400-4157-ba89-2968bbe018b3"
 API = "/api/airlock/v1"
 
@@ -73,7 +74,8 @@ def make_handler(state: State):
             ok = self._record()
             if state.scenario == "auth-before" or not ok:
                 # echo the header back: the script must never print it un-redacted
-                return self._send(401, {"detail": "not authenticated", "echo": self.headers.get("Authorization", "")})
+                pad = "x" * 290  # pushes the echoed token across the 300-char truncation boundary
+                return self._send(401, {"detail": pad + " " + self.headers.get("Authorization", "")})
             if self.path.startswith(f"{API}/apps/"):
                 return self._send(200, self._app(self.path.rsplit("/", 1)[1]))
             if self.path.startswith(f"{API}/app-operations/"):
@@ -176,8 +178,8 @@ def main() -> int:
             problems.append("token appeared outside the Authorization header")
         if any(not ok for (_, _, ok) in st.calls) and scenario not in ("auth-before", "auth-after"):
             problems.append("a request arrived without the bearer")
-        if TOKEN in p.stdout or TOKEN in p.stderr:
-            problems.append("token printed by the script")
+        if TOKEN in p.stdout or TOKEN in p.stderr or TOKEN[:24] in p.stdout or TOKEN[:24] in p.stderr:
+            problems.append("token (or a prefix of it) printed by the script")
         label = f"{scenario} {' '.join(extra)}".strip()
         if problems:
             failed += 1
