@@ -64,6 +64,16 @@ jobs:
           set -euo pipefail
           python3 scripts/check-inline-hashes.py
 
+      # The agentforge pin-pr job runs this SAME guard over all of ailab and refuses to pin while
+      # any Flux-managed Job lacks the immutable-field force annotation. Four such Jobs merged on
+      # 09-25..27 (trueswarm bootstraps, llm-router preflight) and every agentforge image since was
+      # built but never pinned — the conductor fix sat undeployed. Fail here, at the PR that adds
+      # the Job, instead of there, days later, in another repo's CI.
+      # Single source of truth: report_job_force_annotations() in scripts/pin-image-digests.py,
+      # the same function (and output) agentforge's pin-pr runs.
+      - name: Flux-managed Jobs carry kustomize.toolkit.fluxcd.io/force (the pin-pr guard)
+        run: python3 scripts/pin-image-digests.py --check-job-force-annotations
+
       - name: Local embedding serving and route contracts
         run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes scripts.tests.test_ready_watchdog scripts.tests.test_env_pool_soak
 

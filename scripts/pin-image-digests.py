@@ -146,6 +146,17 @@ def main(argv: list[str]) -> int:
 
     # Immutable-Job wedge guard (see header near JOB_KIND_RE). Fail the pin rather than let a
     # Flux-applied Job without the force annotation reach main and wedge its whole layer.
+    if report_job_force_annotations():
+        rc = 1
+
+    print(f"\n{'DRY-RUN — no writes. ' if dry else ''}{len(changed_files)} file(s) touched.")
+    return rc
+
+
+def report_job_force_annotations() -> bool:
+    """Print the force-annotation guard's verdict; True when it FAILS. Shared by the pin run above
+    and the `--check-job-force-annotations` mode that ailab's own manifests workflow runs, so both
+    report the identical `[FAIL] Flux-managed Job(s) missing ...` block."""
     violations = check_job_force_annotations()
     if violations:
         print('\n[FAIL] Flux-managed Job(s) missing `kustomize.toolkit.fluxcd.io/force: "enabled"`:')
@@ -157,13 +168,13 @@ def main(argv: list[str]) -> int:
             "  Add the annotation under metadata.annotations, or keep the Job out of\n"
             "  kustomization.yaml if it is meant to be an operator-run one-shot."
         )
-        rc = 1
-    else:
-        print("\n[ OK ] all Flux-managed Jobs carry the immutable-field force annotation")
-
-    print(f"\n{'DRY-RUN — no writes. ' if dry else ''}{len(changed_files)} file(s) touched.")
-    return rc
+        return True
+    print("\n[ OK ] all Flux-managed Jobs carry the immutable-field force annotation")
+    return False
 
 
 if __name__ == "__main__":
+    # Guard-only mode for ailab's manifests workflow: no pins, no writes.
+    if sys.argv[1:] == ["--check-job-force-annotations"]:
+        raise SystemExit(1 if report_job_force_annotations() else 0)
     raise SystemExit(main(sys.argv[1:]))
