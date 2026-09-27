@@ -137,10 +137,16 @@ got_tenant=$(jq -r '.tenant_id // ""' "$BODY")
 app_status=$(jq -r '.status // ""' "$BODY"); sbx_status=$(jq -r '.sandbox.status // "none"' "$BODY")
 say "app $APP tenant ok; status=$app_status sandbox=$sbx_status lifecycle=$(jq -r '.lifecycle_mode // ""' "$BODY")"
 [ "$app_status" = ACTIVE ] || { say "app is $app_status, not ACTIVE — refusing"; exit 3; }
+# airlock LABELS its pods with airlock.strive.io/tenant and airlock.strive.io/sandbox-id (a new value
+# per deploy) and carries the app id as an ANNOTATION, so: label selector on the tenant, then filter
+# the app id in jq. Prints the pod object or nothing.
+find_pod() {
+  kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" get pods -l "airlock.strive.io/tenant=$TENANT" -o json 2>/dev/null \
+    | jq --arg app "$APP" '[.items[] | select(.metadata.annotations["airlock.strive.io/app-id"] == $app)] | first // empty'
+}
 old_uid=""
 if [ "$SKIP_KUBE" = 0 ]; then
-  old_uid=$(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" get pod -l "airlock.strive.io/app-id=$APP" \
-    -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || true)
+  old_uid=$(find_pod | jq -r '.metadata.uid // ""')
   say "current pod uid: ${old_uid:-none}"
 fi
 
@@ -178,13 +184,13 @@ phase verify
 [ "$SKIP_KUBE" = 1 ] && { say "kube verify skipped"; exit 0; }
 deadline=$((SECONDS + POLL_TIMEOUT))
 while :; do
-  pod_json=$(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" get pod -l "airlock.strive.io/app-id=$APP" -o json 2>/dev/null || echo '{"items":[]}')
-  new_uid=$(printf '%s' "$pod_json" | jq -r '.items[0].metadata.uid // ""')
-  ready=$(printf '%s' "$pod_json" | jq -r '[.items[0].status.conditions[]? | select(.type=="Ready") | .status] | first // "Unknown"')
+  pod_json=$(find_pod)
+  new_uid=$(printf '%s' "${pod_json:-null}" | jq -r '.metadata.uid // ""')
+  ready=$(printf '%s' "${pod_json:-null}" | jq -r '[.status.conditions[]? | select(.type=="Ready") | .status] | first // "Unknown"')
   if [ -n "$new_uid" ] && [ "$new_uid" != "$old_uid" ] && [ "$ready" = True ]; then break; fi
   [ $SECONDS -lt $deadline ] || { say "no new Ready pod for $APP within ${POLL_TIMEOUT}s (uid=$new_uid ready=$ready)"; exit 7; }
   sleep "$INTERVAL"
 done
-printf '%s' "$pod_json" | jq -r '.items[0] | "pod \(.metadata.name) uid \(.metadata.uid) node \(.spec.nodeName) qos \(.status.qosClass)",
+printf '%s' "$pod_json" | jq -r '"pod \(.metadata.name) uid \(.metadata.uid) node \(.spec.nodeName) qos \(.status.qosClass)",
   (.spec.containers[] | "  container \(.name): requests \(.resources.requests // {} | tojson) limits \(.resources.limits // {} | tojson)")'
 phase finished
