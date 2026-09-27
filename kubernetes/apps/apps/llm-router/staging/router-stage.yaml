@@ -18,7 +18,8 @@ spec:
   restartPolicy: Never
   automountServiceAccountToken: false
   # Wherever the router runs (a fixed node went stale when the router moved; the RWO volume then blocks one of the two
-  # pods: this one in ContainerCreating, or, if this one got there first, the router's next rollout).
+  # pods: this one in ContainerCreating, or, if this one got there first, the router's next rollout). Scheduling-time
+  # only; with no router pod running this stays Pending (see the runbook).
   affinity:
     podAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
