@@ -17,8 +17,13 @@ metadata:
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
-  nodeSelector:
-    kubernetes.io/hostname: talos-agent-node-2
+  # Wherever the router runs (a fixed node went stale when the router moved; the RWO volume then blocks one of the two
+  # pods: this one in ContainerCreating, or, if this one got there first, the router's next rollout).
+  affinity:
+    podAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector: {matchLabels: {app: llm-router}}
+          topologyKey: kubernetes.io/hostname
   tolerations:
     - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
   securityContext:
