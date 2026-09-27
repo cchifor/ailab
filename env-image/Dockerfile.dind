@@ -2,5 +2,5 @@
 # Upstream docker:dind + the guest-side storage tooling baked (kills the runtime `apk add`
 # observed at ~3 s/lease in the spikes). Everything else about the dind container (block mount,
 # iptables-legacy entrypoint wrapper, overlay2 assertion) stays in the SandboxTemplate args.
-FROM docker.io/library/docker:29.8-dind@sha256:76cd6bbc3ab600fced21a7e1bea77ac00cb7c545eb95d5767e4ec4ffbcb242dc
+FROM docker.io/library/docker:29.8-dind@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0
 RUN apk add --no-cache e2fsprogs
