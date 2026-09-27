@@ -23,9 +23,16 @@
 # CANNOT attach from different nodes. The CronJob is pinned to the holder's node with podAffinity
 # rather than hoping the scheduler agrees.
 ---
-# Adopts the PVC created by hand on 2026-09-08. Declared with the SAME name, size and class so
-# Flux takes ownership of the existing bound volume instead of provisioning a second one — the
-# existing generation must survive this becoming GitOps-managed.
+# Adopts the PVC created by hand on 2026-09-08. Declared with the SAME name and class so Flux takes
+# ownership of the existing bound volume instead of provisioning a second one — the existing
+# generation must survive this becoming GitOps-managed.
+#
+# 30Gi -> 40Gi (2026-09-27): the volume reached 88% (KubePersistentVolumeFillingUp) with 7
+# generations at 2.2-2.5 GB each and growing with the Gitea database, which leaves less than one
+# generation of slack once a failed run's staging directory is on disk. qnap-iscsi has
+# allowVolumeExpansion: true (the strive-pg WAL volumes went 5Gi -> 10Gi the same way). Grow rather
+# than delete: the QNAP LUNs are thin and do not UNMAP-reclaim, so freed blocks never come back
+# to the pool anyway. Expansion is one-way — never lower this number.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -43,7 +50,7 @@ spec:
   storageClassName: qnap-iscsi
   resources:
     requests:
-      storage: 30Gi
+      storage: 40Gi
 ---
 # Keeps postgres-dumps mounted so Velero's fs-backup can capture it. It does nothing else, and is
 # deliberately given nothing else: no database credential, no cloud credential, no service-account
@@ -64,9 +71,9 @@ spec:
   # the writer still holds the RWO attachment on its node, so the new holder can be unschedulable
   # until that Job ends. `progressDeadlineSeconds` below bounds how long that can look like a
   # failing rollout rather than hanging indefinitely, and the dump's own activeDeadlineSeconds
-  # (5400) bounds the writer. The window is narrow — the holder only moves on node drain or an image
+  # (10800) bounds the writer. The window is narrow — the holder only moves on node drain or an image
   # change — but it is real, and the honest mitigation is bounding it rather than claiming it cannot
-  # happen. Drain the node outside 01:30-03:00, or scale the holder to 0 first.
+  # happen. Drain the node outside 00:00-03:00, or scale the holder to 0 first.
   progressDeadlineSeconds: 900
   strategy:
     type: Recreate
@@ -115,10 +122,16 @@ metadata:
   name: infra-pg-dump
   namespace: databases
 spec:
-  # 01:30, ahead of Velero's 02:00 daily so the night's dump is on disk before the backup that must
+  # 00:00, ahead of Velero's 02:00 daily so the night's dump is on disk before the backup that must
   # capture it runs. Ordering matters more than spindle contention here: a dump written after the
   # backup is a dump that waits 24h for protection.
-  schedule: "30 1 * * *"
+  #
+  # Moved from 01:30 on 2026-09-27. Runs took 67-69 min on 09-24..26 (the Gitea database is ~12 GB,
+  # mostly Actions tables), so an 01:30 start ran INTO the 02:00 backup, which reads both infra-pg
+  # volumes and this one from the same QNAP. The 09-27 run was still writing gitea.dump at 03:00
+  # and hit the 90-min deadline — no dump that night. 00:00 gives the current run-time a 2h runway
+  # before the backup starts.
+  schedule: "0 0 * * *"
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 3600
   successfulJobsHistoryLimit: 3
@@ -126,11 +139,20 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 1
-      activeDeadlineSeconds: 5400
+      # 3h (was 1.5h). A slow night must be able to finish rather than be killed at 90 min and leave
+      # nothing — 2026-09-27 is that failure. The staging sweep below (>8h) must stay strictly longer
+      # than this, or the sweep could delete a LIVE writer's staging directory.
+      activeDeadlineSeconds: 10800
       template:
         metadata:
           labels:
             app.kubernetes.io/name: infra-pg-dump
+          annotations:
+            # Velero fs-backup must NOT try to capture `dumps` through this pod: it is gone within
+            # minutes of finishing, and the 09-21/09-23 daily backups went PartiallyFailed on
+            # exactly that ("error getting client pod ... not found"). postgres-dumps-holder mounts
+            # the same claim for the whole day and is what Velero backs it up through.
+            backup.velero.io/backup-volumes-excludes: dumps
         spec:
           restartPolicy: Never
           automountServiceAccountToken: false
@@ -184,10 +206,14 @@ spec:
                   # Sweep abandoned staging FIRST, before the space check. Doing it after publication
                   # (the original order) meant that once interrupted runs had eaten the free space,
                   # every subsequent run failed at the space check and never reached the sweep —
-                  # a wedge that repairs itself only by hand. >6h old cannot be a live writer:
-                  # activeDeadlineSeconds is 5400 (1.5h) and concurrencyPolicy is Forbid.
-                  find /dumps -maxdepth 1 -name '.staging-*' -type d -mmin +360 \
-                    -exec rm -rf {} + 2>/dev/null
+                  # a wedge that repairs itself only by hand. >8h old cannot be a live writer:
+                  # activeDeadlineSeconds is 10800 (3h) and concurrencyPolicy is Forbid.
+                  # `.partial-*` too: that is the naming of the hand-run 2026-09-08 Jobs, whose two
+                  # abandoned directories held 2.5 GB for three weeks because only `.staging-*` was
+                  # ever swept. Neither prefix can be a published generation (those are bare
+                  # timestamps with a COMPLETE marker), so sweeping both is safe.
+                  find /dumps -maxdepth 1 \( -name '.staging-*' -o -name '.partial-*' \) -type d \
+                    -mmin +480 -exec rm -rf {} + 2>/dev/null
 
                   # Free space BEFORE starting: a partial generation that fills the volume would
                   # also block the next one, and pruning first would destroy the last good copy.
