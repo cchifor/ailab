@@ -70,7 +70,10 @@ github_runner_tasks_max: 16384
 # `dockerd --validate` still printed "configuration OK" (it does not reject unknown keys), and every
 # runner ran BuildKit's disk-proportional default (MaxUsedSpace ~86GiB) — 20-70 GB of cache fleet-wide
 # and CIRunnerBuildCacheHigh firing. `--validate` is NOT evidence; the proof is
-# `docker buildx inspect default --bootstrap` showing "Max Used Space: 10GiB" in the GC policy.
+# `docker buildx inspect default --bootstrap` showing "Max Used Space: 10GiB" in the GC policy —
+# which the role now ASSERTS after every docker restart (handlers/main.yml, `verify buildkit gc`).
+# Units: dockerd parses "10GB" with binary multipliers, so it surfaces as "10GiB" there; that is
+# the same value, not a sign the setting was ignored.
 # Changing these RESTARTS docker (role handler) — roll one runner at a time, and only while idle.
 github_runner_builder_gc_reserved_space: "4GB"
 github_runner_builder_gc_max_used_space: "10GB"
