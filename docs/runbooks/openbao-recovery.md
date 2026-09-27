@@ -135,6 +135,36 @@ more privileged consumers do **not** ride that image:
   token still exists — capture it then and rewrite the `openbao-breakglass-token` Secret, or the
   dev-worker subtree stops converging with no privileged path left to fix it.
 
+## Raft snapshot (before ANY server upgrade or risky change)
+
+A wipe loses KV (above); a raft snapshot does not. Take one before a chart/image bump rolls
+`openbao-0` (the StatefulSet is `RollingUpdate` since 2026-09-27, so MERGING the bump is the
+roll), and before anything else that touches `/openbao/data`. First taken 2026-09-27 on 2.5.5
+before the 2.6.2 roll; it is ~0.7 MB.
+
+```sh
+OUT=kubernetes/infra/_out/openbao-raft-$(date -u +%Y%m%d)-<why>.snap   # _out/ is gitignored
+umask 077
+kubectl --context admin@ai -n openbao get secret openbao-breakglass-token     -o jsonpath='{.data.root_token}' | base64 -d |
+  MSYS_NO_PATHCONV=1 kubectl --context admin@ai -n openbao exec -i openbao-0 -c openbao -- sh -c '
+    read -r T; export BAO_TOKEN="$T" BAO_ADDR=https://127.0.0.1:8200 BAO_SKIP_VERIFY=true
+    bao operator raft snapshot save /tmp/s.snap >/dev/null 2>/tmp/s.err || { cat /tmp/s.err >&2; exit 1; }
+    cat /tmp/s.snap; rm -f /tmp/s.snap /tmp/s.err' > "$OUT"
+tar tzf "$OUT"   # expect meta.json, state.bin, SHA256SUMS, SHA256SUMS.sealed
+```
+
+The token goes pod-ward on stdin, never on a command line or stdout. The snapshot is encrypted
+with the barrier key, so it is only restorable together with `openbao-keys` (the unseal share) —
+keep the two apart, and never commit either.
+
+**Restore** (same seal): `bao operator raft snapshot restore <file>` from inside `openbao-0` with
+the break-glass token (copy the file in with `kubectl cp` first). Add `-force` only when the
+running vault's seal no longer matches the snapshot's (i.e. after a wipe re-initialised it) —
+it bypasses exactly that consistency check, so the unseal key from the snapshot's era is then
+what unseals the restored data. Untested here as of 2026-09-27; prove it on a throwaway before
+relying on it. Rolling the IMAGE back after a newer server has written storage is not a proven
+rollback — restore the snapshot onto the version that took it instead.
+
 ## Ceremony
 1. **Repin FIRST** (or the gap you're fixing reproduces): the three bootstrap refs in
    `kubernetes/apps/infrastructure/security/openbao/{unseal-job,provision-job,provisioner-deploy}.yaml`
