@@ -6,6 +6,8 @@ kind: Job
 metadata:
   name: router-network-preflight-20260927
   namespace: llm-router
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled
 spec:
   backoffLimit: 2
   activeDeadlineSeconds: 180

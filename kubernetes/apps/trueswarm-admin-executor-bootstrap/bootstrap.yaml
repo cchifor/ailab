@@ -81,6 +81,8 @@ kind: Job
 metadata:
   name: trueswarm-admin-executor-bootstrap
   namespace: flux-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled
 spec:
   backoffLimit: 3
   activeDeadlineSeconds: 180
