@@ -1150,10 +1150,11 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: litellm
-          # Pinned by DIGEST (main-stable is a MOVING tag → silent, unreviewed upgrades). This digest =
+          # Pinned by DIGEST, with the tag written beside it so Renovate compares against main-stable
+          # (a bare digest makes it track `latest`; #899 broke text-embeddings that way). This digest =
           # ghcr.io/berriai/litellm:main-stable as of 2026-07-08. Bump deliberately: pull main-stable,
           # read `docker inspect --format '{{index .RepoDigests 0}}'`, update here, review, merge.
-          image: ghcr.io/berriai/litellm@sha256:d295634e09c648dcdb72c4cc2dd226f5fb87823a73e88cbbed6f205e4deb044b
+          image: ghcr.io/berriai/litellm:main-stable@sha256:d295634e09c648dcdb72c4cc2dd226f5fb87823a73e88cbbed6f205e4deb044b
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:
