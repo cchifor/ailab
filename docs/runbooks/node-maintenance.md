@@ -56,6 +56,15 @@ kubectl --context admin@ai -n strive-ailab exec <primary-pod> -c postgres -- \
 #     `preferred` (or lower `instances`) in platform deploy/components/cnpg-cluster/cluster.yaml,
 #     deliberately, so the third instance can double up on a survivor; flip it back once the node
 #     is replaced. Do not leave it at 2/3 "until the node is fixed".
+# 1e. HEADROOM GATE, learned 2026-09-27 during the required-anti-affinity roll (platform#1686): a
+#     replaced instance can only go back to ITS node, which must then hold ≥500m CPU AND ≥2Gi memory
+#     free — memory was the one that bit (cp1 at 1862Mi free vs 2Gi). Pods pinned to that node by a
+#     local-path PV (ai/text-embeddings 4Gi, dsh) CANNOT be moved to make room — cordoning just
+#     leaves them Pending until the node reopens. Free the node with a movable Deployment pod
+#     instead (e.g. ai/litellm, 1Gi, no volumes): `kubectl --context admin@ai cordon talos-cpN`,
+#     delete that pod so its replacement lands elsewhere, `uncordon` — seconds, and the Pending
+#     instance schedules at once. Check with:
+kubectl --context admin@ai describe node talos-cpN | grep -A6 'Allocated resources'
 
 # 2. know your alerting blind spot: if alertmanager/ntfy live on this node, pushes pause during the
 #    move — watch gatus (status.chifor.me) instead.
