@@ -39,8 +39,8 @@ cfg="$WORK/curlcfg"; body="$WORK/body"
 printf 'header = "Authorization: token %s"\nheader = "Accept: application/json"\n' "$GITEA_TOKEN" > "$cfg"
 unset GITEA_TOKEN
 
-api() { # method url -> prints http code, body in $body (000 = transport failure)
-  curl -sS --config "$cfg" --max-time 60 -o "$body" -w '%{http_code}' -X "$1" "$2" || echo 000
+api() { # method url -> prints http code, body in $body; any transfer failure reads as a clean 000
+  if c=$(curl -sS --config "$cfg" --max-time 60 -o "$body" -w '%{http_code}' -X "$1" "$2"); then echo "$c"; else echo 000; fi
 }
 jqr() { # jq -r with jq's OWN status preserved, CRs stripped afterwards
   jq -r "$@" > "$WORK/jq.out" || return 1
@@ -60,7 +60,7 @@ pause() { gate_state=paused; finish; exit 2; }
 
 gate() { # returns 0 = deletion allowed, 1 = pause (fail closed on anything unexpected)
   q=$(printf '%s' "$GATE_QUERY" | jq -sRr @uri | tr -d '\r') || return 1
-  code=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' "$PROM_URL/api/v1/query?query=$q" || echo 000)
+  if ! code=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' "$PROM_URL/api/v1/query?query=$q"); then code=000; fi
   if [ "$code" != 200 ]; then echo "gate: prometheus HTTP $code - pausing (fail closed)"; return 1; fi
   # accept only a success envelope whose result is an ARRAY (null|length is 0 in jq - reviewer finding):
   # an empty array = no alert; exactly one sample with an integer value = that count; anything else pauses
@@ -92,7 +92,7 @@ done
 for r in $EXTRA_REPOS; do repos="$repos
 $r"; done
 repos=$(printf '%s\n' "$repos" | grep -v '^$' | sort -u)
-nrepos=$(printf '%s\n' "$repos" | wc -l | tr -d ' ')
+nrepos=$(printf '%s\n' "$repos" | grep -c . || true)   # not wc -l: an empty string still prints one line
 [ "$nrepos" -gt 0 ] || fail "no repositories found"
 # rotating start so one big backlog cannot starve the others forever
 hour=$(date -u +%H); hour=${hour#0}; hour=${hour:-0}

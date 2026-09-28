@@ -39,8 +39,8 @@ HEALTHY="Cluster in healthy state"
 k() { kubectl -n "$NAMESPACE" --request-timeout=20s "$@"; }
 now() { date -u +%s; }
 ts() { date -u +%FT%TZ; }
-epoch_of() { # 2026-09-28T10:00:00Z -> epoch (GNU date or busybox)
-  date -u -d "$1" +%s 2>/dev/null || date -u -D %Y-%m-%dT%H:%M:%SZ -d "$1" +%s 2>/dev/null || echo 0
+epoch_of() { # 2026-09-28T10:00:00Z -> epoch (GNU date or busybox); non-zero (nothing printed) when unparseable
+  date -u -d "$1" +%s 2>/dev/null || date -u -D %Y-%m-%dT%H:%M:%SZ -d "$1" +%s 2>/dev/null
 }
 read_cluster() { # name -> $WORK/cluster.json; non-zero on ANY API failure
   k get cluster "$1" -o json > "$WORK/cluster.json" 2> "$WORK/err" || { echo "$1: cannot read Cluster: $(head -c 200 "$WORK/err" | tr -d '\n\r')"; return 1; }
@@ -106,7 +106,9 @@ for cluster in $CLUSTERS; do
 
   # --- marker present: observe, verify, clear; never act --------------------------------------------
   if [ -n "$marker" ]; then
-    mts=${marker%%/*}; minst=${marker#*/}; age=$(( $(now) - $(epoch_of "$mts") ))
+    mts=${marker%%/*}; minst=${marker#*/}
+    # an unparseable marker timestamp is treated as stuck (fail closed), never as fresh
+    if mep=$(epoch_of "$mts"); then age=$(( $(now) - mep )); else age=$((STUCK_AFTER_SECONDS + 1)); fi
     gone=1; for inst in $instances; do [ "$inst" = "$minst" ] && gone=0; done
     if [ "$phase" = "$HEALTHY" ] && [ "$((nrep + 1))" = "$want" ] && [ "$gone" = 1 ] && [ "$replicas_healthy" = 1 ]; then
       echo "$cluster: re-clone of $minst verified (replicas=$nrep/$((want - 1)) all active+reserved, old instance gone) - clearing marker"
@@ -129,7 +131,9 @@ for cluster in $CLUSTERS; do
   role=$(pod_role "$lost_inst")
   if [ "$role" != replica ]; then echo "$cluster: $lost_inst role='$role' (pod missing or not a replica) - refusing"; rc=1; continue; fi
   if [ -n "$last" ]; then
-    lage=$(( $(now) - $(epoch_of "${last%%/*}") ))
+    # an unparseable last-reclone timestamp is a refusal, not "long ago" (the budget must fail closed)
+    if ! lep=$(epoch_of "${last%%/*}"); then echo "$cluster: last re-clone annotation '$last' has no parseable timestamp - refusing"; rc=1; continue; fi
+    lage=$(( $(now) - lep ))
     if [ "$lage" -lt "$MIN_INTERVAL_SECONDS" ]; then echo "$cluster: last re-clone ($last) was ${lage}s ago < $MIN_INTERVAL_SECONDS - refusing (budget)"; rc=1; continue; fi
   fi
   pvcs=$(k get pvc "$lost_inst" "$lost_inst-wal" --ignore-not-found -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.uid}={.spec.volumeName}{"\n"}{end}' 2>/dev/null | tr -d '\r' || true)

@@ -159,7 +159,8 @@ def run(name, state, slots, env_over=None):
     (d / "state.json").write_text(json.dumps(state))
     (d / "calls.log").write_text("")
     shim = d / "kubectl"
-    shim.write_text('#!/bin/sh\nFAKE_KUBECTL=1 exec python "%s" "$@"\n' % str(pathlib.Path(__file__).resolve()).replace("\\", "/"))
+    # the interpreter that launched the test, not a bare `python` (absent on stock Debian/Alpine)
+    shim.write_text('#!/bin/sh\nFAKE_KUBECTL=1 exec "%s" "%s" "$@"\n' % (sys.executable.replace("\\", "/"), str(pathlib.Path(__file__).resolve()).replace("\\", "/")))
     shim.chmod(0o755)
     env = dict(os.environ)
     env.update({"PATH": str(d) + os.pathsep + env["PATH"], "FAKE_STATE": str(d / "state.json"), "FAKE_LOG": str(d / "calls.log"),
@@ -261,6 +262,9 @@ def main():
     st = base_state(); st["clusters"]["infra-pg"]["annotations"][LAST] = iso(time.time() - 600) + "/infra-pg-4"
     rc, out, calls, _ = run("budget", st, SLOTS_LOST)
     check("recent last-reclone refused", rc == 1 and not calls and "budget" in out, out)
+    st["clusters"]["infra-pg"]["annotations"][LAST] = "garbage/infra-pg-4"
+    rc, out, calls, _ = run("budget-corrupt", st, SLOTS_LOST)
+    check("unparseable last-reclone refused (fails closed)", rc == 1 and not calls and "no parseable timestamp" in out, out)
     st["clusters"]["infra-pg"]["annotations"][LAST] = iso(time.time() - 30000) + "/infra-pg-4"
     rc, out, calls, _ = run("budget-ok", st, SLOTS_LOST)
     check("old last-reclone allows", rc == 0 and is_live_sequence(calls), str(calls) + out)
