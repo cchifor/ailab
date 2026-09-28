@@ -664,6 +664,75 @@ class ImplReviewRegressionTests(Base):
             self.s.cancel_for_wake("op")
 
 
+class AmbiguousWriteTests(Base):
+    """reviewer-codex on #942: a write that lands but whose response is lost."""
+
+    def _land_then_raise_on(self, nth):
+        orig, n = self.store.write, {"i": 0}
+
+        def write(data, rv):
+            n["i"] += 1
+            r = orig(data, rv)
+            if n["i"] == nth:
+                raise app.StateError("configmap write: TimeoutError (applied, reply lost)")
+            return r
+        self.store.write = write
+        return orig
+
+    def test_draining_write_landed_reply_lost_proceeds_as_scheduled(self):
+        orig = self._land_then_raise_on(2)               # 1 = pausing, 2 = draining
+        with self.assertRaises(app.StateUncertain):
+            self.s.schedule("op")
+        self.store.write = orig
+        self.assertEqual(self.store.schedule()["phase"], "draining")
+        self.tick()
+        self.assertEqual(self.phase(), "draining", "the stored OFF is followed, not contradicted")
+        self.tick(2)
+        self.assertEqual(len(self.shutdowns), 1)
+
+    def test_draining_write_not_landed_rolls_back(self):
+        orig = self.store.write
+        n = {"i": 0}
+
+        def write(data, rv):
+            n["i"] += 1
+            if n["i"] == 2:
+                raise app.StateError("configmap write: HTTP 500")
+            return orig(data, rv)
+        self.store.write = write
+        with self.assertRaises(app.StateUncertain):
+            self.s.schedule("op")
+        self.store.write = orig
+        self.assertEqual(self.store.schedule()["phase"], "pausing")
+        self.tick(3)
+        self.assertEqual(self.shutdowns, [])
+        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2))
+        self.assertEqual(self.phase(), "idle")
+        self.assertEqual(self.s.last["result"], "error")
+
+    def test_pausing_write_landed_reply_lost_is_rolled_back_by_the_tick(self):
+        orig = self._land_then_raise_on(1)
+        with self.assertRaises(app.StateUncertain):
+            self.s.schedule("op")
+        self.store.write = orig
+        self.assertEqual(self.fg.patches, [], "nothing paused")
+        self.tick()
+        self.assertEqual(self.phase(), "idle")
+        self.assertIsNone(self.store.schedule())
+
+    def test_cancel_write_landed_reply_lost_is_honoured(self):
+        self.s.schedule("op")
+        orig = self._land_then_raise_on(1)
+        with self.assertRaises(app.StateUncertain):
+            self.s.cancel("op")
+        self.store.write = orig
+        self.tick()
+        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2))
+        self.assertEqual(self.phase(), "idle")
+        self.tick(3)
+        self.assertEqual(self.shutdowns, [])
+
+
 class GiteaClientTests(unittest.TestCase):
     def test_refuses_a_truncated_list(self):
         fg = FakeGitea([runner(i, "r%d" % i) for i in range(1, 30)])

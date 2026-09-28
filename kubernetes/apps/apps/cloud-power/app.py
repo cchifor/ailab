@@ -431,6 +431,11 @@ class StateConflict(StateError):
     pass
 
 
+class StateUncertain(StateError):
+    """A write whose outcome is unknown (it may have landed). Memory is discarded and the next
+    tick re-reads the ConfigMap and acts on what is ACTUALLY stored - never on a guess."""
+
+
 class KubeState:
     """cloud-power-state through the in-cluster API with the projected SA token. Created at
     runtime, NOT in git, so Flux prune never removes a schedule that is in flight.
@@ -704,9 +709,13 @@ class Scheduler:
                           "skipped": [r["name"] for r in cloud if r["disabled"]]}
             try:
                 self._save()
-            except StateError:
+            except StateError as e:
+                # It may have landed as `pausing`; the next tick re-reads it and rolls a stored
+                # `pausing` back (no runner was paused yet, so that re-enable is a no-op).
                 self.state = None
-                raise
+                self.loaded = False
+                raise StateUncertain("could not confirm the schedule was saved (%s); OFF is not "
+                                     "scheduled unless the dashboard shows it" % e) from e
             self.clear = 0
             self.inflight = []
             self.note = ""
@@ -722,11 +731,15 @@ class Scheduler:
             try:
                 self._save()
             except StateError as e:
-                if self.state is not None and self.loaded:
-                    self._to_releasing("error", "could not persist the schedule (%s); OFF not "
-                                       "scheduled" % e)
+                # Outcome unknown: the write may have landed (response lost) or not. Do NOT
+                # compensate on a stale resourceVersion; re-read on the next tick: a stored
+                # `draining` IS the operator's OFF and proceeds, a stored `pausing` rolls back.
+                self.loaded = False
+                self.dirty = False
                 self.publish()
-                raise
+                raise StateUncertain("could not confirm the schedule was saved (%s); within one "
+                                     "poll the dashboard shows whether the OFF is scheduled - an "
+                                     "unsaved one rolls back and re-enables the runners" % e) from e
             log("OFF SCHEDULED by %s: paused %s (already disabled, left alone: %s)"
                 % (who, ",".join(r["name"] for r in targets) or "-",
                    ",".join(self.state["skipped"]) or "-"))
@@ -753,9 +766,14 @@ class Scheduler:
                 self.state["outcome"] = {"result": "cancelled", "message": "cancelled by %s" % who}
                 try:
                     self._save()                     # persist BEFORE re-enabling
-                except StateError:
+                except StateError as e:
+                    # The cancel may or may not have landed: re-read on the next tick and follow
+                    # what is stored (releasing -> re-enable, draining -> still scheduled).
                     self.state = prev
-                    raise
+                    self.loaded = False
+                    self.dirty = False
+                    raise StateUncertain("could not confirm the cancel was saved (%s); the "
+                                         "dashboard shows the outcome within one poll" % e) from e
                 log("OFF CANCELLED by %s (was %s)" % (who, phase))
                 self._tick_releasing()
             return self.publish()
@@ -790,8 +808,9 @@ class Scheduler:
                 if self.state and not self.corrupt:
                     phase = self.state.get("phase")
                     if phase == "pausing":
-                        self._to_releasing("error", "the controller restarted while pausing "
-                                           "runners; OFF not scheduled")
+                        self._to_releasing("error", "the schedule was never confirmed (a state "
+                                           "write failed or the controller restarted while "
+                                           "pausing runners); OFF not scheduled")
                     elif phase == "draining":
                         self._tick_draining()
                     elif phase == "powering_off":
@@ -1157,8 +1176,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 cancelled, note = SCHED.cancel_for_wake(who)
             except StateError as e:
-                return self._send(503, {"error": "a scheduled OFF could not be withdrawn, so ON was "
-                                                 "not sent: %s" % e})
+                return self._send(503, {"error": "a scheduled OFF could not be confirmed withdrawn, "
+                                                 "so ON was not sent: %s" % e})
             try:
                 res = forward_wake()
             except Exception as e:
@@ -1218,8 +1237,10 @@ class Handler(BaseHTTPRequestHandler):
             except GiteaError as e:
                 return self._send(502, {"error": "could not pause the cloud runners in Gitea; "
                                                  "nothing scheduled: %s" % e})
+            except StateUncertain as e:
+                return self._send(503, {"error": str(e)})
             except StateError as e:
-                return self._send(503, {"error": "could not persist the schedule; nothing "
+                return self._send(503, {"error": "could not read the schedule state; nothing "
                                                  "scheduled: %s" % e})
             return self._send(202, {"action": "scheduled", "schedule": view})
 
@@ -1228,8 +1249,11 @@ class Handler(BaseHTTPRequestHandler):
                 view = SCHED.cancel(who)
             except Refused as e:
                 return self._send(409, {"error": str(e)})
+            except StateUncertain as e:
+                return self._send(503, {"error": str(e)})
             except StateError as e:
-                return self._send(503, {"error": "could not persist the cancel; still scheduled: %s" % e})
+                return self._send(503, {"error": "could not read the schedule state; nothing "
+                                                 "changed: %s" % e})
             return self._send(200, {"action": "cancelled", "schedule": view})
 
         self._send(404, {"error": "not found"})
