@@ -1,10 +1,23 @@
 # Disposable CNPG cluster for drilling cnpg-lost-slot-reclone (plan 2026-09-28, rollout step 2).
 # Applied BY HAND, never listed in a kustomization; delete it (and its PVCs) when the drill is done.
+# Run on 2026-09-28 (see the PR for the transcript). The whole recipe, in order:
 #
-#   kubectl --context admin@ai apply -f scripts/tests/fixtures/cnpg-reclone-drill.yaml
-#   # break the standby: deny its egress to the primary, churn > 64 MB of WAL on the primary, then
-#   # remove the policy - the standby reconnects and is refused (wal_status=lost), the real symptom.
-#   kubectl --context admin@ai -n databases delete cluster reclone-drill; kubectl -n databases delete pvc -l cnpg.io/cluster=reclone-drill
+#   1. kubectl --context admin@ai apply -f scripts/tests/fixtures/cnpg-reclone-drill.yaml
+#      wait for "Cluster in healthy state" 2/2 (baseline replication MUST exist before the break,
+#      or the standby never bootstraps)
+#   2. kubectl --context admin@ai apply -f scripts/tests/fixtures/cnpg-reclone-drill-isolate.yaml
+#      then churn WAL on the primary past the 64 MB slot budget until the slot reads lost:
+#        for i in $(seq 40); do kubectl -n databases exec <primary> -c postgres -- psql -U postgres -Atc \
+#          "insert into churn select g, repeat('x',900) from generate_series(1,8000) g; delete from churn; select pg_switch_wal(); checkpoint;"; done
+#        (create table churn(id bigint, pad text) first; watch pg_replication_slots.wal_status)
+#   3. kubectl --context admin@ai -n databases delete cnp reclone-drill-isolate-standby
+#      the standby reconnects and is refused: the real symptom, with CNPG still reporting healthy 2/2
+#   4. python scripts/tests/fixtures/build-reclone-drill-job.py dry true  > /tmp/drill-dry.yaml   # then apply, read logs
+#      python scripts/tests/fixtures/build-reclone-drill-job.py live false > /tmp/drill-live.yaml  # the positive path
+#      (builds throwaway reclone-drill-* SA/Role/RoleBinding/ConfigMap/Job wired to THIS cluster's
+#      credentials and CA from the real CronJob template - the CronJob itself is never touched)
+#   5. kubectl -n databases delete cluster reclone-drill; kubectl -n databases delete pvc -l cnpg.io/cluster=reclone-drill
+#      kubectl -n databases delete sa,role,rolebinding,cm,job -l ailab.io/drill=reclone; kubectl -n databases delete secret reclone-drill-slotwatch
 #
 # local-path on purpose: no QNAP LUNs for a throwaway (ailab#865/#880), and the drill is about slots,
 # not storage. 64MB slot budget so a few MB of inserts + pg_switch_wal() invalidate the slot quickly.
@@ -51,24 +64,3 @@ spec:
         login: true
         passwordSecret:
           name: reclone-drill-slotwatch
----
-# The break: applied only for the drill window, removed once the slot reports lost.
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: reclone-drill-isolate-standby
-  namespace: databases
-  annotations:
-    ailab.io/drill: "delete me when the slot is lost; the standby must reconnect and be refused"
-spec:
-  endpointSelector:
-    matchLabels:
-      cnpg.io/cluster: reclone-drill
-      cnpg.io/instanceRole: replica
-  egressDeny:
-    - toEndpoints:
-        - matchLabels:
-            cnpg.io/cluster: reclone-drill
-            cnpg.io/instanceRole: primary
-      toPorts:
-        - ports: [{ port: "5432", protocol: TCP }]

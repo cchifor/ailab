@@ -1,0 +1,24 @@
+# The break for the reclone drill (cnpg-reclone-drill.yaml, step 2): deny the standby's egress to the
+# primary so its slot falls behind while WAL is churned past max_slot_wal_keep_size. Apply ONLY after
+# the drill cluster reports healthy 2/2 (a standby that was never able to stream never bootstraps),
+# delete it as soon as pg_replication_slots reads wal_status=lost - the standby then reconnects and is
+# refused, which is the real symptom the CronJob must recognise.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reclone-drill-isolate-standby
+  namespace: databases
+  annotations:
+    ailab.io/drill: "delete me when the slot is lost; the standby must reconnect and be refused"
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: reclone-drill
+      cnpg.io/instanceRole: replica
+  egressDeny:
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: reclone-drill
+            cnpg.io/instanceRole: primary
+      toPorts:
+        - ports: [{ port: "5432", protocol: TCP }]

@@ -58,12 +58,16 @@ is the page. Look at the join job / new pod, fix, then clear the marker yourself
 `kubectl -n databases annotate cluster infra-pg ailab.io/reclone-in-progress-`.
 
 - Dry run (the merged default): `DRY_RUN=true` in the CronJob logs the decision only. Flip it in git
-  after the drill (`scripts/tests/fixtures/cnpg-reclone-drill.yaml`, plan 2026-09-28 rollout step 2) and
   only after run-retention has run safely — it must not hide a bad deletion rate.
+- Drill (done 2026-09-28, repeatable): `scripts/tests/fixtures/cnpg-reclone-drill.yaml` (disposable
+  2-instance cluster on local-path, 64 MB slot budget) + `cnpg-reclone-drill-isolate.yaml` (the break)
+  + `build-reclone-drill-job.py` (a throwaway Job wired to the drill cluster's own credentials, CA and a
+  Role scoped to it — the real CronJob is never modified). The full order is in the fixture header.
 - Stop: `kubectl -n databases patch cronjob cnpg-lost-slot-reclone -p '{"spec":{"suspend":true}}'`.
-- Manual execution carries its own env: `kubectl -n databases create job --from=cronjob/cnpg-lost-slot-reclone
-  reclone-manual-1 --dry-run=client -o yaml`, edit `DRY_RUN`/`CLUSTERS`, apply. Editing the CronJob never
-  changes an existing Job.
+- Manual execution against infra-pg carries its own env: `kubectl -n databases create job
+  --from=cronjob/cnpg-lost-slot-reclone reclone-manual-1 --dry-run=client -o yaml`, edit `DRY_RUN`,
+  apply. Editing the CronJob never changes an existing Job. Concurrent executions cannot both act: the
+  marker is taken with a resourceVersion precondition.
 
 ## Why the replica dies: Gitea's Actions history — CronJob `gitea-actions-run-retention`
 
