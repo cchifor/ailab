@@ -12,6 +12,8 @@ resources:
   - servicemonitor.yaml # Prometheus scrape of Gitea /metrics (gitea_* app metrics) with bearer auth
   - gitea.yaml # HelmRepository + HelmRelease (SQLite on qnap-iscsi, OIDC login, Actions on S3)
   - actions-storage.yaml # 40Gi qnap-iscsi PVC for Actions artifacts/logs (W1) — takes the USB disk off Gitea's critical path
+  - gitea-actions-retention.sops.yaml # SOPS: PAT of the non-admin `actions-retention` user (Actions unit only) — .example has the mint recipe
+  - actions-run-retention.yaml # CronJob: deletes completed Actions RUNS older than RETENTION_DAYS, paced + replication-gated (ailab#923)
 # The one-shot Actions migration Job and its versitygw CA are REMOVED here, not merely deleted from
 # the cluster: the Job lives in Flux's desired state, so `kubectl delete job` would only make Flux
 # recreate it. Removing the manifest is what actually prunes it — and it must be gone before Gitea
@@ -35,3 +37,12 @@ resources:
 #
 # Step 1 before step 2 is what makes this possible at all: Gitea is the git host, so the merge has
 # to happen while it is running, and suspending is what stops that merge from being applied early.
+
+configMapGenerator:
+  # Generated so the name carries a content hash: editing the script renames the ConfigMap and the
+  # CronJob's volume reference with it (ci-rerun-watchdog's reasoning). The script lives beside this
+  # file because kustomize cannot load files from outside the directory; its tests are
+  # scripts/tests/gitea-actions-run-retention-mock.py.
+  - name: gitea-actions-run-retention-script
+    files:
+      - gitea-actions-run-retention.sh

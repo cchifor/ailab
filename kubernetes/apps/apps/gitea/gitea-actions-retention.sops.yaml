@@ -1,0 +1,31 @@
+# SOPS (age): the Gitea PAT the gitea-actions-run-retention CronJob deletes old Actions runs with.
+# Identity = the dedicated NON-ADMIN user `actions-retention`, member of org team `actions-retention`
+# (unit Actions=write, all repos, nothing else). Mint/rotate: see gitea-actions-retention.sops.yaml.example.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: gitea-actions-retention
+    namespace: gitea
+type: Opaque
+stringData:
+    token: ENC[AES256_GCM,data:UoDk+btR87j9qODnLOtKoyRYvD5YRARxQTadd25MSn2VV11pD+Xzxw==,iv:v0dkp4jbcwR4B+OQMVg5pfReWJ2V+Dg1LBf06J3cPeY=,tag:VnbutrQi6iZaGx66cZM+Gg==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBrazNHeVJERVdrRng3MllQ
+            QzFKS1VsbCtKd01KbTNyVkx1OFZxZUw4VXhvCnlYTTlMMUFYL0ZBbUFIdnhJakN6
+            WWFOMFZEa0hZcExoVFNsazJmdXBXeWMKLS0tIEF2UGtnY2lGbGpQeHZqYUtTQ0xs
+            OEpqd2NJTWdHeUFpRUwzVjQ1WEVxZlUKeqdk/8RhSjdnP0YmOwf/AsS00g9LyFPQ
+            DTh+Qr41+L5PhYVGIRxu+EDLuZqE9+Xho9lnmIVPqLei4JTi19YZXw==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-28T08:24:06Z"
+    mac: ENC[AES256_GCM,data:0jd8BslPMBy9Ca6nrn3qIEA1DHoob74O5KbEZxGp7HApa7qvYlPmW8Ds5aVspgDtbtgzoYlQUywoqrTV1b2SAhAbPt3jbaHbDBTIxLpjKgWzeUwURj0gpCE2lNrsx9SxvLmWOFBHbkpelA/ObmCDZr+Pb15uTiCU3JKDkYAO2fg=,iv:hQYEQ9S4PilfW/rmFRn3ICACzC5J0mffjKxZHAeRCgc=,tag:78uBReCS+kRDaqHE7U/xTA==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4
