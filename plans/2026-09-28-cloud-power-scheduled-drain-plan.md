@@ -1,5 +1,12 @@
 # Cloud-power OFF becomes a scheduled, drained power-off
 
+## Codex Review
+
+- Accept the transactional assignment explanation and the home-lab tradeoffs for one worker, internal HTTP, and dashboard access; drop those four round-1 concerns.
+- Distinguish a drain stall from an unresolved host shutdown before allowing CANCEL/ON to restore runners.
+- Revisit release during a shared network outage: host reachability and runner liveness can fail together.
+- Narrow the verification concern to accepted-but-unrecorded shutdowns and hosts that wake within the replay window.
+
 ## Context
 
 The Homepage OFF button (`kubernetes/apps/apps/cloud-power/`, `home.chifor.me/cloud-power/`) powers
@@ -33,9 +40,6 @@ already-assigned task keeps running and reporting. `GET /orgs/{org}/actions/jobs
 flapping to `false` mid-job (runbook §7, 2026-09-16), so it is a SECONDARY signal: the job list is
 authoritative and the two are unioned. So "stop taking new jobs, let the current ones finish" is
 done at the forge, with the guest fully up — no dependence on shutdown ordering or drain caps.
-
-<!-- codex: Reloading before PickTask does not establish an atomic barrier against a FetchTask that read the runner before PATCH committed. Verify how an assignment racing disable becomes visible, including any assigned-but-not-yet-in_progress interval, before treating two empty polls as sufficient. -->
-<!-- opus-pushback: In 1.26.1 FetchTask re-reads the runner immediately before PickTask, and PickTask creates the task and flips the job to StatusRunning in ONE transaction (CreateTaskForRunner), so there is no assigned-but-not-running state; the residual is a millisecond window whose result is a running job, which two clear polls 20 s apart observe. -->
 
 ## Approach
 
@@ -94,12 +98,18 @@ after each transition, so a status poll never blocks on a slow Gitea/PVE call.
    hosts wake (RTC 08:00 or ON) with no morning coupling. A host still up `OFFLINE_WAIT_SEC`=1800 s
    after the shutdown call -> `stalled` with the runners still paused (it may yet go down; re-enabling
    could hand a job to a VM about to die). The operator resolves a stall with CANCEL.
+
+   <!-- codex: A shared network outage can simultaneously make :8006 time out and every runner appear offline, so these two negative observations do not prove the VMs have stopped. If connectivity returns while an accepted shutdown is delayed, a released runner can fetch a job that shutdown then kills; require positive completion evidence or keep ambiguous completion paused for operator verification, and test this sequence. -->
+
 6. **Cancel / ON.** `POST /api/shutdown/cancel` (new) in `draining` or `stalled` persists
    `releasing` BEFORE re-enabling; refused in `powering_off` (the hosts are going down). `POST
    /api/wake` also cancels a `draining`/`stalled` schedule first; in `powering_off` it still forwards
    the packets but the page says the hosts are still shutting down (WoL on a running host is a no-op).
    Direct calls to the hostNetwork wol service and the RTC alarm do not touch the schedule — by then
    it has either finished or is `stalled` (deadline), never pending an unexpected shutdown.
+
+   <!-- codex: Preserve the distinction between a drain stall and a stall after shutdown may have started: at 1800 s a slow host can still be shutting down, and the existing shutdown_all() also labels a POST accepted before a response timeout as ERROR. Persist that uncertainty and keep affected runners paused on CANCEL/ON until shutdown completion or verified abort; otherwise the recovery button can hand a new job to a VM that is about to die. -->
+
 7. **Persistence.** The schedule lives in a runtime-created ConfigMap `cloud-power-state` (not in git,
    so Flux prune leaves it), written with resourceVersion. A 409 marks the state unloaded and the
    next tick RE-READS and re-evaluates it (no merge-and-retry of a stale body). An unreadable or
@@ -107,10 +117,8 @@ after each transition, so a status poll never blocks on a slow Gitea/PVE call.
    the error. Transitions persist before they act, so a restart repeats at most an idempotent call.
 8. **Single worker.** One replica, `strategy: Recreate`.
 
-   <!-- codex: Recreate orders deployment rollouts but is not a general singleton guarantee during pod replacement, forced deletion, or node partition. resourceVersion protects writes rather than external side effects, so define ownership/fencing for workers and stop stale workers from acting after ownership changes. -->
-   <!-- opus-pushback: A lease/fencing layer is disproportionate for a single-replica dashboard controller: the side effects are idempotent PATCHes of the same value and a node shutdown gated on a persisted transition, and a second worker's first write after any external action hits 409 and forces it to re-read. The forced-deletion/partition double-worker case is accepted and documented rather than engineered away. -->
-
 ### UI (the iframe page, h-32)
+
 Preflight shows the in-flight cloud CI jobs **and** the running guests. After confirm the summary
 line shows `OFF scheduled HH:MM - waiting for N CI job(s)`, the scrollable body lists
 `runner job (age)`, the paused runners and the deadline, with a **CANCEL OFF** button (OFF disabled
@@ -121,6 +129,7 @@ line; the last outcome is shown for 12 h. Gitea-supplied strings (job/runner nam
 stays a plain healthz, so a Gitea outage does not restart-loop the pod).
 
 ### Access
+
 - **Gitea PAT** for the org owner `chifor`, scope `write:organization` (runner list/PATCH need owner;
   org jobs need reader; both are in the organization token category — `routers/api/v1/api.go`).
   This is broader than "pause runners" (it can administer the org) and there is no narrower Gitea
@@ -129,9 +138,6 @@ stays a plain healthz, so a Gitea outage does not restart-loop the pod).
   pod, and never printed. Rotation/revocation is in the runbook (UI -> Settings -> Applications).
   `GITEA_URL` = in-cluster `http://gitea-http.gitea.svc.cluster.local:3000`. The client refuses to
   follow redirects (urllib would carry the Authorization header to the redirect target).
-
-  <!-- codex: This URL sends the owner PAT over plaintext HTTP; avoiding Cloudflare does not itself protect the bearer token. Verify the cluster transport trust/encryption assumption or use verified TLS, and prevent the client from forwarding credentials through unexpected redirects. -->
-  <!-- opus-pushback: Redirects: accepted (no-redirect opener). Plaintext: the same in-cluster HTTP path already carries the ci-rerun-watchdog's write:repository PAT and every Gitea runner/agent token in the estate; pod-to-pod traffic stays on the cluster network, and the alternative (git.chifor.me) adds a Cloudflare round trip and an external dependency to a power-off path. -->
 
 - **Kubernetes**: ServiceAccount `cloud-power` + Role: `create` configmaps (cannot be
   resourceName-scoped — namespace-wide create is the accepted limitation) and `get`,`update` on
@@ -143,15 +149,14 @@ stays a plain healthz, so a Gitea outage does not restart-loop the pod).
 - **Who may press it**: unchanged — any Authelia-authenticated dashboard user, behind oauth2-proxy;
   NetworkPolicy still admits only oauth2-proxy to the api pod; egress unchanged (unrestricted).
 
-  <!-- codex: The Homepage proxy currently admits any Authelia-authenticated user, while cloud-power uses forwarded identity only for logging. Confirm that this remains the intended operator boundary for scheduling/cancelling power actions, and test denial of direct non-proxy access to the new routes. -->
-  <!-- opus-pushback: That boundary is the existing, deliberately chosen one for the OFF button (ailab #389/#390) and this change does not widen it; narrowing it is a separate decision. The non-proxy denial is already enforced by the NetworkPolicy and is re-checked in the live verification below. -->
-
 ### Unchanged on purpose
+
 The in-guest 10-min drain, `startup down=720` and cloudlab `cluster-power.sh` stay as the backstop
 for the paths that do not go through the button (PVE UI, `poweroff`, the CLI). Moving the CLI onto
 the same Gitea-level drain is a cloudlab follow-up, noted in the ADR.
 
 ### Operating notes (runbook)
+
 - An operator who quarantines an owned runner mid-drain must do it AFTER cancelling or after the
   schedule finishes: the drain re-pauses and then re-enables every runner it owns.
 - **Rollback** to the previous image: first make sure `/api/status` shows `idle` (CANCEL any
@@ -160,6 +165,7 @@ the same Gitea-level drain is a cloudlab follow-up, noted in the ADR.
 - A `stalled` schedule keeps the cloud runners paused until someone presses CANCEL; the page says so.
 
 ## Critical files
+
 - `kubernetes/apps/apps/cloud-power/app.py` — Gitea client, KubeState, Scheduler + worker,
   `/api/shutdown` (schedule), `/api/shutdown/cancel`, `/api/status.schedule`, CSRF check, page UI.
 - `kubernetes/apps/apps/cloud-power/deployment.yaml` — api pod: SA, automount, Gitea env + secret,
@@ -172,6 +178,7 @@ the same Gitea-level drain is a cloudlab follow-up, noted in the ADR.
   (drain section + operating notes).
 
 ## Verification
+
 1. Unit tests (transport-level fake Gitea with real pagination, in-memory store with resourceVersion
    + injectable write failures, recorded `shutdown_all`, fake host probe, controllable clock):
    pause set/skip set; persist-before-pause; failed pause rolls back and retries a failed re-enable;
@@ -184,11 +191,12 @@ the same Gitea-level drain is a cloudlab follow-up, noted in the ADR.
    reload; unreadable/unknown-version state -> OFF refused; concurrent schedule from two threads ->
    exactly one wins; CSRF check.
 
-   <!-- codex: Add fault injection before and after each state write and external mutation, including accepted-but-timed-out requests, failed rollback, partial restoration, and crashes during shutdown dispatch. Exercise concurrent OFF/CANCEL/ON, multi-page responses, pre-disabled busy runners, identity changes, and stale schedules after a wake using a controllable clock. -->
+   <!-- codex: round-2: An exhaustive fault matrix is unnecessary, but reloading the same phase does not cover different external outcomes: add a shutdown POST accepted before its response times out, and a crash after partial shutdown dispatch but before results persist, followed by a host wake inside the 600 s replay window. Assert that unresolved shutdowns cannot release runners and that recovery cannot shut down the newly booted host again; persist-before-act and a freshness cutoff alone do not make shutdown replay idempotent across a wake. -->
    <!-- opus-pushback: The list above covers each crash boundary the design relies on (persist-then-act means every boundary resumes into a phase already under test) plus the concrete cases named; an exhaustive before/after matrix per call would multiply tests without exercising new code paths. -->
 
 2. `kubectl kustomize kubernetes/apps/apps/cloud-power` renders; manifests CI passes.
 3. Live, after Flux applies (compatibility baseline: Gitea 1.26.1, act_runner 0.6.1):
+
    - `kubectl auth can-i` as `system:serviceaccount:cloud-power:cloud-power`: get/update
      `cloud-power-state` yes; update `cloud-power-app-*`, delete, list configmaps no.
    - `/api/status` through the dashboard shows `schedule.phase: idle` and a fresh `last_tick`; the
@@ -197,6 +205,7 @@ the same Gitea-level drain is a cloudlab follow-up, noted in the ADR.
      is visible), and a reversible `disabled: true` -> read back -> `disabled: false` on the
      quarantined, offline `cloud-ci-6` (no capacity impact).
    - A pod in another namespace still cannot reach the api Service (NetworkPolicy).
+
 4. Live drain test at the next real OFF with a job in flight on a cloud runner (ideally one > 10 min,
    e.g. `gatekeeper`): Gitea shows the runners `disabled` at once, no new task lands on them, ailab
    runners keep taking jobs, the job finishes green, hosts power off only afterwards, runners are
