@@ -756,8 +756,20 @@ class Scheduler:
                 except StateError as e2:
                     log("rollback of an unconfirmed schedule deferred to the next tick: %s" % e2)
                 self.publish()
-                raise StateUncertain("could not save the schedule (%s); OFF not scheduled - the "
-                                     "paused runners are being re-enabled" % e) from e
+                # Say "not scheduled" ONLY when the rollback is durable: the rejection itself lives
+                # in memory, so until the stored state stops authorising this attempt a restart
+                # could still run it.
+                st = self.state
+                durable = self.loaded and not self.dirty and (
+                    st is None or st.get("attempt") != attempt or st.get("phase") == "releasing")
+                if durable:
+                    raise StateUncertain("could not save the schedule (%s); OFF not scheduled - "
+                                         "the paused runners are being re-enabled" % e) from e
+                raise StateUncertain("could not save the schedule (%s) and could not yet record "
+                                     "its rollback: OUTCOME UNKNOWN. It is rolled back as soon as "
+                                     "the state store answers, but if cloud-power restarts first "
+                                     "the OFF may still proceed - watch the dashboard and CANCEL "
+                                     "it there if it shows as scheduled" % e) from e
             log("OFF SCHEDULED by %s: paused %s (already disabled, left alone: %s)"
                 % (who, ",".join(r["name"] for r in targets) or "-",
                    ",".join(self.state["skipped"]) or "-"))

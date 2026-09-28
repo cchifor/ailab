@@ -737,6 +737,37 @@ class AmbiguousWriteTests(Base):
         self.assertEqual(self.phase(), "idle")
         self.assertIsNone(self.store.schedule())
 
+    def test_rejection_reported_definitively_only_when_rollback_is_durable(self):
+        orig = self._land_then_raise_on(2)
+        with self.assertRaises(app.StateUncertain) as cm:
+            self.s.schedule("op")
+        self.store.write = orig
+        self.assertIn("OFF not scheduled", str(cm.exception))
+        self.assertIsNone(self.store.schedule(), "the rollback is stored before that answer")
+
+    def test_restart_before_the_rollback_is_stored_is_reported_as_unknown(self):
+        self.tick()
+        orig = self._land_then_raise_on(2)
+        good_read = self.store.read
+
+        def broken():
+            raise app.StateError("GET configmap: HTTP 503")
+        self.store.read = broken
+        with self.assertRaises(app.StateUncertain) as cm:
+            self.s.schedule("op")
+        self.assertIn("OUTCOME UNKNOWN", str(cm.exception))
+        self.assertIn("CANCEL", str(cm.exception))
+        # The documented residual: a restart before the store recovers follows the stored OFF,
+        # and it is visible and cancellable on the dashboard.
+        self.store.write, self.store.read = orig, good_read
+        self.s = self.new_sched()
+        self.tick()
+        self.assertEqual(self.phase(), "draining")
+        self.s.cancel("op")
+        self.tick(3)
+        self.assertEqual(self.shutdowns, [])
+        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2))
+
     def test_cancel_write_not_landed_is_retried(self):
         self.s.schedule("op")
         self.store.fail_writes = 1
