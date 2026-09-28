@@ -51,6 +51,25 @@ kubectl --context admin@ai -n strive-ailab exec <primary-pod> -c postgres -- \
 # 1c. Trident attach/detach takes 2–5 min per volume here (QNAP per-LUN sweep; runbook
 #     qnap-storage-setup.md §9) — a replaced instance needs up to ~8 min. Confirm the timeout policy
 #     is live before draining: `kubectl --context admin@ai get clusterpolicy trident-attacher-timeout`.
+# 1d. BREAK-GLASS if a CP never comes back (hardware loss): with required anti-affinity the cluster
+#     runs 2/3 with ONE streaming replica until someone acts — flip `podAntiAffinityType` back to
+#     `preferred` in platform deploy/components/cnpg-cluster/cluster.yaml, deliberately, keeping
+#     `instances: 3`, so the third instance can double up on a survivor. Lowering `instances` to 2
+#     is NOT the same lever: it only re-declares the degraded state as nominal (2/2, still one
+#     streaming replica) — the sole reason to do it is a survivor that cannot fit a third instance
+#     (the 1e gate), and it must be reverted just the same. Revert the flip only after the replaced
+#     node holds the third instance and it streams — status 3/3 and `pg_stat_replication` shows two
+#     rows streaming (the 1b check; attach can take ~8 min, 1c) — otherwise restoring `required`
+#     evicts or blocks the instance that just recovered. Do not leave it at 2/3 "until the node is fixed".
+# 1e. HEADROOM GATE, learned 2026-09-27 during the required-anti-affinity roll (platform#1686): a
+#     replaced instance can only go back to ITS node, which must then hold ≥500m CPU AND ≥2Gi memory
+#     free — memory was the one that bit (cp1 at 1862Mi free vs 2Gi). Pods pinned to that node by a
+#     local-path PV (ai/text-embeddings 4Gi, dsh) CANNOT be moved to make room — cordoning just
+#     leaves them Pending until the node reopens. Free the node with a movable Deployment pod
+#     instead (e.g. ai/litellm, 1Gi, no volumes): `kubectl --context admin@ai cordon talos-cpN`,
+#     delete that pod so its replacement lands elsewhere, `uncordon` — seconds, and the Pending
+#     instance schedules at once. Check with:
+kubectl --context admin@ai describe node talos-cpN | grep -A6 'Allocated resources'
 
 # 2. know your alerting blind spot: if alertmanager/ntfy live on this node, pushes pause during the
 #    move — watch gatus (status.chifor.me) instead.
