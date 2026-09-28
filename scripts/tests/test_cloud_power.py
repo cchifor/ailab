@@ -32,36 +32,49 @@ class FakeGitea:
         self.runners = {r["id"]: dict(r) for r in runners}
         self.jobs = list(jobs or [])
         self.patches = []          # (id, disabled)
-        self.fail = {}             # (method, path-prefix) -> status | "transport"
+        self.fail = {}             # (method, path-prefix) -> status | "transport" | "applied-then-lost"
+        self.envelope = {}         # path -> callable(page, body_dict) -> body_dict (malformed replies)
+        self.patch_gate = None     # threading.Event: PATCHes block until it is set
 
     def __call__(self, method, url, headers, body):
         assert headers["Authorization"] == "token T"
         u = urllib.parse.urlparse(url)
         path = u.path[len("/api/v1"):]
         q = dict(urllib.parse.parse_qsl(u.query))
+        lost = False
         for (m, p), how in self.fail.items():
             if m == method and path.startswith(p):
+                if how == "applied-then-lost":
+                    lost = True
+                    continue
                 if how == "transport":
                     raise app.GiteaError("%s %s: TimeoutError" % (method, path))
                 return how, b'{"message":"nope"}'
         if method == "GET" and path == RUNNERS:
-            return 200, self._page(list(self.runners.values()), "runners", q)
+            return 200, self._page(list(self.runners.values()), "runners", q, self.envelope.get(path))
         if method == "GET" and path == JOBS:
             assert q.get("status") == "in_progress"
-            return 200, self._page(self.jobs, "jobs", q)
+            return 200, self._page(self.jobs, "jobs", q, self.envelope.get(path))
         if method == "PATCH" and path.startswith(RUNNERS + "/"):
+            if self.patch_gate is not None:
+                self.patch_gate.wait(5)
             rid = int(path.rsplit("/", 1)[1])
             if rid not in self.runners:
                 return 404, b'{"message":"not found"}'
             self.runners[rid]["disabled"] = json.loads(body)["disabled"]
             self.patches.append((rid, self.runners[rid]["disabled"]))
+            if lost:
+                raise app.GiteaError("PATCH %s: TimeoutError (applied, reply lost)" % path)
             return 200, json.dumps(self.runners[rid]).encode()
         return 404, b"{}"
 
     @staticmethod
-    def _page(items, key, q):
+    def _page(items, key, q, envelope=None):
         page, limit = int(q["page"]), int(q["limit"])
-        return json.dumps({key: items[(page - 1) * limit: page * limit], "total_count": len(items)}).encode()
+        body = {key: items[(page - 1) * limit: page * limit], "total_count": len(items)}
+        if envelope:
+            body = envelope(page, body)
+        return json.dumps(body).encode()
 
     def disabled(self, rid):
         return self.runners[rid]["disabled"]
@@ -75,6 +88,8 @@ class MemStore:
         return (dict(self.data) if self.data is not None else None), self.rv
 
     def write(self, data, rv):
+        if getattr(self, "down", False):
+            raise app.StateError("configmap write: HTTP 503")
         if self.conflicts:
             self.conflicts -= 1
             self.rv = (self.rv or 0) + 1           # someone else wrote in between
@@ -519,6 +534,136 @@ class CancelAndRestartTests(Base):
         self.assertEqual((self.fg.patches, self.shutdowns), ([], []))
 
 
+class ImplReviewRegressionTests(Base):
+    """codex impl-review round 1: each case reproduced a wrong power-off or a stranded runner."""
+
+    def test_missing_collection_key_is_not_an_all_clear(self):
+        self.fg.jobs = [job("gatekeeper", "cloud-ci-1")]
+        self.s.schedule("op")
+        self.fg.envelope[JOBS] = lambda page, b: {"total_count": b["total_count"]}
+        self.tick(5)
+        self.assertEqual(self.shutdowns, [])
+
+    def test_missing_total_count_is_refused(self):
+        self.s.schedule("op")
+        self.fg.envelope[JOBS] = lambda page, b: {"jobs": b["jobs"]}
+        self.tick(5)
+        self.assertEqual(self.shutdowns, [])
+
+    def test_premature_empty_page_is_refused(self):
+        self.fg.jobs = [job("n%d" % i, "ci-runner-1") for i in range(60)] + [job("late", "cloud-ci-1")]
+        self.s.schedule("op")
+        self.fg.envelope[JOBS] = lambda page, b: dict(b, jobs=[]) if page == 2 else b
+        self.tick(5)
+        self.assertEqual(self.shutdowns, [])
+
+    def test_mistyped_field_is_refused(self):
+        self.fg.runners[1]["busy"] = "no"
+        with self.assertRaises(app.GiteaError):
+            self.s.schedule("op")
+
+    def test_null_runner_name_counts_as_in_flight(self):
+        self.fg.jobs = [job("orphan", None)]
+        self.s.schedule("op")
+        self.tick(5)
+        self.assertEqual(self.shutdowns, [])
+        self.assertEqual(self.s.view["inflight"][0]["runner"], "(unknown runner)")
+
+    def test_null_list_with_zero_total_is_empty(self):
+        self.s.schedule("op")
+        self.fg.envelope[JOBS] = lambda page, b: {"jobs": None, "total_count": 0}
+        self.tick(2)
+        self.assertEqual(len(self.shutdowns), 1)
+
+    def test_failed_pause_during_configmap_outage_never_resurrects(self):
+        self.fg.fail[("PATCH", RUNNERS + "/2")] = 500
+        orig_write = self.store.write
+
+        def write_then_break(data, rv):             # the `pausing` write lands, then the outage
+            r = orig_write(data, rv)
+            self.store.down = True
+            return r
+        self.store.write = write_then_break
+        with self.assertRaises(app.GiteaError):
+            self.s.schedule("op")
+        self.assertEqual(self.store.schedule()["phase"], "pausing")
+        self.assertTrue(self.fg.disabled(1), "nothing re-enabled before `releasing` is durable")
+        self.store.write = orig_write
+        self.s = self.new_sched()                    # restart during the outage
+        self.tick(3)
+        self.assertEqual(self.shutdowns, [])
+        self.store.down = False
+        del self.fg.fail[("PATCH", RUNNERS + "/2")]
+        self.tick(2)
+        self.assertEqual(self.shutdowns, [], "a failed OFF is never powered off after a restart")
+        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2))
+        self.assertEqual(self.phase(), "idle")
+
+    def test_final_write_failure_is_retried_and_blocks_side_effects(self):
+        self.s.schedule("op")
+        self.store.down = True
+        with self.assertRaises(app.StateError):
+            self.s.cancel("op")
+        self.assertTrue(self.fg.disabled(1), "cancel not durable -> nothing re-enabled")
+        self.store.down = False
+        self.s.cancel("op")
+        self.assertEqual(self.phase(), "idle")
+        self.assertIsNone(self.store.schedule())
+
+    def test_new_runner_adopted_before_pause_survives_lost_reply(self):
+        self.s.schedule("op")
+        self.fg.runners[7] = runner(7, "cloud-ci-7")
+        self.fg.fail[("PATCH", RUNNERS + "/7")] = "applied-then-lost"
+        self.tick()
+        self.assertTrue(self.fg.disabled(7))
+        self.assertIn(7, [r["id"] for r in self.store.schedule()["runners"]])
+        del self.fg.fail[("PATCH", RUNNERS + "/7")]
+        self.s.cancel("op")
+        self.assertFalse(self.fg.disabled(7), "the adopted runner is handed back")
+
+    def test_new_runner_not_paused_when_adoption_cannot_be_persisted(self):
+        self.s.schedule("op")
+        self.fg.runners[7] = runner(7, "cloud-ci-7")
+        self.store.down = True
+        self.tick()
+        self.assertFalse(self.fg.disabled(7), "never paused without a durable owner")
+        self.store.down = False
+        self.tick()
+        self.assertTrue(self.fg.disabled(7))
+
+    def test_on_during_a_schedule_still_being_set_up_cancels_it(self):
+        gate = threading.Event()
+        self.fg.patch_gate = gate
+        t = threading.Thread(target=self.s.schedule, args=("op",))
+        t.start()
+        while not self.store.data:                   # `pausing` persisted, first PATCH blocked
+            pass
+        result = {}
+        w = threading.Thread(target=lambda: result.update(r=self.s.cancel_for_wake("op")))
+        w.start()
+        gate.set()
+        t.join(5)
+        w.join(5)
+        self.assertEqual(result["r"][0], True, "ON waited for the schedule, then withdrew it")
+        self.fg.patch_gate = None
+        self.tick(3)
+        self.assertEqual(self.shutdowns, [])
+        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2))
+
+    def test_on_while_powering_off_reports_instead_of_cancelling(self):
+        self.s.schedule("op")
+        self.tick(2)
+        cancelled, note = self.s.cancel_for_wake("op")
+        self.assertFalse(cancelled)
+        self.assertIn("shutting down", note)
+
+    def test_on_fails_when_the_cancel_cannot_be_persisted(self):
+        self.s.schedule("op")
+        self.store.down = True
+        with self.assertRaises(app.StateError):
+            self.s.cancel_for_wake("op")
+
+
 class GiteaClientTests(unittest.TestCase):
     def test_refuses_a_truncated_list(self):
         fg = FakeGitea([runner(i, "r%d" % i) for i in range(1, 30)])
@@ -552,6 +697,30 @@ class CsrfTests(unittest.TestCase):
 
     def test_non_browser_caller_allowed(self):
         self.assertTrue(self.same_origin())
+
+
+class StatusEndpointTests(unittest.TestCase):
+    def test_status_carries_a_fresh_clock_even_with_a_frozen_snapshot(self):
+        import http.server
+        import urllib.request as ur
+
+        class Frozen:
+            view = {"phase": "draining", "now": 1000.0, "last_tick": 1000.0}
+        old = (app.SCHED, app.status, app.ALLOW_FROM)
+        app.SCHED, app.status = Frozen(), (lambda: {"nodes": [], "up": 0, "total": 3, "state": "off"})
+        app.ALLOW_FROM = [app.ipaddress.ip_network("127.0.0.1/32")]
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            url = "http://127.0.0.1:%d%s/api/status" % (srv.server_address[1], app.BASE)
+            body = json.load(ur.urlopen(url, timeout=5))
+            self.assertGreater(body["served_at"] - body["schedule"]["last_tick"], 3 * body["poll_sec"],
+                               "a hung worker must read as stale to the page")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            app.SCHED, app.status, app.ALLOW_FROM = old
 
 
 if __name__ == "__main__":

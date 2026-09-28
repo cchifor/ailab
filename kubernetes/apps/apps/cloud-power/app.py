@@ -324,8 +324,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
-RUNNER_FIELDS = ("id", "name", "disabled", "busy", "status")
-JOB_FIELDS = ("runner_name", "name")
+# Field -> accepted types. A missing or mistyped field refuses the WHOLE list: it must never read
+# as "not busy", "no runner" or "nothing running".
+RUNNER_FIELDS = {"id": (int,), "name": (str,), "disabled": (bool,), "busy": (bool,), "status": (str,)}
+# runner_name may be empty/null for a running job whose runner row is gone; the drain counts such a
+# job as in flight (it could be on a cloud runner) rather than dropping it.
+JOB_FIELDS = {"runner_name": (str, type(None)), "name": (str,)}
 
 
 class Gitea:
@@ -373,22 +377,36 @@ class Gitea:
             raise GiteaError("%s %s: response is not JSON" % (method, path)) from e
 
     def _paged(self, path, key, fields, params=None, limit=50, max_pages=40):
+        """Every page must carry `key` and an integer `total_count`, and the pages must add up to
+        that total. Anything else - a missing collection, an empty page before the total, a
+        mistyped field - is an error, never a shorter list."""
         out = []
         for page in range(1, max_pages + 1):
             q = dict(params or {})
             q.update(page=page, limit=limit)
             d = self._call("GET", path, q)
-            if not isinstance(d, dict) or not isinstance(d.get(key, []), list):
-                raise GiteaError("%s: unexpected response shape" % path)
-            items = d.get(key) or []
-            for it in items:
-                # A missing field must never read as "not busy" / "no runner": refuse the list.
-                if not isinstance(it, dict) or any(f not in it for f in fields):
-                    raise GiteaError("%s: an item lacks one of %s (API changed?)" % (path, ",".join(fields)))
-            out.extend(items)
+            if not isinstance(d, dict) or key not in d:
+                raise GiteaError("%s: response has no %r (API changed?)" % (path, key))
             total = d.get("total_count")
-            if not items or (isinstance(total, int) and len(out) >= total):
+            if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+                raise GiteaError("%s: response has no usable total_count" % path)
+            items = d[key]
+            if items is None and total == 0:
+                items = []                           # Go encodes an empty slice as null
+            if not isinstance(items, list):
+                raise GiteaError("%s: %r is not a list" % (path, key))
+            for it in items:
+                if not isinstance(it, dict) or any(
+                        f not in it or not isinstance(it[f], ts) or (isinstance(it[f], bool) and bool not in ts)
+                        for f, ts in fields.items()):
+                    raise GiteaError("%s: an item lacks or mistypes one of %s (API changed?)"
+                                     % (path, ",".join(fields)))
+            out.extend(items)
+            if len(out) >= total:
                 return out
+            if not items:
+                raise GiteaError("%s: page %d is empty but total_count says %d, got %d"
+                                 % (path, page, total, len(out)))
         # A truncated list could hide the one runner or job that matters: refuse it.
         raise GiteaError("%s: more than %d pages, refusing a partial list" % (path, max_pages))
 
@@ -537,6 +555,7 @@ class Scheduler:
         self.inflight = []     # what the drain is waiting for, for the page
         self.note = ""         # transient condition worth showing (e.g. Gitea unreachable)
         self.last_tick = None
+        self.dirty = False     # memory is ahead of the ConfigMap: no side effects until it is saved
         self.view = {"phase": "unknown", "loaded": False}
 
     # -- persistence ----------------------------------------------------------------------
@@ -568,19 +587,27 @@ class Scheduler:
         try:
             self.rv = self.store.write({"schedule": json.dumps(self.state) if self.state else "",
                                         "last": json.dumps(self.last) if self.last else ""}, self.rv)
+            self.dirty = False
         except StateConflict:
             # Someone else wrote it. Never overwrite: re-read and re-evaluate on the next tick.
+            self.dirty = False
             self.loaded = False
+            raise
+        except StateError:
+            self.dirty = True
             raise
 
     def _save_quiet(self):
+        """Persist; on failure mark the state dirty. While dirty, tick() retries the write FIRST
+        and performs no other side effect, so the ConfigMap never lags a completed action for
+        longer than one failed write, and a restart can never act on an older decision."""
         try:
             self._save()
+            return True
         except StateError as e:
-            # The in-memory state is ahead of the persisted one; the next tick saves again, and a
-            # restart before that repeats only idempotent calls (see the class docstring).
             self.note = "state not persisted: %s" % e
-            log("state write FAILED (will retry): %s" % e)
+            log("state write FAILED (will retry before anything else): %s" % e)
+            return False
 
     def publish(self):
         """An immutable snapshot for /api/status, so a status poll never waits on a tick that is
@@ -612,9 +639,10 @@ class Scheduler:
         still be finishing a job). The job list is authoritative; `busy` (LastActive < 10 s,
         seen flapping mid-job) only ADDS to it. Raises GiteaError."""
         jobs = self.gitea.running_jobs()
-        out = [{"runner": j.get("runner_name"), "job": j.get("name") or "?",
+        # A running job whose runner cannot be named could be on a cloud runner: count it.
+        out = [{"runner": j["runner_name"] or "(unknown runner)", "job": j["name"] or "?",
                 "started_at": j.get("started_at"), "url": j.get("html_url")}
-               for j in jobs if self._is_cloud(j.get("runner_name"))]
+               for j in jobs if not j["runner_name"] or self._is_cloud(j["runner_name"])]
         if runners is not None:
             named = {j["runner"] for j in out}
             out += [{"runner": r.get("name"), "job": "(busy)", "started_at": None, "url": None}
@@ -646,8 +674,8 @@ class Scheduler:
         self.state["phase"] = "releasing"
         self.state["outcome"] = {"result": result, "message": message}
         log("releasing paused runners (%s): %s" % (result, message))
-        self._save_quiet()
-        self._tick_releasing()
+        if self._save_quiet():                       # persisted BEFORE re-enabling anything
+            self._tick_releasing()
 
     def _require_usable(self):
         if not self.loaded:
@@ -668,11 +696,14 @@ class Scheduler:
                               % (self.prefix, self.gitea.org))
             targets = [{"id": r["id"], "name": r["name"]} for r in cloud if not r["disabled"]]
             now = self.clock()
-            self.state = {"v": STATE_VERSION, "phase": "draining", "by": who, "at": now,
+            # Persisted as `pausing` BEFORE any PATCH and switched to `draining` only once every
+            # runner is paused: a restart that finds `pausing` rolls back, so an OFF whose
+            # request failed can never be resurrected into a power-off by a later restart.
+            self.state = {"v": STATE_VERSION, "phase": "pausing", "by": who, "at": now,
                           "deadline": now + self.drain_max, "runners": targets,
                           "skipped": [r["name"] for r in cloud if r["disabled"]]}
             try:
-                self._save()                         # persist BEFORE pausing anything
+                self._save()
             except StateError:
                 self.state = None
                 raise
@@ -687,6 +718,15 @@ class Scheduler:
                                        % (rec["name"], e))
                     self.publish()
                     raise
+            self.state["phase"] = "draining"
+            try:
+                self._save()
+            except StateError as e:
+                if self.state is not None and self.loaded:
+                    self._to_releasing("error", "could not persist the schedule (%s); OFF not "
+                                       "scheduled" % e)
+                self.publish()
+                raise
             log("OFF SCHEDULED by %s: paused %s (already disabled, left alone: %s)"
                 % (who, ",".join(r["name"] for r in targets) or "-",
                    ",".join(self.state["skipped"]) or "-"))
@@ -700,6 +740,8 @@ class Scheduler:
             phase = self.state["phase"]
             if phase == "powering_off":
                 raise Refused("the hosts are already shutting down; cancel is no longer possible")
+            if phase == "pausing":
+                raise Refused("the OFF is still being set up; try again in a moment")
             if phase == "stalled":
                 after = (self.state.get("stall") or {}).get("cancel_after") or 0
                 if self.clock() < after:
@@ -718,15 +760,39 @@ class Scheduler:
                 self._tick_releasing()
             return self.publish()
 
+    def cancel_for_wake(self, who):
+        """ON means "I want the cluster on". Decided under the same lock as schedule(), on the
+        CURRENT state (not the published snapshot, which lags a schedule() still pausing runners).
+        Returns (cancelled, note). Raises StateError when a pending OFF could not be withdrawn."""
+        with self.lock:
+            self._require_usable()
+            phase = self.state["phase"] if self.state else "idle"
+            if phase in ("draining", "stalled"):
+                try:
+                    self.cancel(who + " (ON button)")
+                    return True, ""
+                except Refused as e:
+                    return False, str(e)             # stalled, a host may still be going down
+            if phase == "powering_off":
+                return False, ("the hosts are still shutting down - a running host ignores the "
+                               "packets; press ON again once they are off")
+            return False, ""
+
     # -- the worker -----------------------------------------------------------------------
     def tick(self):
         with self.lock:
             try:
                 if not self.loaded:
                     self.load()
+                if self.dirty:
+                    self._save()                     # StateError -> nothing else this tick
+                    log("state caught up with memory")
                 if self.state and not self.corrupt:
                     phase = self.state.get("phase")
-                    if phase == "draining":
+                    if phase == "pausing":
+                        self._to_releasing("error", "the controller restarted while pausing "
+                                           "runners; OFF not scheduled")
+                    elif phase == "draining":
                         self._tick_draining()
                     elif phase == "powering_off":
                         self._tick_powering_off()
@@ -753,13 +819,16 @@ class Scheduler:
             for r in runners:
                 if self._is_cloud(r["name"]) and not r["disabled"]:
                     # Re-enabled mid-drain, or newly registered: the schedule pauses and owns it.
-                    self.gitea.set_disabled(r["id"], True)
+                    # Ownership is PERSISTED FIRST, so a lost PATCH reply or a crash can never
+                    # leave it paused with nobody recorded to hand it back.
+                    self.clear = 0
                     if r["id"] not in owned:
                         st["runners"].append({"id": r["id"], "name": r["name"]})
                         owned.add(r["id"])
-                        self._save_quiet()
+                        if not self._save_quiet():
+                            return                   # no PATCH until the adoption is durable
+                    self.gitea.set_disabled(r["id"], True)
                     log("runner %s was enabled during the drain; paused it" % r["name"])
-                    self.clear = 0
             self.inflight = self.inflight_jobs(runners)
         except GiteaError as e:
             self.clear = 0
@@ -830,7 +899,8 @@ class Scheduler:
         dark = self.down_since is not None and now - self.down_since >= HOST_DOWN_SEC
         if dark and not st.get("hosts_down_at"):
             st["hosts_down_at"] = now
-            self._save_quiet()
+            if not self._save_quiet():
+                return
         if dark:
             try:
                 by_id = {r["id"]: r for r in self.gitea.runners()}
@@ -941,7 +1011,8 @@ function jobs(list,now){return(list||[]).map(j=>'  '+j.runner+'  '+j.job+(j.star
 function render(s){
  const c=s.schedule||{};phase=c.phase||'unknown';
  boff.disabled=phase!=='idle';bcancel.disabled=false;bcancel.style.display=(phase==='draining'||phase==='stalled')?'':'none';
- const stale=c.last_tick&&c.now-c.last_tick>90?'\\n!! controller has not polled for '+ago(c.last_tick,c.now)+' - check the cloud-power pod':'';
+ /* served_at is stamped per request; the snapshot's own clock freezes with a hung worker. */
+ const lim=3*(s.poll_sec||20)+15,stale=c.last_tick&&s.served_at-c.last_tick>lim?'\\n!! controller has not polled for '+ago(c.last_tick,s.served_at)+' - check the cloud-power pod':'';
  if(phase==='draining'){
   const n=(c.inflight||[]).length;
   sched.textContent='OFF scheduled '+hm(c.at)+' - '+(n?'waiting for '+n+' CI job'+(n>1?'s':''):'no CI job in flight, powering off shortly');
@@ -1056,6 +1127,10 @@ class Handler(BaseHTTPRequestHandler):
         if r == "/api/status":
             s = status()
             s["schedule"] = SCHED.view if SCHED else None
+            # Fresh on every request (the snapshot's own "now" freezes with a hung worker), so the
+            # page can tell a stalled controller from a long drain.
+            s["served_at"] = time.time()
+            s["poll_sec"] = DRAIN_POLL_SEC
             return self._send(200, s)
         if r in ("", "/", "/index.html"):
             # Embedded by Homepage's native iframe widget (services.yaml). Also usable
@@ -1078,22 +1153,19 @@ class Handler(BaseHTTPRequestHandler):
             if MODE == "wol":
                 return self._send(200, {"action": "wake", "results": wake_all()})
             log("WAKE by %s from %s" % (who, self.client_address[0]))
-            # ON means "I want the cluster on": a pending OFF is withdrawn first.
-            cancelled = False
-            if SCHED and SCHED.view.get("phase") in ("draining", "stalled"):
-                try:
-                    SCHED.cancel(who + " (ON button)")
-                    cancelled = True
-                except (Refused, StateError) as e:
-                    log("wake: could not cancel the scheduled OFF: %s" % e)
+            # ON means "I want the cluster on": a pending OFF is withdrawn first, or ON fails.
+            try:
+                cancelled, note = SCHED.cancel_for_wake(who)
+            except StateError as e:
+                return self._send(503, {"error": "a scheduled OFF could not be withdrawn, so ON was "
+                                                 "not sent: %s" % e})
             try:
                 res = forward_wake()
             except Exception as e:
                 return self._send(502, {"error": "wol sender unreachable: %s" % e, "cancelled": cancelled})
             res["cancelled"] = cancelled
-            if SCHED and SCHED.view.get("phase") == "powering_off":
-                res["note"] = ("the hosts are still shutting down - a running host ignores the "
-                               "packets; press ON again once they are off")
+            if note:
+                res["note"] = note
             return self._send(200, res)
 
         if MODE == "wol":
