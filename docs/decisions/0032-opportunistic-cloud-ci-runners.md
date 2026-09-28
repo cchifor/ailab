@@ -60,3 +60,38 @@ for the residual.
   (`Conflicts=shutdown.target` was missing), and `cluster-power.sh` gave guests a 120 s shutdown
   attempt followed by an unconditional host poweroff (effectively ~5 min with `pve-guests`' default,
   not the 720 s a draining runner needs).
+
+## Amendment 2026-09-28 — the Homepage OFF drains at the forge, then powers off
+
+**Why.** The first real OFF with the runners live (2026-09-24 23:54) cancelled a job on cloud-ci-3
+exactly 10 min into act_runner's drain. The in-guest layer (decision 3) caps every drain at
+`shutdown_timeout`, while the fleet's job durations have a p99 of ~13 min (`gatekeeper`) and a max
+of 50 min; a longer cap inside a host shutdown would still be invisible, uncancellable and bounded
+by `poweroff.target`'s 30-min job timeout.
+
+**Decision.** The OFF button no longer shuts the hosts down on confirm; it SCHEDULES the power-off
+(`kubernetes/apps/apps/cloud-power/`, plan `plans/2026-09-28-cloud-power-scheduled-drain-plan.md`):
+
+1. Pause every enabled `cloud-ci-*` runner in Gitea (`PATCH /orgs/cchifor/actions/runners/{id}
+   {"disabled": true}`, Gitea 1.26): `PickTask` hands a disabled runner nothing, a running task
+   carries on. The ailab pool keeps taking jobs.
+2. Wait until no cloud runner has a job in flight (org jobs `status=in_progress` by `runner_name`,
+   unioned with the runner `busy` flag) on two polls 20 s apart. No drain cap below the job timeout.
+3. Shut the nodes down as before (`pve-guests` + the RTC hook), then re-enable each paused runner
+   once the hosts have been unreachable for 5 min straight AND Gitea reports it offline, so the pool
+   is whole at the next wake with no morning step.
+4. Anything that does not happen in time (3 h 15 min drain, a host still up 40 min after the
+   shutdown — past `poweroff.target`'s 30-min forced power-off — or no node sent the request) leaves
+   the schedule `stalled`: hosts on, runners paused, the page says why; never a forced power-off and
+   never a replayed shutdown. CANCEL (or ON) hands the runners back once no host can still be
+   mid-shutdown.
+
+The schedule is persisted in the runtime `cloud-power-state` ConfigMap, so a pod restart resumes
+it. Decision 3's in-guest drain, `startup: down=720` and `cluster-power.sh` remain the backstop
+for the paths that do not go through the button (PVE UI, `poweroff`, the CLI); moving
+`cluster-power.sh down` onto the same forge-level drain is a cloudlab follow-up.
+
+**Consequences.** cloud-power now holds an org-owner Gitea PAT (`write:organization`; no narrower
+scope exists for runner pause) and a ServiceAccount limited to its own state ConfigMap. The watchdog
+(decision 4) should see no loss-correlated failures from a button OFF; it still covers hard power
+loss and the non-button paths.

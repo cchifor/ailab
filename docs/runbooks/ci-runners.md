@@ -282,12 +282,35 @@ every evening.
 unit); `gitea_runner` runs unmodified with `gitea_runner_cleanup_peer_services: "none"` (the sentinel
 for "no co-located runner" — an empty string falls back to the GitHub unit).
 
-**Shutdown drains, in three layers (all needed).**
+**The Homepage OFF button drains at the forge first (ADR 0032 amendment 2026-09-28).** Confirming
+OFF on home.chifor.me pauses every enabled `cloud-ci-*` runner in Gitea (`disabled: true` — it
+finishes its current job and gets no new one), waits until no cloud runner has a job in flight, and
+only then shuts the hosts down; each paused runner is re-enabled once the hosts have been dark for
+5 min and Gitea shows it offline. The dashboard shows the phase: `OFF scheduled — waiting for N CI job(s)` with a
+**CANCEL OFF** button, `powering off`, or `OFF STALLED` (drain > 3 h 15 min, a host still up 40 min
+after the shutdown, no node sent it, or the controller restarted mid-dispatch — hosts stay ON,
+runners stay PAUSED until CANCEL; after a mid-dispatch restart CANCEL unlocks 40 min after the
+shutdown began, because a host may still be going down).
+State: `kubectl --context admin@ai -n cloud-power get cm cloud-power-state -o yaml` (runtime object,
+not in git); decisions: `kubectl --context admin@ai -n cloud-power logs deploy/cloud-power`.
+- **Quarantining a runner during a schedule:** do it after CANCEL or after the schedule finishes —
+  the drain re-pauses and later re-enables every cloud runner it owns. A runner already disabled
+  when OFF is confirmed is left alone (never re-enabled).
+- **Rolling cloud-power back to a pre-2026-09-28 image:** first make sure the page shows no
+  schedule (CANCEL it); the old code ignores `cloud-power-state`. If the state was lost with runners
+  paused, re-enable them by hand: `PATCH /api/v1/orgs/cchifor/actions/runners/<id> {"disabled":
+  false}` for each `cloud-ci-*` that is not deliberately quarantined.
+- **Its Gitea PAT** (`chifor` / `cloud-power-drain`, `write:organization`) is in
+  `kubernetes/apps/apps/cloud-power/secret-gitea.sops.yaml` (minting + rotation in its header).
+
+**The other shutdown paths still drain inside the guest, in three layers (all needed).**
 1. In-guest (§7): `shutdown_timeout: 10m` + `KillMode=mixed` + `TimeoutStopSec=11min`.
 2. Hypervisor: every `cloud-ci-*` VM has `startup: order=3,down=720`, which PVE's `pve-guests` stop
    honours at node shutdown (`stopall` uses the guest's `down` before its own default) — so the
-   Homepage OFF button and a plain `poweroff` wait for the drain.
-3. Script: `cluster-power.sh down` (cloudlab `just power-down`) runs the drain detached on the host.
+   PVE UI and a plain `poweroff` wait up to 10 min for the drain (a longer job is CANCELLED, as on
+   2026-09-24; prefer the OFF button).
+3. Script: `cluster-power.sh down` (cloudlab `just power-down`) runs the drain detached on the host
+   (same 10-min in-guest cap; moving it onto the forge-level drain is a cloudlab follow-up).
 
 **The residual — hard power loss, VM crash, a job longer than the drain window.** Gitea never
 re-queues an orphaned task by itself: the zombie reaper fails it after 10 min (`ZOMBIE_TASK_TIMEOUT`,
