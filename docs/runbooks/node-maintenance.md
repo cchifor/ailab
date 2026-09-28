@@ -53,9 +53,14 @@ kubectl --context admin@ai -n strive-ailab exec <primary-pod> -c postgres -- \
 #     is live before draining: `kubectl --context admin@ai get clusterpolicy trident-attacher-timeout`.
 # 1d. BREAK-GLASS if a CP never comes back (hardware loss): with required anti-affinity the cluster
 #     runs 2/3 with ONE streaming replica until someone acts — flip `podAntiAffinityType` back to
-#     `preferred` (or lower `instances`) in platform deploy/components/cnpg-cluster/cluster.yaml,
-#     deliberately, so the third instance can double up on a survivor; flip it back once the node
-#     is replaced. Do not leave it at 2/3 "until the node is fixed".
+#     `preferred` in platform deploy/components/cnpg-cluster/cluster.yaml, deliberately, keeping
+#     `instances: 3`, so the third instance can double up on a survivor. Lowering `instances` to 2
+#     is NOT the same lever: it only re-declares the degraded state as nominal (2/2, still one
+#     streaming replica) — the sole reason to do it is a survivor that cannot fit a third instance
+#     (the 1e gate), and it must be reverted just the same. Revert the flip only after the replaced
+#     node holds the third instance and it streams — status 3/3 and `pg_stat_replication` shows two
+#     rows streaming (the 1b check; attach can take ~8 min, 1c) — otherwise restoring `required`
+#     evicts or blocks the instance that just recovered. Do not leave it at 2/3 "until the node is fixed".
 # 1e. HEADROOM GATE, learned 2026-09-27 during the required-anti-affinity roll (platform#1686): a
 #     replaced instance can only go back to ITS node, which must then hold ≥500m CPU AND ≥2Gi memory
 #     free — memory was the one that bit (cp1 at 1862Mi free vs 2Gi). Pods pinned to that node by a
